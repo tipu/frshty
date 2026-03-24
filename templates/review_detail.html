@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Review Detail — frshty</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<style>
+body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: #0a0a0a; color: #e0e0e0; }
+.card { background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; }
+.link { color: #60a5fa; }
+.link:hover { text-decoration: underline; }
+nav a { color: #888; padding: 4px 12px; border-radius: 4px; }
+nav a:hover, nav a.active { color: #fff; background: #222; }
+.diff-file { border: 1px solid #2a2a2a; border-radius: 6px; overflow: hidden; margin-bottom: 16px; }
+.diff-header { background: #1a1a2a; padding: 8px 12px; font-size: 13px; color: #93c5fd; border-bottom: 1px solid #2a2a2a; cursor: pointer; }
+.diff-header:hover { background: #222244; }
+.diff-hunk { background: #1a1a2a; color: #7c8da6; padding: 2px 12px; font-size: 12px; }
+.diff-line { font-size: 13px; line-height: 20px; white-space: pre-wrap; word-break: break-all; }
+.diff-line-num { display: inline-block; width: 45px; text-align: right; padding-right: 8px; color: #444; user-select: none; cursor: pointer; }
+.diff-line-num:hover { color: #93c5fd; }
+body.moving .diff-line-num[data-line] { color: #60a5fa; cursor: crosshair; }
+body.moving .diff-line-num[data-line]:hover { background: #1e3a5f; color: #fff; }
+.diff-add { background: #0d2818; }
+.diff-add .hljs-keyword, .diff-add .hljs-string, .diff-add .hljs-title, .diff-add .hljs-built_in, .diff-add .hljs-number, .diff-add .hljs-attr { opacity: 0.9; }
+.diff-del { background: #2d0f0f; }
+.diff-del .hljs-keyword, .diff-del .hljs-string, .diff-del .hljs-title, .diff-del .hljs-built_in, .diff-del .hljs-number, .diff-del .hljs-attr { opacity: 0.9; }
+.diff-ctx { color: #888; }
+.comment-inline { background: #1c1c30; border-left: 3px solid #3b82f6; margin: 0; padding: 10px 12px; }
+.comment-inline.blocking { border-left-color: #ef4444; }
+.comment-inline.suggestion { border-left-color: #eab308; }
+.comment-inline.question { border-left-color: #3b82f6; }
+.comment-inline.published { opacity: 0.6; }
+.comment-highlight { animation: highlight 2s ease-out; }
+.move-active { outline: 2px solid #3b82f6; outline-offset: -2px; }
+@keyframes highlight { from { background: #2a2a5a; } to { background: #1c1c30; } }
+.badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; }
+.badge-blocking { background: #991b1b; color: #fca5a5; }
+.badge-suggestion { background: #713f12; color: #fde047; }
+.badge-question { background: #1e3a5f; color: #93c5fd; }
+.persona-badge { font-size: 10px; padding: 0 4px; border-radius: 3px; }
+.persona-active { background: #1e3a5f; color: #93c5fd; }
+.persona-dim { background: #1a1a1a; color: #444; }
+textarea { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; }
+#sidebar { width: 240px; position: sticky; top: 0; max-height: 100vh; overflow-y: auto; }
+#sidebar::-webkit-scrollbar { width: 4px; }
+#sidebar::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+.sidebar-item { cursor: pointer; padding: 4px 8px; border-radius: 4px; font-size: 11px; }
+.sidebar-item:hover { background: #222; }
+.sidebar-item.active { background: #1e3a5f; }
+.sidebar-item.published { opacity: 0.5; }
+</style>
+</head>
+<body class="p-4">
+<header class="flex items-center gap-4 mb-4">
+    <a href="/reviews" class="link text-sm">&larr; Reviews</a>
+    <h1 class="text-lg font-bold" id="title">Review</h1>
+    <nav class="flex gap-1 text-sm">
+        <a href="/">Feed</a>
+        <a href="/reviews" class="active">Reviews</a>
+        <a href="/tickets">Tickets</a>
+        <a href="/slack">Slack</a>
+    </nav>
+    <div class="ml-auto flex items-center gap-2">
+        <span id="verdict" class="badge"></span>
+        <button onclick="discussGeneral()" class="bg-blue-700 hover:bg-blue-600 text-white px-3 py-1 rounded text-xs">Discuss PR</button>
+        <a id="pr-link" href="#" target="_blank" class="link text-sm">[PR]</a>
+    </div>
+</header>
+
+<div class="flex gap-4">
+    <div id="sidebar" class="flex-shrink-0">
+        <div class="text-xs text-gray-500 uppercase font-bold mb-2">Issues <span id="issue-count"></span></div>
+        <div id="sidebar-list" class="space-y-1"></div>
+    </div>
+    <div id="diff-view" class="flex-1 min-w-0"></div>
+</div>
+
+<script>
+const pathParts = window.location.pathname.split('/');
+const repo = pathParts[2];
+const prId = parseInt(pathParts[3]);
+
+let allComments = [];
+const storageKey = `review:${repo}:${prId}`;
+
+async function load() {
+    const [commentsResp, diffResp] = await Promise.all([
+        fetch(`/api/reviews/${repo}/${prId}/comments`),
+        fetch(`/api/reviews/${repo}/${prId}/diff`),
+    ]);
+    allComments = await commentsResp.json();
+    const diffData = await diffResp.json();
+
+    document.getElementById('title').textContent = `${repo} PR #${prId}`;
+    if (allComments.length && allComments[0].pr_url) {
+        document.getElementById('pr-link').href = allComments[0].pr_url;
+    }
+
+    renderSidebar();
+    renderDiff(diffData.diff, allComments);
+}
+
+function renderSidebar() {
+    const list = document.getElementById('sidebar-list');
+    const active = allComments.filter(c => c.status !== 'submitted').length;
+    document.getElementById('issue-count').textContent = `(${active}/${allComments.length})`;
+
+    list.innerHTML = allComments.map((c, i) => {
+        const sev = c.severity || 'suggestion';
+        const cls = c.status === 'submitted' ? 'published' : '';
+        const file = c.path ? c.path.split('/').pop() : 'general';
+        const line = c.line ? `:${c.line}` : '';
+        return `<div class="sidebar-item ${cls}" onclick="jumpTo(${i})">
+            <span class="badge badge-${sev}" style="font-size:9px">${sev[0].toUpperCase()}</span>
+            <span class="text-gray-400">${file}${line}</span>
+        </div>`;
+    }).join('');
+}
+
+function jumpTo(idx) {
+    const el = document.getElementById(`comment-${idx}`);
+    if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        el.classList.add('comment-highlight');
+        setTimeout(() => el.classList.remove('comment-highlight'), 2000);
+    }
+}
+
+function nextComment(afterIdx) {
+    const start = (afterIdx != null ? afterIdx + 1 : 0);
+    for (let i = start; i < allComments.length; i++) {
+        if (allComments[i].status !== 'submitted') { jumpTo(i); return; }
+    }
+    for (let i = 0; i < start; i++) {
+        if (allComments[i].status !== 'submitted') { jumpTo(i); return; }
+    }
+}
+
+function parseDiff(raw) {
+    const files = [];
+    let current = null;
+    for (const line of raw.split('\n')) {
+        if (line.startsWith('diff --git')) {
+            current = { header: '', hunks: [], lines: [], _newLine: 1 };
+            files.push(current);
+        } else if (line.startsWith('+++ b/') && current) {
+            current.header = line.slice(6);
+        } else if (line.startsWith('--- ') && current) {
+        } else if (line.startsWith('@@') && current) {
+            current.lines.push({ type: 'hunk', text: line });
+            const m = line.match(/@@ -\d+(?:,\d+)? \+(\d+)/);
+            current._newLine = m ? parseInt(m[1]) : 1;
+        } else if (current) {
+            let type = 'ctx';
+            let newLine = null;
+            if (line.startsWith('+')) { type = 'add'; newLine = current._newLine++; }
+            else if (line.startsWith('-')) { type = 'del'; }
+            else { newLine = current._newLine++; }
+            current.lines.push({ type, text: line.slice(1), newLine });
+        }
+    }
+    return files;
+}
+
+function renderDiff(raw, comments) {
+    const files = parseDiff(raw);
+    const commentsByFile = {};
+    for (let i = 0; i < comments.length; i++) {
+        const c = comments[i];
+        const key = c.path || '';
+        if (!commentsByFile[key]) commentsByFile[key] = {};
+        const line = c.line || 0;
+        if (!commentsByFile[key][line]) commentsByFile[key][line] = [];
+        commentsByFile[key][line].push({ ...c, idx: i });
+    }
+
+    const container = document.getElementById('diff-view');
+    let html = '';
+
+    for (const file of files) {
+        highlightFile(file);
+        const fileComments = commentsByFile[file.header] || {};
+        const commentCount = Object.values(fileComments).flat().length;
+        html += `<div class="diff-file">`;
+        html += `<div class="diff-header">${esc(file.header)}${commentCount ? ` <span class="text-yellow-400 text-xs">(${commentCount} comments)</span>` : ''}</div>`;
+
+        for (const line of file.lines) {
+            if (line.type === 'hunk') {
+                html += `<div class="diff-hunk">${esc(line.text)}</div>`;
+                continue;
+            }
+            const cls = line.type === 'add' ? 'diff-add' : line.type === 'del' ? 'diff-del' : 'diff-ctx';
+            const prefix = line.type === 'add' ? '+' : line.type === 'del' ? '-' : ' ';
+            const num = line.newLine != null ? line.newLine : '';
+            const clickable = num !== '' ? `data-line="${num}" data-file="${esc(file.header)}" onclick="placeComment(${num}, '${esc(file.header)}')"` : '';
+            const content = line._hl || esc(line.text);
+            html += `<div class="diff-line ${cls}"><span class="diff-line-num" ${clickable}>${num}</span>${prefix}${content}</div>`;
+
+            if (line.newLine && fileComments[line.newLine]) {
+                for (const c of fileComments[line.newLine]) {
+                    html += renderInlineComment(c);
+                }
+            }
+        }
+
+        if (fileComments[0]) {
+            for (const c of fileComments[0]) {
+                html += renderInlineComment(c);
+            }
+        }
+        html += `</div>`;
+    }
+
+    const unmatched = comments.filter((c) => {
+        const key = c.path || '';
+        return !files.some(f => f.header === key);
+    });
+    if (unmatched.length) {
+        html += `<div class="diff-file"><div class="diff-header">General Comments</div>`;
+        for (let i = 0; i < comments.length; i++) {
+            const c = comments[i];
+            if (!files.some(f => f.header === (c.path || ''))) {
+                html += renderInlineComment({ ...c, idx: i });
+            }
+        }
+        html += `</div>`;
+    }
+
+    container.innerHTML = html;
+}
+
+function renderInlineComment(c) {
+    const sev = c.severity || 'suggestion';
+    const isPublished = c.status === 'submitted' || c.remote_id;
+    const isDraft = c.status === 'draft';
+    const isManual = c.persona === 'manual';
+    const cls = '';
+    const personas = (c.persona || '').split(',').map(p => p.trim()).filter(Boolean);
+
+    const statusLabel = isPublished ? '<span class="text-green-400 text-xs">published</span>' :
+                        isDraft ? '<span class="text-yellow-400 text-xs">draft</span>' : '';
+
+    return `<div id="comment-${c.idx}" class="comment-inline ${sev} ${cls}">
+        <div class="flex items-center gap-2 mb-1 text-xs">
+            <span class="badge badge-${sev}">${sev}</span>
+            ${isManual ? '<span class="persona-badge persona-active">you</span>' :
+              ['spec', 'breakage', 'maintainability'].map(p => {
+                const active = personas.includes(p) || (c.agreed_by || []).includes(p);
+                return `<span class="persona-badge ${active ? 'persona-active' : 'persona-dim'}">${p[0].toUpperCase()}</span>`;
+            }).join('')}
+            ${c.path ? `<span class="text-gray-600">${c.path}:<span class="cursor-pointer hover:text-blue-400" onclick="moveLine(${c.idx})" title="click to move, then click a line number">L${c.line || '?'}</span></span>` : ''}
+            ${statusLabel}
+        </div>
+        <textarea id="body-${c.idx}" rows="2" class="w-full p-2 rounded text-sm mb-1"
+            onchange="autoSave(${c.idx})">${esc(c.body)}</textarea>
+        <div class="flex gap-2 items-center">
+            <button onclick="saveComment(${c.idx})" class="bg-gray-700 hover:bg-gray-600 text-white px-2 py-0.5 rounded text-xs">Save</button>
+            <button onclick="publishComment(${c.idx})" class="bg-green-700 hover:bg-green-600 text-white px-2 py-0.5 rounded text-xs">${isPublished ? 'Edit' : 'Publish'}</button>
+            <button onclick="discuss(${c.idx})" class="bg-blue-700 hover:bg-blue-600 text-white px-2 py-0.5 rounded text-xs">Discuss</button>
+            <button onclick="dismissComment(${c.idx})" class="text-red-900 hover:text-red-400 text-xs">x</button>
+            <button onclick="nextComment(${c.idx})" class="text-gray-600 hover:text-white text-xs ml-auto">&darr; next</button>
+        </div>
+    </div>`;
+}
+
+function esc(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+}
+
+const EXT_LANG = {py:'python',js:'javascript',ts:'typescript',tsx:'tsx',jsx:'jsx',java:'java',rb:'ruby',go:'go',rs:'rust',css:'css',html:'html',json:'json',yml:'yaml',yaml:'yaml',sh:'bash',sql:'sql',md:'markdown'};
+
+function highlightFile(file) {
+    const ext = (file.header.split('.').pop() || '').toLowerCase();
+    const lang = EXT_LANG[ext];
+    if (!lang) return;
+    const code = file.lines.filter(l => l.type !== 'hunk').map(l => l.text).join('\n');
+    try {
+        const result = hljs.highlight(code, { language: lang, ignoreIllegals: true });
+        const highlighted = result.value.split('\n');
+        let idx = 0;
+        for (const line of file.lines) {
+            if (line.type === 'hunk') continue;
+            line._hl = highlighted[idx++] || esc(line.text);
+        }
+    } catch(e) {}
+}
+
+async function addComment(filePath, lineNum) {
+    const resp = await fetch(`/api/reviews/${repo}/${prId}/comments/new`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ path: filePath, line: lineNum, body: '', severity: 'suggestion' })
+    });
+    const result = await resp.json();
+    await load();
+    if (result.idx != null) {
+        jumpTo(result.idx);
+        const ta = document.getElementById(`body-${result.idx}`);
+        if (ta) ta.focus();
+    }
+}
+
+async function saveComment(idx) {
+    const body = document.getElementById(`body-${idx}`).value;
+    await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}`, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({body})
+    });
+}
+
+async function autoSave(idx) {
+    const body = document.getElementById(`body-${idx}`).value;
+    await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}`, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({body})
+    });
+}
+
+async function publishComment(idx) {
+    const body = document.getElementById(`body-${idx}`).value;
+    await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}`, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({body})
+    });
+    await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}/submit`, {method: 'POST'});
+    load();
+}
+
+async function dismissComment(idx) {
+    if (!confirm('Delete this comment?')) return;
+    await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}`, {
+        method: 'DELETE',
+    });
+    load();
+}
+
+let movingIdx = null;
+
+function moveLine(idx) {
+    if (movingIdx === idx) {
+        movingIdx = null;
+        document.body.classList.remove('moving');
+        document.querySelectorAll('.move-active').forEach(el => el.classList.remove('move-active'));
+        return;
+    }
+    movingIdx = idx;
+    document.body.classList.add('moving');
+    const el = document.getElementById(`comment-${idx}`);
+    if (el) el.classList.add('move-active');
+}
+
+async function placeComment(lineNum, filePath) {
+    if (movingIdx !== null) {
+        const idx = movingIdx;
+        movingIdx = null;
+        document.body.classList.remove('moving');
+        await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}`, {
+            method: 'PUT',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ line: lineNum })
+        });
+        load();
+        return;
+    }
+    addComment(filePath, lineNum);
+}
+
+function discuss(idx) {
+    const c = allComments[idx];
+    const params = new URLSearchParams({
+        file: c.path || '',
+        line: c.line || '',
+        severity: c.severity || '',
+        idx: idx,
+        repo: repo,
+        pr_id: prId,
+    });
+    sessionStorage.setItem(`discuss-${repo}-${prId}-${idx}`, JSON.stringify({
+        body: document.getElementById(`body-${idx}`).value,
+        path: c.path,
+        line: c.line,
+        severity: c.severity,
+    }));
+    window.open(`/reviews/${repo}/${prId}/discuss?${params}`, '_blank');
+}
+
+function discussGeneral() {
+    sessionStorage.setItem(`discuss-${repo}-${prId}-general`, JSON.stringify({
+        body: 'General PR discussion',
+        commentCount: allComments.length,
+    }));
+    window.open(`/reviews/${repo}/${prId}/discuss?idx=general&repo=${repo}&pr_id=${prId}`, '_blank');
+}
+
+load();
+</script>
+</body>
+</html>

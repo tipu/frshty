@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Slack — frshty</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: #0a0a0a; color: #e0e0e0; }
+.card { background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; }
+.suggestion { background: #1a1a2a; border: 1px solid #2a2a4a; border-radius: 6px; white-space: pre-wrap; }
+.reply-input { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; }
+.reply-input:focus { border-color: #3b82f6; outline: none; }
+.send-btn { background: #2563eb; color: white; padding: 6px 16px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+.send-btn:hover { background: #1d4ed8; }
+.send-btn.sent { background: #14532d; cursor: default; }
+.badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; }
+.badge-mention { background: #1e3a5f; color: #93c5fd; }
+.badge-action { background: #713f12; color: #fde047; }
+.badge-digest { background: #14532d; color: #86efac; }
+nav a { color: #888; padding: 4px 12px; border-radius: 4px; }
+nav a:hover, nav a.active { color: #fff; background: #222; }
+</style>
+</head>
+<body class="p-4 max-w-7xl mx-auto">
+<header class="flex items-center gap-4 mb-4">
+    <h1 class="text-lg font-bold">Slack</h1>
+    <nav class="flex gap-1 text-sm">
+        <a href="/">Feed</a>
+        <a href="/reviews">Reviews</a>
+        <a href="/tickets">Tickets</a>
+        <a href="/slack" class="active">Slack</a>
+        <a href="/timesheet">Timesheet</a>
+    </nav>
+</header>
+
+<section class="mb-6">
+    <h2 class="text-sm font-bold text-yellow-400 mb-2">Mentions & Suggested Replies</h2>
+    <div id="mentions" class="space-y-3"></div>
+</section>
+
+<section class="mb-6">
+    <h2 class="text-sm font-bold text-blue-400 mb-2">Actionable Items</h2>
+    <div id="actionable" class="space-y-2"></div>
+</section>
+
+<section>
+    <h2 class="text-sm font-bold text-gray-400 mb-2">Digests</h2>
+    <div id="digests" class="space-y-2"></div>
+</section>
+
+<script>
+async function load() {
+    const evResp = await fetch('/api/events?limit=100');
+    const events = await evResp.json();
+
+    const mentions = events.filter(e => e.event === 'slack_mention_detected');
+    const actionable = events.filter(e => e.event === 'slack_actionable_item');
+    const digests = events.filter(e => e.event === 'slack_digest');
+
+    document.getElementById('mentions').innerHTML = mentions.length
+        ? mentions.map(e => {
+            const text = e.meta?.text || e.summary;
+            const channel = e.meta?.channel || '';
+            const suggested = e.meta?.suggested_response || '';
+            const replyId = e.meta?.reply_id || '';
+            const time = new Date(e.ts).toLocaleTimeString();
+            return `<div class="card p-4" id="mention-${replyId}">
+                <div class="flex items-center gap-2 mb-2">
+                    <span class="badge badge-mention">mention</span>
+                    <span class="text-gray-500 text-xs">${channel} — ${time}</span>
+                </div>
+                <div class="text-sm mb-3">${esc(text)}</div>
+                ${replyId ? `<div class="flex gap-2 items-start">
+                    <input type="text" id="reply-${replyId}" value="${esc(suggested)}" class="reply-input flex-1 p-2 rounded text-sm" placeholder="type reply...">
+                    <button class="send-btn text-sm" onclick="sendReply('${replyId}')">send</button>
+                </div>` : ''}
+            </div>`;
+        }).join('')
+        : '<div class="text-gray-600 text-sm">No mentions yet.</div>';
+
+    document.getElementById('actionable').innerHTML = actionable.length
+        ? actionable.map(e => {
+            const time = new Date(e.ts).toLocaleTimeString();
+            return `<div class="card p-3 text-sm">
+                <div class="flex items-center gap-2 mb-1">
+                    <span class="badge badge-action">action needed</span>
+                    <span class="text-gray-500 text-xs">${time}</span>
+                </div>
+                <div>${esc(e.meta?.text || e.summary)}</div>
+            </div>`;
+        }).join('')
+        : '<div class="text-gray-600 text-sm">Nothing actionable.</div>';
+
+    document.getElementById('digests').innerHTML = digests.length
+        ? digests.map(e => {
+            const time = new Date(e.ts).toLocaleTimeString();
+            return `<div class="card p-3 text-sm">
+                <div class="flex items-center gap-2 mb-1">
+                    <span class="badge badge-digest">digest</span>
+                    <span class="text-gray-500 text-xs">${time} — ${e.meta?.message_count || 0} messages</span>
+                </div>
+                <div class="text-gray-300 whitespace-pre-wrap">${esc(e.summary)}</div>
+            </div>`;
+        }).join('')
+        : '<div class="text-gray-600 text-sm">No digests yet.</div>';
+}
+
+function esc(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+}
+
+async function sendReply(replyId) {
+    const input = document.getElementById(`reply-${replyId}`);
+    const text = input.value.trim();
+    if (!text) return;
+    const btn = input.parentElement.querySelector('.send-btn');
+    btn.textContent = 'sending...';
+    btn.disabled = true;
+    const resp = await fetch(`/api/slack/send/${replyId}`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({text})
+    });
+    const result = await resp.json();
+    if (result.status === 'sent') {
+        btn.textContent = 'sent';
+        btn.classList.add('sent');
+        input.disabled = true;
+    } else {
+        btn.textContent = 'failed';
+        setTimeout(() => { btn.textContent = 'send'; btn.disabled = false; }, 2000);
+    }
+}
+
+load();
+setInterval(load, 5000);
+</script>
+</body>
+</html>

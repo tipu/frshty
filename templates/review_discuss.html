@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Discuss — frshty</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
+<style>
+body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: #0a0a0a; color: #e0e0e0; margin: 0; display: flex; flex-direction: column; height: 100vh; }
+.badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; }
+.badge-blocking { background: #991b1b; color: #fca5a5; }
+.badge-suggestion { background: #713f12; color: #fde047; }
+.badge-question { background: #1e3a5f; color: #93c5fd; }
+#terminal-container .xterm { height: 100%; }
+</style>
+</head>
+<body>
+<div class="flex items-center gap-3 px-4 py-2 bg-gray-900 border-b border-gray-800 flex-shrink-0">
+    <span id="repo" class="font-bold text-blue-400 text-sm"></span>
+    <span id="file-info" class="text-xs text-gray-400"></span>
+    <span id="severity-badge"></span>
+    <button onclick="resetDiscuss()" class="ml-auto bg-red-900 hover:bg-red-800 text-red-300 px-3 py-1 rounded text-xs">Reset</button>
+</div>
+<div id="context-bar" class="px-4 py-2 bg-gray-900/50 border-b border-gray-800 text-xs text-gray-400 flex-shrink-0 hidden"></div>
+<div id="terminal-container" class="flex-1"></div>
+
+<script>
+const params = new URLSearchParams(window.location.search);
+const repo = params.get('repo') || '';
+const prId = params.get('pr_id') || '';
+const idx = params.get('idx') || 'general';
+const file = params.get('file') || '';
+const line = params.get('line') || '';
+const severity = params.get('severity') || '';
+
+document.getElementById('repo').textContent = `${repo} PR #${prId}`;
+if (file) {
+    document.getElementById('file-info').textContent = `${file}${line ? ':' + line : ''}`;
+}
+if (severity) {
+    document.getElementById('severity-badge').innerHTML = `<span class="badge badge-${severity}">${severity}</span>`;
+}
+
+const stored = JSON.parse(sessionStorage.getItem(`discuss-${repo}-${prId}-${idx}`) || '{}');
+if (stored.body && idx !== 'general') {
+    document.getElementById('context-bar').textContent = stored.body;
+    document.getElementById('context-bar').classList.remove('hidden');
+}
+
+let ws = null;
+let term = null;
+let fitAddon = null;
+let sessionId = null;
+
+async function startDiscuss() {
+    const resp = await fetch(`/api/reviews/${repo}/${prId}/discuss`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            idx, file, line, severity,
+            body: stored.body || '',
+        }),
+    });
+    const data = await resp.json();
+    sessionId = data.session_id;
+
+    setTimeout(connectTerminal, 3000);
+}
+
+function connectTerminal() {
+    const container = document.getElementById('terminal-container');
+    term = new Terminal({
+        cursorBlink: true,
+        fontSize: 14,
+        fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace",
+        theme: { background: '#0a0a0f', foreground: '#e2e8f0', cursor: '#e2e8f0', selectionBackground: '#334155' },
+    });
+
+    fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.loadAddon(new WebLinksAddon.WebLinksAddon());
+    term.open(container);
+    fitAddon.fit();
+
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${protocol}//${location.host}/ws/discuss/${sessionId}`);
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = () => {
+        fitAddon.fit();
+        ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+    };
+    ws.onmessage = (event) => {
+        const data = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : event.data;
+        term.write(data);
+    };
+    ws.onclose = () => { if (term) term.write('\r\n\x1b[90m[disconnected]\x1b[0m\r\n'); };
+    term.onData((data) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(data); });
+
+    new ResizeObserver(() => {
+        if (fitAddon) fitAddon.fit();
+        if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+        }
+    }).observe(container);
+}
+
+async function resetDiscuss() {
+    if (sessionId) {
+        await fetch(`/api/tickets/${sessionId}/terminal`, { method: 'DELETE' });
+    }
+    if (ws) ws.close();
+    if (term) { term.dispose(); term = null; }
+    document.getElementById('terminal-container').innerHTML = '';
+    startDiscuss();
+}
+
+startDiscuss();
+</script>
+</body>
+</html>

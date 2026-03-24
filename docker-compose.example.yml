@@ -1,0 +1,23 @@
+# Copy to docker-compose.yml and adjust paths for your environment.
+# Expects ${HOME} to resolve to your home directory.
+
+x-common: &common
+  build: .
+  network_mode: host
+  volumes:
+    - ${HOME}/.claude:/root/.claude
+    - ${HOME}/.claude:/home/claude/.claude
+    - ${HOME}/.claude.json:/home/claude/.claude.json
+    - ${HOME}/.codex:/home/claude/.codex
+    - ${HOME}/.gemini:/home/claude/.gemini
+    - ${HOME}/.ssh:/tmp/.ssh-host:ro
+    - ${HOME}/.frshty:/root/.frshty
+    - ${HOME}/.frshty:/home/claude/.frshty
+    - .:/app
+    - /tmp:/tmp
+
+services:
+  app:
+    <<: *common
+    container_name: frshty-app
+    command: python frshty.py config/example.toml

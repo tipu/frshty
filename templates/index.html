@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>frshty</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+body { font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; background: #0a0a0a; color: #e0e0e0; }
+.card { background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; }
+.card-red { border-left: 3px solid #ef4444; }
+.card-green { border-left: 3px solid #22c55e; }
+.card-yellow { border-left: 3px solid #eab308; }
+.unread { font-weight: 600; border-left: 3px solid #3b82f6; }
+.read { opacity: 0.4; }
+.pulse { animation: pulse 2s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+.link { color: #60a5fa; text-decoration: none; }
+.link:hover { text-decoration: underline; }
+.badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; }
+.badge-red { background: #991b1b; color: #fca5a5; }
+.badge-green { background: #14532d; color: #86efac; }
+.badge-yellow { background: #713f12; color: #fde047; }
+.badge-blue { background: #1e3a5f; color: #93c5fd; }
+.dismiss-btn { cursor: pointer; opacity: 0.3; }
+.dismiss-btn:hover { opacity: 1; }
+nav a { color: #888; padding: 4px 12px; border-radius: 4px; }
+nav a:hover, nav a.active { color: #fff; background: #222; }
+.settings-panel { display: none; position: absolute; right: 0; top: 100%; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 12px; z-index: 50; min-width: 200px; }
+.settings-panel.open { display: block; }
+</style>
+</head>
+<body class="p-4 max-w-7xl mx-auto">
+
+<header class="flex items-center justify-between mb-4">
+    <div class="flex items-center gap-4">
+        <h1 class="text-lg font-bold" id="job-title">frshty</h1>
+        <nav class="flex gap-1 text-sm">
+            <a href="/" class="active">Feed</a>
+            <a href="/reviews">Reviews</a>
+            <a href="/tickets">Tickets</a>
+            <a href="/slack">Slack</a>
+            <a href="/timesheet">Timesheet</a>
+        </nav>
+    </div>
+    <div class="relative text-sm text-gray-500">
+        <span id="cycle-info"></span>
+        <button onclick="pollNow()" id="poll-btn" class="ml-3 text-xs bg-blue-900 hover:bg-blue-800 text-blue-300 px-3 py-1 rounded">Poll Now</button>
+        <button onclick="toggleSettings()" class="ml-3 text-gray-400 hover:text-white">⚙</button>
+        <div id="settings-panel" class="settings-panel">
+            <div class="text-xs text-gray-400 mb-2 uppercase tracking-wider">Features</div>
+            <div id="feature-toggles"></div>
+        </div>
+    </div>
+</header>
+
+<div id="status-cards" class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4"></div>
+
+<section class="mb-4">
+    <div class="flex items-center justify-between mb-2">
+        <h2 class="text-sm font-bold text-yellow-400 uppercase tracking-wider">⚠ Needs Attention</h2>
+        <span class="text-xs text-gray-500" id="attention-count"></span>
+    </div>
+    <div id="attention-list" class="space-y-1"></div>
+</section>
+
+<section>
+    <div class="flex items-center justify-between mb-2">
+        <h2 class="text-sm font-bold text-gray-400 uppercase tracking-wider">Event Feed</h2>
+        <div class="flex gap-2 text-xs">
+            <button onclick="setFilter('all')" id="filter-all" class="text-gray-400 hover:text-white">all</button>
+            <button onclick="setFilter('unread')" id="filter-unread" class="text-gray-400 hover:text-white">unread</button>
+            <button onclick="dismissAll()" class="text-gray-600 hover:text-red-400">dismiss all</button>
+        </div>
+    </div>
+    <div id="event-feed" class="space-y-0.5 text-xs font-mono"></div>
+</section>
+
+<script>
+let currentFilter = 'all';
+let events = [];
+let config = {};
+
+const ATTENTION_EVENTS = new Set([
+    'pr_comment_flagged_manual', 'pr_stale_no_review', 'review_comments_queued',
+    'slack_mention_detected', 'ticket_tests_fail', 'cycle_error'
+]);
+const SYSTEM_EVENTS = new Set(['cycle_start', 'cycle_end', 'cycle_sleep']);
+
+async function fetchEvents() {
+    const unread = currentFilter === 'unread';
+    const resp = await fetch(`/api/events?limit=200&unread=${unread}`);
+    events = await resp.json();
+    render();
+}
+
+async function fetchConfig() {
+    const resp = await fetch('/api/config');
+    config = await resp.json();
+    document.getElementById('job-title').textContent = `[${config.job.key}] ${config.job.key}`;
+    document.title = `frshty — ${config.job.key}`;
+    renderFeatureToggles();
+}
+
+async function fetchStatus() {
+    const resp = await fetch('/api/status');
+    const status = await resp.json();
+    renderStatusCards(status);
+}
+
+function renderStatusCards(status) {
+    const cards = document.getElementById('status-cards');
+    const unread = status.unread_total;
+    const c = status.counts || {};
+    cards.innerHTML = `
+        <div class="card p-3 cursor-pointer hover:border-gray-500" onclick="setFilter('unread')">
+            <div class="text-xs text-gray-500">Unread</div>
+            <div class="text-2xl font-bold ${unread > 0 ? 'text-blue-400' : 'text-green-400'}">${unread}</div>
+        </div>
+        <a href="/reviews" class="card p-3 hover:border-gray-500">
+            <div class="text-xs text-gray-500">Reviews</div>
+            <div class="text-2xl font-bold">${c.review || 0}</div>
+        </a>
+        <a href="/tickets" class="card p-3 hover:border-gray-500">
+            <div class="text-xs text-gray-500">Tickets</div>
+            <div class="text-2xl font-bold">${c.ticket || 0}</div>
+        </a>
+        <a href="/slack" class="card p-3 hover:border-gray-500">
+            <div class="text-xs text-gray-500 flex items-center gap-1">Slack <span class="w-2 h-2 rounded-full ${status.slack_alive ? 'bg-green-400' : 'bg-red-500'}"></span></div>
+            <div class="text-2xl font-bold">${c.slack || 0}</div>
+        </a>
+        <div class="card p-3">
+            <div class="text-xs text-gray-500">PRs</div>
+            <div class="text-2xl font-bold">${c.pr || 0}</div>
+        </div>
+    `;
+}
+
+function renderFeatureToggles() {
+    const container = document.getElementById('feature-toggles');
+    const features = config.features || {};
+    container.innerHTML = Object.entries(features).map(([key, val]) => `
+        <label class="flex items-center gap-2 mb-1 cursor-pointer text-sm">
+            <input type="checkbox" ${val ? 'checked' : ''} onchange="toggleFeature('${key}', this.checked)">
+            ${key}
+        </label>
+    `).join('');
+}
+
+async function toggleFeature(feature, enabled) {
+    await fetch('/api/settings', {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({features: {[feature]: enabled}})
+    });
+    fetchConfig();
+}
+
+function toggleSettings() {
+    document.getElementById('settings-panel').classList.toggle('open');
+}
+
+function render() {
+    renderAttention();
+    renderFeed();
+}
+
+function renderAttention() {
+    const items = events.filter(e => ATTENTION_EVENTS.has(e.event) && !e.read);
+    document.getElementById('attention-count').textContent = items.length ? `${items.length} items` : '';
+    const container = document.getElementById('attention-list');
+    if (!items.length) {
+        container.innerHTML = '<div class="text-xs text-gray-600 py-2">Nothing needs your attention right now.</div>';
+        return;
+    }
+    container.innerHTML = items.map(e => {
+        const links = Object.entries(e.links || {}).filter(([k, url]) => url).map(([k, url]) =>
+            `<a href="${url}" target="_blank" class="link">[→ ${k}]</a>`
+        ).join(' ');
+        return `<div class="card card-red px-3 py-2 flex items-center justify-between text-sm">
+            <div>
+                <span class="text-gray-500 text-xs">${fmtTime(e.ts)}</span>
+                <span class="badge badge-red ml-2">${e.event}</span>
+                <span class="ml-2">${e.summary}</span>
+                <span class="ml-2">${links}</span>
+            </div>
+            <span class="dismiss-btn" onclick="dismissEvent('${e.id}')">✓</span>
+        </div>`;
+    }).join('');
+}
+
+function renderFeed() {
+    const items = events.filter(e => !SYSTEM_EVENTS.has(e.event));
+    const container = document.getElementById('event-feed');
+    container.innerHTML = items.map(e => {
+        const cls = e.read ? 'read' : 'unread';
+        const dot = e.read ? '○' : '●';
+        const links = Object.entries(e.links || {}).filter(([k, url]) => url).map(([k, url]) =>
+            `<a href="${url}" target="_blank" class="link">[→ ${k}]</a>`
+        ).join(' ');
+        const badgeCls = e.event.includes('error') || e.event.includes('fail') ? 'badge-red'
+            : e.event.includes('complete') || e.event.includes('pass') || e.event.includes('merged') ? 'badge-green'
+            : e.event.includes('started') || e.event.includes('created') ? 'badge-yellow'
+            : 'badge-blue';
+        return `<div class="${cls} px-2 py-1 flex items-center gap-2 hover:bg-gray-900 rounded">
+            <span class="text-gray-600 w-16 shrink-0">${fmtTime(e.ts)}</span>
+            <span>${dot}</span>
+            <span class="badge ${badgeCls}">${e.event}</span>
+            <span class="flex-1 truncate">${e.summary}</span>
+            <span class="shrink-0">${links}</span>
+            <span class="dismiss-btn shrink-0" onclick="dismissEvent('${e.id}')">✓</span>
+        </div>`;
+    }).join('');
+}
+
+async function dismissEvent(id) {
+    await fetch(`/api/events/${id}/dismiss`, {method: 'POST'});
+    fetchEvents();
+}
+
+async function dismissAll() {
+    await fetch('/api/events/dismiss-all', {method: 'POST'});
+    fetchEvents();
+}
+
+function setFilter(f) {
+    currentFilter = f;
+    document.getElementById('filter-all').classList.toggle('text-white', f === 'all');
+    document.getElementById('filter-unread').classList.toggle('text-white', f === 'unread');
+    fetchEvents();
+}
+
+function fmtTime(ts) {
+    const d = new Date(ts);
+    return d.toLocaleTimeString('en-US', {hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'});
+}
+
+async function pollNow() {
+    const btn = document.getElementById('poll-btn');
+    btn.disabled = true;
+    btn.textContent = 'Polling...';
+    await fetch('/api/poll', { method: 'POST' });
+    btn.disabled = false;
+    btn.textContent = 'Poll Now';
+    setTimeout(() => { fetchEvents(); fetchStatus(); }, 3000);
+}
+
+fetchConfig();
+fetchStatus();
+fetchEvents();
+setInterval(() => { fetchEvents(); fetchStatus(); }, 5000);
+</script>
+</body>
+</html>
