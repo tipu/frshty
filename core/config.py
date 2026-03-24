@@ -28,7 +28,7 @@ def load_config(path: str) -> dict:
 
     raw["_config_path"] = Path(path)
     raw["_state_dir"] = Path.home() / ".frshty" / raw["job"]["key"]
-    raw["_base_url"] = f"http://localhost:{raw['job']['port']}"
+    raw["_base_url"] = raw["job"].get("host") or f"http://localhost:{raw['job']['port']}"
 
     return raw
 

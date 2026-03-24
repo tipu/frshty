@@ -4,8 +4,8 @@ from datetime import datetime, timezone, date, timedelta
 
 import httpx
 
-import log
-from config import resolve_env, get_repos
+import core.log as log
+from core.config import resolve_env, get_repos
 
 
 def check(config: dict):

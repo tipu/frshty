@@ -2,9 +2,9 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-import log
-import state
-from claude_runner import run_haiku
+import core.log as log
+import core.state as state
+from core.claude_runner import run_haiku
 
 
 def check(config: dict):

@@ -10,7 +10,7 @@ import signal
 import subprocess
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
-import state
+import core.state as state
 
 MAX_SCROLLBACK = 1024 * 1024
 TMUX_SOCKET = "/tmp/frshty-tmux"

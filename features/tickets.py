@@ -5,11 +5,11 @@ from pathlib import Path
 
 import httpx
 
-import log
-import state
-from config import get_repos, ticket_worktree_path, resolve_env
-from claude_runner import run_haiku, run_claude_code, extract_json
-from platforms import make_platform
+import core.log as log
+import core.state as state
+from core.config import get_repos, ticket_worktree_path, resolve_env
+from core.claude_runner import run_haiku, run_claude_code, extract_json
+from features.platforms import make_platform
 
 
 STATES = ["new", "planning", "reviewing", "pr_ready", "pr_created", "in_review", "merged"]
