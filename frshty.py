@@ -11,10 +11,10 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.websockets import WebSocket
 from pathlib import Path
 
-import config as cfg
-import log
-import state
-import terminal
+import core.config as cfg
+import core.log as log
+import core.state as state
+import core.terminal as terminal
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -581,28 +581,28 @@ def run_cycle(config: dict):
     _reload_config(config)
     log.emit("cycle_start", "Cycle started")
     try:
-        import own_prs
+        import features.own_prs as own_prs
         own_prs.check(config)
     except Exception as e:
         log.emit("cycle_error", f"own_prs failed: {e}")
 
     if config.get("features", {}).get("review_prs"):
         try:
-            import reviewer
+            import features.reviewer as reviewer
             reviewer.check(config)
         except Exception as e:
             log.emit("cycle_error", f"reviewer failed: {e}")
 
     if config.get("features", {}).get("tickets"):
         try:
-            import tickets
-            tickets.check(config)
+            import features.tickets as _tickets_mod
+            _tickets_mod.check(config)
         except Exception as e:
             log.emit("cycle_error", f"tickets failed: {e}")
 
     if config.get("features", {}).get("timesheet"):
         try:
-            import timesheet
+            import features.timesheet as timesheet
             timesheet.check(config)
         except Exception as e:
             log.emit("cycle_error", f"timesheet failed: {e}")
@@ -625,7 +625,7 @@ def slack_loop(config: dict):
     while True:
         if config.get("features", {}).get("slack"):
             try:
-                import slack_monitor
+                import features.slack_monitor as slack_monitor
                 slack_monitor.check(config)
             except Exception as e:
                 log.emit("cycle_error", f"slack_monitor failed: {e}")

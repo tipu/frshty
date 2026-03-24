@@ -4,10 +4,11 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-import log
-import state
-from claude_runner import run_sonnet, run_haiku, extract_json
-from platforms import make_platform
+import core.log as log
+import core.state as state
+from core.claude_runner import run_sonnet, run_haiku, extract_json
+from core.config import get_repos
+from features.platforms import make_platform
 
 PERSONA_SPEC = (
     "You are a spec reviewer. Your single concern: does this diff solve what the ticket or PR description asks for?\n\n"
@@ -289,7 +290,7 @@ def _style_match_all(config: dict, issues: list[dict]) -> list[dict]:
 
 
 def _ensure_review_worktree(config, pr) -> Path | None:
-    repos = __import__("config").get_repos(config)
+    repos = get_repos(config)
     matching = [r for r in repos if r["name"] == pr["repo"]]
     if not matching:
         return None

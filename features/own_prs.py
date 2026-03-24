@@ -2,10 +2,11 @@ import subprocess
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-import log
-import state
-from claude_runner import run_claude_code, run_haiku, extract_json
-from platforms import make_platform
+import core.log as log
+import core.state as state
+from core.claude_runner import run_claude_code, run_haiku, extract_json
+from core.config import get_repos
+from features.platforms import make_platform
 
 
 def check(config: dict):
@@ -115,7 +116,7 @@ def _ensure_worktree(config, pr) -> Path | None:
     branch_slug = pr["branch"].replace("/", "-")
     worktree_path = state_dir / "pr_worktrees" / branch_slug
 
-    repos = __import__("config").get_repos(config)
+    repos = get_repos(config)
     if not repos:
         return None
 

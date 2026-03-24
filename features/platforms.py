@@ -4,7 +4,7 @@ from datetime import datetime, timezone, timedelta
 
 import httpx
 
-from config import resolve_env
+from core.config import resolve_env, get_repos
 
 
 def make_platform(config: dict):
@@ -36,7 +36,7 @@ class BitbucketPlatform:
         self.user = resolve_env(config, "bitbucket", "user_env")
         self.token = resolve_env(config, "bitbucket", "token_env")
         self.user_account_id = bb.get("user_account_id", "")
-        self.repos = [r["name"] for r in __import__("config").get_repos(config)]
+        self.repos = [r["name"] for r in get_repos(config)]
 
     def _auth(self):
         return (self.user, self.token)
