@@ -1,0 +1,31 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Job configs (contain tokens/account IDs)
+config/*.toml
+!config/example.toml
+
+# Scratch scripts (may contain hardcoded credentials)
+/_fetch_*.py
+/_tmp_fetch.py
+/fetch_pr.py
+
+# Local artifacts
+.playwright-cli/
+/review-snap.yaml
+/*.png
+.python-version
+
+# Local docker-compose (use docker-compose.example.yml)
+/docker-compose.yml
+
+# Internal docs
+/docs/

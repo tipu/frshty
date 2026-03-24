@@ -1,0 +1,66 @@
+[job]
+key = "myproject"
+platform = "github"               # "github" or "bitbucket"
+ticket_system = "linear"          # "jira" or "linear"
+port = 7100
+
+# --- GitHub (used when platform = "github") ---
+[github]
+repo = "org/repo-name"
+
+# --- Bitbucket (used when platform = "bitbucket") ---
+# [bitbucket]
+# org = "myorg"
+# user_env = "BB_USER"            # env var name containing bitbucket username
+# token_env = "BB_TOKEN"          # env var name containing bitbucket app password
+# user_account_id = ""            # your bitbucket account ID (for filtering your PRs)
+
+# --- Jira (used when ticket_system = "jira") ---
+# Use direct values (user/token) or env var names (user_env/token_env)
+# [jira]
+# base_url = "https://myorg.atlassian.net"
+# user = "you@company.com"            # direct value, OR
+# user_env = "JIRA_USER"              # env var name
+# token = "your-api-token"            # direct value, OR
+# token_env = "JIRA_TOKEN"            # env var name
+# jql = 'project = X AND assignee = currentUser() AND status IN ("In Progress")'
+
+# --- Linear (used when ticket_system = "linear") ---
+[linear]
+token_env = "LINEAR_TOKEN"        # env var name, or use token = "lin_api_..." directly
+assignee_email = "you@company.com"
+
+[workspace]
+root = "/path/to/project"
+repos = ["repo-name"]             # explicit repo list, OR use projects_dir to scan
+# projects_dir = "projects"       # scan this subdir for git repos (mutually exclusive with repos)
+# exclude = ["some-repo"]         # skip these when scanning projects_dir
+tickets_dir = "tickets"
+ticket_layout = "flat"            # "flat": tickets/{KEY}/{repo}/ or "workspace": tickets/{KEY}/workspace/{repo}/
+base_branch = "main"
+branch_prefix = ""                # empty = branch is {KEY}-{slug}. set to "yourname" for yourname/feature/{KEY}-{slug}
+# dep_commands = [
+#     {match = "some-repo", cmd = "pipenv install --dev"},
+# ]
+# run_commands = ["cd django-app && pipenv run python manage.py runserver &", "cd frontend && npm start &"]
+
+[pr]
+auto_merge = false
+# merge_strategy = "squash"       # squash, merge, rebase
+# merge_flags = ["--admin"]       # extra flags for gh pr merge
+
+[features]
+review_prs = false
+tickets = true
+slack = false
+timesheet = false
+
+# [slack]
+# raw_path = "/path/to/slack_int/messages/raw.jsonl"
+# workspace = "myworkspace"
+# user_id = "UXXXXXXX"
+
+# [timesheet]
+# recurring = [
+#     {ticket = "PROJ-1", days = ["mon", "wed"], time = "30m", label = "standup"},
+# ]
