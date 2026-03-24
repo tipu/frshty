@@ -1,6 +1,6 @@
-# frshty
+# frshty (فرشتہ)
 
-A personal dev dashboard that ties together PR reviews, tickets, Slack, and timesheets into a single FastAPI interface. Built around AI-assisted code review using Claude, Codex, and Gemini CLIs running inside a dev container.
+**/fəˈrɪʃ.tə/** — a personal dev dashboard that ties together PR reviews, tickets, Slack, and timesheets into a single FastAPI interface. Built around AI-assisted code review using Claude, Codex, and Gemini CLIs running inside a dev container.
 
 This is personal automation shared publicly so others can fork and adapt it. It is not a production service.
 
