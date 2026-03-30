@@ -209,6 +209,18 @@ class GitHubPlatform:
             ["gh"] + args, capture_output=True, text=True, timeout=60,
         )
 
+    _repo_cache: dict[str, str] = {}
+
+    def _resolve_repo(self, short_name: str) -> str:
+        if "/" in short_name:
+            return short_name
+        if short_name in self._repo_cache:
+            return self._repo_cache[short_name]
+        org = self.repo.split("/")[0]
+        full = f"{org}/{short_name}"
+        self._repo_cache[short_name] = full
+        return full
+
     def list_my_open_prs(self) -> list[dict]:
         result = self._run_gh([
             "pr", "list", "--repo", self.repo, "--author", "@me",
@@ -221,21 +233,22 @@ class GitHubPlatform:
 
     def list_review_prs(self) -> list[dict]:
         result = self._run_gh([
-            "pr", "list", "--repo", self.repo,
-            "--json", "number,title,author,headRefName,baseRefName,createdAt,updatedAt,url,state",
+            "search", "prs", "--review-requested=@me", "--state=open",
+            "--json", "number,title,author,createdAt,updatedAt,url,repository",
             "--limit", "50",
         ])
         if result.returncode != 0:
             return []
-        my_prs = {p["id"] for p in self.list_my_open_prs()}
-        return [
-            self._normalize_pr(pr) for pr in json.loads(result.stdout)
-            if pr["number"] not in my_prs
-        ]
+        prs = [self._normalize_search_pr(pr) for pr in json.loads(result.stdout)]
+        for pr in prs:
+            if pr.get("full_repo"):
+                self._repo_cache[pr["repo"]] = pr["full_repo"]
+        return prs
 
     def get_pr_comments(self, repo: str, pr_id: int) -> list[dict]:
+        full = self._resolve_repo(repo)
         result = self._run_gh([
-            "api", f"repos/{self.repo}/pulls/{pr_id}/comments",
+            "api", f"repos/{full}/pulls/{pr_id}/comments",
             "--jq", ".",
         ])
         if result.returncode != 0:
@@ -255,14 +268,15 @@ class GitHubPlatform:
         ]
 
     def get_pr_diff(self, repo: str, pr_id: int) -> str | None:
-        result = self._run_gh(["pr", "diff", str(pr_id), "--repo", self.repo])
+        result = self._run_gh(["pr", "diff", str(pr_id), "--repo", self._resolve_repo(repo)])
         if result.returncode != 0:
             return None
         return result.stdout
 
     def get_pr_checks(self, repo: str, pr_id: int) -> list[dict]:
+        full = self._resolve_repo(repo)
         result = self._run_gh([
-            "pr", "checks", str(pr_id), "--repo", self.repo,
+            "pr", "checks", str(pr_id), "--repo", full,
             "--json", "name,state,detailsUrl",
         ])
         if result.returncode != 0:
@@ -273,8 +287,9 @@ class GitHubPlatform:
         ]
 
     def get_pr_state(self, repo: str, pr_id: int) -> str:
+        full = self._resolve_repo(repo)
         result = self._run_gh([
-            "pr", "view", str(pr_id), "--repo", self.repo,
+            "pr", "view", str(pr_id), "--repo", full,
             "--json", "state", "-q", ".state",
         ])
         if result.returncode != 0:
@@ -282,33 +297,35 @@ class GitHubPlatform:
         return result.stdout.strip()
 
     def post_pr_comment(self, repo: str, pr_id: int, body: str, path: str | None = None, line: int | None = None, parent_id: int | None = None) -> dict:
+        full = self._resolve_repo(repo)
         if parent_id:
             result = self._run_gh([
-                "api", f"repos/{self.repo}/pulls/{pr_id}/comments",
+                "api", f"repos/{full}/pulls/{pr_id}/comments",
                 "-f", f"body={body}", "-F", f"in_reply_to={parent_id}",
             ])
         elif path and line:
             head_result = self._run_gh([
-                "pr", "view", str(pr_id), "--repo", self.repo,
+                "pr", "view", str(pr_id), "--repo", full,
                 "--json", "headRefOid", "-q", ".headRefOid",
             ])
             commit_id = head_result.stdout.strip() if head_result.returncode == 0 else ""
             result = self._run_gh([
-                "api", f"repos/{self.repo}/pulls/{pr_id}/comments",
+                "api", f"repos/{full}/pulls/{pr_id}/comments",
                 "-f", f"body={body}", "-f", f"path={path}", "-F", f"line={line}",
                 "-f", f"commit_id={commit_id}",
             ])
         else:
             result = self._run_gh([
-                "pr", "comment", str(pr_id), "--repo", self.repo, "--body", body,
+                "pr", "comment", str(pr_id), "--repo", full, "--body", body,
             ])
         if result.returncode == 0:
             return {"status": "posted"}
         return {"status": "error", "detail": result.stderr}
 
     def edit_pr_comment(self, repo: str, pr_id: int, comment_id: int, body: str) -> dict:
+        full = self._resolve_repo(repo)
         result = self._run_gh([
-            "api", "-X", "PATCH", f"repos/{self.repo}/pulls/comments/{comment_id}",
+            "api", "-X", "PATCH", f"repos/{full}/pulls/comments/{comment_id}",
             "-f", f"body={body}",
         ])
         if result.returncode == 0:
@@ -328,8 +345,9 @@ class GitHubPlatform:
         return result.returncode == 0
 
     def create_pr(self, repo: str, repo_path, branch: str, title: str, body: str, base_branch: str) -> dict:
+        full = self._resolve_repo(repo)
         result = self._run_gh([
-            "pr", "create", "--repo", self.repo,
+            "pr", "create", "--repo", full,
             "--base", base_branch, "--head", branch,
             "--title", title, "--body", body,
         ])
@@ -344,7 +362,7 @@ class GitHubPlatform:
         pr_config = self.config.get("pr", {})
         strategy = pr_config.get("merge_strategy", "squash")
         flags = pr_config.get("merge_flags", [])
-        args = ["pr", "merge", str(pr_id), "--repo", self.repo, f"--{strategy}"]
+        args = ["pr", "merge", str(pr_id), "--repo", self._resolve_repo(repo), f"--{strategy}"]
         args.extend(flags)
         result = self._run_gh(args)
         if result.returncode != 0:
@@ -352,7 +370,7 @@ class GitHubPlatform:
         return {"status": "merged"}
 
     def pr_url(self, repo: str, pr_id: int) -> str:
-        return f"https://github.com/{self.repo}/pull/{pr_id}"
+        return f"https://github.com/{self._resolve_repo(repo)}/pull/{pr_id}"
 
     def _normalize_pr(self, pr: dict) -> dict:
         return {
@@ -362,6 +380,21 @@ class GitHubPlatform:
             "author": pr["author"]["login"],
             "branch": pr["headRefName"],
             "base": pr["baseRefName"],
+            "created_on": pr["createdAt"],
+            "updated_on": pr["updatedAt"],
+            "url": pr["url"],
+        }
+
+    def _normalize_search_pr(self, pr: dict) -> dict:
+        repo_full = pr.get("repository", {}).get("nameWithOwner", self.repo)
+        return {
+            "id": pr["number"],
+            "repo": repo_full.split("/")[-1],
+            "full_repo": repo_full,
+            "title": pr["title"],
+            "author": pr["author"]["login"],
+            "branch": "",
+            "base": "",
             "created_on": pr["createdAt"],
             "updated_on": pr["updatedAt"],
             "url": pr["url"],
