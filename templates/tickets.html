@@ -22,7 +22,7 @@ nav a { color: #888; padding: 4px 12px; border-radius: 4px; }
 nav a:hover, nav a.active { color: #fff; background: #222; }
 </style>
 </head>
-<body class="p-4 max-w-7xl mx-auto">
+<body class="p-4">
 <header class="flex items-center gap-4 mb-4">
     <h1 class="text-lg font-bold">Tickets</h1>
     <nav class="flex gap-1 text-sm">
@@ -43,7 +43,9 @@ async function load() {
     const resp = await fetch('/api/tickets/list');
     const tickets = await resp.json();
     const board = document.getElementById('board');
-    board.innerHTML = COLUMNS.map(col => {
+    board.innerHTML = COLUMNS.filter(col =>
+        Object.values(tickets).some(t => t.status === col)
+    ).map(col => {
         const items = Object.entries(tickets)
             .filter(([_, t]) => t.status === col)
             .map(([key, t]) => `
@@ -51,7 +53,7 @@ async function load() {
                     <div class="font-bold text-sm">${key}</div>
                     <div class="text-xs text-gray-400 mt-1">${t.branch || ''}</div>
                 </a>
-            `).join('') || '<div class="text-xs text-gray-600">empty</div>';
+            `).join('');
         return `<div class="col flex-1">
             <div class="text-xs font-bold text-gray-500 uppercase mb-2">${col}</div>
             ${items}

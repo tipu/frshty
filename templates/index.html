@@ -68,6 +68,11 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
     <div class="flex items-center justify-between mb-2">
         <h2 class="text-sm font-bold text-gray-400 uppercase tracking-wider">Event Feed</h2>
         <div class="flex gap-2 text-xs">
+            <button onclick="toggleCategory('ticket')" id="cat-ticket" class="text-gray-400 hover:text-white px-1 rounded">ticket</button>
+            <button onclick="toggleCategory('review')" id="cat-review" class="text-gray-400 hover:text-white px-1 rounded">review</button>
+            <button onclick="toggleCategory('pr')" id="cat-pr" class="text-gray-400 hover:text-white px-1 rounded">pr</button>
+            <button onclick="toggleCategory('slack')" id="cat-slack" class="text-gray-400 hover:text-white px-1 rounded">slack</button>
+            <span class="text-gray-700">|</span>
             <button onclick="setFilter('all')" id="filter-all" class="text-gray-400 hover:text-white">all</button>
             <button onclick="setFilter('unread')" id="filter-unread" class="text-gray-400 hover:text-white">unread</button>
             <button onclick="dismissAll()" class="text-gray-600 hover:text-red-400">dismiss all</button>
@@ -78,6 +83,7 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
 
 <script>
 let currentFilter = 'all';
+let activeCategories = new Set();
 let events = [];
 let config = {};
 
@@ -190,7 +196,8 @@ function renderAttention() {
 }
 
 function renderFeed() {
-    const items = events.filter(e => !SYSTEM_EVENTS.has(e.event));
+    const items = events.filter(e => !SYSTEM_EVENTS.has(e.event))
+        .filter(e => activeCategories.size === 0 || [...activeCategories].some(c => e.event.startsWith(c + '_')));
     const container = document.getElementById('event-feed');
     container.innerHTML = items.map(e => {
         const cls = e.read ? 'read' : 'unread';
@@ -221,6 +228,15 @@ async function dismissEvent(id) {
 async function dismissAll() {
     await fetch('/api/events/dismiss-all', {method: 'POST'});
     fetchEvents();
+}
+
+function toggleCategory(cat) {
+    if (activeCategories.has(cat)) activeCategories.delete(cat);
+    else activeCategories.add(cat);
+    const btn = document.getElementById('cat-' + cat);
+    btn.classList.toggle('text-white', activeCategories.has(cat));
+    btn.classList.toggle('bg-gray-700', activeCategories.has(cat));
+    render();
 }
 
 function setFilter(f) {

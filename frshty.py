@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
+import json
+import os
 import random
+import shlex
 import sys
 import threading
 import time
 import traceback
+import urllib.parse
+import urllib.request
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -15,6 +20,15 @@ import core.config as cfg
 import core.log as log
 import core.state as state
 import core.terminal as terminal
+from core.claude_runner import run_haiku
+from core.config import get_repos
+from core.terminal import _tmux_session_exists, _tmux_session_name
+from features.platforms import make_platform
+import features.own_prs as own_prs
+import features.reviewer as reviewer
+import features.slack_monitor as slack_monitor
+import features.tickets as _tickets_mod
+import features.timesheet as ts
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -98,7 +112,6 @@ async def api_status():
     slack_alive = False
     raw_path = _config.get("slack", {}).get("raw_path", "")
     if raw_path:
-        import os, time
         try:
             mtime = os.path.getmtime(raw_path)
             slack_alive = (time.time() - mtime) < 120
@@ -128,7 +141,6 @@ async def api_config():
 
 @app.post("/api/poll")
 async def api_poll():
-    import threading
     threading.Thread(target=run_cycle, args=(_config,), daemon=True).start()
     return {"status": "started"}
 
@@ -143,7 +155,6 @@ async def api_settings(request: Request):
 
 @app.get("/api/reviews")
 async def api_reviews_list():
-    import json
     reviews_dir = _config["_state_dir"] / "reviews"
     if not reviews_dir.exists():
         return []
@@ -172,7 +183,6 @@ async def api_reviews_list():
 
 @app.get("/api/reviews/{repo}/{pr_id}/comments")
 async def api_review_comments(repo: str, pr_id: int):
-    import json
     reviews_dir = _config["_state_dir"] / "reviews" / repo
     if not reviews_dir.exists():
         return []
@@ -208,7 +218,6 @@ async def api_start_discuss(repo: str, pr_id: int, request: Request):
     else:
         context += "Help the reviewer understand and discuss this PR."
 
-    from platforms import make_platform
     platform = make_platform(_config)
     pr_data = None
     try:
@@ -219,18 +228,15 @@ async def api_start_discuss(repo: str, pr_id: int, request: Request):
 
     cwd = str(_config["workspace"]["root"])
     if pr_data:
-        from config import get_repos
         repos = get_repos(_config)
         repo_path = next((r["path"] for r in repos if r["name"] == repo), None)
         if repo_path:
             cwd = str(repo_path)
 
     terminal.kill_terminal(session_id)
-    import time
     time.sleep(1)
     terminal.ensure_session(session_id, cwd)
     time.sleep(2)
-    import shlex
     terminal.send_keys(session_id, f"claude --dangerously-skip-permissions --append-system-prompt {shlex.quote(context)}")
 
     return {"session_id": session_id}
@@ -243,7 +249,6 @@ async def ws_discuss(websocket: WebSocket, session_id: str):
 
 @app.get("/api/reviews/{repo}/{pr_id}/diff")
 async def api_review_diff(repo: str, pr_id: int):
-    from platforms import make_platform
     platform = make_platform(_config)
     diff = platform.get_pr_diff(repo, pr_id)
     return {"diff": diff or ""}
@@ -251,8 +256,6 @@ async def api_review_diff(repo: str, pr_id: int):
 
 @app.post("/api/reviews/{repo}/{pr_id}/comments/{idx}/submit")
 async def api_submit_comment(repo: str, pr_id: int, idx: int):
-    import json
-    from platforms import make_platform
     platform = make_platform(_config)
     reviews_dir = _config["_state_dir"] / "reviews" / repo
     for branch_dir in reviews_dir.iterdir():
@@ -289,7 +292,6 @@ async def api_submit_comment(repo: str, pr_id: int, idx: int):
 
 @app.post("/api/reviews/{repo}/{pr_id}/comments/new")
 async def api_new_comment(repo: str, pr_id: int, request: Request):
-    import json
     body = await request.json()
     reviews_dir = _config["_state_dir"] / "reviews" / repo
     for branch_dir in reviews_dir.iterdir():
@@ -318,7 +320,6 @@ async def api_new_comment(repo: str, pr_id: int, request: Request):
 
 @app.delete("/api/reviews/{repo}/{pr_id}/comments/{idx}")
 async def api_delete_comment(repo: str, pr_id: int, idx: int):
-    import json
     reviews_dir = _config["_state_dir"] / "reviews" / repo
     for branch_dir in reviews_dir.iterdir():
         queued = branch_dir / "queued_comments.json"
@@ -337,7 +338,6 @@ async def api_delete_comment(repo: str, pr_id: int, idx: int):
 
 @app.put("/api/reviews/{repo}/{pr_id}/comments/{idx}")
 async def api_update_comment(repo: str, pr_id: int, idx: int, request: Request):
-    import json
     body = await request.json()
     reviews_dir = _config["_state_dir"] / "reviews" / repo
     for branch_dir in reviews_dir.iterdir():
@@ -365,7 +365,6 @@ async def api_tickets_list():
 
 @app.get("/api/tickets/{key}/detail")
 async def api_ticket_detail(key: str):
-    import json as _json
     tickets = state.load("tickets")
     ts = tickets.get(key)
     if not ts:
@@ -387,7 +386,6 @@ async def api_ticket_detail(key: str):
 
     terminal_alive = False
     if ts.get("status") in ("planning", "reviewing", "in_review"):
-        from terminal import _tmux_session_exists, _tmux_session_name
         terminal_alive = _tmux_session_exists(_tmux_session_name(key))
 
     summary = None
@@ -398,7 +396,6 @@ async def api_ticket_detail(key: str):
             if summary_cache.exists() and summary_cache.stat().st_mtime >= manifest.stat().st_mtime:
                 summary = summary_cache.read_text()
             else:
-                from claude_runner import run_haiku
                 summary = run_haiku(
                     f"Summarize this change manifest in 2-3 sentences. Be direct and technical.\n\n{manifest.read_text()[:4000]}"
                 )
@@ -425,7 +422,6 @@ async def api_ticket_diff(key: str):
     ts = tickets.get(key)
     if not ts or not ts.get("prs"):
         return {"diff": ""}
-    from platforms import make_platform
     platform = make_platform(_config)
     pr = ts["prs"][0]
     diff = platform.get_pr_diff(pr["repo"], pr["id"])
@@ -443,8 +439,7 @@ async def api_ticket_pr_comments(key: str):
     path = ws["root"] / ws["tickets_dir"] / slug / "pr_comments.json"
     if not path.exists():
         return []
-    import json as _json
-    return _json.loads(path.read_text())
+    return json.loads(path.read_text())
 
 
 @app.post("/api/tickets/{key}/pr-comments/{comment_id}/reply")
@@ -463,13 +458,11 @@ async def api_ticket_reply(key: str, comment_id: int, request: Request):
     if not path.exists():
         return JSONResponse({"error": "no comments"}, status_code=404)
 
-    import json as _json
-    comments = _json.loads(path.read_text())
+    comments = json.loads(path.read_text())
     entry = next((c for c in comments if c["id"] == comment_id), None)
     if not entry:
         return JSONResponse({"error": "comment not found"}, status_code=404)
 
-    from platforms import make_platform
     platform = make_platform(_config)
     result = platform.post_pr_comment(
         entry["pr_repo"], entry["pr_id"], body,
@@ -479,7 +472,7 @@ async def api_ticket_reply(key: str, comment_id: int, request: Request):
     if result.get("status") == "posted":
         entry["status"] = "replied"
         entry["suggested_reply"] = body
-        path.write_text(_json.dumps(comments, indent=2, default=str))
+        path.write_text(json.dumps(comments, indent=2, default=str))
         log.emit("ticket_pr_reply_sent", f"Replied to comment on {key}",
             links={"detail": f"{_config['_base_url']}/tickets/{key}"},
             meta={"ticket": key, "comment_id": comment_id})
@@ -499,7 +492,6 @@ async def api_restart_ticket(key: str):
         return JSONResponse({"error": "ticket dir not found"}, status_code=404)
 
     terminal.kill_terminal(key)
-    import time
     time.sleep(1)
     terminal.ensure_session(key, str(ticket_dir))
     time.sleep(2)
@@ -534,15 +526,12 @@ async def api_slack_send(reply_id: str, request: Request):
     channel = ctx["channel"]
     thread_ts = ctx.get("thread_ts", "")
 
-    import json as _json
-    import urllib.request
-    import urllib.parse
     tokens_path = _config.get("slack", {}).get("raw_path", "")
     if tokens_path:
         tokens_file = str(Path(tokens_path).parent.parent / "tokens.json")
         try:
-            tokens = _json.loads(Path(tokens_file).read_text())
-        except (FileNotFoundError, _json.JSONDecodeError):
+            tokens = json.loads(Path(tokens_file).read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
             return JSONResponse({"error": "tokens.json not found"}, status_code=500)
         creds = tokens.get(workspace)
         if not creds:
@@ -558,7 +547,7 @@ async def api_slack_send(reply_id: str, request: Request):
             headers={"Cookie": creds["cookie"].replace(", ", "; ")},
         )
         resp = urllib.request.urlopen(req)
-        result = _json.loads(resp.read())
+        result = json.loads(resp.read())
         if result.get("ok"):
             log.emit("slack_reply_sent", f"Replied in {channel}: {text[:80]}",
                 links={"detail": f"{_config['_base_url']}/slack"},
@@ -581,29 +570,25 @@ def run_cycle(config: dict):
     _reload_config(config)
     log.emit("cycle_start", "Cycle started")
     try:
-        import features.own_prs as own_prs
         own_prs.check(config)
     except Exception as e:
         log.emit("cycle_error", f"own_prs failed: {e}")
 
     if config.get("features", {}).get("review_prs"):
         try:
-            import features.reviewer as reviewer
             reviewer.check(config)
         except Exception as e:
             log.emit("cycle_error", f"reviewer failed: {e}")
 
     if config.get("features", {}).get("tickets"):
         try:
-            import features.tickets as _tickets_mod
             _tickets_mod.check(config)
         except Exception as e:
             log.emit("cycle_error", f"tickets failed: {e}")
 
     if config.get("features", {}).get("timesheet"):
         try:
-            import features.timesheet as timesheet
-            timesheet.check(config)
+            ts.check(config)
         except Exception as e:
             log.emit("cycle_error", f"timesheet failed: {e}")
 
@@ -625,7 +610,6 @@ def slack_loop(config: dict):
     while True:
         if config.get("features", {}).get("slack"):
             try:
-                import features.slack_monitor as slack_monitor
                 slack_monitor.check(config)
             except Exception as e:
                 log.emit("cycle_error", f"slack_monitor failed: {e}")

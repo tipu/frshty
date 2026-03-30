@@ -1,4 +1,5 @@
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -235,7 +236,6 @@ def _collect_names(record: dict, names: dict):
 
 
 def _resolve_names(text: str, names: dict) -> str:
-    import re
     def _replace(m):
         prefix, slack_id = m.group(1), m.group(2)
         name = names.get(slack_id)

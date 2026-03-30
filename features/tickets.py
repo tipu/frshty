@@ -1,12 +1,14 @@
 import json
 import re
 import subprocess
+import time
 from pathlib import Path
 
 import httpx
 
 import core.log as log
 import core.state as state
+import core.terminal as terminal
 from core.config import get_repos, ticket_worktree_path, resolve_env
 from core.claude_runner import run_haiku, run_claude_code, extract_json
 from features.platforms import make_platform
@@ -268,8 +270,6 @@ def _setup_ticket(config, ticket, base_url) -> dict:
         meta={"ticket": key, "slug": slug, "branch": branch})
 
     ticket_dir = ws["root"] / ws["tickets_dir"] / slug
-    import terminal
-    import time
     terminal.ensure_session(key, str(ticket_dir))
     time.sleep(2)
     terminal.send_keys(key, "claude --dangerously-skip-permissions")
@@ -296,7 +296,6 @@ def _check_planning(config, ticket, ts, base_url) -> dict:
         links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
         meta={"ticket": ticket["key"]})
 
-    import terminal
     terminal.send_keys(ticket["key"], "Run /tri-review and save the full output to docs/tri-review.md")
 
     log.emit("ticket_review_started", f"Started /tri-review for {ticket['key']}",
@@ -324,7 +323,6 @@ def _check_reviewing(config, ticket, ts, base_url) -> dict:
     )
 
     if verdict and "FAIL" in verdict.upper():
-        import terminal
         terminal.send_keys(ticket["key"], "Fix all blocking findings in docs/tri-review.md. Then run tests. When done, delete docs/tri-review.md.")
 
         log.emit("ticket_review_fixing", f"Fixing tri-review findings for {ticket['key']}",
@@ -358,10 +356,22 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
             continue
         subprocess.run(["git", "add", "-A"], cwd=str(wt), capture_output=True, timeout=60)
         subprocess.run(["git", "commit", "-m", f"{ticket['key']}: {ticket['summary']}"], cwd=str(wt), capture_output=True, timeout=60)
-        platform.push_branch(wt, branch)
+
+        pushed = platform.push_branch(wt, branch)
+        if not pushed:
+            log.emit("ticket_pr_error", f"Failed to push branch for {ticket['key']} in {repo['name']}",
+                links={"detail": f"{base_url}/tickets/{ticket['key']}"},
+                meta={"ticket": ticket["key"], "repo": repo["name"], "branch": branch})
+            continue
 
         title = f"{ticket['key']}: {ticket['summary']}"
         result = platform.create_pr(repo["name"], wt, branch, title, pr_body, ws["base_branch"])
+
+        if result.get("error"):
+            log.emit("ticket_pr_error", f"Failed to create PR for {ticket['key']} in {repo['name']}: {result['error']}",
+                links={"detail": f"{base_url}/tickets/{ticket['key']}"},
+                meta={"ticket": ticket["key"], "repo": repo["name"], "error": result["error"]})
+            continue
 
         pr_url = result.get("url", "")
         pr_id = result.get("id")
@@ -375,6 +385,12 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
 
         if pr_id:
             prs.append({"repo": repo["name"], "id": pr_id, "url": pr_url})
+
+    if not prs:
+        log.emit("ticket_pr_error", f"No PRs created for {ticket['key']}, staying at pr_ready",
+            links={"detail": f"{base_url}/tickets/{ticket['key']}"},
+            meta={"ticket": ticket["key"]})
+        return ts
 
     ts["prs"] = prs
     ts["last_comment_ids"] = {f"{p['repo']}/{p['id']}": 0 for p in prs}
@@ -506,10 +522,25 @@ def _merge(config, ticket, ts, base_url) -> dict:
     if not pr_config.get("auto_merge"):
         return ts
 
-    log.emit("ticket_merged", f"Auto-merged PR for {ticket['key']}",
-        links={"ticket": ticket.get("url", "")},
-        meta={"ticket": ticket["key"]})
-    ts["status"] = "merged"
+    prs = ts.get("prs", [])
+    if not prs:
+        return ts
+
+    all_merged = True
+    for pr in prs:
+        result = platform.merge_pr(pr["repo"], pr["id"])
+        if result.get("error"):
+            log.emit("ticket_merge_error", f"Failed to merge PR #{pr['id']} in {pr['repo']}: {result['error']}",
+                links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+                meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"], "error": result["error"]})
+            all_merged = False
+        else:
+            log.emit("ticket_pr_merged", f"Merged PR #{pr['id']} in {pr['repo']}",
+                links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+                meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"]})
+
+    if all_merged:
+        ts["status"] = "merged"
     return ts
 
 

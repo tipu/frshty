@@ -1,4 +1,5 @@
 import json
+import re
 import subprocess
 from datetime import datetime, timezone, timedelta
 
@@ -335,7 +336,6 @@ class GitHubPlatform:
         if result.returncode != 0:
             return {"error": result.stderr.strip()}
         url = result.stdout.strip()
-        import re
         m = re.search(r"/pull/(\d+)", url)
         pr_id = int(m.group(1)) if m else None
         return {"url": url, "id": pr_id}

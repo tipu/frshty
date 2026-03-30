@@ -1,4 +1,5 @@
 import os
+import re
 import pwd
 import pty
 import json
@@ -201,7 +202,8 @@ async def terminal_handler(websocket: WebSocket, ticket_key: str, config: dict):
     fd = entry["fd"]
 
     if entry["scrollback"]:
-        await websocket.send_bytes(bytes(entry["scrollback"]))
+        clean = re.sub(rb'\x1b\[\?[0-9;]*c', b'', bytes(entry["scrollback"]))
+        await websocket.send_bytes(clean)
 
     entry["readers"].add(websocket)
 
