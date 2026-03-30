@@ -635,7 +635,8 @@ def main():
     slack_thread = threading.Thread(target=slack_loop, args=(_config,), daemon=True)
     slack_thread.start()
 
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    host = _config["job"].get("bind", "127.0.0.1")
+    uvicorn.run(app, host=host, port=port, log_level="warning")
 
 
 if __name__ == "__main__":

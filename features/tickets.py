@@ -45,6 +45,14 @@ def _download_attachments(config, ticket, docs_path):
                 pass
 
 
+def _resolve_status(config: dict, external_status: str) -> str | None:
+    system = config["job"].get("ticket_system", "")
+    status_map = config.get(system, {}).get("status_map", {})
+    if not status_map:
+        return None
+    return status_map.get(external_status)
+
+
 def check(config: dict):
     assigned = _fetch_tickets(config)
     if not assigned:
@@ -56,6 +64,17 @@ def check(config: dict):
     for ticket in assigned:
         key = ticket["key"]
         ts = ticket_state.get(key, {"status": "new"})
+        ts["external_status"] = ticket.get("status", "")
+
+        mapped = _resolve_status(config, ticket.get("status", ""))
+        if mapped:
+            if "slug" not in ts:
+                ts["slug"] = _make_slug(key, ticket["summary"])
+                ts["branch"] = _make_branch(config, key, ticket)
+                ts["url"] = ticket.get("url", "")
+            ts["status"] = mapped
+            ticket_state[key] = ts
+            continue
 
         if ts["status"] == "merged":
             continue
@@ -97,15 +116,28 @@ def _fetch_jira(config: dict) -> list[dict]:
     base_url = jira.get("base_url", "")
     user = resolve_env(config, "jira", "user_env")
     token = resolve_env(config, "jira", "token_env")
-    jql = jira.get("jql", "")
-    if not base_url or not user or not token or not jql:
+    if not base_url or not user or not token:
         return []
-    url = f"{base_url}/rest/api/3/search/jql?jql={jql}&maxResults=20&fields=key,summary,status,description,attachment,issuelinks,parent,subtasks"
+    board_id = jira.get("board_id")
+    account_id = jira.get("user_account_id", "")
+    jql = jira.get("jql", "")
+    if not board_id and not jql:
+        return []
     with httpx.Client(auth=(user, token), timeout=30) as client:
-        resp = client.get(url)
-        if resp.status_code != 200:
-            return []
-        issues = resp.json().get("issues", [])
+        if board_id:
+            url = f"{base_url}/rest/agile/1.0/board/{board_id}/issue?maxResults=100"
+            resp = client.get(url)
+            if resp.status_code != 200:
+                return []
+            issues = resp.json().get("issues", [])
+            if account_id:
+                issues = [i for i in issues if (i.get("fields", {}).get("assignee") or {}).get("accountId") == account_id]
+        else:
+            url = f"{base_url}/rest/api/3/search/jql?jql={jql}&maxResults=20&fields=key,summary,status,description,attachment,issuelinks,parent,subtasks"
+            resp = client.get(url)
+            if resp.status_code != 200:
+                return []
+            issues = resp.json().get("issues", [])
         results = []
         for i in issues:
             fields = i.get("fields", {})
