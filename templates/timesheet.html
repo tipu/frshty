@@ -8,12 +8,23 @@
 body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: #0a0a0a; color: #e0e0e0; }
 .card { background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; }
 table { border-collapse: collapse; width: 100%; }
-th, td { padding: 6px 10px; border: 1px solid #2a2a2a; text-align: left; font-size: 13px; }
+th, td { padding: 6px 10px; border: 1px solid #2a2a2a; text-align: left; font-size: 13px; vertical-align: top; }
 th { background: #1a1a1a; }
 .weekend { opacity: 0.5; }
+.logged { background: rgba(34, 197, 94, 0.1); }
+.missing { background: rgba(239, 68, 68, 0.1); }
+.total-row { background: #1a1a1a; font-weight: bold; }
 nav a { color: #888; padding: 4px 12px; border-radius: 4px; }
 nav a:hover, nav a.active { color: #fff; background: #222; }
-input { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; padding: 4px 8px; border-radius: 4px; }
+input, select { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
+button { cursor: pointer; }
+.btn { background: #1e3a5f; color: #93c5fd; border: none; padding: 2px 8px; border-radius: 4px; font-size: 11px; }
+.btn:hover { background: #2a4a6f; }
+.btn-purple { background: #581c87; color: #c084fc; }
+.btn-purple:hover { background: #6b21a8; }
+.msg { padding: 6px 12px; border-radius: 4px; font-size: 12px; margin-bottom: 8px; display: inline-block; }
+.msg-ok { background: #14532d; color: #86efac; }
+.msg-err { background: #7f1d1d; color: #fca5a5; }
 </style>
 </head>
 <body class="p-4 max-w-7xl mx-auto">
@@ -28,12 +39,369 @@ input { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; padding: 4p
     </nav>
 </header>
 
-<div class="text-gray-500 text-sm mb-4">Timesheet feature — coming from Jira integration. Configure in [timesheet] section.</div>
+<div class="flex items-center gap-3 mb-4">
+    <input type="date" id="start" />
+    <span class="text-gray-500">→</span>
+    <input type="date" id="end" />
+    <button class="btn" onclick="generate(false)">Generate</button>
+    <button class="btn text-gray-400" onclick="generate(true)">Hard Refresh</button>
+    <button class="btn text-gray-400" onclick="prevRange()">← Prev</button>
+    <button class="btn text-gray-400" onclick="nextRange()">Next →</button>
+    <span id="hint" class="hidden text-xs text-gray-500 animate-pulse">updating...</span>
+    <div id="msg"></div>
+</div>
 
-<div id="timesheet-content"></div>
+<div class="flex gap-4">
+    <div id="sidebar" class="w-52 flex-shrink-0 sticky top-4 self-start hidden">
+        <div class="card p-3 mb-3">
+            <span class="text-gray-400 text-sm">Total to log:</span>
+            <span id="total-hours" class="text-xl font-bold text-green-400 ml-1">0h</span>
+        </div>
+        <div id="ticket-sidebar" class="flex flex-col gap-2"></div>
+    </div>
+
+    <div class="flex-1 min-w-0 card overflow-x-auto">
+        <table>
+            <thead>
+                <tr>
+                    <th style="width:110px">Date</th>
+                    <th style="width:80px">Logged</th>
+                    <th>Activity</th>
+                </tr>
+            </thead>
+            <tbody id="tbody"></tbody>
+            <tfoot id="tfoot"></tfoot>
+        </table>
+    </div>
+</div>
 
 <script>
-document.getElementById('timesheet-content').innerHTML = '<div class="text-gray-600">Timesheet data loads here when Jira is configured.</div>';
+let data = {};
+let lastData = null;
+
+function getTwoMonthRange(offset = 0) {
+    const now = new Date();
+    const end = new Date(now);
+    end.setMonth(end.getMonth() + offset * 2);
+    const start = new Date(end);
+    start.setMonth(start.getMonth() - 2);
+    return { start: iso(start), end: iso(end) };
+}
+
+let rangeOffset = 0;
+function prevRange() { rangeOffset--; const r = getTwoMonthRange(rangeOffset); setDates(r.start, r.end); generate(false); }
+function nextRange() { rangeOffset++; const r = getTwoMonthRange(rangeOffset); setDates(r.start, r.end); generate(false); }
+
+function iso(d) { return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
+function parseDate(s) { const [y,m,d] = s.split('-').map(Number); return new Date(y, m-1, d); }
+
+function setDates(s, e) {
+    document.getElementById('start').value = s;
+    document.getElementById('end').value = e;
+}
+
+function cacheWrite(cacheData) {
+    try { localStorage.setItem('ts_cache', JSON.stringify(cacheData)); } catch (_) {}
+}
+
+function cacheRead(start, end) {
+    try {
+        const raw = localStorage.getItem('ts_cache');
+        if (raw) {
+            const parsed = JSON.parse(raw);
+            if (parsed.start === start && parsed.end === end) return parsed.data;
+        }
+    } catch (_) {}
+    return null;
+}
+
+async function generate(hardRefresh) {
+    const start = document.getElementById('start').value;
+    const end = document.getElementById('end').value;
+    const hint = document.getElementById('hint');
+
+    if (hardRefresh) localStorage.removeItem('ts_cache');
+
+    let showedCache = false;
+    const cached = cacheRead(start, end);
+    if (cached && !hardRefresh) {
+        data = cached;
+        render();
+        showedCache = true;
+    }
+
+    if (showedCache) hint.classList.remove('hidden');
+
+    const forceParam = hardRefresh ? '&force=true' : '';
+    try {
+        const resp = await fetch(`/api/timesheet?start=${start}&end=${end}${forceParam}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        data = await resp.json();
+        cacheWrite({start, end, data});
+        render();
+    } catch (e) {
+        if (!showedCache) showMsg('Failed: ' + e.message, true);
+    }
+    hint.classList.add('hidden');
+}
+
+async function refreshDay(ds) {
+    const btn = document.getElementById(`refresh-${ds}`);
+    if (btn) { btn.classList.add('animate-spin'); btn.disabled = true; }
+    try {
+        const resp = await fetch(`/api/timesheet?start=${ds}&end=${ds}&force=true`);
+        if (!resp.ok) return;
+        const dayData = await resp.json();
+        if (data) {
+            for (const key of ['worklogs', 'gitCommits', 'prReviews', 'claudeSessions']) {
+                if (dayData[key] && dayData[key][ds]) data[key][ds] = dayData[key][ds];
+                else if (data[key]) delete data[key][ds];
+            }
+            if (dayData.dailySummaries && dayData.dailySummaries[ds]) {
+                if (!data.dailySummaries) data.dailySummaries = {};
+                data.dailySummaries[ds] = dayData.dailySummaries[ds];
+            }
+            localStorage.removeItem('ts_cache');
+            render();
+        }
+    } catch (_) {}
+    const b = document.getElementById(`refresh-${ds}`);
+    if (b) { b.classList.remove('animate-spin'); b.disabled = false; }
+}
+
+function render() {
+    lastData = data;
+    const tbody = document.getElementById('tbody');
+    const tfoot = document.getElementById('tfoot');
+    if (!data.startDate) return;
+
+    const startDate = parseDate(data.startDate);
+    const endDate = parseDate(data.endDate);
+    const summaries = data.dailySummaries || {};
+    const ticketOptions = (data.tickets || []).map(t => `<option value="${t.key}">${t.key}</option>`).join('');
+    let totalSuggest = 0;
+
+    let rows = '';
+    for (let d = new Date(endDate); d >= startDate; d.setDate(d.getDate() - 1)) {
+        const ds = iso(d);
+        const dayName = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d.getDay()];
+        const wknd = d.getDay() === 0 || d.getDay() === 6;
+
+        const wl = (data.worklogs || {})[ds] || [];
+        const commits = (data.gitCommits || {})[ds] || [];
+        const reviews = (data.prReviews || {})[ds] || [];
+        const claude = (data.claudeSessions || {})[ds] || [];
+        const daySummary = summaries[ds] || {};
+        const dayRecurring = ((data.recurring || {})[ds] || []);
+
+        const hasActivity = commits.length > 0 || reviews.length > 0 || claude.length > 0 || Object.keys(daySummary).length > 0;
+
+        let rowClass = '';
+        let loggedHtml = '';
+        let activityHtml = '';
+
+        if (wknd) {
+            rowClass = 'weekend';
+            loggedHtml = '—';
+        } else if (wl.length > 0) {
+            rowClass = 'logged';
+            loggedHtml = wl.map(w => {
+                const wid = w.worklog_id || '';
+                return `<span class="text-green-400">✓</span> ${w.hours}h <span class="text-gray-500 text-xs">${w.ticket}</span>`;
+            }).join('<br>');
+        } else if (hasActivity) {
+            rowClass = 'missing';
+            loggedHtml = '<span class="text-red-400">✗</span>';
+            let suggestH = 0;
+            if (commits.length > 0) suggestH += 8;
+            suggestH += reviews.length * 0.5;
+            if (suggestH === 0 && claude.length > 0) suggestH = 4;
+            dayRecurring.forEach(r => {
+                const rm = r.time.match(/^(\d+(?:\.\d+)?)(h|m)$/);
+                if (rm) suggestH += rm[2] === 'h' ? parseFloat(rm[1]) : parseFloat(rm[1]) / 60;
+            });
+            totalSuggest += suggestH;
+            const suggestColor = suggestH >= 8 ? 'text-green-400' : suggestH > 0 ? 'text-orange-400' : 'text-red-400';
+            loggedHtml += ` <span class="${suggestColor} font-semibold text-xs">${suggestH}h suggested</span>`;
+        } else if (!wknd) {
+            loggedHtml = '<span class="text-red-400">✗</span>';
+        }
+
+        const ticketKeys = Object.keys(daySummary).filter(t => t !== 'general');
+        const generalSummary = daySummary['general'];
+
+        if (ticketKeys.length > 0 || generalSummary) {
+            activityHtml = ticketKeys.map(tid => {
+                const commitTickets = new Set();
+                commits.forEach(c => { const m = (c.branch||c.message||'').match(/[A-Z]+-\d+/); if (m) commitTickets.add(m[0]); });
+                const reviewTickets = new Set();
+                reviews.forEach(r => { const m = (r.branch||'').match(/[A-Z]+-\d+/); if (m) reviewTickets.add(m[0]); });
+                const isDev = commitTickets.has(tid);
+                const isReview = reviewTickets.has(tid);
+                const tag = isDev && isReview ? '<span class="text-xs text-blue-400 bg-blue-900/50 px-1 rounded">dev+review</span>'
+                    : isDev ? '<span class="text-xs text-green-400 bg-green-900/50 px-1 rounded">dev</span>'
+                    : isReview ? '<span class="text-xs text-purple-400 bg-purple-900/50 px-1 rounded">review</span>'
+                    : '';
+                const recurMatch = dayRecurring.find(r => r.ticket === tid);
+                const ph = recurMatch ? recurMatch.time : isDev ? '8h' : '30m';
+                const existingLog = wl.find(w => w.ticket === tid);
+                const wid = existingLog ? (existingLog.worklog_id || '') : '';
+                let trailingHtml;
+                if (existingLog) {
+                    trailingHtml =
+                        `<span class="wl-display-${ds}-${wid} text-xs text-green-400 ml-2">✓ ${existingLog.hours}h <span class="text-gray-600 hover:text-gray-300 cursor-pointer" onclick="editWl('${ds}','${wid}','${tid}','${existingLog.hours}')">✎</span></span>` +
+                        `<span class="wl-edit-${ds}-${wid} hidden ml-2"><input class="w-14 text-xs" value="${existingLog.hours}h" data-ticket="${tid}" data-worklog-id="${wid}">` +
+                        `<button onclick="saveWl(this,'${ds}','${wid}','${tid}')" class="btn-purple text-xs px-1 ml-1">save</button>` +
+                        `<button onclick="cancelEditWl('${ds}','${wid}')" class="text-xs text-gray-500 hover:text-gray-300 ml-1">✕</button></span>`;
+                } else {
+                    trailingHtml =
+                        `<input class="log-input w-14 text-xs ml-2" placeholder="${ph}" data-ticket="${tid}" data-date="${ds}">` +
+                        `<button onclick="logTime(this)" class="btn-purple text-xs px-1 ml-1">log</button>`;
+                }
+                return `<div class="flex items-center gap-1 mb-0.5"><span class="text-blue-400 font-mono">${tid}</span> ${tag} <span class="text-gray-300 flex-1">${esc(daySummary[tid])}</span>${trailingHtml}</div>`;
+            }).join('');
+
+            wl.filter(w => !ticketKeys.includes(w.ticket)).forEach(w => {
+                const wid = w.worklog_id || '';
+                activityHtml +=
+                    `<div class="flex items-center gap-1 mb-0.5"><span class="text-blue-400 font-mono">${w.ticket}</span> ` +
+                    `<span class="text-gray-300 flex-1"></span>` +
+                    `<span class="wl-display-${ds}-${wid} text-xs text-green-400 ml-2">✓ ${w.hours}h <span class="text-gray-600 hover:text-gray-300 cursor-pointer" onclick="editWl('${ds}','${wid}','${w.ticket}','${w.hours}')">✎</span></span>` +
+                    `<span class="wl-edit-${ds}-${wid} hidden ml-2"><input class="w-14 text-xs" value="${w.hours}h" data-ticket="${w.ticket}" data-worklog-id="${wid}">` +
+                    `<button onclick="saveWl(this,'${ds}','${wid}','${w.ticket}')" class="btn-purple text-xs px-1 ml-1">save</button>` +
+                    `<button onclick="cancelEditWl('${ds}','${wid}')" class="text-xs text-gray-500 hover:text-gray-300 ml-1">✕</button></span></div>`;
+            });
+
+            if (generalSummary) {
+                activityHtml += `<div class="flex items-center gap-1 mb-0.5"><span class="text-gray-400 font-mono">misc</span> <span class="text-gray-300">${esc(generalSummary)}</span></div>`;
+            }
+        } else if (wl.length > 0) {
+            activityHtml = wl.map(w => {
+                const wid = w.worklog_id || '';
+                return `<div class="flex items-center gap-1 mb-0.5"><span class="text-blue-400 font-mono">${w.ticket}</span> <span class="text-gray-500 text-xs">${w.summary || ''}</span>` +
+                    `<span class="wl-display-${ds}-${wid} text-xs text-green-400 ml-2">✓ ${w.hours}h <span class="text-gray-600 hover:text-gray-300 cursor-pointer" onclick="editWl('${ds}','${wid}','${w.ticket}','${w.hours}')">✎</span></span>` +
+                    `<span class="wl-edit-${ds}-${wid} hidden ml-2"><input class="w-14 text-xs" value="${w.hours}h" data-ticket="${w.ticket}" data-worklog-id="${wid}">` +
+                    `<button onclick="saveWl(this,'${ds}','${wid}','${w.ticket}')" class="btn-purple text-xs px-1 ml-1">save</button>` +
+                    `<button onclick="cancelEditWl('${ds}','${wid}')" class="text-xs text-gray-500 hover:text-gray-300 ml-1">✕</button></span></div>`;
+            }).join('');
+        }
+
+        if (!wknd) {
+            const addRowId = `add-${ds}`;
+            activityHtml +=
+                `<div id="${addRowId}" class="hidden mt-1 flex items-center gap-1">` +
+                `<select class="text-xs"><option value="">ticket</option>${ticketOptions}</select>` +
+                `<input class="w-14 text-xs" placeholder="8h" data-date="${ds}">` +
+                `<button onclick="logTimeManual(this)" class="btn-purple text-xs px-1 ml-1">log</button></div>` +
+                `<a href="#" class="text-xs text-gray-500 hover:text-gray-300 mt-1 inline-block" onclick="event.preventDefault(); document.getElementById('${addRowId}').classList.toggle('hidden')">+ add</a>`;
+        }
+
+        rows += `<tr class="${rowClass} border-b border-gray-800/50">
+            <td class="font-mono text-xs whitespace-nowrap">${ds}${!wknd ? ` <span id="refresh-${ds}" class="text-gray-600 hover:text-gray-300 cursor-pointer inline-block" onclick="refreshDay('${ds}')">↻</span>` : ''}</td>
+            <td class="whitespace-nowrap">${loggedHtml}</td>
+            <td class="text-xs leading-relaxed">${activityHtml || '—'}</td>
+        </tr>`;
+    }
+
+    tbody.innerHTML = rows;
+
+    const totalLogged = Object.values(data.worklogs || {}).reduce((s, wls) => s + wls.reduce((a, w) => a + w.hours, 0), 0);
+    tfoot.innerHTML = `<tr class="total-row">
+        <td colspan="2" class="text-right">Logged: <span class="text-green-400">${Math.round(totalLogged * 10) / 10}h</span></td>
+        <td>Suggested: <span class="text-orange-400">${Math.round(totalSuggest * 10) / 10}h</span></td>
+    </tr>`;
+
+    document.getElementById('total-hours').textContent = Math.round(totalSuggest * 10) / 10 + 'h';
+    renderSidebar();
+    document.getElementById('sidebar').classList.remove('hidden');
+}
+
+function renderSidebar() {
+    const sidebar = document.getElementById('ticket-sidebar');
+    if (!data.tickets || data.tickets.length === 0) { sidebar.innerHTML = ''; return; }
+
+    sidebar.innerHTML = data.tickets.map(t => {
+        const logged = t.hoursLogged ? `${t.hoursLogged}h` : '0h';
+        const est = t.hoursEstimated ? ` / ${t.hoursEstimated}h` : '';
+        const summary = t.summary.length > 50 ? t.summary.slice(0, 50) + '…' : t.summary;
+        return `<div class="card border-l-2 border-blue-500 px-2.5 py-2">
+            <div class="font-mono text-xs text-blue-400">${t.key}</div>
+            <div class="text-xs text-gray-300 mt-0.5 leading-snug">${esc(summary)}</div>
+            <div class="text-xs text-gray-400 mt-1">${logged}${est}</div>
+        </div>`;
+    }).join('');
+}
+
+async function logTime(btn) {
+    const input = btn.previousElementSibling;
+    const ticket = input.dataset.ticket;
+    const date = input.dataset.date;
+    const time = input.value.trim();
+    if (!time) return;
+    btn.disabled = true; btn.textContent = '...';
+    try {
+        const resp = await fetch('/api/timesheet/log', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ticket, date, time}) });
+        if (!resp.ok) { const err = await resp.json(); showMsg(err.error || 'Failed', true); btn.textContent = 'log'; btn.disabled = false; return; }
+        localStorage.removeItem('ts_cache');
+        showMsg(`Logged ${time} on ${ticket}`);
+        refreshDay(date);
+    } catch (e) { showMsg('Failed: ' + e.message, true); btn.textContent = 'log'; btn.disabled = false; }
+}
+
+async function logTimeManual(btn) {
+    const row = btn.parentElement;
+    const select = row.querySelector('select');
+    const input = row.querySelector('input');
+    const ticket = select.value;
+    const date = input.dataset.date;
+    const time = input.value.trim();
+    if (!ticket || !time) return;
+    btn.disabled = true; btn.textContent = '...';
+    try {
+        const resp = await fetch('/api/timesheet/log', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ticket, date, time}) });
+        if (!resp.ok) { const err = await resp.json(); showMsg(err.error || 'Failed', true); btn.textContent = 'log'; btn.disabled = false; return; }
+        localStorage.removeItem('ts_cache');
+        showMsg(`Logged ${time} on ${ticket}`);
+        refreshDay(date);
+    } catch (e) { showMsg('Failed: ' + e.message, true); btn.textContent = 'log'; btn.disabled = false; }
+}
+
+function editWl(ds, wid, ticket, hours) {
+    document.querySelectorAll(`.wl-display-${ds}-${wid}`).forEach(el => el.classList.add('hidden'));
+    document.querySelectorAll(`.wl-edit-${ds}-${wid}`).forEach(el => el.classList.remove('hidden'));
+}
+
+function cancelEditWl(ds, wid) {
+    document.querySelectorAll(`.wl-display-${ds}-${wid}`).forEach(el => el.classList.remove('hidden'));
+    document.querySelectorAll(`.wl-edit-${ds}-${wid}`).forEach(el => el.classList.add('hidden'));
+}
+
+async function saveWl(btn, ds, wid, ticket) {
+    const input = btn.previousElementSibling;
+    const time = input.value.trim();
+    if (!time) return;
+    btn.disabled = true; btn.textContent = '...';
+    try {
+        const resp = await fetch('/api/timesheet/worklog', { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ticket, worklog_id: wid, time}) });
+        if (!resp.ok) { const err = await resp.json(); showMsg(err.error || 'Failed', true); btn.textContent = 'save'; btn.disabled = false; return; }
+        localStorage.removeItem('ts_cache');
+        showMsg('Updated');
+        refreshDay(ds);
+    } catch (e) { showMsg('Failed: ' + e.message, true); btn.textContent = 'save'; btn.disabled = false; }
+}
+
+function showMsg(text, isError = false) {
+    const el = document.getElementById('msg');
+    el.className = `msg ${isError ? 'msg-err' : 'msg-ok'}`;
+    el.textContent = text;
+    setTimeout(() => { el.textContent = ''; el.className = ''; }, 4000);
+}
+
+function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+const init = getTwoMonthRange(0);
+setDates(init.start, init.end);
+generate(false);
 </script>
 </body>
 </html>

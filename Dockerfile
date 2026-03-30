@@ -23,4 +23,5 @@ RUN groupadd -g 986 dockerhost || true && \
 
 COPY . .
 
+USER claude
 CMD ["python", "frshty.py", "config/example.toml"]

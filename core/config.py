@@ -1,4 +1,5 @@
 import os
+import re
 import tomllib
 from pathlib import Path
 
@@ -74,7 +75,6 @@ def ticket_worktree_path(config: dict, ticket_slug: str, repo_name: str) -> Path
 
 
 def save_feature_toggle(config: dict, feature: str, enabled: bool):
-    import re
     config_path = config["_config_path"]
     text = config_path.read_text()
     pattern = rf"^(\s*{re.escape(feature)}\s*=\s*)(?:true|false)"
