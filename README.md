@@ -16,6 +16,10 @@ python frshty.py config/local.toml
 
 Set credentials via environment variables referenced in your config (e.g. `BB_TOKEN`, `JIRA_TOKEN`, `LINEAR_TOKEN`). See `config/example.toml` for the full list of options.
 
+### Slack
+
+Slack functionality requires [slack-proxy-tools](https://github.com/tipu/slack-proxy-tools) to be checked out and running. Follow the setup instructions in that repo to get the proxy server configured before enabling Slack features in your config.
+
 ## Docker
 
 The included Dockerfile builds a dev container with Claude Code, Codex, and Gemini CLI pre-installed. This is intentional — the container is designed for AI-assisted code review workflows, not as a minimal runtime image.
