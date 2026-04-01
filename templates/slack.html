@@ -44,18 +44,21 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
 </section>
 
 <section>
-    <h2 class="text-sm font-bold text-gray-400 mb-2">Digests</h2>
-    <div id="digests" class="space-y-2"></div>
+    <h2 class="text-sm font-bold text-green-400 mb-2">Channel Activity</h2>
+    <div id="channels" class="grid gap-2"></div>
 </section>
 
 <script>
 async function load() {
-    const evResp = await fetch('/api/events?limit=100');
+    const [evResp, slackResp] = await Promise.all([
+        fetch('/api/events?limit=100'),
+        fetch('/api/slack/data'),
+    ]);
     const events = await evResp.json();
+    const slackData = await slackResp.json();
 
     const mentions = events.filter(e => e.event === 'slack_mention_detected');
     const actionable = events.filter(e => e.event === 'slack_actionable_item');
-    const digests = events.filter(e => e.event === 'slack_digest');
 
     document.getElementById('mentions').innerHTML = mentions.length
         ? mentions.map(e => {
@@ -91,18 +94,32 @@ async function load() {
         }).join('')
         : '<div class="text-gray-600 text-sm">Nothing actionable.</div>';
 
-    document.getElementById('digests').innerHTML = digests.length
-        ? digests.map(e => {
-            const time = new Date(e.ts).toLocaleTimeString();
-            return `<div class="card p-3 text-sm">
-                <div class="flex items-center gap-2 mb-1">
-                    <span class="badge badge-digest">digest</span>
-                    <span class="text-gray-500 text-xs">${time} — ${e.meta?.message_count || 0} messages</span>
+    const digests = slackData.channel_digests || {};
+    const channels = Object.entries(digests)
+        .sort((a, b) => (b[1].updated_at || '').localeCompare(a[1].updated_at || ''));
+
+    document.getElementById('channels').innerHTML = channels.length
+        ? channels.map(([name, d]) => {
+            const ago = timeAgo(d.updated_at);
+            const fresh = d.new_messages > 0;
+            return `<div class="card p-3 ${fresh ? 'border-l-2 border-l-green-500' : ''}">
+                <div class="flex items-center justify-between mb-1">
+                    <span class="text-sm font-bold ${fresh ? 'text-green-400' : 'text-gray-400'}">${esc(name)}</span>
+                    <span class="text-xs text-gray-600">${d.message_count} msgs · ${ago}</span>
                 </div>
-                <div class="text-gray-300 whitespace-pre-wrap">${esc(e.summary)}</div>
+                <div class="text-xs text-gray-300">${esc(d.summary)}</div>
             </div>`;
         }).join('')
-        : '<div class="text-gray-600 text-sm">No digests yet.</div>';
+        : '<div class="text-gray-600 text-sm">No channel activity yet.</div>';
+}
+
+function timeAgo(iso) {
+    if (!iso) return '';
+    const diff = (Date.now() - new Date(iso).getTime()) / 1000;
+    if (diff < 60) return 'just now';
+    if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+    if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+    return Math.floor(diff / 86400) + 'd ago';
 }
 
 function esc(s) {

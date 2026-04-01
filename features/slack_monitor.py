@@ -1,5 +1,7 @@
 import json
 import re
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -132,20 +134,43 @@ def check(config: dict):
                 links={"detail": f"{base_url}/slack"},
                 meta={"text": text[:200]})
 
-    last_digest = sl.get("last_digest_at", "")
-    if not last_digest or _hours_since(last_digest) >= 4:
-        if messages:
-            all_text = "\n".join(_extract_text(m) for m in messages[-50:] if _extract_text(m))
-            if all_text:
-                digest = run_haiku(
-                    f"Summarize these Slack messages into a brief digest. "
-                    f"Group by topic. Highlight anything that might need attention.\n\n{all_text[:4000]}"
-                )
-                if digest:
-                    log.emit("slack_digest", digest[:500],
-                        links={"detail": f"{base_url}/slack"},
-                        meta={"message_count": len(messages)})
-            sl["last_digest_at"] = datetime.now(timezone.utc).isoformat()
+    _resolve_channel_names(config, names)
+
+    channel_digests = sl.get("channel_digests", {})
+    if messages:
+        by_channel: dict[str, list[str]] = {}
+        for m in messages:
+            ch_id = _extract_channel(m)
+            text = _extract_text(m)
+            if not text or ch_id.startswith("D"):
+                continue
+            ch_name = names.get(ch_id, ch_id)
+            if not ch_name.startswith("#"):
+                ch_name = f"#{ch_name}"
+            by_channel.setdefault(ch_name, []).append(text)
+
+        for ch_name, texts in by_channel.items():
+            existing = channel_digests.get(ch_name, {})
+            prev_count = existing.get("message_count", 0)
+            all_text = "\n".join(texts[-30:])
+            prev_summary = existing.get("summary", "")
+            prompt = (
+                f"Summarize what's happening in the Slack channel {ch_name}. "
+                f"Be concise — 1-3 sentences max. Focus on decisions, asks, and status changes. Skip chatter.\n\n"
+            )
+            if prev_summary:
+                prompt += f"Previous summary: {prev_summary}\n\nNew messages:\n{all_text[:3000]}"
+            else:
+                prompt += f"Messages:\n{all_text[:3000]}"
+            summary = run_haiku(prompt)
+            if summary:
+                channel_digests[ch_name] = {
+                    "summary": summary.strip(),
+                    "message_count": prev_count + len(texts),
+                    "new_messages": len(texts),
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+    sl["channel_digests"] = channel_digests
 
     sl["file_offset"] = new_offset
 
@@ -222,8 +247,12 @@ def _collect_names(record: dict, names: dict):
     if isinstance(self_data, dict) and self_data.get("id"):
         names[self_data["id"]] = self_data.get("real_name") or self_data.get("name", "")
     for ch in payload.get("channels", []):
-        if isinstance(ch, dict) and ch.get("id"):
-            names[ch["id"]] = f"#{ch.get('name', '')}"
+        if not isinstance(ch, dict):
+            continue
+        ch_id = ch.get("id") or ch.get("channel_id")
+        ch_name = ch.get("name") or ch.get("name_normalized")
+        if ch_id and ch_name:
+            names[ch_id] = f"#{ch_name}"
     for u in payload.get("users", []):
         if isinstance(u, dict) and u.get("id"):
             names[u["id"]] = u.get("real_name") or u.get("name", "")
@@ -231,8 +260,23 @@ def _collect_names(record: dict, names: dict):
         uid = payload.get("user", "")
         if uid and uid not in names:
             profile = payload.get("user_profile", {})
-            if isinstance(profile, dict) and profile.get("real_name"):
-                names[uid] = profile["real_name"]
+            if isinstance(profile, dict):
+                name = profile.get("real_name") or profile.get("display_name") or profile.get("name")
+                if name:
+                    names[uid] = name
+    for block in payload.get("blocks", []):
+        if not isinstance(block, dict):
+            continue
+        for element in block.get("elements", []):
+            if not isinstance(element, dict):
+                continue
+            for item in element.get("elements", []):
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "user" and item.get("user_id"):
+                    uid = item["user_id"]
+                    if uid not in names and item.get("name"):
+                        names[uid] = item["name"]
 
 
 def _resolve_names(text: str, names: dict) -> str:
@@ -294,6 +338,8 @@ def _is_mention(record: dict, user_id: str) -> bool:
     text = payload.get("text", "")
     if f"<@{user_id}>" in text:
         return True
+    if "<!here>" in text or "<!channel>" in text:
+        return True
     for block in payload.get("blocks", []):
         if not isinstance(block, dict):
             continue
@@ -304,6 +350,8 @@ def _is_mention(record: dict, user_id: str) -> bool:
                 if not isinstance(item, dict):
                     continue
                 if item.get("type") == "user" and item.get("user_id") == user_id:
+                    return True
+                if item.get("type") == "broadcast":
                     return True
     return False
 
@@ -336,6 +384,57 @@ def _extract_text(record: dict) -> str:
 def _extract_channel(record: dict) -> str:
     payload = record.get("payload", {})
     return payload.get("channel", "unknown")
+
+
+_last_channel_resolve = ""
+
+
+def _resolve_channel_names(config: dict, names: dict):
+    global _last_channel_resolve
+    now = datetime.now(timezone.utc).isoformat()
+    if _last_channel_resolve and (datetime.fromisoformat(now) - datetime.fromisoformat(_last_channel_resolve)).total_seconds() < 3600:
+        return
+
+    slack_cfg = config.get("slack", {})
+    tokens_path = slack_cfg.get("raw_path", "")
+    if not tokens_path:
+        return
+    tokens_file = str(Path(tokens_path).parent.parent / "tokens.json")
+    workspace = slack_cfg.get("workspace", "")
+    try:
+        tokens = json.loads(Path(tokens_file).read_text())
+        creds = tokens.get(workspace, {})
+        if not creds.get("token"):
+            return
+        data = urllib.parse.urlencode({"token": creds["token"], "types": "public_channel,private_channel,mpim", "limit": "1000"}).encode()
+        req = urllib.request.Request(
+            f"https://{workspace}.slack.com/api/conversations.list",
+            data,
+            headers={"Cookie": creds["cookie"].replace(", ", "; ")},
+        )
+        resp = urllib.request.urlopen(req, timeout=30)
+        result = json.loads(resp.read())
+        if result.get("ok"):
+            for ch in result.get("channels", []):
+                if ch.get("id") and ch.get("name"):
+                    names[ch["id"]] = f"#{ch['name']}"
+
+        data2 = urllib.parse.urlencode({"token": creds["token"], "limit": "200"}).encode()
+        req2 = urllib.request.Request(
+            f"https://{workspace}.slack.com/api/users.list",
+            data2,
+            headers={"Cookie": creds["cookie"].replace(", ", "; ")},
+        )
+        resp2 = urllib.request.urlopen(req2, timeout=30)
+        result2 = json.loads(resp2.read())
+        if result2.get("ok"):
+            for u in result2.get("members", []):
+                if u.get("id") and not u.get("deleted"):
+                    names[u["id"]] = u.get("real_name") or u.get("name", "")
+
+        _last_channel_resolve = now
+    except Exception:
+        pass
 
 
 def _hours_since(iso_ts: str) -> float:

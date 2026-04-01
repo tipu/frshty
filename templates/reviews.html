@@ -32,6 +32,15 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
 <div id="reviews-list" class="space-y-2"></div>
 
 <script>
+function extractTicket(branch) {
+    const m = branch.match(/dev-(\d+)/i);
+    return m ? `DEV-${m[1]}` : null;
+}
+
+function ticketLabel(branch) {
+    return branch.replace(/^[A-Za-z]+-dev-\d+-?/i, '').replace(/^dev-\d+-?/i, '').replace(/-/g, ' ').trim() || branch;
+}
+
 async function load() {
     const resp = await fetch('/api/reviews');
     const reviews = await resp.json();
@@ -40,18 +49,80 @@ async function load() {
         container.innerHTML = '<div class="text-gray-600">No reviews queued.</div>';
         return;
     }
-    container.innerHTML = reviews.map(r => {
-        const verdictCls = r.verdict === 'changes_requested' ? 'badge-red' : 'badge-green';
-        return `<div class="card p-3 flex items-center justify-between">
-            <div>
-                <a href="/reviews/${r.repo}/${r.pr_id}" class="link font-bold">${r.repo} PR #${r.pr_id}</a>
-                <span class="badge ${verdictCls} ml-2">${r.verdict || 'pending'}</span>
-                <span class="text-gray-500 ml-2">${r.pending} pending / ${r.total_comments} total</span>
-            </div>
-            <a href="${r.pr_url}" target="_blank" class="link text-sm">[→ PR]</a>
+
+    const groups = {};
+    const ungrouped = [];
+    for (const r of reviews) {
+        const ticket = extractTicket(r.branch);
+        if (ticket) {
+            if (!groups[ticket]) groups[ticket] = { label: ticketLabel(r.branch), items: [] };
+            groups[ticket].items.push(r);
+        } else {
+            ungrouped.push(r);
+        }
+    }
+
+    let html = '';
+    for (const [ticket, group] of Object.entries(groups)) {
+        html += `<div class="mb-4">
+            <div class="text-sm text-gray-400 mb-1">${ticket} — ${group.label}</div>
+            <div class="space-y-1">${group.items.map(prCard).join('')}</div>
         </div>`;
-    }).join('');
+    }
+    if (ungrouped.length) {
+        html += `<div class="mb-4">
+            <div class="text-sm text-gray-400 mb-1">Other</div>
+            <div class="space-y-1">${ungrouped.map(prCard).join('')}</div>
+        </div>`;
+    }
+    container.innerHTML = html;
+    loadBBComments(reviews);
 }
+
+function timeAgo(iso) {
+    if (!iso) return '';
+    const secs = Math.floor((Date.now() - new Date(iso)) / 1000);
+    if (secs < 60) return 'just now';
+    const mins = Math.floor(secs / 60);
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs}h ago`;
+    const days = Math.floor(hrs / 24);
+    return `${days}d ago`;
+}
+
+function prCard(r) {
+    const verdictCls = r.verdict === 'changes_requested' ? 'badge-red' : r.verdict === 'approved' ? 'badge-green' : 'badge-yellow';
+    const cardId = `bb-${r.repo}-${r.pr_id}`;
+    const stale = r.updated_on && r.reviewed_at && new Date(r.updated_on) > new Date(r.reviewed_at);
+    const updated = r.updated_on ? timeAgo(r.updated_on) : '';
+    return `<div class="card p-3 flex items-center justify-between">
+        <div>
+            <a href="/reviews/${r.repo}/${r.pr_id}" class="link font-bold">${r.repo} #${r.pr_id}</a>
+            <span class="badge ${verdictCls} ml-2">${r.verdict || 'pending'}</span>
+            ${updated ? `<span class="text-gray-500 ml-2 text-xs">${updated}</span>` : ''}
+            ${stale ? '<span class="badge badge-yellow ml-1">stale</span>' : ''}
+            <span id="${cardId}" class="text-gray-600 ml-2 text-xs"></span>
+        </div>
+        <a href="${r.pr_url}" target="_blank" class="link text-sm">[→ PR]</a>
+    </div>`;
+}
+
+async function loadBBComments(reviews) {
+    for (const r of reviews) {
+        if (!r.pr_id) continue;
+        fetch(`/api/reviews/${r.repo}/${r.pr_id}/bb-comments`)
+            .then(res => res.json())
+            .then(data => {
+                const el = document.getElementById(`bb-${r.repo}-${r.pr_id}`);
+                if (!el || !data.count) return;
+                el.textContent = `💬 ${data.count}` + (data.initials.length ? ` · ${data.initials.join(', ')}` : '');
+                el.classList.replace('text-gray-600', 'text-gray-400');
+            })
+            .catch(() => {});
+    }
+}
+
 load();
 </script>
 </body>

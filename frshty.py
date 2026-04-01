@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import multiprocessing
 import os
 import random
 import shlex
@@ -11,7 +12,7 @@ import urllib.parse
 import urllib.request
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.websockets import WebSocket
 from pathlib import Path
@@ -36,63 +37,75 @@ app = FastAPI()
 _config: dict = {}
 
 
+@app.middleware("http")
+async def profile_requests(request, call_next):
+    start = time.time()
+    response = await call_next(request)
+    elapsed = time.time() - start
+    path = request.url.path
+    if elapsed > 0.5:
+        print(f"[SLOW] {request.method} {path} took {elapsed:.2f}s", flush=True)
+    response.headers["X-Response-Time"] = f"{elapsed:.3f}s"
+    return response
+
+
 def _template(name: str) -> HTMLResponse:
     return HTMLResponse((TEMPLATES_DIR / name).read_text())
 
 
 @app.get("/", response_class=HTMLResponse)
-async def dashboard():
+def dashboard():
     return _template("index.html")
 
 
 @app.get("/reviews", response_class=HTMLResponse)
-async def reviews_list():
+def reviews_list():
     return _template("reviews.html")
 
 
 @app.get("/reviews/{repo}/{pr_id}", response_class=HTMLResponse)
-async def review_detail(repo: str, pr_id: int):
+def review_detail(repo: str, pr_id: int):
     return _template("review_detail.html")
 
 
 @app.get("/reviews/{repo}/{pr_id}/discuss", response_class=HTMLResponse)
-async def review_discuss(repo: str, pr_id: int):
+def review_discuss(repo: str, pr_id: int):
     return _template("review_discuss.html")
 
 
 @app.get("/tickets", response_class=HTMLResponse)
-async def tickets_page():
+def tickets_page():
     return _template("tickets.html")
 
 
 @app.get("/tickets/{key}", response_class=HTMLResponse)
-async def ticket_detail(key: str):
+def ticket_detail(key: str):
     return _template("ticket_detail.html")
 
 
 @app.get("/slack", response_class=HTMLResponse)
-async def slack_page():
+def slack_page():
     return _template("slack.html")
 
 
 @app.get("/timesheet", response_class=HTMLResponse)
-async def timesheet_page():
+def timesheet_page():
     return _template("timesheet.html")
 
 
 @app.get("/api/events")
-async def api_events(limit: int = 100, after: str = "", unread: bool = False):
+def api_events(limit: int = 100, after: str = "", unread: bool = False):
     return log.get_events(limit=limit, after=after or None, unread_only=unread)
 
 
 @app.post("/api/events/{event_id}/dismiss")
-async def api_dismiss_event(event_id: str):
+def api_dismiss_event(event_id: str):
     log.dismiss(event_id)
     return {"status": "ok"}
 
 
 @app.post("/api/events/dismiss-all")
-async def api_dismiss_all():
+def api_dismiss_all():
     log.dismiss_all()
     return {"status": "ok"}
 
@@ -101,7 +114,7 @@ SYSTEM_EVENTS = {"cycle_start", "cycle_end", "cycle_sleep"}
 
 
 @app.get("/api/status")
-async def api_status():
+def api_status():
     events = log.get_events(limit=500, unread_only=True)
     filtered = [ev for ev in events if ev["event"] not in SYSTEM_EVENTS]
     counts = {}
@@ -128,7 +141,7 @@ async def api_status():
 
 
 @app.get("/api/config")
-async def api_config():
+def api_config():
     return {
         "job": _config.get("job", {}),
         "features": _config.get("features", {}),
@@ -140,25 +153,24 @@ async def api_config():
 
 
 @app.post("/api/poll")
-async def api_poll():
-    threading.Thread(target=run_cycle, args=(_config,), daemon=True).start()
+def api_poll():
+    multiprocessing.Process(target=_run_poll, args=(str(_config["_config_path"]),), daemon=True).start()
     return {"status": "started"}
 
 
 @app.put("/api/settings")
-async def api_settings(request: Request):
-    body = await request.json()
+def api_settings(body: dict):
     for feature, enabled in body.get("features", {}).items():
         cfg.save_feature_toggle(_config, feature, enabled)
     return {"status": "ok", "features": _config.get("features", {})}
 
 
 @app.get("/api/reviews")
-async def api_reviews_list():
+def api_reviews_list():
     reviews_dir = _config["_state_dir"] / "reviews"
     if not reviews_dir.exists():
         return []
-    results = []
+    candidates = []
     for repo_dir in sorted(reviews_dir.iterdir()):
         if not repo_dir.is_dir():
             continue
@@ -169,20 +181,33 @@ async def api_reviews_list():
                 continue
             comments = json.loads(queued.read_text())
             review_data = json.loads(review.read_text()) if review.exists() else {}
-            results.append({
+            candidates.append({
                 "repo": repo_dir.name,
                 "branch": branch_dir.name,
                 "verdict": review_data.get("verdict", ""),
+                "reviewed_at": review_data.get("date", ""),
                 "total_comments": len(comments),
                 "pending": sum(1 for c in comments if c.get("status") == "pending"),
                 "pr_url": comments[0]["pr_url"] if comments else "",
                 "pr_id": comments[0]["pr_id"] if comments else 0,
             })
+    platform = make_platform(_config)
+    from concurrent.futures import ThreadPoolExecutor
+    def check_open(r):
+        if not r["pr_id"]:
+            return None
+        info = platform.get_pr_info(r["repo"], r["pr_id"])
+        if info["state"] != "OPEN":
+            return None
+        r["updated_on"] = info["updated_on"]
+        return r
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        results = [r for r in pool.map(check_open, candidates) if r]
     return results
 
 
 @app.get("/api/reviews/{repo}/{pr_id}/comments")
-async def api_review_comments(repo: str, pr_id: int):
+def api_review_comments(repo: str, pr_id: int):
     reviews_dir = _config["_state_dir"] / "reviews" / repo
     if not reviews_dir.exists():
         return []
@@ -197,8 +222,7 @@ async def api_review_comments(repo: str, pr_id: int):
 
 
 @app.post("/api/reviews/{repo}/{pr_id}/discuss")
-async def api_start_discuss(repo: str, pr_id: int, request: Request):
-    body = await request.json()
+def api_start_discuss(repo: str, pr_id: int, body: dict):
     idx = body.get("idx", "general")
     file_path = body.get("file", "")
     line = body.get("line", "")
@@ -248,14 +272,26 @@ async def ws_discuss(websocket: WebSocket, session_id: str):
 
 
 @app.get("/api/reviews/{repo}/{pr_id}/diff")
-async def api_review_diff(repo: str, pr_id: int):
+def api_review_diff(repo: str, pr_id: int):
     platform = make_platform(_config)
     diff = platform.get_pr_diff(repo, pr_id)
     return {"diff": diff or ""}
 
 
+@app.get("/api/reviews/{repo}/{pr_id}/bb-comments")
+def api_bb_comments(repo: str, pr_id: int):
+    platform = make_platform(_config)
+    comments = platform.get_pr_comments(repo, pr_id)
+    names = list({c["author_name"] for c in comments if c.get("author_name")})
+    initials = []
+    for name in names:
+        parts = name.split()
+        initials.append("".join(p[0].upper() for p in parts if p))
+    return {"count": len(comments), "initials": initials}
+
+
 @app.post("/api/reviews/{repo}/{pr_id}/comments/{idx}/submit")
-async def api_submit_comment(repo: str, pr_id: int, idx: int):
+def api_submit_comment(repo: str, pr_id: int, idx: int):
     platform = make_platform(_config)
     reviews_dir = _config["_state_dir"] / "reviews" / repo
     for branch_dir in reviews_dir.iterdir():
@@ -291,8 +327,7 @@ async def api_submit_comment(repo: str, pr_id: int, idx: int):
 
 
 @app.post("/api/reviews/{repo}/{pr_id}/comments/new")
-async def api_new_comment(repo: str, pr_id: int, request: Request):
-    body = await request.json()
+def api_new_comment(repo: str, pr_id: int, body: dict):
     reviews_dir = _config["_state_dir"] / "reviews" / repo
     for branch_dir in reviews_dir.iterdir():
         queued = branch_dir / "queued_comments.json"
@@ -319,7 +354,7 @@ async def api_new_comment(repo: str, pr_id: int, request: Request):
 
 
 @app.delete("/api/reviews/{repo}/{pr_id}/comments/{idx}")
-async def api_delete_comment(repo: str, pr_id: int, idx: int):
+def api_delete_comment(repo: str, pr_id: int, idx: int):
     reviews_dir = _config["_state_dir"] / "reviews" / repo
     for branch_dir in reviews_dir.iterdir():
         queued = branch_dir / "queued_comments.json"
@@ -337,8 +372,7 @@ async def api_delete_comment(repo: str, pr_id: int, idx: int):
 
 
 @app.put("/api/reviews/{repo}/{pr_id}/comments/{idx}")
-async def api_update_comment(repo: str, pr_id: int, idx: int, request: Request):
-    body = await request.json()
+def api_update_comment(repo: str, pr_id: int, idx: int, body: dict):
     reviews_dir = _config["_state_dir"] / "reviews" / repo
     for branch_dir in reviews_dir.iterdir():
         queued = branch_dir / "queued_comments.json"
@@ -359,12 +393,12 @@ async def api_update_comment(repo: str, pr_id: int, idx: int, request: Request):
 
 
 @app.get("/api/tickets/list")
-async def api_tickets_list():
+def api_tickets_list():
     return state.load("tickets")
 
 
 @app.get("/api/tickets/{key}/detail")
-async def api_ticket_detail(key: str):
+def api_ticket_detail(key: str):
     tickets = state.load("tickets")
     ts = tickets.get(key)
     if not ts:
@@ -411,13 +445,13 @@ async def ws_terminal(websocket: WebSocket, key: str):
 
 
 @app.delete("/api/tickets/{key}/terminal")
-async def api_kill_terminal(key: str):
+def api_kill_terminal(key: str):
     terminal.kill_terminal(key)
     return {"status": "ok"}
 
 
 @app.get("/api/tickets/{key}/diff")
-async def api_ticket_diff(key: str):
+def api_ticket_diff(key: str):
     tickets = state.load("tickets")
     ts = tickets.get(key)
     if not ts or not ts.get("prs"):
@@ -429,7 +463,7 @@ async def api_ticket_diff(key: str):
 
 
 @app.get("/api/tickets/{key}/pr-comments")
-async def api_ticket_pr_comments(key: str):
+def api_ticket_pr_comments(key: str):
     tickets = state.load("tickets")
     ts = tickets.get(key)
     if not ts:
@@ -443,8 +477,8 @@ async def api_ticket_pr_comments(key: str):
 
 
 @app.post("/api/tickets/{key}/pr-comments/{comment_id}/reply")
-async def api_ticket_reply(key: str, comment_id: int, request: Request):
-    body = (await request.json()).get("body", "")
+def api_ticket_reply(key: str, comment_id: int, body: dict):
+    body = body.get("body", "")
     if not body:
         return JSONResponse({"error": "body required"}, status_code=400)
     tickets = state.load("tickets")
@@ -480,7 +514,7 @@ async def api_ticket_reply(key: str, comment_id: int, request: Request):
 
 
 @app.post("/api/tickets/{key}/restart")
-async def api_restart_ticket(key: str):
+def api_restart_ticket(key: str):
     tickets = state.load("tickets")
     ts = tickets.get(key)
     if not ts:
@@ -505,13 +539,12 @@ async def api_restart_ticket(key: str):
 
 
 @app.get("/api/slack/data")
-async def api_slack_data():
+def api_slack_data():
     return state.load("slack")
 
 
 @app.post("/api/slack/send/{reply_id}")
-async def api_slack_send(reply_id: str, request: Request):
-    body = await request.json()
+def api_slack_send(reply_id: str, body: dict):
     text = body.get("text", "")
     if not text:
         return JSONResponse({"error": "text required"}, status_code=400)
@@ -616,10 +649,41 @@ def slack_loop(config: dict):
         time.sleep(random.randint(50, 90))
 
 
+def _run_poll(config_path: str):
+    _ensure_path()
+    poll_config = cfg.load_config(config_path)
+    state.init(poll_config["_state_dir"])
+    log.init(poll_config["_state_dir"], poll_config["job"]["key"])
+    run_cycle(poll_config)
+
+
+def _run_worker(config_path: str):
+    _ensure_path()
+    worker_config = cfg.load_config(config_path)
+    state.init(worker_config["_state_dir"])
+    log.init(worker_config["_state_dir"], worker_config["job"]["key"])
+    loop_thread = threading.Thread(target=main_loop, args=(worker_config,), daemon=True)
+    loop_thread.start()
+    slack_loop(worker_config)
+
+
+def _ensure_path():
+    extra = [
+        os.path.expanduser("~/.local/bin"),
+        os.path.expanduser("~/.local/node/bin"),
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+    ]
+    current = os.environ.get("PATH", "/usr/bin:/bin")
+    os.environ["PATH"] = ":".join(extra) + ":" + current
+
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: frshty.py <config.toml>")
         sys.exit(1)
+
+    _ensure_path()
 
     global _config
     _config = cfg.load_config(sys.argv[1])
@@ -629,11 +693,8 @@ def main():
 
     port = _config["job"]["port"]
 
-    loop_thread = threading.Thread(target=main_loop, args=(_config,), daemon=True)
-    loop_thread.start()
-
-    slack_thread = threading.Thread(target=slack_loop, args=(_config,), daemon=True)
-    slack_thread.start()
+    loop_proc = multiprocessing.Process(target=_run_worker, args=(sys.argv[1],), daemon=True)
+    loop_proc.start()
 
     host = _config["job"].get("bind", "127.0.0.1")
     uvicorn.run(app, host=host, port=port, log_level="warning")

@@ -345,8 +345,6 @@ def _fetch_pr_reviews(config: dict, start: str, end: str) -> dict:
 def _fetch_claude_sessions(config: dict, start: str, end: str) -> dict:
     history_path = Path.home() / ".claude" / "history.jsonl"
     if not history_path.exists():
-        history_path = Path("/root/.claude/history.jsonl")
-    if not history_path.exists():
         return {}
 
     ws_root = str(config.get("workspace", {}).get("root", ""))
