@@ -83,6 +83,7 @@ class BitbucketPlatform:
                     "id": c["id"],
                     "body": c["content"]["raw"],
                     "author_id": c.get("user", {}).get("account_id", ""),
+                    "author_name": c.get("user", {}).get("display_name", ""),
                     "path": c.get("inline", {}).get("path"),
                     "line": c.get("inline", {}).get("to"),
                     "created_on": c["created_on"],
@@ -115,12 +116,17 @@ class BitbucketPlatform:
             ]
 
     def get_pr_state(self, repo: str, pr_id: int) -> str:
+        info = self.get_pr_info(repo, pr_id)
+        return info["state"]
+
+    def get_pr_info(self, repo: str, pr_id: int) -> dict:
         url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}"
         with httpx.Client(auth=self._auth(), timeout=30) as client:
             resp = client.get(url)
             if resp.status_code != 200:
-                return "OPEN"
-            return resp.json().get("state", "OPEN")
+                return {"state": "OPEN", "updated_on": ""}
+            data = resp.json()
+            return {"state": data.get("state", "OPEN"), "updated_on": data.get("updated_on", "")}
 
     def post_pr_comment(self, repo: str, pr_id: int, body: str, path: str | None = None, line: int | None = None, parent_id: int | None = None) -> dict:
         url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}/comments"
@@ -151,9 +157,11 @@ class BitbucketPlatform:
                 return {"status": "resolved"}
             return {"status": "error", "detail": resp.text}
 
-    def push_branch(self, repo_path, branch: str) -> bool:
+    def push_branch(self, repo_path, branch: str) -> dict:
         result = _run_git(repo_path, ["push", "-u", "origin", branch])
-        return result.returncode == 0
+        if result.returncode == 0:
+            return {"ok": True}
+        return {"ok": False, "error": result.stderr.strip()}
 
     def create_pr(self, repo: str, repo_path, branch: str, title: str, body: str, base_branch: str) -> dict:
         url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests"
@@ -259,6 +267,7 @@ class GitHubPlatform:
                 "id": c["id"],
                 "body": c["body"],
                 "author_id": c.get("user", {}).get("login", ""),
+                "author_name": c.get("user", {}).get("login", ""),
                 "path": c.get("path"),
                 "line": c.get("line"),
                 "created_on": c.get("created_at", ""),
@@ -287,14 +296,19 @@ class GitHubPlatform:
         ]
 
     def get_pr_state(self, repo: str, pr_id: int) -> str:
+        info = self.get_pr_info(repo, pr_id)
+        return info["state"]
+
+    def get_pr_info(self, repo: str, pr_id: int) -> dict:
         full = self._resolve_repo(repo)
         result = self._run_gh([
             "pr", "view", str(pr_id), "--repo", full,
-            "--json", "state", "-q", ".state",
+            "--json", "state,updatedAt",
         ])
         if result.returncode != 0:
-            return "OPEN"
-        return result.stdout.strip()
+            return {"state": "OPEN", "updated_on": ""}
+        data = json.loads(result.stdout)
+        return {"state": data.get("state", "OPEN"), "updated_on": data.get("updatedAt", "")}
 
     def post_pr_comment(self, repo: str, pr_id: int, body: str, path: str | None = None, line: int | None = None, parent_id: int | None = None) -> dict:
         full = self._resolve_repo(repo)
@@ -340,9 +354,11 @@ class GitHubPlatform:
             return {"status": "resolved"}
         return {"status": "error", "detail": result.stderr}
 
-    def push_branch(self, repo_path, branch: str) -> bool:
+    def push_branch(self, repo_path, branch: str) -> dict:
         result = _run_git(repo_path, ["push", "-u", "origin", branch])
-        return result.returncode == 0
+        if result.returncode == 0:
+            return {"ok": True}
+        return {"ok": False, "error": result.stderr.strip()}
 
     def create_pr(self, repo: str, repo_path, branch: str, title: str, body: str, base_branch: str) -> dict:
         full = self._resolve_repo(repo)

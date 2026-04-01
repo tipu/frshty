@@ -1,6 +1,6 @@
 import os
 import re
-import pwd
+import shutil
 import pty
 import json
 import struct
@@ -15,6 +15,7 @@ import core.state as state
 
 MAX_SCROLLBACK = 1024 * 1024
 TMUX_SOCKET = "/tmp/frshty-tmux"
+_TMUX_BIN = shutil.which("tmux") or "tmux"
 
 _terminals: dict[str, dict] = {}
 
@@ -25,7 +26,7 @@ def _tmux_session_name(ticket_key: str) -> str:
 
 def _tmux_session_exists(session_name: str) -> bool:
     result = subprocess.run(
-        ["tmux", "-S", TMUX_SOCKET, "has-session", "-t", session_name],
+        [_TMUX_BIN, "-S", TMUX_SOCKET, "has-session", "-t", session_name],
         capture_output=True,
     )
     return result.returncode == 0
@@ -53,28 +54,28 @@ def _resolve_cwd(config: dict, ticket_key: str) -> str | None:
     return None
 
 
+def _child_env():
+    return {
+        "HOME": os.path.expanduser("~"),
+        "USER": os.environ.get("USER", os.getlogin()),
+        "TERM": "xterm-256color",
+        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "LANG": os.environ.get("LANG", "C.UTF-8"),
+        "TMUX": "",
+    }
+
+
 def ensure_session(ticket_key: str, cwd: str):
     session_name = _tmux_session_name(ticket_key)
     if _tmux_session_exists(session_name):
         return session_name
-    pw = pwd.getpwnam("claude")
-    child_env = {
-        "HOME": pw.pw_dir,
-        "USER": "claude",
-        "TERM": "xterm-256color",
-        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-        "LANG": "C.UTF-8",
-        "TMUX": "",
-    }
     subprocess.run(
         [
-            "sudo", "-u", "claude",
-            "tmux", "-S", TMUX_SOCKET, "new-session", "-d", "-s", session_name,
+            _TMUX_BIN, "-S", TMUX_SOCKET, "new-session", "-d", "-s", session_name,
             "-c", cwd, "-x", "80", "-y", "24",
         ],
-        env=child_env,
+        env=_child_env(),
     )
-    subprocess.run(["chmod", "777", TMUX_SOCKET], capture_output=True)
     return session_name
 
 
@@ -83,7 +84,7 @@ def send_keys(ticket_key: str, keys: str):
     if not _tmux_session_exists(session_name):
         return
     subprocess.run(
-        ["tmux", "-S", TMUX_SOCKET, "send-keys", "-t", session_name, keys, "Enter"],
+        [_TMUX_BIN, "-S", TMUX_SOCKET, "send-keys", "-t", session_name, keys, "Enter"],
         capture_output=True,
     )
 
@@ -94,38 +95,25 @@ def _get_or_spawn(ticket_key: str, cwd: str):
         return entry
 
     session_name = _tmux_session_name(ticket_key)
-
-    pw = pwd.getpwnam("claude")
-    child_env = {
-        "HOME": pw.pw_dir,
-        "USER": "claude",
-        "TERM": "xterm-256color",
-        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-        "LANG": "C.UTF-8",
-        "TMUX": "",
-    }
+    env = _child_env()
 
     if not _tmux_session_exists(session_name):
         subprocess.run(
             [
-                "sudo", "-u", "claude",
-                "tmux", "-S", TMUX_SOCKET, "new-session", "-d", "-s", session_name,
+                _TMUX_BIN, "-S", TMUX_SOCKET, "new-session", "-d", "-s", session_name,
                 "-c", cwd, "-x", "80", "-y", "24",
             ],
-            env=child_env,
+            env=env,
         )
-        subprocess.run(["chmod", "777", TMUX_SOCKET], capture_output=True)
 
     pid, fd = pty.fork()
     if pid == 0:
         try:
-            os.setgid(pw.pw_gid)
-            os.setuid(pw.pw_uid)
             os.chdir(cwd)
             os.execve(
-                "/usr/bin/tmux",
-                ["tmux", "-S", TMUX_SOCKET, "attach-session", "-t", session_name],
-                child_env,
+                _TMUX_BIN,
+                [_TMUX_BIN, "-S", TMUX_SOCKET, "attach-session", "-t", session_name],
+                env,
             )
         except Exception as e:
             import sys

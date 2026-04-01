@@ -390,10 +390,10 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
         subprocess.run(["git", "commit", "-m", f"{ticket['key']}: {ticket['summary']}"], cwd=str(wt), capture_output=True, timeout=60)
 
         pushed = platform.push_branch(wt, branch)
-        if not pushed:
-            log.emit("ticket_pr_error", f"Failed to push branch for {ticket['key']} in {repo['name']}",
+        if not pushed["ok"]:
+            log.emit("ticket_pr_error", f"Failed to push branch for {ticket['key']} in {repo['name']}: {pushed.get('error', 'unknown')}",
                 links={"detail": f"{base_url}/tickets/{ticket['key']}"},
-                meta={"ticket": ticket["key"], "repo": repo["name"], "branch": branch})
+                meta={"ticket": ticket["key"], "repo": repo["name"], "branch": branch, "error": pushed.get("error", "")})
             continue
 
         title = f"{ticket['key']}: {ticket['summary']}"
