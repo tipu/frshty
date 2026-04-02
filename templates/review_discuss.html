@@ -67,7 +67,7 @@ async function startDiscuss() {
     const data = await resp.json();
     sessionId = data.session_id;
 
-    setTimeout(connectTerminal, 3000);
+    setTimeout(connectTerminal, 500);
 }
 
 function connectTerminal() {

@@ -15,6 +15,8 @@ body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: #0a0a0a; 
 .badge-yellow { background: #713f12; color: #fde047; }
 nav a { color: #888; padding: 4px 12px; border-radius: 4px; }
 nav a:hover, nav a.active { color: #fff; background: #222; }
+.pulse { animation: pulse 1.5s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 </style>
 </head>
 <body class="p-4 max-w-7xl mx-auto">
@@ -29,9 +31,17 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
     </nav>
 </header>
 
+<div class="card p-3 mb-4 flex gap-2 items-center">
+    <input type="text" id="pr-url" placeholder="paste PR url to review" class="flex-1 bg-transparent border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-200 focus:border-blue-500 focus:outline-none" />
+    <button id="submit-btn" onclick="submitReview()" class="bg-blue-600 hover:bg-blue-700 text-white text-sm px-4 py-1.5 rounded cursor-pointer whitespace-nowrap">review</button>
+</div>
+
+<div id="pending-reviews" class="space-y-2 mb-2"></div>
 <div id="reviews-list" class="space-y-2"></div>
 
 <script>
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
 function extractTicket(branch) {
     const m = branch.match(/dev-(\d+)/i);
     return m ? `DEV-${m[1]}` : null;
@@ -77,6 +87,11 @@ async function load() {
     }
     container.innerHTML = html;
     loadBBComments(reviews);
+    for (const r of reviews) {
+        const key = `${r.repo}/${r.pr_id}`;
+        if (_pending[key]) delete _pending[key];
+    }
+    renderPending();
 }
 
 function timeAgo(iso) {
@@ -92,14 +107,17 @@ function timeAgo(iso) {
 }
 
 function prCard(r) {
-    const verdictCls = r.verdict === 'changes_requested' ? 'badge-red' : r.verdict === 'approved' ? 'badge-green' : 'badge-yellow';
+    const reviewing = r.branch && r.branch.startsWith('pending-');
+    const verdictCls = reviewing ? 'badge-yellow' : r.verdict === 'changes_requested' ? 'badge-red' : r.verdict === 'approved' ? 'badge-green' : 'badge-yellow';
+    const label = reviewing ? 'reviewing <span class="pulse">●</span>' : r.verdict || 'pending';
     const cardId = `bb-${r.repo}-${r.pr_id}`;
-    const stale = r.updated_on && r.reviewed_at && new Date(r.updated_on) > new Date(r.reviewed_at);
+    const borderCls = reviewing ? 'border-l-2 border-l-blue-500' : '';
+    const stale = !reviewing && r.updated_on && r.reviewed_at && new Date(r.updated_on) > new Date(r.reviewed_at);
     const updated = r.updated_on ? timeAgo(r.updated_on) : '';
-    return `<div class="card p-3 flex items-center justify-between">
+    return `<div class="card p-3 flex items-center justify-between ${borderCls}">
         <div>
             <a href="/reviews/${r.repo}/${r.pr_id}" class="link font-bold">${r.repo} #${r.pr_id}</a>
-            <span class="badge ${verdictCls} ml-2">${r.verdict || 'pending'}</span>
+            <span class="badge ${verdictCls} ml-2">${label}</span>
             ${updated ? `<span class="text-gray-500 ml-2 text-xs">${updated}</span>` : ''}
             ${stale ? '<span class="badge badge-yellow ml-1">stale</span>' : ''}
             <span id="${cardId}" class="text-gray-600 ml-2 text-xs"></span>
@@ -123,7 +141,55 @@ async function loadBBComments(reviews) {
     }
 }
 
+const _pending = {};
+
+async function submitReview() {
+    const input = document.getElementById('pr-url');
+    const btn = document.getElementById('submit-btn');
+    const url = input.value.trim();
+    if (!url) return;
+    btn.textContent = 'submitting...';
+    btn.disabled = true;
+    const resp = await fetch('/api/reviews/submit', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({url})
+    });
+    const result = await resp.json();
+    if (result.status === 'started') {
+        _pending[`${result.repo}/${result.pr_id}`] = {repo: result.repo.split('/').pop(), full_repo: result.repo, pr_id: result.pr_id, url: url};
+        input.value = '';
+        btn.textContent = 'review';
+        btn.disabled = false;
+        renderPending();
+    } else {
+        btn.textContent = result.error || 'failed';
+        setTimeout(() => { btn.textContent = 'review'; btn.disabled = false; }, 2000);
+    }
+}
+
+function renderPending() {
+    const el = document.getElementById('pending-reviews');
+    const keys = Object.keys(_pending);
+    if (!keys.length) { el.innerHTML = ''; return; }
+    el.innerHTML = keys.map(k => {
+        const p = _pending[k];
+        return `<div class="card p-3 flex items-center justify-between border-l-2 border-l-blue-500">
+            <div>
+                <span class="text-sm font-bold text-blue-400">${esc(p.full_repo)} #${p.pr_id}</span>
+                <span class="badge badge-yellow ml-2">reviewing <span class="pulse">●</span></span>
+            </div>
+            <a href="${esc(p.url)}" target="_blank" class="link text-sm">[→ PR]</a>
+        </div>`;
+    }).join('');
+}
+
+document.getElementById('pr-url').addEventListener('keydown', e => {
+    if (e.key === 'Enter') submitReview();
+});
+
 load();
+setInterval(load, 10000);
 </script>
 </body>
 </html>

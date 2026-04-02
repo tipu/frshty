@@ -54,17 +54,27 @@ def _resolve_status(config: dict, external_status: str) -> str | None:
 
 
 def check(config: dict):
+    from datetime import datetime, timezone
     assigned = _fetch_tickets(config)
     if not assigned:
         return
 
     ticket_state = state.load("tickets")
     base_url = config["_base_url"]
+    assigned_keys = {t["key"] for t in assigned}
+
+    for key, ts in list(ticket_state.items()):
+        if key not in assigned_keys and ts.get("status") != "done":
+            ts["status"] = "done"
+            ts["done_at"] = datetime.now(timezone.utc).isoformat()
+            ticket_state[key] = ts
 
     for ticket in assigned:
         key = ticket["key"]
         ts = ticket_state.get(key, {"status": "new"})
         ts["external_status"] = ticket.get("status", "")
+        if ts.get("status") == "done":
+            ts.pop("done_at", None)
 
         mapped = _resolve_status(config, ticket.get("status", ""))
         if mapped:
@@ -389,7 +399,19 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
         subprocess.run(["git", "add", "-A"], cwd=str(wt), capture_output=True, timeout=60)
         subprocess.run(["git", "commit", "-m", f"{ticket['key']}: {ticket['summary']}"], cwd=str(wt), capture_output=True, timeout=60)
 
-        pushed = platform.push_branch(wt, branch)
+        subprocess.run(["git", "fetch", "origin", ws["base_branch"]], cwd=str(wt), capture_output=True, timeout=60)
+        diff_check = subprocess.run(
+            ["git", "diff", f"origin/{ws['base_branch']}..HEAD", "--stat"],
+            cwd=str(wt), capture_output=True, text=True, timeout=30)
+        if not diff_check.stdout.strip():
+            continue
+
+        actual_branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=str(wt), capture_output=True, text=True, timeout=10).stdout.strip()
+        push_branch = actual_branch or branch
+
+        pushed = platform.push_branch(wt, push_branch)
         if not pushed["ok"]:
             log.emit("ticket_pr_error", f"Failed to push branch for {ticket['key']} in {repo['name']}: {pushed.get('error', 'unknown')}",
                 links={"detail": f"{base_url}/tickets/{ticket['key']}"},
@@ -397,7 +419,7 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
             continue
 
         title = f"{ticket['key']}: {ticket['summary']}"
-        result = platform.create_pr(repo["name"], wt, branch, title, pr_body, ws["base_branch"])
+        result = platform.create_pr(repo["name"], wt, push_branch, title, pr_body, ws["base_branch"])
 
         if result.get("error"):
             log.emit("ticket_pr_error", f"Failed to create PR for {ticket['key']} in {repo['name']}: {result['error']}",
@@ -419,9 +441,16 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
             prs.append({"repo": repo["name"], "id": pr_id, "url": pr_url})
 
     if not prs:
-        log.emit("ticket_pr_error", f"No PRs created for {ticket['key']}, staying at pr_ready",
-            links={"detail": f"{base_url}/tickets/{ticket['key']}"},
-            meta={"ticket": ticket["key"]})
+        ts["pr_attempts"] = ts.get("pr_attempts", 0) + 1
+        if ts["pr_attempts"] >= 3:
+            log.emit("ticket_pr_error", f"No PRs created for {ticket['key']} after {ts['pr_attempts']} attempts, giving up",
+                links={"detail": f"{base_url}/tickets/{ticket['key']}"},
+                meta={"ticket": ticket["key"]})
+            ts["status"] = "pr_failed"
+        else:
+            log.emit("ticket_pr_error", f"No PRs created for {ticket['key']}, attempt {ts['pr_attempts']}/3",
+                links={"detail": f"{base_url}/tickets/{ticket['key']}"},
+                meta={"ticket": ticket["key"]})
         return ts
 
     ts["prs"] = prs

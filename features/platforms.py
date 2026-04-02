@@ -2,6 +2,7 @@ import json
 import re
 import subprocess
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
 import httpx
 
@@ -156,6 +157,34 @@ class BitbucketPlatform:
             if resp.status_code in (200, 201):
                 return {"status": "resolved"}
             return {"status": "error", "detail": resp.text}
+
+    def get_pr_branch(self, repo: str, pr_id: int) -> str:
+        with httpx.Client(auth=self._auth(), timeout=30) as client:
+            resp = client.get(f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}")
+            if resp.status_code == 200:
+                return resp.json().get("source", {}).get("branch", {}).get("name", "")
+        return ""
+
+    def ensure_pr_worktree(self, repo: str, pr_id: int, target: Path) -> bool:
+        if (target / ".git").exists():
+            _run_git(target, ["fetch", "origin"])
+            return True
+        target.mkdir(parents=True, exist_ok=True)
+        user = self._auth()[0]
+        token = self._auth()[1]
+        clone_url = f"https://{user}:{token}@bitbucket.org/{self.org}/{repo}.git"
+        result = subprocess.run(["git", "clone", "--depth=1", clone_url, str(target)], capture_output=True, timeout=120)
+        if result.returncode != 0:
+            return False
+        branch = ""
+        with httpx.Client(auth=self._auth(), timeout=30) as client:
+            resp = client.get(f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}")
+            if resp.status_code == 200:
+                branch = resp.json().get("source", {}).get("branch", {}).get("name", "")
+        if branch:
+            _run_git(target, ["fetch", "origin", branch])
+            _run_git(target, ["checkout", branch])
+        return True
 
     def push_branch(self, repo_path, branch: str) -> dict:
         result = _run_git(repo_path, ["push", "-u", "origin", branch])
@@ -353,6 +382,29 @@ class GitHubPlatform:
         if result.returncode == 0:
             return {"status": "resolved"}
         return {"status": "error", "detail": result.stderr}
+
+    def get_pr_branch(self, repo: str, pr_id: int) -> str:
+        full = self._resolve_repo(repo)
+        result = self._run_gh(["pr", "view", str(pr_id), "--repo", full, "--json", "headRefName", "-q", ".headRefName"])
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+        return ""
+
+    def ensure_pr_worktree(self, repo: str, pr_id: int, target: Path) -> bool:
+        full = self._resolve_repo(repo)
+        if (target / ".git").exists():
+            _run_git(target, ["fetch", "origin"])
+            _run_git(target, ["checkout", f"pr-{pr_id}"])
+            return True
+        target.mkdir(parents=True, exist_ok=True)
+        result = self._run_gh(["repo", "clone", full, str(target), "--", "--depth=1"])
+        if result.returncode != 0:
+            return False
+        subprocess.run(
+            ["gh", "pr", "checkout", str(pr_id), "--repo", full],
+            cwd=str(target), capture_output=True, text=True, timeout=60,
+        )
+        return True
 
     def push_branch(self, repo_path, branch: str) -> dict:
         result = _run_git(repo_path, ["push", "-u", "origin", branch])
