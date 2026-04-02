@@ -40,7 +40,28 @@ def _save_cache():
 
 
 def check(config: dict):
-    pass
+    if CACHE_FILE is None:
+        _init_cache(config)
+
+    today = date.today()
+    start_date = today
+    end_date = today
+    recurring = _get_recurring(config, start_date, end_date)
+
+    today_str = today.isoformat()
+    if today_str not in recurring:
+        return
+
+    for entry in recurring[today_str]:
+        ticket = entry["ticket"]
+        time_str = entry["time"]
+        result = log_work(config, ticket, today_str, time_str)
+        if result.get("ok"):
+            log.emit("scheduled_worklog_queued", f"Queued {time_str} on {ticket}",
+                meta={"ticket": ticket, "time": time_str, "date": today_str})
+        else:
+            log.emit("scheduled_worklog_failed", f"Failed to queue {time_str} on {ticket}: {result.get('error', 'unknown')}",
+                meta={"ticket": ticket, "time": time_str, "date": today_str})
 
 
 def build_timesheet(config: dict, start: str = "", end: str = "", force: bool = False) -> dict:

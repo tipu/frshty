@@ -4,6 +4,7 @@ import multiprocessing
 import os
 import random
 import shlex
+import subprocess
 import sys
 import threading
 import time
@@ -158,11 +159,52 @@ def api_poll():
     return {"status": "started"}
 
 
+@app.post("/api/reviews/submit")
+def api_submit_review(body: dict):
+    url = body.get("url", "").strip()
+    if not url:
+        return JSONResponse({"error": "url required"}, status_code=400)
+    import re
+    m = re.match(r"https?://github\.com/([^/]+/[^/]+)/pull/(\d+)", url)
+    if not m:
+        return JSONResponse({"error": "invalid github PR url"}, status_code=400)
+    full_repo = m.group(1)
+    repo_short = full_repo.split("/")[-1]
+    pr_id = int(m.group(2))
+    pending_dir = _config["_state_dir"] / "reviews" / repo_short / f"pending-{pr_id}"
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    (pending_dir / "queued_comments.json").write_text(json.dumps([{"pr_id": pr_id, "repo": repo_short, "pr_url": url, "status": "pending"}]))
+    (pending_dir / "review.json").write_text(json.dumps({"verdict": "", "status": "reviewing"}))
+    multiprocessing.Process(
+        target=_run_review, args=(str(_config["_config_path"]), full_repo, pr_id, url), daemon=True
+    ).start()
+    return {"status": "started", "repo": full_repo, "pr_id": pr_id}
+
+
 @app.put("/api/settings")
 def api_settings(body: dict):
     for feature, enabled in body.get("features", {}).items():
         cfg.save_feature_toggle(_config, feature, enabled)
     return {"status": "ok", "features": _config.get("features", {})}
+
+
+def _populate_repo_cache(platform, repo: str):
+    import re
+    reviews_dir = _config["_state_dir"] / "reviews" / repo
+    if not reviews_dir.exists():
+        return
+    for branch_dir in reviews_dir.iterdir():
+        queued = branch_dir / "queued_comments.json"
+        if not queued.exists():
+            continue
+        comments = json.loads(queued.read_text())
+        if not comments:
+            continue
+        pr_url = comments[0].get("pr_url", "")
+        m = re.match(r"https?://github\.com/([^/]+/[^/]+)/pull/", pr_url)
+        if m:
+            platform._repo_cache[repo] = m.group(1)
+            return
 
 
 @app.get("/api/reviews")
@@ -242,25 +284,50 @@ def api_start_discuss(repo: str, pr_id: int, body: dict):
     else:
         context += "Help the reviewer understand and discuss this PR."
 
-    platform = make_platform(_config)
-    pr_data = None
-    try:
-        prs = platform.list_review_prs()
-        pr_data = next((p for p in prs if p["id"] == pr_id and p["repo"] == repo), None)
-    except Exception:
-        pass
-
-    cwd = str(_config["workspace"]["root"])
-    if pr_data:
-        repos = get_repos(_config)
-        repo_path = next((r["path"] for r in repos if r["name"] == repo), None)
-        if repo_path:
-            cwd = str(repo_path)
+    review_dir = _config["_state_dir"] / "reviews" / repo
+    cwd = None
+    matched_dir = None
+    if review_dir.exists():
+        for branch_dir in review_dir.iterdir():
+            queued = branch_dir / "queued_comments.json"
+            if not queued.exists():
+                continue
+            comments = json.loads(queued.read_text())
+            if comments and comments[0].get("pr_id") == pr_id:
+                matched_dir = branch_dir
+                wt = branch_dir / "worktree"
+                if (wt / ".git").exists():
+                    cwd = str(wt)
+                break
+    if not cwd and matched_dir:
+        review_json = matched_dir / "review.json"
+        branch = None
+        if review_json.exists():
+            branch = json.loads(review_json.read_text()).get("source_branch")
+        if branch:
+            repos = get_repos(_config)
+            matching = [r for r in repos if r["name"] == repo]
+            if matching:
+                repo_path = matching[0]["path"]
+                wt = matched_dir / "worktree"
+                wt.parent.mkdir(parents=True, exist_ok=True)
+                subprocess.run(["git", "fetch", "origin", branch], cwd=str(repo_path), capture_output=True, timeout=60)
+                subprocess.run(["git", "worktree", "prune"], cwd=str(repo_path), capture_output=True, timeout=60)
+                subprocess.run(["git", "worktree", "add", str(wt), branch], cwd=str(repo_path), capture_output=True, timeout=60)
+                if (wt / ".git").exists():
+                    cwd = str(wt)
+    if not cwd:
+        platform = make_platform(_config)
+        _populate_repo_cache(platform, repo)
+        worktree = review_dir / f"pr-{pr_id}" / "worktree"
+        platform.ensure_pr_worktree(repo, pr_id, worktree)
+        if (worktree / ".git").exists():
+            cwd = str(worktree)
+    if not cwd:
+        cwd = str(review_dir)
 
     terminal.kill_terminal(session_id)
-    time.sleep(1)
     terminal.ensure_session(session_id, cwd)
-    time.sleep(2)
     terminal.send_keys(session_id, f"claude --dangerously-skip-permissions --append-system-prompt {shlex.quote(context)}")
 
     return {"session_id": session_id}
@@ -274,6 +341,7 @@ async def ws_discuss(websocket: WebSocket, session_id: str):
 @app.get("/api/reviews/{repo}/{pr_id}/diff")
 def api_review_diff(repo: str, pr_id: int):
     platform = make_platform(_config)
+    _populate_repo_cache(platform, repo)
     diff = platform.get_pr_diff(repo, pr_id)
     return {"diff": diff or ""}
 
@@ -293,6 +361,7 @@ def api_bb_comments(repo: str, pr_id: int):
 @app.post("/api/reviews/{repo}/{pr_id}/comments/{idx}/submit")
 def api_submit_comment(repo: str, pr_id: int, idx: int):
     platform = make_platform(_config)
+    _populate_repo_cache(platform, repo)
     reviews_dir = _config["_state_dir"] / "reviews" / repo
     for branch_dir in reviews_dir.iterdir():
         queued = branch_dir / "queued_comments.json"
@@ -394,7 +463,15 @@ def api_update_comment(repo: str, pr_id: int, idx: int, body: dict):
 
 @app.get("/api/tickets/list")
 def api_tickets_list():
-    return state.load("tickets")
+    from datetime import datetime, timezone, timedelta
+    tickets = state.load("tickets")
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    expired = [k for k, v in tickets.items() if v.get("status") == "done" and v.get("done_at", "") < cutoff]
+    if expired:
+        for k in expired:
+            del tickets[k]
+        state.save("tickets", tickets)
+    return {k: v for k, v in tickets.items() if v.get("status") != "done"}
 
 
 @app.get("/api/tickets/{key}/detail")
@@ -617,7 +694,7 @@ def run_cycle(config: dict):
         try:
             _tickets_mod.check(config)
         except Exception as e:
-            log.emit("cycle_error", f"tickets failed: {e}")
+            log.emit("cycle_error", f"tickets failed: {e}\n{traceback.format_exc()}")
 
     if config.get("features", {}).get("timesheet"):
         try:
@@ -647,6 +724,48 @@ def slack_loop(config: dict):
             except Exception as e:
                 log.emit("cycle_error", f"slack_monitor failed: {e}")
         time.sleep(random.randint(50, 90))
+
+
+def _run_review(config_path: str, full_repo: str, pr_id: int, url: str):
+    _ensure_path()
+    review_config = cfg.load_config(config_path)
+    state.init(review_config["_state_dir"])
+    log.init(review_config["_state_dir"], review_config["job"]["key"])
+    platform = make_platform(review_config)
+    repo_short = full_repo.split("/")[-1]
+    platform._repo_cache[repo_short] = full_repo
+    branch = platform.get_pr_branch(repo_short, pr_id) or f"pr-{pr_id}"
+    pr = {
+        "id": pr_id,
+        "repo": repo_short,
+        "full_repo": full_repo,
+        "url": url,
+        "branch": branch,
+        "base": "",
+        "title": "",
+        "author": "",
+        "created_on": "",
+        "updated_on": "",
+    }
+    base_url = review_config["_base_url"]
+    log.emit("review_started", f"Manual review: {full_repo} PR #{pr_id}",
+        links={"pr": url, "detail": f"{base_url}/reviews/{pr['repo']}/{pr_id}"},
+        meta={"repo": pr["repo"], "pr_id": pr_id})
+    pending_dir = review_config["_state_dir"] / "reviews" / pr["repo"] / f"pending-{pr_id}"
+    result = reviewer.review_pr(review_config, platform, pr)
+    import shutil
+    shutil.rmtree(pending_dir, ignore_errors=True)
+    if result:
+        review_state = state.load("reviews")
+        review_state[f"{pr['repo']}/{pr_id}"] = {"reviewed": True, "branch": pr["branch"], "last_updated": pr.get("updated_on")}
+        state.save("reviews", review_state)
+        issues = result.get("issues", [])
+        log.emit("review_complete", f"Review done: {result.get('verdict', 'unknown')}, {len(issues)} issues",
+            links={"pr": url, "detail": f"{base_url}/reviews/{pr['repo']}/{pr_id}"},
+            meta={"repo": pr["repo"], "pr_id": pr_id, "verdict": result.get("verdict"), "issue_count": len(issues)})
+    else:
+        log.emit("cycle_error", f"Manual review failed for {full_repo} PR #{pr_id}",
+            meta={"repo": pr["repo"], "pr_id": pr_id})
 
 
 def _run_poll(config_path: str):
