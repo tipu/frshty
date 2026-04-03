@@ -32,8 +32,8 @@ def check(config: dict):
         seen = pr_state.get(pr_key, {})
 
         _check_comments(config, platform, pr, seen, base_url)
-        _check_ci(config, platform, pr, base_url)
-        _check_stale(pr, base_url)
+        _check_ci(config, platform, pr, seen, base_url)
+        _check_stale(pr, seen, base_url)
 
         pr_state[pr_key] = seen
 
@@ -70,7 +70,10 @@ def _check_comments(config, platform, pr, seen, base_url):
             worktree = _ensure_worktree(config, pr)
             if worktree:
                 context = f"File: {comment.get('path', 'unknown')}\nLine: {comment.get('line', 'unknown')}\n\nReview comment: {comment['body']}\n\nFix this review comment."
-                run_claude_code(context, worktree)
+                result = run_claude_code(context, worktree)
+                if result is None:
+                    log.emit("pr_comment_flagged_manual", f"Claude failed to fix: {comment['body'][:80]}", links=links, meta=meta)
+                    continue
                 platform.push_branch(worktree, pr["branch"])
                 platform.resolve_comment(pr["repo"], pr["id"], comment["id"])
                 log.emit("pr_comment_addressed", f"Fixed: {comment['body'][:80]}", links=links, meta=meta)
@@ -83,32 +86,41 @@ def _check_comments(config, platform, pr, seen, base_url):
         seen["last_comment_id"] = max(c["id"] for c in new_comments)
 
 
-def _check_ci(config, platform, pr, base_url):
+def _check_ci(config, platform, pr, seen, base_url):
     checks = platform.get_pr_checks(pr["repo"], pr["id"])
     failing = [c for c in checks if c["state"] in ("FAILED", "STOPPED", "failure")]
     if not failing:
+        seen.pop("ci_fix_sha", None)
         return
 
     worktree = _ensure_worktree(config, pr)
     if not worktree:
         return
 
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(worktree), capture_output=True, text=True, timeout=10).stdout.strip()
+    if seen.get("ci_fix_sha") == head:
+        return
+
     failure_names = ", ".join(c["name"] for c in failing)
     prompt = f"CI checks are failing: {failure_names}. Investigate and fix the failures."
-    run_claude_code(prompt, worktree)
+    result = run_claude_code(prompt, worktree)
+    if result is None:
+        return
     platform.push_branch(worktree, pr["branch"])
+    seen["ci_fix_sha"] = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(worktree), capture_output=True, text=True, timeout=10).stdout.strip()
 
     log.emit("pr_ci_fix_pushed", f"Fixed failing CI: {failure_names}",
         links={"pr": pr["url"], "detail": f"{base_url}/"},
         meta={"repo": pr["repo"], "pr_id": pr["id"], "checks": failure_names})
 
 
-def _check_stale(pr, base_url):
+def _check_stale(pr, seen, base_url):
     created = datetime.fromisoformat(pr["created_on"].replace("Z", "+00:00"))
-    if datetime.now(timezone.utc) - created > timedelta(hours=24):
+    if datetime.now(timezone.utc) - created > timedelta(hours=24) and not seen.get("stale_notified"):
         log.emit("pr_stale_no_review", f"PR #{pr['id']} has had no review for 24h+",
             links={"pr": pr["url"]},
             meta={"repo": pr["repo"], "pr_id": pr["id"]})
+        seen["stale_notified"] = True
 
 
 def _ensure_worktree(config, pr) -> Path | None:
@@ -120,9 +132,14 @@ def _ensure_worktree(config, pr) -> Path | None:
     if not repos:
         return None
 
-    repo_path = repos[0]["path"]
+    matching = [r for r in repos if r["name"] == pr["repo"]]
+    if not matching:
+        return None
+    repo_path = matching[0]["path"]
 
     if (worktree_path / ".git").is_file():
+        if not worktree_path.resolve().is_relative_to(state_dir.resolve()):
+            return None
         subprocess.run(["git", "fetch", "origin", pr["branch"]], cwd=str(worktree_path), capture_output=True, timeout=60)
         subprocess.run(["git", "reset", "--hard", f"origin/{pr['branch']}"], cwd=str(worktree_path), capture_output=True, timeout=60)
         return worktree_path

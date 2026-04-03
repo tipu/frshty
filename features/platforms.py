@@ -187,6 +187,8 @@ class BitbucketPlatform:
         return True
 
     def push_branch(self, repo_path, branch: str) -> dict:
+        if not branch.strip():
+            return {"ok": False, "error": "empty branch name"}
         result = _run_git(repo_path, ["push", "-u", "origin", branch])
         if result.returncode == 0:
             return {"ok": True}
@@ -280,6 +282,11 @@ class GitHubPlatform:
         for pr in prs:
             if pr.get("full_repo"):
                 self._repo_cache[pr["repo"]] = pr["full_repo"]
+            if not pr.get("branch"):
+                full = self._resolve_repo(pr["repo"])
+                info = self._run_gh(["pr", "view", str(pr["id"]), "--repo", full, "--json", "headRefName", "-q", ".headRefName"])
+                if info.returncode == 0 and info.stdout.strip():
+                    pr["branch"] = info.stdout.strip()
         return prs
 
     def get_pr_comments(self, repo: str, pr_id: int) -> list[dict]:
@@ -407,6 +414,8 @@ class GitHubPlatform:
         return True
 
     def push_branch(self, repo_path, branch: str) -> dict:
+        if not branch.strip():
+            return {"ok": False, "error": "empty branch name"}
         result = _run_git(repo_path, ["push", "-u", "origin", branch])
         if result.returncode == 0:
             return {"ok": True}

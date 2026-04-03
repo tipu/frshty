@@ -185,7 +185,11 @@ async def terminal_handler(websocket: WebSocket, ticket_key: str, config: dict):
         if not cwd:
             session_name = _tmux_session_name(ticket_key)
             if _tmux_session_exists(session_name):
-                cwd = str(config["workspace"]["root"])
+                result = subprocess.run(
+                    [_tmux_bin(), "-S", TMUX_SOCKET, "display-message", "-t", session_name, "-p", "#{pane_current_path}"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                cwd = result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else str(config["workspace"]["root"])
             else:
                 await websocket.close(code=1008)
                 return
