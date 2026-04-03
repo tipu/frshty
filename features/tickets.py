@@ -11,6 +11,7 @@ import core.state as state
 import core.terminal as terminal
 from core.config import get_repos, ticket_worktree_path, resolve_env
 from core.claude_runner import run_haiku, run_claude_code, extract_json
+from core.ticket_status import TicketStatus, transition
 from features.platforms import make_platform
 
 
@@ -64,8 +65,8 @@ def check(config: dict):
     assigned_keys = {t["key"] for t in assigned}
 
     for key, ts in list(ticket_state.items()):
-        if key not in assigned_keys and ts.get("status") != "done":
-            ts["status"] = "done"
+        if key not in assigned_keys and ts.get("status") != TicketStatus.done:
+            ts["status"] = transition(ts.get("status", "new"), "done")
             ts["done_at"] = datetime.now(timezone.utc).isoformat()
             ticket_state[key] = ts
 
@@ -82,12 +83,17 @@ def check(config: dict):
                 ts["slug"] = _make_slug(key, ticket["summary"])
                 ts["branch"] = _make_branch(config, key, ticket)
                 ts["url"] = ticket.get("url", "")
-            ts["status"] = mapped
+            ts["status"] = TicketStatus(mapped).value
             ticket_state[key] = ts
             continue
 
-        if ts["status"] == "merged":
+        if ts["status"] == TicketStatus.merged:
             continue
+
+        if ts["status"] == TicketStatus.pr_failed:
+            ts["pr_attempts"] = 0
+            ts["status"] = transition(ts["status"], "pr_ready")
+
 
         if ts["status"] == "new":
             ts = _setup_ticket(config, ticket, base_url)
@@ -251,9 +257,11 @@ def _setup_ticket(config, ticket, base_url) -> dict:
         links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
         meta={"ticket": key})
 
+    any_worktree = False
     for repo in repos:
         wt_path = ticket_worktree_path(config, slug, repo["name"])
         if (wt_path / ".git").is_file():
+            any_worktree = True
             continue
         wt_path.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "fetch", "origin"], cwd=str(repo["path"]), capture_output=True, timeout=60)
@@ -262,7 +270,12 @@ def _setup_ticket(config, ticket, base_url) -> dict:
             result = subprocess.run(["git", "branch", branch, f"origin/{ws['base_branch']}"], cwd=str(repo["path"]), capture_output=True, timeout=60)
             if result.returncode != 0:
                 subprocess.run(["git", "branch", branch, ws["base_branch"]], cwd=str(repo["path"]), capture_output=True, timeout=60)
-        subprocess.run(["git", "worktree", "add", str(wt_path), branch], cwd=str(repo["path"]), capture_output=True, timeout=60)
+        wt_result = subprocess.run(["git", "worktree", "add", str(wt_path), branch], cwd=str(repo["path"]), capture_output=True, text=True, timeout=60)
+        if wt_result.returncode != 0:
+            log.emit("ticket_worktree_error", f"Failed to create worktree for {key} in {repo['name']}: {wt_result.stderr.strip()}",
+                meta={"ticket": key, "repo": repo["name"]})
+            continue
+        any_worktree = True
         subprocess.run(["chown", "-R", "1000:1000", str(wt_path)], capture_output=True, timeout=60)
 
         for dep in ws.get("dep_commands", []):
@@ -271,6 +284,11 @@ def _setup_ticket(config, ticket, base_url) -> dict:
                     subprocess.run(dep["cmd"].split(), cwd=str(wt_path), capture_output=True, timeout=300)
                 except FileNotFoundError:
                     pass
+
+    if not any_worktree:
+        log.emit("ticket_worktree_error", f"No worktrees created for {key}, staying at new",
+            meta={"ticket": key})
+        return {"status": TicketStatus.new.value, "slug": slug, "branch": branch}
 
     docs_path = ws["root"] / ws["tickets_dir"] / slug / "docs"
     docs_path.mkdir(parents=True, exist_ok=True)
@@ -322,7 +340,7 @@ def _setup_ticket(config, ticket, base_url) -> dict:
         links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
         meta={"ticket": key})
 
-    return {"status": "planning", "slug": slug, "branch": branch}
+    return {"status": transition("new", "planning"), "slug": slug, "branch": branch}
 
 
 def _check_planning(config, ticket, ts, base_url) -> dict:
@@ -344,7 +362,7 @@ def _check_planning(config, ticket, ts, base_url) -> dict:
         links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
         meta={"ticket": ticket["key"]})
 
-    ts["status"] = "reviewing"
+    ts["status"] = transition(ts["status"], "reviewing")
     return ts
 
 
@@ -364,20 +382,34 @@ def _check_reviewing(config, ticket, ts, base_url) -> dict:
         f"{review_text[:4000]}"
     )
 
-    if verdict and "FAIL" in verdict.upper():
-        terminal.send_keys(ticket["key"], "Fix all blocking findings in docs/tri-review.md. Then run tests. When done, delete docs/tri-review.md.")
+    if not verdict:
+        return ts
+
+    if "FAIL" in verdict.upper():
+        review_file.unlink(missing_ok=True)
+        terminal.send_keys(ticket["key"], "Fix all blocking findings from the tri-review. Then run tests.")
 
         log.emit("ticket_review_fixing", f"Fixing tri-review findings for {ticket['key']}",
             links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
             meta={"ticket": ticket["key"]})
-        ts["status"] = "planning"
+        ts["status"] = transition(ts["status"], "planning")
         return ts
 
     log.emit("ticket_review_passed", f"Tri-review passed for {ticket['key']}",
         links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
         meta={"ticket": ticket["key"]})
-    ts["status"] = "pr_ready"
+    ts["status"] = transition(ts["status"], "pr_ready")
     return ts
+
+
+def _summarize_pr_body(raw_body: str, ticket: dict) -> str:
+    if not raw_body or len(raw_body) < 200:
+        return raw_body
+    result = run_haiku(
+        f"Summarize this PR description in 3-5 plain sentences. No bullet points, no headers, no markdown formatting. "
+        f"Just say what changed and why.\n\nTicket: {ticket['key']} — {ticket['summary']}\n\n{raw_body[:3000]}"
+    )
+    return result if result else raw_body[:500]
 
 
 def _create_pr(config, ticket, ts, base_url) -> dict:
@@ -389,7 +421,8 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
 
     ticket_dir = ws["root"] / ws["tickets_dir"] / slug
     manifest = ticket_dir / "docs" / "change-manifest.md"
-    pr_body = manifest.read_text() if manifest.exists() else ticket.get("description", "")
+    raw_body = manifest.read_text() if manifest.exists() else ticket.get("description", "")
+    pr_body = _summarize_pr_body(raw_body, ticket)
 
     prs = []
     for repo in repos:
@@ -422,9 +455,12 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
         result = platform.create_pr(repo["name"], wt, push_branch, title, pr_body, ws["base_branch"])
 
         if result.get("error"):
-            log.emit("ticket_pr_error", f"Failed to create PR for {ticket['key']} in {repo['name']}: {result['error']}",
+            err = result["error"]
+            if "no changes to be pulled" in err.lower():
+                continue
+            log.emit("ticket_pr_error", f"Failed to create PR for {ticket['key']} in {repo['name']}: {err}",
                 links={"detail": f"{base_url}/tickets/{ticket['key']}"},
-                meta={"ticket": ticket["key"], "repo": repo["name"], "error": result["error"]})
+                meta={"ticket": ticket["key"], "repo": repo["name"], "error": err})
             continue
 
         pr_url = result.get("url", "")
@@ -446,7 +482,7 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
             log.emit("ticket_pr_error", f"No PRs created for {ticket['key']} after {ts['pr_attempts']} attempts, giving up",
                 links={"detail": f"{base_url}/tickets/{ticket['key']}"},
                 meta={"ticket": ticket["key"]})
-            ts["status"] = "pr_failed"
+            ts["status"] = transition(ts["status"], "pr_failed")
         else:
             log.emit("ticket_pr_error", f"No PRs created for {ticket['key']}, attempt {ts['pr_attempts']}/3",
                 links={"detail": f"{base_url}/tickets/{ticket['key']}"},
@@ -455,7 +491,7 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
 
     ts["prs"] = prs
     ts["last_comment_ids"] = {f"{p['repo']}/{p['id']}": 0 for p in prs}
-    ts["status"] = "pr_created"
+    ts["status"] = transition(ts["status"], "pr_created")
     return ts
 
 
@@ -493,10 +529,10 @@ def _check_in_review(config, ticket, ts, base_url) -> dict:
         log.emit("ticket_merged", f"All PRs merged for {ticket['key']}",
             links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
             meta={"ticket": ticket["key"]})
-        ts["status"] = "merged"
+        ts["status"] = transition(ts["status"], "merged")
         return ts
 
-    ts["status"] = "in_review"
+    ts["status"] = transition(ts["status"], "in_review")
     platform_name = config["job"].get("platform", "")
     if platform_name == "bitbucket":
         user_id = config.get("bitbucket", {}).get("user_account_id", "")
@@ -601,7 +637,7 @@ def _merge(config, ticket, ts, base_url) -> dict:
                 meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"]})
 
     if all_merged:
-        ts["status"] = "merged"
+        ts["status"] = transition(ts["status"], "merged")
     return ts
 
 
@@ -628,11 +664,32 @@ def _make_branch(config, key: str, ticket: dict) -> str:
 def _adf_to_text(adf) -> str:
     if not adf or not isinstance(adf, dict):
         return ""
-    parts = []
-    for node in adf.get("content", []):
-        if node.get("type") == "paragraph":
-            text = "".join(
-                c.get("text", "") for c in node.get("content", []) if c.get("type") == "text"
-            )
-            parts.append(text)
-    return "\n\n".join(parts)
+    return _adf_node_text(adf)
+
+
+def _adf_node_text(node: dict) -> str:
+    ntype = node.get("type", "")
+    children = node.get("content", [])
+
+    if ntype == "text":
+        return node.get("text", "")
+    if ntype in ("paragraph", "heading"):
+        return "".join(_adf_node_text(c) for c in children) + "\n\n"
+    if ntype == "codeBlock":
+        code = "".join(_adf_node_text(c) for c in children)
+        return f"\n```\n{code}\n```\n\n"
+    if ntype in ("orderedList", "bulletList"):
+        items = []
+        for i, c in enumerate(children, 1):
+            prefix = f"{i}. " if ntype == "orderedList" else "- "
+            items.append(prefix + _adf_node_text(c).strip())
+        return "\n".join(items) + "\n\n"
+    if ntype == "listItem":
+        return "".join(_adf_node_text(c) for c in children)
+    if ntype in ("doc", "tableCell", "tableRow", "tableHeader"):
+        return "".join(_adf_node_text(c) for c in children)
+    if ntype == "table":
+        return "".join(_adf_node_text(c) for c in children) + "\n"
+    if children:
+        return "".join(_adf_node_text(c) for c in children)
+    return ""

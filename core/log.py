@@ -1,3 +1,4 @@
+import fcntl
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,12 +35,17 @@ def emit(event: str, summary: str, links: dict | None = None, meta: dict | None 
     return record
 
 
+MAX_LOG_LINES = 2000
+
+
 def get_events(limit: int = 100, after: str | None = None, unread_only: bool = False) -> list[dict]:
     if not _log_path or not _log_path.exists():
         return []
     dismissed = _load_read_state()
+    lines = _log_path.read_text().splitlines()
+    lines = lines[-MAX_LOG_LINES:] if len(lines) > MAX_LOG_LINES else lines
     events = []
-    for line in _log_path.read_text().splitlines():
+    for line in lines:
         if not line.strip():
             continue
         try:
@@ -65,13 +71,21 @@ def dismiss(event_id: str):
 def dismiss_all():
     if not _log_path or not _log_path.exists():
         return
-    ids = set()
-    for line in _log_path.read_text().splitlines():
-        try:
-            ev = json.loads(line)
-            ids.add(ev["id"])
-        except (json.JSONDecodeError, KeyError):
-            continue
+    lock_path = _log_path.parent / "log.lock"
+    with open(lock_path, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        lines = _log_path.read_text().splitlines()
+        ids = set()
+        for line in lines:
+            try:
+                ev = json.loads(line)
+                ids.add(ev["id"])
+            except (json.JSONDecodeError, KeyError):
+                continue
+        if len(lines) > MAX_LOG_LINES:
+            _log_path.write_text("\n".join(lines[-MAX_LOG_LINES:]) + "\n")
+            retained = set(lines[-MAX_LOG_LINES:])
+            ids = {eid for eid in ids if any(eid in l for l in retained)}
     _save_read_state(ids)
 
 

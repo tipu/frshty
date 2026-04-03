@@ -138,10 +138,12 @@ def review_pr(config: dict, platform, pr: dict) -> dict | None:
 
     merged = _merge_reviews(successful)
     if merged.get("issues"):
+        merged["issues"] = _validate_issues(merged["issues"], worktree)
         merged["issues"] = _simplify_all_issues(merged["issues"])
         merged["issues"] = _style_match_all(config, merged["issues"])
 
-    review_dir = config["_state_dir"] / "reviews" / pr["repo"] / pr["branch"].replace("/", "-")
+    branch_slug = pr["branch"].replace("/", "-") if pr.get("branch") else f"pr-{pr['id']}"
+    review_dir = config["_state_dir"] / "reviews" / pr["repo"] / branch_slug
     review_dir.mkdir(parents=True, exist_ok=True)
     (review_dir / "review.json").write_text(json.dumps(merged, indent=2))
 
@@ -247,6 +249,78 @@ def _merge_reviews(results: list[tuple[str, dict]]) -> dict:
     return base
 
 
+VALIDATE_PROMPT = (
+    "You are auditing a code review comment for correctness. Your job is to DEBUNK the comment if possible.\n\n"
+    "Look for:\n"
+    "- Guard clauses, early returns, or type checks that make the flagged issue impossible\n"
+    "- Type narrowing (TypeScript/Python) that guarantees the variable is defined at the flagged line\n"
+    "- Surrounding logic that already handles the concern\n"
+    "- Initialization or assignment in a higher scope that the reviewer missed\n\n"
+    "If the surrounding code clearly defeats the claim, it is a false positive.\n"
+    "If you cannot determine from the provided context, say uncertain.\n"
+    "Do not speculate about code you cannot see.\n\n"
+    "Return ONLY a JSON object (no markdown fences):\n"
+    '{"decision":"valid"|"false_positive"|"uncertain","reason":"one sentence"}\n'
+)
+
+
+def _read_function_context(worktree: Path, file_path: str, target_line: int) -> str:
+    fp = worktree / file_path
+    if not fp.is_file():
+        return ""
+    try:
+        lines = fp.read_text().splitlines()
+    except OSError:
+        return ""
+    start = max(0, target_line - 60)
+    end = min(len(lines), target_line + 60)
+    numbered = [f"{i+1}: {lines[i]}" for i in range(start, end)]
+    return "\n".join(numbered)
+
+
+def _validate_single(args):
+    issue, worktree = args
+    path = issue.get("path")
+    line = issue.get("line")
+    if not path or not line or not worktree:
+        return issue
+
+    context = _read_function_context(worktree, path, line)
+    if not context:
+        return issue
+
+    prompt = (
+        f"{VALIDATE_PROMPT}"
+        f"REVIEW COMMENT (severity: {issue.get('severity', 'unknown')}):\n{issue['body']}\n\n"
+        f"FILE: {path}, LINE: {line}\n\n"
+        f"CODE CONTEXT:\n{context}\n"
+    )
+    output = run_sonnet(prompt, timeout=120)
+    if not output:
+        return issue
+
+    data = extract_json(output)
+    if not data:
+        return issue
+
+    decision = data.get("decision", "valid")
+    if decision == "false_positive":
+        reason = data.get("reason", "")
+        log.emit("review_validation_dropped", f"Dropped: {path}:{line} — {reason}",
+            meta={"path": path, "line": line, "body": issue["body"], "reason": reason})
+        return None
+    return issue
+
+
+def _validate_issues(issues: list[dict], worktree: Path | None) -> list[dict]:
+    if not worktree:
+        return issues
+    tasks = [(issue, worktree) for issue in issues]
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        results = list(pool.map(_validate_single, tasks))
+    return [r for r in results if r is not None]
+
+
 def _simplify_body(body: str) -> str:
     output = run_haiku(
         "Rewrite this code review comment in 1-3 sentences. "
@@ -300,6 +374,8 @@ def _ensure_review_worktree(config, pr) -> Path | None:
     worktree_path = config["_state_dir"] / "reviews" / pr["repo"] / slug / "worktree"
 
     if (worktree_path / ".git").is_file():
+        if not worktree_path.resolve().is_relative_to(config["_state_dir"].resolve()):
+            return None
         subprocess.run(["git", "fetch", "origin", pr["branch"]], cwd=str(worktree_path), capture_output=True, timeout=60)
         subprocess.run(["git", "reset", "--hard", f"origin/{pr['branch']}"], cwd=str(worktree_path), capture_output=True, timeout=60)
         return worktree_path
