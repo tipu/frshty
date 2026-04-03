@@ -326,6 +326,7 @@ def _simplify_body(body: str) -> str:
         "Rewrite this code review comment in 1-3 sentences. "
         "Speak directly to the code author. Be technical and direct, no fluff. "
         "Never use hyphens, em dashes, or bullet points. "
+        "Wrap function names, variable names, class names, file paths, and code keywords in backticks (e.g. `myFunction`, `user_id`, `None`). "
         f"Return ONLY the rewritten text, nothing else.\n\n{body}"
     )
     return output if output else body
