@@ -17,33 +17,225 @@ from features.platforms import make_platform
 
 STATES = ["new", "planning", "reviewing", "pr_ready", "pr_created", "in_review", "merged"]
 
+MAX_RESTARTS = 3
+RESTART_COOLDOWN_SECS = 300
+
+
+def _command_for_status(status: str) -> str | None:
+    if status == "planning":
+        return "/confer-technical-plan docs/"
+    if status == "reviewing":
+        return "Run /tri-review and save the full output to docs/tri-review.md"
+    return None
+
+
+def restart_session(config, key, ts, base_url=""):
+    from datetime import datetime, timezone
+    ws = config["workspace"]
+    slug = ts.get("slug", "")
+    ticket_dir = ws["root"] / ws["tickets_dir"] / slug
+
+    terminal.kill_terminal(key)
+    time.sleep(1)
+    terminal.ensure_session(key, str(ticket_dir))
+    time.sleep(2)
+    terminal.send_keys(key, "claude --dangerously-skip-permissions")
+    time.sleep(3)
+
+    cmd = _command_for_status(ts.get("status", ""))
+    if cmd:
+        terminal.send_keys(key, cmd)
+
+    ts["last_restart_at"] = datetime.now(timezone.utc).isoformat()
+    ts["restart_count"] = ts.get("restart_count", 0) + 1
+    ts.pop("stuck_logged", None)
+
+    log.emit("ticket_session_restarted", f"Restarted session for {key} (attempt {ts['restart_count']})",
+        links={"detail": f"{base_url}/tickets/{key}"} if base_url else {},
+        meta={"ticket": key, "status": ts.get("status", ""), "restart_count": ts["restart_count"]})
+
+
+def _triage_session(config, key, ts, base_url):
+    from datetime import datetime, timezone
+
+    last = ts.get("last_triage_at", "")
+    if last:
+        elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds()
+        if elapsed < RESTART_COOLDOWN_SECS:
+            return
+
+    health = terminal.session_healthy(key)
+    if health["alive"] and health["claude_running"]:
+        return
+
+    scrollback = terminal.capture_pane(key, 60)
+    status = ts.get("status", "")
+    expected_cmd = _command_for_status(status)
+    expected_file = "docs/change-manifest.md" if status == "planning" else "docs/tri-review.md"
+
+    ws = config["workspace"]
+    slug = ts.get("slug", "")
+    ticket_path = ws["root"] / ws["tickets_dir"] / slug / "docs" / "ticket.md"
+    ticket_desc = ""
+    if ticket_path.exists():
+        ticket_desc = ticket_path.read_text()[:2000]
+
+    prompt = f"""You are a CI supervisor for an automated ticket pipeline. A Claude Code session was given a task but is now idle without producing the expected output.
+
+Your job: decide what to do next. You have deep understanding of the pipeline:
+- "planning" stage: Claude runs /confer-technical-plan docs/ which should produce docs/change-manifest.md
+- "reviewing" stage: Claude runs /tri-review which should produce docs/tri-review.md
+- Claude runs inside a tmux session. You can send text to it (it goes to the Claude Code prompt).
+- If Claude asked a question and is waiting for input, you should answer it or instruct it to proceed.
+- If Claude crashed or the session is empty, recommend a restart.
+- If the ticket is genuinely impossible (missing info that only a human has), say so.
+
+Ticket: {key}
+Stage: {status}
+Expected output file: {expected_file}
+Command that was sent: {expected_cmd}
+Session alive: {health['alive']}
+Claude process running: {health['claude_running']}
+Triage attempts so far: {ts.get('triage_count', 0)}
+
+Ticket description:
+{ticket_desc}
+
+Terminal scrollback (last 60 lines):
+{scrollback}
+
+Reply with EXACTLY one JSON object, no other text:
+{{"action": "send", "message": "text to send to the terminal"}}
+OR {{"action": "restart"}}
+OR {{"action": "skip", "reason": "still working or just needs more time"}}
+OR {{"action": "stuck", "reason": "why human input is needed"}}
+
+Prefer "send" when Claude is at a prompt and you can unblock it. Be direct and actionable in your message — tell Claude exactly what to do, don't ask questions back. If it looks like the work might already be done elsewhere or the ticket is a duplicate, tell Claude to verify and proceed with whatever makes sense."""
+
+    result = run_haiku(prompt, timeout=60)
+    if not result:
+        return
+
+    ts["last_triage_at"] = datetime.now(timezone.utc).isoformat()
+    ts["triage_count"] = ts.get("triage_count", 0) + 1
+
+    try:
+        decision = json.loads(result.strip())
+    except json.JSONDecodeError:
+        parsed = extract_json(result)
+        if not parsed:
+            return
+        decision = parsed
+
+    action = decision.get("action", "")
+
+    if action == "send":
+        msg = decision.get("message", "")
+        if msg:
+            terminal.send_keys(key, msg)
+            log.emit("ticket_session_nudged", f"Sent nudge to {key}: {msg[:80]}",
+                links={"detail": f"{base_url}/tickets/{key}"},
+                meta={"ticket": key, "message": msg[:200]})
+
+    elif action == "restart":
+        restart_session(config, key, ts, base_url)
+
+    elif action == "stuck":
+        reason = decision.get("reason", "unknown")
+        if not ts.get("stuck_logged"):
+            log.emit("ticket_session_stuck", f"Session for {key} needs manual intervention: {reason[:100]}",
+                links={"detail": f"{base_url}/tickets/{key}"},
+                meta={"ticket": key, "reason": reason})
+            ts["stuck_logged"] = True
+
+
+def check_health(config):
+    ticket_state = state.load("tickets")
+    base_url = config["_base_url"]
+    modified_keys = {}
+
+    for key, ts in ticket_state.items():
+        if ts.get("status") not in ("planning", "reviewing"):
+            continue
+        health = terminal.session_healthy(key)
+        if health["alive"] and health["claude_running"]:
+            continue
+        _triage_session(config, key, ts, base_url)
+        modified_keys[key] = ts
+
+    if modified_keys:
+        fresh = state.load("tickets")
+        for key, ts in modified_keys.items():
+            fresh[key] = ts
+        state.save("tickets", fresh)
+
+
+def _image_filename(alt: str, url: str, seen: set | None = None) -> str:
+    filename = re.sub(r'[^\w.\-]', '_', alt) if alt else url.split("/")[-1]
+    if not filename.endswith(('.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp')):
+        filename += '.png'
+    if seen is not None and filename in seen:
+        base, ext = filename.rsplit('.', 1)
+        i = 2
+        while f"{base}_{i}.{ext}" in seen:
+            i += 1
+        filename = f"{base}_{i}.{ext}"
+    if seen is not None:
+        seen.add(filename)
+    return filename
+
 
 def _download_attachments(config, ticket, docs_path):
     attachments = ticket.get("attachments", [])
-    if not attachments:
-        return
     att_dir = docs_path / "attachments"
-    att_dir.mkdir(exist_ok=True)
 
+    headers = {}
     auth = None
-    if config["job"].get("ticket_system") == "jira":
+    ticket_system = config["job"].get("ticket_system", "")
+    if ticket_system == "jira":
         user = resolve_env(config, "jira", "user_env")
         token = resolve_env(config, "jira", "token_env")
         if user and token:
             auth = (user, token)
+    elif ticket_system == "linear":
+        token = resolve_env(config, "linear", "token_env")
+        if token:
+            headers["Authorization"] = token
 
+    inline_images = re.findall(r'!\[([^\]]*)\]\((https?://[^)]+)\)', ticket.get("description", ""))
+    all_downloads = [(a.get("filename", ""), a.get("url", "")) for a in attachments]
+    seen = set()
+    for alt, url in inline_images:
+        filename = _image_filename(alt, url, seen)
+        all_downloads.append((filename, url))
+
+    if not all_downloads:
+        return
+
+    att_dir.mkdir(exist_ok=True)
     with httpx.Client(timeout=60, follow_redirects=True) as client:
-        for a in attachments:
-            url = a.get("url", "")
-            filename = a.get("filename", "")
+        for filename, url in all_downloads:
             if not url or not filename:
                 continue
             try:
-                resp = client.get(url, auth=auth)
+                resp = client.get(url, auth=auth, headers=headers)
                 if resp.status_code == 200:
                     (att_dir / filename).write_bytes(resp.content)
             except Exception:
                 pass
+
+
+def _localize_images(md: str, docs_path: Path) -> str:
+    att_dir = docs_path / "attachments"
+    seen = set()
+    def _replace(m):
+        alt, url = m.group(1), m.group(2)
+        filename = _image_filename(alt, url, seen)
+        local = att_dir / filename
+        if local.exists():
+            return f"![{alt}](attachments/{filename})"
+        return m.group(0)
+    return re.sub(r'!\[([^\]]*)\]\((https?://[^)]+)\)', _replace, md)
 
 
 def _resolve_status(config: dict, external_status: str) -> str | None:
@@ -262,6 +454,10 @@ def _setup_ticket(config, ticket, base_url) -> dict:
         wt_path = ticket_worktree_path(config, slug, repo["name"])
         if (wt_path / ".git").is_file():
             any_worktree = True
+            subprocess.run(["git", "fetch", "origin"], cwd=str(wt_path), capture_output=True, timeout=60)
+            subprocess.run(["git", "checkout", branch], cwd=str(wt_path), capture_output=True, timeout=60)
+            subprocess.run(["git", "reset", "--hard", f"origin/{ws['base_branch']}"], cwd=str(wt_path), capture_output=True, timeout=60)
+            subprocess.run(["git", "clean", "-fd"], cwd=str(wt_path), capture_output=True, timeout=60)
             continue
         wt_path.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "fetch", "origin"], cwd=str(repo["path"]), capture_output=True, timeout=60)
@@ -277,6 +473,9 @@ def _setup_ticket(config, ticket, base_url) -> dict:
             continue
         any_worktree = True
         subprocess.run(["chown", "-R", "1000:1000", str(wt_path)], capture_output=True, timeout=60)
+        git_dir = repo["path"] / ".git"
+        if git_dir.is_dir():
+            subprocess.run(["chown", "-R", "1000:1000", str(git_dir)], capture_output=True, timeout=60)
 
         for dep in ws.get("dep_commands", []):
             if dep["match"] == repo["name"]:
@@ -310,8 +509,6 @@ def _setup_ticket(config, ticket, base_url) -> dict:
         for a in ticket["attachments"]:
             md += f"- {a['filename']} ({a['url']})\n"
 
-    (docs_path / "ticket.md").write_text(md)
-
     if ticket.get("project"):
         p = ticket["project"]
         (docs_path / "epic.md").write_text(f"# Epic: {p['name']}\n\n{p.get('description', '')}\n")
@@ -323,6 +520,8 @@ def _setup_ticket(config, ticket, base_url) -> dict:
         (docs_path / "epic.md").write_text(f"# Parent: {pkey}: {ptitle}\n\n{pdesc}\n")
 
     _download_attachments(config, ticket, docs_path)
+    md = _localize_images(md, docs_path)
+    (docs_path / "ticket.md").write_text(md)
     subprocess.run(["chown", "-R", "1000:1000", str(docs_path.parent)], capture_output=True, timeout=60)
 
     log.emit("ticket_worktree_created", f"Workspace ready for {key}",
@@ -334,7 +533,7 @@ def _setup_ticket(config, ticket, base_url) -> dict:
     time.sleep(2)
     terminal.send_keys(key, "claude --dangerously-skip-permissions")
     time.sleep(3)
-    terminal.send_keys(key, "/confer-technical-plan docs/")
+    terminal.send_keys(key, _command_for_status("planning"))
 
     log.emit("ticket_planning_started", f"Started /confer-technical-plan for {key}",
         links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
@@ -425,12 +624,13 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
     pr_body = _summarize_pr_body(raw_body, ticket)
 
     prs = []
+    any_diff = False
     for repo in repos:
         wt = ticket_worktree_path(config, slug, repo["name"])
         if not wt.is_dir():
             continue
         subprocess.run(["git", "add", "-A"], cwd=str(wt), capture_output=True, timeout=60)
-        subprocess.run(["git", "commit", "-m", f"{ticket['key']}: {ticket['summary']}"], cwd=str(wt), capture_output=True, timeout=60)
+        subprocess.run(["git", "commit", "--no-verify", "-m", f"{ticket['key']}: {ticket['summary']}"], cwd=str(wt), capture_output=True, timeout=60)
 
         subprocess.run(["git", "fetch", "origin", ws["base_branch"]], cwd=str(wt), capture_output=True, timeout=60)
         diff_check = subprocess.run(
@@ -438,6 +638,7 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
             cwd=str(wt), capture_output=True, text=True, timeout=30)
         if not diff_check.stdout.strip():
             continue
+        any_diff = True
 
         actual_branch = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
@@ -475,6 +676,13 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
 
         if pr_id:
             prs.append({"repo": repo["name"], "id": pr_id, "url": pr_url})
+
+    if not any_diff:
+        log.emit("ticket_no_changes", f"No code changes needed for {ticket['key']}, marking as merged",
+            links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
+            meta={"ticket": ticket["key"]})
+        ts["status"] = transition(ts["status"], "merged")
+        return ts
 
     if not prs:
         ts["pr_attempts"] = ts.get("pr_attempts", 0) + 1
@@ -613,7 +821,23 @@ def _check_in_review(config, ticket, ts, base_url) -> dict:
     return ts
 
 
+CI_TIMEOUT_SECS = 3600
+MAX_CI_FIX_ATTEMPTS = 2
+
+
+def _evaluate_checks(checks: list[dict]) -> str:
+    if not checks:
+        return "pending"
+    states = {c["state"].upper() for c in checks}
+    if "FAILURE" in states or "FAILED" in states:
+        return "failed"
+    if states <= {"SUCCESS"}:
+        return "passed"
+    return "pending"
+
+
 def _merge(config, ticket, ts, base_url) -> dict:
+    from datetime import datetime, timezone
     platform = make_platform(config)
     pr_config = config.get("pr", {})
     if not pr_config.get("auto_merge"):
@@ -621,6 +845,30 @@ def _merge(config, ticket, ts, base_url) -> dict:
 
     prs = ts.get("prs", [])
     if not prs:
+        return ts
+
+    if not ts.get("checks_started_at"):
+        ts["checks_started_at"] = datetime.now(timezone.utc).isoformat()
+
+    all_passed = True
+    for pr in prs:
+        checks = platform.get_pr_checks(pr["repo"], pr["id"])
+        verdict = _evaluate_checks(checks)
+
+        if verdict == "pending":
+            elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(ts["checks_started_at"])).total_seconds()
+            if elapsed > CI_TIMEOUT_SECS:
+                log.emit("ticket_checks_timeout", f"CI checks timed out for {ticket['key']} PR #{pr['id']} after {int(elapsed/60)}m",
+                    links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+                    meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"]})
+                return ts
+            all_passed = False
+            continue
+
+        if verdict == "failed":
+            return _handle_ci_failure(config, platform, ticket, ts, pr, checks, base_url)
+
+    if not all_passed:
         return ts
 
     all_merged = True
@@ -638,11 +886,81 @@ def _merge(config, ticket, ts, base_url) -> dict:
 
     if all_merged:
         ts["status"] = transition(ts["status"], "merged")
+        ts.pop("checks_started_at", None)
+        ts.pop("ci_fix_attempts", None)
+    return ts
+
+
+def _handle_ci_failure(config, platform, ticket, ts, pr, checks, base_url) -> dict:
+    failed_names = [c["name"] for c in checks if c["state"].upper() in ("FAILURE", "FAILED")]
+    fix_attempts = ts.get("ci_fix_attempts", 0)
+
+    if fix_attempts >= MAX_CI_FIX_ATTEMPTS:
+        log.emit("ticket_checks_failed", f"CI failed for {ticket['key']} after {fix_attempts} fix attempts: {', '.join(failed_names)}",
+            links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+            meta={"ticket": ticket["key"], "failed_checks": failed_names})
+        return ts
+
+    failure_logs = platform.get_failed_logs(pr["repo"], pr["id"])
+    pr_diff = platform.get_pr_diff(pr["repo"], pr["id"]) or ""
+
+    prompt = f"""CI checks failed on a PR created by our automated pipeline. Determine if this is caused by our changes or is pre-existing/unrelated.
+
+Ticket: {ticket['key']} — {ticket['summary']}
+Failed checks: {', '.join(failed_names)}
+Fix attempt: {fix_attempts + 1}/{MAX_CI_FIX_ATTEMPTS}
+
+PR diff (what we changed):
+{pr_diff[:4000]}
+
+Failure logs:
+{failure_logs[:4000]}
+
+Analyze causality:
+1. Could our diff have caused these failures? Consider both direct changes and indirect effects (e.g. we changed a function that these tests depend on).
+2. Or are these pre-existing failures, flaky tests, or infra issues unrelated to our changes?
+
+Reply with EXACTLY one JSON object:
+{{"caused_by_us": true/false, "reason": "brief explanation", "fix_hint": "what to change if caused_by_us"}}"""
+
+    result = run_haiku(prompt, timeout=120)
+    if not result:
+        return ts
+
+    try:
+        analysis = extract_json(result) or json.loads(result.strip())
+    except (json.JSONDecodeError, TypeError):
+        return ts
+
+    caused = analysis.get("caused_by_us", False)
+    reason = analysis.get("reason", "")
+
+    if not caused:
+        log.emit("ticket_checks_unrelated", f"CI failure for {ticket['key']} not caused by our changes: {reason[:100]}",
+            links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+            meta={"ticket": ticket["key"], "failed_checks": failed_names, "reason": reason})
+        return ts
+
+    fix_hint = analysis.get("fix_hint", "")
+
+    terminal.send_keys(ticket["key"],
+        f"CI checks failed: {', '.join(failed_names)}. This is caused by our changes. "
+        f"Fix the issue: {fix_hint}. Then commit with --no-verify and push.")
+
+    ts["ci_fix_attempts"] = fix_attempts + 1
+    ts.pop("checks_started_at", None)
+
+    log.emit("ticket_ci_fix_sent", f"Sent CI fix to {ticket['key']} (attempt {ts['ci_fix_attempts']}): {fix_hint[:80]}",
+        links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+        meta={"ticket": ticket["key"], "failed_checks": failed_names, "fix_hint": fix_hint})
+
     return ts
 
 
 def _make_slug(key: str, summary: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", summary.lower()).strip("-")[:50]
+    slug = re.sub(r"[^a-z0-9]+", "-", summary.lower()).strip("-")
+    words = slug.split("-")[:7]
+    slug = "-".join(words)
     return f"{key}-{slug}" if slug else key
 
 

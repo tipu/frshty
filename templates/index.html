@@ -89,7 +89,9 @@ let config = {};
 
 const ATTENTION_EVENTS = new Set([
     'pr_comment_flagged_manual', 'pr_stale_no_review', 'review_comments_queued',
-    'slack_mention_detected', 'ticket_tests_fail', 'cycle_error'
+    'slack_mention_detected', 'ticket_tests_fail', 'cycle_error',
+    'ticket_session_nudged', 'ticket_session_stuck',
+    'ticket_checks_failed', 'ticket_checks_unrelated', 'ticket_ci_fix_sent', 'ticket_checks_timeout'
 ]);
 const SYSTEM_EVENTS = new Set(['cycle_start', 'cycle_end', 'cycle_sleep']);
 

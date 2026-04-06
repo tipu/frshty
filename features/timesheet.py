@@ -52,11 +52,20 @@ def check(config: dict):
     if today_str not in recurring:
         return
 
+    existing_entries = set()
+    for entry in recurring[today_str]:
+        for hours in _fetch_ticket_worklogs_today(config, entry["ticket"], today_str):
+            existing_entries.add(f"{entry['ticket']}|{hours}")
+
     for entry in recurring[today_str]:
         ticket = entry["ticket"]
         time_str = entry["time"]
+        hours = round((_parse_time(time_str) or 0) / 3600, 1)
+        if f"{ticket}|{hours}" in existing_entries:
+            continue
         result = log_work(config, ticket, today_str, time_str)
         if result.get("ok"):
+            existing_entries.add(f"{ticket}|{hours}")
             log.emit("scheduled_worklog_queued", f"Queued {time_str} on {ticket}",
                 meta={"ticket": ticket, "time": time_str, "date": today_str})
         else:
@@ -533,6 +542,26 @@ def _date_range(start: str, end: str) -> list[str]:
         days.append(d.isoformat())
         d += timedelta(days=1)
     return days
+
+
+def _fetch_ticket_worklogs_today(config: dict, ticket: str, today_str: str) -> list[float]:
+    jira = config.get("jira", {})
+    base_url = jira.get("base_url", "")
+    user = resolve_env(config, "jira", "user_env")
+    token = resolve_env(config, "jira", "token_env")
+    if not base_url or not user or not token:
+        return []
+    started_after = int(datetime.strptime(today_str, "%Y-%m-%d").timestamp() * 1000)
+    url = f"{base_url}/rest/api/3/issue/{ticket}/worklog?startedAfter={started_after}"
+    with httpx.Client(auth=(user, token), timeout=30) as client:
+        resp = client.get(url)
+        if resp.status_code != 200:
+            return []
+        hours = []
+        for wl in resp.json().get("worklogs", []):
+            if wl.get("started", "")[:10] == today_str:
+                hours.append(round(wl.get("timeSpentSeconds", 0) / 3600, 1))
+        return hours
 
 
 def _parse_time(time_str: str) -> int | None:

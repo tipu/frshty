@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import contextlib
 import json
 import multiprocessing
 import os
@@ -24,7 +25,6 @@ import core.state as state
 import core.terminal as terminal
 from core.claude_runner import run_haiku
 from core.config import get_repos
-from core.terminal import _tmux_session_exists, _tmux_session_name
 from features.platforms import make_platform
 import features.own_prs as own_prs
 import features.reviewer as reviewer
@@ -34,8 +34,28 @@ import features.timesheet as ts
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 
-app = FastAPI()
 _config: dict = {}
+_worker_proc = None
+
+if len(sys.argv) >= 2 and Path(sys.argv[1]).exists():
+    _config = cfg.load_config(sys.argv[1])
+    state.init(_config["_state_dir"])
+    log.init(_config["_state_dir"], _config["job"]["key"])
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(a):
+    global _worker_proc
+    if len(sys.argv) >= 2:
+        _worker_proc = multiprocessing.Process(target=_run_worker, args=(sys.argv[1],), daemon=True)
+        _worker_proc.start()
+    yield
+    if _worker_proc and _worker_proc.is_alive():
+        _worker_proc.kill()
+        _worker_proc.join(timeout=5)
+
+
+app = FastAPI(lifespan=_lifespan)
 
 
 @app.middleware("http")
@@ -261,6 +281,39 @@ def api_review_comments(repo: str, pr_id: int):
         if comments and comments[0].get("pr_id") == pr_id:
             return comments
     return []
+
+
+@app.get("/api/reviews/{repo}/{pr_id}/info")
+def api_review_info(repo: str, pr_id: int):
+    reviews_dir = _config["_state_dir"] / "reviews" / repo
+    if not reviews_dir.exists():
+        return {}
+    for branch_dir in reviews_dir.iterdir():
+        queued = branch_dir / "queued_comments.json"
+        if not queued.exists():
+            continue
+        comments = json.loads(queued.read_text())
+        if comments and comments[0].get("pr_id") == pr_id:
+            review_json = branch_dir / "review.json"
+            review_data = json.loads(review_json.read_text()) if review_json.exists() else {}
+            result = {
+                "summary": review_data.get("summary", ""),
+                "verdict": review_data.get("verdict", ""),
+                "branch": review_data.get("source_branch", ""),
+                "author": review_data.get("author", ""),
+                "date": review_data.get("date", ""),
+                "pr_url": comments[0].get("pr_url", ""),
+                "pr_title": comments[0].get("pr_title", ""),
+            }
+            platform = make_platform(_config)
+            try:
+                pr_info = platform.get_pr_info(repo, pr_id)
+                result["pr_description"] = pr_info.get("description", "")
+                result["pr_title"] = pr_info.get("title", result["pr_title"])
+            except Exception:
+                pass
+            return result
+    return {}
 
 
 @app.post("/api/reviews/{repo}/{pr_id}/discuss")
@@ -497,7 +550,8 @@ def api_ticket_detail(key: str):
 
     terminal_alive = False
     if ts.get("status") in ("planning", "reviewing", "in_review"):
-        terminal_alive = _tmux_session_exists(_tmux_session_name(key))
+        health = terminal.session_healthy(key)
+        terminal_alive = health["alive"] and health["claude_running"]
 
     summary = None
     if docs_dir.is_dir():
@@ -596,22 +650,9 @@ def api_restart_ticket(key: str):
     ts = tickets.get(key)
     if not ts:
         return JSONResponse({"error": "not found"}, status_code=404)
-    slug = ts.get("slug", "")
-    ws = _config["workspace"]
-    ticket_dir = ws["root"] / ws["tickets_dir"] / slug
-    if not ticket_dir.is_dir():
-        return JSONResponse({"error": "ticket dir not found"}, status_code=404)
-
-    terminal.kill_terminal(key)
-    time.sleep(1)
-    terminal.ensure_session(key, str(ticket_dir))
-    time.sleep(2)
-    terminal.send_keys(key, "claude --dangerously-skip-permissions")
-    time.sleep(3)
-    if ts["status"] == "planning":
-        terminal.send_keys(key, "/confer-technical-plan docs/")
-    elif ts["status"] == "reviewing":
-        terminal.send_keys(key, "Run /tri-review and save the full output to docs/tri-review.md")
+    ts["restart_count"] = 0
+    _tickets_mod.restart_session(_config, key, ts, _config["_base_url"])
+    state.save("tickets", tickets)
     return {"status": "restarted"}
 
 
@@ -726,6 +767,16 @@ def slack_loop(config: dict):
         time.sleep(random.randint(50, 90))
 
 
+def health_loop(config: dict):
+    while True:
+        if config.get("features", {}).get("tickets"):
+            try:
+                _tickets_mod.check_health(config)
+            except Exception as e:
+                log.emit("cycle_error", f"health_check failed: {e}")
+        time.sleep(random.randint(60, 90))
+
+
 def _run_review(config_path: str, full_repo: str, pr_id: int, url: str):
     _ensure_path()
     review_config = cfg.load_config(config_path)
@@ -783,6 +834,8 @@ def _run_worker(config_path: str):
     log.init(worker_config["_state_dir"], worker_config["job"]["key"])
     loop_thread = threading.Thread(target=main_loop, args=(worker_config,), daemon=True)
     loop_thread.start()
+    health_thread = threading.Thread(target=health_loop, args=(worker_config,), daemon=True)
+    health_thread.start()
     slack_loop(worker_config)
 
 
@@ -812,11 +865,8 @@ def main():
 
     port = _config["job"]["port"]
 
-    loop_proc = multiprocessing.Process(target=_run_worker, args=(sys.argv[1],), daemon=True)
-    loop_proc.start()
-
     host = _config["job"].get("bind", "127.0.0.1")
-    uvicorn.run(app, host=host, port=port, log_level="warning")
+    uvicorn.run("frshty:app", host=host, port=port, log_level="warning", reload=True, reload_dirs=["/app"])
 
 
 if __name__ == "__main__":
