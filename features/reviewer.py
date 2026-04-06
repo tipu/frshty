@@ -237,7 +237,10 @@ def _merge_reviews(results: list[tuple[str, dict]]) -> dict:
     if output:
         data = extract_json(output)
         if data:
-            return data
+            if "issues" not in data and len(data) == 1:
+                data = next(iter(data.values()))
+            if isinstance(data.get("issues"), list):
+                return data
 
     all_issues = []
     for name, data in results:
