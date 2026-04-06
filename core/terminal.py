@@ -14,7 +14,7 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 import core.state as state
 
 MAX_SCROLLBACK = 1024 * 1024
-TMUX_SOCKET = "/tmp/frshty-tmux"
+TMUX_SOCKET = os.path.expanduser("~/.frshty-tmux")
 def _tmux_bin():
     return shutil.which("tmux") or "tmux"
 
@@ -33,12 +33,44 @@ def _tmux_session_exists(session_name: str) -> bool:
     return result.returncode == 0
 
 
+def capture_pane(ticket_key: str, lines: int = 50) -> str:
+    session_name = _tmux_session_name(ticket_key)
+    if not _tmux_session_exists(session_name):
+        return ""
+    result = subprocess.run(
+        [_tmux_bin(), "-S", TMUX_SOCKET, "capture-pane", "-t", session_name, "-p", "-S", str(-lines)],
+        capture_output=True, text=True,
+    )
+    return result.stdout if result.returncode == 0 else ""
+
+
 def _process_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
         return True
     except OSError:
         return False
+
+
+def session_healthy(ticket_key: str) -> dict:
+    session_name = _tmux_session_name(ticket_key)
+    if not _tmux_session_exists(session_name):
+        return {"alive": False, "claude_running": False}
+
+    result = subprocess.run(
+        [_tmux_bin(), "-S", TMUX_SOCKET, "list-panes", "-t", session_name, "-F", "#{pane_pid}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return {"alive": True, "claude_running": False}
+
+    pane_pid = result.stdout.strip().splitlines()[0]
+    children = subprocess.run(
+        ["pgrep", "-P", pane_pid, "-a"],
+        capture_output=True, text=True,
+    )
+    claude_running = any("claude" in line for line in children.stdout.splitlines())
+    return {"alive": True, "claude_running": claude_running}
 
 
 def _resolve_cwd(config: dict, ticket_key: str) -> str | None:

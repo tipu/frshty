@@ -69,6 +69,8 @@ textarea { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; }
     </div>
 </header>
 
+<div id="summary-bar" class="mb-4 hidden"></div>
+
 <div class="flex gap-4">
     <div id="sidebar" class="flex-shrink-0">
         <div class="text-xs text-gray-500 uppercase font-bold mb-2">Issues <span id="issue-count"></span></div>
@@ -86,16 +88,29 @@ let allComments = [];
 const storageKey = `review:${repo}:${prId}`;
 
 async function load() {
-    const [commentsResp, diffResp] = await Promise.all([
+    const [commentsResp, diffResp, infoResp] = await Promise.all([
         fetch(`/api/reviews/${repo}/${prId}/comments`),
         fetch(`/api/reviews/${repo}/${prId}/diff`),
+        fetch(`/api/reviews/${repo}/${prId}/info`),
     ]);
     allComments = await commentsResp.json();
     const diffData = await diffResp.json();
+    const info = await infoResp.json();
 
-    document.getElementById('title').textContent = `${repo} PR #${prId}`;
-    if (allComments.length && allComments[0].pr_url) {
+    document.getElementById('title').textContent = info.pr_title || `${repo} PR #${prId}`;
+    if (info.pr_url) {
+        document.getElementById('pr-link').href = info.pr_url;
+    } else if (allComments.length && allComments[0].pr_url) {
         document.getElementById('pr-link').href = allComments[0].pr_url;
+    }
+
+    if (info.summary || info.pr_description) {
+        const bar = document.getElementById('summary-bar');
+        bar.classList.remove('hidden');
+        bar.innerHTML = `<div class="card p-4 space-y-2">
+            ${info.pr_description ? `<div class="text-sm text-gray-300">${esc(info.pr_description)}</div>` : ''}
+            ${info.summary ? `<div class="text-sm text-gray-400 border-t border-gray-800 pt-2">${esc(info.summary)}</div>` : ''}
+        </div>`;
     }
 
     renderSidebar();

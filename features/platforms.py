@@ -110,11 +110,14 @@ class BitbucketPlatform:
             return [
                 {
                     "name": s.get("name", ""),
-                    "state": s.get("state", ""),
+                    "state": s.get("state", "").upper().replace("SUCCESSFUL", "SUCCESS"),
                     "url": s.get("url", ""),
                 }
                 for s in resp.json().get("values", [])
             ]
+
+    def get_failed_logs(self, repo: str, pr_id: int) -> str:
+        return ""
 
     def get_pr_state(self, repo: str, pr_id: int) -> str:
         info = self.get_pr_info(repo, pr_id)
@@ -127,7 +130,12 @@ class BitbucketPlatform:
             if resp.status_code != 200:
                 return {"state": "OPEN", "updated_on": ""}
             data = resp.json()
-            return {"state": data.get("state", "OPEN"), "updated_on": data.get("updated_on", "")}
+            return {
+                "state": data.get("state", "OPEN"),
+                "updated_on": data.get("updated_on", ""),
+                "title": data.get("title", ""),
+                "description": (data.get("description", "") or ""),
+            }
 
     def post_pr_comment(self, repo: str, pr_id: int, body: str, path: str | None = None, line: int | None = None, parent_id: int | None = None) -> dict:
         url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}/comments"
@@ -322,14 +330,31 @@ class GitHubPlatform:
         full = self._resolve_repo(repo)
         result = self._run_gh([
             "pr", "checks", str(pr_id), "--repo", full,
-            "--json", "name,state,detailsUrl",
+            "--json", "name,state,link",
         ])
         if result.returncode != 0:
             return []
         return [
-            {"name": c["name"], "state": c["state"], "url": c.get("detailsUrl", "")}
+            {"name": c["name"], "state": c["state"], "url": c.get("link", "")}
             for c in json.loads(result.stdout)
         ]
+
+    def get_failed_logs(self, repo: str, pr_id: int) -> str:
+        full = self._resolve_repo(repo)
+        checks = self.get_pr_checks(repo, pr_id)
+        run_ids = set()
+        for c in checks:
+            if c["state"] == "FAILURE" and c.get("url"):
+                parts = c["url"].split("/runs/")
+                if len(parts) > 1:
+                    run_id = parts[1].split("/")[0]
+                    run_ids.add(run_id)
+        logs = []
+        for run_id in run_ids:
+            result = self._run_gh(["run", "view", run_id, "--repo", full, "--log-failed"])
+            if result.returncode == 0 and result.stdout:
+                logs.append(result.stdout[:3000])
+        return "\n".join(logs)[:6000]
 
     def get_pr_state(self, repo: str, pr_id: int) -> str:
         info = self.get_pr_info(repo, pr_id)
