@@ -28,6 +28,11 @@ nav a { color: #888; padding: 4px 12px; border-radius: 4px; }
 nav a:hover, nav a.active { color: #fff; background: #222; }
 .settings-panel { display: none; position: absolute; right: 0; top: 100%; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 12px; z-index: 50; min-width: 200px; }
 .settings-panel.open { display: block; }
+.row-expand { cursor: pointer; color: #555; width: 12px; display: inline-block; text-align: center; }
+.row-expand:hover { color: #aaa; }
+.summary-full { display: none; white-space: pre-wrap; word-break: break-word; }
+.expanded .summary-line { display: none; }
+.expanded .summary-full { display: block; }
 </style>
 </head>
 <body class="p-4 max-w-7xl mx-auto">
@@ -86,6 +91,13 @@ let currentFilter = 'all';
 let activeCategories = new Set();
 let events = [];
 let config = {};
+let expandedRows = new Set();
+
+function toggleExpand(id) {
+    if (expandedRows.has(id)) expandedRows.delete(id);
+    else expandedRows.add(id);
+    render();
+}
 
 const ATTENTION_EVENTS = new Set([
     'pr_comment_flagged_manual', 'pr_stale_no_review', 'review_comments_queued',
@@ -185,14 +197,23 @@ function renderAttention() {
         const links = Object.entries(e.links || {}).filter(([k, url]) => url).map(([k, url]) =>
             `<a href="${url}" target="_blank" class="link">[→ ${k}]</a>`
         ).join(' ');
-        return `<div class="card card-red px-3 py-2 flex items-center justify-between text-sm">
-            <div>
-                <span class="text-gray-500 text-xs">${fmtTime(e.ts)}</span>
-                <span class="badge badge-red ml-2">${e.event}</span>
-                <span class="ml-2">${e.summary}</span>
-                <span class="ml-2">${links}</span>
+        const firstLine = (e.summary || '').split('\n')[0];
+        const hasMore = (e.summary || '').includes('\n');
+        const exp = expandedRows.has(e.id) ? 'expanded' : '';
+        return `<div class="card card-red px-3 py-2 flex items-start justify-between text-sm ${exp}">
+            <div class="flex-1 min-w-0">
+                <div class="flex items-start gap-2">
+                    ${hasMore ? `<span class="row-expand" onclick="toggleExpand('${e.id}')">▸</span>` : '<span class="row-expand"></span>'}
+                    <div class="flex-1 min-w-0">
+                        <span class="text-gray-500 text-xs">${fmtTime(e.ts)}</span>
+                        <span class="badge badge-red ml-2">${e.event}</span>
+                        <span class="summary-line ml-2">${firstLine}</span>
+                        <span class="ml-2">${links}</span>
+                        <div class="summary-full mt-1 text-xs text-gray-400">${e.summary}</div>
+                    </div>
+                </div>
             </div>
-            <span class="dismiss-btn" onclick="dismissEvent('${e.id}')">✓</span>
+            <span class="dismiss-btn ml-2" onclick="dismissEvent('${e.id}')">✓</span>
         </div>`;
     }).join('');
 }
@@ -211,13 +232,20 @@ function renderFeed() {
             : e.event.includes('complete') || e.event.includes('pass') || e.event.includes('merged') ? 'badge-green'
             : e.event.includes('started') || e.event.includes('created') ? 'badge-yellow'
             : 'badge-blue';
-        return `<div class="${cls} px-2 py-1 flex items-center gap-2 hover:bg-gray-900 rounded">
-            <span class="text-gray-600 w-16 shrink-0">${fmtTime(e.ts)}</span>
-            <span>${dot}</span>
-            <span class="badge ${badgeCls}">${e.event}</span>
-            <span class="flex-1 truncate">${e.summary}</span>
-            <span class="shrink-0">${links}</span>
-            <span class="dismiss-btn shrink-0" onclick="dismissEvent('${e.id}')">✓</span>
+        const firstLine = (e.summary || '').split('\n')[0];
+        const hasMore = (e.summary || '').includes('\n');
+        const exp = expandedRows.has(e.id) ? 'expanded' : '';
+        return `<div class="${cls} feed-row px-2 py-1 hover:bg-gray-900 rounded ${exp}">
+            <div class="flex items-center gap-2">
+                <span class="text-gray-600 w-16 shrink-0">${fmtTime(e.ts)}</span>
+                <span>${dot}</span>
+                ${hasMore ? `<span class="row-expand shrink-0" onclick="toggleExpand('${e.id}')">▸</span>` : '<span class="row-expand shrink-0"></span>'}
+                <span class="badge ${badgeCls}">${e.event}</span>
+                <span class="summary-line flex-1 truncate">${firstLine}</span>
+                <span class="shrink-0">${links}</span>
+                <span class="dismiss-btn shrink-0" onclick="dismissEvent('${e.id}')">✓</span>
+            </div>
+            <div class="summary-full mt-1 ml-20 text-gray-400">${e.summary}</div>
         </div>`;
     }).join('');
 }
