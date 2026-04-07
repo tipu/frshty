@@ -12,6 +12,7 @@ import time
 import traceback
 import urllib.parse
 import urllib.request
+from uuid import uuid4
 
 import uvicorn
 from fastapi import FastAPI
@@ -60,12 +61,19 @@ app = FastAPI(lifespan=_lifespan)
 
 @app.middleware("http")
 async def profile_requests(request, call_next):
-    start = time.time()
-    response = await call_next(request)
-    elapsed = time.time() - start
+    rid = uuid4().hex[:6]
     path = request.url.path
-    if elapsed > 0.5:
-        print(f"[SLOW] {request.method} {path} took {elapsed:.2f}s", flush=True)
+    method = request.method
+    t0 = time.time()
+    print(f"[REQ {rid}] {time.strftime('%H:%M:%S')} {method} {path} enter", flush=True)
+    try:
+        response = await call_next(request)
+    except Exception as e:
+        elapsed = time.time() - t0
+        print(f"[REQ {rid}] {time.strftime('%H:%M:%S')} {method} {path} ERROR after {elapsed:.2f}s: {e!r}", flush=True)
+        raise
+    elapsed = time.time() - t0
+    print(f"[REQ {rid}] {time.strftime('%H:%M:%S')} {method} {path} done {elapsed:.2f}s status={response.status_code}", flush=True)
     response.headers["X-Response-Time"] = f"{elapsed:.3f}s"
     return response
 
@@ -866,7 +874,9 @@ def main():
     port = _config["job"]["port"]
 
     host = _config["job"].get("bind", "127.0.0.1")
-    uvicorn.run("frshty:app", host=host, port=port, log_level="warning", reload=True, reload_dirs=["/app"])
+    src = Path(__file__).parent
+    reload_dirs = [str(src / d) for d in ("core", "features", "templates") if (src / d).exists()]
+    uvicorn.run("frshty:app", host=host, port=port, log_level="info", reload=True, reload_dirs=reload_dirs)
 
 
 if __name__ == "__main__":
