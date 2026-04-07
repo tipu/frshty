@@ -17,6 +17,7 @@ from uuid import uuid4
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.websockets import WebSocket
 from pathlib import Path
 
@@ -34,6 +35,7 @@ import features.tickets as _tickets_mod
 import features.timesheet as ts
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
+STATIC_DIR = Path(__file__).parent / "static"
 
 _config: dict = {}
 _worker_proc = None
@@ -57,6 +59,7 @@ async def _lifespan(a):
 
 
 app = FastAPI(lifespan=_lifespan)
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 @app.middleware("http")
