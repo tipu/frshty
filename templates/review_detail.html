@@ -6,6 +6,10 @@
 <script src="/static/tailwind.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
 <style>
 body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: #0a0a0a; color: #e0e0e0; }
 .card { background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; }
@@ -50,6 +54,11 @@ textarea { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; }
 .sidebar-item:hover { background: #222; }
 .sidebar-item.active { background: #1e3a5f; }
 .sidebar-item.published { opacity: 0.5; }
+.discuss-panel { margin: 8px 0; background: #0a0a0f; border: 1px solid #2a2a2a; border-radius: 6px; display: flex; flex-direction: column; height: 60vh; overflow: hidden; }
+.discuss-panel.fullscreen { position: fixed; inset: 0; z-index: 50; height: 100vh; border-radius: 0; margin: 0; }
+.discuss-header { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: #141425; border-bottom: 1px solid #2a2a2a; font-size: 12px; flex-shrink: 0; }
+.discuss-term { flex: 1; min-height: 0; padding: 4px; }
+.discuss-term .xterm { height: 100%; }
 </style>
 </head>
 <body class="p-4">
@@ -387,23 +396,117 @@ async function placeComment(lineNum, filePath) {
     addComment(filePath, lineNum);
 }
 
+const discussPanels = {};
+
 function discuss(idx) {
+    if (discussPanels[idx]) {
+        closeDiscussPanel(idx);
+        return;
+    }
     const c = allComments[idx];
-    const params = new URLSearchParams({
-        file: c.path || '',
-        line: c.line || '',
-        severity: c.severity || '',
-        idx: idx,
-        repo: repo,
-        pr_id: prId,
+    const commentEl = document.getElementById(`comment-${idx}`);
+    if (!commentEl) return;
+
+    const fileInfo = c.path ? `${c.path}${c.line ? ':' + c.line : ''}` : 'general';
+    const sev = c.severity || 'suggestion';
+    const panel = document.createElement('div');
+    panel.className = 'discuss-panel';
+    panel.id = `discuss-panel-${idx}`;
+    panel.innerHTML = `
+        <div class="discuss-header">
+            <span class="text-blue-400">${esc(fileInfo)}</span>
+            <span class="badge badge-${sev}">${sev}</span>
+            <div class="ml-auto flex gap-2">
+                <button data-act="full" class="text-gray-400 hover:text-white text-xs">fullscreen</button>
+                <button data-act="close" class="text-gray-400 hover:text-red-400 text-xs">close</button>
+            </div>
+        </div>
+        <div class="discuss-term"></div>
+    `;
+    commentEl.insertAdjacentElement('afterend', panel);
+
+    panel.querySelector('[data-act="full"]').onclick = () => {
+        panel.classList.toggle('fullscreen');
+        const p = discussPanels[idx];
+        if (p && p.fit) setTimeout(() => {
+            try {
+                p.fit.fit();
+                if (p.ws && p.ws.readyState === WebSocket.OPEN) {
+                    p.ws.send(JSON.stringify({ type: 'resize', cols: p.term.cols, rows: p.term.rows }));
+                }
+            } catch (e) {}
+        }, 50);
+    };
+    panel.querySelector('[data-act="close"]').onclick = () => closeDiscussPanel(idx);
+
+    discussPanels[idx] = { el: panel };
+    startDiscussSession(idx, c);
+}
+
+async function startDiscussSession(idx, c) {
+    const body = document.getElementById(`body-${idx}`).value;
+    const resp = await fetch(`/api/reviews/${repo}/${prId}/discuss`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            idx, file: c.path || '', line: c.line || '', severity: c.severity || '', body,
+        }),
     });
-    sessionStorage.setItem(`discuss-${repo}-${prId}-${idx}`, JSON.stringify({
-        body: document.getElementById(`body-${idx}`).value,
-        path: c.path,
-        line: c.line,
-        severity: c.severity,
-    }));
-    window.open(`/reviews/${repo}/${prId}/discuss?${params}`, '_blank');
+    const data = await resp.json();
+    connectDiscussTerminal(idx, data.session_id);
+}
+
+function connectDiscussTerminal(idx, sessionId) {
+    const panel = discussPanels[idx];
+    if (!panel) return;
+    const container = panel.el.querySelector('.discuss-term');
+    const term = new Terminal({
+        cursorBlink: true,
+        fontSize: 13,
+        fontFamily: "'JetBrains Mono','Fira Code','Cascadia Code',Menlo,monospace",
+        theme: { background: '#0a0a0f', foreground: '#e2e8f0', cursor: '#e2e8f0', selectionBackground: '#334155' },
+    });
+    const fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.loadAddon(new WebLinksAddon.WebLinksAddon());
+    term.open(container);
+    fit.fit();
+
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${protocol}//${location.host}/ws/discuss/${sessionId}`);
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = () => {
+        fit.fit();
+        ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+    };
+    ws.onmessage = (e) => {
+        const data = e.data instanceof ArrayBuffer ? new Uint8Array(e.data) : e.data;
+        term.write(data);
+    };
+    ws.onclose = () => { try { term.write('\r\n\x1b[90m[disconnected]\x1b[0m\r\n'); } catch (e) {} };
+    term.onData((data) => { if (ws.readyState === WebSocket.OPEN) ws.send(data); });
+
+    const ro = new ResizeObserver(() => {
+        try {
+            fit.fit();
+            if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+            }
+        } catch (e) {}
+    });
+    ro.observe(container);
+
+    Object.assign(panel, { term, ws, fit, ro, sessionId });
+}
+
+function closeDiscussPanel(idx) {
+    const p = discussPanels[idx];
+    if (!p) return;
+    try { p.ro && p.ro.disconnect(); } catch (e) {}
+    try { p.ws && p.ws.close(); } catch (e) {}
+    try { p.term && p.term.dispose(); } catch (e) {}
+    p.el.remove();
+    delete discussPanels[idx];
 }
 
 function discussGeneral() {

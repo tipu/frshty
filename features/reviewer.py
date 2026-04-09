@@ -285,6 +285,10 @@ def _validate_single(args):
     issue, worktree = args
     path = issue.get("path")
     line = issue.get("line")
+    try:
+        line = int(line) if line is not None else None
+    except (TypeError, ValueError):
+        line = None
     if not path or not line or not worktree:
         return issue
 
