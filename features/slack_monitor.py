@@ -23,6 +23,12 @@ def check(config: dict):
     user_id = sl.get("user_id", "")
     team_id = sl.get("team_id", "")
     offset = sl.get("file_offset", 0)
+    last_dt = sl.get("last_dt", "")
+
+    file_size = Path(raw_path).stat().st_size
+    rotated = offset > file_size
+    if rotated:
+        offset = 0
 
     with open(raw_path) as f:
         f.seek(offset)
@@ -40,6 +46,8 @@ def check(config: dict):
         try:
             record = json.loads(line.strip())
         except json.JSONDecodeError:
+            continue
+        if rotated and last_dt and record.get("dt", "") <= last_dt:
             continue
         if workspace and not _matches_workspace(record, workspace, team_id):
             continue
@@ -173,6 +181,10 @@ def check(config: dict):
     sl["channel_digests"] = channel_digests
 
     sl["file_offset"] = new_offset
+    if messages:
+        last_record_dt = max(m.get("dt", "") for m in messages)
+        if last_record_dt:
+            sl["last_dt"] = last_record_dt
 
     existing_mentions = sl.get("mentions", [])
     for mention in mentions:
