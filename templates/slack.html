@@ -95,7 +95,9 @@ async function load() {
         : '<div class="text-gray-600 text-sm">Nothing actionable.</div>';
 
     const digests = slackData.channel_digests || {};
+    const cutoff = Date.now() - 2 * 86400 * 1000;
     const channels = Object.entries(digests)
+        .filter(([, d]) => d.updated_at && new Date(d.updated_at).getTime() >= cutoff)
         .sort((a, b) => (b[1].updated_at || '').localeCompare(a[1].updated_at || ''));
 
     document.getElementById('channels').innerHTML = channels.length
