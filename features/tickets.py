@@ -276,8 +276,9 @@ def check(config: dict):
                 ts["branch"] = _make_branch(config, key, ticket)
                 ts["url"] = ticket.get("url", "")
             ts["status"] = TicketStatus(mapped).value
-            ticket_state[key] = ts
-            continue
+            if mapped != "new":
+                ticket_state[key] = ts
+                continue
 
         if ts["status"] == TicketStatus.merged:
             continue
@@ -296,7 +297,7 @@ def check(config: dict):
         if ts["status"] == "reviewing":
             ts = _check_reviewing(config, ticket, ts, base_url)
 
-        if ts["status"] == "pr_ready":
+        if ts["status"] == "pr_ready" and config.get("pr", {}).get("auto_pr"):
             ts = _create_pr(config, ticket, ts, base_url)
 
         if ts["status"] == "pr_created" and config.get("pr", {}).get("auto_merge"):
