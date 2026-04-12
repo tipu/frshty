@@ -64,7 +64,10 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
 <section class="mb-4">
     <div class="flex items-center justify-between mb-2">
         <h2 class="text-sm font-bold text-yellow-400 uppercase tracking-wider">⚠ Needs Attention</h2>
-        <span class="text-xs text-gray-500" id="attention-count"></span>
+        <div class="flex items-center gap-3 text-xs">
+            <span class="text-gray-500" id="attention-count"></span>
+            <button onclick="dismissAttention()" class="text-gray-600 hover:text-red-400">dismiss all</button>
+        </div>
     </div>
     <div id="attention-list" class="space-y-1"></div>
 </section>
@@ -257,6 +260,12 @@ async function dismissEvent(id) {
 
 async function dismissAll() {
     await fetch('/api/events/dismiss-all', {method: 'POST'});
+    fetchEvents();
+}
+
+async function dismissAttention() {
+    const items = events.filter(e => ATTENTION_EVENTS.has(e.event) && !e.read);
+    await Promise.all(items.map(e => fetch(`/api/events/${e.id}/dismiss`, {method: 'POST'})));
     fetchEvents();
 }
 
