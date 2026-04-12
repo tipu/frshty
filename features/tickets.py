@@ -255,6 +255,7 @@ def check(config: dict):
     ticket_state = state.load("tickets")
     base_url = config["_base_url"]
     assigned_keys = {t["key"] for t in assigned}
+    discovery_only = not get_repos(config)
 
     for key, ts in list(ticket_state.items()):
         if key not in assigned_keys and ts.get("status") != TicketStatus.done:
@@ -264,10 +265,22 @@ def check(config: dict):
 
     for ticket in assigned:
         key = ticket["key"]
+        existing = key in ticket_state
         ts = ticket_state.get(key, {"status": "new"})
         ts["external_status"] = ticket.get("status", "")
         if ts.get("status") == "done":
             ts.pop("done_at", None)
+
+        if discovery_only:
+            if not existing:
+                log.emit("ticket_found", f"New ticket: {key} — {ticket['summary']}",
+                    links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
+                    meta={"ticket": key})
+                ts["slug"] = _make_slug(key, ticket["summary"])
+                ts["branch"] = _make_branch(config, key, ticket)
+                ts["url"] = ticket.get("url", "")
+            ticket_state[key] = ts
+            continue
 
         mapped = _resolve_status(config, ticket.get("status", ""))
         if mapped:
