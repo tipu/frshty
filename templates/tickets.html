@@ -49,16 +49,29 @@ async function load() {
         const items = Object.entries(tickets)
             .filter(([_, t]) => t.status === col)
             .map(([key, t]) => `
-                <a href="/tickets/${key}" class="card p-3 mb-2 block hover:border-gray-500 transition-colors">
-                    <div class="font-bold text-sm">${key}</div>
-                    <div class="text-xs text-gray-400 mt-1">${t.branch || ''}</div>
-                </a>
+                <div class="card p-3 mb-2 hover:border-gray-500 transition-colors relative group">
+                    <a href="/tickets/${key}" class="block">
+                        <div class="flex items-center gap-2">
+                            <span class="font-bold text-sm">${key}</span>
+                            <span class="badge badge-${t.status}">${t.status}</span>
+                        </div>
+                        <div class="text-xs text-gray-400 mt-1">${t.branch || ''}</div>
+                        ${t.pr_scheduled_at ? `<div class="text-xs text-yellow-400 mt-1">PR scheduled ${new Date(t.pr_scheduled_at).toLocaleDateString('en-US', {weekday:'short', month:'short', day:'numeric', hour:'numeric', minute:'2-digit'})}</div>` : ''}
+                        ${t.external_status ? `<div class="text-xs text-gray-500 mt-1">${t.external_status}</div>` : ''}
+                    </a>
+                    <button onclick="discard('${key}')" class="absolute top-2 right-2 text-gray-600 hover:text-red-400 text-xs hidden group-hover:block">discard</button>
+                </div>
             `).join('');
         return `<div class="col flex-1">
             <div class="text-xs font-bold text-gray-500 uppercase mb-2">${col}</div>
             ${items}
         </div>`;
     }).join('');
+}
+async function discard(key) {
+    if (!confirm(`Discard ${key}? It will be picked up fresh on next poll.`)) return;
+    await fetch(`/api/tickets/${key}`, { method: 'DELETE' });
+    load();
 }
 load();
 setInterval(load, 10000);

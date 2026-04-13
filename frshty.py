@@ -33,6 +33,11 @@ import features.reviewer as reviewer
 import features.slack_monitor as slack_monitor
 import features.tickets as _tickets_mod
 import features.timesheet as ts
+import core.events as events
+import core.scheduler as scheduler
+from actions.schedule_pr import handle as _schedule_pr_action
+
+events.register_action("schedule_pr", _schedule_pr_action)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
@@ -667,6 +672,50 @@ def api_restart_ticket(key: str):
     return {"status": "restarted"}
 
 
+@app.delete("/api/tickets/{key}")
+def api_discard_ticket(key: str):
+    import shutil
+    tickets = state.load("tickets")
+    if key not in tickets:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    ts = tickets[key]
+    terminal.kill_terminal(key)
+    slug = ts.get("slug", "")
+    if slug:
+        ws = _config["workspace"]
+        repos = get_repos(_config)
+        for repo in repos:
+            wt_path = cfg.ticket_worktree_path(_config, slug, repo["name"])
+            if (wt_path / ".git").is_file():
+                subprocess.run(["git", "worktree", "remove", "--force", str(wt_path)], cwd=str(repo["path"]), capture_output=True, timeout=60)
+        ticket_dir = ws["root"] / ws["tickets_dir"] / slug
+        if ticket_dir.is_dir():
+            shutil.rmtree(ticket_dir)
+        for repo in repos:
+            subprocess.run(["git", "worktree", "prune"], cwd=str(repo["path"]), capture_output=True, timeout=60)
+    del tickets[key]
+    state.save("tickets", tickets)
+    return {"status": "discarded"}
+
+
+@app.post("/api/tickets/{key}/start-dev")
+def api_start_dev(key: str):
+    tickets = state.load("tickets")
+    ts = tickets.get(key)
+    if not ts:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if ts.get("status") != "new":
+        return JSONResponse({"error": f"ticket is {ts.get('status')}, not new"}, status_code=400)
+    assigned = _tickets_mod._fetch_tickets(_config)
+    ticket = next((t for t in assigned if t["key"] == key), None)
+    if not ticket:
+        return JSONResponse({"error": "ticket not found in ticket system"}, status_code=404)
+    ts = _tickets_mod._setup_ticket(_config, ticket, _config["_base_url"])
+    tickets[key] = ts
+    state.save("tickets", tickets)
+    return {"status": "started", "new_status": ts.get("status")}
+
+
 @app.get("/api/slack/data")
 def api_slack_data():
     return state.load("slack")
@@ -720,6 +769,37 @@ def api_slack_send(reply_id: str, body: dict):
     return JSONResponse({"error": "slack not configured"}, status_code=400)
 
 
+@app.get("/api/timesheet")
+def api_timesheet(start: str = "", end: str = "", force: bool = False):
+    return ts.build_timesheet(_config, start, end, force)
+
+
+@app.post("/api/timesheet/log")
+def api_timesheet_log(body: dict):
+    ticket = body.get("ticket", "")
+    date_str = body.get("date", "")
+    time_str = body.get("time", "")
+    if not ticket or not date_str or not time_str:
+        return JSONResponse({"error": "ticket, date, and time required"}, status_code=400)
+    result = ts.log_work(_config, ticket, date_str, time_str)
+    if result.get("error"):
+        return JSONResponse(result, status_code=400)
+    return result
+
+
+@app.put("/api/timesheet/worklog")
+def api_timesheet_worklog(body: dict):
+    ticket = body.get("ticket", "")
+    worklog_id = body.get("worklog_id", "")
+    time_str = body.get("time", "")
+    if not ticket or not worklog_id or not time_str:
+        return JSONResponse({"error": "ticket, worklog_id, and time required"}, status_code=400)
+    result = ts.update_worklog(_config, ticket, worklog_id, time_str)
+    if result.get("error"):
+        return JSONResponse(result, status_code=400)
+    return result
+
+
 def _reload_config(config: dict):
     try:
         fresh = cfg.load_config(str(config["_config_path"]))
@@ -753,6 +833,11 @@ def run_cycle(config: dict):
             ts.check(config)
         except Exception as e:
             log.emit("cycle_error", f"timesheet failed: {e}")
+
+    try:
+        scheduler.check_due(config)
+    except Exception as e:
+        log.emit("cycle_error", f"scheduler failed: {e}")
 
     log.emit("cycle_end", "Cycle complete")
 

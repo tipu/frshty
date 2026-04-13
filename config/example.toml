@@ -45,6 +45,7 @@ branch_prefix = ""                # empty = branch is {KEY}-{slug}. set to "your
 # run_commands = ["cd django-app && pipenv run python manage.py runserver &", "cd frontend && npm start &"]
 
 [pr]
+auto_pr = true
 auto_merge = false
 # merge_strategy = "squash"       # squash, merge, rebase
 # merge_flags = ["--admin"]       # extra flags for gh pr merge
@@ -64,3 +65,11 @@ timesheet = false
 # recurring = [
 #     {ticket = "PROJ-1", days = ["mon", "wed"], time = "30m", label = "standup"},
 # ]
+
+# --- Events (per-config triggers on lifecycle events) ---
+# [events]
+# [[events.triggers]]
+# on = "ticket_dev_complete"          # fires when ticket passes tri-review
+# action = "schedule_pr"              # delay PR creation based on estimation
+# jitter_hours = 3                    # +/- random hours
+# work_hours = [9, 17]               # clamp to business hours
