@@ -162,6 +162,9 @@ def build_timesheet(config: dict, start: str = "", end: str = "", force: bool = 
         for r in recurring.get(day_str, []):
             daily_summaries.setdefault(day_str, {})[r["ticket"]] = r.get("label", "recurring")
             ticket_ids.add(r["ticket"])
+            expected_hours = round((_parse_time(r["time"]) or 0) / 3600, 1)
+            day_wl = final_wl.get(day_str, [])
+            r["logged"] = any(w["ticket"] == r["ticket"] and w.get("hours") == expected_hours for w in day_wl)
 
     uncached_recurring = [t for t in sorted(ticket_ids) if t not in _ticket_cache]
     if uncached_recurring:
@@ -505,6 +508,7 @@ def _fetch_ticket_info(config: dict, ticket_ids: list, worklogs: dict) -> list:
                         "key": tid,
                         "summary": data["fields"]["summary"],
                         "status": data["fields"]["status"]["name"],
+                        "url": f"{base_url}/browse/{tid}",
                         "hoursLogged": round(hours_by_ticket.get(tid, 0), 1),
                         "hoursEstimated": round(estimate_secs / 3600, 1) if estimate_secs else None,
                     })

@@ -23,6 +23,7 @@ def load_config(path: str) -> dict:
     ws.setdefault("exclude", [])
     ws.setdefault("dep_commands", [])
 
+    raw["pr"].setdefault("auto_pr", True)
     raw["pr"].setdefault("auto_merge", False)
     raw["pr"].setdefault("merge_strategy", "squash")
     raw["pr"].setdefault("merge_flags", [])

@@ -12,6 +12,7 @@ th, td { padding: 6px 10px; border: 1px solid #2a2a2a; text-align: left; font-si
 th { background: #1a1a1a; }
 .weekend { opacity: 0.5; }
 .logged { background: rgba(34, 197, 94, 0.1); }
+.logged-partial { background: rgba(59, 130, 246, 0.1); }
 .missing { background: rgba(239, 68, 68, 0.1); }
 .total-row { background: #1a1a1a; font-weight: bold; }
 nav a { color: #888; padding: 4px 12px; border-radius: 4px; }
@@ -52,12 +53,12 @@ button { cursor: pointer; }
 </div>
 
 <div class="flex gap-4">
-    <div id="sidebar" class="w-52 flex-shrink-0 sticky top-4 self-start hidden">
+    <div id="hover-panel" class="w-52 flex-shrink-0 sticky top-4 self-start">
         <div class="card p-3 mb-3">
             <span class="text-gray-400 text-sm">Total to log:</span>
             <span id="total-hours" class="text-xl font-bold text-green-400 ml-1">0h</span>
         </div>
-        <div id="ticket-sidebar" class="flex flex-col gap-2"></div>
+        <div id="hover-detail"></div>
     </div>
 
     <div class="flex-1 min-w-0 card overflow-x-auto">
@@ -204,7 +205,8 @@ function render() {
             rowClass = 'weekend';
             loggedHtml = '—';
         } else if (wl.length > 0) {
-            rowClass = 'logged';
+            const dayTotal = wl.reduce((s, w) => s + (w.hours || 0), 0);
+            rowClass = dayTotal < 6 ? 'logged-partial' : 'logged';
             loggedHtml = wl.map(w => {
                 const wid = w.worklog_id || '';
                 return `<span class="text-green-400">✓</span> ${w.hours}h <span class="text-gray-500 text-xs">${w.ticket}</span>`;
@@ -216,7 +218,7 @@ function render() {
             if (commits.length > 0) suggestH += 8;
             suggestH += reviews.length * 0.5;
             if (suggestH === 0 && claude.length > 0) suggestH = 4;
-            dayRecurring.forEach(r => {
+            dayRecurring.filter(r => !r.logged).forEach(r => {
                 const rm = r.time.match(/^(\d+(?:\.\d+)?)(h|m)$/);
                 if (rm) suggestH += rm[2] === 'h' ? parseFloat(rm[1]) : parseFloat(rm[1]) / 60;
             });
@@ -247,7 +249,9 @@ function render() {
                 const existingLog = wl.find(w => w.ticket === tid);
                 const wid = existingLog ? (existingLog.worklog_id || '') : '';
                 let trailingHtml;
-                if (existingLog) {
+                if (recurMatch && recurMatch.logged) {
+                    trailingHtml = `<span class="text-xs text-green-400 ml-2">✓ ${recurMatch.time} (auto)</span>`;
+                } else if (existingLog) {
                     trailingHtml =
                         `<span class="wl-display-${ds}-${wid} text-xs text-green-400 ml-2">✓ ${existingLog.hours}h <span class="text-gray-600 hover:text-gray-300 cursor-pointer" onclick="editWl('${ds}','${wid}','${tid}','${existingLog.hours}')">✎</span></span>` +
                         `<span class="wl-edit-${ds}-${wid} hidden ml-2"><input class="w-14 text-xs" value="${existingLog.hours}h" data-ticket="${tid}" data-worklog-id="${wid}">` +
@@ -255,16 +259,16 @@ function render() {
                         `<button onclick="cancelEditWl('${ds}','${wid}')" class="text-xs text-gray-500 hover:text-gray-300 ml-1">✕</button></span>`;
                 } else {
                     trailingHtml =
-                        `<input class="log-input w-14 text-xs ml-2" placeholder="${ph}" data-ticket="${tid}" data-date="${ds}">` +
+                        `<input class="log-input w-14 text-xs ml-2" value="${ph}" data-ticket="${tid}" data-date="${ds}">` +
                         `<button onclick="logTime(this)" class="btn-purple text-xs px-1 ml-1">log</button>`;
                 }
-                return `<div class="flex items-center gap-1 mb-0.5"><span class="text-blue-400 font-mono">${tid}</span> ${tag} <span class="text-gray-300 flex-1">${esc(daySummary[tid])}</span>${trailingHtml}</div>`;
+                return `<div class="flex items-center gap-1 mb-0.5" data-hover-ticket="${tid}">${ticketLink(tid)} ${tag} <span class="text-gray-300 flex-1">${esc(daySummary[tid])}</span>${trailingHtml}</div>`;
             }).join('');
 
             wl.filter(w => !ticketKeys.includes(w.ticket)).forEach(w => {
                 const wid = w.worklog_id || '';
                 activityHtml +=
-                    `<div class="flex items-center gap-1 mb-0.5"><span class="text-blue-400 font-mono">${w.ticket}</span> ` +
+                    `<div class="flex items-center gap-1 mb-0.5" data-hover-ticket="${w.ticket}">${ticketLink(w.ticket)} ` +
                     `<span class="text-gray-300 flex-1"></span>` +
                     `<span class="wl-display-${ds}-${wid} text-xs text-green-400 ml-2">✓ ${w.hours}h <span class="text-gray-600 hover:text-gray-300 cursor-pointer" onclick="editWl('${ds}','${wid}','${w.ticket}','${w.hours}')">✎</span></span>` +
                     `<span class="wl-edit-${ds}-${wid} hidden ml-2"><input class="w-14 text-xs" value="${w.hours}h" data-ticket="${w.ticket}" data-worklog-id="${wid}">` +
@@ -278,7 +282,7 @@ function render() {
         } else if (wl.length > 0) {
             activityHtml = wl.map(w => {
                 const wid = w.worklog_id || '';
-                return `<div class="flex items-center gap-1 mb-0.5"><span class="text-blue-400 font-mono">${w.ticket}</span> <span class="text-gray-500 text-xs">${w.summary || ''}</span>` +
+                return `<div class="flex items-center gap-1 mb-0.5" data-hover-ticket="${w.ticket}">${ticketLink(w.ticket)} <span class="text-gray-500 text-xs">${w.summary || ''}</span>` +
                     `<span class="wl-display-${ds}-${wid} text-xs text-green-400 ml-2">✓ ${w.hours}h <span class="text-gray-600 hover:text-gray-300 cursor-pointer" onclick="editWl('${ds}','${wid}','${w.ticket}','${w.hours}')">✎</span></span>` +
                     `<span class="wl-edit-${ds}-${wid} hidden ml-2"><input class="w-14 text-xs" value="${w.hours}h" data-ticket="${w.ticket}" data-worklog-id="${wid}">` +
                     `<button onclick="saveWl(this,'${ds}','${wid}','${w.ticket}')" class="btn-purple text-xs px-1 ml-1">save</button>` +
@@ -312,24 +316,43 @@ function render() {
     </tr>`;
 
     document.getElementById('total-hours').textContent = Math.round(totalSuggest * 10) / 10 + 'h';
-    renderSidebar();
-    document.getElementById('sidebar').classList.remove('hidden');
+    attachHoverListeners();
 }
 
-function renderSidebar() {
-    const sidebar = document.getElementById('ticket-sidebar');
-    if (!data.tickets || data.tickets.length === 0) { sidebar.innerHTML = ''; return; }
+function showTicketDetail(tid) {
+    const panel = document.getElementById('hover-detail');
+    const t = (data.tickets || []).find(t => t.key === tid);
+    if (!t) { panel.innerHTML = ''; return; }
+    const logged = t.hoursLogged ? `${t.hoursLogged}h` : '0h';
+    const est = t.hoursEstimated ? ` / ${t.hoursEstimated}h` : '';
+    panel.innerHTML = `<div class="card border-l-2 border-blue-500 px-2.5 py-2">
+        <a href="${t.url || '#'}" target="_blank" class="font-mono text-xs text-blue-400 hover:underline">${t.key}</a>
+        <div class="text-xs text-gray-300 mt-0.5 leading-snug">${esc(t.summary)}</div>
+        <div class="text-xs text-gray-400 mt-1">${logged}${est}</div>
+        <div class="text-xs text-gray-500 mt-0.5">${esc(t.status || '')}</div>
+    </div>`;
+}
 
-    sidebar.innerHTML = data.tickets.map(t => {
-        const logged = t.hoursLogged ? `${t.hoursLogged}h` : '0h';
-        const est = t.hoursEstimated ? ` / ${t.hoursEstimated}h` : '';
-        const summary = t.summary.length > 50 ? t.summary.slice(0, 50) + '…' : t.summary;
-        return `<div class="card border-l-2 border-blue-500 px-2.5 py-2">
-            <div class="font-mono text-xs text-blue-400">${t.key}</div>
-            <div class="text-xs text-gray-300 mt-0.5 leading-snug">${esc(summary)}</div>
-            <div class="text-xs text-gray-400 mt-1">${logged}${est}</div>
-        </div>`;
-    }).join('');
+function attachHoverListeners() {
+    document.querySelectorAll('[data-hover-ticket]').forEach(el => {
+        el.addEventListener('mouseenter', () => showTicketDetail(el.dataset.hoverTicket));
+    });
+}
+
+function parseTimeToHours(s) {
+    const m = s.match(/^(?:(\d+(?:\.\d+)?)\s*h)?\s*(?:(\d+(?:\.\d+)?)\s*m)?$/);
+    if (!m || (!m[1] && !m[2])) return 0;
+    return (parseFloat(m[1] || 0)) + (parseFloat(m[2] || 0) / 60);
+}
+
+function ticketLink(tid) {
+    const t = (data.tickets || []).find(t => t.key === tid);
+    return t && t.url ? `<a href="${t.url}" target="_blank" class="text-blue-400 font-mono hover:underline">${tid}</a>` : `<span class="text-blue-400 font-mono">${tid}</span>`;
+}
+
+function adjustTicketHours(ticket, delta) {
+    const t = (data.tickets || []).find(t => t.key === ticket);
+    if (t) t.hoursLogged = Math.round((t.hoursLogged + delta) * 10) / 10;
 }
 
 async function logTime(btn) {
@@ -343,6 +366,7 @@ async function logTime(btn) {
         const resp = await fetch('/api/timesheet/log', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ticket, date, time}) });
         if (!resp.ok) { const err = await resp.json(); showMsg(err.error || 'Failed', true); btn.textContent = 'log'; btn.disabled = false; return; }
         localStorage.removeItem('ts_cache');
+        adjustTicketHours(ticket, parseTimeToHours(time));
         showMsg(`Logged ${time} on ${ticket}`);
         refreshDay(date);
     } catch (e) { showMsg('Failed: ' + e.message, true); btn.textContent = 'log'; btn.disabled = false; }
@@ -361,6 +385,7 @@ async function logTimeManual(btn) {
         const resp = await fetch('/api/timesheet/log', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ticket, date, time}) });
         if (!resp.ok) { const err = await resp.json(); showMsg(err.error || 'Failed', true); btn.textContent = 'log'; btn.disabled = false; return; }
         localStorage.removeItem('ts_cache');
+        adjustTicketHours(ticket, parseTimeToHours(time));
         showMsg(`Logged ${time} on ${ticket}`);
         refreshDay(date);
     } catch (e) { showMsg('Failed: ' + e.message, true); btn.textContent = 'log'; btn.disabled = false; }
@@ -380,11 +405,14 @@ async function saveWl(btn, ds, wid, ticket) {
     const input = btn.previousElementSibling;
     const time = input.value.trim();
     if (!time) return;
+    const oldWl = ((data.worklogs || {})[ds] || []).find(w => w.worklog_id === wid);
+    const oldHours = oldWl ? oldWl.hours : 0;
     btn.disabled = true; btn.textContent = '...';
     try {
         const resp = await fetch('/api/timesheet/worklog', { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ticket, worklog_id: wid, time}) });
         if (!resp.ok) { const err = await resp.json(); showMsg(err.error || 'Failed', true); btn.textContent = 'save'; btn.disabled = false; return; }
         localStorage.removeItem('ts_cache');
+        adjustTicketHours(ticket, parseTimeToHours(time) - oldHours);
         showMsg('Updated');
         refreshDay(ds);
     } catch (e) { showMsg('Failed: ' + e.message, true); btn.textContent = 'save'; btn.disabled = false; }

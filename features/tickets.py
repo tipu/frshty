@@ -13,6 +13,8 @@ from core.config import get_repos, ticket_worktree_path, resolve_env
 from core.claude_runner import run_haiku, run_claude_code, extract_json
 from core.ticket_status import TicketStatus, transition
 from features.platforms import make_platform
+from features.ticket_systems import make_ticket_system
+import core.events as events
 
 
 STATES = ["new", "planning", "reviewing", "pr_ready", "pr_created", "in_review", "merged"]
@@ -310,10 +312,13 @@ def check(config: dict):
         if ts["status"] == "reviewing":
             ts = _check_reviewing(config, ticket, ts, base_url)
 
-        if ts["status"] == "pr_ready" and config.get("pr", {}).get("auto_pr"):
+        if ts["status"] == "pr_ready" and config.get("pr", {}).get("auto_pr") and not ts.get("pr_scheduled_at"):
             ts = _create_pr(config, ticket, ts, base_url)
 
-        if ts["status"] == "pr_created" and config.get("pr", {}).get("auto_merge"):
+        if ts["status"] == "pr_created":
+            ts = _monitor_ci(config, ticket, ts, base_url)
+
+        if ts["status"] == "pr_created" and ts.get("ci_passed") and config.get("pr", {}).get("auto_merge"):
             ts = _merge(config, ticket, ts, base_url)
 
         if ts["status"] in ("pr_created", "in_review"):
@@ -325,134 +330,14 @@ def check(config: dict):
 
 
 def _fetch_tickets(config: dict) -> list[dict]:
-    system = config["job"].get("ticket_system", "")
-    if system == "jira":
-        return _fetch_jira(config)
-    if system == "linear":
-        return _fetch_linear(config)
-    return []
-
-
-def _fetch_jira(config: dict) -> list[dict]:
-    jira = config.get("jira", {})
-    base_url = jira.get("base_url", "")
-    user = resolve_env(config, "jira", "user_env")
-    token = resolve_env(config, "jira", "token_env")
-    if not base_url or not user or not token:
+    ts = make_ticket_system(config)
+    if not ts:
         return []
-    board_id = jira.get("board_id")
-    account_id = jira.get("user_account_id", "")
-    jql = jira.get("jql", "")
-    if not board_id and not jql:
-        return []
-    with httpx.Client(auth=(user, token), timeout=30) as client:
-        if board_id:
-            url = f"{base_url}/rest/agile/1.0/board/{board_id}/issue?maxResults=100"
-            resp = client.get(url)
-            if resp.status_code != 200:
-                return []
-            issues = resp.json().get("issues", [])
-            if account_id:
-                issues = [i for i in issues if (i.get("fields", {}).get("assignee") or {}).get("accountId") == account_id]
-        else:
-            url = f"{base_url}/rest/api/3/search/jql?jql={jql}&maxResults=20&fields=key,summary,status,description,attachment,issuelinks,parent,subtasks"
-            resp = client.get(url)
-            if resp.status_code != 200:
-                return []
-            issues = resp.json().get("issues", [])
-        results = []
-        for i in issues:
-            fields = i.get("fields", {})
-            if not fields:
-                continue
-            status = fields.get("status", {})
-
-            attachments = []
-            for a in fields.get("attachment", []):
-                attachments.append({"filename": a.get("filename", ""), "url": a.get("content", ""), "mime": a.get("mimeType", "")})
-
-            related = []
-            for link in fields.get("issuelinks", []):
-                rel_type = link.get("type", {}).get("outward", "relates to")
-                if link.get("outwardIssue"):
-                    ri = link["outwardIssue"]
-                    related.append({"key": ri.get("key", ""), "summary": ri.get("fields", {}).get("summary", ""), "relation": rel_type})
-                elif link.get("inwardIssue"):
-                    ri = link["inwardIssue"]
-                    rel_type = link.get("type", {}).get("inward", "relates to")
-                    related.append({"key": ri.get("key", ""), "summary": ri.get("fields", {}).get("summary", ""), "relation": rel_type})
-
-            parent = fields.get("parent")
-            parent_info = None
-            if parent:
-                parent_info = {"key": parent.get("key", ""), "summary": parent.get("fields", {}).get("summary", "")}
-
-            subtasks = []
-            for st_item in fields.get("subtasks", []):
-                subtasks.append({"key": st_item.get("key", ""), "summary": st_item.get("fields", {}).get("summary", "")})
-
-            results.append({
-                "key": i.get("key", ""),
-                "summary": fields.get("summary", ""),
-                "status": status.get("name", "") if isinstance(status, dict) else str(status),
-                "description": _adf_to_text(fields.get("description")),
-                "url": f"{base_url.split('/rest')[0]}/browse/{i.get('key', '')}",
-                "attachments": attachments,
-                "related": related,
-                "parent": parent_info,
-                "subtasks": subtasks,
-            })
-        return results
-
-
-def _fetch_linear(config: dict) -> list[dict]:
-    linear = config.get("linear", {})
-    token = resolve_env(config, "linear", "token_env")
-    email = linear.get("assignee_email", "")
-    if not token or not email:
-        return []
-    query = '''
-    query {
-      issues(
-        filter: { assignee: { email: { eq: "%s" } } state: { name: { in: ["In Progress", "Prioritized"] } } }
-        first: 20 orderBy: updatedAt
-      ) { nodes { identifier title state { name } description url
-          project { name description }
-          parent { identifier title description }
-          attachments { nodes { title url } }
-          relations { nodes { type relatedIssue { identifier title description url } } }
-          children { nodes { identifier title state { name } } }
-      } }
-    }
-    ''' % email
-    with httpx.Client(timeout=30) as client:
-        resp = client.post("https://api.linear.app/graphql",
-            json={"query": query},
-            headers={"Authorization": token, "Content-Type": "application/json"})
-        if resp.status_code != 200:
-            return []
-        nodes = resp.json().get("data", {}).get("issues", {}).get("nodes", [])
-        results = []
-        for n in nodes:
-            attachments = [{"filename": a.get("title", ""), "url": a.get("url", "")} for a in n.get("attachments", {}).get("nodes", [])]
-            related = [{"key": r["relatedIssue"]["identifier"], "summary": r["relatedIssue"]["title"], "relation": r.get("type", "related")} for r in n.get("relations", {}).get("nodes", []) if r.get("relatedIssue")]
-            subtasks = [{"key": c["identifier"], "summary": c["title"]} for c in n.get("children", {}).get("nodes", [])]
-            results.append({
-                "key": n["identifier"],
-                "summary": n["title"],
-                "status": n["state"]["name"],
-                "description": n.get("description", ""),
-                "url": n.get("url", ""),
-                "project": n.get("project"),
-                "parent": n.get("parent"),
-                "attachments": attachments,
-                "related": related,
-                "subtasks": subtasks,
-            })
-        return results
+    return ts.fetch_tickets()
 
 
 def _setup_ticket(config, ticket, base_url) -> dict:
+    from datetime import datetime, timezone
     ws = config["workspace"]
     repos = get_repos(config)
     key = ticket["key"]
@@ -474,6 +359,7 @@ def _setup_ticket(config, ticket, base_url) -> dict:
             subprocess.run(["git", "clean", "-fd"], cwd=str(wt_path), capture_output=True, timeout=60)
             continue
         wt_path.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "worktree", "prune"], cwd=str(repo["path"]), capture_output=True, timeout=60)
         subprocess.run(["git", "fetch", "origin"], cwd=str(repo["path"]), capture_output=True, timeout=60)
         branches = subprocess.run(["git", "branch", "--list"], cwd=str(repo["path"]), capture_output=True, text=True, timeout=60).stdout
         if branch not in branches.replace("* ", "").replace("  ", " ").split():
@@ -553,7 +439,8 @@ def _setup_ticket(config, ticket, base_url) -> dict:
         links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
         meta={"ticket": key})
 
-    return {"status": transition("new", "planning"), "slug": slug, "branch": branch}
+    return {"status": transition("new", "planning"), "slug": slug, "branch": branch,
+            "discovered_at": datetime.now(timezone.utc).isoformat()}
 
 
 def _check_planning(config, ticket, ts, base_url) -> dict:
@@ -612,6 +499,15 @@ def _check_reviewing(config, ticket, ts, base_url) -> dict:
         links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
         meta={"ticket": ticket["key"]})
     ts["status"] = transition(ts["status"], "pr_ready")
+
+    events.dispatch("ticket_dev_complete", {
+        "ticket_key": ticket["key"],
+        "estimate_seconds": ticket.get("estimate_seconds", 0),
+        "discovered_at": ts.get("discovered_at", ""),
+        "slug": ts.get("slug", ""),
+        "branch": ts.get("branch", ""),
+    }, config)
+
     return ts
 
 
@@ -810,6 +706,8 @@ def _check_in_review(config, ticket, ts, base_url) -> dict:
                         subprocess.run(["git", "add", "-A"], cwd=str(wt), capture_output=True, timeout=60)
                         subprocess.run(["git", "commit", "-m", f"fix: address review comment on {comment.get('path', 'unknown')}"], cwd=str(wt), capture_output=True, timeout=60)
                         platform.push_branch(wt, ts["branch"])
+                        ts.pop("ci_passed", None)
+                        ts.pop("checks_started_at", None)
                         platform.resolve_comment(pr["repo"], pr["id"], comment["id"])
                         entry["status"] = "addressed"
                         log.emit("ticket_pr_comment_fixed", f"Fixed: {comment['body'][:80]}",
@@ -850,13 +748,9 @@ def _evaluate_checks(checks: list[dict]) -> str:
     return "pending"
 
 
-def _merge(config, ticket, ts, base_url) -> dict:
+def _monitor_ci(config, ticket, ts, base_url) -> dict:
     from datetime import datetime, timezone
     platform = make_platform(config)
-    pr_config = config.get("pr", {})
-    if not pr_config.get("auto_merge"):
-        return ts
-
     prs = ts.get("prs", [])
     if not prs:
         return ts
@@ -885,6 +779,21 @@ def _merge(config, ticket, ts, base_url) -> dict:
     if not all_passed:
         return ts
 
+    log.emit("ticket_checks_passed", f"All CI checks passed for {ticket['key']}",
+        links={"detail": f"{base_url}/tickets/{ticket['key']}"},
+        meta={"ticket": ticket["key"]})
+    ts["ci_passed"] = True
+    ts.pop("checks_started_at", None)
+    ts.pop("ci_fix_attempts", None)
+    return ts
+
+
+def _merge(config, ticket, ts, base_url) -> dict:
+    platform = make_platform(config)
+    prs = ts.get("prs", [])
+    if not prs:
+        return ts
+
     all_merged = True
     for pr in prs:
         result = platform.merge_pr(pr["repo"], pr["id"])
@@ -900,8 +809,7 @@ def _merge(config, ticket, ts, base_url) -> dict:
 
     if all_merged:
         ts["status"] = transition(ts["status"], "merged")
-        ts.pop("checks_started_at", None)
-        ts.pop("ci_fix_attempts", None)
+        ts.pop("ci_passed", None)
     return ts
 
 
@@ -993,35 +901,3 @@ def _make_branch(config, key: str, ticket: dict) -> str:
     return slug
 
 
-def _adf_to_text(adf) -> str:
-    if not adf or not isinstance(adf, dict):
-        return ""
-    return _adf_node_text(adf)
-
-
-def _adf_node_text(node: dict) -> str:
-    ntype = node.get("type", "")
-    children = node.get("content", [])
-
-    if ntype == "text":
-        return node.get("text", "")
-    if ntype in ("paragraph", "heading"):
-        return "".join(_adf_node_text(c) for c in children) + "\n\n"
-    if ntype == "codeBlock":
-        code = "".join(_adf_node_text(c) for c in children)
-        return f"\n```\n{code}\n```\n\n"
-    if ntype in ("orderedList", "bulletList"):
-        items = []
-        for i, c in enumerate(children, 1):
-            prefix = f"{i}. " if ntype == "orderedList" else "- "
-            items.append(prefix + _adf_node_text(c).strip())
-        return "\n".join(items) + "\n\n"
-    if ntype == "listItem":
-        return "".join(_adf_node_text(c) for c in children)
-    if ntype in ("doc", "tableCell", "tableRow", "tableHeader"):
-        return "".join(_adf_node_text(c) for c in children)
-    if ntype == "table":
-        return "".join(_adf_node_text(c) for c in children) + "\n"
-    if children:
-        return "".join(_adf_node_text(c) for c in children)
-    return ""
