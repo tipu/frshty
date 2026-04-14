@@ -316,7 +316,12 @@ def check(config: dict):
             ts = _create_pr(config, ticket, ts, base_url)
 
         if ts["status"] == "pr_created":
-            ts = _monitor_ci(config, ticket, ts, base_url)
+            platform = make_platform(config)
+            result = platform.monitor_ci(ticket, ts, base_url)
+            if result.get("_ci_failed"):
+                ts = _handle_ci_failure(config, platform, ticket, ts, result["pr"], result["checks"], base_url)
+            else:
+                ts = result
 
         if ts["status"] == "pr_created" and ts.get("ci_passed") and config.get("pr", {}).get("auto_merge"):
             ts = _merge(config, ticket, ts, base_url)
@@ -485,19 +490,19 @@ def _check_reviewing(config, ticket, ts, base_url) -> dict:
     if not verdict:
         return ts
 
-    if "FAIL" in verdict.upper():
+    if verdict.strip().upper().startswith("FAIL"):
         review_file.unlink(missing_ok=True)
         terminal.send_keys(ticket["key"], "Fix all blocking findings from the tri-review. Then run tests.")
 
         log.emit("ticket_review_fixing", f"Fixing tri-review findings for {ticket['key']}",
             links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
-            meta={"ticket": ticket["key"]})
+            meta={"ticket": ticket["key"], "verdict": verdict.strip()})
         ts["status"] = transition(ts["status"], "planning")
         return ts
 
     log.emit("ticket_review_passed", f"Tri-review passed for {ticket['key']}",
         links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
-        meta={"ticket": ticket["key"]})
+        meta={"ticket": ticket["key"], "verdict": verdict.strip()})
     ts["status"] = transition(ts["status"], "pr_ready")
 
     events.dispatch("ticket_dev_complete", {
@@ -733,59 +738,7 @@ def _check_in_review(config, ticket, ts, base_url) -> dict:
     return ts
 
 
-CI_TIMEOUT_SECS = 3600
 MAX_CI_FIX_ATTEMPTS = 2
-
-
-def _evaluate_checks(checks: list[dict]) -> str:
-    if not checks:
-        return "pending"
-    states = {c["state"].upper() for c in checks}
-    if "FAILURE" in states or "FAILED" in states:
-        return "failed"
-    if states <= {"SUCCESS"}:
-        return "passed"
-    return "pending"
-
-
-def _monitor_ci(config, ticket, ts, base_url) -> dict:
-    from datetime import datetime, timezone
-    platform = make_platform(config)
-    prs = ts.get("prs", [])
-    if not prs:
-        return ts
-
-    if not ts.get("checks_started_at"):
-        ts["checks_started_at"] = datetime.now(timezone.utc).isoformat()
-
-    all_passed = True
-    for pr in prs:
-        checks = platform.get_pr_checks(pr["repo"], pr["id"])
-        verdict = _evaluate_checks(checks)
-
-        if verdict == "pending":
-            elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(ts["checks_started_at"])).total_seconds()
-            if elapsed > CI_TIMEOUT_SECS:
-                log.emit("ticket_checks_timeout", f"CI checks timed out for {ticket['key']} PR #{pr['id']} after {int(elapsed/60)}m",
-                    links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
-                    meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"]})
-                return ts
-            all_passed = False
-            continue
-
-        if verdict == "failed":
-            return _handle_ci_failure(config, platform, ticket, ts, pr, checks, base_url)
-
-    if not all_passed:
-        return ts
-
-    log.emit("ticket_checks_passed", f"All CI checks passed for {ticket['key']}",
-        links={"detail": f"{base_url}/tickets/{ticket['key']}"},
-        meta={"ticket": ticket["key"]})
-    ts["ci_passed"] = True
-    ts.pop("checks_started_at", None)
-    ts.pop("ci_fix_attempts", None)
-    return ts
 
 
 def _merge(config, ticket, ts, base_url) -> dict:

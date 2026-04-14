@@ -1,5 +1,6 @@
 import random
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 import core.log as log
 import core.state as state
@@ -102,3 +103,24 @@ def compute_target_time(start: datetime, estimate_seconds: int, jitter_hours: in
         current += timedelta(days=1)
 
     return current
+
+
+def compute_delay_time(start: datetime, delay_hours: list[int], quiet_hours: list[int] | None = None, tz_name: str = "US/Pacific") -> datetime:
+    if not quiet_hours:
+        quiet_hours = [23, 7]
+
+    delay = random.uniform(delay_hours[0], delay_hours[1])
+    target = start + timedelta(hours=delay)
+
+    tz = ZoneInfo(tz_name)
+    local = target.astimezone(tz)
+
+    quiet_start, quiet_end = quiet_hours
+    if local.hour >= quiet_start or local.hour < quiet_end:
+        next_day = local.date() if local.hour >= quiet_start else local.date()
+        if local.hour >= quiet_start:
+            next_day += timedelta(days=1)
+        local = local.replace(year=next_day.year, month=next_day.month, day=next_day.day,
+                              hour=quiet_end, minute=random.randint(0, 59))
+
+    return local.astimezone(timezone.utc)

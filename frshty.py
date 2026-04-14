@@ -16,7 +16,7 @@ from uuid import uuid4
 
 import uvicorn
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.websockets import WebSocket
 from pathlib import Path
@@ -27,6 +27,7 @@ import core.state as state
 import core.terminal as terminal
 from core.claude_runner import run_haiku
 from core.config import get_repos
+from core.ticket_status import TicketStatus
 from features.platforms import make_platform
 import features.own_prs as own_prs
 import features.reviewer as reviewer
@@ -35,8 +36,10 @@ import features.tickets as _tickets_mod
 import features.timesheet as ts
 import core.events as events
 import core.scheduler as scheduler
+from actions.record_demo import handle as _record_demo_action
 from actions.schedule_pr import handle as _schedule_pr_action
 
+events.register_action("record_demo", _record_demo_action)
 events.register_action("schedule_pr", _schedule_pr_action)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -123,6 +126,11 @@ def ticket_detail(key: str):
 @app.get("/slack", response_class=HTMLResponse)
 def slack_page():
     return _template("slack.html")
+
+
+@app.get("/scheduled", response_class=HTMLResponse)
+def scheduled_page():
+    return _template("scheduled.html")
 
 
 @app.get("/timesheet", response_class=HTMLResponse)
@@ -543,6 +551,24 @@ def api_tickets_list():
     return {k: v for k, v in tickets.items() if v.get("status") != "done"}
 
 
+@app.get("/api/scheduled")
+def api_scheduled():
+    scheduled = state.load("scheduler")
+    tickets = state.load("tickets")
+    items = []
+    for key, entry in scheduled.items():
+        items.append({"key": key, "type": "scheduled_pr", "run_at": entry["run_at"],
+                       "scheduled_at": entry["scheduled_at"], "action": entry["action"],
+                       "meta": entry.get("meta", {})})
+    for key, ts in tickets.items():
+        if ts.get("status") == "pr_created" and not ts.get("ci_passed"):
+            items.append({"key": key, "type": "ci_pending", "status": ts["status"],
+                          "checks_started_at": ts.get("checks_started_at"),
+                          "branch": ts.get("branch", ""),
+                          "prs": ts.get("prs", [])})
+    return items
+
+
 @app.get("/api/tickets/{key}/detail")
 def api_ticket_detail(key: str):
     tickets = state.load("tickets")
@@ -583,7 +609,23 @@ def api_ticket_detail(key: str):
                 if summary:
                     summary_cache.write_text(summary)
 
-    return {"key": key, "state": ts, "docs": docs, "history": history, "summary": summary, "terminal_alive": terminal_alive}
+    all_statuses = [s.value for s in TicketStatus]
+    demo_video = (docs_dir / "demo.webm").exists() if docs_dir.is_dir() else False
+    return {"key": key, "state": ts, "docs": docs, "history": history, "summary": summary, "terminal_alive": terminal_alive, "all_statuses": all_statuses, "demo_video": demo_video}
+
+
+@app.get("/api/tickets/{key}/demo")
+def api_ticket_demo(key: str):
+    tickets = state.load("tickets")
+    ts = tickets.get(key)
+    if not ts:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    slug = ts.get("slug", "")
+    ws = _config["workspace"]
+    demo = ws["root"] / ws["tickets_dir"] / slug / "docs" / "demo.webm"
+    if not demo.exists():
+        return JSONResponse({"error": "no demo"}, status_code=404)
+    return FileResponse(str(demo), media_type="video/webm")
 
 
 @app.websocket("/ws/terminal/{key}")
@@ -672,6 +714,27 @@ def api_restart_ticket(key: str):
     return {"status": "restarted"}
 
 
+@app.post("/api/tickets/{key}/status")
+def api_set_ticket_status(key: str, body: dict):
+    target = body.get("status", "")
+    try:
+        TicketStatus(target)
+    except ValueError:
+        return JSONResponse({"error": f"invalid status: {target}"}, status_code=400)
+    tickets = state.load("tickets")
+    ts = tickets.get(key)
+    if not ts:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    old_status = ts.get("status", "unknown")
+    ts["status"] = target
+    tickets[key] = ts
+    state.save("tickets", tickets)
+    log.emit("ticket_status_override", f"Manual override {old_status} → {target} for {key}",
+        links={"detail": f"{_config['_base_url']}/tickets/{key}"},
+        meta={"ticket": key, "old_status": old_status, "new_status": target})
+    return {"status": target, "old_status": old_status}
+
+
 @app.delete("/api/tickets/{key}")
 def api_discard_ticket(key: str):
     import shutil
@@ -714,6 +777,26 @@ def api_start_dev(key: str):
     tickets[key] = ts
     state.save("tickets", tickets)
     return {"status": "started", "new_status": ts.get("status")}
+
+
+@app.post("/api/scheduled/{key}/reschedule")
+def api_reschedule(key: str, body: dict):
+    pending = state.load("scheduler")
+    if key not in pending:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    run_at = body.get("run_at", "")
+    if not run_at:
+        return JSONResponse({"error": "run_at required"}, status_code=400)
+    from datetime import datetime
+    try:
+        datetime.fromisoformat(run_at)
+    except ValueError:
+        return JSONResponse({"error": "invalid datetime"}, status_code=400)
+    pending[key]["run_at"] = run_at
+    state.save("scheduler", pending)
+    log.emit("schedule_updated", f"Rescheduled {key} to {run_at}",
+        meta={"ticket": key, "run_at": run_at})
+    return {"status": "updated", "run_at": run_at}
 
 
 @app.get("/api/slack/data")

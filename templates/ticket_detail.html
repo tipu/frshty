@@ -64,6 +64,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
         <a href="/">Feed</a>
         <a href="/reviews">Reviews</a>
         <a href="/tickets" class="active">Tickets</a>
+        <a href="/scheduled">Scheduled</a>
         <a href="/slack">Slack</a>
     </nav>
 </header>
@@ -150,7 +151,9 @@ async function load() {
 
     document.getElementById('status-bar').innerHTML = `
         <div class="card p-4 flex items-center gap-4 flex-wrap">
-            <span class="badge badge-${status}" style="font-size:13px;padding:3px 10px;">${status.replace('_', ' ')}</span>
+            <select onchange="setStatus(this.value)" class="bg-transparent border border-gray-700 rounded px-2 py-1 text-sm cursor-pointer" style="font-size:13px;">
+                ${(data.all_statuses || []).map(s => `<option value="${s}" ${s === status ? 'selected' : ''} class="bg-gray-900">${s.replace('_', ' ')}</option>`).join('')}
+            </select>
             ${inProgress ? `<span class="flex items-center gap-1 text-xs ${alive ? 'text-green-400' : 'text-red-400'}"><span class="w-2 h-2 rounded-full ${alive ? 'bg-green-400 animate-pulse' : 'bg-red-400'}"></span>${alive ? 'running' : 'stalled'}</span>` : ''}
             ${stalled ? `<button onclick="restartTicket()" class="text-xs bg-yellow-800 hover:bg-yellow-700 text-yellow-200 px-3 py-1 rounded">Restart</button>` : ''}
             ${status === 'new' ? `<button onclick="startDev()" class="text-xs bg-blue-700 hover:bg-blue-600 text-white px-3 py-1 rounded">Start Dev</button>` : ''}
@@ -171,7 +174,20 @@ async function load() {
         return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
     });
 
-    document.getElementById('docs').innerHTML = sorted.map(([name, content]) => `
+    if (data.demo_video) {
+        document.getElementById('docs').innerHTML = `
+            <div class="card p-4 mb-4">
+                <div class="text-xs font-bold text-gray-500 uppercase mb-2">Demo Recording</div>
+                <video controls class="w-full rounded" style="max-height:600px">
+                    <source src="/api/tickets/${key}/demo" type="video/webm">
+                </video>
+            </div>
+        `;
+    } else {
+        document.getElementById('docs').innerHTML = '';
+    }
+
+    document.getElementById('docs').innerHTML += sorted.map(([name, content]) => `
         <div class="card p-4">
             <div class="text-xs font-bold text-gray-500 uppercase mb-2">${name}</div>
             <div class="md-content text-sm">${marked.parse(content)}</div>
@@ -189,10 +205,11 @@ async function load() {
                     const links = Object.entries(e.links || {}).filter(([k,v]) => v && k !== 'detail' && k !== 'ticket').map(([k,url]) =>
                         `<a href="${url}" target="_blank" class="link">[${k}]</a>`
                     ).join(' ');
+                    const verdict = (e.meta || {}).verdict;
                     return `<div class="flex gap-2 text-gray-400">
                         <span class="text-gray-600 w-16 cursor-default" title="${absTime}">${rel}</span>
                         <span class="text-blue-400">${e.event}</span>
-                        <span class="flex-1">${e.summary}</span>
+                        <span class="flex-1">${e.summary}${verdict ? `<span class="text-gray-600 ml-2">— ${esc(verdict)}</span>` : ''}</span>
                         <span>${links}</span>
                     </div>`;
                 }).join('')}
@@ -439,6 +456,15 @@ function runServices() {
     for (const cmd of runCommands) {
         ws.send(cmd + '\n');
     }
+}
+
+async function setStatus(newStatus) {
+    const resp = await fetch(`/api/tickets/${key}/status`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({status: newStatus}),
+    });
+    if (resp.ok) load();
 }
 
 async function startDev() {
