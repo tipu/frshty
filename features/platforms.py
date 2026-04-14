@@ -6,6 +6,7 @@ from pathlib import Path
 
 import httpx
 
+import core.log as log
 from core.config import resolve_env, get_repos
 
 
@@ -216,6 +217,10 @@ class BitbucketPlatform:
                 data = resp.json()
                 return {"url": data["links"]["html"]["href"], "id": data["id"]}
             return {"error": resp.text}
+
+    def monitor_ci(self, ticket, ts, base_url) -> dict:
+        ts["ci_passed"] = True
+        return ts
 
     def merge_pr(self, repo: str, pr_id: int) -> dict:
         strategy = self.config.get("pr", {}).get("merge_strategy", "squash")
@@ -459,6 +464,55 @@ class GitHubPlatform:
         m = re.search(r"/pull/(\d+)", url)
         pr_id = int(m.group(1)) if m else None
         return {"url": url, "id": pr_id}
+
+    CI_TIMEOUT_SECS = 3600
+
+    def monitor_ci(self, ticket, ts, base_url) -> dict:
+        prs = ts.get("prs", [])
+        if not prs:
+            return ts
+
+        if not ts.get("checks_started_at"):
+            ts["checks_started_at"] = datetime.now(timezone.utc).isoformat()
+
+        all_passed = True
+        for pr in prs:
+            checks = self.get_pr_checks(pr["repo"], pr["id"])
+            verdict = self._evaluate_checks(checks)
+
+            if verdict == "pending":
+                elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(ts["checks_started_at"])).total_seconds()
+                if elapsed > self.CI_TIMEOUT_SECS:
+                    log.emit("ticket_checks_timeout", f"CI checks timed out for {ticket['key']} PR #{pr['id']} after {int(elapsed/60)}m",
+                        links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+                        meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"]})
+                    return ts
+                all_passed = False
+                continue
+
+            if verdict == "failed":
+                return {"_ci_failed": True, "pr": pr, "checks": checks}
+
+        if not all_passed:
+            return ts
+
+        log.emit("ticket_checks_passed", f"All CI checks passed for {ticket['key']}",
+            links={"detail": f"{base_url}/tickets/{ticket['key']}"},
+            meta={"ticket": ticket["key"]})
+        ts["ci_passed"] = True
+        ts.pop("checks_started_at", None)
+        ts.pop("ci_fix_attempts", None)
+        return ts
+
+    def _evaluate_checks(self, checks: list[dict]) -> str:
+        if not checks:
+            return "pending"
+        states = {c["state"].upper() for c in checks}
+        if "FAILURE" in states or "FAILED" in states:
+            return "failed"
+        if states <= {"SUCCESS"}:
+            return "passed"
+        return "pending"
 
     def merge_pr(self, repo: str, pr_id: int) -> dict:
         pr_config = self.config.get("pr", {})
