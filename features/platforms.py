@@ -8,6 +8,7 @@ import httpx
 
 import core.log as log
 from core.config import resolve_env, get_repos
+from core.claude_runner import run_haiku
 
 
 def make_platform(config: dict):
@@ -27,6 +28,40 @@ def _run_git(cwd, args: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git"] + args, cwd=str(cwd), capture_output=True, text=True, timeout=60,
     )
+
+
+def _resolve_merge_conflicts(repo_path, base_branch: str) -> dict:
+    conflicted = _run_git(repo_path, ["diff", "--name-only", "--diff-filter=U"])
+    if conflicted.returncode != 0 or not conflicted.stdout.strip():
+        _run_git(repo_path, ["merge", "--abort"])
+        return {"ok": False, "error": "no conflicted files found"}
+
+    files = conflicted.stdout.strip().split("\n")
+    for filepath in files:
+        full_path = Path(repo_path) / filepath
+        if not full_path.exists():
+            _run_git(repo_path, ["merge", "--abort"])
+            return {"ok": False, "error": f"conflicted file not found: {filepath}"}
+
+        content = full_path.read_text()
+        resolved = run_haiku(
+            f"This file has git merge conflicts. Resolve them by picking the correct code. "
+            f"Output ONLY the resolved file contents, no explanation, no markdown fences.\n\n{content}",
+            timeout=120,
+        )
+        if not resolved or "<<<<<<<" in resolved or ">>>>>>>" in resolved:
+            _run_git(repo_path, ["merge", "--abort"])
+            return {"ok": False, "error": f"failed to resolve conflicts in {filepath}"}
+
+        full_path.write_text(resolved)
+        _run_git(repo_path, ["add", filepath])
+
+    result = _run_git(repo_path, ["commit", "--no-edit"])
+    if result.returncode != 0:
+        _run_git(repo_path, ["merge", "--abort"])
+        return {"ok": False, "error": result.stderr.strip()}
+
+    return {"ok": True}
 
 
 class BitbucketPlatform:
@@ -212,8 +247,7 @@ class BitbucketPlatform:
         result = _run_git(repo_path, ["merge", f"origin/{base_branch}", "--no-edit"])
         if result.returncode == 0:
             return {"ok": True}
-        _run_git(repo_path, ["merge", "--abort"])
-        return {"ok": False, "error": result.stderr.strip()}
+        return _resolve_merge_conflicts(repo_path, base_branch)
 
     def create_pr(self, repo: str, repo_path, branch: str, title: str, body: str, base_branch: str) -> dict:
         url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests"
@@ -487,8 +521,7 @@ class GitHubPlatform:
         result = _run_git(repo_path, ["merge", f"origin/{base_branch}", "--no-edit"])
         if result.returncode == 0:
             return {"ok": True}
-        _run_git(repo_path, ["merge", "--abort"])
-        return {"ok": False, "error": result.stderr.strip()}
+        return _resolve_merge_conflicts(repo_path, base_branch)
 
     def create_pr(self, repo: str, repo_path, branch: str, title: str, body: str, base_branch: str) -> dict:
         full = self._resolve_repo(repo)
