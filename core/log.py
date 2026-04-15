@@ -89,11 +89,29 @@ def dismiss_all():
     _save_read_state(ids)
 
 
+def _read_state_lock_path():
+    return _read_state_path.parent / "read_state.lock"
+
+
 def _load_read_state() -> set:
-    if _read_state_path and _read_state_path.exists():
+    if not _read_state_path or not _read_state_path.exists():
+        return set()
+    with open(_read_state_lock_path(), "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_SH)
         return set(json.loads(_read_state_path.read_text()))
-    return set()
 
 
 def _save_read_state(ids: set):
-    _read_state_path.write_text(json.dumps(list(ids)))
+    import os, tempfile
+    with open(_read_state_lock_path(), "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", dir=str(_read_state_path.parent), suffix=".tmp", delete=False) as f:
+                tmp = f.name
+                json.dump(list(ids), f)
+            os.replace(tmp, str(_read_state_path))
+        except Exception:
+            if tmp and os.path.exists(tmp):
+                os.unlink(tmp)
+            raise
