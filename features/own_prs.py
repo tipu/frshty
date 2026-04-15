@@ -49,16 +49,27 @@ def _check_comments(config, platform, pr, seen, base_url):
     if not new_comments:
         return
 
-    for comment in new_comments:
-        classification = run_haiku(
-            f"Is this PR review comment actionable (clear code change requested) or ambiguous (vague, question, opinion)?\n\n"
-            f"Comment: {comment['body']}\n\n"
-            f"Reply with JSON: {{\"actionable\": true/false, \"reason\": \"brief reason\"}}"
-        )
+    comment_list = "\n".join(f"[{i}] {c['body'][:200]}" for i, c in enumerate(new_comments))
+    batch_prompt = (
+        "Classify each PR review comment as actionable (clear code change requested) or ambiguous (vague, question, opinion).\n\n"
+        f"{comment_list}\n\n"
+        'Reply with JSON array: [{"id": 0, "actionable": true/false, "reason": "brief reason"}, ...]'
+    )
+    batch_raw = run_haiku(batch_prompt, timeout=60)
+    classifications = {}
+    if batch_raw:
+        parsed_batch = extract_json(batch_raw)
+        if isinstance(parsed_batch, list):
+            for item in parsed_batch:
+                classifications[item.get("id", -1)] = item
+        elif isinstance(parsed_batch, dict) and any(isinstance(v, list) for v in parsed_batch.values()):
+            for item in next(v for v in parsed_batch.values() if isinstance(v, list)):
+                classifications[item.get("id", -1)] = item
 
-        parsed = extract_json(classification) if classification else None
-        actionable = parsed.get("actionable", False) if parsed else False
-        reason = parsed.get("reason", "") if parsed else "failed to classify"
+    for i, comment in enumerate(new_comments):
+        cls = classifications.get(i, {})
+        actionable = cls.get("actionable", False)
+        reason = cls.get("reason", "failed to classify")
 
         links = {
             "pr": pr["url"],

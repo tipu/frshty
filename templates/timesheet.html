@@ -38,6 +38,7 @@ button { cursor: pointer; }
         <a href="/scheduled">Scheduled</a>
         <a href="/slack">Slack</a>
         <a href="/timesheet" class="active">Timesheet</a>
+        <a href="/config">Config</a>
     </nav>
 </header>
 
@@ -45,8 +46,7 @@ button { cursor: pointer; }
     <input type="date" id="start" />
     <span class="text-gray-500">→</span>
     <input type="date" id="end" />
-    <button class="btn" onclick="generate(false)">Generate</button>
-    <button class="btn text-gray-400" onclick="generate(true)">Hard Refresh</button>
+    <button id="refresh-btn" class="btn" onclick="generate(event.shiftKey)">Refresh</button>
     <button class="btn text-gray-400" onclick="prevRange()">← Prev</button>
     <button class="btn text-gray-400" onclick="nextRange()">Next →</button>
     <span id="hint" class="hidden text-xs text-gray-500 animate-pulse">updating...</span>
@@ -117,7 +117,13 @@ function cacheRead(start, end) {
     return null;
 }
 
+let _loading = false;
 async function generate(hardRefresh) {
+    if (_loading) return;
+    _loading = true;
+    const btn = document.getElementById('refresh-btn');
+    if (btn) { btn.disabled = true; btn.classList.add('opacity-50'); }
+
     const start = document.getElementById('start').value;
     const end = document.getElementById('end').value;
     const hint = document.getElementById('hint');
@@ -145,6 +151,8 @@ async function generate(hardRefresh) {
         if (!showedCache) showMsg('Failed: ' + e.message, true);
     }
     hint.classList.add('hidden');
+    _loading = false;
+    if (btn) { btn.disabled = false; btn.classList.remove('opacity-50'); }
 }
 
 async function refreshDay(ds) {
@@ -222,11 +230,11 @@ function render() {
         const generalSummary = daySummary['general'];
 
         const commitTickets = new Set();
-        commits.forEach(c => { const m = (c.branch||c.message||'').match(/[A-Z]+-\d+/); if (m) commitTickets.add(m[0]); });
+        commits.forEach(c => { const m = (c.branch||c.message||'').match(/\b([A-Z]+-\d{2,})\b/); if (m) commitTickets.add(m[1]); });
         const reviewTickets = new Map();
-        reviews.forEach(r => { const m = (r.branch||'').match(/[A-Z]+-\d+/); if (m) { const tid = m[0]; const prev = reviewTickets.get(tid); reviewTickets.set(tid, { repos: new Set([...(prev?.repos || []), r.repo]), minutes: Math.max(prev?.minutes || 0, r.review_minutes || 30) }); } });
+        reviews.forEach(r => { const m = (r.branch||'').match(/\b([A-Z]+-\d{2,})\b/); if (m) { const tid = m[1]; const prev = reviewTickets.get(tid); reviewTickets.set(tid, { repos: new Set([...(prev?.repos || []), r.repo]), minutes: Math.max(prev?.minutes || 0, r.review_minutes || 30) }); } });
         const claudeTickets = new Set();
-        claude.forEach(s => { const src = (s.cwd||'') + ' ' + (s.prompt||''); const m = src.match(/[A-Z]+-\d+/i); if (m) claudeTickets.add(m[0].toUpperCase()); });
+        claude.forEach(s => { const src = (s.cwd||'') + ' ' + (s.prompt||''); const m = src.match(/\b([A-Z]+-\d{2,})\b/i); if (m) claudeTickets.add(m[1].toUpperCase()); });
 
         if (ticketKeys.length === 0 && hasActivity) {
             const inferred = new Set([...commitTickets, ...reviewTickets.keys(), ...claudeTickets]);
@@ -240,14 +248,17 @@ function render() {
 
         if (ticketKeys.length > 0 || generalSummary) {
             activityHtml = ticketKeys.map(tid => {
-                const isDev = commitTickets.has(tid) || claudeTickets.has(tid);
+                const isCommit = commitTickets.has(tid);
+                const isClaude = claudeTickets.has(tid);
+                const isDev = isCommit || isClaude;
                 const reviewInfo = reviewTickets.get(tid);
                 const isReview = !!reviewInfo;
                 const reviewRepos = isReview ? [...reviewInfo.repos].join(', ') : '';
-                const tag = isDev && isReview ? `<span class="text-xs text-blue-400 bg-blue-900/50 px-1 rounded">dev+review</span>`
-                    : isDev ? '<span class="text-xs text-green-400 bg-green-900/50 px-1 rounded">dev</span>'
-                    : isReview ? `<span class="text-xs text-purple-400 bg-purple-900/50 px-1 rounded">review · ${esc(reviewRepos)}</span>`
-                    : '';
+                const sources = [];
+                if (isCommit) sources.push('commit');
+                if (isClaude) sources.push('claude');
+                if (isReview) sources.push(`review · ${reviewRepos}`);
+                const tag = sources.length ? `<span class="text-xs ${isReview && !isDev ? 'text-purple-400 bg-purple-900/50' : isDev && isReview ? 'text-blue-400 bg-blue-900/50' : 'text-green-400 bg-green-900/50'} px-1 rounded">${esc(sources.join(', '))}</span>` : '';
                 const recurMatch = dayRecurring.find(r => r.ticket === tid);
                 let ph;
                 if (recurMatch) { ph = recurMatch.time; }
