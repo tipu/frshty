@@ -141,7 +141,7 @@ def build_timesheet(config: dict, start: str = "", end: str = "", force: bool = 
             tid = _extract_ticket(e.get("branch", ""))
             if tid: ticket_ids.add(tid)
 
-    uncached_tids = [t for t in sorted(ticket_ids) if t not in _ticket_cache]
+    uncached_tids = [t for t in sorted(ticket_ids) if t not in _ticket_cache or "assignee_id" not in _ticket_cache[t]]
     if uncached_tids:
         fresh = _fetch_ticket_info(config, uncached_tids, final_wl)
         for t in fresh:
@@ -185,6 +185,8 @@ def build_timesheet(config: dict, start: str = "", end: str = "", force: bool = 
 
     _save_cache()
 
+    user_account_id = config.get("bitbucket", {}).get("user_account_id", "") or config.get("jira", {}).get("user_account_id", "")
+
     return {
         "worklogs": final_wl,
         "gitCommits": final_commits,
@@ -195,6 +197,7 @@ def build_timesheet(config: dict, start: str = "", end: str = "", force: bool = 
         "endDate": end,
         "dailySummaries": daily_summaries,
         "recurring": {d: entries for d, entries in recurring.items()},
+        "userAccountId": user_account_id,
     }
 
 
@@ -271,6 +274,8 @@ def _fetch_worklogs(config: dict, start_date: date, end_date: date) -> dict:
             key = issue["key"]
             summary = issue["fields"]["summary"]
             for wl in issue["fields"].get("worklog", {}).get("worklogs", []):
+                if wl.get("author", {}).get("emailAddress") != user:
+                    continue
                 started = wl.get("started", "")[:10]
                 if started < str(start_date) or started > str(end_date):
                     continue
@@ -345,6 +350,7 @@ def _fetch_pr_reviews(config: dict, start: str, end: str) -> dict:
     except Exception:
         return {}
 
+    pr_review_minutes = {}
     for pr in all_prs:
         if (pr.get("updated_on", "")[:10] or "") < start:
             continue
@@ -352,6 +358,7 @@ def _fetch_pr_reviews(config: dict, start: str, end: str) -> dict:
             comments = platform.get_pr_comments(pr["repo"], pr["id"])
         except Exception:
             continue
+        has_my_comments = False
         for c in comments:
             c_date = (c.get("created_on", "") or "")[:10]
             if not (start <= c_date <= end):
@@ -366,13 +373,50 @@ def _fetch_pr_reviews(config: dict, start: str, end: str) -> dict:
             body = (c.get("body", "") or "")[:200]
             if not body:
                 continue
+            has_my_comments = True
             result.setdefault(c_date, []).append({
                 "repo": pr["repo"],
                 "pr": pr["id"],
                 "branch": _truncate_branch(pr.get("branch", "")),
                 "summary": body[:80],
             })
+        if has_my_comments:
+            pr_key = f"{pr['repo']}/{pr['id']}"
+            if pr_key not in pr_review_minutes:
+                pr_review_minutes[pr_key] = _estimate_review_minutes(platform, pr["repo"], pr["id"])
+
+    for entries in result.values():
+        for entry in entries:
+            pr_key = f"{entry['repo']}/{entry['pr']}"
+            entry["review_minutes"] = pr_review_minutes.get(pr_key, 30)
     return result
+
+
+def _estimate_review_minutes(platform, repo: str, pr_id: int) -> int:
+    try:
+        diff = platform.get_pr_diff(repo, pr_id)
+    except Exception:
+        return 30
+    if not diff:
+        return 15
+    truncated = diff[:6000]
+    prompt = (
+        "You are estimating how long a code review takes. "
+        "Given this PR diff, respond with ONLY a number between 15 and 45 representing minutes. "
+        "Small trivial changes = 15. Medium complexity = 30. Large or complex changes = 45.\n\n"
+        f"{truncated}"
+    )
+    try:
+        resp = run_haiku(prompt, timeout=30)
+        if resp:
+            import re
+            m = re.search(r'\d+', resp)
+            if m:
+                mins = int(m.group())
+                return max(15, min(45, mins))
+    except Exception:
+        pass
+    return 30
 
 
 def _fetch_claude_sessions(config: dict, start: str, end: str) -> dict:
@@ -416,6 +460,7 @@ def _fetch_claude_sessions(config: dict, start: str, end: str) -> dict:
                     "project": short,
                     "prompt": prompt,
                     "time": time_str,
+                    "cwd": relative,
                 })
     except OSError:
         pass
@@ -500,10 +545,12 @@ def _fetch_ticket_info(config: dict, ticket_ids: list, worklogs: dict) -> list:
         for tid in ticket_ids:
             try:
                 resp = client.get(f"{base_url}/rest/api/3/issue/{tid}",
-                                  params={"fields": "summary,status,timeoriginalestimate"})
+                                  params={"fields": "summary,status,timeoriginalestimate,assignee"})
                 if resp.status_code == 200:
                     data = resp.json()
                     estimate_secs = data["fields"].get("timeoriginalestimate")
+                    assignee = data["fields"].get("assignee")
+                    assignee_id = assignee.get("accountId", "") if assignee else ""
                     tickets.append({
                         "key": tid,
                         "summary": data["fields"]["summary"],
@@ -511,6 +558,7 @@ def _fetch_ticket_info(config: dict, ticket_ids: list, worklogs: dict) -> list:
                         "url": f"{base_url}/browse/{tid}",
                         "hoursLogged": round(hours_by_ticket.get(tid, 0), 1),
                         "hoursEstimated": round(estimate_secs / 3600, 1) if estimate_secs else None,
+                        "assignee_id": assignee_id,
                     })
                 else:
                     tickets.append({"key": tid, "summary": "?", "status": "?"})
