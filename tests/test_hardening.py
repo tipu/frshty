@@ -155,6 +155,95 @@ def test_tri_review_deleted_on_fail_verdict(tmp_path):
     assert result["status"] == "planning"
 
 
+def _make_conflicting_repo(tmp_path):
+    """Create a bare 'origin' repo and a worktree clone with a feature branch
+    that conflicts with main."""
+    import subprocess
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "--initial-branch=main", str(bare)], capture_output=True)
+
+    clone = tmp_path / "clone"
+    subprocess.run(["git", "clone", str(bare), str(clone)], capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=str(clone), capture_output=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=str(clone), capture_output=True)
+
+    (clone / "file.ts").write_text("line1\nline2\nline3\n")
+    subprocess.run(["git", "add", "."], cwd=str(clone), capture_output=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=str(clone), capture_output=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=str(clone), capture_output=True)
+
+    subprocess.run(["git", "checkout", "-b", "feature"], cwd=str(clone), capture_output=True)
+    (clone / "file.ts").write_text("line1\nfeature-change\nline3\n")
+    subprocess.run(["git", "add", "."], cwd=str(clone), capture_output=True)
+    subprocess.run(["git", "commit", "-m", "feature change"], cwd=str(clone), capture_output=True)
+
+    subprocess.run(["git", "checkout", "main"], cwd=str(clone), capture_output=True)
+    (clone / "file.ts").write_text("line1\nmain-change\nline3\n")
+    subprocess.run(["git", "add", "."], cwd=str(clone), capture_output=True)
+    subprocess.run(["git", "commit", "-m", "main change"], cwd=str(clone), capture_output=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=str(clone), capture_output=True)
+
+    subprocess.run(["git", "checkout", "feature"], cwd=str(clone), capture_output=True)
+    return clone
+
+
+def test_merge_base_resolves_conflicts_with_claude(tmp_path):
+    """When git merge has conflicts, merge_base should use Claude to resolve
+    the conflict markers, stage, commit, and return ok=True."""
+    from features.platforms import GitHubPlatform
+
+    repo = _make_conflicting_repo(tmp_path)
+
+    def fake_haiku(prompt, timeout=60):
+        return "line1\nfeature-change\nline3\n"
+
+    platform = GitHubPlatform({"github": {"repo": "org/repo"}, "workspace": {"base_branch": "main"}})
+    with patch("features.platforms.run_haiku", side_effect=fake_haiku):
+        result = platform.merge_base(repo, "main")
+
+    assert result["ok"], f"merge_base should resolve conflicts, got: {result}"
+    content = (repo / "file.ts").read_text()
+    assert "<<<<<<<" not in content, "Conflict markers should be resolved"
+    assert ">>>>>>>" not in content, "Conflict markers should be resolved"
+
+
+def test_merge_base_auto_resolves_without_claude(tmp_path):
+    """When git merge succeeds without conflicts, merge_base should return
+    ok=True without invoking Claude."""
+    import subprocess
+    from features.platforms import GitHubPlatform
+
+    bare = tmp_path / "origin.git"
+    subprocess.run(["git", "init", "--bare", "--initial-branch=main", str(bare)], capture_output=True)
+    repo = tmp_path / "clone"
+    subprocess.run(["git", "clone", str(bare), str(repo)], capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=str(repo), capture_output=True)
+    subprocess.run(["git", "config", "user.name", "test"], cwd=str(repo), capture_output=True)
+
+    (repo / "file.ts").write_text("line1\nline2\nline3\n")
+    subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=str(repo), capture_output=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=str(repo), capture_output=True)
+
+    subprocess.run(["git", "checkout", "-b", "feature"], cwd=str(repo), capture_output=True)
+    (repo / "feature.ts").write_text("new file\n")
+    subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True)
+    subprocess.run(["git", "commit", "-m", "feature"], cwd=str(repo), capture_output=True)
+
+    subprocess.run(["git", "checkout", "main"], cwd=str(repo), capture_output=True)
+    (repo / "main.ts").write_text("another file\n")
+    subprocess.run(["git", "add", "."], cwd=str(repo), capture_output=True)
+    subprocess.run(["git", "commit", "-m", "main"], cwd=str(repo), capture_output=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=str(repo), capture_output=True)
+
+    subprocess.run(["git", "checkout", "feature"], cwd=str(repo), capture_output=True)
+
+    platform = GitHubPlatform({"github": {"repo": "org/repo"}, "workspace": {"base_branch": "main"}})
+    result = platform.merge_base(repo, "main")
+
+    assert result["ok"], f"Clean merge should succeed, got: {result}"
+
+
 def test_done_ticket_with_prs_preserves_state_on_rediscovery(tmp_path):
     """When a ticket with open PRs goes to done and reappears,
     it should resume at in_review with PRs intact, not restart from new."""
