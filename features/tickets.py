@@ -19,6 +19,10 @@ import core.events as events
 
 STATES = ["new", "planning", "reviewing", "pr_ready", "pr_created", "in_review", "merged"]
 
+
+def _label(key: str, ts: dict) -> str:
+    return ts.get("slug", key)
+
 MAX_RESTARTS = 3
 RESTART_COOLDOWN_SECS = 300
 
@@ -52,7 +56,7 @@ def restart_session(config, key, ts, base_url=""):
     ts["restart_count"] = ts.get("restart_count", 0) + 1
     ts.pop("stuck_logged", None)
 
-    log.emit("ticket_session_restarted", f"Restarted session for {key} (attempt {ts['restart_count']})",
+    log.emit("ticket_session_restarted", f"Restarted session for {_label(key, ts)} (attempt {ts['restart_count']})",
         links={"detail": f"{base_url}/tickets/{key}"} if base_url else {},
         meta={"ticket": key, "status": ts.get("status", ""), "restart_count": ts["restart_count"]})
 
@@ -135,7 +139,7 @@ Prefer "send" when Claude is at a prompt and you can unblock it. Be direct and a
         msg = decision.get("message", "")
         if msg:
             terminal.send_keys(key, msg)
-            log.emit("ticket_session_nudged", f"Sent nudge to {key}: {msg[:80]}",
+            log.emit("ticket_session_nudged", f"Sent nudge to {_label(key, ts)}: {msg[:80]}",
                 links={"detail": f"{base_url}/tickets/{key}"},
                 meta={"ticket": key, "message": msg[:200]})
 
@@ -145,7 +149,7 @@ Prefer "send" when Claude is at a prompt and you can unblock it. Be direct and a
     elif action == "stuck":
         reason = decision.get("reason", "unknown")
         if not ts.get("stuck_logged"):
-            log.emit("ticket_session_stuck", f"Session for {key} needs manual intervention: {reason[:100]}",
+            log.emit("ticket_session_stuck", f"Session for {_label(key, ts)} needs manual intervention: {reason[:100]}",
                 links={"detail": f"{base_url}/tickets/{key}"},
                 meta={"ticket": key, "reason": reason})
             ts["stuck_logged"] = True
@@ -272,6 +276,12 @@ def check(config: dict):
         ts["external_status"] = ticket.get("status", "")
         if ts.get("status") == "done":
             ts.pop("done_at", None)
+            if ts.get("prs"):
+                ts["status"] = "pr_created"
+            elif ts.get("slug"):
+                ts["status"] = "pr_ready"
+            else:
+                ts["status"] = "new"
 
         if discovery_only:
             if not existing:
@@ -315,7 +325,10 @@ def check(config: dict):
         if ts["status"] == "pr_ready" and config.get("pr", {}).get("auto_pr") and not ts.get("pr_scheduled_at"):
             ts = _create_pr(config, ticket, ts, base_url)
 
-        if ts["status"] == "pr_created":
+        if ts["status"] in ("pr_created", "in_review"):
+            ts = _resolve_conflicts(config, ticket, ts, base_url)
+
+        if ts["status"] in ("pr_created", "in_review"):
             platform = make_platform(config)
             result = platform.monitor_ci(ticket, ts, base_url)
             if result.get("_ci_failed"):
@@ -323,7 +336,7 @@ def check(config: dict):
             else:
                 ts = result
 
-        if ts["status"] == "pr_created" and ts.get("ci_passed") and config.get("pr", {}).get("auto_merge"):
+        if ts["status"] in ("pr_created", "in_review") and ts.get("ci_passed") and config.get("pr", {}).get("auto_merge"):
             ts = _merge(config, ticket, ts, base_url)
 
         if ts["status"] in ("pr_created", "in_review"):
@@ -373,7 +386,7 @@ def _setup_ticket(config, ticket, base_url) -> dict:
                 subprocess.run(["git", "branch", branch, ws["base_branch"]], cwd=str(repo["path"]), capture_output=True, timeout=60)
         wt_result = subprocess.run(["git", "worktree", "add", str(wt_path), branch], cwd=str(repo["path"]), capture_output=True, text=True, timeout=60)
         if wt_result.returncode != 0:
-            log.emit("ticket_worktree_error", f"Failed to create worktree for {key} in {repo['name']}: {wt_result.stderr.strip()}",
+            log.emit("ticket_worktree_error", f"Failed to create worktree for {slug} in {repo['name']}: {wt_result.stderr.strip()}",
                 meta={"ticket": key, "repo": repo["name"]})
             continue
         any_worktree = True
@@ -390,7 +403,7 @@ def _setup_ticket(config, ticket, base_url) -> dict:
                     pass
 
     if not any_worktree:
-        log.emit("ticket_worktree_error", f"No worktrees created for {key}, staying at new",
+        log.emit("ticket_worktree_error", f"No worktrees created for {slug}, staying at new",
             meta={"ticket": key})
         return {"status": TicketStatus.new.value, "slug": slug, "branch": branch}
 
@@ -429,7 +442,7 @@ def _setup_ticket(config, ticket, base_url) -> dict:
     (docs_path / "ticket.md").write_text(md)
     subprocess.run(["chown", "-R", "1000:1000", str(docs_path.parent)], capture_output=True, timeout=60)
 
-    log.emit("ticket_worktree_created", f"Workspace ready for {key}",
+    log.emit("ticket_worktree_created", f"Workspace ready for {slug}",
         links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
         meta={"ticket": key, "slug": slug, "branch": branch})
 
@@ -440,7 +453,7 @@ def _setup_ticket(config, ticket, base_url) -> dict:
     time.sleep(3)
     terminal.send_keys(key, _command_for_status("planning"))
 
-    log.emit("ticket_planning_started", f"Started /confer-technical-plan for {key}",
+    log.emit("ticket_planning_started", f"Started /confer-technical-plan for {slug}",
         links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
         meta={"ticket": key})
 
@@ -457,13 +470,13 @@ def _check_planning(config, ticket, ts, base_url) -> dict:
     if not manifest.exists():
         return ts
 
-    log.emit("ticket_planned", f"confer-technical-plan complete for {ticket['key']}",
+    log.emit("ticket_planned", f"confer-technical-plan complete for {_label(ticket['key'], ts)}",
         links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
         meta={"ticket": ticket["key"]})
 
     terminal.send_keys(ticket["key"], "Run /tri-review and save the full output to docs/tri-review.md")
 
-    log.emit("ticket_review_started", f"Started /tri-review for {ticket['key']}",
+    log.emit("ticket_review_started", f"Started /tri-review for {_label(ticket['key'], ts)}",
         links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
         meta={"ticket": ticket["key"]})
 
@@ -494,13 +507,13 @@ def _check_reviewing(config, ticket, ts, base_url) -> dict:
         review_file.unlink(missing_ok=True)
         terminal.send_keys(ticket["key"], "Fix all blocking findings from the tri-review. Then run tests.")
 
-        log.emit("ticket_review_fixing", f"Fixing tri-review findings for {ticket['key']}",
+        log.emit("ticket_review_fixing", f"Fixing tri-review findings for {_label(ticket['key'], ts)}",
             links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
             meta={"ticket": ticket["key"], "verdict": verdict.strip()})
         ts["status"] = transition(ts["status"], "planning")
         return ts
 
-    log.emit("ticket_review_passed", f"Tri-review passed for {ticket['key']}",
+    log.emit("ticket_review_passed", f"Tri-review passed for {_label(ticket['key'], ts)}",
         links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
         meta={"ticket": ticket["key"], "verdict": verdict.strip()})
     ts["status"] = transition(ts["status"], "pr_ready")
@@ -562,7 +575,7 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
 
         pushed = platform.push_branch(wt, push_branch)
         if not pushed["ok"]:
-            log.emit("ticket_pr_error", f"Failed to push branch for {ticket['key']} in {repo['name']}: {pushed.get('error', 'unknown')}",
+            log.emit("ticket_pr_error", f"Failed to push branch for {_label(ticket['key'], ts)} in {repo['name']}: {pushed.get('error', 'unknown')}",
                 links={"detail": f"{base_url}/tickets/{ticket['key']}"},
                 meta={"ticket": ticket["key"], "repo": repo["name"], "branch": branch, "error": pushed.get("error", "")})
             continue
@@ -574,7 +587,7 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
             err = result["error"]
             if "no changes to be pulled" in err.lower():
                 continue
-            log.emit("ticket_pr_error", f"Failed to create PR for {ticket['key']} in {repo['name']}: {err}",
+            log.emit("ticket_pr_error", f"Failed to create PR for {_label(ticket['key'], ts)} in {repo['name']}: {err}",
                 links={"detail": f"{base_url}/tickets/{ticket['key']}"},
                 meta={"ticket": ticket["key"], "repo": repo["name"], "error": err})
             continue
@@ -586,14 +599,14 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
             pr_links["ticket"] = ticket["url"]
         if pr_url:
             pr_links["pr"] = pr_url
-        log.emit("ticket_pr_created", f"PR created for {ticket['key']} in {repo['name']}",
+        log.emit("ticket_pr_created", f"PR created for {_label(ticket['key'], ts)} in {repo['name']}",
             links=pr_links, meta={"ticket": ticket["key"], "repo": repo["name"], "pr_url": pr_url})
 
         if pr_id:
             prs.append({"repo": repo["name"], "id": pr_id, "url": pr_url})
 
     if not any_diff:
-        log.emit("ticket_no_changes", f"No code changes needed for {ticket['key']}, marking as merged",
+        log.emit("ticket_no_changes", f"No code changes needed for {_label(ticket['key'], ts)}, marking as merged",
             links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
             meta={"ticket": ticket["key"]})
         ts["status"] = transition(ts["status"], "merged")
@@ -602,12 +615,12 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
     if not prs:
         ts["pr_attempts"] = ts.get("pr_attempts", 0) + 1
         if ts["pr_attempts"] >= 3:
-            log.emit("ticket_pr_error", f"No PRs created for {ticket['key']} after {ts['pr_attempts']} attempts, giving up",
+            log.emit("ticket_pr_error", f"No PRs created for {_label(ticket['key'], ts)} after {ts['pr_attempts']} attempts, giving up",
                 links={"detail": f"{base_url}/tickets/{ticket['key']}"},
                 meta={"ticket": ticket["key"]})
             ts["status"] = transition(ts["status"], "pr_failed")
         else:
-            log.emit("ticket_pr_error", f"No PRs created for {ticket['key']}, attempt {ts['pr_attempts']}/3",
+            log.emit("ticket_pr_error", f"No PRs created for {_label(ticket['key'], ts)}, attempt {ts['pr_attempts']}/3",
                 links={"detail": f"{base_url}/tickets/{ticket['key']}"},
                 meta={"ticket": ticket["key"]})
         return ts
@@ -649,7 +662,7 @@ def _check_in_review(config, ticket, ts, base_url) -> dict:
             break
 
     if all_merged:
-        log.emit("ticket_merged", f"All PRs merged for {ticket['key']}",
+        log.emit("ticket_merged", f"All PRs merged for {_label(ticket['key'], ts)}",
             links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
             meta={"ticket": ticket["key"]})
         ts["status"] = transition(ts["status"], "merged")
@@ -715,7 +728,7 @@ def _check_in_review(config, ticket, ts, base_url) -> dict:
                         ts.pop("checks_started_at", None)
                         platform.resolve_comment(pr["repo"], pr["id"], comment["id"])
                         entry["status"] = "addressed"
-                        log.emit("ticket_pr_comment_fixed", f"Fixed: {comment['body'][:80]}",
+                        log.emit("ticket_pr_comment_fixed", f"{_label(ticket['key'], ts)}: Fixed {comment['body'][:80]}",
                             links={"detail": f"{base_url}/tickets/{ticket['key']}"},
                             meta={"ticket": ticket["key"]})
             else:
@@ -725,7 +738,7 @@ def _check_in_review(config, ticket, ts, base_url) -> dict:
                 )
                 entry["status"] = "needs_reply"
                 entry["suggested_reply"] = suggested or ""
-                log.emit("ticket_pr_comment_needs_reply", f"Reply needed: {comment['body'][:80]}",
+                log.emit("ticket_pr_comment_needs_reply", f"{_label(ticket['key'], ts)}: Reply needed {comment['body'][:80]}",
                     links={"detail": f"{base_url}/tickets/{ticket['key']}"},
                     meta={"ticket": ticket["key"]})
 
@@ -735,6 +748,63 @@ def _check_in_review(config, ticket, ts, base_url) -> dict:
 
     ts["last_comment_ids"] = last_comment_ids
     _save_pr_comments(config, slug, pr_comments)
+    return ts
+
+
+MAX_CONFLICT_ATTEMPTS = 2
+
+
+def _resolve_conflicts(config, ticket, ts, base_url) -> dict:
+    platform = make_platform(config)
+    prs = ts.get("prs", [])
+    if not prs:
+        return ts
+
+    base_branch = config["workspace"].get("base_branch", "main")
+
+    for pr in prs:
+        info = platform.get_pr_info(pr["repo"], pr["id"])
+        if info.get("mergeable") != "CONFLICTING":
+            continue
+
+        attempts = ts.get("conflict_resolution_attempts", 0)
+        if attempts >= MAX_CONFLICT_ATTEMPTS:
+            log.emit("ticket_conflict_failed", f"Conflict resolution failed for {_label(ticket['key'], ts)} PR #{pr['id']} after {attempts} attempts",
+                links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+                meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"]})
+            ts["status"] = transition(ts["status"], "pr_failed")
+            return ts
+
+        wt = ticket_worktree_path(config, ts["slug"], pr["repo"])
+        if not wt.is_dir():
+            continue
+
+        result = platform.merge_base(wt, base_branch)
+        if not result["ok"]:
+            log.emit("ticket_conflict_failed", f"Merge failed for {_label(ticket['key'], ts)} PR #{pr['id']}: {result.get('error', '')[:100]}",
+                links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+                meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"], "error": result.get("error", "")})
+            ts["conflict_resolution_attempts"] = attempts + 1
+            if attempts + 1 >= MAX_CONFLICT_ATTEMPTS:
+                ts["status"] = transition(ts["status"], "pr_failed")
+            return ts
+
+        pushed = platform.push_branch(wt, ts["branch"])
+        if not pushed["ok"]:
+            log.emit("ticket_conflict_push_failed", f"Push failed for {_label(ticket['key'], ts)}: {pushed.get('error', '')[:100]}",
+                links={"detail": f"{base_url}/tickets/{ticket['key']}"},
+                meta={"ticket": ticket["key"], "repo": pr["repo"]})
+            ts["conflict_resolution_attempts"] = attempts + 1
+            return ts
+
+        ts.pop("ci_passed", None)
+        ts.pop("checks_started_at", None)
+        ts["conflict_resolution_attempts"] = attempts + 1
+
+        log.emit("ticket_conflict_resolved", f"Merged {base_branch} into {_label(ticket['key'], ts)} PR #{pr['id']}",
+            links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+            meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"]})
+
     return ts
 
 
@@ -771,7 +841,7 @@ def _handle_ci_failure(config, platform, ticket, ts, pr, checks, base_url) -> di
     fix_attempts = ts.get("ci_fix_attempts", 0)
 
     if fix_attempts >= MAX_CI_FIX_ATTEMPTS:
-        log.emit("ticket_checks_failed", f"CI failed for {ticket['key']} after {fix_attempts} fix attempts: {', '.join(failed_names)}",
+        log.emit("ticket_checks_failed", f"CI failed for {_label(ticket['key'], ts)} after {fix_attempts} fix attempts: {', '.join(failed_names)}",
             links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
             meta={"ticket": ticket["key"], "failed_checks": failed_names})
         return ts
@@ -811,7 +881,7 @@ Reply with EXACTLY one JSON object:
     reason = analysis.get("reason", "")
 
     if not caused:
-        log.emit("ticket_checks_unrelated", f"CI failure for {ticket['key']} not caused by our changes: {reason[:100]}",
+        log.emit("ticket_checks_unrelated", f"CI failure for {_label(ticket['key'], ts)} not caused by our changes: {reason[:100]}",
             links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
             meta={"ticket": ticket["key"], "failed_checks": failed_names, "reason": reason})
         return ts
@@ -825,7 +895,7 @@ Reply with EXACTLY one JSON object:
     ts["ci_fix_attempts"] = fix_attempts + 1
     ts.pop("checks_started_at", None)
 
-    log.emit("ticket_ci_fix_sent", f"Sent CI fix to {ticket['key']} (attempt {ts['ci_fix_attempts']}): {fix_hint[:80]}",
+    log.emit("ticket_ci_fix_sent", f"Sent CI fix to {_label(ticket['key'], ts)} (attempt {ts['ci_fix_attempts']}): {fix_hint[:80]}",
         links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
         meta={"ticket": ticket["key"], "failed_checks": failed_names, "fix_hint": fix_hint})
 

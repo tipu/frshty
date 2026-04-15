@@ -24,5 +24,6 @@ RUN groupadd -g 986 dockerhost || true && \
 COPY . .
 
 USER claude
-ENV GIT_SSH_COMMAND="ssh -i /tmp/.ssh-host/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=/tmp/.ssh-host/known_hosts"
+COPY config/ssh_config /etc/ssh/frshty_ssh_config
+ENV GIT_SSH_COMMAND="ssh -F /etc/ssh/frshty_ssh_config"
 CMD ["python", "frshty.py", "config/example.toml"]
