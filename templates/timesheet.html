@@ -214,39 +214,46 @@ function render() {
             }).join('<br>');
         } else if (hasActivity) {
             rowClass = 'missing';
-            loggedHtml = '<span class="text-red-400">✗</span>';
-            let suggestH = 0;
-            if (commits.length > 0) suggestH += 8;
-            suggestH += reviews.length * 0.5;
-            if (suggestH === 0 && claude.length > 0) suggestH = 4;
-            dayRecurring.filter(r => !r.logged).forEach(r => {
-                const rm = r.time.match(/^(\d+(?:\.\d+)?)(h|m)$/);
-                if (rm) suggestH += rm[2] === 'h' ? parseFloat(rm[1]) : parseFloat(rm[1]) / 60;
-            });
-            totalSuggest += suggestH;
-            const suggestColor = suggestH >= 8 ? 'text-green-400' : suggestH > 0 ? 'text-orange-400' : 'text-red-400';
-            loggedHtml += ` <span class="${suggestColor} font-semibold text-xs">${suggestH}h suggested</span>`;
         } else if (!wknd) {
             loggedHtml = '<span class="text-red-400">✗</span>';
         }
 
-        const ticketKeys = Object.keys(daySummary).filter(t => t !== 'general');
+        let ticketKeys = Object.keys(daySummary).filter(t => t !== 'general');
         const generalSummary = daySummary['general'];
+
+        const commitTickets = new Set();
+        commits.forEach(c => { const m = (c.branch||c.message||'').match(/[A-Z]+-\d+/); if (m) commitTickets.add(m[0]); });
+        const reviewTickets = new Map();
+        reviews.forEach(r => { const m = (r.branch||'').match(/[A-Z]+-\d+/); if (m) { const tid = m[0]; const prev = reviewTickets.get(tid); reviewTickets.set(tid, { repos: new Set([...(prev?.repos || []), r.repo]), minutes: Math.max(prev?.minutes || 0, r.review_minutes || 30) }); } });
+        const claudeTickets = new Set();
+        claude.forEach(s => { const src = (s.cwd||'') + ' ' + (s.prompt||''); const m = src.match(/[A-Z]+-\d+/i); if (m) claudeTickets.add(m[0].toUpperCase()); });
+
+        if (ticketKeys.length === 0 && hasActivity) {
+            const inferred = new Set([...commitTickets, ...reviewTickets.keys(), ...claudeTickets]);
+            dayRecurring.forEach(r => inferred.add(r.ticket));
+            ticketKeys = [...inferred];
+        }
+        ticketKeys = [...new Set(ticketKeys)];
+
+        const devTicketCount = ticketKeys.filter(t => (commitTickets.has(t) || claudeTickets.has(t)) && !dayRecurring.find(r => r.ticket === t)).length;
+        const perDevH = devTicketCount > 0 ? Math.round(8 / devTicketCount * 10) / 10 : 8;
 
         if (ticketKeys.length > 0 || generalSummary) {
             activityHtml = ticketKeys.map(tid => {
-                const commitTickets = new Set();
-                commits.forEach(c => { const m = (c.branch||c.message||'').match(/[A-Z]+-\d+/); if (m) commitTickets.add(m[0]); });
-                const reviewTickets = new Set();
-                reviews.forEach(r => { const m = (r.branch||'').match(/[A-Z]+-\d+/); if (m) reviewTickets.add(m[0]); });
-                const isDev = commitTickets.has(tid);
-                const isReview = reviewTickets.has(tid);
-                const tag = isDev && isReview ? '<span class="text-xs text-blue-400 bg-blue-900/50 px-1 rounded">dev+review</span>'
+                const isDev = commitTickets.has(tid) || claudeTickets.has(tid);
+                const reviewInfo = reviewTickets.get(tid);
+                const isReview = !!reviewInfo;
+                const reviewRepos = isReview ? [...reviewInfo.repos].join(', ') : '';
+                const tag = isDev && isReview ? `<span class="text-xs text-blue-400 bg-blue-900/50 px-1 rounded">dev+review</span>`
                     : isDev ? '<span class="text-xs text-green-400 bg-green-900/50 px-1 rounded">dev</span>'
-                    : isReview ? '<span class="text-xs text-purple-400 bg-purple-900/50 px-1 rounded">review</span>'
+                    : isReview ? `<span class="text-xs text-purple-400 bg-purple-900/50 px-1 rounded">review · ${esc(reviewRepos)}</span>`
                     : '';
                 const recurMatch = dayRecurring.find(r => r.ticket === tid);
-                const ph = recurMatch ? recurMatch.time : isDev ? '8h' : '30m';
+                let ph;
+                if (recurMatch) { ph = recurMatch.time; }
+                else if (isDev) { ph = `${perDevH}h`; }
+                else if (isReview) { ph = `${reviewInfo.minutes}m`; }
+                else { ph = '30m'; }
                 const existingLog = wl.find(w => w.ticket === tid);
                 const wid = existingLog ? (existingLog.worklog_id || '') : '';
                 let trailingHtml;
@@ -263,7 +270,10 @@ function render() {
                         `<input class="log-input w-14 text-xs ml-2" value="${ph}" data-ticket="${tid}" data-date="${ds}">` +
                         `<button onclick="logTime(this)" class="btn-purple text-xs px-1 ml-1">log</button>`;
                 }
-                return `<div class="flex items-center gap-1 mb-0.5" data-hover-ticket="${tid}">${ticketLink(tid)} ${tag} <span class="text-gray-300 flex-1">${esc(daySummary[tid])}</span>${trailingHtml}</div>`;
+                const ticketInfo = (data.tickets || []).find(t => t.key === tid) || {};
+                const title = ticketInfo.summary || '';
+                const activity = daySummary[tid] || '';
+                return `<div class="flex items-center gap-1 mb-0.5" data-hover-ticket="${tid}">${ticketLink(tid)} ${tag} <span class="text-gray-500 flex-1">${esc(title)}${activity && title ? ` <span class="text-gray-600">— ${esc(activity)}</span>` : activity ? esc(activity) : ''}</span>${trailingHtml}</div>`;
             }).join('');
 
             wl.filter(w => !ticketKeys.includes(w.ticket)).forEach(w => {
@@ -279,6 +289,31 @@ function render() {
 
             if (generalSummary) {
                 activityHtml += `<div class="flex items-center gap-1 mb-0.5"><span class="text-gray-400 font-mono">misc</span> <span class="text-gray-300">${esc(generalSummary)}</span></div>`;
+            }
+
+            if (wl.length === 0) {
+                let suggestH = 0;
+                let recurH = 0;
+                const devTids = [];
+                const reviewTids = [];
+                ticketKeys.forEach(tid => {
+                    const recurMatch = dayRecurring.find(r => r.ticket === tid);
+                    if (recurMatch && recurMatch.logged) return;
+                    if (recurMatch) {
+                        const rm = recurMatch.time.match(/^(\d+(?:\.\d+)?)(h|m)$/);
+                        if (rm) recurH += rm[2] === 'h' ? parseFloat(rm[1]) : parseFloat(rm[1]) / 60;
+                    } else if (commitTickets.has(tid) || claudeTickets.has(tid)) {
+                        devTids.push(tid);
+                    } else if (reviewTickets.has(tid)) {
+                        reviewTids.push(tid);
+                    }
+                });
+                const reviewH = reviewTids.reduce((sum, tid) => { const ri = reviewTickets.get(tid); return sum + (ri ? ri.minutes / 60 : 0.5); }, 0);
+                const devH = devTids.length > 0 ? Math.max(8 - recurH - reviewH, 0) : 0;
+                suggestH = recurH + reviewH + devH;
+                totalSuggest += suggestH;
+                const suggestColor = suggestH >= 8 ? 'text-green-400' : suggestH > 0 ? 'text-orange-400' : 'text-red-400';
+                loggedHtml = `<span class="text-red-400">✗</span> <span class="${suggestColor} font-semibold text-xs">${suggestH}h suggested</span>`;
             }
         } else if (wl.length > 0) {
             activityHtml = wl.map(w => {
@@ -348,7 +383,9 @@ function parseTimeToHours(s) {
 
 function ticketLink(tid) {
     const t = (data.tickets || []).find(t => t.key === tid);
-    return t && t.url ? `<a href="${t.url}" target="_blank" class="text-blue-400 font-mono hover:underline">${tid}</a>` : `<span class="text-blue-400 font-mono">${tid}</span>`;
+    const mine = t && data.userAccountId && t.assignee_id === data.userAccountId;
+    const mineTag = mine ? ' <span class="text-xs text-gray-500">(mine)</span>' : '';
+    return t && t.url ? `<a href="${t.url}" target="_blank" class="text-blue-400 font-mono hover:underline">${tid}</a>${mineTag}` : `<span class="text-blue-400 font-mono">${tid}</span>`;
 }
 
 function adjustTicketHours(ticket, delta) {
