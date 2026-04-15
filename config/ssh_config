@@ -1,0 +1,19 @@
+Host github-personal
+    HostName github.com
+    User git
+    IdentityFile /tmp/.ssh-host/id_ed25519
+    IdentitiesOnly yes
+
+Host github-quill
+    HostName github.com
+    User git
+    IdentityFile /tmp/.ssh-host/id_ed25519_quill
+    IdentitiesOnly yes
+
+Host bitbucket.org
+    IdentityFile /tmp/.ssh-host/id_ed25519
+    IdentitiesOnly yes
+
+Host *
+    UserKnownHostsFile /tmp/.ssh-host/known_hosts
+    StrictHostKeyChecking no

@@ -93,14 +93,16 @@ class LinearTicketSystem:
         linear = config.get("linear", {})
         self.token = resolve_env(config, "linear", "token_env")
         self.email = linear.get("assignee_email", "")
+        self.states = linear.get("states", ["In Progress", "Prioritized"])
 
     def fetch_tickets(self) -> list[dict]:
         if not self.token or not self.email:
             return []
+        states_str = "[" + ", ".join(f'"{s}"' for s in self.states) + "]"
         query = '''
         query {
           issues(
-            filter: { assignee: { email: { eq: "%s" } } state: { name: { in: ["In Progress", "Prioritized"] } } }
+            filter: { assignee: { email: { eq: "%s" } } state: { name: { in: %s } } }
             first: 20 orderBy: updatedAt
           ) { nodes { identifier title state { name } description url
               project { name description }
@@ -110,8 +112,8 @@ class LinearTicketSystem:
               children { nodes { identifier title state { name } } }
           } }
         }
-        ''' % self.email
-        with httpx.Client(timeout=30) as client:
+        ''' % (self.email, states_str)
+        with httpx.Client(timeout=30, transport=httpx.HTTPTransport(retries=2)) as client:
             resp = client.post("https://api.linear.app/graphql",
                 json={"query": query},
                 headers={"Authorization": self.token, "Content-Type": "application/json"})

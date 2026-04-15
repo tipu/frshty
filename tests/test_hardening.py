@@ -155,6 +155,105 @@ def test_tri_review_deleted_on_fail_verdict(tmp_path):
     assert result["status"] == "planning"
 
 
+def test_done_ticket_with_prs_preserves_state_on_rediscovery(tmp_path):
+    """When a ticket with open PRs goes to done and reappears,
+    it should resume at in_review with PRs intact, not restart from new."""
+    from features import tickets
+
+    state.init(tmp_path)
+    state.save("tickets", {
+        "NEC-100": {
+            "status": "done",
+            "done_at": "2026-04-15T00:00:00+00:00",
+            "slug": "NEC-100-fix-the-thing",
+            "branch": "NEC-100-fix-the-thing",
+            "prs": [{"repo": "backend", "id": 42, "url": "http://pr/42"}],
+            "last_comment_ids": {"backend/42": 0},
+        }
+    })
+
+    config = {
+        "_base_url": "http://test",
+        "job": {"ticket_system": "", "platform": "github"},
+        "workspace": {"root": tmp_path, "repos": [{"name": "backend", "path": tmp_path}],
+                      "tickets_dir": "tickets", "base_branch": "main", "ticket_layout": "flat"},
+        "github": {"repo": "org/backend"},
+        "pr": {},
+        "features": {},
+    }
+
+    (tmp_path / "tickets" / "NEC-100-fix-the-thing").mkdir(parents=True)
+
+    assigned = [{"key": "NEC-100", "summary": "Fix the thing", "status": "In Review", "url": "",
+                 "description": "", "attachments": [], "related": [], "subtasks": []}]
+
+    with patch("features.tickets._fetch_tickets", return_value=assigned), \
+         patch("features.tickets.get_repos", return_value=[{"name": "backend", "path": tmp_path}]), \
+         patch("features.tickets.make_platform") as mock_platform, \
+         patch("features.tickets.subprocess.run") as mock_run, \
+         patch("features.tickets.terminal.ensure_session"), \
+         patch("features.tickets.terminal.send_keys"), \
+         patch("features.tickets.time.sleep"), \
+         patch("features.tickets.log"):
+        mock_run.return_value = MagicMock(returncode=0, stdout="main\n", stderr="")
+        p = MagicMock()
+        p.monitor_ci.side_effect = lambda ticket, ts, base_url: ts
+        p.get_pr_info.return_value = {"state": "OPEN", "updated_on": "", "mergeable": "MERGEABLE"}
+        p.get_pr_state.return_value = "OPEN"
+        p.get_pr_comments.return_value = []
+        mock_platform.return_value = p
+
+        tickets.check(config)
+
+    result = state.load("tickets")["NEC-100"]
+    assert result["status"] in ("pr_created", "in_review"), f"Expected pr_created or in_review, got {result['status']}"
+    assert result.get("prs"), "PRs should be preserved"
+    assert result["prs"][0]["id"] == 42
+
+
+def test_done_ticket_without_prs_restarts_fresh(tmp_path):
+    """When a ticket without PRs goes to done and reappears,
+    it should restart from new."""
+    from features import tickets
+
+    state.init(tmp_path)
+    state.save("tickets", {
+        "NEC-200": {
+            "status": "done",
+            "done_at": "2026-04-15T00:00:00+00:00",
+            "slug": "NEC-200-add-feature",
+            "branch": "NEC-200-add-feature",
+        }
+    })
+
+    config = {
+        "_base_url": "http://test",
+        "job": {"ticket_system": "", "platform": "github"},
+        "workspace": {"root": tmp_path, "repos": [{"name": "backend", "path": tmp_path}],
+                      "tickets_dir": "tickets", "base_branch": "main", "ticket_layout": "flat"},
+        "github": {"repo": "org/backend"},
+        "pr": {},
+        "features": {},
+    }
+
+    assigned = [{"key": "NEC-200", "summary": "Add feature", "status": "In Progress", "url": "",
+                 "description": "", "attachments": [], "related": [], "subtasks": []}]
+
+    with patch("features.tickets._fetch_tickets", return_value=assigned), \
+         patch("features.tickets.get_repos", return_value=[{"name": "backend", "path": tmp_path}]), \
+         patch("features.tickets.make_platform"), \
+         patch("features.tickets.subprocess.run") as mock_run, \
+         patch("features.tickets.terminal.ensure_session"), \
+         patch("features.tickets.terminal.send_keys"), \
+         patch("features.tickets.time.sleep"), \
+         patch("features.tickets.log"):
+        mock_run.return_value = MagicMock(returncode=0, stdout="main\n", stderr="")
+        tickets.check(config)
+
+    result = state.load("tickets")["NEC-200"]
+    assert result["status"] == "pr_ready", f"Expected pr_ready, got {result['status']}"
+
+
 def test_empty_branch_falls_back_to_pr_id_slug(tmp_path):
     from features import reviewer
 

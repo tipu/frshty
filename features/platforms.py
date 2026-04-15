@@ -129,13 +129,14 @@ class BitbucketPlatform:
         with httpx.Client(auth=self._auth(), timeout=30) as client:
             resp = client.get(url)
             if resp.status_code != 200:
-                return {"state": "OPEN", "updated_on": ""}
+                return {"state": "OPEN", "updated_on": "", "mergeable": "UNKNOWN"}
             data = resp.json()
             return {
                 "state": data.get("state", "OPEN"),
                 "updated_on": data.get("updated_on", ""),
                 "title": data.get("title", ""),
                 "description": (data.get("description", "") or ""),
+                "mergeable": "CONFLICTING" if data.get("has_conflicts") else "MERGEABLE",
             }
 
     def post_pr_comment(self, repo: str, pr_id: int, body: str, path: str | None = None, line: int | None = None, parent_id: int | None = None) -> dict:
@@ -195,12 +196,23 @@ class BitbucketPlatform:
             _run_git(target, ["checkout", branch])
         return True
 
-    def push_branch(self, repo_path, branch: str) -> dict:
+    def push_branch(self, repo_path, branch: str, force: bool = False) -> dict:
         if not branch.strip():
             return {"ok": False, "error": "empty branch name"}
-        result = _run_git(repo_path, ["push", "-u", "origin", branch])
+        args = ["push", "-u", "origin", branch]
+        if force:
+            args.insert(1, "--force-with-lease")
+        result = _run_git(repo_path, args)
         if result.returncode == 0:
             return {"ok": True}
+        return {"ok": False, "error": result.stderr.strip()}
+
+    def merge_base(self, repo_path, base_branch: str) -> dict:
+        _run_git(repo_path, ["fetch", "origin", base_branch])
+        result = _run_git(repo_path, ["merge", f"origin/{base_branch}", "--no-edit"])
+        if result.returncode == 0:
+            return {"ok": True}
+        _run_git(repo_path, ["merge", "--abort"])
         return {"ok": False, "error": result.stderr.strip()}
 
     def create_pr(self, repo: str, repo_path, branch: str, title: str, body: str, base_branch: str) -> dict:
@@ -381,12 +393,16 @@ class GitHubPlatform:
         full = self._resolve_repo(repo)
         result = self._run_gh([
             "pr", "view", str(pr_id), "--repo", full,
-            "--json", "state,updatedAt",
+            "--json", "state,updatedAt,mergeable",
         ])
         if result.returncode != 0:
-            return {"state": "OPEN", "updated_on": ""}
+            return {"state": "OPEN", "updated_on": "", "mergeable": "UNKNOWN"}
         data = json.loads(result.stdout)
-        return {"state": data.get("state", "OPEN"), "updated_on": data.get("updatedAt", "")}
+        return {
+            "state": data.get("state", "OPEN"),
+            "updated_on": data.get("updatedAt", ""),
+            "mergeable": data.get("mergeable", "UNKNOWN"),
+        }
 
     def post_pr_comment(self, repo: str, pr_id: int, body: str, path: str | None = None, line: int | None = None, parent_id: int | None = None) -> dict:
         full = self._resolve_repo(repo)
@@ -455,12 +471,23 @@ class GitHubPlatform:
         )
         return True
 
-    def push_branch(self, repo_path, branch: str) -> dict:
+    def push_branch(self, repo_path, branch: str, force: bool = False) -> dict:
         if not branch.strip():
             return {"ok": False, "error": "empty branch name"}
-        result = _run_git(repo_path, ["push", "-u", "origin", branch])
+        args = ["push", "-u", "origin", branch]
+        if force:
+            args.insert(1, "--force-with-lease")
+        result = _run_git(repo_path, args)
         if result.returncode == 0:
             return {"ok": True}
+        return {"ok": False, "error": result.stderr.strip()}
+
+    def merge_base(self, repo_path, base_branch: str) -> dict:
+        _run_git(repo_path, ["fetch", "origin", base_branch])
+        result = _run_git(repo_path, ["merge", f"origin/{base_branch}", "--no-edit"])
+        if result.returncode == 0:
+            return {"ok": True}
+        _run_git(repo_path, ["merge", "--abort"])
         return {"ok": False, "error": result.stderr.strip()}
 
     def create_pr(self, repo: str, repo_path, branch: str, title: str, body: str, base_branch: str) -> dict:
