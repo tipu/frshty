@@ -292,14 +292,26 @@ class GitHubPlatform:
         if result.returncode != 0:
             return []
         prs = [self._normalize_search_pr(pr) for pr in json.loads(result.stdout)]
+        needs_branch = []
         for pr in prs:
             if pr.get("full_repo"):
                 self._repo_cache[pr["repo"]] = pr["full_repo"]
             if not pr.get("branch"):
-                full = self._resolve_repo(pr["repo"])
-                info = self._run_gh(["pr", "view", str(pr["id"]), "--repo", full, "--json", "headRefName", "-q", ".headRefName"])
-                if info.returncode == 0 and info.stdout.strip():
-                    pr["branch"] = info.stdout.strip()
+                needs_branch.append(pr)
+        if needs_branch:
+            fragments = []
+            for i, pr in enumerate(needs_branch):
+                full = pr.get("full_repo") or self._resolve_repo(pr["repo"])
+                owner, name = full.split("/", 1)
+                fragments.append(f'pr{i}: repository(owner:"{owner}",name:"{name}") {{ pullRequest(number:{pr["id"]}) {{ headRefName }} }}')
+            query = "{ " + " ".join(fragments) + " }"
+            gql = self._run_gh(["api", "graphql", "-f", f"query={query}"])
+            if gql.returncode == 0:
+                data = json.loads(gql.stdout).get("data", {})
+                for i, pr in enumerate(needs_branch):
+                    node = data.get(f"pr{i}", {}).get("pullRequest", {})
+                    if node and node.get("headRefName"):
+                        pr["branch"] = node["headRefName"]
         return prs
 
     def get_pr_comments(self, repo: str, pr_id: int) -> list[dict]:

@@ -3,10 +3,12 @@ import re
 import subprocess
 from datetime import datetime, timezone, date, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import httpx
 
 import core.log as log
+import core.state as state
 from core.config import resolve_env, get_repos
 from core.claude_runner import run_haiku, extract_json
 from features.platforms import make_platform
@@ -71,6 +73,123 @@ def check(config: dict):
         else:
             log.emit("scheduled_worklog_failed", f"Failed to queue {time_str} on {ticket}: {result.get('error', 'unknown')}",
                 meta={"ticket": ticket, "time": time_str, "date": today_str})
+
+    _auto_fill(config)
+
+
+def _auto_fill(config: dict):
+    ts_config = config.get("timesheet", {})
+    if not ts_config.get("auto_fill"):
+        return
+
+    today = date.today()
+    if today.weekday() >= 5:
+        return
+
+    tz_name = ts_config.get("timezone", "US/Pacific")
+    tz = ZoneInfo(tz_name)
+    now_local = datetime.now(tz)
+    fill_window = ts_config.get("fill_window", [18, 20])
+    if not (fill_window[0] <= now_local.hour < fill_window[1]):
+        return
+
+    today_str = today.isoformat()
+    fill_state = state.load("timesheet_fill")
+    if fill_state.get(today_str):
+        return
+
+    fill_target = ts_config.get("fill_target", 8)
+    data = build_timesheet(config, today_str, today_str)
+    user_id = data.get("userAccountId", "")
+    ticket_map = {t["key"]: t for t in data.get("tickets", [])}
+
+    day_wl = data.get("worklogs", {}).get(today_str, [])
+    logged_hours = sum(w.get("hours", 0) for w in day_wl)
+    logged_tickets = {w["ticket"] for w in day_wl}
+
+    recurring_pending = 0
+    for r in data.get("recurring", {}).get(today_str, []):
+        if not r.get("logged"):
+            secs = _parse_time(r["time"]) or 0
+            recurring_pending += secs / 3600
+
+    remaining = round(fill_target - logged_hours - recurring_pending, 1)
+    if remaining <= 0:
+        fill_state[today_str] = {"filled": True, "entries": []}
+        state.save("timesheet_fill", fill_state)
+        return
+
+    entries = []
+
+    review_tickets = {}
+    for r in data.get("prReviews", {}).get(today_str, []):
+        tid = _extract_ticket(r.get("branch", ""))
+        if tid and tid not in logged_tickets:
+            mins = r.get("review_minutes", 30)
+            review_tickets[tid] = max(review_tickets.get(tid, 0), mins)
+
+    for tid, mins in review_tickets.items():
+        hours = round(mins / 60, 1)
+        if hours > remaining:
+            hours = remaining
+        if hours <= 0:
+            break
+        entries.append({"ticket": tid, "hours": hours, "source": "review"})
+        remaining = round(remaining - hours, 1)
+
+    if remaining > 0:
+        dev_tickets = set()
+        for c in data.get("gitCommits", {}).get(today_str, []):
+            tid = _extract_ticket(c.get("branch", "") or c.get("message", ""))
+            if tid:
+                dev_tickets.add(tid)
+        for s in data.get("claudeSessions", {}).get(today_str, []):
+            src = (s.get("cwd", "") or "") + " " + (s.get("prompt", "") or "")
+            m = re.search(r"\b([A-Z]+-\d{2,})\b", src, re.IGNORECASE)
+            if m:
+                dev_tickets.add(m.group(1).upper())
+        for tid in data.get("dailySummaries", {}).get(today_str, {}).keys():
+            if tid != "general" and re.match(r"[A-Z]+-\d{2,}", tid):
+                dev_tickets.add(tid)
+
+        dev_tickets -= logged_tickets
+        dev_tickets -= set(review_tickets.keys())
+        mine = [t for t in dev_tickets if ticket_map.get(t, {}).get("assignee_id") == user_id]
+
+        if not mine:
+            lookback = build_timesheet(config, (today - timedelta(days=7)).isoformat(), (today - timedelta(days=1)).isoformat())
+            lb_ticket_map = {t["key"]: t for t in lookback.get("tickets", [])}
+            for day_str in sorted(lookback.get("worklogs", {}).keys(), reverse=True):
+                for w in lookback["worklogs"][day_str]:
+                    info = lb_ticket_map.get(w["ticket"], {})
+                    if info.get("assignee_id") == user_id:
+                        mine = [w["ticket"]]
+                        break
+                if mine:
+                    break
+
+        if mine:
+            per_ticket = round(remaining / len(mine), 1)
+            for tid in mine:
+                entries.append({"ticket": tid, "hours": per_ticket, "source": "dev"})
+
+    fill_state[today_str] = {"filled": True, "entries": [{"ticket": e["ticket"], "hours": e["hours"]} for e in entries]}
+    state.save("timesheet_fill", fill_state)
+
+    for entry in entries:
+        time_str = f"{entry['hours']}h"
+        desc = " ".join((ticket_map.get(entry["ticket"], {}).get("summary", "") or "").split()[:7])
+        result = log_work(config, entry["ticket"], today_str, time_str)
+        if result.get("ok"):
+            log.emit("auto_fill_logged", f"Auto-filled {time_str} on {entry['ticket']} — {desc} ({entry['source']})",
+                meta={"ticket": entry["ticket"], "hours": entry["hours"], "source": entry["source"], "date": today_str})
+        else:
+            log.emit("auto_fill_failed", f"Failed to auto-fill {time_str} on {entry['ticket']} — {desc}: {result.get('error', 'unknown')}",
+                meta={"ticket": entry["ticket"], "hours": entry["hours"], "date": today_str})
+
+    if not entries:
+        log.emit("auto_fill_skipped", "No eligible tickets found for auto-fill",
+            meta={"date": today_str})
 
 
 def build_timesheet(config: dict, start: str = "", end: str = "", force: bool = False) -> dict:
@@ -350,14 +469,21 @@ def _fetch_pr_reviews(config: dict, start: str, end: str) -> dict:
     except Exception:
         return {}
 
-    pr_review_minutes = {}
-    for pr in all_prs:
-        if (pr.get("updated_on", "")[:10] or "") < start:
-            continue
+    from concurrent.futures import ThreadPoolExecutor
+
+    eligible_prs = [pr for pr in all_prs if (pr.get("updated_on", "")[:10] or "") >= start]
+
+    def fetch_comments(pr):
         try:
-            comments = platform.get_pr_comments(pr["repo"], pr["id"])
+            return pr, platform.get_pr_comments(pr["repo"], pr["id"])
         except Exception:
-            continue
+            return pr, []
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        comment_results = list(pool.map(fetch_comments, eligible_prs))
+
+    prs_needing_diff = set()
+    for pr, comments in comment_results:
         has_my_comments = False
         for c in comments:
             c_date = (c.get("created_on", "") or "")[:10]
@@ -381,9 +507,14 @@ def _fetch_pr_reviews(config: dict, start: str, end: str) -> dict:
                 "summary": body[:80],
             })
         if has_my_comments:
-            pr_key = f"{pr['repo']}/{pr['id']}"
-            if pr_key not in pr_review_minutes:
-                pr_review_minutes[pr_key] = _estimate_review_minutes(platform, pr["repo"], pr["id"])
+            prs_needing_diff.add((pr["repo"], pr["id"]))
+
+    pr_review_minutes = {}
+    diff_prs = [(r, pid) for r, pid in prs_needing_diff if f"{r}/{pid}" not in pr_review_minutes]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        diff_results = list(pool.map(lambda args: (args, _estimate_review_minutes(platform, args[0], args[1])), diff_prs))
+    for (repo, pid), mins in diff_results:
+        pr_review_minutes[f"{repo}/{pid}"] = mins
 
     for entries in result.values():
         for entry in entries:
@@ -541,28 +672,35 @@ def _fetch_ticket_info(config: dict, ticket_ids: list, worklogs: dict) -> list:
             hours_by_ticket[e["ticket"]] = hours_by_ticket.get(e["ticket"], 0) + e.get("hours", 0)
 
     tickets = []
+    fetched = set()
     with httpx.Client(auth=(user, token), timeout=30) as client:
-        for tid in ticket_ids:
+        for i in range(0, len(ticket_ids), 50):
+            batch = ticket_ids[i:i + 50]
+            jql = f"issueKey in ({','.join(batch)})"
             try:
-                resp = client.get(f"{base_url}/rest/api/3/issue/{tid}",
-                                  params={"fields": "summary,status,timeoriginalestimate,assignee"})
+                resp = client.get(f"{base_url}/rest/api/3/search/jql",
+                                  params={"jql": jql, "maxResults": 50,
+                                          "fields": "summary,status,timeoriginalestimate,assignee"})
                 if resp.status_code == 200:
-                    data = resp.json()
-                    estimate_secs = data["fields"].get("timeoriginalestimate")
-                    assignee = data["fields"].get("assignee")
-                    assignee_id = assignee.get("accountId", "") if assignee else ""
-                    tickets.append({
-                        "key": tid,
-                        "summary": data["fields"]["summary"],
-                        "status": data["fields"]["status"]["name"],
-                        "url": f"{base_url}/browse/{tid}",
-                        "hoursLogged": round(hours_by_ticket.get(tid, 0), 1),
-                        "hoursEstimated": round(estimate_secs / 3600, 1) if estimate_secs else None,
-                        "assignee_id": assignee_id,
-                    })
-                else:
-                    tickets.append({"key": tid, "summary": "?", "status": "?"})
+                    for issue in resp.json().get("issues", []):
+                        tid = issue["key"]
+                        fetched.add(tid)
+                        estimate_secs = issue["fields"].get("timeoriginalestimate")
+                        assignee = issue["fields"].get("assignee")
+                        assignee_id = assignee.get("accountId", "") if assignee else ""
+                        tickets.append({
+                            "key": tid,
+                            "summary": issue["fields"]["summary"],
+                            "status": issue["fields"]["status"]["name"],
+                            "url": f"{base_url}/browse/{tid}",
+                            "hoursLogged": round(hours_by_ticket.get(tid, 0), 1),
+                            "hoursEstimated": round(estimate_secs / 3600, 1) if estimate_secs else None,
+                            "assignee_id": assignee_id,
+                        })
             except Exception:
+                pass
+        for tid in ticket_ids:
+            if tid not in fetched:
                 tickets.append({"key": tid, "summary": "?", "status": "?"})
     return tickets
 

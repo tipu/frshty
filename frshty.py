@@ -133,6 +133,11 @@ def scheduled_page():
     return _template("scheduled.html")
 
 
+@app.get("/config", response_class=HTMLResponse)
+def config_page():
+    return _template("config.html")
+
+
 @app.get("/timesheet", response_class=HTMLResponse)
 def timesheet_page():
     return _template("timesheet.html")
@@ -195,6 +200,23 @@ def api_config():
         },
         "run_commands": _config.get("workspace", {}).get("run_commands", []),
     }
+
+
+@app.get("/api/config/raw")
+def api_config_raw():
+    config_path = _config.get("_config_path")
+    if not config_path or not config_path.exists():
+        return JSONResponse({"error": "config not found"}, status_code=404)
+    return {"content": config_path.read_text(), "path": str(config_path)}
+
+
+@app.post("/api/config/raw")
+def api_config_raw_save(body: dict):
+    config_path = _config.get("_config_path")
+    if not config_path:
+        return JSONResponse({"error": "config not found"}, status_code=404)
+    config_path.write_text(body.get("content", ""))
+    return {"ok": True}
 
 
 @app.post("/api/poll")

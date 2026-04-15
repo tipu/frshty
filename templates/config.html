@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Config — frshty</title>
+<script src="/static/tailwind.js"></script>
+<style>
+body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: #0a0a0a; color: #e0e0e0; }
+.card { background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; }
+nav a { color: #888; padding: 4px 12px; border-radius: 4px; }
+nav a:hover, nav a.active { color: #fff; background: #222; }
+#editor { width: 100%; min-height: 600px; background: #0d0d0d; color: #e0e0e0; border: 1px solid #2a2a2a; border-radius: 6px; padding: 12px; font-family: 'SF Mono', 'Cascadia Code', monospace; font-size: 13px; line-height: 1.5; resize: vertical; tab-size: 4; }
+#editor:focus { outline: none; border-color: #444; }
+.btn { background: #1e3a5f; color: #93c5fd; border: none; padding: 4px 14px; border-radius: 4px; font-size: 12px; cursor: pointer; }
+.btn:hover { background: #2a4a6f; }
+.btn:disabled { opacity: 0.5; cursor: default; }
+.msg { font-size: 12px; padding: 4px 10px; border-radius: 4px; display: inline-block; }
+.msg-ok { background: #14532d; color: #86efac; }
+.msg-err { background: #7f1d1d; color: #fca5a5; }
+</style>
+</head>
+<body class="p-4 max-w-4xl mx-auto">
+<header class="flex items-center gap-4 mb-4">
+    <h1 class="text-lg font-bold">Config</h1>
+    <nav class="flex gap-1 text-sm">
+        <a href="/">Feed</a>
+        <a href="/reviews">Reviews</a>
+        <a href="/tickets">Tickets</a>
+        <a href="/scheduled">Scheduled</a>
+        <a href="/slack">Slack</a>
+        <a href="/timesheet">Timesheet</a>
+        <a href="/config" class="active">Config</a>
+    </nav>
+</header>
+
+<div class="flex items-center gap-3 mb-3">
+    <span id="path" class="text-xs text-gray-500"></span>
+    <div class="ml-auto flex items-center gap-2">
+        <span id="msg"></span>
+        <button id="save-btn" class="btn" onclick="save()">Save</button>
+    </div>
+</div>
+
+<textarea id="editor" spellcheck="false"></textarea>
+
+<script>
+async function load() {
+    const resp = await fetch('/api/config/raw');
+    const data = await resp.json();
+    document.getElementById('editor').value = data.content;
+    document.getElementById('path').textContent = data.path;
+}
+
+async function save() {
+    const btn = document.getElementById('save-btn');
+    const msg = document.getElementById('msg');
+    btn.disabled = true;
+    try {
+        const resp = await fetch('/api/config/raw', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({content: document.getElementById('editor').value}),
+        });
+        const data = await resp.json();
+        if (data.ok) {
+            msg.className = 'msg msg-ok';
+            msg.textContent = 'saved';
+        } else {
+            msg.className = 'msg msg-err';
+            msg.textContent = data.error || 'failed';
+        }
+    } catch (e) {
+        msg.className = 'msg msg-err';
+        msg.textContent = e.message;
+    }
+    btn.disabled = false;
+    setTimeout(() => { msg.textContent = ''; msg.className = ''; }, 3000);
+}
+
+document.getElementById('editor').addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); save(); }
+    if (e.key === 'Tab') {
+        e.preventDefault();
+        const el = e.target;
+        const start = el.selectionStart;
+        el.value = el.value.substring(0, start) + '    ' + el.value.substring(el.selectionEnd);
+        el.selectionStart = el.selectionEnd = start + 4;
+    }
+});
+
+load();
+</script>
+</body>
+</html>
