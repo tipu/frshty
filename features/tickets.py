@@ -38,12 +38,19 @@ def _scrollback_fingerprint(scrollback: str) -> str:
     return hashlib.sha256("\n".join(lines).encode()).hexdigest()[:16]
 
 
-def _command_for_status(status: str) -> str | None:
+def _command_for_status(status: str) -> str:
     if status == "planning":
         return "/confer-technical-plan docs/"
     if status == "reviewing":
-        return "Run /tri-review and save the full output to docs/tri-review.md"
-    return None
+        return (
+            "Run /tri-review and save the full output to docs/tri-review.md. "
+            "In the Verdict section, include a line reading exactly 'VERDICT: PASS' "
+            "if no blocking findings remain unresolved, or 'VERDICT: FAIL' otherwise."
+        )
+    return ""
+
+
+_VERDICT_RE = re.compile(r"^VERDICT:\s*(PASS|FAIL)\b", re.MULTILINE | re.IGNORECASE)
 
 
 def restart_session(config, key, ts, base_url=""):
@@ -516,7 +523,7 @@ def _check_planning(config, ticket, ts, base_url) -> dict:
         links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
         meta={"ticket": ticket["key"]})
 
-    terminal.send_keys(ticket["key"], "Run /tri-review and save the full output to docs/tri-review.md")
+    terminal.send_keys(ticket["key"], _command_for_status("reviewing"))
 
     log.emit("ticket_review_started", f"Started /tri-review for {_label(ticket['key'], ts)}",
         links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
@@ -536,16 +543,24 @@ def _check_reviewing(config, ticket, ts, base_url) -> dict:
         return ts
 
     review_text = review_file.read_text()
-    verdict = run_haiku(
-        f"Read this code review and reply with exactly one word: PASS or FAIL.\n"
-        f"PASS means safe to merge or no blocking issues. FAIL means there are blocking issues that must be fixed.\n\n"
-        f"{review_text[:4000]}"
-    )
+    match = _VERDICT_RE.search(review_text)
+    if match:
+        verdict = match.group(1).upper()
+    else:
+        raw = run_haiku(
+            "Read this code review and decide whether the code is ready to merge. "
+            "Look at the Verdict section first, and any 'Blocking fixes applied' or similar section "
+            "that indicates findings have been resolved. A review may list [blocking] findings and "
+            "then note they have already been fixed — in that case answer PASS. Only answer FAIL if "
+            "there are blocking findings that remain unresolved.\n\n"
+            "Reply with exactly one word: PASS or FAIL.\n\n"
+            f"{review_text[:20000]}"
+        )
+        if not raw:
+            return ts
+        verdict = raw.strip().upper()
 
-    if not verdict:
-        return ts
-
-    if verdict.strip().upper().startswith("FAIL"):
+    if verdict.startswith("FAIL"):
         review_file.unlink(missing_ok=True)
         terminal.send_keys(ticket["key"], "Fix all blocking findings from the tri-review. Then run tests.")
 
