@@ -69,6 +69,64 @@ class TestBitbucketPushBranch:
         assert result["ok"] is False
 
 
+class TestGitHubRepoConfig:
+    def test_string_repo_back_compat(self):
+        config = {"job": {"platform": "github"}, "github": {"repo": "org/main-repo"}, "workspace": {"base_branch": "main"}}
+        p = GitHubPlatform(config)
+        assert p.repos == ["org/main-repo"]
+        assert p.repo == "org/main-repo"
+
+    def test_list_repo(self):
+        config = {"job": {"platform": "github"}, "github": {"repo": ["org/a", "org/b", "org/c"]}, "workspace": {"base_branch": "main"}}
+        p = GitHubPlatform(config)
+        assert p.repos == ["org/a", "org/b", "org/c"]
+        assert p.repo == "org/a"
+
+
+class TestGitHubListMyOpenPrs:
+    def test_iterates_all_repos(self):
+        config = {"job": {"platform": "github"}, "github": {"repo": ["org/a", "org/b"]}, "workspace": {"base_branch": "main"}}
+        p = GitHubPlatform(config)
+
+        def fake_run(args):
+            repo = args[args.index("--repo") + 1]
+            result = MagicMock()
+            result.returncode = 0
+            if repo == "org/a":
+                result.stdout = '[{"number": 1, "title": "t1", "author": {"login": "me"}, "headRefName": "br1", "baseRefName": "main", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z", "url": "u1", "state": "OPEN"}]'
+            else:
+                result.stdout = '[{"number": 2, "title": "t2", "author": {"login": "me"}, "headRefName": "br2", "baseRefName": "main", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z", "url": "u2", "state": "OPEN"}]'
+            return result
+
+        with patch.object(p, "_run_gh", side_effect=fake_run):
+            prs = p.list_my_open_prs()
+
+        assert len(prs) == 2
+        assert {pr["id"] for pr in prs} == {1, 2}
+        assert {pr["repo"] for pr in prs} == {"a", "b"}
+
+    def test_failure_in_one_repo_does_not_abort(self):
+        config = {"job": {"platform": "github"}, "github": {"repo": ["org/a", "org/b"]}, "workspace": {"base_branch": "main"}}
+        p = GitHubPlatform(config)
+
+        def fake_run(args):
+            repo = args[args.index("--repo") + 1]
+            result = MagicMock()
+            if repo == "org/a":
+                result.returncode = 1
+                result.stdout = ""
+            else:
+                result.returncode = 0
+                result.stdout = '[{"number": 2, "title": "t2", "author": {"login": "me"}, "headRefName": "br2", "baseRefName": "main", "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z", "url": "u2", "state": "OPEN"}]'
+            return result
+
+        with patch.object(p, "_run_gh", side_effect=fake_run):
+            prs = p.list_my_open_prs()
+
+        assert len(prs) == 1
+        assert prs[0]["id"] == 2
+
+
 class TestGitHubResolveRepo:
     def test_full_name_passthrough(self):
         config = {"job": {"platform": "github"}, "github": {"repo": "org/main-repo"}, "workspace": {"base_branch": "main"}}

@@ -299,7 +299,9 @@ class GitHubPlatform:
 
     def __init__(self, config: dict):
         self.config = config
-        self.repo = config["github"]["repo"]
+        raw = config["github"]["repo"]
+        self.repos = [raw] if isinstance(raw, str) else list(raw)
+        self.repo = self.repos[0]
         self.base_branch = config["workspace"].get("base_branch", "main")
 
     def _run_gh(self, args: list[str]) -> subprocess.CompletedProcess:
@@ -320,14 +322,17 @@ class GitHubPlatform:
         return full
 
     def list_my_open_prs(self) -> list[dict]:
-        result = self._run_gh([
-            "pr", "list", "--repo", self.repo, "--author", "@me",
-            "--json", "number,title,author,headRefName,baseRefName,createdAt,updatedAt,url,state",
-            "--limit", "50",
-        ])
-        if result.returncode != 0:
-            return []
-        return [self._normalize_pr(pr) for pr in json.loads(result.stdout)]
+        prs = []
+        for repo in self.repos:
+            result = self._run_gh([
+                "pr", "list", "--repo", repo, "--author", "@me",
+                "--json", "number,title,author,headRefName,baseRefName,createdAt,updatedAt,url,state",
+                "--limit", "50",
+            ])
+            if result.returncode != 0:
+                continue
+            prs.extend(self._normalize_pr(pr, repo) for pr in json.loads(result.stdout))
+        return prs
 
     def list_review_prs(self) -> list[dict]:
         result = self._run_gh([
@@ -600,10 +605,11 @@ class GitHubPlatform:
     def pr_url(self, repo: str, pr_id: int) -> str:
         return f"https://github.com/{self._resolve_repo(repo)}/pull/{pr_id}"
 
-    def _normalize_pr(self, pr: dict) -> dict:
+    def _normalize_pr(self, pr: dict, repo: str | None = None) -> dict:
+        repo_full = repo or self.repo
         return {
             "id": pr["number"],
-            "repo": self.repo.split("/")[-1],
+            "repo": repo_full.split("/")[-1],
             "title": pr["title"],
             "author": pr["author"]["login"],
             "branch": pr["headRefName"],
