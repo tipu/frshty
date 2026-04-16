@@ -492,7 +492,7 @@ async function resetTerminal() {
     const btn = document.getElementById('reset-btn');
     btn.disabled = true;
     btn.textContent = 'Resetting...';
-    await fetch(`/api/tickets/${key}/terminal`, { method: 'DELETE' });
+    await fetch(`/api/tickets/${key}/terminal/reset`, { method: 'POST' });
     if (ws) ws.close();
     if (term) {
         term.dispose();
@@ -501,7 +501,7 @@ async function resetTerminal() {
     document.getElementById('terminal-container').innerHTML = '';
     btn.disabled = false;
     btn.textContent = 'Reset';
-    setTimeout(startTerminal, 500);
+    setTimeout(startTerminal, 1500);
 }
 
 function toggleMaximize() {

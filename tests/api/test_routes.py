@@ -155,6 +155,22 @@ class TestTickets:
         assert resp.status_code == 200
         mock_kill.assert_called_once_with("T-1")
 
+    def test_reset_terminal_kills_and_spawns_with_claude(self, client):
+        state.save("tickets", {"T-1": {"status": "in_review", "slug": "T-1-s"}})
+        with patch("frshty.terminal.kill_terminal") as mock_kill, \
+             patch("frshty.terminal.ensure_session") as mock_ensure, \
+             patch("frshty.terminal.send_keys") as mock_send, \
+             patch("frshty.time.sleep"):
+            resp = client.post("/api/tickets/T-1/terminal/reset")
+        assert resp.status_code == 200
+        mock_kill.assert_called_once_with("T-1")
+        mock_ensure.assert_called_once()
+        mock_send.assert_called_once_with("T-1", "claude --dangerously-skip-permissions")
+
+    def test_reset_terminal_not_found(self, client):
+        resp = client.post("/api/tickets/NOPE/terminal/reset")
+        assert resp.status_code == 404
+
     def test_pr_comments_empty(self, client):
         state.save("tickets", {"T-1": {"status": "in_review", "slug": "T-1-s"}})
         resp = client.get("/api/tickets/T-1/pr-comments")
