@@ -262,6 +262,58 @@ class TestResolveConflicts:
         assert result["status"] == "pr_failed"
 
 
+class TestDiscoverPrs:
+    def test_match_by_branch_populates_prs(self, fake_config):
+        mock_platform = MagicMock()
+        mock_platform.list_my_open_prs.return_value = [
+            {"repo": "r", "id": 99, "branch": "other-branch", "url": "u1"},
+            {"repo": "r", "id": 100, "branch": "PROJ-1-do-the-thing", "url": "u2"},
+        ]
+        ts = make_ticket_state(status="in_review", branch="PROJ-1-do-the-thing")
+
+        with patch("features.tickets.make_platform", return_value=mock_platform):
+            result = tickets._discover_prs(fake_config, ts)
+
+        assert result["prs"] == [{"repo": "r", "id": 100, "branch": "PROJ-1-do-the-thing", "url": "u2"}]
+
+    def test_no_match_leaves_ts_unchanged(self, fake_config):
+        mock_platform = MagicMock()
+        mock_platform.list_my_open_prs.return_value = [
+            {"repo": "r", "id": 99, "branch": "other-branch", "url": "u1"},
+        ]
+        ts = make_ticket_state(status="in_review", branch="PROJ-1-do-the-thing")
+
+        with patch("features.tickets.make_platform", return_value=mock_platform):
+            result = tickets._discover_prs(fake_config, ts)
+
+        assert "prs" not in result
+
+    def test_platform_error_is_swallowed(self, fake_config):
+        mock_platform = MagicMock()
+        mock_platform.list_my_open_prs.side_effect = RuntimeError("api down")
+        ts = make_ticket_state(status="in_review", branch="PROJ-1-do-the-thing")
+
+        with patch("features.tickets.make_platform", return_value=mock_platform):
+            result = tickets._discover_prs(fake_config, ts)
+
+        assert "prs" not in result
+
+    def test_multiple_matches_all_included(self, fake_config):
+        mock_platform = MagicMock()
+        mock_platform.list_my_open_prs.return_value = [
+            {"repo": "a", "id": 1, "branch": "shared-branch", "url": "u1"},
+            {"repo": "b", "id": 2, "branch": "shared-branch", "url": "u2"},
+            {"repo": "c", "id": 3, "branch": "other", "url": "u3"},
+        ]
+        ts = make_ticket_state(status="pr_created", branch="shared-branch")
+
+        with patch("features.tickets.make_platform", return_value=mock_platform):
+            result = tickets._discover_prs(fake_config, ts)
+
+        assert len(result["prs"]) == 2
+        assert {p["repo"] for p in result["prs"]} == {"a", "b"}
+
+
 class TestMerge:
     def test_all_merged(self, fake_config):
         mock_platform = MagicMock()
