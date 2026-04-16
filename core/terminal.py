@@ -33,6 +33,21 @@ def _tmux_session_exists(session_name: str) -> bool:
     return result.returncode == 0
 
 
+def list_ticket_keys() -> list[str]:
+    result = subprocess.run(
+        [_tmux_bin(), "-S", TMUX_SOCKET, "list-sessions", "-F", "#{session_name}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return []
+    prefix = "term-"
+    return [
+        line[len(prefix):]
+        for line in result.stdout.splitlines()
+        if line.startswith(prefix)
+    ]
+
+
 def capture_pane(ticket_key: str, lines: int = 50) -> str:
     session_name = _tmux_session_name(ticket_key)
     if not _tmux_session_exists(session_name):

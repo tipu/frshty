@@ -25,6 +25,17 @@ def _label(key: str, ts: dict) -> str:
 
 MAX_RESTARTS = 3
 RESTART_COOLDOWN_SECS = 300
+STUCK_SCROLLBACK_SECS = 300
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+_SPINNER_LINE_RE = re.compile(r"(Cogitated|Worked|Cooked|Baked|Churned|Crunched|Thought) for \d+[ms\d\s]*")
+
+
+def _scrollback_fingerprint(scrollback: str) -> str:
+    import hashlib
+    stripped = _ANSI_RE.sub("", scrollback)
+    lines = [l for l in stripped.splitlines() if not _SPINNER_LINE_RE.search(l)]
+    return hashlib.sha256("\n".join(lines).encode()).hexdigest()[:16]
 
 
 def _command_for_status(status: str) -> str | None:
@@ -73,9 +84,6 @@ def _triage_session(config, key, ts, base_url):
             return
 
     health = terminal.session_healthy(key)
-    if health["alive"] and health["claude_running"]:
-        return
-
     scrollback = terminal.capture_pane(key, 60)
     status = ts.get("status", "")
     expected_cmd = _command_for_status(status)
@@ -159,16 +167,43 @@ Prefer "send" when Claude is at a prompt and you can unblock it. Be direct and a
 
 
 def check_health(config):
+    from datetime import datetime, timezone
     ticket_state = state.load("tickets")
     base_url = config["_base_url"]
     modified_keys = {}
 
+    active_keys = {k for k, v in ticket_state.items() if v.get("status") not in ("done", "merged")}
+    for session_key in terminal.list_ticket_keys():
+        if session_key not in active_keys:
+            terminal.kill_terminal(session_key)
+            log.emit("ticket_session_orphan_reaped", f"Killed orphan tmux session term-{session_key}",
+                meta={"ticket": session_key})
+
+    now = datetime.now(timezone.utc)
     for key, ts in ticket_state.items():
         if ts.get("status") not in ("planning", "reviewing"):
             continue
         health = terminal.session_healthy(key)
-        if health["alive"] and health["claude_running"]:
-            continue
+        stuck = not (health["alive"] and health["claude_running"])
+
+        if not stuck:
+            scrollback = terminal.capture_pane(key, 60)
+            fp = _scrollback_fingerprint(scrollback)
+            if ts.get("last_scrollback_hash") != fp:
+                ts["last_scrollback_hash"] = fp
+                ts["last_scrollback_change_at"] = now.isoformat()
+                modified_keys[key] = ts
+                continue
+            last_change = ts.get("last_scrollback_change_at", "")
+            if last_change:
+                idle_secs = (now - datetime.fromisoformat(last_change)).total_seconds()
+                if idle_secs < STUCK_SCROLLBACK_SECS:
+                    continue
+            else:
+                ts["last_scrollback_change_at"] = now.isoformat()
+                modified_keys[key] = ts
+                continue
+
         _triage_session(config, key, ts, base_url)
         modified_keys[key] = ts
 
