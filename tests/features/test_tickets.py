@@ -380,7 +380,8 @@ class TestHandleCiFailure:
         pr = {"repo": "r", "id": 1, "url": "u"}
         checks = [{"name": "lint", "state": "FAILED"}]
 
-        with patch("features.tickets.run_haiku", return_value='{"caused_by_us": false, "reason": "flaky"}'), \
+        with patch("features.tickets.terminal.is_claude_idle", return_value=True), \
+             patch("features.tickets.run_haiku", return_value='{"caused_by_us": false, "reason": "flaky"}'), \
              patch("features.tickets.extract_json", return_value={"caused_by_us": False, "reason": "flaky"}), \
              patch("features.tickets.log"):
             result = tickets._handle_ci_failure(fake_config, mock_platform, make_ticket(), ts, pr, checks, "http://base")
@@ -394,12 +395,41 @@ class TestHandleCiFailure:
         pr = {"repo": "r", "id": 1, "url": "u"}
         checks = [{"name": "lint", "state": "FAILED"}]
 
-        with patch("features.tickets.run_haiku", return_value='{"caused_by_us": true, "reason": "bad", "fix_hint": "fix it"}'), \
+        with patch("features.tickets.terminal.is_claude_idle", return_value=True), \
+             patch("features.tickets.terminal.send_prompt", return_value=True), \
+             patch("features.tickets.run_haiku", return_value='{"caused_by_us": true, "reason": "bad", "fix_hint": "fix it"}'), \
              patch("features.tickets.extract_json", return_value={"caused_by_us": True, "reason": "bad", "fix_hint": "fix it"}), \
-             patch("features.tickets.terminal.send_keys"), \
              patch("features.tickets.log"):
             result = tickets._handle_ci_failure(fake_config, mock_platform, make_ticket(), ts, pr, checks, "http://base")
         assert result["ci_fix_attempts"] == 1
+
+    def test_skipped_when_not_idle(self, fake_config):
+        mock_platform = MagicMock()
+        ts = make_ticket_state(status="pr_created")
+        pr = {"repo": "r", "id": 1, "url": "u"}
+        checks = [{"name": "lint", "state": "FAILED"}]
+
+        with patch("features.tickets.terminal.is_claude_idle", return_value=False), \
+             patch("features.tickets.log"):
+            result = tickets._handle_ci_failure(fake_config, mock_platform, make_ticket(), ts, pr, checks, "http://base")
+        assert result.get("ci_fix_attempts", 0) == 0
+        mock_platform.get_failed_logs.assert_not_called()
+
+    def test_not_delivered_does_not_increment(self, fake_config):
+        mock_platform = MagicMock()
+        mock_platform.get_failed_logs.return_value = "logs"
+        mock_platform.get_pr_diff.return_value = "diff"
+        ts = make_ticket_state(status="pr_created")
+        pr = {"repo": "r", "id": 1, "url": "u"}
+        checks = [{"name": "lint", "state": "FAILED"}]
+
+        with patch("features.tickets.terminal.is_claude_idle", return_value=True), \
+             patch("features.tickets.terminal.send_prompt", return_value=False), \
+             patch("features.tickets.run_haiku", return_value='{"caused_by_us": true, "reason": "bad", "fix_hint": "fix it"}'), \
+             patch("features.tickets.extract_json", return_value={"caused_by_us": True, "reason": "bad", "fix_hint": "fix it"}), \
+             patch("features.tickets.log"):
+            result = tickets._handle_ci_failure(fake_config, mock_platform, make_ticket(), ts, pr, checks, "http://base")
+        assert result.get("ci_fix_attempts", 0) == 0
 
     def test_max_attempts_stops(self, fake_config):
         mock_platform = MagicMock()
