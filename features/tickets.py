@@ -361,6 +361,9 @@ def check(config: dict):
         if ts["status"] == "pr_ready" and config.get("pr", {}).get("auto_pr") and not ts.get("pr_scheduled_at"):
             ts = _create_pr(config, ticket, ts, base_url)
 
+        if ts["status"] in ("pr_created", "in_review") and not ts.get("prs") and ts.get("branch"):
+            ts = _discover_prs(config, ts)
+
         if ts["status"] in ("pr_created", "in_review"):
             ts = _resolve_conflicts(config, ticket, ts, base_url)
 
@@ -790,6 +793,18 @@ def _check_in_review(config, ticket, ts, base_url) -> dict:
 
 
 MAX_CONFLICT_ATTEMPTS = 2
+
+
+def _discover_prs(config, ts) -> dict:
+    platform = make_platform(config)
+    try:
+        open_prs = platform.list_my_open_prs()
+    except Exception:
+        return ts
+    matches = [p for p in open_prs if p.get("branch") == ts.get("branch")]
+    if matches:
+        ts["prs"] = matches
+    return ts
 
 
 def _resolve_conflicts(config, ticket, ts, base_url) -> dict:
