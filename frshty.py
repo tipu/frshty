@@ -683,16 +683,56 @@ def api_kill_terminal(key: str):
     return {"status": "ok"}
 
 
+@app.post("/api/tickets/{key}/terminal/reset")
+def api_reset_terminal(key: str):
+    tickets = state.load("tickets")
+    ts = tickets.get(key)
+    if not ts:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    slug = ts.get("slug", "")
+    ws = _config["workspace"]
+    ticket_dir = ws["root"] / ws["tickets_dir"] / slug
+    terminal.kill_terminal(key)
+    time.sleep(1)
+    terminal.ensure_session(key, str(ticket_dir))
+    time.sleep(1)
+    terminal.send_keys(key, "claude --dangerously-skip-permissions")
+    return {"status": "ok"}
+
+
 @app.get("/api/tickets/{key}/diff")
 def api_ticket_diff(key: str):
     tickets = state.load("tickets")
     ts = tickets.get(key)
-    if not ts or not ts.get("prs"):
+    if not ts:
         return {"diff": ""}
-    platform = make_platform(_config)
-    pr = ts["prs"][0]
-    diff = platform.get_pr_diff(pr["repo"], pr["id"])
-    return {"diff": diff or ""}
+    if ts.get("prs"):
+        platform = make_platform(_config)
+        pr = ts["prs"][0]
+        diff = platform.get_pr_diff(pr["repo"], pr["id"])
+        return {"diff": diff or ""}
+    return {"diff": _local_worktree_diff(ts)}
+
+
+def _local_worktree_diff(ts: dict) -> str:
+    import subprocess
+    slug = ts.get("slug")
+    if not slug:
+        return ""
+    base_branch = _config["workspace"].get("base_branch", "main")
+    parts = []
+    for repo in get_repos(_config):
+        wt = cfg.ticket_worktree_path(_config, slug, repo["name"])
+        if not wt.is_dir():
+            continue
+        subprocess.run(["git", "fetch", "origin", base_branch],
+            cwd=str(wt), capture_output=True, timeout=60)
+        result = subprocess.run(
+            ["git", "diff", f"origin/{base_branch}...HEAD"],
+            cwd=str(wt), capture_output=True, text=True, timeout=30)
+        if result.stdout.strip():
+            parts.append(result.stdout)
+    return "\n".join(parts)
 
 
 @app.get("/api/tickets/{key}/pr-comments")
