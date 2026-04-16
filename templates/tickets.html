@@ -41,6 +41,11 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
 
 <script>
 const COLUMNS = ['new', 'planning', 'reviewing', 'pr_ready', 'pr_created', 'in_review', 'merged'];
+const HELP = {
+    pr_ready: 'Branch pushed and work finished. Waiting for the scheduler (or auto_pr) to open the PR on the platform.',
+    pr_created: 'PR has just been opened. Transient — next cycle it becomes in_review (or merged if already merged).',
+    in_review: 'PR open, not all merged. Each cycle: poll CI, resolve conflicts, read review comments, check merge state.',
+};
 
 async function load() {
     const resp = await fetch('/api/tickets/list');
@@ -65,8 +70,9 @@ async function load() {
                     <button onclick="discard('${key}')" class="absolute top-2 right-2 text-gray-600 hover:text-red-400 text-xs hidden group-hover:block">discard</button>
                 </div>
             `).join('');
+        const help = HELP[col] ? `<span class="text-gray-600 hover:text-gray-300 cursor-help ml-1" title="${HELP[col]}">&#9432;</span>` : '';
         return `<div class="col flex-1">
-            <div class="text-xs font-bold text-gray-500 uppercase mb-2">${col}</div>
+            <div class="text-xs font-bold text-gray-500 uppercase mb-2">${col}${help}</div>
             ${items}
         </div>`;
     }).join('');
