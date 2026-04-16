@@ -921,6 +921,12 @@ def _handle_ci_failure(config, platform, ticket, ts, pr, checks, base_url) -> di
         ts["status"] = transition(ts["status"], "pr_failed")
         return ts
 
+    if not terminal.is_claude_idle(ticket["key"]):
+        log.emit("ticket_ci_fix_skipped", f"Skipped CI fix for {_label(ticket['key'], ts)}: terminal not idle",
+            links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+            meta={"ticket": ticket["key"], "failed_checks": failed_names})
+        return ts
+
     failure_logs = platform.get_failed_logs(pr["repo"], pr["id"])
     pr_diff = platform.get_pr_diff(pr["repo"], pr["id"]) or ""
 
@@ -963,9 +969,14 @@ Reply with EXACTLY one JSON object:
 
     fix_hint = analysis.get("fix_hint", "")
 
-    terminal.send_keys(ticket["key"],
+    delivered = terminal.send_prompt(ticket["key"],
         f"CI checks failed: {', '.join(failed_names)}. This is caused by our changes. "
         f"Fix the issue: {fix_hint}. Then commit with --no-verify and push.")
+    if not delivered:
+        log.emit("ticket_ci_fix_not_delivered", f"CI fix for {_label(ticket['key'], ts)} did not land in terminal",
+            links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+            meta={"ticket": ticket["key"], "failed_checks": failed_names, "fix_hint": fix_hint})
+        return ts
 
     ts["ci_fix_attempts"] = fix_attempts + 1
     ts.pop("checks_started_at", None)
