@@ -7,4 +7,6 @@ dependencies = [
     "fastapi",
     "uvicorn",
     "watchfiles>=1.1.1",
+    "mcp",
+    "playwright",
 ]
