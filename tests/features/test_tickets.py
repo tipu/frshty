@@ -329,4 +329,4 @@ class TestHandleCiFailure:
 
         with patch("features.tickets.log"):
             result = tickets._handle_ci_failure(fake_config, mock_platform, make_ticket(), ts, pr, checks, "http://base")
-        assert result["status"] == "pr_created"
+        assert result["status"] == "pr_failed"
