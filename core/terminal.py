@@ -81,11 +81,11 @@ def session_healthy(ticket_key: str) -> dict:
         return {"alive": True, "claude_running": False}
 
     pane_pid = result.stdout.strip().splitlines()[0]
-    children = subprocess.run(
-        ["pgrep", "-P", pane_pid, "-a"],
+    claude_check = subprocess.run(
+        ["pgrep", "-P", pane_pid, "-f", "claude"],
         capture_output=True, text=True,
     )
-    claude_running = any("claude" in line for line in children.stdout.splitlines())
+    claude_running = bool(claude_check.stdout.strip())
     return {"alive": True, "claude_running": claude_running}
 
 
