@@ -301,6 +301,8 @@ def check(config: dict):
     assigned_keys = {t["key"] for t in assigned}
     discovery_only = not get_repos(config)
 
+    open_prs = [] if discovery_only else _fetch_open_prs(config)
+
     for key, ts in list(ticket_state.items()):
         if key not in assigned_keys and ts.get("status") != TicketStatus.done:
             ts["status"] = transition(ts.get("status", "new"), "done")
@@ -348,6 +350,8 @@ def check(config: dict):
         if ts["status"] == TicketStatus.pr_failed:
             continue
 
+        if ts.get("branch"):
+            ts = _reconcile_prs(ts, open_prs)
 
         if ts["status"] == "new":
             ts = _setup_ticket(config, ticket, base_url)
@@ -360,9 +364,6 @@ def check(config: dict):
 
         if ts["status"] == "pr_ready" and config.get("pr", {}).get("auto_pr") and not ts.get("pr_scheduled_at"):
             ts = _create_pr(config, ticket, ts, base_url)
-
-        if ts["status"] in ("pr_created", "in_review") and not ts.get("prs") and ts.get("branch"):
-            ts = _discover_prs(config, ts)
 
         if ts["status"] in ("pr_created", "in_review"):
             ts = _resolve_conflicts(config, ticket, ts, base_url)
@@ -795,15 +796,35 @@ def _check_in_review(config, ticket, ts, base_url) -> dict:
 MAX_CONFLICT_ATTEMPTS = 2
 
 
-def _discover_prs(config, ts) -> dict:
+def _fetch_open_prs(config) -> list[dict]:
     platform = make_platform(config)
     try:
-        open_prs = platform.list_my_open_prs()
+        return platform.list_my_open_prs()
     except Exception:
-        return ts
+        return []
+
+
+def _reconcile_prs(ts: dict, open_prs: list[dict]) -> dict:
     matches = [p for p in open_prs if p.get("branch") == ts.get("branch")]
-    if matches:
-        ts["prs"] = matches
+    if not matches:
+        return ts
+
+    prior_ids = {(p["repo"], p["id"]) for p in ts.get("prs", [])}
+    current_ids = {(p["repo"], p["id"]) for p in matches}
+    pr_changed = prior_ids != current_ids
+    status_regressed = ts["status"] in ("new", "planning", "reviewing", "pr_ready")
+
+    ts["prs"] = matches
+
+    if status_regressed:
+        ts["status"] = "pr_created"
+
+    if pr_changed or status_regressed:
+        ts["conflict_resolution_attempts"] = 0
+        ts["ci_fix_attempts"] = 0
+        ts.pop("ci_passed", None)
+        ts.pop("checks_started_at", None)
+
     return ts
 
 
