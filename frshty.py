@@ -573,6 +573,28 @@ def api_tickets_list():
     return {k: v for k, v in tickets.items() if v.get("status") != "done"}
 
 
+@app.get("/api/raw/tickets")
+def api_raw_tickets():
+    from features.ticket_systems import make_ticket_system
+    ts = make_ticket_system(_config)
+    if not ts:
+        return {"error": "no ticket system configured"}
+    try:
+        return ts.fetch_tickets()
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/raw/prs")
+def api_raw_prs():
+    platform = make_platform(_config)
+    try:
+        my_prs = platform.list_my_open_prs()
+        return {"my_prs": my_prs}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.get("/api/scheduled")
 def api_scheduled():
     scheduled = state.load("scheduler")
@@ -731,6 +753,10 @@ def api_restart_ticket(key: str):
     if not ts:
         return JSONResponse({"error": "not found"}, status_code=404)
     ts["restart_count"] = 0
+    ts.pop("ci_fix_attempts", None)
+    ts.pop("pr_attempts", None)
+    if ts.get("status") == TicketStatus.pr_failed.value:
+        ts["status"] = "pr_ready"
     _tickets_mod.restart_session(_config, key, ts, _config["_base_url"])
     state.save("tickets", tickets)
     return {"status": "restarted"}

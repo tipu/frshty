@@ -46,6 +46,8 @@ def restart_session(config, key, ts, base_url=""):
     terminal.ensure_session(key, str(ticket_dir))
     time.sleep(2)
     terminal.send_keys(key, "claude --dangerously-skip-permissions")
+    time.sleep(5)
+    terminal.send_bare_enter(key)
     time.sleep(3)
 
     cmd = _command_for_status(ts.get("status", ""))
@@ -95,6 +97,7 @@ Your job: decide what to do next. You have deep understanding of the pipeline:
 - If Claude asked a question and is waiting for input, you should answer it or instruct it to proceed.
 - If Claude crashed or the session is empty, recommend a restart.
 - If the ticket is genuinely impossible (missing info that only a human has), say so.
+- NEVER tell Claude to git push, create a PR, or run gh pr create. The pipeline handles PRs separately. Your job is only to get the expected output file produced.
 
 Ticket: {key}
 Stage: {status}
@@ -295,11 +298,10 @@ def check(config: dict):
             continue
 
         mapped = _resolve_status(config, ticket.get("status", ""))
-        if mapped:
-            if "slug" not in ts:
-                ts["slug"] = _make_slug(key, ticket["summary"])
-                ts["branch"] = _make_branch(config, key, ticket)
-                ts["url"] = ticket.get("url", "")
+        if mapped and "slug" not in ts:
+            ts["slug"] = _make_slug(key, ticket["summary"])
+            ts["branch"] = _make_branch(config, key, ticket)
+            ts["url"] = ticket.get("url", "")
             ts["status"] = TicketStatus(mapped).value
             if mapped != "new":
                 ticket_state[key] = ts
@@ -309,8 +311,7 @@ def check(config: dict):
             continue
 
         if ts["status"] == TicketStatus.pr_failed:
-            ts["pr_attempts"] = 0
-            ts["status"] = transition(ts["status"], "pr_ready")
+            continue
 
 
         if ts["status"] == "new":
@@ -450,6 +451,8 @@ def _setup_ticket(config, ticket, base_url) -> dict:
     terminal.ensure_session(key, str(ticket_dir))
     time.sleep(2)
     terminal.send_keys(key, "claude --dangerously-skip-permissions")
+    time.sleep(5)
+    terminal.send_bare_enter(key)
     time.sleep(3)
     terminal.send_keys(key, _command_for_status("planning"))
 
@@ -844,6 +847,7 @@ def _handle_ci_failure(config, platform, ticket, ts, pr, checks, base_url) -> di
         log.emit("ticket_checks_failed", f"CI failed for {_label(ticket['key'], ts)} after {fix_attempts} fix attempts: {', '.join(failed_names)}",
             links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
             meta={"ticket": ticket["key"], "failed_checks": failed_names})
+        ts["status"] = transition(ts["status"], "pr_failed")
         return ts
 
     failure_logs = platform.get_failed_logs(pr["repo"], pr["id"])

@@ -122,6 +122,16 @@ def send_keys(ticket_key: str, keys: str):
     )
 
 
+def send_bare_enter(ticket_key: str):
+    session_name = _tmux_session_name(ticket_key)
+    if not _tmux_session_exists(session_name):
+        return
+    subprocess.run(
+        [_tmux_bin(), "-S", TMUX_SOCKET, "send-keys", "-t", session_name, "Enter"],
+        capture_output=True,
+    )
+
+
 def _get_or_spawn(ticket_key: str, cwd: str):
     entry = _terminals.get(ticket_key)
     if entry and _process_alive(entry["pid"]):
