@@ -775,6 +775,10 @@ def api_set_ticket_status(key: str, body: dict):
         return JSONResponse({"error": "not found"}, status_code=404)
     old_status = ts.get("status", "unknown")
     ts["status"] = target
+    ts["ci_fix_attempts"] = 0
+    ts["conflict_resolution_attempts"] = 0
+    ts.pop("ci_passed", None)
+    ts.pop("checks_started_at", None)
     tickets[key] = ts
     state.save("tickets", tickets)
     log.emit("ticket_status_override", f"Manual override {old_status} → {target} for {key}",

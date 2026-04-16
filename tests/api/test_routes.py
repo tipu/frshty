@@ -161,6 +161,33 @@ class TestTickets:
         assert resp.status_code == 200
         assert resp.json() == []
 
+    def test_status_override_resets_counters(self, client):
+        state.save("tickets", {"T-1": {
+            "status": "pr_failed",
+            "slug": "T-1-s",
+            "ci_fix_attempts": 2,
+            "conflict_resolution_attempts": 1,
+            "ci_passed": True,
+            "checks_started_at": "2026-04-15T00:00:00+00:00",
+        }})
+        resp = client.post("/api/tickets/T-1/status", json={"status": "pr_created"})
+        assert resp.status_code == 200
+        ts = state.load("tickets")["T-1"]
+        assert ts["status"] == "pr_created"
+        assert ts["ci_fix_attempts"] == 0
+        assert ts["conflict_resolution_attempts"] == 0
+        assert "ci_passed" not in ts
+        assert "checks_started_at" not in ts
+
+    def test_status_override_invalid(self, client):
+        state.save("tickets", {"T-1": {"status": "pr_failed", "slug": "T-1-s"}})
+        resp = client.post("/api/tickets/T-1/status", json={"status": "garbage"})
+        assert resp.status_code == 400
+
+    def test_status_override_not_found(self, client):
+        resp = client.post("/api/tickets/NOPE/status", json={"status": "pr_created"})
+        assert resp.status_code == 404
+
 
 class TestScheduled:
     def test_empty(self, client):
