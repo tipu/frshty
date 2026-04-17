@@ -55,6 +55,7 @@ review_prs = false
 tickets = true
 slack = false
 timesheet = false
+billing = false
 
 # [slack]
 # raw_path = "/path/to/slack_int/messages/raw.jsonl"
@@ -65,6 +66,16 @@ timesheet = false
 # recurring = [
 #     {ticket = "PROJ-1", days = ["mon", "wed"], time = "30m", label = "standup"},
 # ]
+
+# --- Billing (requires bill.com env vars) ---
+# [billing]
+# name = "Acme, Inc."
+# rate = 90
+# billing_freq = "weekly"             # "weekly" or "monthly"
+# billcom_customer_id = "0cu0..."
+# invoice_prefix = "INV"
+# include_daily_descriptions = false  # when true, pull per-day summaries from jira worklogs
+# extras = { ai_tool = 20 }           # flat-fee line items added to every invoice
 
 # --- Events (per-config triggers on lifecycle events) ---
 # [events]
