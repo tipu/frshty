@@ -107,6 +107,12 @@ function renderSchedule(sched) {
     const panel = document.getElementById('schedule-panel');
     if (!sched || !sched.enabled) { panel.classList.add('hidden'); return; }
     const cadence = sched.freq === 'monthly' ? 'Monthly' : 'Weekly';
+    let nextFire = 'n/a';
+    if (sched.next_fire) {
+        const dt = new Date(sched.next_fire);
+        nextFire = dt.toLocaleString('en-US', {weekday: 'short', month: 'short', day: 'numeric',
+            hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles', timeZoneName: 'short'});
+    }
     let last = '';
     if (sched.last_run) {
         const r = sched.last_run.result;
@@ -114,7 +120,7 @@ function renderSchedule(sched) {
         const err = sched.last_run.error ? ` — ${sched.last_run.error}` : '';
         last = ` · Last: ${sched.last_run.date} ${r}${num}${err}`;
     }
-    panel.textContent = `Schedule: ${cadence} · Next fire: ${sched.next_fire || 'n/a'}${last}`;
+    panel.textContent = `Schedule: ${cadence} · Next fire: ${nextFire}${last}`;
     panel.classList.remove('hidden');
 }
 
