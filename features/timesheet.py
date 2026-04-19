@@ -393,7 +393,8 @@ def _fetch_worklogs(config: dict, start_date: date, end_date: date) -> dict:
             key = issue["key"]
             summary = issue["fields"]["summary"]
             for wl in issue["fields"].get("worklog", {}).get("worklogs", []):
-                if wl.get("author", {}).get("emailAddress") != user:
+                author_email = wl.get("author", {}).get("emailAddress")
+                if author_email and author_email != user:
                     continue
                 started = wl.get("started", "")[:10]
                 if started < str(start_date) or started > str(end_date):

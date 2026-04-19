@@ -67,6 +67,7 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
 <div class="card p-4 mb-4">
     <div id="client-header" class="subtitle">Loading…</div>
     <div id="creds-warn" class="text-xs text-red-400 mt-1 hidden"></div>
+    <div id="schedule-panel" class="text-xs text-gray-400 mt-2 hidden"></div>
 </div>
 
 <div class="legend">
@@ -94,11 +95,27 @@ async function api(path, opts) {
 async function load() {
     client = await api('/api/billing/client');
     renderHeader();
-    const calls = [api('/api/billing/entries'), api('/api/billing/invoices')];
+    const calls = [api('/api/billing/entries'), api('/api/billing/invoices'), api('/api/billing/schedule-status')];
     if (client.billcom_available) calls.push(api('/api/billing/next-invoice-number'));
-    const [e, inv, n] = await Promise.all(calls);
+    const [e, inv, sched, n] = await Promise.all(calls);
     entries = e; invoices = inv; nextInvNumber = n ? n.number : '';
+    renderSchedule(sched);
     renderCalendar();
+}
+
+function renderSchedule(sched) {
+    const panel = document.getElementById('schedule-panel');
+    if (!sched || !sched.enabled) { panel.classList.add('hidden'); return; }
+    const cadence = sched.freq === 'monthly' ? 'Monthly' : 'Weekly';
+    let last = '';
+    if (sched.last_run) {
+        const r = sched.last_run.result;
+        const num = sched.last_run.number ? ` (${sched.last_run.number})` : '';
+        const err = sched.last_run.error ? ` — ${sched.last_run.error}` : '';
+        last = ` · Last: ${sched.last_run.date} ${r}${num}${err}`;
+    }
+    panel.textContent = `Schedule: ${cadence} · Next fire: ${sched.next_fire || 'n/a'}${last}`;
+    panel.classList.remove('hidden');
 }
 
 function renderHeader() {

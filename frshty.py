@@ -989,6 +989,11 @@ def api_billing_client():
     return billing.get_client(_config)
 
 
+@app.get("/api/billing/schedule-status")
+def api_billing_schedule_status():
+    return billing.get_schedule_status(_config)
+
+
 @app.get("/api/billing/entries")
 def api_billing_entries(month: str = ""):
     return billing.list_entries(_config, month)
