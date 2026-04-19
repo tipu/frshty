@@ -1,6 +1,8 @@
 import asyncio
+import calendar
 import re
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -8,6 +10,9 @@ import core.log as log
 import core.state as state
 from features import billcom
 from features.timesheet import _fetch_worklogs
+
+FIRE_TZ = ZoneInfo("America/Los_Angeles")
+FIRE_HOUR = 19
 
 
 def _billing_cfg(config: dict) -> dict:
@@ -324,49 +329,47 @@ class OverlapError(Exception):
         self.conflict = conflict
 
 
-def _due_period(today: date, freq: str) -> tuple[date, date] | None:
+def _due_period(now: datetime, freq: str) -> tuple[date, date] | None:
+    today = now.date()
+    if now.hour < FIRE_HOUR:
+        return None
     if freq == "weekly":
-        if today.weekday() != 0:
+        if today.weekday() != 4:
             return None
-        last_mon = today - timedelta(days=7)
-        last_fri = last_mon + timedelta(days=4)
-        return last_mon, last_fri
+        mon = today - timedelta(days=4)
+        return mon, today
     if freq == "monthly":
-        first_biz = _first_business_day(today.year, today.month)
-        if today != first_biz:
+        last_day = calendar.monthrange(today.year, today.month)[1]
+        if today.day != last_day:
             return None
-        last_month_end = today.replace(day=1) - timedelta(days=1)
-        last_month_start = last_month_end.replace(day=1)
-        return last_month_start, last_month_end
+        return today.replace(day=1), today
     return None
 
 
-def _first_business_day(year: int, month: int) -> date:
-    d = date(year, month, 1)
-    while d.weekday() >= 5:
-        d += timedelta(days=1)
-    return d
-
-
-def _next_fire(today: date, freq: str) -> date | None:
+def _next_fire(now: datetime, freq: str) -> datetime | None:
+    today = now.date()
     if freq == "weekly":
-        days_ahead = (0 - today.weekday()) % 7
-        return today + timedelta(days=days_ahead or 7)
+        days_ahead = (4 - today.weekday()) % 7
+        candidate = datetime.combine(today + timedelta(days=days_ahead), time(FIRE_HOUR), tzinfo=FIRE_TZ)
+        if candidate <= now:
+            candidate += timedelta(days=7)
+        return candidate
     if freq == "monthly":
-        this_month_fire = _first_business_day(today.year, today.month)
-        if today < this_month_fire:
-            return this_month_fire
-        if today.month == 12:
-            return _first_business_day(today.year + 1, 1)
-        return _first_business_day(today.year, today.month + 1)
+        last = calendar.monthrange(today.year, today.month)[1]
+        candidate = datetime.combine(date(today.year, today.month, last), time(FIRE_HOUR), tzinfo=FIRE_TZ)
+        if candidate <= now:
+            ny, nm = (today.year + 1, 1) if today.month == 12 else (today.year, today.month + 1)
+            last = calendar.monthrange(ny, nm)[1]
+            candidate = datetime.combine(date(ny, nm, last), time(FIRE_HOUR), tzinfo=FIRE_TZ)
+        return candidate
     return None
 
 
 def get_schedule_status(config: dict) -> dict:
     enabled = _enabled(config)
     freq = _billing_cfg(config).get("billing_freq", "weekly")
-    today = datetime.now(timezone.utc).date()
-    next_fire = _next_fire(today, freq) if enabled else None
+    now = datetime.now(FIRE_TZ)
+    next_fire = _next_fire(now, freq) if enabled else None
 
     autogen = state.load("billing_autogen")
     last_run = None
@@ -404,14 +407,14 @@ def check(config: dict) -> None:
     if not billcom.has_credentials():
         return
 
-    today = datetime.now(timezone.utc).date()
+    now = datetime.now(FIRE_TZ)
     freq = b.get("billing_freq", "weekly")
-    period = _due_period(today, freq)
+    period = _due_period(now, freq)
     if not period:
         return
     start, end = period
 
-    marker_key = f"{today.isoformat()}|{start.isoformat()}|{end.isoformat()}"
+    marker_key = f"{now.date().isoformat()}|{start.isoformat()}|{end.isoformat()}"
     autogen = state.load("billing_autogen")
     if marker_key in autogen:
         return

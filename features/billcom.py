@@ -95,6 +95,7 @@ async def create_invoice(customer_id: str, invoice_number: str, due_date: str, l
             "invoiceNumber": invoice_number,
             "dueDate": due_date,
             "invoiceLineItems": line_items,
+            "processingOptions": {"sendEmail": False},
         })
         r.raise_for_status()
         return r.json()
