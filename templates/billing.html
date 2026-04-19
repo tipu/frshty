@@ -107,20 +107,21 @@ function renderSchedule(sched) {
     const panel = document.getElementById('schedule-panel');
     if (!sched || !sched.enabled) { panel.classList.add('hidden'); return; }
     const cadence = sched.freq === 'monthly' ? 'Monthly' : 'Weekly';
-    let nextFire = 'n/a';
-    if (sched.next_fire) {
-        const dt = new Date(sched.next_fire);
-        nextFire = dt.toLocaleString('en-US', {weekday: 'short', month: 'short', day: 'numeric',
-            hour: 'numeric', minute: '2-digit', timeZone: 'America/Los_Angeles', timeZoneName: 'short'});
-    }
-    let last = '';
+    const fmtDateTime = iso => new Date(iso).toLocaleString('en-US', {weekday: 'short',
+        month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+        timeZone: 'America/Los_Angeles', timeZoneName: 'short'});
+    const fmtDate = ymd => new Date(ymd + 'T12:00:00').toLocaleDateString('en-US',
+        {weekday: 'short', month: 'short', day: 'numeric'});
+    const nextFire = sched.next_fire ? fmtDateTime(sched.next_fire) : 'n/a';
+    let last = 'never';
     if (sched.last_run) {
-        const r = sched.last_run.result;
-        const num = sched.last_run.number ? ` (${sched.last_run.number})` : '';
-        const err = sched.last_run.error ? ` — ${sched.last_run.error}` : '';
-        last = ` · Last: ${sched.last_run.date} ${r}${num}${err}`;
+        const lr = sched.last_run;
+        const period = (lr.start && lr.end) ? ` (${fmtDate(lr.start)} – ${fmtDate(lr.end)})` : '';
+        const num = lr.number ? ` ${lr.number}` : '';
+        const err = lr.error ? ` — ${lr.error}` : '';
+        last = `${fmtDate(lr.date)} · ${lr.result}${num}${period}${err}`;
     }
-    panel.textContent = `Schedule: ${cadence} · Next fire: ${nextFire}${last}`;
+    panel.textContent = `Schedule: ${cadence} · Next: ${nextFire} · Last: ${last}`;
     panel.classList.remove('hidden');
 }
 
@@ -225,7 +226,9 @@ function renderCalendar() {
                 const cls = inv.status === 'paid' ? '' : ' pending';
                 html += `<div class="invoice-cell"><div class="invoice-tag${cls}">${inv.number} · $${inv.amount.toLocaleString()}<br>${inv.status}</div></div>`;
             } else if (weekWorkDays > 0) {
-                const est = weekHours * client.rate + Object.values(client.extras || {}).reduce((a,b)=>a+b, 0);
+                const weekStartDay = monday.getUTCDate();
+                const extraSum = weekStartDay <= 7 ? Object.values(client.extras || {}).reduce((a,b)=>a+b, 0) : 0;
+                const est = weekHours * client.rate + extraSum;
                 html += `<div class="invoice-cell"><div class="invoice-tag missing" onclick="newInvoice('${weekStart}', '${weekEnd}', ${weekHours}, ${est}, event)">MISSING · ~$${est.toLocaleString()}<br>${weekWorkDays} days · ${weekHours}hrs</div></div>`;
             } else html += `<div class="invoice-cell"></div>`;
         }
@@ -244,7 +247,9 @@ function renderCalendar() {
             if (e && e.type === 'work') { wd++; wh += e.hours || 8; }
         }
         if (wd > 0) {
-            const amt = wh * client.rate + Object.values(client.extras || {}).reduce((a,b)=>a+b, 0);
+            const weekStartDay = monday.getUTCDate();
+            const extraSum = weekStartDay <= 7 ? Object.values(client.extras || {}).reduce((a,b)=>a+b, 0) : 0;
+            const amt = wh * client.rate + extraSum;
             missing.push({weekLabel: `${shortMonth(monday)} ${monday.getUTCDate()} – ${fri.getUTCDate()}`, date: `${shortMonth(fri)} ${fri.getUTCDate()}`, days: wd, hours: wh, amount: amt});
         }
     });
