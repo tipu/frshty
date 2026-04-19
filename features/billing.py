@@ -177,11 +177,19 @@ def _work_days_in(start: str, end: str) -> list[dict]:
     )
 
 
-def _totals(config: dict, work_entries: list[dict]) -> tuple[float, float]:
+def _extras_apply(config: dict, start_str: str) -> bool:
+    b = _billing_cfg(config)
+    if b.get("billing_freq") != "weekly":
+        return True
+    return date.fromisoformat(start_str).day <= 7
+
+
+def _totals(config: dict, work_entries: list[dict], start: str = "") -> tuple[float, float]:
     b = _billing_cfg(config)
     rate = b.get("rate", 0)
     hours = sum(e.get("hours", 8) for e in work_entries)
-    amount = hours * rate + sum((b.get("extras") or {}).values())
+    extras = sum((b.get("extras") or {}).values()) if (not start or _extras_apply(config, start)) else 0
+    amount = hours * rate + extras
     return hours, amount
 
 
@@ -236,8 +244,9 @@ def _build_line_items(config: dict, body: dict, work_entries: list[dict]) -> lis
                     "description": f"{d.strftime('%A')}, {d.strftime('%B')} {d.day}",
                 })
 
-    for label, price in (b.get("extras") or {}).items():
-        items.append({"quantity": 1, "price": price, "description": label.replace("_", " ")})
+    if _extras_apply(config, body["start"]):
+        for label, price in (b.get("extras") or {}).items():
+            items.append({"quantity": 1, "price": price, "description": label.replace("_", " ")})
 
     return items
 
@@ -269,7 +278,7 @@ async def create_invoice(config: dict, body: dict, source: str = "manual") -> di
         raise OverlapError(conflict)
 
     work_entries = _work_days_in(start, end)
-    hours, amount = _totals(config, work_entries)
+    hours, amount = _totals(config, work_entries, start)
     number = body.get("number") or (await next_invoice_number(config))["number"]
     due_date = body.get("date") or end
 
@@ -365,7 +374,7 @@ def _next_fire(now: datetime, freq: str) -> datetime | None:
     return None
 
 
-def get_schedule_status(config: dict) -> dict:
+async def get_schedule_status(config: dict) -> dict:
     enabled = _enabled(config)
     freq = _billing_cfg(config).get("billing_freq", "weekly")
     now = datetime.now(FIRE_TZ)
@@ -389,6 +398,23 @@ def get_schedule_status(config: dict) -> dict:
             "date": d, "start": start, "end": end, "result": result,
             "number": record.get("number"), "error": record.get("error"),
         }
+    else:
+        try:
+            invoices = await list_invoices(config)
+        except Exception:
+            invoices = []
+        dated = [i for i in invoices if i.get("date")]
+        if dated:
+            latest = max(dated, key=lambda i: (i.get("end") or i["date"], i["date"]))
+            last_run = {
+                "date": latest["date"],
+                "start": latest.get("start"),
+                "end": latest.get("end"),
+                "result": "created",
+                "number": latest.get("number"),
+                "error": None,
+                "source": latest.get("source"),
+            }
 
     return {
         "enabled": enabled,
@@ -441,7 +467,7 @@ def check(config: dict) -> None:
 
     try:
         number = asyncio.run(next_invoice_number(config))["number"]
-        hours, amount = _totals(config, work_entries)
+        hours, amount = _totals(config, work_entries, start.isoformat())
         inv = asyncio.run(create_invoice(config, {
             "number": number,
             "start": start.isoformat(),

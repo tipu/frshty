@@ -990,8 +990,8 @@ def api_billing_client():
 
 
 @app.get("/api/billing/schedule-status")
-def api_billing_schedule_status():
-    return billing.get_schedule_status(_config)
+async def api_billing_schedule_status():
+    return await billing.get_schedule_status(_config)
 
 
 @app.get("/api/billing/entries")
