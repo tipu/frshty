@@ -9,6 +9,9 @@ wheels/
 # Virtual environments
 .venv
 
+# Secrets
+.env
+
 # Job configs (contain tokens/account IDs)
 config/*.toml
 !config/example.toml
@@ -23,6 +26,7 @@ config/*.toml
 /review-snap.yaml
 /*.png
 .python-version
+.codex
 
 # Local docker-compose (use docker-compose.example.yml)
 /docker-compose.yml

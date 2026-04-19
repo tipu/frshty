@@ -108,6 +108,14 @@ async def list_invoices(max_results: int = 100) -> dict | list:
         return r.json()
 
 
+async def get_invoice(invoice_id: str) -> dict:
+    h = await _headers()
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.get(f"{BASE}/invoices/{invoice_id}", headers=h)
+        r.raise_for_status()
+        return r.json()
+
+
 async def list_customers(max_results: int = 100) -> dict | list:
     h = await _headers()
     async with httpx.AsyncClient(timeout=30) as c:
