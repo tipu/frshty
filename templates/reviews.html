@@ -69,8 +69,9 @@ async function load() {
     for (const r of reviews) {
         const ticket = extractTicket(r.branch);
         if (ticket) {
-            if (!groups[ticket]) groups[ticket] = { label: ticketLabel(r.branch), items: [] };
+            if (!groups[ticket]) groups[ticket] = { label: ticketLabel(r.branch), items: [], authors: new Set() };
             groups[ticket].items.push(r);
+            if (r.author) groups[ticket].authors.add(r.author);
         } else {
             ungrouped.push(r);
         }
@@ -78,8 +79,10 @@ async function load() {
 
     let html = '';
     for (const [ticket, group] of Object.entries(groups)) {
+        const authors = [...group.authors].join(', ');
+        const authorHtml = authors ? ` <span class="text-gray-500">by ${esc(authors)}</span>` : '';
         html += `<div class="mb-4">
-            <div class="text-sm text-gray-400 mb-1">${ticket} — ${group.label}</div>
+            <div class="text-sm text-gray-400 mb-1">${ticket} — ${group.label}${authorHtml}</div>
             <div class="space-y-1">${group.items.map(prCard).join('')}</div>
         </div>`;
     }

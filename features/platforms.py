@@ -171,6 +171,7 @@ class BitbucketPlatform:
                 "updated_on": data.get("updated_on", ""),
                 "title": data.get("title", ""),
                 "description": (data.get("description", "") or ""),
+                "author": data.get("author", {}).get("display_name", ""),
                 "mergeable": "CONFLICTING" if data.get("has_conflicts") else "MERGEABLE",
             }
 
@@ -432,7 +433,7 @@ class GitHubPlatform:
         full = self._resolve_repo(repo)
         result = self._run_gh([
             "pr", "view", str(pr_id), "--repo", full,
-            "--json", "state,updatedAt,mergeable",
+            "--json", "state,updatedAt,mergeable,author",
         ])
         if result.returncode != 0:
             return {"state": "OPEN", "updated_on": "", "mergeable": "UNKNOWN"}
@@ -440,6 +441,7 @@ class GitHubPlatform:
         return {
             "state": data.get("state", "OPEN"),
             "updated_on": data.get("updatedAt", ""),
+            "author": data.get("author", {}).get("login", ""),
             "mergeable": data.get("mergeable", "UNKNOWN"),
         }
 

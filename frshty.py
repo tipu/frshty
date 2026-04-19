@@ -316,6 +316,7 @@ def api_reviews_list():
         if info["state"] != "OPEN":
             return None
         r["updated_on"] = info["updated_on"]
+        r["author"] = info.get("author", "")
         return r
     with ThreadPoolExecutor(max_workers=10) as pool:
         results = [r for r in pool.map(check_open, candidates) if r]

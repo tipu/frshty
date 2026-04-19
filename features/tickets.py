@@ -310,11 +310,22 @@ def check(config: dict):
 
     open_prs = [] if discovery_only else _fetch_open_prs(config)
 
+    platform = None
     for key, ts in list(ticket_state.items()):
-        if key not in assigned_keys and ts.get("status") != TicketStatus.done:
-            ts["status"] = transition(ts.get("status", "new"), "done")
-            ts["done_at"] = datetime.now(timezone.utc).isoformat()
-            ticket_state[key] = ts
+        if key in assigned_keys or ts.get("status") == TicketStatus.done:
+            continue
+        prs = ts.get("prs", [])
+        if prs and not discovery_only:
+            if platform is None:
+                platform = make_platform(config)
+            try:
+                if any(platform.get_pr_state(p["repo"], p["id"]) == "OPEN" for p in prs):
+                    continue
+            except Exception:
+                continue
+        ts["status"] = transition(ts.get("status", "new"), "done")
+        ts["done_at"] = datetime.now(timezone.utc).isoformat()
+        ticket_state[key] = ts
 
     for ticket in assigned:
         key = ticket["key"]
@@ -660,7 +671,12 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
             links=pr_links, meta={"ticket": ticket["key"], "repo": repo["name"], "pr_url": pr_url})
 
         if pr_id:
-            prs.append({"repo": repo["name"], "id": pr_id, "url": pr_url})
+            author = ""
+            try:
+                author = platform.get_pr_info(repo["name"], pr_id).get("author", "")
+            except Exception:
+                pass
+            prs.append({"repo": repo["name"], "id": pr_id, "url": pr_url, "author": author})
 
     if not any_diff:
         log.emit("ticket_no_changes", f"No code changes needed for {_label(ticket['key'], ts)}, marking as merged",

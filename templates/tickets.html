@@ -67,6 +67,7 @@ async function load() {
                             <span class="badge badge-${t.status}">${t.status}</span>
                         </div>
                         <div class="text-xs text-gray-400 mt-1">${t.branch || ''}</div>
+                        ${(t.prs || []).map(p => p.author).filter(a => a).length ? `<div class="text-xs text-gray-500 mt-1">by ${[...new Set((t.prs || []).map(p => p.author).filter(a => a))].join(', ')}</div>` : ''}
                         ${t.pr_scheduled_at ? `<div class="text-xs text-yellow-400 mt-1">PR scheduled ${new Date(t.pr_scheduled_at).toLocaleDateString('en-US', {weekday:'short', month:'short', day:'numeric', hour:'numeric', minute:'2-digit'})}</div>` : ''}
                         ${t.external_status ? `<div class="text-xs text-gray-500 mt-1">${t.external_status}</div>` : ''}
                     </a>
