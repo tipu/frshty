@@ -68,6 +68,33 @@ def test_recurring_skip_ahead_on_missed_windows(tmp_path):
     assert new_run_at > datetime.now(timezone.utc), "next_run_at moved past now"
 
 
+def test_pst_future_run_at_is_not_misread_as_due(tmp_path):
+    """Regression: lexical SQL comparison of run_at with a PST offset vs
+    a UTC-formatted now string gave wrong results. Storing a future 7pm PDT
+    today (2026-04-20T19:00:00-07:00) while now is 1:56pm PDT today
+    (2026-04-20T20:56:06+00:00) used to look 'past' due to string ordering.
+    """
+    from zoneinfo import ZoneInfo
+    for mod in list(sys.modules):
+        if mod == "frshty" or mod.startswith("core.") or mod == "core":
+            sys.modules.pop(mod, None)
+
+    import core.db as db
+    import core.scheduler as scheduler
+
+    db.init(tmp_path / "t.db", ROOT / "migrations")
+
+    pst = ZoneInfo("America/Los_Angeles")
+    fake_now_utc = datetime(2026, 4, 20, 20, 56, 6, tzinfo=timezone.utc)
+    # 7 PM today PDT is future of 1:56 PM PDT (20:56 UTC) — must NOT fire
+    future_7pm_pdt = datetime(2026, 4, 20, 19, 0, 0, tzinfo=pst)
+    scheduler.upsert_recurring("t", "timesheet_check", "timesheet_check",
+                                cadence="daily_19pst", next_run_at=future_7pm_pdt)
+
+    fired = scheduler.fire_due_recurring(now=fake_now_utc)
+    assert fired == [], f"future 7pm PDT should not have fired at 1:56pm PDT, got {fired}"
+
+
 def test_oneshot_coexists_with_recurring(tmp_path):
     """Both kinds live in the same scheduler table and are listable together."""
     for mod in list(sys.modules):
@@ -100,6 +127,7 @@ def test_oneshot_coexists_with_recurring(tmp_path):
 if __name__ == "__main__":
     tests = [test_recurring_fires_and_advances,
              test_recurring_skip_ahead_on_missed_windows,
+             test_pst_future_run_at_is_not_misread_as_due,
              test_oneshot_coexists_with_recurring]
     for t in tests:
         with tempfile.TemporaryDirectory() as d:
