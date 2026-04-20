@@ -29,8 +29,9 @@ def emit(event: str, summary: str, links: dict | None = None, meta: dict | None 
         "links": clean_links,
         "meta": meta or {},
     }
-    with open(_log_path, "a") as f:
-        f.write(json.dumps(record) + "\n")
+    if _log_path is not None:
+        with open(_log_path, "a") as f:
+            f.write(json.dumps(record) + "\n")
     print(f"[{_job_key}] {event}: {summary}", flush=True)
     return record
 
