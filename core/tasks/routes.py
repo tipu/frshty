@@ -16,12 +16,11 @@ def _cron_routes(event: dict, registries: dict) -> list[dict]:
         if features.get("review_prs"):
             jobs.append({"instance_key": instance_key, "task": "poll_own_prs"})
             jobs.append({"instance_key": instance_key, "task": "poll_reviewer"})
-        if features.get("timesheet"):
-            jobs.append({"instance_key": instance_key, "task": "timesheet_check"})
         if features.get("slack"):
             jobs.append({"instance_key": instance_key, "task": "slack_scan"})
-        if features.get("billing"):
-            jobs.append({"instance_key": instance_key, "task": "billing_check"})
+        # billing_check and timesheet_check are deadline-driven; the beat
+        # thread in core/beat.py owns their firing via the scheduler table.
+        # scheduler_check handles legacy oneshot rows that aren't recurring.
         jobs.append({"instance_key": instance_key, "task": "scheduler_check"})
     return jobs
 
