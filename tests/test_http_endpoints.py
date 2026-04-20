@@ -78,16 +78,9 @@ def test_endpoints_round_trip(tmp_path):
     rt.start_events([config], db_path=db_path, migrations_dir=migrations,
                      worker_count=1, cron_interval=3600)
 
-    tickets_json = {
-        "T-1": {"status": "pr_failed", "slug": "t-1", "branch": "danial/t-1"},
-    }
-    (config["_state_dir"] / "tickets.json").write_text(json.dumps(tickets_json))
-    now = datetime.now(timezone.utc).isoformat()
-    db.execute(
-        "INSERT OR REPLACE INTO tickets(instance_key, ticket_key, status, slug, branch, auto_pr, updated_at)"
-        " VALUES ('tiny', 'T-1', 'pr_failed', 't-1', 'danial/t-1', 0, ?)",
-        (now,),
-    )
+    state.save("tickets", {
+        "T-1": {"status": "pr_failed", "slug": "t-1", "branch": "danial/t-1", "auto_pr": False},
+    })
 
     import frshty
     from fastapi.testclient import TestClient
@@ -98,30 +91,22 @@ def test_endpoints_round_trip(tmp_path):
     assert r.json()["target"] == "pr_ready"
 
     deadline = time.time() + 5
-    final = None
+    ticket = {}
     while time.time() < deadline:
-        row = db.query_one(
-            "SELECT status FROM tickets WHERE instance_key='tiny' AND ticket_key='T-1'"
-        )
-        if row and row["status"] == "pr_ready":
-            final = row
+        ticket = state.load("tickets").get("T-1", {})
+        if ticket.get("status") == "pr_ready":
             break
         time.sleep(0.1)
-    assert final and final["status"] == "pr_ready", f"set_state did not land: {final}"
+    assert ticket.get("status") == "pr_ready", f"set_state did not land: {ticket}"
 
     r = client.patch("/api/tickets/T-1/auto-pr", json={"auto_pr": True})
     assert r.status_code == 200, r.text
     assert r.json()["auto_pr"] is True
-    row = db.query_one("SELECT auto_pr FROM tickets WHERE ticket_key='T-1'")
-    assert row["auto_pr"] == 1
+    assert state.load("tickets")["T-1"]["auto_pr"] is True
 
     r = client.patch("/api/tickets/T-1/auto-pr", json={"auto_pr": False})
     assert r.status_code == 200
 
-    import core.db as dbb
-    dbb.execute(
-        "UPDATE tickets SET status='pr_created' WHERE ticket_key='T-1'"
-    )
     state_data = state.load("tickets")
     state_data["T-1"]["status"] = "pr_created"
     state.save("tickets", state_data)
@@ -242,9 +227,9 @@ def test_multi_hostname_routing(tmp_path):
     db.init(db_path, migrations)
 
     configs = [cfg_mod.load_config(str(a)), cfg_mod.load_config(str(b))]
-    # Redirect state dirs into tmp_path instead of ~/.frshty/<key>
+    # Redirect state dirs into tmp_path with name == job.key so state.use derives the right instance_key
     for c in configs:
-        c["_state_dir"] = tmp_path / f"{c['job']['key']}-state"
+        c["_state_dir"] = tmp_path / c["job"]["key"]
         c["_state_dir"].mkdir(parents=True, exist_ok=True)
     rt._started = False
     rt._instances = None
@@ -264,12 +249,13 @@ def test_multi_hostname_routing(tmp_path):
     frshty._configs_by_host["alpha.localhost"] = configs[0]
     frshty._configs_by_host["beta.localhost"] = configs[1]
 
-    (configs[0]["_state_dir"] / "tickets.json").write_text(json.dumps({
-        "A-1": {"status": "pr_ready", "slug": "a-1", "branch": "x"},
-    }))
-    (configs[1]["_state_dir"] / "tickets.json").write_text(json.dumps({
-        "B-1": {"status": "pr_failed", "slug": "b-1", "branch": "y"},
-    }))
+    # Seed each instance's tickets via contextvar overlay so sqlite gets the right instance_key
+    tok_a = state.use(configs[0]["_state_dir"])
+    state.save("tickets", {"A-1": {"status": "pr_ready", "slug": "a-1", "branch": "x"}})
+    state.reset(tok_a)
+    tok_b = state.use(configs[1]["_state_dir"])
+    state.save("tickets", {"B-1": {"status": "pr_failed", "slug": "b-1", "branch": "y"}})
+    state.reset(tok_b)
 
     from fastapi.testclient import TestClient
     client = TestClient(frshty.app)

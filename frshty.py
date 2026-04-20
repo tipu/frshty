@@ -1020,13 +1020,6 @@ def api_set_auto_pr(key: str, body: dict):
     ts_row["auto_pr"] = bool(body.get("auto_pr"))
     tickets[key] = ts_row
     state.save("tickets", tickets)
-    if _events_enabled():
-        import core.db as db
-        instance_key = _config.get("job", {}).get("key", "")
-        db.execute(
-            "UPDATE tickets SET auto_pr=? WHERE instance_key=? AND ticket_key=?",
-            (1 if ts_row["auto_pr"] else 0, instance_key, key),
-        )
     return {"status": "ok", "auto_pr": ts_row["auto_pr"]}
 
 

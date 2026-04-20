@@ -2,16 +2,17 @@ import re
 from pathlib import Path
 from typing import Callable
 
-import core.db as db
+import core.state as state
+
+
+def _ticket(ctx) -> dict:
+    tickets = state.load("tickets")
+    return tickets.get(ctx.ticket_key or "", {})
 
 
 def status_is(*states: str) -> Callable:
     def check(ctx):
-        row = db.query_one(
-            "SELECT status FROM tickets WHERE instance_key=? AND ticket_key=?",
-            (ctx.instance_key, ctx.ticket_key),
-        )
-        cur = row["status"] if row else None
+        cur = _ticket(ctx).get("status")
         return (cur in states, f"status={cur} not in {states}")
     return check
 
@@ -21,15 +22,12 @@ def status_in(*states: str) -> Callable:
 
 
 def auto_pr_true(ctx) -> tuple[bool, str]:
-    row = db.query_one(
-        "SELECT auto_pr FROM tickets WHERE instance_key=? AND ticket_key=?",
-        (ctx.instance_key, ctx.ticket_key),
-    )
-    if not row:
+    t = _ticket(ctx)
+    if not t:
         return (False, "ticket not found")
-    val = row["auto_pr"]
+    val = t.get("auto_pr")
     if val is None:
-        val = 1 if ctx.config.get("pr", {}).get("auto_pr") else 0
+        val = bool(ctx.config.get("pr", {}).get("auto_pr"))
     return (bool(val), f"auto_pr={bool(val)}")
 
 
@@ -42,11 +40,8 @@ def feature_enabled(name: str) -> Callable:
 
 def _ticket_dir(ctx) -> Path:
     ws = ctx.config["workspace"]
-    slug_row = db.query_one(
-        "SELECT slug FROM tickets WHERE instance_key=? AND ticket_key=?",
-        (ctx.instance_key, ctx.ticket_key),
-    )
-    slug = slug_row["slug"] if slug_row else (ctx.ticket_key or "")
+    t = _ticket(ctx)
+    slug = t.get("slug") or (ctx.ticket_key or "")
     root = Path(ws["root"]) if isinstance(ws["root"], str) else ws["root"]
     return root / ws["tickets_dir"] / slug
 
