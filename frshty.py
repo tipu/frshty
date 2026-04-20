@@ -1420,7 +1420,12 @@ def main():
     src = Path(__file__).parent
     reload_dirs = [str(src / d) for d in ("core", "features", "templates") if (src / d).exists()] if reload else None
     log_level = _config["job"].get("log_level", "info")
-    uvicorn.run("frshty:app", host=host, port=port, log_level=log_level, reload=reload, reload_dirs=reload_dirs)
+    if args.multi:
+        # Pass app object directly so _configs_by_host populated in __main__ is
+        # visible to middleware (vs. uvicorn re-importing frshty as a fresh module).
+        uvicorn.run(app, host=host, port=port, log_level=log_level)
+    else:
+        uvicorn.run("frshty:app", host=host, port=port, log_level=log_level, reload=reload, reload_dirs=reload_dirs)
 
 
 if __name__ == "__main__":
