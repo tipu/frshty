@@ -221,6 +221,80 @@ def test_multi_registers_all_instances(tmp_path):
     rt.stop_events()
 
 
+def test_multi_hostname_routing(tmp_path):
+    """Two configs behind --multi; each hostname sees its own state dir."""
+    a = _write_config(tmp_path, "alpha", 17101)
+    b = _write_config(tmp_path, "beta", 17102)
+
+    for mod in list(sys.modules):
+        if mod == "frshty" or mod.startswith("core.") or mod == "core":
+            sys.modules.pop(mod, None)
+
+    import core.db as db
+    import core.runtime as rt
+    import core.config as cfg_mod
+    import core.state as state
+    import core.log as log
+    from core import tasks  # noqa: F401
+
+    db_path = tmp_path / "multi-host.db"
+    migrations = ROOT / "migrations"
+    db.init(db_path, migrations)
+
+    configs = [cfg_mod.load_config(str(a)), cfg_mod.load_config(str(b))]
+    # Redirect state dirs into tmp_path instead of ~/.frshty/<key>
+    for c in configs:
+        c["_state_dir"] = tmp_path / f"{c['job']['key']}-state"
+        c["_state_dir"].mkdir(parents=True, exist_ok=True)
+    rt._started = False
+    rt._instances = None
+    rt._pool = None
+    rt._dispatcher = None
+    rt.start_events(configs, db_path=db_path, migrations_dir=migrations,
+                     worker_count=1, cron_interval=3600)
+
+    # Simulate main() populating hostname map + primary config
+    primary = configs[0]
+    state.init(primary["_state_dir"])
+    log.init(primary["_state_dir"], primary["job"]["key"])
+
+    import frshty
+    frshty._set_primary_config(primary)
+    frshty._configs_by_host.clear()
+    frshty._configs_by_host["alpha.localhost"] = configs[0]
+    frshty._configs_by_host["beta.localhost"] = configs[1]
+
+    (configs[0]["_state_dir"] / "tickets.json").write_text(json.dumps({
+        "A-1": {"status": "pr_ready", "slug": "a-1", "branch": "x"},
+    }))
+    (configs[1]["_state_dir"] / "tickets.json").write_text(json.dumps({
+        "B-1": {"status": "pr_failed", "slug": "b-1", "branch": "y"},
+    }))
+
+    from fastapi.testclient import TestClient
+    client = TestClient(frshty.app)
+
+    r_a = client.get("/api/config", headers={"host": "alpha.localhost"})
+    assert r_a.status_code == 200, r_a.text
+    assert r_a.json()["job"]["key"] == "alpha"
+
+    r_b = client.get("/api/config", headers={"host": "beta.localhost"})
+    assert r_b.status_code == 200, r_b.text
+    assert r_b.json()["job"]["key"] == "beta"
+
+    r_list_a = client.get("/api/tickets/list", headers={"host": "alpha.localhost"})
+    assert r_list_a.status_code == 200, r_list_a.text
+    assert "A-1" in r_list_a.json(), f"expected A-1 in alpha tickets, got {r_list_a.json()}"
+    assert "B-1" not in r_list_a.json(), "alpha should not see beta ticket"
+
+    r_list_b = client.get("/api/tickets/list", headers={"host": "beta.localhost"})
+    assert r_list_b.status_code == 200, r_list_b.text
+    assert "B-1" in r_list_b.json(), f"expected B-1 in beta tickets, got {r_list_b.json()}"
+    assert "A-1" not in r_list_b.json(), "beta should not see alpha ticket"
+
+    rt.stop_events()
+
+
 def test_multi_rejects_duplicate_slack_workspace(tmp_path):
     a = _write_config(tmp_path, "inst-a", 18001)
     b_path = _write_config(tmp_path, "inst-b", 18002)
@@ -258,7 +332,7 @@ def test_multi_rejects_duplicate_slack_workspace(tmp_path):
 if __name__ == "__main__":
     import tempfile
     tests = [test_endpoints_round_trip, test_multi_registers_all_instances,
-             test_multi_rejects_duplicate_slack_workspace]
+             test_multi_hostname_routing, test_multi_rejects_duplicate_slack_workspace]
     for t in tests:
         with tempfile.TemporaryDirectory() as d:
             t(Path(d))

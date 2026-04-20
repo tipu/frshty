@@ -48,13 +48,52 @@ events.register_action("schedule_pr", _schedule_pr_action)
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
 
-_config: dict = {}
+from contextvars import ContextVar as _ContextVar
+_cv_config: _ContextVar[dict] = _ContextVar("frshty_config", default={})
+
+
+class _ConfigView(dict):
+    """Dict-subclass proxy that resolves to the active config for the current request.
+
+    In single-instance mode, the contextvar default is set at boot and stays.
+    In --multi mode, the hostname middleware sets it per request. dict is the
+    base class so FastAPI handlers typed as `dict` accept the view without
+    static-checker noise.
+    """
+    def _d(self) -> dict:
+        return _cv_config.get()
+    def __getitem__(self, k): return self._d()[k]
+    def __setitem__(self, k, v): self._d()[k] = v
+    def __delitem__(self, k): del self._d()[k]
+    def __contains__(self, k): return k in self._d()
+    def __iter__(self): return iter(self._d())
+    def __len__(self): return len(self._d())
+    def __bool__(self): return bool(self._d())
+    def __repr__(self): return repr(self._d())
+    def get(self, k, default=None): return self._d().get(k, default)
+    def items(self): return self._d().items()  # type: ignore[override]
+    def keys(self): return self._d().keys()  # type: ignore[override]
+    def values(self): return self._d().values()  # type: ignore[override]
+    def setdefault(self, k, d=None): return self._d().setdefault(k, d)
+    def update(self, *a, **kw): return self._d().update(*a, **kw)
+    def pop(self, k, *a): return self._d().pop(k, *a)
+    def copy(self): return self._d().copy()
+
+
+_config: _ConfigView = _ConfigView()
+_configs_by_host: dict[str, dict] = {}
 _worker_proc = None
 
+
+def _set_primary_config(c: dict) -> None:
+    _cv_config.set(c)
+
+
 if len(sys.argv) >= 2 and Path(sys.argv[1]).exists():
-    _config = cfg.load_config(sys.argv[1])
-    state.init(_config["_state_dir"])
-    log.init(_config["_state_dir"], _config["job"]["key"])
+    _primary = cfg.load_config(sys.argv[1])
+    _set_primary_config(_primary)
+    state.init(_primary["_state_dir"])
+    log.init(_primary["_state_dir"], _primary["job"]["key"])
 
 
 @contextlib.asynccontextmanager
@@ -71,6 +110,31 @@ async def _lifespan(a):
 
 app = FastAPI(lifespan=_lifespan)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+@app.middleware("http")
+async def resolve_instance_by_host(request, call_next):
+    """In --multi mode, pick the active config by matching the request Host header.
+
+    Unknown hosts fall through to whatever config is currently the contextvar
+    default (typically the primary). Single-instance mode is a no-op.
+    """
+    config_token = None
+    state_token = None
+    if _configs_by_host:
+        host = (request.headers.get("host") or "").split(":")[0].lower()
+        target = _configs_by_host.get(host)
+        if target is not None:
+            config_token = _cv_config.set(target)
+            state_token = state.use(target["_state_dir"])
+    try:
+        response = await call_next(request)
+    finally:
+        if state_token is not None:
+            state.reset(state_token)
+        if config_token is not None:
+            _cv_config.reset(config_token)
+    return response
 
 
 @app.middleware("http")
@@ -1305,16 +1369,25 @@ def main():
 
     _ensure_path()
 
-    global _config
-    if args.multi:
-        configs = [cfg.load_config(p) for p in args.multi]
-        _config = configs[0]
-    else:
-        configs = [cfg.load_config(args.config)]
-        _config = configs[0]
+    configs = [cfg.load_config(p) for p in (args.multi or [args.config])]
+    primary = configs[0]
+    _set_primary_config(primary)
 
-    state.init(_config["_state_dir"])
-    log.init(_config["_state_dir"], _config["job"]["key"])
+    if args.multi:
+        for c in configs:
+            host = c.get("job", {}).get("host", "")
+            if host.startswith("http://"):
+                host = host[len("http://"):]
+            elif host.startswith("https://"):
+                host = host[len("https://"):]
+            host = host.split(":")[0].split("/")[0].lower()
+            if host:
+                if host in _configs_by_host:
+                    raise ValueError(f"hostname {host} claimed by two configs")
+                _configs_by_host[host] = c
+
+    state.init(primary["_state_dir"])
+    log.init(primary["_state_dir"], primary["job"]["key"])
 
     if args.multi or os.environ.get("FRSHTY_EVENTS") == "1":
         try:
