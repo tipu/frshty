@@ -862,6 +862,91 @@ def api_discard_ticket(key: str):
     return {"status": "discarded"}
 
 
+def _events_enabled() -> bool:
+    try:
+        import core.runtime as _rt
+        return _rt.instances() is not None
+    except Exception:
+        return False
+
+
+@app.get("/api/tickets/{key}/jobs")
+def api_ticket_jobs(key: str, limit: int = 100):
+    if not _events_enabled():
+        return []
+    import core.queue as q
+    instance_key = _config.get("job", {}).get("key", "")
+    return q.jobs_for_ticket(instance_key, key, limit)
+
+
+@app.post("/api/tickets/{key}/retry-job")
+def api_retry_job(key: str, body: dict):
+    if not _events_enabled():
+        return JSONResponse({"error": "events not enabled"}, status_code=400)
+    import core.queue as q
+    instance_key = _config.get("job", {}).get("key", "")
+    job_id = body.get("job_id")
+    if job_id is None:
+        jobs = q.jobs_for_ticket(instance_key, key, limit=50)
+        failed = [j for j in jobs if j["status"] in ("failed", "skipped")]
+        if not failed:
+            return JSONResponse({"error": "no failed job to retry"}, status_code=404)
+        job = failed[0]
+    else:
+        import core.db as db
+        row = db.query_one(
+            "SELECT id, task, payload FROM jobs WHERE id=? AND instance_key=? AND ticket_key=?",
+            (int(job_id), instance_key, key),
+        )
+        if not row:
+            return JSONResponse({"error": "job not found"}, status_code=404)
+        job = {"task": row["task"], "payload": row["payload"]}
+    import json as _json
+    payload = job["payload"] if isinstance(job["payload"], dict) else _json.loads(job["payload"] or "{}")
+    q.emit_event(source="ui", kind="ui_retry",
+                 payload={"task": job["task"], "payload": payload, "ticket_key": key},
+                 instance_key=instance_key)
+    return {"status": "enqueued", "task": job["task"]}
+
+
+@app.post("/api/tickets/{key}/notes")
+def api_ticket_notes(key: str, body: dict):
+    note = (body.get("note") or "").strip()
+    if not note:
+        return JSONResponse({"error": "note required"}, status_code=400)
+    if not _events_enabled():
+        return JSONResponse({"error": "events not enabled"}, status_code=400)
+    import core.queue as q
+    instance_key = _config.get("job", {}).get("key", "")
+    q.emit_event(source="ui", kind="ui_notes",
+                 payload={"note": note, "ticket_key": key},
+                 instance_key=instance_key)
+    return {"status": "enqueued"}
+
+
+@app.patch("/api/tickets/{key}/auto-pr")
+def api_set_auto_pr(key: str, body: dict):
+    tickets = state.load("tickets")
+    ts_row = tickets.get(key)
+    if not ts_row:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    status_val = ts_row.get("status", "")
+    gate = {"pr_created", "in_review", "merged", "done"}
+    if status_val in gate:
+        return JSONResponse({"error": f"auto_pr locked; status={status_val}"}, status_code=400)
+    ts_row["auto_pr"] = bool(body.get("auto_pr"))
+    tickets[key] = ts_row
+    state.save("tickets", tickets)
+    if _events_enabled():
+        import core.db as db
+        instance_key = _config.get("job", {}).get("key", "")
+        db.execute(
+            "UPDATE tickets SET auto_pr=? WHERE instance_key=? AND ticket_key=?",
+            (1 if ts_row["auto_pr"] else 0, instance_key, key),
+        )
+    return {"status": "ok", "auto_pr": ts_row["auto_pr"]}
+
+
 @app.post("/api/tickets/{key}/start-dev")
 def api_start_dev(key: str):
     tickets = state.load("tickets")
@@ -1197,6 +1282,13 @@ def main():
 
     state.init(_config["_state_dir"])
     log.init(_config["_state_dir"], _config["job"]["key"])
+
+    if os.environ.get("FRSHTY_EVENTS") == "1":
+        try:
+            import core.runtime as _rt
+            _rt.start_events([_config])
+        except Exception as e:
+            log.emit("events_boot_failed", f"{type(e).__name__}: {e}")
 
     port = _config["job"]["port"]
 
