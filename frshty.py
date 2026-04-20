@@ -1198,6 +1198,11 @@ async def api_billing_next_number():
     return await billing.next_invoice_number(_config)
 
 
+@app.get("/api/billing/preview")
+def api_billing_preview(start: str, end: str):
+    return {"descriptions": billing.preview_descriptions(_config, start, end)}
+
+
 def _reload_config(config: dict):
     try:
         fresh = cfg.load_config(str(config["_config_path"]))
