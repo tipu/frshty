@@ -1290,29 +1290,43 @@ def _ensure_path():
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: frshty.py <config.toml>")
-        sys.exit(1)
+    import argparse
+    parser = argparse.ArgumentParser(prog="frshty.py")
+    parser.add_argument("config", nargs="?", help="single-instance config.toml path")
+    parser.add_argument("--multi", nargs="+", metavar="CONFIG",
+                        help="boot all listed configs in one process with shared event system")
+    parser.add_argument("--port", type=int, default=None,
+                        help="override listen port (multi mode default: first config's port)")
+    parser.add_argument("--host", default=None, help="override bind host")
+    args = parser.parse_args()
+
+    if not args.config and not args.multi:
+        parser.error("pass a config path or --multi <config1> <config2> ...")
 
     _ensure_path()
 
     global _config
-    _config = cfg.load_config(sys.argv[1])
+    if args.multi:
+        configs = [cfg.load_config(p) for p in args.multi]
+        _config = configs[0]
+    else:
+        configs = [cfg.load_config(args.config)]
+        _config = configs[0]
 
     state.init(_config["_state_dir"])
     log.init(_config["_state_dir"], _config["job"]["key"])
 
-    if os.environ.get("FRSHTY_EVENTS") == "1":
+    if args.multi or os.environ.get("FRSHTY_EVENTS") == "1":
         try:
             import core.runtime as _rt
-            _rt.start_events([_config])
+            _rt.start_events(configs)
         except Exception as e:
             log.emit("events_boot_failed", f"{type(e).__name__}: {e}")
 
-    port = _config["job"]["port"]
+    port = args.port or _config["job"]["port"]
 
-    host = _config["job"].get("bind", "127.0.0.1")
-    reload = _config["job"].get("reload", True)
+    host = args.host or _config["job"].get("bind", "127.0.0.1")
+    reload = False if args.multi else _config["job"].get("reload", True)
     src = Path(__file__).parent
     reload_dirs = [str(src / d) for d in ("core", "features", "templates") if (src / d).exists()] if reload else None
     log_level = _config["job"].get("log_level", "info")
