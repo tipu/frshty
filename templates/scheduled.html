@@ -15,6 +15,7 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
 .badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; }
 .badge-scheduled { background: #713f12; color: #fde047; }
 .badge-ci { background: #1e3a5f; color: #93c5fd; }
+.badge-recurring { background: #14532d; color: #86efac; }
 </style>
 </head>
 <body class="p-4">
@@ -102,6 +103,21 @@ async function load() {
                     <button onclick="reschedule('${item.key}')" class="bg-blue-800 hover:bg-blue-700 text-blue-200 px-2 py-0.5 rounded text-xs">Save</button>
                 </div>
                 ${item.meta.branch ? `<div class="text-xs text-gray-500 mt-1">${item.meta.branch}</div>` : ''}
+            </div>`;
+        }
+        if (item.type === 'recurring') {
+            const cadenceLabel = {weekly: 'Weekly', monthly: 'Monthly', daily_19pst: 'Daily 7pm PT'}[item.cadence] || item.cadence;
+            const lastRun = item.last_run_at ? `<div class="text-xs text-gray-500 mt-1">Last fired ${fmtDate(item.last_run_at)} (${relTime(item.last_run_at)})</div>` : '<div class="text-xs text-gray-500 mt-1">Never fired</div>';
+            return `<div class="card p-4">
+                <div class="flex items-center gap-2 mb-1">
+                    <span class="badge badge-recurring">${cadenceLabel}</span>
+                    <span class="font-bold text-sm">${item.task}</span>
+                </div>
+                <div class="flex items-center gap-2 text-xs text-gray-400 mt-1">
+                    <span>fires ${fmtDate(item.run_at)}</span>
+                    <span class="text-yellow-400">(${relTime(item.run_at)})</span>
+                </div>
+                ${lastRun}
             </div>`;
         }
         if (item.type === 'ci_pending') {
