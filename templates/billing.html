@@ -268,6 +268,11 @@ function renderCalendar() {
     cal.innerHTML = html;
 }
 
+async function refreshEntries() {
+    entries = await api('/api/billing/entries');
+    renderCalendar();
+}
+
 async function cycleDay(ds) {
     const entry = entries.find(e => e.date === ds);
     if (!entry) return;
@@ -277,7 +282,7 @@ async function cycleDay(ds) {
         if (next === 'delete') await api(`/api/billing/entries/${ds}`, {method: 'DELETE'});
         else await api('/api/billing/entries', {method: 'POST', headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({date: ds, type: next, hours: next === 'work' ? 8 : 0})});
-        await load();
+        await refreshEntries();
     } catch (e) { showMsg(e.message, true); }
 }
 
@@ -285,7 +290,7 @@ async function createDay(ds) {
     try {
         await api('/api/billing/entries', {method: 'POST', headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({date: ds, type: 'work', hours: 8})});
-        await load();
+        await refreshEntries();
     } catch (e) { showMsg(e.message, true); }
 }
 
@@ -300,7 +305,7 @@ async function fillWeek(mondayStr) {
     if (!batch.length) return;
     try {
         await api('/api/billing/entries', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(batch)});
-        await load();
+        await refreshEntries();
     } catch (e) { showMsg(e.message, true); }
 }
 
