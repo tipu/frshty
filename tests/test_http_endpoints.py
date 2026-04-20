@@ -137,8 +137,129 @@ def test_endpoints_round_trip(tmp_path):
     rt.stop_events()
 
 
+def _write_config(tmp_path: Path, key: str, port: int) -> Path:
+    cfg_path = tmp_path / f"{key}.toml"
+    state_dir = tmp_path / f"{key}-state"
+    state_dir.mkdir()
+    (state_dir / "logs").mkdir()
+    cfg_path.write_text(f"""
+[job]
+key = "{key}"
+platform = "github"
+ticket_system = "linear"
+port = {port}
+host = "http://{key}.localhost"
+
+[github]
+repo = "fake/{key}"
+
+[linear]
+token = "x"
+assignee_email = "{key}@x.com"
+
+[workspace]
+root = "{tmp_path}"
+repos = ["repo"]
+tickets_dir = "tickets"
+base_branch = "main"
+
+[pr]
+auto_pr = false
+
+[slack]
+workspace = "ws-{key}"
+""")
+    return cfg_path
+
+
+def test_multi_registers_all_instances(tmp_path):
+    """--multi boot path: start_events with two configs registers both instances and starts one pool."""
+    a = _write_config(tmp_path, "alpha", 17001)
+    b = _write_config(tmp_path, "beta", 17002)
+
+    for mod in list(sys.modules):
+        if mod == "frshty" or mod.startswith("core.") or mod == "core":
+            sys.modules.pop(mod, None)
+
+    import core.db as db
+    import core.runtime as rt
+    import core.config as cfg_mod
+    import core.queue as q
+    from core import tasks  # noqa: F401
+
+    db_path = tmp_path / "multi.db"
+    migrations = ROOT / "migrations"
+    db.init(db_path, migrations)
+
+    configs = [cfg_mod.load_config(str(a)), cfg_mod.load_config(str(b))]
+    rt._started = False
+    rt._instances = None
+    rt._pool = None
+    rt._dispatcher = None
+    instances = rt.start_events(configs, db_path=db_path, migrations_dir=migrations,
+                                 worker_count=1, cron_interval=3600)
+
+    assert sorted(instances.keys()) == ["alpha", "beta"], instances.keys()
+    assert instances.route_slack("ws-alpha") == "alpha"
+    assert instances.route_slack("ws-beta") == "beta"
+    assert instances.route_slack("nope") is None
+
+    q.emit_event(source="cron", kind="cron_tick", payload={}, instance_key="alpha")
+    q.emit_event(source="cron", kind="cron_tick", payload={}, instance_key="beta")
+
+    deadline = time.time() + 5
+    got = {"alpha": False, "beta": False}
+    while time.time() < deadline and not all(got.values()):
+        rows = db.query_all(
+            "SELECT instance_key FROM jobs WHERE status IN ('queued','running','ok','skipped','failed')"
+        )
+        for r in rows:
+            got[r["instance_key"]] = True
+        time.sleep(0.1)
+    assert got["alpha"] and got["beta"], f"expected jobs for both instances, got {got}"
+
+    rt.stop_events()
+
+
+def test_multi_rejects_duplicate_slack_workspace(tmp_path):
+    a = _write_config(tmp_path, "inst-a", 18001)
+    b_path = _write_config(tmp_path, "inst-b", 18002)
+    b_content = b_path.read_text().replace('workspace = "ws-inst-b"', 'workspace = "ws-inst-a"')
+    b_path.write_text(b_content)
+
+    for mod in list(sys.modules):
+        if mod == "frshty" or mod.startswith("core.") or mod == "core":
+            sys.modules.pop(mod, None)
+
+    import core.db as db
+    import core.runtime as rt
+    import core.config as cfg_mod
+
+    db_path = tmp_path / "dup.db"
+    migrations = ROOT / "migrations"
+    db.init(db_path, migrations)
+
+    configs = [cfg_mod.load_config(str(a)), cfg_mod.load_config(str(b_path))]
+    rt._started = False
+    rt._instances = None
+    rt._pool = None
+    rt._dispatcher = None
+    raised = False
+    try:
+        rt.start_events(configs, db_path=db_path, migrations_dir=migrations,
+                         worker_count=1, cron_interval=3600)
+    except ValueError as e:
+        raised = "already claimed" in str(e)
+    finally:
+        rt.stop_events()
+    assert raised, "expected ValueError on duplicate slack workspace"
+
+
 if __name__ == "__main__":
     import tempfile
-    with tempfile.TemporaryDirectory() as d:
-        test_endpoints_round_trip(Path(d))
-        print("test_endpoints_round_trip: PASS")
+    tests = [test_endpoints_round_trip, test_multi_registers_all_instances,
+             test_multi_rejects_duplicate_slack_workspace]
+    for t in tests:
+        with tempfile.TemporaryDirectory() as d:
+            t(Path(d))
+            print(f"{t.__name__}: PASS")
