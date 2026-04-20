@@ -42,10 +42,19 @@ def schedule(key: str, action: str, run_at: datetime, meta: dict | None = None) 
     db.execute(
         "INSERT INTO scheduler(instance_key, key, run_at, data) VALUES (?, ?, ?, ?) "
         "ON CONFLICT(instance_key, key) DO UPDATE SET run_at=excluded.run_at, data=excluded.data",
-        (instance_key, key, run_at.isoformat(), db.dump_json(data)),
+        (instance_key, key, _to_utc_iso(run_at), db.dump_json(data)),
     )
     log.emit("scheduled", f"Scheduled {action} for {key} at {run_at.strftime('%a %b %d %I:%M%p')}",
-             meta={"ticket": key, "action": action, "run_at": run_at.isoformat()})
+             meta={"ticket": key, "action": action, "run_at": _to_utc_iso(run_at)})
+
+
+def _to_utc_iso(dt: datetime) -> str:
+    """Normalize any datetime to a UTC ISO string so lexical SQL comparisons
+    against UTC 'now' are correct. Stored timestamps with PST offsets
+    (-07:00) lexically compare wrong against UTC +00:00."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat()
 
 
 def upsert_recurring(instance_key: str, key: str, task: str, cadence: str,
@@ -71,7 +80,7 @@ def upsert_recurring(instance_key: str, key: str, task: str, cadence: str,
     db.execute(
         "INSERT INTO scheduler(instance_key, key, run_at, data) VALUES (?, ?, ?, ?) "
         "ON CONFLICT(instance_key, key) DO UPDATE SET run_at=excluded.run_at, data=excluded.data",
-        (instance_key, key, next_run_at.isoformat(), db.dump_json(data)),
+        (instance_key, key, _to_utc_iso(next_run_at), db.dump_json(data)),
     )
 
 
@@ -136,7 +145,7 @@ def fire_due_recurring(enqueue_fn: Callable[[str, str, dict, str | None], int] |
         due_rows = conn.execute(
             "SELECT instance_key, key, run_at, data FROM scheduler"
             " WHERE run_at IS NOT NULL AND run_at <= ?",
-            (now.isoformat(),),
+            (_to_utc_iso(now),),
         ).fetchall()
 
         for r in due_rows:
@@ -162,7 +171,7 @@ def fire_due_recurring(enqueue_fn: Callable[[str, str, dict, str | None], int] |
             data["last_run_at"] = now.isoformat()
             conn.execute(
                 "UPDATE scheduler SET run_at=?, data=? WHERE instance_key=? AND key=?",
-                (next_run_at.isoformat(), db.dump_json(data), r["instance_key"], r["key"]),
+                (_to_utc_iso(next_run_at), db.dump_json(data), r["instance_key"], r["key"]),
             )
             fired.append({"instance_key": r["instance_key"], "key": r["key"],
                           "task": task, "next_run_at": next_run_at.isoformat()})
