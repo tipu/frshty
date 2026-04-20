@@ -74,12 +74,14 @@ def start_events(
         _pool.start()
         _dispatcher.start()
 
-        cron = threading.Thread(target=_cron_ticker, args=(cron_interval,),
-                                 daemon=True, name="cron-ticker")
-        cron.start()
+        if cron_interval > 0:
+            cron = threading.Thread(target=_cron_ticker, args=(cron_interval,),
+                                     daemon=True, name="cron-ticker")
+            cron.start()
 
         log.emit("events_started",
-                 f"event system up: {len(instance_configs)} instance(s), {worker_count} workers, cron={cron_interval}s")
+                 f"event system up: {len(instance_configs)} instance(s), {worker_count} workers, "
+                 f"cron={'off (external)' if cron_interval <= 0 else f'{cron_interval}s'}")
         _started = True
         return _instances
 

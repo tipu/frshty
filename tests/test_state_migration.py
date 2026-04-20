@@ -80,8 +80,45 @@ def test_migrate_state_script(tmp_path):
         state.reset(tok)
 
 
+def test_log_contextvar_isolation(tmp_path):
+    for mod in list(sys.modules):
+        if mod == "frshty" or mod.startswith("core.") or mod == "core":
+            sys.modules.pop(mod, None)
+
+    import core.log as log
+
+    dir_a = tmp_path / "alpha"
+    dir_b = tmp_path / "beta"
+    (dir_a / "logs").mkdir(parents=True)
+    (dir_b / "logs").mkdir(parents=True)
+
+    log.init(dir_a, "alpha")
+    log.emit("event1", "from default alpha")
+
+    tokens = log.use(dir_b, "beta")
+    try:
+        log.emit("event2", "from contextvar beta")
+    finally:
+        log.reset(tokens)
+
+    log.emit("event3", "back to default alpha")
+
+    a_lines = (dir_a / "logs" / "alpha.jsonl").read_text().splitlines()
+    b_lines = (dir_b / "logs" / "beta.jsonl").read_text().splitlines()
+
+    assert len(a_lines) == 2, f"alpha should have 2 entries, got {len(a_lines)}"
+    assert len(b_lines) == 1, f"beta should have 1 entry, got {len(b_lines)}"
+    a0 = json.loads(a_lines[0])
+    a1 = json.loads(a_lines[1])
+    b0 = json.loads(b_lines[0])
+    assert a0["event"] == "event1" and a0["job"] == "alpha"
+    assert a1["event"] == "event3" and a1["job"] == "alpha"
+    assert b0["event"] == "event2" and b0["job"] == "beta"
+
+
 if __name__ == "__main__":
-    tests = [test_state_save_load_roundtrip, test_migrate_state_script]
+    tests = [test_state_save_load_roundtrip, test_migrate_state_script,
+             test_log_contextvar_isolation]
     for t in tests:
         with tempfile.TemporaryDirectory() as d:
             t(Path(d))

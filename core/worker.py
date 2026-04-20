@@ -52,32 +52,46 @@ class WorkerPool:
             self._run_one(job)
 
     def _run_one(self, job: dict) -> None:
+        import core.state as state
         instance_key = job["instance_key"]
         reg = self.registries.get(instance_key)
         if not reg:
             q.mark_done(job["id"], "failed", {"reason": f"unknown instance_key: {instance_key}"})
             return
-        ctx = registry.TaskContext(
-            instance_key=instance_key,
-            ticket_key=job["ticket_key"],
-            task=job["task"],
-            payload=job["payload"],
-            job_id=job["id"],
-            triggering_event_id=job["triggering_event_id"],
-            config=reg.config,
-            registry=reg,
-            now=datetime.now(timezone.utc),
-        )
-        log.emit("job_started", f"[{instance_key}] {job['task']} ticket={job['ticket_key']} job_id={job['id']}")
-        result = registry.run_task(ctx)
-        response = {"reason": result.reason, "artifacts": result.artifacts}
-        q.mark_done(job["id"], result.status, response)
-        log.emit("job_finished",
-                 f"[{instance_key}] {job['task']} ticket={job['ticket_key']} "
-                 f"job_id={job['id']} status={result.status}{(' reason='+result.reason) if result.reason else ''}")
-        for ev in result.next_events or []:
-            try:
-                q.emit_event(source="task", kind=ev["kind"], payload=ev.get("payload", {}),
-                             instance_key=ev.get("instance_key", instance_key))
-            except Exception as e:
-                log.emit("worker_next_event_error", f"{type(e).__name__}: {e}")
+        state_token = None
+        log_tokens = None
+        state_dir = reg.config.get("_state_dir")
+        if state_dir is not None:
+            state_token = state.use(state_dir)
+            log_tokens = log.use(state_dir, instance_key)
+        try:
+            ctx = registry.TaskContext(
+                instance_key=instance_key,
+                ticket_key=job["ticket_key"],
+                task=job["task"],
+                payload=job["payload"],
+                job_id=job["id"],
+                triggering_event_id=job["triggering_event_id"],
+                config=reg.config,
+                registry=reg,
+                now=datetime.now(timezone.utc),
+            )
+            log.emit("job_started", f"{job['task']} ticket={job['ticket_key']} job_id={job['id']}")
+            result = registry.run_task(ctx)
+            response = {"reason": result.reason, "artifacts": result.artifacts}
+            q.mark_done(job["id"], result.status, response)
+            log.emit("job_finished",
+                     f"{job['task']} ticket={job['ticket_key']} "
+                     f"job_id={job['id']} status={result.status}"
+                     f"{(' reason='+result.reason) if result.reason else ''}")
+            for ev in result.next_events or []:
+                try:
+                    q.emit_event(source="task", kind=ev["kind"], payload=ev.get("payload", {}),
+                                 instance_key=ev.get("instance_key", instance_key))
+                except Exception as e:
+                    log.emit("worker_next_event_error", f"{type(e).__name__}: {e}")
+        finally:
+            if log_tokens is not None:
+                log.reset(log_tokens)
+            if state_token is not None:
+                state.reset(state_token)
