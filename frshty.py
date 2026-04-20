@@ -121,15 +121,19 @@ async def resolve_instance_by_host(request, call_next):
     """
     config_token = None
     state_token = None
+    log_tokens = None
     if _configs_by_host:
         host = (request.headers.get("host") or "").split(":")[0].lower()
         target = _configs_by_host.get(host)
         if target is not None:
             config_token = _cv_config.set(target)
             state_token = state.use(target["_state_dir"])
+            log_tokens = log.use(target["_state_dir"], target["job"]["key"])
     try:
         response = await call_next(request)
     finally:
+        if log_tokens is not None:
+            log.reset(log_tokens)
         if state_token is not None:
             state.reset(state_token)
         if config_token is not None:
@@ -1205,6 +1209,16 @@ def _reload_config(config: dict):
 def run_cycle(config: dict):
     _reload_config(config)
     log.emit("cycle_start", "Cycle started")
+    if _events_enabled():
+        try:
+            import core.queue as _q
+            _q.emit_event(source="cron", kind="cron_tick", payload={},
+                           instance_key=config.get("job", {}).get("key", ""))
+            log.emit("cycle_end", "Cycle emitted cron_tick (worker pool owns execution)")
+            return
+        except Exception as e:
+            log.emit("cycle_error", f"cron_tick emit failed, falling back to direct: {e}")
+
     try:
         own_prs.check(config)
     except Exception as e:
@@ -1385,7 +1399,12 @@ def main():
     if args.multi or os.environ.get("FRSHTY_EVENTS") == "1":
         try:
             import core.runtime as _rt
-            _rt.start_events(configs)
+            # In single-instance FRSHTY_EVENTS=1 mode, main_loop is the cron ticker
+            # (it emits cron_tick from run_cycle), so disable the runtime ticker to
+            # avoid double-firing. In --multi mode, no main_loop runs, so keep the
+            # runtime ticker at its default interval.
+            cron_interval = 0 if (not args.multi and os.environ.get("FRSHTY_EVENTS") == "1") else 240
+            _rt.start_events(configs, cron_interval=cron_interval)
         except Exception as e:
             log.emit("events_boot_failed", f"{type(e).__name__}: {e}")
 

@@ -315,10 +315,54 @@ def test_multi_rejects_duplicate_slack_workspace(tmp_path):
     assert raised, "expected ValueError on duplicate slack workspace"
 
 
+def test_run_cycle_emits_cron_tick(tmp_path):
+    """Phase D: when events are enabled, run_cycle should emit cron_tick instead of calling features directly."""
+    cfg_path, state_dir = _install_single_instance_config(tmp_path)
+
+    for mod in list(sys.modules):
+        if mod == "frshty" or mod.startswith("core.") or mod == "core":
+            sys.modules.pop(mod, None)
+
+    sys.argv = ["frshty.py", str(cfg_path)]
+
+    import core.db as db
+    import core.runtime as rt
+    import core.config as cfg_mod
+    import core.state as state
+    import core.log as log
+
+    db_path = tmp_path / "cron.db"
+    migrations = ROOT / "migrations"
+    db.init(db_path, migrations)
+
+    config = cfg_mod.load_config(str(cfg_path))
+    state.init(config["_state_dir"])
+    log.init(config["_state_dir"], config["job"]["key"])
+
+    rt._started = False
+    rt._instances = None
+    rt._pool = None
+    rt._dispatcher = None
+    rt.start_events([config], db_path=db_path, migrations_dir=migrations,
+                     worker_count=1, cron_interval=0)
+
+    import frshty
+    frshty._set_primary_config(config)
+    frshty.run_cycle(config)
+
+    row = db.query_one(
+        "SELECT kind, instance_key FROM events WHERE source='cron' AND kind='cron_tick' ORDER BY id DESC LIMIT 1"
+    )
+    assert row and row["instance_key"] == "tiny", f"cron_tick not emitted: {row}"
+
+    rt.stop_events()
+
+
 if __name__ == "__main__":
     import tempfile
     tests = [test_endpoints_round_trip, test_multi_registers_all_instances,
-             test_multi_hostname_routing, test_multi_rejects_duplicate_slack_workspace]
+             test_multi_hostname_routing, test_multi_rejects_duplicate_slack_workspace,
+             test_run_cycle_emits_cron_tick]
     for t in tests:
         with tempfile.TemporaryDirectory() as d:
             t(Path(d))
