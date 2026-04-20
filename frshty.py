@@ -50,18 +50,21 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 from contextvars import ContextVar as _ContextVar
 _cv_config: _ContextVar[dict] = _ContextVar("frshty_config", default={})
+_primary_config: dict = {}  # module-level fallback: survives uvicorn reload subprocess boundaries
 
 
 class _ConfigView(dict):
     """Dict-subclass proxy that resolves to the active config for the current request.
 
-    In single-instance mode, the contextvar default is set at boot and stays.
-    In --multi mode, the hostname middleware sets it per request. dict is the
-    base class so FastAPI handlers typed as `dict` accept the view without
-    static-checker noise.
+    In --multi mode, the hostname middleware sets the contextvar per request. In
+    single-instance mode the module-level _primary_config is the fallback when
+    the contextvar's default ({}) is still in effect (e.g. uvicorn reload
+    subprocesses don't always inherit contextvar sets from module-import time).
+    dict is the base class so FastAPI handlers typed as `dict` accept the view.
     """
     def _d(self) -> dict:
-        return _cv_config.get()
+        v = _cv_config.get()
+        return v if v else _primary_config
     def __getitem__(self, k): return self._d()[k]
     def __setitem__(self, k, v): self._d()[k] = v
     def __delitem__(self, k): del self._d()[k]
@@ -86,6 +89,8 @@ _worker_proc = None
 
 
 def _set_primary_config(c: dict) -> None:
+    global _primary_config
+    _primary_config = c
     _cv_config.set(c)
 
 
