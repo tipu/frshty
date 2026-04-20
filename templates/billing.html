@@ -169,7 +169,7 @@ function renderCalendar() {
         prevMonth = monMonth;
 
         const label = `${shortMonth(monday)} ${monday.getUTCDate()} – ${monday.getUTCMonth() !== fri.getUTCMonth() ? shortMonth(fri) + ' ' : ''}${fri.getUTCDate()}`;
-        html += `<div class="week-row"><div class="week-label" onclick="fillWeek('${fmtDate(monday)}')">${label}</div>`;
+        html += `<div class="week-row"><div class="week-label">${label}</div>`;
 
         let weekWorkDays = 0, weekHours = 0;
         for (let i = 0; i < 5; i++) {
@@ -177,14 +177,11 @@ function renderCalendar() {
             const ds = fmtDate(d);
             const entry = entryMap[ds];
             const dayNum = d.getUTCDate();
-            if (entry) {
-                const cls = entry.type;
-                const lbl = entry.type === 'vacation' ? '<span class="label">Vacation</span>' : entry.type === 'closed' ? '<span class="label">Closed</span>' : '';
-                if (entry.type === 'work') { weekWorkDays++; weekHours += entry.hours || 8; }
-                html += `<div class="day ${cls}" onclick="cycleDay('${ds}')" title="${ds}"><span class="date">${dayNum}</span>${lbl}</div>`;
-            } else {
-                html += `<div class="day empty" onclick="createDay('${ds}')"><span class="date" style="color:#333">${dayNum}</span></div>`;
-            }
+            const type = entry ? entry.type : 'work';
+            const hours = entry ? (entry.hours || 0) : 8;
+            const lbl = type === 'vacation' ? '<span class="label">Vacation</span>' : type === 'closed' ? '<span class="label">Closed</span>' : '';
+            if (type === 'work') { weekWorkDays++; weekHours += hours; }
+            html += `<div class="day ${type}" onclick="cycleDay('${ds}')" title="${ds}"><span class="date">${dayNum}</span>${lbl}</div>`;
         }
 
         const weekStart = fmtDate(monday), weekEnd = fmtDate(fri);
@@ -210,7 +207,9 @@ function renderCalendar() {
                         for (let j = 0; j < 5; j++) {
                             const dd = new Date(w); dd.setUTCDate(dd.getUTCDate() + j);
                             const ee = entryMap[fmtDate(dd)];
-                            if (ee && ee.type === 'work') { monthDays++; monthHours += ee.hours || 8; }
+                            const type = ee ? ee.type : 'work';
+                            const hrs = ee ? (ee.hours || 0) : 8;
+                            if (type === 'work') { monthDays++; monthHours += hrs; }
                         }
                     });
                     if (monthDays > 0) {
@@ -244,7 +243,9 @@ function renderCalendar() {
         for (let i = 0; i < 5; i++) {
             const d = new Date(monday); d.setUTCDate(d.getUTCDate() + i);
             const e = entryMap[fmtDate(d)];
-            if (e && e.type === 'work') { wd++; wh += e.hours || 8; }
+            const type = e ? e.type : 'work';
+            const hrs = e ? (e.hours || 0) : 8;
+            if (type === 'work') { wd++; wh += hrs; }
         }
         if (wd > 0) {
             const weekStartDay = monday.getUTCDate();
@@ -275,36 +276,13 @@ async function refreshEntries() {
 
 async function cycleDay(ds) {
     const entry = entries.find(e => e.date === ds);
-    if (!entry) return;
-    const order = ['work', 'vacation', 'closed', 'delete'];
-    const next = order[(order.indexOf(entry.type) + 1) % order.length];
+    const current = entry ? entry.type : 'work';
+    const nextByType = {work: 'vacation', vacation: 'closed', closed: 'delete'};
+    const next = nextByType[current] || 'vacation';
     try {
         if (next === 'delete') await api(`/api/billing/entries/${ds}`, {method: 'DELETE'});
         else await api('/api/billing/entries', {method: 'POST', headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({date: ds, type: next, hours: next === 'work' ? 8 : 0})});
-        await refreshEntries();
-    } catch (e) { showMsg(e.message, true); }
-}
-
-async function createDay(ds) {
-    try {
-        await api('/api/billing/entries', {method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({date: ds, type: 'work', hours: 8})});
-        await refreshEntries();
-    } catch (e) { showMsg(e.message, true); }
-}
-
-async function fillWeek(mondayStr) {
-    const monday = new Date(mondayStr + 'T00:00:00Z');
-    const batch = [];
-    for (let i = 0; i < 5; i++) {
-        const d = new Date(monday); d.setUTCDate(d.getUTCDate() + i);
-        const ds = fmtDate(d);
-        if (!entries.find(e => e.date === ds)) batch.push({date: ds, type: 'work', hours: 8});
-    }
-    if (!batch.length) return;
-    try {
-        await api('/api/billing/entries', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(batch)});
         await refreshEntries();
     } catch (e) { showMsg(e.message, true); }
 }

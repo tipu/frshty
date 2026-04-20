@@ -171,10 +171,21 @@ async def next_invoice_number(config: dict) -> dict:
 
 def _work_days_in(start: str, end: str) -> list[dict]:
     entries = _load_entries()
-    return sorted(
-        [e for e in entries.values() if e.get("type") == "work" and start <= e["date"] <= end],
-        key=lambda e: e["date"],
-    )
+    start_d = date.fromisoformat(start)
+    end_d = date.fromisoformat(end)
+    result = []
+    d = start_d
+    while d <= end_d:
+        if d.weekday() < 5:
+            ds = d.isoformat()
+            explicit = entries.get(ds)
+            if explicit:
+                if explicit.get("type") == "work":
+                    result.append(explicit)
+            else:
+                result.append({"date": ds, "type": "work", "hours": 8})
+        d += timedelta(days=1)
+    return sorted(result, key=lambda e: e["date"])
 
 
 def _extras_apply(config: dict, start_str: str) -> bool:
