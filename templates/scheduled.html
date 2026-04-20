@@ -16,6 +16,7 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
 .badge-scheduled { background: #713f12; color: #fde047; }
 .badge-ci { background: #1e3a5f; color: #93c5fd; }
 .badge-recurring { background: #14532d; color: #86efac; }
+.badge-virtual { background: #4b3a1a; color: #fcd34d; }
 </style>
 </head>
 <body class="p-4">
@@ -103,6 +104,19 @@ async function load() {
                     <button onclick="reschedule('${item.key}')" class="bg-blue-800 hover:bg-blue-700 text-blue-200 px-2 py-0.5 rounded text-xs">Save</button>
                 </div>
                 ${item.meta.branch ? `<div class="text-xs text-gray-500 mt-1">${item.meta.branch}</div>` : ''}
+            </div>`;
+        }
+        if (item.type === 'recurring_virtual') {
+            return `<div class="card p-4" title="Derived from config (read-only). Edit the TOML and restart to change.">
+                <div class="flex items-center gap-2 mb-1">
+                    <span class="badge badge-virtual">from config 🔒</span>
+                    <span class="font-bold text-sm">${item.ticket} · ${item.time}</span>
+                    ${item.label ? `<span class="text-xs text-gray-500">${item.label}</span>` : ''}
+                </div>
+                <div class="flex items-center gap-2 text-xs text-gray-400 mt-1">
+                    <span>fires ${fmtDate(item.run_at)}</span>
+                    <span class="text-yellow-400">(${relTime(item.run_at)})</span>
+                </div>
             </div>`;
         }
         if (item.type === 'recurring') {
