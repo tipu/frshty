@@ -79,6 +79,18 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
 <div id="docs-section">
     <div id="docs" class="space-y-4 mb-6"></div>
     <div id="history" class="mb-4"></div>
+    <div id="jobs-timeline-section" class="card p-3 mb-4 hidden">
+        <div class="flex items-center justify-between mb-2">
+            <span class="text-xs font-bold text-gray-500 uppercase">Jobs timeline</span>
+            <button onclick="loadJobs()" class="text-xs text-gray-500 hover:text-gray-300">Refresh</button>
+        </div>
+        <div id="jobs-timeline" class="text-xs space-y-1"></div>
+    </div>
+    <div id="notes-section" class="card p-3 mb-4 hidden">
+        <span class="text-xs font-bold text-gray-500 uppercase">Add note and reset to new</span>
+        <textarea id="notes-input" rows="3" class="w-full mt-2 p-2 bg-gray-900 border border-gray-700 rounded text-sm"></textarea>
+        <button onclick="submitNote()" class="mt-2 text-xs bg-yellow-800 hover:bg-yellow-700 text-yellow-200 px-3 py-1 rounded">Add note and restart</button>
+    </div>
 </div>
 <div id="diff-section" style="display:none">
     <div id="diff-view"></div>
@@ -123,6 +135,7 @@ let runCommands = [];
 let hasPrs = false;
 
 async function load() {
+    loadJobs();
     const [ticketResp, configResp] = await Promise.all([
         fetch(`/api/tickets/${key}/detail`),
         fetch('/api/config'),
@@ -486,6 +499,51 @@ async function restartTicket() {
     if (term) { term.dispose(); term = null; }
     document.getElementById('terminal-container').innerHTML = '';
     setTimeout(() => { startTerminal(); load(); }, 2000);
+}
+
+async function loadJobs() {
+    try {
+        const r = await fetch(`/api/tickets/${key}/jobs`);
+        if (!r.ok) return;
+        const rows = await r.json();
+        const sec = document.getElementById('jobs-timeline-section');
+        const timeline = document.getElementById('jobs-timeline');
+        const notesSec = document.getElementById('notes-section');
+        if (!Array.isArray(rows) || !rows.length) { sec.classList.add('hidden'); notesSec.classList.add('hidden'); return; }
+        sec.classList.remove('hidden');
+        notesSec.classList.remove('hidden');
+        timeline.innerHTML = rows.map(j => {
+            const color = j.status === 'ok' ? 'text-green-400' : j.status === 'failed' ? 'text-red-400' : j.status === 'skipped' ? 'text-gray-500' : 'text-blue-400';
+            const retry = (j.status === 'failed' || j.status === 'skipped') ? ` <button onclick="retryJob(${j.id})" class="ml-2 text-xs text-yellow-400 hover:text-yellow-200 underline">retry</button>` : '';
+            const at = j.finished_at || j.started_at || j.enqueued_at;
+            let resp = '';
+            try { const r = JSON.parse(j.response || '{}'); if (r.reason) resp = ` — ${r.reason}`; } catch(e) {}
+            return `<div class="flex items-start gap-2"><span class="text-gray-500">${at}</span><span class="${color}">${j.status}</span><span class="text-gray-300">${j.task}</span><span class="text-gray-500">${resp}</span>${retry}</div>`;
+        }).join('');
+    } catch (e) { console.warn('jobs fetch failed', e); }
+}
+
+async function retryJob(jobId) {
+    const r = await fetch(`/api/tickets/${key}/retry-job`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({job_id: jobId}),
+    });
+    if (r.ok) { await loadJobs(); } else { alert((await r.json()).error || 'retry failed'); }
+}
+
+async function submitNote() {
+    const note = (document.getElementById('notes-input').value || '').trim();
+    if (!note) return;
+    const r = await fetch(`/api/tickets/${key}/notes`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({note}),
+    });
+    if (r.ok) {
+        document.getElementById('notes-input').value = '';
+        setTimeout(() => { loadJobs(); load(); }, 1500);
+    } else {
+        alert((await r.json()).error || 'note submit failed');
+    }
 }
 
 async function resetTerminal() {
