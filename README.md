@@ -16,6 +16,16 @@ python frshty.py config/local.toml
 
 Set credentials via environment variables referenced in your config (e.g. `BB_TOKEN`, `JIRA_TOKEN`, `LINEAR_TOKEN`). See `config/example.toml` for the full list of options.
 
+### Timezone
+
+Set `FRSHTY_TIMEZONE` in your environment (any IANA zone, e.g. `America/Los_Angeles`, `Europe/Paris`, `Asia/Tokyo`). Default is `UTC`.
+
+```
+FRSHTY_TIMEZONE=America/Los_Angeles
+```
+
+Single source of truth for calendar-day semantics: "today", the timesheet fill window, billing fire times (Fri 7pm local, last-day-of-month 7pm local), recurring meeting weekday matching. Stored timestamps in sqlite, logs, and events are always UTC; rendering converts to this zone for display.
+
 ### Slack
 
 Slack functionality requires [slack-proxy-tools](https://github.com/tipu/slack-proxy-tools) to be checked out and running. Follow the setup instructions in that repo to get the proxy server configured before enabling Slack features in your config.

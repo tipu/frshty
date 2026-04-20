@@ -9,6 +9,7 @@ import httpx
 
 import core.log as log
 import core.state as state
+import core.tz as tz
 from core.config import resolve_env, get_repos
 from core.claude_runner import run_haiku, extract_json
 from features.platforms import make_platform
@@ -45,7 +46,7 @@ def check(config: dict):
     if CACHE_FILE is None:
         _init_cache(config)
 
-    today = date.today()
+    today = tz.today_local()
     start_date = today
     end_date = today
     recurring = _get_recurring(config, start_date, end_date)
@@ -82,13 +83,11 @@ def _auto_fill(config: dict):
     if not ts_config.get("auto_fill"):
         return
 
-    today = date.today()
+    today = tz.today_local()
     if today.weekday() >= 5:
         return
 
-    tz_name = ts_config.get("timezone", "US/Pacific")
-    tz = ZoneInfo(tz_name)
-    now_local = datetime.now(tz)
+    now_local = tz.now_local()
     fill_window = ts_config.get("fill_window", [18, 20])
     if not (fill_window[0] <= now_local.hour < fill_window[1]):
         return
@@ -196,7 +195,7 @@ def build_timesheet(config: dict, start: str = "", end: str = "", force: bool = 
     if CACHE_FILE is None:
         _init_cache(config)
 
-    today = date.today()
+    today = tz.today_local()
     if not start:
         start = (today - timedelta(days=30)).isoformat()
     if not end:
