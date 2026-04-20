@@ -315,6 +315,89 @@ def test_multi_rejects_duplicate_slack_workspace(tmp_path):
     assert raised, "expected ValueError on duplicate slack workspace"
 
 
+def test_cron_tick_fans_out_to_enabled_features(tmp_path):
+    """Phase E: cron_tick event -> dispatcher -> one job per enabled feature for that instance."""
+    cfg_path = tmp_path / "featured.toml"
+    state_dir = tmp_path / "featured-state"
+    state_dir.mkdir()
+    (state_dir / "logs").mkdir()
+    cfg_path.write_text(f"""
+[job]
+key = "featured"
+platform = "github"
+ticket_system = "linear"
+port = 19999
+host = "http://featured.localhost"
+
+[github]
+repo = "fake/featured"
+
+[linear]
+token = "x"
+assignee_email = "x@x.com"
+
+[workspace]
+root = "{tmp_path}"
+repos = ["repo"]
+tickets_dir = "tickets"
+base_branch = "main"
+
+[pr]
+auto_pr = false
+
+[features]
+tickets = true
+review_prs = true
+billing = true
+timesheet = false
+slack = false
+""")
+
+    for mod in list(sys.modules):
+        if mod == "frshty" or mod.startswith("core.") or mod == "core":
+            sys.modules.pop(mod, None)
+
+    import core.db as db
+    import core.runtime as rt
+    import core.config as cfg_mod
+    import core.event_bus as bus
+    import core.queue as q
+    from core import tasks  # noqa: F401
+
+    db_path = tmp_path / "fanout.db"
+    migrations = ROOT / "migrations"
+    db.init(db_path, migrations)
+
+    config = cfg_mod.load_config(str(cfg_path))
+    rt._started = False
+    rt._instances = None
+    rt._pool = None
+    rt._dispatcher = None
+    rt.start_events([config], db_path=db_path, migrations_dir=migrations,
+                     worker_count=0, cron_interval=0)
+
+    # Drive the dispatcher synchronously, skip the worker pool
+    dispatcher = bus.Dispatcher({"featured": rt._instances.get("featured")}, poll_interval=0.1)
+    q.emit_event(source="cron", kind="cron_tick", payload={}, instance_key="featured")
+    n = dispatcher._drain()
+    assert n == 1, f"expected 1 event drained, got {n}"
+
+    enqueued = db.query_all("SELECT task FROM jobs WHERE instance_key='featured' ORDER BY id")
+    tasks_enqueued = {r["task"] for r in enqueued}
+
+    # features enabled: tickets, review_prs, billing, scheduler (always)
+    assert "scan_tickets" in tasks_enqueued, tasks_enqueued
+    assert "poll_own_prs" in tasks_enqueued, tasks_enqueued
+    assert "poll_reviewer" in tasks_enqueued, tasks_enqueued
+    assert "billing_check" in tasks_enqueued, tasks_enqueued
+    assert "scheduler_check" in tasks_enqueued, tasks_enqueued
+    # features disabled:
+    assert "timesheet_check" not in tasks_enqueued
+    assert "slack_scan" not in tasks_enqueued
+
+    rt.stop_events()
+
+
 def test_run_cycle_emits_cron_tick(tmp_path):
     """Phase D: when events are enabled, run_cycle should emit cron_tick instead of calling features directly."""
     cfg_path, state_dir = _install_single_instance_config(tmp_path)
@@ -362,6 +445,7 @@ if __name__ == "__main__":
     import tempfile
     tests = [test_endpoints_round_trip, test_multi_registers_all_instances,
              test_multi_hostname_routing, test_multi_rejects_duplicate_slack_workspace,
+             test_cron_tick_fans_out_to_enabled_features,
              test_run_cycle_emits_cron_tick]
     for t in tests:
         with tempfile.TemporaryDirectory() as d:
