@@ -97,14 +97,11 @@ def _wait_job(job_id: int, timeout: float = 5.0) -> dict:
 
 
 def test_set_state_roundtrip(tmp_path):
-    """ui_set_state event routes to set_state task, which UPDATEs tickets.status."""
+    """ui_set_state event routes to set_state task, which mutates state.save('tickets', ...)."""
+    import core.state as state
     db.init(tmp_path / "t.db", ROOT / "migrations")
-    now = datetime.now(timezone.utc).isoformat()
-    db.execute(
-        "INSERT INTO tickets(instance_key, ticket_key, status, slug, branch, updated_at)"
-        " VALUES ('t', 'T-1', 'pr_failed', 'slug-1', 'feat/t-1', ?)",
-        (now,),
-    )
+    state.init("t")
+    state.save("tickets", {"T-1": {"status": "pr_failed", "slug": "slug-1", "branch": "feat/t-1"}})
 
     class FakeRegistry:
         def __init__(self):
@@ -125,15 +122,13 @@ def test_set_state_roundtrip(tmp_path):
         )
         assert ev_id
         deadline = time.time() + 5
-        row = None
+        tickets = {}
         while time.time() < deadline:
-            row = db.query_one(
-                "SELECT status FROM tickets WHERE instance_key='t' AND ticket_key='T-1'"
-            )
-            if row and row["status"] == "pr_ready":
+            tickets = state.load("tickets")
+            if tickets.get("T-1", {}).get("status") == "pr_ready":
                 break
             time.sleep(0.1)
-        assert row and row["status"] == "pr_ready", f"expected pr_ready, got {row}"
+        assert tickets.get("T-1", {}).get("status") == "pr_ready", f"got {tickets}"
 
         ev_row = db.query_one("SELECT dispatched_at, dispatch_reason FROM events WHERE id=?", (ev_id,))
         assert ev_row and ev_row["dispatched_at"] is not None, ev_row
@@ -144,17 +139,16 @@ def test_set_state_roundtrip(tmp_path):
 
 
 def test_auto_pr_precondition_reads_per_ticket(tmp_path):
-    """auto_pr_true precondition reads tickets.auto_pr; NULL inherits config."""
+    """auto_pr_true precondition reads per-ticket auto_pr; missing inherits config."""
+    import core.state as state
     db.init(tmp_path / "t.db", ROOT / "migrations")
+    state.init("t")
+    state.save("tickets", {
+        "T-A": {"status": "pr_ready"},
+        "T-B": {"status": "pr_ready", "auto_pr": True},
+        "T-C": {"status": "pr_ready", "auto_pr": False},
+    })
     from core.tasks import preconditions as pc
-
-    now = datetime.now(timezone.utc).isoformat()
-    db.execute("INSERT INTO tickets(instance_key, ticket_key, status, updated_at)"
-               " VALUES ('t', 'T-A', 'pr_ready', ?)", (now,))
-    db.execute("INSERT INTO tickets(instance_key, ticket_key, status, auto_pr, updated_at)"
-               " VALUES ('t', 'T-B', 'pr_ready', 1, ?)", (now,))
-    db.execute("INSERT INTO tickets(instance_key, ticket_key, status, auto_pr, updated_at)"
-               " VALUES ('t', 'T-C', 'pr_ready', 0, ?)", (now,))
 
     def ctx_for(key: str, cfg_auto_pr: bool):
         class Ctx: pass
@@ -169,10 +163,10 @@ def test_auto_pr_precondition_reads_per_ticket(tmp_path):
     ok_b, _ = pc.auto_pr_true(ctx_for("T-B", False))
     ok_c, _ = pc.auto_pr_true(ctx_for("T-C", True))
 
-    assert ok_a_true is True, "NULL auto_pr should inherit config=True"
-    assert ok_a_false is False, "NULL auto_pr should inherit config=False"
-    assert ok_b is True, "per-ticket auto_pr=1 should win even if config=False"
-    assert ok_c is False, "per-ticket auto_pr=0 should win even if config=True"
+    assert ok_a_true is True, "missing auto_pr should inherit config=True"
+    assert ok_a_false is False, "missing auto_pr should inherit config=False"
+    assert ok_b is True, "per-ticket auto_pr=True should win even if config=False"
+    assert ok_c is False, "per-ticket auto_pr=False should win even if config=True"
 
 
 if __name__ == "__main__":

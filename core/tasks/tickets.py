@@ -1,8 +1,6 @@
 """Ticket pipeline tasks. Thin wrappers around features.tickets functions."""
-from datetime import datetime, timezone
-
-import core.db as db
 import core.log as log
+import core.state as state
 from core.tasks.registry import TaskContext, TaskResult, task
 from core.tasks.preconditions import (
     status_is, auto_pr_true, file_exists, file_contains, feature_enabled,
@@ -10,15 +8,17 @@ from core.tasks.preconditions import (
 
 
 def _set_status(ctx: TaskContext, new_status: str) -> None:
-    db.execute(
-        "UPDATE tickets SET status=?, updated_at=? WHERE instance_key=? AND ticket_key=?",
-        (new_status, datetime.now(timezone.utc).isoformat(), ctx.instance_key, ctx.ticket_key),
-    )
+    tickets = state.load("tickets")
+    ts = tickets.get(ctx.ticket_key or "")
+    if ts is None:
+        return
+    ts["status"] = new_status
+    tickets[ctx.ticket_key] = ts
+    state.save("tickets", tickets)
 
 
 @task("scan_tickets", preconditions=[feature_enabled("tickets")], timeout=120)
 def scan_tickets(ctx: TaskContext) -> TaskResult:
-    """Wrap features.tickets.check. Reads ticket system, enqueues per-ticket follow-ups."""
     from features import tickets as tix
     try:
         tix.check(ctx.config)
@@ -33,13 +33,10 @@ def scan_tickets(ctx: TaskContext) -> TaskResult:
       timeout=30)
 def start_planning(ctx: TaskContext) -> TaskResult:
     from features import tickets as tix
-    row = db.query_one(
-        "SELECT slug, branch FROM tickets WHERE instance_key=? AND ticket_key=?",
-        (ctx.instance_key, ctx.ticket_key),
-    )
-    if not row:
-        return TaskResult("failed", "ticket row missing")
-    ts = {"slug": row["slug"], "branch": row["branch"], "status": "new"}
+    tickets = state.load("tickets")
+    ts = tickets.get(ctx.ticket_key or "")
+    if ts is None:
+        return TaskResult("failed", "ticket not found")
     tix.restart_session(ctx.config, ctx.ticket_key, ts, base_url=ctx.registry.base_url)
     _set_status(ctx, "planning")
     return TaskResult("ok", artifacts={"transitioned_to": "planning"})
@@ -50,14 +47,11 @@ def start_planning(ctx: TaskContext) -> TaskResult:
       timeout=30)
 def start_reviewing(ctx: TaskContext) -> TaskResult:
     from features import tickets as tix
-    row = db.query_one(
-        "SELECT slug, branch FROM tickets WHERE instance_key=? AND ticket_key=?",
-        (ctx.instance_key, ctx.ticket_key),
-    )
-    ts = {"slug": row["slug"] if row else "", "branch": row["branch"] if row else "",
-          "status": "reviewing"}
     _set_status(ctx, "reviewing")
-    tix.restart_session(ctx.config, ctx.ticket_key, ts, base_url=ctx.registry.base_url)
+    tickets = state.load("tickets")
+    ts = tickets.get(ctx.ticket_key or "")
+    if ts is not None:
+        tix.restart_session(ctx.config, ctx.ticket_key, ts, base_url=ctx.registry.base_url)
     return TaskResult("ok", artifacts={"transitioned_to": "reviewing"})
 
 
@@ -83,31 +77,18 @@ def retry_plan(ctx: TaskContext) -> TaskResult:
       preconditions=[status_is("pr_ready"), auto_pr_true],
       timeout=300)
 def create_pr(ctx: TaskContext) -> TaskResult:
-    """Placeholder for PR creation; production code lives in features/tickets.py."""
     from features import tickets as tix
-    row = db.query_one(
-        "SELECT slug, branch, data FROM tickets WHERE instance_key=? AND ticket_key=?",
-        (ctx.instance_key, ctx.ticket_key),
-    )
-    if not row:
-        return TaskResult("failed", "ticket row missing")
-    ts = {
-        "slug": row["slug"], "branch": row["branch"], "status": "pr_ready",
-        **db.load_json(row, "data"),
-    }
-    ticket_state = db.query_all(
-        "SELECT ticket_key, data, status, slug, branch FROM tickets WHERE instance_key=?",
-        (ctx.instance_key,),
-    )
-    tickets_dict = {r["ticket_key"]: {"status": r["status"], "slug": r["slug"],
-                                       "branch": r["branch"], **db.load_json(r, "data")}
-                    for r in ticket_state}
+    tickets = state.load("tickets")
+    ts = tickets.get(ctx.ticket_key or "")
+    if ts is None:
+        return TaskResult("failed", "ticket not found")
     ticket = {"key": ctx.ticket_key, "summary": ts.get("summary", ""),
               "description": ts.get("description", ""), "url": ts.get("url", "")}
     try:
         updated = tix._create_pr(ctx.config, ticket, ts, ctx.registry.base_url)
         new_status = updated.get("status", "pr_failed")
-        _set_status(ctx, new_status)
+        tickets[ctx.ticket_key] = updated
+        state.save("tickets", tickets)
         return TaskResult("ok", artifacts={"transitioned_to": new_status})
     except Exception as e:
         _set_status(ctx, "pr_failed")
@@ -118,17 +99,16 @@ def create_pr(ctx: TaskContext) -> TaskResult:
 @task("apply_note_reset", timeout=30)
 def apply_note_reset(ctx: TaskContext) -> TaskResult:
     import shutil
+    from datetime import datetime, timezone
     from pathlib import Path
     note = ctx.payload.get("note", "")
     ws = ctx.config["workspace"]
-    row = db.query_one(
-        "SELECT slug FROM tickets WHERE instance_key=? AND ticket_key=?",
-        (ctx.instance_key, ctx.ticket_key),
-    )
-    if not row:
+    tickets = state.load("tickets")
+    ts = tickets.get(ctx.ticket_key or "")
+    if ts is None:
         return TaskResult("failed", "ticket not found")
     root = ws["root"] if isinstance(ws["root"], Path) else Path(ws["root"])
-    ticket_dir = root / ws["tickets_dir"] / (row["slug"] or ctx.ticket_key or "")
+    ticket_dir = root / ws["tickets_dir"] / (ts.get("slug") or ctx.ticket_key or "")
     docs = ticket_dir / "docs"
     now = datetime.now(timezone.utc).isoformat()
     archived_to = None
@@ -154,7 +134,9 @@ def apply_note_reset(ctx: TaskContext) -> TaskResult:
     except Exception:
         pass
 
-    _set_status(ctx, "new")
+    ts["status"] = "new"
+    tickets[ctx.ticket_key] = ts
+    state.save("tickets", tickets)
     return TaskResult("ok", artifacts={"archived_to": archived_to, "moved": moved,
                                         "transitioned_to": "new"})
 
