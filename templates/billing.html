@@ -38,7 +38,11 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
 .summary-table td { padding: 6px 10px; border-bottom: 1px solid #1a1a1a; }
 .summary-table tr.total td { border-top: 1px solid #333; font-weight: 700; color: #f87171; }
 .amount { text-align: right; }
-.inv-form { position: absolute; left: 0; top: 100%; z-index: 10; background: #1a1a1a; border: 1px solid #333; border-radius: 6px; padding: 10px; width: 240px; display: flex; flex-direction: column; gap: 6px; }
+.inv-form { position: absolute; right: 0; top: 100%; z-index: 10; background: #1a1a1a; border: 1px solid #333; border-radius: 6px; padding: 10px; width: 360px; display: flex; flex-direction: column; gap: 6px; }
+.inv-form .preview { max-height: 200px; overflow-y: auto; font-size: 11px; background: #0d0d0d; border: 1px solid #2a2a2a; border-radius: 4px; }
+.inv-form .preview > div { padding: 4px 6px; border-bottom: 1px solid #1a1a1a; white-space: pre-wrap; word-break: break-word; color: #d0d0d0; }
+.inv-form .preview > div:last-child { border-bottom: none; }
+.inv-form .preview > div.muted { color: #666; font-style: italic; }
 .inv-form input { font-family: inherit; font-size: 12px; background: #111; border: 1px solid #333; color: #e0e0e0; padding: 5px 8px; border-radius: 4px; }
 .inv-form .inv-form-row { display: flex; gap: 6px; }
 .inv-form button { font-family: inherit; font-size: 11px; padding: 5px 10px; border-radius: 4px; border: none; cursor: pointer; }
@@ -289,7 +293,13 @@ async function cycleDay(ds) {
 
 function closeForm() { if (openForm) { openForm.remove(); openForm = null; } }
 
-function newInvoice(start, end, hours, amount, ev) {
+function esc(s) {
+    const d = document.createElement('div');
+    d.textContent = s ?? '';
+    return d.innerHTML;
+}
+
+async function newInvoice(start, end, hours, amount, ev) {
     ev.stopPropagation();
     closeForm();
     if (!client.billcom_available || !client.billcom_customer_id) { showMsg('bill.com not configured', true); return; }
@@ -297,14 +307,28 @@ function newInvoice(start, end, hours, amount, ev) {
     const form = document.createElement('div');
     form.className = 'inv-form';
     form.innerHTML = `
-        <div style="font-size:13px;color:#4ade80;font-weight:600">${nextInvNumber}</div>
-        <div class="subtitle" style="font-size:11px">${start} → ${end} · ${hours}h · $${amount.toLocaleString()}</div>
+        <div style="font-size:13px;color:#4ade80;font-weight:600">${esc(nextInvNumber)}</div>
+        <div class="subtitle" style="font-size:11px">${esc(start)} → ${esc(end)} · ${hours}h · $${amount.toLocaleString()}</div>
+        <div id="inv-preview" class="preview"><div class="muted">Loading descriptions…</div></div>
         <div class="inv-form-row">
             <button class="btn-save" onclick="saveInvoice(this, '${start}', '${end}', ${hours}, ${amount})">Create</button>
             <button class="btn-cancel" onclick="closeForm()">Cancel</button>
         </div>`;
     cell.appendChild(form);
     openForm = form;
+
+    const preview = form.querySelector('#inv-preview');
+    try {
+        const resp = await api(`/api/billing/preview?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`);
+        const descs = (resp && resp.descriptions) || [];
+        if (!descs.length) {
+            preview.innerHTML = '<div class="muted">No line items.</div>';
+        } else {
+            preview.innerHTML = descs.map(d => `<div>${esc(d)}</div>`).join('');
+        }
+    } catch (e) {
+        preview.innerHTML = `<div class="muted">Preview failed: ${esc(e.message || String(e))}</div>`;
+    }
 }
 
 async function saveInvoice(btn, start, end, hours, amount) {

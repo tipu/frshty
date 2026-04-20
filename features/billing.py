@@ -272,6 +272,12 @@ def _overlapping(invoices: list[dict], start: str, end: str) -> dict | None:
     return None
 
 
+def preview_descriptions(config: dict, start: str, end: str) -> list[str]:
+    work_entries = _work_days_in(start, end)
+    items = _build_line_items(config, {"start": start, "end": end}, work_entries)
+    return [i.get("description", "") for i in items]
+
+
 async def create_invoice(config: dict, body: dict, source: str = "manual") -> dict:
     b = _billing_cfg(config)
     customer_id = b.get("billcom_customer_id", "")
