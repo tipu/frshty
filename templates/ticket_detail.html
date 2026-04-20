@@ -82,7 +82,18 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
     <div id="jobs-timeline-section" class="card p-3 mb-4 hidden">
         <div class="flex items-center justify-between mb-2">
             <span class="text-xs font-bold text-gray-500 uppercase">Jobs timeline</span>
-            <button onclick="loadJobs()" class="text-xs text-gray-500 hover:text-gray-300">Refresh</button>
+            <div class="flex items-center gap-3 text-xs">
+                <label class="flex items-center gap-1">
+                    <input type="checkbox" id="auto-pr-cb" onchange="toggleAutoPr(this.checked)" />
+                    <span>auto_pr</span>
+                </label>
+                <label class="flex items-center gap-1">
+                    <span>set state</span>
+                    <select id="set-state-dd" onchange="submitSetState(this.value); this.value='';"
+                            class="bg-transparent border border-gray-700 rounded px-1 py-0.5 text-xs"></select>
+                </label>
+                <button onclick="loadJobs()" class="text-gray-500 hover:text-gray-300">Refresh</button>
+            </div>
         </div>
         <div id="jobs-timeline" class="text-xs space-y-1"></div>
     </div>
@@ -152,6 +163,9 @@ async function load() {
     const st = data.state || {};
     const status = st.status || 'unknown';
     const branch = st.branch || '';
+    const statusBarEl = document.getElementById('status-bar');
+    statusBarEl.dataset.status = status;
+    refreshAutoPrCheckbox(status, st.auto_pr);
     const ticketUrl = (data.history || []).map(e => (e.links || {}).ticket).find(u => u);
 
     hasPrs = (st.prs || []).length > 0;
@@ -501,6 +515,28 @@ async function restartTicket() {
     setTimeout(() => { startTerminal(); load(); }, 2000);
 }
 
+const ALL_STATES = ['new','planning','reviewing','pr_ready','pr_created','in_review','merged','pr_failed','done'];
+const LOCKED_AUTO_PR_STATES = new Set(['pr_created','in_review','merged','done']);
+
+function populateStateDropdown(visited, current) {
+    const dd = document.getElementById('set-state-dd');
+    if (!dd) return;
+    const options = ['<option value="">—</option>'];
+    for (const s of ALL_STATES) {
+        if (s === current) continue;
+        if (!visited.has(s) && s !== 'new' && s !== 'pr_ready') continue;
+        options.push(`<option value="${s}">${s}</option>`);
+    }
+    dd.innerHTML = options.join('');
+}
+
+function refreshAutoPrCheckbox(state, autoPr) {
+    const cb = document.getElementById('auto-pr-cb');
+    if (!cb) return;
+    cb.checked = !!autoPr;
+    cb.disabled = LOCKED_AUTO_PR_STATES.has(state);
+}
+
 async function loadJobs() {
     try {
         const r = await fetch(`/api/tickets/${key}/jobs`);
@@ -512,6 +548,22 @@ async function loadJobs() {
         if (!Array.isArray(rows) || !rows.length) { sec.classList.add('hidden'); notesSec.classList.add('hidden'); return; }
         sec.classList.remove('hidden');
         notesSec.classList.remove('hidden');
+        const visited = new Set();
+        for (const j of rows) {
+            try {
+                const pl = typeof j.payload === 'string' ? JSON.parse(j.payload || '{}') : (j.payload || {});
+                if (pl.target) visited.add(pl.target);
+            } catch (e) {}
+            try {
+                const resp = JSON.parse(j.response || '{}');
+                const t = resp.artifacts && resp.artifacts.transitioned_to;
+                if (t) visited.add(t);
+            } catch (e) {}
+        }
+        visited.add('new');
+        const statusBar = document.getElementById('status-bar');
+        const currentState = (statusBar && statusBar.dataset && statusBar.dataset.status) || '';
+        populateStateDropdown(visited, currentState);
         timeline.innerHTML = rows.map(j => {
             const color = j.status === 'ok' ? 'text-green-400' : j.status === 'failed' ? 'text-red-400' : j.status === 'skipped' ? 'text-gray-500' : 'text-blue-400';
             const retry = (j.status === 'failed' || j.status === 'skipped') ? ` <button onclick="retryJob(${j.id})" class="ml-2 text-xs text-yellow-400 hover:text-yellow-200 underline">retry</button>` : '';
@@ -543,6 +595,30 @@ async function submitNote() {
         setTimeout(() => { loadJobs(); load(); }, 1500);
     } else {
         alert((await r.json()).error || 'note submit failed');
+    }
+}
+
+async function submitSetState(target) {
+    if (!target) return;
+    const r = await fetch(`/api/tickets/${key}/set-state`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({target}),
+    });
+    if (r.ok) {
+        setTimeout(() => { loadJobs(); load(); }, 1200);
+    } else {
+        alert((await r.json()).error || 'set-state failed');
+    }
+}
+
+async function toggleAutoPr(checked) {
+    const r = await fetch(`/api/tickets/${key}/auto-pr`, {
+        method: 'PATCH', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({auto_pr: checked}),
+    });
+    if (!r.ok) {
+        alert((await r.json()).error || 'auto_pr update failed');
+        document.getElementById('auto-pr-cb').checked = !checked;
     }
 }
 

@@ -924,6 +924,25 @@ def api_ticket_notes(key: str, body: dict):
     return {"status": "enqueued"}
 
 
+@app.post("/api/tickets/{key}/set-state")
+def api_set_state_event(key: str, body: dict):
+    target = (body.get("target") or "").strip()
+    if not target:
+        return JSONResponse({"error": "target required"}, status_code=400)
+    try:
+        TicketStatus(target)
+    except ValueError:
+        return JSONResponse({"error": f"invalid target: {target}"}, status_code=400)
+    if not _events_enabled():
+        return JSONResponse({"error": "events not enabled"}, status_code=400)
+    import core.queue as q
+    instance_key = _config.get("job", {}).get("key", "")
+    q.emit_event(source="ui", kind="ui_set_state",
+                 payload={"target": target, "ticket_key": key},
+                 instance_key=instance_key)
+    return {"status": "enqueued", "target": target}
+
+
 @app.patch("/api/tickets/{key}/auto-pr")
 def api_set_auto_pr(key: str, body: dict):
     tickets = state.load("tickets")
