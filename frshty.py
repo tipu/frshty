@@ -674,13 +674,32 @@ def api_raw_prs():
 
 @app.get("/api/scheduled")
 def api_scheduled():
-    scheduled = state.load("scheduler")
-    tickets = state.load("tickets")
+    import core.scheduler as _sch
+    instance_key = _config.get("job", {}).get("key", "")
+    rows = _sch.list_all(instance_key) if instance_key else _sch.list_all()
     items = []
-    for key, entry in scheduled.items():
-        items.append({"key": key, "type": "scheduled_pr", "run_at": entry["run_at"],
-                       "scheduled_at": entry["scheduled_at"], "action": entry["action"],
-                       "meta": entry.get("meta", {})})
+    for r in rows:
+        kind = r.get("kind") or "oneshot"
+        if kind == "recurring":
+            items.append({
+                "key": r["key"],
+                "type": "recurring",
+                "task": r.get("task"),
+                "cadence": r.get("cadence"),
+                "run_at": r["run_at"],
+                "last_run_at": r.get("last_run_at"),
+                "payload": r.get("payload", {}),
+            })
+        else:
+            items.append({
+                "key": r["key"],
+                "type": "scheduled_pr" if r.get("action") == "create_pr" else "oneshot",
+                "run_at": r["run_at"],
+                "scheduled_at": r.get("scheduled_at"),
+                "action": r.get("action"),
+                "meta": r.get("meta", {}),
+            })
+    tickets = state.load("tickets")
     for key, ts in tickets.items():
         if ts.get("status") == "pr_created" and not ts.get("ci_passed"):
             items.append({"key": key, "type": "ci_pending", "status": ts["status"],

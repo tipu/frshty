@@ -385,14 +385,17 @@ slack = false
     enqueued = db.query_all("SELECT task FROM jobs WHERE instance_key='featured' ORDER BY id")
     tasks_enqueued = {r["task"] for r in enqueued}
 
-    # features enabled: tickets, review_prs, billing, scheduler (always)
+    # features enabled as fast polls via cron_tick: tickets, review_prs
     assert "scan_tickets" in tasks_enqueued, tasks_enqueued
     assert "poll_own_prs" in tasks_enqueued, tasks_enqueued
     assert "poll_reviewer" in tasks_enqueued, tasks_enqueued
-    assert "billing_check" in tasks_enqueued, tasks_enqueued
     assert "scheduler_check" in tasks_enqueued, tasks_enqueued
+    # deadline-driven tasks are owned by the beat thread (scheduler table), NOT cron_tick
+    assert "billing_check" not in tasks_enqueued, \
+        "billing_check should be beat-driven, not in cron_tick fan-out"
+    assert "timesheet_check" not in tasks_enqueued, \
+        "timesheet_check should be beat-driven, not in cron_tick fan-out"
     # features disabled:
-    assert "timesheet_check" not in tasks_enqueued
     assert "slack_scan" not in tasks_enqueued
 
     rt.stop_events()
