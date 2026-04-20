@@ -11,7 +11,9 @@ import core.state as state
 from features import billcom
 from features.timesheet import _fetch_worklogs
 
-FIRE_TZ = ZoneInfo("America/Los_Angeles")
+import core.tz as _tz
+
+FIRE_TZ = _tz.local_tz()
 FIRE_HOUR = 19
 
 

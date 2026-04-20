@@ -104,11 +104,11 @@ def _seed_recurring_schedules(instance_configs: list[dict]) -> None:
     upsert a recurring scheduler row so the beat thread owns its firing."""
     from datetime import datetime as _dt
     from features.billing import _next_fire as billing_next_fire, FIRE_TZ as BILLING_TZ
-    from zoneinfo import ZoneInfo as _ZI
+    import core.tz as _ctz
 
-    pst = _ZI("America/Los_Angeles")
+    local_tz = _ctz.local_tz()
     now_billing = _dt.now(BILLING_TZ)
-    now_pst = _dt.now(pst)
+    now_pst = _dt.now(local_tz)
 
     for c in instance_configs:
         key = c["job"]["key"]

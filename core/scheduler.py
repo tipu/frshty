@@ -186,7 +186,8 @@ def _advance_recurring(cadence: str, prev_run_at: datetime, now: datetime) -> da
         from features.billing import _next_fire as billing_next_fire, FIRE_TZ
     except Exception:
         billing_next_fire = None
-        FIRE_TZ = ZoneInfo("America/Los_Angeles")
+        import core.tz as _ctz
+        FIRE_TZ = _ctz.local_tz()
 
     if cadence in ("weekly", "monthly") and billing_next_fire is not None:
         tz_prev = prev_run_at.astimezone(FIRE_TZ) if prev_run_at.tzinfo else prev_run_at.replace(tzinfo=timezone.utc).astimezone(FIRE_TZ)
@@ -203,7 +204,8 @@ def _advance_recurring(cadence: str, prev_run_at: datetime, now: datetime) -> da
         return candidate
 
     if cadence == "daily_19pst":
-        tz = ZoneInfo("America/Los_Angeles")
+        import core.tz as _ctz
+        tz = _ctz.local_tz()
         local = prev_run_at.astimezone(tz) if prev_run_at.tzinfo else prev_run_at.replace(tzinfo=timezone.utc).astimezone(tz)
         candidate = local.replace(hour=19, minute=0, second=0, microsecond=0) + timedelta(days=1)
         while candidate.astimezone(timezone.utc) <= now:
