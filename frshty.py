@@ -387,11 +387,21 @@ def api_reviews_list():
     else:
         my_id = _config.get("github", {}).get("user", "") or "@me"
     from concurrent.futures import ThreadPoolExecutor
+    import shutil
+
     def check_open(r):
         if not r["pr_id"]:
             return None
         info = platform.get_pr_info(r["repo"], r["pr_id"])
-        if info["state"] != "OPEN":
+        state_val = info.get("state", "UNKNOWN")
+        if state_val in ("MERGED", "DECLINED", "CLOSED", "SUPERSEDED", "DELETED"):
+            branch_dir = reviews_dir / r["repo"] / r["branch"]
+            if branch_dir.is_dir():
+                shutil.rmtree(branch_dir, ignore_errors=True)
+                log.emit("review_removed", f"Removed review for {r['repo']}#{r['pr_id']} ({state_val.lower()})",
+                    meta={"repo": r["repo"], "pr_id": r["pr_id"], "state": state_val})
+            return None
+        if state_val != "OPEN":
             return None
         r["updated_on"] = info["updated_on"]
         r["author"] = info.get("author", "")
