@@ -2,7 +2,7 @@ import json
 import re
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import core.log as log
@@ -18,6 +18,7 @@ def check(config: dict):
 
     workspace = slack_cfg.get("workspace", "")
     base_url = config["_base_url"]
+    max_age_hours = int(slack_cfg.get("mention_max_age_hours", 48))
 
     sl = state.load("slack")
     user_id = sl.get("user_id", "")
@@ -29,6 +30,15 @@ def check(config: dict):
     rotated = offset > file_size
     if rotated:
         offset = 0
+
+    # First run on this instance: skip the backlog. Seed last_dt to now so only
+    # messages that land after this point are ever considered for attention.
+    if not last_dt:
+        now_iso = datetime.now(timezone.utc).isoformat()
+        sl["last_dt"] = now_iso
+        sl["file_offset"] = file_size
+        state.save("slack", sl)
+        return
 
     with open(raw_path) as f:
         f.seek(offset)
@@ -47,7 +57,9 @@ def check(config: dict):
             record = json.loads(line.strip())
         except json.JSONDecodeError:
             continue
-        if rotated and last_dt and record.get("dt", "") <= last_dt:
+        # Always enforce the high-water mark: anything at or before last_dt is
+        # already accounted for and must not resurface as attention.
+        if last_dt and record.get("dt", "") <= last_dt:
             continue
         if workspace and not _matches_workspace(record, workspace, team_id):
             continue
@@ -186,14 +198,18 @@ def check(config: dict):
         if last_record_dt:
             sl["last_dt"] = last_record_dt
 
-    existing_mentions = sl.get("mentions", [])
+    # Age out stored mentions so the UI doesn't keep surfacing stale items.
+    cutoff_iso = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
+    existing_mentions = [m for m in sl.get("mentions", []) if m.get("ts", "") > cutoff_iso]
     for mention in mentions:
         text = _resolve_names(_extract_text(mention), names)
         channel = names.get(_extract_channel(mention), _extract_channel(mention))
+        # Store the slack message time, not the processing time, so age reflects reality.
+        msg_dt = mention.get("dt") or datetime.now(timezone.utc).isoformat()
         existing_mentions.append({
             "text": text[:500] if text else "",
             "channel": channel,
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": msg_dt,
         })
     sl["mentions"] = existing_mentions[-50:]
 
