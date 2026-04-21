@@ -107,6 +107,7 @@ const SYSTEM_EVENTS = new Set(['cycle_start', 'cycle_end', 'cycle_sleep']);
 function isNoise(e) {
     if (e.event === 'job_started') return true;
     if (e.event === 'ticket_ci_fix_skipped') return true;
+    if (e.event === 'events_started') return true;
     if (e.event === 'job_finished') {
         const s = e.summary || '';
         if (s.includes('ticket=None') && s.includes('status=ok')) return true;
