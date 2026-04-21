@@ -77,21 +77,22 @@ def _check_comments(config, platform, pr, seen, base_url):
         }
         meta = {"repo": pr["repo"], "pr_id": pr["id"], "comment_id": comment["id"]}
 
+        pr_ref = f"{pr['repo']}#{pr['id']}"
         if actionable:
             worktree = _ensure_worktree(config, pr)
             if worktree:
                 context = f"File: {comment.get('path', 'unknown')}\nLine: {comment.get('line', 'unknown')}\n\nReview comment: {comment['body']}\n\nFix this review comment."
                 result = run_claude_code(context, worktree)
                 if result is None:
-                    log.emit("pr_comment_flagged_manual", f"Claude failed to fix: {comment['body'][:80]}", links=links, meta=meta)
+                    log.emit("pr_comment_flagged_manual", f"{pr_ref}: Claude failed to fix — {comment['body'][:80]}", links=links, meta=meta)
                     continue
                 platform.push_branch(worktree, pr["branch"])
                 platform.resolve_comment(pr["repo"], pr["id"], comment["id"])
-                log.emit("pr_comment_addressed", f"Fixed: {comment['body'][:80]}", links=links, meta=meta)
+                log.emit("pr_comment_addressed", f"{pr_ref}: Fixed — {comment['body'][:80]}", links=links, meta=meta)
             else:
-                log.emit("pr_comment_flagged_manual", f"Could not create worktree: {comment['body'][:80]}", links=links, meta=meta)
+                log.emit("pr_comment_flagged_manual", f"{pr_ref}: Could not create worktree — {comment['body'][:80]}", links=links, meta=meta)
         else:
-            log.emit("pr_comment_flagged_manual", f"Ambiguous: {reason} — {comment['body'][:80]}", links=links, meta=meta)
+            log.emit("pr_comment_flagged_manual", f"{pr_ref}: Ambiguous ({reason}) — {comment['body'][:80]}", links=links, meta=meta)
 
     if new_comments:
         seen["last_comment_id"] = max(c["id"] for c in new_comments)
@@ -120,7 +121,7 @@ def _check_ci(config, platform, pr, seen, base_url):
     platform.push_branch(worktree, pr["branch"])
     seen["ci_fix_sha"] = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(worktree), capture_output=True, text=True, timeout=10).stdout.strip()
 
-    log.emit("pr_ci_fix_pushed", f"Fixed failing CI: {failure_names}",
+    log.emit("pr_ci_fix_pushed", f"{pr['repo']}#{pr['id']}: Fixed failing CI — {failure_names}",
         links={"pr": pr["url"], "detail": f"{base_url}/"},
         meta={"repo": pr["repo"], "pr_id": pr["id"], "checks": failure_names})
 
