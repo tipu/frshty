@@ -309,8 +309,13 @@ async function dismissAll() {
 }
 
 async function dismissAttention() {
-    const items = events.filter(e => ATTENTION_EVENTS.has(e.event) && !e.read);
-    await Promise.all(items.map(e => fetch(`/api/events/${e.id}/dismiss`, {method: 'POST'})));
+    const ids = events.filter(e => ATTENTION_EVENTS.has(e.event) && !e.read).map(e => e.id);
+    if (!ids.length) return;
+    await fetch('/api/events/dismiss-batch', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ids}),
+    });
     fetchEvents();
 }
 

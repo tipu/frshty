@@ -103,9 +103,44 @@ def get_events(limit: int = 100, after: str | None = None, unread_only: bool = F
 
 
 def dismiss(event_id: str):
-    dismissed = _load_read_state()
-    dismissed.add(event_id)
-    _save_read_state(dismissed)
+    _dismiss_ids({event_id})
+
+
+def dismiss_ids(event_ids) -> int:
+    """Dismiss a batch in a single atomic write. Returns how many were added."""
+    ids = set(event_ids) if not isinstance(event_ids, set) else event_ids
+    return _dismiss_ids(ids)
+
+
+def _dismiss_ids(new_ids: set) -> int:
+    """Atomic load → union → save under an exclusive lock so concurrent
+    dismiss calls can't lose updates to each other."""
+    import os, tempfile
+    p = _active_read_state_path()
+    lock = _read_state_lock_path()
+    if p is None or lock is None:
+        return 0
+    with open(lock, "w") as lf:
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        current: set = set()
+        if p.exists():
+            try:
+                current = set(json.loads(p.read_text()))
+            except (json.JSONDecodeError, ValueError):
+                current = set()
+        added = len(new_ids - current)
+        current |= new_ids
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", dir=str(p.parent), suffix=".tmp", delete=False) as f:
+                tmp = f.name
+                json.dump(list(current), f)
+            os.replace(tmp, str(p))
+        except Exception:
+            if tmp and os.path.exists(tmp):
+                os.unlink(tmp)
+            raise
+        return added
 
 
 def dismiss_all():
