@@ -262,14 +262,14 @@ _global_remote_cache: dict[str, tuple[float, dict]] = {}
 _GLOBAL_REMOTE_TTL = 3.0
 
 
-def _fetch_local_global_events(limit: int, unread_only: bool) -> list[dict]:
+def _fetch_local_global_events(limit: int, unread_only: bool, after: str) -> list[dict]:
     out = []
     for config in _configs_by_host.values():
         state_dir = config["_state_dir"]
         key = config["job"]["key"]
         log_tokens = log.use(state_dir, key)
         try:
-            for ev in log.get_events(limit=limit, unread_only=unread_only):
+            for ev in log.get_events(limit=limit, unread_only=unread_only, after=after or None):
                 ev["instance_key"] = key
                 ev["global_id"] = f"{key}:{ev['id']}"
                 ev["base_url"] = config.get("_base_url") or config["job"].get("host", "")
@@ -279,7 +279,7 @@ def _fetch_local_global_events(limit: int, unread_only: bool) -> list[dict]:
     return out
 
 
-def _fetch_remote_global_events(limit: int, unread_only: bool) -> tuple[list[dict], dict[str, str]]:
+def _fetch_remote_global_events(limit: int, unread_only: bool, since_hours: int) -> tuple[list[dict], dict[str, str]]:
     import asyncio
     from core.discovery import discover_instances, call_instance
 
@@ -290,12 +290,13 @@ def _fetch_remote_global_events(limit: int, unread_only: bool) -> tuple[list[dic
     if not remote:
         return [], {}
 
-    cache_key = f"{limit}:{unread_only}"
+    cache_key = f"{limit}:{unread_only}:{since_hours}"
     cached = _global_remote_cache.get(cache_key)
     if cached and (time.time() - cached[0]) < _GLOBAL_REMOTE_TTL:
         return cached[1]["events"], cached[1]["errors"]
 
-    path = f"/api/events?limit={limit}&unread={'true' if unread_only else 'false'}"
+    since_param = f"&since_hours={since_hours}" if since_hours > 0 else ""
+    path = f"/api/events?limit={limit}&unread={'true' if unread_only else 'false'}{since_param}"
     errors: dict[str, str] = {}
     events: list[dict] = []
 
@@ -331,9 +332,13 @@ def _fetch_remote_global_events(limit: int, unread_only: bool) -> tuple[list[dic
 
 
 @app.get("/api/global/events")
-def api_global_events(limit: int = 200, unread: bool = False):
-    local_events = _fetch_local_global_events(limit=limit, unread_only=unread)
-    remote_events, errors = _fetch_remote_global_events(limit=limit, unread_only=unread)
+def api_global_events(limit: int = 5000, unread: bool = False, since_hours: int = 8):
+    after = ""
+    if since_hours > 0:
+        from datetime import datetime, timezone, timedelta
+        after = (datetime.now(timezone.utc) - timedelta(hours=since_hours)).isoformat()
+    local_events = _fetch_local_global_events(limit=limit, unread_only=unread, after=after)
+    remote_events, errors = _fetch_remote_global_events(limit=limit, unread_only=unread, since_hours=since_hours)
     merged = local_events + remote_events
     merged.sort(key=lambda e: e.get("ts") or "", reverse=True)
     return {"events": merged[:limit], "errors": errors}
