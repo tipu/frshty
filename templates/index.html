@@ -117,6 +117,7 @@ let expandedRows = new Set();
 function isNoise(e) {
     if (e.event === 'job_started') return true;
     if (e.event === 'ticket_ci_fix_skipped') return true;
+    if (e.event === 'events_started') return true;
     if (e.event === 'job_finished') {
         const s = e.summary || '';
         const isInfra = s.includes('ticket=None');
@@ -147,7 +148,8 @@ function toggleExpand(id) {
 const ATTENTION_EVENTS = new Set([
     'pr_comment_flagged_manual', 'pr_stale_no_review', 'review_comments_queued',
     'slack_mention_detected', 'ticket_tests_fail', 'cycle_error',
-    'ticket_checks_failed', 'ticket_checks_unrelated', 'ticket_ci_fix_sent', 'ticket_checks_timeout'
+    'ticket_checks_failed', 'ticket_checks_unrelated', 'ticket_ci_fix_sent', 'ticket_checks_timeout',
+    'pr_checks_failed', 'pr_checks_unrelated', 'pr_ci_fix_sent',
 ]);
 const SYSTEM_EVENTS = new Set(['cycle_start', 'cycle_end', 'cycle_sleep']);
 
