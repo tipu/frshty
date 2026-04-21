@@ -1,7 +1,4 @@
-from pathlib import Path
 from unittest.mock import patch, MagicMock
-
-import pytest
 
 from features import tickets
 from tests.conftest import make_ticket, make_ticket_state
@@ -306,74 +303,178 @@ class TestMerge:
         assert result["status"] == "pr_created"
 
 
-class TestHandleCiFailure:
-    def test_not_caused_by_us(self, fake_config):
-        mock_platform = MagicMock()
-        mock_platform.get_failed_logs.return_value = "logs"
-        mock_platform.get_pr_diff.return_value = "diff"
+class TestHandleCiFailureStub:
+    def test_sets_flag_and_enqueues(self):
         ts = make_ticket_state(status="pr_created")
         pr = {"repo": "r", "id": 1, "url": "u"}
         checks = [{"name": "lint", "state": "FAILED"}]
-
-        with patch("features.tickets.terminal.is_claude_idle", return_value=True), \
-             patch("features.tickets.run_haiku", return_value='{"caused_by_us": false, "reason": "flaky"}'), \
-             patch("features.tickets.extract_json", return_value={"caused_by_us": False, "reason": "flaky"}), \
+        with patch("features.tickets._enqueue_stage") as eq, \
              patch("features.tickets.log"):
-            result = tickets._handle_ci_failure(fake_config, mock_platform, make_ticket(), ts, pr, checks, "http://base")
+            result = tickets._handle_ci_failure(make_ticket(), ts, pr, checks, "http://base", "inst")
+        assert result["_ci_failed_pending"] is True
+        eq.assert_called_once_with("inst", "PROJ-1", "fix_ci_failures")
         assert result.get("ci_fix_attempts", 0) == 0
 
-    def test_caused_by_us_increments(self, fake_config):
-        mock_platform = MagicMock()
-        mock_platform.get_failed_logs.return_value = "logs"
-        mock_platform.get_pr_diff.return_value = "diff"
+    def test_does_not_double_enqueue(self):
+        ts = make_ticket_state(status="pr_created", _ci_failed_pending=True)
+        pr = {"repo": "r", "id": 1, "url": "u"}
+        checks = [{"name": "lint", "state": "FAILED"}]
+        with patch("features.tickets._enqueue_stage") as eq, \
+             patch("features.tickets.log"):
+            tickets._handle_ci_failure(make_ticket(), ts, pr, checks, "http://base", "inst")
+        eq.assert_not_called()
+
+    def test_no_instance_key_does_not_enqueue(self):
         ts = make_ticket_state(status="pr_created")
         pr = {"repo": "r", "id": 1, "url": "u"}
         checks = [{"name": "lint", "state": "FAILED"}]
-
-        with patch("features.tickets.terminal.is_claude_idle", return_value=True), \
-             patch("features.tickets.terminal.send_prompt", return_value=True), \
-             patch("features.tickets.run_haiku", return_value='{"caused_by_us": true, "reason": "bad", "fix_hint": "fix it"}'), \
-             patch("features.tickets.extract_json", return_value={"caused_by_us": True, "reason": "bad", "fix_hint": "fix it"}), \
+        with patch("features.tickets._enqueue_stage") as eq, \
              patch("features.tickets.log"):
-            result = tickets._handle_ci_failure(fake_config, mock_platform, make_ticket(), ts, pr, checks, "http://base")
-        assert result["ci_fix_attempts"] == 1
+            result = tickets._handle_ci_failure(make_ticket(), ts, pr, checks, "http://base", "")
+        assert result["_ci_failed_pending"] is True
+        eq.assert_not_called()
 
-    def test_skipped_when_not_idle(self, fake_config):
-        mock_platform = MagicMock()
-        ts = make_ticket_state(status="pr_created")
+    def test_max_attempts_transitions_pr_failed_and_clears_flag(self):
+        ts = make_ticket_state(status="pr_created", ci_fix_attempts=2, _ci_failed_pending=True)
         pr = {"repo": "r", "id": 1, "url": "u"}
         checks = [{"name": "lint", "state": "FAILED"}]
-
-        with patch("features.tickets.terminal.is_claude_idle", return_value=False), \
+        with patch("features.tickets._enqueue_stage") as eq, \
              patch("features.tickets.log"):
-            result = tickets._handle_ci_failure(fake_config, mock_platform, make_ticket(), ts, pr, checks, "http://base")
-        assert result.get("ci_fix_attempts", 0) == 0
-        mock_platform.get_failed_logs.assert_not_called()
-
-    def test_not_delivered_does_not_increment(self, fake_config):
-        mock_platform = MagicMock()
-        mock_platform.get_failed_logs.return_value = "logs"
-        mock_platform.get_pr_diff.return_value = "diff"
-        ts = make_ticket_state(status="pr_created")
-        pr = {"repo": "r", "id": 1, "url": "u"}
-        checks = [{"name": "lint", "state": "FAILED"}]
-
-        with patch("features.tickets.terminal.is_claude_idle", return_value=True), \
-             patch("features.tickets.terminal.send_prompt", return_value=False), \
-             patch("features.tickets.run_haiku", return_value='{"caused_by_us": true, "reason": "bad", "fix_hint": "fix it"}'), \
-             patch("features.tickets.extract_json", return_value={"caused_by_us": True, "reason": "bad", "fix_hint": "fix it"}), \
-             patch("features.tickets.log"):
-            result = tickets._handle_ci_failure(fake_config, mock_platform, make_ticket(), ts, pr, checks, "http://base")
-        assert result.get("ci_fix_attempts", 0) == 0
-
-    def test_max_attempts_stops(self, fake_config):
-        mock_platform = MagicMock()
-        mock_platform.get_failed_logs.return_value = "logs"
-        mock_platform.get_pr_diff.return_value = "diff"
-        ts = make_ticket_state(status="pr_created", ci_fix_attempts=2)
-        pr = {"repo": "r", "id": 1, "url": "u"}
-        checks = [{"name": "lint", "state": "FAILED"}]
-
-        with patch("features.tickets.log"):
-            result = tickets._handle_ci_failure(fake_config, mock_platform, make_ticket(), ts, pr, checks, "http://base")
+            result = tickets._handle_ci_failure(make_ticket(), ts, pr, checks, "http://base", "inst")
         assert result["status"] == "pr_failed"
+        assert "_ci_failed_pending" not in result
+        eq.assert_not_called()
+
+
+class TestCheckSkipsBusyTicket:
+    def test_skips_ticket_with_running_job(self, fake_config, tmp_state):
+        import core.state as state
+        from tests.conftest import make_ticket
+        state.save("tickets", {"PROJ-1": make_ticket_state(status="planning", slug="PROJ-1-do-the-thing")})
+
+        with patch("features.tickets._fetch_tickets", return_value=[make_ticket()]), \
+             patch("features.tickets.get_repos", return_value=[]), \
+             patch("core.queue.jobs_for_ticket",
+                   return_value=[{"task": "start_planning", "status": "running"}]), \
+             patch("features.tickets._enqueue_stage") as eq:
+            tickets.check(fake_config, instance_key="inst")
+        eq.assert_not_called()
+
+    def test_processes_ticket_with_no_running_job(self, fake_config, tmp_state):
+        import core.state as state
+        from tests.conftest import make_ticket
+        state.save("tickets", {"PROJ-1": make_ticket_state(status="planning", slug="PROJ-1-do-the-thing")})
+
+        with patch("features.tickets._fetch_tickets", return_value=[make_ticket()]), \
+             patch("features.tickets.get_repos", return_value=[]), \
+             patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("features.tickets._enqueue_stage"):
+            tickets.check(fake_config, instance_key="inst")
+
+
+class TestFixCiFailuresTask:
+    def _ctx(self, config, ticket_key="PROJ-1"):
+        from core.tasks.registry import TaskContext
+        from datetime import datetime, timezone
+        return TaskContext(
+            instance_key="inst", ticket_key=ticket_key, task="fix_ci_failures",
+            payload={}, job_id=1, triggering_event_id=None,
+            config=config, registry=None, now=datetime.now(timezone.utc),
+        )
+
+    def _seed(self, ts):
+        import core.state as state
+        state.save("tickets", {"PROJ-1": ts})
+
+    def test_no_prs_fails_and_clears_flag(self, fake_config, tmp_state):
+        from core.tasks.tickets import fix_ci_failures
+        self._seed(make_ticket_state(status="pr_created", _ci_failed_pending=True, prs=[]))
+        result = fix_ci_failures(self._ctx(fake_config))
+        assert result.status == "failed"
+        import core.state as state
+        ts = state.load("tickets")["PROJ-1"]
+        assert "_ci_failed_pending" not in ts
+
+    def test_worktree_missing_emits_skip(self, fake_config, tmp_state, tmp_log):
+        from core.tasks.tickets import fix_ci_failures
+        self._seed(make_ticket_state(
+            status="pr_created", _ci_failed_pending=True,
+            prs=[{"repo": "r", "id": 1, "url": "u"}],
+        ))
+        mock_platform = MagicMock()
+        mock_platform.get_pr_checks.return_value = [{"name": "lint", "state": "FAILED"}]
+        with patch("core.tasks.tickets.make_platform", return_value=mock_platform):
+            result = fix_ci_failures(self._ctx(fake_config))
+        assert result.status == "ok"
+        import core.state as state
+        ts = state.load("tickets")["PROJ-1"]
+        assert ts.get("ci_fix_attempts", 0) == 0
+        assert "_ci_failed_pending" not in ts
+
+    def test_not_caused_by_us_no_increment(self, fake_config, tmp_state, tmp_log):
+        from core.tasks.tickets import fix_ci_failures
+        slug = "PROJ-1-do-the-thing"
+        self._seed(make_ticket_state(
+            status="pr_created", _ci_failed_pending=True, slug=slug,
+            prs=[{"repo": "r", "id": 1, "url": "u"}],
+        ))
+        wt = fake_config["workspace"]["root"] / "tickets" / slug / "r"
+        wt.mkdir(parents=True)
+
+        mock_platform = MagicMock()
+        mock_platform.get_pr_checks.return_value = [{"name": "lint", "state": "FAILED"}]
+        mock_platform.get_failed_logs.return_value = "logs"
+        mock_platform.get_pr_diff.return_value = "diff"
+        with patch("core.tasks.tickets.make_platform", return_value=mock_platform), \
+             patch("core.tasks.tickets.run_haiku", return_value='{"caused_by_us": false, "reason": "flaky"}'), \
+             patch("core.tasks.tickets.run_claude_code") as rcc:
+            result = fix_ci_failures(self._ctx(fake_config))
+        assert result.status == "ok"
+        rcc.assert_not_called()
+        import core.state as state
+        ts = state.load("tickets")["PROJ-1"]
+        assert ts.get("ci_fix_attempts", 0) == 0
+        assert "_ci_failed_pending" not in ts
+
+    def test_caused_by_us_increments_and_clears_flag(self, fake_config, tmp_state, tmp_log):
+        from core.tasks.tickets import fix_ci_failures
+        slug = "PROJ-1-do-the-thing"
+        self._seed(make_ticket_state(
+            status="pr_created", _ci_failed_pending=True, slug=slug,
+            prs=[{"repo": "r", "id": 1, "url": "u"}],
+        ))
+        wt = fake_config["workspace"]["root"] / "tickets" / slug / "r"
+        wt.mkdir(parents=True)
+
+        mock_platform = MagicMock()
+        mock_platform.get_pr_checks.return_value = [{"name": "lint", "state": "FAILED"}]
+        mock_platform.get_failed_logs.return_value = "logs"
+        mock_platform.get_pr_diff.return_value = "diff"
+        with patch("core.tasks.tickets.make_platform", return_value=mock_platform), \
+             patch("core.tasks.tickets.run_haiku",
+                   return_value='{"caused_by_us": true, "reason": "bad", "fix_hint": "fix it"}'), \
+             patch("core.tasks.tickets.run_claude_code", return_value="ok"):
+            result = fix_ci_failures(self._ctx(fake_config))
+        assert result.status == "ok"
+        import core.state as state
+        ts = state.load("tickets")["PROJ-1"]
+        assert ts["ci_fix_attempts"] == 1
+        assert "_ci_failed_pending" not in ts
+
+    def test_exception_clears_pending_flag(self, fake_config, tmp_state, tmp_log):
+        from core.tasks.tickets import fix_ci_failures
+        slug = "PROJ-1-do-the-thing"
+        self._seed(make_ticket_state(
+            status="pr_created", _ci_failed_pending=True, slug=slug,
+            prs=[{"repo": "r", "id": 1, "url": "u"}],
+        ))
+        mock_platform = MagicMock()
+        mock_platform.get_pr_checks.side_effect = RuntimeError("boom")
+        with patch("core.tasks.tickets.make_platform", return_value=mock_platform):
+            try:
+                fix_ci_failures(self._ctx(fake_config))
+            except RuntimeError:
+                pass
+        import core.state as state
+        ts = state.load("tickets")["PROJ-1"]
+        assert "_ci_failed_pending" not in ts

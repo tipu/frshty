@@ -6,8 +6,8 @@ from pathlib import Path
 import httpx
 
 import core.log as log
+import core.queue as q
 import core.state as state
-import core.terminal as terminal
 from core.config import get_repos, ticket_worktree_path, resolve_env
 from core.claude_runner import run_haiku, run_claude_code, extract_json
 from core.ticket_status import TicketStatus, transition
@@ -26,7 +26,6 @@ _VERDICT_RE = re.compile(r"^VERDICT:\s*(PASS|FAIL)\b", re.MULTILINE | re.IGNOREC
 
 
 def _enqueue_stage(instance_key: str, ticket_key: str, task_name: str) -> None:
-    import core.queue as q
     existing = q.jobs_for_ticket(instance_key, ticket_key, limit=20)
     if any(j["task"] == task_name and j["status"] in ("queued", "running") for j in existing):
         return
@@ -140,93 +139,102 @@ def check(config: dict, instance_key: str = ""):
         ticket_state[key] = ts
 
     for ticket in assigned:
-        key = ticket["key"]
-        existing = key in ticket_state
-        ts = ticket_state.get(key, {"status": "new"})
-        ts["external_status"] = ticket.get("status", "")
-        if ts.get("status") == "done":
-            ts.pop("done_at", None)
-            if ts.get("prs"):
-                ts["status"] = "pr_created"
-            elif ts.get("slug"):
-                ts["status"] = "pr_ready"
-            else:
-                ts["status"] = "new"
+        key = ticket.get("key", "?")
+        try:
+            if instance_key:
+                running = [j for j in q.jobs_for_ticket(instance_key, key) if j["status"] == "running"]
+                if running:
+                    continue
+            existing = key in ticket_state
+            ts = ticket_state.get(key, {"status": "new"})
+            ts["external_status"] = ticket.get("status", "")
+            if ts.get("status") == "done":
+                ts.pop("done_at", None)
+                if ts.get("prs"):
+                    ts["status"] = "pr_created"
+                elif ts.get("slug"):
+                    ts["status"] = "pr_ready"
+                else:
+                    ts["status"] = "new"
 
-        if discovery_only:
-            if not existing:
-                log.emit("ticket_found", f"New ticket: {key} — {ticket['summary']}",
-                    links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
-                    meta={"ticket": key})
-                ts["slug"] = _make_slug(key, ticket["summary"])
-                ts["branch"] = _make_branch(config, key, ticket)
-                ts["url"] = ticket.get("url", "")
-            ticket_state[key] = ts
-            continue
-
-        mapped = _resolve_status(config, ticket.get("status", ""))
-        if mapped and "slug" not in ts:
-            ts["slug"] = _make_slug(key, ticket["summary"])
-            ts["branch"] = _make_branch(config, key, ticket)
-            ts["url"] = ticket.get("url", "")
-            ts["status"] = TicketStatus(mapped).value
-            if mapped != "new":
+            if discovery_only:
+                if not existing:
+                    log.emit("ticket_found", f"New ticket: {key} — {ticket['summary']}",
+                        links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
+                        meta={"ticket": key})
+                    ts["slug"] = _make_slug(key, ticket["summary"])
+                    ts["branch"] = _make_branch(config, key, ticket)
+                    ts["url"] = ticket.get("url", "")
                 ticket_state[key] = ts
                 continue
 
-        if ts["status"] == TicketStatus.merged:
-            continue
+            mapped = _resolve_status(config, ticket.get("status", ""))
+            if mapped and "slug" not in ts:
+                ts["slug"] = _make_slug(key, ticket["summary"])
+                ts["branch"] = _make_branch(config, key, ticket)
+                ts["url"] = ticket.get("url", "")
+                ts["status"] = TicketStatus(mapped).value
+                if mapped != "new":
+                    ticket_state[key] = ts
+                    continue
 
-        if ts["status"] == TicketStatus.pr_failed:
-            continue
+            if ts["status"] == TicketStatus.merged:
+                continue
 
-        if ts.get("branch"):
-            ts = _reconcile_prs(ts, open_prs)
+            if ts["status"] == TicketStatus.pr_failed:
+                continue
 
-        if ts["status"] == "new":
-            ts = _setup_ticket(config, ticket, base_url)
-            if ts.get("discovered_at") and instance_key:
+            if ts.get("branch"):
+                ts = _reconcile_prs(ts, open_prs)
+
+            if ts["status"] == "new":
+                ts = _setup_ticket(config, ticket, base_url)
+                if ts.get("discovered_at") and instance_key:
+                    _enqueue_stage(instance_key, key, "start_planning")
+
+            if ts["status"] == "planning" and instance_key:
                 _enqueue_stage(instance_key, key, "start_planning")
 
-        if ts["status"] == "planning" and instance_key:
-            _enqueue_stage(instance_key, key, "start_planning")
-
-        if ts["status"] == "reviewing" and instance_key:
-            ws = config["workspace"]
-            slug = ts.get("slug", "")
-            review_file = ws["root"] / ws["tickets_dir"] / slug / "docs" / "tri-review.md"
-            if review_file.exists():
-                verdict = _VERDICT_RE.search(review_file.read_text())
-                if verdict and verdict.group(1).upper() == "PASS":
-                    _enqueue_stage(instance_key, key, "mark_ready")
-                elif verdict and verdict.group(1).upper() == "FAIL":
-                    _enqueue_stage(instance_key, key, "fix_review_findings")
+            if ts["status"] == "reviewing" and instance_key:
+                ws = config["workspace"]
+                slug = ts.get("slug", "")
+                review_file = ws["root"] / ws["tickets_dir"] / slug / "docs" / "tri-review.md"
+                if review_file.exists():
+                    verdict = _VERDICT_RE.search(review_file.read_text())
+                    if verdict and verdict.group(1).upper() == "PASS":
+                        _enqueue_stage(instance_key, key, "mark_ready")
+                    elif verdict and verdict.group(1).upper() == "FAIL":
+                        _enqueue_stage(instance_key, key, "fix_review_findings")
+                    else:
+                        _enqueue_stage(instance_key, key, "start_reviewing")
                 else:
                     _enqueue_stage(instance_key, key, "start_reviewing")
-            else:
-                _enqueue_stage(instance_key, key, "start_reviewing")
 
-        if ts["status"] == "pr_ready" and config.get("pr", {}).get("auto_pr") and not ts.get("pr_scheduled_at"):
-            ts = _create_pr(config, ticket, ts, base_url)
+            if ts["status"] == "pr_ready" and config.get("pr", {}).get("auto_pr") and not ts.get("pr_scheduled_at"):
+                ts = _create_pr(config, ticket, ts, base_url)
 
-        if ts["status"] in ("pr_created", "in_review"):
-            ts = _resolve_conflicts(config, ticket, ts, base_url)
+            if ts["status"] in ("pr_created", "in_review"):
+                ts = _resolve_conflicts(config, ticket, ts, base_url)
 
-        if ts["status"] in ("pr_created", "in_review"):
-            platform = make_platform(config)
-            result = platform.monitor_ci(ticket, ts, base_url)
-            if result.get("_ci_failed"):
-                ts = _handle_ci_failure(config, platform, ticket, ts, result["pr"], result["checks"], base_url)
-            else:
-                ts = result
+            if ts["status"] in ("pr_created", "in_review"):
+                platform = make_platform(config)
+                result = platform.monitor_ci(ticket, ts, base_url)
+                if result.get("_ci_failed"):
+                    ts = _handle_ci_failure(ticket, ts, result["pr"], result["checks"], base_url, instance_key)
+                else:
+                    ts = result
 
-        if ts["status"] in ("pr_created", "in_review") and ts.get("ci_passed") and config.get("pr", {}).get("auto_merge"):
-            ts = _merge(config, ticket, ts, base_url)
+            if ts["status"] in ("pr_created", "in_review") and ts.get("ci_passed") and config.get("pr", {}).get("auto_merge"):
+                ts = _merge(config, ticket, ts, base_url)
 
-        if ts["status"] in ("pr_created", "in_review"):
-            ts = _check_in_review(config, ticket, ts, base_url)
+            if ts["status"] in ("pr_created", "in_review"):
+                ts = _check_in_review(config, ticket, ts, base_url)
 
-        ticket_state[key] = ts
+            ticket_state[key] = ts
+        except Exception as e:
+            log.emit("ticket_check_error", f"[{key}] {type(e).__name__}: {e}",
+                links={"detail": f"{base_url}/tickets/{key}"},
+                meta={"ticket": key, "error": type(e).__name__})
 
     state.save("tickets", ticket_state)
 
@@ -679,7 +687,7 @@ def _merge(config, ticket, ts, base_url) -> dict:
     return ts
 
 
-def _handle_ci_failure(config, platform, ticket, ts, pr, checks, base_url) -> dict:
+def _handle_ci_failure(ticket, ts, pr, checks, base_url, instance_key="") -> dict:
     failed_names = [c["name"] for c in checks if c["state"].upper() in ("FAILURE", "FAILED")]
     fix_attempts = ts.get("ci_fix_attempts", 0)
 
@@ -688,72 +696,13 @@ def _handle_ci_failure(config, platform, ticket, ts, pr, checks, base_url) -> di
             links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
             meta={"ticket": ticket["key"], "failed_checks": failed_names})
         ts["status"] = transition(ts["status"], "pr_failed")
+        ts.pop("_ci_failed_pending", None)
         return ts
 
-    if not terminal.is_claude_idle(ticket["key"]):
-        log.emit("ticket_ci_fix_skipped", f"Skipped CI fix for {_label(ticket['key'], ts)}: terminal not idle",
-            links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
-            meta={"ticket": ticket["key"], "failed_checks": failed_names})
-        return ts
-
-    failure_logs = platform.get_failed_logs(pr["repo"], pr["id"])
-    pr_diff = platform.get_pr_diff(pr["repo"], pr["id"]) or ""
-
-    prompt = f"""CI checks failed on a PR created by our automated pipeline. Determine if this is caused by our changes or is pre-existing/unrelated.
-
-Ticket: {ticket['key']} — {ticket['summary']}
-Failed checks: {', '.join(failed_names)}
-Fix attempt: {fix_attempts + 1}/{MAX_CI_FIX_ATTEMPTS}
-
-PR diff (what we changed):
-{pr_diff[:4000]}
-
-Failure logs:
-{failure_logs[:4000]}
-
-Analyze causality:
-1. Could our diff have caused these failures? Consider both direct changes and indirect effects (e.g. we changed a function that these tests depend on).
-2. Or are these pre-existing failures, flaky tests, or infra issues unrelated to our changes?
-
-Reply with EXACTLY one JSON object:
-{{"caused_by_us": true/false, "reason": "brief explanation", "fix_hint": "what to change if caused_by_us"}}"""
-
-    result = run_haiku(prompt, timeout=120)
-    if not result:
-        return ts
-
-    try:
-        analysis = extract_json(result) or json.loads(result.strip())
-    except (json.JSONDecodeError, TypeError):
-        return ts
-
-    caused = analysis.get("caused_by_us", False)
-    reason = analysis.get("reason", "")
-
-    if not caused:
-        log.emit("ticket_checks_unrelated", f"CI failure for {_label(ticket['key'], ts)} not caused by our changes: {reason[:100]}",
-            links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
-            meta={"ticket": ticket["key"], "failed_checks": failed_names, "reason": reason})
-        return ts
-
-    fix_hint = analysis.get("fix_hint", "")
-
-    delivered = terminal.send_prompt(ticket["key"],
-        f"CI checks failed: {', '.join(failed_names)}. This is caused by our changes. "
-        f"Fix the issue: {fix_hint}. Then commit with --no-verify and push.")
-    if not delivered:
-        log.emit("ticket_ci_fix_not_delivered", f"CI fix for {_label(ticket['key'], ts)} did not land in terminal",
-            links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
-            meta={"ticket": ticket["key"], "failed_checks": failed_names, "fix_hint": fix_hint})
-        return ts
-
-    ts["ci_fix_attempts"] = fix_attempts + 1
-    ts.pop("checks_started_at", None)
-
-    log.emit("ticket_ci_fix_sent", f"Sent CI fix to {_label(ticket['key'], ts)} (attempt {ts['ci_fix_attempts']}): {fix_hint[:80]}",
-        links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
-        meta={"ticket": ticket["key"], "failed_checks": failed_names, "fix_hint": fix_hint})
-
+    if not ts.get("_ci_failed_pending"):
+        ts["_ci_failed_pending"] = True
+        if instance_key:
+            _enqueue_stage(instance_key, ticket["key"], "fix_ci_failures")
     return ts
 
 

@@ -1,13 +1,16 @@
 """Ticket pipeline tasks. Headless claude -p invocations, postcondition-gated."""
+import json
 from pathlib import Path
 
 import core.log as log
 import core.state as state
-from core.claude_runner import run_claude_code
+from core.claude_runner import run_claude_code, run_haiku, extract_json
+from core.config import ticket_worktree_path
 from core.tasks.registry import TaskContext, TaskResult, task
 from core.tasks.preconditions import (
-    status_is, auto_pr_true, file_exists, file_contains, feature_enabled,
+    status_is, auto_pr_true, file_exists, file_contains, feature_enabled, has_flag,
 )
+from features.platforms import make_platform
 
 
 PLAN_TIMEOUT = 1800
@@ -106,6 +109,102 @@ def fix_review_findings(ctx: TaskContext) -> TaskResult:
     if result is None:
         return TaskResult("failed", "claude returned non-zero or empty")
     return TaskResult("ok")
+
+
+@task("fix_ci_failures",
+      preconditions=[status_is("pr_created", "in_review"),
+                     has_flag("_ci_failed_pending")],
+      timeout=FIX_TIMEOUT)
+def fix_ci_failures(ctx: TaskContext) -> TaskResult:
+    from features.tickets import MAX_CI_FIX_ATTEMPTS
+
+    tickets = state.load("tickets")
+    ts = tickets.get(ctx.ticket_key or "") or {}
+    slug = ts.get("slug", "")
+    prs = ts.get("prs", [])
+    base_url = ctx.config.get("_base_url", "")
+    ticket_link = {"detail": f"{base_url}/tickets/{ctx.ticket_key}"}
+
+    try:
+        if not prs:
+            return TaskResult("failed", "no prs on ticket")
+
+        platform = make_platform(ctx.config)
+
+        for pr in prs:
+            checks = platform.get_pr_checks(pr["repo"], pr["id"]) or []
+            failed_names = [c["name"] for c in checks if c["state"].upper() in ("FAILURE", "FAILED")]
+            if not failed_names:
+                continue
+
+            fix_attempts = ts.get("ci_fix_attempts", 0)
+            if fix_attempts >= MAX_CI_FIX_ATTEMPTS:
+                continue
+
+            wt = ticket_worktree_path(ctx.config, slug, pr["repo"])
+            if not wt.is_dir():
+                log.emit("ticket_ci_fix_skipped",
+                         f"Skipped CI fix for {slug or ctx.ticket_key}/{pr['repo']}: worktree missing",
+                         links=ticket_link,
+                         meta={"ticket": ctx.ticket_key, "repo": pr["repo"], "reason": "worktree_missing"})
+                continue
+
+            failure_logs = platform.get_failed_logs(pr["repo"], pr["id"]) or ""
+            pr_diff = platform.get_pr_diff(pr["repo"], pr["id"]) or ""
+            causality_prompt = (
+                "CI checks failed on a PR created by our automated pipeline. "
+                "Determine if this is caused by our changes or is pre-existing/unrelated.\n\n"
+                f"Ticket: {ctx.ticket_key} — {ts.get('summary', '')}\n"
+                f"Failed checks: {', '.join(failed_names)}\n"
+                f"Fix attempt: {fix_attempts + 1}/{MAX_CI_FIX_ATTEMPTS}\n\n"
+                f"PR diff (what we changed):\n{pr_diff[:4000]}\n\n"
+                f"Failure logs:\n{failure_logs[:4000]}\n\n"
+                "Analyze causality:\n"
+                "1. Could our diff have caused these failures? Consider both direct changes and indirect effects.\n"
+                "2. Or are these pre-existing failures, flaky tests, or infra issues unrelated to our changes?\n\n"
+                "Reply with EXACTLY one JSON object:\n"
+                '{"caused_by_us": true/false, "reason": "brief explanation", "fix_hint": "what to change if caused_by_us"}'
+            )
+            classification = run_haiku(causality_prompt, timeout=120)
+            if not classification:
+                continue
+            try:
+                analysis = extract_json(classification) or json.loads(classification.strip())
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+            if not analysis.get("caused_by_us", False):
+                reason = analysis.get("reason", "")
+                log.emit("ticket_checks_unrelated",
+                         f"CI failure for {slug or ctx.ticket_key} not caused by our changes: {reason[:100]}",
+                         links={**ticket_link, "pr": pr.get("url", "")},
+                         meta={"ticket": ctx.ticket_key, "failed_checks": failed_names, "reason": reason})
+                continue
+
+            fix_hint = analysis.get("fix_hint", "")
+            fix_prompt = (
+                f"CI checks failed: {', '.join(failed_names)}. This is caused by our changes. "
+                f"Fix the issue: {fix_hint}. Run the failing tests locally if you can, "
+                f"then commit with --no-verify and push."
+            )
+            result = run_claude_code(fix_prompt, cwd=wt, timeout=FIX_TIMEOUT)
+            if result is None:
+                continue
+
+            ts["ci_fix_attempts"] = fix_attempts + 1
+            ts.pop("ci_passed", None)
+            ts.pop("checks_started_at", None)
+            log.emit("ticket_ci_fix_sent",
+                     f"Sent CI fix to {slug or ctx.ticket_key} (attempt {ts['ci_fix_attempts']}): {fix_hint[:80]}",
+                     links={**ticket_link, "pr": pr.get("url", "")},
+                     meta={"ticket": ctx.ticket_key, "failed_checks": failed_names, "fix_hint": fix_hint})
+
+        return TaskResult("ok", artifacts={"ci_fix_attempts": ts.get("ci_fix_attempts", 0)})
+    finally:
+        ts.pop("_ci_failed_pending", None)
+        if ctx.ticket_key:
+            tickets[ctx.ticket_key] = ts
+            state.save("tickets", tickets)
 
 
 @task("mark_ready",
