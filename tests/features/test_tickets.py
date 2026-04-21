@@ -426,8 +426,8 @@ class TestFixCiFailuresTask:
         mock_platform.get_failed_logs.return_value = "logs"
         mock_platform.get_pr_diff.return_value = "diff"
         with patch("core.tasks.tickets.make_platform", return_value=mock_platform), \
-             patch("core.tasks.tickets.run_haiku", return_value='{"caused_by_us": false, "reason": "flaky"}'), \
-             patch("core.tasks.tickets.run_claude_code") as rcc:
+             patch("features.pr_ci.run_haiku", return_value='{"caused_by_us": false, "reason": "flaky"}'), \
+             patch("features.pr_ci.run_claude_code") as rcc:
             result = fix_ci_failures(self._ctx(fake_config))
         assert result.status == "ok"
         rcc.assert_not_called()
@@ -451,9 +451,9 @@ class TestFixCiFailuresTask:
         mock_platform.get_failed_logs.return_value = "logs"
         mock_platform.get_pr_diff.return_value = "diff"
         with patch("core.tasks.tickets.make_platform", return_value=mock_platform), \
-             patch("core.tasks.tickets.run_haiku",
+             patch("features.pr_ci.run_haiku",
                    return_value='{"caused_by_us": true, "reason": "bad", "fix_hint": "fix it"}'), \
-             patch("core.tasks.tickets.run_claude_code", return_value="ok"):
+             patch("features.pr_ci.run_claude_code", return_value="ok"):
             result = fix_ci_failures(self._ctx(fake_config))
         assert result.status == "ok"
         import core.state as state
@@ -478,3 +478,200 @@ class TestFixCiFailuresTask:
         import core.state as state
         ts = state.load("tickets")["PROJ-1"]
         assert "_ci_failed_pending" not in ts
+
+
+class TestCommentSnapshot:
+    def test_empty(self):
+        assert tickets._comment_snapshot([]) == {"count": 0, "latest_created_at": None}
+
+    def test_picks_max_date(self):
+        snap = tickets._comment_snapshot([
+            {"created_at": "2026-04-20T00:00:00Z"},
+            {"created_at": "2026-04-22T00:00:00Z"},
+            {"created_at": "2026-04-21T00:00:00Z"},
+        ])
+        assert snap == {"count": 3, "latest_created_at": "2026-04-22T00:00:00Z"}
+
+    def test_ignores_missing_dates(self):
+        snap = tickets._comment_snapshot([
+            {"created_at": "2026-04-20T00:00:00Z"}, {},
+        ])
+        assert snap == {"count": 2, "latest_created_at": "2026-04-20T00:00:00Z"}
+
+
+class TestWriteCommentsMd:
+    def test_empty(self, tmp_path):
+        tickets._write_comments_md(tmp_path, [])
+        assert (tmp_path / "comments.md").read_text() == "# Comments\n\nNo upstream comments.\n"
+
+    def test_rendered(self, tmp_path):
+        tickets._write_comments_md(tmp_path, [
+            {"author": "Alice", "created_at": "2026-04-20T18:00:00Z", "body": "First"},
+            {"author": "Bob", "created_at": "2026-04-21T09:00:00Z", "body": "Reply"},
+        ])
+        out = (tmp_path / "comments.md").read_text()
+        assert "# Comments" in out
+        assert "## Alice — 2026-04-20T18:00:00Z" in out
+        assert "First" in out
+        assert "## Bob — 2026-04-21T09:00:00Z" in out
+        assert "Reply" in out
+
+
+class TestMarkTicketMerged:
+    def test_stores_snapshot(self, fake_config):
+        ts = {"status": "pr_created"}
+        ticket = make_ticket()
+        comments = [
+            {"created_at": "2026-04-20T00:00:00Z", "body": "a"},
+            {"created_at": "2026-04-21T00:00:00Z", "body": "b"},
+        ]
+        with patch("features.tickets._fetch_ticket_comments", return_value=comments):
+            result = tickets._mark_ticket_merged(fake_config, ticket, ts)
+        assert result["status"] == "merged"
+        assert result["merged_comment_snapshot"] == {
+            "count": 2, "latest_created_at": "2026-04-21T00:00:00Z",
+        }
+        assert "merged_at" in result
+
+    def test_clears_ci_passed(self, fake_config):
+        ts = {"status": "pr_created", "ci_passed": True}
+        with patch("features.tickets._fetch_ticket_comments", return_value=[]):
+            result = tickets._mark_ticket_merged(fake_config, make_ticket(), ts)
+        assert "ci_passed" not in result
+
+
+class TestClearReingestDocs:
+    def test_deletes_only_targeted(self, tmp_path, fake_config):
+        fake_config["workspace"]["root"] = tmp_path
+        slug = "PROJ-1-slug"
+        docs = tmp_path / "tickets" / slug / "docs"
+        docs.mkdir(parents=True)
+        for name in ("ticket.md", "technical-plan.md", "change-manifest.md",
+                     "tri-review.md", "epic.md", "other.md"):
+            (docs / name).write_text("x")
+        (docs / "attachments").mkdir()
+        (docs / "attachments" / "pic.png").write_bytes(b"p")
+
+        deleted = tickets._clear_reingest_docs(fake_config, slug)
+        assert set(deleted) == {"ticket.md", "technical-plan.md",
+                                "change-manifest.md", "tri-review.md"}
+        assert (docs / "epic.md").exists()
+        assert (docs / "other.md").exists()
+        assert (docs / "attachments" / "pic.png").exists()
+
+    def test_missing_docs_dir_noop(self, tmp_path, fake_config):
+        fake_config["workspace"]["root"] = tmp_path
+        assert tickets._clear_reingest_docs(fake_config, "nope") == []
+
+
+class TestReingestMergedTicket:
+    def _prep(self, tmp_path, fake_config, slug="PROJ-1-slug"):
+        fake_config["workspace"]["root"] = tmp_path
+        docs = tmp_path / "tickets" / slug / "docs"
+        docs.mkdir(parents=True)
+        for name in ("ticket.md", "technical-plan.md", "change-manifest.md", "tri-review.md"):
+            (docs / name).write_text("old")
+        return docs
+
+    def test_resets_status_and_emits_requeued(self, tmp_path, fake_config):
+        docs = self._prep(tmp_path, fake_config)
+        ts = make_ticket_state(status="merged", slug="PROJ-1-slug",
+                               merged_comment_snapshot={"count": 1,
+                                                        "latest_created_at": "2026-04-20T00:00:00Z"},
+                               merged_at="2026-04-20T01:00:00Z")
+        ticket = make_ticket(status="Prioritized")
+
+        fresh_comments = [
+            {"id": "1", "author": "Alice", "body": "old", "created_at": "2026-04-20T00:00:00Z"},
+            {"id": "2", "author": "Bob", "body": "new feedback", "created_at": "2026-04-22T00:00:00Z"},
+        ]
+        with patch("features.tickets._fetch_ticket_comments", return_value=fresh_comments), \
+             patch("features.tickets._setup_ticket", return_value={"status": "new",
+                                                                    "slug": "PROJ-1-slug",
+                                                                    "branch": "PROJ-1-slug",
+                                                                    "discovered_at": "2026-04-22T09:00:00Z"}), \
+             patch("features.tickets.log") as mlog:
+            result = tickets._reingest_merged_ticket(fake_config, ticket, ts, "http://base")
+
+        assert result["status"] == "new"
+        assert result["reopened_count"] == 1
+        assert result["last_merged_at"] == "2026-04-20T01:00:00Z"
+        assert result["last_merged_comment_snapshot"]["count"] == 1
+        assert "merged_at" not in result
+        assert "merged_comment_snapshot" not in result
+        for name in ("ticket.md", "technical-plan.md", "change-manifest.md", "tri-review.md"):
+            assert not (docs / name).exists()
+        events = [c.args[0] for c in mlog.emit.call_args_list]
+        assert "ticket_requeued" in events
+        assert "ticket_requeued_without_comment" not in events
+
+    def test_emits_stale_when_no_new_comment(self, tmp_path, fake_config):
+        self._prep(tmp_path, fake_config)
+        ts = make_ticket_state(status="merged", slug="PROJ-1-slug",
+                               merged_comment_snapshot={"count": 2,
+                                                        "latest_created_at": "2026-04-21T00:00:00Z"})
+        ticket = make_ticket(status="Prioritized")
+        comments = [
+            {"id": "1", "author": "A", "body": "x", "created_at": "2026-04-20T00:00:00Z"},
+            {"id": "2", "author": "B", "body": "y", "created_at": "2026-04-21T00:00:00Z"},
+        ]
+        with patch("features.tickets._fetch_ticket_comments", return_value=comments), \
+             patch("features.tickets._setup_ticket", return_value={"status": "new",
+                                                                    "slug": "PROJ-1-slug",
+                                                                    "branch": "PROJ-1-slug"}), \
+             patch("features.tickets.log") as mlog:
+            tickets._reingest_merged_ticket(fake_config, ticket, ts, "http://base")
+        events = [c.args[0] for c in mlog.emit.call_args_list]
+        assert "ticket_requeued" in events
+        assert "ticket_requeued_without_comment" in events
+
+    def test_skips_stale_when_no_snapshot(self, tmp_path, fake_config):
+        self._prep(tmp_path, fake_config)
+        ts = make_ticket_state(status="merged", slug="PROJ-1-slug")
+        ticket = make_ticket(status="Prioritized")
+        with patch("features.tickets._fetch_ticket_comments", return_value=[]), \
+             patch("features.tickets._setup_ticket", return_value={"status": "new",
+                                                                    "slug": "PROJ-1-slug",
+                                                                    "branch": "PROJ-1-slug"}), \
+             patch("features.tickets.log") as mlog:
+            tickets._reingest_merged_ticket(fake_config, ticket, ts, "http://base")
+        events = [c.args[0] for c in mlog.emit.call_args_list]
+        assert "ticket_requeued" in events
+        assert "ticket_requeued_without_comment" not in events
+        meta = mlog.emit.call_args_list[0].kwargs["meta"]
+        assert meta["comment_check"] == "skipped_no_merge_snapshot"
+
+
+class TestCheckRequeue:
+    def test_merged_ticket_in_queue_is_reingested(self, tmp_path, fake_config):
+        import core.state as state
+        state.init(tmp_path)
+        fake_config["workspace"]["root"] = tmp_path
+        slug = "PROJ-1-slug"
+        docs = tmp_path / "tickets" / slug / "docs"
+        docs.mkdir(parents=True)
+        (docs / "ticket.md").write_text("old")
+
+        state.save_ticket("PROJ-1", {
+            "status": "merged", "slug": slug, "branch": slug,
+            "merged_comment_snapshot": {"count": 0, "latest_created_at": None},
+        })
+
+        ticket = make_ticket(status="Prioritized")
+        repos = [{"name": "myrepo", "path": tmp_path / "repo"}]
+        with patch("features.tickets._fetch_tickets", return_value=[ticket]), \
+             patch("features.tickets._fetch_open_prs", return_value=[]), \
+             patch("features.tickets.get_repos", return_value=repos), \
+             patch("features.tickets._fetch_ticket_comments", return_value=[]), \
+             patch("features.tickets._setup_ticket",
+                   return_value={"status": "new", "slug": slug, "branch": slug}), \
+             patch("features.tickets._enqueue_stage") as menq, \
+             patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("features.tickets.log"):
+            tickets.check({**fake_config, "_base_url": "http://base"}, instance_key="inst")
+
+        saved = state.load_ticket("PROJ-1")
+        assert saved is not None
+        assert saved["status"] == "new"
+        assert saved["reopened_count"] == 1
+        menq.assert_any_call("inst", "PROJ-1", "start_planning")
