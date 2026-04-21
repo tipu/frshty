@@ -243,6 +243,15 @@ def api_dismiss_event(event_id: str):
     return {"status": "ok"}
 
 
+@app.post("/api/events/dismiss-batch")
+def api_dismiss_batch(body: dict):
+    ids = body.get("ids") or []
+    if not isinstance(ids, list):
+        return JSONResponse({"error": "ids must be a list"}, status_code=400)
+    added = log.dismiss_ids([str(i) for i in ids])
+    return {"status": "ok", "added": added, "total": len(ids)}
+
+
 @app.post("/api/events/dismiss-all")
 def api_dismiss_all():
     log.dismiss_all()
