@@ -25,7 +25,7 @@ import core.db as db  # noqa: E402
 
 
 KNOWN_MODULES = [
-    "tickets", "own_prs", "scheduler", "slack", "reviews", "timesheet_fill",
+    "own_prs", "scheduler", "slack", "reviews", "timesheet_fill",
     "billing_entries", "billing_invoices", "billing_autogen",
 ]
 
@@ -58,24 +58,10 @@ def migrate_instance(instance_key: str, instance_dir: Path) -> int:
     return n
 
 
-def migrate_tickets_kv_to_rows(instance_key: str) -> int:
-    """Promote kv['tickets'] blob into per-row entries in the tickets table.
-    Idempotent: skips tickets that already exist as rows. Leaves the kv blob
-    in place for rollback safety."""
-    row = db.query_one(
-        "SELECT data FROM kv WHERE instance_key=? AND key='tickets'", (instance_key,)
-    )
-    if not row or not row.get("data"):
-        return 0
-    try:
-        existing = json.loads(row["data"])
-    except json.JSONDecodeError:
-        return 0
-    if not isinstance(existing, dict) or not existing:
-        return 0
+def _insert_ticket_rows(instance_key: str, tickets: dict) -> int:
     now = _now()
     inserted = 0
-    for k, v in existing.items():
+    for k, v in tickets.items():
         if not isinstance(v, dict):
             continue
         auto_pr = v.get("auto_pr")
@@ -98,6 +84,33 @@ def migrate_tickets_kv_to_rows(instance_key: str) -> int:
     return inserted
 
 
+def migrate_tickets_kv_to_rows(instance_key: str) -> int:
+    """Promote kv['tickets'] blob into per-row entries in the tickets table.
+    Idempotent: skips tickets that already exist as rows. Leaves the kv blob
+    in place for rollback safety."""
+    row = db.query_one(
+        "SELECT data FROM kv WHERE instance_key=? AND key='tickets'", (instance_key,)
+    )
+    if not row or not row.get("data"):
+        return 0
+    try:
+        existing = json.loads(row["data"])
+    except json.JSONDecodeError:
+        return 0
+    if not isinstance(existing, dict) or not existing:
+        return 0
+    return _insert_ticket_rows(instance_key, existing)
+
+
+def migrate_tickets_json_to_rows(instance_key: str, instance_dir: Path) -> int:
+    """Promote ~/.frshty/<inst>/tickets.json directly into the tickets table,
+    skipping the kv staging. Idempotent."""
+    data = _load(instance_dir / "tickets.json")
+    if not isinstance(data, dict) or not data:
+        return 0
+    return _insert_ticket_rows(instance_key, data)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default=str(Path.home() / ".frshty"))
@@ -112,29 +125,34 @@ def main() -> int:
     db.init(db_path, migrations_dir)
 
     total = 0
-    instance_keys: list[str] = []
+    instance_dirs: dict[str, Path] = {}
     for instance_dir in sorted(p for p in root.iterdir() if p.is_dir()):
         instance_key = instance_dir.name
         if instance_key.startswith(".") or instance_key == "__pycache__":
             continue
-        instance_keys.append(instance_key)
+        instance_dirs[instance_key] = instance_dir
         n = migrate_instance(instance_key, instance_dir)
         if n:
             print(f"  {instance_key}: {n} modules")
             total += n
     print(f"Done. Inserted/updated {total} kv rows.")
 
-    # Also pull in any instances that already have a kv blob but no on-disk dir
-    # (e.g. from a prior migration run) so the rows promotion covers them too.
-    rows = db.query_all("SELECT DISTINCT instance_key FROM kv WHERE key='tickets'")
-    for r in rows:
+    # Include any instances that already have a kv['tickets'] blob but no on-disk dir
+    # (e.g. from a prior migration run) so the rows promotion still covers them.
+    extra_keys: list[str] = []
+    for r in db.query_all("SELECT DISTINCT instance_key FROM kv WHERE key='tickets'"):
         ik = r["instance_key"]
-        if ik and ik not in instance_keys:
-            instance_keys.append(ik)
+        if ik and ik not in instance_dirs:
+            extra_keys.append(ik)
 
-    print("Promoting kv['tickets'] -> tickets rows...")
+    print("Promoting tickets -> per-row storage...")
     promoted_total = 0
-    for ik in instance_keys:
+    for ik, idir in instance_dirs.items():
+        n = migrate_tickets_json_to_rows(ik, idir) + migrate_tickets_kv_to_rows(ik)
+        if n:
+            print(f"  {ik}: {n} tickets")
+            promoted_total += n
+    for ik in extra_keys:
         n = migrate_tickets_kv_to_rows(ik)
         if n:
             print(f"  {ik}: {n} tickets")

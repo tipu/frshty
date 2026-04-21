@@ -150,6 +150,21 @@ def _migrate_kv_to_rows(instance: str) -> None:
     _TICKETS_MIGRATED.add(instance)
 
 
+_STALE_TICKET_KEYS = (
+    "triage_count", "last_triage_at",
+    "last_scrollback_hash", "last_scrollback_change_at",
+    "stuck_logged", "restart_count", "last_restart_at",
+)
+
+
+def _strip_stale(data: dict) -> dict:
+    """Opportunistic removal of pre-refactor ticket fields. Converges old blobs
+    to clean shape on next write; no migration script needed."""
+    for k in _STALE_TICKET_KEYS:
+        data.pop(k, None)
+    return data
+
+
 def _row_to_ticket(row: dict) -> dict:
     raw = row.get("data") or "{}"
     try:
@@ -187,6 +202,7 @@ def save_ticket(key: str, data: dict) -> None:
     _ensure_db()
     instance = _active_key()
     _migrate_kv_to_rows(instance)
+    _strip_stale(data)
     now = datetime.now(timezone.utc).isoformat()
     auto_pr = data.get("auto_pr")
     db.execute(
@@ -235,6 +251,7 @@ def update_ticket(key: str, mutate: Callable[[dict], dict | None]) -> dict | Non
                 (instance, key),
             )
             return None
+        _strip_stale(new)
         auto_pr = new.get("auto_pr")
         c.execute(
             "INSERT INTO tickets"
@@ -274,6 +291,7 @@ def _save_tickets_dict(data: dict) -> None:
         for k, v in data.items():
             if not isinstance(v, dict):
                 continue
+            _strip_stale(v)
             auto_pr = v.get("auto_pr")
             c.execute(
                 "INSERT INTO tickets"
