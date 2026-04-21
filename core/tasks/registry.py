@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable
 
-_REGISTRY: dict[str, tuple[Callable, list[Callable], int]] = {}
+_REGISTRY: dict[str, tuple[Callable, list[Callable], list[Callable], int]] = {}
 
 
 @dataclass
@@ -28,16 +28,20 @@ class TaskResult:
 
 
 Precondition = Callable[[TaskContext], tuple[bool, str]]
+Postcondition = Callable[[TaskContext], tuple[bool, str]]
 
 
-def task(name: str, preconditions: list[Precondition] | None = None, timeout: int = 60):
+def task(name: str,
+         preconditions: list[Precondition] | None = None,
+         postconditions: list[Postcondition] | None = None,
+         timeout: int = 60):
     def deco(fn):
-        _REGISTRY[name] = (fn, list(preconditions or []), timeout)
+        _REGISTRY[name] = (fn, list(preconditions or []), list(postconditions or []), timeout)
         return fn
     return deco
 
 
-def get_task(name: str) -> tuple[Callable, list[Callable], int] | None:
+def get_task(name: str) -> tuple[Callable, list[Callable], list[Callable], int] | None:
     return _REGISTRY.get(name)
 
 
@@ -49,7 +53,7 @@ def run_task(ctx: TaskContext) -> TaskResult:
     entry = _REGISTRY.get(ctx.task)
     if not entry:
         return TaskResult("failed", f"unknown task: {ctx.task}")
-    fn, preconds, _ = entry
+    fn, preconds, postconds, _ = entry
     for p in preconds:
         try:
             ok, reason = p(ctx)
@@ -60,10 +64,21 @@ def run_task(ctx: TaskContext) -> TaskResult:
     try:
         result = fn(ctx)
         if result is None:
-            return TaskResult("ok")
-        if isinstance(result, TaskResult):
-            return result
-        return TaskResult("ok", artifacts={"return": result})
+            result = TaskResult("ok")
+        elif not isinstance(result, TaskResult):
+            result = TaskResult("ok", artifacts={"return": result})
     except Exception as e:
         return TaskResult("failed", f"{type(e).__name__}: {e}",
                           artifacts={"traceback": traceback.format_exc()})
+    if result.status != "ok":
+        return result
+    for p in postconds:
+        try:
+            ok, reason = p(ctx)
+        except Exception as e:
+            return TaskResult("failed", f"postcondition errored: {type(e).__name__}: {e}",
+                              artifacts=result.artifacts, next_events=result.next_events)
+        if not ok:
+            return TaskResult("failed", f"postcondition: {reason}",
+                              artifacts=result.artifacts, next_events=result.next_events)
+    return result
