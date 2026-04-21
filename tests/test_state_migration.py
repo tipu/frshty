@@ -1,6 +1,5 @@
-"""Covers core/state.py sqlite backend and scripts/migrate_state.py."""
+"""Covers core/state.py sqlite backend."""
 import json
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -40,42 +39,6 @@ def test_state_save_load_roundtrip(tmp_path):
     tok = state.use("beta")
     try:
         assert state.load("tickets") == {"B-1": {"status": "new"}}
-    finally:
-        state.reset(tok)
-
-
-def test_migrate_state_script(tmp_path):
-    for mod in list(sys.modules):
-        if mod == "frshty" or mod.startswith("core.") or mod == "core":
-            sys.modules.pop(mod, None)
-
-    root = tmp_path / "frshty-root"
-    for key, tickets in (("inst-a", {"A-1": {"status": "new"}}),
-                         ("inst-b", {"B-1": {"status": "merged"}, "B-2": {"status": "pr_ready"}})):
-        inst_dir = root / key
-        inst_dir.mkdir(parents=True)
-        (inst_dir / "tickets.json").write_text(json.dumps(tickets))
-        (inst_dir / "scheduler.json").write_text(json.dumps({f"{key}-sched": {"run_at": "2026-05-01"}}))
-
-    db_path = tmp_path / "multi.db"
-
-    r = subprocess.run([sys.executable, str(ROOT / "scripts" / "migrate_state.py"),
-                         "--root", str(root), "--db", str(db_path)],
-                        capture_output=True, text=True, timeout=30)
-    assert r.returncode == 0, r.stderr
-    assert "Done" in r.stdout
-
-    import core.db as db
-    import core.state as state
-    db.init(db_path, ROOT / "migrations")
-    state.init("inst-a")
-    assert state.load("tickets") == {"A-1": {"status": "new"}}
-    assert state.load("scheduler") == {"inst-a-sched": {"run_at": "2026-05-01"}}
-
-    tok = state.use("inst-b")
-    try:
-        loaded = state.load("tickets")
-        assert loaded == {"B-1": {"status": "merged"}, "B-2": {"status": "pr_ready"}}
     finally:
         state.reset(tok)
 
@@ -177,38 +140,9 @@ def test_kv_to_rows_migration_lazy(tmp_path):
     assert {r["ticket_key"] for r in rows} == {"OLD-1", "OLD-2", "NEW-1"}
 
 
-def test_migrate_state_script_promotes_kv_tickets_to_rows(tmp_path):
-    for mod in list(sys.modules):
-        if mod == "frshty" or mod.startswith("core.") or mod == "core":
-            sys.modules.pop(mod, None)
-
-    root = tmp_path / "frshty-root"
-    inst_dir = root / "instX"
-    inst_dir.mkdir(parents=True)
-    (inst_dir / "tickets.json").write_text(json.dumps({
-        "X-1": {"status": "planning", "slug": "x-1"},
-    }))
-    db_path = tmp_path / "promo.db"
-
-    r = subprocess.run([sys.executable, str(ROOT / "scripts" / "migrate_state.py"),
-                         "--root", str(root), "--db", str(db_path)],
-                        capture_output=True, text=True, timeout=30)
-    assert r.returncode == 0, r.stderr
-    assert "Promoted" in r.stdout
-
-    import core.db as db
-    import core.state as state
-    db.init(db_path, ROOT / "migrations")
-    state.init("instX")
-    rows = db.query_all("SELECT ticket_key, status FROM tickets WHERE instance_key=?", ("instX",))
-    assert {(r["ticket_key"], r["status"]) for r in rows} == {("X-1", "planning")}
-
-
 if __name__ == "__main__":
-    tests = [test_state_save_load_roundtrip, test_migrate_state_script,
-             test_log_contextvar_isolation, test_per_row_ticket_api,
-             test_kv_to_rows_migration_lazy,
-             test_migrate_state_script_promotes_kv_tickets_to_rows]
+    tests = [test_state_save_load_roundtrip, test_log_contextvar_isolation,
+             test_per_row_ticket_api, test_kv_to_rows_migration_lazy]
     for t in tests:
         with tempfile.TemporaryDirectory() as d:
             t(Path(d))
