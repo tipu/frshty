@@ -136,7 +136,7 @@ def check(config: dict, instance_key: str = ""):
                 continue
         ts["status"] = transition(ts.get("status", "new"), "done")
         ts["done_at"] = datetime.now(timezone.utc).isoformat()
-        ticket_state[key] = ts
+        state.save_ticket(key, ts)
 
     for ticket in assigned:
         key = ticket.get("key", "?")
@@ -165,7 +165,7 @@ def check(config: dict, instance_key: str = ""):
                     ts["slug"] = _make_slug(key, ticket["summary"])
                     ts["branch"] = _make_branch(config, key, ticket)
                     ts["url"] = ticket.get("url", "")
-                ticket_state[key] = ts
+                state.save_ticket(key, ts)
                 continue
 
             mapped = _resolve_status(config, ticket.get("status", ""))
@@ -175,7 +175,7 @@ def check(config: dict, instance_key: str = ""):
                 ts["url"] = ticket.get("url", "")
                 ts["status"] = TicketStatus(mapped).value
                 if mapped != "new":
-                    ticket_state[key] = ts
+                    state.save_ticket(key, ts)
                     continue
 
             if ts["status"] == TicketStatus.merged:
@@ -230,13 +230,11 @@ def check(config: dict, instance_key: str = ""):
             if ts["status"] in ("pr_created", "in_review"):
                 ts = _check_in_review(config, ticket, ts, base_url)
 
-            ticket_state[key] = ts
+            state.save_ticket(key, ts)
         except Exception as e:
             log.emit("ticket_check_error", f"[{key}] {type(e).__name__}: {e}",
                 links={"detail": f"{base_url}/tickets/{key}"},
                 meta={"ticket": key, "error": type(e).__name__})
-
-    state.save("tickets", ticket_state)
 
 
 def _fetch_tickets(config: dict) -> list[dict]:
