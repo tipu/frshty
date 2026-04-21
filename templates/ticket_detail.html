@@ -572,9 +572,10 @@ async function loadJobs() {
             const color = j.status === 'ok' ? 'text-green-400' : j.status === 'failed' ? 'text-red-400' : j.status === 'skipped' ? 'text-gray-500' : 'text-blue-400';
             const retry = (j.status === 'failed' || j.status === 'skipped') ? ` <button onclick="retryJob(${j.id})" class="ml-2 text-xs text-yellow-400 hover:text-yellow-200 underline">retry</button>` : '';
             const at = j.finished_at || j.started_at || j.enqueued_at;
+            const rel = at ? ` <span class="text-gray-600">(${relativeTime(at)})</span>` : '';
             let resp = '';
             try { const r = JSON.parse(j.response || '{}'); if (r.reason) resp = ` — ${r.reason}`; } catch(e) {}
-            return `<div class="flex items-start gap-2"><span class="text-gray-500">${at}</span><span class="${color}">${j.status}</span><span class="text-gray-300">${j.task}</span><span class="text-gray-500">${resp}</span>${retry}</div>`;
+            return `<div class="flex items-start gap-2"><span class="text-gray-500">${at}${rel}</span><span class="${color}">${j.status}</span><span class="text-gray-300">${j.task}</span><span class="text-gray-500">${resp}</span>${retry}</div>`;
         }).join('');
     } catch (e) { console.warn('jobs fetch failed', e); }
 }
