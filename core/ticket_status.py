@@ -20,9 +20,9 @@ _ALLOWED: dict[TicketStatus, set[TicketStatus]] = {
     TicketStatus.pr_ready:   {TicketStatus.pr_created, TicketStatus.pr_failed, TicketStatus.merged},
     TicketStatus.pr_created: {TicketStatus.merged, TicketStatus.in_review, TicketStatus.pr_failed},
     TicketStatus.in_review:  {TicketStatus.merged, TicketStatus.pr_created, TicketStatus.in_review, TicketStatus.pr_failed},
-    TicketStatus.merged:     set(),
-    TicketStatus.pr_failed:  {TicketStatus.pr_ready},
-    TicketStatus.done:       set(),
+    TicketStatus.merged:     {TicketStatus.new},
+    TicketStatus.pr_failed:  {TicketStatus.pr_ready, TicketStatus.merged},
+    TicketStatus.done:       {TicketStatus.new, TicketStatus.pr_ready, TicketStatus.pr_created},
 }
 
 
