@@ -14,6 +14,7 @@ body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: #0a0a0a; 
 .badge-red { background: #991b1b; color: #fca5a5; }
 .badge-green { background: #14532d; color: #86efac; }
 .badge-yellow { background: #713f12; color: #fde047; }
+.badge-purple { background: #3b1e5f; color: #d8b4fe; }
 nav a { color: #888; padding: 4px 12px; border-radius: 4px; }
 nav a:hover, nav a.active { color: #fff; background: #222; }
 .pulse { animation: pulse 1.5s ease-in-out infinite; }
@@ -121,10 +122,12 @@ function prCard(r) {
     const borderCls = reviewing ? 'border-l-2 border-l-blue-500' : '';
     const stale = !reviewing && r.updated_on && r.reviewed_at && new Date(r.updated_on) > new Date(r.reviewed_at);
     const updated = r.updated_on ? timeAgo(r.updated_on) : '';
+    const youBadge = r.approved_by_me ? '<span class="badge badge-purple ml-1" title="you approved this PR on the platform">✓ you</span>' : '';
     return `<div class="card p-3 flex items-center justify-between ${borderCls}">
         <div>
             <a href="/reviews/${r.repo}/${r.pr_id}" class="link font-bold">${r.repo} #${r.pr_id}</a>
-            <span class="badge ${verdictCls} ml-2">${label}</span>
+            <span class="badge ${verdictCls} ml-2" title="LLM verdict">${label}</span>
+            ${youBadge}
             ${updated ? `<span class="text-gray-500 ml-2 text-xs">${updated}</span>` : ''}
             ${stale ? '<span class="badge badge-yellow ml-1">stale</span>' : ''}
             <span id="${cardId}" class="text-gray-600 ml-2 text-xs"></span>

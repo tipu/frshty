@@ -166,6 +166,11 @@ class BitbucketPlatform:
             if resp.status_code != 200:
                 return {"state": "OPEN", "updated_on": "", "mergeable": "UNKNOWN"}
             data = resp.json()
+            approvers = [
+                p.get("user", {}).get("account_id", "")
+                for p in (data.get("participants") or [])
+                if p.get("approved")
+            ]
             return {
                 "state": data.get("state", "OPEN"),
                 "updated_on": data.get("updated_on", ""),
@@ -173,6 +178,7 @@ class BitbucketPlatform:
                 "description": (data.get("description", "") or ""),
                 "author": data.get("author", {}).get("display_name", ""),
                 "mergeable": "CONFLICTING" if data.get("has_conflicts") else "MERGEABLE",
+                "approvers": approvers,
             }
 
     def post_pr_comment(self, repo: str, pr_id: int, body: str, path: str | None = None, line: int | None = None, parent_id: int | None = None) -> dict:
@@ -433,16 +439,22 @@ class GitHubPlatform:
         full = self._resolve_repo(repo)
         result = self._run_gh([
             "pr", "view", str(pr_id), "--repo", full,
-            "--json", "state,updatedAt,mergeable,author",
+            "--json", "state,updatedAt,mergeable,author,latestReviews",
         ])
         if result.returncode != 0:
             return {"state": "OPEN", "updated_on": "", "mergeable": "UNKNOWN"}
         data = json.loads(result.stdout)
+        approvers = [
+            r.get("author", {}).get("login", "")
+            for r in (data.get("latestReviews") or [])
+            if r.get("state") == "APPROVED"
+        ]
         return {
             "state": data.get("state", "OPEN"),
             "updated_on": data.get("updatedAt", ""),
             "author": data.get("author", {}).get("login", ""),
             "mergeable": data.get("mergeable", "UNKNOWN"),
+            "approvers": approvers,
         }
 
     def post_pr_comment(self, repo: str, pr_id: int, body: str, path: str | None = None, line: int | None = None, parent_id: int | None = None) -> dict:

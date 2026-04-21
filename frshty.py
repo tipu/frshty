@@ -381,6 +381,11 @@ def api_reviews_list():
                 "pr_id": comments[0]["pr_id"] if comments else 0,
             })
     platform = make_platform(_config)
+    job_platform = _config.get("job", {}).get("platform", "")
+    if job_platform == "bitbucket":
+        my_id = _config.get("bitbucket", {}).get("user_account_id", "")
+    else:
+        my_id = _config.get("github", {}).get("user", "") or "@me"
     from concurrent.futures import ThreadPoolExecutor
     def check_open(r):
         if not r["pr_id"]:
@@ -390,6 +395,8 @@ def api_reviews_list():
             return None
         r["updated_on"] = info["updated_on"]
         r["author"] = info.get("author", "")
+        approvers = info.get("approvers") or []
+        r["approved_by_me"] = bool(my_id) and my_id in approvers
         return r
     with ThreadPoolExecutor(max_workers=10) as pool:
         results = [r for r in pool.map(check_open, candidates) if r]
