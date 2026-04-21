@@ -64,13 +64,23 @@ class TestTransitionIllegal:
         ("planning", "pr_ready"),
         ("planning", "merged"),
         ("pr_failed", "pr_created"),
-        ("pr_failed", "merged"),
-        ("merged", "new"),
         ("merged", "planning"),
     ])
     def test_illegal_raises(self, current, target):
         with pytest.raises(ValueError, match="Illegal transition"):
             transition(current, target)
+
+
+class TestTransitionLegalized:
+    @pytest.mark.parametrize("current,target", [
+        ("pr_failed", "merged"),   # manual match-state
+        ("merged", "new"),         # requeue
+        ("done", "new"),           # revive on upstream reopen
+        ("done", "pr_ready"),      # revive with slug
+        ("done", "pr_created"),    # revive with PRs
+    ])
+    def test_now_legal(self, current, target):
+        assert transition(current, target) == target
 
 
 class TestTransitionInvalidEnum:
@@ -84,11 +94,11 @@ class TestTransitionInvalidEnum:
 
 
 class TestAllowedGraph:
-    def test_merged_is_terminal(self):
-        assert _ALLOWED[TicketStatus.merged] == set()
+    def test_merged_only_recovers_to_new(self):
+        assert _ALLOWED[TicketStatus.merged] == {TicketStatus.new}
 
-    def test_done_is_terminal(self):
-        assert _ALLOWED[TicketStatus.done] == set()
+    def test_done_revivals(self):
+        assert _ALLOWED[TicketStatus.done] == {TicketStatus.new, TicketStatus.pr_ready, TicketStatus.pr_created}
 
     def test_all_states_have_entries(self):
         for s in TicketStatus:
