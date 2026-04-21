@@ -61,6 +61,8 @@ def start_planning(ctx: TaskContext) -> TaskResult:
     result = run_claude_code("/confer-technical-plan docs/", cwd=ticket_dir, timeout=PLAN_TIMEOUT)
     if result is None:
         return TaskResult("failed", "claude returned non-zero or empty")
+    if not (ticket_dir / "docs" / "change-manifest.md").exists():
+        return TaskResult("failed", "claude finished but change-manifest.md not produced")
     _set_status(ctx, "reviewing")
     return TaskResult("ok", artifacts={"transitioned_to": "reviewing"})
 
