@@ -662,13 +662,12 @@ def api_update_comment(repo: str, pr_id: int, idx: int, body: dict):
 @app.get("/api/tickets/list")
 def api_tickets_list():
     from datetime import datetime, timezone, timedelta
-    tickets = state.load("tickets")
+    tickets = state.list_tickets()
     cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
     expired = [k for k, v in tickets.items() if v.get("status") == "done" and v.get("done_at", "") < cutoff]
-    if expired:
-        for k in expired:
-            del tickets[k]
-        state.save("tickets", tickets)
+    for k in expired:
+        state.delete_ticket(k)
+        del tickets[k]
     return {k: v for k, v in tickets.items() if v.get("status") != "done"}
 
 
@@ -956,15 +955,14 @@ def api_ticket_reply(key: str, comment_id: int, body: dict):
 @app.post("/api/tickets/{key}/restart")
 def api_restart_ticket(key: str):
     import core.queue as q
-    tickets = state.load("tickets")
-    ts = tickets.get(key)
+    ts = state.load_ticket(key)
     if not ts:
         return JSONResponse({"error": "not found"}, status_code=404)
     ts.pop("ci_fix_attempts", None)
     ts.pop("pr_attempts", None)
     if ts.get("status") == TicketStatus.pr_failed.value:
         ts["status"] = "pr_ready"
-    state.save("tickets", tickets)
+    state.save_ticket(key, ts)
     status = ts.get("status", "")
     instance_key = _config.get("job", {}).get("key", "")
     if instance_key and status in ("new", "planning"):
@@ -981,8 +979,7 @@ def api_set_ticket_status(key: str, body: dict):
         TicketStatus(target)
     except ValueError:
         return JSONResponse({"error": f"invalid status: {target}"}, status_code=400)
-    tickets = state.load("tickets")
-    ts = tickets.get(key)
+    ts = state.load_ticket(key)
     if not ts:
         return JSONResponse({"error": "not found"}, status_code=404)
     old_status = ts.get("status", "unknown")
@@ -991,8 +988,7 @@ def api_set_ticket_status(key: str, body: dict):
     ts["conflict_resolution_attempts"] = 0
     ts.pop("ci_passed", None)
     ts.pop("checks_started_at", None)
-    tickets[key] = ts
-    state.save("tickets", tickets)
+    state.save_ticket(key, ts)
     log.emit("ticket_status_override", f"Manual override {old_status} → {target} for {key}",
         links={"detail": f"{_config['_base_url']}/tickets/{key}"},
         meta={"ticket": key, "old_status": old_status, "new_status": target})
@@ -1002,10 +998,9 @@ def api_set_ticket_status(key: str, body: dict):
 @app.delete("/api/tickets/{key}")
 def api_discard_ticket(key: str):
     import shutil
-    tickets = state.load("tickets")
-    if key not in tickets:
+    ts = state.load_ticket(key)
+    if ts is None:
         return JSONResponse({"error": "not found"}, status_code=404)
-    ts = tickets[key]
     terminal.kill_terminal(key)
     slug = ts.get("slug", "")
     if slug:
@@ -1020,8 +1015,7 @@ def api_discard_ticket(key: str):
             shutil.rmtree(ticket_dir)
         for repo in repos:
             subprocess.run(["git", "worktree", "prune"], cwd=str(repo["path"]), capture_output=True, timeout=60)
-    del tickets[key]
-    state.save("tickets", tickets)
+    state.delete_ticket(key)
     return {"status": "discarded"}
 
 
@@ -1108,8 +1102,7 @@ def api_set_state_event(key: str, body: dict):
 
 @app.patch("/api/tickets/{key}/auto-pr")
 def api_set_auto_pr(key: str, body: dict):
-    tickets = state.load("tickets")
-    ts_row = tickets.get(key)
+    ts_row = state.load_ticket(key)
     if not ts_row:
         return JSONResponse({"error": "not found"}, status_code=404)
     status_val = ts_row.get("status", "")
@@ -1117,15 +1110,13 @@ def api_set_auto_pr(key: str, body: dict):
     if status_val in gate:
         return JSONResponse({"error": f"auto_pr locked; status={status_val}"}, status_code=400)
     ts_row["auto_pr"] = bool(body.get("auto_pr"))
-    tickets[key] = ts_row
-    state.save("tickets", tickets)
+    state.save_ticket(key, ts_row)
     return {"status": "ok", "auto_pr": ts_row["auto_pr"]}
 
 
 @app.post("/api/tickets/{key}/start-dev")
 def api_start_dev(key: str):
-    tickets = state.load("tickets")
-    ts = tickets.get(key)
+    ts = state.load_ticket(key)
     if not ts:
         return JSONResponse({"error": "not found"}, status_code=404)
     if ts.get("status") != "new":
@@ -1135,8 +1126,7 @@ def api_start_dev(key: str):
     if not ticket:
         return JSONResponse({"error": "ticket not found in ticket system"}, status_code=404)
     ts = _tickets_mod._setup_ticket(_config, ticket, _config["_base_url"])
-    tickets[key] = ts
-    state.save("tickets", tickets)
+    state.save_ticket(key, ts)
     return {"status": "started", "new_status": ts.get("status")}
 
 
