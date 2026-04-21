@@ -224,8 +224,7 @@ def _execute_create_pr(key: str, _meta: dict, config: dict):
     from features.tickets import _create_pr
     from features.ticket_systems import make_ticket_system
 
-    ticket_state = state.load("tickets")
-    ts = ticket_state.get(key)
+    ts = state.load_ticket(key)
     if not ts or ts.get("status") != "pr_ready":
         return
 
@@ -239,8 +238,7 @@ def _execute_create_pr(key: str, _meta: dict, config: dict):
     updated = _create_pr(config, ticket, ts, base_url)
     if updated:
         updated.pop("pr_scheduled_at", None)
-        ticket_state[key] = updated
-        state.save("tickets", ticket_state)
+        state.save_ticket(key, updated)
 
 
 def compute_target_time(start: datetime, estimate_seconds: int, jitter_hours: int = 3,

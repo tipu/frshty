@@ -32,8 +32,8 @@ def handle(payload: dict, trigger: dict, config: dict):
         "branch": payload.get("branch", ""),
     })
 
-    ticket_state = state.load("tickets")
-    ts = ticket_state.get(key, {})
-    ts["pr_scheduled_at"] = run_at.isoformat()
-    ticket_state[key] = ts
-    state.save("tickets", ticket_state)
+    def _mark(current: dict) -> dict:
+        new = dict(current or {})
+        new["pr_scheduled_at"] = run_at.isoformat()
+        return new
+    state.update_ticket(key, _mark)
