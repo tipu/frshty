@@ -19,19 +19,19 @@ FIX_TIMEOUT = 1800
 
 
 def _set_status(ctx: TaskContext, new_status: str) -> None:
-    tickets = state.load("tickets")
-    ts = tickets.get(ctx.ticket_key or "")
-    if ts is None:
+    if not ctx.ticket_key:
         return
-    ts["status"] = new_status
-    tickets[ctx.ticket_key] = ts
-    state.save("tickets", tickets)
+    def mutate(ts):
+        if not ts:
+            return None
+        ts["status"] = new_status
+        return ts
+    state.update_ticket(ctx.ticket_key, mutate)
 
 
 def _ticket_dir(ctx: TaskContext) -> Path:
     ws = ctx.config["workspace"]
-    tickets = state.load("tickets")
-    ts = tickets.get(ctx.ticket_key or "", {})
+    ts = state.load_ticket(ctx.ticket_key or "") or {}
     slug = ts.get("slug") or (ctx.ticket_key or "")
     root = Path(ws["root"]) if isinstance(ws["root"], str) else ws["root"]
     return root / ws["tickets_dir"] / slug
@@ -118,8 +118,7 @@ def fix_review_findings(ctx: TaskContext) -> TaskResult:
 def fix_ci_failures(ctx: TaskContext) -> TaskResult:
     from features.tickets import MAX_CI_FIX_ATTEMPTS
 
-    tickets = state.load("tickets")
-    ts = tickets.get(ctx.ticket_key or "") or {}
+    ts = state.load_ticket(ctx.ticket_key or "") or {}
     slug = ts.get("slug", "")
     prs = ts.get("prs", [])
     base_url = ctx.config.get("_base_url", "")
@@ -191,20 +190,29 @@ def fix_ci_failures(ctx: TaskContext) -> TaskResult:
             if result is None:
                 continue
 
-            ts["ci_fix_attempts"] = fix_attempts + 1
-            ts.pop("ci_passed", None)
-            ts.pop("checks_started_at", None)
+            def _bump(current):
+                if not current:
+                    return None
+                current["ci_fix_attempts"] = current.get("ci_fix_attempts", 0) + 1
+                current.pop("ci_passed", None)
+                current.pop("checks_started_at", None)
+                return current
+            updated = state.update_ticket(ctx.ticket_key or "", _bump) or {}
+            ts = updated  # refresh snapshot for the next PR's ceiling check
             log.emit("ticket_ci_fix_sent",
-                     f"Sent CI fix to {slug or ctx.ticket_key} (attempt {ts['ci_fix_attempts']}): {fix_hint[:80]}",
+                     f"Sent CI fix to {slug or ctx.ticket_key} (attempt {updated.get('ci_fix_attempts', 0)}): {fix_hint[:80]}",
                      links={**ticket_link, "pr": pr.get("url", "")},
                      meta={"ticket": ctx.ticket_key, "failed_checks": failed_names, "fix_hint": fix_hint})
 
         return TaskResult("ok", artifacts={"ci_fix_attempts": ts.get("ci_fix_attempts", 0)})
     finally:
-        ts.pop("_ci_failed_pending", None)
         if ctx.ticket_key:
-            tickets[ctx.ticket_key] = ts
-            state.save("tickets", tickets)
+            def _clear(current):
+                if current is None:
+                    return None
+                current.pop("_ci_failed_pending", None)
+                return current
+            state.update_ticket(ctx.ticket_key, _clear)
 
 
 BACKFILL_TIMEOUT = 2400
@@ -250,8 +258,7 @@ def backfill_artifacts(ctx: TaskContext) -> TaskResult:
       timeout=15)
 def mark_ready(ctx: TaskContext) -> TaskResult:
     import core.events as events
-    tickets = state.load("tickets")
-    ts = tickets.get(ctx.ticket_key or "", {})
+    ts = state.load_ticket(ctx.ticket_key or "") or {}
     _set_status(ctx, "pr_ready")
     events.dispatch("ticket_dev_complete", {
         "ticket_key": ctx.ticket_key,
@@ -268,8 +275,7 @@ def mark_ready(ctx: TaskContext) -> TaskResult:
       timeout=300)
 def create_pr(ctx: TaskContext) -> TaskResult:
     from features import tickets as tix
-    tickets = state.load("tickets")
-    ts = tickets.get(ctx.ticket_key or "")
+    ts = state.load_ticket(ctx.ticket_key or "")
     if ts is None:
         return TaskResult("failed", "ticket not found")
     ticket = {"key": ctx.ticket_key, "summary": ts.get("summary", ""),
@@ -277,8 +283,7 @@ def create_pr(ctx: TaskContext) -> TaskResult:
     try:
         updated = tix._create_pr(ctx.config, ticket, ts, ctx.registry.base_url)
         new_status = updated.get("status", "pr_failed")
-        tickets[ctx.ticket_key] = updated
-        state.save("tickets", tickets)
+        state.save_ticket(ctx.ticket_key or "", updated)
         return TaskResult("ok", artifacts={"transitioned_to": new_status})
     except Exception as e:
         _set_status(ctx, "pr_failed")
@@ -292,8 +297,7 @@ def apply_note_reset(ctx: TaskContext) -> TaskResult:
     from datetime import datetime, timezone
     note = ctx.payload.get("note", "")
     ws = ctx.config["workspace"]
-    tickets = state.load("tickets")
-    ts = tickets.get(ctx.ticket_key or "")
+    ts = state.load_ticket(ctx.ticket_key or "")
     if ts is None:
         return TaskResult("failed", "ticket not found")
     root = ws["root"] if isinstance(ws["root"], Path) else Path(ws["root"])
@@ -317,9 +321,7 @@ def apply_note_reset(ctx: TaskContext) -> TaskResult:
     if moved:
         archived_to = str(archive)
 
-    ts["status"] = "new"
-    tickets[ctx.ticket_key] = ts
-    state.save("tickets", tickets)
+    _set_status(ctx, "new")
     return TaskResult("ok", artifacts={"archived_to": archived_to, "moved": moved,
                                         "transitioned_to": "new"})
 
