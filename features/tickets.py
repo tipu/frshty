@@ -108,6 +108,124 @@ def _resolve_status(config: dict, external_status: str) -> str | None:
     return status_map.get(external_status)
 
 
+def _fetch_ticket_comments(config: dict, key: str) -> list[dict]:
+    ts = make_ticket_system(config)
+    if not ts:
+        return []
+    try:
+        return ts.fetch_comments(key)
+    except Exception:
+        return []
+
+
+def _comment_snapshot(comments: list[dict]) -> dict:
+    dates = [c["created_at"] for c in comments if c.get("created_at")]
+    return {
+        "count": len(comments),
+        "latest_created_at": max(dates) if dates else None,
+    }
+
+
+def _write_comments_md(docs_path: Path, comments: list[dict]) -> None:
+    if not comments:
+        (docs_path / "comments.md").write_text("# Comments\n\nNo upstream comments.\n")
+        return
+    parts = ["# Comments\n"]
+    for c in comments:
+        author = c.get("author") or "Unknown"
+        created = c.get("created_at") or ""
+        body = (c.get("body") or "").strip()
+        parts.append(f"\n## {author} — {created}\n\n{body}\n")
+    (docs_path / "comments.md").write_text("".join(parts))
+
+
+def _mark_ticket_merged(config: dict, ticket: dict, ts: dict) -> dict:
+    from datetime import datetime, timezone
+    comments = _fetch_ticket_comments(config, ticket["key"])
+    ts["status"] = transition(ts["status"], "merged")
+    ts["merged_at"] = datetime.now(timezone.utc).isoformat()
+    ts["merged_comment_snapshot"] = _comment_snapshot(comments)
+    ts.pop("ci_passed", None)
+    return ts
+
+
+def _clear_reingest_docs(config: dict, slug: str) -> list[str]:
+    ws = config["workspace"]
+    docs = ws["root"] / ws["tickets_dir"] / slug / "docs"
+    deleted = []
+    for name in ("ticket.md", "technical-plan.md", "change-manifest.md", "tri-review.md"):
+        p = docs / name
+        if p.exists():
+            p.unlink()
+            deleted.append(name)
+    return deleted
+
+
+def _reingest_merged_ticket(config: dict, ticket: dict, ts: dict, base_url: str) -> dict:
+    from datetime import datetime, timezone
+    key = ticket["key"]
+    slug = ts.get("slug")
+    snapshot = ts.get("merged_comment_snapshot") or {}
+    comments = _fetch_ticket_comments(config, key)
+    current = _comment_snapshot(comments)
+
+    deleted = _clear_reingest_docs(config, slug) if slug else []
+
+    cur_latest = current["latest_created_at"]
+    snap_latest = snapshot.get("latest_created_at")
+    has_new = current["count"] > snapshot.get("count", 0) or (
+        cur_latest is not None and snap_latest is not None and cur_latest > snap_latest
+    )
+
+    for field in ("prs", "ci_fix_attempts", "pr_attempts", "ci_passed",
+                  "checks_started_at", "_ci_failed_pending", "pr_scheduled_at",
+                  "conflict_resolution_attempts", "last_comment_ids", "done_at"):
+        ts.pop(field, None)
+
+    ts["status"] = "new"
+    ts["external_status"] = ticket.get("status", "")
+    ts["requeued_at"] = datetime.now(timezone.utc).isoformat()
+    ts["reopened_count"] = ts.get("reopened_count", 0) + 1
+    ts["last_merged_at"] = ts.pop("merged_at", None)
+    ts["last_merged_comment_snapshot"] = ts.pop("merged_comment_snapshot", None)
+
+    comment_check = "ok" if snapshot else "skipped_no_merge_snapshot"
+
+    log.emit(
+        "ticket_requeued",
+        f"Re-queued ticket: {key} — {ticket['summary']}",
+        links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
+        meta={
+            "ticket": key, "slug": slug, "deleted_docs": deleted,
+            "reopened_count": ts["reopened_count"],
+            "comment_check": comment_check,
+            "merged_comment_count": snapshot.get("count"),
+            "current_comment_count": current["count"],
+        },
+    )
+
+    if snapshot and not has_new:
+        log.emit(
+            "ticket_requeued_without_comment",
+            f"Re-queued without new upstream comment: {key}",
+            links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
+            meta={
+                "ticket": key, "slug": slug,
+                "merged_comment_count": snapshot.get("count"),
+                "current_comment_count": current["count"],
+                "merged_latest_at": snapshot.get("latest_created_at"),
+                "current_latest_at": current["latest_created_at"],
+            },
+        )
+
+    new_ts = _setup_ticket(config, ticket, base_url, comments=comments)
+    for k in ("slug", "branch", "discovered_at"):
+        if new_ts.get(k):
+            ts[k] = new_ts[k]
+    ts["status"] = new_ts.get("status", "new")
+    return ts
+
+
 def check(config: dict, instance_key: str = ""):
     from datetime import datetime, timezone
     assigned = _fetch_tickets(config)
@@ -179,6 +297,10 @@ def check(config: dict, instance_key: str = ""):
                     continue
 
             if ts["status"] == TicketStatus.merged:
+                ts = _reingest_merged_ticket(config, ticket, ts, base_url)
+                state.save_ticket(key, ts)
+                if instance_key:
+                    _enqueue_stage(instance_key, key, "start_planning")
                 continue
 
             if ts["status"] == TicketStatus.pr_failed:
@@ -244,7 +366,7 @@ def _fetch_tickets(config: dict) -> list[dict]:
     return ts.fetch_tickets()
 
 
-def _setup_ticket(config, ticket, base_url) -> dict:
+def _setup_ticket(config, ticket, base_url, comments=None) -> dict:
     from datetime import datetime, timezone
     ws = config["workspace"]
     repos = get_repos(config)
@@ -330,6 +452,9 @@ def _setup_ticket(config, ticket, base_url) -> dict:
     _download_attachments(config, ticket, docs_path)
     md = _localize_images(md, docs_path)
     (docs_path / "ticket.md").write_text(md)
+    if comments is None:
+        comments = _fetch_ticket_comments(config, key)
+    _write_comments_md(docs_path, comments)
     subprocess.run(["chown", "-R", "1000:1000", str(docs_path.parent)], capture_output=True, timeout=60)
 
     log.emit("ticket_worktree_created", f"Workspace ready for {slug}",
@@ -425,8 +550,7 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
         log.emit("ticket_no_changes", f"No code changes needed for {_label(ticket['key'], ts)}, marking as merged",
             links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
             meta={"ticket": ticket["key"]})
-        ts["status"] = transition(ts["status"], "merged")
-        return ts
+        return _mark_ticket_merged(config, ticket, ts)
 
     if not prs:
         ts["pr_attempts"] = ts.get("pr_attempts", 0) + 1
@@ -482,8 +606,7 @@ def _check_in_review(config, ticket, ts, base_url) -> dict:
         log.emit("ticket_merged", f"All PRs merged for {_label(ticket['key'], ts)}",
             links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
             meta={"ticket": ticket["key"]})
-        ts["status"] = transition(ts["status"], "merged")
-        return ts
+        return _mark_ticket_merged(config, ticket, ts)
 
     ts["status"] = transition(ts["status"], "in_review")
     platform_name = config["job"].get("platform", "")
@@ -680,8 +803,7 @@ def _merge(config, ticket, ts, base_url) -> dict:
                 meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"]})
 
     if all_merged:
-        ts["status"] = transition(ts["status"], "merged")
-        ts.pop("ci_passed", None)
+        ts = _mark_ticket_merged(config, ticket, ts)
     return ts
 
 

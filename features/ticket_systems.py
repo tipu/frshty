@@ -87,6 +87,28 @@ class JiraTicketSystem:
                 })
             return results
 
+    def fetch_comments(self, ticket_key: str) -> list[dict]:
+        if not self.base_url or not self.user or not self.token or not ticket_key:
+            return []
+        url = f"{self.base_url}/rest/api/3/issue/{ticket_key}/comment?maxResults=100&orderBy=created"
+        try:
+            with httpx.Client(auth=(self.user, self.token), timeout=30) as client:
+                resp = client.get(url)
+                if resp.status_code != 200:
+                    return []
+                results = []
+                for c in resp.json().get("comments", []):
+                    author = (c.get("author") or {}).get("displayName", "")
+                    results.append({
+                        "id": str(c.get("id", "")),
+                        "author": author,
+                        "body": _adf_to_text(c.get("body")),
+                        "created_at": c.get("created"),
+                    })
+                return results
+        except Exception:
+            return []
+
 
 class LinearTicketSystem:
     def __init__(self, config: dict):
@@ -138,6 +160,40 @@ class LinearTicketSystem:
                     "subtasks": subtasks,
                 })
             return results
+
+    def fetch_comments(self, ticket_key: str) -> list[dict]:
+        if not self.token or not ticket_key:
+            return []
+        query = '''
+        query {
+          issue(id: "%s") {
+            comments(first: 100) {
+              nodes { id body createdAt user { name } }
+            }
+          }
+        }
+        ''' % ticket_key
+        try:
+            with httpx.Client(timeout=30, transport=httpx.HTTPTransport(retries=2)) as client:
+                resp = client.post("https://api.linear.app/graphql",
+                    json={"query": query},
+                    headers={"Authorization": self.token, "Content-Type": "application/json"})
+                if resp.status_code != 200:
+                    return []
+                issue = (resp.json().get("data") or {}).get("issue") or {}
+                nodes = (issue.get("comments") or {}).get("nodes", [])
+                results = []
+                for n in nodes:
+                    author = (n.get("user") or {}).get("name", "")
+                    results.append({
+                        "id": str(n.get("id", "")),
+                        "author": author,
+                        "body": n.get("body", ""),
+                        "created_at": n.get("createdAt"),
+                    })
+                return results
+        except Exception:
+            return []
 
 
 def _adf_to_text(adf) -> str:

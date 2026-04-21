@@ -183,3 +183,124 @@ class TestLinearFetchTickets:
         assert len(tickets) == 1
         assert tickets[0]["key"] == "LIN-1"
         assert tickets[0]["summary"] == "Linear ticket"
+
+
+class TestJiraFetchComments:
+    def _make_ts(self):
+        config = {"job": {"ticket_system": "jira"},
+                  "jira": {"base_url": "http://j", "user": "u", "token": "t", "board_id": 1}}
+        return JiraTicketSystem(config)
+
+    def test_missing_credentials_returns_empty(self):
+        config = {"job": {"ticket_system": "jira"}, "jira": {"base_url": ""}}
+        ts = JiraTicketSystem(config)
+        assert ts.fetch_comments("PROJ-1") == []
+
+    def test_missing_key_returns_empty(self):
+        assert self._make_ts().fetch_comments("") == []
+
+    def test_normalizes(self):
+        ts = self._make_ts()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"comments": [{
+            "id": "10001",
+            "author": {"displayName": "Alice"},
+            "body": {"type": "doc", "content": [
+                {"type": "paragraph", "content": [{"type": "text", "text": "First"}]}
+            ]},
+            "created": "2026-04-20T18:00:00.000+0000",
+        }, {
+            "id": "10002",
+            "author": {"displayName": "Bob"},
+            "body": {"type": "doc", "content": [
+                {"type": "paragraph", "content": [{"type": "text", "text": "Second"}]}
+            ]},
+            "created": "2026-04-21T09:00:00.000+0000",
+        }]}
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_resp
+        with patch("features.ticket_systems.httpx.Client", return_value=mock_client):
+            comments = ts.fetch_comments("PROJ-1")
+        assert len(comments) == 2
+        assert comments[0] == {"id": "10001", "author": "Alice", "body": "First\n\n",
+                               "created_at": "2026-04-20T18:00:00.000+0000"}
+        assert comments[1]["author"] == "Bob"
+        call_url = mock_client.get.call_args[0][0]
+        assert "/rest/api/3/issue/PROJ-1/comment" in call_url
+
+    def test_non_200_returns_empty(self):
+        ts = self._make_ts()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 401
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.return_value = mock_resp
+        with patch("features.ticket_systems.httpx.Client", return_value=mock_client):
+            assert ts.fetch_comments("PROJ-1") == []
+
+    def test_exception_returns_empty(self):
+        ts = self._make_ts()
+        with patch("features.ticket_systems.httpx.Client", side_effect=Exception("boom")):
+            assert ts.fetch_comments("PROJ-1") == []
+
+
+class TestLinearFetchComments:
+    def _make_ts(self):
+        config = {"job": {"ticket_system": "linear"},
+                  "linear": {"token": "tok", "assignee_email": "a@b.com"}}
+        return LinearTicketSystem(config)
+
+    def test_missing_token_returns_empty(self):
+        config = {"job": {"ticket_system": "linear"}, "linear": {"assignee_email": "a@b.com"}}
+        assert LinearTicketSystem(config).fetch_comments("LIN-1") == []
+
+    def test_missing_key_returns_empty(self):
+        assert self._make_ts().fetch_comments("") == []
+
+    def test_normalizes(self):
+        ts = self._make_ts()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"data": {"issue": {"comments": {"nodes": [
+            {"id": "c1", "body": "hi", "createdAt": "2026-04-20T00:00:00Z",
+             "user": {"name": "Alice"}},
+            {"id": "c2", "body": "reply", "createdAt": "2026-04-21T00:00:00Z",
+             "user": None},
+        ]}}}}
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.post.return_value = mock_resp
+        with patch("features.ticket_systems.httpx.Client", return_value=mock_client):
+            comments = ts.fetch_comments("LIN-1")
+        assert len(comments) == 2
+        assert comments[0] == {"id": "c1", "author": "Alice", "body": "hi",
+                               "created_at": "2026-04-20T00:00:00Z"}
+        assert comments[1]["author"] == ""
+
+    def test_non_200_returns_empty(self):
+        ts = self._make_ts()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.post.return_value = mock_resp
+        with patch("features.ticket_systems.httpx.Client", return_value=mock_client):
+            assert ts.fetch_comments("LIN-1") == []
+
+    def test_missing_issue_returns_empty(self):
+        ts = self._make_ts()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"data": {"issue": None}}
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.post.return_value = mock_resp
+        with patch("features.ticket_systems.httpx.Client", return_value=mock_client):
+            assert ts.fetch_comments("LIN-1") == []
