@@ -693,7 +693,8 @@ def _project_virtual_rows(config: dict, days: int = 7) -> list[dict]:
     recurring = config.get("timesheet", {}).get("recurring", []) or []
     if not recurring:
         return out
-    today = date.today()
+    import core.tz as _ctz
+    today = _ctz.today_local()
     for offset in range(days):
         day = today + timedelta(days=offset)
         for entry in recurring:
