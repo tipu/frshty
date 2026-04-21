@@ -17,17 +17,6 @@ REVIEW_TIMEOUT = 900
 FIX_TIMEOUT = 1800
 
 
-def _set_status(ctx: TaskContext, new_status: str) -> None:
-    if not ctx.ticket_key:
-        return
-    def mutate(ts):
-        if not ts:
-            return None
-        ts["status"] = new_status
-        return ts
-    state.update_ticket(ctx.ticket_key, mutate)
-
-
 def _ticket_dir(ctx: TaskContext) -> Path:
     ws = ctx.config["workspace"]
     ts = state.load_ticket(ctx.ticket_key or "") or {}
@@ -50,21 +39,19 @@ def scan_tickets(ctx: TaskContext) -> TaskResult:
 @task("start_planning",
       preconditions=[status_is("new", "planning")],
       postconditions=[file_exists("docs/change-manifest.md")],
+      on_entry_status="planning",
+      on_success_status="reviewing",
       timeout=PLAN_TIMEOUT)
 def start_planning(ctx: TaskContext) -> TaskResult:
     ticket_dir = _ticket_dir(ctx)
     if not ticket_dir.is_dir():
         return TaskResult("failed", f"ticket dir missing: {ticket_dir}")
-    _set_status(ctx, "planning")
     log.emit("ticket_planning_started", f"Headless /confer-technical-plan for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key})
     result = run_claude_code("/confer-technical-plan docs/", cwd=ticket_dir, timeout=PLAN_TIMEOUT)
     if result is None:
         return TaskResult("failed", "claude returned non-zero or empty")
-    if not (ticket_dir / "docs" / "change-manifest.md").exists():
-        return TaskResult("failed", "claude finished but change-manifest.md not produced")
-    _set_status(ctx, "reviewing")
-    return TaskResult("ok", artifacts={"transitioned_to": "reviewing"})
+    return TaskResult("ok")
 
 
 @task("start_reviewing",
@@ -224,11 +211,11 @@ def backfill_artifacts(ctx: TaskContext) -> TaskResult:
 @task("mark_ready",
       preconditions=[status_is("reviewing"),
                      file_contains("docs/tri-review.md", r"VERDICT:\s*PASS")],
+      on_success_status="pr_ready",
       timeout=15)
 def mark_ready(ctx: TaskContext) -> TaskResult:
     import core.events as events
     ts = state.load_ticket(ctx.ticket_key or "") or {}
-    _set_status(ctx, "pr_ready")
     events.dispatch("ticket_dev_complete", {
         "ticket_key": ctx.ticket_key,
         "estimate_seconds": ts.get("estimate_seconds", 0),
@@ -236,7 +223,7 @@ def mark_ready(ctx: TaskContext) -> TaskResult:
         "slug": ts.get("slug", ""),
         "branch": ts.get("branch", ""),
     }, ctx.config)
-    return TaskResult("ok", artifacts={"transitioned_to": "pr_ready"})
+    return TaskResult("ok")
 
 
 @task("create_pr",
@@ -255,12 +242,18 @@ def create_pr(ctx: TaskContext) -> TaskResult:
         state.save_ticket(ctx.ticket_key or "", updated)
         return TaskResult("ok", artifacts={"transitioned_to": new_status})
     except Exception as e:
-        _set_status(ctx, "pr_failed")
+        if ctx.ticket_key:
+            try:
+                state.transition_ticket(ctx.ticket_key, "pr_failed")
+            except state.TicketStateError:
+                pass
         return TaskResult("failed", f"{type(e).__name__}: {e}",
                           artifacts={"transitioned_to": "pr_failed"})
 
 
-@task("apply_note_reset", timeout=30)
+@task("apply_note_reset",
+      on_success_status="new",
+      timeout=30)
 def apply_note_reset(ctx: TaskContext) -> TaskResult:
     import shutil
     from datetime import datetime, timezone
@@ -290,15 +283,14 @@ def apply_note_reset(ctx: TaskContext) -> TaskResult:
     if moved:
         archived_to = str(archive)
 
-    _set_status(ctx, "new")
-    return TaskResult("ok", artifacts={"archived_to": archived_to, "moved": moved,
-                                        "transitioned_to": "new"})
+    return TaskResult("ok", artifacts={"archived_to": archived_to, "moved": moved})
 
 
-@task("set_state", timeout=15)
+@task("set_state",
+      on_success_status=lambda ctx, _r: ctx.payload.get("target", "") or None,
+      timeout=15)
 def set_state(ctx: TaskContext) -> TaskResult:
     target = ctx.payload.get("target", "")
     if not target:
         return TaskResult("failed", "target state missing")
-    _set_status(ctx, target)
     return TaskResult("ok", artifacts={"transitioned_to": target})
