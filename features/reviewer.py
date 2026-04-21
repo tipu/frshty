@@ -89,10 +89,14 @@ def check(config: dict):
     for pr in review_prs:
         pr_key = f"{pr['repo']}/{pr['id']}"
         existing = review_state.get(pr_key, {})
+        head_sha = pr.get("head_sha", "")
 
         needs_review = False
         if not existing.get("reviewed"):
             needs_review = True
+        elif existing.get("last_head_sha"):
+            if head_sha and head_sha != existing["last_head_sha"]:
+                needs_review = True
         elif existing.get("last_updated") != pr.get("updated_on"):
             needs_review = True
 
@@ -107,7 +111,12 @@ def check(config: dict):
 
         result = review_pr(config, platform, pr)
         if result:
-            review_state[pr_key] = {"reviewed": True, "branch": pr["branch"], "last_updated": pr.get("updated_on")}
+            review_state[pr_key] = {
+                "reviewed": True,
+                "branch": pr["branch"],
+                "last_updated": pr.get("updated_on"),
+                "last_head_sha": head_sha,
+            }
             issues = result.get("issues", [])
             log.emit("review_complete", f"{pr['repo']}#{pr['id']}: Review done — {result.get('verdict', 'unknown')}, {len(issues)} issues",
                 links={"pr": pr["url"], "detail": f"{base_url}/reviews/{pr['repo']}/{pr['id']}"},

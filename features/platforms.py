@@ -301,6 +301,7 @@ class BitbucketPlatform:
             "created_on": pr["created_on"],
             "updated_on": pr["updated_on"],
             "url": pr["links"]["html"]["href"],
+            "head_sha": pr.get("source", {}).get("commit", {}).get("hash", ""),
         }
 
 
@@ -352,26 +353,27 @@ class GitHubPlatform:
         if result.returncode != 0:
             return []
         prs = [self._normalize_search_pr(pr) for pr in json.loads(result.stdout)]
-        needs_branch = []
         for pr in prs:
             if pr.get("full_repo"):
                 self._repo_cache[pr["repo"]] = pr["full_repo"]
-            if not pr.get("branch"):
-                needs_branch.append(pr)
-        if needs_branch:
+        if prs:
             fragments = []
-            for i, pr in enumerate(needs_branch):
+            for i, pr in enumerate(prs):
                 full = pr.get("full_repo") or self._resolve_repo(pr["repo"])
                 owner, name = full.split("/", 1)
-                fragments.append(f'pr{i}: repository(owner:"{owner}",name:"{name}") {{ pullRequest(number:{pr["id"]}) {{ headRefName }} }}')
+                fragments.append(f'pr{i}: repository(owner:"{owner}",name:"{name}") {{ pullRequest(number:{pr["id"]}) {{ headRefName headRefOid }} }}')
             query = "{ " + " ".join(fragments) + " }"
             gql = self._run_gh(["api", "graphql", "-f", f"query={query}"])
             if gql.returncode == 0:
                 data = json.loads(gql.stdout).get("data", {})
-                for i, pr in enumerate(needs_branch):
+                for i, pr in enumerate(prs):
                     node = data.get(f"pr{i}", {}).get("pullRequest", {})
-                    if node and node.get("headRefName"):
+                    if not node:
+                        continue
+                    if not pr.get("branch") and node.get("headRefName"):
                         pr["branch"] = node["headRefName"]
+                    if node.get("headRefOid"):
+                        pr["head_sha"] = node["headRefOid"]
         return prs
 
     def get_pr_comments(self, repo: str, pr_id: int) -> list[dict]:
@@ -648,4 +650,5 @@ class GitHubPlatform:
             "created_on": pr["createdAt"],
             "updated_on": pr["updatedAt"],
             "url": pr["url"],
+            "head_sha": "",
         }
