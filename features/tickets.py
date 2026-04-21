@@ -188,6 +188,7 @@ def _reingest_merged_ticket(config: dict, ticket: dict, ts: dict, base_url: str)
     ts["reopened_count"] = ts.get("reopened_count", 0) + 1
     ts["last_merged_at"] = ts.pop("merged_at", None)
     ts["last_merged_comment_snapshot"] = ts.pop("merged_comment_snapshot", None)
+    ts["last_merged_external_status"] = ts.pop("merged_external_status", None)
 
     comment_check = "ok" if snapshot else "skipped_no_merge_snapshot"
 
@@ -297,6 +298,13 @@ def check(config: dict, instance_key: str = ""):
                     continue
 
             if ts["status"] == TicketStatus.merged:
+                curr_ext = ticket.get("status", "")
+                if "merged_external_status" not in ts:
+                    ts["merged_external_status"] = curr_ext
+                    state.save_ticket(key, ts)
+                    continue
+                if curr_ext == ts["merged_external_status"]:
+                    continue
                 ts = _reingest_merged_ticket(config, ticket, ts, base_url)
                 state.save_ticket(key, ts)
                 if instance_key:

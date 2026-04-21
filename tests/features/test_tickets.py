@@ -643,35 +643,62 @@ class TestReingestMergedTicket:
 
 
 class TestCheckRequeue:
-    def test_merged_ticket_in_queue_is_reingested(self, tmp_path, fake_config):
+    def _run_check(self, tmp_path, fake_config, saved_state, external_status,
+                   setup_return=None, repos=None):
         import core.state as state
         state.init(tmp_path)
         fake_config["workspace"]["root"] = tmp_path
-        slug = "PROJ-1-slug"
+        slug = saved_state.get("slug", "PROJ-1-slug")
         docs = tmp_path / "tickets" / slug / "docs"
-        docs.mkdir(parents=True)
+        docs.mkdir(parents=True, exist_ok=True)
         (docs / "ticket.md").write_text("old")
 
-        state.save_ticket("PROJ-1", {
-            "status": "merged", "slug": slug, "branch": slug,
-            "merged_comment_snapshot": {"count": 0, "latest_created_at": None},
-        })
+        state.save_ticket("PROJ-1", saved_state)
+        ticket = make_ticket(status=external_status)
+        repos = repos if repos is not None else [{"name": "myrepo", "path": tmp_path / "repo"}]
+        setup_return = setup_return or {"status": "new", "slug": slug, "branch": slug}
 
-        ticket = make_ticket(status="Prioritized")
-        repos = [{"name": "myrepo", "path": tmp_path / "repo"}]
         with patch("features.tickets._fetch_tickets", return_value=[ticket]), \
              patch("features.tickets._fetch_open_prs", return_value=[]), \
              patch("features.tickets.get_repos", return_value=repos), \
              patch("features.tickets._fetch_ticket_comments", return_value=[]), \
-             patch("features.tickets._setup_ticket",
-                   return_value={"status": "new", "slug": slug, "branch": slug}), \
+             patch("features.tickets._setup_ticket", return_value=setup_return), \
              patch("features.tickets._enqueue_stage") as menq, \
              patch("core.queue.jobs_for_ticket", return_value=[]), \
              patch("features.tickets.log"):
             tickets.check({**fake_config, "_base_url": "http://base"}, instance_key="inst")
+        return state.load_ticket("PROJ-1"), menq
 
-        saved = state.load_ticket("PROJ-1")
+    def test_first_observation_captures_baseline_and_skips(self, tmp_path, fake_config):
+        saved, menq = self._run_check(tmp_path, fake_config,
+            saved_state={"status": "merged", "slug": "PROJ-1-slug", "branch": "PROJ-1-slug"},
+            external_status="QA")
+        assert saved is not None
+        assert saved["status"] == "merged"
+        assert saved["merged_external_status"] == "QA"
+        assert "reopened_count" not in saved
+        menq.assert_not_called()
+
+    def test_same_external_status_skips(self, tmp_path, fake_config):
+        saved, menq = self._run_check(tmp_path, fake_config,
+            saved_state={"status": "merged", "slug": "PROJ-1-slug", "branch": "PROJ-1-slug",
+                         "merged_external_status": "QA"},
+            external_status="QA")
+        assert saved is not None
+        assert saved["status"] == "merged"
+        assert saved["merged_external_status"] == "QA"
+        assert "reopened_count" not in saved
+        menq.assert_not_called()
+
+    def test_changed_external_status_reingests(self, tmp_path, fake_config):
+        saved, menq = self._run_check(tmp_path, fake_config,
+            saved_state={"status": "merged", "slug": "PROJ-1-slug", "branch": "PROJ-1-slug",
+                         "merged_external_status": "QA",
+                         "merged_comment_snapshot": {"count": 0, "latest_created_at": None}},
+            external_status="Prioritized")
         assert saved is not None
         assert saved["status"] == "new"
         assert saved["reopened_count"] == 1
+        assert saved["last_merged_external_status"] == "QA"
+        assert "merged_external_status" not in saved
         menq.assert_any_call("inst", "PROJ-1", "start_planning")
