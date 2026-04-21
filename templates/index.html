@@ -152,7 +152,9 @@ const SYSTEM_EVENTS = new Set(['cycle_start', 'cycle_end', 'cycle_sleep']);
 
 async function fetchEvents() {
     const unread = currentFilter === 'unread';
-    const limit = timeWindow >= 24 ? 2000 : timeWindow >= 16 ? 1000 : 500;
+    // Budget 1000 events per hour of window (atropos runs ~500/hr, leaves headroom).
+    // The time filter is the primary cap; limit is just a memory ceiling.
+    const limit = Math.max(5000, timeWindow * 1000);
     const resp = await fetch(`/api/events?limit=${limit}&unread=${unread}&since_hours=${timeWindow}`);
     events = await resp.json();
     render();
