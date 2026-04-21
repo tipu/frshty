@@ -35,6 +35,11 @@ def check(config: dict):
     workspace = slack_cfg.get("workspace", "")
     base_url = config["_base_url"]
     max_age_hours = int(slack_cfg.get("mention_max_age_hours", 48))
+    # Don't emit attention events for messages older than this. slack_int can
+    # REST-sync days-old conversations at any time; those shouldn't spam the
+    # feed even if they sit past the high-water mark.
+    notify_max_age_hours = int(slack_cfg.get("notify_max_age_hours", 2))
+    notify_cutoff_iso = (datetime.now(timezone.utc) - timedelta(hours=notify_max_age_hours)).isoformat()
 
     sl = state.load("slack")
     user_id = sl.get("user_id", "")
@@ -92,6 +97,9 @@ def check(config: dict):
     sl["names"] = names
 
     mentions = [m for m in messages if _is_mention(m, user_id) or _is_dm_to_me(m, user_id)]
+    # Only emit + triage for mentions young enough to be actionable. Older ones
+    # still clear the high-water mark so they won't re-surface, but don't spam.
+    mentions = [m for m in mentions if _msg_ts_iso(m) > notify_cutoff_iso]
     for mention in mentions:
         text = _resolve_names(_extract_text(mention), names)
         if not text:
@@ -157,6 +165,7 @@ def check(config: dict):
             meta={"channel": channel, "text": text[:200], "suggested_response": suggested, "action": action, "reply_id": reply_id})
 
     thread_msgs = [m for m in messages if _is_in_thread(m, user_id)]
+    thread_msgs = [m for m in thread_msgs if _msg_ts_iso(m) > notify_cutoff_iso]
     for msg in thread_msgs:
         text = _extract_text(msg)
         if not text:
