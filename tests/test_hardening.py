@@ -152,7 +152,8 @@ def test_tri_review_deleted_on_fail_verdict(tmp_path):
         result = tickets._check_reviewing(config, ticket, ts, "http://base")
 
     assert not review_file.exists()
-    assert result["status"] == "planning"
+    assert result["status"] == "reviewing"
+    assert result["fixing"] is True
 
 
 def _make_conflicting_repo(tmp_path):
