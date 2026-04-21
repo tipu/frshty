@@ -119,6 +119,8 @@ def _seed_recurring_schedules(instance_configs: list[dict]) -> None:
             if next_fire is not None:
                 scheduler.upsert_recurring(key, "billing_check", "billing_check",
                                             cadence=freq, next_run_at=next_fire)
+        else:
+            scheduler.delete(key, "billing_check")
         if feats.get("timesheet"):
             candidate = now_pst.replace(hour=19, minute=0, second=0, microsecond=0)
             if candidate <= now_pst:
@@ -126,6 +128,8 @@ def _seed_recurring_schedules(instance_configs: list[dict]) -> None:
                 candidate = candidate + _td(days=1)
             scheduler.upsert_recurring(key, "timesheet_check", "timesheet_check",
                                         cadence="daily_19pst", next_run_at=candidate)
+        else:
+            scheduler.delete(key, "timesheet_check")
 
 
 def stop_events() -> None:
