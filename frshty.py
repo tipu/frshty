@@ -945,6 +945,7 @@ def api_ticket_reply(key: str, comment_id: int, body: dict):
 
 @app.post("/api/tickets/{key}/restart")
 def api_restart_ticket(key: str):
+    import core.queue as q
     tickets = state.load("tickets")
     ts = tickets.get(key)
     if not ts:
@@ -954,8 +955,13 @@ def api_restart_ticket(key: str):
     ts.pop("pr_attempts", None)
     if ts.get("status") == TicketStatus.pr_failed.value:
         ts["status"] = "pr_ready"
-    _tickets_mod.restart_session(_config, key, ts, _config["_base_url"])
     state.save("tickets", tickets)
+    status = ts.get("status", "")
+    instance_key = _config.get("job", {}).get("key", "")
+    if instance_key and status in ("new", "planning"):
+        q.enqueue_job(instance_key, "start_planning", ticket_key=key)
+    elif instance_key and status == "reviewing":
+        q.enqueue_job(instance_key, "start_reviewing", ticket_key=key)
     return {"status": "restarted"}
 
 
@@ -1375,16 +1381,6 @@ def slack_loop(config: dict):
         time.sleep(random.randint(50, 90))
 
 
-def health_loop(config: dict):
-    while True:
-        if config.get("features", {}).get("tickets"):
-            try:
-                _tickets_mod.check_health(config)
-            except Exception as e:
-                log.emit("cycle_error", f"health_check failed: {e}")
-        time.sleep(random.randint(60, 90))
-
-
 def _run_review(config_path: str, full_repo: str, pr_id: int, url: str):
     _ensure_path()
     review_config = cfg.load_config(config_path)
@@ -1442,8 +1438,6 @@ def _run_worker(config_path: str):
     log.init(worker_config["_state_dir"], worker_config["job"]["key"])
     loop_thread = threading.Thread(target=main_loop, args=(worker_config,), daemon=True)
     loop_thread.start()
-    health_thread = threading.Thread(target=health_loop, args=(worker_config,), daemon=True)
-    health_thread.start()
     slack_loop(worker_config)
 
 

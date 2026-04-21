@@ -77,139 +77,34 @@ class TestLocalizeImages:
         assert "https://example.com/missing.png" in result
 
 
-class TestCommandForStatus:
-    def test_planning(self):
-        assert tickets._command_for_status("planning") == "/confer-technical-plan docs/"
+class TestEnqueueStage:
+    def test_enqueues_when_no_existing(self):
+        with patch("core.queue.jobs_for_ticket", return_value=[]) as qj, \
+             patch("core.queue.enqueue_job") as eq:
+            tickets._enqueue_stage("inst", "T-1", "start_planning")
+            qj.assert_called_once_with("inst", "T-1", limit=20)
+            eq.assert_called_once_with("inst", "start_planning", ticket_key="T-1")
 
-    def test_reviewing(self):
-        assert "tri-review" in tickets._command_for_status("reviewing")
+    def test_skips_when_already_queued(self):
+        with patch("core.queue.jobs_for_ticket",
+                   return_value=[{"task": "start_planning", "status": "queued"}]), \
+             patch("core.queue.enqueue_job") as eq:
+            tickets._enqueue_stage("inst", "T-1", "start_planning")
+            eq.assert_not_called()
 
-    def test_other_returns_none(self):
-        assert tickets._command_for_status("new") is None
-        assert tickets._command_for_status("pr_ready") is None
+    def test_skips_when_already_running(self):
+        with patch("core.queue.jobs_for_ticket",
+                   return_value=[{"task": "start_planning", "status": "running"}]), \
+             patch("core.queue.enqueue_job") as eq:
+            tickets._enqueue_stage("inst", "T-1", "start_planning")
+            eq.assert_not_called()
 
-
-class TestCheckPlanning:
-    def test_no_manifest_stays(self, tmp_path):
-        ws = {"root": tmp_path, "tickets_dir": "tickets"}
-        config = {"workspace": ws}
-        ts = make_ticket_state(status="planning")
-        ticket = make_ticket()
-        result = tickets._check_planning(config, ticket, ts, "http://base")
-        assert result["status"] == "planning"
-
-    def test_manifest_exists_transitions(self, tmp_path):
-        ws = {"root": tmp_path, "tickets_dir": "tickets"}
-        slug = "PROJ-1-do-the-thing"
-        manifest_dir = tmp_path / "tickets" / slug / "docs"
-        manifest_dir.mkdir(parents=True)
-        (manifest_dir / "change-manifest.md").write_text("plan done")
-
-        config = {"workspace": ws}
-        ts = make_ticket_state(status="planning", slug=slug)
-        ticket = make_ticket()
-
-        with patch("features.tickets.terminal.send_keys"), \
-             patch("features.tickets.log"):
-            result = tickets._check_planning(config, ticket, ts, "http://base")
-        assert result["status"] == "reviewing"
-
-
-class TestCheckReviewing:
-    def test_no_review_file_stays(self, tmp_path):
-        ws = {"root": tmp_path, "tickets_dir": "tickets"}
-        config = {"workspace": ws}
-        ts = make_ticket_state(status="reviewing")
-        result = tickets._check_reviewing(config, make_ticket(), ts, "http://base")
-        assert result["status"] == "reviewing"
-
-    def test_pass_verdict_to_pr_ready(self, tmp_path):
-        ws = {"root": tmp_path, "tickets_dir": "tickets"}
-        slug = "PROJ-1-do-the-thing"
-        review_dir = tmp_path / "tickets" / slug / "docs"
-        review_dir.mkdir(parents=True)
-        (review_dir / "tri-review.md").write_text("all good")
-
-        config = {"workspace": ws}
-        ts = make_ticket_state(status="reviewing", slug=slug)
-
-        with patch("features.tickets.run_haiku", return_value="PASS"), \
-             patch("features.tickets.log"), \
-             patch("features.tickets.events"):
-            result = tickets._check_reviewing(config, make_ticket(), ts, "http://base")
-        assert result["status"] == "pr_ready"
-
-    def test_fail_verdict_deletes_review_and_marks_fixing(self, tmp_path):
-        ws = {"root": tmp_path, "tickets_dir": "tickets"}
-        slug = "PROJ-1-do-the-thing"
-        review_dir = tmp_path / "tickets" / slug / "docs"
-        review_dir.mkdir(parents=True)
-        review_file = review_dir / "tri-review.md"
-        review_file.write_text("blocking issues")
-
-        config = {"workspace": ws}
-        ts = make_ticket_state(status="reviewing", slug=slug)
-
-        with patch("features.tickets.run_haiku", return_value="FAIL"), \
-             patch("features.tickets.terminal.send_keys"), \
-             patch("features.tickets.log"):
-            result = tickets._check_reviewing(config, make_ticket(), ts, "http://base")
-        assert result["status"] == "reviewing"
-        assert result["fixing"] is True
-        assert result.get("last_scrollback_change_at")
-        assert not review_file.exists()
-
-    def test_fixing_idle_reruns_tri_review(self, tmp_path):
-        from datetime import datetime, timedelta, timezone
-        ws = {"root": tmp_path, "tickets_dir": "tickets"}
-        slug = "PROJ-1-do-the-thing"
-        (tmp_path / "tickets" / slug / "docs").mkdir(parents=True)
-
-        config = {"workspace": ws}
-        idle_since = (datetime.now(timezone.utc) - timedelta(seconds=tickets.FIX_IDLE_SECS + 5)).isoformat()
-        ts = make_ticket_state(status="reviewing", slug=slug)
-        ts["fixing"] = True
-        ts["last_scrollback_change_at"] = idle_since
-
-        with patch("features.tickets.terminal.send_keys") as send, \
-             patch("features.tickets.log"):
-            result = tickets._check_reviewing(config, make_ticket(), ts, "http://base")
-        assert result["status"] == "reviewing"
-        assert "fixing" not in result
-        assert send.called
-        assert "tri-review" in send.call_args.args[1]
-
-    def test_fixing_not_idle_waits(self, tmp_path):
-        from datetime import datetime, timezone
-        ws = {"root": tmp_path, "tickets_dir": "tickets"}
-        slug = "PROJ-1-do-the-thing"
-        (tmp_path / "tickets" / slug / "docs").mkdir(parents=True)
-
-        config = {"workspace": ws}
-        ts = make_ticket_state(status="reviewing", slug=slug)
-        ts["fixing"] = True
-        ts["last_scrollback_change_at"] = datetime.now(timezone.utc).isoformat()
-
-        with patch("features.tickets.terminal.send_keys") as send, \
-             patch("features.tickets.log"):
-            result = tickets._check_reviewing(config, make_ticket(), ts, "http://base")
-        assert result["status"] == "reviewing"
-        assert result["fixing"] is True
-        assert not send.called
-
-    def test_none_verdict_stays(self, tmp_path):
-        ws = {"root": tmp_path, "tickets_dir": "tickets"}
-        slug = "PROJ-1-do-the-thing"
-        review_dir = tmp_path / "tickets" / slug / "docs"
-        review_dir.mkdir(parents=True)
-        (review_dir / "tri-review.md").write_text("review text")
-
-        config = {"workspace": ws}
-        ts = make_ticket_state(status="reviewing", slug=slug)
-
-        with patch("features.tickets.run_haiku", return_value=None):
-            result = tickets._check_reviewing(config, make_ticket(), ts, "http://base")
-        assert result["status"] == "reviewing"
+    def test_enqueues_when_only_finished_exist(self):
+        with patch("core.queue.jobs_for_ticket",
+                   return_value=[{"task": "start_planning", "status": "ok"}]), \
+             patch("core.queue.enqueue_job") as eq:
+            tickets._enqueue_stage("inst", "T-1", "start_planning")
+            eq.assert_called_once()
 
 
 class TestCreatePr:

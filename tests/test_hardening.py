@@ -113,47 +113,40 @@ def test_check_stale_emits_only_once():
     mock_emit.assert_not_called()
 
 
-def test_none_verdict_does_not_advance_ticket(tmp_path):
-    from features import tickets
-
-    ws = {"root": tmp_path, "tickets_dir": "tickets"}
-    slug = "PROJ-1-do-thing"
-    review_dir = tmp_path / "tickets" / slug / "docs"
-    review_dir.mkdir(parents=True)
-    (review_dir / "tri-review.md").write_text("some review text")
-
-    config = {"workspace": ws}
-    ticket = {"key": "PROJ-1", "summary": "do thing", "url": "", "status": "reviewing"}
-    ts = {"status": "reviewing", "slug": slug, "branch": "feat/do-thing"}
-
-    with patch("features.tickets.run_haiku", return_value=None):
-        result = tickets._check_reviewing(config, ticket, ts, "http://base")
-
-    assert result["status"] == "reviewing"
-
-
-def test_tri_review_deleted_on_fail_verdict(tmp_path):
+def test_reviewing_fail_verdict_enqueues_fix(tmp_path):
     from features import tickets
 
     ws = {"root": tmp_path, "tickets_dir": "tickets"}
     slug = "PROJ-2-fix-it"
     review_dir = tmp_path / "tickets" / slug / "docs"
     review_dir.mkdir(parents=True)
-    review_file = review_dir / "tri-review.md"
-    review_file.write_text("blocking issue found")
+    (review_dir / "tri-review.md").write_text("blocking issue\n\nVERDICT: FAIL\n")
 
-    config = {"workspace": ws}
-    ticket = {"key": "PROJ-2", "summary": "fix it", "url": "", "status": "reviewing"}
-    ts = {"status": "reviewing", "slug": slug, "branch": "fix/it"}
+    state.init(tmp_path)
+    state.save("tickets", {"PROJ-2": {"status": "reviewing", "slug": slug, "branch": "fix/it"}})
 
-    with patch("features.tickets.run_haiku", return_value="FAIL"), \
-         patch("features.tickets.terminal.send_keys"), \
-         patch("features.tickets.log"):
-        result = tickets._check_reviewing(config, ticket, ts, "http://base")
+    config = {
+        "_base_url": "http://test",
+        "job": {"ticket_system": "", "platform": "github"},
+        "workspace": {**ws, "root": tmp_path, "base_branch": "main", "ticket_layout": "flat"},
+        "github": {"repo": "org/backend"},
+        "pr": {},
+        "features": {},
+    }
 
-    assert not review_file.exists()
-    assert result["status"] == "reviewing"
-    assert result["fixing"] is True
+    assigned = [{"key": "PROJ-2", "summary": "fix it", "status": "In Progress", "url": "",
+                 "description": "", "attachments": [], "related": [], "subtasks": []}]
+
+    with patch("features.tickets._fetch_tickets", return_value=assigned), \
+         patch("features.tickets.get_repos", return_value=[{"name": "backend", "path": tmp_path}]), \
+         patch("features.tickets.make_platform"), \
+         patch("features.tickets._fetch_open_prs", return_value=[]), \
+         patch("features.tickets.log"), \
+         patch("features.tickets._enqueue_stage") as enq:
+        tickets.check(config, "inst")
+
+    tasks_enqueued = [c.args[2] for c in enq.call_args_list]
+    assert "fix_review_findings" in tasks_enqueued
 
 
 def _make_conflicting_repo(tmp_path):
@@ -281,9 +274,6 @@ def test_done_ticket_with_prs_preserves_state_on_rediscovery(tmp_path):
          patch("features.tickets.get_repos", return_value=[{"name": "backend", "path": tmp_path}]), \
          patch("features.tickets.make_platform") as mock_platform, \
          patch("features.tickets.subprocess.run") as mock_run, \
-         patch("features.tickets.terminal.ensure_session"), \
-         patch("features.tickets.terminal.send_keys"), \
-         patch("features.tickets.time.sleep"), \
          patch("features.tickets.log"):
         mock_run.return_value = MagicMock(returncode=0, stdout="main\n", stderr="")
         p = MagicMock()
@@ -333,9 +323,6 @@ def test_done_ticket_without_prs_restarts_fresh(tmp_path):
          patch("features.tickets.get_repos", return_value=[{"name": "backend", "path": tmp_path}]), \
          patch("features.tickets.make_platform"), \
          patch("features.tickets.subprocess.run") as mock_run, \
-         patch("features.tickets.terminal.ensure_session"), \
-         patch("features.tickets.terminal.send_keys"), \
-         patch("features.tickets.time.sleep"), \
          patch("features.tickets.log"):
         mock_run.return_value = MagicMock(returncode=0, stdout="main\n", stderr="")
         tickets.check(config)

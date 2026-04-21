@@ -73,7 +73,7 @@ def mark_done(job_id: int, status: str, response: dict) -> None:
         )
 
 
-def sweep_stale(max_age_seconds: int = 600) -> int:
+def sweep_stale(max_age_seconds: int = 3600) -> int:
     """Reset stuck jobs back to queued so another worker can pick them up."""
     with _db.tx() as c:
         cur = c.execute(
