@@ -139,7 +139,7 @@ class TestCheckReviewing:
             result = tickets._check_reviewing(config, make_ticket(), ts, "http://base")
         assert result["status"] == "pr_ready"
 
-    def test_fail_verdict_deletes_review_goes_planning(self, tmp_path):
+    def test_fail_verdict_deletes_review_and_marks_fixing(self, tmp_path):
         ws = {"root": tmp_path, "tickets_dir": "tickets"}
         slug = "PROJ-1-do-the-thing"
         review_dir = tmp_path / "tickets" / slug / "docs"
@@ -154,8 +154,48 @@ class TestCheckReviewing:
              patch("features.tickets.terminal.send_keys"), \
              patch("features.tickets.log"):
             result = tickets._check_reviewing(config, make_ticket(), ts, "http://base")
-        assert result["status"] == "planning"
+        assert result["status"] == "reviewing"
+        assert result["fixing"] is True
+        assert result.get("last_scrollback_change_at")
         assert not review_file.exists()
+
+    def test_fixing_idle_reruns_tri_review(self, tmp_path):
+        from datetime import datetime, timedelta, timezone
+        ws = {"root": tmp_path, "tickets_dir": "tickets"}
+        slug = "PROJ-1-do-the-thing"
+        (tmp_path / "tickets" / slug / "docs").mkdir(parents=True)
+
+        config = {"workspace": ws}
+        idle_since = (datetime.now(timezone.utc) - timedelta(seconds=tickets.FIX_IDLE_SECS + 5)).isoformat()
+        ts = make_ticket_state(status="reviewing", slug=slug)
+        ts["fixing"] = True
+        ts["last_scrollback_change_at"] = idle_since
+
+        with patch("features.tickets.terminal.send_keys") as send, \
+             patch("features.tickets.log"):
+            result = tickets._check_reviewing(config, make_ticket(), ts, "http://base")
+        assert result["status"] == "reviewing"
+        assert "fixing" not in result
+        assert send.called
+        assert "tri-review" in send.call_args.args[1]
+
+    def test_fixing_not_idle_waits(self, tmp_path):
+        from datetime import datetime, timezone
+        ws = {"root": tmp_path, "tickets_dir": "tickets"}
+        slug = "PROJ-1-do-the-thing"
+        (tmp_path / "tickets" / slug / "docs").mkdir(parents=True)
+
+        config = {"workspace": ws}
+        ts = make_ticket_state(status="reviewing", slug=slug)
+        ts["fixing"] = True
+        ts["last_scrollback_change_at"] = datetime.now(timezone.utc).isoformat()
+
+        with patch("features.tickets.terminal.send_keys") as send, \
+             patch("features.tickets.log"):
+            result = tickets._check_reviewing(config, make_ticket(), ts, "http://base")
+        assert result["status"] == "reviewing"
+        assert result["fixing"] is True
+        assert not send.called
 
     def test_none_verdict_stays(self, tmp_path):
         ws = {"root": tmp_path, "tickets_dir": "tickets"}

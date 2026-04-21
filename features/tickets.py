@@ -26,6 +26,7 @@ def _label(key: str, ts: dict) -> str:
 MAX_RESTARTS = 3
 RESTART_COOLDOWN_SECS = 300
 STUCK_SCROLLBACK_SECS = 300
+FIX_IDLE_SECS = 120
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
 _SPINNER_LINE_RE = re.compile(r"(Cogitated|Worked|Cooked|Baked|Churned|Crunched|Thought) for \d+[ms\d\s]*")
@@ -94,7 +95,13 @@ def _triage_session(config, key, ts, base_url):
     scrollback = terminal.capture_pane(key, 60)
     status = ts.get("status", "")
     expected_cmd = _command_for_status(status)
-    expected_file = "docs/change-manifest.md" if status == "planning" else "docs/tri-review.md"
+    fixing = bool(ts.get("fixing"))
+    if status == "planning":
+        expected_file = "docs/change-manifest.md"
+    elif fixing:
+        expected_file = "docs/tri-review.md with VERDICT: PASS (must fix the blocking findings from the prior FAIL, then re-run /tri-review)"
+    else:
+        expected_file = "docs/tri-review.md with VERDICT: PASS or FAIL"
 
     ws = config["workspace"]
     slug = ts.get("slug", "")
@@ -107,7 +114,7 @@ def _triage_session(config, key, ts, base_url):
 
 Your job: decide what to do next. You have deep understanding of the pipeline:
 - "planning" stage: Claude runs /confer-technical-plan docs/ which should produce docs/change-manifest.md
-- "reviewing" stage: Claude runs /tri-review which should produce docs/tri-review.md
+- "reviewing" stage: Claude runs /tri-review which should produce docs/tri-review.md. VERDICT: FAIL is NOT finished — Claude must fix the blocking findings and re-run /tri-review until it produces VERDICT: PASS.
 - Claude runs inside a tmux session. You can send text to it (it goes to the Claude Code prompt).
 - If Claude asked a question and is waiting for input, you should answer it or instruct it to proceed.
 - If Claude crashed or the session is empty, recommend a restart.
@@ -545,10 +552,26 @@ def _check_planning(config, ticket, ts, base_url) -> dict:
 
 
 def _check_reviewing(config, ticket, ts, base_url) -> dict:
+    from datetime import datetime, timezone
     ws = config["workspace"]
     slug = ts["slug"]
     ticket_dir = ws["root"] / ws["tickets_dir"] / slug
     review_file = ticket_dir / "docs" / "tri-review.md"
+
+    if ts.get("fixing") and not review_file.exists():
+        last_change = ts.get("last_scrollback_change_at", "")
+        if not last_change:
+            return ts
+        idle_secs = (datetime.now(timezone.utc) - datetime.fromisoformat(last_change)).total_seconds()
+        if idle_secs < FIX_IDLE_SECS:
+            return ts
+        terminal.send_keys(ticket["key"], _command_for_status("reviewing"))
+        log.emit("ticket_review_retried", f"Re-running /tri-review for {_label(ticket['key'], ts)} after fix",
+            links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
+            meta={"ticket": ticket["key"]})
+        ts.pop("fixing", None)
+        ts["last_scrollback_change_at"] = datetime.now(timezone.utc).isoformat()
+        return ts
 
     if not review_file.exists():
         return ts
@@ -578,7 +601,8 @@ def _check_reviewing(config, ticket, ts, base_url) -> dict:
         log.emit("ticket_review_fixing", f"Fixing tri-review findings for {_label(ticket['key'], ts)}",
             links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
             meta={"ticket": ticket["key"], "verdict": verdict.strip()})
-        ts["status"] = transition(ts["status"], "planning")
+        ts["fixing"] = True
+        ts["last_scrollback_change_at"] = datetime.now(timezone.utc).isoformat()
         return ts
 
     log.emit("ticket_review_passed", f"Tri-review passed for {_label(ticket['key'], ts)}",
