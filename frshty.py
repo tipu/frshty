@@ -1091,6 +1091,8 @@ def api_set_ticket_status(key: str, body: dict):
     ts["conflict_resolution_attempts"] = 0
     ts.pop("ci_passed", None)
     ts.pop("checks_started_at", None)
+    if target == "merged" and "merged_external_status" not in ts:
+        ts["merged_external_status"] = ts.get("external_status", "")
     state.save_ticket(key, ts)
     log.emit("ticket_status_override", f"Manual override {old_status} → {target} for {key}",
         links={"detail": f"{_config['_base_url']}/tickets/{key}"},
