@@ -145,6 +145,8 @@ def _mark_ticket_merged(config: dict, ticket: dict, ts: dict) -> dict:
     ts["status"] = transition(ts["status"], "merged")
     ts["merged_at"] = datetime.now(timezone.utc).isoformat()
     ts["merged_comment_snapshot"] = _comment_snapshot(comments)
+    if "merged_external_status" not in ts:
+        ts["merged_external_status"] = ticket.get("status", "") or ts.get("external_status", "")
     ts.pop("ci_passed", None)
     return ts
 

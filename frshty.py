@@ -1058,14 +1058,22 @@ def api_ticket_reply(key: str, comment_id: int, body: dict):
 @app.post("/api/tickets/{key}/restart")
 def api_restart_ticket(key: str):
     import core.queue as q
-    ts = state.load_ticket(key)
+
+    def _reset(ts: dict) -> dict:
+        if not ts:
+            return ts
+        ts.pop("ci_fix_attempts", None)
+        ts.pop("pr_attempts", None)
+        return ts
+
+    ts = state.update_ticket(key, _reset)
     if not ts:
         return JSONResponse({"error": "not found"}, status_code=404)
-    ts.pop("ci_fix_attempts", None)
-    ts.pop("pr_attempts", None)
     if ts.get("status") == TicketStatus.pr_failed.value:
-        ts["status"] = "pr_ready"
-    state.save_ticket(key, ts)
+        try:
+            ts = state.transition_ticket(key, "pr_ready")
+        except state.TicketStateError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
     status = ts.get("status", "")
     instance_key = _config.get("job", {}).get("key", "")
     if instance_key and status in ("new", "planning"):
@@ -1086,14 +1094,18 @@ def api_set_ticket_status(key: str, body: dict):
     if not ts:
         return JSONResponse({"error": "not found"}, status_code=404)
     old_status = ts.get("status", "unknown")
-    ts["status"] = target
-    ts["ci_fix_attempts"] = 0
-    ts["conflict_resolution_attempts"] = 0
-    ts.pop("ci_passed", None)
-    ts.pop("checks_started_at", None)
-    if target == "merged" and "merged_external_status" not in ts:
-        ts["merged_external_status"] = ts.get("external_status", "")
-    state.save_ticket(key, ts)
+    fields: dict = {
+        "ci_fix_attempts": 0,
+        "conflict_resolution_attempts": 0,
+        "ci_passed": None,
+        "checks_started_at": None,
+    }
+    if target == "merged" and not ts.get("merged_external_status"):
+        fields["merged_external_status"] = ts.get("external_status", "")
+    try:
+        state.transition_ticket(key, target, **fields)
+    except state.TicketStateError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
     log.emit("ticket_status_override", f"Manual override {old_status} → {target} for {key}",
         links={"detail": f"{_config['_base_url']}/tickets/{key}"},
         meta={"ticket": key, "old_status": old_status, "new_status": target})

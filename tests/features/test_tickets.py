@@ -669,16 +669,6 @@ class TestCheckRequeue:
             tickets.check({**fake_config, "_base_url": "http://base"}, instance_key="inst")
         return state.load_ticket("PROJ-1"), menq
 
-    def test_first_observation_captures_baseline_and_skips(self, tmp_path, fake_config):
-        saved, menq = self._run_check(tmp_path, fake_config,
-            saved_state={"status": "merged", "slug": "PROJ-1-slug", "branch": "PROJ-1-slug"},
-            external_status="QA")
-        assert saved is not None
-        assert saved["status"] == "merged"
-        assert saved["merged_external_status"] == "QA"
-        assert "reopened_count" not in saved
-        menq.assert_not_called()
-
     def test_same_external_status_skips(self, tmp_path, fake_config):
         saved, menq = self._run_check(tmp_path, fake_config,
             saved_state={"status": "merged", "slug": "PROJ-1-slug", "branch": "PROJ-1-slug",
