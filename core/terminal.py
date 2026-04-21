@@ -4,7 +4,6 @@ import shutil
 import pty
 import json
 import struct
-import time
 import asyncio
 import fcntl
 import termios
@@ -32,32 +31,6 @@ def _tmux_session_exists(session_name: str) -> bool:
         capture_output=True,
     )
     return result.returncode == 0
-
-
-def list_ticket_keys() -> list[str]:
-    result = subprocess.run(
-        [_tmux_bin(), "-S", TMUX_SOCKET, "list-sessions", "-F", "#{session_name}"],
-        capture_output=True, text=True,
-    )
-    if result.returncode != 0:
-        return []
-    prefix = "term-"
-    return [
-        line[len(prefix):]
-        for line in result.stdout.splitlines()
-        if line.startswith(prefix)
-    ]
-
-
-def capture_pane(ticket_key: str, lines: int = 50) -> str:
-    session_name = _tmux_session_name(ticket_key)
-    if not _tmux_session_exists(session_name):
-        return ""
-    result = subprocess.run(
-        [_tmux_bin(), "-S", TMUX_SOCKET, "capture-pane", "-t", session_name, "-p", "-S", str(-lines)],
-        capture_output=True, text=True,
-    )
-    return result.stdout if result.returncode == 0 else ""
 
 
 def _process_alive(pid: int) -> bool:
@@ -128,106 +101,12 @@ def ensure_session(ticket_key: str, cwd: str):
     return session_name
 
 
-_BUSY_MARKERS = ("esc to interrupt", "cogitated", "worked", "cooked", "baked", "churned", "crunched", "thought")
-_MODAL_MARKERS = ("do you want", "(y/n)", "press enter to continue", "permission to")
-
-
-def _classify_pane(pane: str) -> str:
-    lowered = pane.lower()
-    if any(m in lowered for m in _BUSY_MARKERS):
-        return "busy"
-    if any(m in lowered for m in _MODAL_MARKERS):
-        return "busy"
-    for line in reversed(pane.splitlines()[-10:]):
-        if "❯" in line:
-            return "busy" if line.split("❯", 1)[1].strip() else "idle"
-    return "ambiguous"
-
-
-def _haiku_is_idle(pane: str) -> bool:
-    from core.claude_runner import run_haiku, extract_json
-    prompt = f"""You are inspecting a Claude Code TUI pane to decide if it is idle (ready to accept a new typed prompt) or busy (actively processing, waiting for permission, or showing a modal/dialog).
-
-Terminal pane (last lines):
-{pane}
-
-Reply with EXACTLY one JSON object:
-{{"idle": true/false, "reason": "brief"}}"""
-    result = run_haiku(prompt, timeout=60)
-    if not result:
-        return False
-    try:
-        parsed = extract_json(result) or json.loads(result.strip())
-        return bool(parsed.get("idle", False))
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return False
-
-
-def is_claude_idle(ticket_key: str) -> bool:
-    pane = capture_pane(ticket_key, lines=20)
-    if not pane:
-        return False
-    state = _classify_pane(pane)
-    if state == "idle":
-        return True
-    if state == "busy":
-        return False
-    full_pane = capture_pane(ticket_key, lines=60)
-    return _haiku_is_idle(full_pane)
-
-
-def send_prompt(ticket_key: str, text: str) -> bool:
-    session_name = _tmux_session_name(ticket_key)
-    if not _tmux_session_exists(session_name):
-        return False
-    buf = f"frshty-{ticket_key}"
-    load = subprocess.run(
-        [_tmux_bin(), "-S", TMUX_SOCKET, "load-buffer", "-b", buf, "-"],
-        input=text.encode(), capture_output=True,
-    )
-    if load.returncode != 0:
-        return False
-    paste = subprocess.run(
-        [_tmux_bin(), "-S", TMUX_SOCKET, "paste-buffer", "-b", buf, "-t", session_name, "-d"],
-        capture_output=True,
-    )
-    if paste.returncode != 0:
-        return False
-    time.sleep(0.3)
-    subprocess.run(
-        [_tmux_bin(), "-S", TMUX_SOCKET, "send-keys", "-t", session_name, "Enter"],
-        capture_output=True,
-    )
-    for _ in range(6):
-        time.sleep(0.5)
-        pane = capture_pane(ticket_key, lines=10)
-        lowered = pane.lower()
-        if any(m in lowered for m in _BUSY_MARKERS):
-            return True
-        for line in reversed(pane.splitlines()[-6:]):
-            if "❯" in line:
-                if not line.split("❯", 1)[1].strip():
-                    return True
-                break
-    return False
-
-
 def send_keys(ticket_key: str, keys: str):
     session_name = _tmux_session_name(ticket_key)
     if not _tmux_session_exists(session_name):
         return
     subprocess.run(
         [_tmux_bin(), "-S", TMUX_SOCKET, "send-keys", "-t", session_name, keys, "Enter"],
-        capture_output=True,
-    )
-
-
-def send_bare_enter(ticket_key: str):
-    session_name = _tmux_session_name(ticket_key)
-    if not _tmux_session_exists(session_name):
-        return
-    subprocess.run(
-        [_tmux_bin(), "-S", TMUX_SOCKET, "send-keys", "-t", session_name, "Enter"],
         capture_output=True,
     )
 

@@ -960,7 +960,6 @@ def api_restart_ticket(key: str):
     ts = tickets.get(key)
     if not ts:
         return JSONResponse({"error": "not found"}, status_code=404)
-    ts["restart_count"] = 0
     ts.pop("ci_fix_attempts", None)
     ts.pop("pr_attempts", None)
     if ts.get("status") == TicketStatus.pr_failed.value:
