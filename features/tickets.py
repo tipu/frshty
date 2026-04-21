@@ -1,7 +1,6 @@
 import json
 import re
 import subprocess
-import time
 from pathlib import Path
 
 import httpx
@@ -14,7 +13,6 @@ from core.claude_runner import run_haiku, run_claude_code, extract_json
 from core.ticket_status import TicketStatus, transition
 from features.platforms import make_platform
 from features.ticket_systems import make_ticket_system
-import core.events as events
 
 
 STATES = ["new", "planning", "reviewing", "pr_ready", "pr_created", "in_review", "merged"]
@@ -23,209 +21,16 @@ STATES = ["new", "planning", "reviewing", "pr_ready", "pr_created", "in_review",
 def _label(key: str, ts: dict) -> str:
     return ts.get("slug", key)
 
-MAX_RESTARTS = 3
-RESTART_COOLDOWN_SECS = 300
-STUCK_SCROLLBACK_SECS = 300
-FIX_IDLE_SECS = 120
-
-_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
-_SPINNER_LINE_RE = re.compile(r"(Cogitated|Worked|Cooked|Baked|Churned|Crunched|Thought) for \d+[ms\d\s]*")
-
-
-def _scrollback_fingerprint(scrollback: str) -> str:
-    import hashlib
-    stripped = _ANSI_RE.sub("", scrollback)
-    lines = [l for l in stripped.splitlines() if not _SPINNER_LINE_RE.search(l)]
-    return hashlib.sha256("\n".join(lines).encode()).hexdigest()[:16]
-
-
-def _command_for_status(status: str) -> str:
-    if status == "planning":
-        return "/confer-technical-plan docs/"
-    if status == "reviewing":
-        return (
-            "Run /tri-review and save the full output to docs/tri-review.md. "
-            "In the Verdict section, include a line reading exactly 'VERDICT: PASS' "
-            "if no blocking findings remain unresolved, or 'VERDICT: FAIL' otherwise."
-        )
-    return ""
-
 
 _VERDICT_RE = re.compile(r"^VERDICT:\s*(PASS|FAIL)\b", re.MULTILINE | re.IGNORECASE)
 
 
-def restart_session(config, key, ts, base_url=""):
-    from datetime import datetime, timezone
-    ws = config["workspace"]
-    slug = ts.get("slug", "")
-    ticket_dir = ws["root"] / ws["tickets_dir"] / slug
-
-    terminal.kill_terminal(key)
-    time.sleep(1)
-    terminal.ensure_session(key, str(ticket_dir))
-    time.sleep(2)
-    terminal.send_keys(key, "claude --dangerously-skip-permissions")
-    time.sleep(5)
-    terminal.send_bare_enter(key)
-    time.sleep(3)
-
-    cmd = _command_for_status(ts.get("status", ""))
-    if cmd:
-        terminal.send_keys(key, cmd)
-
-    ts["last_restart_at"] = datetime.now(timezone.utc).isoformat()
-    ts["restart_count"] = ts.get("restart_count", 0) + 1
-    ts.pop("stuck_logged", None)
-
-    log.emit("ticket_session_restarted", f"Restarted session for {_label(key, ts)} (attempt {ts['restart_count']})",
-        links={"detail": f"{base_url}/tickets/{key}"} if base_url else {},
-        meta={"ticket": key, "status": ts.get("status", ""), "restart_count": ts["restart_count"]})
-
-
-def _triage_session(config, key, ts, base_url):
-    from datetime import datetime, timezone
-
-    last = ts.get("last_triage_at", "")
-    if last:
-        elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(last)).total_seconds()
-        if elapsed < RESTART_COOLDOWN_SECS:
-            return
-
-    health = terminal.session_healthy(key)
-    scrollback = terminal.capture_pane(key, 60)
-    status = ts.get("status", "")
-    expected_cmd = _command_for_status(status)
-    fixing = bool(ts.get("fixing"))
-    if status == "planning":
-        expected_file = "docs/change-manifest.md"
-    elif fixing:
-        expected_file = "docs/tri-review.md with VERDICT: PASS (must fix the blocking findings from the prior FAIL, then re-run /tri-review)"
-    else:
-        expected_file = "docs/tri-review.md with VERDICT: PASS or FAIL"
-
-    ws = config["workspace"]
-    slug = ts.get("slug", "")
-    ticket_path = ws["root"] / ws["tickets_dir"] / slug / "docs" / "ticket.md"
-    ticket_desc = ""
-    if ticket_path.exists():
-        ticket_desc = ticket_path.read_text()[:2000]
-
-    prompt = f"""You are a CI supervisor for an automated ticket pipeline. A Claude Code session was given a task but is now idle without producing the expected output.
-
-Your job: decide what to do next. You have deep understanding of the pipeline:
-- "planning" stage: Claude runs /confer-technical-plan docs/ which should produce docs/change-manifest.md
-- "reviewing" stage: Claude runs /tri-review which should produce docs/tri-review.md. VERDICT: FAIL is NOT finished — Claude must fix the blocking findings and re-run /tri-review until it produces VERDICT: PASS.
-- Claude runs inside a tmux session. You can send text to it (it goes to the Claude Code prompt).
-- If Claude asked a question and is waiting for input, you should answer it or instruct it to proceed.
-- If Claude crashed or the session is empty, recommend a restart.
-- If the ticket is genuinely impossible (missing info that only a human has), say so.
-- NEVER tell Claude to git push, create a PR, or run gh pr create. The pipeline handles PRs separately. Your job is only to get the expected output file produced.
-
-Ticket: {key}
-Stage: {status}
-Expected output file: {expected_file}
-Command that was sent: {expected_cmd}
-Session alive: {health['alive']}
-Claude process running: {health['claude_running']}
-Triage attempts so far: {ts.get('triage_count', 0)}
-
-Ticket description:
-{ticket_desc}
-
-Terminal scrollback (last 60 lines):
-{scrollback}
-
-Reply with EXACTLY one JSON object, no other text:
-{{"action": "send", "message": "text to send to the terminal"}}
-OR {{"action": "restart"}}
-OR {{"action": "skip", "reason": "still working or just needs more time"}}
-OR {{"action": "stuck", "reason": "why human input is needed"}}
-
-Prefer "send" when Claude is at a prompt and you can unblock it. Be direct and actionable in your message — tell Claude exactly what to do, don't ask questions back. If it looks like the work might already be done elsewhere or the ticket is a duplicate, tell Claude to verify and proceed with whatever makes sense."""
-
-    result = run_haiku(prompt, timeout=60)
-    if not result:
+def _enqueue_stage(instance_key: str, ticket_key: str, task_name: str) -> None:
+    import core.queue as q
+    existing = q.jobs_for_ticket(instance_key, ticket_key, limit=20)
+    if any(j["task"] == task_name and j["status"] in ("queued", "running") for j in existing):
         return
-
-    ts["last_triage_at"] = datetime.now(timezone.utc).isoformat()
-    ts["triage_count"] = ts.get("triage_count", 0) + 1
-
-    try:
-        decision = json.loads(result.strip())
-    except json.JSONDecodeError:
-        parsed = extract_json(result)
-        if not parsed:
-            return
-        decision = parsed
-
-    action = decision.get("action", "")
-
-    if action == "send":
-        msg = decision.get("message", "")
-        if msg:
-            terminal.send_keys(key, msg)
-            log.emit("ticket_session_nudged", f"Sent nudge to {_label(key, ts)}: {msg[:80]}",
-                links={"detail": f"{base_url}/tickets/{key}"},
-                meta={"ticket": key, "message": msg[:200]})
-
-    elif action == "restart":
-        restart_session(config, key, ts, base_url)
-
-    elif action == "stuck":
-        reason = decision.get("reason", "unknown")
-        if not ts.get("stuck_logged"):
-            log.emit("ticket_session_stuck", f"Session for {_label(key, ts)} needs manual intervention: {reason[:100]}",
-                links={"detail": f"{base_url}/tickets/{key}"},
-                meta={"ticket": key, "reason": reason})
-            ts["stuck_logged"] = True
-
-
-def check_health(config):
-    from datetime import datetime, timezone
-    ticket_state = state.load("tickets")
-    base_url = config["_base_url"]
-    modified_keys = {}
-
-    active_keys = {k for k, v in ticket_state.items() if v.get("status") not in ("done", "merged")}
-    for session_key in terminal.list_ticket_keys():
-        if session_key not in active_keys:
-            terminal.kill_terminal(session_key)
-            log.emit("ticket_session_orphan_reaped", f"Killed orphan tmux session term-{session_key}",
-                meta={"ticket": session_key})
-
-    now = datetime.now(timezone.utc)
-    for key, ts in ticket_state.items():
-        if ts.get("status") not in ("planning", "reviewing"):
-            continue
-        health = terminal.session_healthy(key)
-        stuck = not (health["alive"] and health["claude_running"])
-
-        if not stuck:
-            scrollback = terminal.capture_pane(key, 60)
-            fp = _scrollback_fingerprint(scrollback)
-            if ts.get("last_scrollback_hash") != fp:
-                ts["last_scrollback_hash"] = fp
-                ts["last_scrollback_change_at"] = now.isoformat()
-                modified_keys[key] = ts
-                continue
-            last_change = ts.get("last_scrollback_change_at", "")
-            if last_change:
-                idle_secs = (now - datetime.fromisoformat(last_change)).total_seconds()
-                if idle_secs < STUCK_SCROLLBACK_SECS:
-                    continue
-            else:
-                ts["last_scrollback_change_at"] = now.isoformat()
-                modified_keys[key] = ts
-                continue
-
-        _triage_session(config, key, ts, base_url)
-        modified_keys[key] = ts
-
-    if modified_keys:
-        fresh = state.load("tickets")
-        for key, ts in modified_keys.items():
-            fresh[key] = ts
-        state.save("tickets", fresh)
+    q.enqueue_job(instance_key, task_name, ticket_key=ticket_key)
 
 
 def _image_filename(alt: str, url: str, seen: set | None = None) -> str:
@@ -304,7 +109,7 @@ def _resolve_status(config: dict, external_status: str) -> str | None:
     return status_map.get(external_status)
 
 
-def check(config: dict):
+def check(config: dict, instance_key: str = ""):
     from datetime import datetime, timezone
     assigned = _fetch_tickets(config)
     if not assigned:
@@ -380,12 +185,26 @@ def check(config: dict):
 
         if ts["status"] == "new":
             ts = _setup_ticket(config, ticket, base_url)
+            if ts.get("discovered_at") and instance_key:
+                _enqueue_stage(instance_key, key, "start_planning")
 
-        if ts["status"] == "planning":
-            ts = _check_planning(config, ticket, ts, base_url)
+        if ts["status"] == "planning" and instance_key:
+            _enqueue_stage(instance_key, key, "start_planning")
 
-        if ts["status"] == "reviewing":
-            ts = _check_reviewing(config, ticket, ts, base_url)
+        if ts["status"] == "reviewing" and instance_key:
+            ws = config["workspace"]
+            slug = ts.get("slug", "")
+            review_file = ws["root"] / ws["tickets_dir"] / slug / "docs" / "tri-review.md"
+            if review_file.exists():
+                verdict = _VERDICT_RE.search(review_file.read_text())
+                if verdict and verdict.group(1).upper() == "PASS":
+                    _enqueue_stage(instance_key, key, "mark_ready")
+                elif verdict and verdict.group(1).upper() == "FAIL":
+                    _enqueue_stage(instance_key, key, "fix_review_findings")
+                else:
+                    _enqueue_stage(instance_key, key, "start_reviewing")
+            else:
+                _enqueue_stage(instance_key, key, "start_reviewing")
 
         if ts["status"] == "pr_ready" and config.get("pr", {}).get("auto_pr") and not ts.get("pr_scheduled_at"):
             ts = _create_pr(config, ticket, ts, base_url)
@@ -511,114 +330,8 @@ def _setup_ticket(config, ticket, base_url) -> dict:
         links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
         meta={"ticket": key, "slug": slug, "branch": branch})
 
-    ticket_dir = ws["root"] / ws["tickets_dir"] / slug
-    terminal.ensure_session(key, str(ticket_dir))
-    time.sleep(2)
-    terminal.send_keys(key, "claude --dangerously-skip-permissions")
-    time.sleep(5)
-    terminal.send_bare_enter(key)
-    time.sleep(3)
-    terminal.send_keys(key, _command_for_status("planning"))
-
-    log.emit("ticket_planning_started", f"Started /confer-technical-plan for {slug}",
-        links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
-        meta={"ticket": key})
-
-    return {"status": transition("new", "planning"), "slug": slug, "branch": branch,
+    return {"status": "new", "slug": slug, "branch": branch,
             "discovered_at": datetime.now(timezone.utc).isoformat()}
-
-
-def _check_planning(config, ticket, ts, base_url) -> dict:
-    ws = config["workspace"]
-    slug = ts["slug"]
-    ticket_dir = ws["root"] / ws["tickets_dir"] / slug
-    manifest = ticket_dir / "docs" / "change-manifest.md"
-
-    if not manifest.exists():
-        return ts
-
-    log.emit("ticket_planned", f"confer-technical-plan complete for {_label(ticket['key'], ts)}",
-        links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
-        meta={"ticket": ticket["key"]})
-
-    terminal.send_keys(ticket["key"], _command_for_status("reviewing"))
-
-    log.emit("ticket_review_started", f"Started /tri-review for {_label(ticket['key'], ts)}",
-        links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
-        meta={"ticket": ticket["key"]})
-
-    ts["status"] = transition(ts["status"], "reviewing")
-    return ts
-
-
-def _check_reviewing(config, ticket, ts, base_url) -> dict:
-    from datetime import datetime, timezone
-    ws = config["workspace"]
-    slug = ts["slug"]
-    ticket_dir = ws["root"] / ws["tickets_dir"] / slug
-    review_file = ticket_dir / "docs" / "tri-review.md"
-
-    if ts.get("fixing") and not review_file.exists():
-        last_change = ts.get("last_scrollback_change_at", "")
-        if not last_change:
-            return ts
-        idle_secs = (datetime.now(timezone.utc) - datetime.fromisoformat(last_change)).total_seconds()
-        if idle_secs < FIX_IDLE_SECS:
-            return ts
-        terminal.send_keys(ticket["key"], _command_for_status("reviewing"))
-        log.emit("ticket_review_retried", f"Re-running /tri-review for {_label(ticket['key'], ts)} after fix",
-            links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
-            meta={"ticket": ticket["key"]})
-        ts.pop("fixing", None)
-        ts["last_scrollback_change_at"] = datetime.now(timezone.utc).isoformat()
-        return ts
-
-    if not review_file.exists():
-        return ts
-
-    review_text = review_file.read_text()
-    match = _VERDICT_RE.search(review_text)
-    if match:
-        verdict = match.group(1).upper()
-    else:
-        raw = run_haiku(
-            "Read this code review and decide whether the code is ready to merge. "
-            "Look at the Verdict section first, and any 'Blocking fixes applied' or similar section "
-            "that indicates findings have been resolved. A review may list [blocking] findings and "
-            "then note they have already been fixed — in that case answer PASS. Only answer FAIL if "
-            "there are blocking findings that remain unresolved.\n\n"
-            "Reply with exactly one word: PASS or FAIL.\n\n"
-            f"{review_text[:20000]}"
-        )
-        if not raw:
-            return ts
-        verdict = raw.strip().upper()
-
-    if verdict.startswith("FAIL"):
-        review_file.unlink(missing_ok=True)
-        terminal.send_keys(ticket["key"], "Fix all blocking findings from the tri-review. Then run tests.")
-
-        log.emit("ticket_review_fixing", f"Fixing tri-review findings for {_label(ticket['key'], ts)}",
-            links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
-            meta={"ticket": ticket["key"], "verdict": verdict.strip()})
-        ts["fixing"] = True
-        ts["last_scrollback_change_at"] = datetime.now(timezone.utc).isoformat()
-        return ts
-
-    log.emit("ticket_review_passed", f"Tri-review passed for {_label(ticket['key'], ts)}",
-        links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
-        meta={"ticket": ticket["key"], "verdict": verdict.strip()})
-    ts["status"] = transition(ts["status"], "pr_ready")
-
-    events.dispatch("ticket_dev_complete", {
-        "ticket_key": ticket["key"],
-        "estimate_seconds": ticket.get("estimate_seconds", 0),
-        "discovered_at": ts.get("discovered_at", ""),
-        "slug": ts.get("slug", ""),
-        "branch": ts.get("branch", ""),
-    }, config)
-
-    return ts
 
 
 def _summarize_pr_body(raw_body: str, ticket: dict) -> str:
