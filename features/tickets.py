@@ -950,12 +950,12 @@ def _merge(config, ticket, ts, base_url) -> dict:
     for pr in prs:
         result = platform.merge_pr(pr["repo"], pr["id"])
         if result.get("error"):
-            log.emit("ticket_merge_error", f"Failed to merge PR #{pr['id']} in {pr['repo']}: {result['error']}",
+            log.emit("ticket_merge_error", f"{_label(ticket['key'], ts)}: Failed to merge PR #{pr['id']} in {pr['repo']}: {result['error']}",
                 links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
                 meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"], "error": result["error"]})
             all_merged = False
         else:
-            log.emit("ticket_pr_merged", f"Merged PR #{pr['id']} in {pr['repo']}",
+            log.emit("ticket_pr_merged", f"{_label(ticket['key'], ts)}: Merged PR #{pr['id']} in {pr['repo']}",
                 links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
                 meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"]})
 

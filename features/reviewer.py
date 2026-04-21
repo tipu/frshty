@@ -109,12 +109,12 @@ def check(config: dict):
         if result:
             review_state[pr_key] = {"reviewed": True, "branch": pr["branch"], "last_updated": pr.get("updated_on")}
             issues = result.get("issues", [])
-            log.emit("review_complete", f"Review done: {result.get('verdict', 'unknown')}, {len(issues)} issues",
+            log.emit("review_complete", f"{pr['repo']}#{pr['id']}: Review done — {result.get('verdict', 'unknown')}, {len(issues)} issues",
                 links={"pr": pr["url"], "detail": f"{base_url}/reviews/{pr['repo']}/{pr['id']}"},
                 meta={"repo": pr["repo"], "pr_id": pr["id"], "verdict": result.get("verdict"), "issue_count": len(issues)})
 
             if issues:
-                log.emit("review_comments_queued", f"{len(issues)} comments ready to submit",
+                log.emit("review_comments_queued", f"{pr['repo']}#{pr['id']}: {len(issues)} comments ready to submit",
                     links={"detail": f"{base_url}/reviews/{pr['repo']}/{pr['id']}"},
                     meta={"repo": pr["repo"], "pr_id": pr["id"]})
 
