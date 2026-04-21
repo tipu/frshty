@@ -65,7 +65,7 @@ The personas' findings are deduped, simplified, and merged into `review.json` + 
 
 **Multi-instance.** `python frshty.py --multi a.toml b.toml c.toml --port 7000` runs several dashboards from one Python process. State is partitioned by each config's `job.key` in a shared SQLite DB at `~/.frshty/frshty.db`. Each instance gets its own port from its config, its own worktree tree, and its own feature flags.
 
-**Supervisor & MCP.** `supervisor.py` polls all running instances, detects stuck states (stale scans, wedged workers), and can auto-trigger a restart or escalate to you. `mcp_server.py` exposes the same inspection and control surface as MCP tools so Claude Desktop can query tickets, reviews, events, and trigger cycles across all instances.
+**Supervisor & MCP.** `supervisor.py` polls all running instances, detects unresponsive processes and error events, and can restart a downed instance or escalate to you. `mcp_server.py` exposes the same inspection and control surface as MCP tools so Claude Desktop can query tickets, reviews, events, and trigger cycles across all instances.
 
 ### The UI
 
@@ -98,7 +98,7 @@ Per-request state access uses a `ContextVar` (`_instance_key_cv`) so handlers, t
 
 ### State store (`core/state.py`, `core/db.py`)
 
-Legacy API (`state.load("tickets")`, `state.save("tickets", {...})`) wraps a row in the `kv` table: `(instance_key, key) → data JSON`. Anything that used to be a JSON file on disk is now a row. Concurrent workers serialize via SQLite's busy_timeout. `state.use(instance_key)` and `state.reset(token)` provide scoped overrides for per-job context.
+Tickets live in a per-row `tickets` table keyed by `(instance_key, ticket_key)`, accessed via `state.load_ticket(key) / save_ticket(key, data) / update_ticket(key, mutate)` — `update_ticket` wraps read-modify-write in a single `BEGIN IMMEDIATE` so concurrent workers can mutate different tickets without clobbering each other. Non-ticket modules (`scheduler`, `actions`, feature-specific blobs) still use the legacy `state.load(module) / state.save(module, dict)` API which reads/writes the `kv` table. `state.use(instance_key)` and `state.reset(token)` provide scoped overrides for per-job context.
 
 ### Worker queue (`core/queue.py`, `core/worker.py`)
 
@@ -176,7 +176,7 @@ core/                 # orchestration primitives (no business logic)
 ├── scheduler.py, beat.py  # cron + recurring
 ├── claude_runner.py  # headless subprocess wrappers
 ├── tasks/            # @task-registered units of work
-└── terminal.py       # tmux wrapper (used only by CI-fix and the operator terminal websocket)
+└── terminal.py       # tmux wrapper (interactive operator terminal websocket only — backend pipeline is headless)
 
 features/             # per-domain logic
 ├── tickets.py        # discovery, worktree setup, PR creation, CI fix, in-review handling
