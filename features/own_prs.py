@@ -99,31 +99,75 @@ def _check_comments(config, platform, pr, seen, base_url):
 
 
 def _check_ci(config, platform, pr, seen, base_url):
+    from features.tickets import MAX_CI_FIX_ATTEMPTS
+    from features.pr_ci import triage_and_fix_pr, FAILED_STATES
+
     checks = platform.get_pr_checks(pr["repo"], pr["id"])
-    failing = [c for c in checks if c["state"] in ("FAILED", "STOPPED", "failure")]
+    failing = [c for c in checks if c.get("state", "").upper() in FAILED_STATES]
     if not failing:
+        # CI is clean on this PR — reset the per-sha dedup AND attempt counter
+        # so a future failure on a new push gets a fresh budget.
         seen.pop("ci_fix_sha", None)
+        seen.pop("ci_unrelated_sha", None)
+        seen.pop("ci_fix_attempts", None)
+        seen.pop("ci_cap_emitted", None)
         return
 
     worktree = _ensure_worktree(config, pr)
     if not worktree:
         return
 
-    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(worktree), capture_output=True, text=True, timeout=10).stdout.strip()
-    if seen.get("ci_fix_sha") == head:
+    head = subprocess.run(["git", "rev-parse", "HEAD"],
+                          cwd=str(worktree), capture_output=True, text=True, timeout=10).stdout.strip()
+    # Don't re-triage the same commit we already acted on (either fixed or
+    # classified as unrelated). New commits reset this.
+    if seen.get("ci_fix_sha") == head or seen.get("ci_unrelated_sha") == head:
         return
 
-    failure_names = ", ".join(c["name"] for c in failing)
-    prompt = f"CI checks are failing: {failure_names}. Investigate and fix the failures."
-    result = run_claude_code(prompt, worktree)
-    if result is None:
-        return
-    platform.push_branch(worktree, pr["branch"])
-    seen["ci_fix_sha"] = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(worktree), capture_output=True, text=True, timeout=10).stdout.strip()
+    attempts = seen.get("ci_fix_attempts", 0)
+    pr_ref = f"{pr['repo']}#{pr['id']}"
+    pr_link = {"pr": pr["url"], "detail": f"{base_url}/"}
+    meta = {"repo": pr["repo"], "pr_id": pr["id"],
+            "failed_checks": [c["name"] for c in failing]}
 
-    log.emit("pr_ci_fix_pushed", f"{pr['repo']}#{pr['id']}: Fixed failing CI — {failure_names}",
-        links={"pr": pr["url"], "detail": f"{base_url}/"},
-        meta={"repo": pr["repo"], "pr_id": pr["id"], "checks": failure_names})
+    outcome = triage_and_fix_pr(platform, pr["repo"], pr["id"], label=pr_ref,
+                                  worktree=worktree,
+                                  attempts=attempts,
+                                  max_attempts=MAX_CI_FIX_ATTEMPTS)
+    kind = outcome["result"]
+    failed_names = outcome.get("failed_names", [])
+
+    if kind == "capped":
+        if not seen.get("ci_cap_emitted"):
+            log.emit("pr_checks_failed",
+                     f"CI failed on {pr_ref} after {attempts} fix attempts: {', '.join(failed_names)}",
+                     links=pr_link, meta=meta)
+            seen["ci_cap_emitted"] = True
+        return
+
+    if kind == "unrelated":
+        log.emit("pr_checks_unrelated",
+                 f"CI failure on {pr_ref} not caused by our changes: {outcome.get('reason','')[:100]}",
+                 links=pr_link,
+                 meta={**meta, "reason": outcome.get("reason", "")})
+        seen["ci_unrelated_sha"] = head
+        return
+
+    if kind == "fixed":
+        platform.push_branch(worktree, pr["branch"])
+        new_head = subprocess.run(["git", "rev-parse", "HEAD"],
+                                    cwd=str(worktree), capture_output=True, text=True, timeout=10).stdout.strip()
+        seen["ci_fix_sha"] = new_head
+        seen["ci_fix_attempts"] = outcome["attempts"]
+        seen.pop("ci_cap_emitted", None)
+        log.emit("pr_ci_fix_sent",
+                 f"{pr_ref}: Sent CI fix (attempt {outcome['attempts']}/{MAX_CI_FIX_ATTEMPTS}): {outcome.get('fix_hint','')[:80]}",
+                 links=pr_link,
+                 meta={**meta, "fix_hint": outcome.get("fix_hint", "")})
+        return
+
+    # haiku_empty, haiku_parse_error, fix_failed, no_failing, worktree_missing:
+    # no action — we'll retry next cycle (possibly against a new sha).
 
 
 def _check_stale(pr, seen, base_url):
