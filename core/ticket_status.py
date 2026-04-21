@@ -29,6 +29,8 @@ _ALLOWED: dict[TicketStatus, set[TicketStatus]] = {
 def transition(current: str, target: str) -> str:
     cur = TicketStatus(current)
     tgt = TicketStatus(target)
+    if tgt == cur:
+        return tgt.value
     if tgt == TicketStatus.done:
         return tgt.value
     if tgt not in _ALLOWED.get(cur, set()):

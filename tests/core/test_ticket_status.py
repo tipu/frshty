@@ -71,6 +71,19 @@ class TestTransitionIllegal:
             transition(current, target)
 
 
+class TestSelfTransition:
+    """A transition to the status you're already at must be a no-op, not a raise.
+
+    The task registry's on_entry_status fires every time a task is claimed,
+    so e.g. start_planning on a ticket already at 'planning' (from a prior
+    failed run) would otherwise raise and block every retry.
+    """
+
+    @pytest.mark.parametrize("status", [s.value for s in TicketStatus])
+    def test_self_transition_is_legal(self, status):
+        assert transition(status, status) == status
+
+
 class TestTransitionLegalized:
     @pytest.mark.parametrize("current,target", [
         ("pr_failed", "merged"),   # manual match-state
