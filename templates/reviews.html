@@ -118,7 +118,7 @@ function timeAgo(iso) {
 function prCard(r) {
     const reviewing = r.branch && r.branch.startsWith('pending-');
     const verdictCls = reviewing ? 'badge-yellow' : r.verdict === 'changes_requested' ? 'badge-red' : r.verdict === 'approved' ? 'badge-green' : 'badge-yellow';
-    const label = reviewing ? 'reviewing <span class="pulse">●</span>' : r.verdict || 'pending';
+    const label = reviewing ? 'reviewing <span class="pulse">●</span>' : (r.verdict ? `llm: ${r.verdict}` : 'pending');
     const cardId = `bb-${r.repo}-${r.pr_id}`;
     const borderCls = reviewing ? 'border-l-2 border-l-blue-500' : '';
     const stale = !reviewing && r.updated_on && r.reviewed_at && new Date(r.updated_on) > new Date(r.reviewed_at);
