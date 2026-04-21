@@ -86,13 +86,11 @@ async def _detect_problems(instances: list[dict]) -> list[dict]:
     problems = []
 
     statuses = await fan_out(instances, "GET", "/api/status")
-    tickets_all = await fan_out(instances, "GET", "/api/tickets/list")
     events_all = await fan_out(instances, "GET", "/api/events?unread=true&limit=50")
 
     for inst in instances:
         key = inst["key"]
         status = statuses.get(key, {})
-        tickets = tickets_all.get(key, {})
         events = events_all.get(key, [])
 
         if "error" in status:
@@ -103,28 +101,6 @@ async def _detect_problems(instances: list[dict]) -> list[dict]:
             for ev in events:
                 if "error" in ev.get("event", ""):
                     problems.append({"type": "error_event", "instance": key, "event": ev})
-
-        if "error" in tickets:
-            continue
-
-        for ticket_key, ticket in tickets.items():
-            tst = ticket.get("status", "")
-            if tst not in ("planning", "reviewing"):
-                continue
-
-            detail = await call_instance(inst["base_url"], "GET", f"/api/tickets/{ticket_key}/detail")
-            if "error" in detail:
-                continue
-
-            terminal_alive = detail.get("terminal_alive", True)
-            if not terminal_alive:
-                problems.append({
-                    "type": "stuck_ticket",
-                    "instance": key,
-                    "ticket": ticket_key,
-                    "status": tst,
-                    "reason": "terminal_dead",
-                })
 
     return problems
 
@@ -140,18 +116,7 @@ async def _autofix(problem: dict, instances: list[dict], state: dict) -> bool:
     if not _can_autofix(state, ak):
         return False
 
-    if ptype == "stuck_ticket":
-        ticket = problem["ticket"]
-        log.info(f"[{inst_key}] restarting stuck ticket {ticket}")
-        result = await call_instance(inst["base_url"], "POST", f"/api/tickets/{ticket}/restart")
-        _record_autofix(state, ak)
-        if "error" not in result:
-            log.info(f"[{inst_key}] restart successful for {ticket}")
-            return True
-        log.warning(f"[{inst_key}] restart failed for {ticket}: {result}")
-        return False
-
-    elif ptype == "unresponsive":
+    if ptype == "unresponsive":
         log.info(f"[{inst_key}] instance unresponsive, attempting restart")
         config_path = inst["config_path"]
         try:

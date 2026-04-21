@@ -62,3 +62,10 @@ def file_contains(rel: str, pattern: str) -> Callable:
         ok = bool(rx.search(p.read_text(errors="replace")))
         return (ok, f"{rel} {'matches' if ok else 'does not match'} /{pattern}/")
     return check
+
+
+def has_flag(name: str) -> Callable:
+    def check(ctx):
+        val = bool(_ticket(ctx).get(name))
+        return (val, f"flag {name}={val}")
+    return check
