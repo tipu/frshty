@@ -76,9 +76,10 @@ def mark_done(job_id: int, status: str, response: dict) -> None:
 def sweep_stale(max_age_seconds: int = 3600) -> int:
     """Reset stuck jobs back to queued so another worker can pick them up.
 
-    Uses julianday() on both sides so the ISO-8601 `T`-separated started_at
-    and the `datetime()`-returned space-separated threshold compare as real
-    timestamps instead of lexicographic strings.
+    Uses julianday() on both sides so the ISO-8601 T-separated started_at
+    and the datetime()-returned space-separated threshold compare as real
+    timestamps instead of lexicographic strings (T > space would otherwise
+    make started_at < threshold always evaluate false).
     """
     with _db.tx() as c:
         cur = c.execute(
