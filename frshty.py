@@ -225,7 +225,10 @@ def billing_page():
 
 
 @app.get("/api/events")
-def api_events(limit: int = 100, after: str = "", unread: bool = False):
+def api_events(limit: int = 100, after: str = "", unread: bool = False, since_hours: int = 0):
+    if since_hours > 0 and not after:
+        from datetime import datetime, timezone, timedelta
+        after = (datetime.now(timezone.utc) - timedelta(hours=since_hours)).isoformat()
     return log.get_events(limit=limit, after=after or None, unread_only=unread)
 
 

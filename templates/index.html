@@ -85,6 +85,11 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
                 <option value="useful">useful</option>
                 <option value="noise">noise</option>
             </select>
+            <select id="time-window" onchange="setTimeWindow(this.value)" class="bg-gray-900 border border-gray-700 text-gray-300 text-xs px-1 py-0.5 rounded">
+                <option value="8">8h</option>
+                <option value="16">16h</option>
+                <option value="24">24h</option>
+            </select>
             <span class="text-gray-700">|</span>
             <button onclick="toggleCategory('ticket')" id="cat-ticket" class="text-gray-400 hover:text-white px-1 rounded">ticket</button>
             <button onclick="toggleCategory('review')" id="cat-review" class="text-gray-400 hover:text-white px-1 rounded">review</button>
@@ -102,6 +107,7 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
 <script>
 let currentFilter = 'all';
 let noiseMode = localStorage.getItem('eventNoiseMode') || 'useful';
+let timeWindow = parseInt(localStorage.getItem('eventTimeWindow') || '8', 10);
 let activeCategories = new Set();
 let events = [];
 let config = {};
@@ -125,6 +131,12 @@ function setNoiseMode(m) {
     render();
 }
 
+function setTimeWindow(v) {
+    timeWindow = parseInt(v, 10);
+    localStorage.setItem('eventTimeWindow', String(timeWindow));
+    fetchEvents();
+}
+
 function toggleExpand(id) {
     if (expandedRows.has(id)) expandedRows.delete(id);
     else expandedRows.add(id);
@@ -140,7 +152,8 @@ const SYSTEM_EVENTS = new Set(['cycle_start', 'cycle_end', 'cycle_sleep']);
 
 async function fetchEvents() {
     const unread = currentFilter === 'unread';
-    const resp = await fetch(`/api/events?limit=200&unread=${unread}`);
+    const limit = timeWindow >= 24 ? 2000 : timeWindow >= 16 ? 1000 : 500;
+    const resp = await fetch(`/api/events?limit=${limit}&unread=${unread}&since_hours=${timeWindow}`);
     events = await resp.json();
     render();
 }
@@ -337,6 +350,7 @@ async function pollNow() {
 }
 
 document.getElementById('noise-mode').value = noiseMode;
+document.getElementById('time-window').value = String(timeWindow);
 fetchConfig();
 fetchStatus();
 fetchEvents();

@@ -74,7 +74,7 @@ def emit(event: str, summary: str, links: dict | None = None, meta: dict | None 
     return record
 
 
-MAX_LOG_LINES = 2000
+MAX_LOG_LINES = 50000
 
 
 def get_events(limit: int = 100, after: str | None = None, unread_only: bool = False) -> list[dict]:
