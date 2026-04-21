@@ -53,6 +53,7 @@ class WorkerPool:
 
     def _run_one(self, job: dict) -> None:
         import core.state as state
+        import core.job_logs as job_logs
         instance_key = job["instance_key"]
         reg = self.registries.get(instance_key)
         if not reg:
@@ -60,6 +61,7 @@ class WorkerPool:
             return
         state_token = None
         log_tokens = None
+        live_token = job_logs.use_live_job(instance_key, job["id"])
         state_dir = reg.config.get("_state_dir")
         if state_dir is not None:
             state_token = state.use(state_dir)
@@ -95,3 +97,4 @@ class WorkerPool:
                 log.reset(log_tokens)
             if state_token is not None:
                 state.reset(state_token)
+            job_logs.reset_live_job(live_token)
