@@ -599,7 +599,7 @@ def _fetch_claude_sessions(config: dict, start: str, end: str) -> dict:
 
 
 def _extract_ticket(text: str) -> str:
-    m = re.search(r"[A-Z]+-\d+", text)
+    m = re.search(r"[A-Za-z]+-\d+", text)
     return m.group().upper() if m else ""
 
 
