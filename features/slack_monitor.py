@@ -10,6 +10,22 @@ import core.state as state
 from core.claude_runner import run_haiku
 
 
+def _msg_ts_iso(record: dict) -> str:
+    """Slack message wall-clock time in ISO. Uses payload.ts (authoritative
+    slack timestamp) because slack_int's record `dt` is when the line was
+    written, which for REST history pulls can be today even if the message
+    is weeks old."""
+    payload = record.get("payload", {})
+    if isinstance(payload, dict):
+        raw = payload.get("ts", "")
+        if raw:
+            try:
+                return datetime.fromtimestamp(float(raw), tz=timezone.utc).isoformat()
+            except (ValueError, TypeError):
+                pass
+    return record.get("dt", "")
+
+
 def check(config: dict):
     slack_cfg = config.get("slack", {})
     raw_path = slack_cfg.get("raw_path")
@@ -57,9 +73,9 @@ def check(config: dict):
             record = json.loads(line.strip())
         except json.JSONDecodeError:
             continue
-        # Always enforce the high-water mark: anything at or before last_dt is
-        # already accounted for and must not resurface as attention.
-        if last_dt and record.get("dt", "") <= last_dt:
+        # High-water mark against the SLACK message time, not slack_int's record
+        # time — REST history pulls land with dt=now but payload.ts = weeks ago.
+        if last_dt and _msg_ts_iso(record) <= last_dt:
             continue
         if workspace and not _matches_workspace(record, workspace, team_id):
             continue
@@ -194,9 +210,9 @@ def check(config: dict):
 
     sl["file_offset"] = new_offset
     if messages:
-        last_record_dt = max(m.get("dt", "") for m in messages)
+        last_record_dt = max(_msg_ts_iso(m) for m in messages)
         if last_record_dt:
-            sl["last_dt"] = last_record_dt
+            sl["last_dt"] = max(sl.get("last_dt", ""), last_record_dt)
 
     # Age out stored mentions so the UI doesn't keep surfacing stale items.
     cutoff_iso = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
@@ -205,7 +221,7 @@ def check(config: dict):
         text = _resolve_names(_extract_text(mention), names)
         channel = names.get(_extract_channel(mention), _extract_channel(mention))
         # Store the slack message time, not the processing time, so age reflects reality.
-        msg_dt = mention.get("dt") or datetime.now(timezone.utc).isoformat()
+        msg_dt = _msg_ts_iso(mention) or datetime.now(timezone.utc).isoformat()
         existing_mentions.append({
             "text": text[:500] if text else "",
             "channel": channel,
