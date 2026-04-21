@@ -5,6 +5,7 @@
 <meta charset="utf-8">
 <title>Review Detail — frshty</title>
 <script src="/static/tailwind.js"></script>
+<script defer src="/static/nav-gate.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
@@ -62,7 +63,7 @@ textarea { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; }
 .discuss-term .xterm { height: 100%; }
 </style>
 </head>
-<body class="p-4">
+<body class="p-4 max-w-7xl mx-auto">
 <header class="flex items-center gap-4 mb-4">
     <a href="/reviews" class="link text-sm">&larr; Reviews</a>
     <h1 class="text-lg font-bold" id="title">Review</h1>
@@ -72,6 +73,8 @@ textarea { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; }
         <a href="/tickets">Tickets</a>
         <a href="/scheduled">Scheduled</a>
         <a href="/slack">Slack</a>
+        <a href="/timesheet">Timesheet</a>
+        <a href="/billing">Billing</a>
         <a href="/config">Config</a>
     </nav>
     <div class="ml-auto flex items-center gap-2">

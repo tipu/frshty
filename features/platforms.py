@@ -163,6 +163,8 @@ class BitbucketPlatform:
         url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}"
         with httpx.Client(auth=self._auth(), timeout=30) as client:
             resp = client.get(url)
+            if resp.status_code == 404:
+                return {"state": "DELETED", "updated_on": "", "mergeable": "UNKNOWN"}
             if resp.status_code != 200:
                 return {"state": "OPEN", "updated_on": "", "mergeable": "UNKNOWN"}
             data = resp.json()
