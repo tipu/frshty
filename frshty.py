@@ -174,6 +174,11 @@ def dashboard():
     return _template("index.html")
 
 
+@app.get("/global", response_class=HTMLResponse)
+def global_feed_page():
+    return _template("global.html")
+
+
 @app.get("/reviews", response_class=HTMLResponse)
 def reviews_list():
     return _template("reviews.html")
@@ -242,6 +247,87 @@ def api_dismiss_event(event_id: str):
 def api_dismiss_all():
     log.dismiss_all()
     return {"status": "ok"}
+
+
+_global_remote_cache: dict[str, tuple[float, dict]] = {}
+_GLOBAL_REMOTE_TTL = 3.0
+
+
+def _fetch_local_global_events(limit: int, unread_only: bool) -> list[dict]:
+    out = []
+    for config in _configs_by_host.values():
+        state_dir = config["_state_dir"]
+        key = config["job"]["key"]
+        log_tokens = log.use(state_dir, key)
+        try:
+            for ev in log.get_events(limit=limit, unread_only=unread_only):
+                ev["instance_key"] = key
+                ev["global_id"] = f"{key}:{ev['id']}"
+                ev["base_url"] = config.get("_base_url") or config["job"].get("host", "")
+                out.append(ev)
+        finally:
+            log.reset(log_tokens)
+    return out
+
+
+def _fetch_remote_global_events(limit: int, unread_only: bool) -> tuple[list[dict], dict[str, str]]:
+    import asyncio
+    from core.discovery import discover_instances, call_instance
+
+    local_keys = {c["job"]["key"] for c in _configs_by_host.values()}
+    if not local_keys and _primary_config:
+        local_keys = {_primary_config.get("job", {}).get("key", "")}
+    remote = [i for i in discover_instances() if i["key"] not in local_keys]
+    if not remote:
+        return [], {}
+
+    cache_key = f"{limit}:{unread_only}"
+    cached = _global_remote_cache.get(cache_key)
+    if cached and (time.time() - cached[0]) < _GLOBAL_REMOTE_TTL:
+        return cached[1]["events"], cached[1]["errors"]
+
+    path = f"/api/events?limit={limit}&unread={'true' if unread_only else 'false'}"
+    errors: dict[str, str] = {}
+    events: list[dict] = []
+
+    async def _one(inst):
+        result = await call_instance(inst["base_url"], "GET", path, timeout=3.0)
+        return inst, result
+
+    async def _all():
+        return await asyncio.gather(*[_one(i) for i in remote], return_exceptions=True)
+
+    results = asyncio.run(_all())
+    for item in results:
+        if isinstance(item, Exception):
+            continue
+        inst, payload = item
+        if isinstance(payload, dict) and payload.get("error"):
+            errors[inst["key"]] = str(payload["error"])[:200]
+            continue
+        rows = payload if isinstance(payload, list) else (payload.get("events") if isinstance(payload, dict) else None)
+        if not isinstance(rows, list):
+            errors[inst["key"]] = "unexpected response shape"
+            continue
+        for ev in rows:
+            if not isinstance(ev, dict):
+                continue
+            ev["instance_key"] = inst["key"]
+            ev["global_id"] = f"{inst['key']}:{ev.get('id', '')}"
+            ev["base_url"] = inst["base_url"]
+            events.append(ev)
+
+    _global_remote_cache[cache_key] = (time.time(), {"events": events, "errors": errors})
+    return events, errors
+
+
+@app.get("/api/global/events")
+def api_global_events(limit: int = 200, unread: bool = False):
+    local_events = _fetch_local_global_events(limit=limit, unread_only=unread)
+    remote_events, errors = _fetch_remote_global_events(limit=limit, unread_only=unread)
+    merged = local_events + remote_events
+    merged.sort(key=lambda e: e.get("ts") or "", reverse=True)
+    return {"events": merged[:limit], "errors": errors}
 
 
 SYSTEM_EVENTS = {"cycle_start", "cycle_end", "cycle_sleep"}

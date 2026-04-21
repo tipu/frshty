@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Global Feed — frshty</title>
+<script src="/static/tailwind.js"></script>
+<script defer src="/static/nav-gate.js"></script>
+<style>
+body { font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; background: #0a0a0a; color: #e0e0e0; }
+.card { background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; }
+.unread { font-weight: 600; border-left: 3px solid #3b82f6; }
+.read { opacity: 0.4; }
+.link { color: #60a5fa; text-decoration: none; }
+.link:hover { text-decoration: underline; }
+.badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; }
+.badge-red { background: #991b1b; color: #fca5a5; }
+.badge-green { background: #14532d; color: #86efac; }
+.badge-yellow { background: #713f12; color: #fde047; }
+.badge-blue { background: #1e3a5f; color: #93c5fd; }
+.badge-purple { background: #3b1e5f; color: #d8b4fe; }
+.badge-instance { background: #1a1a2a; color: #7c8da6; border: 1px solid #2a2a3a; }
+.dismiss-btn { cursor: pointer; opacity: 0.3; }
+.dismiss-btn:hover { opacity: 1; }
+nav a { color: #888; padding: 4px 12px; border-radius: 4px; }
+nav a:hover, nav a.active { color: #fff; background: #222; }
+.row-expand { cursor: pointer; color: #555; width: 12px; display: inline-block; text-align: center; }
+.row-expand:hover { color: #aaa; }
+.summary-full { display: none; white-space: pre-wrap; word-break: break-word; }
+.expanded .summary-line { display: none; }
+.expanded .summary-full { display: block; }
+</style>
+</head>
+<body class="p-4 max-w-7xl mx-auto">
+
+<header class="flex items-center justify-between mb-4">
+    <div class="flex items-center gap-4">
+        <h1 class="text-lg font-bold">Global Feed</h1>
+        <nav class="flex gap-1 text-sm">
+            <a href="/">Feed</a>
+            <a href="/global" class="active">Global</a>
+            <a href="/reviews">Reviews</a>
+            <a href="/tickets">Tickets</a>
+            <a href="/scheduled">Scheduled</a>
+            <a href="/slack">Slack</a>
+            <a href="/timesheet">Timesheet</a>
+            <a href="/billing">Billing</a>
+            <a href="/config">Config</a>
+        </nav>
+    </div>
+    <div class="flex gap-2 text-xs items-center">
+        <select id="noise-mode" onchange="setNoiseMode(this.value)" class="bg-gray-900 border border-gray-700 text-gray-300 text-xs px-1 py-0.5 rounded">
+            <option value="useful">useful</option>
+            <option value="noise">noise</option>
+        </select>
+        <span class="text-gray-700">|</span>
+        <label class="flex items-center gap-1 text-gray-400">
+            <input type="checkbox" id="show-dismissed" onchange="setShowDismissed(this.checked)" />
+            show dismissed
+        </label>
+        <button onclick="clearDismissed()" class="text-gray-600 hover:text-red-400">clear dismissed</button>
+    </div>
+</header>
+
+<div id="error-banner" class="hidden card card-red px-3 py-2 mb-3 text-sm"></div>
+
+<div id="event-feed" class="space-y-0.5 text-xs font-mono"></div>
+
+<script>
+let noiseMode = localStorage.getItem('eventNoiseMode') || 'useful';
+let showDismissed = false;
+let events = [];
+let errors = {};
+let expandedRows = new Set();
+let dismissed = new Set(JSON.parse(localStorage.getItem('globalDismissedEventKeys') || '[]'));
+
+const SYSTEM_EVENTS = new Set(['cycle_start', 'cycle_end', 'cycle_sleep']);
+
+function isNoise(e) {
+    if (e.event === 'job_started') return true;
+    if (e.event === 'ticket_ci_fix_skipped') return true;
+    if (e.event === 'job_finished') {
+        const s = e.summary || '';
+        if (s.includes('ticket=None') && s.includes('status=ok')) return true;
+    }
+    return false;
+}
+
+function setNoiseMode(m) {
+    noiseMode = m;
+    localStorage.setItem('eventNoiseMode', m);
+    render();
+}
+
+function setShowDismissed(v) {
+    showDismissed = v;
+    render();
+}
+
+function toggleExpand(id) {
+    if (expandedRows.has(id)) expandedRows.delete(id);
+    else expandedRows.add(id);
+    render();
+}
+
+function dismissGlobal(gid) {
+    dismissed.add(gid);
+    localStorage.setItem('globalDismissedEventKeys', JSON.stringify([...dismissed]));
+    render();
+}
+
+function clearDismissed() {
+    if (!confirm('Clear all dismissed events from the global feed?')) return;
+    dismissed = new Set();
+    localStorage.setItem('globalDismissedEventKeys', '[]');
+    render();
+}
+
+function fmtTime(iso) {
+    try {
+        const d = new Date(iso);
+        const now = Date.now();
+        const diff = now - d.getTime();
+        const mins = Math.floor(diff / 60000);
+        if (mins < 1) return 'just now';
+        if (mins < 60) return `${mins}m`;
+        const hrs = Math.floor(mins / 60);
+        if (hrs < 24) return `${hrs}h`;
+        return `${Math.floor(hrs / 24)}d`;
+    } catch { return ''; }
+}
+
+function resolveLink(url, baseUrl) {
+    if (!url) return '';
+    if (/^https?:\/\//.test(url)) return url;
+    if (!baseUrl) return url;
+    const b = baseUrl.replace(/\/$/, '');
+    const u = url.startsWith('/') ? url : `/${url}`;
+    return b + u;
+}
+
+async function fetchEvents() {
+    try {
+        const resp = await fetch('/api/global/events?limit=200');
+        const data = await resp.json();
+        events = data.events || [];
+        errors = data.errors || {};
+    } catch (e) {
+        errors = {_fetch: String(e)};
+        events = [];
+    }
+    render();
+}
+
+function renderErrorBanner() {
+    const banner = document.getElementById('error-banner');
+    const keys = Object.keys(errors);
+    if (!keys.length) {
+        banner.classList.add('hidden');
+        return;
+    }
+    banner.classList.remove('hidden');
+    banner.innerHTML = `<div class="text-red-300">⚠ ${keys.length} instance(s) unreachable: ${keys.map(k => `<span class="badge badge-red ml-1">${k}</span>`).join(' ')} — events may be missing</div>`;
+}
+
+function render() {
+    renderErrorBanner();
+    const items = events
+        .filter(e => !SYSTEM_EVENTS.has(e.event))
+        .filter(e => noiseMode === 'noise' || !isNoise(e))
+        .filter(e => showDismissed || !dismissed.has(e.global_id));
+    const container = document.getElementById('event-feed');
+    if (!items.length) {
+        container.innerHTML = '<div class="text-gray-600 text-xs py-2">Nothing to show.</div>';
+        return;
+    }
+    container.innerHTML = items.map(e => {
+        const isDismissed = dismissed.has(e.global_id);
+        const cls = (e.read || isDismissed) ? 'read' : 'unread';
+        const dot = (e.read || isDismissed) ? '○' : '●';
+        const links = Object.entries(e.links || {}).filter(([_, url]) => url).map(([k, url]) =>
+            `<a href="${resolveLink(url, e.base_url)}" target="_blank" class="link">[→ ${k}]</a>`
+        ).join(' ');
+        const badgeCls = e.event.includes('error') || e.event.includes('fail') ? 'badge-red'
+            : e.event.includes('complete') || e.event.includes('pass') || e.event.includes('merged') ? 'badge-green'
+            : e.event.includes('started') || e.event.includes('created') ? 'badge-yellow'
+            : 'badge-blue';
+        const firstLine = (e.summary || '').split('\n')[0];
+        const hasMore = (e.summary || '').includes('\n');
+        const exp = expandedRows.has(e.global_id) ? 'expanded' : '';
+        const dismissControl = isDismissed
+            ? `<span class="text-gray-600 ml-2 text-xs" title="dismissed globally">⌀</span>`
+            : `<span class="dismiss-btn ml-2" onclick="dismissGlobal('${e.global_id}')" title="dismiss from global feed (does not affect per-instance)">✓</span>`;
+        return `<div class="${cls} feed-row px-2 py-1 hover:bg-gray-900 rounded ${exp} flex items-center gap-2">
+            <span class="text-gray-600 w-14 shrink-0">${fmtTime(e.ts)}</span>
+            <span class="badge badge-instance shrink-0">${e.instance_key || '?'}</span>
+            <span>${dot}</span>
+            ${hasMore ? `<span class="row-expand shrink-0" onclick="toggleExpand('${e.global_id}')">▸</span>` : '<span class="row-expand shrink-0"></span>'}
+            <div class="flex-1 min-w-0">
+                <span class="badge ${badgeCls}">${e.event}</span>
+                <span class="summary-line ml-2">${firstLine}</span>
+                <span class="ml-2">${links}</span>
+                <div class="summary-full mt-1 text-xs text-gray-400">${e.summary || ''}</div>
+            </div>
+            ${dismissControl}
+        </div>`;
+    }).join('');
+}
+
+document.getElementById('noise-mode').value = noiseMode;
+fetchEvents();
+setInterval(fetchEvents, 5000);
+</script>
+</body>
+</html>
