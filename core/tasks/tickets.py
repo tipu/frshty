@@ -207,6 +207,43 @@ def fix_ci_failures(ctx: TaskContext) -> TaskResult:
             state.save("tickets", tickets)
 
 
+BACKFILL_TIMEOUT = 2400
+
+
+@task("backfill_artifacts",
+      postconditions=[file_contains("docs/tri-review.md", r"VERDICT:\s*(PASS|FAIL)")],
+      timeout=BACKFILL_TIMEOUT)
+def backfill_artifacts(ctx: TaskContext) -> TaskResult:
+    ticket_dir = _ticket_dir(ctx)
+    if not ticket_dir.is_dir():
+        return TaskResult("failed", f"ticket dir missing: {ticket_dir}")
+    pr_url = ctx.payload.get("pr_url", "")
+    repo = ctx.payload.get("repo", "")
+    if not pr_url or not repo:
+        return TaskResult("failed", "payload must include pr_url and repo")
+    prompt = (
+        f"You are backfilling planning/review docs for a ticket whose PR is already open.\n\n"
+        f"Context:\n"
+        f"- Ticket: {ctx.ticket_key}\n"
+        f"- PR: {pr_url}\n"
+        f"- PR branch checked out at ./{repo}/ (git worktree)\n"
+        f"- Current dir has docs/ and {repo}/ as siblings\n\n"
+        f"Tasks in order:\n"
+        f"1. Read docs/ticket.md for ticket context.\n"
+        f"2. Examine PR changes: cd {repo}/ && git diff --stat origin/main...HEAD ; git diff origin/main...HEAD\n"
+        f"3. Write docs/technical-plan.md as a retrospective technical plan explaining the approach in this PR. Cover architecture, data flow, files modified, key types/interfaces.\n"
+        f"4. Write docs/change-manifest.md as a change manifest at technical-product-owner altitude. Include capability delivered, release-note framing, problem and approach, what changed by area, new surfaces, changed surfaces, integration obligations, tradeoffs accepted, what could break, what tests prove. Ground it in the actual diff.\n"
+        f"5. Run /tri-review and save the full output to docs/tri-review.md, including a line reading exactly 'VERDICT: PASS' or 'VERDICT: FAIL' in the Verdict section.\n\n"
+        f"Write all three docs. Do not modify code in the repo."
+    )
+    log.emit("ticket_backfill_started", f"Backfilling artifacts for {ctx.ticket_key}",
+             meta={"ticket": ctx.ticket_key, "pr_url": pr_url})
+    result = run_claude_code(prompt, cwd=ticket_dir, timeout=BACKFILL_TIMEOUT)
+    if result is None:
+        return TaskResult("failed", "claude returned non-zero or empty")
+    return TaskResult("ok")
+
+
 @task("mark_ready",
       preconditions=[status_is("reviewing"),
                      file_contains("docs/tri-review.md", r"VERDICT:\s*PASS")],
