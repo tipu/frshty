@@ -50,6 +50,9 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
         </nav>
     </div>
     <div class="flex gap-2 text-xs items-center">
+        <select id="instance-filter" onchange="setInstanceFilter(this.value)" class="bg-gray-900 border border-gray-700 text-gray-300 text-xs px-1 py-0.5 rounded">
+            <option value="">all instances</option>
+        </select>
         <select id="noise-mode" onchange="setNoiseMode(this.value)" class="bg-gray-900 border border-gray-700 text-gray-300 text-xs px-1 py-0.5 rounded">
             <option value="useful">useful</option>
             <option value="noise">noise</option>
@@ -75,8 +78,26 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
 <script>
 let noiseMode = localStorage.getItem('eventNoiseMode') || 'useful';
 let timeWindow = parseInt(localStorage.getItem('eventTimeWindow') || '8', 10);
+let instanceFilter = localStorage.getItem('globalInstanceFilter') || '';
 let showDismissed = false;
 let events = [];
+
+const INSTANCE_PALETTE = [
+    {bg: '#1e3a5f', fg: '#93c5fd'},  // blue
+    {bg: '#14532d', fg: '#86efac'},  // green
+    {bg: '#713f12', fg: '#fde047'},  // yellow
+    {bg: '#3b1e5f', fg: '#d8b4fe'},  // purple
+    {bg: '#5f1e3a', fg: '#fbcfe8'},  // pink
+    {bg: '#1e5f5f', fg: '#5eead4'},  // teal
+    {bg: '#5f3a1e', fg: '#fdba74'},  // orange
+    {bg: '#4c1d95', fg: '#c4b5fd'},  // violet
+];
+
+function instanceColor(key) {
+    let h = 0;
+    for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) | 0;
+    return INSTANCE_PALETTE[Math.abs(h) % INSTANCE_PALETTE.length];
+}
 let errors = {};
 let expandedRows = new Set();
 let dismissed = new Set(JSON.parse(localStorage.getItem('globalDismissedEventKeys') || '[]'));
@@ -103,6 +124,25 @@ function setTimeWindow(v) {
     timeWindow = parseInt(v, 10);
     localStorage.setItem('eventTimeWindow', String(timeWindow));
     fetchEvents();
+}
+
+function setInstanceFilter(v) {
+    instanceFilter = v || '';
+    localStorage.setItem('globalInstanceFilter', instanceFilter);
+    render();
+}
+
+function refreshInstanceDropdown() {
+    const sel = document.getElementById('instance-filter');
+    const seen = new Set(events.map(e => e.instance_key).filter(Boolean));
+    const current = new Set(Array.from(sel.options).map(o => o.value));
+    const desired = new Set(['', ...seen]);
+    if (seen.size === 0 || [...current].every(v => desired.has(v)) && [...desired].every(v => current.has(v))) return;
+    const prev = sel.value;
+    sel.innerHTML = '<option value="">all instances</option>' +
+        [...seen].sort().map(k => `<option value="${esc(k)}">${esc(k)}</option>`).join('');
+    sel.value = desired.has(prev) ? prev : '';
+    instanceFilter = sel.value;
 }
 
 function setShowDismissed(v) {
@@ -184,9 +224,11 @@ function renderErrorBanner() {
 }
 
 function render() {
+    refreshInstanceDropdown();
     renderErrorBanner();
     const items = events
         .filter(e => !SYSTEM_EVENTS.has(e.event))
+        .filter(e => !instanceFilter || e.instance_key === instanceFilter)
         .filter(e => noiseMode === 'noise' || !isNoise(e))
         .filter(e => showDismissed || !dismissed.has(e.global_id));
     const container = document.getElementById('event-feed');
@@ -210,12 +252,13 @@ function render() {
         const hasMore = summary.includes('\n');
         const exp = expandedRows.has(e.global_id) ? 'expanded' : '';
         const gid = esc(e.global_id);
+        const instColor = instanceColor(e.instance_key || '');
         const dismissControl = isDismissed
             ? `<span class="text-gray-600 ml-2 text-xs" title="dismissed globally">⌀</span>`
             : `<span class="dismiss-btn ml-2" onclick="dismissGlobal('${gid}')" title="dismiss from global feed (does not affect per-instance)">✓</span>`;
         return `<div class="${cls} feed-row px-2 py-1 hover:bg-gray-900 rounded ${exp} flex items-center gap-2">
             <span class="text-gray-600 w-14 shrink-0">${esc(fmtTime(e.ts))}</span>
-            <span class="badge badge-instance shrink-0">${esc(e.instance_key || '?')}</span>
+            <span class="badge shrink-0" style="background:${instColor.bg};color:${instColor.fg}">${esc(e.instance_key || '?')}</span>
             <span>${dot}</span>
             ${hasMore ? `<span class="row-expand shrink-0" onclick="toggleExpand('${gid}')">▸</span>` : '<span class="row-expand shrink-0"></span>'}
             <div class="flex-1 min-w-0">
@@ -231,6 +274,14 @@ function render() {
 
 document.getElementById('noise-mode').value = noiseMode;
 document.getElementById('time-window').value = String(timeWindow);
+if (instanceFilter) {
+    const sel = document.getElementById('instance-filter');
+    const opt = document.createElement('option');
+    opt.value = instanceFilter;
+    opt.textContent = instanceFilter;
+    sel.appendChild(opt);
+    sel.value = instanceFilter;
+}
 fetchEvents();
 setInterval(fetchEvents, 5000);
 </script>
