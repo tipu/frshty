@@ -15,7 +15,7 @@ class WorkerPool:
         self._stop = threading.Event()
 
     def start(self) -> None:
-        q.sweep_stale()
+        q.sweep_stale(max_age_seconds=0)
         for i in range(self.size):
             t = threading.Thread(target=self._run, args=(i,), daemon=True, name=f"worker-{i}")
             t.start()
