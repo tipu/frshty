@@ -455,6 +455,7 @@ def _load_pr_comments(config, slug) -> list[dict]:
 
 def _save_pr_comments(config, slug, comments: list[dict]):
     path = _pr_comments_path(config, slug)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(comments, indent=2, default=str))
 
 
