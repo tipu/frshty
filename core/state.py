@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Callable
 
 import core.db as db
+from core.ticket_status import transition as _transition
 
 _default_instance_key: str | None = None
 _instance_key_cv: ContextVar[str | None] = ContextVar("frshty_instance_key", default=None)
@@ -198,11 +199,24 @@ def list_tickets() -> dict:
     return {r["ticket_key"]: _row_to_ticket(r) for r in rows}
 
 
+class TicketStateError(ValueError):
+    """Raised when a ticket write violates status invariants."""
+
+
+def _validate_ticket_invariants(data: dict, key: str = "") -> None:
+    status = data.get("status")
+    if status == "merged" and not data.get("merged_external_status"):
+        raise TicketStateError(
+            f"ticket {key or '?'}: status=merged requires merged_external_status"
+        )
+
+
 def save_ticket(key: str, data: dict) -> None:
     _ensure_db()
     instance = _active_key()
     _migrate_kv_to_rows(instance)
     _strip_stale(data)
+    _validate_ticket_invariants(data, key)
     now = datetime.now(timezone.utc).isoformat()
     auto_pr = data.get("auto_pr")
     db.execute(
@@ -229,6 +243,35 @@ def delete_ticket(key: str) -> None:
     )
 
 
+def transition_ticket(key: str, new_status: str, *, reason: str = "", **fields) -> dict:
+    """Atomically transition a ticket to new_status with optional co-field updates.
+
+    Enforces the legal-transition graph via core.ticket_status.transition() and
+    the per-status invariants via _validate_ticket_invariants. Raises
+    TicketStateError if the ticket doesn't exist, the transition is illegal,
+    or a required co-field is missing after the merge.
+    """
+    def _mutate(current: dict) -> dict:
+        if not current:
+            raise TicketStateError(f"ticket {key}: not found, cannot transition")
+        merged = dict(current)
+        current_status = current.get("status", "new")
+        try:
+            merged["status"] = _transition(current_status, new_status)
+        except ValueError as e:
+            raise TicketStateError(str(e)) from e
+        for k, v in fields.items():
+            if v is None:
+                merged.pop(k, None)
+            else:
+                merged[k] = v
+        return merged
+    result = update_ticket(key, _mutate)
+    if result is None:
+        raise TicketStateError(f"ticket {key}: vanished during transition")
+    return result
+
+
 def update_ticket(key: str, mutate: Callable[[dict], dict | None]) -> dict | None:
     """Transactional read-modify-write on a single ticket. Atomic against
     other update_ticket / save_ticket calls. Pass a mutator that takes the
@@ -252,6 +295,7 @@ def update_ticket(key: str, mutate: Callable[[dict], dict | None]) -> dict | Non
             )
             return None
         _strip_stale(new)
+        _validate_ticket_invariants(new, key)
         auto_pr = new.get("auto_pr")
         c.execute(
             "INSERT INTO tickets"
