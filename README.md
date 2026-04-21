@@ -16,7 +16,7 @@ python frshty.py config/local.toml          # single instance
 python frshty.py --multi config/a.toml config/b.toml --port 7000   # multi-instance supervisor
 ```
 
-Credentials via env vars referenced in your config (`BB_TOKEN`, `JIRA_TOKEN`, `LINEAR_TOKEN`, `ANTHROPIC_API_KEY`, etc). See `config/example.toml` for the full list.
+Credentials via env vars referenced in your config (`BB_TOKEN`, `JIRA_TOKEN`, `LINEAR_TOKEN`, etc). See `config/example.toml` for the full list. Claude/Codex/Gemini CLIs each manage their own auth (run `claude /login`, `codex login`, `gemini auth login` once on the host, then mount the auth dirs into the container).
 
 Docker:
 
