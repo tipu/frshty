@@ -141,12 +141,16 @@ def test_reviewing_fail_verdict_enqueues_fix(tmp_path):
          patch("features.tickets.get_repos", return_value=[{"name": "backend", "path": tmp_path}]), \
          patch("features.tickets.make_platform"), \
          patch("features.tickets._fetch_open_prs", return_value=[]), \
+         patch("features.tickets._reconcile_prs", side_effect=lambda ts, _: ts), \
+         patch("features.tickets._resolve_conflicts", side_effect=lambda c, t, ts, u: ts), \
+         patch("features.tickets._check_in_review", side_effect=lambda c, t, ts, u: ts), \
          patch("features.tickets.log"), \
          patch("features.tickets._enqueue_stage") as enq:
         tickets.check(config, "inst")
 
     tasks_enqueued = [c.args[2] for c in enq.call_args_list]
-    assert "fix_review_findings" in tasks_enqueued
+    assert "fix_review_findings" in tasks_enqueued, \
+        f"expected fix_review_findings in {tasks_enqueued}"
 
 
 def _make_conflicting_repo(tmp_path):
@@ -273,20 +277,23 @@ def test_done_ticket_with_prs_preserves_state_on_rediscovery(tmp_path):
     with patch("features.tickets._fetch_tickets", return_value=assigned), \
          patch("features.tickets.get_repos", return_value=[{"name": "backend", "path": tmp_path}]), \
          patch("features.tickets.make_platform") as mock_platform, \
+         patch("features.tickets._fetch_open_prs", return_value=[]), \
+         patch("features.tickets._reconcile_prs", side_effect=lambda ts, _: ts), \
+         patch("features.tickets._resolve_conflicts", side_effect=lambda c, t, ts, u: ts), \
+         patch("features.tickets._check_in_review", side_effect=lambda c, t, ts, u: ts), \
          patch("features.tickets.subprocess.run") as mock_run, \
          patch("features.tickets.log"):
         mock_run.return_value = MagicMock(returncode=0, stdout="main\n", stderr="")
         p = MagicMock()
         p.monitor_ci.side_effect = lambda ticket, ts, base_url: ts
-        p.get_pr_info.return_value = {"state": "OPEN", "updated_on": "", "mergeable": "MERGEABLE"}
         p.get_pr_state.return_value = "OPEN"
-        p.get_pr_comments.return_value = []
         mock_platform.return_value = p
 
         tickets.check(config)
 
     result = state.load("tickets")["NEC-100"]
-    assert result["status"] in ("pr_created", "in_review"), f"Expected pr_created or in_review, got {result['status']}"
+    assert result["status"] in ("pr_created", "in_review"), \
+        f"Expected pr_created or in_review, got {result['status']}"
     assert result.get("prs"), "PRs should be preserved"
     assert result["prs"][0]["id"] == 42
 
@@ -322,6 +329,10 @@ def test_done_ticket_without_prs_restarts_fresh(tmp_path):
     with patch("features.tickets._fetch_tickets", return_value=assigned), \
          patch("features.tickets.get_repos", return_value=[{"name": "backend", "path": tmp_path}]), \
          patch("features.tickets.make_platform"), \
+         patch("features.tickets._fetch_open_prs", return_value=[]), \
+         patch("features.tickets._reconcile_prs", side_effect=lambda ts, _: ts), \
+         patch("features.tickets._resolve_conflicts", side_effect=lambda c, t, ts, u: ts), \
+         patch("features.tickets._check_in_review", side_effect=lambda c, t, ts, u: ts), \
          patch("features.tickets.subprocess.run") as mock_run, \
          patch("features.tickets.log"):
         mock_run.return_value = MagicMock(returncode=0, stdout="main\n", stderr="")
