@@ -50,7 +50,7 @@ extras = {{ ai_tool = 20 }}
 
 def test_preview_descriptions_matches_line_items(tmp_path):
     for mod in list(sys.modules):
-        if mod == "frshty" or mod.startswith("core.") or mod == "core":
+        if mod == "frshty" or mod.startswith("core.") or mod.startswith("features.") or mod in ("core", "features"):
             sys.modules.pop(mod, None)
 
     cfg_path, state_dir = _install_billing_config(tmp_path)
@@ -94,7 +94,7 @@ def test_preview_descriptions_matches_line_items(tmp_path):
 
 def test_preview_endpoint_returns_descriptions(tmp_path):
     for mod in list(sys.modules):
-        if mod == "frshty" or mod.startswith("core.") or mod == "core":
+        if mod == "frshty" or mod.startswith("core.") or mod.startswith("features.") or mod in ("core", "features"):
             sys.modules.pop(mod, None)
 
     cfg_path, state_dir = _install_billing_config(tmp_path)
