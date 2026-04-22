@@ -45,11 +45,14 @@ def _isolated_db(tmp_path_factory):
 
 @pytest.fixture(autouse=True)
 def _restore_session_db(_isolated_db):
-    """Five legacy files (test_scheduler_beat, test_http_endpoints,
-    test_scheduled_virtual, test_tz, test_billing_preview) `sys.modules.pop`
-    core.* (+ frshty) and `db.init(tmp_path/'t.db')` for self-isolation.
-    That leaves fresh core.state / core.db modules with _DB_PATH pointing at
-    a deleted tmp file. Before every test, restore the originals."""
+    """Some legacy tests (test_billing_preview, test_scheduler_beat,
+    test_scheduled_virtual, test_tz, test_http_endpoints, test_worker_smoke)
+    `sys.modules.pop` core.* and features.* then `db.init(tmp_path/'t.db')`.
+    That leaves fresh core.state / core.db / features.tickets modules in
+    sys.modules with their own _DB_PATH pointing at a deleted tmp file, and
+    subsequent tests that `from features import tickets` get those stale
+    modules. Before every test, restore the originals so the session DB is
+    the single source of truth."""
     sys.modules["core.db"] = db
     sys.modules["core.state"] = state
     sys.modules["core.log"] = log
@@ -57,6 +60,20 @@ def _restore_session_db(_isolated_db):
     db._MIGRATIONS_DIR = _SESSION_MIGRATIONS_DIR
     state._DB_INITIALIZED = True
     state._TICKETS_MIGRATED.clear()
+    # Re-inject the session db/state module references into modules that
+    # cache them at import-time (features.tickets in particular, since
+    # hardening tests patch attributes via `features.tickets.state`).
+    for mod_name in ("features.tickets", "features.billing", "features.reviewer",
+                     "features.own_prs", "features.ticket_systems", "frshty"):
+        mod = sys.modules.get(mod_name)
+        if mod is None:
+            continue
+        if hasattr(mod, "state"):
+            mod.state = state
+        if hasattr(mod, "db"):
+            mod.db = db
+        if hasattr(mod, "log"):
+            mod.log = log
     yield
 
 
