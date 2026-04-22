@@ -1,3 +1,4 @@
+import json
 import random
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch, MagicMock
@@ -5,50 +6,171 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+import core.db as db
 import core.state as state
 import core.scheduler as scheduler
 
 
-class TestSchedule:
-    def test_saves_to_state(self, tmp_state):
-        log_mock = MagicMock()
-        with patch("core.scheduler.log", log_mock):
-            run_at = datetime(2026, 4, 20, 10, 0, tzinfo=timezone.utc)
-            scheduler.schedule("PROJ-1", "create_pr", run_at, meta={"slug": "s"})
+def _seed_oneshot(key: str, action: str, run_at: datetime, meta: dict | None = None):
+    with patch("core.scheduler.log"):
+        scheduler.schedule(key, action, run_at, meta=meta or {})
 
-        pending = state.load("scheduler")
-        assert "PROJ-1" in pending
-        assert pending["PROJ-1"]["action"] == "create_pr"
-        assert pending["PROJ-1"]["meta"] == {"slug": "s"}
+
+class TestSchedule:
+    def test_writes_scheduler_row(self, tmp_state):
+        run_at = datetime(2026, 4, 20, 10, 0, tzinfo=timezone.utc)
+        _seed_oneshot("PROJ-1", "create_pr", run_at, meta={"slug": "s"})
+
+        row = db.query_one(
+            "SELECT run_at, data FROM scheduler WHERE instance_key=? AND key=?",
+            (tmp_state.name, "PROJ-1"),
+        )
+        assert row is not None, "expected scheduler row for PROJ-1"
+        data = json.loads(row["data"])
+        assert data["kind"] == "oneshot"
+        assert data["action"] == "create_pr"
+        assert data["meta"] == {"slug": "s"}
+
+    def test_schedule_not_visible_through_kv_state_load(self, tmp_state):
+        run_at = datetime(2026, 4, 20, 10, 0, tzinfo=timezone.utc)
+        _seed_oneshot("PROJ-1", "create_pr", run_at)
+        assert state.load("scheduler") == {}, \
+            "state.load('scheduler') reads kv; scheduler writes to scheduler table"
 
 
 class TestCheckDue:
-    def test_executes_due_task(self, tmp_state):
+    def test_executes_due_oneshot(self, tmp_state):
         past = datetime(2020, 1, 1, tzinfo=timezone.utc)
-        state.save("scheduler", {
-            "T-1": {"action": "create_pr", "run_at": past.isoformat(), "meta": {}},
-        })
+        _seed_oneshot("T-1", "create_pr", past)
+
         with patch("core.scheduler._execute") as mock_exec, \
              patch("core.scheduler.log"):
             scheduler.check_due({})
-            mock_exec.assert_called_once_with("create_pr", "T-1", {}, {})
 
-        assert state.load("scheduler") == {}
+        mock_exec.assert_called_once_with("create_pr", "T-1", {}, {})
+        leftover = db.query_one(
+            "SELECT 1 AS x FROM scheduler WHERE instance_key=? AND key=?",
+            (tmp_state.name, "T-1"),
+        )
+        assert leftover is None, "fired oneshot row must be deleted"
 
-    def test_skips_future_task(self, tmp_state):
+    def test_skips_future_oneshot(self, tmp_state):
         future = datetime(2099, 1, 1, tzinfo=timezone.utc)
-        state.save("scheduler", {
-            "T-1": {"action": "create_pr", "run_at": future.isoformat(), "meta": {}},
-        })
+        _seed_oneshot("T-1", "create_pr", future)
+
         with patch("core.scheduler._execute") as mock_exec, \
              patch("core.scheduler.log"):
             scheduler.check_due({})
-            mock_exec.assert_not_called()
 
-        assert "T-1" in state.load("scheduler")
+        mock_exec.assert_not_called()
+        row = db.query_one(
+            "SELECT 1 AS x FROM scheduler WHERE instance_key=? AND key=?",
+            (tmp_state.name, "T-1"),
+        )
+        assert row is not None, "future oneshot must remain"
+
+    def test_check_due_ignores_recurring_even_if_past(self, tmp_state):
+        past = datetime(2020, 1, 1, tzinfo=timezone.utc)
+        scheduler.upsert_recurring(tmp_state.name, "beat-1", "poll", "daily_19pst", past)
+
+        with patch("core.scheduler._execute") as mock_exec, \
+             patch("core.scheduler.log"):
+            scheduler.check_due({})
+
+        mock_exec.assert_not_called()
 
     def test_empty_scheduler(self, tmp_state):
         scheduler.check_due({})
+
+
+class TestRecurring:
+    def test_upsert_recurring_roundtrip(self, tmp_state):
+        run_at = datetime(2026, 5, 1, 19, 0, tzinfo=timezone.utc)
+        scheduler.upsert_recurring(
+            tmp_state.name, "beat-a", "billing_autogen", "daily_19pst",
+            run_at, payload={"tz": "US/Pacific"},
+        )
+        row = db.query_one(
+            "SELECT run_at, data FROM scheduler WHERE instance_key=? AND key=?",
+            (tmp_state.name, "beat-a"),
+        )
+        assert row is not None
+        data = json.loads(row["data"])
+        assert data["kind"] == "recurring"
+        assert data["task"] == "billing_autogen"
+        assert data["cadence"] == "daily_19pst"
+        assert data["payload"] == {"tz": "US/Pacific"}
+
+    def test_upsert_preserves_last_run_at(self, tmp_state):
+        run_at = datetime(2026, 5, 1, 19, 0, tzinfo=timezone.utc)
+        scheduler.upsert_recurring(tmp_state.name, "beat-a", "t", "daily_19pst", run_at)
+        db.execute(
+            "UPDATE scheduler SET data = json_set(data, '$.last_run_at', '2026-05-01T19:00:00+00:00') "
+            "WHERE instance_key=? AND key='beat-a'",
+            (tmp_state.name,),
+        )
+        scheduler.upsert_recurring(
+            tmp_state.name, "beat-a", "t", "daily_19pst",
+            run_at + timedelta(days=1),
+        )
+        row = db.query_one(
+            "SELECT data FROM scheduler WHERE instance_key=? AND key='beat-a'",
+            (tmp_state.name,),
+        )
+        data = json.loads(row["data"])
+        assert data.get("last_run_at") == "2026-05-01T19:00:00+00:00"
+
+    def test_fire_due_recurring_enqueues_and_advances(self, tmp_state):
+        past = datetime(2026, 4, 1, 19, 0, tzinfo=timezone.utc)
+        scheduler.upsert_recurring(tmp_state.name, "beat-a", "billing_autogen",
+                                   "daily_19pst", past, payload={"x": 1})
+        now = datetime(2026, 4, 21, 19, 0, tzinfo=timezone.utc)
+
+        fired = scheduler.fire_due_recurring(now=now)
+        mine = [f for f in fired if f["instance_key"] == tmp_state.name]
+        assert len(mine) == 1
+        assert mine[0]["task"] == "billing_autogen"
+
+        jobs = db.query_all(
+            "SELECT task, payload FROM jobs WHERE instance_key=? AND task='billing_autogen'",
+            (tmp_state.name,),
+        )
+        assert len(jobs) == 1
+        assert json.loads(jobs[0]["payload"]) == {"x": 1}
+
+        row = db.query_one(
+            "SELECT run_at FROM scheduler WHERE instance_key=? AND key='beat-a'",
+            (tmp_state.name,),
+        )
+        next_run_at = datetime.fromisoformat(row["run_at"])
+        assert next_run_at > now
+
+    def test_fire_due_recurring_no_double_fire(self, tmp_state):
+        past = datetime(2026, 4, 1, 19, 0, tzinfo=timezone.utc)
+        scheduler.upsert_recurring(tmp_state.name, "beat-a", "t",
+                                   "daily_19pst", past)
+        now = datetime(2026, 4, 21, 19, 0, tzinfo=timezone.utc)
+
+        first = scheduler.fire_due_recurring(now=now)
+        mine_first = [f for f in first if f["instance_key"] == tmp_state.name]
+        assert len(mine_first) == 1
+
+        second = scheduler.fire_due_recurring(now=now)
+        mine_second = [f for f in second if f["instance_key"] == tmp_state.name]
+        assert mine_second == []
+
+
+class TestListAll:
+    def test_list_all_ordered_by_run_at(self, tmp_state):
+        early = datetime(2026, 5, 1, 10, tzinfo=timezone.utc)
+        late = datetime(2026, 6, 1, 10, tzinfo=timezone.utc)
+        _seed_oneshot("late-one", "create_pr", late)
+        scheduler.upsert_recurring(tmp_state.name, "early-recurring", "t",
+                                   "daily_19pst", early)
+
+        items = scheduler.list_all(tmp_state.name)
+        keys_in_order = [i["key"] for i in items]
+        assert keys_in_order == ["early-recurring", "late-one"]
 
 
 class TestComputeTargetTime:

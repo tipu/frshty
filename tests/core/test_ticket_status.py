@@ -116,3 +116,31 @@ class TestAllowedGraph:
     def test_all_states_have_entries(self):
         for s in TicketStatus:
             assert s in _ALLOWED
+
+
+class TestFullMatrix:
+    """Parametrized over every (src, dst) pair. A transition is legal iff:
+      - dst == src (self-transition), or
+      - dst == done (always), or
+      - dst is in _ALLOWED[src].
+    This test locks the graph: adding/removing edges in core/ticket_status.py
+    will require updating expectations here, making graph changes intentional.
+    """
+
+    @pytest.mark.parametrize(
+        "src,dst",
+        [(s.value, d.value) for s in TicketStatus for d in TicketStatus],
+    )
+    def test_pair(self, src, dst):
+        src_enum = TicketStatus(src)
+        dst_enum = TicketStatus(dst)
+        expected_legal = (
+            dst_enum == src_enum
+            or dst_enum == TicketStatus.done
+            or dst_enum in _ALLOWED.get(src_enum, set())
+        )
+        if expected_legal:
+            assert transition(src, dst) == dst
+        else:
+            with pytest.raises(ValueError, match="Illegal transition"):
+                transition(src, dst)

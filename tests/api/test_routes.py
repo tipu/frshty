@@ -179,21 +179,28 @@ class TestTickets:
 
     def test_status_override_resets_counters(self, client):
         state.save("tickets", {"T-1": {
-            "status": "pr_failed",
+            "status": "pr_created",
             "slug": "T-1-s",
             "ci_fix_attempts": 2,
             "conflict_resolution_attempts": 1,
             "ci_passed": True,
             "checks_started_at": "2026-04-15T00:00:00+00:00",
         }})
-        resp = client.post("/api/tickets/T-1/status", json={"status": "pr_created"})
-        assert resp.status_code == 200
+        resp = client.post("/api/tickets/T-1/status", json={"status": "pr_failed"})
+        assert resp.status_code == 200, resp.text
         ts = state.load("tickets")["T-1"]
-        assert ts["status"] == "pr_created"
+        assert ts["status"] == "pr_failed"
         assert ts["ci_fix_attempts"] == 0
         assert ts["conflict_resolution_attempts"] == 0
         assert "ci_passed" not in ts
         assert "checks_started_at" not in ts
+
+    def test_status_override_illegal_transition(self, client):
+        state.save("tickets", {"T-1": {"status": "pr_failed", "slug": "T-1-s"}})
+        resp = client.post("/api/tickets/T-1/status", json={"status": "pr_created"})
+        assert resp.status_code == 400, resp.text
+        ts = state.load("tickets")["T-1"]
+        assert ts["status"] == "pr_failed"
 
     def test_status_override_invalid(self, client):
         state.save("tickets", {"T-1": {"status": "pr_failed", "slug": "T-1-s"}})
@@ -212,14 +219,26 @@ class TestScheduled:
         assert resp.json() == []
 
     def test_with_scheduled_items(self, client):
-        state.save("scheduler", {
-            "T-1": {"action": "create_pr", "run_at": "2026-04-20T10:00:00Z", "scheduled_at": "2026-04-15T10:00:00Z", "meta": {}}
-        })
+        import core.scheduler as scheduler
+        from datetime import datetime, timezone
+        token = state.use("test")
+        try:
+            with patch("core.scheduler.log"):
+                scheduler.schedule(
+                    "T-1", "create_pr",
+                    datetime(2026, 4, 20, 10, 0, tzinfo=timezone.utc),
+                    meta={"slug": "s"},
+                )
+        finally:
+            state.reset(token)
         resp = client.get("/api/scheduled")
+        assert resp.status_code == 200
         data = resp.json()
-        assert len(data) == 1
-        assert data[0]["key"] == "T-1"
-        assert data[0]["type"] == "scheduled_pr"
+        keys = [item.get("key") for item in data]
+        assert "T-1" in keys, f"expected T-1 in scheduled list, got {keys}"
+        t1 = next(item for item in data if item["key"] == "T-1")
+        assert t1["type"] == "scheduled_pr"
+        assert t1.get("action") == "create_pr"
 
 
 class TestReviews:

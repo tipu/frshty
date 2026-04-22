@@ -1,24 +1,16 @@
-"""Covers core/state.py sqlite backend."""
+"""Covers core/state.py sqlite backend.
+
+Uses the session-scoped isolated DB from tests/conftest.py. Each test picks a
+unique instance_key (via state.use) so rows don't collide across tests.
+"""
 import json
-import sys
-import tempfile
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+import core.db as db
+import core.state as state
+import core.log as log
 
 
-def test_state_save_load_roundtrip(tmp_path):
-    for mod in list(sys.modules):
-        if mod == "frshty" or mod.startswith("core.") or mod == "core":
-            sys.modules.pop(mod, None)
-
-    import core.db as db
-    import core.state as state
-
-    db.init(tmp_path / "t.db", ROOT / "migrations")
-    state.init("alpha")
-
+def test_state_save_load_roundtrip(tmp_state):
     state.save("tickets", {"T-1": {"status": "new", "slug": "t-1"}})
     assert state.load("tickets") == {"T-1": {"status": "new", "slug": "t-1"}}
 
@@ -28,7 +20,8 @@ def test_state_save_load_roundtrip(tmp_path):
     assert loaded["T-1"]["status"] == "planning"
     assert loaded["T-2"]["status"] == "new"
 
-    tok = state.use("beta")
+    beta_key = f"{tmp_state.name}-beta"
+    tok = state.use(beta_key)
     try:
         assert state.load("tickets") == {}, "fresh instance_key should be empty"
         state.save("tickets", {"B-1": {"status": "new"}})
@@ -36,7 +29,7 @@ def test_state_save_load_roundtrip(tmp_path):
         state.reset(tok)
 
     assert "B-1" not in state.load("tickets"), "alpha should not see beta rows"
-    tok = state.use("beta")
+    tok = state.use(beta_key)
     try:
         assert state.load("tickets") == {"B-1": {"status": "new"}}
     finally:
@@ -44,12 +37,6 @@ def test_state_save_load_roundtrip(tmp_path):
 
 
 def test_log_contextvar_isolation(tmp_path):
-    for mod in list(sys.modules):
-        if mod == "frshty" or mod.startswith("core.") or mod == "core":
-            sys.modules.pop(mod, None)
-
-    import core.log as log
-
     dir_a = tmp_path / "alpha"
     dir_b = tmp_path / "beta"
     (dir_a / "logs").mkdir(parents=True)
@@ -79,71 +66,38 @@ def test_log_contextvar_isolation(tmp_path):
     assert b0["event"] == "event2" and b0["job"] == "beta"
 
 
-def test_per_row_ticket_api(tmp_path):
-    for mod in list(sys.modules):
-        if mod == "frshty" or mod.startswith("core.") or mod == "core":
-            sys.modules.pop(mod, None)
-
-    import core.db as db
-    import core.state as state
-
-    db.init(tmp_path / "t.db", ROOT / "migrations")
-    state.init("rowtest")
-
+def test_per_row_ticket_api(tmp_state):
     state.save_ticket("T-1", {"status": "planning", "slug": "T-1-s", "branch": "b"})
     assert state.load_ticket("T-1") == {"status": "planning", "slug": "T-1-s", "branch": "b"}
 
-    # update_ticket as transactional read-modify-write
     state.update_ticket("T-1", lambda c: {**c, "ci_fix_attempts": (c.get("ci_fix_attempts", 0) + 1)})
     state.update_ticket("T-1", lambda c: {**c, "ci_fix_attempts": (c.get("ci_fix_attempts", 0) + 1)})
     assert state.load_ticket("T-1")["ci_fix_attempts"] == 2
 
-    # legacy state.load("tickets") shim returns rows as a dict
     state.save_ticket("T-2", {"status": "new"})
     all_t = state.load("tickets")
     assert set(all_t.keys()) == {"T-1", "T-2"}
 
-    # delete via update_ticket returning None
     state.update_ticket("T-1", lambda c: None)
     assert state.load_ticket("T-1") is None
     assert "T-1" not in state.load("tickets")
 
 
-def test_kv_to_rows_migration_lazy(tmp_path):
-    for mod in list(sys.modules):
-        if mod == "frshty" or mod.startswith("core.") or mod == "core":
-            sys.modules.pop(mod, None)
-
-    import core.db as db
-    import core.state as state
-
-    db.init(tmp_path / "t.db", ROOT / "migrations")
-    state.init("legacyinst")
-
-    # Seed kv directly (simulating pre-migration data)
+def test_kv_to_rows_migration_lazy(tmp_state):
+    instance = tmp_state.name
     db.execute(
         "INSERT INTO kv(instance_key, key, data, updated_at) VALUES (?, ?, ?, datetime('now'))",
-        ("legacyinst", "tickets", json.dumps({
+        (instance, "tickets", json.dumps({
             "OLD-1": {"status": "planning", "slug": "old-1"},
             "OLD-2": {"status": "in_review", "slug": "old-2", "ci_fix_attempts": 1},
         })),
     )
+    state._TICKETS_MIGRATED.discard(instance)
 
-    # First read of any ticket triggers lazy migration
     loaded = state.load("tickets")
     assert set(loaded.keys()) == {"OLD-1", "OLD-2"}
     assert state.load_ticket("OLD-2")["ci_fix_attempts"] == 1
 
-    # Subsequent saves go to rows, not kv blob
     state.save_ticket("NEW-1", {"status": "new"})
-    rows = db.query_all("SELECT ticket_key FROM tickets WHERE instance_key=?", ("legacyinst",))
+    rows = db.query_all("SELECT ticket_key FROM tickets WHERE instance_key=?", (instance,))
     assert {r["ticket_key"] for r in rows} == {"OLD-1", "OLD-2", "NEW-1"}
-
-
-if __name__ == "__main__":
-    tests = [test_state_save_load_roundtrip, test_log_contextvar_isolation,
-             test_per_row_ticket_api, test_kv_to_rows_migration_lazy]
-    for t in tests:
-        with tempfile.TemporaryDirectory() as d:
-            t(Path(d))
-            print(f"{t.__name__}: PASS")

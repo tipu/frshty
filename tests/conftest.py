@@ -1,17 +1,89 @@
 import json
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
+import core.db as db
 import core.state as state
 import core.log as log
 
 
+_SESSION_DB_PATH = None
+_SESSION_MIGRATIONS_DIR = None
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolated_db(tmp_path_factory):
+    global _SESSION_DB_PATH, _SESSION_MIGRATIONS_DIR
+    db_dir = tmp_path_factory.mktemp("frshty-db")
+    db_path = db_dir / "frshty.db"
+    migrations = Path(__file__).resolve().parent.parent / "migrations"
+
+    db._DB_PATH = None
+    db._MIGRATIONS_DIR = None
+    state._DB_INITIALIZED = False
+    state._default_instance_key = None
+    state._TICKETS_MIGRATED.clear()
+
+    db.init(db_path, migrations)
+    state._DB_INITIALIZED = True
+    _SESSION_DB_PATH = db_path
+    _SESSION_MIGRATIONS_DIR = migrations
+
+    yield db_path
+
+    db._DB_PATH = None
+    db._MIGRATIONS_DIR = None
+    state._DB_INITIALIZED = False
+    state._default_instance_key = None
+    state._TICKETS_MIGRATED.clear()
+    _SESSION_DB_PATH = None
+    _SESSION_MIGRATIONS_DIR = None
+
+
+@pytest.fixture(autouse=True)
+def _restore_session_db(_isolated_db):
+    """Some legacy tests (test_billing_preview, test_scheduler_beat,
+    test_scheduled_virtual, test_tz, test_http_endpoints, test_worker_smoke)
+    `sys.modules.pop` core.* and features.* then `db.init(tmp_path/'t.db')`.
+    That leaves fresh core.state / core.db / features.tickets modules in
+    sys.modules with their own _DB_PATH pointing at a deleted tmp file, and
+    subsequent tests that `from features import tickets` get those stale
+    modules. Before every test, restore the originals so the session DB is
+    the single source of truth."""
+    sys.modules["core.db"] = db
+    sys.modules["core.state"] = state
+    sys.modules["core.log"] = log
+    db._DB_PATH = _SESSION_DB_PATH
+    db._MIGRATIONS_DIR = _SESSION_MIGRATIONS_DIR
+    state._DB_INITIALIZED = True
+    state._TICKETS_MIGRATED.clear()
+    # Re-inject the session db/state module references into modules that
+    # cache them at import-time (features.tickets in particular, since
+    # hardening tests patch attributes via `features.tickets.state`).
+    for mod_name in ("features.tickets", "features.billing", "features.reviewer",
+                     "features.own_prs", "features.ticket_systems", "frshty"):
+        mod = sys.modules.get(mod_name)
+        if mod is None:
+            continue
+        if hasattr(mod, "state"):
+            mod.state = state
+        if hasattr(mod, "db"):
+            mod.db = db
+        if hasattr(mod, "log"):
+            mod.log = log
+    yield
+
+
 @pytest.fixture()
-def tmp_state(tmp_path):
+def tmp_state(tmp_path, _isolated_db):
+    state._default_instance_key = None
+    state._TICKETS_MIGRATED.clear()
     state.init(tmp_path)
-    return tmp_path
+    yield tmp_path
+    state._TICKETS_MIGRATED.clear()
 
 
 @pytest.fixture()
