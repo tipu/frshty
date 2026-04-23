@@ -295,7 +295,7 @@ def check(config: dict, instance_key: str = ""):
                 ts["branch"] = _make_branch(config, key, ticket)
                 ts["url"] = ticket.get("url", "")
                 ts["status"] = TicketStatus(mapped).value
-                if mapped != "new":
+                if mapped not in ("new", "planning", "reviewing"):
                     state.save_ticket(key, ts)
                     continue
 
@@ -318,6 +318,19 @@ def check(config: dict, instance_key: str = ""):
 
             if ts.get("branch"):
                 ts = _reconcile_prs(ts, open_prs)
+
+            if ts["status"] in ("planning", "reviewing") and ts.get("slug"):
+                ws = config["workspace"]
+                ticket_dir = ws["root"] / ws["tickets_dir"] / ts["slug"]
+                if not ticket_dir.is_dir():
+                    log.emit("ticket_dir_rebuild",
+                        f"Ticket dir missing for {key}, rebuilding",
+                        links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
+                        meta={"ticket": key, "slug": ts["slug"], "status": ts["status"]})
+                    new_ts = _setup_ticket(config, ticket, base_url)
+                    for k in ("slug", "branch", "discovered_at"):
+                        if new_ts.get(k):
+                            ts[k] = new_ts[k]
 
             if ts["status"] == "new":
                 ts = _setup_ticket(config, ticket, base_url)
