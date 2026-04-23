@@ -372,6 +372,99 @@ class TestCheckSkipsBusyTicket:
             tickets.check(fake_config, instance_key="inst")
 
 
+class TestCheckRebuildsMissingTicketDir:
+    def test_planning_with_missing_dir_triggers_setup(self, fake_config, tmp_state):
+        import core.state as state
+        from tests.conftest import make_ticket
+        slug = "PROJ-1-do-the-thing"
+        state.save("tickets", {"PROJ-1": make_ticket_state(status="planning", slug=slug)})
+
+        with patch("features.tickets._fetch_tickets", return_value=[make_ticket()]), \
+             patch("features.tickets._fetch_open_prs", return_value=[]), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "myrepo", "path": tmp_state / "repo"}]), \
+             patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("features.tickets._setup_ticket",
+                   return_value={"status": "new", "slug": slug, "branch": slug,
+                                 "discovered_at": "2026-04-22T00:00:00Z"}) as setup, \
+             patch("features.tickets._enqueue_stage") as eq:
+            tickets.check({**fake_config, "_base_url": "http://base"}, instance_key="inst")
+        setup.assert_called_once()
+        eq.assert_any_call("inst", "PROJ-1", "start_planning")
+        saved = state.load_ticket("PROJ-1")
+        assert saved is not None
+        assert saved["status"] == "planning"
+
+    def test_planning_with_existing_dir_skips_setup(self, fake_config, tmp_state):
+        import core.state as state
+        from tests.conftest import make_ticket
+        slug = "PROJ-1-do-the-thing"
+        (fake_config["workspace"]["root"] / "tickets" / slug).mkdir(parents=True)
+        state.save("tickets", {"PROJ-1": make_ticket_state(status="planning", slug=slug)})
+
+        with patch("features.tickets._fetch_tickets", return_value=[make_ticket()]), \
+             patch("features.tickets._fetch_open_prs", return_value=[]), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "myrepo", "path": tmp_state / "repo"}]), \
+             patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("features.tickets._reconcile_prs", side_effect=lambda ts, _prs: ts), \
+             patch("features.tickets._setup_ticket") as setup, \
+             patch("features.tickets._enqueue_stage") as eq:
+            tickets.check({**fake_config, "_base_url": "http://base"}, instance_key="inst")
+        setup.assert_not_called()
+        eq.assert_any_call("inst", "PROJ-1", "start_planning")
+
+    def test_new_ticket_mapped_to_planning_runs_setup(self, fake_config, tmp_state):
+        """When Jira status 'In Progress' maps to 'planning', a freshly
+        assigned ticket must still run _setup_ticket to create its dir
+        rather than fast-forwarding past setup."""
+        import core.state as state
+        from tests.conftest import make_ticket
+        fake_config["jira"]["status_map"] = {"In Progress": "planning"}
+        slug = "PROJ-1-do-the-thing"
+
+        with patch("features.tickets._fetch_tickets",
+                   return_value=[make_ticket(status="In Progress")]), \
+             patch("features.tickets._fetch_open_prs", return_value=[]), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "myrepo", "path": tmp_state / "repo"}]), \
+             patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("features.tickets._reconcile_prs", side_effect=lambda ts, _prs: ts), \
+             patch("features.tickets._setup_ticket",
+                   return_value={"status": "new", "slug": slug, "branch": slug,
+                                 "discovered_at": "2026-04-22T00:00:00Z"}) as setup, \
+             patch("features.tickets._enqueue_stage") as eq:
+            tickets.check({**fake_config, "_base_url": "http://base"}, instance_key="inst")
+        setup.assert_called_once()
+        eq.assert_any_call("inst", "PROJ-1", "start_planning")
+        saved = state.load_ticket("PROJ-1")
+        assert saved is not None
+        assert saved["status"] == "planning"
+        assert saved["slug"] == slug
+        assert saved["discovered_at"] == "2026-04-22T00:00:00Z"
+
+    def test_reviewing_with_missing_dir_triggers_setup(self, fake_config, tmp_state):
+        import core.state as state
+        from tests.conftest import make_ticket
+        slug = "PROJ-1-do-the-thing"
+        state.save("tickets", {"PROJ-1": make_ticket_state(status="reviewing", slug=slug)})
+
+        with patch("features.tickets._fetch_tickets", return_value=[make_ticket()]), \
+             patch("features.tickets._fetch_open_prs", return_value=[]), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "myrepo", "path": tmp_state / "repo"}]), \
+             patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("features.tickets._setup_ticket",
+                   return_value={"status": "new", "slug": slug, "branch": slug,
+                                 "discovered_at": "2026-04-22T00:00:00Z"}) as setup, \
+             patch("features.tickets._enqueue_stage"):
+            tickets.check({**fake_config, "_base_url": "http://base"}, instance_key="inst")
+        setup.assert_called_once()
+        saved = state.load_ticket("PROJ-1")
+        assert saved is not None
+        assert saved["status"] == "reviewing"
+
+
 class TestFixCiFailuresTask:
     def _ctx(self, config, ticket_key="PROJ-1"):
         from core.tasks.registry import TaskContext
