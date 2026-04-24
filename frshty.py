@@ -23,6 +23,7 @@ from starlette.websockets import WebSocket
 from pathlib import Path
 
 import core.config as cfg
+import core.db as db
 import core.log as log
 import core.state as state
 import core.terminal as terminal
@@ -86,8 +87,6 @@ class _ConfigView(dict):
 
 _config: _ConfigView = _ConfigView()
 _configs_by_host: dict[str, dict] = {}
-_worker_proc = None
-
 
 def _set_primary_config(c: dict) -> None:
     global _primary_config
@@ -100,18 +99,13 @@ if len(sys.argv) >= 2 and Path(sys.argv[1]).exists():
     _set_primary_config(_primary)
     state.init(_primary["_state_dir"])
     log.init(_primary["_state_dir"], _primary["job"]["key"])
+    db.init(_primary["_state_dir"] / ".frshty.db", Path(__file__).parent / "migrations")
 
 
 @contextlib.asynccontextmanager
 async def _lifespan(a):
-    global _worker_proc
-    if len(sys.argv) >= 2 and not (sys.argv[1] == "--multi"):
-        _worker_proc = multiprocessing.Process(target=_run_worker, args=(sys.argv[1],), daemon=True)
-        _worker_proc.start()
+    # Event system started in main() before uvicorn
     yield
-    if _worker_proc and _worker_proc.is_alive():
-        _worker_proc.kill()
-        _worker_proc.join(timeout=5)
 
 
 app = FastAPI(lifespan=_lifespan)
@@ -406,8 +400,15 @@ def api_config_raw_save(body: dict):
 
 @app.post("/api/poll")
 def api_poll():
-    multiprocessing.Process(target=_run_poll, args=(str(_config["_config_path"]),), daemon=True).start()
-    return {"status": "started"}
+    # Legacy endpoint - event system now handles cycles
+    # Trigger cycle manually via cron_tick event
+    try:
+        import core.queue as _q
+        _q.emit_event(source="manual", kind="cron_tick", payload={},
+                      instance_key=_config.get("job", {}).get("key", ""))
+        return {"status": "triggered"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
 
 
 @app.post("/api/reviews/submit")
@@ -1676,24 +1677,6 @@ def _run_review(config_path: str, full_repo: str, pr_id: int, url: str):
             meta={"repo": pr["repo"], "pr_id": pr_id})
 
 
-def _run_poll(config_path: str):
-    _ensure_path()
-    poll_config = cfg.load_config(config_path)
-    state.init(poll_config["_state_dir"])
-    log.init(poll_config["_state_dir"], poll_config["job"]["key"])
-    run_cycle(poll_config)
-
-
-def _run_worker(config_path: str):
-    _ensure_path()
-    worker_config = cfg.load_config(config_path)
-    state.init(worker_config["_state_dir"])
-    log.init(worker_config["_state_dir"], worker_config["job"]["key"])
-    loop_thread = threading.Thread(target=main_loop, args=(worker_config,), daemon=True)
-    loop_thread.start()
-    slack_loop(worker_config)
-
-
 def _ensure_path():
     extra = [
         os.path.expanduser("~/.local/bin"),
@@ -1724,6 +1707,19 @@ def main():
     configs = [cfg.load_config(p) for p in (args.multi or [args.config])]
     primary = configs[0]
     _set_primary_config(primary)
+    # Always use event-driven system (unified architecture)
+    try:
+        import core.runtime as _rt
+        _rt.start_events(configs, cron_interval=0)
+    except Exception as e:
+        log.emit("events_boot_failed", f"{type(e).__name__}: {e}")
+        raise
+
+    # Start main_loop as cron ticker
+    import threading
+    thread = threading.Thread(target=main_loop, args=(_config,), daemon=True)
+    thread.start()
+
 
     if args.multi:
         for c in configs:
@@ -1741,30 +1737,11 @@ def main():
     state.init(primary["_state_dir"])
     log.init(primary["_state_dir"], primary["job"]["key"])
 
-    if args.multi or os.environ.get("FRSHTY_EVENTS") == "1":
-        try:
-            import core.runtime as _rt
-            # In single-instance FRSHTY_EVENTS=1 mode, main_loop is the cron ticker
-            # (it emits cron_tick from run_cycle), so disable the runtime ticker to
-            # avoid double-firing. In --multi mode, no main_loop runs, so keep the
-            # runtime ticker at its default interval.
-            cron_interval = 0 if (not args.multi and os.environ.get("FRSHTY_EVENTS") == "1") else 240
-            _rt.start_events(configs, cron_interval=cron_interval)
-            # Start main_loop as daemon thread in single-instance FRSHTY_EVENTS=1 mode
-            if not args.multi and os.environ.get("FRSHTY_EVENTS") == "1":
-                import threading
-                thread = threading.Thread(target=main_loop, args=(_config,), daemon=True)
-                thread.start()
-        except Exception as e:
-            log.emit("events_boot_failed", f"{type(e).__name__}: {e}")
-
     port = args.port or _config["job"]["port"]
 
     host = args.host or _config["job"].get("bind", "127.0.0.1")
-    # Disable reload when FRSHTY_EVENTS=1 in single-instance mode to ensure main_loop
-    # runs in the app process (uvicorn subprocess), not just the parent. With reload=True,
-    # the subprocess fails the lifespan check for starting _run_worker.
-    reload = False if (args.multi or os.environ.get("FRSHTY_EVENTS") == "1") else _config["job"].get("reload", True)
+    # Always disable reload: event system (started before uvicorn) handles cron internally
+    reload = False
     src = Path(__file__).parent
     reload_dirs = [str(src / d) for d in ("core", "features", "templates") if (src / d).exists()] if reload else None
     log_level = _config["job"].get("log_level", "info")
