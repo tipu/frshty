@@ -2,7 +2,7 @@
 
 [[instances.list]]
 key = "aimyable"
-base_url = "https://aimyable.localhost"
+base_url = "http://localhost:7100"
 platform = "bitbucket"
 ticket_system = "jira"
 
@@ -14,12 +14,12 @@ ticket_system = "jira"
 
 [[instances.list]]
 key = "nectar"
-base_url = "https://nectar.localhost"
+base_url = "http://localhost:7101"
 platform = "github"
 ticket_system = "linear"
 
 [[instances.list]]
 key = "tipu-test"
-base_url = "https://tipu-test.localhost"
+base_url = "http://localhost:7102"
 platform = "github"
 ticket_system = "jira"
