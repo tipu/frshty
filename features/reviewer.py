@@ -83,58 +83,14 @@ def check(config: dict):
     if not review_prs:
         return
 
+    ticket_state = state.load("tickets")
     review_state = state.load("reviews")
-    base_url = config["_base_url"]
-    seen_prs = set()
+    pending = state.load("reviews_pending")
 
-    for pr in review_prs:
-        pr_key = f"{pr['repo']}/{pr['id']}"
-        if pr_key in seen_prs:
-            continue
-        seen_prs.add(pr_key)
-        existing = review_state.get(pr_key, {})
-        head_sha = pr.get("head_sha", "")
+    _track_pending_prs(pending, review_prs, ticket_state)
+    _process_ready_tickets(config, pending)
 
-        needs_review = False
-        if not existing.get("reviewed"):
-            needs_review = True
-        elif existing.get("last_head_sha"):
-            if head_sha and head_sha != existing["last_head_sha"]:
-                needs_review = True
-        elif existing.get("last_updated") != pr.get("updated_on"):
-            needs_review = True
-
-        if not needs_review:
-            continue
-
-        re_review = existing.get("reviewed", False)
-        label = "Re-reviewing" if re_review else "Reviewing"
-        log.emit("review_started", f"{label} PR #{pr['id']} in {pr['repo']}",
-            links={"pr": pr["url"], "detail": f"{base_url}/reviews/{pr['repo']}/{pr['id']}"},
-            meta={"repo": pr["repo"], "pr_id": pr["id"], "re_review": re_review})
-
-        result = review_pr(config, platform, pr)
-        if result:
-            review_state[pr_key] = {
-                "reviewed": True,
-                "branch": pr["branch"],
-                "last_updated": pr.get("updated_on"),
-                "last_head_sha": head_sha,
-            }
-            issues = result.get("issues", [])
-            log.emit("review_complete", f"{pr['repo']}#{pr['id']}: Review done — {result.get('verdict', 'unknown')}, {len(issues)} issues",
-                links={"pr": pr["url"], "detail": f"{base_url}/reviews/{pr['repo']}/{pr['id']}"},
-                meta={"repo": pr["repo"], "pr_id": pr["id"], "verdict": result.get("verdict"), "issue_count": len(issues)})
-
-            if issues:
-                log.emit("review_comments_queued", f"{pr['repo']}#{pr['id']}: {len(issues)} comments ready to submit",
-                    links={"detail": f"{base_url}/reviews/{pr['repo']}/{pr['id']}"},
-                    meta={"repo": pr["repo"], "pr_id": pr["id"]})
-        else:
-            log.emit("review_failed", f"Review failed for {pr['repo']}#{pr['id']} (will retry next cycle)",
-                links={"pr": pr["url"], "detail": f"{base_url}/reviews/{pr['repo']}/{pr['id']}"},
-                meta={"repo": pr["repo"], "pr_id": pr["id"]})
-
+    state.save("reviews_pending", pending)
     state.save("reviews", review_state)
 
 
@@ -454,3 +410,113 @@ def _read_changed_files(diff_text: str, worktree_path: Path) -> str:
         if total > 120_000:
             break
     return "\n\n".join(parts)
+
+
+import time
+import re as regex_module
+
+
+def _extract_ticket_from_pr(pr: dict, ticket_state: dict) -> str | None:
+    repo = pr.get("repo")
+    pr_id = pr.get("id")
+    if not repo or not pr_id:
+        return None
+
+    for ticket_key, ticket_data in ticket_state.items():
+        prs = ticket_data.get("prs", [])
+        for ticket_pr in prs:
+            if ticket_pr.get("repo") == repo and ticket_pr.get("id") == pr_id:
+                return ticket_key
+
+    branch = pr.get("branch", "")
+    if branch:
+        match = regex_module.match(r"([A-Z]+-\d+)", branch)
+        if match:
+            return match.group(1)
+
+    return None
+
+
+def _track_pending_prs(pending: dict, prs: list[dict], ticket_state: dict) -> dict:
+    now = time.time()
+    for pr in prs:
+        ticket = _extract_ticket_from_pr(pr, ticket_state)
+        if ticket is None:
+            ticket = "__no_ticket__"
+
+        if ticket not in pending:
+            pending[ticket] = {
+                "tracked_at": now,
+                "last_pr_at": now,
+                "prs": [pr]
+            }
+        else:
+            pr_key = (pr.get("repo"), pr.get("id"))
+            existing_keys = {(p.get("repo"), p.get("id")) for p in pending[ticket]["prs"]}
+            if pr_key not in existing_keys:
+                pending[ticket]["prs"].append(pr)
+            pending[ticket]["last_pr_at"] = now
+
+    return pending
+
+
+def _process_ready_tickets(config: dict, pending: dict) -> dict:
+    now = time.time()
+    ready_tickets = []
+
+    for ticket_key in list(pending.keys()):
+        last_pr_at = pending[ticket_key].get("last_pr_at", now)
+        quiet_seconds = now - last_pr_at
+        if quiet_seconds >= 900:
+            ready_tickets.append(ticket_key)
+
+    for ticket_key in ready_tickets:
+        prs = pending[ticket_key].get("prs", [])
+        if prs:
+            review_ticket_prs(config, ticket_key, prs)
+        del pending[ticket_key]
+
+    return pending
+
+
+def review_ticket_prs(config: dict, ticket_key: str, prs: list[dict]) -> None:
+    platform = make_platform(config)
+    review_state = state.load("reviews")
+    base_url = config["_base_url"]
+
+    for pr in prs:
+        pr_key = f"{pr['repo']}/{pr['id']}"
+        existing = review_state.get(pr_key, {})
+        head_sha = pr.get("head_sha", "")
+
+        re_review = existing.get("reviewed", False)
+        label = "Re-reviewing" if re_review else "Reviewing"
+        log.emit("review_started", f"{label} PR #{pr['id']} in {pr['repo']} (ticket: {ticket_key})",
+            links={"pr": pr["url"], "detail": f"{base_url}/reviews/{pr['repo']}/{pr['id']}"},
+            meta={"repo": pr["repo"], "pr_id": pr["id"], "ticket": ticket_key, "re_review": re_review})
+
+        result = review_pr(config, platform, pr)
+        if result:
+            review_state[pr_key] = {
+                "reviewed": True,
+                "branch": pr["branch"],
+                "ticket": ticket_key,
+                "reviewed_at": time.time(),
+                "last_updated": pr.get("updated_on"),
+                "last_head_sha": head_sha,
+            }
+            issues = result.get("issues", [])
+            log.emit("review_complete", f"{pr['repo']}#{pr['id']}: Review done — {result.get('verdict', 'unknown')}, {len(issues)} issues",
+                links={"pr": pr["url"], "detail": f"{base_url}/reviews/{pr['repo']}/{pr['id']}"},
+                meta={"repo": pr["repo"], "pr_id": pr["id"], "ticket": ticket_key, "verdict": result.get("verdict"), "issue_count": len(issues)})
+
+            if issues:
+                log.emit("review_comments_queued", f"{pr['repo']}#{pr['id']}: {len(issues)} comments ready to submit",
+                    links={"detail": f"{base_url}/reviews/{pr['repo']}/{pr['id']}"},
+                    meta={"repo": pr["repo"], "pr_id": pr["id"], "ticket": ticket_key})
+        else:
+            log.emit("review_failed", f"Review failed for {pr['repo']}#{pr['id']} (will retry next cycle)",
+                links={"pr": pr["url"], "detail": f"{base_url}/reviews/{pr['repo']}/{pr['id']}"},
+                meta={"repo": pr["repo"], "pr_id": pr["id"], "ticket": ticket_key})
+
+    state.save("reviews", review_state)
