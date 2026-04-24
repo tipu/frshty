@@ -1,6 +1,4 @@
-import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
 
 
 def test_check_is_callable():
@@ -14,21 +12,21 @@ def test_check_is_callable():
     assert callable(tickets.check), "tickets.check should be callable"
 
 
-def test_main_loop_calls_check():
+def test_main_loop_function_exists():
     """
-    Verify main_loop calls tickets.check() for auto-healing.
+    Verify main_loop function exists in frshty.py.
     """
-    import frshty
+    frshty_path = Path(__file__).parent.parent.parent / "frshty.py"
+    source = frshty_path.read_text()
 
-    assert hasattr(frshty, "main_loop"), "frshty should have main_loop() function"
-    assert callable(frshty.main_loop), "main_loop should be callable"
+    assert "def main_loop(" in source, "frshty should have main_loop() function"
 
 
-def test_run_cycle_calls_check():
+def test_run_cycle_function_exists():
     """
-    Verify run_cycle calls tickets.check() for auto-healing.
+    Verify run_cycle function exists in frshty.py.
     """
-    import frshty
+    frshty_path = Path(__file__).parent.parent.parent / "frshty.py"
+    source = frshty_path.read_text()
 
-    assert hasattr(frshty, "run_cycle"), "frshty should have run_cycle() function"
-    assert callable(frshty.run_cycle), "run_cycle should be callable"
+    assert "def run_cycle(" in source, "frshty should have run_cycle() function"

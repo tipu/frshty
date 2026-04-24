@@ -34,9 +34,14 @@ def test_auto_healing_without_frshty_events_env():
 
         # VERIFY: Process is still running
         poll_result = process.poll()
-        assert (
-            poll_result is None
-        ), f"frshty crashed on startup with code {poll_result}"
+
+        if poll_result is not None:
+            # Process crashed, get error output
+            _, stderr = process.communicate(timeout=1)
+            raise AssertionError(
+                f"frshty crashed on startup with code {poll_result}.\n"
+                f"stderr: {stderr}"
+            )
 
         # VERIFY: Check for startup logs indicating event system started
         # (This is a minimal check - the real validation is that process doesn't crash)
