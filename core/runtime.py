@@ -6,6 +6,7 @@ the Instances registry, start the dispatcher, and start the worker pool.
 Safe to call once per process. Re-entrancy is guarded.
 """
 from __future__ import annotations
+import random
 import threading
 import time
 from datetime import datetime, timezone
@@ -50,7 +51,8 @@ def _cron_ticker(interval: int = 240) -> None:
                                   instance_key=instance_key)
                 except Exception as e:
                     log.emit("cron_emit_error", f"{type(e).__name__}: {e}")
-        if _cron_stop.wait(interval):
+        wait_time = random.randint(300, 420) if interval > 0 else interval
+        if _cron_stop.wait(wait_time):
             return
 
 
