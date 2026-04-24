@@ -1761,7 +1761,10 @@ def main():
     port = args.port or _config["job"]["port"]
 
     host = args.host or _config["job"].get("bind", "127.0.0.1")
-    reload = False if args.multi else _config["job"].get("reload", True)
+    # Disable reload when FRSHTY_EVENTS=1 in single-instance mode to ensure main_loop
+    # runs in the app process (uvicorn subprocess), not just the parent. With reload=True,
+    # the subprocess fails the lifespan check for starting _run_worker.
+    reload = False if (args.multi or os.environ.get("FRSHTY_EVENTS") == "1") else _config["job"].get("reload", True)
     src = Path(__file__).parent
     reload_dirs = [str(src / d) for d in ("core", "features", "templates") if (src / d).exists()] if reload else None
     log_level = _config["job"].get("log_level", "info")

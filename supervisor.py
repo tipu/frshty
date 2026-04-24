@@ -9,6 +9,7 @@ from pathlib import Path
 
 from core.discovery import discover_instances, fan_out, call_instance
 from core.claude_runner import run_claude_code
+import core.db as _db
 
 STATE_DIR = Path.home() / ".frshty"
 STATE_FILE = STATE_DIR / "supervisor.json"
@@ -38,16 +39,25 @@ def _setup_logging():
 
 
 def _load_state() -> dict:
-    if STATE_FILE.exists():
-        try:
-            return json.loads(STATE_FILE.read_text())
-        except Exception:
-            pass
+    try:
+        actions = {r["key"]: {"count": r["count"], "ts": r["ts"]}
+                   for r in _db.query_all("SELECT key, count, ts FROM supervisor_actions")}
+        escalations = {r["key"]: r["ts"]
+                       for r in _db.query_all("SELECT key, ts FROM supervisor_escalations")}
+        return {"actions": actions, "escalations": escalations}
+    except Exception:
+        pass
     return {"actions": {}, "escalations": {}}
 
 
 def _save_state(state: dict):
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+    with _db.tx() as conn:
+        conn.execute("DELETE FROM supervisor_actions")
+        conn.execute("DELETE FROM supervisor_escalations")
+        for k, v in state.get("actions", {}).items():
+            conn.execute("INSERT INTO supervisor_actions(key, count, ts) VALUES(?,?,?)", (k, v["count"], v["ts"]))
+        for k, ts in state.get("escalations", {}).items():
+            conn.execute("INSERT INTO supervisor_escalations(key, ts) VALUES(?,?)", (k, ts))
 
 
 def _now() -> float:
@@ -207,6 +217,7 @@ async def run_once(state: dict):
 async def main():
     _setup_logging()
     log.info("Supervisor starting")
+    _db.init(STATE_DIR / "frshty.db", PROJECT_DIR / "migrations")
     state = _load_state()
 
     loop = asyncio.get_event_loop()
