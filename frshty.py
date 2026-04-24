@@ -47,6 +47,7 @@ events.register_action("schedule_pr", _schedule_pr_action)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
+CUSTOM_CONTEXT_DIR = Path(__file__).parent / "docs" / "custom-context"
 
 from contextvars import ContextVar as _ContextVar
 _cv_config: _ContextVar[dict] = _ContextVar("frshty_config", default={})
@@ -1313,6 +1314,27 @@ def api_ticket_notes(key: str, body: dict):
                  payload={"note": note, "ticket_key": key},
                  instance_key=instance_key)
     return {"status": "enqueued"}
+
+
+@app.get("/api/tickets/{key}/context")
+def api_ticket_context_get(key: str):
+    f = CUSTOM_CONTEXT_DIR / f"{key}.md"
+    return {"context": f.read_text() if f.exists() else ""}
+
+
+@app.put("/api/tickets/{key}/context")
+def api_ticket_context_put(key: str, body: dict):
+    CUSTOM_CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
+    (CUSTOM_CONTEXT_DIR / f"{key}.md").write_text(body.get("context", ""))
+    return {"status": "saved"}
+
+
+@app.delete("/api/tickets/{key}/context")
+def api_ticket_context_delete(key: str):
+    f = CUSTOM_CONTEXT_DIR / f"{key}.md"
+    if f.exists():
+        f.unlink()
+    return {"status": "deleted"}
 
 
 @app.post("/api/tickets/{key}/set-state")

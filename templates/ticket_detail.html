@@ -106,6 +106,16 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
         <textarea id="notes-input" rows="3" class="w-full mt-2 p-2 bg-gray-900 border border-gray-700 rounded text-sm"></textarea>
         <button onclick="submitNote()" class="mt-2 text-xs bg-yellow-800 hover:bg-yellow-700 text-yellow-200 px-3 py-1 rounded">Add note and restart</button>
     </div>
+    <div id="context-section" class="card p-3 mb-4">
+        <div class="flex items-center justify-between mb-2">
+            <span class="text-xs font-bold text-gray-500 uppercase">Context</span>
+            <div class="flex gap-2">
+                <button onclick="saveContext()" class="text-xs bg-blue-800 hover:bg-blue-700 text-blue-200 px-3 py-1 rounded">Save</button>
+                <button onclick="deleteContext()" class="text-xs bg-red-900 hover:bg-red-800 text-red-300 px-3 py-1 rounded">Delete</button>
+            </div>
+        </div>
+        <textarea id="context-input" rows="4" class="w-full p-2 bg-gray-900 border border-gray-700 rounded text-sm font-mono" placeholder="Context for AI tools — saved to docs/custom-context/{key}.md"></textarea>
+    </div>
 </div>
 <div id="diff-section" style="display:none">
     <div id="diff-view"></div>
@@ -650,10 +660,34 @@ function toggleMaximize() {
     if (fitAddon) setTimeout(() => fitAddon.fit(), 50);
 }
 
+async function loadContext() {
+    const r = await fetch(`/api/tickets/${key}/context`);
+    if (r.ok) {
+        const d = await r.json();
+        document.getElementById('context-input').value = d.context || '';
+    }
+}
+
+async function saveContext() {
+    const context = document.getElementById('context-input').value;
+    await fetch(`/api/tickets/${key}/context`, {
+        method: 'PUT',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({context})
+    });
+}
+
+async function deleteContext() {
+    if (!confirm('Delete context file?')) return;
+    await fetch(`/api/tickets/${key}/context`, {method: 'DELETE'});
+    document.getElementById('context-input').value = '';
+}
+
 document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && maximized) toggleMaximize();
 });
 
+loadContext();
 startTerminal();
 </script>
 </body>
