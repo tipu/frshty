@@ -258,7 +258,11 @@ _GLOBAL_REMOTE_TTL = 3.0
 
 def _fetch_local_global_events(limit: int, unread_only: bool, after: str) -> list[dict]:
     out = []
-    for config in _configs_by_host.values():
+    configs = list(_configs_by_host.values())
+    # In single-instance mode, also include the primary config's events
+    if not configs and _primary_config:
+        configs = [_primary_config]
+    for config in configs:
         state_dir = config["_state_dir"]
         key = config["job"]["key"]
         log_tokens = log.use(state_dir, key)
