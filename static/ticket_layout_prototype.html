@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Ticket Layout Prototype - DEV-439</title>
+    <script src="/static/tailwind.js"></script>
+    <style>
+        body { @apply bg-gray-900 text-gray-100 font-sans; }
+        .layout-grid { display: grid; grid-template-columns: 1fr 2fr 1fr; gap: 1rem; height: 100vh; overflow: hidden; }
+        .panel { @apply overflow-y-auto bg-gray-800 rounded border border-gray-700; }
+        .panel-header { @apply sticky top-0 bg-gray-900 border-b border-gray-700 p-3 z-10; }
+        .section-title { @apply text-xs font-bold text-gray-400 uppercase tracking-wider mb-2; }
+        .collapsible-header { @apply flex items-center justify-between cursor-pointer hover:bg-gray-600 p-3 rounded transition; }
+        .collapsible-header.collapsed::before { content: '▶ '; }
+        .collapsible-header.expanded::before { content: '▼ '; }
+        .collapsible-content { @apply transition-all duration-200 overflow-hidden; }
+        .collapsible-content.collapsed { max-height: 0; }
+        .collapsible-content.expanded { max-height: 500px; }
+        .info-row { @apply flex justify-between py-2 px-2 border-b border-gray-700 text-xs; }
+        .label { @apply text-gray-500; }
+        .value { @apply text-gray-200 font-mono; }
+        .job-item { @apply cursor-pointer hover:bg-gray-700 p-2 border-b border-gray-700 transition text-xs; }
+        .job-item.running { @apply bg-blue-900 bg-opacity-30; }
+        .job-item.failed { @apply bg-red-900 bg-opacity-30; }
+        .job-time { @apply text-gray-500 text-xs; }
+        .job-task { @apply text-gray-300 font-mono; }
+        .status-badge { @apply inline-block px-2 py-1 rounded text-xs font-bold; }
+        .status-ok { @apply bg-green-900 text-green-200; }
+        .status-failed { @apply bg-red-900 text-red-200; }
+        .status-running { @apply bg-blue-900 text-blue-200; }
+        .content-card { @apply bg-gray-700 rounded mb-3; }
+        .code-block { @apply bg-gray-950 rounded p-3 text-xs font-mono overflow-x-auto max-h-96; }
+        .output-live { @apply bg-gray-950 rounded p-3 text-xs font-mono border border-green-700; animation: pulse 1s infinite; }
+    </style>
+</head>
+<body class="p-0">
+    <!-- Top Nav -->
+    <div class="bg-gray-950 border-b border-gray-700 p-4 flex justify-between items-center">
+        <div class="flex items-center gap-4">
+            <h1 class="text-lg font-bold">DEV-439</h1>
+            <span class="text-xs bg-blue-900 px-2 py-1 rounded text-blue-200">reviewing</span>
+            <span class="text-xs text-gray-500">branch: danial/feature/DEV-439-add-screenshots-to-logs</span>
+        </div>
+        <div class="flex gap-2">
+            <button class="bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded text-xs">Restart</button>
+            <button class="bg-yellow-900 hover:bg-yellow-800 px-3 py-1 rounded text-xs text-yellow-200">Retry</button>
+        </div>
+    </div>
+
+    <!-- 3-Column Layout -->
+    <div class="layout-grid" style="height: calc(100vh - 60px);">
+
+        <!-- LEFT SIDEBAR: Metadata -->
+        <div class="panel">
+            <div class="panel-header">
+                <div class="section-title">Status & Controls</div>
+            </div>
+            <div class="p-4 space-y-4">
+                <div>
+                    <div class="section-title">State</div>
+                    <select class="w-full bg-gray-700 border border-gray-600 rounded p-2 text-xs">
+                        <option>new</option>
+                        <option selected>reviewing</option>
+                        <option>pr_created</option>
+                        <option>closed</option>
+                    </select>
+                </div>
+
+                <div>
+                    <div class="section-title">External Status</div>
+                    <p class="text-xs text-gray-400">In Review</p>
+                </div>
+
+                <div>
+                    <div class="section-title">Timeline</div>
+                    <div class="text-xs space-y-1">
+                        <div class="info-row">
+                            <span class="label">Created</span>
+                            <span class="value">Apr 24</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="label">Started</span>
+                            <span class="value">Apr 24 23:52</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="label">Status</span>
+                            <span class="value text-blue-300">In Progress</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div>
+                    <div class="section-title">PR</div>
+                    <a href="#" class="text-blue-400 hover:text-blue-300 text-xs underline block">danial/feature/DEV-439-add-screenshots-to-logs</a>
+                </div>
+
+                <div>
+                    <div class="section-title">Labels</div>
+                    <div class="flex flex-wrap gap-1">
+                        <span class="bg-purple-900 text-purple-200 px-2 py-1 rounded text-xs">feature</span>
+                        <span class="bg-blue-900 text-blue-200 px-2 py-1 rounded text-xs">ui-ux</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- CENTER: Main Content -->
+        <div class="panel">
+            <div class="panel-header">
+                <div class="section-title">Content</div>
+            </div>
+            <div class="p-4 space-y-2">
+                <div class="content-card">
+                    <div class="collapsible-header collapsed" onclick="toggleCollapse(this)">
+                        <span class="section-title">Change Summary</span>
+                    </div>
+                    <div class="collapsible-content collapsed">
+                        <p class="text-xs leading-relaxed text-gray-300 p-3 pt-0">
+                            RPA execution logs now support optional screenshot attachments captured by the client and uploaded to S3, with Django generating deterministic presigned URLs (24-hour windows) for browser caching and the frontend displaying them lazily with automatic expiration fallback after 30 days. Non-blocking async uploads decouple image delivery from log creation, while infrastructure enforces S3-managed encryption, role-scoped write access by tenant/queue prefix, and automated lifecycle deletion.
+                        </p>
+                    </div>
+                </div>
+
+                <div class="content-card">
+                    <div class="collapsible-header collapsed" onclick="toggleCollapse(this)">
+                        <span class="section-title">Description</span>
+                    </div>
+                    <div class="collapsible-content collapsed">
+                        <p class="text-xs leading-relaxed text-gray-300 p-3 pt-0">
+                            Create a new Logs S3 bucket for storing our log screenshots. We could consolidate our buckets so we don't need to manage so many. Whether this is a separate bucket, or a folder within a bucket, doesn't matter too much. But storing them in the "invoices" bucket would not make sense, so we would need to rename it at least, which would be a fair amount of work...
+                        </p>
+                    </div>
+                </div>
+
+                <div class="content-card">
+                    <div class="collapsible-header collapsed" onclick="toggleCollapse(this)">
+                        <span class="section-title">Acceptance Criteria</span>
+                    </div>
+                    <div class="collapsible-content collapsed">
+                        <ul class="text-xs space-y-1 text-gray-300 p-3 pt-0">
+                            <li>✓ S3 bucket created with lifecycle policies</li>
+                            <li>✓ Django model updated with screenshot fields</li>
+                            <li>⏳ Frontend upload component implemented</li>
+                            <li>□ E2E tests passing</li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- RIGHT SIDEBAR: Jobs & Output -->
+        <div class="panel flex flex-col">
+            <div class="panel-header">
+                <div class="section-title">Jobs ({activeCount}/{totalCount})</div>
+            </div>
+
+            <!-- Jobs List -->
+            <div class="flex-1 overflow-y-auto border-b border-gray-700">
+                <div class="job-item running" onclick="selectJob(this, 5000, 'fix_review_findings')">
+                    <div class="job-time">09:32 (now)</div>
+                    <div class="job-task text-blue-300">fix_review_findings</div>
+                    <span class="status-badge status-running">running</span>
+                </div>
+                <div class="job-item failed" onclick="selectJob(this, 4999, 'fix_review_findings')">
+                    <div class="job-time">09:30</div>
+                    <div class="job-task">fix_review_findings</div>
+                    <span class="status-badge status-failed">failed</span>
+                </div>
+                <div class="job-item failed" onclick="selectJob(this, 4977, 'start_reviewing')">
+                    <div class="job-time">16:07</div>
+                    <div class="job-task">start_reviewing</div>
+                    <span class="status-badge status-failed">failed</span>
+                </div>
+                <div class="job-item" onclick="selectJob(this, 4888, 'start_planning')">
+                    <div class="job-time">23:52</div>
+                    <div class="job-task text-green-300">start_planning</div>
+                    <span class="status-badge status-ok">ok</span>
+                </div>
+                <div class="job-item" onclick="selectJob(this, 4871, 'start_planning')">
+                    <div class="job-time">23:44</div>
+                    <div class="job-task">start_planning</div>
+                    <span class="status-badge status-failed">failed</span>
+                </div>
+            </div>
+
+            <!-- Output Display -->
+            <div class="p-3 border-t border-gray-700">
+                <div class="section-title mb-2">Output</div>
+                <div class="output-live text-green-300" style="height: 200px; overflow-y-auto;">
+## Summary
+
+I've successfully generated and implemented a comprehensive technical plan for **RPA Screenshot Logging**. Here's what was delivered:
+
+### 📋 Documentation
+- **technical-plan.md** - Complete analysis
+- **phase1.md** - S3 setup
+- **phase2.md** - Django model
+- **phase3.md** - Frontend tests
+
+### 🔧 Code Changes
+- 2 database migrations
+- 4 new E2E tests
+- Zero breaking changes
+
+### ✅ Status
+Ready for staging deployment
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function selectJob(elem, jobId, taskName) {
+            document.querySelectorAll('.job-item').forEach(e => e.style.borderLeft = '');
+            elem.style.borderLeft = '3px solid #60a5fa';
+            console.log(`Selected job ${jobId}: ${taskName}`);
+        }
+
+        function toggleCollapse(headerEl) {
+            const header = headerEl;
+            const content = headerEl.nextElementSibling;
+
+            header.classList.toggle('collapsed');
+            header.classList.toggle('expanded');
+            content.classList.toggle('collapsed');
+            content.classList.toggle('expanded');
+        }
+    </script>
+</body>
+</html>
