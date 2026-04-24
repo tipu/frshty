@@ -15,6 +15,7 @@ wheels/
 # Job configs (contain tokens/account IDs)
 config/*.toml
 !config/example.toml
+!config/discovery.toml
 
 # Scratch scripts (may contain hardcoded credentials)
 /_fetch_*.py

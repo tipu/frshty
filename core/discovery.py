@@ -5,12 +5,32 @@ from pathlib import Path
 import httpx
 
 CONFIG_DIR = Path(__file__).parent.parent / "config"
-SKIP_CONFIGS = {"example.toml", "test.toml"}
+SKIP_CONFIGS = {"example.toml", "test.toml", "discovery.toml"}
 
 
 def discover_instances() -> list[dict]:
     instances = []
     seen_keys = set()
+
+    discovery_path = CONFIG_DIR / "discovery.toml"
+    if discovery_path.exists():
+        try:
+            with open(discovery_path, "rb") as f:
+                raw = tomllib.load(f)
+            for inst_config in raw.get("instances", {}).get("list", []):
+                inst_key = inst_config.get("key", "")
+                if inst_key and inst_key not in seen_keys:
+                    instances.append({
+                        "key": inst_key,
+                        "port": inst_config.get("port", 0),
+                        "base_url": inst_config.get("base_url", ""),
+                        "config_path": str(discovery_path),
+                        "platform": inst_config.get("platform", ""),
+                        "ticket_system": inst_config.get("ticket_system", ""),
+                    })
+                    seen_keys.add(inst_key)
+        except Exception:
+            pass
 
     for path in sorted(CONFIG_DIR.glob("*.toml")):
         if path.name in SKIP_CONFIGS:
@@ -22,7 +42,7 @@ def discover_instances() -> list[dict]:
             job = raw.get("job", {})
             key = job.get("key", "")
             port = job.get("port", 0)
-            if key and port:
+            if key and port and key not in seen_keys:
                 instances.append({
                     "key": key,
                     "port": port,
@@ -32,20 +52,6 @@ def discover_instances() -> list[dict]:
                     "ticket_system": job.get("ticket_system", ""),
                 })
                 seen_keys.add(key)
-
-            discovery = raw.get("discovery", {})
-            for inst_config in discovery.get("instances", []):
-                inst_key = inst_config.get("key", "")
-                if inst_key and inst_key not in seen_keys:
-                    instances.append({
-                        "key": inst_key,
-                        "port": inst_config.get("port", 0),
-                        "base_url": inst_config.get("base_url", ""),
-                        "config_path": str(path),
-                        "platform": inst_config.get("platform", ""),
-                        "ticket_system": inst_config.get("ticket_system", ""),
-                    })
-                    seen_keys.add(inst_key)
         except Exception:
             continue
 

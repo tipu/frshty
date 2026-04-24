@@ -1,0 +1,25 @@
+[instances]
+
+[[instances.list]]
+key = "aimyable"
+base_url = "https://aimyable.localhost"
+platform = "bitbucket"
+ticket_system = "jira"
+
+[[instances.list]]
+key = "atropos"
+base_url = "http://192.168.1.117:7100"
+platform = "github"
+ticket_system = "jira"
+
+[[instances.list]]
+key = "nectar"
+base_url = "https://nectar.localhost"
+platform = "github"
+ticket_system = "linear"
+
+[[instances.list]]
+key = "tipu-test"
+base_url = "https://tipu-test.localhost"
+platform = "github"
+ticket_system = "jira"
