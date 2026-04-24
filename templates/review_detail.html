@@ -241,6 +241,23 @@ function renderDiff(raw, comments) {
                 html += renderInlineComment(c);
             }
         }
+
+        const shownLines = new Set(file.lines.filter(l => l.newLine).map(l => l.newLine));
+        const unmatchedComments = Object.entries(fileComments)
+            .filter(([lineStr]) => {
+                const lineNum = parseInt(lineStr);
+                return lineNum > 0 && !shownLines.has(lineNum);
+            })
+            .flatMap(([_, comments]) => comments);
+
+        if (unmatchedComments.length) {
+            html += `<div class="diff-line diff-ctx" style="padding: 12px; background: #1a1a2a; border-top: 1px solid #2a2a2a; font-size: 12px; color: #888;">
+                <span class="ml-2">Comments on lines outside the diff context:</span>
+            </div>`;
+            for (const c of unmatchedComments) {
+                html += renderInlineComment(c);
+            }
+        }
         html += `</div>`;
     }
 
