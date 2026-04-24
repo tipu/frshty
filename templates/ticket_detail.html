@@ -100,6 +100,13 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
             </div>
         </div>
         <div id="jobs-timeline" class="text-xs space-y-1"></div>
+        <div id="job-output-section" class="hidden mt-4 pt-4 border-t border-gray-700">
+            <div class="flex items-center justify-between mb-2">
+                <span class="text-xs font-bold text-gray-500 uppercase" id="job-output-title">Output</span>
+                <button onclick="closeJobOutput()" class="text-xs text-gray-500 hover:text-gray-300">Close</button>
+            </div>
+            <pre id="job-output" class="bg-gray-950 border border-gray-700 rounded p-3 text-xs overflow-auto max-h-96 text-gray-300 font-mono whitespace-pre-wrap word-break break-all"></pre>
+        </div>
     </div>
     <div id="notes-section" class="card p-3 mb-4 hidden">
         <span class="text-xs font-bold text-gray-500 uppercase">Add note and reset to new</span>
@@ -580,12 +587,12 @@ async function loadJobs() {
         populateStateDropdown(visited, currentState);
         timeline.innerHTML = rows.map(j => {
             const color = j.status === 'ok' ? 'text-green-400' : j.status === 'failed' ? 'text-red-400' : j.status === 'skipped' ? 'text-gray-500' : 'text-blue-400';
-            const retry = (j.status === 'failed' || j.status === 'skipped') ? ` <button onclick="retryJob(${j.id})" class="ml-2 text-xs text-yellow-400 hover:text-yellow-200 underline">retry</button>` : '';
+            const retry = (j.status === 'failed' || j.status === 'skipped') ? ` <button onclick="event.stopPropagation(); retryJob(${j.id})" class="ml-2 text-xs text-yellow-400 hover:text-yellow-200 underline">retry</button>` : '';
             const at = j.finished_at || j.started_at || j.enqueued_at;
             const rel = at ? ` <span class="text-gray-600">(${relativeTime(at)})</span>` : '';
             let resp = '';
             try { const r = JSON.parse(j.response || '{}'); if (r.reason) resp = ` — ${r.reason}`; } catch(e) {}
-            return `<div class="flex items-start gap-2"><span class="text-gray-500">${at}${rel}</span><span class="${color}">${j.status}</span><span class="text-gray-300">${j.task}</span><span class="text-gray-500">${resp}</span>${retry}</div>`;
+            return `<div class="cursor-pointer hover:bg-gray-800 p-2 rounded flex items-start gap-2" onclick="viewJobOutput(${j.id}, '${j.task}')"><span class="text-gray-500">${at}${rel}</span><span class="${color}">${j.status}</span><span class="text-gray-300">${j.task}</span><span class="text-gray-500">${resp}</span>${retry}</div>`;
         }).join('');
     } catch (e) { console.warn('jobs fetch failed', e); }
 }
@@ -596,6 +603,65 @@ async function retryJob(jobId) {
         body: JSON.stringify({job_id: jobId}),
     });
     if (r.ok) { await loadJobs(); } else { alert((await r.json()).error || 'retry failed'); }
+}
+
+let currentJobId = null;
+let jobOutputOffset = 0;
+let jobOutputPolling = null;
+
+async function viewJobOutput(jobId, taskName) {
+    currentJobId = jobId;
+    jobOutputOffset = 0;
+    const section = document.getElementById('job-output-section');
+    const output = document.getElementById('job-output');
+    const title = document.getElementById('job-output-title');
+    title.textContent = `Output — ${taskName} (job ${jobId})`;
+    output.textContent = 'Loading...';
+    section.classList.remove('hidden');
+    window.scrollTo({top: section.offsetTop - 100, behavior: 'smooth'});
+
+    if (jobOutputPolling) clearTimeout(jobOutputPolling);
+    pollJobOutput();
+}
+
+async function pollJobOutput() {
+    if (!currentJobId) return;
+    try {
+        const r = await fetch(`/api/jobs/${currentJobId}/live?offset=${jobOutputOffset}`);
+        if (!r.ok) {
+            document.getElementById('job-output').textContent = 'Error loading output';
+            return;
+        }
+        const data = await r.json();
+        const output = document.getElementById('job-output');
+
+        if (jobOutputOffset === 0) {
+            output.textContent = data.content || '';
+        } else {
+            output.textContent += data.content || '';
+        }
+
+        jobOutputOffset = data.offset;
+
+        // Auto-scroll to bottom
+        output.parentElement.scrollTop = output.parentElement.scrollHeight;
+
+        // Continue polling if job is not done
+        if (!data.done) {
+            jobOutputPolling = setTimeout(pollJobOutput, 500);
+        } else {
+            jobOutputPolling = null;
+        }
+    } catch (e) {
+        console.error('job output poll failed', e);
+        jobOutputPolling = setTimeout(pollJobOutput, 2000);
+    }
+}
+
+function closeJobOutput() {
+    currentJobId = null;
+    if (jobOutputPolling) clearTimeout(jobOutputPolling);
+    document.getElementById('job-output-section').classList.add('hidden');
 }
 
 async function submitNote() {
