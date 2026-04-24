@@ -347,11 +347,13 @@ def _validate_issues(issues: list[dict], worktree: Path | None) -> list[dict]:
 
 def _simplify_body(body: str) -> str:
     output = run_haiku(
-        "Rewrite this code review comment in 1-3 sentences. "
-        "Speak directly to the code author. Be technical and direct, no fluff. "
-        "Never use hyphens, em dashes, or bullet points. "
-        "Wrap function names, variable names, class names, file paths, and code keywords in backticks (e.g. `myFunction`, `user_id`, `None`). "
-        f"Return ONLY the rewritten text, nothing else.\n\n{body}"
+        "Strip this review comment to its essence. Remove: hedging language (might, could, may), "
+        "examples, explanations of why, background context. "
+        "1-2 sentences max. Be imperative not narrative. "
+        "Bad: 'This might overflow if the array is large.' "
+        "Good: 'This overflows on large arrays; use a buffer.' "
+        "Backticks for code only. Return ONLY the rewritten text."
+        f"\n\n{body}"
     )
     return output if output else body
 
