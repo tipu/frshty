@@ -85,9 +85,13 @@ def check(config: dict):
 
     review_state = state.load("reviews")
     base_url = config["_base_url"]
+    seen_prs = set()
 
     for pr in review_prs:
         pr_key = f"{pr['repo']}/{pr['id']}"
+        if pr_key in seen_prs:
+            continue
+        seen_prs.add(pr_key)
         existing = review_state.get(pr_key, {})
         head_sha = pr.get("head_sha", "")
 
@@ -126,6 +130,10 @@ def check(config: dict):
                 log.emit("review_comments_queued", f"{pr['repo']}#{pr['id']}: {len(issues)} comments ready to submit",
                     links={"detail": f"{base_url}/reviews/{pr['repo']}/{pr['id']}"},
                     meta={"repo": pr["repo"], "pr_id": pr["id"]})
+        else:
+            log.emit("review_failed", f"Review failed for {pr['repo']}#{pr['id']} (will retry next cycle)",
+                links={"pr": pr["url"], "detail": f"{base_url}/reviews/{pr['repo']}/{pr['id']}"},
+                meta={"repo": pr["repo"], "pr_id": pr["id"]})
 
     state.save("reviews", review_state)
 
