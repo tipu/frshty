@@ -1573,10 +1573,8 @@ def run_cycle(config: dict):
             import core.queue as _q
             _q.emit_event(source="cron", kind="cron_tick", payload={},
                            instance_key=config.get("job", {}).get("key", ""))
-            log.emit("cycle_end", "Cycle emitted cron_tick (worker pool owns execution)")
-            return
         except Exception as e:
-            log.emit("cycle_error", f"cron_tick emit failed, falling back to direct: {e}")
+            log.emit("cycle_error", f"cron_tick emit failed: {e}")
 
     try:
         own_prs.check(config)
@@ -1591,7 +1589,7 @@ def run_cycle(config: dict):
 
     if config.get("features", {}).get("tickets"):
         try:
-            _tickets_mod.check(config)
+            _tickets_mod.check(config, config.get("job", {}).get("key", ""))
         except Exception as e:
             log.emit("cycle_error", f"tickets failed: {e}\n{traceback.format_exc()}")
 
