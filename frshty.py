@@ -1557,81 +1557,6 @@ def api_billing_preview(start: str, end: str):
     return {"descriptions": billing.preview_descriptions(_config, start, end)}
 
 
-def _reload_config(config: dict):
-    try:
-        fresh = cfg.load_config(str(config["_config_path"]))
-        config.update(fresh)
-    except Exception:
-        pass
-
-
-def run_cycle(config: dict):
-    _reload_config(config)
-    log.emit("cycle_start", "Cycle started")
-    if _events_enabled():
-        try:
-            import core.queue as _q
-            _q.emit_event(source="cron", kind="cron_tick", payload={},
-                           instance_key=config.get("job", {}).get("key", ""))
-        except Exception as e:
-            log.emit("cycle_error", f"cron_tick emit failed: {e}")
-
-    try:
-        own_prs.check(config)
-    except Exception as e:
-        log.emit("cycle_error", f"own_prs failed: {e}")
-
-    if config.get("features", {}).get("review_prs"):
-        try:
-            reviewer.check(config)
-        except Exception as e:
-            log.emit("cycle_error", f"reviewer failed: {e}")
-
-    if config.get("features", {}).get("tickets"):
-        try:
-            _tickets_mod.check(config, config.get("job", {}).get("key", ""))
-        except Exception as e:
-            log.emit("cycle_error", f"tickets failed: {e}\n{traceback.format_exc()}")
-
-    if config.get("features", {}).get("timesheet"):
-        try:
-            ts.check(config)
-        except Exception as e:
-            log.emit("cycle_error", f"timesheet failed: {e}")
-
-    if config.get("features", {}).get("billing"):
-        try:
-            billing.check(config)
-        except Exception as e:
-            log.emit("cycle_error", f"billing failed: {e}")
-
-    try:
-        scheduler.check_due(config)
-    except Exception as e:
-        log.emit("cycle_error", f"scheduler failed: {e}")
-
-    log.emit("cycle_end", "Cycle complete")
-
-
-def main_loop(config: dict):
-    while True:
-        try:
-            run_cycle(config)
-        except Exception:
-            log.emit("cycle_error", traceback.format_exc())
-        sleep_time = random.randint(180, 420)
-        log.emit("cycle_sleep", f"Sleeping {sleep_time}s")
-        time.sleep(sleep_time)
-
-
-def slack_loop(config: dict):
-    while True:
-        if config.get("features", {}).get("slack"):
-            try:
-                slack_monitor.check(config)
-            except Exception as e:
-                log.emit("cycle_error", f"slack_monitor failed: {e}")
-        time.sleep(random.randint(50, 90))
 
 
 def _run_review(config_path: str, full_repo: str, pr_id: int, url: str):
@@ -1706,18 +1631,13 @@ def main():
     configs = [cfg.load_config(p) for p in (args.multi or [args.config])]
     primary = configs[0]
     _set_primary_config(primary)
-    # Always use event-driven system (unified architecture)
+    # Fully event-driven: all periodic work via cron_tick -> Dispatcher -> WorkerPool
     try:
         import core.runtime as _rt
-        _rt.start_events(configs, cron_interval=0)
+        _rt.start_events(configs, cron_interval=240)
     except Exception as e:
         log.emit("events_boot_failed", f"{type(e).__name__}: {e}")
         raise
-
-    # Start main_loop as cron ticker
-    import threading
-    thread = threading.Thread(target=main_loop, args=(_config,), daemon=True)
-    thread.start()
 
 
     if args.multi:

@@ -12,21 +12,23 @@ def test_check_is_callable():
     assert callable(tickets.check), "tickets.check should be callable"
 
 
-def test_main_loop_function_exists():
+def test_main_loop_function_removed():
     """
-    Verify main_loop function exists in frshty.py.
-    """
-    frshty_path = Path(__file__).parent.parent.parent / "frshty.py"
-    source = frshty_path.read_text()
-
-    assert "def main_loop(" in source, "frshty should have main_loop() function"
-
-
-def test_run_cycle_function_exists():
-    """
-    Verify run_cycle function exists in frshty.py.
+    Verify main_loop function was removed from frshty.py.
+    Fully event-driven: no polling threads.
     """
     frshty_path = Path(__file__).parent.parent.parent / "frshty.py"
     source = frshty_path.read_text()
 
-    assert "def run_cycle(" in source, "frshty should have run_cycle() function"
+    assert "def main_loop(" not in source, "main_loop should be removed (fully event-driven)"
+
+
+def test_run_cycle_function_removed():
+    """
+    Verify run_cycle function was removed from frshty.py.
+    Fully event-driven: cron_tick emitted by event system, not by run_cycle.
+    """
+    frshty_path = Path(__file__).parent.parent.parent / "frshty.py"
+    source = frshty_path.read_text()
+
+    assert "def run_cycle(" not in source, "run_cycle should be removed (fully event-driven)"
