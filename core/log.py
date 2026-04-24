@@ -1,42 +1,34 @@
-import fcntl
 import json
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+import core.db as _db
+from core.state import _instance_key_cv as _instance_key_cv
+
 _default_job_key: str = ""
-_default_log_path: Path | None = None
-_default_read_state_path: Path | None = None
 
 _job_key_cv: ContextVar[str | None] = ContextVar("frshty_log_job_key", default=None)
-_log_path_cv: ContextVar[Path | None] = ContextVar("frshty_log_path", default=None)
-_read_state_path_cv: ContextVar[Path | None] = ContextVar("frshty_log_read_state", default=None)
 
 
 def init(state_dir: Path, job_key: str):
-    global _default_job_key, _default_log_path, _default_read_state_path
+    global _default_job_key
     _default_job_key = job_key
     logs_dir = state_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
-    _default_log_path = logs_dir / f"{job_key}.jsonl"
-    _default_read_state_path = logs_dir / "read_state.json"
 
 
 def use(state_dir: Path, job_key: str):
     logs_dir = state_dir / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
     k_token = _job_key_cv.set(job_key)
-    l_token = _log_path_cv.set(logs_dir / f"{job_key}.jsonl")
-    r_token = _read_state_path_cv.set(logs_dir / "read_state.json")
-    return (k_token, l_token, r_token)
+    return (k_token,)
 
 
 def reset(tokens):
-    k, l, r = tokens
+    (k,) = tokens
     _job_key_cv.reset(k)
-    _log_path_cv.reset(l)
-    _read_state_path_cv.reset(r)
 
 
 def _active_job_key() -> str:
@@ -44,32 +36,36 @@ def _active_job_key() -> str:
     return k if k is not None else _default_job_key
 
 
-def _active_log_path() -> Path | None:
-    p = _log_path_cv.get()
-    return p if p is not None else _default_log_path
-
-
-def _active_read_state_path() -> Path | None:
-    p = _read_state_path_cv.get()
-    return p if p is not None else _default_read_state_path
+def _active_instance_key() -> str:
+    k = _instance_key_cv.get()
+    if k is not None:
+        return k
+    import core.state as _state
+    try:
+        return _state.active_instance_key()
+    except RuntimeError:
+        return ""
 
 
 def emit(event: str, summary: str, links: dict | None = None, meta: dict | None = None):
     clean_links = {k: v for k, v in (links or {}).items() if v}
     job = _active_job_key()
+    instance_key = _active_instance_key()
+    ts = datetime.now(timezone.utc).isoformat()
+    record_id = uuid4().hex[:12]
     record = {
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": ts,
         "job": job,
         "event": event,
-        "id": uuid4().hex[:12],
+        "id": record_id,
         "summary": summary,
         "links": clean_links,
         "meta": meta or {},
     }
-    log_path = _active_log_path()
-    if log_path is not None:
-        with open(log_path, "a") as f:
-            f.write(json.dumps(record) + "\n")
+    _db.execute(
+        "INSERT OR IGNORE INTO log_events(id, instance_key, job, event, summary, links, meta, ts) VALUES(?,?,?,?,?,?,?,?)",
+        (record_id, instance_key, job, event, summary, json.dumps(clean_links), json.dumps(meta or {}), ts)
+    )
     print(f"[{job}] {event}: {summary}", flush=True)
     return record
 
@@ -78,27 +74,40 @@ MAX_LOG_LINES = 50000
 
 
 def get_events(limit: int = 100, after: str | None = None, unread_only: bool = False) -> list[dict]:
-    log_path = _active_log_path()
-    if not log_path or not log_path.exists():
+    instance_key = _active_instance_key()
+    job = _active_job_key()
+    if not instance_key or not job:
         return []
-    dismissed = _load_read_state()
-    lines = log_path.read_text().splitlines()
-    lines = lines[-MAX_LOG_LINES:] if len(lines) > MAX_LOG_LINES else lines
+
+    query = """
+        SELECT e.id, e.job, e.event, e.summary, e.ts,
+               COALESCE(json_extract(e.links, '$'), '{}') as links,
+               COALESCE(json_extract(e.meta, '$'), '{}') as meta,
+               (r.event_id IS NOT NULL) as read
+        FROM log_events e
+        LEFT JOIN log_read_state r ON r.instance_key=e.instance_key AND r.event_id=e.id
+        WHERE e.instance_key=? AND e.job=?
+    """
+    params = [instance_key, job]
+
+    if after:
+        query += " AND e.ts > ?"
+        params.append(after)
+
+    query += " ORDER BY e.ts DESC LIMIT ?"
+    params.append(MAX_LOG_LINES)
+
+    rows = _db.query_all(query, tuple(params))
     events = []
-    for line in lines:
-        if not line.strip():
-            continue
-        try:
-            ev = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if after and ev["ts"] <= after:
-            continue
-        ev["read"] = ev["id"] in dismissed
+    for row in rows:
+        ev = dict(row)
+        ev["links"] = json.loads(ev.get("links") or "{}")
+        ev["meta"] = json.loads(ev.get("meta") or "{}")
+        ev["read"] = bool(ev["read"])
         if unread_only and ev["read"]:
             continue
         events.append(ev)
-    events.reverse()
+
     return events[:limit]
 
 
@@ -113,92 +122,32 @@ def dismiss_ids(event_ids) -> int:
 
 
 def _dismiss_ids(new_ids: set) -> int:
-    """Atomic load → union → save under an exclusive lock so concurrent
-    dismiss calls can't lose updates to each other."""
-    import os, tempfile
-    p = _active_read_state_path()
-    lock = _read_state_lock_path()
-    if p is None or lock is None:
+    instance_key = _active_instance_key()
+    if not instance_key:
         return 0
-    with open(lock, "w") as lf:
-        fcntl.flock(lf, fcntl.LOCK_EX)
-        current: set = set()
-        if p.exists():
-            try:
-                current = set(json.loads(p.read_text()))
-            except (json.JSONDecodeError, ValueError):
-                current = set()
-        added = len(new_ids - current)
-        current |= new_ids
-        tmp = None
-        try:
-            with tempfile.NamedTemporaryFile(mode="w", dir=str(p.parent), suffix=".tmp", delete=False) as f:
-                tmp = f.name
-                json.dump(list(current), f)
-            os.replace(tmp, str(p))
-        except Exception:
-            if tmp and os.path.exists(tmp):
-                os.unlink(tmp)
-            raise
-        return added
+    existing = {r["event_id"] for r in _db.query_all(
+        "SELECT event_id FROM log_read_state WHERE instance_key=?", (instance_key,)
+    )}
+    to_add = new_ids - existing
+    for eid in to_add:
+        _db.execute("INSERT OR IGNORE INTO log_read_state(instance_key, event_id) VALUES(?,?)", (instance_key, eid))
+    return len(to_add)
 
 
 def dismiss_all():
-    log_path = _active_log_path()
-    if not log_path or not log_path.exists():
+    instance_key = _active_instance_key()
+    job = _active_job_key()
+    if not instance_key or not job:
         return
-    lock_path = log_path.parent / "log.lock"
-    with open(lock_path, "w") as lf:
-        fcntl.flock(lf, fcntl.LOCK_EX)
-        lines = log_path.read_text().splitlines()
-        ids = set()
-        for line in lines:
-            try:
-                ev = json.loads(line)
-                ids.add(ev["id"])
-            except (json.JSONDecodeError, KeyError):
-                continue
-        if len(lines) > MAX_LOG_LINES:
-            log_path.write_text("\n".join(lines[-MAX_LOG_LINES:]) + "\n")
-            retained = set(lines[-MAX_LOG_LINES:])
-            ids = {eid for eid in ids if any(eid in l for l in retained)}
-    _save_read_state(ids)
-
-
-def _read_state_lock_path():
-    p = _active_read_state_path()
-    return p.parent / "read_state.lock" if p else None
-
-
-def _load_read_state() -> set:
-    p = _active_read_state_path()
-    if not p or not p.exists():
-        return set()
-    lock = _read_state_lock_path()
-    if lock is None:
-        return set()
-    with open(lock, "w") as lf:
-        fcntl.flock(lf, fcntl.LOCK_SH)
-        return set(json.loads(p.read_text()))
-
-
-def _save_read_state(ids: set):
-    import os, tempfile
-    p = _active_read_state_path()
-    if p is None:
-        return
-    lock = _read_state_lock_path()
-    if lock is None:
-        return
-    with open(lock, "w") as lf:
-        fcntl.flock(lf, fcntl.LOCK_EX)
-        tmp = None
-        try:
-            with tempfile.NamedTemporaryFile(mode="w", dir=str(p.parent), suffix=".tmp", delete=False) as f:
-                tmp = f.name
-                json.dump(list(ids), f)
-            os.replace(tmp, str(p))
-        except Exception:
-            if tmp and os.path.exists(tmp):
-                os.unlink(tmp)
-            raise
+    with _db.tx() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO log_read_state(instance_key, event_id) "
+            "SELECT instance_key, id FROM log_events WHERE instance_key=? AND job=?",
+            (instance_key, job)
+        )
+        conn.execute(
+            "DELETE FROM log_events WHERE instance_key=? AND job=? AND id NOT IN ("
+            "  SELECT id FROM log_events WHERE instance_key=? AND job=? ORDER BY ts DESC LIMIT ?"
+            ")",
+            (instance_key, job, instance_key, job, MAX_LOG_LINES)
+        )
