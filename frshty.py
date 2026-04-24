@@ -104,7 +104,7 @@ if len(sys.argv) >= 2 and Path(sys.argv[1]).exists():
 @contextlib.asynccontextmanager
 async def _lifespan(a):
     global _worker_proc
-    if len(sys.argv) >= 2:
+    if len(sys.argv) >= 2 and not (sys.argv[1] == "--multi"):
         _worker_proc = multiprocessing.Process(target=_run_worker, args=(sys.argv[1],), daemon=True)
         _worker_proc.start()
     yield
@@ -429,6 +429,19 @@ def api_submit_review(body: dict):
         target=_run_review, args=(str(_config["_config_path"]), full_repo, pr_id, url), daemon=True
     ).start()
     return {"status": "started", "repo": full_repo, "pr_id": pr_id}
+
+
+@app.post("/api/reviews/rerun-ticket/{ticket_key}")
+def api_rerun_ticket_review(ticket_key: str):
+    ticket_state = state.load("tickets")
+    ticket_data = ticket_state.get(ticket_key)
+    if not ticket_data:
+        return JSONResponse({"error": f"Ticket {ticket_key} not found"}, status_code=404)
+    prs = ticket_data.get("prs", [])
+    if not prs:
+        return JSONResponse({"error": f"No PRs found for {ticket_key}"}, status_code=404)
+    reviewer.review_ticket_prs(_config, ticket_key, prs)
+    return {"status": "review_started", "ticket": ticket_key, "pr_count": len(prs)}
 
 
 @app.put("/api/settings")
@@ -1151,6 +1164,80 @@ def api_ticket_jobs(key: str, limit: int = 100):
     import core.queue as q
     instance_key = _config.get("job", {}).get("key", "")
     return q.jobs_for_ticket(instance_key, key, limit)
+
+
+_TERMINAL_JOB_STATUSES = {"ok", "failed", "skipped"}
+
+
+def _trim_to_utf8_boundary(data: bytes) -> bytes:
+    """Return a prefix of data that ends at a valid UTF-8 codepoint boundary.
+
+    Walks up to 3 continuation bytes back from the end. If the trailing byte
+    is a start byte of a multi-byte sequence we haven't fully received yet,
+    trim those bytes so decode() with strict=False works cleanly and the
+    next poll picks them up."""
+    n = len(data)
+    if n == 0:
+        return data
+    i = n - 1
+    # Continuation bytes: 10xxxxxx
+    while i >= 0 and (data[i] & 0xC0) == 0x80:
+        i -= 1
+        if n - i > 3:
+            return data
+    if i < 0:
+        return data
+    b = data[i]
+    # ASCII
+    if b < 0x80:
+        return data
+    # 2-byte sequence: 110xxxxx, expects 1 continuation
+    if (b & 0xE0) == 0xC0 and n - i == 2:
+        return data
+    if (b & 0xE0) == 0xC0:
+        return data[:i]
+    # 3-byte sequence: 1110xxxx, expects 2 continuations
+    if (b & 0xF0) == 0xE0 and n - i == 3:
+        return data
+    if (b & 0xF0) == 0xE0:
+        return data[:i]
+    # 4-byte sequence: 11110xxx, expects 3 continuations
+    if (b & 0xF8) == 0xF0 and n - i == 4:
+        return data
+    if (b & 0xF8) == 0xF0:
+        return data[:i]
+    return data
+
+
+@app.get("/api/jobs/{job_id}/live")
+def api_job_live(job_id: int, offset: int = 0):
+    from core.job_logs import job_log_path
+    import core.db as _db
+    instance_key = _config.get("job", {}).get("key", "")
+    row = _db.query_one(
+        "SELECT status FROM jobs WHERE id=? AND instance_key=?",
+        (job_id, instance_key),
+    )
+    if not row:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    done = row["status"] in _TERMINAL_JOB_STATUSES
+    log_path = job_log_path(instance_key, job_id)
+    if not log_path.exists():
+        return {"content": "", "offset": 0, "done": done}
+    if offset < 0:
+        return JSONResponse({"error": "negative offset"}, status_code=400)
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(offset)
+            raw = f.read()
+    except OSError as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    trimmed = _trim_to_utf8_boundary(raw)
+    return {
+        "content": trimmed.decode("utf-8", errors="replace"),
+        "offset": offset + len(trimmed),
+        "done": done,
+    }
 
 
 @app.post("/api/tickets/{key}/retry-job")
