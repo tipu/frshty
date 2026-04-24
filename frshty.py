@@ -1750,6 +1750,11 @@ def main():
             # runtime ticker at its default interval.
             cron_interval = 0 if (not args.multi and os.environ.get("FRSHTY_EVENTS") == "1") else 240
             _rt.start_events(configs, cron_interval=cron_interval)
+            # Start main_loop as daemon thread in single-instance FRSHTY_EVENTS=1 mode
+            if not args.multi and os.environ.get("FRSHTY_EVENTS") == "1":
+                import threading
+                thread = threading.Thread(target=main_loop, args=(_config,), daemon=True)
+                thread.start()
         except Exception as e:
             log.emit("events_boot_failed", f"{type(e).__name__}: {e}")
 
