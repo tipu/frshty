@@ -55,9 +55,16 @@ body.maximized #terminal-container { flex: 1; height: auto !important; }
 .comment-inline.needs_reply { border-left-color: #eab308; }
 .comment-inline.replied { border-left-color: #22c55e; opacity: 0.5; }
 textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; }
+.layout-3col { display: grid; grid-template-columns: 250px 1fr 300px; gap: 16px; margin-bottom: 16px; }
+@media (max-width: 1400px) { .layout-3col { grid-template-columns: 1fr; } }
+.collapsible-header { cursor: pointer; display: flex; align-items: center; user-select: none; }
+.collapsible-header::before { content: '▶ '; font-size: 10px; margin-right: 4px; display: inline-block; transition: transform 0.2s; }
+.collapsible-header.expanded::before { transform: rotate(90deg); }
+.collapsible-content { max-height: 600px; overflow: hidden; transition: max-height 0.2s ease-in-out; }
+.collapsible-content.collapsed { max-height: 0; opacity: 0; }
 </style>
 </head>
-<body class="p-4 max-w-5xl mx-auto">
+<body class="p-4 max-w-full">
 <div id="content">
 <header class="flex items-center gap-4 mb-4">
     <a href="/tickets" class="link text-sm">&larr; Tickets</a>
@@ -80,48 +87,68 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
     <button class="tab-btn active" onclick="showTab('docs')">Docs</button>
     <button class="tab-btn" onclick="showTab('diff')">Diff & Comments</button>
 </div>
-<div id="docs-section">
-    <div id="docs" class="space-y-4 mb-6"></div>
-    <div id="history" class="mb-4"></div>
-    <div id="jobs-timeline-section" class="card p-3 mb-4 hidden">
-        <div class="flex items-center justify-between mb-2">
-            <span class="text-xs font-bold text-gray-500 uppercase">Jobs timeline</span>
-            <div class="flex items-center gap-3 text-xs">
-                <label class="flex items-center gap-1">
-                    <input type="checkbox" id="auto-pr-cb" onchange="toggleAutoPr(this.checked)" />
-                    <span>auto_pr</span>
-                </label>
-                <label class="flex items-center gap-1">
-                    <span>set state</span>
+<div id="docs-section" class="layout-3col">
+    <!-- LEFT SIDEBAR: Controls & Context -->
+    <div class="space-y-4">
+        <div id="status-controls" class="card p-3">
+            <div class="text-xs font-bold text-gray-500 uppercase mb-3">Controls</div>
+            <div class="space-y-3 text-xs">
+                <div>
+                    <label class="text-gray-400 block mb-1">Set State</label>
                     <select id="set-state-dd" onchange="submitSetState(this.value); this.value='';"
-                            class="bg-transparent border border-gray-700 rounded px-1 py-0.5 text-xs"></select>
+                            class="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1"></select>
+                </div>
+                <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="checkbox" id="auto-pr-cb" onchange="toggleAutoPr(this.checked)" />
+                    <span class="text-gray-400">auto_pr</span>
                 </label>
-                <button onclick="loadJobs()" class="text-gray-500 hover:text-gray-300">Refresh</button>
             </div>
         </div>
-        <div id="jobs-timeline" class="text-xs space-y-1"></div>
-        <div id="job-output-section" class="hidden mt-4 pt-4 border-t border-gray-700">
+
+        <div id="context-section" class="card p-3">
+            <div class="collapsible-header expanded" onclick="toggleCollapse(this)">
+                <span class="text-xs font-bold text-gray-500 uppercase">Context</span>
+            </div>
+            <div class="collapsible-content expanded">
+                <textarea id="context-input" rows="4" class="w-full mt-2 p-2 bg-gray-900 border border-gray-700 rounded text-xs font-mono" placeholder="Context for AI tools — saved to docs/custom-context/{key}.md"></textarea>
+                <div class="flex gap-2 mt-2">
+                    <button onclick="saveContext()" class="text-xs bg-blue-800 hover:bg-blue-700 text-blue-200 px-2 py-1 rounded flex-1">Save</button>
+                    <button onclick="deleteContext()" class="text-xs bg-red-900 hover:bg-red-800 text-red-300 px-2 py-1 rounded flex-1">Delete</button>
+                </div>
+            </div>
+        </div>
+
+        <div id="notes-section" class="card p-3 hidden">
+            <div class="collapsible-header collapsed" onclick="toggleCollapse(this)">
+                <span class="text-xs font-bold text-gray-500 uppercase">Add Note</span>
+            </div>
+            <div class="collapsible-content collapsed">
+                <textarea id="notes-input" rows="3" class="w-full mt-2 p-2 bg-gray-900 border border-gray-700 rounded text-xs"></textarea>
+                <button onclick="submitNote()" class="mt-2 w-full text-xs bg-yellow-800 hover:bg-yellow-700 text-yellow-200 px-2 py-1 rounded">Add note & restart</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- CENTER: Main Content (Docs & History) -->
+    <div class="space-y-4">
+        <div id="docs" class="space-y-2"></div>
+        <div id="history" class="card p-3"></div>
+    </div>
+
+    <!-- RIGHT SIDEBAR: Jobs & Output -->
+    <div id="jobs-timeline-section" class="card p-3 flex flex-col" style="height: fit-content; max-height: 600px;">
+        <div class="flex items-center justify-between mb-3 pb-3 border-b border-gray-700">
+            <span class="text-xs font-bold text-gray-500 uppercase">Jobs</span>
+            <button onclick="loadJobs()" class="text-xs text-gray-500 hover:text-gray-300">⟳</button>
+        </div>
+        <div id="jobs-timeline" class="text-xs space-y-1 overflow-y-auto flex-1 mb-3"></div>
+        <div id="job-output-section" class="hidden border-t border-gray-700 pt-2">
             <div class="flex items-center justify-between mb-2">
                 <span class="text-xs font-bold text-gray-500 uppercase" id="job-output-title">Output</span>
-                <button onclick="closeJobOutput()" class="text-xs text-gray-500 hover:text-gray-300">Close</button>
+                <button onclick="closeJobOutput()" class="text-xs text-gray-500 hover:text-gray-300">×</button>
             </div>
-            <pre id="job-output" class="bg-gray-950 border border-gray-700 rounded p-3 text-xs overflow-auto max-h-96 text-gray-300 font-mono whitespace-pre-wrap word-break break-all"></pre>
+            <pre id="job-output" class="bg-gray-950 border border-gray-700 rounded p-2 text-xs overflow-auto max-h-64 text-gray-300 font-mono whitespace-pre-wrap word-break break-all"></pre>
         </div>
-    </div>
-    <div id="notes-section" class="card p-3 mb-4 hidden">
-        <span class="text-xs font-bold text-gray-500 uppercase">Add note and reset to new</span>
-        <textarea id="notes-input" rows="3" class="w-full mt-2 p-2 bg-gray-900 border border-gray-700 rounded text-sm"></textarea>
-        <button onclick="submitNote()" class="mt-2 text-xs bg-yellow-800 hover:bg-yellow-700 text-yellow-200 px-3 py-1 rounded">Add note and restart</button>
-    </div>
-    <div id="context-section" class="card p-3 mb-4">
-        <div class="flex items-center justify-between mb-2">
-            <span class="text-xs font-bold text-gray-500 uppercase">Context</span>
-            <div class="flex gap-2">
-                <button onclick="saveContext()" class="text-xs bg-blue-800 hover:bg-blue-700 text-blue-200 px-3 py-1 rounded">Save</button>
-                <button onclick="deleteContext()" class="text-xs bg-red-900 hover:bg-red-800 text-red-300 px-3 py-1 rounded">Delete</button>
-            </div>
-        </div>
-        <textarea id="context-input" rows="4" class="w-full p-2 bg-gray-900 border border-gray-700 rounded text-sm font-mono" placeholder="Context for AI tools — saved to docs/custom-context/{key}.md"></textarea>
     </div>
 </div>
 <div id="diff-section" style="display:none">
@@ -239,16 +266,23 @@ async function load() {
     }
 
     document.getElementById('docs').innerHTML += sorted.map(([name, content]) => `
-        <div class="card p-4">
-            <div class="text-xs font-bold text-gray-500 uppercase mb-2">${name}</div>
-            <div class="md-content text-sm">${marked.parse(content)}</div>
+        <div class="card p-3">
+            <div class="collapsible-header collapsed" onclick="toggleCollapse(this)">
+                <span class="text-xs font-bold text-gray-500 uppercase">${name}</span>
+            </div>
+            <div class="collapsible-content collapsed">
+                <div class="md-content text-sm p-3 pt-2">${marked.parse(content)}</div>
+            </div>
         </div>
     `).join('');
 
     const history = data.history || [];
     document.getElementById('history').innerHTML = history.length ? `
-        <div class="card p-4">
-            <div class="text-xs font-bold text-gray-500 uppercase mb-2">Event History</div>
+        <div class="card p-3">
+            <div class="collapsible-header collapsed" onclick="toggleCollapse(this)">
+                <span class="text-xs font-bold text-gray-500 uppercase">Event History</span>
+            </div>
+            <div class="collapsible-content collapsed">
             <div class="space-y-1 text-xs">
                 ${history.map(e => {
                     const absTime = new Date(e.ts).toLocaleString();
@@ -264,6 +298,7 @@ async function load() {
                         <span>${links}</span>
                     </div>`;
                 }).join('')}
+            </div>
             </div>
         </div>
     ` : '';
@@ -752,6 +787,15 @@ async function deleteContext() {
 document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && maximized) toggleMaximize();
 });
+
+function toggleCollapse(headerEl) {
+    const content = headerEl.nextElementSibling;
+    if (!content) return;
+    headerEl.classList.toggle('expanded');
+    headerEl.classList.toggle('collapsed');
+    content.classList.toggle('collapsed');
+    content.classList.toggle('expanded');
+}
 
 loadContext();
 startTerminal();
