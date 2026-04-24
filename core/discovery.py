@@ -10,27 +10,45 @@ SKIP_CONFIGS = {"example.toml", "test.toml"}
 
 def discover_instances() -> list[dict]:
     instances = []
+    seen_keys = set()
+
     for path in sorted(CONFIG_DIR.glob("*.toml")):
         if path.name in SKIP_CONFIGS:
             continue
         try:
             with open(path, "rb") as f:
                 raw = tomllib.load(f)
+
             job = raw.get("job", {})
             key = job.get("key", "")
             port = job.get("port", 0)
-            if not key or not port:
-                continue
-            instances.append({
-                "key": key,
-                "port": port,
-                "base_url": job.get("host") or f"http://localhost:{port}",
-                "config_path": str(path),
-                "platform": job.get("platform", ""),
-                "ticket_system": job.get("ticket_system", ""),
-            })
+            if key and port:
+                instances.append({
+                    "key": key,
+                    "port": port,
+                    "base_url": job.get("host") or f"http://localhost:{port}",
+                    "config_path": str(path),
+                    "platform": job.get("platform", ""),
+                    "ticket_system": job.get("ticket_system", ""),
+                })
+                seen_keys.add(key)
+
+            discovery = raw.get("discovery", {})
+            for inst_config in discovery.get("instances", []):
+                inst_key = inst_config.get("key", "")
+                if inst_key and inst_key not in seen_keys:
+                    instances.append({
+                        "key": inst_key,
+                        "port": inst_config.get("port", 0),
+                        "base_url": inst_config.get("base_url", ""),
+                        "config_path": str(path),
+                        "platform": inst_config.get("platform", ""),
+                        "ticket_system": inst_config.get("ticket_system", ""),
+                    })
+                    seen_keys.add(inst_key)
         except Exception:
             continue
+
     return instances
 
 
