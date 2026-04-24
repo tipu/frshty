@@ -18,8 +18,3 @@ base_url = "http://localhost:7101"
 platform = "github"
 ticket_system = "linear"
 
-[[instances.list]]
-key = "tipu-test"
-base_url = "http://localhost:7102"
-platform = "github"
-ticket_system = "jira"
