@@ -281,10 +281,8 @@ def _fetch_remote_global_events(limit: int, unread_only: bool, since_hours: int)
     import asyncio
     from core.discovery import discover_instances, call_instance
 
-    local_keys = {c["job"]["key"] for c in _configs_by_host.values()}
-    if not local_keys and _primary_config:
-        local_keys = {_primary_config.get("job", {}).get("key", "")}
-    remote = [i for i in discover_instances() if i["key"] not in local_keys]
+    local_key = _primary_config.get("job", {}).get("key", "") if _primary_config else ""
+    remote = [i for i in discover_instances() if i["key"] != local_key]
     if not remote:
         return [], {}
 
