@@ -594,6 +594,11 @@ function refreshAutoPrCheckbox(state, autoPr) {
     cb.disabled = LOCKED_AUTO_PR_STATES.has(state);
 }
 
+function jobHasOutput(task, status) {
+    const outputTasks = ['start_planning', 'start_reviewing', 'fix_review_findings', 'confer'];
+    return outputTasks.some(t => task && task.includes(t)) && status === 'ok';
+}
+
 async function loadJobs() {
     try {
         const r = await fetch(`/api/tickets/${key}/jobs`);
@@ -626,9 +631,11 @@ async function loadJobs() {
             const retry = (j.status === 'failed' || j.status === 'skipped') ? ` <button onclick="event.stopPropagation(); retryJob(${j.id})" class="ml-2 text-xs text-yellow-400 hover:text-yellow-200 underline">retry</button>` : '';
             const at = j.finished_at || j.started_at || j.enqueued_at;
             const rel = at ? ` <span class="text-gray-600">(${relativeTime(at)})</span>` : '';
+            const hasOutput = jobHasOutput(j.task, j.status);
+            const outputBadge = hasOutput ? '<span class="text-xs bg-green-900 text-green-300 px-1.5 py-0.5 rounded ml-1">📄</span>' : '';
             let resp = '';
             try { const r = JSON.parse(j.response || '{}'); if (r.reason) resp = ` — ${r.reason}`; } catch(e) {}
-            return `<div class="cursor-pointer hover:bg-gray-800 p-2 rounded flex items-start gap-2" onclick="viewJobOutput(${j.id}, '${j.task}')"><span class="text-gray-500">${at}${rel}</span><span class="${color}">${j.status}</span><span class="text-gray-300">${j.task}</span><span class="text-gray-500">${resp}</span>${retry}</div>`;
+            return `<div class="cursor-pointer hover:bg-gray-800 p-2 rounded flex items-center gap-2" onclick="viewJobOutput(${j.id}, '${j.task}')"><span class="text-gray-500 flex-shrink-0">${at}${rel}</span><span class="${color} flex-shrink-0">${j.status}</span><span class="text-gray-300 flex-1">${j.task}</span>${outputBadge}<span class="text-gray-500">${resp}</span>${retry}</div>`;
         }).join('');
     } catch (e) { console.warn('jobs fetch failed', e); }
 }
