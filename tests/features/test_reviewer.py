@@ -1,5 +1,6 @@
 from pathlib import Path
 from unittest.mock import patch, MagicMock
+import time
 
 from features import reviewer
 from tests.conftest import make_pr
@@ -161,3 +162,124 @@ class TestReviewPr:
              patch("features.reviewer._run_all_personas", return_value=[("spec", None), ("breakage", None), ("maint", None)]):
             result = reviewer.review_pr(config, mock_platform, pr)
         assert result is None
+
+
+class TestExtractTicketFromPr:
+    def test_extracts_ticket_from_state(self):
+        pr = {"repo": "backend", "id": 123, "branch": "feature/x"}
+        ticket_state = {
+            "JIRA-456": {"prs": [{"repo": "backend", "id": 123}]}
+        }
+        result = reviewer._extract_ticket_from_pr(pr, ticket_state)
+        assert result == "JIRA-456"
+
+    def test_extracts_ticket_from_branch_name(self):
+        pr = {"repo": "frontend", "id": 789, "branch": "JIRA-789/ui-fix"}
+        ticket_state = {}
+        result = reviewer._extract_ticket_from_pr(pr, ticket_state)
+        assert result == "JIRA-789"
+
+    def test_returns_none_when_no_ticket(self):
+        pr = {"repo": "backend", "id": 999, "branch": "feature/something"}
+        ticket_state = {}
+        result = reviewer._extract_ticket_from_pr(pr, ticket_state)
+        assert result is None
+
+    def test_state_lookup_takes_precedence(self):
+        pr = {"repo": "backend", "id": 111, "branch": "JIRA-999/fix"}
+        ticket_state = {
+            "JIRA-111": {"prs": [{"repo": "backend", "id": 111}]}
+        }
+        result = reviewer._extract_ticket_from_pr(pr, ticket_state)
+        assert result == "JIRA-111"
+
+
+class TestTrackPendingPrs:
+    def test_tracks_new_pr_for_ticket(self):
+        pending = {}
+        pr = {"repo": "backend", "id": 123}
+        ticket_state = {"JIRA-456": {"prs": [{"repo": "backend", "id": 123}]}}
+
+        with patch("features.reviewer.time.time", return_value=1000.0):
+            reviewer._track_pending_prs(pending, [pr], ticket_state)
+
+        assert "JIRA-456" in pending
+        assert pending["JIRA-456"]["prs"] == [pr]
+        assert pending["JIRA-456"]["tracked_at"] == 1000.0
+        assert pending["JIRA-456"]["last_pr_at"] == 1000.0
+
+    def test_extends_timeout_on_new_pr_for_same_ticket(self):
+        pending = {
+            "JIRA-456": {
+                "tracked_at": 1000.0,
+                "last_pr_at": 1000.0,
+                "prs": [{"repo": "backend", "id": 123}]
+            }
+        }
+        new_pr = {"repo": "frontend", "id": 789}
+        ticket_state = {
+            "JIRA-456": {
+                "prs": [
+                    {"repo": "backend", "id": 123},
+                    {"repo": "frontend", "id": 789}
+                ]
+            }
+        }
+
+        with patch("features.reviewer.time.time", return_value=1300.0):
+            reviewer._track_pending_prs(pending, [new_pr], ticket_state)
+
+        assert pending["JIRA-456"]["last_pr_at"] == 1300.0
+        assert len(pending["JIRA-456"]["prs"]) == 2
+
+    def test_no_duplicate_prs(self):
+        pending = {
+            "JIRA-456": {
+                "tracked_at": 1000.0,
+                "last_pr_at": 1000.0,
+                "prs": [{"repo": "backend", "id": 123}]
+            }
+        }
+        same_pr = {"repo": "backend", "id": 123}
+        ticket_state = {"JIRA-456": {"prs": [{"repo": "backend", "id": 123}]}}
+
+        with patch("features.reviewer.time.time", return_value=1100.0):
+            reviewer._track_pending_prs(pending, [same_pr], ticket_state)
+
+        assert len(pending["JIRA-456"]["prs"]) == 1
+
+
+class TestProcessReadyTickets:
+    def test_processes_ticket_after_quiet_period(self, tmp_path):
+        pending = {
+            "JIRA-456": {
+                "tracked_at": 1000.0,
+                "last_pr_at": 1000.0,
+                "prs": [{"repo": "backend", "id": 123}]
+            }
+        }
+        config = {"_state_dir": tmp_path, "_base_url": "http://localhost"}
+
+        with patch("features.reviewer.time.time", return_value=1950.0), \
+             patch("features.reviewer.review_ticket_prs") as mock_review:
+            reviewer._process_ready_tickets(config, pending)
+
+        assert mock_review.called
+        assert "JIRA-456" not in pending
+
+    def test_ignores_ticket_with_active_timeout(self, tmp_path):
+        pending = {
+            "JIRA-456": {
+                "tracked_at": 1000.0,
+                "last_pr_at": 1500.0,
+                "prs": [{"repo": "backend", "id": 123}]
+            }
+        }
+        config = {"_state_dir": tmp_path}
+
+        with patch("features.reviewer.time.time", return_value=1700.0), \
+             patch("features.reviewer.review_ticket_prs") as mock_review:
+            reviewer._process_ready_tickets(config, pending)
+
+        assert not mock_review.called
+        assert "JIRA-456" in pending
