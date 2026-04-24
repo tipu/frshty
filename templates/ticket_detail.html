@@ -55,8 +55,8 @@ body.maximized #terminal-container { flex: 1; height: auto !important; }
 .comment-inline.needs_reply { border-left-color: #eab308; }
 .comment-inline.replied { border-left-color: #22c55e; opacity: 0.5; }
 textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; }
-.layout-3col { display: grid; grid-template-columns: 250px 1fr 300px; gap: 16px; margin-bottom: 16px; }
-@media (max-width: 1400px) { .layout-3col { grid-template-columns: 1fr; } }
+.layout-main { display: grid; grid-template-columns: 250px 1fr; gap: 16px; }
+@media (max-width: 1400px) { .layout-main { grid-template-columns: 1fr; } }
 .collapsible-header { cursor: pointer; display: flex; align-items: center; user-select: none; }
 .collapsible-header::before { content: '▶ '; font-size: 10px; margin-right: 4px; display: inline-block; transition: transform 0.2s; }
 .collapsible-header.expanded::before { transform: rotate(90deg); }
@@ -87,7 +87,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
     <button class="tab-btn active" onclick="showTab('docs')">Docs</button>
     <button class="tab-btn" onclick="showTab('diff')">Diff & Comments</button>
 </div>
-<div id="docs-section" class="layout-3col">
+<div id="docs-section" class="layout-main">
     <!-- LEFT SIDEBAR: Controls & Context -->
     <div class="space-y-4">
         <div id="status-controls" class="card p-3">
@@ -129,26 +129,27 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
         </div>
     </div>
 
-    <!-- CENTER: Main Content (Docs & History) -->
+    <!-- RIGHT: Main Content (Jobs first, then Docs) -->
     <div class="space-y-4">
+        <!-- JOBS SECTION: High Priority, Top -->
+        <div id="jobs-timeline-section" class="card p-3">
+            <div class="flex items-center justify-between mb-3 pb-3 border-b border-gray-700">
+                <span class="text-xs font-bold text-gray-500 uppercase">Jobs</span>
+                <button onclick="loadJobs()" class="text-xs text-gray-500 hover:text-gray-300">⟳</button>
+            </div>
+            <div id="jobs-timeline" class="text-xs space-y-1 max-h-96 overflow-y-auto"></div>
+            <div id="job-output-section" class="hidden border-t border-gray-700 pt-3 mt-3">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-xs font-bold text-gray-500 uppercase" id="job-output-title">Output</span>
+                    <button onclick="closeJobOutput()" class="text-xs text-gray-500 hover:text-gray-300">×</button>
+                </div>
+                <pre id="job-output" class="bg-gray-950 border border-gray-700 rounded p-2 text-xs overflow-auto max-h-96 text-gray-300 font-mono whitespace-pre-wrap word-break break-all"></pre>
+            </div>
+        </div>
+
+        <!-- DOCS & HISTORY: Below Jobs, Collapsible -->
         <div id="docs" class="space-y-2"></div>
         <div id="history" class="card p-3"></div>
-    </div>
-
-    <!-- RIGHT SIDEBAR: Jobs & Output -->
-    <div id="jobs-timeline-section" class="card p-3 flex flex-col" style="height: fit-content; max-height: 600px;">
-        <div class="flex items-center justify-between mb-3 pb-3 border-b border-gray-700">
-            <span class="text-xs font-bold text-gray-500 uppercase">Jobs</span>
-            <button onclick="loadJobs()" class="text-xs text-gray-500 hover:text-gray-300">⟳</button>
-        </div>
-        <div id="jobs-timeline" class="text-xs space-y-1 overflow-y-auto flex-1 mb-3"></div>
-        <div id="job-output-section" class="hidden border-t border-gray-700 pt-2">
-            <div class="flex items-center justify-between mb-2">
-                <span class="text-xs font-bold text-gray-500 uppercase" id="job-output-title">Output</span>
-                <button onclick="closeJobOutput()" class="text-xs text-gray-500 hover:text-gray-300">×</button>
-            </div>
-            <pre id="job-output" class="bg-gray-950 border border-gray-700 rounded p-2 text-xs overflow-auto max-h-64 text-gray-300 font-mono whitespace-pre-wrap word-break break-all"></pre>
-        </div>
     </div>
 </div>
 <div id="diff-section" style="display:none">
