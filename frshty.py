@@ -433,7 +433,6 @@ def api_submit_review(body: dict):
 
 @app.post("/api/reviews/rerun-ticket/{ticket_key}")
 def api_rerun_ticket_review(ticket_key: str):
-    import re as regex
     reviews_dir = _config["_state_dir"] / "reviews"
     if not reviews_dir.exists():
         return JSONResponse({"error": "No reviews found"}, status_code=404)
@@ -453,10 +452,19 @@ def api_rerun_ticket_review(ticket_key: str):
             if queued_file.exists():
                 try:
                     queued = json.loads(queued_file.read_text())
-                    if queued and queued[0].get("pr_id"):
-                        pr_id = queued[0]["pr_id"]
-                        prs.append({"repo": repo, "id": pr_id, "branch": branch})
-                except (json.JSONDecodeError, IndexError, KeyError):
+                    if queued:
+                        first = queued[0]
+                        pr_id = first.get("pr_id")
+                        pr_url = first.get("pr_url", "")
+                        if pr_id:
+                            prs.append({
+                                "repo": repo,
+                                "id": pr_id,
+                                "branch": branch,
+                                "url": pr_url,
+                                "head_sha": ""
+                            })
+                except (json.JSONDecodeError, IndexError, KeyError, TypeError):
                     pass
 
     if not prs:
