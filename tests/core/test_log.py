@@ -11,14 +11,6 @@ class TestEmit:
         assert record["job"] == "test"
         assert len(record["id"]) == 12
 
-    def test_writes_to_file(self, tmp_log):
-        log.emit("evt", "msg")
-        path = tmp_log / "logs" / "test.jsonl"
-        lines = path.read_text().splitlines()
-        assert len(lines) == 1
-        parsed = json.loads(lines[0])
-        assert parsed["event"] == "evt"
-
     def test_filters_empty_links(self, tmp_log):
         record = log.emit("evt", "msg", links={"good": "http://x", "empty": "", "none": None})
         assert record["links"] == {"good": "http://x"}
@@ -79,6 +71,5 @@ class TestDismissAll:
         for i in range(log.MAX_LOG_LINES + 50):
             log.emit("evt", str(i))
         log.dismiss_all()
-        path = tmp_log / "logs" / "test.jsonl"
-        lines = path.read_text().splitlines()
-        assert len(lines) <= log.MAX_LOG_LINES
+        events = log.get_events(limit=log.MAX_LOG_LINES + 100)
+        assert len(events) <= log.MAX_LOG_LINES
