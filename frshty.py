@@ -433,13 +433,35 @@ def api_submit_review(body: dict):
 
 @app.post("/api/reviews/rerun-ticket/{ticket_key}")
 def api_rerun_ticket_review(ticket_key: str):
-    ticket_state = state.load("tickets")
-    ticket_data = ticket_state.get(ticket_key)
-    if not ticket_data:
-        return JSONResponse({"error": f"Ticket {ticket_key} not found"}, status_code=404)
-    prs = ticket_data.get("prs", [])
+    import re as regex
+    reviews_dir = _config["_state_dir"] / "reviews"
+    if not reviews_dir.exists():
+        return JSONResponse({"error": "No reviews found"}, status_code=404)
+
+    prs = []
+    for repo_dir in reviews_dir.iterdir():
+        if not repo_dir.is_dir():
+            continue
+        repo = repo_dir.name
+        for branch_dir in repo_dir.iterdir():
+            if not branch_dir.is_dir():
+                continue
+            branch = branch_dir.name
+            if ticket_key.lower() not in branch.lower():
+                continue
+            queued_file = branch_dir / "queued_comments.json"
+            if queued_file.exists():
+                try:
+                    queued = json.loads(queued_file.read_text())
+                    if queued and queued[0].get("pr_id"):
+                        pr_id = queued[0]["pr_id"]
+                        prs.append({"repo": repo, "id": pr_id, "branch": branch})
+                except (json.JSONDecodeError, IndexError, KeyError):
+                    pass
+
     if not prs:
-        return JSONResponse({"error": f"No PRs found for {ticket_key}"}, status_code=404)
+        return JSONResponse({"error": f"No pending reviews found for {ticket_key}"}, status_code=404)
+
     reviewer.review_ticket_prs(_config, ticket_key, prs)
     return {"status": "review_started", "ticket": ticket_key, "pr_count": len(prs)}
 
