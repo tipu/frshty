@@ -118,6 +118,7 @@ function isNoise(e) {
     if (e.event === 'job_started') return true;
     if (e.event === 'ticket_ci_fix_skipped') return true;
     if (e.event === 'events_started') return true;
+    if (e.event === 'review_validation_dropped') return true;
     if (e.event === 'job_finished') {
         const s = e.summary || '';
         const isInfra = s.includes('ticket=None');

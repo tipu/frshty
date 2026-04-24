@@ -578,9 +578,30 @@ class GitHubPlatform:
             if verdict == "pending":
                 elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(ts["checks_started_at"])).total_seconds()
                 if elapsed > self.CI_TIMEOUT_SECS:
-                    log.emit("ticket_checks_timeout", f"CI checks timed out for {ticket['key']} PR #{pr['id']} after {int(elapsed/60)}m",
-                        links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
-                        meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"]})
+                    elapsed_mins = int(elapsed / 60)
+                    timeout_state = ts.get("_ci_timeout_state", {})
+
+                    is_same_pr = timeout_state.get("pr_id") == str(pr["id"])
+                    is_same_duration = abs(int(timeout_state.get("last_elapsed_mins", "0")) - elapsed_mins) < 10
+
+                    if is_same_pr and is_same_duration:
+                        timeout_state["strike_count"] = str(int(timeout_state.get("strike_count", "1")) + 1)
+                    else:
+                        timeout_state["strike_count"] = "1"
+
+                    timeout_state["pr_id"] = str(pr["id"])
+                    timeout_state["last_elapsed_mins"] = str(elapsed_mins)
+                    ts["_ci_timeout_state"] = timeout_state
+
+                    if int(timeout_state["strike_count"]) >= 5:
+                        log.emit("ticket_checks_stalled", f"CI checks stalled for {ticket['key']} PR #{pr['id']} after {elapsed_mins}m (5+ timeouts, stopping polling)",
+                            links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+                            meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"]})
+                        return {"_ci_stalled": True, "pr": pr}
+                    else:
+                        log.emit("ticket_checks_timeout", f"CI checks timed out for {ticket['key']} PR #{pr['id']} after {elapsed_mins}m ({timeout_state.get('strike_count', '1')}/5)",
+                            links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+                            meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"]})
                     return ts
                 all_passed = False
                 continue
@@ -597,6 +618,7 @@ class GitHubPlatform:
         ts["ci_passed"] = True
         ts.pop("checks_started_at", None)
         ts.pop("ci_fix_attempts", None)
+        ts.pop("_ci_timeout_state", None)
         return ts
 
     def _evaluate_checks(self, checks: list[dict]) -> str:

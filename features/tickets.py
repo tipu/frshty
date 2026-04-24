@@ -366,6 +366,9 @@ def check(config: dict, instance_key: str = ""):
                 result = platform.monitor_ci(ticket, ts, base_url)
                 if result.get("_ci_failed"):
                     ts = _handle_ci_failure(ticket, ts, result["pr"], result["checks"], base_url, instance_key)
+                elif result.get("_ci_stalled"):
+                    ts["status"] = transition(ts["status"], "pr_failed")
+                    ts.pop("_ci_timeout_state", None)
                 else:
                     ts = result
 
