@@ -281,12 +281,12 @@ def _fetch_remote_global_events(limit: int, unread_only: bool, since_hours: int)
     import asyncio
     from core.discovery import discover_instances, call_instance
 
-    local_key = _primary_config.get("job", {}).get("key", "") if _primary_config else ""
+    local_key = _config.get("job", {}).get("key", "")
     remote = [i for i in discover_instances() if i["key"] != local_key]
     if not remote:
         return [], {}
 
-    cache_key = f"{limit}:{unread_only}:{since_hours}"
+    cache_key = f"{local_key}:{limit}:{unread_only}:{since_hours}"
     cached = _global_remote_cache.get(cache_key)
     if cached and (time.time() - cached[0]) < _GLOBAL_REMOTE_TTL:
         return cached[1]["events"], cached[1]["errors"]
