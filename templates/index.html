@@ -41,7 +41,10 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
 
 <header class="flex items-center justify-between mb-4">
     <div class="flex items-center gap-4">
-        <h1 class="text-lg font-bold" id="job-title">frshty</h1>
+        <div class="flex items-center gap-2">
+            <h1 class="text-lg font-bold">frshty</h1>
+            <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700" id="instance-badge"></span>
+        </div>
         <nav class="flex gap-1 text-sm">
             <a href="/" class="active">Feed</a>
             <a href="/global">Global</a>
@@ -167,8 +170,9 @@ async function fetchEvents() {
 async function fetchConfig() {
     const resp = await fetch('/api/config');
     config = await resp.json();
-    document.getElementById('job-title').textContent = `[${config.job.key}] ${config.job.key}`;
-    document.title = `frshty — ${config.job.key}`;
+    const instanceName = config.job.key || 'default';
+    document.getElementById('instance-badge').textContent = instanceName;
+    document.title = `frshty — ${instanceName}`;
     renderFeatureToggles();
 }
 
