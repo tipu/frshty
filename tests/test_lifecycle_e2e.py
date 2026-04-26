@@ -171,8 +171,9 @@ async def test_complete_lifecycle(e2e_env):
     # Second comment: "Have you considered using OAuth instead of basic auth?"
     # This is EXPLORATORY (question/discussion) → frshty would:
     # 1. Run Haiku: "Write a reply that addresses their concern"
-    # 2. Store as status="needs_reply" with suggested_reply
-    # 3. User can submit the reply manually or let frshty submit it
+    # 2. Store as status="needs_reply" with suggested_reply in pr_comments.json
+    # 3. User reviews suggested reply on /reviews page and decides to post or skip
+    # NOTE: frshty does NOT auto-post replies, only auto-fixes code for actionable comments
     exploratory_comment = comments[1]
     assert "oauth" in exploratory_comment["body"].lower()
 
@@ -186,7 +187,7 @@ async def test_complete_lifecycle(e2e_env):
     assert commit_count > 1, "Actionable comment should trigger code fix (commit added)"
 
     print(f"✓ Step 8a: Actionable comment detected → code auto-fixed via commit")
-    print(f"✓ Step 8b: Exploratory comment detected → reply would be prepared for user")
+    print(f"✓ Step 8b: Exploratory comment detected → suggested reply generated (not auto-posted)")
 
     # Step 9: Merge PR
     merge_result = github.merge_pr(pr_num)
