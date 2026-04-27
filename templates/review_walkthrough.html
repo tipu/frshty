@@ -135,8 +135,8 @@ async function loadComment(idx) {
 
   document.getElementById('explanation').textContent = data.explanation || '(no explanation available)';
 
-  if (data.snippet) {
-    renderSnippet(data.snippet, data.snippet_start_line, data.comment.line, data.file);
+  if (data.snippets && data.snippets.length > 0) {
+    renderSnippets(data.snippets, data.comment.line);
   } else {
     document.getElementById('code-card').style.display = 'none';
   }
@@ -145,36 +145,57 @@ async function loadComment(idx) {
   startDiscussSession();
 }
 
-function renderSnippet(snippet, startLine, targetLine, filePath) {
-  document.getElementById('code-card').style.display = '';
-  document.getElementById('code-file-label').textContent = filePath || '';
+function renderSnippets(snippets, targetLine) {
+  const container = document.getElementById('code-card');
+  container.style.display = '';
 
-  const rawLines = snippet.split('\n');
-  const parsed = rawLines.map(raw => {
-    const m = raw.match(/^(\d+): (.*)$/);
-    if (m) return { num: parseInt(m[1]), text: m[2] };
-    return { num: null, text: raw };
-  });
+  let html = '';
+  for (const snippet of snippets) {
+    const role = snippet.role || 'code';
+    const code = snippet.code || '';
+    const startLine = snippet.start_line || 0;
 
-  const ext = (filePath || '').split('.').pop().toLowerCase();
-  const lang = EXT_LANG[ext];
-  let highlighted = null;
-  if (lang) {
-    try {
-      const code = parsed.map(l => l.text).join('\n');
-      highlighted = hljs.highlight(code, { language: lang, ignoreIllegals: true }).value.split('\n');
-    } catch (e) {}
+    html += `<div class="snippet-block" style="margin-bottom: 16px;">`;
+    html += `<div class="text-xs text-blue-400 mb-2 font-semibold uppercase">${esc(role)}</div>`;
+
+    const rawLines = code.split('\n');
+    const parsed = rawLines.map(raw => {
+      const m = raw.match(/^(\d+): (.*)$/);
+      if (m) return { num: parseInt(m[1]), text: m[2] };
+      return { num: null, text: raw };
+    });
+
+    // Try to infer language from code pattern
+    let lang = null;
+    if (code.includes('def ') || code.includes('class ')) lang = 'python';
+    else if (code.includes('function ') || code.includes('const ') || code.includes('let ')) lang = 'javascript';
+
+    let highlighted = null;
+    if (lang) {
+      try {
+        const codeText = parsed.map(l => l.text).join('\n');
+        highlighted = hljs.highlight(codeText, { language: lang, ignoreIllegals: true }).value.split('\n');
+      } catch (e) {}
+    }
+
+    const linesHtml = parsed.map((line, i) => {
+      const isTarget = line.num === targetLine;
+      const content = highlighted ? highlighted[i] : esc(line.text);
+      return `<div class="code-line${isTarget ? ' target-line' : ''}">
+        <span class="code-line-num">${line.num ?? ''}</span>
+        <span class="code-line-body">${content}</span>
+      </div>`;
+    }).join('');
+
+    html += `<div class="overflow-x-auto border border-gray-800 rounded" style="background: #0d1117;">${linesHtml}</div>`;
+    html += `</div>`;
   }
 
-  const container = document.getElementById('code-lines');
-  container.innerHTML = parsed.map((line, i) => {
-    const isTarget = line.num === targetLine;
-    const content = highlighted ? highlighted[i] : esc(line.text);
-    return `<div class="code-line${isTarget ? ' target-line' : ''}">
-      <span class="code-line-num">${line.num ?? ''}</span>
-      <span class="code-line-body">${content}</span>
-    </div>`;
-  }).join('');
+  const codeCard = document.getElementById('code-card');
+  codeCard.style.display = '';
+  const codeLines = document.getElementById('code-lines');
+  codeLines.innerHTML = html;
+  document.getElementById('code-file-label').style.display = 'none';
 }
 
 async function startDiscussSession() {

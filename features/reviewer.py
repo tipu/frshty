@@ -340,11 +340,11 @@ def build_walkthrough_context(comment: dict, worktree: Path | None) -> dict:
     line = int(comment.get("line", 0) or 0)
 
     if not worktree or not file_path or line <= 0:
-        return {"explanation": comment.get("body", ""), "snippet": "", "snippet_start_line": 0}
+        return {"explanation": comment.get("body", ""), "snippets": []}
 
     raw_context = _read_function_context(worktree, file_path, line)
     if not raw_context:
-        return {"explanation": comment.get("body", ""), "snippet": "", "snippet_start_line": 0}
+        return {"explanation": comment.get("body", ""), "snippets": []}
 
     severity = comment.get("severity", "suggestion")
     body = comment.get("body", "")
@@ -354,26 +354,25 @@ def build_walkthrough_context(comment: dict, worktree: Path | None) -> dict:
         f"CODE CONTEXT (±60 lines, line numbers on left):\n{raw_context}\n\n"
         "Tasks:\n"
         '1. Classify: "local" (style/naming, stays within one expression), "behavioral" (logic/control flow, needs full function), or "contract" (interface boundary, caller/callee mismatch)\n'
-        "2. Select minimal snippet:\n"
-        "   - local: flagged line ± 8 lines\n"
-        "   - behavioral: full enclosing function (up to 40 lines)\n"
-        "   - contract: flagged area ± 10 lines\n"
-        "3. Write a 3-5 sentence prose explanation: what does this code do, why does the comment matter architecturally, what's the risk if not addressed. Do NOT prescribe a fix. Do NOT repeat the comment.\n\n"
-        'Return ONLY valid JSON (no markdown): {"comment_type":"local|behavioral|contract","explanation":"...","snippet":"lines preserving NUM: text format","snippet_start_line":<int>}'
+        "2. Identify ALL relevant code blocks in the provided context (may be multiple if the comment touches on multiple areas).\n"
+        "3. For each block, extract it with role labels:\n"
+        "   - 'flagged': the primary commented lines\n"
+        "   - 'related': other relevant code in the same file that relates to the comment (e.g., another use of the same variable, another function handling the same case)\n"
+        "4. Write a 3-5 sentence prose explanation: what does this code do, why does the comment matter architecturally, what's the risk if not addressed. Do NOT prescribe a fix. Do NOT repeat the comment.\n\n"
+        'Return ONLY valid JSON (no markdown): {"comment_type":"local|behavioral|contract","explanation":"...","snippets":[{"role":"flagged|related","code":"lines preserving NUM: text format","start_line":<int>}]}'
     )
 
     result = run_haiku(prompt)
     if not result:
-        return {"explanation": body, "snippet": "", "snippet_start_line": 0}
+        return {"explanation": body, "snippets": []}
 
     parsed = extract_json(result)
     if not parsed:
-        return {"explanation": body, "snippet": "", "snippet_start_line": 0}
+        return {"explanation": body, "snippets": []}
 
     return {
         "explanation": parsed.get("explanation", body),
-        "snippet": parsed.get("snippet", ""),
-        "snippet_start_line": parsed.get("snippet_start_line", 0),
+        "snippets": parsed.get("snippets", []),
     }
 
 
