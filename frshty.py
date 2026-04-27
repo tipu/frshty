@@ -415,6 +415,7 @@ def api_poll():
 @app.get("/api/tickets/{ticket_key}/pr-info")
 def api_ticket_pr_info(ticket_key: str):
     import features.tickets as tickets_mod
+    from core.ticket_status import TicketStatus
 
     try:
         tickets = state.load("tickets")
@@ -422,25 +423,30 @@ def api_ticket_pr_info(ticket_key: str):
         if not ticket:
             return {"error": "Ticket not found"}, 404
 
-        title = f"{ticket_key}: {ticket.get('summary', '')}"
         slug = ticket.get("slug", "")
         if not slug:
             return {"error": "No slug found"}, 400
 
         ws = _config.get("workspace", {})
         ticket_dir = ws.get("root", Path(".")) / ws.get("tickets_dir", "tickets") / slug
-        manifest = ticket_dir / "docs" / "change-manifest.md"
-        raw_body = manifest.read_text() if manifest.exists() else ticket.get("description", "")
+        docs_dir = ticket_dir / "docs"
 
-        try:
-            pr_body = tickets_mod._summarize_pr_body(raw_body, ticket)
-            if not pr_body or len(pr_body) < 10:
-                pr_body = f"Implementation for {ticket_key}: {ticket.get('summary', '')}"
-        except Exception as e:
-            pr_body = f"Implementation for {ticket_key}: {ticket.get('summary', '')}"
-            log.emit("pr_summary_error", f"Failed to summarize PR body: {e}", meta={"ticket": ticket_key})
+        ticket_summary = ""
+        if docs_dir.is_dir():
+            summary_cache = docs_dir / ".change-summary.txt"
+            manifest = docs_dir / "change-manifest.md"
+            if manifest.exists():
+                if summary_cache.exists() and summary_cache.stat().st_mtime >= manifest.stat().st_mtime:
+                    ticket_summary = summary_cache.read_text()
+                else:
+                    ticket_summary = run_haiku(
+                        f"Summarize this change manifest in 2-3 sentences. Be direct and technical.\n\n{manifest.read_text()[:4000]}"
+                    )
+                    if ticket_summary:
+                        summary_cache.write_text(ticket_summary)
 
-        return {"title": title, "description": pr_body}
+        title = f"{ticket_key}: {ticket_summary[:80] if ticket_summary else ''}"
+        return {"title": title, "description": ticket_summary if ticket_summary else f"Implementation for {ticket_key}"}
     except Exception as e:
         log.emit("pr_info_error", f"Error generating PR info: {e}", meta={"ticket": ticket_key})
         return {"error": str(e)}, 500
