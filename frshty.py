@@ -414,21 +414,18 @@ def api_poll():
 
 @app.get("/api/tickets/{ticket_key}/pr-info")
 def api_ticket_pr_info(ticket_key: str):
-    from core.ticket_status import TicketStatus
     import features.tickets as tickets_mod
 
     ticket = state.load_ticket(ticket_key)
     if not ticket:
         return {"error": "Ticket not found"}, 404
 
-    ts = ticket.get("state", {})
     title = f"{ticket_key}: {ticket.get('summary', '')}"
-
-    ws = _config.get("workspace", {})
-    slug = ts.get("slug", "")
+    slug = ticket.get("slug", "")
     if not slug:
         return {"error": "No slug found"}, 400
 
+    ws = _config.get("workspace", {})
     ticket_dir = ws.get("root", Path(".")) / ws.get("tickets_dir", "tickets") / slug
     manifest = ticket_dir / "docs" / "change-manifest.md"
     raw_body = manifest.read_text() if manifest.exists() else ticket.get("description", "")
@@ -456,12 +453,11 @@ async def api_submit_pr(ticket_key: str, request: Request):
     if not ticket:
         return {"error": "Ticket not found"}, 404
 
-    ts = ticket.get("state", {})
-    if ts.get("status") != "pr_ready":
-        return {"error": f"Ticket is {ts.get('status')}, not pr_ready"}, 400
+    if ticket.get("status") != "pr_ready":
+        return {"error": f"Ticket is {ticket.get('status')}, not pr_ready"}, 400
 
     ws = _config.get("workspace", {})
-    slug = ts.get("slug", "")
+    slug = ticket.get("slug", "")
     if not slug:
         return {"error": "No slug found"}, 400
 
@@ -488,7 +484,7 @@ async def api_submit_pr(ticket_key: str, request: Request):
         actual_branch = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             cwd=str(wt), capture_output=True, text=True, timeout=10).stdout.strip()
-        push_branch = actual_branch or ts.get("branch", "")
+        push_branch = actual_branch or ticket.get("branch", "")
 
         pushed = platform.push_branch(wt, push_branch)
         if not pushed.get("ok"):
