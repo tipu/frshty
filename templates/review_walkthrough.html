@@ -157,7 +157,7 @@ function renderSnippets(snippets, targetLine) {
     const snippetExplanation = snippet.explanation || '';
 
     html += `<div class="snippet-block" style="margin-bottom: 16px;">`;
-    html += `<div class="text-xs text-blue-400 mb-2 font-semibold uppercase">${esc(role)}</div>`;
+    html += `<div class="text-xs text-blue-400 mb-2 font-semibold uppercase" style="font-style: normal;">${esc(role)}</div>`;
     if (snippetExplanation) {
       html += `<div class="text-xs text-gray-400 mb-2 italic">${esc(snippetExplanation)}</div>`;
     }
@@ -169,10 +169,13 @@ function renderSnippets(snippets, targetLine) {
       return { num: null, text: raw };
     });
 
-    // Try to infer language from code pattern
+    // Detect language: check for Python first, then TypeScript/JS, else default to Python
     let lang = null;
-    if (code.includes('def ') || code.includes('class ') || code.includes('import ')) lang = 'python';
-    else if (code.includes('interface ') || code.includes('type ') || code.includes('async ') || code.includes('=>') || code.includes('function ') || code.includes('const ') || code.includes('let ')) lang = 'typescript';
+    const pythonIndicators = ['def ', 'class ', 'import ', 'from ', 'self.', '==', 'print(', 'return ', 'if ', 'for ', 'range(', '__'];
+    const tsIndicators = ['interface ', 'type ', 'async ', '=>', 'function ', 'const ', 'let ', 'var ', '===', 'console.log', 'this.'];
+    const pythonScore = pythonIndicators.filter(p => code.includes(p)).length;
+    const tsScore = tsIndicators.filter(t => code.includes(t)).length;
+    lang = pythonScore > tsScore ? 'python' : (tsScore > 0 ? 'typescript' : 'python');
 
     let highlighted = null;
     if (lang) {
