@@ -433,7 +433,7 @@ def api_ticket_pr_info(ticket_key: str):
         try:
             pr_body = tickets_mod._summarize_pr_body(raw_body, ticket)
         except Exception as e:
-            pr_body = raw_body[:500]
+            pr_body = raw_body
             log.emit("pr_summary_error", f"Failed to summarize PR body: {e}", meta={"ticket": ticket_key})
 
         return {"title": title, "description": pr_body}
