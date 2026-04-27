@@ -1330,8 +1330,6 @@ def _local_worktree_diff(ts: dict) -> str:
         wt = cfg.ticket_worktree_path(_config, slug, repo["name"])
         if not wt.is_dir():
             continue
-        subprocess.run(["git", "fetch", "origin", base_branch],
-            cwd=str(wt), capture_output=True, timeout=60)
         result = subprocess.run(
             ["git", "diff", f"origin/{base_branch}...HEAD"],
             cwd=str(wt), capture_output=True, text=True, timeout=30)
