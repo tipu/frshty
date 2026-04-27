@@ -119,6 +119,7 @@ def review_pr(config: dict, platform, pr: dict) -> dict | None:
     review_dir = config["_state_dir"] / "reviews" / pr["repo"] / branch_slug
     review_dir.mkdir(parents=True, exist_ok=True)
     (review_dir / "review.json").write_text(json.dumps(merged, indent=2))
+    (review_dir / "diff.txt").write_text(diff_text)
 
     queued = [
         {
@@ -332,6 +333,48 @@ def _simplify_body_with_context(body: str, code_context: str | None, file_path: 
 
     output = run_haiku(prompt)
     return output if output else body
+
+
+def build_walkthrough_context(comment: dict, worktree: Path | None) -> dict:
+    file_path = comment.get("path", "")
+    line = int(comment.get("line", 0) or 0)
+
+    if not worktree or not file_path or line <= 0:
+        return {"explanation": comment.get("body", ""), "snippet": "", "snippet_start_line": 0}
+
+    raw_context = _read_function_context(worktree, file_path, line)
+    if not raw_context:
+        return {"explanation": comment.get("body", ""), "snippet": "", "snippet_start_line": 0}
+
+    severity = comment.get("severity", "suggestion")
+    body = comment.get("body", "")
+    prompt = (
+        "You are helping a code reviewer deeply understand a review comment.\n\n"
+        f"COMMENT:\nFile: {file_path}:{line}\nSeverity: {severity}\n\"{body}\"\n\n"
+        f"CODE CONTEXT (±60 lines, line numbers on left):\n{raw_context}\n\n"
+        "Tasks:\n"
+        '1. Classify: "local" (style/naming, stays within one expression), "behavioral" (logic/control flow, needs full function), or "contract" (interface boundary, caller/callee mismatch)\n'
+        "2. Select minimal snippet:\n"
+        "   - local: flagged line ± 8 lines\n"
+        "   - behavioral: full enclosing function (up to 40 lines)\n"
+        "   - contract: flagged area ± 10 lines\n"
+        "3. Write a 3-5 sentence prose explanation: what does this code do, why does the comment matter architecturally, what's the risk if not addressed. Do NOT prescribe a fix. Do NOT repeat the comment.\n\n"
+        'Return ONLY valid JSON (no markdown): {"comment_type":"local|behavioral|contract","explanation":"...","snippet":"lines preserving NUM: text format","snippet_start_line":<int>}'
+    )
+
+    result = run_haiku(prompt)
+    if not result:
+        return {"explanation": body, "snippet": "", "snippet_start_line": 0}
+
+    parsed = extract_json(result)
+    if not parsed:
+        return {"explanation": body, "snippet": "", "snippet_start_line": 0}
+
+    return {
+        "explanation": parsed.get("explanation", body),
+        "snippet": parsed.get("snippet", ""),
+        "snippet_start_line": parsed.get("snippet_start_line", 0),
+    }
 
 
 def _simplify_all_issues(issues: list[dict]) -> list[dict]:
