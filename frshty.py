@@ -445,7 +445,7 @@ def api_ticket_pr_info(ticket_key: str):
                     if ticket_summary:
                         summary_cache.write_text(ticket_summary)
 
-        title = f"{ticket_key}: {ticket_summary[:80] if ticket_summary else ''}"
+        title = f"{ticket_key}: {ticket_summary.split('.')[0] if ticket_summary else 'Work'}"
         return {"title": title, "description": ticket_summary if ticket_summary else f"Implementation for {ticket_key}"}
     except Exception as e:
         log.emit("pr_info_error", f"Error generating PR info: {e}", meta={"ticket": ticket_key})
