@@ -228,10 +228,15 @@ function renderErrorBanner() {
 function render() {
     refreshInstanceDropdown();
     renderErrorBanner();
+    const localKey = document.getElementById('instance-badge').textContent.trim();
     const items = events
         .filter(e => !SYSTEM_EVENTS.has(e.event))
         .filter(e => !instanceFilter || e.instance_key === instanceFilter)
-        .filter(e => noiseMode === 'noise' || !isNoise(e))
+        .filter(e => {
+            if (noiseMode === 'noise') return true;
+            if (e.instance_key !== localKey) return true;
+            return !isNoise(e);
+        })
         .filter(e => showDismissed || !dismissed.has(e.global_id));
     const container = document.getElementById('event-feed');
     if (!items.length) {
