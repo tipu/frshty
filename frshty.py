@@ -693,6 +693,97 @@ def api_review_diff(repo: str, pr_id: int):
     return {"diff": diff or ""}
 
 
+def _find_review_branch_dir(repo: str, pr_id: int):
+    """Return (branch_dir, worktree) or (None, None)."""
+    reviews_dir = _config["_state_dir"] / "reviews" / repo
+    if not reviews_dir.exists():
+        return None, None
+    for branch_dir in reviews_dir.iterdir():
+        queued = branch_dir / "queued_comments.json"
+        if not queued.exists():
+            continue
+        try:
+            comments = json.loads(queued.read_text())
+        except (json.JSONDecodeError, OSError):
+            continue
+        if comments and comments[0].get("pr_id") == pr_id:
+            wt = branch_dir / "worktree"
+            worktree = wt if (wt / ".git").exists() else None
+            return branch_dir, worktree
+    return None, None
+
+
+@app.get("/reviews/{repo}/{pr_id}/walkthrough/{idx}", response_class=HTMLResponse)
+def review_walkthrough_page(repo: str, pr_id: int, idx: int):
+    return _template("review_walkthrough.html")
+
+
+@app.get("/api/reviews/{repo}/{pr_id}/walkthrough/{idx}")
+def api_review_walkthrough(repo: str, pr_id: int, idx: int):
+    from features.reviewer import build_walkthrough_context
+    branch_dir, worktree = _find_review_branch_dir(repo, pr_id)
+    if branch_dir is None:
+        return JSONResponse({"error": "review not found"}, status_code=404)
+    try:
+        comments = json.loads((branch_dir / "queued_comments.json").read_text())
+    except (json.JSONDecodeError, OSError):
+        return JSONResponse({"error": "could not read comments"}, status_code=500)
+    content_comments = [c for c in comments if c.get("body")]
+    total = len(content_comments)
+    if total == 0:
+        return JSONResponse({"error": "no comments"}, status_code=404)
+    idx = max(0, min(idx, total - 1))
+    comment = content_comments[idx]
+    ctx = build_walkthrough_context(comment, worktree)
+    # Check cache first
+    cache_file = branch_dir / "walkthrough_cache.json"
+    if cache_file.exists():
+        try:
+            cache = json.loads(cache_file.read_text())
+            if idx < len(cache):
+                cached = cache[idx]
+                return {"comment": comment, "explanation": cached.get("explanation", ""),
+                        "snippet": cached.get("snippet", ""), "snippet_start_line": cached.get("snippet_start_line", 0),
+                        "file": comment.get("path", ""), "total": total, "idx": idx}
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    return {"comment": comment, "explanation": ctx["explanation"], "snippet": ctx["snippet"],
+            "snippet_start_line": ctx["snippet_start_line"], "file": comment.get("path", ""),
+            "total": total, "idx": idx}
+
+
+@app.post("/api/reviews/{repo}/{pr_id}/walkthrough/preprocess")
+def api_walkthrough_preprocess(repo: str, pr_id: int):
+    from concurrent.futures import ThreadPoolExecutor
+    from features.reviewer import build_walkthrough_context
+
+    branch_dir, worktree = _find_review_branch_dir(repo, pr_id)
+    if branch_dir is None:
+        return JSONResponse({"error": "review not found"}, status_code=404)
+    try:
+        comments = json.loads((branch_dir / "queued_comments.json").read_text())
+    except (json.JSONDecodeError, OSError):
+        return JSONResponse({"error": "could not read comments"}, status_code=500)
+
+    content_comments = [c for c in comments if c.get("body")]
+    if not content_comments:
+        return JSONResponse({"error": "no comments"}, status_code=404)
+
+    # Compute contexts in parallel
+    def compute_context(comment):
+        return build_walkthrough_context(comment, worktree)
+
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        contexts = list(pool.map(compute_context, content_comments))
+
+    # Write cache
+    cache_file = branch_dir / "walkthrough_cache.json"
+    cache_file.write_text(json.dumps(contexts, indent=2))
+
+    return {"status": "ok", "count": len(contexts)}
+
+
 @app.get("/api/reviews/{repo}/{pr_id}/bb-comments")
 def api_bb_comments(repo: str, pr_id: int):
     platform = make_platform(_config)

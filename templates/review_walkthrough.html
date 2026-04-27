@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<meta charset="utf-8">
+<title>Walkthrough — frshty</title>
+<script src="/static/tailwind.js"></script>
+<script defer src="/static/nav-gate.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
+<style>
+body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: #0a0a0a; color: #e0e0e0; }
+.card { background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; }
+.link { color: #60a5fa; }
+.link:hover { text-decoration: underline; }
+nav a { color: #888; padding: 4px 12px; border-radius: 4px; }
+nav a:hover, nav a.active { color: #fff; background: #222; }
+.badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; }
+.badge-blocking { background: #991b1b; color: #fca5a5; }
+.badge-suggestion { background: #713f12; color: #fde047; }
+.badge-question { background: #1e3a5f; color: #93c5fd; }
+.explain-card { background: #101828; border: 1px solid #1e3a5f; border-radius: 8px; }
+.code-card { background: #0d1117; border: 1px solid #2a2a2a; border-radius: 8px; font-size: 12px; overflow: hidden; }
+.code-line { display: flex; gap: 8px; line-height: 1.6; padding: 2px 12px; }
+.code-line-num { color: #444; min-width: 40px; text-align: right; user-select: none; flex-shrink: 0; }
+.code-line-body { flex: 1; white-space: pre-wrap; word-break: break-all; }
+.code-line.target-line { background: #1a3a1a; }
+.discuss-panel { background: #0a0a0f; border: 1px solid #2a2a2a; border-radius: 6px; display: flex; flex-direction: column; height: 40vh; overflow: hidden; }
+.discuss-panel.fullscreen-term { position: fixed; inset: 0; z-index: 50; height: 100vh; border-radius: 0; }
+.discuss-header { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: #141425; border-bottom: 1px solid #2a2a2a; font-size: 12px; flex-shrink: 0; }
+.discuss-term { flex: 1; min-height: 0; padding: 4px; }
+.discuss-term .xterm { height: 100%; }
+.spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #444; border-top-color: #60a5fa; border-radius: 50%; animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body class="p-4 max-w-5xl mx-auto flex flex-col gap-4">
+
+<!-- HEADER -->
+<header class="flex items-center gap-3">
+  <a href="/reviews" class="link text-sm">&larr; Reviews</a>
+  <h1 class="text-base font-bold flex-1 truncate" id="title">Walkthrough</h1>
+  <span id="progress" class="text-sm text-gray-500"></span>
+  <button id="btn-prev" onclick="navigate(-1)" class="bg-gray-800 hover:bg-gray-700 text-white px-3 py-1 rounded text-xs disabled:opacity-40">&#8592; prev</button>
+  <button id="btn-next" onclick="navigate(1)" class="bg-gray-800 hover:bg-gray-700 text-white px-3 py-1 rounded text-xs disabled:opacity-40">next &#8594;</button>
+</header>
+
+<!-- COMMENT CARD -->
+<div class="card p-4" id="comment-card">
+  <div class="flex items-center gap-2 mb-2 text-xs">
+    <span id="badge-sev" class="badge"></span>
+    <span id="file-loc" class="text-gray-500"></span>
+    <span id="loading-indicator" class="ml-auto hidden"><span class="spinner"></span> <span class="text-gray-500 text-xs">thinking...</span></span>
+  </div>
+  <p id="comment-body" class="text-sm text-gray-200 leading-relaxed"></p>
+</div>
+
+<!-- EXPLANATION CARD -->
+<div class="explain-card p-4" id="explain-card">
+  <div class="text-xs text-blue-400 mb-1 font-semibold uppercase tracking-wide">Why this matters</div>
+  <p id="explanation" class="text-sm text-gray-300 leading-relaxed"></p>
+</div>
+
+<!-- CODE CARD -->
+<div class="code-card p-3" id="code-card">
+  <div class="text-xs text-gray-600 mb-2" id="code-file-label"></div>
+  <div id="code-lines" class="overflow-x-auto"></div>
+</div>
+
+<!-- DISCUSS TERMINAL (always visible, auto-starts) -->
+<div>
+  <div class="discuss-header rounded-t-md">
+    <span class="text-blue-400 text-xs">Discuss with Claude</span>
+    <div class="ml-auto flex gap-2">
+      <button onclick="toggleFullscreen()" class="text-gray-400 hover:text-white text-xs">fullscreen</button>
+      <button onclick="resetSession()" class="text-gray-400 hover:text-yellow-400 text-xs">reset</button>
+    </div>
+  </div>
+  <div class="discuss-panel rounded-t-none" id="discuss-panel">
+    <div class="discuss-term" id="discuss-term"></div>
+  </div>
+</div>
+
+<script>
+const pathParts = window.location.pathname.split('/');
+const repo = pathParts[2];
+const prId = parseInt(pathParts[3]);
+let currentIdx = parseInt(pathParts[5]) || 0;
+let totalComments = 0;
+let currentComment = null;
+let discussState = { term: null, ws: null, fit: null, ro: null, sessionId: null };
+
+const EXT_LANG = {py:'python',js:'javascript',ts:'typescript',tsx:'tsx',jsx:'jsx',java:'java',rb:'ruby',go:'go',rs:'rust',css:'css',html:'html',json:'json',yml:'yaml',yaml:'yaml',sh:'bash',sql:'sql',md:'markdown'};
+
+function esc(s) {
+  const d = document.createElement('div');
+  d.textContent = s || '';
+  return d.innerHTML;
+}
+
+async function loadComment(idx) {
+  document.getElementById('loading-indicator').classList.remove('hidden');
+  document.getElementById('explanation').textContent = '';
+  document.getElementById('code-lines').innerHTML = '';
+
+  const resp = await fetch(`/api/reviews/${repo}/${prId}/walkthrough/${idx}`);
+  if (!resp.ok) {
+    document.getElementById('loading-indicator').classList.add('hidden');
+    document.getElementById('explanation').textContent = 'Error loading comment.';
+    return;
+  }
+  const data = await resp.json();
+  currentIdx = data.idx;
+  totalComments = data.total;
+  currentComment = data.comment;
+
+  history.replaceState(null, '', `/reviews/${repo}/${prId}/walkthrough/${currentIdx}`);
+
+  document.getElementById('title').textContent = `${repo} PR #${prId} — Walkthrough`;
+  document.getElementById('progress').textContent = `${currentIdx + 1} / ${totalComments}`;
+  document.getElementById('btn-prev').disabled = currentIdx === 0;
+  document.getElementById('btn-next').disabled = currentIdx === totalComments - 1;
+
+  const sev = data.comment.severity || 'suggestion';
+  const badgeEl = document.getElementById('badge-sev');
+  badgeEl.className = `badge badge-${sev}`;
+  badgeEl.textContent = sev;
+  document.getElementById('file-loc').textContent =
+    data.file ? `${data.file}${data.comment.line ? ':' + data.comment.line : ''}` : '';
+  document.getElementById('comment-body').textContent = data.comment.body || '';
+
+  document.getElementById('explanation').textContent = data.explanation || '(no explanation available)';
+
+  if (data.snippet) {
+    renderSnippet(data.snippet, data.snippet_start_line, data.comment.line, data.file);
+  } else {
+    document.getElementById('code-card').style.display = 'none';
+  }
+
+  document.getElementById('loading-indicator').classList.add('hidden');
+  startDiscussSession();
+}
+
+function renderSnippet(snippet, startLine, targetLine, filePath) {
+  document.getElementById('code-card').style.display = '';
+  document.getElementById('code-file-label').textContent = filePath || '';
+
+  const rawLines = snippet.split('\n');
+  const parsed = rawLines.map(raw => {
+    const m = raw.match(/^(\d+): (.*)$/);
+    if (m) return { num: parseInt(m[1]), text: m[2] };
+    return { num: null, text: raw };
+  });
+
+  const ext = (filePath || '').split('.').pop().toLowerCase();
+  const lang = EXT_LANG[ext];
+  let highlighted = null;
+  if (lang) {
+    try {
+      const code = parsed.map(l => l.text).join('\n');
+      highlighted = hljs.highlight(code, { language: lang, ignoreIllegals: true }).value.split('\n');
+    } catch (e) {}
+  }
+
+  const container = document.getElementById('code-lines');
+  container.innerHTML = parsed.map((line, i) => {
+    const isTarget = line.num === targetLine;
+    const content = highlighted ? highlighted[i] : esc(line.text);
+    return `<div class="code-line${isTarget ? ' target-line' : ''}">
+      <span class="code-line-num">${line.num ?? ''}</span>
+      <span class="code-line-body">${content}</span>
+    </div>`;
+  }).join('');
+}
+
+async function startDiscussSession() {
+  teardownDiscuss();
+
+  const c = currentComment;
+  if (!c) return;
+
+  const resp = await fetch(`/api/reviews/${repo}/${prId}/discuss`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      idx: currentIdx,
+      file: c.path || '',
+      line: c.line || '',
+      severity: c.severity || '',
+      body: c.body || '',
+    }),
+  });
+  const data = await resp.json();
+  discussState.sessionId = data.session_id;
+  connectDiscussTerminal(data.session_id);
+}
+
+function connectDiscussTerminal(sessionId) {
+  const container = document.getElementById('discuss-term');
+  const term = new Terminal({
+    cursorBlink: true,
+    fontSize: 13,
+    fontFamily: "'JetBrains Mono','Fira Code','Cascadia Code',Menlo,monospace",
+    theme: { background: '#0a0a0f', foreground: '#e2e8f0', cursor: '#e2e8f0', selectionBackground: '#334155' },
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.loadAddon(new WebLinksAddon.WebLinksAddon());
+  term.open(container);
+  fit.fit();
+
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(`${protocol}//${location.host}/ws/discuss/${sessionId}`);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => {
+    fit.fit();
+    ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+  };
+  ws.onmessage = (e) => {
+    const d = e.data instanceof ArrayBuffer ? new Uint8Array(e.data) : e.data;
+    term.write(d);
+  };
+  ws.onclose = () => { try { term.write('\r\n\x1b[90m[disconnected]\x1b[0m\r\n'); } catch (e) {} };
+  term.onData((d) => { if (ws.readyState === WebSocket.OPEN) ws.send(d); });
+
+  const ro = new ResizeObserver(() => {
+    try {
+      fit.fit();
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+    } catch (e) {}
+  });
+  ro.observe(container);
+
+  Object.assign(discussState, { term, ws, fit, ro });
+}
+
+function teardownDiscuss() {
+  try { discussState.ro && discussState.ro.disconnect(); } catch (e) {}
+  try { discussState.ws && discussState.ws.close(); } catch (e) {}
+  try { discussState.term && discussState.term.dispose(); } catch (e) {}
+  document.getElementById('discuss-term').innerHTML = '';
+  Object.assign(discussState, { term: null, ws: null, fit: null, ro: null, sessionId: null });
+}
+
+function navigate(delta) {
+  const next = currentIdx + delta;
+  if (next < 0 || next >= totalComments) return;
+  loadComment(next);
+}
+
+function toggleFullscreen() {
+  const panel = document.getElementById('discuss-panel');
+  panel.classList.toggle('fullscreen-term');
+  setTimeout(() => {
+    try {
+      if (discussState.fit) {
+        discussState.fit.fit();
+        if (discussState.ws && discussState.ws.readyState === WebSocket.OPEN) {
+          discussState.ws.send(JSON.stringify({ type: 'resize', cols: discussState.term.cols, rows: discussState.term.rows }));
+        }
+      }
+    } catch (e) {}
+  }, 50);
+}
+
+function resetSession() {
+  startDiscussSession();
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+  if (e.key === 'ArrowLeft' || e.key === 'h') navigate(-1);
+  if (e.key === 'ArrowRight' || e.key === 'l') navigate(1);
+});
+
+loadComment(currentIdx);
+</script>
+</body>
+</html>
