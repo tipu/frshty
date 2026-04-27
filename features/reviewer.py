@@ -358,8 +358,9 @@ def build_walkthrough_context(comment: dict, worktree: Path | None) -> dict:
         "3. For each block, extract it with role labels:\n"
         "   - 'flagged': the primary commented lines\n"
         "   - 'related': other relevant code in the same file that relates to the comment (e.g., another use of the same variable, another function handling the same case)\n"
-        "4. Write a 3-5 sentence prose explanation: what does this code do, why does the comment matter architecturally, what's the risk if not addressed. Do NOT prescribe a fix. Do NOT repeat the comment.\n\n"
-        'Return ONLY valid JSON (no markdown): {"comment_type":"local|behavioral|contract","explanation":"...","snippets":[{"role":"flagged|related","code":"lines preserving NUM: text format","start_line":<int>}]}'
+        "4. For each block, write a specific 1-2 sentence explanation of how THIS BLOCK is relevant to the comment. Be thorough but concise.\n"
+        "5. Write a 3-5 sentence overall explanation: what does this code do, why does the comment matter architecturally, what's the risk if not addressed. Do NOT prescribe a fix.\n\n"
+        'Return ONLY valid JSON (no markdown): {"comment_type":"local|behavioral|contract","explanation":"overall explanation","snippets":[{"role":"flagged|related","code":"lines preserving NUM: text format","start_line":<int>,"explanation":"how this block relates to the comment"}]}'
     )
 
     result = run_haiku(prompt)

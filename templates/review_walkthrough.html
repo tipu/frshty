@@ -154,9 +154,13 @@ function renderSnippets(snippets, targetLine) {
     const role = snippet.role || 'code';
     const code = snippet.code || '';
     const startLine = snippet.start_line || 0;
+    const snippetExplanation = snippet.explanation || '';
 
     html += `<div class="snippet-block" style="margin-bottom: 16px;">`;
     html += `<div class="text-xs text-blue-400 mb-2 font-semibold uppercase">${esc(role)}</div>`;
+    if (snippetExplanation) {
+      html += `<div class="text-xs text-gray-400 mb-2 italic">${esc(snippetExplanation)}</div>`;
+    }
 
     const rawLines = code.split('\n');
     const parsed = rawLines.map(raw => {
@@ -167,8 +171,8 @@ function renderSnippets(snippets, targetLine) {
 
     // Try to infer language from code pattern
     let lang = null;
-    if (code.includes('def ') || code.includes('class ')) lang = 'python';
-    else if (code.includes('function ') || code.includes('const ') || code.includes('let ')) lang = 'javascript';
+    if (code.includes('def ') || code.includes('class ') || code.includes('import ')) lang = 'python';
+    else if (code.includes('interface ') || code.includes('type ') || code.includes('async ') || code.includes('=>') || code.includes('function ') || code.includes('const ') || code.includes('let ')) lang = 'typescript';
 
     let highlighted = null;
     if (lang) {
