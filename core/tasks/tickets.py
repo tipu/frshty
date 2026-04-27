@@ -226,6 +226,25 @@ def mark_ready(ctx: TaskContext) -> TaskResult:
     return TaskResult("ok")
 
 
+@task("fix_reported_bug",
+      timeout=FIX_TIMEOUT)
+def fix_reported_bug(ctx: TaskContext) -> TaskResult:
+    ticket_dir = _ticket_dir(ctx)
+    if not ticket_dir.is_dir():
+        return TaskResult("failed", f"ticket dir missing: {ticket_dir}")
+    prompt = (
+        "A user reported that this ticket's fix is not working or has regressed. "
+        "Re-investigate the issue in the current worktree state, identify why it's failing, "
+        "and fix it. Then run relevant tests to verify the fix works. Commit your changes."
+    )
+    log.emit("ticket_bug_fix_started", f"Investigating reported bug for {ctx.ticket_key}",
+             meta={"ticket": ctx.ticket_key})
+    result = run_claude_code(prompt, cwd=ticket_dir, timeout=FIX_TIMEOUT)
+    if result is None:
+        return TaskResult("failed", "claude returned non-zero or empty")
+    return TaskResult("ok")
+
+
 @task("create_pr",
       preconditions=[status_is("pr_ready"), auto_pr_true],
       timeout=300)

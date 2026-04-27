@@ -120,9 +120,11 @@ def _fetch_ticket_comments(config: dict, key: str) -> list[dict]:
 
 def _comment_snapshot(comments: list[dict]) -> dict:
     dates = [c["created_at"] for c in comments if c.get("created_at")]
+    comment_ids = [c.get("id") for c in comments if c.get("id")]
     return {
         "count": len(comments),
         "latest_created_at": max(dates) if dates else None,
+        "comment_ids": comment_ids,
     }
 
 
@@ -230,6 +232,147 @@ def _reingest_merged_ticket(config: dict, ticket: dict, ts: dict, base_url: str)
     return ts
 
 
+def _is_issue_comment(body: str, ticket_summary: str, last_comments: list[dict]) -> bool:
+    if not body:
+        return False
+    context = f"Ticket: {ticket_summary}\n\nRecent comments:\n"
+    for c in last_comments[-3:]:
+        context += f"- {c.get('body', '')}\n"
+    context += f"\nNew comment: {body}\n\n"
+
+    prompt = context + (
+        "Does this comment report a bug, regression, or issue that needs fixing? "
+        "Answer 'yes' or 'no' only. Examples of yes: 'still broken on staging', "
+        "'getting timeout now', 'regression after merge'. Examples of no: 'looks good', "
+        "'thanks for fixing', 'deployed successfully'."
+    )
+    result = run_haiku(prompt)
+    if not result:
+        return False
+    return result.strip().lower().startswith("yes")
+
+
+def _ensure_worktree(config: dict, ticket_key: str, slug: str) -> dict | None:
+    ws = config["workspace"]
+    repos = get_repos(config)
+    base_branch = ws.get("base_branch", "main")
+
+    created = False
+    synced = False
+    repos_status = {}
+
+    for repo in repos:
+        wt_path = ticket_worktree_path(config, slug, repo["name"])
+        try:
+            if (wt_path / ".git").is_file():
+                subprocess.run(["git", "fetch", "origin"], cwd=str(wt_path), capture_output=True, timeout=60)
+                result = subprocess.run(
+                    ["git", "merge", f"origin/{base_branch}"],
+                    cwd=str(wt_path), capture_output=True, text=True, timeout=60
+                )
+                if result.returncode != 0:
+                    subprocess.run(["git", "merge", "--abort"], cwd=str(wt_path), capture_output=True, timeout=60)
+                    subprocess.run(
+                        ["git", "reset", "--hard", f"origin/{base_branch}"],
+                        cwd=str(wt_path), capture_output=True, timeout=60
+                    )
+                    subprocess.run(["git", "clean", "-fd"], cwd=str(wt_path), capture_output=True, timeout=60)
+                synced = True
+            else:
+                wt_path.parent.mkdir(parents=True, exist_ok=True)
+                subprocess.run(["git", "worktree", "prune"], cwd=str(repo["path"]), capture_output=True, timeout=60)
+                subprocess.run(["git", "fetch", "origin"], cwd=str(repo["path"]), capture_output=True, timeout=60)
+
+                branch = ws.get("branch") or _make_branch(config, ticket_key, {"key": ticket_key})
+                branches = subprocess.run(
+                    ["git", "branch", "--list"], cwd=str(repo["path"]),
+                    capture_output=True, text=True, timeout=60
+                ).stdout
+                if branch not in branches.replace("* ", "").replace("  ", " ").split():
+                    subprocess.run(
+                        ["git", "branch", branch, f"origin/{base_branch}"],
+                        cwd=str(repo["path"]), capture_output=True, timeout=60
+                    )
+
+                wt_result = subprocess.run(
+                    ["git", "worktree", "add", str(wt_path), branch],
+                    cwd=str(repo["path"]), capture_output=True, text=True, timeout=60
+                )
+                if wt_result.returncode != 0:
+                    log.emit("worktree_creation_failed", f"Failed to create worktree for {slug} in {repo['name']}",
+                        meta={"ticket": ticket_key, "repo": repo["name"]})
+                    continue
+                created = True
+                subprocess.run(["chown", "-R", "1000:1000", str(wt_path)], capture_output=True, timeout=60)
+
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=str(wt_path), capture_output=True, text=True, timeout=10
+            ).stdout.strip()
+            repos_status[repo["name"]] = {"path": wt_path, "head": head}
+        except Exception as e:
+            log.emit("worktree_ensure_error", f"Error ensuring worktree for {repo['name']}: {e}",
+                meta={"ticket": ticket_key, "repo": repo["name"]})
+            continue
+
+    if not repos_status:
+        return None
+
+    return {
+        "created": created,
+        "synced": synced,
+        "repos": repos_status,
+    }
+
+
+def _process_ticket_comments(config: dict, key: str, ts: dict, ticket: dict, base_url: str, instance_key: str = "") -> None:
+    if not instance_key:
+        return
+    if not get_repos(config):
+        return
+
+    slug = ts.get("slug")
+    if not slug:
+        return
+
+    comments = _fetch_ticket_comments(config, key)
+    if not comments:
+        ts["ticket_comment_snapshot"] = _comment_snapshot([])
+        return
+
+    old_snapshot = ts.get("ticket_comment_snapshot", {})
+    old_ids = set(old_snapshot.get("comment_ids", []))
+    new_snapshot = _comment_snapshot(comments)
+    new_ids = set(new_snapshot.get("comment_ids", []))
+
+    new_comment_ids = new_ids - old_ids
+    if not new_comment_ids:
+        ts["ticket_comment_snapshot"] = new_snapshot
+        return
+
+    new_comments = [c for c in comments if c.get("id") in new_comment_ids]
+    last_comments = sorted(comments, key=lambda c: c.get("created_at", ""))[-5:]
+
+    for comment in new_comments:
+        body = comment.get("body", "")
+        if not _is_issue_comment(body, ticket.get("summary", ""), last_comments):
+            continue
+
+        log.emit("ticket_issue_detected", f"Issue detected in comment for {key}",
+            links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
+            meta={"ticket": key, "comment_id": comment.get("id")})
+
+        wt_result = _ensure_worktree(config, key, slug)
+        if not wt_result:
+            log.emit("worktree_ensure_failed", f"Failed to ensure worktree for {key}",
+                meta={"ticket": key})
+            continue
+
+        _enqueue_stage(instance_key, key, "fix_reported_bug")
+
+    ts["ticket_comment_snapshot"] = new_snapshot
+
+
 def check(config: dict, instance_key: str = ""):
     from datetime import datetime, timezone
     assigned = _fetch_tickets(config)
@@ -289,6 +432,8 @@ def check(config: dict, instance_key: str = ""):
                     ts["url"] = ticket.get("url", "")
                 state.save_ticket(key, ts)
                 continue
+
+            _process_ticket_comments(config, key, ts, ticket, base_url, instance_key)
 
             mapped = _resolve_status(config, ticket.get("status", ""))
             if mapped and "slug" not in ts:

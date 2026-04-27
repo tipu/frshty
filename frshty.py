@@ -808,6 +808,72 @@ def api_update_comment(repo: str, pr_id: int, idx: int, body: dict):
     return JSONResponse({"error": "not found"}, status_code=404)
 
 
+@app.post("/api/reviews/{repo}/{pr_id}/comments/{idx}/simplify")
+def api_simplify_comment(repo: str, pr_id: int, idx: int, body: dict):
+    from features.reviewer import _simplify_body_with_context
+    if "body" not in body:
+        return JSONResponse({"error": "body required"}, status_code=400)
+
+    comment_body = body["body"]
+    file_path = body.get("path", "")
+    line_num = body.get("line", 0)
+
+    # Fetch diff to get code context
+    code_context = None
+    if file_path:
+        reviews_dir = _config["_state_dir"] / "reviews" / repo
+        for branch_dir in reviews_dir.iterdir():
+            diff_file = branch_dir / "diff.txt"
+            if diff_file.exists():
+                diff_text = diff_file.read_text()
+                code_context = _extract_code_context(diff_text, file_path, line_num)
+                break
+
+    simplified = _simplify_body_with_context(comment_body, code_context, file_path, line_num)
+    return {"simplified": simplified}
+
+
+def _extract_code_context(diff_text: str, target_file: str, target_line: int, context_lines: int = 5) -> str:
+    """Extract code around the target line from the diff."""
+    lines = diff_text.split('\n')
+    in_file = False
+    current_line_num = 0
+    context = []
+
+    for line in lines:
+        if line.startswith(f'+++ b/{target_file}'):
+            in_file = True
+            continue
+        if in_file and line.startswith('@@'):
+            m = __import__('re').match(r'@@ -\d+(?:,\d+)? \+(\d+)', line)
+            if m:
+                current_line_num = int(m.group(1))
+            continue
+        if in_file and line.startswith('diff --git'):
+            break
+        if not in_file:
+            continue
+
+        if line.startswith(('-', '+')):
+            content = line[1:]
+        elif line.startswith(' '):
+            content = line[1:]
+        else:
+            continue
+
+        if abs(current_line_num - target_line) <= context_lines:
+            prefix = '+ ' if line.startswith('+') else '  '
+            context.append(f"{current_line_num:4d} {prefix}{content}")
+
+        if not line.startswith('-'):
+            current_line_num += 1
+
+        if current_line_num > target_line + context_lines:
+            break
+
+    return '\n'.join(context) if context else None
+
+
 @app.get("/api/tickets/list")
 def api_tickets_list():
     from datetime import datetime, timezone, timedelta

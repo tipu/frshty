@@ -314,6 +314,26 @@ def _simplify_body(body: str) -> str:
     return output if output else body
 
 
+def _simplify_body_with_context(body: str, code_context: str | None, file_path: str, line_num: int) -> str:
+    context_section = ""
+    if code_context:
+        context_section = f"\nCode context (line {line_num} in {file_path}):\n```\n{code_context}\n```\n"
+
+    prompt = (
+        "You are simplifying a code review comment. Strip it to its essence while preserving the technical intent.\n"
+        "Remove: hedging language (might, could, may), examples, explanations of why, background context.\n"
+        "Keep: the actual problem and the prescribed fix, which must still make sense in context of the code.\n"
+        "1-2 sentences max. Be imperative not narrative.\n"
+        "Bad: 'This might overflow if the array is large.'\n"
+        "Good: 'This overflows on large arrays; use a buffer.'\n"
+        "Backticks for code identifiers only. Return ONLY the rewritten text, nothing else."
+        f"{context_section}\nReview comment to simplify:\n{body}"
+    )
+
+    output = run_haiku(prompt)
+    return output if output else body
+
+
 def _simplify_all_issues(issues: list[dict]) -> list[dict]:
     with ThreadPoolExecutor(max_workers=10) as pool:
         bodies = list(pool.map(lambda i: _simplify_body(i["body"]), issues))
