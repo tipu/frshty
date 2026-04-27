@@ -222,10 +222,11 @@ def _reingest_merged_ticket(config: dict, ticket: dict, ts: dict, base_url: str)
         )
 
     new_ts = _setup_ticket(config, ticket, base_url, comments=comments)
-    for k in ("slug", "branch", "discovered_at"):
-        if new_ts.get(k):
-            ts[k] = new_ts[k]
-    ts["status"] = new_ts.get("status", "new")
+    if new_ts:
+        for k in ("slug", "branch", "discovered_at"):
+            if new_ts.get(k):
+                ts[k] = new_ts[k]
+        ts["status"] = new_ts.get("status", "new")
     return ts
 
 
