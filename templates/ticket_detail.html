@@ -218,7 +218,8 @@ async function load() {
     const ticketUrl = (data.history || []).map(e => (e.links || {}).ticket).find(u => u);
 
     hasPrs = (st.prs || []).length > 0;
-    if (hasPrs) document.getElementById('tab-bar').style.display = 'flex';
+    const hasCode = ['pr_ready', 'pr_created', 'in_review', 'pr_failed', 'merged'].includes(status) || hasPrs;
+    if (hasCode) document.getElementById('tab-bar').style.display = 'flex';
 
     const summary = data.summary || '';
     const alive = data.terminal_alive;
