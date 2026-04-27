@@ -734,7 +734,7 @@ def api_review_walkthrough(repo: str, pr_id: int, idx: int):
         return JSONResponse({"error": "no comments"}, status_code=404)
     idx = max(0, min(idx, total - 1))
     comment = content_comments[idx]
-    ctx = build_walkthrough_context(comment, worktree)
+
     # Check cache first
     cache_file = branch_dir / "walkthrough_cache.json"
     if cache_file.exists():
@@ -748,6 +748,8 @@ def api_review_walkthrough(repo: str, pr_id: int, idx: int):
         except (json.JSONDecodeError, OSError):
             pass
 
+    # Cache miss - compute on demand
+    ctx = build_walkthrough_context(comment, worktree)
     return {"comment": comment, "explanation": ctx["explanation"], "snippets": ctx["snippets"],
             "file": comment.get("path", ""), "total": total, "idx": idx}
 
@@ -769,18 +771,23 @@ def api_walkthrough_preprocess(repo: str, pr_id: int):
     if not content_comments:
         return JSONResponse({"error": "no comments"}, status_code=404)
 
-    # Compute contexts in parallel
-    def compute_context(comment):
-        return build_walkthrough_context(comment, worktree)
-
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        contexts = list(pool.map(compute_context, content_comments))
-
-    # Write cache
     cache_file = branch_dir / "walkthrough_cache.json"
-    cache_file.write_text(json.dumps(contexts, indent=2))
+    if cache_file.exists():
+        return {"status": "ok", "count": len(content_comments), "cached": True}
 
-    return {"status": "ok", "count": len(contexts)}
+    def preprocess_in_background():
+        try:
+            def compute_context(comment):
+                return build_walkthrough_context(comment, worktree)
+
+            with ThreadPoolExecutor(max_workers=5) as pool:
+                contexts = list(pool.map(compute_context, content_comments))
+            cache_file.write_text(json.dumps(contexts, indent=2))
+        except Exception:
+            pass
+
+    threading.Thread(target=preprocess_in_background, daemon=True).start()
+    return {"status": "ok", "count": len(content_comments), "cached": False}
 
 
 @app.get("/api/reviews/{repo}/{pr_id}/bb-comments")
