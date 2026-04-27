@@ -412,6 +412,110 @@ def api_poll():
         return {"status": "error", "error": str(e)}
 
 
+@app.get("/api/tickets/{ticket_key}/pr-info")
+def api_ticket_pr_info(ticket_key: str):
+    from core.ticket_status import TicketStatus
+    import features.tickets as tickets_mod
+
+    ticket = state.load_ticket(ticket_key)
+    if not ticket:
+        return {"error": "Ticket not found"}, 404
+
+    ts = ticket.get("state", {})
+    title = f"{ticket_key}: {ticket.get('summary', '')}"
+
+    ws = _config.get("workspace", {})
+    slug = ts.get("slug", "")
+    if not slug:
+        return {"error": "No slug found"}, 400
+
+    ticket_dir = ws.get("root", Path(".")) / ws.get("tickets_dir", "tickets") / slug
+    manifest = ticket_dir / "docs" / "change-manifest.md"
+    raw_body = manifest.read_text() if manifest.exists() else ticket.get("description", "")
+    pr_body = tickets_mod._summarize_pr_body(raw_body, ticket)
+
+    return {"title": title, "description": pr_body}
+
+
+@app.post("/api/tickets/{ticket_key}/submit-pr")
+async def api_submit_pr(ticket_key: str, request: Request):
+    import features.tickets as tickets_mod
+    from pathlib import Path as PathlibPath
+
+    try:
+        data = await request.json()
+    except:
+        return {"error": "Invalid JSON"}, 400
+
+    title = data.get("title", "")
+    description = data.get("description", "")
+    if not title or not description:
+        return {"error": "Title and description are required"}, 400
+
+    ticket = state.load_ticket(ticket_key)
+    if not ticket:
+        return {"error": "Ticket not found"}, 404
+
+    ts = ticket.get("state", {})
+    if ts.get("status") != "pr_ready":
+        return {"error": f"Ticket is {ts.get('status')}, not pr_ready"}, 400
+
+    ws = _config.get("workspace", {})
+    slug = ts.get("slug", "")
+    if not slug:
+        return {"error": "No slug found"}, 400
+
+    platform = make_platform(_config)
+    repos = get_repos(_config)
+    ticket_dir = ws.get("root", PathlibPath(".")) / ws.get("tickets_dir", "tickets") / slug
+    prs = []
+
+    for repo in repos:
+        wt = tickets_mod.ticket_worktree_path(_config, slug, repo["name"])
+        if not wt.is_dir():
+            continue
+
+        subprocess.run(["git", "add", "-A"], cwd=str(wt), capture_output=True, timeout=60)
+        subprocess.run(["git", "commit", "--no-verify", "-m", f"{ticket_key}: {ticket.get('summary', '')}"], cwd=str(wt), capture_output=True, timeout=60)
+        subprocess.run(["git", "fetch", "origin", ws.get("base_branch", "main")], cwd=str(wt), capture_output=True, timeout=60)
+
+        diff_check = subprocess.run(
+            ["git", "diff", f"origin/{ws.get('base_branch', 'main')}..HEAD", "--stat"],
+            cwd=str(wt), capture_output=True, text=True, timeout=30)
+        if not diff_check.stdout.strip():
+            continue
+
+        actual_branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=str(wt), capture_output=True, text=True, timeout=10).stdout.strip()
+        push_branch = actual_branch or ts.get("branch", "")
+
+        pushed = platform.push_branch(wt, push_branch)
+        if not pushed.get("ok"):
+            return {"error": f"Failed to push branch: {pushed.get('error', 'unknown')}"}, 400
+
+        result = platform.create_pr(repo["name"], wt, push_branch, title, description, ws.get("base_branch", "main"))
+        if result.get("error"):
+            return {"error": f"Failed to create PR: {result['error']}"}, 400
+
+        pr_url = result.get("url", "")
+        pr_id = result.get("id")
+        if pr_id:
+            prs.append({"repo": repo["name"], "id": pr_id, "url": pr_url})
+
+    if not prs:
+        return {"error": "No PRs were created"}, 400
+
+    def _mark(current):
+        new = dict(current or {})
+        new["prs"] = prs
+        return new
+
+    state.update_ticket(ticket_key, _mark)
+    log.emit("ticket_pr_created", f"PR submitted for {ticket_key}")
+    return {"status": "ok", "prs": prs}
+
+
 @app.post("/api/reviews/submit")
 def api_submit_review(body: dict):
     url = body.get("url", "").strip()
