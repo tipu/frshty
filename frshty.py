@@ -519,6 +519,7 @@ def api_reviews_list():
                 continue
             comments = json.loads(queued.read_text())
             review_data = json.loads(review.read_text()) if review.exists() else {}
+            first_comment = comments[0] if comments else {}
             candidates.append({
                 "repo": repo_dir.name,
                 "branch": branch_dir.name,
@@ -526,8 +527,9 @@ def api_reviews_list():
                 "reviewed_at": review_data.get("date", ""),
                 "total_comments": len(comments),
                 "pending": sum(1 for c in comments if c.get("status") == "pending"),
-                "pr_url": comments[0]["pr_url"] if comments else "",
-                "pr_id": comments[0]["pr_id"] if comments else 0,
+                "pr_url": first_comment.get("pr_url", ""),
+                "pr_id": first_comment.get("pr_id", 0),
+                "created_on": first_comment.get("created_at", ""),
             })
     platform = make_platform(_config)
     job_platform = _config.get("job", {}).get("platform", "")
@@ -556,10 +558,16 @@ def api_reviews_list():
         r["author"] = info.get("author", "")
         approvers = info.get("approvers") or []
         r["approved_by_me"] = bool(my_id) and my_id in approvers
+        r["title"] = info.get("title", "")
         return r
     with ThreadPoolExecutor(max_workers=10) as pool:
         results = [r for r in pool.map(check_open, candidates) if r]
-    return results
+    seen = {}
+    for r in results:
+        key = (r["repo"], r["pr_id"])
+        if key not in seen or r.get("reviewed_at", "") > seen[key].get("reviewed_at", ""):
+            seen[key] = r
+    return list(seen.values())
 
 
 @app.get("/api/reviews/{repo}/{pr_id}/comments")
