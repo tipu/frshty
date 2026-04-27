@@ -98,7 +98,7 @@ class BitbucketPlatform:
         results = []
         with httpx.Client(auth=self._auth(), timeout=30) as client:
             for repo in self.repos:
-                url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests?state=OPEN&pagelen=50"
+                url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests?state=OPEN"
                 resp = client.get(url)
                 if resp.status_code != 200:
                     continue
