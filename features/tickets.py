@@ -639,12 +639,12 @@ def _setup_ticket(config, ticket, base_url, comments=None) -> dict:
 
 def _summarize_pr_body(raw_body: str, ticket: dict) -> str:
     if not raw_body or len(raw_body) < 200:
-        return raw_body
+        return f"Implemented {ticket['key']}: {ticket.get('summary', '')}"
     result = run_haiku(
         f"Summarize this PR description in 3-5 plain sentences. No bullet points, no headers, no markdown formatting. "
         f"Just say what changed and why.\n\nTicket: {ticket['key']} — {ticket['summary']}\n\n{raw_body[:3000]}"
     )
-    return result if result else raw_body[:500]
+    return result if result and len(result) > 10 else f"Implemented {ticket['key']}: {ticket.get('summary', '')}"
 
 
 def _create_pr(config, ticket, ts, base_url) -> dict:
