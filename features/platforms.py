@@ -103,9 +103,6 @@ class BitbucketPlatform:
                 if resp.status_code != 200:
                     continue
                 for pr in resp.json().get("values", []):
-                    author_id = pr.get("author", {}).get("account_id", "")
-                    if author_id == self.user_account_id:
-                        continue
                     results.append(self._normalize_pr(pr, repo))
         return results
 
