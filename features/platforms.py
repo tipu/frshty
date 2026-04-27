@@ -95,15 +95,22 @@ class BitbucketPlatform:
         return results
 
     def list_review_prs(self) -> list[dict]:
+        import core.log as log
         results = []
         with httpx.Client(auth=self._auth(), timeout=30) as client:
             for repo in self.repos:
                 url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests?state=OPEN"
                 resp = client.get(url)
                 if resp.status_code != 200:
+                    log.emit("poll_error", f"Failed to fetch PRs from {repo}: HTTP {resp.status_code}",
+                             meta={"repo": repo, "status": resp.status_code, "url": url})
                     continue
-                for pr in resp.json().get("values", []):
-                    results.append(self._normalize_pr(pr, repo))
+                try:
+                    for pr in resp.json().get("values", []):
+                        results.append(self._normalize_pr(pr, repo))
+                except Exception as e:
+                    log.emit("poll_error", f"Error parsing PRs from {repo}: {type(e).__name__}: {e}",
+                             meta={"repo": repo, "error": str(e)})
         return results
 
     def get_pr_comments(self, repo: str, pr_id: int) -> list[dict]:
