@@ -416,22 +416,30 @@ def api_poll():
 def api_ticket_pr_info(ticket_key: str):
     import features.tickets as tickets_mod
 
-    ticket = state.load_ticket(ticket_key)
-    if not ticket:
-        return {"error": "Ticket not found"}, 404
+    try:
+        ticket = state.load_ticket(ticket_key)
+        if not ticket:
+            return {"error": "Ticket not found"}, 404
 
-    title = f"{ticket_key}: {ticket.get('summary', '')}"
-    slug = ticket.get("slug", "")
-    if not slug:
-        return {"error": "No slug found"}, 400
+        title = f"{ticket_key}: {ticket.get('summary', '')}"
+        slug = ticket.get("slug", "")
+        if not slug:
+            return {"error": "No slug found"}, 400
 
-    ws = _config.get("workspace", {})
-    ticket_dir = ws.get("root", Path(".")) / ws.get("tickets_dir", "tickets") / slug
-    manifest = ticket_dir / "docs" / "change-manifest.md"
-    raw_body = manifest.read_text() if manifest.exists() else ticket.get("description", "")
-    pr_body = tickets_mod._summarize_pr_body(raw_body, ticket)
+        ws = _config.get("workspace", {})
+        ticket_dir = ws.get("root", Path(".")) / ws.get("tickets_dir", "tickets") / slug
+        manifest = ticket_dir / "docs" / "change-manifest.md"
+        raw_body = manifest.read_text() if manifest.exists() else ticket.get("description", "")
+        try:
+            pr_body = tickets_mod._summarize_pr_body(raw_body, ticket)
+        except Exception as e:
+            pr_body = raw_body[:500]
+            log.emit("pr_summary_error", f"Failed to summarize PR body: {e}", meta={"ticket": ticket_key})
 
-    return {"title": title, "description": pr_body}
+        return {"title": title, "description": pr_body}
+    except Exception as e:
+        log.emit("pr_info_error", f"Error generating PR info: {e}", meta={"ticket": ticket_key})
+        return {"error": str(e)}, 500
 
 
 @app.post("/api/tickets/{ticket_key}/submit-pr")
