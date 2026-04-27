@@ -430,10 +430,13 @@ def api_ticket_pr_info(ticket_key: str):
         ticket_dir = ws.get("root", Path(".")) / ws.get("tickets_dir", "tickets") / slug
         manifest = ticket_dir / "docs" / "change-manifest.md"
         raw_body = manifest.read_text() if manifest.exists() else ticket.get("description", "")
+
         try:
             pr_body = tickets_mod._summarize_pr_body(raw_body, ticket)
+            if not pr_body or len(pr_body) < 10:
+                pr_body = f"Implementation for {ticket_key}: {ticket.get('summary', '')}"
         except Exception as e:
-            pr_body = raw_body
+            pr_body = f"Implementation for {ticket_key}: {ticket.get('summary', '')}"
             log.emit("pr_summary_error", f"Failed to summarize PR body: {e}", meta={"ticket": ticket_key})
 
         return {"title": title, "description": pr_body}
