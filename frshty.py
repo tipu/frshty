@@ -417,7 +417,8 @@ def api_ticket_pr_info(ticket_key: str):
     import features.tickets as tickets_mod
 
     try:
-        ticket = state.load_ticket(ticket_key)
+        tickets = state.load("tickets")
+        ticket = tickets.get(ticket_key)
         if not ticket:
             return {"error": "Ticket not found"}, 404
 
@@ -460,7 +461,8 @@ async def api_submit_pr(ticket_key: str, request: Request):
     if not title or not description:
         return {"error": "Title and description are required"}, 400
 
-    ticket = state.load_ticket(ticket_key)
+    tickets = state.load("tickets")
+    ticket = tickets.get(ticket_key)
     if not ticket:
         return {"error": "Ticket not found"}, 404
 
