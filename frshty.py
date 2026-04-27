@@ -743,14 +743,13 @@ def api_review_walkthrough(repo: str, pr_id: int, idx: int):
             if idx < len(cache):
                 cached = cache[idx]
                 return {"comment": comment, "explanation": cached.get("explanation", ""),
-                        "snippet": cached.get("snippet", ""), "snippet_start_line": cached.get("snippet_start_line", 0),
+                        "snippets": cached.get("snippets", []),
                         "file": comment.get("path", ""), "total": total, "idx": idx}
         except (json.JSONDecodeError, OSError):
             pass
 
-    return {"comment": comment, "explanation": ctx["explanation"], "snippet": ctx["snippet"],
-            "snippet_start_line": ctx["snippet_start_line"], "file": comment.get("path", ""),
-            "total": total, "idx": idx}
+    return {"comment": comment, "explanation": ctx["explanation"], "snippets": ctx["snippets"],
+            "file": comment.get("path", ""), "total": total, "idx": idx}
 
 
 @app.post("/api/reviews/{repo}/{pr_id}/walkthrough/preprocess")
