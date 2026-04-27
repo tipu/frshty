@@ -575,21 +575,21 @@ class TestFixCiFailuresTask:
 
 class TestCommentSnapshot:
     def test_empty(self):
-        assert tickets._comment_snapshot([]) == {"count": 0, "latest_created_at": None}
+        assert tickets._comment_snapshot([]) == {"count": 0, "latest_created_at": None, "comment_ids": []}
 
     def test_picks_max_date(self):
         snap = tickets._comment_snapshot([
-            {"created_at": "2026-04-20T00:00:00Z"},
-            {"created_at": "2026-04-22T00:00:00Z"},
-            {"created_at": "2026-04-21T00:00:00Z"},
+            {"created_at": "2026-04-20T00:00:00Z", "id": "c1"},
+            {"created_at": "2026-04-22T00:00:00Z", "id": "c2"},
+            {"created_at": "2026-04-21T00:00:00Z", "id": "c3"},
         ])
-        assert snap == {"count": 3, "latest_created_at": "2026-04-22T00:00:00Z"}
+        assert snap == {"count": 3, "latest_created_at": "2026-04-22T00:00:00Z", "comment_ids": ["c1", "c2", "c3"]}
 
     def test_ignores_missing_dates(self):
         snap = tickets._comment_snapshot([
-            {"created_at": "2026-04-20T00:00:00Z"}, {},
+            {"created_at": "2026-04-20T00:00:00Z", "id": "c1"}, {"id": "c2"},
         ])
-        assert snap == {"count": 2, "latest_created_at": "2026-04-20T00:00:00Z"}
+        assert snap == {"count": 2, "latest_created_at": "2026-04-20T00:00:00Z", "comment_ids": ["c1", "c2"]}
 
 
 class TestWriteCommentsMd:
@@ -622,7 +622,7 @@ class TestMarkTicketMerged:
             result = tickets._mark_ticket_merged(fake_config, ticket, ts)
         assert result["status"] == "merged"
         assert result["merged_comment_snapshot"] == {
-            "count": 2, "latest_created_at": "2026-04-21T00:00:00Z",
+            "count": 2, "latest_created_at": "2026-04-21T00:00:00Z", "comment_ids": []
         }
         assert "merged_at" in result
 

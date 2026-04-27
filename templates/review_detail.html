@@ -305,6 +305,7 @@ function renderInlineComment(c) {
             onchange="autoSave(${c.idx})">${esc(c.body)}</textarea>
         <div class="flex gap-2 items-center">
             <button onclick="saveComment(${c.idx})" class="bg-gray-700 hover:bg-gray-600 text-white px-2 py-0.5 rounded text-xs">Save</button>
+            <button onclick="simplifyComment(${c.idx})" class="bg-amber-700 hover:bg-amber-600 text-white px-2 py-0.5 rounded text-xs">Simplify</button>
             <button onclick="publishComment(${c.idx})" class="bg-green-700 hover:bg-green-600 text-white px-2 py-0.5 rounded text-xs">${isPublished ? 'Edit' : 'Publish'}</button>
             <button onclick="discuss(${c.idx})" class="bg-blue-700 hover:bg-blue-600 text-white px-2 py-0.5 rounded text-xs">Discuss</button>
             <button onclick="dismissComment(${c.idx})" class="text-red-900 hover:text-red-400 text-xs">x</button>
@@ -370,8 +371,35 @@ async function autoSave(idx) {
     });
 }
 
+async function simplifyComment(idx) {
+    const c = allComments[idx];
+    const bodyEl = document.getElementById(`body-${idx}`);
+    const body = bodyEl.value;
+    const resp = await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}/simplify`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            body,
+            path: c.path || '',
+            line: c.line || 0
+        })
+    });
+    if (resp.ok) {
+        const result = await resp.json();
+        bodyEl.value = result.simplified;
+    }
+}
+
 async function publishComment(idx) {
+    const c = allComments[idx];
     const body = document.getElementById(`body-${idx}`).value;
+    const file = c.path ? c.path.split('/').pop() : 'general';
+    const line = c.line ? `:${c.line}` : '';
+
+    if (!confirm(`Publish comment on ${file}${line}?\n\n${body.substring(0, 100)}${body.length > 100 ? '...' : ''}`)) {
+        return;
+    }
+
     await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}`, {
         method: 'PUT',
         headers: {'Content-Type': 'application/json'},
