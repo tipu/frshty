@@ -87,7 +87,7 @@ class JiraTicketSystem:
                 })
             return results
 
-    def get_comments(self, ticket_key: str) -> list[dict]:
+    def fetch_comments(self, ticket_key: str) -> list[dict]:
         if not self.base_url or not self.user or not self.token or not ticket_key:
             return []
         url = f"{self.base_url}/rest/api/3/issue/{ticket_key}/comment?maxResults=100&orderBy=created"
@@ -110,6 +110,9 @@ class JiraTicketSystem:
                 return results
         except Exception:
             return []
+
+    def get_comments(self, ticket_key: str) -> list[dict]:
+        return self.fetch_comments(ticket_key)
 
 
 class LinearTicketSystem:
@@ -163,7 +166,7 @@ class LinearTicketSystem:
                 })
             return results
 
-    def get_comments(self, ticket_key: str) -> list[dict]:
+    def fetch_comments(self, ticket_key: str) -> list[dict]:
         if not self.token or not ticket_key:
             return []
         query = '''
@@ -198,6 +201,9 @@ class LinearTicketSystem:
                 return results
         except Exception:
             return []
+
+    def get_comments(self, ticket_key: str) -> list[dict]:
+        return self.fetch_comments(ticket_key)
 
 
 def _adf_to_text(adf) -> str:
