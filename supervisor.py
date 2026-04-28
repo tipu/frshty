@@ -45,8 +45,8 @@ def _load_state() -> dict:
         escalations = {r["key"]: r["ts"]
                        for r in _db.query_all("SELECT key, ts FROM supervisor_escalations")}
         return {"actions": actions, "escalations": escalations}
-    except Exception:
-        pass
+    except Exception as e:
+        log.error(f"Failed to load supervisor state: {e}")
     return {"actions": {}, "escalations": {}}
 
 
@@ -138,8 +138,8 @@ async def _autofix(problem: dict, instances: list[dict], state: dict) -> bool:
                 ["fuser", "-k", f"{inst['port']}/tcp"],
                 capture_output=True, timeout=10,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            log.debug(f"Could not kill port {inst['port']}: {e}")
         try:
             subprocess.Popen(
                 ["uv", "run", "python", "frshty.py", config_path],

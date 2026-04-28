@@ -5,6 +5,7 @@ import subprocess
 import threading
 from pathlib import Path
 
+import core.log as log
 from core.job_logs import active_live_log_path
 
 
@@ -77,8 +78,8 @@ def run_claude_code(prompt: str, cwd: Path, timeout: int = 600) -> str | None:
             if log_fh is not None:
                 try:
                     log_fh.write(chunk)
-                except OSError:
-                    pass
+                except OSError as e:
+                    log.emit("job_log_write_failed", f"Failed to write to job log: {e}")
 
     reader = threading.Thread(target=_drain, daemon=True)
     reader.start()
@@ -99,12 +100,12 @@ def run_claude_code(prompt: str, cwd: Path, timeout: int = 600) -> str | None:
                 log_fh.write(f"\n[TIMEOUT after {timeout}s]\n".encode())
             elif proc.returncode != 0:
                 log_fh.write(f"\n[EXIT code={proc.returncode}]\n".encode())
-        except OSError:
-            pass
+        except OSError as e:
+            log.emit("job_log_write_failed", f"Failed to write job status to log: {e}")
         try:
             log_fh.close()
-        except OSError:
-            pass
+        except OSError as e:
+            log.emit("job_log_close_failed", f"Failed to close job log: {e}")
 
     if timed_out or proc.returncode != 0:
         return None

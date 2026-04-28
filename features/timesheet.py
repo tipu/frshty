@@ -466,7 +466,8 @@ def _fetch_pr_reviews(config: dict, start: str, end: str) -> dict:
     result = {}
     try:
         all_prs = platform.list_my_open_prs() + platform.list_review_prs()
-    except Exception:
+    except Exception as e:
+        log.emit("list_prs_failed", f"Failed to list PRs for timesheet: {e}")
         return {}
 
     from concurrent.futures import ThreadPoolExecutor
