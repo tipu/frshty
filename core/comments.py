@@ -50,7 +50,8 @@ def fetch_and_detect_comments(
 
     for comment in platform_comments:
         comment_id = str(comment["id"])
-        edited_at = comment.get("updated_at") or comment.get("created_at")
+        # Use updated_at if available (comment was edited), otherwise created_at
+        current_timestamp = comment.get("updated_at") or comment.get("created_at")
 
         deleted_ids.discard(comment_id)
 
@@ -58,16 +59,21 @@ def fetch_and_detect_comments(
             # New comment
             new_comments.append(comment)
         else:
-            # Check if edited
-            existing_edited_at = existing_map[comment_id].get("comment_edited_at")
-            if edited_at and existing_edited_at != edited_at:
-                # Comment has been edited
+            # Check if edited (different timestamp than what we have stored)
+            existing_timestamp = existing_map[comment_id].get("comment_edited_at")
+            existing_state = existing_map[comment_id].get("state")
+
+            # If timestamps match and comment was previously processed, it's unchanged
+            if current_timestamp == existing_timestamp and existing_state == "processed":
+                unchanged_count += 1
+            # If timestamp is different, it's been edited
+            elif current_timestamp != existing_timestamp:
                 edited_comments.append({
                     **comment,
-                    "previously_at": existing_edited_at,
+                    "previously_at": existing_timestamp,
                 })
             else:
-                # No change
+                # No change (new state or in-progress state but same timestamp)
                 unchanged_count += 1
 
     # Remaining in deleted_ids are deleted comments
@@ -88,7 +94,11 @@ def mark_comment_processing(
     comment_id: str,
     edited_at: str | None = None,
 ) -> None:
-    """Mark a comment as being processed (transactional)."""
+    """Mark a comment as being processed (transactional).
+
+    Args:
+        edited_at: Timestamp when comment was last modified (updated_at or created_at from platform)
+    """
     now = datetime.now(timezone.utc).isoformat()
 
     with db.tx() as conn:
@@ -101,9 +111,9 @@ def mark_comment_processing(
             )
             VALUES (?, ?, ?, ?, ?, ?, 'processing')
             ON CONFLICT(instance_key, resource_type, resource_id, comment_id)
-            DO UPDATE SET state = 'processing', last_checked_at = ?
+            DO UPDATE SET state = 'processing', last_checked_at = ?, comment_edited_at = ?
             """,
-            (instance_key, resource_type, resource_id, comment_id, edited_at, now, now),
+            (instance_key, resource_type, resource_id, comment_id, edited_at, now, now, edited_at),
         )
 
 
