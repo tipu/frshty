@@ -731,8 +731,8 @@ def api_review_info(repo: str, pr_id: int):
                 pr_info = platform.get_pr_info(repo, pr_id)
                 result["pr_description"] = pr_info.get("description", "")
                 result["pr_title"] = pr_info.get("title", result["pr_title"])
-            except Exception:
-                pass
+            except Exception as e:
+                log.emit("get_pr_info_failed", f"Failed to get PR info: {e}", meta={"repo": repo, "pr_id": pr_id})
             return result
     return {}
 
@@ -910,8 +910,8 @@ def api_walkthrough_preprocess(repo: str, pr_id: int):
             with ThreadPoolExecutor(max_workers=5) as pool:
                 contexts = list(pool.map(compute_context, content_comments))
             cache_file.write_text(json.dumps(contexts, indent=2))
-        except Exception:
-            pass
+        except Exception as e:
+            log.emit("preprocess_comments_failed", f"Failed to preprocess comments: {e}")
 
     threading.Thread(target=preprocess_in_background, daemon=True).start()
     return {"status": "ok", "count": len(content_comments), "cached": False}

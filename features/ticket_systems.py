@@ -1,5 +1,6 @@
 import httpx
 
+import core.log as log
 from core.config import resolve_env
 
 
@@ -108,7 +109,8 @@ class JiraTicketSystem:
                         "updated_at": c.get("updated"),
                     })
                 return results
-        except Exception:
+        except (httpx.HTTPError, httpx.TimeoutException) as e:
+            log.emit("jira_fetch_comments_failed", f"Failed to fetch comments for {ticket_key}: {e}", meta={"ticket": ticket_key})
             return []
 
     def get_comments(self, ticket_key: str) -> list[dict]:
@@ -199,7 +201,8 @@ class LinearTicketSystem:
                         "updated_at": n.get("updatedAt"),
                     })
                 return results
-        except Exception:
+        except (httpx.HTTPError, httpx.TimeoutException) as e:
+            log.emit("linear_fetch_comments_failed", f"Failed to fetch comments for {ticket_key}: {e}", meta={"ticket": ticket_key})
             return []
 
     def get_comments(self, ticket_key: str) -> list[dict]:

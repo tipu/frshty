@@ -84,8 +84,8 @@ def _download_attachments(config, ticket, docs_path):
                 resp = client.get(url, auth=auth, headers=headers)
                 if resp.status_code == 200:
                     (att_dir / filename).write_bytes(resp.content)
-            except Exception:
-                pass
+            except Exception as e:
+                log.emit("download_attachment_failed", f"Failed to download {filename}: {e}")
 
 
 def _localize_images(md: str, docs_path: Path) -> str:
@@ -115,8 +115,12 @@ def _fetch_ticket_comments(config: dict, key: str) -> list[dict]:
         return []
     try:
         return ts.fetch_comments(key)
-    except Exception:
-        return []
+    except AttributeError as e:
+        log.emit("fetch_comments_method_missing", f"Method not found: {e}", meta={"ticket": key})
+        raise
+    except Exception as e:
+        log.emit("fetch_ticket_comments_error", f"Unexpected error fetching comments: {e}", meta={"ticket": key})
+        raise
 
 
 def _comment_snapshot(comments: list[dict]) -> dict:
@@ -424,7 +428,8 @@ def check(config: dict, instance_key: str = ""):
             try:
                 if any(platform.get_pr_state(p["repo"], p["id"]) == "OPEN" for p in prs):
                     continue
-            except Exception:
+            except Exception as e:
+                log.emit("check_pr_state_failed", f"Failed to check PR state: {e}", meta={"ticket": key})
                 continue
         ts["status"] = transition(ts.get("status", "new"), "done")
         ts["done_at"] = datetime.now(timezone.utc).isoformat()
@@ -741,8 +746,8 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
             author = ""
             try:
                 author = platform.get_pr_info(repo["name"], pr_id).get("author", "")
-            except Exception:
-                pass
+            except Exception as e:
+                log.emit("get_pr_info_failed", f"Failed to get PR info: {e}", meta={"repo": repo["name"], "pr_id": pr_id})
             prs.append({"repo": repo["name"], "id": pr_id, "url": pr_url, "author": author})
 
     if not any_diff:
@@ -897,7 +902,8 @@ def _fetch_open_prs(config) -> list[dict]:
     platform = make_platform(config)
     try:
         return platform.list_my_open_prs()
-    except Exception:
+    except Exception as e:
+        log.emit("fetch_open_prs_failed", f"Failed to fetch open PRs: {e}")
         return []
 
 
