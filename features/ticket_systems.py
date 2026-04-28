@@ -87,7 +87,7 @@ class JiraTicketSystem:
                 })
             return results
 
-    def fetch_comments(self, ticket_key: str) -> list[dict]:
+    def get_comments(self, ticket_key: str) -> list[dict]:
         if not self.base_url or not self.user or not self.token or not ticket_key:
             return []
         url = f"{self.base_url}/rest/api/3/issue/{ticket_key}/comment?maxResults=100&orderBy=created"
@@ -98,12 +98,14 @@ class JiraTicketSystem:
                     return []
                 results = []
                 for c in resp.json().get("comments", []):
-                    author = (c.get("author") or {}).get("displayName", "")
+                    author_info = c.get("author") or {}
                     results.append({
                         "id": str(c.get("id", "")),
-                        "author": author,
+                        "author_id": author_info.get("accountId", ""),
+                        "author_name": author_info.get("displayName", ""),
                         "body": _adf_to_text(c.get("body")),
                         "created_at": c.get("created"),
+                        "updated_at": c.get("updated"),
                     })
                 return results
         except Exception:
@@ -161,14 +163,14 @@ class LinearTicketSystem:
                 })
             return results
 
-    def fetch_comments(self, ticket_key: str) -> list[dict]:
+    def get_comments(self, ticket_key: str) -> list[dict]:
         if not self.token or not ticket_key:
             return []
         query = '''
         query {
           issue(id: "%s") {
             comments(first: 100) {
-              nodes { id body createdAt user { name } }
+              nodes { id body createdAt updatedAt user { id name } }
             }
           }
         }
@@ -184,12 +186,14 @@ class LinearTicketSystem:
                 nodes = (issue.get("comments") or {}).get("nodes", [])
                 results = []
                 for n in nodes:
-                    author = (n.get("user") or {}).get("name", "")
+                    user_info = n.get("user") or {}
                     results.append({
                         "id": str(n.get("id", "")),
-                        "author": author,
+                        "author_id": user_info.get("id", ""),
+                        "author_name": user_info.get("name", ""),
                         "body": n.get("body", ""),
                         "created_at": n.get("createdAt"),
+                        "updated_at": n.get("updatedAt"),
                     })
                 return results
         except Exception:
