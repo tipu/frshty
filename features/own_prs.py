@@ -4,12 +4,14 @@ from pathlib import Path
 
 import core.log as log
 import core.state as state
+import core.comments as comments
 from core.claude_runner import run_claude_code, run_haiku, extract_json
 from core.config import get_repos
 from features.platforms import make_platform
 
 
 def check(config: dict):
+    instance_key = config.get("instance_key", "default")
     platform = make_platform(config)
     my_prs = platform.list_my_open_prs()
     if not my_prs:
@@ -31,7 +33,7 @@ def check(config: dict):
         pr_key = f"{pr['repo']}/{pr['id']}"
         seen = pr_state.get(pr_key, {})
 
-        _check_comments(config, platform, pr, seen, base_url)
+        _check_comments(config, instance_key, platform, pr, base_url)
         _check_ci(config, platform, pr, seen, base_url)
         _check_stale(pr, seen, base_url)
 
@@ -40,16 +42,17 @@ def check(config: dict):
     state.save("own_prs", pr_state)
 
 
-def _check_comments(config, platform, pr, seen, base_url):
-    comments = platform.get_pr_comments(pr["repo"], pr["id"])
-    last_seen_id = seen.get("last_comment_id", 0)
+def _check_comments(config, instance_key, platform, pr, base_url):
     user_id = config.get("bitbucket", {}).get("user_account_id", "")
+    pr_key = f"{pr['repo']}/{pr['id']}"
 
-    new_comments = [c for c in comments if c["id"] > last_seen_id and c["author_id"] != user_id]
-    if not new_comments:
+    detection = comments.fetch_and_detect_comments(instance_key, platform, "pr", pr_key)
+    all_to_process = [c for c in detection["new"] + detection["edited"] if c.get("author_id") != user_id]
+
+    if not all_to_process:
         return
 
-    comment_list = "\n".join(f"[{i}] {c['body'][:200]}" for i, c in enumerate(new_comments))
+    comment_list = "\n".join(f"[{i}] {c['body'][:200]}" for i, c in enumerate(all_to_process))
     batch_prompt = (
         "Classify each PR review comment as actionable (clear code change requested) or ambiguous (vague, question, opinion).\n\n"
         f"{comment_list}\n\n"
@@ -66,7 +69,10 @@ def _check_comments(config, platform, pr, seen, base_url):
             for item in next(v for v in parsed_batch.values() if isinstance(v, list)):
                 classifications[item.get("id", -1)] = item
 
-    for i, comment in enumerate(new_comments):
+    for i, comment in enumerate(all_to_process):
+        comment_id = str(comment["id"])
+        edited_at = comment.get("updated_at") or comment.get("created_at")
+
         cls = classifications.get(i, {})
         actionable = cls.get("actionable", False)
         reason = cls.get("reason", "failed to classify")
@@ -75,9 +81,12 @@ def _check_comments(config, platform, pr, seen, base_url):
             "pr": pr["url"],
             "detail": f"{base_url}/",
         }
-        meta = {"repo": pr["repo"], "pr_id": pr["id"], "comment_id": comment["id"]}
+        meta = {"repo": pr["repo"], "pr_id": pr["id"], "comment_id": comment_id}
 
         pr_ref = f"{pr['repo']}#{pr['id']}"
+
+        comments.mark_comment_processing(instance_key, "pr", pr_key, comment_id, edited_at)
+
         if actionable:
             worktree = _ensure_worktree(config, pr)
             if worktree:
@@ -85,17 +94,18 @@ def _check_comments(config, platform, pr, seen, base_url):
                 result = run_claude_code(context, worktree)
                 if result is None:
                     log.emit("pr_comment_flagged_manual", f"{pr_ref}: Claude failed to fix — {comment['body'][:80]}", links=links, meta=meta)
+                    comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "Claude failed to fix")
                     continue
                 platform.push_branch(worktree, pr["branch"])
-                platform.resolve_comment(pr["repo"], pr["id"], comment["id"])
+                platform.resolve_comment(pr["repo"], pr["id"], int(comment_id))
                 log.emit("pr_comment_addressed", f"{pr_ref}: Fixed — {comment['body'][:80]}", links=links, meta=meta)
+                comments.mark_comment_processed(instance_key, "pr", pr_key, comment_id)
             else:
                 log.emit("pr_comment_flagged_manual", f"{pr_ref}: Could not create worktree — {comment['body'][:80]}", links=links, meta=meta)
+                comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "Could not create worktree")
         else:
             log.emit("pr_comment_flagged_manual", f"{pr_ref}: Ambiguous ({reason}) — {comment['body'][:80]}", links=links, meta=meta)
-
-    if new_comments:
-        seen["last_comment_id"] = max(c["id"] for c in new_comments)
+            comments.mark_comment_processed(instance_key, "pr", pr_key, comment_id)
 
 
 def _check_ci(config, platform, pr, seen, base_url):
