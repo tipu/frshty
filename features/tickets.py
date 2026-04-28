@@ -8,6 +8,7 @@ import httpx
 import core.log as log
 import core.queue as q
 import core.state as state
+import core.comments as comments
 from core.config import get_repos, ticket_worktree_path, resolve_env
 from core.claude_runner import run_haiku, run_claude_code, extract_json
 from core.ticket_status import TicketStatus, transition
@@ -325,6 +326,15 @@ def _ensure_worktree(config: dict, ticket_key: str, slug: str) -> dict | None:
     }
 
 
+class _TicketCommentAdapter:
+    """Adapter to make ticket comment list compatible with fetch_and_detect_comments."""
+    def __init__(self, comments_list):
+        self.comments_list = comments_list
+
+    def get_ticket_comments(self, ticket_key: str = ""):
+        return self.comments_list
+
+
 def _process_ticket_comments(config: dict, key: str, ts: dict, ticket: dict, base_url: str, instance_key: str = "") -> None:
     if not instance_key:
         return
@@ -335,40 +345,57 @@ def _process_ticket_comments(config: dict, key: str, ts: dict, ticket: dict, bas
     if not slug:
         return
 
-    comments = _fetch_ticket_comments(config, key)
-    if not comments:
+    comments_data = _fetch_ticket_comments(config, key)
+    if not comments_data:
         ts["ticket_comment_snapshot"] = _comment_snapshot([])
         return
 
+    # Use stateful comment tracking for idempotency and edit detection
+    detection = comments.fetch_and_detect_comments(instance_key, _TicketCommentAdapter(comments_data), "ticket", key)
+    all_to_process = detection["new"] + detection["edited"]
+
+    # Keep legacy snapshot for backward compatibility
     old_snapshot = ts.get("ticket_comment_snapshot", {})
     old_ids = set(old_snapshot.get("comment_ids", []))
-    new_snapshot = _comment_snapshot(comments)
+    new_snapshot = _comment_snapshot(comments_data)
     new_ids = set(new_snapshot.get("comment_ids", []))
-
     new_comment_ids = new_ids - old_ids
-    if not new_comment_ids:
+
+    if not all_to_process:
         ts["ticket_comment_snapshot"] = new_snapshot
         return
 
-    new_comments = [c for c in comments if c.get("id") in new_comment_ids]
-    last_comments = sorted(comments, key=lambda c: c.get("created_at", ""))[-5:]
+    to_process = [c for c in all_to_process if c.get("id") in new_comment_ids]
+    if not to_process:
+        ts["ticket_comment_snapshot"] = new_snapshot
+        return
 
-    for comment in new_comments:
+    last_comments = sorted(comments_data, key=lambda c: c.get("created_at", ""))[-5:]
+
+    for comment in to_process:
+        comment_id = str(comment["id"])
+        edited_at = comment.get("updated_at") or comment.get("created_at")
         body = comment.get("body", "")
+
+        comments.mark_comment_processing(instance_key, "ticket", key, comment_id, edited_at)
+
         if not _is_issue_comment(body, ticket.get("summary", ""), last_comments):
+            comments.mark_comment_processed(instance_key, "ticket", key, comment_id)
             continue
 
         log.emit("ticket_issue_detected", f"Issue detected in comment for {key}",
             links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
-            meta={"ticket": key, "comment_id": comment.get("id")})
+            meta={"ticket": key, "comment_id": comment_id})
 
         wt_result = _ensure_worktree(config, key, slug)
         if not wt_result:
             log.emit("worktree_ensure_failed", f"Failed to ensure worktree for {key}",
                 meta={"ticket": key})
+            comments.mark_comment_error(instance_key, "ticket", key, comment_id, "Failed to ensure worktree")
             continue
 
         _enqueue_stage(instance_key, key, "fix_reported_bug")
+        comments.mark_comment_processed(instance_key, "ticket", key, comment_id)
 
     ts["ticket_comment_snapshot"] = new_snapshot
 
