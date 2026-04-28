@@ -79,9 +79,12 @@ class WorkerPool:
                 now=datetime.now(timezone.utc),
             )
             log.emit("job_started", f"{job['task']} ticket={job['ticket_key']} job_id={job['id']}")
-            log.emit("task_execution_started", f"job_id={job['id']} task={job['task']}")
+            routine_tasks = {"scan_tickets", "poll_own_prs", "poll_reviewer", "scheduler_check", "slack_scan"}
+            if job['task'] not in routine_tasks:
+                log.emit("task_execution_started", f"job_id={job['id']} task={job['task']}")
             result = registry.run_task(ctx)
-            log.emit("task_execution_completed", f"job_id={job['id']} status={result.status}")
+            if job['task'] not in routine_tasks:
+                log.emit("task_execution_completed", f"job_id={job['id']} status={result.status}")
             response = {"reason": result.reason, "artifacts": result.artifacts}
             log.emit("marking_job_done", f"job_id={job['id']} status={result.status}")
             q.mark_done(job["id"], result.status, response)
