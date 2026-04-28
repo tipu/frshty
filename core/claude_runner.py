@@ -78,6 +78,7 @@ def run_claude_code(prompt: str, cwd: Path, timeout: int = 600) -> str | None:
             if log_fh is not None:
                 try:
                     log_fh.write(chunk)
+                    os.fsync(log_fh.fileno())
                 except OSError as e:
                     log.emit("job_log_write_failed", f"Failed to write to job log: {e}")
 
