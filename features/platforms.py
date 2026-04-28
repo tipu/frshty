@@ -128,6 +128,8 @@ class BitbucketPlatform:
                     "path": c.get("inline", {}).get("path"),
                     "line": c.get("inline", {}).get("to"),
                     "created_on": c["created_on"],
+                    "created_at": c["created_on"],
+                    "updated_at": c.get("updated_on", c["created_on"]),
                     "parent_id": c.get("parent", {}).get("id") if c.get("parent") else None,
                 }
                 for c in resp.json().get("values", [])
@@ -398,6 +400,8 @@ class GitHubPlatform:
                 "path": c.get("path"),
                 "line": c.get("line"),
                 "created_on": c.get("created_at", ""),
+                "created_at": c.get("created_at", ""),
+                "updated_at": c.get("updated_at", c.get("created_at", "")),
                 "parent_id": c.get("in_reply_to_id"),
             }
             for c in comments
