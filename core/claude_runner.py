@@ -51,6 +51,8 @@ def run_claude_code(prompt: str, cwd: Path, timeout: int = 600) -> str | None:
     if log_path:
         try:
             log_path.parent.mkdir(parents=True, exist_ok=True)
+            if not log_path.exists():
+                log_path.touch()
             log_fh = open(log_path, "ab", buffering=0)
         except OSError:
             log_fh = None
