@@ -32,9 +32,9 @@ class WorkerPool:
             if self._stop.wait(60):
                 return
             try:
-                n = q.sweep_stale()
+                n = q.sweep_stale(max_age_seconds=1800)
                 if n:
-                    log.emit("worker_sweep", f"reset {n} stale jobs")
+                    log.emit("stuck_jobs_reset", f"detected and reset {n} jobs (exceeded 30min timeout)")
             except Exception as e:
                 log.emit("worker_sweep_error", f"{type(e).__name__}: {e}")
 
@@ -79,9 +79,13 @@ class WorkerPool:
                 now=datetime.now(timezone.utc),
             )
             log.emit("job_started", f"{job['task']} ticket={job['ticket_key']} job_id={job['id']}")
+            log.emit("task_execution_started", f"job_id={job['id']} task={job['task']}")
             result = registry.run_task(ctx)
+            log.emit("task_execution_completed", f"job_id={job['id']} status={result.status}")
             response = {"reason": result.reason, "artifacts": result.artifacts}
+            log.emit("marking_job_done", f"job_id={job['id']} status={result.status}")
             q.mark_done(job["id"], result.status, response)
+            log.emit("job_marked_done", f"job_id={job['id']}")
             log.emit("job_finished",
                      f"{job['task']} ticket={job['ticket_key']} "
                      f"job_id={job['id']} status={result.status}"
@@ -93,6 +97,9 @@ class WorkerPool:
                 except Exception as e:
                     log.emit("worker_next_event_error", f"{type(e).__name__}: {e}")
         finally:
+            log_path = job_logs.job_log_path(instance_key, job["id"])
+            if log_path.exists() and log_path.stat().st_size == 0:
+                log.emit("empty_job_log_detected", f"job_id={job['id']} - task may have crashed before writing output")
             if log_tokens is not None:
                 log.reset(log_tokens)
             if state_token is not None:
