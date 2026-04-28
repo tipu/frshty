@@ -288,7 +288,8 @@ def _ensure_worktree(config: dict, ticket_key: str, slug: str) -> dict | None:
                 subprocess.run(["git", "worktree", "prune"], cwd=str(repo["path"]), capture_output=True, timeout=60)
                 subprocess.run(["git", "fetch", "origin"], cwd=str(repo["path"]), capture_output=True, timeout=60)
 
-                branch = ws.get("branch") or _make_branch(config, ticket_key, {"key": ticket_key})
+                ts = state.load_ticket(ticket_key) or {}
+                branch = ws.get("branch") or _make_branch(config, ticket_key, {"key": ticket_key, "summary": ts.get("summary", ticket_key)})
                 branches = subprocess.run(
                     ["git", "branch", "--list"], cwd=str(repo["path"]),
                     capture_output=True, text=True, timeout=60
@@ -1041,11 +1042,12 @@ def _make_slug(key: str, summary: str) -> str:
 def _make_branch(config, key: str, ticket: dict) -> str:
     ws = config["workspace"]
     prefix = ws.get("branch_prefix", "")
-    slug = _make_slug(key, ticket["summary"])
+    summary = ticket.get("summary", key)
+    slug = _make_slug(key, summary)
 
     if prefix:
         branch_type = run_haiku(
-            f"Ticket summary: {ticket['summary']}\nDescription: {ticket.get('description', '')[:500]}\n\n"
+            f"Ticket summary: {summary}\nDescription: {ticket.get('description', '')[:500]}\n\n"
             "Is this a bugfix or a feature? Reply with exactly one word: bugfix or feature"
         )
         bt = "bugfix" if branch_type and "bugfix" in branch_type.lower() else "feature"
