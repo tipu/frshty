@@ -86,9 +86,7 @@ class WorkerPool:
             if job['task'] not in routine_tasks:
                 log.emit("task_execution_completed", f"job_id={job['id']} status={result.status}")
             response = {"reason": result.reason, "artifacts": result.artifacts}
-            log.emit("marking_job_done", f"job_id={job['id']} status={result.status}")
             q.mark_done(job["id"], result.status, response)
-            log.emit("job_marked_done", f"job_id={job['id']}")
             log.emit("job_finished",
                      f"{job['task']} ticket={job['ticket_key']} "
                      f"job_id={job['id']} status={result.status}"
