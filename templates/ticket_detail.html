@@ -5,7 +5,7 @@
 <meta charset="utf-8">
 <title>Ticket — frshty</title>
 <script src="/static/tailwind.js"></script>
-<script defer src="/static/nav-gate.js"></script>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
@@ -61,13 +61,17 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
 .collapsible-header.expanded::before { transform: rotate(90deg); }
 .collapsible-content { max-height: 600px; overflow: hidden; transition: max-height 0.2s ease-in-out; }
 .collapsible-content.collapsed { max-height: 0; opacity: 0; }
+[v-cloak] { display: none; }
 </style>
 </head>
 <body class="p-4 max-w-full">
+
+<div id="app" v-cloak>
+
 <div id="content">
 <header class="flex items-center gap-4 mb-4">
     <a href="/tickets" class="link text-sm">&larr; Tickets</a>
-    <h1 class="text-lg font-bold" id="title">Ticket</h1>
+    <h1 class="text-lg font-bold">{{ key }}</h1>
     <nav class="flex gap-1 text-sm">
         <a href="/">Feed</a>
         <a href="/global">Global</a>
@@ -75,779 +79,886 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
         <a href="/tickets" class="active">Tickets</a>
         <a href="/scheduled">Scheduled</a>
         <a href="/slack">Slack</a>
-        <a href="/timesheet">Timesheet</a>
-        <a href="/billing">Billing</a>
+        <a v-if="features.timesheet !== false" href="/timesheet">Timesheet</a>
+        <a v-if="features.billing !== false" href="/billing">Billing</a>
         <a href="/config">Config</a>
     </nav>
 </header>
 
-<div id="status-bar" class="mb-4"></div>
-<div id="tab-bar" class="flex gap-2 mb-4" style="display:none">
-    <button class="tab-btn active" onclick="showTab('docs')">Docs</button>
-    <button class="tab-btn" onclick="showTab('diff')">Diff & Comments</button>
+<div v-if="loadError" class="text-red-400 mb-4">Ticket not found</div>
+
+<div v-else-if="ticket" class="mb-4">
+    <div class="card p-4 flex items-center gap-4 flex-wrap">
+        <select :value="status" @change="setStatus($event.target.value)"
+                class="bg-transparent border border-gray-700 rounded px-2 py-1 text-sm cursor-pointer" style="font-size:13px;">
+            <option v-for="s in (ticket.all_statuses || [])" :key="s" :value="s" class="bg-gray-900">{{ s.replace('_', ' ') }}</option>
+        </select>
+        <span v-if="inProgress" class="flex items-center gap-1 text-xs" :class="terminalAlive ? 'text-green-400' : 'text-red-400'">
+            <span class="w-2 h-2 rounded-full" :class="terminalAlive ? 'bg-green-400 animate-pulse' : 'bg-red-400'"></span>
+            {{ terminalAlive ? 'running' : 'stalled' }}
+        </span>
+        <button v-if="stalled" @click="restartTicket"
+                class="text-xs bg-yellow-800 hover:bg-yellow-700 text-yellow-200 px-3 py-1 rounded">Restart</button>
+        <button v-if="status === 'new'" @click="startDev"
+                class="text-xs bg-blue-700 hover:bg-blue-600 text-white px-3 py-1 rounded">Start Dev</button>
+        <span v-if="prScheduledLabel" class="text-xs text-yellow-400">PR scheduled {{ prScheduledLabel }}</span>
+        <span v-if="['pr_ready','in_review','pr_failed'].includes(status)"
+              class="text-xs"
+              :class="(state.ci_fix_attempts || 0) >= 2 ? 'text-red-400' : (state.ci_fix_attempts || 0) > 0 ? 'text-yellow-400' : 'text-gray-500'"
+              title="Automated CI fix attempts. Maxes out at 2 before status becomes pr_failed.">
+            CI fixes: {{ state.ci_fix_attempts || 0 }}/2
+        </span>
+        <span v-if="state.external_status" class="text-xs text-gray-500">{{ state.external_status }}</span>
+        <span class="text-sm text-gray-400">branch: <code>{{ branch }}</code></span>
+        <a v-for="pr in (state.prs || [])" :key="pr.url" :href="pr.url" target="_blank"
+           class="link text-sm">{{ pr.repo }} PR #{{ pr.id }} &nearr;</a>
+        <a v-if="ticketUrl" :href="ticketUrl" target="_blank" class="link text-sm ml-auto">Open Ticket &nearr;</a>
+    </div>
+    <div v-if="ticket.summary" class="card p-4 mt-2 border-l-2 border-blue-500">
+        <div class="text-xs font-bold text-gray-500 uppercase mb-1">Change Summary</div>
+        <div class="text-sm text-gray-300">{{ ticket.summary }}</div>
+    </div>
 </div>
-<div id="docs-section" class="layout-main">
-    <!-- LEFT SIDEBAR: Controls & Context -->
+
+<div v-if="hasCode" class="flex gap-2 mb-4">
+    <button class="tab-btn" :class="{ active: activeTab === 'docs' }" @click="activeTab = 'docs'">Docs</button>
+    <button class="tab-btn" :class="{ active: activeTab === 'diff' }" @click="switchTab('diff')">Diff &amp; Comments</button>
+</div>
+
+<div v-show="activeTab === 'docs'" class="layout-main">
     <div class="space-y-4">
-        <div id="status-controls" class="card p-3">
+        <div class="card p-3">
             <div class="text-xs font-bold text-gray-500 uppercase mb-3">Controls</div>
             <div class="space-y-3 text-xs">
                 <div>
                     <label class="text-gray-400 block mb-1">Set State</label>
-                    <select id="set-state-dd" onchange="submitSetState(this.value); this.value='';"
-                            class="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1"></select>
+                    <select v-model="setStateDdValue" @change="onSetStateChange"
+                            class="w-full bg-gray-900 border border-gray-700 rounded px-2 py-1">
+                        <option value="">—</option>
+                        <option v-for="s in dropdownStates" :key="s" :value="s">{{ s }}</option>
+                    </select>
                 </div>
                 <label class="flex items-center gap-2 cursor-pointer">
-                    <input type="checkbox" id="auto-pr-cb" onchange="toggleAutoPr(this.checked)" />
+                    <input type="checkbox" :checked="!!state.auto_pr" :disabled="lockedAutoPr"
+                           @change="toggleAutoPr($event.target.checked)" />
                     <span class="text-gray-400">auto_pr</span>
                 </label>
             </div>
         </div>
 
-        <div id="context-section" class="card p-3">
-            <div class="collapsible-header expanded" onclick="toggleCollapse(this)">
+        <div class="card p-3">
+            <div class="collapsible-header" :class="sections.context ? 'expanded' : 'collapsed'"
+                 @click="sections.context = !sections.context">
                 <span class="text-xs font-bold text-gray-500 uppercase">Context</span>
             </div>
-            <div class="collapsible-content expanded">
-                <textarea id="context-input" rows="4" class="w-full mt-2 p-2 bg-gray-900 border border-gray-700 rounded text-xs font-mono" placeholder="Context for AI tools — saved to docs/custom-context/{key}.md"></textarea>
+            <div class="collapsible-content" :class="sections.context ? 'expanded' : 'collapsed'">
+                <textarea v-model="contextText" rows="4"
+                          class="w-full mt-2 p-2 bg-gray-900 border border-gray-700 rounded text-xs font-mono"
+                          placeholder="Context for AI tools — saved to docs/custom-context/{key}.md"></textarea>
                 <div class="flex gap-2 mt-2">
-                    <button onclick="saveContext()" class="text-xs bg-blue-800 hover:bg-blue-700 text-blue-200 px-2 py-1 rounded flex-1">Save</button>
-                    <button onclick="deleteContext()" class="text-xs bg-red-900 hover:bg-red-800 text-red-300 px-2 py-1 rounded flex-1">Delete</button>
+                    <button @click="saveContext" class="text-xs bg-blue-800 hover:bg-blue-700 text-blue-200 px-2 py-1 rounded flex-1">Save</button>
+                    <button @click="deleteContext" class="text-xs bg-red-900 hover:bg-red-800 text-red-300 px-2 py-1 rounded flex-1">Delete</button>
                 </div>
             </div>
         </div>
 
-        <div id="notes-section" class="card p-3 hidden">
-            <div class="collapsible-header collapsed" onclick="toggleCollapse(this)">
+        <div v-if="jobs.length" class="card p-3">
+            <div class="collapsible-header" :class="sections.notes ? 'expanded' : 'collapsed'"
+                 @click="sections.notes = !sections.notes">
                 <span class="text-xs font-bold text-gray-500 uppercase">Add Note</span>
             </div>
-            <div class="collapsible-content collapsed">
-                <textarea id="notes-input" rows="3" class="w-full mt-2 p-2 bg-gray-900 border border-gray-700 rounded text-xs"></textarea>
-                <button onclick="submitNote()" class="mt-2 w-full text-xs bg-yellow-800 hover:bg-yellow-700 text-yellow-200 px-2 py-1 rounded">Add note & restart</button>
+            <div class="collapsible-content" :class="sections.notes ? 'expanded' : 'collapsed'">
+                <textarea v-model="noteText" rows="3"
+                          class="w-full mt-2 p-2 bg-gray-900 border border-gray-700 rounded text-xs"></textarea>
+                <button @click="submitNote"
+                        class="mt-2 w-full text-xs bg-yellow-800 hover:bg-yellow-700 text-yellow-200 px-2 py-1 rounded">Add note &amp; restart</button>
             </div>
         </div>
     </div>
 
-    <!-- RIGHT: Main Content (Jobs first, then Docs) -->
     <div class="space-y-4">
-        <!-- JOBS SECTION: High Priority, Top -->
-        <div id="jobs-timeline-section" class="card p-3">
+        <div v-show="jobs.length" class="card p-3">
             <div class="flex items-center justify-between mb-3 pb-3 border-b border-gray-700">
                 <span class="text-xs font-bold text-gray-500 uppercase">Jobs</span>
                 <div class="flex gap-2">
-                    <select id="eventFilter" onchange="applyEventFilter()" class="text-xs bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-300">
+                    <select v-model="eventFilter" class="text-xs bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-300">
                         <option value="all">All Events</option>
-                        <option value="useful" selected>Useful Only</option>
+                        <option value="useful">Useful Only</option>
                         <option value="noise">Noise Only</option>
                     </select>
-                    <button onclick="loadJobs()" class="text-xs text-gray-500 hover:text-gray-300">⟳</button>
+                    <button @click="loadJobs" class="text-xs text-gray-500 hover:text-gray-300">⟳</button>
                 </div>
             </div>
-            <div id="jobs-timeline" class="text-xs space-y-1 max-h-96 overflow-y-auto"></div>
-            <div id="job-output-section" class="hidden border-t border-gray-700 pt-3 mt-3">
-                <div class="flex items-center justify-between mb-2">
-                    <span class="text-xs font-bold text-gray-500 uppercase" id="job-output-title">Output</span>
-                    <button onclick="closeJobOutput()" class="text-xs text-gray-500 hover:text-gray-300">×</button>
+            <div class="text-xs space-y-1 max-h-96 overflow-y-auto">
+                <div v-for="j in jobs" :key="j.id"
+                     class="cursor-pointer hover:bg-gray-800 p-2 rounded flex items-center gap-2"
+                     @click="viewJobOutput(j.id, j.task)">
+                    <span class="text-gray-500 flex-shrink-0">{{ j.finished_at || j.started_at || j.enqueued_at }} <span class="text-gray-600">({{ relTime(j.finished_at || j.started_at || j.enqueued_at) }})</span></span>
+                    <span class="flex-shrink-0" :class="jobStatusClass(j.status)">{{ j.status }}</span>
+                    <span v-if="j.status === 'running'" class="text-xs px-1.5 py-0.5 rounded ml-1"
+                          :class="j.pid_alive ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'"
+                          :title="j.pid_alive ? 'claude pid alive' : 'claude pid dead — orphan, will be finalized on next poll'">
+                        {{ j.pid_alive ? '● alive' : '○ dead' }}
+                    </span>
+                    <span class="text-gray-300 flex-1">{{ j.task }}</span>
+                    <span v-if="jobHasOutput(j.task, j.status)" class="text-xs bg-green-900 text-green-300 px-1.5 py-0.5 rounded ml-1">📄</span>
+                    <span class="text-gray-500">{{ jobReason(j) }}</span>
+                    <button v-if="j.status === 'failed' || j.status === 'skipped'"
+                            @click.stop="retryJob(j.id)"
+                            class="ml-2 text-xs text-yellow-400 hover:text-yellow-200 underline">retry</button>
                 </div>
-                <pre id="job-output" class="bg-gray-950 border border-gray-700 rounded p-2 text-xs overflow-auto max-h-96 text-gray-300 font-mono whitespace-pre-wrap word-break break-all"></pre>
+            </div>
+            <div v-show="jobOutput.jobId !== null" class="border-t border-gray-700 pt-3 mt-3">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-xs font-bold text-gray-500 uppercase">Output — {{ jobOutput.taskName }} (job {{ jobOutput.jobId }})</span>
+                    <button @click="closeJobOutput" class="text-xs text-gray-500 hover:text-gray-300">×</button>
+                </div>
+                <pre ref="jobOutputEl" class="bg-gray-950 border border-gray-700 rounded p-2 text-xs overflow-auto max-h-96 text-gray-300 font-mono whitespace-pre-wrap word-break break-all">{{ jobOutput.text }}</pre>
             </div>
         </div>
 
-        <!-- DOCS & HISTORY: Below Jobs, Collapsible -->
-        <div id="docs" class="space-y-2"></div>
-        <div id="history" class="card p-3"></div>
+        <div class="space-y-2">
+            <div v-if="ticket && ticket.demo_video" class="card p-4 mb-4">
+                <div class="text-xs font-bold text-gray-500 uppercase mb-2">Demo Recording</div>
+                <video controls class="w-full rounded" style="max-height:600px">
+                    <source :src="`/api/tickets/${key}/demo`" type="video/webm">
+                </video>
+            </div>
+            <div v-for="[name, content] in sortedDocs" :key="name" class="card p-3">
+                <div class="collapsible-header" :class="docExpanded[name] ? 'expanded' : 'collapsed'"
+                     @click="docExpanded[name] = !docExpanded[name]">
+                    <span class="text-xs font-bold text-gray-500 uppercase">{{ name }}</span>
+                </div>
+                <div class="collapsible-content" :class="docExpanded[name] ? 'expanded' : 'collapsed'">
+                    <div class="md-content text-sm p-3 pt-2" v-html="renderMarkdown(content)"></div>
+                </div>
+            </div>
+        </div>
+
+        <div v-if="ticket && (ticket.history || []).length" class="card p-3">
+            <div class="flex items-center justify-between mb-3 pb-3 border-b border-gray-700">
+                <div class="collapsible-header" :class="sections.history ? 'expanded' : 'collapsed'"
+                     @click="sections.history = !sections.history">
+                    <span class="text-xs font-bold text-gray-500 uppercase">Event History</span>
+                </div>
+            </div>
+            <div class="collapsible-content" :class="sections.history ? 'expanded' : 'collapsed'">
+                <div class="space-y-1 text-xs">
+                    <div v-for="e in filteredHistory" :key="e.id" class="text-gray-400">
+                        <span class="text-gray-600">{{ relTime(e.ts) }}</span>
+                        <span class="ml-2">{{ e.event }}</span>
+                        <span class="ml-2">{{ (e.summary || '').split('\n')[0] }}</span>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 </div>
-<div id="diff-section" style="display:none">
-    <div id="diff-view"></div>
+
+<div v-show="activeTab === 'diff'">
+    <div v-if="!parsedDiff.length && !comments.length" class="text-gray-500 text-sm p-4">No diff or comments yet.</div>
+    <div v-for="file in parsedDiff" :key="file.header" class="diff-file">
+        <div class="diff-header">
+            {{ file.header }}
+            <span v-if="commentsByFile[file.header]" class="text-yellow-400 text-xs">({{ flatCount(commentsByFile[file.header]) }} comments)</span>
+        </div>
+        <template v-for="(line, i) in file.lines" :key="i">
+            <div v-if="line.type === 'hunk'" class="diff-hunk">{{ line.text }}</div>
+            <template v-else>
+                <div class="diff-line" :class="diffLineClass(line.type)">
+                    <span class="diff-line-num">{{ line.newLine != null ? line.newLine : '' }}</span>{{ diffLinePrefix(line.type) }}<span v-html="line._hl || escHtml(line.text)"></span>
+                </div>
+                <template v-if="line.newLine && commentsByFile[file.header] && commentsByFile[file.header][line.newLine]">
+                    <component v-for="c in commentsByFile[file.header][line.newLine]" :key="c.id"
+                               :is="'div'" class="comment-inline" :class="commentClass(c)">
+                        <div class="flex items-center gap-2 text-xs mb-1">
+                            <span class="badge" :style="commentBadgeStyle(c)">{{ commentLabel(c) }}</span>
+                            <span class="text-gray-500">{{ c.path ? c.path + ':' + (c.line || '') : '' }}</span>
+                        </div>
+                        <div class="text-sm" :class="commentBodyTextClass(c)">{{ c.body }}</div>
+                        <template v-if="commentLabel(c) === 'replied'">
+                            <div class="text-sm text-gray-500 mt-1 italic">Reply: {{ c.suggested_reply || '' }}</div>
+                        </template>
+                        <template v-else-if="commentLabel(c) === 'needs reply'">
+                            <textarea v-model="replyDrafts[c.id]" rows="2" class="reply-box w-full p-2 rounded text-sm mb-1 mt-2"></textarea>
+                            <button @click="postReply(c.id)" class="bg-green-700 hover:bg-green-600 text-white px-3 py-1 rounded text-xs">Post Reply</button>
+                        </template>
+                    </component>
+                </template>
+            </template>
+        </template>
+        <template v-if="commentsByFile[file.header] && commentsByFile[file.header][0]">
+            <div v-for="c in commentsByFile[file.header][0]" :key="c.id" class="comment-inline" :class="commentClass(c)">
+                <div class="flex items-center gap-2 text-xs mb-1">
+                    <span class="badge" :style="commentBadgeStyle(c)">{{ commentLabel(c) }}</span>
+                    <span class="text-gray-500">{{ c.path ? c.path + ':' + (c.line || '') : '' }}</span>
+                </div>
+                <div class="text-sm" :class="commentBodyTextClass(c)">{{ c.body }}</div>
+                <template v-if="commentLabel(c) === 'replied'">
+                    <div class="text-sm text-gray-500 mt-1 italic">Reply: {{ c.suggested_reply || '' }}</div>
+                </template>
+                <template v-else-if="commentLabel(c) === 'needs reply'">
+                    <textarea v-model="replyDrafts[c.id]" rows="2" class="reply-box w-full p-2 rounded text-sm mb-1 mt-2"></textarea>
+                    <button @click="postReply(c.id)" class="bg-green-700 hover:bg-green-600 text-white px-3 py-1 rounded text-xs">Post Reply</button>
+                </template>
+            </div>
+        </template>
+    </div>
+    <div v-if="unmatchedComments.length" class="diff-file">
+        <div class="diff-header">General Comments</div>
+        <div v-for="c in unmatchedComments" :key="c.id" class="comment-inline" :class="commentClass(c)">
+            <div class="flex items-center gap-2 text-xs mb-1">
+                <span class="badge" :style="commentBadgeStyle(c)">{{ commentLabel(c) }}</span>
+                <span class="text-gray-500">{{ c.path ? c.path + ':' + (c.line || '') : '' }}</span>
+            </div>
+            <div class="text-sm" :class="commentBodyTextClass(c)">{{ c.body }}</div>
+            <template v-if="commentLabel(c) === 'replied'">
+                <div class="text-sm text-gray-500 mt-1 italic">Reply: {{ c.suggested_reply || '' }}</div>
+            </template>
+            <template v-else-if="commentLabel(c) === 'needs reply'">
+                <textarea v-model="replyDrafts[c.id]" rows="2" class="reply-box w-full p-2 rounded text-sm mb-1 mt-2"></textarea>
+                <button @click="postReply(c.id)" class="bg-green-700 hover:bg-green-600 text-white px-3 py-1 rounded text-xs">Post Reply</button>
+            </template>
+        </div>
+    </div>
 </div>
-</div>
+
+</div><!-- /#content -->
 
 <div id="terminal-section" class="card mb-4">
     <div class="flex items-center justify-between p-2 border-b border-gray-800">
         <span class="text-xs font-bold text-gray-500 uppercase">Terminal</span>
         <div class="flex items-center gap-2">
-            <button onclick="runServices()" id="run-btn" class="text-xs bg-green-800 hover:bg-green-700 text-green-200 px-3 py-1 rounded hidden">Run</button>
-            <button onclick="resetTerminal()" id="reset-btn" class="text-xs bg-red-900 hover:bg-red-800 text-red-300 px-3 py-1 rounded">Reset</button>
-            <button onclick="toggleMaximize()" id="max-btn" class="text-xs text-gray-400 hover:text-white px-2 py-1 rounded hover:bg-gray-700">&nesear;</button>
+            <button v-if="runCommands.length" @click="runServices"
+                    class="text-xs bg-green-800 hover:bg-green-700 text-green-200 px-3 py-1 rounded">Run</button>
+            <button @click="resetTerminal" :disabled="resetting"
+                    class="text-xs bg-red-900 hover:bg-red-800 text-red-300 px-3 py-1 rounded">{{ resetting ? 'Resetting...' : 'Reset' }}</button>
+            <button @click="toggleMaximize" class="text-xs text-gray-400 hover:text-white px-2 py-1 rounded hover:bg-gray-700"
+                    v-html="maximized ? '&swnwar;' : '&nesear;'"></button>
         </div>
     </div>
-    <div id="terminal-container" style="height: 500px; padding: 4px;"></div>
+    <div ref="terminalContainer" id="terminal-container" style="height: 500px; padding: 4px;"></div>
 </div>
 
+</div><!-- /#app -->
+
 <script>
-const key = window.location.pathname.split('/').pop();
-document.getElementById('title').textContent = key;
-
-function relativeTime(ts) {
-    const now = Date.now();
-    const diff = now - new Date(ts).getTime();
-    const mins = Math.floor(diff / 60000);
-    if (mins < 1) return 'just now';
-    if (mins < 60) return `${mins}m ago`;
-    const hrs = Math.floor(mins / 60);
-    if (hrs < 24) return `${hrs}h ago`;
-    const days = Math.floor(hrs / 24);
-    return `${days}d ago`;
-}
-
-function esc(s) {
-    const d = document.createElement('div');
-    d.textContent = s;
-    return d.innerHTML;
-}
-
-let runCommands = [];
-let hasPrs = false;
-
-async function load() {
-    loadJobs();
-    const [ticketResp, configResp] = await Promise.all([
-        fetch(`/api/tickets/${key}/detail`),
-        fetch('/api/config'),
-    ]);
-    if (!ticketResp.ok) {
-        document.getElementById('status-bar').innerHTML = '<div class="text-red-400">Ticket not found</div>';
-        return;
-    }
-    const data = await ticketResp.json();
-    const cfg = await configResp.json();
-    runCommands = (cfg.run_commands || []);
-    if (runCommands.length) document.getElementById('run-btn').classList.remove('hidden');
-
-    const st = data.state || {};
-    const status = st.status || 'unknown';
-    const branch = st.branch || '';
-    const statusBarEl = document.getElementById('status-bar');
-    statusBarEl.dataset.status = status;
-    refreshAutoPrCheckbox(status, st.auto_pr);
-    const ticketUrl = (data.history || []).map(e => (e.links || {}).ticket).find(u => u);
-
-    hasPrs = (st.prs || []).length > 0;
-    const hasCode = ['pr_ready', 'in_review', 'pr_failed', 'merged'].includes(status) || hasPrs;
-    if (hasCode) document.getElementById('tab-bar').style.display = 'flex';
-
-    const summary = data.summary || '';
-    const alive = data.terminal_alive;
-    const inProgress = ['planning', 'reviewing'].includes(status);
-    const stalled = inProgress && !alive;
-
-    const prScheduled = st.pr_scheduled_at ? new Date(st.pr_scheduled_at).toLocaleString('en-US', {weekday:'short', month:'short', day:'numeric', hour:'numeric', minute:'2-digit'}) : '';
-
-    document.getElementById('status-bar').innerHTML = `
-        <div class="card p-4 flex items-center gap-4 flex-wrap">
-            <select onchange="setStatus(this.value)" class="bg-transparent border border-gray-700 rounded px-2 py-1 text-sm cursor-pointer" style="font-size:13px;">
-                ${(data.all_statuses || []).map(s => `<option value="${s}" ${s === status ? 'selected' : ''} class="bg-gray-900">${s.replace('_', ' ')}</option>`).join('')}
-            </select>
-            ${inProgress ? `<span class="flex items-center gap-1 text-xs ${alive ? 'text-green-400' : 'text-red-400'}"><span class="w-2 h-2 rounded-full ${alive ? 'bg-green-400 animate-pulse' : 'bg-red-400'}"></span>${alive ? 'running' : 'stalled'}</span>` : ''}
-            ${stalled ? `<button onclick="restartTicket()" class="text-xs bg-yellow-800 hover:bg-yellow-700 text-yellow-200 px-3 py-1 rounded">Restart</button>` : ''}
-            ${status === 'new' ? `<button onclick="startDev()" class="text-xs bg-blue-700 hover:bg-blue-600 text-white px-3 py-1 rounded">Start Dev</button>` : ''}
-            ${prScheduled ? `<span class="text-xs text-yellow-400">PR scheduled ${prScheduled}</span>` : ''}
-            ${['pr_ready','in_review','pr_failed'].includes(status) ? `<span class="text-xs ${(st.ci_fix_attempts || 0) >= 2 ? 'text-red-400' : (st.ci_fix_attempts || 0) > 0 ? 'text-yellow-400' : 'text-gray-500'}" title="Automated CI fix attempts. Maxes out at 2 before status becomes pr_failed.">CI fixes: ${st.ci_fix_attempts || 0}/2</span>` : ''}
-            ${st.external_status ? `<span class="text-xs text-gray-500">${esc(st.external_status)}</span>` : ''}
-            <span class="text-sm text-gray-400">branch: <code>${branch}</code></span>
-            ${(st.prs || []).map(pr => `<a href="${pr.url}" target="_blank" class="link text-sm">${pr.repo} PR #${pr.id} &nearr;</a>`).join('')}
-            ${ticketUrl ? `<a href="${ticketUrl}" target="_blank" class="link text-sm ml-auto">Open Ticket &nearr;</a>` : ''}
-        </div>
-        ${summary ? `<div class="card p-4 mt-2 border-l-2 border-blue-500"><div class="text-xs font-bold text-gray-500 uppercase mb-1">Change Summary</div><div class="text-sm text-gray-300">${summary}</div></div>` : ''}
-    `;
-
-    const docs = data.docs || {};
-    const docOrder = ['ticket.md', 'epic.md', 'plan.md', 'technical-plan.md', 'change-manifest.md', 'tri-review.md'];
-    const sorted = Object.entries(docs).sort((a, b) => {
-        const ai = docOrder.indexOf(a[0]);
-        const bi = docOrder.indexOf(b[0]);
-        return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
-    });
-
-    if (data.demo_video) {
-        document.getElementById('docs').innerHTML = `
-            <div class="card p-4 mb-4">
-                <div class="text-xs font-bold text-gray-500 uppercase mb-2">Demo Recording</div>
-                <video controls class="w-full rounded" style="max-height:600px">
-                    <source src="/api/tickets/${key}/demo" type="video/webm">
-                </video>
-            </div>
-        `;
-    } else {
-        document.getElementById('docs').innerHTML = '';
-    }
-
-    document.getElementById('docs').innerHTML += sorted.map(([name, content]) => `
-        <div class="card p-3">
-            <div class="collapsible-header collapsed" onclick="toggleCollapse(this)">
-                <span class="text-xs font-bold text-gray-500 uppercase">${name}</span>
-            </div>
-            <div class="collapsible-content collapsed">
-                <div class="md-content text-sm p-3 pt-2">${marked.parse(content)}</div>
-            </div>
-        </div>
-    `).join('');
-
-    const history = data.history || [];
-    window.allEvents = history;
-    document.getElementById('history').innerHTML = history.length ? `
-        <div class="card p-3">
-            <div class="flex items-center justify-between mb-3 pb-3 border-b border-gray-700">
-                <div class="collapsible-header collapsed" onclick="toggleCollapse(this)">
-                    <span class="text-xs font-bold text-gray-500 uppercase">Event History</span>
-                </div>
-            </div>
-            <div class="collapsible-content collapsed">
-            <div class="space-y-1 text-xs" id="history-events">
-            </div>
-            </div>
-        </div>
-    ` : '';
-    renderFilteredHistory();
-}
-load();
-
-function showTab(tab) {
-    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-    if (tab === 'docs') {
-        document.getElementById('docs-section').style.display = '';
-        document.getElementById('diff-section').style.display = 'none';
-        document.querySelectorAll('.tab-btn')[0].classList.add('active');
-    } else {
-        document.getElementById('docs-section').style.display = 'none';
-        document.getElementById('diff-section').style.display = '';
-        document.querySelectorAll('.tab-btn')[1].classList.add('active');
-        loadDiff();
-    }
-}
-
-const EXT_LANG = {py:'python',js:'javascript',ts:'typescript',tsx:'tsx',jsx:'jsx',java:'java',rb:'ruby',go:'go',rs:'rust',css:'css',html:'html',json:'json',yml:'yaml',yaml:'yaml',sh:'bash',sql:'sql',md:'markdown'};
-
-function parseDiff(raw) {
-    const files = [];
-    let current = null;
-    for (const line of raw.split('\n')) {
-        if (line.startsWith('diff --git')) {
-            current = { header: '', hunks: [], lines: [], _newLine: 1 };
-            files.push(current);
-        } else if (line.startsWith('+++ b/') && current) {
-            current.header = line.slice(6);
-        } else if (line.startsWith('--- ') && current) {
-        } else if (line.startsWith('@@') && current) {
-            current.lines.push({ type: 'hunk', text: line });
-            const m = line.match(/@@ -\d+(?:,\d+)? \+(\d+)/);
-            current._newLine = m ? parseInt(m[1]) : 1;
-        } else if (current) {
-            let type = 'ctx';
-            let newLine = null;
-            if (line.startsWith('+')) { type = 'add'; newLine = current._newLine++; }
-            else if (line.startsWith('-')) { type = 'del'; }
-            else { newLine = current._newLine++; }
-            current.lines.push({ type, text: line.slice(1), newLine });
-        }
-    }
-    return files;
-}
-
-function highlightFile(file) {
-    const ext = (file.header.split('.').pop() || '').toLowerCase();
-    const lang = EXT_LANG[ext];
-    if (!lang) return;
-    const code = file.lines.filter(l => l.type !== 'hunk').map(l => l.text).join('\n');
-    try {
-        const result = hljs.highlight(code, { language: lang, ignoreIllegals: true });
-        const highlighted = result.value.split('\n');
-        let idx = 0;
-        for (const line of file.lines) {
-            if (line.type === 'hunk') continue;
-            line._hl = highlighted[idx++] || esc(line.text);
-        }
-    } catch(e) {}
-}
-
-function renderInlineComment(c) {
-    const statusCls = c.status || 'needs_reply';
-    if (statusCls === 'addressed') {
-        return `<div class="comment-inline addressed">
-            <div class="flex items-center gap-2 text-xs mb-1">
-                <span class="badge" style="background:#14532d;color:#86efac">addressed</span>
-                <span class="text-gray-500">${c.path ? esc(c.path) + ':' + (c.line||'') : ''}</span>
-            </div>
-            <div class="text-sm text-gray-400">${esc(c.body)}</div>
-        </div>`;
-    }
-    if (statusCls === 'replied') {
-        return `<div class="comment-inline replied">
-            <div class="flex items-center gap-2 text-xs mb-1">
-                <span class="badge" style="background:#14532d;color:#86efac">replied</span>
-                <span class="text-gray-500">${c.path ? esc(c.path) + ':' + (c.line||'') : ''}</span>
-            </div>
-            <div class="text-sm text-gray-400">${esc(c.body)}</div>
-            <div class="text-sm text-gray-500 mt-1 italic">Reply: ${esc(c.suggested_reply || '')}</div>
-        </div>`;
-    }
-    return `<div class="comment-inline needs_reply" id="comment-${c.id}">
-        <div class="flex items-center gap-2 text-xs mb-1">
-            <span class="badge" style="background:#713f12;color:#fde047">needs reply</span>
-            <span class="text-gray-500">${c.path ? esc(c.path) + ':' + (c.line||'') : ''}</span>
-        </div>
-        <div class="text-sm text-gray-300 mb-2">${esc(c.body)}</div>
-        <textarea id="reply-${c.id}" rows="2" class="reply-box w-full p-2 rounded text-sm mb-1">${esc(c.suggested_reply || '')}</textarea>
-        <button onclick="postReply(${c.id})" class="bg-green-700 hover:bg-green-600 text-white px-3 py-1 rounded text-xs">Post Reply</button>
-    </div>`;
-}
-
-async function loadDiff() {
-    const [diffResp, commentsResp] = await Promise.all([
-        fetch(`/api/tickets/${key}/diff`),
-        fetch(`/api/tickets/${key}/pr-comments`),
-    ]);
-    const diffData = await diffResp.json();
-    const comments = await commentsResp.json();
-
-    const files = parseDiff(diffData.diff || '');
-    const commentsByFile = {};
-    for (const c of comments) {
-        const k = c.path || '';
-        if (!commentsByFile[k]) commentsByFile[k] = {};
-        const line = c.line || 0;
-        if (!commentsByFile[k][line]) commentsByFile[k][line] = [];
-        commentsByFile[k][line].push(c);
-    }
-
-    let html = '';
-    for (const file of files) {
-        highlightFile(file);
-        const fileComments = commentsByFile[file.header] || {};
-        const commentCount = Object.values(fileComments).flat().length;
-        html += `<div class="diff-file">`;
-        html += `<div class="diff-header">${esc(file.header)}${commentCount ? ` <span class="text-yellow-400 text-xs">(${commentCount} comments)</span>` : ''}</div>`;
-
-        for (const line of file.lines) {
-            if (line.type === 'hunk') {
-                html += `<div class="diff-hunk">${esc(line.text)}</div>`;
-                continue;
-            }
-            const cls = line.type === 'add' ? 'diff-add' : line.type === 'del' ? 'diff-del' : 'diff-ctx';
-            const prefix = line.type === 'add' ? '+' : line.type === 'del' ? '-' : ' ';
-            const num = line.newLine != null ? line.newLine : '';
-            const content = line._hl || esc(line.text);
-            html += `<div class="diff-line ${cls}"><span class="diff-line-num">${num}</span>${prefix}${content}</div>`;
-
-            if (line.newLine && fileComments[line.newLine]) {
-                for (const c of fileComments[line.newLine]) {
-                    html += renderInlineComment(c);
-                }
-            }
-        }
-
-        if (fileComments[0]) {
-            for (const c of fileComments[0]) {
-                html += renderInlineComment(c);
-            }
-        }
-        html += `</div>`;
-    }
-
-    const unmatched = comments.filter(c => !files.some(f => f.header === (c.path || '')));
-    if (unmatched.length) {
-        html += `<div class="diff-file"><div class="diff-header">General Comments</div>`;
-        for (const c of unmatched) {
-            html += renderInlineComment(c);
-        }
-        html += `</div>`;
-    }
-
-    if (!comments.length && !diffData.diff) {
-        html = '<div class="text-gray-500 text-sm p-4">No diff or comments yet.</div>';
-    }
-
-    document.getElementById('diff-view').innerHTML = html;
-}
-
-async function postReply(commentId) {
-    const textarea = document.getElementById(`reply-${commentId}`);
-    const body = textarea.value.trim();
-    if (!body) return;
-    textarea.disabled = true;
-    const resp = await fetch(`/api/tickets/${key}/pr-comments/${commentId}/reply`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({body}),
-    });
-    if (resp.ok) {
-        loadDiff();
-    } else {
-        textarea.disabled = false;
-    }
-}
-
-let ws = null;
-let term = null;
-let fitAddon = null;
-let maximized = false;
-
-let reconnectDelay = 0;
-const MAX_RECONNECT_DELAY = 10000;
-
-function connectTerminalWs() {
-    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${protocol}//${location.host}/ws/terminal/${key}`);
-    ws.binaryType = 'arraybuffer';
-
-    ws.onopen = () => {
-        reconnectDelay = 0;
-        if (fitAddon) fitAddon.fit();
-        if (term) ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-    };
-
-    ws.onmessage = (event) => {
-        const data = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : event.data;
-        if (term) term.write(data);
-    };
-
-    ws.onclose = (event) => {
-        if (!term) return;
-        if (event.code === 1008) {
-            term.write('\r\n\x1b[31m[terminal unavailable]\x1b[0m\r\n');
-            return;
-        }
-        reconnectDelay = Math.min(reconnectDelay ? reconnectDelay * 2 : 500, MAX_RECONNECT_DELAY);
-        term.write(`\r\n\x1b[90m[reconnecting in ${reconnectDelay}ms…]\x1b[0m\r\n`);
-        setTimeout(() => {
-            if (!term) return;
-            term.reset();
-            connectTerminalWs();
-        }, reconnectDelay);
-    };
-}
-
-function startTerminal() {
-    const container = document.getElementById('terminal-container');
-    term = new Terminal({
-        cursorBlink: true,
-        fontSize: 14,
-        fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace",
-        theme: {
-            background: '#0a0a0f',
-            foreground: '#e2e8f0',
-            cursor: '#e2e8f0',
-            selectionBackground: '#334155',
-        },
-    });
-
-    fitAddon = new FitAddon.FitAddon();
-    const webLinksAddon = new WebLinksAddon.WebLinksAddon();
-    term.loadAddon(fitAddon);
-    term.loadAddon(webLinksAddon);
-    term.open(container);
-    fitAddon.fit();
-
-    connectTerminalWs();
-
-    term.onData((data) => {
-        if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
-    });
-
-    const resizeObserver = new ResizeObserver(() => {
-        if (fitAddon) fitAddon.fit();
-        if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-        }
-    });
-    resizeObserver.observe(container);
-}
-
-function runServices() {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    for (const cmd of runCommands) {
-        ws.send(cmd + '\n');
-    }
-}
-
-async function setStatus(newStatus) {
-    const resp = await fetch(`/api/tickets/${key}/status`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({status: newStatus}),
-    });
-    if (resp.ok) load();
-}
-
-async function startDev() {
-    const resp = await fetch(`/api/tickets/${key}/start-dev`, { method: 'POST' });
-    if (resp.ok) {
-        if (ws) ws.close();
-        if (term) { term.dispose(); term = null; }
-        document.getElementById('terminal-container').innerHTML = '';
-        setTimeout(() => { startTerminal(); load(); }, 3000);
-    }
-}
-
-async function restartTicket() {
-    await fetch(`/api/tickets/${key}/restart`, { method: 'POST' });
-    if (ws) ws.close();
-    if (term) { term.dispose(); term = null; }
-    document.getElementById('terminal-container').innerHTML = '';
-    setTimeout(() => { startTerminal(); load(); }, 2000);
-}
+const { createApp, ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } = Vue;
 
 const ALL_STATES = ['new','planning','reviewing','pr_ready','in_review','merged','pr_failed','done'];
 const LOCKED_AUTO_PR_STATES = new Set(['in_review','merged','done']);
+const EXT_LANG = {py:'python',js:'javascript',ts:'typescript',tsx:'tsx',jsx:'jsx',java:'java',rb:'ruby',go:'go',rs:'rust',css:'css',html:'html',json:'json',yml:'yaml',yaml:'yaml',sh:'bash',sql:'sql',md:'markdown'};
+const OUTPUT_TASKS = ['start_planning', 'start_reviewing', 'fix_review_findings', 'confer'];
 
-function populateStateDropdown(visited, current) {
-    const dd = document.getElementById('set-state-dd');
-    if (!dd) return;
-    const options = ['<option value="">—</option>'];
-    for (const s of ALL_STATES) {
-        if (s === current) continue;
-        if (!visited.has(s) && s !== 'new' && s !== 'pr_ready') continue;
-        options.push(`<option value="${s}">${s}</option>`);
+function isNoiseEvent(e) {
+    if (e.meta?.category === 'noise') return true;
+    if (e.event === 'job_started') return true;
+    if (e.event === 'task_execution_started') return true;
+    if (e.event === 'task_execution_completed') return true;
+    if (e.event === 'marking_job_done') return true;
+    if (e.event === 'job_marked_done') return true;
+    if (e.event === 'ticket_ci_fix_skipped') return true;
+    if (e.event === 'events_started') return true;
+    if (e.event === 'review_validation_dropped') return true;
+    if (e.event === 'job_finished') {
+        const s = e.summary || '';
+        return s.includes('ticket=None') && s.includes('status=ok');
     }
-    dd.innerHTML = options.join('');
+    return false;
 }
 
-function refreshAutoPrCheckbox(state, autoPr) {
-    const cb = document.getElementById('auto-pr-cb');
-    if (!cb) return;
-    cb.checked = !!autoPr;
-    cb.disabled = LOCKED_AUTO_PR_STATES.has(state);
-}
+createApp({
+    setup() {
+        const key = window.location.pathname.split('/').pop();
 
-function jobHasOutput(task, status) {
-    const outputTasks = ['start_planning', 'start_reviewing', 'fix_review_findings', 'confer'];
-    return outputTasks.some(t => task && task.includes(t)) && status === 'ok';
-}
+        const ticket = ref(null);
+        const features = ref({});
+        const runCommands = ref([]);
+        const jobs = ref([]);
+        const diffData = ref({ diff: '' });
+        const comments = ref([]);
+        const contextText = ref('');
+        const noteText = ref('');
+        const activeTab = ref('docs');
+        const maximized = ref(false);
+        const resetting = ref(false);
+        const eventFilter = ref('useful');
+        const setStateDdValue = ref('');
+        const loadError = ref(false);
+        const sections = reactive({ context: true, notes: false, history: false });
+        const docExpanded = reactive({});
+        const replyDrafts = reactive({});
+        const jobOutput = reactive({ jobId: null, taskName: '', text: '', offset: 0 });
 
-function pidBadgeHtml(jobId, alive) {
-    return alive
-        ? `<span id="pid-badge-${jobId}" class="text-xs bg-green-900 text-green-300 px-1.5 py-0.5 rounded ml-1" title="claude pid alive">● alive</span>`
-        : `<span id="pid-badge-${jobId}" class="text-xs bg-red-900 text-red-300 px-1.5 py-0.5 rounded ml-1" title="claude pid dead — orphan, will be finalized on next poll">○ dead</span>`;
-}
+        const jobOutputEl = ref(null);
+        const terminalContainer = ref(null);
 
-function updatePidBadge(jobId, alive) {
-    const badge = document.getElementById(`pid-badge-${jobId}`);
-    if (!badge) return;
-    badge.outerHTML = pidBadgeHtml(jobId, alive);
-}
+        let term = null;
+        let ws = null;
+        let fitAddon = null;
+        let reconnectDelay = 0;
+        const MAX_RECONNECT_DELAY = 10000;
+        let jobOutputPollTimer = null;
+        let resizeObserver = null;
+        let escListener = null;
 
-async function loadJobs() {
-    try {
-        const r = await fetch(`/api/tickets/${key}/jobs`);
-        if (!r.ok) return;
-        const rows = await r.json();
-        const sec = document.getElementById('jobs-timeline-section');
-        const timeline = document.getElementById('jobs-timeline');
-        const notesSec = document.getElementById('notes-section');
-        if (!Array.isArray(rows) || !rows.length) { sec.classList.add('hidden'); notesSec.classList.add('hidden'); return; }
-        sec.classList.remove('hidden');
-        notesSec.classList.remove('hidden');
-        const visited = new Set();
-        for (const j of rows) {
-            try {
-                const pl = typeof j.payload === 'string' ? JSON.parse(j.payload || '{}') : (j.payload || {});
-                if (pl.target) visited.add(pl.target);
-            } catch (e) {}
-            try {
-                const resp = JSON.parse(j.response || '{}');
-                const t = resp.artifacts && resp.artifacts.transitioned_to;
-                if (t) visited.add(t);
-            } catch (e) {}
-        }
-        visited.add('new');
-        const statusBar = document.getElementById('status-bar');
-        const currentState = (statusBar && statusBar.dataset && statusBar.dataset.status) || '';
-        populateStateDropdown(visited, currentState);
-        let autoStartJobId = null;
-        timeline.innerHTML = rows.map(j => {
-            const color = j.status === 'ok' ? 'text-green-400' : j.status === 'failed' ? 'text-red-400' : j.status === 'skipped' ? 'text-gray-500' : 'text-blue-400';
-            const retry = (j.status === 'failed' || j.status === 'skipped') ? ` <button onclick="event.stopPropagation(); retryJob(${j.id})" class="ml-2 text-xs text-yellow-400 hover:text-yellow-200 underline">retry</button>` : '';
-            const at = j.finished_at || j.started_at || j.enqueued_at;
-            const rel = at ? ` <span class="text-gray-600">(${relativeTime(at)})</span>` : '';
-            const hasOutput = jobHasOutput(j.task, j.status);
-            const outputBadge = hasOutput ? '<span class="text-xs bg-green-900 text-green-300 px-1.5 py-0.5 rounded ml-1">📄</span>' : '';
-            let resp = '';
-            try { const r = JSON.parse(j.response || '{}'); if (r.reason) resp = ` — ${r.reason}`; } catch(e) {}
-            if (j.status === 'running' && !autoStartJobId) autoStartJobId = { id: j.id, task: j.task };
-            let pidBadge = '';
-            if (j.status === 'running') {
-                pidBadge = pidBadgeHtml(j.id, j.pid_alive);
+        const state = computed(() => (ticket.value && ticket.value.state) || {});
+        const status = computed(() => state.value.status || 'unknown');
+        const branch = computed(() => state.value.branch || '');
+        const terminalAlive = computed(() => !!(ticket.value && ticket.value.terminal_alive));
+        const inProgress = computed(() => ['planning', 'reviewing'].includes(status.value));
+        const stalled = computed(() => inProgress.value && !terminalAlive.value);
+        const hasPrs = computed(() => (state.value.prs || []).length > 0);
+        const hasCode = computed(() => ['pr_ready', 'in_review', 'pr_failed', 'merged'].includes(status.value) || hasPrs.value);
+        const lockedAutoPr = computed(() => LOCKED_AUTO_PR_STATES.has(status.value));
+
+        const ticketUrl = computed(() => {
+            const hist = (ticket.value && ticket.value.history) || [];
+            for (const e of hist) {
+                const u = (e.links || {}).ticket;
+                if (u) return u;
             }
-            return `<div class="cursor-pointer hover:bg-gray-800 p-2 rounded flex items-center gap-2" onclick="viewJobOutput(${j.id}, '${j.task}')"><span class="text-gray-500 flex-shrink-0">${at}${rel}</span><span class="${color} flex-shrink-0">${j.status}</span>${pidBadge}<span class="text-gray-300 flex-1">${j.task}</span>${outputBadge}<span class="text-gray-500">${resp}</span>${retry}</div>`;
-        }).join('');
+            return '';
+        });
 
-        if (autoStartJobId) {
-            setTimeout(() => {
-                viewJobOutput(autoStartJobId.id, autoStartJobId.task);
-            }, 500);
+        const prScheduledLabel = computed(() => {
+            const t = state.value.pr_scheduled_at;
+            if (!t) return '';
+            return new Date(t).toLocaleString('en-US', {
+                weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+            });
+        });
+
+        const visitedStates = computed(() => {
+            const v = new Set(['new']);
+            for (const j of jobs.value) {
+                try {
+                    const pl = typeof j.payload === 'string' ? JSON.parse(j.payload || '{}') : (j.payload || {});
+                    if (pl.target) v.add(pl.target);
+                } catch (e) {}
+                try {
+                    const resp = JSON.parse(j.response || '{}');
+                    const t = resp.artifacts && resp.artifacts.transitioned_to;
+                    if (t) v.add(t);
+                } catch (e) {}
+            }
+            return v;
+        });
+
+        const dropdownStates = computed(() => {
+            const out = [];
+            for (const s of ALL_STATES) {
+                if (s === status.value) continue;
+                if (!visitedStates.value.has(s) && s !== 'new' && s !== 'pr_ready') continue;
+                out.push(s);
+            }
+            return out;
+        });
+
+        const sortedDocs = computed(() => {
+            const docs = (ticket.value && ticket.value.docs) || {};
+            const order = ['ticket.md', 'epic.md', 'plan.md', 'technical-plan.md', 'change-manifest.md', 'tri-review.md'];
+            return Object.entries(docs).sort((a, b) => {
+                const ai = order.indexOf(a[0]);
+                const bi = order.indexOf(b[0]);
+                return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+            });
+        });
+
+        const filteredHistory = computed(() => {
+            const hist = (ticket.value && ticket.value.history) || [];
+            if (eventFilter.value === 'all') return hist;
+            if (eventFilter.value === 'noise') return hist.filter(isNoiseEvent);
+            return hist.filter(e => !isNoiseEvent(e));
+        });
+
+        const parsedDiff = computed(() => {
+            const raw = (diffData.value && diffData.value.diff) || '';
+            const files = [];
+            let current = null;
+            for (const line of raw.split('\n')) {
+                if (line.startsWith('diff --git')) {
+                    current = { header: '', lines: [], _newLine: 1 };
+                    files.push(current);
+                } else if (line.startsWith('+++ b/') && current) {
+                    current.header = line.slice(6);
+                } else if (line.startsWith('--- ') && current) {
+                    // skip
+                } else if (line.startsWith('@@') && current) {
+                    current.lines.push({ type: 'hunk', text: line });
+                    const m = line.match(/@@ -\d+(?:,\d+)? \+(\d+)/);
+                    current._newLine = m ? parseInt(m[1]) : 1;
+                } else if (current) {
+                    let type = 'ctx';
+                    let newLine = null;
+                    if (line.startsWith('+')) { type = 'add'; newLine = current._newLine++; }
+                    else if (line.startsWith('-')) { type = 'del'; }
+                    else { newLine = current._newLine++; }
+                    current.lines.push({ type, text: line.slice(1), newLine });
+                }
+            }
+            for (const f of files) highlightFile(f);
+            return files;
+        });
+
+        const commentsByFile = computed(() => {
+            const out = {};
+            for (const c of comments.value) {
+                const k = c.path || '';
+                if (!out[k]) out[k] = {};
+                const ln = c.line || 0;
+                if (!out[k][ln]) out[k][ln] = [];
+                out[k][ln].push(c);
+            }
+            return out;
+        });
+
+        const unmatchedComments = computed(() =>
+            comments.value.filter(c => !parsedDiff.value.some(f => f.header === (c.path || '')))
+        );
+
+        function highlightFile(file) {
+            const ext = (file.header.split('.').pop() || '').toLowerCase();
+            const lang = EXT_LANG[ext];
+            if (!lang) return;
+            const code = file.lines.filter(l => l.type !== 'hunk').map(l => l.text).join('\n');
+            try {
+                const result = hljs.highlight(code, { language: lang, ignoreIllegals: true });
+                const highlighted = result.value.split('\n');
+                let idx = 0;
+                for (const line of file.lines) {
+                    if (line.type === 'hunk') continue;
+                    line._hl = highlighted[idx++] || escHtml(line.text);
+                }
+            } catch (e) {}
         }
-    } catch (e) { console.warn('jobs fetch failed', e); }
-}
 
-async function retryJob(jobId) {
-    const r = await fetch(`/api/tickets/${key}/retry-job`, {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({job_id: jobId}),
-    });
-    if (r.ok) { await loadJobs(); } else { alert((await r.json()).error || 'retry failed'); }
-}
-
-let currentJobId = null;
-let jobOutputOffset = 0;
-let jobOutputPolling = null;
-
-async function viewJobOutput(jobId, taskName) {
-    currentJobId = jobId;
-    jobOutputOffset = 0;
-    const section = document.getElementById('job-output-section');
-    const output = document.getElementById('job-output');
-    const title = document.getElementById('job-output-title');
-    title.textContent = `Output — ${taskName} (job ${jobId})`;
-    output.textContent = 'Loading...';
-    section.classList.remove('hidden');
-    window.scrollTo({top: section.offsetTop - 100, behavior: 'smooth'});
-
-    if (jobOutputPolling) clearTimeout(jobOutputPolling);
-    pollJobOutput();
-}
-
-async function pollJobOutput() {
-    if (!currentJobId) return;
-    try {
-        const r = await fetch(`/api/jobs/${currentJobId}/live?offset=${jobOutputOffset}`);
-        if (!r.ok) {
-            document.getElementById('job-output').textContent = 'Error loading output';
-            return;
-        }
-        const data = await r.json();
-        const output = document.getElementById('job-output');
-        const isFirst = jobOutputOffset === 0;
-
-        if (isFirst) {
-            output.textContent = data.content || (data.done ? '(no output)' : 'running…');
-        } else if (data.content) {
-            output.textContent += data.content;
-        }
-        jobOutputOffset = data.offset;
-        output.parentElement.scrollTop = output.parentElement.scrollHeight;
-
-        if (typeof data.pid_alive === 'boolean') {
-            updatePidBadge(currentJobId, data.pid_alive);
+        function escHtml(s) {
+            const d = document.createElement('div');
+            d.textContent = s == null ? '' : String(s);
+            return d.innerHTML;
         }
 
-        if (data.done) {
-            jobOutputPolling = null;
-        } else {
-            jobOutputPolling = setTimeout(pollJobOutput, 3000);
+        function renderMarkdown(content) {
+            return marked.parse(content || '');
         }
-    } catch (e) {
-        console.error('job output poll failed', e);
-        jobOutputPolling = setTimeout(pollJobOutput, 3000);
-    }
-}
 
-function closeJobOutput() {
-    currentJobId = null;
-    if (jobOutputPolling) clearTimeout(jobOutputPolling);
-    document.getElementById('job-output-section').classList.add('hidden');
-}
+        function relTime(ts) {
+            if (!ts) return '';
+            const diff = Date.now() - new Date(ts).getTime();
+            const mins = Math.floor(diff / 60000);
+            if (mins < 1) return 'just now';
+            if (mins < 60) return `${mins}m ago`;
+            const hrs = Math.floor(mins / 60);
+            if (hrs < 24) return `${hrs}h ago`;
+            return `${Math.floor(hrs / 24)}d ago`;
+        }
 
-async function submitNote() {
-    const note = (document.getElementById('notes-input').value || '').trim();
-    if (!note) return;
-    const r = await fetch(`/api/tickets/${key}/notes`, {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({note}),
-    });
-    if (r.ok) {
-        document.getElementById('notes-input').value = '';
-        setTimeout(() => { loadJobs(); load(); }, 1500);
-    } else {
-        alert((await r.json()).error || 'note submit failed');
-    }
-}
+        function jobStatusClass(s) {
+            return s === 'ok' ? 'text-green-400' : s === 'failed' ? 'text-red-400' : s === 'skipped' ? 'text-gray-500' : 'text-blue-400';
+        }
 
-async function submitSetState(target) {
-    if (!target) return;
-    const r = await fetch(`/api/tickets/${key}/set-state`, {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({target}),
-    });
-    if (r.ok) {
-        setTimeout(() => { loadJobs(); load(); }, 1200);
-    } else {
-        alert((await r.json()).error || 'set-state failed');
-    }
-}
+        function jobReason(j) {
+            try {
+                const r = JSON.parse(j.response || '{}');
+                return r.reason ? ` — ${r.reason}` : '';
+            } catch (e) { return ''; }
+        }
 
-async function toggleAutoPr(checked) {
-    const r = await fetch(`/api/tickets/${key}/auto-pr`, {
-        method: 'PATCH', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({auto_pr: checked}),
-    });
-    if (!r.ok) {
-        alert((await r.json()).error || 'auto_pr update failed');
-        document.getElementById('auto-pr-cb').checked = !checked;
-    }
-}
+        function jobHasOutput(task, status) {
+            return OUTPUT_TASKS.some(t => task && task.includes(t)) && status === 'ok';
+        }
 
-async function resetTerminal() {
-    const btn = document.getElementById('reset-btn');
-    btn.disabled = true;
-    btn.textContent = 'Resetting...';
-    await fetch(`/api/tickets/${key}/terminal/reset`, { method: 'POST' });
-    if (ws) ws.close();
-    if (term) {
-        term.dispose();
-        term = null;
-    }
-    document.getElementById('terminal-container').innerHTML = '';
-    btn.disabled = false;
-    btn.textContent = 'Reset';
-    setTimeout(startTerminal, 1500);
-}
+        function diffLineClass(t) {
+            return t === 'add' ? 'diff-add' : t === 'del' ? 'diff-del' : 'diff-ctx';
+        }
 
-function toggleMaximize() {
-    maximized = !maximized;
-    document.body.classList.toggle('maximized', maximized);
-    document.getElementById('max-btn').innerHTML = maximized ? '&swnwar;' : '&nesear;';
-    if (fitAddon) setTimeout(() => fitAddon.fit(), 50);
-}
+        function diffLinePrefix(t) {
+            return t === 'add' ? '+' : t === 'del' ? '-' : ' ';
+        }
 
-async function loadContext() {
-    const r = await fetch(`/api/tickets/${key}/context`);
-    if (r.ok) {
-        const d = await r.json();
-        document.getElementById('context-input').value = d.context || '';
-    }
-}
+        function commentLabel(c) {
+            const s = c.status || 'needs_reply';
+            if (s === 'addressed') return 'addressed';
+            if (s === 'replied') return 'replied';
+            return 'needs reply';
+        }
 
-async function saveContext() {
-    const context = document.getElementById('context-input').value;
-    await fetch(`/api/tickets/${key}/context`, {
-        method: 'PUT',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({context})
-    });
-}
+        function commentClass(c) {
+            const s = c.status || 'needs_reply';
+            if (s === 'addressed') return 'addressed';
+            if (s === 'replied') return 'replied';
+            return 'needs_reply';
+        }
 
-async function deleteContext() {
-    if (!confirm('Delete context file?')) return;
-    await fetch(`/api/tickets/${key}/context`, {method: 'DELETE'});
-    document.getElementById('context-input').value = '';
-}
+        function commentBodyTextClass(c) {
+            const s = c.status || 'needs_reply';
+            return (s === 'addressed' || s === 'replied') ? 'text-gray-400' : 'text-gray-300';
+        }
 
-document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && maximized) toggleMaximize();
-});
+        function commentBadgeStyle(c) {
+            const s = c.status || 'needs_reply';
+            if (s === 'addressed' || s === 'replied') return 'background:#14532d;color:#86efac';
+            return 'background:#713f12;color:#fde047';
+        }
 
-function toggleCollapse(headerEl) {
-    const content = headerEl.nextElementSibling;
-    if (!content) return;
-    headerEl.classList.toggle('expanded');
-    headerEl.classList.toggle('collapsed');
-    content.classList.toggle('collapsed');
-    content.classList.toggle('expanded');
-}
+        function flatCount(byLine) {
+            return Object.values(byLine).reduce((a, b) => a + b.length, 0);
+        }
 
-loadContext();
-startTerminal();
+        async function load() {
+            try {
+                const [ticketResp, configResp] = await Promise.all([
+                    fetch(`/api/tickets/${key}/detail`),
+                    fetch('/api/config'),
+                ]);
+                if (!ticketResp.ok) {
+                    loadError.value = true;
+                    return;
+                }
+                const data = await ticketResp.json();
+                const cfg = await configResp.json();
+                ticket.value = data;
+                features.value = cfg.features || {};
+                runCommands.value = cfg.run_commands || [];
+                // seed reply drafts from server-suggested replies on first load
+                for (const c of comments.value) {
+                    if (replyDrafts[c.id] === undefined) replyDrafts[c.id] = c.suggested_reply || '';
+                }
+            } catch (e) {
+                console.error('load failed', e);
+            }
+        }
+
+        async function loadJobs() {
+            try {
+                const r = await fetch(`/api/tickets/${key}/jobs`);
+                if (!r.ok) return;
+                const rows = await r.json();
+                jobs.value = Array.isArray(rows) ? rows : [];
+                let autoStart = null;
+                for (const j of jobs.value) {
+                    if (j.status === 'running' && !autoStart) {
+                        autoStart = { id: j.id, task: j.task };
+                    }
+                }
+                if (autoStart && jobOutput.jobId === null) {
+                    setTimeout(() => viewJobOutput(autoStart.id, autoStart.task), 500);
+                }
+            } catch (e) {
+                console.warn('jobs fetch failed', e);
+            }
+        }
+
+        async function loadDiff() {
+            const [diffResp, commentsResp] = await Promise.all([
+                fetch(`/api/tickets/${key}/diff`),
+                fetch(`/api/tickets/${key}/pr-comments`),
+            ]);
+            diffData.value = await diffResp.json();
+            comments.value = await commentsResp.json();
+            for (const c of comments.value) {
+                if (replyDrafts[c.id] === undefined) replyDrafts[c.id] = c.suggested_reply || '';
+            }
+        }
+
+        function switchTab(tab) {
+            activeTab.value = tab;
+            if (tab === 'diff') loadDiff();
+        }
+
+        async function loadContext() {
+            const r = await fetch(`/api/tickets/${key}/context`);
+            if (r.ok) {
+                const d = await r.json();
+                contextText.value = d.context || '';
+            }
+        }
+
+        async function saveContext() {
+            await fetch(`/api/tickets/${key}/context`, {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({context: contextText.value}),
+            });
+        }
+
+        async function deleteContext() {
+            if (!confirm('Delete context file?')) return;
+            await fetch(`/api/tickets/${key}/context`, {method: 'DELETE'});
+            contextText.value = '';
+        }
+
+        async function setStatus(newStatus) {
+            const r = await fetch(`/api/tickets/${key}/status`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({status: newStatus}),
+            });
+            if (r.ok) load();
+        }
+
+        async function startDev() {
+            const r = await fetch(`/api/tickets/${key}/start-dev`, {method: 'POST'});
+            if (r.ok) {
+                disposeTerminal();
+                setTimeout(() => { startTerminal(); load(); loadJobs(); }, 3000);
+            }
+        }
+
+        async function restartTicket() {
+            await fetch(`/api/tickets/${key}/restart`, {method: 'POST'});
+            disposeTerminal();
+            setTimeout(() => { startTerminal(); load(); loadJobs(); }, 2000);
+        }
+
+        async function submitNote() {
+            const note = (noteText.value || '').trim();
+            if (!note) return;
+            const r = await fetch(`/api/tickets/${key}/notes`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({note}),
+            });
+            if (r.ok) {
+                noteText.value = '';
+                setTimeout(() => { loadJobs(); load(); }, 1500);
+            } else {
+                alert((await r.json()).error || 'note submit failed');
+            }
+        }
+
+        async function onSetStateChange() {
+            const target = setStateDdValue.value;
+            if (!target) return;
+            const r = await fetch(`/api/tickets/${key}/set-state`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({target}),
+            });
+            setStateDdValue.value = '';
+            if (r.ok) {
+                setTimeout(() => { loadJobs(); load(); }, 1200);
+            } else {
+                alert((await r.json()).error || 'set-state failed');
+            }
+        }
+
+        async function toggleAutoPr(checked) {
+            const r = await fetch(`/api/tickets/${key}/auto-pr`, {
+                method: 'PATCH',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({auto_pr: checked}),
+            });
+            if (!r.ok) {
+                alert((await r.json()).error || 'auto_pr update failed');
+                load();
+            } else {
+                if (ticket.value && ticket.value.state) ticket.value.state.auto_pr = checked;
+            }
+        }
+
+        async function retryJob(jobId) {
+            const r = await fetch(`/api/tickets/${key}/retry-job`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({job_id: jobId}),
+            });
+            if (r.ok) await loadJobs();
+            else alert((await r.json()).error || 'retry failed');
+        }
+
+        async function postReply(commentId) {
+            const body = (replyDrafts[commentId] || '').trim();
+            if (!body) return;
+            const r = await fetch(`/api/tickets/${key}/pr-comments/${commentId}/reply`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({body}),
+            });
+            if (r.ok) loadDiff();
+        }
+
+        function viewJobOutput(jobId, taskName) {
+            jobOutput.jobId = jobId;
+            jobOutput.taskName = taskName;
+            jobOutput.text = 'Loading...';
+            jobOutput.offset = 0;
+            nextTick(() => {
+                if (jobOutputEl.value) {
+                    window.scrollTo({top: jobOutputEl.value.getBoundingClientRect().top + window.scrollY - 100, behavior: 'smooth'});
+                }
+            });
+            if (jobOutputPollTimer) clearTimeout(jobOutputPollTimer);
+            pollJobOutput();
+        }
+
+        async function pollJobOutput() {
+            if (jobOutput.jobId === null) return;
+            try {
+                const r = await fetch(`/api/jobs/${jobOutput.jobId}/live?offset=${jobOutput.offset}`);
+                if (!r.ok) {
+                    jobOutput.text = 'Error loading output';
+                    return;
+                }
+                const data = await r.json();
+                const isFirst = jobOutput.offset === 0;
+                if (isFirst) {
+                    jobOutput.text = data.content || (data.done ? '(no output)' : 'running…');
+                } else if (data.content) {
+                    jobOutput.text += data.content;
+                }
+                jobOutput.offset = data.offset;
+                nextTick(() => {
+                    if (jobOutputEl.value) jobOutputEl.value.scrollTop = jobOutputEl.value.scrollHeight;
+                });
+                if (typeof data.pid_alive === 'boolean') {
+                    const j = jobs.value.find(j => j.id === jobOutput.jobId);
+                    if (j) j.pid_alive = data.pid_alive;
+                }
+                if (data.done) {
+                    jobOutputPollTimer = null;
+                } else {
+                    jobOutputPollTimer = setTimeout(pollJobOutput, 3000);
+                }
+            } catch (e) {
+                console.error('job output poll failed', e);
+                jobOutputPollTimer = setTimeout(pollJobOutput, 3000);
+            }
+        }
+
+        function closeJobOutput() {
+            jobOutput.jobId = null;
+            if (jobOutputPollTimer) clearTimeout(jobOutputPollTimer);
+        }
+
+        function runServices() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) return;
+            for (const cmd of runCommands.value) ws.send(cmd + '\n');
+        }
+
+        async function resetTerminal() {
+            resetting.value = true;
+            await fetch(`/api/tickets/${key}/terminal/reset`, {method: 'POST'});
+            disposeTerminal();
+            resetting.value = false;
+            setTimeout(startTerminal, 1500);
+        }
+
+        function toggleMaximize() {
+            maximized.value = !maximized.value;
+            if (fitAddon) setTimeout(() => fitAddon.fit(), 50);
+        }
+
+        function disposeTerminal() {
+            if (ws) try { ws.close(); } catch (e) {}
+            ws = null;
+            if (term) try { term.dispose(); } catch (e) {}
+            term = null;
+            if (terminalContainer.value) terminalContainer.value.innerHTML = '';
+        }
+
+        function connectTerminalWs() {
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${location.host}/ws/terminal/${key}`);
+            ws.binaryType = 'arraybuffer';
+            ws.onopen = () => {
+                reconnectDelay = 0;
+                if (fitAddon) fitAddon.fit();
+                if (term) ws.send(JSON.stringify({type: 'resize', cols: term.cols, rows: term.rows}));
+            };
+            ws.onmessage = (event) => {
+                const data = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : event.data;
+                if (term) term.write(data);
+            };
+            ws.onclose = (event) => {
+                if (!term) return;
+                if (event.code === 1008) {
+                    term.write('\r\n\x1b[31m[terminal unavailable]\x1b[0m\r\n');
+                    return;
+                }
+                reconnectDelay = Math.min(reconnectDelay ? reconnectDelay * 2 : 500, MAX_RECONNECT_DELAY);
+                term.write(`\r\n\x1b[90m[reconnecting in ${reconnectDelay}ms…]\x1b[0m\r\n`);
+                setTimeout(() => {
+                    if (!term) return;
+                    term.reset();
+                    connectTerminalWs();
+                }, reconnectDelay);
+            };
+        }
+
+        function startTerminal() {
+            const container = terminalContainer.value;
+            if (!container) return;
+            term = new Terminal({
+                cursorBlink: true,
+                fontSize: 14,
+                fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace",
+                theme: {
+                    background: '#0a0a0f',
+                    foreground: '#e2e8f0',
+                    cursor: '#e2e8f0',
+                    selectionBackground: '#334155',
+                },
+            });
+            fitAddon = new FitAddon.FitAddon();
+            const webLinksAddon = new WebLinksAddon.WebLinksAddon();
+            term.loadAddon(fitAddon);
+            term.loadAddon(webLinksAddon);
+            term.open(container);
+            fitAddon.fit();
+            connectTerminalWs();
+            term.onData((data) => {
+                if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
+            });
+            if (resizeObserver) resizeObserver.disconnect();
+            resizeObserver = new ResizeObserver(() => {
+                if (fitAddon) fitAddon.fit();
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({type: 'resize', cols: term.cols, rows: term.rows}));
+                }
+            });
+            resizeObserver.observe(container);
+        }
+
+        watch(maximized, v => {
+            document.body.classList.toggle('maximized', v);
+        });
+
+        onMounted(() => {
+            load();
+            loadJobs();
+            loadContext();
+            startTerminal();
+            escListener = (e) => { if (e.key === 'Escape' && maximized.value) toggleMaximize(); };
+            document.addEventListener('keydown', escListener);
+        });
+
+        onUnmounted(() => {
+            disposeTerminal();
+            if (resizeObserver) resizeObserver.disconnect();
+            if (escListener) document.removeEventListener('keydown', escListener);
+            if (jobOutputPollTimer) clearTimeout(jobOutputPollTimer);
+        });
+
+        return {
+            key, ticket, features, runCommands, jobs, diffData, comments,
+            contextText, noteText, activeTab, maximized, resetting, eventFilter, setStateDdValue,
+            loadError, sections, docExpanded, replyDrafts, jobOutput,
+            jobOutputEl, terminalContainer,
+            state, status, branch, terminalAlive, inProgress, stalled, hasPrs, hasCode, lockedAutoPr,
+            ticketUrl, prScheduledLabel, dropdownStates,
+            sortedDocs, filteredHistory, parsedDiff, commentsByFile, unmatchedComments,
+            renderMarkdown, escHtml, relTime,
+            jobStatusClass, jobReason, jobHasOutput,
+            diffLineClass, diffLinePrefix, commentLabel, commentClass, commentBodyTextClass, commentBadgeStyle, flatCount,
+            load, loadJobs, switchTab, saveContext, deleteContext,
+            setStatus, startDev, restartTicket, submitNote, onSetStateChange, toggleAutoPr,
+            retryJob, postReply, viewJobOutput, closeJobOutput,
+            runServices, resetTerminal, toggleMaximize,
+        };
+    },
+}).mount('#app');
 </script>
 </body>
 </html>
