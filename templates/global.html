@@ -105,6 +105,7 @@ let dismissed = new Set(JSON.parse(localStorage.getItem('globalDismissedEventKey
 const SYSTEM_EVENTS = new Set(['cycle_start', 'cycle_end', 'cycle_sleep']);
 
 function isNoise(e) {
+    if (e.meta?.category === 'noise') return true;
     if (e.event === 'job_started') return true;
     if (e.event === 'ticket_ci_fix_skipped') return true;
     if (e.event === 'events_started') return true;
