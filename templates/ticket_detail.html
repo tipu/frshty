@@ -487,6 +487,41 @@ let term = null;
 let fitAddon = null;
 let maximized = false;
 
+let reconnectDelay = 0;
+const MAX_RECONNECT_DELAY = 10000;
+
+function connectTerminalWs() {
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${protocol}//${location.host}/ws/terminal/${key}`);
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = () => {
+        reconnectDelay = 0;
+        if (fitAddon) fitAddon.fit();
+        if (term) ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+    };
+
+    ws.onmessage = (event) => {
+        const data = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : event.data;
+        if (term) term.write(data);
+    };
+
+    ws.onclose = (event) => {
+        if (!term) return;
+        if (event.code === 1008) {
+            term.write('\r\n\x1b[31m[terminal unavailable]\x1b[0m\r\n');
+            return;
+        }
+        reconnectDelay = Math.min(reconnectDelay ? reconnectDelay * 2 : 500, MAX_RECONNECT_DELAY);
+        term.write(`\r\n\x1b[90m[reconnecting in ${reconnectDelay}ms…]\x1b[0m\r\n`);
+        setTimeout(() => {
+            if (!term) return;
+            term.reset();
+            connectTerminalWs();
+        }, reconnectDelay);
+    };
+}
+
 function startTerminal() {
     const container = document.getElementById('terminal-container');
     term = new Terminal({
@@ -508,23 +543,7 @@ function startTerminal() {
     term.open(container);
     fitAddon.fit();
 
-    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${protocol}//${location.host}/ws/terminal/${key}`);
-    ws.binaryType = 'arraybuffer';
-
-    ws.onopen = () => {
-        fitAddon.fit();
-        ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-    };
-
-    ws.onmessage = (event) => {
-        const data = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : event.data;
-        term.write(data);
-    };
-
-    ws.onclose = () => {
-        if (term) term.write('\r\n\x1b[90m[disconnected]\x1b[0m\r\n');
-    };
+    connectTerminalWs();
 
     term.onData((data) => {
         if (ws && ws.readyState === WebSocket.OPEN) ws.send(data);
