@@ -421,7 +421,7 @@ _LOCKFILE_NOISE = frozenset({
 
 def _changed_files(wt: Path, base_ref: str) -> list[str]:
     result = subprocess.run(
-        ["git", "diff", "--name-only", f"{base_ref}..HEAD"],
+        ["git", "diff", "--name-only", f"{base_ref}...HEAD"],
         cwd=str(wt), capture_output=True, text=True, timeout=30,
     )
     if result.returncode != 0:
