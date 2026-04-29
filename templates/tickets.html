@@ -184,18 +184,34 @@ function closePrModal() {
 
 async function submitPrModal() {
     if (!currentTicketKey || !prRepos.length) return;
-    const payload = {repos: prRepos.map(r => ({name: r.name, title: r.title, description: r.description}))};
-    const resp = await fetch(`/api/tickets/${currentTicketKey}/submit-pr`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(payload)
-    });
-    if (resp.ok) {
-        closePrModal();
-        load();
-    } else {
-        const err = await resp.json();
-        alert('Error: ' + (err.error || 'Unknown error'));
+    const btn = document.getElementById('pr-submit-btn');
+    if (btn.disabled) return;
+    const original = btn.textContent;
+    btn.disabled = true;
+    btn.classList.add('opacity-50', 'cursor-not-allowed');
+    btn.textContent = 'Submitting…';
+    try {
+        const payload = {repos: prRepos.map(r => ({name: r.name, title: r.title, description: r.description}))};
+        const resp = await fetch(`/api/tickets/${currentTicketKey}/submit-pr`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(payload)
+        });
+        if (resp.ok) {
+            closePrModal();
+            load();
+        } else {
+            const err = await resp.json();
+            alert('Error: ' + (err.error || 'Unknown error'));
+            btn.disabled = false;
+            btn.classList.remove('opacity-50', 'cursor-not-allowed');
+            btn.textContent = original;
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+        btn.disabled = false;
+        btn.classList.remove('opacity-50', 'cursor-not-allowed');
+        btn.textContent = original;
     }
 }
 
