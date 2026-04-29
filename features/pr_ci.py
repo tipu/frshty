@@ -69,9 +69,13 @@ def triage_and_fix_pr(platform, repo: str, pr_id: int, label: str,
                 "failed_names": failed_names, "reason": reason}
 
     fix_prompt = (
-        f"CI checks failed: {', '.join(failed_names)}. This is caused by our changes. "
-        f"Fix the issue: {fix_hint}. Run the failing tests locally if you can, "
-        f"then commit with --no-verify and push."
+        f"CI failed: {', '.join(failed_names)}. Caused by our changes. Hint: {fix_hint}\n\n"
+        "Reproduce the failure locally first. Read `gh run view --log-failed` for the exact "
+        "errors, then find the local equivalent of each failing step (check "
+        ".github/workflows/, Makefile, package.json scripts, pyproject.toml). Run that "
+        "command locally and confirm you see the same failure. Fix the code. Re-run the "
+        "same command — it must pass locally before you commit. Only then commit and push. "
+        "If you cannot get it green locally, do not push: say what you tried and stop."
     )
     ran = run_claude_code(fix_prompt, cwd=worktree, timeout=FIX_TIMEOUT)
     if ran is None:
