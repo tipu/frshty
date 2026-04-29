@@ -52,18 +52,11 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
             <h2 class="text-lg font-bold">Submit PR</h2>
             <button onclick="closePrModal()" class="text-gray-600 hover:text-white text-xl">×</button>
         </div>
-        <div class="flex-1 flex flex-col overflow-hidden pr-4">
-            <div class="mb-4">
-                <label class="text-xs font-bold text-gray-400 block mb-2">Title</label>
-                <input type="text" id="pr-title" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none" />
-            </div>
-            <div class="flex-1 flex flex-col overflow-hidden">
-                <label class="text-xs font-bold text-gray-400 block mb-2">Description</label>
-                <textarea id="pr-description" class="flex-1 bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none font-mono resize-none overflow-y-auto"></textarea>
-            </div>
-        </div>
+        <div id="pr-tabs" class="flex gap-1 mb-3 border-b border-gray-700"></div>
+        <div id="pr-tab-empty" class="hidden text-sm text-gray-400 flex-1 flex items-center justify-center">No repos with meaningful changes.</div>
+        <div id="pr-tab-panels" class="flex-1 flex flex-col overflow-hidden"></div>
         <div class="flex gap-2 mt-4 pt-4 border-t border-gray-700">
-            <button onclick="submitPrModal()" class="flex-1 bg-green-700 hover:bg-green-600 text-white text-sm px-4 py-2 rounded">Submit</button>
+            <button onclick="submitPrModal()" id="pr-submit-btn" class="flex-1 bg-green-700 hover:bg-green-600 text-white text-sm px-4 py-2 rounded">Submit</button>
             <button onclick="closePrModal()" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white text-sm px-4 py-2 rounded">Cancel</button>
         </div>
     </div>
@@ -116,6 +109,8 @@ async function discard(key) {
 }
 
 let currentTicketKey = null;
+let prRepos = [];
+let prActiveRepo = null;
 
 async function submitPr(key) {
     currentTicketKey = key;
@@ -125,24 +120,75 @@ async function submitPr(key) {
         return;
     }
     const data = await resp.json();
-    document.getElementById('pr-title').value = data.title || '';
-    document.getElementById('pr-description').value = data.description || '';
+    prRepos = (data.repos || []).map(r => ({...r}));
+    prActiveRepo = prRepos[0]?.name || null;
+    renderPrModal();
     document.getElementById('pr-modal').classList.remove('hidden');
+}
+
+function renderPrModal() {
+    const tabs = document.getElementById('pr-tabs');
+    const panels = document.getElementById('pr-tab-panels');
+    const empty = document.getElementById('pr-tab-empty');
+    const submitBtn = document.getElementById('pr-submit-btn');
+    if (!prRepos.length) {
+        tabs.innerHTML = '';
+        panels.innerHTML = '';
+        empty.classList.remove('hidden');
+        submitBtn.disabled = true;
+        submitBtn.classList.add('opacity-50', 'cursor-not-allowed');
+        return;
+    }
+    empty.classList.add('hidden');
+    submitBtn.disabled = false;
+    submitBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+    tabs.innerHTML = prRepos.map(r => {
+        const active = r.name === prActiveRepo;
+        const cls = active
+            ? 'px-3 py-2 text-sm border-b-2 border-blue-500 text-white'
+            : 'px-3 py-2 text-sm border-b-2 border-transparent text-gray-400 hover:text-gray-200';
+        return `<button onclick="switchPrTab('${r.name}')" class="${cls}">${r.name} <span class="text-xs text-gray-500">(${r.files_changed} files)</span></button>`;
+    }).join('');
+    const active = prRepos.find(r => r.name === prActiveRepo) || prRepos[0];
+    panels.innerHTML = `
+        <div class="mb-1 text-xs text-gray-500">${active.name} → ${active.branch}</div>
+        <div class="mb-3">
+            <label class="text-xs font-bold text-gray-400 block mb-2">Title</label>
+            <input type="text" id="pr-title-input" oninput="updatePrField('title', this.value)" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none" />
+        </div>
+        <div class="flex-1 flex flex-col overflow-hidden">
+            <label class="text-xs font-bold text-gray-400 block mb-2">Description</label>
+            <textarea id="pr-description-input" oninput="updatePrField('description', this.value)" class="flex-1 bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none font-mono resize-none overflow-y-auto"></textarea>
+        </div>
+    `;
+    document.getElementById('pr-title-input').value = active.title || '';
+    document.getElementById('pr-description-input').value = active.description || '';
+}
+
+function switchPrTab(name) {
+    prActiveRepo = name;
+    renderPrModal();
+}
+
+function updatePrField(field, value) {
+    const r = prRepos.find(r => r.name === prActiveRepo);
+    if (r) r[field] = value;
 }
 
 function closePrModal() {
     document.getElementById('pr-modal').classList.add('hidden');
     currentTicketKey = null;
+    prRepos = [];
+    prActiveRepo = null;
 }
 
 async function submitPrModal() {
-    if (!currentTicketKey) return;
-    const title = document.getElementById('pr-title').value;
-    const description = document.getElementById('pr-description').value;
+    if (!currentTicketKey || !prRepos.length) return;
+    const payload = {repos: prRepos.map(r => ({name: r.name, title: r.title, description: r.description}))};
     const resp = await fetch(`/api/tickets/${currentTicketKey}/submit-pr`, {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({title, description})
+        body: JSON.stringify(payload)
     });
     if (resp.ok) {
         closePrModal();
