@@ -23,7 +23,6 @@ body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: #0a0a0a; 
 .badge-planning { background: #713f12; color: #fde047; }
 .badge-reviewing { background: #713f12; color: #fde047; }
 .badge-pr_ready { background: #14532d; color: #86efac; }
-.badge-pr_created { background: #14532d; color: #86efac; }
 .badge-in_review { background: #1e3a5f; color: #93c5fd; }
 .badge-merged { background: #14532d; color: #86efac; }
 .md-content h1 { font-size: 1.2em; font-weight: bold; margin: 12px 0 8px; }
@@ -225,7 +224,7 @@ async function load() {
     const ticketUrl = (data.history || []).map(e => (e.links || {}).ticket).find(u => u);
 
     hasPrs = (st.prs || []).length > 0;
-    const hasCode = ['pr_ready', 'pr_created', 'in_review', 'pr_failed', 'merged'].includes(status) || hasPrs;
+    const hasCode = ['pr_ready', 'in_review', 'pr_failed', 'merged'].includes(status) || hasPrs;
     if (hasCode) document.getElementById('tab-bar').style.display = 'flex';
 
     const summary = data.summary || '';
@@ -244,7 +243,7 @@ async function load() {
             ${stalled ? `<button onclick="restartTicket()" class="text-xs bg-yellow-800 hover:bg-yellow-700 text-yellow-200 px-3 py-1 rounded">Restart</button>` : ''}
             ${status === 'new' ? `<button onclick="startDev()" class="text-xs bg-blue-700 hover:bg-blue-600 text-white px-3 py-1 rounded">Start Dev</button>` : ''}
             ${prScheduled ? `<span class="text-xs text-yellow-400">PR scheduled ${prScheduled}</span>` : ''}
-            ${['pr_ready','pr_created','in_review','pr_failed'].includes(status) ? `<span class="text-xs ${(st.ci_fix_attempts || 0) >= 2 ? 'text-red-400' : (st.ci_fix_attempts || 0) > 0 ? 'text-yellow-400' : 'text-gray-500'}" title="Automated CI fix attempts. Maxes out at 2 before status becomes pr_failed.">CI fixes: ${st.ci_fix_attempts || 0}/2</span>` : ''}
+            ${['pr_ready','in_review','pr_failed'].includes(status) ? `<span class="text-xs ${(st.ci_fix_attempts || 0) >= 2 ? 'text-red-400' : (st.ci_fix_attempts || 0) > 0 ? 'text-yellow-400' : 'text-gray-500'}" title="Automated CI fix attempts. Maxes out at 2 before status becomes pr_failed.">CI fixes: ${st.ci_fix_attempts || 0}/2</span>` : ''}
             ${st.external_status ? `<span class="text-xs text-gray-500">${esc(st.external_status)}</span>` : ''}
             <span class="text-sm text-gray-400">branch: <code>${branch}</code></span>
             ${(st.prs || []).map(pr => `<a href="${pr.url}" target="_blank" class="link text-sm">${pr.repo} PR #${pr.id} &nearr;</a>`).join('')}
@@ -589,8 +588,8 @@ async function restartTicket() {
     setTimeout(() => { startTerminal(); load(); }, 2000);
 }
 
-const ALL_STATES = ['new','planning','reviewing','pr_ready','pr_created','in_review','merged','pr_failed','done'];
-const LOCKED_AUTO_PR_STATES = new Set(['pr_created','in_review','merged','done']);
+const ALL_STATES = ['new','planning','reviewing','pr_ready','in_review','merged','pr_failed','done'];
+const LOCKED_AUTO_PR_STATES = new Set(['in_review','merged','done']);
 
 function populateStateDropdown(visited, current) {
     const dd = document.getElementById('set-state-dd');

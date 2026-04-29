@@ -63,10 +63,9 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
 </div>
 
 <script>
-const COLUMNS = ['new', 'planning', 'reviewing', 'pr_ready', 'pr_created', 'in_review', 'pr_failed', 'merged'];
+const COLUMNS = ['new', 'planning', 'reviewing', 'pr_ready', 'in_review', 'pr_failed', 'merged'];
 const HELP = {
     pr_ready: 'Branch pushed and work finished. Waiting for the scheduler (or auto_pr) to open the PR on the platform.',
-    pr_created: 'PR has just been opened. Transient — next cycle it becomes in_review (or merged if already merged).',
     in_review: 'PR open, not all merged. Each cycle: poll CI, resolve conflicts, read review comments, check merge state.',
     pr_failed: 'CI or conflict resolution exhausted retries. Needs manual intervention — restart the ticket to retry.',
 };

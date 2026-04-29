@@ -569,10 +569,10 @@ async def api_submit_pr(ticket_key: str, request: Request):
         return {"error": "No PRs were created"}, 400
 
     try:
-        state.transition_ticket(ticket_key, "pr_created", prs=prs)
+        state.transition_ticket(ticket_key, "in_review", prs=prs)
     except state.TicketStateError as e:
         log.emit("ticket_pr_transition_failed",
-                 f"PRs created for {ticket_key} but transition to pr_created failed: {e}",
+                 f"PRs created for {ticket_key} but transition to in_review failed: {e}",
                  meta={"ticket": ticket_key, "prs": prs})
         return {"error": f"PRs created but state transition failed: {e}", "prs": prs}, 500
     log.emit("ticket_pr_created", f"PR submitted for {ticket_key}: {len(prs)} repo(s)",
@@ -1259,7 +1259,8 @@ def api_scheduled():
     items.sort(key=lambda x: x.get("run_at") or "")
     tickets = state.load("tickets")
     for key, ts in tickets.items():
-        if ts.get("status") == "pr_created" and not ts.get("ci_passed"):
+        if (ts.get("status") == "in_review" and not ts.get("ci_passed")
+                and not ts.get("ci_fix_attempts")):
             items.append({"key": key, "type": "ci_pending", "status": ts["status"],
                           "checks_started_at": ts.get("checks_started_at"),
                           "branch": ts.get("branch", ""),
@@ -1721,7 +1722,7 @@ def api_set_auto_pr(key: str, body: dict):
     if not ts_row:
         return JSONResponse({"error": "not found"}, status_code=404)
     status_val = ts_row.get("status", "")
-    gate = {"pr_created", "in_review", "merged", "done"}
+    gate = {"in_review", "merged", "done"}
     if status_val in gate:
         return JSONResponse({"error": f"auto_pr locked; status={status_val}"}, status_code=400)
     ts_row["auto_pr"] = bool(body.get("auto_pr"))

@@ -292,8 +292,8 @@ def test_done_ticket_with_prs_preserves_state_on_rediscovery(tmp_path):
         tickets.check(config)
 
     result = state.load("tickets")["NEC-100"]
-    assert result["status"] in ("pr_created", "in_review"), \
-        f"Expected pr_created or in_review, got {result['status']}"
+    assert result["status"] == "in_review", \
+        f"Expected in_review, got {result['status']}"
     assert result.get("prs"), "PRs should be preserved"
     assert result["prs"][0]["id"] == 42
 
@@ -378,7 +378,7 @@ def test_ticket_status_transition_rejects_illegal():
         transition("new", "merged")
 
     with pytest.raises(ValueError, match="Illegal transition"):
-        transition("pr_failed", "pr_created")
+        transition("merged", "planning")
 
     assert transition("pr_failed", "pr_ready") == "pr_ready"
 
@@ -386,7 +386,7 @@ def test_ticket_status_transition_rejects_illegal():
 def test_ticket_status_transition_allows_done_from_any():
     from core.ticket_status import transition
 
-    for status in ["new", "planning", "reviewing", "pr_ready", "pr_created", "in_review", "merged", "pr_failed"]:
+    for status in ["new", "planning", "reviewing", "pr_ready", "in_review", "merged", "pr_failed"]:
         assert transition(status, "done") == "done"
 
 

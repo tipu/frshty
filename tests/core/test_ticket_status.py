@@ -16,8 +16,8 @@ class TestTransitionValid:
     def test_reviewing_to_planning(self):
         assert transition("reviewing", "planning") == "planning"
 
-    def test_pr_ready_to_pr_created(self):
-        assert transition("pr_ready", "pr_created") == "pr_created"
+    def test_pr_ready_to_in_review(self):
+        assert transition("pr_ready", "in_review") == "in_review"
 
     def test_pr_ready_to_pr_failed(self):
         assert transition("pr_ready", "pr_failed") == "pr_failed"
@@ -25,20 +25,8 @@ class TestTransitionValid:
     def test_pr_ready_to_merged(self):
         assert transition("pr_ready", "merged") == "merged"
 
-    def test_pr_created_to_merged(self):
-        assert transition("pr_created", "merged") == "merged"
-
-    def test_pr_created_to_in_review(self):
-        assert transition("pr_created", "in_review") == "in_review"
-
-    def test_pr_created_to_pr_failed(self):
-        assert transition("pr_created", "pr_failed") == "pr_failed"
-
     def test_in_review_to_merged(self):
         assert transition("in_review", "merged") == "merged"
-
-    def test_in_review_to_pr_created(self):
-        assert transition("in_review", "pr_created") == "pr_created"
 
     def test_in_review_self_loop(self):
         assert transition("in_review", "in_review") == "in_review"
@@ -63,7 +51,6 @@ class TestTransitionIllegal:
         ("new", "pr_ready"),
         ("planning", "pr_ready"),
         ("planning", "merged"),
-        ("pr_failed", "pr_created"),
         ("merged", "planning"),
     ])
     def test_illegal_raises(self, current, target):
@@ -90,7 +77,7 @@ class TestTransitionLegalized:
         ("merged", "new"),         # requeue
         ("done", "new"),           # revive on upstream reopen
         ("done", "pr_ready"),      # revive with slug
-        ("done", "pr_created"),    # revive with PRs
+        ("done", "in_review"),     # revive with PRs
     ])
     def test_now_legal(self, current, target):
         assert transition(current, target) == target
@@ -111,7 +98,7 @@ class TestAllowedGraph:
         assert _ALLOWED[TicketStatus.merged] == {TicketStatus.new}
 
     def test_done_revivals(self):
-        assert _ALLOWED[TicketStatus.done] == {TicketStatus.new, TicketStatus.pr_ready, TicketStatus.pr_created}
+        assert _ALLOWED[TicketStatus.done] == {TicketStatus.new, TicketStatus.pr_ready, TicketStatus.in_review}
 
     def test_all_states_have_entries(self):
         for s in TicketStatus:
