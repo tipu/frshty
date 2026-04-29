@@ -6,7 +6,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>frshty</title>
 <script src="/static/tailwind.js"></script>
-<script defer src="/static/nav-gate.js"></script>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <style>
 body { font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; background: #0a0a0a; color: #e0e0e0; }
 .card { background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; }
@@ -35,15 +35,18 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
 .summary-full { display: none; white-space: pre-wrap; word-break: break-word; }
 .expanded .summary-line { display: none; }
 .expanded .summary-full { display: block; }
+[v-cloak] { display: none; }
 </style>
 </head>
 <body class="p-4 max-w-7xl mx-auto">
+
+<div id="app" v-cloak>
 
 <header class="flex items-center justify-between mb-4">
     <div class="flex items-center gap-4">
         <div class="flex items-center gap-2">
             <h1 class="text-lg font-bold">frshty</h1>
-            <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700" id="instance-badge"></span>
+            <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700">{{ instanceName }}</span>
         </div>
         <nav class="flex gap-1 text-sm">
             <a href="/" class="active">Feed</a>
@@ -52,70 +55,135 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
             <a href="/tickets">Tickets</a>
             <a href="/scheduled">Scheduled</a>
             <a href="/slack">Slack</a>
-            <a href="/timesheet">Timesheet</a>
-            <a href="/billing">Billing</a>
+            <a v-if="features.timesheet !== false" href="/timesheet">Timesheet</a>
+            <a v-if="features.billing !== false" href="/billing">Billing</a>
             <a href="/config">Config</a>
         </nav>
     </div>
     <div class="relative text-sm text-gray-500">
-        <span id="cycle-info"></span>
-        <button onclick="pollNow()" id="poll-btn" class="ml-3 text-xs bg-blue-900 hover:bg-blue-800 text-blue-300 px-3 py-1 rounded">Poll Now</button>
-        <button onclick="toggleSettings()" class="ml-3 text-gray-400 hover:text-white">⚙</button>
-        <div id="settings-panel" class="settings-panel">
+        <button @click="pollNow" :disabled="polling" class="ml-3 text-xs bg-blue-900 hover:bg-blue-800 text-blue-300 px-3 py-1 rounded">{{ polling ? 'Polling...' : 'Poll Now' }}</button>
+        <button @click="settingsOpen = !settingsOpen" class="ml-3 text-gray-400 hover:text-white">⚙</button>
+        <div class="settings-panel" :class="{ open: settingsOpen }">
             <div class="text-xs text-gray-400 mb-2 uppercase tracking-wider">Features</div>
-            <div id="feature-toggles"></div>
+            <label v-for="(val, key) in features" :key="key" class="flex items-center gap-2 mb-1 cursor-pointer text-sm">
+                <input type="checkbox" :checked="val" @change="toggleFeature(key, $event.target.checked)">
+                {{ key }}
+            </label>
         </div>
     </div>
 </header>
 
-<div id="status-cards" class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4"></div>
+<div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
+    <div class="card p-3 cursor-pointer hover:border-gray-500" @click="setFilter('unread')">
+        <div class="text-xs text-gray-500">Unread</div>
+        <div class="text-2xl font-bold" :class="(status.unread_total || 0) > 0 ? 'text-blue-400' : 'text-green-400'">{{ status.unread_total || 0 }}</div>
+    </div>
+    <a href="/reviews" class="card p-3 hover:border-gray-500">
+        <div class="text-xs text-gray-500">Reviews</div>
+        <div class="text-2xl font-bold">{{ counts.review || 0 }}</div>
+    </a>
+    <a href="/tickets" class="card p-3 hover:border-gray-500">
+        <div class="text-xs text-gray-500">Tickets</div>
+        <div class="text-2xl font-bold">{{ counts.ticket || 0 }}</div>
+    </a>
+    <a href="/slack" class="card p-3 hover:border-gray-500">
+        <div class="text-xs text-gray-500 flex items-center gap-1">Slack <span class="w-2 h-2 rounded-full" :class="status.slack_alive ? 'bg-green-400' : 'bg-red-500'"></span></div>
+        <div class="text-2xl font-bold">{{ counts.slack || 0 }}</div>
+    </a>
+    <div class="card p-3">
+        <div class="text-xs text-gray-500">PRs</div>
+        <div class="text-2xl font-bold">{{ counts.pr || 0 }}</div>
+    </div>
+</div>
 
 <section class="mb-4">
     <div class="flex items-center justify-between mb-2">
         <h2 class="text-sm font-bold text-yellow-400 uppercase tracking-wider">⚠ Needs Attention</h2>
         <div class="flex items-center gap-3 text-xs">
-            <span class="text-gray-500" id="attention-count"></span>
-            <button onclick="dismissAttention()" class="text-gray-600 hover:text-red-400">dismiss all</button>
+            <span class="text-gray-500">{{ attentionItems.length ? attentionItems.length + ' items' : '' }}</span>
+            <button @click="dismissAttention" class="text-gray-600 hover:text-red-400">dismiss all</button>
         </div>
     </div>
-    <div id="attention-list" class="space-y-1"></div>
+    <div class="space-y-1">
+        <div v-if="!attentionItems.length" class="text-xs text-gray-600 py-2">Nothing needs your attention right now.</div>
+        <div v-for="e in attentionItems" :key="e.id"
+             class="card card-red px-3 py-2 flex items-start justify-between text-sm"
+             :class="{ expanded: expandedRows.has(e.id) }">
+            <div class="flex-1 min-w-0">
+                <div class="flex items-start gap-2">
+                    <span v-if="hasMore(e)" class="row-expand" @click="toggleExpand(e.id)">▸</span>
+                    <span v-else class="row-expand"></span>
+                    <div class="flex-1 min-w-0">
+                        <span class="text-gray-500 text-xs">{{ fmtTime(e.ts) }}</span>
+                        <span class="badge badge-red ml-2">{{ e.event }}</span>
+                        <span class="summary-line ml-2">{{ firstLine(e) }}</span>
+                        <span class="ml-2"><a v-for="[k, url] in linkPairs(e)" :key="k" :href="url" target="_blank" class="link">[→ {{ k }}]</a></span>
+                        <div class="summary-full mt-1 text-xs text-gray-400">{{ e.summary }}</div>
+                    </div>
+                </div>
+            </div>
+            <span class="dismiss-btn ml-2" @click="dismissEvent(e.id)">✓</span>
+        </div>
+    </div>
 </section>
 
 <section>
     <div class="flex items-center justify-between mb-2">
         <h2 class="text-sm font-bold text-gray-400 uppercase tracking-wider">Event Feed</h2>
         <div class="flex gap-2 text-xs items-center">
-            <select id="noise-mode" onchange="setNoiseMode(this.value)" class="bg-gray-900 border border-gray-700 text-gray-300 text-xs px-1 py-0.5 rounded">
+            <select v-model="noiseMode" class="bg-gray-900 border border-gray-700 text-gray-300 text-xs px-1 py-0.5 rounded">
                 <option value="useful">useful</option>
                 <option value="noise">noise</option>
             </select>
-            <select id="time-window" onchange="setTimeWindow(this.value)" class="bg-gray-900 border border-gray-700 text-gray-300 text-xs px-1 py-0.5 rounded">
-                <option value="8">8h</option>
-                <option value="16">16h</option>
-                <option value="24">24h</option>
+            <select v-model.number="timeWindow" class="bg-gray-900 border border-gray-700 text-gray-300 text-xs px-1 py-0.5 rounded">
+                <option :value="8">8h</option>
+                <option :value="16">16h</option>
+                <option :value="24">24h</option>
             </select>
             <span class="text-gray-700">|</span>
-            <button onclick="toggleCategory('ticket')" id="cat-ticket" class="text-gray-400 hover:text-white px-1 rounded">ticket</button>
-            <button onclick="toggleCategory('review')" id="cat-review" class="text-gray-400 hover:text-white px-1 rounded">review</button>
-            <button onclick="toggleCategory('pr')" id="cat-pr" class="text-gray-400 hover:text-white px-1 rounded">pr</button>
-            <button onclick="toggleCategory('slack')" id="cat-slack" class="text-gray-400 hover:text-white px-1 rounded">slack</button>
+            <button v-for="cat in ['ticket','review','pr','slack']" :key="cat"
+                    @click="toggleCategory(cat)"
+                    class="hover:text-white px-1 rounded"
+                    :class="activeCategories.has(cat) ? 'text-white bg-gray-700' : 'text-gray-400'">
+                {{ cat }}
+            </button>
             <span class="text-gray-700">|</span>
-            <button onclick="setFilter('all')" id="filter-all" class="text-gray-400 hover:text-white">all</button>
-            <button onclick="setFilter('unread')" id="filter-unread" class="text-gray-400 hover:text-white">unread</button>
-            <button onclick="dismissAll()" class="text-gray-600 hover:text-red-400">dismiss all</button>
+            <button @click="setFilter('all')" :class="currentFilter === 'all' ? 'text-white' : 'text-gray-400 hover:text-white'">all</button>
+            <button @click="setFilter('unread')" :class="currentFilter === 'unread' ? 'text-white' : 'text-gray-400 hover:text-white'">unread</button>
+            <button @click="dismissAll" class="text-gray-600 hover:text-red-400">dismiss all</button>
         </div>
     </div>
-    <div id="event-feed" class="space-y-0.5 text-xs font-mono"></div>
+    <div class="space-y-0.5 text-xs font-mono">
+        <div v-for="e in feedItems" :key="e.id"
+             class="feed-row px-2 py-1 hover:bg-gray-900 rounded"
+             :class="[e.read ? 'read' : 'unread', { expanded: expandedRows.has(e.id) }]">
+            <div class="flex items-center gap-2">
+                <span class="text-gray-600 w-16 shrink-0">{{ fmtTime(e.ts) }}</span>
+                <span>{{ e.read ? '○' : '●' }}</span>
+                <span v-if="hasMore(e)" class="row-expand shrink-0" @click="toggleExpand(e.id)">▸</span>
+                <span v-else class="row-expand shrink-0"></span>
+                <span class="badge" :class="badgeCls(e)">{{ e.event }}</span>
+                <span class="summary-line flex-1 truncate">{{ firstLine(e) }}</span>
+                <span class="shrink-0"><a v-for="[k, url] in linkPairs(e)" :key="k" :href="url" target="_blank" class="link">[→ {{ k }}]</a></span>
+                <span class="dismiss-btn shrink-0" @click="dismissEvent(e.id)">✓</span>
+            </div>
+            <div class="summary-full mt-1 ml-20 text-gray-400">{{ e.summary }}</div>
+        </div>
+    </div>
 </section>
 
+</div>
+
 <script>
-let currentFilter = 'all';
-let noiseMode = localStorage.getItem('eventNoiseMode') || 'useful';
-let timeWindow = parseInt(localStorage.getItem('eventTimeWindow') || '8', 10);
-let activeCategories = new Set();
-let events = [];
-let config = {};
-let expandedRows = new Set();
+const { createApp, ref, computed, reactive, watch, onMounted } = Vue;
+
+const ATTENTION_EVENTS = new Set([
+    'pr_comment_flagged_manual', 'pr_stale_no_review', 'review_comments_queued',
+    'slack_mention_detected', 'ticket_tests_fail', 'cycle_error',
+    'ticket_checks_failed', 'ticket_checks_unrelated', 'ticket_ci_fix_sent', 'ticket_checks_timeout',
+    'pr_checks_failed', 'pr_checks_unrelated', 'pr_ci_fix_sent',
+]);
+const SYSTEM_EVENTS = new Set(['cycle_start', 'cycle_end', 'cycle_sleep']);
 
 function isNoise(e) {
     if (e.meta?.category === 'noise') return true;
@@ -129,252 +197,164 @@ function isNoise(e) {
     if (e.event === 'review_validation_dropped') return true;
     if (e.event === 'job_finished') {
         const s = e.summary || '';
-        const isInfra = s.includes('ticket=None');
-        const isOk = s.includes('status=ok');
-        if (isInfra && isOk) return true;
+        return s.includes('ticket=None') && s.includes('status=ok');
     }
     return false;
 }
 
-function setNoiseMode(m) {
-    noiseMode = m;
-    localStorage.setItem('eventNoiseMode', m);
-    render();
-}
+createApp({
+    setup() {
+        const events = ref([]);
+        const status = ref({ unread_total: 0, slack_alive: false, counts: {} });
+        const features = ref({});
+        const instanceName = ref('default');
+        const currentFilter = ref('all');
+        const noiseMode = ref(localStorage.getItem('eventNoiseMode') || 'useful');
+        const timeWindow = ref(parseInt(localStorage.getItem('eventTimeWindow') || '8', 10));
+        const activeCategories = reactive(new Set());
+        const expandedRows = reactive(new Set());
+        const settingsOpen = ref(false);
+        const polling = ref(false);
 
-function setTimeWindow(v) {
-    timeWindow = parseInt(v, 10);
-    localStorage.setItem('eventTimeWindow', String(timeWindow));
-    fetchEvents();
-}
+        const counts = computed(() => status.value.counts || {});
+        const attentionItems = computed(() =>
+            events.value.filter(e => ATTENTION_EVENTS.has(e.event) && !e.read)
+        );
+        const feedItems = computed(() =>
+            events.value
+                .filter(e => !SYSTEM_EVENTS.has(e.event))
+                .filter(e => noiseMode.value === 'noise' || !isNoise(e))
+                .filter(e => activeCategories.size === 0 || [...activeCategories].some(c => e.event.startsWith(c + '_')))
+        );
 
-function toggleExpand(id) {
-    if (expandedRows.has(id)) expandedRows.delete(id);
-    else expandedRows.add(id);
-    render();
-}
+        async function fetchEvents() {
+            const limit = Math.max(5000, timeWindow.value * 1000);
+            const unread = currentFilter.value === 'unread';
+            const resp = await fetch(`/api/events?limit=${limit}&unread=${unread}&since_hours=${timeWindow.value}`);
+            events.value = await resp.json();
+        }
 
-const ATTENTION_EVENTS = new Set([
-    'pr_comment_flagged_manual', 'pr_stale_no_review', 'review_comments_queued',
-    'slack_mention_detected', 'ticket_tests_fail', 'cycle_error',
-    'ticket_checks_failed', 'ticket_checks_unrelated', 'ticket_ci_fix_sent', 'ticket_checks_timeout',
-    'pr_checks_failed', 'pr_checks_unrelated', 'pr_ci_fix_sent',
-]);
-const SYSTEM_EVENTS = new Set(['cycle_start', 'cycle_end', 'cycle_sleep']);
+        async function fetchStatus() {
+            const resp = await fetch('/api/status');
+            status.value = await resp.json();
+        }
 
-async function fetchEvents() {
-    const unread = currentFilter === 'unread';
-    // Budget 1000 events per hour of window (atropos runs ~500/hr, leaves headroom).
-    // The time filter is the primary cap; limit is just a memory ceiling.
-    const limit = Math.max(5000, timeWindow * 1000);
-    const resp = await fetch(`/api/events?limit=${limit}&unread=${unread}&since_hours=${timeWindow}`);
-    events = await resp.json();
-    render();
-}
+        async function fetchConfig() {
+            const resp = await fetch('/api/config');
+            const config = await resp.json();
+            features.value = config.features || {};
+            instanceName.value = config.job?.key || 'default';
+            document.title = `frshty — ${instanceName.value}`;
+        }
 
-async function fetchConfig() {
-    const resp = await fetch('/api/config');
-    config = await resp.json();
-    const instanceName = config.job.key || 'default';
-    document.getElementById('instance-badge').textContent = instanceName;
-    document.title = `frshty — ${instanceName}`;
-    renderFeatureToggles();
-}
+        async function toggleFeature(key, enabled) {
+            await fetch('/api/settings', {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({features: {[key]: enabled}}),
+            });
+            fetchConfig();
+        }
 
-async function fetchStatus() {
-    const resp = await fetch('/api/status');
-    const status = await resp.json();
-    renderStatusCards(status);
-}
+        function setFilter(f) {
+            currentFilter.value = f;
+            fetchEvents();
+        }
 
-function renderStatusCards(status) {
-    const cards = document.getElementById('status-cards');
-    const unread = status.unread_total;
-    const c = status.counts || {};
-    cards.innerHTML = `
-        <div class="card p-3 cursor-pointer hover:border-gray-500" onclick="setFilter('unread')">
-            <div class="text-xs text-gray-500">Unread</div>
-            <div class="text-2xl font-bold ${unread > 0 ? 'text-blue-400' : 'text-green-400'}">${unread}</div>
-        </div>
-        <a href="/reviews" class="card p-3 hover:border-gray-500">
-            <div class="text-xs text-gray-500">Reviews</div>
-            <div class="text-2xl font-bold">${c.review || 0}</div>
-        </a>
-        <a href="/tickets" class="card p-3 hover:border-gray-500">
-            <div class="text-xs text-gray-500">Tickets</div>
-            <div class="text-2xl font-bold">${c.ticket || 0}</div>
-        </a>
-        <a href="/slack" class="card p-3 hover:border-gray-500">
-            <div class="text-xs text-gray-500 flex items-center gap-1">Slack <span class="w-2 h-2 rounded-full ${status.slack_alive ? 'bg-green-400' : 'bg-red-500'}"></span></div>
-            <div class="text-2xl font-bold">${c.slack || 0}</div>
-        </a>
-        <div class="card p-3">
-            <div class="text-xs text-gray-500">PRs</div>
-            <div class="text-2xl font-bold">${c.pr || 0}</div>
-        </div>
-    `;
-}
+        function toggleCategory(cat) {
+            if (activeCategories.has(cat)) activeCategories.delete(cat);
+            else activeCategories.add(cat);
+        }
 
-function renderFeatureToggles() {
-    const container = document.getElementById('feature-toggles');
-    const features = config.features || {};
-    container.innerHTML = Object.entries(features).map(([key, val]) => `
-        <label class="flex items-center gap-2 mb-1 cursor-pointer text-sm">
-            <input type="checkbox" ${val ? 'checked' : ''} onchange="toggleFeature('${key}', this.checked)">
-            ${key}
-        </label>
-    `).join('');
-}
+        function toggleExpand(id) {
+            if (expandedRows.has(id)) expandedRows.delete(id);
+            else expandedRows.add(id);
+        }
 
-async function toggleFeature(feature, enabled) {
-    await fetch('/api/settings', {
-        method: 'PUT',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({features: {[feature]: enabled}})
-    });
-    fetchConfig();
-}
+        async function dismissEvent(id) {
+            await fetch(`/api/events/${id}/dismiss`, {method: 'POST'});
+            fetchEvents();
+        }
 
-function toggleSettings() {
-    document.getElementById('settings-panel').classList.toggle('open');
-}
+        async function dismissAll() {
+            await fetch('/api/events/dismiss-all', {method: 'POST'});
+            fetchEvents();
+        }
 
-function render() {
-    renderAttention();
-    renderFeed();
-}
+        async function dismissAttention() {
+            const ids = attentionItems.value.map(e => e.id);
+            if (!ids.length) return;
+            await fetch('/api/events/dismiss-batch', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ids}),
+            });
+            fetchEvents();
+        }
 
-function renderAttention() {
-    const items = events.filter(e => ATTENTION_EVENTS.has(e.event) && !e.read);
-    document.getElementById('attention-count').textContent = items.length ? `${items.length} items` : '';
-    const container = document.getElementById('attention-list');
-    if (!items.length) {
-        container.innerHTML = '<div class="text-xs text-gray-600 py-2">Nothing needs your attention right now.</div>';
-        return;
-    }
-    container.innerHTML = items.map(e => {
-        const links = Object.entries(e.links || {}).filter(([k, url]) => url).map(([k, url]) =>
-            `<a href="${url}" target="_blank" class="link">[→ ${k}]</a>`
-        ).join(' ');
-        const firstLine = (e.summary || '').split('\n')[0];
-        const hasMore = (e.summary || '').includes('\n');
-        const exp = expandedRows.has(e.id) ? 'expanded' : '';
-        return `<div class="card card-red px-3 py-2 flex items-start justify-between text-sm ${exp}">
-            <div class="flex-1 min-w-0">
-                <div class="flex items-start gap-2">
-                    ${hasMore ? `<span class="row-expand" onclick="toggleExpand('${e.id}')">▸</span>` : '<span class="row-expand"></span>'}
-                    <div class="flex-1 min-w-0">
-                        <span class="text-gray-500 text-xs">${fmtTime(e.ts)}</span>
-                        <span class="badge badge-red ml-2">${e.event}</span>
-                        <span class="summary-line ml-2">${firstLine}</span>
-                        <span class="ml-2">${links}</span>
-                        <div class="summary-full mt-1 text-xs text-gray-400">${e.summary}</div>
-                    </div>
-                </div>
-            </div>
-            <span class="dismiss-btn ml-2" onclick="dismissEvent('${e.id}')">✓</span>
-        </div>`;
-    }).join('');
-}
+        async function pollNow() {
+            polling.value = true;
+            await fetch('/api/poll', {method: 'POST'});
+            polling.value = false;
+            setTimeout(() => { fetchEvents(); fetchStatus(); }, 3000);
+        }
 
-function renderFeed() {
-    const items = events.filter(e => !SYSTEM_EVENTS.has(e.event))
-        .filter(e => noiseMode === 'noise' || !isNoise(e))
-        .filter(e => activeCategories.size === 0 || [...activeCategories].some(c => e.event.startsWith(c + '_')));
-    const container = document.getElementById('event-feed');
-    container.innerHTML = items.map(e => {
-        const cls = e.read ? 'read' : 'unread';
-        const dot = e.read ? '○' : '●';
-        const links = Object.entries(e.links || {}).filter(([k, url]) => url).map(([k, url]) =>
-            `<a href="${url}" target="_blank" class="link">[→ ${k}]</a>`
-        ).join(' ');
-        const badgeCls = e.event.includes('error') || e.event.includes('fail') ? 'badge-red'
-            : e.event.includes('complete') || e.event.includes('pass') || e.event.includes('merged') ? 'badge-green'
-            : e.event.includes('started') || e.event.includes('created') ? 'badge-yellow'
-            : 'badge-blue';
-        const firstLine = (e.summary || '').split('\n')[0];
-        const hasMore = (e.summary || '').includes('\n');
-        const exp = expandedRows.has(e.id) ? 'expanded' : '';
-        return `<div class="${cls} feed-row px-2 py-1 hover:bg-gray-900 rounded ${exp}">
-            <div class="flex items-center gap-2">
-                <span class="text-gray-600 w-16 shrink-0">${fmtTime(e.ts)}</span>
-                <span>${dot}</span>
-                ${hasMore ? `<span class="row-expand shrink-0" onclick="toggleExpand('${e.id}')">▸</span>` : '<span class="row-expand shrink-0"></span>'}
-                <span class="badge ${badgeCls}">${e.event}</span>
-                <span class="summary-line flex-1 truncate">${firstLine}</span>
-                <span class="shrink-0">${links}</span>
-                <span class="dismiss-btn shrink-0" onclick="dismissEvent('${e.id}')">✓</span>
-            </div>
-            <div class="summary-full mt-1 ml-20 text-gray-400">${e.summary}</div>
-        </div>`;
-    }).join('');
-}
+        function fmtTime(ts) {
+            const d = new Date(ts);
+            const secs = Math.floor((Date.now() - d.getTime()) / 1000);
+            if (secs < 60) return 'just now';
+            const mins = Math.floor(secs / 60);
+            if (mins < 60) return `${mins}m ago`;
+            const hrs = Math.floor(mins / 60);
+            if (hrs < 24) return `${hrs}h ago`;
+            const days = Math.floor(hrs / 24);
+            return `${days}d ago`;
+        }
 
-async function dismissEvent(id) {
-    await fetch(`/api/events/${id}/dismiss`, {method: 'POST'});
-    fetchEvents();
-}
+        function firstLine(e) {
+            return (e.summary || '').split('\n')[0];
+        }
 
-async function dismissAll() {
-    await fetch('/api/events/dismiss-all', {method: 'POST'});
-    fetchEvents();
-}
+        function hasMore(e) {
+            return (e.summary || '').includes('\n');
+        }
 
-async function dismissAttention() {
-    const ids = events.filter(e => ATTENTION_EVENTS.has(e.event) && !e.read).map(e => e.id);
-    if (!ids.length) return;
-    await fetch('/api/events/dismiss-batch', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ids}),
-    });
-    fetchEvents();
-}
+        function linkPairs(e) {
+            return Object.entries(e.links || {}).filter(([, url]) => url);
+        }
 
-function toggleCategory(cat) {
-    if (activeCategories.has(cat)) activeCategories.delete(cat);
-    else activeCategories.add(cat);
-    const btn = document.getElementById('cat-' + cat);
-    btn.classList.toggle('text-white', activeCategories.has(cat));
-    btn.classList.toggle('bg-gray-700', activeCategories.has(cat));
-    render();
-}
+        function badgeCls(e) {
+            if (e.event.includes('error') || e.event.includes('fail')) return 'badge-red';
+            if (e.event.includes('complete') || e.event.includes('pass') || e.event.includes('merged')) return 'badge-green';
+            if (e.event.includes('started') || e.event.includes('created')) return 'badge-yellow';
+            return 'badge-blue';
+        }
 
-function setFilter(f) {
-    currentFilter = f;
-    document.getElementById('filter-all').classList.toggle('text-white', f === 'all');
-    document.getElementById('filter-unread').classList.toggle('text-white', f === 'unread');
-    fetchEvents();
-}
+        watch(noiseMode, v => localStorage.setItem('eventNoiseMode', v));
+        watch(timeWindow, v => {
+            localStorage.setItem('eventTimeWindow', String(v));
+            fetchEvents();
+        });
 
-function fmtTime(ts) {
-    const d = new Date(ts);
-    const secs = Math.floor((Date.now() - d.getTime()) / 1000);
-    if (secs < 60) return 'just now';
-    const mins = Math.floor(secs / 60);
-    if (mins < 60) return `${mins}m ago`;
-    const hrs = Math.floor(mins / 60);
-    if (hrs < 24) return `${hrs}h ago`;
-    const days = Math.floor(hrs / 24);
-    return `${days}d ago`;
-}
+        onMounted(() => {
+            fetchConfig();
+            fetchStatus();
+            fetchEvents();
+            setInterval(() => { fetchEvents(); fetchStatus(); }, 5000);
+        });
 
-async function pollNow() {
-    const btn = document.getElementById('poll-btn');
-    btn.disabled = true;
-    btn.textContent = 'Polling...';
-    await fetch('/api/poll', { method: 'POST' });
-    btn.disabled = false;
-    btn.textContent = 'Poll Now';
-    setTimeout(() => { fetchEvents(); fetchStatus(); }, 3000);
-}
-
-document.getElementById('noise-mode').value = noiseMode;
-document.getElementById('time-window').value = String(timeWindow);
-fetchConfig();
-fetchStatus();
-fetchEvents();
-setInterval(() => { fetchEvents(); fetchStatus(); }, 5000);
+        return {
+            events, status, features, instanceName, counts,
+            currentFilter, noiseMode, timeWindow, activeCategories,
+            expandedRows, settingsOpen, polling,
+            attentionItems, feedItems,
+            setFilter, toggleCategory, toggleExpand,
+            toggleFeature, pollNow,
+            dismissEvent, dismissAll, dismissAttention,
+            fmtTime, firstLine, hasMore, linkPairs, badgeCls,
+        };
+    },
+}).mount('#app');
 </script>
 </body>
 </html>
