@@ -1483,8 +1483,24 @@ def api_ticket_jobs(key: str, limit: int = 100):
     if not _events_enabled():
         return []
     import core.queue as q
+    from core.job_logs import job_pid_path
     instance_key = _config.get("job", {}).get("key", "")
-    return q.jobs_for_ticket(instance_key, key, limit)
+    rows = q.jobs_for_ticket(instance_key, key, limit)
+    for row in rows:
+        if row.get("status") != "running":
+            continue
+        pid_path = job_pid_path(instance_key, row["id"])
+        try:
+            pid = int(pid_path.read_text().strip())
+        except (OSError, ValueError):
+            row["pid_alive"] = False
+            continue
+        try:
+            os.kill(pid, 0)
+            row["pid_alive"] = True
+        except OSError:
+            row["pid_alive"] = False
+    return rows
 
 
 _TERMINAL_JOB_STATUSES = {"ok", "failed", "skipped"}
