@@ -412,10 +412,32 @@ def api_poll():
         return {"status": "error", "error": str(e)}
 
 
+_LOCKFILE_NOISE = frozenset({
+    "Pipfile.lock", "poetry.lock", "uv.lock",
+    "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "npm-shrinkwrap.json",
+    "Cargo.lock", "Gemfile.lock", "go.sum", "composer.lock", "mix.lock",
+})
+
+
+def _changed_files(wt: Path, base_ref: str) -> list[str]:
+    result = subprocess.run(
+        ["git", "diff", "--name-only", f"{base_ref}..HEAD"],
+        cwd=str(wt), capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        return []
+    return [f for f in result.stdout.splitlines() if f.strip()]
+
+
+def _is_meaningful_change(files: list[str]) -> bool:
+    if not files:
+        return False
+    return any(f.split("/")[-1] not in _LOCKFILE_NOISE for f in files)
+
+
 @app.get("/api/tickets/{ticket_key}/pr-info")
 def api_ticket_pr_info(ticket_key: str):
     import features.tickets as tickets_mod
-    from core.ticket_status import TicketStatus
 
     try:
         tickets = state.load("tickets")
@@ -428,6 +450,7 @@ def api_ticket_pr_info(ticket_key: str):
             return {"error": "No slug found"}, 400
 
         ws = _config.get("workspace", {})
+        base_branch = ws.get("base_branch", "main")
         ticket_dir = ws.get("root", Path(".")) / ws.get("tickets_dir", "tickets") / slug
         docs_dir = ticket_dir / "docs"
 
@@ -445,8 +468,32 @@ def api_ticket_pr_info(ticket_key: str):
                     if ticket_summary:
                         summary_cache.write_text(ticket_summary)
 
-        title = f"{ticket_key}: {ticket_summary.split('.')[0] if ticket_summary else 'Work'}"
-        return {"title": title, "description": ticket_summary if ticket_summary else f"Implementation for {ticket_key}"}
+        default_title = f"{ticket_key}: {ticket_summary.split('.')[0] if ticket_summary else 'Work'}"
+        default_description = ticket_summary if ticket_summary else f"Implementation for {ticket_key}"
+
+        repos_out = []
+        for repo in get_repos(_config):
+            wt = tickets_mod.ticket_worktree_path(_config, slug, repo["name"])
+            if not wt.is_dir():
+                continue
+            subprocess.run(["git", "fetch", "origin", base_branch],
+                           cwd=str(wt), capture_output=True, timeout=60)
+            files = _changed_files(wt, f"origin/{base_branch}")
+            if not _is_meaningful_change(files):
+                continue
+            branch = subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=str(wt), capture_output=True, text=True, timeout=10,
+            ).stdout.strip() or ticket.get("branch", "")
+            repos_out.append({
+                "name": repo["name"],
+                "branch": branch,
+                "files_changed": len(files),
+                "title": default_title,
+                "description": default_description,
+            })
+
+        return {"repos": repos_out}
     except Exception as e:
         log.emit("pr_info_error", f"Error generating PR info: {e}", meta={"ticket": ticket_key})
         return {"error": str(e)}, 500
@@ -455,17 +502,18 @@ def api_ticket_pr_info(ticket_key: str):
 @app.post("/api/tickets/{ticket_key}/submit-pr")
 async def api_submit_pr(ticket_key: str, request: Request):
     import features.tickets as tickets_mod
-    from pathlib import Path as PathlibPath
 
     try:
         data = await request.json()
     except:
         return {"error": "Invalid JSON"}, 400
 
-    title = data.get("title", "")
-    description = data.get("description", "")
-    if not title or not description:
-        return {"error": "Title and description are required"}, 400
+    repos_in = data.get("repos") or []
+    if not isinstance(repos_in, list) or not repos_in:
+        return {"error": "repos required"}, 400
+    for r in repos_in:
+        if not isinstance(r, dict) or not r.get("name") or not r.get("title") or not r.get("description"):
+            return {"error": "each repo needs name, title, description"}, 400
 
     tickets = state.load("tickets")
     ticket = tickets.get(ticket_key)
@@ -481,24 +529,23 @@ async def api_submit_pr(ticket_key: str, request: Request):
         return {"error": "No slug found"}, 400
 
     platform = make_platform(_config)
-    repos = get_repos(_config)
-    ticket_dir = ws.get("root", PathlibPath(".")) / ws.get("tickets_dir", "tickets") / slug
+    base_branch = ws.get("base_branch", "main")
     prs = []
 
-    for repo in repos:
-        wt = tickets_mod.ticket_worktree_path(_config, slug, repo["name"])
+    for r in repos_in:
+        repo_name = r["name"]
+        wt = tickets_mod.ticket_worktree_path(_config, slug, repo_name)
         if not wt.is_dir():
-            continue
+            return {"error": f"worktree missing for {repo_name}"}, 400
 
         subprocess.run(["git", "add", "-A"], cwd=str(wt), capture_output=True, timeout=60)
-        subprocess.run(["git", "commit", "--no-verify", "-m", f"{ticket_key}: {ticket.get('summary', '')}"], cwd=str(wt), capture_output=True, timeout=60)
-        subprocess.run(["git", "fetch", "origin", ws.get("base_branch", "main")], cwd=str(wt), capture_output=True, timeout=60)
+        subprocess.run(["git", "commit", "--no-verify", "-m", f"{ticket_key}: {ticket.get('summary', '')}"],
+                       cwd=str(wt), capture_output=True, timeout=60)
+        subprocess.run(["git", "fetch", "origin", base_branch], cwd=str(wt), capture_output=True, timeout=60)
 
-        diff_check = subprocess.run(
-            ["git", "diff", f"origin/{ws.get('base_branch', 'main')}..HEAD", "--stat"],
-            cwd=str(wt), capture_output=True, text=True, timeout=30)
-        if not diff_check.stdout.strip():
-            continue
+        files = _changed_files(wt, f"origin/{base_branch}")
+        if not _is_meaningful_change(files):
+            return {"error": f"no meaningful changes in {repo_name}"}, 400
 
         actual_branch = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
@@ -507,16 +554,16 @@ async def api_submit_pr(ticket_key: str, request: Request):
 
         pushed = platform.push_branch(wt, push_branch)
         if not pushed.get("ok"):
-            return {"error": f"Failed to push branch: {pushed.get('error', 'unknown')}"}, 400
+            return {"error": f"Failed to push {repo_name}: {pushed.get('error', 'unknown')}"}, 400
 
-        result = platform.create_pr(repo["name"], wt, push_branch, title, description, ws.get("base_branch", "main"))
+        result = platform.create_pr(repo_name, wt, push_branch, r["title"], r["description"], base_branch)
         if result.get("error"):
-            return {"error": f"Failed to create PR: {result['error']}"}, 400
+            return {"error": f"Failed to create PR for {repo_name}: {result['error']}"}, 400
 
         pr_url = result.get("url", "")
         pr_id = result.get("id")
         if pr_id:
-            prs.append({"repo": repo["name"], "id": pr_id, "url": pr_url})
+            prs.append({"repo": repo_name, "id": pr_id, "url": pr_url})
 
     if not prs:
         return {"error": "No PRs were created"}, 400
@@ -527,7 +574,8 @@ async def api_submit_pr(ticket_key: str, request: Request):
         return new
 
     state.update_ticket(ticket_key, _mark)
-    log.emit("ticket_pr_created", f"PR submitted for {ticket_key}")
+    log.emit("ticket_pr_created", f"PR submitted for {ticket_key}: {len(prs)} repo(s)",
+             meta={"ticket": ticket_key, "repos": [p["repo"] for p in prs]})
     return {"status": "ok", "prs": prs}
 
 
