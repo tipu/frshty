@@ -108,7 +108,7 @@ def test_endpoints_round_trip(tmp_path):
     assert r.status_code == 200
 
     state_data = state.load("tickets")
-    state_data["T-1"]["status"] = "pr_created"
+    state_data["T-1"]["status"] = "in_review"
     state.save("tickets", state_data)
     r = client.patch("/api/tickets/T-1/auto-pr", json={"auto_pr": True})
     assert r.status_code == 400, r.text

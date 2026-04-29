@@ -121,7 +121,7 @@ class TestTransitionTicket:
     def test_illegal_raises(self, tmp_state):
         state.save_ticket("T-1", {"status": "pr_failed", "slug": "t-1"})
         with pytest.raises(TicketStateError):
-            state.transition_ticket("T-1", "pr_created")
+            state.transition_ticket("T-1", "in_review")
         assert state.load_ticket("T-1")["status"] == "pr_failed"
 
     def test_missing_raises(self, tmp_state):
@@ -134,7 +134,7 @@ class TestTransitionTicket:
         assert result["status"] == "reviewing"
 
     def test_merged_requires_external_status(self, tmp_state):
-        state.save_ticket("T-1", {"status": "pr_created", "slug": "t-1"})
+        state.save_ticket("T-1", {"status": "in_review", "slug": "t-1"})
         with pytest.raises(TicketStateError, match="merged_external_status"):
             state.transition_ticket("T-1", "merged")
         state.transition_ticket("T-1", "merged", merged_external_status="Released")

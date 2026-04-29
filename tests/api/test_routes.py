@@ -179,7 +179,7 @@ class TestTickets:
 
     def test_status_override_resets_counters(self, client):
         state.save("tickets", {"T-1": {
-            "status": "pr_created",
+            "status": "in_review",
             "slug": "T-1-s",
             "ci_fix_attempts": 2,
             "conflict_resolution_attempts": 1,
@@ -197,7 +197,7 @@ class TestTickets:
 
     def test_status_override_illegal_transition(self, client):
         state.save("tickets", {"T-1": {"status": "pr_failed", "slug": "T-1-s"}})
-        resp = client.post("/api/tickets/T-1/status", json={"status": "pr_created"})
+        resp = client.post("/api/tickets/T-1/status", json={"status": "in_review"})
         assert resp.status_code == 400, resp.text
         ts = state.load("tickets")["T-1"]
         assert ts["status"] == "pr_failed"
@@ -208,7 +208,7 @@ class TestTickets:
         assert resp.status_code == 400
 
     def test_status_override_not_found(self, client):
-        resp = client.post("/api/tickets/NOPE/status", json={"status": "pr_created"})
+        resp = client.post("/api/tickets/NOPE/status", json={"status": "in_review"})
         assert resp.status_code == 404
 
 
