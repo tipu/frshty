@@ -5,7 +5,7 @@
 <meta charset="utf-8">
 <title>Reviews — frshty</title>
 <script src="/static/tailwind.js"></script>
-<script defer src="/static/nav-gate.js"></script>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <style>
 body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: #0a0a0a; color: #e0e0e0; }
 .card { background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; }
@@ -20,13 +20,17 @@ nav a { color: #888; padding: 4px 12px; border-radius: 4px; }
 nav a:hover, nav a.active { color: #fff; background: #222; }
 .pulse { animation: pulse 1.5s ease-in-out infinite; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+[v-cloak] { display: none; }
 </style>
 </head>
 <body class="p-4 max-w-7xl mx-auto">
+
+<div id="app" v-cloak>
+
 <header class="flex items-center gap-4 mb-4">
     <div class="flex items-center gap-2">
         <h1 class="text-lg font-bold">Reviews</h1>
-        <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700" id="instance-badge"></span>
+        <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700">{{ instanceName }}</span>
     </div>
     <nav class="flex gap-1 text-sm">
         <a href="/">Feed</a>
@@ -35,77 +39,58 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
         <a href="/tickets">Tickets</a>
         <a href="/scheduled">Scheduled</a>
         <a href="/slack">Slack</a>
-        <a href="/timesheet">Timesheet</a>
-        <a href="/billing">Billing</a>
+        <a v-if="features.timesheet !== false" href="/timesheet">Timesheet</a>
+        <a v-if="features.billing !== false" href="/billing">Billing</a>
         <a href="/config">Config</a>
     </nav>
 </header>
 
 <div class="card p-3 mb-4 flex gap-2 items-center">
-    <input type="text" id="pr-url" placeholder="paste PR url to review" class="flex-1 bg-transparent border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-200 focus:border-blue-500 focus:outline-none" />
-    <button id="submit-btn" onclick="submitReview()" class="bg-blue-600 hover:bg-blue-700 text-white text-sm px-4 py-1.5 rounded cursor-pointer whitespace-nowrap">review</button>
+    <input type="text" v-model="prUrl" @keydown.enter="submitReview" placeholder="paste PR url to review"
+           class="flex-1 bg-transparent border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-200 focus:border-blue-500 focus:outline-none" />
+    <button @click="submitReview" :disabled="submitting"
+            class="bg-blue-600 hover:bg-blue-700 text-white text-sm px-4 py-1.5 rounded cursor-pointer whitespace-nowrap">
+        {{ submitButtonLabel }}
+    </button>
 </div>
 
-<div id="pending-reviews" class="space-y-3 mb-4"></div>
-<div id="reviews-list" class="space-y-3"></div>
+<div class="space-y-3 mb-4">
+    <div v-for="p in pendingList" :key="p.full_repo + '/' + p.pr_id" class="card p-4 border-l-4 border-l-blue-500">
+        <div class="flex items-start justify-between">
+            <div>
+                <span class="font-semibold text-base text-blue-400">{{ p.full_repo }}#{{ p.pr_id }}</span>
+                <span class="badge badge-yellow ml-2 mt-2 inline-block">reviewing <span class="pulse">●</span></span>
+            </div>
+            <a :href="p.url" target="_blank" class="link text-xs whitespace-nowrap hover:underline">[open →]</a>
+        </div>
+    </div>
+</div>
+
+<div class="space-y-3">
+    <div v-if="!reviews.length" class="text-gray-600">No reviews queued.</div>
+    <template v-else>
+        <div v-for="(group, ticket) in groups" :key="ticket" class="mb-4">
+            <div class="text-sm text-gray-400 mb-1">
+                {{ ticket }} — {{ group.label }}
+                <span v-if="group.authors.length" class="text-gray-500">by {{ group.authors.join(', ') }}</span>
+            </div>
+            <div class="space-y-1">
+                <pr-card v-for="r in group.items" :key="r.repo + '/' + r.pr_id" :r="r" :bb="bbByKey[r.repo + '/' + r.pr_id]"></pr-card>
+            </div>
+        </div>
+        <div v-if="ungrouped.length" class="mb-4">
+            <div class="text-sm text-gray-400 mb-1">Other</div>
+            <div class="space-y-1">
+                <pr-card v-for="r in ungrouped" :key="r.repo + '/' + r.pr_id" :r="r" :bb="bbByKey[r.repo + '/' + r.pr_id]"></pr-card>
+            </div>
+        </div>
+    </template>
+</div>
+
+</div>
 
 <script>
-function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
-
-function extractTicket(branch) {
-    const m = branch.match(/dev-(\d+)/i);
-    return m ? `DEV-${m[1]}` : null;
-}
-
-function ticketLabel(branch) {
-    return branch.replace(/^[A-Za-z]+-dev-\d+-?/i, '').replace(/^dev-\d+-?/i, '').replace(/-/g, ' ').trim() || branch;
-}
-
-async function load() {
-    const resp = await fetch('/api/reviews');
-    const reviews = await resp.json();
-    const container = document.getElementById('reviews-list');
-    if (!reviews.length) {
-        container.innerHTML = '<div class="text-gray-600">No reviews queued.</div>';
-        return;
-    }
-
-    const groups = {};
-    const ungrouped = [];
-    for (const r of reviews) {
-        const ticket = extractTicket(r.branch);
-        if (ticket) {
-            if (!groups[ticket]) groups[ticket] = { label: ticketLabel(r.branch), items: [], authors: new Set() };
-            groups[ticket].items.push(r);
-            if (r.author) groups[ticket].authors.add(r.author);
-        } else {
-            ungrouped.push(r);
-        }
-    }
-
-    let html = '';
-    for (const [ticket, group] of Object.entries(groups)) {
-        const authors = [...group.authors].join(', ');
-        const authorHtml = authors ? ` <span class="text-gray-500">by ${esc(authors)}</span>` : '';
-        html += `<div class="mb-4">
-            <div class="text-sm text-gray-400 mb-1">${ticket} — ${group.label}${authorHtml}</div>
-            <div class="space-y-1">${group.items.map(prCard).join('')}</div>
-        </div>`;
-    }
-    if (ungrouped.length) {
-        html += `<div class="mb-4">
-            <div class="text-sm text-gray-400 mb-1">Other</div>
-            <div class="space-y-1">${ungrouped.map(prCard).join('')}</div>
-        </div>`;
-    }
-    container.innerHTML = html;
-    loadBBComments(reviews);
-    for (const r of reviews) {
-        const key = `${r.repo}/${r.pr_id}`;
-        if (_pending[key]) delete _pending[key];
-    }
-    renderPending();
-}
+const { createApp, ref, reactive, computed, onMounted } = Vue;
 
 function timeAgo(iso) {
     if (!iso) return '';
@@ -115,104 +100,160 @@ function timeAgo(iso) {
     if (mins < 60) return `${mins}m ago`;
     const hrs = Math.floor(mins / 60);
     if (hrs < 24) return `${hrs}h ago`;
-    const days = Math.floor(hrs / 24);
-    return `${days}d ago`;
+    return `${Math.floor(hrs / 24)}d ago`;
 }
 
-function prCard(r) {
-    const reviewing = r.branch && r.branch.startsWith('pending-');
-    const verdictCls = reviewing ? 'badge-yellow' : r.verdict === 'changes_requested' ? 'badge-red' : r.verdict === 'approved' ? 'badge-green' : 'badge-yellow';
-    const label = reviewing ? 'reviewing <span class="pulse">●</span>' : (r.verdict ? `llm: ${r.verdict}` : 'pending');
-    const cardId = `bb-${r.repo}-${r.pr_id}`;
-    const borderCls = reviewing ? 'border-l-4 border-l-blue-500' : '';
-    const stale = !reviewing && r.updated_on && r.reviewed_at && new Date(r.updated_on) > new Date(r.reviewed_at);
-    const updated = r.updated_on ? timeAgo(r.updated_on) : '';
-    const created = r.created_on ? timeAgo(r.created_on) : '';
-    const youBadge = r.approved_by_me ? '<span class="badge badge-purple" title="you approved this PR on the platform">✓ you</span>' : '';
-    return `<div class="card p-4 ${borderCls}">
-        <div class="flex items-start justify-between mb-2">
-            <div class="flex-1">
-                <a href="/reviews/${r.repo}/${r.pr_id}" class="link font-semibold text-base hover:text-blue-300">${r.repo}#${r.pr_id}</a>
-                <div class="text-gray-400 text-sm mt-1 line-clamp-2">${esc(r.title || '')}</div>
-            </div>
-            <a href="${r.pr_url}" target="_blank" class="link text-xs ml-3 whitespace-nowrap hover:underline">[open →]</a>
-        </div>
-        <div class="flex flex-wrap gap-2 items-center mt-3 pt-3 border-t border-gray-800">
-            <span class="badge ${verdictCls}" title="LLM verdict">${label}</span>
-            ${youBadge}
-            ${created ? `<span class="text-gray-600 text-xs">created ${created}</span>` : ''}
-            ${updated ? `<span class="text-gray-600 text-xs">updated ${updated}</span>` : ''}
-            ${stale ? '<span class="badge badge-yellow text-xs">stale</span>' : ''}
-            <span id="${cardId}" class="text-gray-600 text-xs ml-auto"></span>
-        </div>
-    </div>`;
+function extractTicket(branch) {
+    const m = (branch || '').match(/dev-(\d+)/i);
+    return m ? `DEV-${m[1]}` : null;
 }
 
-async function loadBBComments(reviews) {
-    for (const r of reviews) {
-        if (!r.pr_id) continue;
-        fetch(`/api/reviews/${r.repo}/${r.pr_id}/bb-comments`)
-            .then(res => res.json())
-            .then(data => {
-                const el = document.getElementById(`bb-${r.repo}-${r.pr_id}`);
-                if (!el || !data.count) return;
-                el.textContent = `💬 ${data.count}` + (data.initials.length ? ` · ${data.initials.join(', ')}` : '');
-                el.classList.replace('text-gray-600', 'text-gray-400');
-            })
-            .catch(() => {});
-    }
+function ticketLabel(branch) {
+    return (branch || '').replace(/^[A-Za-z]+-dev-\d+-?/i, '').replace(/^dev-\d+-?/i, '').replace(/-/g, ' ').trim() || branch || '';
 }
 
-const _pending = {};
-
-async function submitReview() {
-    const input = document.getElementById('pr-url');
-    const btn = document.getElementById('submit-btn');
-    const url = input.value.trim();
-    if (!url) return;
-    btn.textContent = 'submitting...';
-    btn.disabled = true;
-    const resp = await fetch('/api/reviews/submit', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({url})
-    });
-    const result = await resp.json();
-    if (result.status === 'started') {
-        _pending[`${result.repo}/${result.pr_id}`] = {repo: result.repo.split('/').pop(), full_repo: result.repo, pr_id: result.pr_id, url: url};
-        input.value = '';
-        btn.textContent = 'review';
-        btn.disabled = false;
-        renderPending();
-    } else {
-        btn.textContent = result.error || 'failed';
-        setTimeout(() => { btn.textContent = 'review'; btn.disabled = false; }, 2000);
-    }
-}
-
-function renderPending() {
-    const el = document.getElementById('pending-reviews');
-    const keys = Object.keys(_pending);
-    if (!keys.length) { el.innerHTML = ''; return; }
-    el.innerHTML = keys.map(k => {
-        const p = _pending[k];
-        return `<div class="card p-4 border-l-4 border-l-blue-500">
-            <div class="flex items-start justify-between">
-                <div>
-                    <span class="font-semibold text-base text-blue-400">${esc(p.full_repo)}#${p.pr_id}</span>
-                    <span class="badge badge-yellow ml-2 mt-2 inline-block">reviewing <span class="pulse">●</span></span>
+const PrCard = {
+    props: ['r', 'bb'],
+    setup(props) {
+        const reviewing = computed(() => props.r.branch && props.r.branch.startsWith('pending-'));
+        const verdictCls = computed(() => {
+            if (reviewing.value) return 'badge-yellow';
+            if (props.r.verdict === 'changes_requested') return 'badge-red';
+            if (props.r.verdict === 'approved') return 'badge-green';
+            return 'badge-yellow';
+        });
+        const stale = computed(() => !reviewing.value && props.r.updated_on && props.r.reviewed_at &&
+            new Date(props.r.updated_on) > new Date(props.r.reviewed_at));
+        return { reviewing, verdictCls, stale, timeAgo };
+    },
+    template: `
+        <div class="card p-4" :class="{ 'border-l-4 border-l-blue-500': reviewing }">
+            <div class="flex items-start justify-between mb-2">
+                <div class="flex-1">
+                    <a :href="'/reviews/' + r.repo + '/' + r.pr_id" class="link font-semibold text-base hover:text-blue-300">{{ r.repo }}#{{ r.pr_id }}</a>
+                    <div class="text-gray-400 text-sm mt-1 line-clamp-2">{{ r.title || '' }}</div>
                 </div>
-                <a href="${esc(p.url)}" target="_blank" class="link text-xs whitespace-nowrap hover:underline">[open →]</a>
+                <a :href="r.pr_url" target="_blank" class="link text-xs ml-3 whitespace-nowrap hover:underline">[open →]</a>
             </div>
-        </div>`;
-    }).join('');
-}
+            <div class="flex flex-wrap gap-2 items-center mt-3 pt-3 border-t border-gray-800">
+                <span class="badge" :class="verdictCls" title="LLM verdict">
+                    <template v-if="reviewing">reviewing <span class="pulse">●</span></template>
+                    <template v-else-if="r.verdict">llm: {{ r.verdict }}</template>
+                    <template v-else>pending</template>
+                </span>
+                <span v-if="r.approved_by_me" class="badge badge-purple" title="you approved this PR on the platform">✓ you</span>
+                <span v-if="r.created_on" class="text-gray-600 text-xs">created {{ timeAgo(r.created_on) }}</span>
+                <span v-if="r.updated_on" class="text-gray-600 text-xs">updated {{ timeAgo(r.updated_on) }}</span>
+                <span v-if="stale" class="badge badge-yellow text-xs">stale</span>
+                <span v-if="bb && bb.count" class="text-gray-400 text-xs ml-auto">💬 {{ bb.count }}<template v-if="bb.initials && bb.initials.length"> · {{ bb.initials.join(', ') }}</template></span>
+            </div>
+        </div>
+    `,
+};
 
-document.getElementById('pr-url').addEventListener('keydown', e => {
-    if (e.key === 'Enter') submitReview();
-});
+createApp({
+    components: { 'pr-card': PrCard },
+    setup() {
+        const reviews = ref([]);
+        const features = ref({});
+        const instanceName = ref('');
+        const prUrl = ref('');
+        const submitting = ref(false);
+        const submitButtonLabel = ref('review');
+        const pending = reactive({});
+        const bbByKey = reactive({});
 
-load();
+        const groups = computed(() => {
+            const out = {};
+            for (const r of reviews.value) {
+                const t = extractTicket(r.branch);
+                if (!t) continue;
+                if (!out[t]) out[t] = { label: ticketLabel(r.branch), items: [], authors: new Set() };
+                out[t].items.push(r);
+                if (r.author) out[t].authors.add(r.author);
+            }
+            const result = {};
+            for (const k of Object.keys(out)) {
+                result[k] = { label: out[k].label, items: out[k].items, authors: [...out[k].authors] };
+            }
+            return result;
+        });
+
+        const ungrouped = computed(() => reviews.value.filter(r => !extractTicket(r.branch)));
+
+        const pendingList = computed(() => Object.values(pending));
+
+        async function load() {
+            try {
+                const [revResp, configResp] = await Promise.all([
+                    fetch('/api/reviews'),
+                    fetch('/api/config'),
+                ]);
+                reviews.value = await revResp.json();
+                const cfg = await configResp.json();
+                features.value = cfg.features || {};
+                instanceName.value = cfg.job?.key || '';
+                for (const r of reviews.value) {
+                    const k = `${r.repo}/${r.pr_id}`;
+                    if (pending[k]) delete pending[k];
+                }
+                loadBBComments();
+            } catch (e) { console.error('reviews load failed', e); }
+        }
+
+        function loadBBComments() {
+            for (const r of reviews.value) {
+                if (!r.pr_id) continue;
+                fetch(`/api/reviews/${r.repo}/${r.pr_id}/bb-comments`)
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data && typeof data.count === 'number') {
+                            bbByKey[`${r.repo}/${r.pr_id}`] = data;
+                        }
+                    })
+                    .catch(() => {});
+            }
+        }
+
+        async function submitReview() {
+            const url = prUrl.value.trim();
+            if (!url) return;
+            submitting.value = true;
+            submitButtonLabel.value = 'submitting...';
+            try {
+                const resp = await fetch('/api/reviews/submit', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({url}),
+                });
+                const result = await resp.json();
+                if (result.status === 'started') {
+                    pending[`${result.repo}/${result.pr_id}`] = {
+                        repo: result.repo.split('/').pop(),
+                        full_repo: result.repo,
+                        pr_id: result.pr_id,
+                        url,
+                    };
+                    prUrl.value = '';
+                    submitButtonLabel.value = 'review';
+                } else {
+                    submitButtonLabel.value = result.error || 'failed';
+                    setTimeout(() => { submitButtonLabel.value = 'review'; }, 2000);
+                }
+            } finally {
+                submitting.value = false;
+            }
+        }
+
+        onMounted(() => { load(); });
+
+        return {
+            reviews, features, instanceName, prUrl, submitting, submitButtonLabel,
+            pendingList, groups, ungrouped, bbByKey,
+            submitReview,
+        };
+    },
+}).mount('#app');
 </script>
 </body>
 </html>
