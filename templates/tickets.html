@@ -99,7 +99,7 @@ async function load() {
                         ${t.pr_scheduled_at ? `<div class="text-xs text-yellow-400 mt-1">PR scheduled ${new Date(t.pr_scheduled_at).toLocaleDateString('en-US', {weekday:'short', month:'short', day:'numeric', hour:'numeric', minute:'2-digit'})}</div>` : ''}
                         ${t.external_status ? `<div class="text-xs text-gray-500 mt-1">${t.external_status}</div>` : ''}
                     </a>
-                    ${t.status === 'pr_ready' ? `<button onclick="submitPr('${key}')" class="absolute top-2 right-2 bg-green-700 hover:bg-green-600 text-white text-xs px-2 py-1 rounded">Submit PR</button>` : `<button onclick="discard('${key}')" class="absolute top-2 right-2 text-gray-600 hover:text-red-400 text-xs hidden group-hover:block">discard</button>`}
+                    ${t.status === 'pr_ready' ? `<button onclick="submitPr('${key}')" class="absolute top-2 right-2 bg-green-700 hover:bg-green-600 text-white text-xs px-2 py-1 rounded">Submit PR</button><button onclick="discard('${key}')" class="absolute bottom-2 right-2 text-gray-600 hover:text-red-400 text-xs hidden group-hover:block">discard</button>` : `<button onclick="discard('${key}')" class="absolute top-2 right-2 text-gray-600 hover:text-red-400 text-xs hidden group-hover:block">discard</button>`}
                 </div>
             `).join('');
         const help = HELP[col] ? `<span class="text-gray-600 hover:text-gray-300 cursor-help ml-1" title="${HELP[col]}">&#9432;</span>` : '';

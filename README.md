@@ -29,7 +29,7 @@ docker compose up
 
 ### What it does for you
 
-You assign a ticket in Jira or Linear. frshty picks it up, creates a git worktree, runs `/confer-technical-plan` to produce a plan and a change manifest, then `/tri-review` to review its own work, loops on the review until it passes, and opens a PR. When CI fails on one of your PRs, it tries to fix it. When reviewers leave comments, it classifies them as actionable or needing a reply and either fixes the code or drafts a response. When someone mentions you in Slack, it summarizes and queues the thread for you. It logs hours against the tickets you worked on that day. At the end of the week or month, it generates an invoice via bill.com.
+You assign a ticket in Jira or Linear. frshty picks it up, creates a git worktree, runs `/ctp` to produce a plan and a change manifest, then `/tri-review` to review its own work, loops on the review until it passes, and opens a PR. When CI fails on one of your PRs, it tries to fix it. When reviewers leave comments, it classifies them as actionable or needing a reply and either fixes the code or drafts a response. When someone mentions you in Slack, it summarizes and queues the thread for you. It logs hours against the tickets you worked on that day. At the end of the week or month, it generates an invoice via bill.com.
 
 Everything shows in a single web UI at `http://localhost:<port>`. The event feed is the center of gravity; the other pages are focused views.
 
@@ -39,7 +39,7 @@ Everything shows in a single web UI at `http://localhost:<port>`. The event feed
 
 | Stage | What runs | Artifact produced |
 |---|---|---|
-| `start_planning` | `/confer-technical-plan docs/` | `docs/change-manifest.md`, `docs/technical-plan.md` |
+| `start_planning` | `/ctp docs/` | `docs/change-manifest.md`, `docs/technical-plan.md` |
 | `start_reviewing` | `/tri-review` | `docs/tri-review.md` with `VERDICT: PASS` or `VERDICT: FAIL` |
 | `fix_review_findings` | Read tri-review, fix blockers, re-run /tri-review | updated `docs/tri-review.md` |
 | `mark_ready` | Precondition check only | transitions to `pr_ready` |
