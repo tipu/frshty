@@ -322,7 +322,7 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
 
     def fake_run_claude_code(prompt: str, cwd: Path, timeout: int = 0):
         cwd = Path(cwd)
-        if "/confer-technical-plan docs/" in prompt:
+        if "/ctp docs/" in prompt:
             docs = cwd / "docs"
             docs.mkdir(parents=True, exist_ok=True)
             (docs / "technical-plan.md").write_text("# Plan\n\nImplement lifecycle flow.\n")
