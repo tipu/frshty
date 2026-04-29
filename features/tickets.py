@@ -1025,10 +1025,9 @@ def _handle_ci_failure(ticket, ts, pr, checks, base_url, instance_key="") -> dic
         ts.pop("_ci_failed_pending", None)
         return ts
 
-    if not ts.get("_ci_failed_pending"):
-        ts["_ci_failed_pending"] = True
-        if instance_key:
-            _enqueue_stage(instance_key, ticket["key"], "fix_ci_failures")
+    ts["_ci_failed_pending"] = True
+    if instance_key:
+        _enqueue_stage(instance_key, ticket["key"], "fix_ci_failures")
     return ts
 
 
