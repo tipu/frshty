@@ -9,22 +9,35 @@ from contextvars import ContextVar, Token
 from pathlib import Path
 
 _active_live_log: ContextVar[Path | None] = ContextVar("active_live_log", default=None)
+_active_live_pid: ContextVar[Path | None] = ContextVar("active_live_pid", default=None)
 
 
 def job_log_path(instance_key: str, job_id: int) -> Path:
     return Path.home() / ".frshty" / instance_key / "jobs" / f"{job_id}.log"
 
 
-def use_live_job(instance_key: str, job_id: int) -> Token:
-    return _active_live_log.set(job_log_path(instance_key, job_id))
+def job_pid_path(instance_key: str, job_id: int) -> Path:
+    return Path.home() / ".frshty" / instance_key / "jobs" / f"{job_id}.pid"
 
 
-def reset_live_job(token: Token) -> None:
-    _active_live_log.reset(token)
+def use_live_job(instance_key: str, job_id: int) -> tuple[Token, Token]:
+    log_token = _active_live_log.set(job_log_path(instance_key, job_id))
+    pid_token = _active_live_pid.set(job_pid_path(instance_key, job_id))
+    return log_token, pid_token
+
+
+def reset_live_job(tokens: tuple[Token, Token]) -> None:
+    log_token, pid_token = tokens
+    _active_live_log.reset(log_token)
+    _active_live_pid.reset(pid_token)
 
 
 def active_live_log_path() -> Path | None:
     return _active_live_log.get()
+
+
+def active_live_pid_path() -> Path | None:
+    return _active_live_pid.get()
 
 
 def trim_to_utf8_boundary(data: bytes) -> bytes:

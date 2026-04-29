@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 
 import core.log as log
-from core.job_logs import active_live_log_path
+from core.job_logs import active_live_log_path, active_live_pid_path
 
 
 def _env():
@@ -79,7 +79,15 @@ def run_claude_code(prompt: str, cwd: Path, timeout: int = 600) -> str | None:
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         cwd=str(cwd), env=_env(), text=True, bufsize=1, errors="replace",
+        start_new_session=True,
     )
+    pid_path = active_live_pid_path()
+    if pid_path is not None:
+        try:
+            pid_path.parent.mkdir(parents=True, exist_ok=True)
+            pid_path.write_text(str(proc.pid))
+        except OSError as e:
+            log.emit("job_pid_write_failed", f"Failed to write pid file: {e}")
     parts: list[str] = []
 
     def _drain():
@@ -125,6 +133,12 @@ def run_claude_code(prompt: str, cwd: Path, timeout: int = 600) -> str | None:
             log_fh.close()
         except OSError as e:
             log.emit("job_log_close_failed", f"Failed to close job log: {e}")
+
+    if pid_path is not None:
+        try:
+            pid_path.unlink(missing_ok=True)
+        except OSError as e:
+            log.emit("job_pid_unlink_failed", f"Failed to remove pid file: {e}")
 
     if timed_out or proc.returncode != 0:
         return None
