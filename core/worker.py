@@ -89,7 +89,9 @@ class WorkerPool:
                 log.emit("task_execution_completed", f"job_id={job['id']} status={result.status}",
                          meta={"category": "noise"})
             response = {"reason": result.reason, "artifacts": result.artifacts}
+            log.emit("marking_job_done", f"job_id={job['id']} status={result.status}", meta={"category": "noise"})
             q.mark_done(job["id"], result.status, response)
+            log.emit("job_marked_done", f"job_id={job['id']}", meta={"category": "noise"})
             log.emit("job_finished",
                      f"{job['task']} ticket={job['ticket_key']} "
                      f"job_id={job['id']} status={result.status}"
