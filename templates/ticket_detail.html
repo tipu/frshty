@@ -616,6 +616,18 @@ function jobHasOutput(task, status) {
     return outputTasks.some(t => task && task.includes(t)) && status === 'ok';
 }
 
+function pidBadgeHtml(jobId, alive) {
+    return alive
+        ? `<span id="pid-badge-${jobId}" class="text-xs bg-green-900 text-green-300 px-1.5 py-0.5 rounded ml-1" title="claude pid alive">● alive</span>`
+        : `<span id="pid-badge-${jobId}" class="text-xs bg-red-900 text-red-300 px-1.5 py-0.5 rounded ml-1" title="claude pid dead — orphan, will be finalized on next poll">○ dead</span>`;
+}
+
+function updatePidBadge(jobId, alive) {
+    const badge = document.getElementById(`pid-badge-${jobId}`);
+    if (!badge) return;
+    badge.outerHTML = pidBadgeHtml(jobId, alive);
+}
+
 async function loadJobs() {
     try {
         const r = await fetch(`/api/tickets/${key}/jobs`);
@@ -656,9 +668,7 @@ async function loadJobs() {
             if (j.status === 'running' && !autoStartJobId) autoStartJobId = { id: j.id, task: j.task };
             let pidBadge = '';
             if (j.status === 'running') {
-                pidBadge = j.pid_alive
-                    ? '<span class="text-xs bg-green-900 text-green-300 px-1.5 py-0.5 rounded ml-1" title="claude pid alive">● alive</span>'
-                    : '<span class="text-xs bg-red-900 text-red-300 px-1.5 py-0.5 rounded ml-1" title="claude pid dead — orphan, will be finalized on next poll">○ dead</span>';
+                pidBadge = pidBadgeHtml(j.id, j.pid_alive);
             }
             return `<div class="cursor-pointer hover:bg-gray-800 p-2 rounded flex items-center gap-2" onclick="viewJobOutput(${j.id}, '${j.task}')"><span class="text-gray-500 flex-shrink-0">${at}${rel}</span><span class="${color} flex-shrink-0">${j.status}</span>${pidBadge}<span class="text-gray-300 flex-1">${j.task}</span>${outputBadge}<span class="text-gray-500">${resp}</span>${retry}</div>`;
         }).join('');
@@ -717,6 +727,10 @@ async function pollJobOutput() {
         }
         jobOutputOffset = data.offset;
         output.parentElement.scrollTop = output.parentElement.scrollHeight;
+
+        if (typeof data.pid_alive === 'boolean') {
+            updatePidBadge(currentJobId, data.pid_alive);
+        }
 
         if (data.done) {
             jobOutputPolling = null;
