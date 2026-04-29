@@ -5,7 +5,7 @@
 <meta charset="utf-8">
 <title>Review Detail — frshty</title>
 <script src="/static/tailwind.js"></script>
-<script defer src="/static/nav-gate.js"></script>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
@@ -29,9 +29,7 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
 body.moving .diff-line-num[data-line] { color: #60a5fa; cursor: crosshair; }
 body.moving .diff-line-num[data-line]:hover { background: #1e3a5f; color: #fff; }
 .diff-add { background: #0d2818; }
-.diff-add .hljs-keyword, .diff-add .hljs-string, .diff-add .hljs-title, .diff-add .hljs-built_in, .diff-add .hljs-number, .diff-add .hljs-attr { opacity: 0.9; }
 .diff-del { background: #2d0f0f; }
-.diff-del .hljs-keyword, .diff-del .hljs-string, .diff-del .hljs-title, .diff-del .hljs-built_in, .diff-del .hljs-number, .diff-del .hljs-attr { opacity: 0.9; }
 .diff-ctx { color: #888; }
 .comment-inline { background: #1c1c30; border-left: 3px solid #3b82f6; margin: 0; padding: 10px 12px; }
 .comment-inline.blocking { border-left-color: #ef4444; }
@@ -61,12 +59,16 @@ textarea { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; }
 .discuss-header { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: #141425; border-bottom: 1px solid #2a2a2a; font-size: 12px; flex-shrink: 0; }
 .discuss-term { flex: 1; min-height: 0; padding: 4px; }
 .discuss-term .xterm { height: 100%; }
+[v-cloak] { display: none; }
 </style>
 </head>
 <body class="p-4 max-w-7xl mx-auto">
+
+<div id="app" v-cloak>
+
 <header class="flex items-center gap-4 mb-4">
     <a href="/reviews" class="link text-sm">&larr; Reviews</a>
-    <h1 class="text-lg font-bold" id="title">Review</h1>
+    <h1 class="text-lg font-bold">{{ info.pr_title || `${repo} PR #${prId}` }}</h1>
     <nav class="flex gap-1 text-sm">
         <a href="/">Feed</a>
         <a href="/global">Global</a>
@@ -74,519 +76,506 @@ textarea { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; }
         <a href="/tickets">Tickets</a>
         <a href="/scheduled">Scheduled</a>
         <a href="/slack">Slack</a>
-        <a href="/timesheet">Timesheet</a>
-        <a href="/billing">Billing</a>
+        <a v-if="features.timesheet !== false" href="/timesheet">Timesheet</a>
+        <a v-if="features.billing !== false" href="/billing">Billing</a>
         <a href="/config">Config</a>
     </nav>
     <div class="ml-auto flex items-center gap-2">
-        <span id="verdict" class="badge"></span>
-        <button onclick="discussGeneral()" class="bg-blue-700 hover:bg-blue-600 text-white px-3 py-1 rounded text-xs">Discuss PR</button>
-        <button id="walkthrough-btn" onclick="startWalkthrough()" class="bg-purple-700 hover:bg-purple-600 text-white px-3 py-1 rounded text-xs">Walkthrough</button>
-        <a id="pr-link" href="#" target="_blank" class="link text-sm">[PR]</a>
+        <button @click="discussGeneral" class="bg-blue-700 hover:bg-blue-600 text-white px-3 py-1 rounded text-xs">Discuss PR</button>
+        <button @click="startWalkthrough" :disabled="walkthroughBusy"
+                class="bg-purple-700 hover:bg-purple-600 text-white px-3 py-1 rounded text-xs">{{ walkthroughBusy ? 'Preprocessing...' : 'Walkthrough' }}</button>
+        <a v-if="prLink" :href="prLink" target="_blank" class="link text-sm">[PR]</a>
     </div>
 </header>
 
-<div id="summary-bar" class="mb-4 hidden"></div>
+<div v-if="info.summary || info.pr_description" class="mb-4">
+    <div class="card p-4 space-y-2">
+        <div v-if="info.pr_description" class="text-sm text-gray-300">{{ info.pr_description }}</div>
+        <div v-if="info.summary" class="text-sm text-gray-400 border-t border-gray-800 pt-2">{{ info.summary }}</div>
+    </div>
+</div>
 
 <div class="flex gap-4">
     <div id="sidebar" class="flex-shrink-0">
-        <div class="text-xs text-gray-500 uppercase font-bold mb-2">Issues <span id="issue-count"></span></div>
-        <div id="sidebar-list" class="space-y-1"></div>
+        <div class="text-xs text-gray-500 uppercase font-bold mb-2">Issues <span>({{ activeCount }}/{{ allComments.length }})</span></div>
+        <div class="space-y-1">
+            <div v-for="(c, i) in allComments" :key="i"
+                 class="sidebar-item"
+                 :class="{ published: c.status === 'submitted' }"
+                 @click="jumpTo(i)">
+                <span class="badge" :class="`badge-${c.severity || 'suggestion'}`" style="font-size:9px">{{ (c.severity || 'suggestion')[0].toUpperCase() }}</span>
+                <span class="text-gray-400">{{ commentFile(c) }}{{ c.line ? ':' + c.line : '' }}</span>
+            </div>
+        </div>
     </div>
-    <div id="diff-view" class="flex-1 min-w-0"></div>
+
+    <div class="flex-1 min-w-0">
+        <div v-for="file in parsedDiff" :key="file.header" class="diff-file">
+            <div class="diff-header">
+                {{ file.header }}
+                <span v-if="commentCountFor(file.header)" class="text-yellow-400 text-xs">({{ commentCountFor(file.header) }} comments)</span>
+            </div>
+            <template v-for="(line, li) in file.lines" :key="li">
+                <div v-if="line.type === 'hunk'" class="diff-hunk">{{ line.text }}</div>
+                <template v-else>
+                    <div class="diff-line" :class="diffLineClass(line.type)">
+                        <span class="diff-line-num"
+                              :data-line="line.newLine || ''"
+                              :data-file="file.header"
+                              @click="line.newLine != null && placeOrAdd(line.newLine, file.header)">{{ line.newLine != null ? line.newLine : '' }}</span>{{ diffLinePrefix(line.type) }}<span v-html="line._hl || escHtml(line.text)"></span>
+                    </div>
+                    <template v-if="line.newLine && commentsByFile[file.header] && commentsByFile[file.header][line.newLine]">
+                        <comment-block v-for="c in commentsByFile[file.header][line.newLine]" :key="c.idx" :c="c"
+                                       :draft="drafts[c.idx]"
+                                       @update:draft="val => drafts[c.idx] = val"
+                                       :discuss-open="!!discussPanels[c.idx]"
+                                       @save="saveComment(c.idx)"
+                                       @simplify="simplifyComment(c.idx)"
+                                       @publish="publishComment(c.idx)"
+                                       @discuss="toggleDiscuss(c.idx)"
+                                       @dismiss="dismissComment(c.idx)"
+                                       @next="nextComment(c.idx)"
+                                       @move="moveLine(c.idx)"></comment-block>
+                    </template>
+                </template>
+            </template>
+            <template v-if="commentsByFile[file.header] && commentsByFile[file.header][0]">
+                <comment-block v-for="c in commentsByFile[file.header][0]" :key="c.idx" :c="c"
+                               :draft="drafts[c.idx]" @update:draft="val => drafts[c.idx] = val"
+                               :discuss-open="!!discussPanels[c.idx]"
+                               @save="saveComment(c.idx)" @simplify="simplifyComment(c.idx)" @publish="publishComment(c.idx)"
+                               @discuss="toggleDiscuss(c.idx)" @dismiss="dismissComment(c.idx)"
+                               @next="nextComment(c.idx)" @move="moveLine(c.idx)"></comment-block>
+            </template>
+            <template v-if="unmatchedFor(file).length">
+                <div class="diff-line diff-ctx" style="padding: 12px; background: #1a1a2a; border-top: 1px solid #2a2a2a; font-size: 12px; color: #888;">
+                    <span class="ml-2">Comments on lines outside the diff context:</span>
+                </div>
+                <comment-block v-for="c in unmatchedFor(file)" :key="c.idx" :c="c"
+                               :draft="drafts[c.idx]" @update:draft="val => drafts[c.idx] = val"
+                               :discuss-open="!!discussPanels[c.idx]"
+                               @save="saveComment(c.idx)" @simplify="simplifyComment(c.idx)" @publish="publishComment(c.idx)"
+                               @discuss="toggleDiscuss(c.idx)" @dismiss="dismissComment(c.idx)"
+                               @next="nextComment(c.idx)" @move="moveLine(c.idx)"></comment-block>
+            </template>
+        </div>
+        <div v-if="generalComments.length" class="diff-file">
+            <div class="diff-header">General Comments</div>
+            <comment-block v-for="c in generalComments" :key="c.idx" :c="c"
+                           :draft="drafts[c.idx]" @update:draft="val => drafts[c.idx] = val"
+                           :discuss-open="!!discussPanels[c.idx]"
+                           @save="saveComment(c.idx)" @simplify="simplifyComment(c.idx)" @publish="publishComment(c.idx)"
+                           @discuss="toggleDiscuss(c.idx)" @dismiss="dismissComment(c.idx)"
+                           @next="nextComment(c.idx)" @move="moveLine(c.idx)"></comment-block>
+        </div>
+    </div>
+</div>
+
 </div>
 
 <script>
-const pathParts = window.location.pathname.split('/');
-const repo = pathParts[2];
-const prId = parseInt(pathParts[3]);
+const { createApp, ref, reactive, computed, watch, onMounted, nextTick } = Vue;
 
-let allComments = [];
-const storageKey = `review:${repo}:${prId}`;
+const EXT_LANG = {py:'python',js:'javascript',ts:'typescript',tsx:'tsx',jsx:'jsx',java:'java',rb:'ruby',go:'go',rs:'rust',css:'css',html:'html',json:'json',yml:'yaml',yaml:'yaml',sh:'bash',sql:'sql',md:'markdown'};
+const PERSONAS = ['spec', 'breakage', 'maintainability'];
 
-async function load() {
-    const [commentsResp, diffResp, infoResp] = await Promise.all([
-        fetch(`/api/reviews/${repo}/${prId}/comments`),
-        fetch(`/api/reviews/${repo}/${prId}/diff`),
-        fetch(`/api/reviews/${repo}/${prId}/info`),
-    ]);
-    allComments = await commentsResp.json();
-    const diffData = await diffResp.json();
-    const info = await infoResp.json();
-
-    document.getElementById('title').textContent = info.pr_title || `${repo} PR #${prId}`;
-    if (info.pr_url) {
-        document.getElementById('pr-link').href = info.pr_url;
-    } else if (allComments.length && allComments[0].pr_url) {
-        document.getElementById('pr-link').href = allComments[0].pr_url;
-    }
-
-    if (info.summary || info.pr_description) {
-        const bar = document.getElementById('summary-bar');
-        bar.classList.remove('hidden');
-        bar.innerHTML = `<div class="card p-4 space-y-2">
-            ${info.pr_description ? `<div class="text-sm text-gray-300">${esc(info.pr_description)}</div>` : ''}
-            ${info.summary ? `<div class="text-sm text-gray-400 border-t border-gray-800 pt-2">${esc(info.summary)}</div>` : ''}
-        </div>`;
-    }
-
-    renderSidebar();
-    renderDiff(diffData.diff, allComments);
-}
-
-function renderSidebar() {
-    const list = document.getElementById('sidebar-list');
-    const active = allComments.filter(c => c.status !== 'submitted').length;
-    document.getElementById('issue-count').textContent = `(${active}/${allComments.length})`;
-
-    list.innerHTML = allComments.map((c, i) => {
-        const sev = c.severity || 'suggestion';
-        const cls = c.status === 'submitted' ? 'published' : '';
-        const file = c.path ? c.path.split('/').pop() : 'general';
-        const line = c.line ? `:${c.line}` : '';
-        return `<div class="sidebar-item ${cls}" onclick="jumpTo(${i})">
-            <span class="badge badge-${sev}" style="font-size:9px">${sev[0].toUpperCase()}</span>
-            <span class="text-gray-400">${file}${line}</span>
-        </div>`;
-    }).join('');
-}
-
-function jumpTo(idx) {
-    const el = document.getElementById(`comment-${idx}`);
-    if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        el.classList.add('comment-highlight');
-        setTimeout(() => el.classList.remove('comment-highlight'), 2000);
-    }
-}
-
-function nextComment(afterIdx) {
-    const start = (afterIdx != null ? afterIdx + 1 : 0);
-    for (let i = start; i < allComments.length; i++) {
-        if (allComments[i].status !== 'submitted') { jumpTo(i); return; }
-    }
-    for (let i = 0; i < start; i++) {
-        if (allComments[i].status !== 'submitted') { jumpTo(i); return; }
-    }
-}
-
-function parseDiff(raw) {
-    const files = [];
-    let current = null;
-    for (const line of raw.split('\n')) {
-        if (line.startsWith('diff --git')) {
-            current = { header: '', hunks: [], lines: [], _newLine: 1 };
-            files.push(current);
-        } else if (line.startsWith('+++ b/') && current) {
-            current.header = line.slice(6);
-        } else if (line.startsWith('--- ') && current) {
-        } else if (line.startsWith('@@') && current) {
-            current.lines.push({ type: 'hunk', text: line });
-            const m = line.match(/@@ -\d+(?:,\d+)? \+(\d+)/);
-            current._newLine = m ? parseInt(m[1]) : 1;
-        } else if (current) {
-            let type = 'ctx';
-            let newLine = null;
-            if (line.startsWith('+')) { type = 'add'; newLine = current._newLine++; }
-            else if (line.startsWith('-')) { type = 'del'; }
-            else { newLine = current._newLine++; }
-            current.lines.push({ type, text: line.slice(1), newLine });
-        }
-    }
-    return files;
-}
-
-function renderDiff(raw, comments) {
-    const files = parseDiff(raw);
-    const commentsByFile = {};
-    for (let i = 0; i < comments.length; i++) {
-        const c = comments[i];
-        const key = c.path || '';
-        if (!commentsByFile[key]) commentsByFile[key] = {};
-        const line = c.line || 0;
-        if (!commentsByFile[key][line]) commentsByFile[key][line] = [];
-        commentsByFile[key][line].push({ ...c, idx: i });
-    }
-
-    const container = document.getElementById('diff-view');
-    let html = '';
-
-    for (const file of files) {
-        highlightFile(file);
-        const fileComments = commentsByFile[file.header] || {};
-        const commentCount = Object.values(fileComments).flat().length;
-        html += `<div class="diff-file">`;
-        html += `<div class="diff-header">${esc(file.header)}${commentCount ? ` <span class="text-yellow-400 text-xs">(${commentCount} comments)</span>` : ''}</div>`;
-
-        for (const line of file.lines) {
-            if (line.type === 'hunk') {
-                html += `<div class="diff-hunk">${esc(line.text)}</div>`;
-                continue;
-            }
-            const cls = line.type === 'add' ? 'diff-add' : line.type === 'del' ? 'diff-del' : 'diff-ctx';
-            const prefix = line.type === 'add' ? '+' : line.type === 'del' ? '-' : ' ';
-            const num = line.newLine != null ? line.newLine : '';
-            const clickable = num !== '' ? `data-line="${num}" data-file="${esc(file.header)}" onclick="placeComment(${num}, '${esc(file.header)}')"` : '';
-            const content = line._hl || esc(line.text);
-            html += `<div class="diff-line ${cls}"><span class="diff-line-num" ${clickable}>${num}</span>${prefix}${content}</div>`;
-
-            if (line.newLine && fileComments[line.newLine]) {
-                for (const c of fileComments[line.newLine]) {
-                    html += renderInlineComment(c);
-                }
-            }
-        }
-
-        if (fileComments[0]) {
-            for (const c of fileComments[0]) {
-                html += renderInlineComment(c);
-            }
-        }
-
-        const shownLines = new Set(file.lines.filter(l => l.newLine).map(l => l.newLine));
-        const unmatchedComments = Object.entries(fileComments)
-            .filter(([lineStr]) => {
-                const lineNum = parseInt(lineStr);
-                return lineNum > 0 && !shownLines.has(lineNum);
-            })
-            .flatMap(([_, comments]) => comments);
-
-        if (unmatchedComments.length) {
-            html += `<div class="diff-line diff-ctx" style="padding: 12px; background: #1a1a2a; border-top: 1px solid #2a2a2a; font-size: 12px; color: #888;">
-                <span class="ml-2">Comments on lines outside the diff context:</span>
-            </div>`;
-            for (const c of unmatchedComments) {
-                html += renderInlineComment(c);
-            }
-        }
-        html += `</div>`;
-    }
-
-    const unmatched = comments.filter((c) => {
-        const key = c.path || '';
-        return !files.some(f => f.header === key);
-    });
-    if (unmatched.length) {
-        html += `<div class="diff-file"><div class="diff-header">General Comments</div>`;
-        for (let i = 0; i < comments.length; i++) {
-            const c = comments[i];
-            if (!files.some(f => f.header === (c.path || ''))) {
-                html += renderInlineComment({ ...c, idx: i });
-            }
-        }
-        html += `</div>`;
-    }
-
-    container.innerHTML = html;
-}
-
-function renderInlineComment(c) {
-    const sev = c.severity || 'suggestion';
-    const isPublished = c.status === 'submitted' || c.remote_id;
-    const isDraft = c.status === 'draft';
-    const isManual = c.persona === 'manual';
-    const cls = '';
-    const personas = (c.persona || '').split(',').map(p => p.trim()).filter(Boolean);
-
-    const statusLabel = isPublished ? '<span class="text-green-400 text-xs">published</span>' :
-                        isDraft ? '<span class="text-yellow-400 text-xs">draft</span>' : '';
-
-    return `<div id="comment-${c.idx}" class="comment-inline ${sev} ${cls}">
-        <div class="flex items-center gap-2 mb-1 text-xs">
-            <span class="badge badge-${sev}">${sev}</span>
-            ${isManual ? '<span class="persona-badge persona-active">you</span>' :
-              ['spec', 'breakage', 'maintainability'].map(p => {
-                const active = personas.includes(p) || (c.agreed_by || []).includes(p);
-                return `<span class="persona-badge ${active ? 'persona-active' : 'persona-dim'}">${p[0].toUpperCase()}</span>`;
-            }).join('')}
-            ${c.path ? `<span class="text-gray-600">${c.path}:<span class="cursor-pointer hover:text-blue-400" onclick="moveLine(${c.idx})" title="click to move, then click a line number">L${c.line || '?'}</span></span>` : ''}
-            ${statusLabel}
-        </div>
-        <textarea id="body-${c.idx}" rows="2" class="w-full p-2 rounded text-sm mb-1"
-            onchange="autoSave(${c.idx})">${esc(c.body)}</textarea>
-        <div class="flex gap-2 items-center">
-            <button onclick="saveComment(${c.idx})" class="bg-gray-700 hover:bg-gray-600 text-white px-2 py-0.5 rounded text-xs">Save</button>
-            <button onclick="simplifyComment(${c.idx})" class="bg-amber-700 hover:bg-amber-600 text-white px-2 py-0.5 rounded text-xs">Simplify</button>
-            <button onclick="publishComment(${c.idx})" class="bg-green-700 hover:bg-green-600 text-white px-2 py-0.5 rounded text-xs">${isPublished ? 'Edit' : 'Publish'}</button>
-            <button onclick="discuss(${c.idx})" class="bg-blue-700 hover:bg-blue-600 text-white px-2 py-0.5 rounded text-xs">Discuss</button>
-            <button onclick="dismissComment(${c.idx})" class="text-red-900 hover:text-red-400 text-xs">x</button>
-            <button onclick="nextComment(${c.idx})" class="text-gray-600 hover:text-white text-xs ml-auto">&darr; next</button>
-        </div>
-    </div>`;
-}
-
-function esc(s) {
+function escHtml(s) {
     const d = document.createElement('div');
-    d.textContent = s;
+    d.textContent = s == null ? '' : String(s);
     return d.innerHTML;
 }
 
-const EXT_LANG = {py:'python',js:'javascript',ts:'typescript',tsx:'tsx',jsx:'jsx',java:'java',rb:'ruby',go:'go',rs:'rust',css:'css',html:'html',json:'json',yml:'yaml',yaml:'yaml',sh:'bash',sql:'sql',md:'markdown'};
-
-function highlightFile(file) {
-    const ext = (file.header.split('.').pop() || '').toLowerCase();
-    const lang = EXT_LANG[ext];
-    if (!lang) return;
-    const code = file.lines.filter(l => l.type !== 'hunk').map(l => l.text).join('\n');
-    try {
-        const result = hljs.highlight(code, { language: lang, ignoreIllegals: true });
-        const highlighted = result.value.split('\n');
-        let idx = 0;
-        for (const line of file.lines) {
-            if (line.type === 'hunk') continue;
-            line._hl = highlighted[idx++] || esc(line.text);
+const CommentBlock = {
+    props: ['c', 'draft', 'discussOpen'],
+    emits: ['update:draft', 'save', 'simplify', 'publish', 'discuss', 'dismiss', 'next', 'move'],
+    setup(props, { emit }) {
+        const isPublished = computed(() => props.c.status === 'submitted' || props.c.remote_id);
+        const isDraft = computed(() => props.c.status === 'draft');
+        const isManual = computed(() => props.c.persona === 'manual');
+        const personas = computed(() => (props.c.persona || '').split(',').map(p => p.trim()).filter(Boolean));
+        function personaActive(p) {
+            return personas.value.includes(p) || (props.c.agreed_by || []).includes(p);
         }
-    } catch(e) {}
-}
-
-async function addComment(filePath, lineNum) {
-    const resp = await fetch(`/api/reviews/${repo}/${prId}/comments/new`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ path: filePath, line: lineNum, body: '', severity: 'suggestion' })
-    });
-    const result = await resp.json();
-    await load();
-    if (result.idx != null) {
-        jumpTo(result.idx);
-        const ta = document.getElementById(`body-${result.idx}`);
-        if (ta) ta.focus();
-    }
-}
-
-async function saveComment(idx) {
-    const body = document.getElementById(`body-${idx}`).value;
-    await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}`, {
-        method: 'PUT',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({body})
-    });
-}
-
-async function autoSave(idx) {
-    const body = document.getElementById(`body-${idx}`).value;
-    await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}`, {
-        method: 'PUT',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({body})
-    });
-}
-
-async function simplifyComment(idx) {
-    const c = allComments[idx];
-    const bodyEl = document.getElementById(`body-${idx}`);
-    const body = bodyEl.value;
-    const resp = await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}/simplify`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-            body,
-            path: c.path || '',
-            line: c.line || 0
-        })
-    });
-    if (resp.ok) {
-        const result = await resp.json();
-        bodyEl.value = result.simplified;
-    }
-}
-
-async function publishComment(idx) {
-    const c = allComments[idx];
-    const body = document.getElementById(`body-${idx}`).value;
-    const file = c.path ? c.path.split('/').pop() : 'general';
-    const line = c.line ? `:${c.line}` : '';
-
-    if (!confirm(`Publish comment on ${file}${line}?\n\n${body.substring(0, 100)}${body.length > 100 ? '...' : ''}`)) {
-        return;
-    }
-
-    await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}`, {
-        method: 'PUT',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({body})
-    });
-    await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}/submit`, {method: 'POST'});
-    load();
-}
-
-async function dismissComment(idx) {
-    if (!confirm('Delete this comment?')) return;
-    await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}`, {
-        method: 'DELETE',
-    });
-    load();
-}
-
-let movingIdx = null;
-
-function moveLine(idx) {
-    if (movingIdx === idx) {
-        movingIdx = null;
-        document.body.classList.remove('moving');
-        document.querySelectorAll('.move-active').forEach(el => el.classList.remove('move-active'));
-        return;
-    }
-    movingIdx = idx;
-    document.body.classList.add('moving');
-    const el = document.getElementById(`comment-${idx}`);
-    if (el) el.classList.add('move-active');
-}
-
-async function placeComment(lineNum, filePath) {
-    if (movingIdx !== null) {
-        const idx = movingIdx;
-        movingIdx = null;
-        document.body.classList.remove('moving');
-        await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}`, {
-            method: 'PUT',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ line: lineNum })
-        });
-        load();
-        return;
-    }
-    addComment(filePath, lineNum);
-}
-
-const discussPanels = {};
-
-function discuss(idx) {
-    if (discussPanels[idx]) {
-        closeDiscussPanel(idx);
-        return;
-    }
-    const c = allComments[idx];
-    const commentEl = document.getElementById(`comment-${idx}`);
-    if (!commentEl) return;
-
-    const fileInfo = c.path ? `${c.path}${c.line ? ':' + c.line : ''}` : 'general';
-    const sev = c.severity || 'suggestion';
-    const panel = document.createElement('div');
-    panel.className = 'discuss-panel';
-    panel.id = `discuss-panel-${idx}`;
-    panel.innerHTML = `
-        <div class="discuss-header">
-            <span class="text-blue-400">${esc(fileInfo)}</span>
-            <span class="badge badge-${sev}">${sev}</span>
-            <div class="ml-auto flex gap-2">
-                <button data-act="full" class="text-gray-400 hover:text-white text-xs">fullscreen</button>
-                <button data-act="close" class="text-gray-400 hover:text-red-400 text-xs">close</button>
+        const sev = computed(() => props.c.severity || 'suggestion');
+        return { isPublished, isDraft, isManual, sev, PERSONAS, personaActive, escHtml };
+    },
+    template: `
+        <div :id="'comment-' + c.idx" class="comment-inline" :class="sev">
+            <div class="flex items-center gap-2 mb-1 text-xs">
+                <span class="badge" :class="'badge-' + sev">{{ sev }}</span>
+                <span v-if="isManual" class="persona-badge persona-active">you</span>
+                <template v-else>
+                    <span v-for="p in PERSONAS" :key="p" class="persona-badge" :class="personaActive(p) ? 'persona-active' : 'persona-dim'">{{ p[0].toUpperCase() }}</span>
+                </template>
+                <span v-if="c.path" class="text-gray-600">{{ c.path }}:<span class="cursor-pointer hover:text-blue-400" @click.stop="$emit('move')" title="click to move, then click a line number">L{{ c.line || '?' }}</span></span>
+                <span v-if="isPublished" class="text-green-400 text-xs">published</span>
+                <span v-else-if="isDraft" class="text-yellow-400 text-xs">draft</span>
+            </div>
+            <textarea :value="draft" @input="$emit('update:draft', $event.target.value)" @change="$emit('save')"
+                      rows="2" class="w-full p-2 rounded text-sm mb-1"></textarea>
+            <div class="flex gap-2 items-center">
+                <button @click="$emit('save')" class="bg-gray-700 hover:bg-gray-600 text-white px-2 py-0.5 rounded text-xs">Save</button>
+                <button @click="$emit('simplify')" class="bg-amber-700 hover:bg-amber-600 text-white px-2 py-0.5 rounded text-xs">Simplify</button>
+                <button @click="$emit('publish')" class="bg-green-700 hover:bg-green-600 text-white px-2 py-0.5 rounded text-xs">{{ isPublished ? 'Edit' : 'Publish' }}</button>
+                <button @click="$emit('discuss')" class="bg-blue-700 hover:bg-blue-600 text-white px-2 py-0.5 rounded text-xs">Discuss</button>
+                <button @click="$emit('dismiss')" class="text-red-900 hover:text-red-400 text-xs">x</button>
+                <button @click="$emit('next')" class="text-gray-600 hover:text-white text-xs ml-auto">↓ next</button>
+            </div>
+            <div v-if="discussOpen" class="discuss-panel" :id="'discuss-panel-' + c.idx">
+                <div class="discuss-header">
+                    <span class="text-blue-400">{{ c.path ? c.path + (c.line ? ':' + c.line : '') : 'general' }}</span>
+                    <span class="badge" :class="'badge-' + sev">{{ sev }}</span>
+                    <div class="ml-auto flex gap-2">
+                        <button @click="$root.toggleFullscreen(c.idx)" class="text-gray-400 hover:text-white text-xs">fullscreen</button>
+                        <button @click="$emit('discuss')" class="text-gray-400 hover:text-red-400 text-xs">close</button>
+                    </div>
+                </div>
+                <div class="discuss-term" :id="'discuss-term-' + c.idx"></div>
             </div>
         </div>
-        <div class="discuss-term"></div>
-    `;
-    commentEl.insertAdjacentElement('afterend', panel);
+    `,
+};
 
-    panel.querySelector('[data-act="full"]').onclick = () => {
-        panel.classList.toggle('fullscreen');
-        const p = discussPanels[idx];
-        if (p && p.fit) setTimeout(() => {
+createApp({
+    components: { 'comment-block': CommentBlock },
+    setup() {
+        const pathParts = window.location.pathname.split('/');
+        const repo = pathParts[2];
+        const prId = parseInt(pathParts[3]);
+
+        const allComments = ref([]);
+        const info = ref({});
+        const features = ref({});
+        const rawDiff = ref('');
+        const drafts = reactive({});
+        const movingIdx = ref(null);
+        const walkthroughBusy = ref(false);
+        const discussPanels = reactive({});
+
+        const prLink = computed(() => info.value.pr_url || (allComments.value[0] && allComments.value[0].pr_url) || '');
+        const activeCount = computed(() => allComments.value.filter(c => c.status !== 'submitted').length);
+
+        const parsedDiff = computed(() => {
+            const raw = rawDiff.value;
+            const files = [];
+            let current = null;
+            for (const line of raw.split('\n')) {
+                if (line.startsWith('diff --git')) {
+                    current = { header: '', lines: [], _newLine: 1 };
+                    files.push(current);
+                } else if (line.startsWith('+++ b/') && current) {
+                    current.header = line.slice(6);
+                } else if (line.startsWith('--- ') && current) {
+                    // skip
+                } else if (line.startsWith('@@') && current) {
+                    current.lines.push({ type: 'hunk', text: line });
+                    const m = line.match(/@@ -\d+(?:,\d+)? \+(\d+)/);
+                    current._newLine = m ? parseInt(m[1]) : 1;
+                } else if (current) {
+                    let type = 'ctx';
+                    let newLine = null;
+                    if (line.startsWith('+')) { type = 'add'; newLine = current._newLine++; }
+                    else if (line.startsWith('-')) { type = 'del'; }
+                    else { newLine = current._newLine++; }
+                    current.lines.push({ type, text: line.slice(1), newLine });
+                }
+            }
+            for (const f of files) highlightFile(f);
+            return files;
+        });
+
+        const commentsByFile = computed(() => {
+            const out = {};
+            allComments.value.forEach((c, i) => {
+                const k = c.path || '';
+                if (!out[k]) out[k] = {};
+                const ln = c.line || 0;
+                if (!out[k][ln]) out[k][ln] = [];
+                out[k][ln].push({ ...c, idx: i });
+            });
+            return out;
+        });
+
+        const generalComments = computed(() => {
+            const headers = new Set(parsedDiff.value.map(f => f.header));
+            return allComments.value
+                .map((c, i) => ({ ...c, idx: i }))
+                .filter(c => !headers.has(c.path || ''));
+        });
+
+        function commentFile(c) { return c.path ? c.path.split('/').pop() : 'general'; }
+        function commentCountFor(header) {
+            const fc = commentsByFile.value[header];
+            if (!fc) return 0;
+            return Object.values(fc).reduce((a, b) => a + b.length, 0);
+        }
+        function unmatchedFor(file) {
+            const fc = commentsByFile.value[file.header] || {};
+            const shown = new Set(file.lines.filter(l => l.newLine).map(l => l.newLine));
+            const out = [];
+            for (const [lineStr, list] of Object.entries(fc)) {
+                const ln = parseInt(lineStr);
+                if (ln > 0 && !shown.has(ln)) out.push(...list);
+            }
+            return out;
+        }
+
+        function diffLineClass(t) { return t === 'add' ? 'diff-add' : t === 'del' ? 'diff-del' : 'diff-ctx'; }
+        function diffLinePrefix(t) { return t === 'add' ? '+' : t === 'del' ? '-' : ' '; }
+
+        function highlightFile(file) {
+            const ext = (file.header.split('.').pop() || '').toLowerCase();
+            const lang = EXT_LANG[ext];
+            if (!lang) return;
+            const code = file.lines.filter(l => l.type !== 'hunk').map(l => l.text).join('\n');
             try {
-                p.fit.fit();
-                if (p.ws && p.ws.readyState === WebSocket.OPEN) {
-                    p.ws.send(JSON.stringify({ type: 'resize', cols: p.term.cols, rows: p.term.rows }));
+                const result = hljs.highlight(code, { language: lang, ignoreIllegals: true });
+                const highlighted = result.value.split('\n');
+                let idx = 0;
+                for (const line of file.lines) {
+                    if (line.type === 'hunk') continue;
+                    line._hl = highlighted[idx++] || escHtml(line.text);
                 }
             } catch (e) {}
-        }, 50);
-    };
-    panel.querySelector('[data-act="close"]').onclick = () => closeDiscussPanel(idx);
+        }
 
-    discussPanels[idx] = { el: panel };
-    startDiscussSession(idx, c);
-}
+        async function load() {
+            try {
+                const [commentsResp, diffResp, infoResp, configResp] = await Promise.all([
+                    fetch(`/api/reviews/${repo}/${prId}/comments`),
+                    fetch(`/api/reviews/${repo}/${prId}/diff`),
+                    fetch(`/api/reviews/${repo}/${prId}/info`),
+                    fetch('/api/config'),
+                ]);
+                allComments.value = await commentsResp.json();
+                rawDiff.value = (await diffResp.json()).diff || '';
+                info.value = await infoResp.json();
+                const cfg = await configResp.json();
+                features.value = cfg.features || {};
+                allComments.value.forEach((c, i) => { drafts[i] = c.body || ''; });
+            } catch (e) { console.error('review_detail load failed', e); }
+        }
 
-async function startDiscussSession(idx, c) {
-    const body = document.getElementById(`body-${idx}`).value;
-    const resp = await fetch(`/api/reviews/${repo}/${prId}/discuss`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({
-            idx, file: c.path || '', line: c.line || '', severity: c.severity || '', body,
-        }),
-    });
-    const data = await resp.json();
-    connectDiscussTerminal(idx, data.session_id);
-}
-
-function connectDiscussTerminal(idx, sessionId) {
-    const panel = discussPanels[idx];
-    if (!panel) return;
-    const container = panel.el.querySelector('.discuss-term');
-    const term = new Terminal({
-        cursorBlink: true,
-        fontSize: 13,
-        fontFamily: "'JetBrains Mono','Fira Code','Cascadia Code',Menlo,monospace",
-        theme: { background: '#0a0a0f', foreground: '#e2e8f0', cursor: '#e2e8f0', selectionBackground: '#334155' },
-    });
-    const fit = new FitAddon.FitAddon();
-    term.loadAddon(fit);
-    term.loadAddon(new WebLinksAddon.WebLinksAddon());
-    term.open(container);
-    fit.fit();
-
-    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(`${protocol}//${location.host}/ws/discuss/${sessionId}`);
-    ws.binaryType = 'arraybuffer';
-    ws.onopen = () => {
-        fit.fit();
-        ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-    };
-    ws.onmessage = (e) => {
-        const data = e.data instanceof ArrayBuffer ? new Uint8Array(e.data) : e.data;
-        term.write(data);
-    };
-    ws.onclose = () => { try { term.write('\r\n\x1b[90m[disconnected]\x1b[0m\r\n'); } catch (e) {} };
-    term.onData((data) => { if (ws.readyState === WebSocket.OPEN) ws.send(data); });
-
-    const ro = new ResizeObserver(() => {
-        try {
-            fit.fit();
-            if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+        function jumpTo(idx) {
+            const el = document.getElementById(`comment-${idx}`);
+            if (el) {
+                el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                el.classList.add('comment-highlight');
+                setTimeout(() => el.classList.remove('comment-highlight'), 2000);
             }
-        } catch (e) {}
-    });
-    ro.observe(container);
+        }
 
-    Object.assign(panel, { term, ws, fit, ro, sessionId });
-}
+        function nextComment(afterIdx) {
+            const start = afterIdx != null ? afterIdx + 1 : 0;
+            for (let i = start; i < allComments.value.length; i++) {
+                if (allComments.value[i].status !== 'submitted') { jumpTo(i); return; }
+            }
+            for (let i = 0; i < start; i++) {
+                if (allComments.value[i].status !== 'submitted') { jumpTo(i); return; }
+            }
+        }
 
-function closeDiscussPanel(idx) {
-    const p = discussPanels[idx];
-    if (!p) return;
-    try { p.ro && p.ro.disconnect(); } catch (e) {}
-    try { p.ws && p.ws.close(); } catch (e) {}
-    try { p.term && p.term.dispose(); } catch (e) {}
-    p.el.remove();
-    delete discussPanels[idx];
-}
+        async function saveComment(idx) {
+            await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}`, {
+                method: 'PUT', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({body: drafts[idx] || ''}),
+            });
+        }
 
-async function startWalkthrough() {
-    const btn = document.getElementById('walkthrough-btn');
-    const originalText = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = 'Preprocessing...';
+        async function simplifyComment(idx) {
+            const c = allComments.value[idx];
+            const resp = await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}/simplify`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({body: drafts[idx] || '', path: c.path || '', line: c.line || 0}),
+            });
+            if (resp.ok) {
+                const result = await resp.json();
+                drafts[idx] = result.simplified;
+            }
+        }
 
-    const resp = await fetch(`/api/reviews/${repo}/${prId}/walkthrough/preprocess`, { method: 'POST' });
-    if (resp.ok) {
-        location.href = `/reviews/${repo}/${prId}/walkthrough/0`;
-    } else {
-        btn.disabled = false;
-        btn.textContent = originalText;
-        alert('Failed to preprocess walkthrough');
-    }
-}
+        async function publishComment(idx) {
+            const c = allComments.value[idx];
+            const body = drafts[idx] || '';
+            const file = c.path ? c.path.split('/').pop() : 'general';
+            const lineSuffix = c.line ? `:${c.line}` : '';
+            if (!confirm(`Publish comment on ${file}${lineSuffix}?\n\n${body.substring(0, 100)}${body.length > 100 ? '...' : ''}`)) return;
+            await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}`, {
+                method: 'PUT', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({body}),
+            });
+            await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}/submit`, {method: 'POST'});
+            load();
+        }
 
-function discussGeneral() {
-    sessionStorage.setItem(`discuss-${repo}-${prId}-general`, JSON.stringify({
-        body: 'General PR discussion',
-        commentCount: allComments.length,
-    }));
-    window.open(`/reviews/${repo}/${prId}/discuss?idx=general&repo=${repo}&pr_id=${prId}`, '_blank');
-}
+        async function dismissComment(idx) {
+            if (!confirm('Delete this comment?')) return;
+            await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}`, {method: 'DELETE'});
+            load();
+        }
 
-load();
+        function moveLine(idx) {
+            if (movingIdx.value === idx) {
+                movingIdx.value = null;
+                document.querySelectorAll('.move-active').forEach(el => el.classList.remove('move-active'));
+                return;
+            }
+            movingIdx.value = idx;
+            nextTick(() => {
+                const el = document.getElementById(`comment-${idx}`);
+                if (el) el.classList.add('move-active');
+            });
+        }
+
+        async function placeOrAdd(lineNum, filePath) {
+            if (movingIdx.value !== null) {
+                const idx = movingIdx.value;
+                movingIdx.value = null;
+                document.querySelectorAll('.move-active').forEach(el => el.classList.remove('move-active'));
+                await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}`, {
+                    method: 'PUT', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({line: lineNum}),
+                });
+                load();
+                return;
+            }
+            const resp = await fetch(`/api/reviews/${repo}/${prId}/comments/new`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({path: filePath, line: lineNum, body: '', severity: 'suggestion'}),
+            });
+            const result = await resp.json();
+            await load();
+            if (result.idx != null) {
+                jumpTo(result.idx);
+                nextTick(() => {
+                    const ta = document.querySelector(`#comment-${result.idx} textarea`);
+                    if (ta) ta.focus();
+                });
+            }
+        }
+
+        function toggleDiscuss(idx) {
+            if (discussPanels[idx]) {
+                closeDiscuss(idx);
+                return;
+            }
+            const c = allComments.value[idx];
+            discussPanels[idx] = { fullscreen: false, term: null, ws: null, fit: null, ro: null, sessionId: null };
+            nextTick(() => startDiscussSession(idx, c));
+        }
+
+        async function startDiscussSession(idx, c) {
+            const body = drafts[idx] || '';
+            const resp = await fetch(`/api/reviews/${repo}/${prId}/discuss`, {
+                method: 'POST', headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({idx, file: c.path || '', line: c.line || '', severity: c.severity || '', body}),
+            });
+            const data = await resp.json();
+            connectDiscussTerminal(idx, data.session_id);
+        }
+
+        function connectDiscussTerminal(idx, sessionId) {
+            const panel = discussPanels[idx];
+            if (!panel) return;
+            const container = document.getElementById(`discuss-term-${idx}`);
+            if (!container) return;
+            const term = new Terminal({
+                cursorBlink: true, fontSize: 13,
+                fontFamily: "'JetBrains Mono','Fira Code','Cascadia Code',Menlo,monospace",
+                theme: { background: '#0a0a0f', foreground: '#e2e8f0', cursor: '#e2e8f0', selectionBackground: '#334155' },
+            });
+            const fit = new FitAddon.FitAddon();
+            term.loadAddon(fit);
+            term.loadAddon(new WebLinksAddon.WebLinksAddon());
+            term.open(container);
+            fit.fit();
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const ws = new WebSocket(`${protocol}//${location.host}/ws/discuss/${sessionId}`);
+            ws.binaryType = 'arraybuffer';
+            ws.onopen = () => {
+                fit.fit();
+                ws.send(JSON.stringify({type: 'resize', cols: term.cols, rows: term.rows}));
+            };
+            ws.onmessage = (e) => {
+                const data = e.data instanceof ArrayBuffer ? new Uint8Array(e.data) : e.data;
+                term.write(data);
+            };
+            ws.onclose = () => { try { term.write('\r\n\x1b[90m[disconnected]\x1b[0m\r\n'); } catch (e) {} };
+            term.onData((data) => { if (ws.readyState === WebSocket.OPEN) ws.send(data); });
+            const ro = new ResizeObserver(() => {
+                try {
+                    fit.fit();
+                    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type: 'resize', cols: term.cols, rows: term.rows}));
+                } catch (e) {}
+            });
+            ro.observe(container);
+            Object.assign(panel, { term, ws, fit, ro, sessionId });
+        }
+
+        function closeDiscuss(idx) {
+            const p = discussPanels[idx];
+            if (!p) return;
+            try { p.ro && p.ro.disconnect(); } catch (e) {}
+            try { p.ws && p.ws.close(); } catch (e) {}
+            try { p.term && p.term.dispose(); } catch (e) {}
+            delete discussPanels[idx];
+        }
+
+        function toggleFullscreen(idx) {
+            const p = discussPanels[idx];
+            if (!p) return;
+            const el = document.getElementById(`discuss-panel-${idx}`);
+            if (!el) return;
+            el.classList.toggle('fullscreen');
+            p.fullscreen = !p.fullscreen;
+            setTimeout(() => {
+                try {
+                    p.fit && p.fit.fit();
+                    if (p.ws && p.ws.readyState === WebSocket.OPEN) {
+                        p.ws.send(JSON.stringify({type: 'resize', cols: p.term.cols, rows: p.term.rows}));
+                    }
+                } catch (e) {}
+            }, 50);
+        }
+
+        async function startWalkthrough() {
+            walkthroughBusy.value = true;
+            const resp = await fetch(`/api/reviews/${repo}/${prId}/walkthrough/preprocess`, {method: 'POST'});
+            if (resp.ok) {
+                location.href = `/reviews/${repo}/${prId}/walkthrough/0`;
+            } else {
+                walkthroughBusy.value = false;
+                alert('Failed to preprocess walkthrough');
+            }
+        }
+
+        function discussGeneral() {
+            sessionStorage.setItem(`discuss-${repo}-${prId}-general`, JSON.stringify({
+                body: 'General PR discussion', commentCount: allComments.value.length,
+            }));
+            window.open(`/reviews/${repo}/${prId}/discuss?idx=general&repo=${repo}&pr_id=${prId}`, '_blank');
+        }
+
+        watch(movingIdx, v => {
+            document.body.classList.toggle('moving', v !== null);
+        });
+
+        onMounted(load);
+
+        return {
+            repo, prId,
+            allComments, info, features, drafts, walkthroughBusy, discussPanels,
+            prLink, activeCount, parsedDiff, commentsByFile, generalComments,
+            commentFile, commentCountFor, unmatchedFor,
+            diffLineClass, diffLinePrefix, escHtml,
+            jumpTo, nextComment,
+            saveComment, simplifyComment, publishComment, dismissComment,
+            moveLine, placeOrAdd,
+            toggleDiscuss, toggleFullscreen,
+            startWalkthrough, discussGeneral,
+        };
+    },
+}).mount('#app');
 </script>
 </body>
 </html>
