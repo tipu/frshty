@@ -1483,23 +1483,11 @@ def api_ticket_jobs(key: str, limit: int = 100):
     if not _events_enabled():
         return []
     import core.queue as q
-    from core.job_logs import job_pid_path
     instance_key = _config.get("job", {}).get("key", "")
     rows = q.jobs_for_ticket(instance_key, key, limit)
     for row in rows:
-        if row.get("status") != "running":
-            continue
-        pid_path = job_pid_path(instance_key, row["id"])
-        try:
-            pid = int(pid_path.read_text().strip())
-        except (OSError, ValueError):
-            row["pid_alive"] = False
-            continue
-        try:
-            os.kill(pid, 0)
-            row["pid_alive"] = True
-        except OSError:
-            row["pid_alive"] = False
+        if row.get("status") == "running":
+            row["pid_alive"] = _pid_alive_for_job(instance_key, row["id"])
     return rows
 
 
@@ -1546,6 +1534,20 @@ def _trim_to_utf8_boundary(data: bytes) -> bytes:
     return data
 
 
+def _pid_alive_for_job(instance_key: str, job_id: int) -> bool:
+    from core.job_logs import job_pid_path
+    pid_path = job_pid_path(instance_key, job_id)
+    try:
+        pid = int(pid_path.read_text().strip())
+    except (OSError, ValueError):
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
 @app.get("/api/jobs/{job_id}/live")
 def api_job_live(job_id: int, offset: int = 0):
     from core.job_logs import job_log_path
@@ -1558,9 +1560,10 @@ def api_job_live(job_id: int, offset: int = 0):
     if not row:
         return JSONResponse({"error": "not found"}, status_code=404)
     done = row["status"] in _TERMINAL_JOB_STATUSES
+    pid_alive = _pid_alive_for_job(instance_key, job_id) if not done else None
     log_path = job_log_path(instance_key, job_id)
     if not log_path.exists():
-        return {"content": "", "offset": 0, "done": done}
+        return {"content": "", "offset": 0, "done": done, "pid_alive": pid_alive}
     if offset < 0:
         return JSONResponse({"error": "negative offset"}, status_code=400)
     try:
@@ -1574,6 +1577,7 @@ def api_job_live(job_id: int, offset: int = 0):
         "content": trimmed.decode("utf-8", errors="replace"),
         "offset": offset + len(trimmed),
         "done": done,
+        "pid_alive": pid_alive,
     }
 
 
