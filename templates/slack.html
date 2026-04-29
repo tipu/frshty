@@ -5,7 +5,7 @@
 <meta charset="utf-8">
 <title>Slack — frshty</title>
 <script src="/static/tailwind.js"></script>
-<script defer src="/static/nav-gate.js"></script>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <style>
 body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: #0a0a0a; color: #e0e0e0; }
 .card { background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; }
@@ -21,11 +21,18 @@ body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: #0a0a0a; 
 .badge-digest { background: #14532d; color: #86efac; }
 nav a { color: #888; padding: 4px 12px; border-radius: 4px; }
 nav a:hover, nav a.active { color: #fff; background: #222; }
+[v-cloak] { display: none; }
 </style>
 </head>
 <body class="p-4 max-w-7xl mx-auto">
+
+<div id="app" v-cloak>
+
 <header class="flex items-center gap-4 mb-4">
-    <div class="flex items-center gap-2"><h1 class="text-lg font-bold">Slack</h1><span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700" id="instance-badge"></span></div>
+    <div class="flex items-center gap-2">
+        <h1 class="text-lg font-bold">Slack</h1>
+        <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700">{{ instanceName }}</span>
+    </div>
     <nav class="flex gap-1 text-sm">
         <a href="/">Feed</a>
         <a href="/global">Global</a>
@@ -33,134 +40,165 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
         <a href="/tickets">Tickets</a>
         <a href="/scheduled">Scheduled</a>
         <a href="/slack" class="active">Slack</a>
-        <a href="/timesheet">Timesheet</a>
-        <a href="/billing">Billing</a>
+        <a v-if="features.timesheet !== false" href="/timesheet">Timesheet</a>
+        <a v-if="features.billing !== false" href="/billing">Billing</a>
         <a href="/config">Config</a>
     </nav>
 </header>
 
 <section class="mb-6">
-    <h2 class="text-sm font-bold text-yellow-400 mb-2">Mentions & Suggested Replies</h2>
-    <div id="mentions" class="space-y-3"></div>
+    <h2 class="text-sm font-bold text-yellow-400 mb-2">Mentions &amp; Suggested Replies</h2>
+    <div v-if="!mentions.length" class="text-gray-600 text-sm">No mentions yet.</div>
+    <div v-else class="space-y-3">
+        <div v-for="e in mentions" :key="e.id" class="card p-4">
+            <div class="flex items-center gap-2 mb-2">
+                <span class="badge badge-mention">mention</span>
+                <span class="text-gray-500 text-xs">{{ e.meta?.channel || '' }} — {{ fmtTime(e.ts) }}</span>
+            </div>
+            <div class="text-sm mb-3">{{ e.meta?.text || e.summary }}</div>
+            <div v-if="e.meta?.reply_id" class="flex gap-2 items-start">
+                <input type="text" v-model="replyDrafts[e.meta.reply_id]" :disabled="sentMap[e.meta.reply_id]"
+                       class="reply-input flex-1 p-2 rounded text-sm" placeholder="type reply..." />
+                <button class="send-btn text-sm" :class="{ sent: sentMap[e.meta.reply_id] }"
+                        :disabled="sendingMap[e.meta.reply_id] || sentMap[e.meta.reply_id]"
+                        @click="sendReply(e.meta.reply_id)">
+                    {{ sendButtonLabel(e.meta.reply_id) }}
+                </button>
+            </div>
+        </div>
+    </div>
 </section>
 
 <section class="mb-6">
     <h2 class="text-sm font-bold text-blue-400 mb-2">Actionable Items</h2>
-    <div id="actionable" class="space-y-2"></div>
+    <div v-if="!actionable.length" class="text-gray-600 text-sm">Nothing actionable.</div>
+    <div v-else class="space-y-2">
+        <div v-for="e in actionable" :key="e.id" class="card p-3 text-sm">
+            <div class="flex items-center gap-2 mb-1">
+                <span class="badge badge-action">action needed</span>
+                <span class="text-gray-500 text-xs">{{ fmtTime(e.ts) }}</span>
+            </div>
+            <div>{{ e.meta?.text || e.summary }}</div>
+        </div>
+    </div>
 </section>
 
 <section>
     <h2 class="text-sm font-bold text-green-400 mb-2">Channel Activity</h2>
-    <div id="channels" class="grid gap-2"></div>
+    <div v-if="!channels.length" class="text-gray-600 text-sm">No channel activity yet.</div>
+    <div v-else class="grid gap-2">
+        <div v-for="[name, d] in channels" :key="name" class="card p-3"
+             :class="{ 'border-l-2 border-l-green-500': d.new_messages > 0 }">
+            <div class="flex items-center justify-between mb-1">
+                <span class="text-sm font-bold" :class="d.new_messages > 0 ? 'text-green-400' : 'text-gray-400'">{{ name }}</span>
+                <span class="text-xs text-gray-600">{{ d.message_count }} msgs · {{ timeAgo(d.updated_at) }}</span>
+            </div>
+            <div class="text-xs text-gray-300">{{ d.summary }}</div>
+        </div>
+    </div>
 </section>
 
+</div>
+
 <script>
-async function load() {
-    const [evResp, slackResp] = await Promise.all([
-        fetch('/api/events?limit=100'),
-        fetch('/api/slack/data'),
-    ]);
-    const events = await evResp.json();
-    const slackData = await slackResp.json();
+const { createApp, ref, reactive, computed, onMounted } = Vue;
 
-    const mentions = events.filter(e => e.event === 'slack_mention_detected');
-    const actionable = events.filter(e => e.event === 'slack_actionable_item');
+createApp({
+    setup() {
+        const events = ref([]);
+        const slackData = ref({});
+        const features = ref({});
+        const instanceName = ref('');
+        const replyDrafts = reactive({});
+        const sendingMap = reactive({});
+        const sentMap = reactive({});
 
-    document.getElementById('mentions').innerHTML = mentions.length
-        ? mentions.map(e => {
-            const text = e.meta?.text || e.summary;
-            const channel = e.meta?.channel || '';
-            const suggested = e.meta?.suggested_response || '';
-            const replyId = e.meta?.reply_id || '';
-            const time = new Date(e.ts).toLocaleTimeString();
-            return `<div class="card p-4" id="mention-${replyId}">
-                <div class="flex items-center gap-2 mb-2">
-                    <span class="badge badge-mention">mention</span>
-                    <span class="text-gray-500 text-xs">${channel} — ${time}</span>
-                </div>
-                <div class="text-sm mb-3">${esc(text)}</div>
-                ${replyId ? `<div class="flex gap-2 items-start">
-                    <input type="text" id="reply-${replyId}" value="${esc(suggested)}" class="reply-input flex-1 p-2 rounded text-sm" placeholder="type reply...">
-                    <button class="send-btn text-sm" onclick="sendReply('${replyId}')">send</button>
-                </div>` : ''}
-            </div>`;
-        }).join('')
-        : '<div class="text-gray-600 text-sm">No mentions yet.</div>';
+        const mentions = computed(() => events.value.filter(e => e.event === 'slack_mention_detected'));
+        const actionable = computed(() => events.value.filter(e => e.event === 'slack_actionable_item'));
 
-    document.getElementById('actionable').innerHTML = actionable.length
-        ? actionable.map(e => {
-            const time = new Date(e.ts).toLocaleTimeString();
-            return `<div class="card p-3 text-sm">
-                <div class="flex items-center gap-2 mb-1">
-                    <span class="badge badge-action">action needed</span>
-                    <span class="text-gray-500 text-xs">${time}</span>
-                </div>
-                <div>${esc(e.meta?.text || e.summary)}</div>
-            </div>`;
-        }).join('')
-        : '<div class="text-gray-600 text-sm">Nothing actionable.</div>';
+        const channels = computed(() => {
+            const digests = slackData.value.channel_digests || {};
+            const cutoff = Date.now() - 2 * 86400 * 1000;
+            return Object.entries(digests)
+                .filter(([, d]) => d.updated_at && new Date(d.updated_at).getTime() >= cutoff)
+                .sort((a, b) => (b[1].updated_at || '').localeCompare(a[1].updated_at || ''));
+        });
 
-    const digests = slackData.channel_digests || {};
-    const cutoff = Date.now() - 2 * 86400 * 1000;
-    const channels = Object.entries(digests)
-        .filter(([, d]) => d.updated_at && new Date(d.updated_at).getTime() >= cutoff)
-        .sort((a, b) => (b[1].updated_at || '').localeCompare(a[1].updated_at || ''));
+        function fmtTime(ts) {
+            try { return new Date(ts).toLocaleTimeString(); } catch { return ''; }
+        }
 
-    document.getElementById('channels').innerHTML = channels.length
-        ? channels.map(([name, d]) => {
-            const ago = timeAgo(d.updated_at);
-            const fresh = d.new_messages > 0;
-            return `<div class="card p-3 ${fresh ? 'border-l-2 border-l-green-500' : ''}">
-                <div class="flex items-center justify-between mb-1">
-                    <span class="text-sm font-bold ${fresh ? 'text-green-400' : 'text-gray-400'}">${esc(name)}</span>
-                    <span class="text-xs text-gray-600">${d.message_count} msgs · ${ago}</span>
-                </div>
-                <div class="text-xs text-gray-300">${esc(d.summary)}</div>
-            </div>`;
-        }).join('')
-        : '<div class="text-gray-600 text-sm">No channel activity yet.</div>';
-}
+        function timeAgo(iso) {
+            if (!iso) return '';
+            const diff = (Date.now() - new Date(iso).getTime()) / 1000;
+            if (diff < 60) return 'just now';
+            if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+            if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+            return Math.floor(diff / 86400) + 'd ago';
+        }
 
-function timeAgo(iso) {
-    if (!iso) return '';
-    const diff = (Date.now() - new Date(iso).getTime()) / 1000;
-    if (diff < 60) return 'just now';
-    if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
-    if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
-    return Math.floor(diff / 86400) + 'd ago';
-}
+        function sendButtonLabel(replyId) {
+            if (sentMap[replyId]) return 'sent';
+            if (sendingMap[replyId]) return 'sending...';
+            return 'send';
+        }
 
-function esc(s) {
-    const d = document.createElement('div');
-    d.textContent = s;
-    return d.innerHTML;
-}
+        async function load() {
+            try {
+                const [evResp, slackResp, configResp] = await Promise.all([
+                    fetch('/api/events?limit=100'),
+                    fetch('/api/slack/data'),
+                    fetch('/api/config'),
+                ]);
+                events.value = await evResp.json();
+                slackData.value = await slackResp.json();
+                const cfg = await configResp.json();
+                features.value = cfg.features || {};
+                instanceName.value = cfg.job?.key || '';
+                for (const e of mentions.value) {
+                    const rid = e.meta?.reply_id;
+                    if (rid && replyDrafts[rid] === undefined) {
+                        replyDrafts[rid] = e.meta?.suggested_response || '';
+                    }
+                }
+            } catch (e) { console.error('slack load failed', e); }
+        }
 
-async function sendReply(replyId) {
-    const input = document.getElementById(`reply-${replyId}`);
-    const text = input.value.trim();
-    if (!text) return;
-    const btn = input.parentElement.querySelector('.send-btn');
-    btn.textContent = 'sending...';
-    btn.disabled = true;
-    const resp = await fetch(`/api/slack/send/${replyId}`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text})
-    });
-    const result = await resp.json();
-    if (result.status === 'sent') {
-        btn.textContent = 'sent';
-        btn.classList.add('sent');
-        input.disabled = true;
-    } else {
-        btn.textContent = 'failed';
-        setTimeout(() => { btn.textContent = 'send'; btn.disabled = false; }, 2000);
-    }
-}
+        async function sendReply(replyId) {
+            const text = (replyDrafts[replyId] || '').trim();
+            if (!text) return;
+            sendingMap[replyId] = true;
+            try {
+                const resp = await fetch(`/api/slack/send/${replyId}`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({text}),
+                });
+                const result = await resp.json();
+                if (result.status === 'sent') {
+                    sentMap[replyId] = true;
+                } else {
+                    setTimeout(() => { sendingMap[replyId] = false; }, 2000);
+                }
+            } finally {
+                if (!sentMap[replyId]) sendingMap[replyId] = false;
+            }
+        }
 
-load();
-setInterval(load, 5000);
+        onMounted(() => {
+            load();
+            setInterval(load, 5000);
+        });
+
+        return {
+            events, slackData, features, instanceName,
+            replyDrafts, sendingMap, sentMap,
+            mentions, actionable, channels,
+            fmtTime, timeAgo, sendButtonLabel,
+            sendReply,
+        };
+    },
+}).mount('#app');
 </script>
 </body>
 </html>
