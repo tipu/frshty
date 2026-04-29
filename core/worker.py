@@ -78,19 +78,23 @@ class WorkerPool:
                 registry=reg,
                 now=datetime.now(timezone.utc),
             )
-            log.emit("job_started", f"{job['task']} ticket={job['ticket_key']} job_id={job['id']}")
+            log.emit("job_started", f"{job['task']} ticket={job['ticket_key']} job_id={job['id']}",
+                     meta={"category": "noise"})
             routine_tasks = {"scan_tickets", "poll_own_prs", "poll_reviewer", "scheduler_check", "slack_scan"}
             if job['task'] not in routine_tasks:
-                log.emit("task_execution_started", f"job_id={job['id']} task={job['task']}")
+                log.emit("task_execution_started", f"job_id={job['id']} task={job['task']}",
+                         meta={"category": "noise"})
             result = registry.run_task(ctx)
             if job['task'] not in routine_tasks:
-                log.emit("task_execution_completed", f"job_id={job['id']} status={result.status}")
+                log.emit("task_execution_completed", f"job_id={job['id']} status={result.status}",
+                         meta={"category": "noise"})
             response = {"reason": result.reason, "artifacts": result.artifacts}
             q.mark_done(job["id"], result.status, response)
             log.emit("job_finished",
                      f"{job['task']} ticket={job['ticket_key']} "
                      f"job_id={job['id']} status={result.status}"
-                     f"{(' reason='+result.reason) if result.reason else ''}")
+                     f"{(' reason='+result.reason) if result.reason else ''}",
+                     meta={"category": "noise"} if result.status == "ok" else None)
             for ev in result.next_events or []:
                 try:
                     q.emit_event(source="task", kind=ev["kind"], payload=ev.get("payload", {}),
