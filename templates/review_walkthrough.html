@@ -5,7 +5,7 @@
 <meta charset="utf-8">
 <title>Walkthrough — frshty</title>
 <script src="/static/tailwind.js"></script>
-<script defer src="/static/nav-gate.js"></script>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
@@ -36,276 +36,263 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
 .discuss-term .xterm { height: 100%; }
 .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid #444; border-top-color: #60a5fa; border-radius: 50%; animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+[v-cloak] { display: none; }
 </style>
 </head>
-<body class="p-4 max-w-5xl mx-auto flex flex-col gap-4">
+<body class="p-4 max-w-5xl mx-auto">
 
-<!-- HEADER -->
+<div id="app" v-cloak class="flex flex-col gap-4">
+
 <header class="flex items-center gap-3">
-  <a href="/reviews" class="link text-sm">&larr; Reviews</a>
-  <h1 class="text-base font-bold flex-1 truncate" id="title">Walkthrough</h1>
-  <span id="progress" class="text-sm text-gray-500"></span>
-  <button id="btn-prev" onclick="navigate(-1)" class="bg-gray-800 hover:bg-gray-700 text-white px-3 py-1 rounded text-xs disabled:opacity-40">&#8592; prev</button>
-  <button id="btn-next" onclick="navigate(1)" class="bg-gray-800 hover:bg-gray-700 text-white px-3 py-1 rounded text-xs disabled:opacity-40">next &#8594;</button>
+    <a href="/reviews" class="link text-sm">&larr; Reviews</a>
+    <h1 class="text-base font-bold flex-1 truncate">{{ repo }} PR #{{ prId }} — Walkthrough</h1>
+    <span class="text-sm text-gray-500">{{ total ? `${currentIdx + 1} / ${total}` : '' }}</span>
+    <button @click="navigate(-1)" :disabled="currentIdx === 0"
+            class="bg-gray-800 hover:bg-gray-700 text-white px-3 py-1 rounded text-xs disabled:opacity-40">&larr; prev</button>
+    <button @click="navigate(1)" :disabled="currentIdx >= total - 1"
+            class="bg-gray-800 hover:bg-gray-700 text-white px-3 py-1 rounded text-xs disabled:opacity-40">next &rarr;</button>
 </header>
 
-<!-- COMMENT CARD -->
-<div class="card p-4" id="comment-card">
-  <div class="flex items-center gap-2 mb-2 text-xs">
-    <span id="badge-sev" class="badge"></span>
-    <span id="file-loc" class="text-gray-500"></span>
-    <span id="loading-indicator" class="ml-auto hidden"><span class="spinner"></span> <span class="text-gray-500 text-xs">thinking...</span></span>
-  </div>
-  <p id="comment-body" class="text-sm text-gray-200 leading-relaxed"></p>
-</div>
-
-<!-- EXPLANATION CARD -->
-<div class="explain-card p-4" id="explain-card">
-  <div class="text-xs text-blue-400 mb-1 font-semibold uppercase tracking-wide">Why this matters</div>
-  <p id="explanation" class="text-sm text-gray-300 leading-relaxed"></p>
-</div>
-
-<!-- CODE CARD -->
-<div class="code-card p-3" id="code-card">
-  <div class="text-xs text-gray-600 mb-2" id="code-file-label"></div>
-  <div id="code-lines" class="overflow-x-auto"></div>
-</div>
-
-<!-- DISCUSS TERMINAL (always visible, auto-starts) -->
-<div>
-  <div class="discuss-header rounded-t-md">
-    <span class="text-blue-400 text-xs">Discuss with Claude</span>
-    <div class="ml-auto flex gap-2">
-      <button onclick="toggleFullscreen()" class="text-gray-400 hover:text-white text-xs">fullscreen</button>
-      <button onclick="resetSession()" class="text-gray-400 hover:text-yellow-400 text-xs">reset</button>
+<div class="card p-4">
+    <div class="flex items-center gap-2 mb-2 text-xs">
+        <span v-if="comment" class="badge" :class="`badge-${comment.severity || 'suggestion'}`">{{ comment.severity || 'suggestion' }}</span>
+        <span v-if="fileLoc" class="text-gray-500">{{ fileLoc }}</span>
+        <span v-if="loading" class="ml-auto"><span class="spinner"></span> <span class="text-gray-500 text-xs">thinking...</span></span>
     </div>
-  </div>
-  <div class="discuss-panel rounded-t-none" id="discuss-panel">
-    <div class="discuss-term" id="discuss-term"></div>
-  </div>
+    <p class="text-sm text-gray-200 leading-relaxed">{{ comment ? (comment.body || '') : '' }}</p>
+</div>
+
+<div class="explain-card p-4">
+    <div class="text-xs text-blue-400 mb-1 font-semibold uppercase tracking-wide">Why this matters</div>
+    <p class="text-sm text-gray-300 leading-relaxed">{{ explanation || '(no explanation available)' }}</p>
+</div>
+
+<div v-if="snippets.length" class="code-card p-3">
+    <div class="overflow-x-auto" id="code-lines">
+        <div v-for="(s, si) in snippets" :key="si" class="snippet-block" style="margin-bottom: 16px;">
+            <div class="text-xs text-blue-400 mb-2 font-semibold uppercase">{{ s.role || 'code' }}</div>
+            <div v-if="s.explanation" class="text-xs text-gray-400 mb-2 italic">{{ s.explanation }}</div>
+            <div class="overflow-x-auto border border-gray-800 rounded" style="background: #0d1117;">
+                <div v-for="(ln, li) in parseSnippet(s)" :key="li" class="code-line"
+                     :class="{ 'target-line': ln.num === (comment && comment.line) }">
+                    <span class="code-line-num">{{ ln.num != null ? ln.num : '' }}</span>
+                    <span class="code-line-body" v-html="highlightLine(s, li)"></span>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div>
+    <div class="discuss-header rounded-t-md">
+        <span class="text-blue-400 text-xs">Discuss with Claude</span>
+        <div class="ml-auto flex gap-2">
+            <button @click="toggleFullscreen" class="text-gray-400 hover:text-white text-xs">fullscreen</button>
+            <button @click="resetSession" class="text-gray-400 hover:text-yellow-400 text-xs">reset</button>
+        </div>
+    </div>
+    <div class="discuss-panel rounded-t-none" id="discuss-panel">
+        <div ref="discussTerm" class="discuss-term"></div>
+    </div>
+</div>
+
 </div>
 
 <script>
-const pathParts = window.location.pathname.split('/');
-const repo = pathParts[2];
-const prId = parseInt(pathParts[3]);
-let currentIdx = parseInt(pathParts[5]) || 0;
-let totalComments = 0;
-let currentComment = null;
-let discussState = { term: null, ws: null, fit: null, ro: null, sessionId: null };
+const { createApp, ref, computed, onMounted, onUnmounted, watch } = Vue;
 
-const EXT_LANG = {py:'python',js:'javascript',ts:'typescript',tsx:'tsx',jsx:'jsx',java:'java',rb:'ruby',go:'go',rs:'rust',css:'css',html:'html',json:'json',yml:'yaml',yaml:'yaml',sh:'bash',sql:'sql',md:'markdown'};
+const PYTHON_INDICATORS = ['def ', 'class ', 'import ', 'from ', 'self.', '==', 'print(', 'return ', 'if ', 'for ', 'range(', '__'];
+const TS_INDICATORS = ['interface ', 'type ', 'async ', '=>', 'function ', 'const ', 'let ', 'var ', '===', 'console.log', 'this.'];
 
-function esc(s) {
-  const d = document.createElement('div');
-  d.textContent = s || '';
-  return d.innerHTML;
+function escHtml(s) {
+    const d = document.createElement('div');
+    d.textContent = s == null ? '' : String(s);
+    return d.innerHTML;
 }
 
-async function loadComment(idx) {
-  document.getElementById('loading-indicator').classList.remove('hidden');
-  document.getElementById('explanation').textContent = '';
-  document.getElementById('code-lines').innerHTML = '';
-
-  const resp = await fetch(`/api/reviews/${repo}/${prId}/walkthrough/${idx}`);
-  if (!resp.ok) {
-    document.getElementById('loading-indicator').classList.add('hidden');
-    document.getElementById('explanation').textContent = 'Error loading comment.';
-    return;
-  }
-  const data = await resp.json();
-  currentIdx = data.idx;
-  totalComments = data.total;
-  currentComment = data.comment;
-
-  history.replaceState(null, '', `/reviews/${repo}/${prId}/walkthrough/${currentIdx}`);
-
-  document.getElementById('title').textContent = `${repo} PR #${prId} — Walkthrough`;
-  document.getElementById('progress').textContent = `${currentIdx + 1} / ${totalComments}`;
-  document.getElementById('btn-prev').disabled = currentIdx === 0;
-  document.getElementById('btn-next').disabled = currentIdx === totalComments - 1;
-
-  const sev = data.comment.severity || 'suggestion';
-  const badgeEl = document.getElementById('badge-sev');
-  badgeEl.className = `badge badge-${sev}`;
-  badgeEl.textContent = sev;
-  document.getElementById('file-loc').textContent =
-    data.file ? `${data.file}${data.comment.line ? ':' + data.comment.line : ''}` : '';
-  document.getElementById('comment-body').textContent = data.comment.body || '';
-
-  document.getElementById('explanation').textContent = data.explanation || '(no explanation available)';
-
-  if (data.snippets && data.snippets.length > 0) {
-    renderSnippets(data.snippets, data.comment.line);
-  } else {
-    document.getElementById('code-card').style.display = 'none';
-  }
-
-  document.getElementById('loading-indicator').classList.add('hidden');
-  startDiscussSession();
+function detectLang(code) {
+    const py = PYTHON_INDICATORS.filter(p => code.includes(p)).length;
+    const ts = TS_INDICATORS.filter(t => code.includes(t)).length;
+    return py > ts ? 'python' : (ts > 0 ? 'typescript' : 'python');
 }
 
-function renderSnippets(snippets, targetLine) {
-  const container = document.getElementById('code-card');
-  container.style.display = '';
-
-  let html = '';
-  for (const snippet of snippets) {
-    const role = snippet.role || 'code';
-    const code = snippet.code || '';
-    const startLine = snippet.start_line || 0;
-    const snippetExplanation = snippet.explanation || '';
-
-    html += `<div class="snippet-block" style="margin-bottom: 16px;">`;
-    html += `<div class="text-xs text-blue-400 mb-2 font-semibold uppercase" style="font-style: normal;">${esc(role)}</div>`;
-    if (snippetExplanation) {
-      html += `<div class="text-xs text-gray-400 mb-2 italic">${esc(snippetExplanation)}</div>`;
-    }
-
-    const rawLines = code.split('\n');
-    const parsed = rawLines.map(raw => {
-      const m = raw.match(/^(\d+): (.*)$/);
-      if (m) return { num: parseInt(m[1]), text: m[2] };
-      return { num: null, text: raw };
+function parseSnippetLines(code) {
+    return (code || '').split('\n').map(raw => {
+        const m = raw.match(/^(\d+): (.*)$/);
+        if (m) return { num: parseInt(m[1]), text: m[2] };
+        return { num: null, text: raw };
     });
-
-    // Detect language: check for Python first, then TypeScript/JS, else default to Python
-    let lang = null;
-    const pythonIndicators = ['def ', 'class ', 'import ', 'from ', 'self.', '==', 'print(', 'return ', 'if ', 'for ', 'range(', '__'];
-    const tsIndicators = ['interface ', 'type ', 'async ', '=>', 'function ', 'const ', 'let ', 'var ', '===', 'console.log', 'this.'];
-    const pythonScore = pythonIndicators.filter(p => code.includes(p)).length;
-    const tsScore = tsIndicators.filter(t => code.includes(t)).length;
-    lang = pythonScore > tsScore ? 'python' : (tsScore > 0 ? 'typescript' : 'python');
-
-    let highlighted = null;
-    if (lang) {
-      try {
-        const codeText = parsed.map(l => l.text).join('\n');
-        highlighted = hljs.highlight(codeText, { language: lang, ignoreIllegals: true }).value.split('\n');
-      } catch (e) {}
-    }
-
-    const linesHtml = parsed.map((line, i) => {
-      const isTarget = line.num === targetLine;
-      const content = highlighted ? highlighted[i] : esc(line.text);
-      return `<div class="code-line${isTarget ? ' target-line' : ''}">
-        <span class="code-line-num">${line.num ?? ''}</span>
-        <span class="code-line-body">${content}</span>
-      </div>`;
-    }).join('');
-
-    html += `<div class="overflow-x-auto border border-gray-800 rounded" style="background: #0d1117;">${linesHtml}</div>`;
-    html += `</div>`;
-  }
-
-  const codeCard = document.getElementById('code-card');
-  codeCard.style.display = '';
-  const codeLines = document.getElementById('code-lines');
-  codeLines.innerHTML = html;
-  document.getElementById('code-file-label').style.display = 'none';
 }
 
-async function startDiscussSession() {
-  teardownDiscuss();
+createApp({
+    setup() {
+        const pathParts = window.location.pathname.split('/');
+        const repo = pathParts[2];
+        const prId = parseInt(pathParts[3]);
 
-  const c = currentComment;
-  if (!c) return;
+        const currentIdx = ref(parseInt(pathParts[5]) || 0);
+        const total = ref(0);
+        const comment = ref(null);
+        const explanation = ref('');
+        const snippets = ref([]);
+        const loading = ref(false);
 
-  const resp = await fetch(`/api/reviews/${repo}/${prId}/discuss`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      idx: currentIdx,
-      file: c.path || '',
-      line: c.line || '',
-      severity: c.severity || '',
-      body: c.body || '',
-    }),
-  });
-  const data = await resp.json();
-  discussState.sessionId = data.session_id;
-  connectDiscussTerminal(data.session_id);
-}
+        const discussTerm = ref(null);
+        let discussState = { term: null, ws: null, fit: null, ro: null, sessionId: null };
+        let escListener = null;
 
-function connectDiscussTerminal(sessionId) {
-  const container = document.getElementById('discuss-term');
-  const term = new Terminal({
-    cursorBlink: true,
-    fontSize: 13,
-    fontFamily: "'JetBrains Mono','Fira Code','Cascadia Code',Menlo,monospace",
-    theme: { background: '#0a0a0f', foreground: '#e2e8f0', cursor: '#e2e8f0', selectionBackground: '#334155' },
-  });
-  const fit = new FitAddon.FitAddon();
-  term.loadAddon(fit);
-  term.loadAddon(new WebLinksAddon.WebLinksAddon());
-  term.open(container);
-  fit.fit();
+        const fileLoc = computed(() => {
+            if (!comment.value) return '';
+            const c = comment.value;
+            if (!c.path) return '';
+            return `${c.path}${c.line ? ':' + c.line : ''}`;
+        });
 
-  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const ws = new WebSocket(`${protocol}//${location.host}/ws/discuss/${sessionId}`);
-  ws.binaryType = 'arraybuffer';
-  ws.onopen = () => {
-    fit.fit();
-    ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-  };
-  ws.onmessage = (e) => {
-    const d = e.data instanceof ArrayBuffer ? new Uint8Array(e.data) : e.data;
-    term.write(d);
-  };
-  ws.onclose = () => { try { term.write('\r\n\x1b[90m[disconnected]\x1b[0m\r\n'); } catch (e) {} };
-  term.onData((d) => { if (ws.readyState === WebSocket.OPEN) ws.send(d); });
-
-  const ro = new ResizeObserver(() => {
-    try {
-      fit.fit();
-      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
-    } catch (e) {}
-  });
-  ro.observe(container);
-
-  Object.assign(discussState, { term, ws, fit, ro });
-}
-
-function teardownDiscuss() {
-  try { discussState.ro && discussState.ro.disconnect(); } catch (e) {}
-  try { discussState.ws && discussState.ws.close(); } catch (e) {}
-  try { discussState.term && discussState.term.dispose(); } catch (e) {}
-  document.getElementById('discuss-term').innerHTML = '';
-  Object.assign(discussState, { term: null, ws: null, fit: null, ro: null, sessionId: null });
-}
-
-function navigate(delta) {
-  const next = currentIdx + delta;
-  if (next < 0 || next >= totalComments) return;
-  loadComment(next);
-}
-
-function toggleFullscreen() {
-  const panel = document.getElementById('discuss-panel');
-  panel.classList.toggle('fullscreen-term');
-  setTimeout(() => {
-    try {
-      if (discussState.fit) {
-        discussState.fit.fit();
-        if (discussState.ws && discussState.ws.readyState === WebSocket.OPEN) {
-          discussState.ws.send(JSON.stringify({ type: 'resize', cols: discussState.term.cols, rows: discussState.term.rows }));
+        function parseSnippet(s) {
+            return parseSnippetLines(s.code);
         }
-      }
-    } catch (e) {}
-  }, 50);
-}
 
-function resetSession() {
-  startDiscussSession();
-}
+        function highlightLine(s, lineIdx) {
+            const lines = parseSnippetLines(s.code);
+            const lang = detectLang(s.code || '');
+            try {
+                const codeText = lines.map(l => l.text).join('\n');
+                const result = hljs.highlight(codeText, { language: lang, ignoreIllegals: true });
+                return result.value.split('\n')[lineIdx] || escHtml(lines[lineIdx]?.text || '');
+            } catch (e) {
+                return escHtml(lines[lineIdx]?.text || '');
+            }
+        }
 
-document.addEventListener('keydown', (e) => {
-  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
-  if (e.key === 'ArrowLeft' || e.key === 'h') navigate(-1);
-  if (e.key === 'ArrowRight' || e.key === 'l') navigate(1);
-});
+        async function loadComment(idx) {
+            loading.value = true;
+            explanation.value = '';
+            snippets.value = [];
+            const resp = await fetch(`/api/reviews/${repo}/${prId}/walkthrough/${idx}`);
+            if (!resp.ok) {
+                loading.value = false;
+                explanation.value = 'Error loading comment.';
+                return;
+            }
+            const data = await resp.json();
+            currentIdx.value = data.idx;
+            total.value = data.total;
+            comment.value = data.comment;
+            explanation.value = data.explanation || '';
+            snippets.value = data.snippets || [];
+            history.replaceState(null, '', `/reviews/${repo}/${prId}/walkthrough/${currentIdx.value}`);
+            loading.value = false;
+            startDiscussSession();
+        }
 
-loadComment(currentIdx);
+        async function startDiscussSession() {
+            teardownDiscuss();
+            const c = comment.value;
+            if (!c) return;
+            const resp = await fetch(`/api/reviews/${repo}/${prId}/discuss`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    idx: currentIdx.value, file: c.path || '', line: c.line || '',
+                    severity: c.severity || '', body: c.body || '',
+                }),
+            });
+            const data = await resp.json();
+            discussState.sessionId = data.session_id;
+            connectDiscussTerminal(data.session_id);
+        }
+
+        function connectDiscussTerminal(sessionId) {
+            const container = discussTerm.value;
+            if (!container) return;
+            const term = new Terminal({
+                cursorBlink: true, fontSize: 13,
+                fontFamily: "'JetBrains Mono','Fira Code','Cascadia Code',Menlo,monospace",
+                theme: { background: '#0a0a0f', foreground: '#e2e8f0', cursor: '#e2e8f0', selectionBackground: '#334155' },
+            });
+            const fit = new FitAddon.FitAddon();
+            term.loadAddon(fit);
+            term.loadAddon(new WebLinksAddon.WebLinksAddon());
+            term.open(container);
+            fit.fit();
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const ws = new WebSocket(`${protocol}//${location.host}/ws/discuss/${sessionId}`);
+            ws.binaryType = 'arraybuffer';
+            ws.onopen = () => {
+                fit.fit();
+                ws.send(JSON.stringify({type: 'resize', cols: term.cols, rows: term.rows}));
+            };
+            ws.onmessage = (e) => {
+                const d = e.data instanceof ArrayBuffer ? new Uint8Array(e.data) : e.data;
+                term.write(d);
+            };
+            ws.onclose = () => { try { term.write('\r\n\x1b[90m[disconnected]\x1b[0m\r\n'); } catch (e) {} };
+            term.onData((d) => { if (ws.readyState === WebSocket.OPEN) ws.send(d); });
+            const ro = new ResizeObserver(() => {
+                try {
+                    fit.fit();
+                    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({type: 'resize', cols: term.cols, rows: term.rows}));
+                } catch (e) {}
+            });
+            ro.observe(container);
+            Object.assign(discussState, { term, ws, fit, ro });
+        }
+
+        function teardownDiscuss() {
+            try { discussState.ro && discussState.ro.disconnect(); } catch (e) {}
+            try { discussState.ws && discussState.ws.close(); } catch (e) {}
+            try { discussState.term && discussState.term.dispose(); } catch (e) {}
+            if (discussTerm.value) discussTerm.value.innerHTML = '';
+            discussState = { term: null, ws: null, fit: null, ro: null, sessionId: null };
+        }
+
+        function navigate(delta) {
+            const next = currentIdx.value + delta;
+            if (next < 0 || next >= total.value) return;
+            loadComment(next);
+        }
+
+        function toggleFullscreen() {
+            const panel = document.getElementById('discuss-panel');
+            if (!panel) return;
+            panel.classList.toggle('fullscreen-term');
+            setTimeout(() => {
+                try {
+                    if (discussState.fit) {
+                        discussState.fit.fit();
+                        if (discussState.ws && discussState.ws.readyState === WebSocket.OPEN) {
+                            discussState.ws.send(JSON.stringify({type: 'resize', cols: discussState.term.cols, rows: discussState.term.rows}));
+                        }
+                    }
+                } catch (e) {}
+            }, 50);
+        }
+
+        function resetSession() { startDiscussSession(); }
+
+        onMounted(() => {
+            loadComment(currentIdx.value);
+            escListener = (e) => {
+                if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+                if (e.key === 'ArrowLeft' || e.key === 'h') navigate(-1);
+                if (e.key === 'ArrowRight' || e.key === 'l') navigate(1);
+            };
+            document.addEventListener('keydown', escListener);
+        });
+
+        onUnmounted(() => {
+            teardownDiscuss();
+            if (escListener) document.removeEventListener('keydown', escListener);
+        });
+
+        return {
+            repo, prId, currentIdx, total, comment, explanation, snippets, loading,
+            fileLoc, discussTerm,
+            parseSnippet, highlightLine,
+            navigate, toggleFullscreen, resetSession,
+        };
+    },
+}).mount('#app');
 </script>
 </body>
 </html>
