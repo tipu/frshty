@@ -5,7 +5,7 @@
 <meta charset="utf-8">
 <title>Timesheet — frshty</title>
 <script src="/static/tailwind.js"></script>
-<script defer src="/static/nav-gate.js"></script>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <style>
 body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: #0a0a0a; color: #e0e0e0; }
 .card { background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; }
@@ -28,11 +28,18 @@ button { cursor: pointer; }
 .msg { padding: 6px 12px; border-radius: 4px; font-size: 12px; margin-bottom: 8px; display: inline-block; }
 .msg-ok { background: #14532d; color: #86efac; }
 .msg-err { background: #7f1d1d; color: #fca5a5; }
+[v-cloak] { display: none; }
 </style>
 </head>
 <body class="p-4 max-w-7xl mx-auto">
+
+<div id="app" v-cloak>
+
 <header class="flex items-center gap-4 mb-4">
-    <div class="flex items-center gap-2"><h1 class="text-lg font-bold">Timesheet</h1><span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700" id="instance-badge"></span></div>
+    <div class="flex items-center gap-2">
+        <h1 class="text-lg font-bold">Timesheet</h1>
+        <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700">{{ instanceName }}</span>
+    </div>
     <nav class="flex gap-1 text-sm">
         <a href="/">Feed</a>
         <a href="/global">Global</a>
@@ -40,30 +47,35 @@ button { cursor: pointer; }
         <a href="/tickets">Tickets</a>
         <a href="/scheduled">Scheduled</a>
         <a href="/slack">Slack</a>
-        <a href="/timesheet" class="active">Timesheet</a>
-        <a href="/billing">Billing</a>
+        <a v-if="features.timesheet !== false" href="/timesheet" class="active">Timesheet</a>
+        <a v-if="features.billing !== false" href="/billing">Billing</a>
         <a href="/config">Config</a>
     </nav>
 </header>
 
 <div class="flex items-center gap-3 mb-4">
-    <input type="date" id="start" />
+    <input type="date" v-model="startDate" />
     <span class="text-gray-500">→</span>
-    <input type="date" id="end" />
-    <button id="refresh-btn" class="btn" onclick="generate(event.shiftKey)">Refresh</button>
-    <button class="btn text-gray-400" onclick="prevRange()">← Prev</button>
-    <button class="btn text-gray-400" onclick="nextRange()">Next →</button>
-    <span id="hint" class="hidden text-xs text-gray-500 animate-pulse">updating...</span>
-    <div id="msg"></div>
+    <input type="date" v-model="endDate" />
+    <button class="btn" :disabled="loading" :class="{ 'opacity-50': loading }" @click="generate($event.shiftKey)">Refresh</button>
+    <button class="btn text-gray-400" @click="prevRange">← Prev</button>
+    <button class="btn text-gray-400" @click="nextRange">Next →</button>
+    <span v-if="hint" class="text-xs text-gray-500 animate-pulse">updating...</span>
+    <span v-if="msg" class="msg" :class="msgKind === 'err' ? 'msg-err' : 'msg-ok'">{{ msg }}</span>
 </div>
 
 <div class="flex gap-4">
-    <div id="hover-panel" class="w-52 flex-shrink-0 sticky top-4 self-start">
+    <div class="w-52 flex-shrink-0 sticky top-4 self-start">
         <div class="card p-3 mb-3">
             <span class="text-gray-400 text-sm">Total to log:</span>
-            <span id="total-hours" class="text-xl font-bold text-green-400 ml-1">0h</span>
+            <span class="text-xl font-bold text-green-400 ml-1">{{ Math.round(totalSuggest * 10) / 10 }}h</span>
         </div>
-        <div id="hover-detail"></div>
+        <div v-if="hoverTicket" class="card border-l-2 border-blue-500 px-2.5 py-2">
+            <a :href="hoverTicket.url || '#'" target="_blank" class="font-mono text-xs text-blue-400 hover:underline">{{ hoverTicket.key }}</a>
+            <div class="text-xs text-gray-300 mt-0.5 leading-snug">{{ hoverTicket.summary }}</div>
+            <div class="text-xs text-gray-400 mt-1">{{ hoverTicket.hoursLogged || 0 }}h<template v-if="hoverTicket.hoursEstimated"> / {{ hoverTicket.hoursEstimated }}h</template></div>
+            <div class="text-xs text-gray-500 mt-0.5">{{ hoverTicket.status || '' }}</div>
+        </div>
     </div>
 
     <div class="flex-1 min-w-0 card overflow-x-auto">
@@ -75,16 +87,126 @@ button { cursor: pointer; }
                     <th>Activity</th>
                 </tr>
             </thead>
-            <tbody id="tbody"></tbody>
-            <tfoot id="tfoot"></tfoot>
+            <tbody>
+                <tr v-for="row in rows" :key="row.ds" class="border-b border-gray-800/50" :class="row.rowClass">
+                    <td class="font-mono text-xs whitespace-nowrap">
+                        {{ row.ds }}
+                        <span v-if="!row.weekend" class="text-gray-600 hover:text-gray-300 cursor-pointer inline-block"
+                              :class="{ 'animate-spin': row.refreshing }" @click="refreshDay(row.ds)">↻</span>
+                    </td>
+                    <td class="whitespace-nowrap">
+                        <template v-if="row.weekend">—</template>
+                        <template v-else-if="row.workLogs.length">
+                            <template v-for="(w, i) in row.workLogs" :key="w.worklog_id || i">
+                                <br v-if="i > 0" />
+                                <span class="text-green-400">✓</span> {{ w.hours }}h <span class="text-gray-500 text-xs">{{ w.ticket }}</span>
+                            </template>
+                        </template>
+                        <template v-else-if="row.suggestSummary">
+                            <span class="text-red-400">✗</span> <span :class="row.suggestColor" class="font-semibold text-xs">{{ row.suggestSummary }}</span>
+                        </template>
+                        <template v-else><span class="text-red-400">✗</span></template>
+                    </td>
+                    <td class="text-xs leading-relaxed">
+                        <div v-for="item in row.activityItems" :key="item.tid + ':' + (item.kind || '')"
+                             class="flex items-center gap-1 mb-0.5"
+                             @mouseenter="hoverTicket = ticketByKey[item.tid]">
+                            <span v-if="ticketByKey[item.tid]?.url">
+                                <a :href="ticketByKey[item.tid].url" target="_blank" class="text-blue-400 font-mono hover:underline">{{ item.tid }}</a>
+                                <span v-if="ticketByKey[item.tid]?.assignee_id === data.userAccountId" class="text-xs text-gray-500"> (mine)</span>
+                            </span>
+                            <span v-else class="text-blue-400 font-mono">{{ item.tid }}</span>
+                            <span v-if="item.tag" class="text-xs px-1 rounded" :class="item.tagClass">{{ item.tag }}</span>
+                            <span class="text-gray-500 flex-1">{{ item.titleText }}<span v-if="item.activity" class="text-gray-600">{{ item.activitySep }}{{ item.activity }}</span></span>
+                            <template v-if="item.recurringLogged">
+                                <span class="text-xs text-green-400 ml-2">✓ {{ item.recurringTime }} (auto)</span>
+                            </template>
+                            <template v-else-if="item.existingLog">
+                                <span v-if="!editingWl[`${row.ds}-${item.existingLog.worklog_id || ''}`]"
+                                      class="text-xs text-green-400 ml-2">
+                                    ✓ {{ item.existingLog.hours }}h
+                                    <span class="text-gray-600 hover:text-gray-300 cursor-pointer"
+                                          @click="startEdit(row.ds, item.existingLog.worklog_id, item.existingLog.hours)">✎</span>
+                                </span>
+                                <span v-else class="ml-2">
+                                    <input class="w-14 text-xs" v-model="editDrafts[`${row.ds}-${item.existingLog.worklog_id || ''}`]" />
+                                    <button class="btn-purple text-xs px-1 ml-1"
+                                            @click="saveWl(row.ds, item.existingLog.worklog_id, item.tid, item.existingLog.hours)">save</button>
+                                    <button class="text-xs text-gray-500 hover:text-gray-300 ml-1"
+                                            @click="cancelEdit(row.ds, item.existingLog.worklog_id)">✕</button>
+                                </span>
+                            </template>
+                            <template v-else>
+                                <input class="w-14 text-xs ml-2" v-model="logDrafts[`${row.ds}-${item.tid}`]"
+                                       :placeholder="item.placeholderHours" />
+                                <button class="btn-purple text-xs px-1 ml-1"
+                                        @click="logTime(row.ds, item.tid, item.placeholderHours)">log</button>
+                            </template>
+                        </div>
+                        <template v-if="row.unmatchedWorklogs.length">
+                            <div v-for="w in row.unmatchedWorklogs" :key="(w.worklog_id || '') + ':' + w.ticket"
+                                 class="flex items-center gap-1 mb-0.5"
+                                 @mouseenter="hoverTicket = ticketByKey[w.ticket]">
+                                <span v-if="ticketByKey[w.ticket]?.url">
+                                    <a :href="ticketByKey[w.ticket].url" target="_blank" class="text-blue-400 font-mono hover:underline">{{ w.ticket }}</a>
+                                </span>
+                                <span v-else class="text-blue-400 font-mono">{{ w.ticket }}</span>
+                                <span class="text-gray-300 flex-1"></span>
+                                <span v-if="!editingWl[`${row.ds}-${w.worklog_id || ''}`]"
+                                      class="text-xs text-green-400 ml-2">
+                                    ✓ {{ w.hours }}h
+                                    <span class="text-gray-600 hover:text-gray-300 cursor-pointer"
+                                          @click="startEdit(row.ds, w.worklog_id, w.hours)">✎</span>
+                                </span>
+                                <span v-else class="ml-2">
+                                    <input class="w-14 text-xs" v-model="editDrafts[`${row.ds}-${w.worklog_id || ''}`]" />
+                                    <button class="btn-purple text-xs px-1 ml-1"
+                                            @click="saveWl(row.ds, w.worklog_id, w.ticket, w.hours)">save</button>
+                                    <button class="text-xs text-gray-500 hover:text-gray-300 ml-1"
+                                            @click="cancelEdit(row.ds, w.worklog_id)">✕</button>
+                                </span>
+                            </div>
+                        </template>
+                        <div v-if="row.generalSummary" class="flex items-center gap-1 mb-0.5">
+                            <span class="text-gray-400 font-mono">misc</span>
+                            <span class="text-gray-300">{{ row.generalSummary }}</span>
+                        </div>
+                        <template v-if="!row.weekend">
+                            <div v-if="addRowOpen[row.ds]" class="mt-1 flex items-center gap-1">
+                                <select class="text-xs" v-model="addDrafts[row.ds + ':ticket']">
+                                    <option value="">ticket</option>
+                                    <option v-for="t in (data.tickets || [])" :key="t.key" :value="t.key">{{ t.key }}</option>
+                                </select>
+                                <input class="w-14 text-xs" placeholder="8h" v-model="addDrafts[row.ds + ':time']" />
+                                <button class="btn-purple text-xs px-1 ml-1"
+                                        @click="logTimeManual(row.ds)">log</button>
+                            </div>
+                            <a href="#" class="text-xs text-gray-500 hover:text-gray-300 mt-1 inline-block"
+                               @click.prevent="addRowOpen[row.ds] = !addRowOpen[row.ds]">+ add</a>
+                        </template>
+                        <span v-if="!row.activityItems.length && !row.unmatchedWorklogs.length && !row.generalSummary && row.weekend">—</span>
+                    </td>
+                </tr>
+            </tbody>
+            <tfoot>
+                <tr class="total-row">
+                    <td colspan="2" class="text-right">Logged: <span class="text-green-400">{{ Math.round(totalLogged * 10) / 10 }}h</span></td>
+                    <td>Suggested: <span class="text-orange-400">{{ Math.round(totalSuggest * 10) / 10 }}h</span></td>
+                </tr>
+            </tfoot>
         </table>
     </div>
 </div>
 
-<script>
-let data = {};
-let lastData = null;
+</div>
 
+<script>
+const { createApp, ref, reactive, computed, watch, onMounted } = Vue;
+
+function iso(d) {
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+}
+function parseDate(s) { const [y, m, d] = s.split('-').map(Number); return new Date(y, m - 1, d); }
 function getTwoMonthRange(offset = 0) {
     const now = new Date();
     const end = new Date(now);
@@ -93,396 +215,365 @@ function getTwoMonthRange(offset = 0) {
     start.setMonth(start.getMonth() - 2);
     return { start: iso(start), end: iso(end) };
 }
-
-let rangeOffset = 0;
-function prevRange() { rangeOffset--; const r = getTwoMonthRange(rangeOffset); setDates(r.start, r.end); generate(false); }
-function nextRange() { rangeOffset++; const r = getTwoMonthRange(rangeOffset); setDates(r.start, r.end); generate(false); }
-
-function iso(d) { return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0'); }
-function parseDate(s) { const [y,m,d] = s.split('-').map(Number); return new Date(y, m-1, d); }
-
-function setDates(s, e) {
-    document.getElementById('start').value = s;
-    document.getElementById('end').value = e;
+function parseTimeToHours(s) {
+    const m = (s || '').match(/^(?:(\d+(?:\.\d+)?)\s*h)?\s*(?:(\d+(?:\.\d+)?)\s*m)?$/);
+    if (!m || (!m[1] && !m[2])) return 0;
+    return parseFloat(m[1] || 0) + parseFloat(m[2] || 0) / 60;
 }
 
-function cacheWrite(cacheData) {
-    try { localStorage.setItem('ts_cache', JSON.stringify(cacheData)); } catch (_) {}
-}
+createApp({
+    setup() {
+        const initial = getTwoMonthRange(0);
+        const data = ref({});
+        const features = ref({});
+        const instanceName = ref('');
+        const startDate = ref(initial.start);
+        const endDate = ref(initial.end);
+        const rangeOffset = ref(0);
+        const loading = ref(false);
+        const hint = ref(false);
+        const msg = ref('');
+        const msgKind = ref('ok');
+        const editingWl = reactive({});
+        const editDrafts = reactive({});
+        const logDrafts = reactive({});
+        const addRowOpen = reactive({});
+        const addDrafts = reactive({});
+        const hoverTicket = ref(null);
+        const refreshingDays = reactive({});
+        let msgTimer = null;
 
-function cacheRead(start, end) {
-    try {
-        const raw = localStorage.getItem('ts_cache');
-        if (raw) {
-            const parsed = JSON.parse(raw);
-            if (parsed.start === start && parsed.end === end) return parsed.data;
+        const ticketByKey = computed(() => {
+            const out = {};
+            for (const t of (data.value.tickets || [])) out[t.key] = t;
+            return out;
+        });
+
+        function cacheWrite(payload) {
+            try { localStorage.setItem('ts_cache', JSON.stringify(payload)); } catch (_) {}
         }
-    } catch (_) {}
-    return null;
-}
-
-let _loading = false;
-async function generate(hardRefresh) {
-    if (_loading) return;
-    _loading = true;
-    const btn = document.getElementById('refresh-btn');
-    if (btn) { btn.disabled = true; btn.classList.add('opacity-50'); }
-
-    const start = document.getElementById('start').value;
-    const end = document.getElementById('end').value;
-    const hint = document.getElementById('hint');
-
-    if (hardRefresh) localStorage.removeItem('ts_cache');
-
-    let showedCache = false;
-    const cached = cacheRead(start, end);
-    if (cached && !hardRefresh) {
-        data = cached;
-        render();
-        showedCache = true;
-    }
-
-    if (showedCache) hint.classList.remove('hidden');
-
-    const forceParam = hardRefresh ? '&force=true' : '';
-    try {
-        const resp = await fetch(`/api/timesheet?start=${start}&end=${end}${forceParam}`);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        data = await resp.json();
-        cacheWrite({start, end, data});
-        render();
-    } catch (e) {
-        if (!showedCache) showMsg('Failed: ' + e.message, true);
-    }
-    hint.classList.add('hidden');
-    _loading = false;
-    if (btn) { btn.disabled = false; btn.classList.remove('opacity-50'); }
-}
-
-async function refreshDay(ds) {
-    const btn = document.getElementById(`refresh-${ds}`);
-    if (btn) { btn.classList.add('animate-spin'); btn.disabled = true; }
-    try {
-        const resp = await fetch(`/api/timesheet?start=${ds}&end=${ds}&force=true`);
-        if (!resp.ok) return;
-        const dayData = await resp.json();
-        if (data) {
-            for (const key of ['worklogs', 'gitCommits', 'prReviews', 'claudeSessions']) {
-                if (dayData[key] && dayData[key][ds]) data[key][ds] = dayData[key][ds];
-                else if (data[key]) delete data[key][ds];
-            }
-            if (dayData.dailySummaries && dayData.dailySummaries[ds]) {
-                if (!data.dailySummaries) data.dailySummaries = {};
-                data.dailySummaries[ds] = dayData.dailySummaries[ds];
-            }
-            localStorage.removeItem('ts_cache');
-            render();
-        }
-    } catch (_) {}
-    const b = document.getElementById(`refresh-${ds}`);
-    if (b) { b.classList.remove('animate-spin'); b.disabled = false; }
-}
-
-function render() {
-    lastData = data;
-    const tbody = document.getElementById('tbody');
-    const tfoot = document.getElementById('tfoot');
-    if (!data.startDate) return;
-
-    const startDate = parseDate(data.startDate);
-    const endDate = parseDate(data.endDate);
-    const summaries = data.dailySummaries || {};
-    const ticketOptions = (data.tickets || []).map(t => `<option value="${t.key}">${t.key}</option>`).join('');
-    let totalSuggest = 0;
-
-    let rows = '';
-    for (let d = new Date(endDate); d >= startDate; d.setDate(d.getDate() - 1)) {
-        const ds = iso(d);
-        const dayName = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d.getDay()];
-        const wknd = d.getDay() === 0 || d.getDay() === 6;
-
-        const wl = (data.worklogs || {})[ds] || [];
-        const commits = (data.gitCommits || {})[ds] || [];
-        const reviews = (data.prReviews || {})[ds] || [];
-        const claude = (data.claudeSessions || {})[ds] || [];
-        const daySummary = summaries[ds] || {};
-        const dayRecurring = ((data.recurring || {})[ds] || []);
-
-        const hasActivity = commits.length > 0 || reviews.length > 0 || claude.length > 0 || Object.keys(daySummary).length > 0;
-
-        let rowClass = '';
-        let loggedHtml = '';
-        let activityHtml = '';
-
-        if (wknd) {
-            rowClass = 'weekend';
-            loggedHtml = '—';
-        } else if (wl.length > 0) {
-            const dayTotal = wl.reduce((s, w) => s + (w.hours || 0), 0);
-            rowClass = dayTotal < 6 ? 'logged-partial' : 'logged';
-            loggedHtml = wl.map(w => {
-                const wid = w.worklog_id || '';
-                return `<span class="text-green-400">✓</span> ${w.hours}h <span class="text-gray-500 text-xs">${w.ticket}</span>`;
-            }).join('<br>');
-        } else if (hasActivity) {
-            rowClass = 'missing';
-        } else if (!wknd) {
-            loggedHtml = '<span class="text-red-400">✗</span>';
-        }
-
-        let ticketKeys = Object.keys(daySummary).filter(t => t !== 'general');
-        const generalSummary = daySummary['general'];
-
-        const commitTickets = new Set();
-        commits.forEach(c => { const m = (c.branch||c.message||'').match(/\b([A-Z]+-\d{2,})\b/); if (m) commitTickets.add(m[1]); });
-        const reviewTickets = new Map();
-        reviews.forEach(r => { const m = (r.branch||'').match(/\b([A-Z]+-\d{2,})\b/); if (m) { const tid = m[1]; const prev = reviewTickets.get(tid); reviewTickets.set(tid, { repos: new Set([...(prev?.repos || []), r.repo]), minutes: Math.max(prev?.minutes || 0, r.review_minutes || 30) }); } });
-        const claudeTickets = new Set();
-        claude.forEach(s => { const src = (s.cwd||'') + ' ' + (s.prompt||''); const m = src.match(/\b([A-Z]+-\d{2,})\b/i); if (m) claudeTickets.add(m[1].toUpperCase()); });
-
-        if (ticketKeys.length === 0 && hasActivity) {
-            const inferred = new Set([...commitTickets, ...reviewTickets.keys(), ...claudeTickets]);
-            dayRecurring.forEach(r => inferred.add(r.ticket));
-            ticketKeys = [...inferred];
-        }
-        ticketKeys = [...new Set(ticketKeys)];
-
-        const devTicketCount = ticketKeys.filter(t => (commitTickets.has(t) || claudeTickets.has(t)) && !dayRecurring.find(r => r.ticket === t)).length;
-        const perDevH = devTicketCount > 0 ? Math.round(8 / devTicketCount * 10) / 10 : 8;
-
-        if (ticketKeys.length > 0 || generalSummary) {
-            activityHtml = ticketKeys.map(tid => {
-                const isCommit = commitTickets.has(tid);
-                const isClaude = claudeTickets.has(tid);
-                const isDev = isCommit || isClaude;
-                const reviewInfo = reviewTickets.get(tid);
-                const isReview = !!reviewInfo;
-                const reviewRepos = isReview ? [...reviewInfo.repos].join(', ') : '';
-                const sources = [];
-                if (isCommit) sources.push('commit');
-                if (isClaude) sources.push('claude');
-                if (isReview) sources.push(`review · ${reviewRepos}`);
-                const tag = sources.length ? `<span class="text-xs ${isReview && !isDev ? 'text-purple-400 bg-purple-900/50' : isDev && isReview ? 'text-blue-400 bg-blue-900/50' : 'text-green-400 bg-green-900/50'} px-1 rounded">${esc(sources.join(', '))}</span>` : '';
-                const recurMatch = dayRecurring.find(r => r.ticket === tid);
-                let ph;
-                if (recurMatch) { ph = recurMatch.time; }
-                else if (isDev) { ph = `${perDevH}h`; }
-                else if (isReview) { ph = `${reviewInfo.minutes}m`; }
-                else { ph = '30m'; }
-                const existingLog = wl.find(w => w.ticket === tid);
-                const wid = existingLog ? (existingLog.worklog_id || '') : '';
-                let trailingHtml;
-                if (recurMatch && recurMatch.logged) {
-                    trailingHtml = `<span class="text-xs text-green-400 ml-2">✓ ${recurMatch.time} (auto)</span>`;
-                } else if (existingLog) {
-                    trailingHtml =
-                        `<span class="wl-display-${ds}-${wid} text-xs text-green-400 ml-2">✓ ${existingLog.hours}h <span class="text-gray-600 hover:text-gray-300 cursor-pointer" onclick="editWl('${ds}','${wid}','${tid}','${existingLog.hours}')">✎</span></span>` +
-                        `<span class="wl-edit-${ds}-${wid} hidden ml-2"><input class="w-14 text-xs" value="${existingLog.hours}h" data-ticket="${tid}" data-worklog-id="${wid}">` +
-                        `<button onclick="saveWl(this,'${ds}','${wid}','${tid}')" class="btn-purple text-xs px-1 ml-1">save</button>` +
-                        `<button onclick="cancelEditWl('${ds}','${wid}')" class="text-xs text-gray-500 hover:text-gray-300 ml-1">✕</button></span>`;
-                } else {
-                    trailingHtml =
-                        `<input class="log-input w-14 text-xs ml-2" value="${ph}" data-ticket="${tid}" data-date="${ds}">` +
-                        `<button onclick="logTime(this)" class="btn-purple text-xs px-1 ml-1">log</button>`;
+        function cacheRead(s, e) {
+            try {
+                const raw = localStorage.getItem('ts_cache');
+                if (raw) {
+                    const parsed = JSON.parse(raw);
+                    if (parsed.start === s && parsed.end === e) return parsed.data;
                 }
-                const ticketInfo = (data.tickets || []).find(t => t.key === tid) || {};
-                const title = ticketInfo.summary || '';
-                const activity = daySummary[tid] || '';
-                return `<div class="flex items-center gap-1 mb-0.5" data-hover-ticket="${tid}">${ticketLink(tid)} ${tag} <span class="text-gray-500 flex-1">${esc(title)}${activity && title ? ` <span class="text-gray-600">— ${esc(activity)}</span>` : activity ? esc(activity) : ''}</span>${trailingHtml}</div>`;
-            }).join('');
+            } catch (_) {}
+            return null;
+        }
 
-            wl.filter(w => !ticketKeys.includes(w.ticket)).forEach(w => {
-                const wid = w.worklog_id || '';
-                activityHtml +=
-                    `<div class="flex items-center gap-1 mb-0.5" data-hover-ticket="${w.ticket}">${ticketLink(w.ticket)} ` +
-                    `<span class="text-gray-300 flex-1"></span>` +
-                    `<span class="wl-display-${ds}-${wid} text-xs text-green-400 ml-2">✓ ${w.hours}h <span class="text-gray-600 hover:text-gray-300 cursor-pointer" onclick="editWl('${ds}','${wid}','${w.ticket}','${w.hours}')">✎</span></span>` +
-                    `<span class="wl-edit-${ds}-${wid} hidden ml-2"><input class="w-14 text-xs" value="${w.hours}h" data-ticket="${w.ticket}" data-worklog-id="${wid}">` +
-                    `<button onclick="saveWl(this,'${ds}','${wid}','${w.ticket}')" class="btn-purple text-xs px-1 ml-1">save</button>` +
-                    `<button onclick="cancelEditWl('${ds}','${wid}')" class="text-xs text-gray-500 hover:text-gray-300 ml-1">✕</button></span></div>`;
-            });
-
-            if (generalSummary) {
-                activityHtml += `<div class="flex items-center gap-1 mb-0.5"><span class="text-gray-400 font-mono">misc</span> <span class="text-gray-300">${esc(generalSummary)}</span></div>`;
+        async function generate(hardRefresh = false) {
+            if (loading.value) return;
+            loading.value = true;
+            if (hardRefresh) localStorage.removeItem('ts_cache');
+            const cached = cacheRead(startDate.value, endDate.value);
+            let showedCache = false;
+            if (cached && !hardRefresh) {
+                data.value = cached;
+                showedCache = true;
             }
+            if (showedCache) hint.value = true;
+            const force = hardRefresh ? '&force=true' : '';
+            try {
+                const resp = await fetch(`/api/timesheet?start=${startDate.value}&end=${endDate.value}${force}`);
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                data.value = await resp.json();
+                cacheWrite({ start: startDate.value, end: endDate.value, data: data.value });
+            } catch (e) {
+                if (!showedCache) showMsg('Failed: ' + e.message, true);
+            }
+            hint.value = false;
+            loading.value = false;
+        }
 
-            if (wl.length === 0) {
-                let suggestH = 0;
-                let recurH = 0;
-                const devTids = [];
-                const reviewTids = [];
-                ticketKeys.forEach(tid => {
-                    const recurMatch = dayRecurring.find(r => r.ticket === tid);
-                    if (recurMatch && recurMatch.logged) return;
-                    if (recurMatch) {
-                        const rm = recurMatch.time.match(/^(\d+(?:\.\d+)?)(h|m)$/);
-                        if (rm) recurH += rm[2] === 'h' ? parseFloat(rm[1]) : parseFloat(rm[1]) / 60;
-                    } else if (commitTickets.has(tid) || claudeTickets.has(tid)) {
-                        devTids.push(tid);
-                    } else if (reviewTickets.has(tid)) {
-                        reviewTids.push(tid);
+        async function refreshDay(ds) {
+            refreshingDays[ds] = true;
+            try {
+                const resp = await fetch(`/api/timesheet?start=${ds}&end=${ds}&force=true`);
+                if (!resp.ok) return;
+                const dayData = await resp.json();
+                const next = { ...data.value };
+                for (const key of ['worklogs', 'gitCommits', 'prReviews', 'claudeSessions']) {
+                    next[key] = { ...(next[key] || {}) };
+                    if (dayData[key] && dayData[key][ds]) next[key][ds] = dayData[key][ds];
+                    else delete next[key][ds];
+                }
+                if (dayData.dailySummaries && dayData.dailySummaries[ds]) {
+                    next.dailySummaries = { ...(next.dailySummaries || {}) };
+                    next.dailySummaries[ds] = dayData.dailySummaries[ds];
+                }
+                data.value = next;
+                localStorage.removeItem('ts_cache');
+            } catch (_) {}
+            refreshingDays[ds] = false;
+        }
+
+        function prevRange() {
+            rangeOffset.value -= 1;
+            const r = getTwoMonthRange(rangeOffset.value);
+            startDate.value = r.start; endDate.value = r.end;
+            generate(false);
+        }
+        function nextRange() {
+            rangeOffset.value += 1;
+            const r = getTwoMonthRange(rangeOffset.value);
+            startDate.value = r.start; endDate.value = r.end;
+            generate(false);
+        }
+
+        function showMsg(text, isError = false) {
+            msg.value = text;
+            msgKind.value = isError ? 'err' : 'ok';
+            if (msgTimer) clearTimeout(msgTimer);
+            msgTimer = setTimeout(() => { msg.value = ''; }, 4000);
+        }
+
+        function adjustTicketHours(tid, delta) {
+            const tickets = data.value.tickets || [];
+            const t = tickets.find(t => t.key === tid);
+            if (t) t.hoursLogged = Math.round((t.hoursLogged + delta) * 10) / 10;
+        }
+
+        async function logTime(ds, tid, defaultTime) {
+            const time = (logDrafts[`${ds}-${tid}`] || defaultTime || '').trim();
+            if (!time) return;
+            try {
+                const resp = await fetch('/api/timesheet/log', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ ticket: tid, date: ds, time }),
+                });
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    showMsg(err.error || 'Failed', true);
+                    return;
+                }
+                localStorage.removeItem('ts_cache');
+                adjustTicketHours(tid, parseTimeToHours(time));
+                showMsg(`Logged ${time} on ${tid}`);
+                refreshDay(ds);
+            } catch (e) { showMsg('Failed: ' + e.message, true); }
+        }
+
+        async function logTimeManual(ds) {
+            const tid = (addDrafts[ds + ':ticket'] || '').trim();
+            const time = (addDrafts[ds + ':time'] || '').trim();
+            if (!tid || !time) return;
+            try {
+                const resp = await fetch('/api/timesheet/log', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ ticket: tid, date: ds, time }),
+                });
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    showMsg(err.error || 'Failed', true);
+                    return;
+                }
+                localStorage.removeItem('ts_cache');
+                adjustTicketHours(tid, parseTimeToHours(time));
+                showMsg(`Logged ${time} on ${tid}`);
+                addDrafts[ds + ':ticket'] = '';
+                addDrafts[ds + ':time'] = '';
+                refreshDay(ds);
+            } catch (e) { showMsg('Failed: ' + e.message, true); }
+        }
+
+        function startEdit(ds, wid, hours) {
+            const k = `${ds}-${wid || ''}`;
+            editingWl[k] = true;
+            editDrafts[k] = `${hours}h`;
+        }
+        function cancelEdit(ds, wid) {
+            const k = `${ds}-${wid || ''}`;
+            editingWl[k] = false;
+        }
+        async function saveWl(ds, wid, tid, oldHours) {
+            const k = `${ds}-${wid || ''}`;
+            const time = (editDrafts[k] || '').trim();
+            if (!time) return;
+            try {
+                const resp = await fetch('/api/timesheet/worklog', {
+                    method: 'PUT', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ ticket: tid, worklog_id: wid, time }),
+                });
+                if (!resp.ok) {
+                    const err = await resp.json();
+                    showMsg(err.error || 'Failed', true);
+                    return;
+                }
+                localStorage.removeItem('ts_cache');
+                adjustTicketHours(tid, parseTimeToHours(time) - (oldHours || 0));
+                showMsg('Updated');
+                editingWl[k] = false;
+                refreshDay(ds);
+            } catch (e) { showMsg('Failed: ' + e.message, true); }
+        }
+
+        const rows = computed(() => {
+            const d = data.value;
+            if (!d.startDate) return [];
+            const startDateObj = parseDate(d.startDate);
+            const endDateObj = parseDate(d.endDate);
+            const summaries = d.dailySummaries || {};
+            const out = [];
+            for (let cur = new Date(endDateObj); cur >= startDateObj; cur.setDate(cur.getDate() - 1)) {
+                const ds = iso(cur);
+                const weekend = cur.getDay() === 0 || cur.getDay() === 6;
+                const wl = (d.worklogs || {})[ds] || [];
+                const commits = (d.gitCommits || {})[ds] || [];
+                const reviews = (d.prReviews || {})[ds] || [];
+                const claude = (d.claudeSessions || {})[ds] || [];
+                const daySummary = summaries[ds] || {};
+                const dayRecurring = (d.recurring || {})[ds] || [];
+                const hasActivity = commits.length || reviews.length || claude.length || Object.keys(daySummary).length;
+
+                let rowClass = '';
+                if (weekend) rowClass = 'weekend';
+                else if (wl.length) {
+                    const dayTotal = wl.reduce((s, w) => s + (w.hours || 0), 0);
+                    rowClass = dayTotal < 6 ? 'logged-partial' : 'logged';
+                } else if (hasActivity) rowClass = 'missing';
+
+                let ticketKeys = Object.keys(daySummary).filter(t => t !== 'general');
+                const generalSummary = daySummary['general'];
+
+                const commitTickets = new Set();
+                commits.forEach(c => { const m = (c.branch || c.message || '').match(/\b([A-Z]+-\d{2,})\b/); if (m) commitTickets.add(m[1]); });
+                const reviewTickets = new Map();
+                reviews.forEach(r => {
+                    const m = (r.branch || '').match(/\b([A-Z]+-\d{2,})\b/);
+                    if (m) {
+                        const tid = m[1]; const prev = reviewTickets.get(tid);
+                        reviewTickets.set(tid, {
+                            repos: new Set([...(prev?.repos || []), r.repo]),
+                            minutes: Math.max(prev?.minutes || 0, r.review_minutes || 30),
+                        });
                     }
                 });
-                const reviewH = reviewTids.reduce((sum, tid) => { const ri = reviewTickets.get(tid); return sum + (ri ? ri.minutes / 60 : 0.5); }, 0);
-                const devH = devTids.length > 0 ? Math.max(8 - recurH - reviewH, 0) : 0;
-                suggestH = recurH + reviewH + devH;
-                totalSuggest += suggestH;
-                const suggestColor = suggestH >= 8 ? 'text-green-400' : suggestH > 0 ? 'text-orange-400' : 'text-red-400';
-                loggedHtml = `<span class="text-red-400">✗</span> <span class="${suggestColor} font-semibold text-xs">${suggestH}h suggested</span>`;
+                const claudeTickets = new Set();
+                claude.forEach(s => {
+                    const src = (s.cwd || '') + ' ' + (s.prompt || '');
+                    const m = src.match(/\b([A-Z]+-\d{2,})\b/i);
+                    if (m) claudeTickets.add(m[1].toUpperCase());
+                });
+
+                if (!ticketKeys.length && hasActivity) {
+                    const inferred = new Set([...commitTickets, ...reviewTickets.keys(), ...claudeTickets]);
+                    dayRecurring.forEach(r => inferred.add(r.ticket));
+                    ticketKeys = [...inferred];
+                }
+                ticketKeys = [...new Set(ticketKeys)];
+
+                const devTicketCount = ticketKeys.filter(t =>
+                    (commitTickets.has(t) || claudeTickets.has(t)) && !dayRecurring.find(r => r.ticket === t)
+                ).length;
+                const perDevH = devTicketCount > 0 ? Math.round(8 / devTicketCount * 10) / 10 : 8;
+
+                const activityItems = ticketKeys.map(tid => {
+                    const isCommit = commitTickets.has(tid);
+                    const isClaude = claudeTickets.has(tid);
+                    const isDev = isCommit || isClaude;
+                    const reviewInfo = reviewTickets.get(tid);
+                    const isReview = !!reviewInfo;
+                    const reviewRepos = isReview ? [...reviewInfo.repos].join(', ') : '';
+                    const sources = [];
+                    if (isCommit) sources.push('commit');
+                    if (isClaude) sources.push('claude');
+                    if (isReview) sources.push(`review · ${reviewRepos}`);
+                    const tag = sources.join(', ');
+                    const tagClass = isReview && !isDev
+                        ? 'text-purple-400 bg-purple-900/50'
+                        : isDev && isReview ? 'text-blue-400 bg-blue-900/50' : 'text-green-400 bg-green-900/50';
+                    const recurMatch = dayRecurring.find(r => r.ticket === tid);
+                    let placeholderHours;
+                    if (recurMatch) placeholderHours = recurMatch.time;
+                    else if (isDev) placeholderHours = `${perDevH}h`;
+                    else if (isReview) placeholderHours = `${reviewInfo.minutes}m`;
+                    else placeholderHours = '30m';
+                    const existingLog = wl.find(w => w.ticket === tid);
+                    const ticketInfo = (d.tickets || []).find(t => t.key === tid) || {};
+                    const titleText = ticketInfo.summary || '';
+                    const activity = daySummary[tid] || '';
+                    return {
+                        tid,
+                        kind: sources.join(','),
+                        tag, tagClass,
+                        placeholderHours,
+                        recurringLogged: !!(recurMatch && recurMatch.logged),
+                        recurringTime: recurMatch ? recurMatch.time : '',
+                        existingLog,
+                        titleText,
+                        activity,
+                        activitySep: titleText && activity ? ' — ' : '',
+                    };
+                });
+
+                const unmatchedWorklogs = wl.filter(w => !ticketKeys.includes(w.ticket));
+
+                let suggestSummary = '', suggestColor = '', suggestH = 0;
+                if (wl.length === 0 && (ticketKeys.length || generalSummary)) {
+                    let recurH = 0;
+                    const devTids = [], reviewTids = [];
+                    ticketKeys.forEach(tid => {
+                        const recurMatch = dayRecurring.find(r => r.ticket === tid);
+                        if (recurMatch && recurMatch.logged) return;
+                        if (recurMatch) {
+                            const rm = recurMatch.time.match(/^(\d+(?:\.\d+)?)(h|m)$/);
+                            if (rm) recurH += rm[2] === 'h' ? parseFloat(rm[1]) : parseFloat(rm[1]) / 60;
+                        } else if (commitTickets.has(tid) || claudeTickets.has(tid)) devTids.push(tid);
+                        else if (reviewTickets.has(tid)) reviewTids.push(tid);
+                    });
+                    const reviewH = reviewTids.reduce((s, tid) => {
+                        const ri = reviewTickets.get(tid); return s + (ri ? ri.minutes / 60 : 0.5);
+                    }, 0);
+                    const devH = devTids.length ? Math.max(8 - recurH - reviewH, 0) : 0;
+                    suggestH = recurH + reviewH + devH;
+                    suggestColor = suggestH >= 8 ? 'text-green-400' : suggestH > 0 ? 'text-orange-400' : 'text-red-400';
+                    suggestSummary = `${suggestH}h suggested`;
+                }
+
+                out.push({
+                    ds, weekend, rowClass, workLogs: wl,
+                    activityItems, unmatchedWorklogs,
+                    generalSummary,
+                    suggestSummary, suggestColor, suggestH,
+                    refreshing: refreshingDays[ds] || false,
+                });
             }
-        } else if (wl.length > 0) {
-            activityHtml = wl.map(w => {
-                const wid = w.worklog_id || '';
-                return `<div class="flex items-center gap-1 mb-0.5" data-hover-ticket="${w.ticket}">${ticketLink(w.ticket)} <span class="text-gray-500 text-xs">${w.summary || ''}</span>` +
-                    `<span class="wl-display-${ds}-${wid} text-xs text-green-400 ml-2">✓ ${w.hours}h <span class="text-gray-600 hover:text-gray-300 cursor-pointer" onclick="editWl('${ds}','${wid}','${w.ticket}','${w.hours}')">✎</span></span>` +
-                    `<span class="wl-edit-${ds}-${wid} hidden ml-2"><input class="w-14 text-xs" value="${w.hours}h" data-ticket="${w.ticket}" data-worklog-id="${wid}">` +
-                    `<button onclick="saveWl(this,'${ds}','${wid}','${w.ticket}')" class="btn-purple text-xs px-1 ml-1">save</button>` +
-                    `<button onclick="cancelEditWl('${ds}','${wid}')" class="text-xs text-gray-500 hover:text-gray-300 ml-1">✕</button></span></div>`;
-            }).join('');
+            return out;
+        });
+
+        const totalLogged = computed(() =>
+            Object.values(data.value.worklogs || {}).reduce((s, wls) => s + wls.reduce((a, w) => a + w.hours, 0), 0)
+        );
+        const totalSuggest = computed(() =>
+            rows.value.reduce((s, r) => s + (r.suggestH || 0), 0)
+        );
+
+        async function loadConfig() {
+            try {
+                const r = await fetch('/api/config');
+                const cfg = await r.json();
+                features.value = cfg.features || {};
+                instanceName.value = cfg.job?.key || '';
+            } catch (e) {}
         }
 
-        if (!wknd) {
-            const addRowId = `add-${ds}`;
-            activityHtml +=
-                `<div id="${addRowId}" class="hidden mt-1 flex items-center gap-1">` +
-                `<select class="text-xs"><option value="">ticket</option>${ticketOptions}</select>` +
-                `<input class="w-14 text-xs" placeholder="8h" data-date="${ds}">` +
-                `<button onclick="logTimeManual(this)" class="btn-purple text-xs px-1 ml-1">log</button></div>` +
-                `<a href="#" class="text-xs text-gray-500 hover:text-gray-300 mt-1 inline-block" onclick="event.preventDefault(); document.getElementById('${addRowId}').classList.toggle('hidden')">+ add</a>`;
-        }
+        onMounted(() => {
+            loadConfig();
+            generate(false);
+        });
 
-        rows += `<tr class="${rowClass} border-b border-gray-800/50">
-            <td class="font-mono text-xs whitespace-nowrap">${ds}${!wknd ? ` <span id="refresh-${ds}" class="text-gray-600 hover:text-gray-300 cursor-pointer inline-block" onclick="refreshDay('${ds}')">↻</span>` : ''}</td>
-            <td class="whitespace-nowrap">${loggedHtml}</td>
-            <td class="text-xs leading-relaxed">${activityHtml || '—'}</td>
-        </tr>`;
-    }
-
-    tbody.innerHTML = rows;
-
-    const totalLogged = Object.values(data.worklogs || {}).reduce((s, wls) => s + wls.reduce((a, w) => a + w.hours, 0), 0);
-    tfoot.innerHTML = `<tr class="total-row">
-        <td colspan="2" class="text-right">Logged: <span class="text-green-400">${Math.round(totalLogged * 10) / 10}h</span></td>
-        <td>Suggested: <span class="text-orange-400">${Math.round(totalSuggest * 10) / 10}h</span></td>
-    </tr>`;
-
-    document.getElementById('total-hours').textContent = Math.round(totalSuggest * 10) / 10 + 'h';
-    attachHoverListeners();
-}
-
-function showTicketDetail(tid) {
-    const panel = document.getElementById('hover-detail');
-    const t = (data.tickets || []).find(t => t.key === tid);
-    if (!t) { panel.innerHTML = ''; return; }
-    const logged = t.hoursLogged ? `${t.hoursLogged}h` : '0h';
-    const est = t.hoursEstimated ? ` / ${t.hoursEstimated}h` : '';
-    panel.innerHTML = `<div class="card border-l-2 border-blue-500 px-2.5 py-2">
-        <a href="${t.url || '#'}" target="_blank" class="font-mono text-xs text-blue-400 hover:underline">${t.key}</a>
-        <div class="text-xs text-gray-300 mt-0.5 leading-snug">${esc(t.summary)}</div>
-        <div class="text-xs text-gray-400 mt-1">${logged}${est}</div>
-        <div class="text-xs text-gray-500 mt-0.5">${esc(t.status || '')}</div>
-    </div>`;
-}
-
-function attachHoverListeners() {
-    document.querySelectorAll('[data-hover-ticket]').forEach(el => {
-        el.addEventListener('mouseenter', () => showTicketDetail(el.dataset.hoverTicket));
-    });
-}
-
-function parseTimeToHours(s) {
-    const m = s.match(/^(?:(\d+(?:\.\d+)?)\s*h)?\s*(?:(\d+(?:\.\d+)?)\s*m)?$/);
-    if (!m || (!m[1] && !m[2])) return 0;
-    return (parseFloat(m[1] || 0)) + (parseFloat(m[2] || 0) / 60);
-}
-
-function ticketLink(tid) {
-    const t = (data.tickets || []).find(t => t.key === tid);
-    const mine = t && data.userAccountId && t.assignee_id === data.userAccountId;
-    const mineTag = mine ? ' <span class="text-xs text-gray-500">(mine)</span>' : '';
-    return t && t.url ? `<a href="${t.url}" target="_blank" class="text-blue-400 font-mono hover:underline">${tid}</a>${mineTag}` : `<span class="text-blue-400 font-mono">${tid}</span>`;
-}
-
-function adjustTicketHours(ticket, delta) {
-    const t = (data.tickets || []).find(t => t.key === ticket);
-    if (t) t.hoursLogged = Math.round((t.hoursLogged + delta) * 10) / 10;
-}
-
-async function logTime(btn) {
-    const input = btn.previousElementSibling;
-    const ticket = input.dataset.ticket;
-    const date = input.dataset.date;
-    const time = input.value.trim();
-    if (!time) return;
-    btn.disabled = true; btn.textContent = '...';
-    try {
-        const resp = await fetch('/api/timesheet/log', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ticket, date, time}) });
-        if (!resp.ok) { const err = await resp.json(); showMsg(err.error || 'Failed', true); btn.textContent = 'log'; btn.disabled = false; return; }
-        localStorage.removeItem('ts_cache');
-        adjustTicketHours(ticket, parseTimeToHours(time));
-        showMsg(`Logged ${time} on ${ticket}`);
-        refreshDay(date);
-    } catch (e) { showMsg('Failed: ' + e.message, true); btn.textContent = 'log'; btn.disabled = false; }
-}
-
-async function logTimeManual(btn) {
-    const row = btn.parentElement;
-    const select = row.querySelector('select');
-    const input = row.querySelector('input');
-    const ticket = select.value;
-    const date = input.dataset.date;
-    const time = input.value.trim();
-    if (!ticket || !time) return;
-    btn.disabled = true; btn.textContent = '...';
-    try {
-        const resp = await fetch('/api/timesheet/log', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ticket, date, time}) });
-        if (!resp.ok) { const err = await resp.json(); showMsg(err.error || 'Failed', true); btn.textContent = 'log'; btn.disabled = false; return; }
-        localStorage.removeItem('ts_cache');
-        adjustTicketHours(ticket, parseTimeToHours(time));
-        showMsg(`Logged ${time} on ${ticket}`);
-        refreshDay(date);
-    } catch (e) { showMsg('Failed: ' + e.message, true); btn.textContent = 'log'; btn.disabled = false; }
-}
-
-function editWl(ds, wid, ticket, hours) {
-    document.querySelectorAll(`.wl-display-${ds}-${wid}`).forEach(el => el.classList.add('hidden'));
-    document.querySelectorAll(`.wl-edit-${ds}-${wid}`).forEach(el => el.classList.remove('hidden'));
-}
-
-function cancelEditWl(ds, wid) {
-    document.querySelectorAll(`.wl-display-${ds}-${wid}`).forEach(el => el.classList.remove('hidden'));
-    document.querySelectorAll(`.wl-edit-${ds}-${wid}`).forEach(el => el.classList.add('hidden'));
-}
-
-async function saveWl(btn, ds, wid, ticket) {
-    const input = btn.previousElementSibling;
-    const time = input.value.trim();
-    if (!time) return;
-    const oldWl = ((data.worklogs || {})[ds] || []).find(w => w.worklog_id === wid);
-    const oldHours = oldWl ? oldWl.hours : 0;
-    btn.disabled = true; btn.textContent = '...';
-    try {
-        const resp = await fetch('/api/timesheet/worklog', { method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ticket, worklog_id: wid, time}) });
-        if (!resp.ok) { const err = await resp.json(); showMsg(err.error || 'Failed', true); btn.textContent = 'save'; btn.disabled = false; return; }
-        localStorage.removeItem('ts_cache');
-        adjustTicketHours(ticket, parseTimeToHours(time) - oldHours);
-        showMsg('Updated');
-        refreshDay(ds);
-    } catch (e) { showMsg('Failed: ' + e.message, true); btn.textContent = 'save'; btn.disabled = false; }
-}
-
-function showMsg(text, isError = false) {
-    const el = document.getElementById('msg');
-    el.className = `msg ${isError ? 'msg-err' : 'msg-ok'}`;
-    el.textContent = text;
-    setTimeout(() => { el.textContent = ''; el.className = ''; }, 4000);
-}
-
-function esc(s) { if (!s) return ''; const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
-
-const init = getTwoMonthRange(0);
-setDates(init.start, init.end);
-generate(false);
+        return {
+            data, features, instanceName,
+            startDate, endDate, loading, hint, msg, msgKind,
+            editingWl, editDrafts, logDrafts, addRowOpen, addDrafts,
+            hoverTicket, ticketByKey, rows, totalLogged, totalSuggest,
+            generate, refreshDay, prevRange, nextRange,
+            startEdit, cancelEdit, saveWl, logTime, logTimeManual,
+        };
+    },
+}).mount('#app');
 </script>
 </body>
 </html>
