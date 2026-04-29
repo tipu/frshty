@@ -654,7 +654,13 @@ async function loadJobs() {
             let resp = '';
             try { const r = JSON.parse(j.response || '{}'); if (r.reason) resp = ` — ${r.reason}`; } catch(e) {}
             if (j.status === 'running' && !autoStartJobId) autoStartJobId = { id: j.id, task: j.task };
-            return `<div class="cursor-pointer hover:bg-gray-800 p-2 rounded flex items-center gap-2" onclick="viewJobOutput(${j.id}, '${j.task}')"><span class="text-gray-500 flex-shrink-0">${at}${rel}</span><span class="${color} flex-shrink-0">${j.status}</span><span class="text-gray-300 flex-1">${j.task}</span>${outputBadge}<span class="text-gray-500">${resp}</span>${retry}</div>`;
+            let pidBadge = '';
+            if (j.status === 'running') {
+                pidBadge = j.pid_alive
+                    ? '<span class="text-xs bg-green-900 text-green-300 px-1.5 py-0.5 rounded ml-1" title="claude pid alive">● alive</span>'
+                    : '<span class="text-xs bg-red-900 text-red-300 px-1.5 py-0.5 rounded ml-1" title="claude pid dead — orphan, will be finalized on next poll">○ dead</span>';
+            }
+            return `<div class="cursor-pointer hover:bg-gray-800 p-2 rounded flex items-center gap-2" onclick="viewJobOutput(${j.id}, '${j.task}')"><span class="text-gray-500 flex-shrink-0">${at}${rel}</span><span class="${color} flex-shrink-0">${j.status}</span>${pidBadge}<span class="text-gray-300 flex-1">${j.task}</span>${outputBadge}<span class="text-gray-500">${resp}</span>${retry}</div>`;
         }).join('');
 
         if (autoStartJobId) {
