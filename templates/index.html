@@ -118,6 +118,7 @@ let config = {};
 let expandedRows = new Set();
 
 function isNoise(e) {
+    if (e.meta?.category === 'noise') return true;
     if (e.event === 'job_started') return true;
     if (e.event === 'ticket_ci_fix_skipped') return true;
     if (e.event === 'events_started') return true;
