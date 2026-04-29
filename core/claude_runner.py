@@ -37,6 +37,18 @@ def run_haiku(prompt: str, timeout: int = 120) -> str | None:
     return result.stdout.decode().strip()
 
 
+def _extract_text(evt: dict) -> str:
+    if evt.get("type") != "stream_event":
+        return ""
+    inner = evt.get("event") or {}
+    if inner.get("type") != "content_block_delta":
+        return ""
+    delta = inner.get("delta") or {}
+    if delta.get("type") == "text_delta":
+        return delta.get("text") or ""
+    return ""
+
+
 def run_claude_code(prompt: str, cwd: Path, timeout: int = 600) -> str | None:
     """Run `claude -p <prompt>` in cwd. Returns stdout on success, None on
     non-zero exit or timeout.
@@ -46,7 +58,13 @@ def run_claude_code(prompt: str, cwd: Path, timeout: int = 600) -> str | None:
     so the web UI can tail it. Logging is best-effort; a file-write failure
     never stops the subprocess.
     """
-    cmd = ["claude", "-p", prompt, "--dangerously-skip-permissions"]
+    cmd = [
+        "claude", "-p", prompt,
+        "--dangerously-skip-permissions",
+        "--output-format", "stream-json",
+        "--include-partial-messages",
+        "--verbose",
+    ]
     log_path = active_live_log_path()
     log_fh = None
     if log_path:
@@ -60,24 +78,24 @@ def run_claude_code(prompt: str, cwd: Path, timeout: int = 600) -> str | None:
 
     proc = subprocess.Popen(
         cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        cwd=str(cwd), env=_env(), bufsize=0,
+        cwd=str(cwd), env=_env(), text=True, bufsize=1, errors="replace",
     )
-    buf = bytearray()
+    parts: list[str] = []
 
     def _drain():
         assert proc.stdout is not None
-        fd = proc.stdout.fileno()
-        while True:
+        for line in proc.stdout:
             try:
-                chunk = os.read(fd, 4096)
-            except OSError:
-                return
-            if not chunk:
-                return
-            buf.extend(chunk)
+                evt = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            text = _extract_text(evt)
+            if not text:
+                continue
+            parts.append(text)
             if log_fh is not None:
                 try:
-                    log_fh.write(chunk)
+                    log_fh.write(text.encode("utf-8"))
                     os.fsync(log_fh.fileno())
                 except OSError as e:
                     log.emit("job_log_write_failed", f"Failed to write to job log: {e}")
@@ -110,7 +128,7 @@ def run_claude_code(prompt: str, cwd: Path, timeout: int = 600) -> str | None:
 
     if timed_out or proc.returncode != 0:
         return None
-    return buf.decode("utf-8", errors="replace")
+    return "".join(parts)
 
 
 def extract_json(text: str) -> dict | None:

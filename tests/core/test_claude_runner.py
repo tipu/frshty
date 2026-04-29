@@ -2,16 +2,14 @@
 
 Uses a shell subprocess instead of real claude, injected via PATH so the
 binary name `claude` resolves to a test script. Each test creates a stub
-`claude` in tmp_path that prints lines on a schedule, then verifies the
-tee'd log file and the return value.
+`claude` in tmp_path that prints stream-json NDJSON lines, then verifies
+the tee'd log file and the return value.
 """
+import json
 import os
 import stat
 import sys
-import time
 from pathlib import Path
-
-import pytest
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
@@ -27,9 +25,31 @@ def _install_fake_claude(bin_dir: Path, script_body: str) -> None:
     fake.chmod(fake.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
 
-def test_run_claude_code_tees_stdout_to_log_when_contextvar_set(tmp_path, monkeypatch):
+def _text_delta(text: str) -> str:
+    return json.dumps({
+        "type": "stream_event",
+        "event": {
+            "type": "content_block_delta",
+            "delta": {"type": "text_delta", "text": text},
+        },
+    })
+
+
+def _write_events(tmp_path: Path, events: list[dict]) -> Path:
+    f = tmp_path / "events.ndjson"
+    f.write_text("\n".join(json.dumps(e) for e in events) + "\n")
+    return f
+
+
+def test_run_claude_code_tees_text_deltas_to_log(tmp_path, monkeypatch):
     bin_dir = tmp_path / "bin"
-    _install_fake_claude(bin_dir, 'echo "line1"; echo "line2"; echo "line3"')
+    events_file = tmp_path / "events.ndjson"
+    events_file.write_text(
+        _text_delta("hello ") + "\n"
+        + _text_delta("world") + "\n"
+        + _text_delta("!") + "\n"
+    )
+    _install_fake_claude(bin_dir, f'cat "{events_file}"')
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
 
     log_path = tmp_path / "job.log"
@@ -39,26 +59,77 @@ def test_run_claude_code_tees_stdout_to_log_when_contextvar_set(tmp_path, monkey
     finally:
         job_logs._active_live_log.reset(token)
 
-    assert out == "line1\nline2\nline3\n"
+    assert out == "hello world!"
     assert log_path.exists()
-    assert log_path.read_bytes() == b"line1\nline2\nline3\n"
+    assert log_path.read_bytes() == b"hello world!"
+
+
+def test_run_claude_code_skips_non_text_events(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    events = [
+        {"type": "system", "subtype": "init"},
+        json.loads(_text_delta("hi")),
+        {"type": "stream_event", "event": {"type": "content_block_delta",
+            "delta": {"type": "input_json_delta", "partial_json": "{\"x\":1}"}}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "hi"}]}},
+        json.loads(_text_delta(" there")),
+        {"type": "result", "subtype": "success", "result": "hi there"},
+    ]
+    events_file = _write_events(tmp_path, events)
+    _install_fake_claude(bin_dir, f'cat "{events_file}"')
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+
+    log_path = tmp_path / "job.log"
+    token = job_logs._active_live_log.set(log_path)
+    try:
+        out = run_claude_code("hi", cwd=tmp_path, timeout=10)
+    finally:
+        job_logs._active_live_log.reset(token)
+
+    assert out == "hi there"
+    assert log_path.read_bytes() == b"hi there"
+
+
+def test_run_claude_code_ignores_malformed_lines(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    events_file = tmp_path / "events.ndjson"
+    events_file.write_text(
+        "not json\n"
+        + _text_delta("ok") + "\n"
+        + "{partial broken\n"
+    )
+    _install_fake_claude(bin_dir, f'cat "{events_file}"')
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+
+    log_path = tmp_path / "job.log"
+    token = job_logs._active_live_log.set(log_path)
+    try:
+        out = run_claude_code("hi", cwd=tmp_path, timeout=10)
+    finally:
+        job_logs._active_live_log.reset(token)
+
+    assert out == "ok"
+    assert log_path.read_bytes() == b"ok"
 
 
 def test_run_claude_code_without_contextvar_does_not_write_log(tmp_path, monkeypatch):
     bin_dir = tmp_path / "bin"
-    _install_fake_claude(bin_dir, 'echo "x"')
+    events_file = tmp_path / "events.ndjson"
+    events_file.write_text(_text_delta("x") + "\n")
+    _install_fake_claude(bin_dir, f'cat "{events_file}"')
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
 
     sentinel = tmp_path / "should_not_exist.log"
-    # Contextvar defaults to None
     out = run_claude_code("hi", cwd=tmp_path, timeout=10)
-    assert out == "x\n"
+    assert out == "x"
     assert not sentinel.exists()
 
 
 def test_run_claude_code_non_zero_exit_writes_exit_marker_and_returns_none(tmp_path, monkeypatch):
     bin_dir = tmp_path / "bin"
-    _install_fake_claude(bin_dir, 'echo "partial"; exit 7')
+    events_file = tmp_path / "events.ndjson"
+    events_file.write_text(_text_delta("partial") + "\n")
+    _install_fake_claude(bin_dir, f'cat "{events_file}"; exit 7')
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
 
     log_path = tmp_path / "job.log"
@@ -76,8 +147,9 @@ def test_run_claude_code_non_zero_exit_writes_exit_marker_and_returns_none(tmp_p
 
 def test_run_claude_code_timeout_writes_timeout_marker_and_returns_none(tmp_path, monkeypatch):
     bin_dir = tmp_path / "bin"
-    # Print something, then sleep longer than the timeout
-    _install_fake_claude(bin_dir, 'echo "started"; sleep 5')
+    events_file = tmp_path / "events.ndjson"
+    events_file.write_text(_text_delta("started") + "\n")
+    _install_fake_claude(bin_dir, f'cat "{events_file}"; sleep 5')
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
 
     log_path = tmp_path / "job.log"
@@ -93,10 +165,11 @@ def test_run_claude_code_timeout_writes_timeout_marker_and_returns_none(tmp_path
     assert b"[TIMEOUT after 1s]" in data
 
 
-def test_run_claude_code_preserves_ansi_bytes_in_log(tmp_path, monkeypatch):
+def test_run_claude_code_preserves_unicode_in_text_deltas(tmp_path, monkeypatch):
     bin_dir = tmp_path / "bin"
-    # ANSI red "red" reset
-    _install_fake_claude(bin_dir, 'printf "\\033[31mred\\033[0m\\n"')
+    events_file = tmp_path / "events.ndjson"
+    events_file.write_text(_text_delta("héllo — 世界") + "\n")
+    _install_fake_claude(bin_dir, f'cat "{events_file}"')
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
 
     log_path = tmp_path / "job.log"
@@ -106,5 +179,5 @@ def test_run_claude_code_preserves_ansi_bytes_in_log(tmp_path, monkeypatch):
     finally:
         job_logs._active_live_log.reset(token)
 
-    assert out == "\x1b[31mred\x1b[0m\n"
-    assert log_path.read_bytes() == b"\x1b[31mred\x1b[0m\n"
+    assert out == "héllo — 世界"
+    assert log_path.read_bytes() == "héllo — 世界".encode("utf-8")
