@@ -73,6 +73,13 @@ def mark_done(job_id: int, status: str, response: dict) -> None:
         )
 
 
+def running_jobs() -> list[dict]:
+    return _db.query_all(
+        "SELECT id, instance_key, ticket_key, task, payload, started_at, triggering_event_id"
+        " FROM jobs WHERE status='running' ORDER BY id"
+    )
+
+
 def sweep_stale(max_age_seconds: int = 3600) -> int:
     """Reset stuck jobs back to queued so another worker can pick them up.
 
