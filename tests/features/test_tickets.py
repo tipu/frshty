@@ -315,11 +315,14 @@ class TestHandleCiFailureStub:
         eq.assert_called_once_with("inst", "PROJ-1", "fix_ci_failures")
         assert result.get("ci_fix_attempts", 0) == 0
 
-    def test_does_not_double_enqueue(self):
+    def test_does_not_double_enqueue_when_job_already_inflight(self):
+        import core.queue as q
         ts = make_ticket_state(status="pr_created", _ci_failed_pending=True)
         pr = {"repo": "r", "id": 1, "url": "u"}
         checks = [{"name": "lint", "state": "FAILED"}]
-        with patch("features.tickets._enqueue_stage") as eq, \
+        with patch.object(q, "jobs_for_ticket",
+                           return_value=[{"task": "fix_ci_failures", "status": "queued"}]), \
+             patch.object(q, "enqueue_job") as eq, \
              patch("features.tickets.log"):
             tickets._handle_ci_failure(make_ticket(), ts, pr, checks, "http://base", "inst")
         eq.assert_not_called()
@@ -344,6 +347,22 @@ class TestHandleCiFailureStub:
         assert result["status"] == "pr_failed"
         assert "_ci_failed_pending" not in result
         eq.assert_not_called()
+
+    def test_re_enqueues_when_flag_stuck_with_no_inflight_job(self):
+        """Stuck _ci_failed_pending (from a prior fix_ci_failures that got
+        skipped without clearing the flag) must not permanently block new
+        CI fix attempts. With no in-flight job, the next failure detection
+        should still produce a new enqueue."""
+        import core.queue as q
+        ts = make_ticket_state(status="in_review", _ci_failed_pending=True,
+                                ci_fix_attempts=0)
+        pr = {"repo": "r", "id": 1, "url": "u"}
+        checks = [{"name": "lint", "state": "FAILURE"}]
+        with patch.object(q, "jobs_for_ticket", return_value=[]), \
+             patch.object(q, "enqueue_job") as eq, \
+             patch("features.tickets.log"):
+            tickets._handle_ci_failure(make_ticket(), ts, pr, checks, "http://base", "inst")
+        eq.assert_called_once_with("inst", "fix_ci_failures", ticket_key="PROJ-1")
 
 
 class TestCheckSkipsBusyTicket:
