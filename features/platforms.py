@@ -620,9 +620,10 @@ class GitHubPlatform:
         if not all_passed:
             return ts
 
-        log.emit("ticket_checks_passed", f"All CI checks passed for {ticket['key']}",
-            links={"detail": f"{base_url}/tickets/{ticket['key']}"},
-            meta={"ticket": ticket["key"]})
+        if not ts.get("ci_passed"):
+            log.emit("ticket_checks_passed", f"All CI checks passed for {ticket['key']}",
+                links={"detail": f"{base_url}/tickets/{ticket['key']}"},
+                meta={"ticket": ticket["key"]})
         ts["ci_passed"] = True
         ts.pop("checks_started_at", None)
         ts.pop("ci_fix_attempts", None)
