@@ -702,14 +702,19 @@ async function pollJobOutput() {
         }
         const data = await r.json();
         const output = document.getElementById('job-output');
+        const isFirst = jobOutputOffset === 0;
+
+        if (isFirst) {
+            output.textContent = data.content || (data.done ? '(no output)' : 'running…');
+        } else if (data.content) {
+            output.textContent += data.content;
+        }
+        jobOutputOffset = data.offset;
+        output.parentElement.scrollTop = output.parentElement.scrollHeight;
 
         if (data.done) {
-            output.textContent = data.content || '(no output)';
-            jobOutputOffset = data.offset;
-            output.parentElement.scrollTop = output.parentElement.scrollHeight;
             jobOutputPolling = null;
         } else {
-            output.textContent = 'running…';
             jobOutputPolling = setTimeout(pollJobOutput, 3000);
         }
     } catch (e) {
