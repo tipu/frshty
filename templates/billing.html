@@ -5,7 +5,7 @@
 <meta charset="utf-8">
 <title>Billing — frshty</title>
 <script src="/static/tailwind.js"></script>
-<script defer src="/static/nav-gate.js"></script>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <style>
 body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: #0a0a0a; color: #e0e0e0; }
 nav a { color: #888; padding: 4px 12px; border-radius: 4px; }
@@ -52,11 +52,18 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
 .msg { padding: 5px 12px; border-radius: 4px; font-size: 12px; display: inline-block; }
 .msg-ok { background: #14532d; color: #86efac; }
 .msg-err { background: #7f1d1d; color: #fca5a5; }
+[v-cloak] { display: none; }
 </style>
 </head>
 <body class="p-4 max-w-7xl mx-auto">
+
+<div id="app" v-cloak>
+
 <header class="flex items-center gap-4 mb-4">
-    <div class="flex items-center gap-2"><h1 class="text-lg font-bold">Billing</h1><span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700" id="instance-badge"></span></div>
+    <div class="flex items-center gap-2">
+        <h1 class="text-lg font-bold">Billing</h1>
+        <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700">{{ instanceName }}</span>
+    </div>
     <nav class="flex gap-1 text-sm">
         <a href="/">Feed</a>
         <a href="/global">Global</a>
@@ -64,301 +71,431 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
         <a href="/tickets">Tickets</a>
         <a href="/scheduled">Scheduled</a>
         <a href="/slack">Slack</a>
-        <a href="/timesheet">Timesheet</a>
-        <a href="/billing" class="active">Billing</a>
+        <a v-if="features.timesheet !== false" href="/timesheet">Timesheet</a>
+        <a v-if="features.billing !== false" href="/billing" class="active">Billing</a>
         <a href="/config">Config</a>
     </nav>
 </header>
 
 <div class="card p-4 mb-4">
-    <div id="client-header" class="subtitle">Loading…</div>
-    <div id="creds-warn" class="text-xs text-red-400 mt-1 hidden"></div>
-    <div id="schedule-panel" class="text-xs text-gray-400 mt-2 hidden"></div>
+    <div v-if="!client" class="subtitle">Loading…</div>
+    <template v-else>
+        <div class="subtitle">
+            <template v-if="client.name">{{ client.name }}</template>
+            <span v-else class="text-red-400">No [billing] in config</span>
+            · ${{ client.rate }}/hr · {{ client.billing_freq === 'monthly' ? 'Monthly billing' : 'Weekly billing' }}<template v-if="extrasText"> · {{ extrasText }}</template>
+        </div>
+        <div v-if="credsWarn" class="text-xs text-red-400 mt-1">{{ credsWarn }}</div>
+        <div v-if="scheduleSummary" class="text-xs text-gray-400 mt-2">{{ scheduleSummary }}</div>
+    </template>
 </div>
 
 <div class="legend">
     <div class="legend-item"><div class="legend-dot" style="background:#1a2a1a;border:1px solid #2d4a2d"></div> Work day</div>
     <div class="legend-item"><div class="legend-dot" style="background:#2a1a2a;border:1px solid #4a2d4a"></div> Vacation</div>
     <div class="legend-item"><div class="legend-dot" style="background:#1a1a2a;border:1px solid #2d2d4a"></div> Client closed</div>
-    <span id="msg" class="msg"></span>
+    <span v-if="msg" class="msg" :class="msgKind === 'err' ? 'msg-err' : 'msg-ok'">{{ msg }}</span>
 </div>
 
-<div id="calendar"></div>
+<div>
+    <div class="header-row"><div></div><div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div><div></div></div>
+    <template v-for="(week, wIdx) in weeks" :key="week.weekStart">
+        <div v-if="week.divider" class="divider"></div>
+        <div class="week-row">
+            <div class="week-label">{{ week.label }}</div>
+            <div v-for="day in week.days" :key="day.ds" class="day" :class="day.type"
+                 :title="day.ds" @click="cycleDay(day.ds)">
+                <span class="date">{{ day.dayNum }}</span>
+                <span v-if="day.type === 'vacation'" class="label">Vacation</span>
+                <span v-else-if="day.type === 'closed'" class="label">Closed</span>
+            </div>
+            <div class="invoice-cell">
+                <div v-if="week.invoiceTag" class="invoice-tag" :class="week.invoiceTag.cls"
+                     @click="week.invoiceTag.missing ? openInvoiceForm(wIdx, week, $event) : null">
+                    <template v-if="week.invoiceTag.missing">MISSING · ~${{ week.invoiceTag.amount.toLocaleString() }}<br>{{ week.invoiceTag.days }} days · {{ week.invoiceTag.hours }}hrs</template>
+                    <template v-else>{{ week.invoiceTag.number }} · ${{ week.invoiceTag.amount.toLocaleString() }}<br>{{ week.invoiceTag.status }}</template>
+                </div>
+                <div v-if="formOpenWeek === wIdx" class="inv-form" @click.stop>
+                    <div style="font-size:13px;color:#4ade80;font-weight:600">{{ nextInvNumber }}</div>
+                    <div class="subtitle" style="font-size:11px">{{ formData.start }} → {{ formData.end }} · {{ formData.hours }}h · ${{ formData.amount.toLocaleString() }}</div>
+                    <div class="preview">
+                        <div v-if="previewLoading" class="muted">Loading descriptions…</div>
+                        <div v-else-if="previewError" class="muted">Preview failed: {{ previewError }}</div>
+                        <div v-else-if="!previewItems.length" class="muted">No line items.</div>
+                        <div v-for="(d, di) in previewItems" :key="di">{{ d }}</div>
+                    </div>
+                    <div class="inv-form-row">
+                        <button class="btn-save" :disabled="saving" @click="saveInvoice">{{ saving ? '…' : 'Create' }}</button>
+                        <button class="btn-cancel" @click="closeForm">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </template>
+    <div v-if="missingSummary.length && client && client.billing_freq !== 'monthly'" class="summary">
+        <h2>Missing Invoices</h2>
+        <table class="summary-table">
+            <tr><th>Week</th><th>Invoice Date</th><th>Days</th><th>Hours</th><th class="amount">Amount</th></tr>
+            <tr v-for="(m, i) in missingSummary" :key="i">
+                <td>{{ m.weekLabel }}</td>
+                <td>{{ m.date }}</td>
+                <td>{{ m.days }}</td>
+                <td>{{ m.hours }}</td>
+                <td class="amount">${{ m.amount.toLocaleString() }}</td>
+            </tr>
+            <tr class="total">
+                <td>Total</td>
+                <td></td>
+                <td>{{ missingTotals.days }}</td>
+                <td>{{ missingTotals.hours }}</td>
+                <td class="amount">${{ missingTotals.amount.toLocaleString() }}</td>
+            </tr>
+        </table>
+    </div>
+</div>
+
+</div>
 
 <script>
-let client = null;
-let entries = [];
-let invoices = [];
-let nextInvNumber = '';
-let openForm = null;
+const { createApp, ref, reactive, computed, watch, onMounted, onUnmounted } = Vue;
 
-async function api(path, opts) {
-    const r = await fetch(path, opts);
-    if (!r.ok) { const e = await r.json().catch(()=>({})); throw Object.assign(new Error(e.error || `HTTP ${r.status}`), {status: r.status, data: e}); }
-    return r.json();
+function getMonday(d) {
+    const dt = new Date(d);
+    const day = dt.getUTCDay();
+    const diff = day === 0 ? -6 : 1 - day;
+    dt.setUTCDate(dt.getUTCDate() + diff);
+    return dt;
 }
-
-async function load() {
-    client = await api('/api/billing/client');
-    renderHeader();
-    const calls = [api('/api/billing/entries'), api('/api/billing/invoices'), api('/api/billing/schedule-status')];
-    if (client.billcom_available) calls.push(api('/api/billing/next-invoice-number'));
-    const [e, inv, sched, n] = await Promise.all(calls);
-    entries = e; invoices = inv; nextInvNumber = n ? n.number : '';
-    renderSchedule(sched);
-    renderCalendar();
-}
-
-function renderSchedule(sched) {
-    const panel = document.getElementById('schedule-panel');
-    if (!sched || !sched.enabled) { panel.classList.add('hidden'); return; }
-    const cadence = sched.freq === 'monthly' ? 'Monthly' : 'Weekly';
-    const fmtDateTime = iso => new Date(iso).toLocaleString('en-US', {weekday: 'short',
-        month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
-        timeZone: 'America/Los_Angeles', timeZoneName: 'short'});
-    const fmtDate = ymd => new Date(ymd + 'T12:00:00').toLocaleDateString('en-US',
-        {weekday: 'short', month: 'short', day: 'numeric'});
-    const nextFire = sched.next_fire ? fmtDateTime(sched.next_fire) : 'n/a';
-    let last = 'never';
-    if (sched.last_run) {
-        const lr = sched.last_run;
-        const period = (lr.start && lr.end) ? ` (${fmtDate(lr.start)} – ${fmtDate(lr.end)})` : '';
-        const num = lr.number ? ` ${lr.number}` : '';
-        const err = lr.error ? ` — ${lr.error}` : '';
-        last = `${fmtDate(lr.date)} · ${lr.result}${num}${period}${err}`;
-    }
-    panel.textContent = `Schedule: ${cadence} · Next: ${nextFire} · Last: ${last}`;
-    panel.classList.remove('hidden');
-}
-
-function renderHeader() {
-    document.title = `Billing · ${client.name || 'frshty'}`;
-    const freq = client.billing_freq === 'monthly' ? 'Monthly billing' : 'Weekly billing';
-    const extras = Object.entries(client.extras || {}).map(([k, v]) => `$${v}/mo ${k.replace(/_/g, ' ')}`).join(' · ');
-    document.getElementById('client-header').innerHTML =
-        `${client.name || '<span class="text-red-400">No [billing] in config</span>'} · $${client.rate}/hr · ${freq}${extras ? ' · ' + extras : ''}`;
-    const warn = document.getElementById('creds-warn');
-    if (!client.billcom_available) {
-        warn.textContent = 'bill.com credentials missing (BILLCOM_DEV_KEY/EMAIL/PASSWORD/ORG_ID). Invoice creation disabled.';
-        warn.classList.remove('hidden');
-    } else if (!client.billcom_customer_id) {
-        warn.textContent = '[billing].billcom_customer_id not set. Invoice creation disabled.';
-        warn.classList.remove('hidden');
-    }
-}
-
-function getMonday(d) { const dt = new Date(d); const day = dt.getUTCDay(); const diff = day === 0 ? -6 : 1 - day; dt.setUTCDate(dt.getUTCDate() + diff); return dt; }
 function fmtDate(d) { return d.toISOString().slice(0, 10); }
-function shortMonth(d) { return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getUTCMonth()]; }
+function shortMonth(d) {
+    return ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][d.getUTCMonth()];
+}
 
-function renderCalendar() {
-    const cal = document.getElementById('calendar');
-    const entryMap = {};
-    entries.forEach(e => { entryMap[e.date] = e; });
+createApp({
+    setup() {
+        const client = ref(null);
+        const entries = ref([]);
+        const invoices = ref([]);
+        const schedule = ref(null);
+        const nextInvNumber = ref('');
+        const features = ref({});
+        const instanceName = ref('');
+        const msg = ref('');
+        const msgKind = ref('ok');
+        const formOpenWeek = ref(null);
+        const formData = reactive({ start: '', end: '', hours: 0, amount: 0 });
+        const previewItems = ref([]);
+        const previewLoading = ref(false);
+        const previewError = ref('');
+        const saving = ref(false);
+        let msgTimer = null;
 
-    const now = new Date();
-    const threeMonthsAgo = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 3, 1));
-    const endOfThisWeek = getMonday(now); endOfThisWeek.setUTCDate(endOfThisWeek.getUTCDate() + 7);
-    const firstMonday = getMonday(threeMonthsAgo);
-    const weeks = [];
-    let cur = new Date(firstMonday);
-    while (cur < endOfThisWeek) { weeks.push(new Date(cur)); cur.setUTCDate(cur.getUTCDate() + 7); }
-
-    const isMonthly = client.billing_freq === 'monthly';
-    let prevMonth = null;
-    let html = `<div class="header-row"><div></div><div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div><div></div></div>`;
-
-    weeks.forEach((monday, wIdx) => {
-        const fri = new Date(monday); fri.setUTCDate(fri.getUTCDate() + 4);
-        const monMonth = monday.getUTCMonth();
-        if (prevMonth !== null && monMonth !== prevMonth) html += `<div class="divider"></div>`;
-        prevMonth = monMonth;
-
-        const label = `${shortMonth(monday)} ${monday.getUTCDate()} – ${monday.getUTCMonth() !== fri.getUTCMonth() ? shortMonth(fri) + ' ' : ''}${fri.getUTCDate()}`;
-        html += `<div class="week-row"><div class="week-label">${label}</div>`;
-
-        let weekWorkDays = 0, weekHours = 0;
-        for (let i = 0; i < 5; i++) {
-            const d = new Date(monday); d.setUTCDate(d.getUTCDate() + i);
-            const ds = fmtDate(d);
-            const entry = entryMap[ds];
-            const dayNum = d.getUTCDate();
-            const type = entry ? entry.type : 'work';
-            const hours = entry ? (entry.hours || 0) : 8;
-            const lbl = type === 'vacation' ? '<span class="label">Vacation</span>' : type === 'closed' ? '<span class="label">Closed</span>' : '';
-            if (type === 'work') { weekWorkDays++; weekHours += hours; }
-            html += `<div class="day ${type}" onclick="cycleDay('${ds}')" title="${ds}"><span class="date">${dayNum}</span>${lbl}</div>`;
-        }
-
-        const weekStart = fmtDate(monday), weekEnd = fmtDate(fri);
-        const inv = invoices.find(v => v.start && v.end && v.start <= weekEnd && v.end >= weekStart);
-
-        if (isMonthly) {
-            if (inv) {
-                const showTag = inv.end >= weekStart && inv.end <= weekEnd;
-                if (showTag) {
-                    const cls = inv.status === 'paid' ? '' : ' pending';
-                    html += `<div class="invoice-cell"><div class="invoice-tag${cls}">${inv.number} · $${inv.amount.toLocaleString()}<br>${inv.status}</div></div>`;
-                } else html += `<div class="invoice-cell"></div>`;
-            } else {
-                const nextWeek = weeks[wIdx + 1];
-                const isLastWeekOfMonth = !nextWeek || nextWeek.getUTCMonth() !== monday.getUTCMonth();
-                if (isLastWeekOfMonth) {
-                    let monthDays = 0, monthHours = 0;
-                    weeks.filter(w => w.getUTCMonth() === monday.getUTCMonth()).forEach(w => {
-                        const ws = fmtDate(w);
-                        const wf = new Date(w); wf.setUTCDate(wf.getUTCDate() + 4);
-                        const we = fmtDate(wf);
-                        if (invoices.find(v => v.start && v.end && v.start <= we && v.end >= ws)) return;
-                        for (let j = 0; j < 5; j++) {
-                            const dd = new Date(w); dd.setUTCDate(dd.getUTCDate() + j);
-                            const ee = entryMap[fmtDate(dd)];
-                            const type = ee ? ee.type : 'work';
-                            const hrs = ee ? (ee.hours || 0) : 8;
-                            if (type === 'work') { monthDays++; monthHours += hrs; }
-                        }
-                    });
-                    if (monthDays > 0) {
-                        const monthStart = fmtDate(new Date(Date.UTC(monday.getUTCFullYear(), monday.getUTCMonth(), 1)));
-                        const monthEnd = fmtDate(new Date(Date.UTC(monday.getUTCFullYear(), monday.getUTCMonth() + 1, 0)));
-                        const est = monthHours * client.rate + Object.values(client.extras || {}).reduce((a,b)=>a+b, 0);
-                        html += `<div class="invoice-cell"><div class="invoice-tag missing" onclick="newInvoice('${monthStart}', '${monthEnd}', ${monthHours}, ${est}, event)">MISSING · ~$${est.toLocaleString()}<br>${monthDays} days · ${monthHours}hrs</div></div>`;
-                    } else html += `<div class="invoice-cell"></div>`;
-                } else html += `<div class="invoice-cell"></div>`;
-            }
-        } else {
-            if (inv) {
-                const cls = inv.status === 'paid' ? '' : ' pending';
-                html += `<div class="invoice-cell"><div class="invoice-tag${cls}">${inv.number} · $${inv.amount.toLocaleString()}<br>${inv.status}</div></div>`;
-            } else if (weekWorkDays > 0) {
-                const weekStartDay = monday.getUTCDate();
-                const extraSum = weekStartDay <= 7 ? Object.values(client.extras || {}).reduce((a,b)=>a+b, 0) : 0;
-                const est = weekHours * client.rate + extraSum;
-                html += `<div class="invoice-cell"><div class="invoice-tag missing" onclick="newInvoice('${weekStart}', '${weekEnd}', ${weekHours}, ${est}, event)">MISSING · ~$${est.toLocaleString()}<br>${weekWorkDays} days · ${weekHours}hrs</div></div>`;
-            } else html += `<div class="invoice-cell"></div>`;
-        }
-        html += `</div>`;
-    });
-
-    const missing = [];
-    weeks.forEach(monday => {
-        const fri = new Date(monday); fri.setUTCDate(fri.getUTCDate() + 4);
-        const weekStart = fmtDate(monday), weekEnd = fmtDate(fri);
-        if (invoices.find(v => v.start && v.end && v.start <= weekEnd && v.end >= weekStart)) return;
-        let wh = 0, wd = 0;
-        for (let i = 0; i < 5; i++) {
-            const d = new Date(monday); d.setUTCDate(d.getUTCDate() + i);
-            const e = entryMap[fmtDate(d)];
-            const type = e ? e.type : 'work';
-            const hrs = e ? (e.hours || 0) : 8;
-            if (type === 'work') { wd++; wh += hrs; }
-        }
-        if (wd > 0) {
-            const weekStartDay = monday.getUTCDate();
-            const extraSum = weekStartDay <= 7 ? Object.values(client.extras || {}).reduce((a,b)=>a+b, 0) : 0;
-            const amt = wh * client.rate + extraSum;
-            missing.push({weekLabel: `${shortMonth(monday)} ${monday.getUTCDate()} – ${fri.getUTCDate()}`, date: `${shortMonth(fri)} ${fri.getUTCDate()}`, days: wd, hours: wh, amount: amt});
-        }
-    });
-
-    if (missing.length && !isMonthly) {
-        html += `<div class="summary"><h2>Missing Invoices</h2><table class="summary-table">
-            <tr><th>Week</th><th>Invoice Date</th><th>Days</th><th>Hours</th><th class="amount">Amount</th></tr>`;
-        let td = 0, th = 0, ta = 0;
-        missing.forEach(m => {
-            html += `<tr><td>${m.weekLabel}</td><td>${m.date}</td><td>${m.days}</td><td>${m.hours}</td><td class="amount">$${m.amount.toLocaleString()}</td></tr>`;
-            td += m.days; th += m.hours; ta += m.amount;
+        const extrasText = computed(() => {
+            if (!client.value) return '';
+            return Object.entries(client.value.extras || {})
+                .map(([k, v]) => `$${v}/mo ${k.replace(/_/g, ' ')}`)
+                .join(' · ');
         });
-        html += `<tr class="total"><td>Total</td><td></td><td>${td}</td><td>${th}</td><td class="amount">$${ta.toLocaleString()}</td></tr></table></div>`;
-    }
 
-    cal.innerHTML = html;
-}
+        const credsWarn = computed(() => {
+            if (!client.value) return '';
+            if (!client.value.billcom_available) return 'bill.com credentials missing (BILLCOM_DEV_KEY/EMAIL/PASSWORD/ORG_ID). Invoice creation disabled.';
+            if (!client.value.billcom_customer_id) return '[billing].billcom_customer_id not set. Invoice creation disabled.';
+            return '';
+        });
 
-async function refreshEntries() {
-    entries = await api('/api/billing/entries');
-    renderCalendar();
-}
+        const scheduleSummary = computed(() => {
+            const s = schedule.value;
+            if (!s || !s.enabled) return '';
+            const cadence = s.freq === 'monthly' ? 'Monthly' : 'Weekly';
+            const fmtDateTime = iso => new Date(iso).toLocaleString('en-US', {
+                weekday: 'short', month: 'short', day: 'numeric',
+                hour: 'numeric', minute: '2-digit',
+                timeZone: 'America/Los_Angeles', timeZoneName: 'short',
+            });
+            const fmtDayDate = ymd => new Date(ymd + 'T12:00:00').toLocaleDateString('en-US',
+                { weekday: 'short', month: 'short', day: 'numeric' });
+            const nextFire = s.next_fire ? fmtDateTime(s.next_fire) : 'n/a';
+            let last = 'never';
+            if (s.last_run) {
+                const lr = s.last_run;
+                const period = (lr.start && lr.end) ? ` (${fmtDayDate(lr.start)} – ${fmtDayDate(lr.end)})` : '';
+                const num = lr.number ? ` ${lr.number}` : '';
+                const err = lr.error ? ` — ${lr.error}` : '';
+                last = `${fmtDayDate(lr.date)} · ${lr.result}${num}${period}${err}`;
+            }
+            return `Schedule: ${cadence} · Next: ${nextFire} · Last: ${last}`;
+        });
 
-async function cycleDay(ds) {
-    const entry = entries.find(e => e.date === ds);
-    const current = entry ? entry.type : 'work';
-    const nextByType = {work: 'vacation', vacation: 'closed', closed: 'delete'};
-    const next = nextByType[current] || 'vacation';
-    try {
-        if (next === 'delete') await api(`/api/billing/entries/${ds}`, {method: 'DELETE'});
-        else await api('/api/billing/entries', {method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({date: ds, type: next, hours: next === 'work' ? 8 : 0})});
-        await refreshEntries();
-    } catch (e) { showMsg(e.message, true); }
-}
+        const entryByDate = computed(() => {
+            const out = {};
+            for (const e of entries.value) out[e.date] = e;
+            return out;
+        });
 
-function closeForm() { if (openForm) { openForm.remove(); openForm = null; } }
+        const weeks = computed(() => {
+            if (!client.value) return [];
+            const isMonthly = client.value.billing_freq === 'monthly';
+            const now = new Date();
+            const threeMonthsAgo = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 3, 1));
+            const endOfThisWeek = getMonday(now);
+            endOfThisWeek.setUTCDate(endOfThisWeek.getUTCDate() + 7);
+            const firstMonday = getMonday(threeMonthsAgo);
 
-function esc(s) {
-    const d = document.createElement('div');
-    d.textContent = s ?? '';
-    return d.innerHTML;
-}
+            const weekObjs = [];
+            let cur = new Date(firstMonday);
+            while (cur < endOfThisWeek) {
+                weekObjs.push(new Date(cur));
+                cur.setUTCDate(cur.getUTCDate() + 7);
+            }
 
-async function newInvoice(start, end, hours, amount, ev) {
-    ev.stopPropagation();
-    closeForm();
-    if (!client.billcom_available || !client.billcom_customer_id) { showMsg('bill.com not configured', true); return; }
-    const cell = ev.target.closest('.invoice-cell');
-    const form = document.createElement('div');
-    form.className = 'inv-form';
-    form.innerHTML = `
-        <div style="font-size:13px;color:#4ade80;font-weight:600">${esc(nextInvNumber)}</div>
-        <div class="subtitle" style="font-size:11px">${esc(start)} → ${esc(end)} · ${hours}h · $${amount.toLocaleString()}</div>
-        <div id="inv-preview" class="preview"><div class="muted">Loading descriptions…</div></div>
-        <div class="inv-form-row">
-            <button class="btn-save" onclick="saveInvoice(this, '${start}', '${end}', ${hours}, ${amount})">Create</button>
-            <button class="btn-cancel" onclick="closeForm()">Cancel</button>
-        </div>`;
-    cell.appendChild(form);
-    openForm = form;
+            let prevMonth = null;
+            const result = [];
+            for (let wIdx = 0; wIdx < weekObjs.length; wIdx++) {
+                const monday = weekObjs[wIdx];
+                const fri = new Date(monday); fri.setUTCDate(fri.getUTCDate() + 4);
+                const monMonth = monday.getUTCMonth();
+                const divider = prevMonth !== null && monMonth !== prevMonth;
+                prevMonth = monMonth;
 
-    const preview = form.querySelector('#inv-preview');
-    try {
-        const resp = await api(`/api/billing/preview?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`);
-        const descs = (resp && resp.descriptions) || [];
-        if (!descs.length) {
-            preview.innerHTML = '<div class="muted">No line items.</div>';
-        } else {
-            preview.innerHTML = descs.map(d => `<div>${esc(d)}</div>`).join('');
+                const label = `${shortMonth(monday)} ${monday.getUTCDate()} – ${monday.getUTCMonth() !== fri.getUTCMonth() ? shortMonth(fri) + ' ' : ''}${fri.getUTCDate()}`;
+                const days = [];
+                let weekWorkDays = 0, weekHours = 0;
+                for (let i = 0; i < 5; i++) {
+                    const d = new Date(monday); d.setUTCDate(d.getUTCDate() + i);
+                    const ds = fmtDate(d);
+                    const entry = entryByDate.value[ds];
+                    const type = entry ? entry.type : 'work';
+                    const hours = entry ? (entry.hours || 0) : 8;
+                    if (type === 'work') { weekWorkDays++; weekHours += hours; }
+                    days.push({ ds, dayNum: d.getUTCDate(), type });
+                }
+
+                const weekStart = fmtDate(monday), weekEnd = fmtDate(fri);
+                const inv = invoices.value.find(v => v.start && v.end && v.start <= weekEnd && v.end >= weekStart);
+
+                let invoiceTag = null;
+                if (isMonthly) {
+                    if (inv) {
+                        const showTag = inv.end >= weekStart && inv.end <= weekEnd;
+                        if (showTag) {
+                            invoiceTag = {
+                                missing: false,
+                                cls: inv.status === 'paid' ? '' : 'pending',
+                                number: inv.number, amount: inv.amount, status: inv.status,
+                            };
+                        }
+                    } else {
+                        const nextWeek = weekObjs[wIdx + 1];
+                        const isLastWeekOfMonth = !nextWeek || nextWeek.getUTCMonth() !== monday.getUTCMonth();
+                        if (isLastWeekOfMonth) {
+                            let monthDays = 0, monthHours = 0;
+                            weekObjs.filter(w => w.getUTCMonth() === monday.getUTCMonth()).forEach(w => {
+                                const ws = fmtDate(w);
+                                const wf = new Date(w); wf.setUTCDate(wf.getUTCDate() + 4);
+                                const we = fmtDate(wf);
+                                if (invoices.value.find(v => v.start && v.end && v.start <= we && v.end >= ws)) return;
+                                for (let j = 0; j < 5; j++) {
+                                    const dd = new Date(w); dd.setUTCDate(dd.getUTCDate() + j);
+                                    const ee = entryByDate.value[fmtDate(dd)];
+                                    const type = ee ? ee.type : 'work';
+                                    const hrs = ee ? (ee.hours || 0) : 8;
+                                    if (type === 'work') { monthDays++; monthHours += hrs; }
+                                }
+                            });
+                            if (monthDays > 0) {
+                                const monthStart = fmtDate(new Date(Date.UTC(monday.getUTCFullYear(), monday.getUTCMonth(), 1)));
+                                const monthEnd = fmtDate(new Date(Date.UTC(monday.getUTCFullYear(), monday.getUTCMonth() + 1, 0)));
+                                const est = monthHours * client.value.rate + Object.values(client.value.extras || {}).reduce((a,b) => a + b, 0);
+                                invoiceTag = {
+                                    missing: true, cls: 'missing',
+                                    days: monthDays, hours: monthHours, amount: est,
+                                    formStart: monthStart, formEnd: monthEnd, formHours: monthHours, formAmount: est,
+                                };
+                            }
+                        }
+                    }
+                } else {
+                    if (inv) {
+                        invoiceTag = {
+                            missing: false,
+                            cls: inv.status === 'paid' ? '' : 'pending',
+                            number: inv.number, amount: inv.amount, status: inv.status,
+                        };
+                    } else if (weekWorkDays > 0) {
+                        const weekStartDay = monday.getUTCDate();
+                        const extraSum = weekStartDay <= 7 ? Object.values(client.value.extras || {}).reduce((a,b) => a + b, 0) : 0;
+                        const est = weekHours * client.value.rate + extraSum;
+                        invoiceTag = {
+                            missing: true, cls: 'missing',
+                            days: weekWorkDays, hours: weekHours, amount: est,
+                            formStart: weekStart, formEnd: weekEnd, formHours: weekHours, formAmount: est,
+                        };
+                    }
+                }
+
+                result.push({ label, weekStart, weekEnd, days, divider, invoiceTag });
+            }
+            return result;
+        });
+
+        const missingSummary = computed(() => {
+            if (!client.value) return [];
+            const result = [];
+            for (const w of weeks.value) {
+                if (!w.invoiceTag || !w.invoiceTag.missing) continue;
+                const parts = w.label.split(' – ');
+                result.push({
+                    weekLabel: w.label,
+                    date: parts[1] || w.label,
+                    days: w.invoiceTag.days,
+                    hours: w.invoiceTag.hours,
+                    amount: w.invoiceTag.amount,
+                });
+            }
+            return result;
+        });
+
+        const missingTotals = computed(() => {
+            const t = { days: 0, hours: 0, amount: 0 };
+            for (const m of missingSummary.value) {
+                t.days += m.days; t.hours += m.hours; t.amount += m.amount;
+            }
+            return t;
+        });
+
+        async function api(path, opts) {
+            const r = await fetch(path, opts);
+            if (!r.ok) {
+                const e = await r.json().catch(() => ({}));
+                throw Object.assign(new Error(e.error || `HTTP ${r.status}`), { status: r.status, data: e });
+            }
+            return r.json();
         }
-    } catch (e) {
-        preview.innerHTML = `<div class="muted">Preview failed: ${esc(e.message || String(e))}</div>`;
-    }
-}
 
-async function saveInvoice(btn, start, end, hours, amount) {
-    btn.disabled = true; btn.textContent = '…';
-    try {
-        await api('/api/billing/invoices', {method: 'POST', headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({number: nextInvNumber, start, end, hours, amount, date: end})});
-        closeForm();
-        showMsg(`Created ${nextInvNumber}`);
-        await load();
-    } catch (e) {
-        btn.disabled = false; btn.textContent = 'Create';
-        showMsg(e.message, true);
-    }
-}
+        async function load() {
+            try {
+                client.value = await api('/api/billing/client');
+                document.title = `Billing · ${client.value.name || 'frshty'}`;
+                const calls = [
+                    api('/api/billing/entries'),
+                    api('/api/billing/invoices'),
+                    api('/api/billing/schedule-status'),
+                    api('/api/config'),
+                ];
+                if (client.value.billcom_available) calls.push(api('/api/billing/next-invoice-number'));
+                const results = await Promise.all(calls);
+                entries.value = results[0];
+                invoices.value = results[1];
+                schedule.value = results[2];
+                features.value = (results[3] || {}).features || {};
+                instanceName.value = (results[3] || {}).job?.key || '';
+                if (client.value.billcom_available && results[4]) nextInvNumber.value = results[4].number || '';
+            } catch (e) {
+                showMsg(e.message, true);
+            }
+        }
 
-document.addEventListener('click', (e) => {
-    if (openForm && !openForm.contains(e.target) && !e.target.closest('.invoice-tag')) closeForm();
-});
+        async function refreshEntries() {
+            entries.value = await api('/api/billing/entries');
+        }
 
-function showMsg(text, isError = false) {
-    const el = document.getElementById('msg');
-    el.className = `msg ${isError ? 'msg-err' : 'msg-ok'}`;
-    el.textContent = text;
-    setTimeout(() => { el.textContent = ''; el.className = 'msg'; }, 4000);
-}
+        async function cycleDay(ds) {
+            const entry = entries.value.find(e => e.date === ds);
+            const current = entry ? entry.type : 'work';
+            const nextByType = { work: 'vacation', vacation: 'closed', closed: 'delete' };
+            const next = nextByType[current] || 'vacation';
+            try {
+                if (next === 'delete') await api(`/api/billing/entries/${ds}`, { method: 'DELETE' });
+                else await api('/api/billing/entries', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ date: ds, type: next, hours: next === 'work' ? 8 : 0 }),
+                });
+                await refreshEntries();
+            } catch (e) { showMsg(e.message, true); }
+        }
 
-load().catch(e => showMsg(e.message, true));
+        async function openInvoiceForm(wIdx, week, ev) {
+            ev.stopPropagation();
+            if (!client.value.billcom_available || !client.value.billcom_customer_id) {
+                showMsg('bill.com not configured', true);
+                return;
+            }
+            const t = week.invoiceTag;
+            formData.start = t.formStart;
+            formData.end = t.formEnd;
+            formData.hours = t.formHours;
+            formData.amount = t.formAmount;
+            formOpenWeek.value = wIdx;
+            previewItems.value = [];
+            previewError.value = '';
+            previewLoading.value = true;
+            try {
+                const resp = await api(`/api/billing/preview?start=${encodeURIComponent(t.formStart)}&end=${encodeURIComponent(t.formEnd)}`);
+                previewItems.value = (resp && resp.descriptions) || [];
+            } catch (e) {
+                previewError.value = e.message || String(e);
+            }
+            previewLoading.value = false;
+        }
+
+        function closeForm() {
+            formOpenWeek.value = null;
+        }
+
+        async function saveInvoice() {
+            saving.value = true;
+            try {
+                await api('/api/billing/invoices', {
+                    method: 'POST', headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        number: nextInvNumber.value,
+                        start: formData.start, end: formData.end,
+                        hours: formData.hours, amount: formData.amount,
+                        date: formData.end,
+                    }),
+                });
+                closeForm();
+                showMsg(`Created ${nextInvNumber.value}`);
+                await load();
+            } catch (e) {
+                showMsg(e.message, true);
+            } finally {
+                saving.value = false;
+            }
+        }
+
+        function showMsg(text, isError = false) {
+            msg.value = text;
+            msgKind.value = isError ? 'err' : 'ok';
+            if (msgTimer) clearTimeout(msgTimer);
+            msgTimer = setTimeout(() => { msg.value = ''; }, 4000);
+        }
+
+        function onDocClick(e) {
+            if (formOpenWeek.value === null) return;
+            if (e.target.closest('.inv-form') || e.target.closest('.invoice-tag')) return;
+            closeForm();
+        }
+
+        onMounted(() => {
+            load();
+            document.addEventListener('click', onDocClick);
+        });
+        onUnmounted(() => {
+            document.removeEventListener('click', onDocClick);
+        });
+
+        return {
+            client, entries, invoices, nextInvNumber, features, instanceName,
+            msg, msgKind,
+            extrasText, credsWarn, scheduleSummary,
+            weeks, missingSummary, missingTotals,
+            formOpenWeek, formData, previewItems, previewLoading, previewError, saving,
+            cycleDay, openInvoiceForm, closeForm, saveInvoice,
+        };
+    },
+}).mount('#app');
 </script>
 </body>
 </html>
