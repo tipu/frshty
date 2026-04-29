@@ -133,7 +133,7 @@ async def get_raw_prs(instance: str | None = None) -> str:
     return json.dumps(results, indent=2)
 
 
-@server.tool(description="Compare frshty ticket state vs actual ticket system and PR state. Detects drift like tickets that exist in Jira/Linear but not in frshty, or PRs that are merged but frshty still shows pr_created.")
+@server.tool(description="Compare frshty ticket state vs actual ticket system and PR state. Detects drift like tickets that exist in Jira/Linear but not in frshty, or PRs that are merged but frshty still shows in_review.")
 async def reconcile(instance: str | None = None) -> str:
     instances, found = _resolve(instance)
     if instance and not found:
@@ -176,7 +176,7 @@ async def reconcile(instance: str | None = None) -> str:
                     for pr in ticket.get("prs", []):
                         pr_tuple = (pr.get("repo"), pr.get("id"))
                         frshty_status = ticket.get("status", "")
-                        if frshty_status in ("pr_created", "in_review") and pr_tuple not in open_pr_ids:
+                        if frshty_status == "in_review" and pr_tuple not in open_pr_ids:
                             discrepancies.append({
                                 "instance": key,
                                 "type": "pr_no_longer_open",

@@ -16,7 +16,7 @@ from features.platforms import make_platform
 from features.ticket_systems import make_ticket_system
 
 
-STATES = ["new", "planning", "reviewing", "pr_ready", "pr_created", "in_review", "merged"]
+STATES = ["new", "planning", "reviewing", "pr_ready", "in_review", "merged"]
 
 
 def _label(key: str, ts: dict) -> str:
@@ -449,7 +449,7 @@ def check(config: dict, instance_key: str = ""):
             if ts.get("status") == "done":
                 ts.pop("done_at", None)
                 if ts.get("prs"):
-                    ts["status"] = "pr_created"
+                    ts["status"] = "in_review"
                 elif ts.get("slug"):
                     ts["status"] = "pr_ready"
                 else:
@@ -537,10 +537,10 @@ def check(config: dict, instance_key: str = ""):
             if ts["status"] == "pr_ready" and config.get("pr", {}).get("auto_pr") and not ts.get("pr_scheduled_at"):
                 ts = _create_pr(config, ticket, ts, base_url)
 
-            if ts["status"] in ("pr_created", "in_review"):
+            if ts["status"] == "in_review":
                 ts = _resolve_conflicts(config, ticket, ts, base_url)
 
-            if ts["status"] in ("pr_created", "in_review"):
+            if ts["status"] == "in_review":
                 platform = make_platform(config)
                 result = platform.monitor_ci(ticket, ts, base_url)
                 if result.get("_ci_failed"):
@@ -551,10 +551,10 @@ def check(config: dict, instance_key: str = ""):
                 else:
                     ts = result
 
-            if ts["status"] in ("pr_created", "in_review") and ts.get("ci_passed") and config.get("pr", {}).get("auto_merge"):
+            if ts["status"] == "in_review" and ts.get("ci_passed") and config.get("pr", {}).get("auto_merge"):
                 ts = _merge(config, ticket, ts, base_url)
 
-            if ts["status"] in ("pr_created", "in_review"):
+            if ts["status"] == "in_review":
                 ts = _check_in_review(config, ticket, ts, base_url)
 
             state.save_ticket(key, ts)
@@ -772,7 +772,7 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
 
     ts["prs"] = prs
     ts["last_comment_ids"] = {f"{p['repo']}/{p['id']}": 0 for p in prs}
-    ts["status"] = transition(ts["status"], "pr_created")
+    ts["status"] = transition(ts["status"], "in_review")
     return ts
 
 
@@ -921,7 +921,7 @@ def _reconcile_prs(ts: dict, open_prs: list[dict]) -> dict:
     ts["prs"] = matches
 
     if status_regressed:
-        ts["status"] = "pr_created"
+        ts["status"] = "in_review"
 
     if pr_changed or status_regressed:
         ts["conflict_resolution_attempts"] = 0
