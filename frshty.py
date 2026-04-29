@@ -568,12 +568,13 @@ async def api_submit_pr(ticket_key: str, request: Request):
     if not prs:
         return {"error": "No PRs were created"}, 400
 
-    def _mark(current):
-        new = dict(current or {})
-        new["prs"] = prs
-        return new
-
-    state.update_ticket(ticket_key, _mark)
+    try:
+        state.transition_ticket(ticket_key, "pr_created", prs=prs)
+    except state.TicketStateError as e:
+        log.emit("ticket_pr_transition_failed",
+                 f"PRs created for {ticket_key} but transition to pr_created failed: {e}",
+                 meta={"ticket": ticket_key, "prs": prs})
+        return {"error": f"PRs created but state transition failed: {e}", "prs": prs}, 500
     log.emit("ticket_pr_created", f"PR submitted for {ticket_key}: {len(prs)} repo(s)",
              meta={"ticket": ticket_key, "repos": [p["repo"] for p in prs]})
     return {"status": "ok", "prs": prs}
