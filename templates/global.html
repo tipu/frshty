@@ -6,10 +6,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Global Feed — frshty</title>
 <script src="/static/tailwind.js"></script>
-<script defer src="/static/nav-gate.js"></script>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <style>
 body { font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; background: #0a0a0a; color: #e0e0e0; }
 .card { background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; }
+.card-red { border-left: 3px solid #ef4444; }
 .unread { font-weight: 600; border-left: 3px solid #3b82f6; }
 .read { opacity: 0.4; }
 .link { color: #60a5fa; text-decoration: none; }
@@ -30,13 +31,19 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
 .summary-full { display: none; white-space: pre-wrap; word-break: break-word; }
 .expanded .summary-line { display: none; }
 .expanded .summary-full { display: block; }
+[v-cloak] { display: none; }
 </style>
 </head>
 <body class="p-4 max-w-7xl mx-auto">
 
+<div id="app" v-cloak>
+
 <header class="flex items-center justify-between mb-4">
     <div class="flex items-center gap-4">
-        <div class="flex items-center gap-2"><h1 class="text-lg font-bold">Global Feed</h1><span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700" id="instance-badge"></span></div>
+        <div class="flex items-center gap-2">
+            <h1 class="text-lg font-bold">Global Feed</h1>
+            <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700">{{ instanceName }}</span>
+        </div>
         <nav class="flex gap-1 text-sm">
             <a href="/">Feed</a>
             <a href="/global" class="active">Global</a>
@@ -44,67 +51,80 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
             <a href="/tickets">Tickets</a>
             <a href="/scheduled">Scheduled</a>
             <a href="/slack">Slack</a>
-            <a href="/timesheet">Timesheet</a>
-            <a href="/billing">Billing</a>
+            <a v-if="features.timesheet !== false" href="/timesheet">Timesheet</a>
+            <a v-if="features.billing !== false" href="/billing">Billing</a>
             <a href="/config">Config</a>
         </nav>
     </div>
     <div class="flex gap-2 text-xs items-center">
-        <select id="instance-filter" onchange="setInstanceFilter(this.value)" class="bg-gray-900 border border-gray-700 text-gray-300 text-xs px-1 py-0.5 rounded">
+        <select v-model="instanceFilter" class="bg-gray-900 border border-gray-700 text-gray-300 text-xs px-1 py-0.5 rounded">
             <option value="">all instances</option>
+            <option v-for="k in instanceOptions" :key="k" :value="k">{{ k }}</option>
         </select>
-        <select id="noise-mode" onchange="setNoiseMode(this.value)" class="bg-gray-900 border border-gray-700 text-gray-300 text-xs px-1 py-0.5 rounded">
+        <select v-model="noiseMode" class="bg-gray-900 border border-gray-700 text-gray-300 text-xs px-1 py-0.5 rounded">
             <option value="useful">useful</option>
             <option value="noise">noise</option>
         </select>
-        <select id="time-window" onchange="setTimeWindow(this.value)" class="bg-gray-900 border border-gray-700 text-gray-300 text-xs px-1 py-0.5 rounded">
-            <option value="8">8h</option>
-            <option value="16">16h</option>
-            <option value="24">24h</option>
+        <select v-model.number="timeWindow" class="bg-gray-900 border border-gray-700 text-gray-300 text-xs px-1 py-0.5 rounded">
+            <option :value="8">8h</option>
+            <option :value="16">16h</option>
+            <option :value="24">24h</option>
         </select>
         <span class="text-gray-700">|</span>
         <label class="flex items-center gap-1 text-gray-400">
-            <input type="checkbox" id="show-dismissed" onchange="setShowDismissed(this.checked)" />
+            <input type="checkbox" v-model="showDismissed" />
             show dismissed
         </label>
-        <button onclick="clearDismissed()" class="text-gray-600 hover:text-red-400">clear dismissed</button>
+        <button @click="clearDismissed" class="text-gray-600 hover:text-red-400">clear dismissed</button>
     </div>
 </header>
 
-<div id="error-banner" class="hidden card card-red px-3 py-2 mb-3 text-sm"></div>
+<div v-if="errorKeys.length" class="card card-red px-3 py-2 mb-3 text-sm">
+    <div class="text-red-300">⚠ {{ errorKeys.length }} instance(s) unreachable:
+        <span v-for="k in errorKeys" :key="k" class="badge badge-red ml-1">{{ k }}</span>
+        — events may be missing
+    </div>
+</div>
 
-<div id="event-feed" class="space-y-0.5 text-xs font-mono"></div>
+<div class="space-y-0.5 text-xs font-mono">
+    <div v-if="!filteredEvents.length" class="text-gray-600 text-xs py-2">Nothing to show.</div>
+    <div v-for="e in filteredEvents" :key="e.global_id"
+         class="feed-row px-2 py-1 hover:bg-gray-900 rounded flex items-center gap-2"
+         :class="[(e.read || dismissed.has(e.global_id)) ? 'read' : 'unread', { expanded: expandedRows.has(e.global_id) }]">
+        <span class="text-gray-600 w-14 shrink-0">{{ fmtTime(e.ts) }}</span>
+        <span class="badge shrink-0" :style="instanceBadgeStyle(e.instance_key)">{{ e.instance_key || '?' }}</span>
+        <span>{{ (e.read || dismissed.has(e.global_id)) ? '○' : '●' }}</span>
+        <span v-if="hasMore(e)" class="row-expand shrink-0" @click="toggleExpand(e.global_id)">▸</span>
+        <span v-else class="row-expand shrink-0"></span>
+        <div class="flex-1 min-w-0">
+            <span class="badge" :class="badgeCls(e)">{{ e.event }}</span>
+            <span class="summary-line ml-2">{{ firstLine(e) }}</span>
+            <span class="ml-2"><a v-for="[k, url] in linkPairs(e)" :key="k" :href="resolveLink(url, e.base_url)" target="_blank" class="link">[→ {{ k }}]</a></span>
+            <div class="summary-full mt-1 text-xs text-gray-400">{{ e.summary }}</div>
+        </div>
+        <span v-if="dismissed.has(e.global_id)" class="text-gray-600 ml-2 text-xs" title="dismissed globally">⌀</span>
+        <span v-else class="dismiss-btn ml-2" @click="dismissGlobal(e.global_id)" title="dismiss from global feed (does not affect per-instance)">✓</span>
+    </div>
+</div>
+
+</div>
 
 <script>
-let noiseMode = localStorage.getItem('eventNoiseMode') || 'useful';
-let timeWindow = parseInt(localStorage.getItem('eventTimeWindow') || '8', 10);
-let instanceFilter = localStorage.getItem('globalInstanceFilter') || '';
-let showDismissed = false;
-let events = [];
-
-const INSTANCE_PALETTE = [
-    {bg: '#1e3a5f', fg: '#93c5fd'},  // blue
-    {bg: '#14532d', fg: '#86efac'},  // green
-    {bg: '#713f12', fg: '#fde047'},  // yellow
-    {bg: '#3b1e5f', fg: '#d8b4fe'},  // purple
-    {bg: '#5f1e3a', fg: '#fbcfe8'},  // pink
-    {bg: '#1e5f5f', fg: '#5eead4'},  // teal
-    {bg: '#5f3a1e', fg: '#fdba74'},  // orange
-    {bg: '#4c1d95', fg: '#c4b5fd'},  // violet
-];
-
-function instanceColor(key) {
-    let h = 0;
-    for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) | 0;
-    return INSTANCE_PALETTE[Math.abs(h) % INSTANCE_PALETTE.length];
-}
-let errors = {};
-let expandedRows = new Set();
-let dismissed = new Set(JSON.parse(localStorage.getItem('globalDismissedEventKeys') || '[]'));
+const { createApp, ref, reactive, computed, watch, onMounted } = Vue;
 
 const SYSTEM_EVENTS = new Set(['cycle_start', 'cycle_end', 'cycle_sleep']);
+const INSTANCE_PALETTE = [
+    {bg: '#1e3a5f', fg: '#93c5fd'},
+    {bg: '#14532d', fg: '#86efac'},
+    {bg: '#713f12', fg: '#fde047'},
+    {bg: '#3b1e5f', fg: '#d8b4fe'},
+    {bg: '#5f1e3a', fg: '#fbcfe8'},
+    {bg: '#1e5f5f', fg: '#5eead4'},
+    {bg: '#5f3a1e', fg: '#fdba74'},
+    {bg: '#4c1d95', fg: '#c4b5fd'},
+];
 
-function isNoise(e) {
+function isNoiseEvent(e) {
     if (e.meta?.category === 'noise') return true;
     if (e.event === 'job_started') return true;
     if (e.event === 'ticket_ci_fix_skipped') return true;
@@ -112,186 +132,151 @@ function isNoise(e) {
     if (e.event === 'review_validation_dropped') return true;
     if (e.event === 'job_finished') {
         const s = e.summary || '';
-        if (s.includes('ticket=None') && s.includes('status=ok')) return true;
+        return s.includes('ticket=None') && s.includes('status=ok');
     }
     return false;
 }
 
-function setNoiseMode(m) {
-    noiseMode = m;
-    localStorage.setItem('eventNoiseMode', m);
-    render();
+function instanceColor(key) {
+    let h = 0;
+    for (let i = 0; i < (key || '').length; i++) h = (h * 31 + key.charCodeAt(i)) | 0;
+    return INSTANCE_PALETTE[Math.abs(h) % INSTANCE_PALETTE.length];
 }
 
-function setTimeWindow(v) {
-    timeWindow = parseInt(v, 10);
-    localStorage.setItem('eventTimeWindow', String(timeWindow));
-    fetchEvents();
-}
+createApp({
+    setup() {
+        const events = ref([]);
+        const errors = ref({});
+        const features = ref({});
+        const instanceName = ref('');
+        const noiseMode = ref(localStorage.getItem('eventNoiseMode') || 'useful');
+        const timeWindow = ref(parseInt(localStorage.getItem('eventTimeWindow') || '8', 10));
+        const instanceFilter = ref(localStorage.getItem('globalInstanceFilter') || '');
+        const showDismissed = ref(false);
+        const expandedRows = reactive(new Set());
+        const dismissed = reactive(new Set(JSON.parse(localStorage.getItem('globalDismissedEventKeys') || '[]')));
 
-function setInstanceFilter(v) {
-    instanceFilter = v || '';
-    localStorage.setItem('globalInstanceFilter', instanceFilter);
-    render();
-}
+        const errorKeys = computed(() => Object.keys(errors.value));
 
-function refreshInstanceDropdown() {
-    const sel = document.getElementById('instance-filter');
-    const seen = new Set(events.map(e => e.instance_key).filter(Boolean));
-    const current = new Set(Array.from(sel.options).map(o => o.value));
-    const desired = new Set(['', ...seen]);
-    if (seen.size === 0 || [...current].every(v => desired.has(v)) && [...desired].every(v => current.has(v))) return;
-    const prev = sel.value;
-    sel.innerHTML = '<option value="">all instances</option>' +
-        [...seen].sort().map(k => `<option value="${esc(k)}">${esc(k)}</option>`).join('');
-    sel.value = desired.has(prev) ? prev : '';
-    instanceFilter = sel.value;
-}
+        const instanceOptions = computed(() => {
+            const seen = new Set();
+            for (const e of events.value) if (e.instance_key) seen.add(e.instance_key);
+            return [...seen].sort();
+        });
 
-function setShowDismissed(v) {
-    showDismissed = v;
-    render();
-}
+        const filteredEvents = computed(() => {
+            const local = instanceName.value;
+            return events.value
+                .filter(e => !SYSTEM_EVENTS.has(e.event))
+                .filter(e => !instanceFilter.value || e.instance_key === instanceFilter.value)
+                .filter(e => {
+                    if (noiseMode.value === 'noise') return true;
+                    if (e.instance_key !== local) return true;
+                    return !isNoiseEvent(e);
+                })
+                .filter(e => showDismissed.value || !dismissed.has(e.global_id));
+        });
 
-function toggleExpand(id) {
-    if (expandedRows.has(id)) expandedRows.delete(id);
-    else expandedRows.add(id);
-    render();
-}
+        function fmtTime(iso) {
+            try {
+                const d = new Date(iso);
+                const diff = Date.now() - d.getTime();
+                const mins = Math.floor(diff / 60000);
+                if (mins < 1) return 'just now';
+                if (mins < 60) return `${mins}m`;
+                const hrs = Math.floor(mins / 60);
+                if (hrs < 24) return `${hrs}h`;
+                return `${Math.floor(hrs / 24)}d`;
+            } catch { return ''; }
+        }
 
-function dismissGlobal(gid) {
-    dismissed.add(gid);
-    localStorage.setItem('globalDismissedEventKeys', JSON.stringify([...dismissed]));
-    render();
-}
+        function firstLine(e) { return (e.summary || '').split('\n')[0]; }
+        function hasMore(e) { return (e.summary || '').includes('\n'); }
+        function linkPairs(e) { return Object.entries(e.links || {}).filter(([, url]) => url); }
 
-function clearDismissed() {
-    if (!confirm('Clear all dismissed events from the global feed?')) return;
-    dismissed = new Set();
-    localStorage.setItem('globalDismissedEventKeys', '[]');
-    render();
-}
+        function instanceBadgeStyle(key) {
+            const c = instanceColor(key || '');
+            return `background:${c.bg};color:${c.fg}`;
+        }
 
-function esc(s) {
-    const d = document.createElement('div');
-    d.textContent = String(s == null ? '' : s);
-    return d.innerHTML;
-}
+        function badgeCls(e) {
+            if (e.event.includes('error') || e.event.includes('fail')) return 'badge-red';
+            if (e.event.includes('complete') || e.event.includes('pass') || e.event.includes('merged')) return 'badge-green';
+            if (e.event.includes('started') || e.event.includes('created')) return 'badge-yellow';
+            return 'badge-blue';
+        }
 
-function fmtTime(iso) {
-    try {
-        const d = new Date(iso);
-        const now = Date.now();
-        const diff = now - d.getTime();
-        const mins = Math.floor(diff / 60000);
-        if (mins < 1) return 'just now';
-        if (mins < 60) return `${mins}m`;
-        const hrs = Math.floor(mins / 60);
-        if (hrs < 24) return `${hrs}h`;
-        return `${Math.floor(hrs / 24)}d`;
-    } catch { return ''; }
-}
+        function resolveLink(url, baseUrl) {
+            if (!url) return '';
+            if (/^https?:\/\//.test(url)) return url;
+            if (!baseUrl) return url;
+            const b = baseUrl.replace(/\/$/, '');
+            const u = url.startsWith('/') ? url : `/${url}`;
+            return b + u;
+        }
 
-function resolveLink(url, baseUrl) {
-    if (!url) return '';
-    if (/^https?:\/\//.test(url)) return url;
-    if (!baseUrl) return url;
-    const b = baseUrl.replace(/\/$/, '');
-    const u = url.startsWith('/') ? url : `/${url}`;
-    return b + u;
-}
+        function toggleExpand(id) {
+            if (expandedRows.has(id)) expandedRows.delete(id);
+            else expandedRows.add(id);
+        }
 
-async function fetchEvents() {
-    try {
-        const limit = Math.max(5000, timeWindow * 1000);
-        const resp = await fetch(`/api/global/events?limit=${limit}&since_hours=${timeWindow}`);
-        const data = await resp.json();
-        events = data.events || [];
-        errors = data.errors || {};
-    } catch (e) {
-        errors = {_fetch: String(e)};
-        events = [];
-    }
-    render();
-}
+        function dismissGlobal(gid) {
+            dismissed.add(gid);
+            localStorage.setItem('globalDismissedEventKeys', JSON.stringify([...dismissed]));
+        }
 
-function renderErrorBanner() {
-    const banner = document.getElementById('error-banner');
-    const keys = Object.keys(errors);
-    if (!keys.length) {
-        banner.classList.add('hidden');
-        return;
-    }
-    banner.classList.remove('hidden');
-    banner.innerHTML = `<div class="text-red-300">⚠ ${keys.length} instance(s) unreachable: ${keys.map(k => `<span class="badge badge-red ml-1">${k}</span>`).join(' ')} — events may be missing</div>`;
-}
+        function clearDismissed() {
+            if (!confirm('Clear all dismissed events from the global feed?')) return;
+            dismissed.clear();
+            localStorage.setItem('globalDismissedEventKeys', '[]');
+        }
 
-function render() {
-    refreshInstanceDropdown();
-    renderErrorBanner();
-    const localKey = document.getElementById('instance-badge').textContent.trim();
-    const items = events
-        .filter(e => !SYSTEM_EVENTS.has(e.event))
-        .filter(e => !instanceFilter || e.instance_key === instanceFilter)
-        .filter(e => {
-            if (noiseMode === 'noise') return true;
-            if (e.instance_key !== localKey) return true;
-            return !isNoise(e);
-        })
-        .filter(e => showDismissed || !dismissed.has(e.global_id));
-    const container = document.getElementById('event-feed');
-    if (!items.length) {
-        container.innerHTML = '<div class="text-gray-600 text-xs py-2">Nothing to show.</div>';
-        return;
-    }
-    container.innerHTML = items.map(e => {
-        const isDismissed = dismissed.has(e.global_id);
-        const cls = (e.read || isDismissed) ? 'read' : 'unread';
-        const dot = (e.read || isDismissed) ? '○' : '●';
-        const links = Object.entries(e.links || {}).filter(([_, url]) => url).map(([k, url]) =>
-            `<a href="${esc(resolveLink(url, e.base_url))}" target="_blank" class="link">[→ ${esc(k)}]</a>`
-        ).join(' ');
-        const badgeCls = e.event.includes('error') || e.event.includes('fail') ? 'badge-red'
-            : e.event.includes('complete') || e.event.includes('pass') || e.event.includes('merged') ? 'badge-green'
-            : e.event.includes('started') || e.event.includes('created') ? 'badge-yellow'
-            : 'badge-blue';
-        const summary = e.summary || '';
-        const firstLine = summary.split('\n')[0];
-        const hasMore = summary.includes('\n');
-        const exp = expandedRows.has(e.global_id) ? 'expanded' : '';
-        const gid = esc(e.global_id);
-        const instColor = instanceColor(e.instance_key || '');
-        const dismissControl = isDismissed
-            ? `<span class="text-gray-600 ml-2 text-xs" title="dismissed globally">⌀</span>`
-            : `<span class="dismiss-btn ml-2" onclick="dismissGlobal('${gid}')" title="dismiss from global feed (does not affect per-instance)">✓</span>`;
-        return `<div class="${cls} feed-row px-2 py-1 hover:bg-gray-900 rounded ${exp} flex items-center gap-2">
-            <span class="text-gray-600 w-14 shrink-0">${esc(fmtTime(e.ts))}</span>
-            <span class="badge shrink-0" style="background:${instColor.bg};color:${instColor.fg}">${esc(e.instance_key || '?')}</span>
-            <span>${dot}</span>
-            ${hasMore ? `<span class="row-expand shrink-0" onclick="toggleExpand('${gid}')">▸</span>` : '<span class="row-expand shrink-0"></span>'}
-            <div class="flex-1 min-w-0">
-                <span class="badge ${badgeCls}">${esc(e.event)}</span>
-                <span class="summary-line ml-2">${esc(firstLine)}</span>
-                <span class="ml-2">${links}</span>
-                <div class="summary-full mt-1 text-xs text-gray-400">${esc(summary)}</div>
-            </div>
-            ${dismissControl}
-        </div>`;
-    }).join('');
-}
+        async function fetchConfig() {
+            try {
+                const r = await fetch('/api/config');
+                const cfg = await r.json();
+                features.value = cfg.features || {};
+                instanceName.value = cfg.job?.key || '';
+            } catch (e) {}
+        }
 
-document.getElementById('noise-mode').value = noiseMode;
-document.getElementById('time-window').value = String(timeWindow);
-if (instanceFilter) {
-    const sel = document.getElementById('instance-filter');
-    const opt = document.createElement('option');
-    opt.value = instanceFilter;
-    opt.textContent = instanceFilter;
-    sel.appendChild(opt);
-    sel.value = instanceFilter;
-}
-fetchEvents();
-setInterval(fetchEvents, 5000);
+        async function fetchEvents() {
+            try {
+                const limit = Math.max(5000, timeWindow.value * 1000);
+                const r = await fetch(`/api/global/events?limit=${limit}&since_hours=${timeWindow.value}`);
+                const data = await r.json();
+                events.value = data.events || [];
+                errors.value = data.errors || {};
+            } catch (e) {
+                errors.value = { _fetch: String(e) };
+                events.value = [];
+            }
+        }
+
+        watch(noiseMode, v => localStorage.setItem('eventNoiseMode', v));
+        watch(timeWindow, v => {
+            localStorage.setItem('eventTimeWindow', String(v));
+            fetchEvents();
+        });
+        watch(instanceFilter, v => localStorage.setItem('globalInstanceFilter', v || ''));
+
+        onMounted(() => {
+            fetchConfig();
+            fetchEvents();
+            setInterval(fetchEvents, 5000);
+        });
+
+        return {
+            events, errors, features, instanceName,
+            noiseMode, timeWindow, instanceFilter, showDismissed,
+            expandedRows, dismissed,
+            errorKeys, instanceOptions, filteredEvents,
+            fmtTime, firstLine, hasMore, linkPairs,
+            instanceBadgeStyle, badgeCls, resolveLink,
+            toggleExpand, dismissGlobal, clearDismissed,
+        };
+    },
+}).mount('#app');
 </script>
 </body>
 </html>
