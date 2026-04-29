@@ -1499,6 +1499,7 @@ def api_set_ticket_status(key: str, body: dict):
 @app.delete("/api/tickets/{key}")
 def api_discard_ticket(key: str):
     import shutil
+    import core.scheduler as scheduler
     ts = state.load_ticket(key)
     if ts is None:
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -1516,6 +1517,9 @@ def api_discard_ticket(key: str):
             shutil.rmtree(ticket_dir)
         for repo in repos:
             subprocess.run(["git", "worktree", "prune"], cwd=str(repo["path"]), capture_output=True, timeout=60)
+    instance_key = _config.get("job", {}).get("key", "")
+    if instance_key:
+        scheduler.delete(instance_key, key)
     state.delete_ticket(key)
     return {"status": "discarded"}
 
