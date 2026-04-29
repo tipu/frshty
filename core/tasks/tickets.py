@@ -46,9 +46,9 @@ def start_planning(ctx: TaskContext) -> TaskResult:
     ticket_dir = _ticket_dir(ctx)
     if not ticket_dir.is_dir():
         return TaskResult("failed", f"ticket dir missing: {ticket_dir}")
-    log.emit("ticket_planning_started", f"Headless /confer-technical-plan for {ctx.ticket_key}",
+    log.emit("ticket_planning_started", f"Headless /ctp for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key})
-    result = run_claude_code("/confer-technical-plan docs/", cwd=ticket_dir, timeout=PLAN_TIMEOUT)
+    result = run_claude_code("/ctp docs/", cwd=ticket_dir, timeout=PLAN_TIMEOUT)
     if result is None:
         return TaskResult("failed", "claude returned non-zero or empty")
     return TaskResult("ok")
