@@ -1957,9 +1957,12 @@ def main():
     if args.multi:
         # Pass app object directly so _configs_by_host populated in __main__ is
         # visible to middleware (vs. uvicorn re-importing frshty as a fresh module).
-        uvicorn.run(app, host=host, port=port, log_level=log_level)
+        uvicorn.run(app, host=host, port=port, log_level=log_level,
+                    ws_ping_interval=60, ws_ping_timeout=60)
     else:
-        uvicorn.run("frshty:app", host=host, port=port, log_level=log_level, reload=reload, reload_dirs=reload_dirs)
+        uvicorn.run("frshty:app", host=host, port=port, log_level=log_level,
+                    reload=reload, reload_dirs=reload_dirs,
+                    ws_ping_interval=60, ws_ping_timeout=60)
 
 
 if __name__ == "__main__":
