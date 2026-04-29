@@ -5,7 +5,7 @@
 <meta charset="utf-8">
 <title>Scheduled — frshty</title>
 <script src="/static/tailwind.js"></script>
-<script defer src="/static/nav-gate.js"></script>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <style>
 body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: #0a0a0a; color: #e0e0e0; }
 .card { background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; }
@@ -18,11 +18,18 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
 .badge-ci { background: #1e3a5f; color: #93c5fd; }
 .badge-recurring { background: #14532d; color: #86efac; }
 .badge-virtual { background: #4b3a1a; color: #fcd34d; }
+[v-cloak] { display: none; }
 </style>
 </head>
 <body class="p-4 max-w-7xl mx-auto">
+
+<div id="app" v-cloak>
+
 <header class="flex items-center gap-4 mb-4">
-    <div class="flex items-center gap-2"><h1 class="text-lg font-bold">Scheduled</h1><span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700" id="instance-badge"></span></div>
+    <div class="flex items-center gap-2">
+        <h1 class="text-lg font-bold">Scheduled</h1>
+        <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700">{{ instanceName }}</span>
+    </div>
     <nav class="flex gap-1 text-sm">
         <a href="/">Feed</a>
         <a href="/global">Global</a>
@@ -30,132 +37,149 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
         <a href="/tickets">Tickets</a>
         <a href="/scheduled" class="active">Scheduled</a>
         <a href="/slack">Slack</a>
-        <a href="/timesheet">Timesheet</a>
-        <a href="/billing">Billing</a>
+        <a v-if="features.timesheet !== false" href="/timesheet">Timesheet</a>
+        <a v-if="features.billing !== false" href="/billing">Billing</a>
         <a href="/config">Config</a>
     </nav>
 </header>
 
-<div id="empty" class="text-gray-500 text-sm hidden">Nothing pending.</div>
-<div id="items" class="grid gap-3 max-w-2xl"></div>
+<div v-if="!items.length" class="text-gray-500 text-sm">Nothing pending.</div>
+<div v-else class="grid gap-3 max-w-2xl">
+    <template v-for="item in items">
+        <div v-if="item.type === 'scheduled_pr'" :key="`pr-${item.key}`" class="card p-4">
+            <div class="flex items-center gap-2 mb-1">
+                <span class="badge badge-scheduled">pr scheduled</span>
+                <a :href="`/tickets/${item.key}`" class="link font-bold text-sm">{{ item.key }}</a>
+            </div>
+            <div class="flex items-center gap-2 text-xs text-gray-400 mt-1">
+                <span>fires {{ fmtDate(item.run_at) }}</span>
+                <span class="text-yellow-400">({{ relTime(item.run_at) }})</span>
+                <input type="time" v-model="timeDrafts[item.key]"
+                       class="bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-xs text-gray-300" />
+                <button @click="reschedule(item.key)"
+                        class="bg-blue-800 hover:bg-blue-700 text-blue-200 px-2 py-0.5 rounded text-xs">Save</button>
+            </div>
+            <div v-if="item.meta && item.meta.branch" class="text-xs text-gray-500 mt-1">{{ item.meta.branch }}</div>
+        </div>
+        <div v-else-if="item.type === 'recurring_virtual'" :key="`virt-${item.ticket}-${item.time}`"
+             class="card p-4" title="Derived from config (read-only). Edit the TOML and restart to change.">
+            <div class="flex items-center gap-2 mb-1">
+                <span class="badge badge-virtual">from config 🔒</span>
+                <span class="font-bold text-sm">{{ item.ticket }} · {{ item.time }}</span>
+                <span v-if="item.label" class="text-xs text-gray-500">{{ item.label }}</span>
+            </div>
+            <div class="flex items-center gap-2 text-xs text-gray-400 mt-1">
+                <span>fires {{ fmtDate(item.run_at) }}</span>
+                <span class="text-yellow-400">({{ relTime(item.run_at) }})</span>
+            </div>
+        </div>
+        <div v-else-if="item.type === 'recurring'" :key="`rec-${item.task}-${item.run_at}`" class="card p-4">
+            <div class="flex items-center gap-2 mb-1">
+                <span class="badge badge-recurring">{{ cadenceLabel(item.cadence) }}</span>
+                <span class="font-bold text-sm">{{ item.task }}</span>
+            </div>
+            <div class="flex items-center gap-2 text-xs text-gray-400 mt-1">
+                <span>fires {{ fmtDate(item.run_at) }}</span>
+                <span class="text-yellow-400">({{ relTime(item.run_at) }})</span>
+            </div>
+            <div class="text-xs text-gray-500 mt-1">
+                <template v-if="item.last_run_at">Last fired {{ fmtDate(item.last_run_at) }} ({{ relTime(item.last_run_at) }})</template>
+                <template v-else>Never fired</template>
+            </div>
+        </div>
+        <div v-else-if="item.type === 'ci_pending'" :key="`ci-${item.key}`" class="card p-4">
+            <div class="flex items-center gap-2 mb-1">
+                <span class="badge badge-ci">ci pending</span>
+                <a :href="`/tickets/${item.key}`" class="link font-bold text-sm">{{ item.key }}</a>
+                <span v-if="(item.prs || []).length" class="text-xs">
+                    <a v-for="p in item.prs" :key="p.url" :href="p.url" class="link" target="_blank">#{{ p.id }}</a>
+                </span>
+            </div>
+            <div class="text-xs text-gray-400">
+                <template v-if="item.checks_started_at">checks running {{ relTime(item.checks_started_at) }}</template>
+                <template v-else>waiting for checks</template>
+            </div>
+            <div v-if="item.branch" class="text-xs text-gray-500 mt-1">{{ item.branch }}</div>
+        </div>
+    </template>
+</div>
+
+</div>
 
 <script>
-function relTime(iso) {
-    const d = new Date(iso);
-    const now = Date.now();
-    const diff = d - now;
-    const abs = Math.abs(diff);
-    const mins = Math.floor(abs / 60000);
-    const hrs = Math.floor(mins / 60);
-    const remMins = mins % 60;
-    const label = hrs > 0 ? `${hrs}h ${remMins}m` : `${mins}m`;
-    return diff > 0 ? `in ${label}` : `${label} ago`;
-}
+const { createApp, ref, reactive, watch, onMounted } = Vue;
 
-function fmtDate(iso) {
-    return new Date(iso).toLocaleDateString('en-US', {
-        weekday: 'short', month: 'short', day: 'numeric',
-        hour: 'numeric', minute: '2-digit'
-    });
-}
+const CADENCE_LABELS = { weekly: 'Weekly', monthly: 'Monthly', daily_19pst: 'Daily 7pm PT' };
 
-async function reschedule(key) {
-    const input = document.getElementById(`time-${key}`);
-    const [h, m] = input.value.split(':').map(Number);
-    const resp = await fetch('/api/scheduled');
-    const items = await resp.json();
-    const item = items.find(i => i.key === key);
-    if (!item) return;
-    const d = new Date();
-    d.setHours(h, m, 0, 0);
-    const r = await fetch(`/api/scheduled/${key}/reschedule`, {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({run_at: d.toISOString()}),
-    });
-    if (r.ok) load();
-}
+createApp({
+    setup() {
+        const items = ref([]);
+        const features = ref({});
+        const instanceName = ref('');
+        const timeDrafts = reactive({});
 
-async function load() {
-    const resp = await fetch('/api/scheduled');
-    const items = await resp.json();
-    const el = document.getElementById('items');
-    const empty = document.getElementById('empty');
-
-    if (!items.length) {
-        el.innerHTML = '';
-        empty.classList.remove('hidden');
-        return;
-    }
-    empty.classList.add('hidden');
-
-    el.innerHTML = items.map(item => {
-        if (item.type === 'scheduled_pr') {
-            const d = new Date(item.run_at);
-            const hh = String(d.getHours()).padStart(2, '0');
-            const mm = String(d.getMinutes()).padStart(2, '0');
-            return `<div class="card p-4">
-                <div class="flex items-center gap-2 mb-1">
-                    <span class="badge badge-scheduled">pr scheduled</span>
-                    <a href="/tickets/${item.key}" class="link font-bold text-sm">${item.key}</a>
-                </div>
-                <div class="flex items-center gap-2 text-xs text-gray-400 mt-1">
-                    <span>fires ${fmtDate(item.run_at)}</span>
-                    <span class="text-yellow-400">(${relTime(item.run_at)})</span>
-                    <input type="time" value="${hh}:${mm}" id="time-${item.key}" class="bg-gray-900 border border-gray-700 rounded px-1 py-0.5 text-xs text-gray-300" />
-                    <button onclick="reschedule('${item.key}')" class="bg-blue-800 hover:bg-blue-700 text-blue-200 px-2 py-0.5 rounded text-xs">Save</button>
-                </div>
-                ${item.meta.branch ? `<div class="text-xs text-gray-500 mt-1">${item.meta.branch}</div>` : ''}
-            </div>`;
+        function relTime(iso) {
+            const d = new Date(iso);
+            const diff = d - Date.now();
+            const abs = Math.abs(diff);
+            const mins = Math.floor(abs / 60000);
+            const hrs = Math.floor(mins / 60);
+            const remMins = mins % 60;
+            const label = hrs > 0 ? `${hrs}h ${remMins}m` : `${mins}m`;
+            return diff > 0 ? `in ${label}` : `${label} ago`;
         }
-        if (item.type === 'recurring_virtual') {
-            return `<div class="card p-4" title="Derived from config (read-only). Edit the TOML and restart to change.">
-                <div class="flex items-center gap-2 mb-1">
-                    <span class="badge badge-virtual">from config 🔒</span>
-                    <span class="font-bold text-sm">${item.ticket} · ${item.time}</span>
-                    ${item.label ? `<span class="text-xs text-gray-500">${item.label}</span>` : ''}
-                </div>
-                <div class="flex items-center gap-2 text-xs text-gray-400 mt-1">
-                    <span>fires ${fmtDate(item.run_at)}</span>
-                    <span class="text-yellow-400">(${relTime(item.run_at)})</span>
-                </div>
-            </div>`;
+        function fmtDate(iso) {
+            return new Date(iso).toLocaleDateString('en-US', {
+                weekday: 'short', month: 'short', day: 'numeric',
+                hour: 'numeric', minute: '2-digit',
+            });
         }
-        if (item.type === 'recurring') {
-            const cadenceLabel = {weekly: 'Weekly', monthly: 'Monthly', daily_19pst: 'Daily 7pm PT'}[item.cadence] || item.cadence;
-            const lastRun = item.last_run_at ? `<div class="text-xs text-gray-500 mt-1">Last fired ${fmtDate(item.last_run_at)} (${relTime(item.last_run_at)})</div>` : '<div class="text-xs text-gray-500 mt-1">Never fired</div>';
-            return `<div class="card p-4">
-                <div class="flex items-center gap-2 mb-1">
-                    <span class="badge badge-recurring">${cadenceLabel}</span>
-                    <span class="font-bold text-sm">${item.task}</span>
-                </div>
-                <div class="flex items-center gap-2 text-xs text-gray-400 mt-1">
-                    <span>fires ${fmtDate(item.run_at)}</span>
-                    <span class="text-yellow-400">(${relTime(item.run_at)})</span>
-                </div>
-                ${lastRun}
-            </div>`;
+        function cadenceLabel(c) { return CADENCE_LABELS[c] || c; }
+
+        async function load() {
+            try {
+                const [r1, r2] = await Promise.all([fetch('/api/scheduled'), fetch('/api/config')]);
+                items.value = await r1.json();
+                const cfg = await r2.json();
+                features.value = cfg.features || {};
+                instanceName.value = cfg.job?.key || '';
+                for (const item of items.value) {
+                    if (item.type === 'scheduled_pr') {
+                        if (timeDrafts[item.key] === undefined) {
+                            const d = new Date(item.run_at);
+                            timeDrafts[item.key] = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+                        }
+                    }
+                }
+            } catch (e) { console.error('scheduled load failed', e); }
         }
-        if (item.type === 'ci_pending') {
-            const elapsed = item.checks_started_at ? relTime(item.checks_started_at) : '';
-            const prLinks = (item.prs || []).map(p =>
-                `<a href="${p.url}" class="link" target="_blank">#${p.id}</a>`
-            ).join(' ');
-            return `<div class="card p-4">
-                <div class="flex items-center gap-2 mb-1">
-                    <span class="badge badge-ci">ci pending</span>
-                    <a href="/tickets/${item.key}" class="link font-bold text-sm">${item.key}</a>
-                    ${prLinks ? `<span class="text-xs">${prLinks}</span>` : ''}
-                </div>
-                ${elapsed ? `<div class="text-xs text-gray-400">checks running ${elapsed}</div>` : '<div class="text-xs text-gray-400">waiting for checks</div>'}
-                ${item.branch ? `<div class="text-xs text-gray-500 mt-1">${item.branch}</div>` : ''}
-            </div>`;
+
+        async function reschedule(key) {
+            const t = timeDrafts[key];
+            if (!t) return;
+            const [h, m] = t.split(':').map(Number);
+            const d = new Date();
+            d.setHours(h, m, 0, 0);
+            const r = await fetch(`/api/scheduled/${key}/reschedule`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({run_at: d.toISOString()}),
+            });
+            if (r.ok) load();
         }
-        return '';
-    }).join('');
-}
-load();
-setInterval(load, 10000);
+
+        onMounted(() => {
+            load();
+            setInterval(load, 10000);
+        });
+
+        return {
+            items, features, instanceName, timeDrafts,
+            relTime, fmtDate, cadenceLabel,
+            reschedule,
+        };
+    },
+}).mount('#app');
 </script>
 </body>
 </html>
