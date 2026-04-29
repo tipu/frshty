@@ -120,6 +120,10 @@ let expandedRows = new Set();
 function isNoise(e) {
     if (e.meta?.category === 'noise') return true;
     if (e.event === 'job_started') return true;
+    if (e.event === 'task_execution_started') return true;
+    if (e.event === 'task_execution_completed') return true;
+    if (e.event === 'marking_job_done') return true;
+    if (e.event === 'job_marked_done') return true;
     if (e.event === 'ticket_ci_fix_skipped') return true;
     if (e.event === 'events_started') return true;
     if (e.event === 'review_validation_dropped') return true;
