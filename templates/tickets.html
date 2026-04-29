@@ -5,7 +5,7 @@
 <meta charset="utf-8">
 <title>Tickets — frshty</title>
 <script src="/static/tailwind.js"></script>
-<script defer src="/static/nav-gate.js"></script>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <style>
 body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: #0a0a0a; color: #e0e0e0; }
 .card { background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; }
@@ -23,13 +23,17 @@ body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: #0a0a0a; 
 .badge-merged { background: #14532d; color: #86efac; }
 nav a { color: #888; padding: 4px 12px; border-radius: 4px; }
 nav a:hover, nav a.active { color: #fff; background: #222; }
+[v-cloak] { display: none; }
 </style>
 </head>
 <body class="p-4 max-w-7xl mx-auto">
+
+<div id="app" v-cloak>
+
 <header class="flex items-center gap-4 mb-4">
     <div class="flex items-center gap-2">
         <h1 class="text-lg font-bold">Tickets</h1>
-        <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700" id="instance-badge"></span>
+        <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700">{{ instanceName }}</span>
     </div>
     <nav class="flex gap-1 text-sm">
         <a href="/">Feed</a>
@@ -38,31 +42,83 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
         <a href="/tickets" class="active">Tickets</a>
         <a href="/scheduled">Scheduled</a>
         <a href="/slack">Slack</a>
-        <a href="/timesheet">Timesheet</a>
-        <a href="/billing">Billing</a>
+        <a v-if="features.timesheet !== false" href="/timesheet">Timesheet</a>
+        <a v-if="features.billing !== false" href="/billing">Billing</a>
         <a href="/config">Config</a>
     </nav>
 </header>
 
-<div id="board" class="flex gap-4 overflow-x-auto pb-4"></div>
-
-<div id="pr-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-    <div class="card p-6 w-[70vw] h-[85vh] mx-4 flex flex-col">
-        <div class="flex items-center justify-between mb-4 pb-4 border-b border-gray-700">
-            <h2 class="text-lg font-bold">Submit PR</h2>
-            <button onclick="closePrModal()" class="text-gray-600 hover:text-white text-xl">×</button>
+<div class="flex gap-4 overflow-x-auto pb-4">
+    <div v-for="col in visibleColumns" :key="col" class="col flex-1">
+        <div class="text-xs font-bold text-gray-500 uppercase mb-2">
+            {{ col }}<span v-if="HELP[col]" class="text-gray-600 hover:text-gray-300 cursor-help ml-1" :title="HELP[col]">&#9432;</span>
         </div>
-        <div id="pr-tabs" class="flex gap-1 mb-3 border-b border-gray-700"></div>
-        <div id="pr-tab-empty" class="hidden text-sm text-gray-400 flex-1 flex items-center justify-center">No repos with meaningful changes.</div>
-        <div id="pr-tab-panels" class="flex-1 flex flex-col overflow-hidden"></div>
-        <div class="flex gap-2 mt-4 pt-4 border-t border-gray-700">
-            <button onclick="submitPrModal()" id="pr-submit-btn" class="flex-1 bg-green-700 hover:bg-green-600 text-white text-sm px-4 py-2 rounded">Submit</button>
-            <button onclick="closePrModal()" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white text-sm px-4 py-2 rounded">Cancel</button>
+        <div v-for="[key, t] in ticketsForColumn(col)" :key="key"
+             class="card p-3 mb-2 hover:border-gray-500 transition-colors relative group">
+            <a :href="`/tickets/${key}`" class="block">
+                <div class="flex items-center gap-2">
+                    <span class="font-bold text-sm">{{ key }}</span>
+                    <span class="badge" :class="`badge-${t.status}`">{{ t.status }}</span>
+                </div>
+                <div class="text-xs text-gray-400 mt-1">{{ t.branch || '' }}</div>
+                <div v-if="prAuthors(t).length" class="text-xs text-gray-500 mt-1">by {{ prAuthors(t).join(', ') }}</div>
+                <div v-if="t.pr_scheduled_at" class="text-xs text-yellow-400 mt-1">PR scheduled {{ fmtScheduled(t.pr_scheduled_at) }}</div>
+                <div v-if="t.external_status" class="text-xs text-gray-500 mt-1">{{ t.external_status }}</div>
+            </a>
+            <button v-if="t.status === 'pr_ready'" @click="submitPr(key)"
+                    class="absolute top-2 right-2 bg-green-700 hover:bg-green-600 text-white text-xs px-2 py-1 rounded">Submit PR</button>
+            <button @click="discard(key)"
+                    class="absolute right-2 text-gray-600 hover:text-red-400 text-xs hidden group-hover:block"
+                    :class="t.status === 'pr_ready' ? 'bottom-2' : 'top-2'">discard</button>
         </div>
     </div>
 </div>
 
+<div v-if="prModalOpen" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+    <div class="card p-6 w-[70vw] h-[85vh] mx-4 flex flex-col">
+        <div class="flex items-center justify-between mb-4 pb-4 border-b border-gray-700">
+            <h2 class="text-lg font-bold">Submit PR</h2>
+            <button @click="closePrModal" class="text-gray-600 hover:text-white text-xl">×</button>
+        </div>
+        <div v-if="!prRepos.length" class="text-sm text-gray-400 flex-1 flex items-center justify-center">No repos with meaningful changes.</div>
+        <template v-else>
+            <div class="flex gap-1 mb-3 border-b border-gray-700">
+                <button v-for="r in prRepos" :key="r.name" @click="prActiveRepo = r.name"
+                        class="px-3 py-2 text-sm border-b-2"
+                        :class="r.name === prActiveRepo ? 'border-blue-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'">
+                    {{ r.name }} <span class="text-xs text-gray-500">({{ r.files_changed }} files)</span>
+                </button>
+            </div>
+            <div v-if="activePrRepo" class="flex-1 flex flex-col overflow-hidden">
+                <div class="mb-1 text-xs text-gray-500">{{ activePrRepo.name }} → {{ activePrRepo.branch }}</div>
+                <div class="mb-3">
+                    <label class="text-xs font-bold text-gray-400 block mb-2">Title</label>
+                    <input type="text" v-model="activePrRepo.title"
+                           class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none" />
+                </div>
+                <div class="flex-1 flex flex-col overflow-hidden">
+                    <label class="text-xs font-bold text-gray-400 block mb-2">Description</label>
+                    <textarea v-model="activePrRepo.description"
+                              class="flex-1 bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none font-mono resize-none overflow-y-auto"></textarea>
+                </div>
+            </div>
+        </template>
+        <div class="flex gap-2 mt-4 pt-4 border-t border-gray-700">
+            <button @click="submitPrModal" :disabled="prSubmitting || !prRepos.length"
+                    class="flex-1 bg-green-700 hover:bg-green-600 text-white text-sm px-4 py-2 rounded"
+                    :class="{ 'opacity-50 cursor-not-allowed': prSubmitting || !prRepos.length }">
+                {{ prSubmitting ? 'Submitting…' : 'Submit' }}
+            </button>
+            <button @click="closePrModal" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white text-sm px-4 py-2 rounded">Cancel</button>
+        </div>
+    </div>
+</div>
+
+</div>
+
 <script>
+const { createApp, ref, computed, onMounted } = Vue;
+
 const COLUMNS = ['new', 'planning', 'reviewing', 'pr_ready', 'in_review', 'pr_failed', 'merged'];
 const HELP = {
     pr_ready: 'Branch pushed and work finished. Waiting for the scheduler (or auto_pr) to open the PR on the platform.',
@@ -70,152 +126,117 @@ const HELP = {
     pr_failed: 'CI or conflict resolution exhausted retries. Needs manual intervention — restart the ticket to retry.',
 };
 
-async function load() {
-    const resp = await fetch('/api/tickets/list');
-    const tickets = await resp.json();
-    const board = document.getElementById('board');
-    board.innerHTML = COLUMNS.filter(col =>
-        Object.values(tickets).some(t => t.status === col)
-    ).map(col => {
-        const items = Object.entries(tickets)
-            .filter(([_, t]) => t.status === col)
-            .map(([key, t]) => `
-                <div class="card p-3 mb-2 hover:border-gray-500 transition-colors relative group">
-                    <a href="/tickets/${key}" class="block">
-                        <div class="flex items-center gap-2">
-                            <span class="font-bold text-sm">${key}</span>
-                            <span class="badge badge-${t.status}">${t.status}</span>
-                        </div>
-                        <div class="text-xs text-gray-400 mt-1">${t.branch || ''}</div>
-                        ${(t.prs || []).map(p => p.author).filter(a => a).length ? `<div class="text-xs text-gray-500 mt-1">by ${[...new Set((t.prs || []).map(p => p.author).filter(a => a))].join(', ')}</div>` : ''}
-                        ${t.pr_scheduled_at ? `<div class="text-xs text-yellow-400 mt-1">PR scheduled ${new Date(t.pr_scheduled_at).toLocaleDateString('en-US', {weekday:'short', month:'short', day:'numeric', hour:'numeric', minute:'2-digit'})}</div>` : ''}
-                        ${t.external_status ? `<div class="text-xs text-gray-500 mt-1">${t.external_status}</div>` : ''}
-                    </a>
-                    ${t.status === 'pr_ready' ? `<button onclick="submitPr('${key}')" class="absolute top-2 right-2 bg-green-700 hover:bg-green-600 text-white text-xs px-2 py-1 rounded">Submit PR</button><button onclick="discard('${key}')" class="absolute bottom-2 right-2 text-gray-600 hover:text-red-400 text-xs hidden group-hover:block">discard</button>` : `<button onclick="discard('${key}')" class="absolute top-2 right-2 text-gray-600 hover:text-red-400 text-xs hidden group-hover:block">discard</button>`}
-                </div>
-            `).join('');
-        const help = HELP[col] ? `<span class="text-gray-600 hover:text-gray-300 cursor-help ml-1" title="${HELP[col]}">&#9432;</span>` : '';
-        return `<div class="col flex-1">
-            <div class="text-xs font-bold text-gray-500 uppercase mb-2">${col}${help}</div>
-            ${items}
-        </div>`;
-    }).join('');
-}
-async function discard(key) {
-    if (!confirm(`Discard ${key}? It will be picked up fresh on next poll.`)) return;
-    await fetch(`/api/tickets/${key}`, { method: 'DELETE' });
-    load();
-}
+createApp({
+    setup() {
+        const tickets = ref({});
+        const features = ref({});
+        const instanceName = ref('');
+        const prModalOpen = ref(false);
+        const prRepos = ref([]);
+        const prActiveRepo = ref(null);
+        const prSubmitting = ref(false);
+        const currentTicketKey = ref(null);
 
-let currentTicketKey = null;
-let prRepos = [];
-let prActiveRepo = null;
+        const visibleColumns = computed(() =>
+            COLUMNS.filter(col => Object.values(tickets.value).some(t => t.status === col))
+        );
 
-async function submitPr(key) {
-    currentTicketKey = key;
-    const resp = await fetch(`/api/tickets/${key}/pr-info`);
-    if (!resp.ok) {
-        alert('Failed to load PR info');
-        return;
-    }
-    const data = await resp.json();
-    prRepos = (data.repos || []).map(r => ({...r}));
-    prActiveRepo = prRepos[0]?.name || null;
-    renderPrModal();
-    document.getElementById('pr-modal').classList.remove('hidden');
-}
+        const activePrRepo = computed(() => prRepos.value.find(r => r.name === prActiveRepo.value));
 
-function renderPrModal() {
-    const tabs = document.getElementById('pr-tabs');
-    const panels = document.getElementById('pr-tab-panels');
-    const empty = document.getElementById('pr-tab-empty');
-    const submitBtn = document.getElementById('pr-submit-btn');
-    if (!prRepos.length) {
-        tabs.innerHTML = '';
-        panels.innerHTML = '';
-        empty.classList.remove('hidden');
-        submitBtn.disabled = true;
-        submitBtn.classList.add('opacity-50', 'cursor-not-allowed');
-        return;
-    }
-    empty.classList.add('hidden');
-    submitBtn.disabled = false;
-    submitBtn.classList.remove('opacity-50', 'cursor-not-allowed');
-    tabs.innerHTML = prRepos.map(r => {
-        const active = r.name === prActiveRepo;
-        const cls = active
-            ? 'px-3 py-2 text-sm border-b-2 border-blue-500 text-white'
-            : 'px-3 py-2 text-sm border-b-2 border-transparent text-gray-400 hover:text-gray-200';
-        return `<button onclick="switchPrTab('${r.name}')" class="${cls}">${r.name} <span class="text-xs text-gray-500">(${r.files_changed} files)</span></button>`;
-    }).join('');
-    const active = prRepos.find(r => r.name === prActiveRepo) || prRepos[0];
-    panels.innerHTML = `
-        <div class="mb-1 text-xs text-gray-500">${active.name} → ${active.branch}</div>
-        <div class="mb-3">
-            <label class="text-xs font-bold text-gray-400 block mb-2">Title</label>
-            <input type="text" id="pr-title-input" oninput="updatePrField('title', this.value)" class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none" />
-        </div>
-        <div class="flex-1 flex flex-col overflow-hidden">
-            <label class="text-xs font-bold text-gray-400 block mb-2">Description</label>
-            <textarea id="pr-description-input" oninput="updatePrField('description', this.value)" class="flex-1 bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none font-mono resize-none overflow-y-auto"></textarea>
-        </div>
-    `;
-    document.getElementById('pr-title-input').value = active.title || '';
-    document.getElementById('pr-description-input').value = active.description || '';
-}
-
-function switchPrTab(name) {
-    prActiveRepo = name;
-    renderPrModal();
-}
-
-function updatePrField(field, value) {
-    const r = prRepos.find(r => r.name === prActiveRepo);
-    if (r) r[field] = value;
-}
-
-function closePrModal() {
-    document.getElementById('pr-modal').classList.add('hidden');
-    currentTicketKey = null;
-    prRepos = [];
-    prActiveRepo = null;
-}
-
-async function submitPrModal() {
-    if (!currentTicketKey || !prRepos.length) return;
-    const btn = document.getElementById('pr-submit-btn');
-    if (btn.disabled) return;
-    const original = btn.textContent;
-    btn.disabled = true;
-    btn.classList.add('opacity-50', 'cursor-not-allowed');
-    btn.textContent = 'Submitting…';
-    try {
-        const payload = {repos: prRepos.map(r => ({name: r.name, title: r.title, description: r.description}))};
-        const resp = await fetch(`/api/tickets/${currentTicketKey}/submit-pr`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify(payload)
-        });
-        if (resp.ok) {
-            closePrModal();
-            load();
-        } else {
-            const err = await resp.json();
-            alert('Error: ' + (err.error || 'Unknown error'));
-            btn.disabled = false;
-            btn.classList.remove('opacity-50', 'cursor-not-allowed');
-            btn.textContent = original;
+        function ticketsForColumn(col) {
+            return Object.entries(tickets.value).filter(([_, t]) => t.status === col);
         }
-    } catch (e) {
-        alert('Error: ' + e.message);
-        btn.disabled = false;
-        btn.classList.remove('opacity-50', 'cursor-not-allowed');
-        btn.textContent = original;
-    }
-}
 
-load();
-setInterval(load, 10000);
+        function prAuthors(t) {
+            const authors = (t.prs || []).map(p => p.author).filter(a => a);
+            return [...new Set(authors)];
+        }
+
+        function fmtScheduled(ts) {
+            return new Date(ts).toLocaleDateString('en-US', {
+                weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+            });
+        }
+
+        async function load() {
+            try {
+                const [ticketsResp, configResp] = await Promise.all([
+                    fetch('/api/tickets/list'),
+                    fetch('/api/config'),
+                ]);
+                tickets.value = await ticketsResp.json();
+                const cfg = await configResp.json();
+                features.value = cfg.features || {};
+                instanceName.value = cfg.job?.key || '';
+            } catch (e) { console.error('load failed', e); }
+        }
+
+        async function discard(key) {
+            if (!confirm(`Discard ${key}? It will be picked up fresh on next poll.`)) return;
+            await fetch(`/api/tickets/${key}`, {method: 'DELETE'});
+            load();
+        }
+
+        async function submitPr(key) {
+            currentTicketKey.value = key;
+            const r = await fetch(`/api/tickets/${key}/pr-info`);
+            if (!r.ok) {
+                alert('Failed to load PR info');
+                return;
+            }
+            const data = await r.json();
+            prRepos.value = (data.repos || []).map(repo => ({...repo}));
+            prActiveRepo.value = prRepos.value[0]?.name || null;
+            prModalOpen.value = true;
+        }
+
+        function closePrModal() {
+            prModalOpen.value = false;
+            currentTicketKey.value = null;
+            prRepos.value = [];
+            prActiveRepo.value = null;
+        }
+
+        async function submitPrModal() {
+            if (!currentTicketKey.value || !prRepos.value.length) return;
+            prSubmitting.value = true;
+            try {
+                const payload = {
+                    repos: prRepos.value.map(r => ({name: r.name, title: r.title, description: r.description})),
+                };
+                const resp = await fetch(`/api/tickets/${currentTicketKey.value}/submit-pr`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload),
+                });
+                if (resp.ok) {
+                    closePrModal();
+                    load();
+                } else {
+                    const err = await resp.json();
+                    alert('Error: ' + (err.error || 'Unknown error'));
+                }
+            } catch (e) {
+                alert('Error: ' + e.message);
+            } finally {
+                prSubmitting.value = false;
+            }
+        }
+
+        onMounted(() => {
+            load();
+            setInterval(load, 10000);
+        });
+
+        return {
+            tickets, features, instanceName, HELP,
+            prModalOpen, prRepos, prActiveRepo, prSubmitting,
+            visibleColumns, activePrRepo,
+            ticketsForColumn, prAuthors, fmtScheduled,
+            discard, submitPr, closePrModal, submitPrModal,
+        };
+    },
+}).mount('#app');
 </script>
 </body>
 </html>
