@@ -1147,6 +1147,17 @@ def _extract_code_context(diff_text: str, target_file: str, target_line: int, co
     return '\n'.join(context) if context else None
 
 
+def _ticket_repo_count(slug: str) -> int:
+    if not slug:
+        return 0
+    import core.config as cfg
+    n = 0
+    for repo in get_repos(_config):
+        if cfg.ticket_worktree_path(_config, slug, repo["name"]).is_dir():
+            n += 1
+    return n
+
+
 @app.get("/api/tickets/list")
 def api_tickets_list():
     from datetime import datetime, timezone, timedelta
@@ -1156,7 +1167,13 @@ def api_tickets_list():
     for k in expired:
         state.delete_ticket(k)
         del tickets[k]
-    return {k: v for k, v in tickets.items() if v.get("status") != "done"}
+    out = {}
+    for k, v in tickets.items():
+        if v.get("status") == "done":
+            continue
+        v["repo_count"] = _ticket_repo_count(v.get("slug", ""))
+        out[k] = v
+    return out
 
 
 @app.get("/api/raw/tickets")
@@ -1310,6 +1327,7 @@ def api_ticket_detail(key: str):
 
     all_statuses = [s.value for s in TicketStatus]
     demo_video = (docs_dir / "demo.webm").exists() if docs_dir.is_dir() else False
+    ts["repo_count"] = _ticket_repo_count(slug)
     return {"key": key, "state": ts, "docs": docs, "history": history, "summary": summary, "terminal_alive": terminal_alive, "all_statuses": all_statuses, "demo_video": demo_video}
 
 
