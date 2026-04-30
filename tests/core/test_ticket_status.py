@@ -73,6 +73,7 @@ class TestSelfTransition:
 
 class TestTransitionLegalized:
     @pytest.mark.parametrize("current,target", [
+        ("pr_ready", "reviewing"), # rewind to re-review before opening PR
         ("pr_failed", "merged"),   # manual match-state
         ("merged", "new"),         # requeue
         ("done", "new"),           # revive on upstream reopen
