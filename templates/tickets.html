@@ -13,6 +13,7 @@ body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: #0a0a0a; 
 .link:hover { text-decoration: underline; }
 .col { min-width: 180px; }
 .badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; }
+.badge-pending_approval { background: #4a3a0a; color: #fbbf24; }
 .badge-new { background: #1e3a5f; color: #93c5fd; }
 .badge-planning { background: #713f12; color: #fde047; }
 .badge-reviewing { background: #713f12; color: #fde047; }
@@ -21,6 +22,11 @@ body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: #0a0a0a; 
 .badge-in_review { background: #1e3a5f; color: #93c5fd; }
 .badge-pr_failed { background: #7f1d1d; color: #fca5a5; }
 .badge-merged { background: #14532d; color: #86efac; }
+.badge-validation { background: #1e3a5f; color: #93c5fd; }
+.badge-val-pass { background: #14532d; color: #86efac; }
+.badge-val-fail { background: #7f1d1d; color: #fca5a5; }
+.badge-val-regression { background: #7f1d1d; color: #fcd34d; }
+.badge-obsolete { background: #444; color: #aaa; }
 nav a { color: #888; padding: 4px 12px; border-radius: 4px; }
 nav a:hover, nav a.active { color: #fff; background: #222; }
 [v-cloak] { display: none; }
@@ -69,9 +75,13 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
             </a>
             <button v-if="t.status === 'pr_ready'" @click="submitPr(key)"
                     class="absolute top-2 right-2 bg-green-700 hover:bg-green-600 text-white text-xs px-2 py-1 rounded">Submit PR</button>
+            <div v-if="t.status === 'pending_approval'" class="absolute top-2 right-2 flex gap-1">
+                <button @click="approve(key)" class="bg-green-700 hover:bg-green-600 text-white text-xs px-2 py-1 rounded">Approve</button>
+                <button @click="reject(key)" class="bg-red-800 hover:bg-red-700 text-white text-xs px-2 py-1 rounded">Reject</button>
+            </div>
             <button @click="discard(key)"
                     class="absolute right-2 text-gray-600 hover:text-red-400 text-xs hidden group-hover:block"
-                    :class="t.status === 'pr_ready' ? 'bottom-2' : 'top-2'">discard</button>
+                    :class="t.status === 'pr_ready' || t.status === 'pending_approval' ? 'bottom-2' : 'top-2'">discard</button>
         </div>
     </div>
 </div>
@@ -121,11 +131,13 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
 <script>
 const { createApp, ref, computed, onMounted } = Vue;
 
-const COLUMNS = ['new', 'planning', 'reviewing', 'pr_ready', 'in_review', 'pr_failed', 'merged'];
+const COLUMNS = ['pending_approval', 'new', 'planning', 'reviewing', 'pr_ready', 'in_review', 'pr_failed', 'merged', 'validation'];
 const HELP = {
+    pending_approval: 'Awaiting human approve/reject before entering the pipeline (gated by [ticket_approval] config).',
     pr_ready: 'Branch pushed and work finished. Waiting for the scheduler (or auto_pr) to open the PR on the platform.',
     in_review: 'PR open, not all merged. Each cycle: poll CI, resolve conflicts, read review comments, check merge state.',
     pr_failed: 'CI or conflict resolution exhausted retries. Needs manual intervention — restart the ticket to retry.',
+    validation: 'Post-merge playwright validation running against the live app. Replays the regression pool too.',
 };
 
 createApp({
@@ -176,6 +188,25 @@ createApp({
         async function discard(key) {
             if (!confirm(`Discard ${key}? It will be picked up fresh on next poll.`)) return;
             await fetch(`/api/tickets/${key}`, {method: 'DELETE'});
+            load();
+        }
+
+        async function approve(key) {
+            const r = await fetch(`/api/tickets/${key}/approve`, {method: 'POST'});
+            if (!r.ok) {
+                const e = await r.json().catch(() => ({}));
+                alert('Approve failed: ' + (e.error || r.statusText));
+            }
+            load();
+        }
+
+        async function reject(key) {
+            if (!confirm(`Reject ${key}?`)) return;
+            const r = await fetch(`/api/tickets/${key}/reject`, {method: 'POST'});
+            if (!r.ok) {
+                const e = await r.json().catch(() => ({}));
+                alert('Reject failed: ' + (e.error || r.statusText));
+            }
             load();
         }
 
@@ -236,6 +267,7 @@ createApp({
             visibleColumns, activePrRepo,
             ticketsForColumn, prAuthors, fmtScheduled,
             discard, submitPr, closePrModal, submitPrModal,
+            approve, reject,
         };
     },
 }).mount('#app');
