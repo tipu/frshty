@@ -84,3 +84,23 @@ billing = false
 # action = "schedule_pr"              # delay PR creation based on estimation
 # jitter_hours = 3                    # +/- random hours
 # work_hours = [9, 17]               # clamp to business hours
+
+# --- Approval gate ---
+# [ticket_approval]
+# required = true                     # tickets land in pending_approval before new
+# sources = ["prd"]                   # optional; default = all sources
+
+# --- PM agent ---
+# [pm_agent]
+# enabled = true                      # default; set false to disable advisory PM reviews
+# post_shipping_cadence = "weekly"
+
+# --- Post-merge validator ---
+# [validation]
+# live_url = "https://staging.example.com"   # base URL for playwright steps
+# persistent_browser_context = false         # phase 5: opt-in regression-replay optimization
+
+# --- PRD intake ---
+# [prd]
+# enabled = true
+# file = "/abs/path/to/myapp-prd.md"

@@ -6,4 +6,5 @@ from core.tasks import billing  # noqa: F401
 from core.tasks import polls  # noqa: F401
 from core.tasks import slack  # noqa: F401
 from core.tasks import pm  # noqa: F401
+from core.tasks import prd  # noqa: F401
 from core.tasks import routes  # noqa: F401
