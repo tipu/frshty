@@ -22,6 +22,8 @@ config/*.toml
 /_tmp_fetch.py
 /fetch_pr.py
 
+.tmp
+
 # Local artifacts
 .playwright-cli/
 /review-snap.yaml
@@ -34,3 +36,8 @@ config/*.toml
 
 # Internal docs
 /docs/
+
+# Claude Code local files (keep tracked worktrees submodules)
+.claude/*
+!.claude/worktrees/
+!.claude/worktrees/**
