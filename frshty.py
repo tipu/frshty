@@ -1161,17 +1161,38 @@ def _ticket_repo_count(slug: str) -> int:
 @app.get("/api/tickets/list")
 def api_tickets_list():
     from datetime import datetime, timezone, timedelta
+    import core.db as _db
     tickets = state.list_tickets()
     cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
     expired = [k for k, v in tickets.items() if v.get("status") == "done" and v.get("done_at", "") < cutoff]
     for k in expired:
         state.delete_ticket(k)
         del tickets[k]
+    instance_key = _config.get("job", {}).get("key", "")
+    pm_counts: dict[str, int] = {}
+    if instance_key:
+        rows = _db.query_all(
+            "SELECT ticket_key, findings FROM pm_review pr"
+            " WHERE instance_key=? AND checkpoint_type='pre_approval'"
+            " AND created_at = ("
+            "   SELECT MAX(created_at) FROM pm_review"
+            "   WHERE instance_key=? AND ticket_key=pr.ticket_key AND checkpoint_type='pre_approval'"
+            " )",
+            (instance_key, instance_key),
+        )
+        for r in rows:
+            try:
+                import json as _json
+                f = _json.loads(r["findings"]) if r["findings"] else []
+                pm_counts[r["ticket_key"]] = len(f) if isinstance(f, list) else 0
+            except (ValueError, TypeError):
+                pm_counts[r["ticket_key"]] = 0
     out = {}
     for k, v in tickets.items():
         if v.get("status") == "done":
             continue
         v["repo_count"] = _ticket_repo_count(v.get("slug", ""))
+        v["pm_findings_count"] = pm_counts.get(k, 0)
         out[k] = v
     return out
 
@@ -1626,6 +1647,16 @@ def api_ticket_validation(key: str, limit: int = 50):
     runs = v.latest_runs(instance_key, key, limit)
     badge = v.badge_for(instance_key, key)
     return {"badge": badge, "runs": runs}
+
+
+@app.get("/api/tickets/{key}/pm-findings")
+def api_ticket_pm_findings(key: str, limit: int = 20):
+    from pm import runner
+    instance_key = _config.get("job", {}).get("key", "")
+    if not instance_key:
+        return {"reviews": []}
+    reviews = runner.latest_findings(instance_key, key, limit)
+    return {"reviews": reviews}
 
 
 @app.get("/api/tickets/{key}/jobs")

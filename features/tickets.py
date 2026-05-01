@@ -543,16 +543,24 @@ def check(config: dict, instance_key: str = ""):
                     if "discovered_at" not in ts:
                         from datetime import datetime, timezone
                         ts["discovered_at"] = datetime.now(timezone.utc).isoformat()
+                    if "summary" not in ts:
+                        ts["summary"] = ticket.get("summary", "")
+                    if "description" not in ts:
+                        ts["description"] = ticket.get("description", "")
                     state.save_ticket(key, ts)
                     log.emit("ticket_pending_approval",
                              f"Ticket {key} awaiting approval (source={source})",
                              links={"detail": f"{base_url}/tickets/{key}"},
                              meta={"ticket": key, "source": source})
+                    if instance_key and (config.get("pm_agent") or {}).get("enabled", True):
+                        _enqueue_stage(instance_key, key, "pm_pre_approval")
                     continue
                 ts = _setup_ticket(config, ticket, base_url)
                 if "source" not in ts:
                     ts["source"] = source
                 if ts.get("discovered_at") and instance_key:
+                    if (config.get("pm_agent") or {}).get("enabled", True):
+                        _enqueue_stage(instance_key, key, "pm_pre_approval")
                     _enqueue_stage(instance_key, key, "start_planning")
 
             if ts["status"] == "pending_approval":
