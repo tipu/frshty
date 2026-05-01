@@ -198,6 +198,11 @@ def ticket_detail(key: str):
     return _template("ticket_detail.html")
 
 
+@app.get("/prd", response_class=HTMLResponse)
+def prd_page():
+    return _template("prd.html")
+
+
 @app.get("/slack", response_class=HTMLResponse)
 def slack_page():
     return _template("slack.html")
@@ -1657,6 +1662,25 @@ def api_ticket_pm_findings(key: str, limit: int = 20):
         return {"reviews": []}
     reviews = runner.latest_findings(instance_key, key, limit)
     return {"reviews": reviews}
+
+
+@app.get("/api/prd")
+def api_prd():
+    from prd import orchestrator
+    instance_key = _config.get("job", {}).get("key", "")
+    if not instance_key:
+        return {"prd": None, "sections": []}
+    return orchestrator.render_for_ui(instance_key)
+
+
+@app.post("/api/prd/reload")
+def api_prd_reload():
+    from prd import orchestrator
+    instance_key = _config.get("job", {}).get("key", "")
+    if not instance_key:
+        return JSONResponse({"error": "no instance"}, status_code=400)
+    summary = orchestrator.scan(_config, instance_key)
+    return summary
 
 
 @app.get("/api/tickets/{key}/jobs")
