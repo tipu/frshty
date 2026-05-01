@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<meta charset="utf-8">
+<title>PRD — frshty</title>
+<script src="/static/tailwind.js"></script>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<style>
+body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: #0a0a0a; color: #e0e0e0; }
+.card { background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; }
+.link { color: #60a5fa; }
+.link:hover { text-decoration: underline; }
+.badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; }
+.badge-pending_approval { background: #4a3a0a; color: #fbbf24; }
+.badge-new { background: #1e3a5f; color: #93c5fd; }
+.badge-planning { background: #713f12; color: #fde047; }
+.badge-reviewing { background: #713f12; color: #fde047; }
+.badge-pr_ready { background: #14532d; color: #86efac; }
+.badge-in_review { background: #1e3a5f; color: #93c5fd; }
+.badge-pr_failed { background: #7f1d1d; color: #fca5a5; }
+.badge-merged { background: #14532d; color: #86efac; }
+.badge-validation { background: #1e3a5f; color: #93c5fd; }
+.badge-done { background: #2a2a2a; color: #888; }
+.badge-obsolete { background: #444; color: #aaa; }
+nav a { color: #888; padding: 4px 12px; border-radius: 4px; }
+nav a:hover, nav a.active { color: #fff; background: #222; }
+[v-cloak] { display: none; }
+.section-card { border-left: 3px solid #2a2a2a; padding-left: 12px; margin-bottom: 24px; }
+.section-card.deleted { border-left-color: #7f1d1d; opacity: 0.6; }
+.prd-content { white-space: pre-wrap; line-height: 1.5; font-size: 13px; }
+</style>
+</head>
+<body class="p-4 max-w-7xl mx-auto">
+
+<div id="app" v-cloak>
+
+<header class="flex items-center gap-4 mb-4">
+    <div class="flex items-center gap-2">
+        <h1 class="text-lg font-bold">PRD</h1>
+        <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700">{{ instanceName }}</span>
+    </div>
+    <nav class="flex gap-1 text-sm">
+        <a href="/">Feed</a>
+        <a href="/global">Global</a>
+        <a href="/reviews">Reviews</a>
+        <a href="/tickets">Tickets</a>
+        <a href="/prd" class="active">PRD</a>
+        <a href="/scheduled">Scheduled</a>
+        <a href="/config">Config</a>
+    </nav>
+    <div class="ml-auto text-xs text-gray-500">
+        <span v-if="lastParsed">last parsed {{ fmtDate(lastParsed) }}</span>
+        <button @click="reload" :disabled="reloading"
+                class="ml-3 bg-gray-800 hover:bg-gray-700 text-gray-200 px-3 py-1 rounded">
+            {{ reloading ? 'reloading…' : 'reload' }}
+        </button>
+    </div>
+</header>
+
+<div v-if="!prd" class="card p-6">
+    <div class="text-sm text-gray-400">No PRD configured. Set <code class="bg-gray-800 px-1 rounded">[prd].enabled = true</code> and <code class="bg-gray-800 px-1 rounded">[prd].file = "/path/to/prd.md"</code> in your config, then reload.</div>
+</div>
+
+<div v-else>
+    <div class="text-xs text-gray-500 mb-4">{{ prd.file_path }}</div>
+    <div v-if="totals" class="text-xs text-gray-400 mb-4">
+        sections: {{ sections.length }}
+        | tickets: {{ totals.total }}
+        ({{ totals.pending }} pending,
+         {{ totals.in_progress }} in-progress,
+         {{ totals.merged }} merged,
+         {{ totals.obsolete }} obsolete)
+    </div>
+
+    <div v-for="s in sections" :key="s.id" :class="['section-card', s.deleted_at ? 'deleted' : '']">
+        <div class="flex items-baseline gap-3 mb-2">
+            <h2 class="text-base font-bold">{{ s.header }}</h2>
+            <span v-if="s.deleted_at" class="badge badge-obsolete" title="section removed from PRD">deleted from PRD</span>
+            <span class="text-xs text-gray-500 ml-auto">{{ s.tickets.length }} ticket(s)</span>
+        </div>
+        <div class="grid grid-cols-2 gap-4">
+            <div class="card p-3 prd-content">{{ s.content }}</div>
+            <div>
+                <div v-if="!s.tickets.length" class="text-xs text-gray-500 italic">No tickets generated yet.</div>
+                <div v-for="t in s.tickets" :key="t.key" class="card p-2 mb-2 hover:border-gray-500">
+                    <a :href="`/tickets/${t.key}`" class="block">
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <span class="font-bold text-xs">{{ t.key }}</span>
+                            <span class="badge" :class="`badge-${t.status}`">{{ t.status }}</span>
+                            <span v-if="t.obsolete_at" class="badge badge-obsolete">obsolete</span>
+                        </div>
+                        <div class="text-xs text-gray-300 mt-1">{{ t.summary }}</div>
+                    </a>
+                    <div v-if="t.status === 'pending_approval'" class="flex gap-1 mt-2">
+                        <button @click="approve(t.key)" class="bg-green-700 hover:bg-green-600 text-white text-xs px-2 py-1 rounded">Approve</button>
+                        <button @click="reject(t.key)" class="bg-red-800 hover:bg-red-700 text-white text-xs px-2 py-1 rounded">Reject</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+</div>
+
+<script>
+const { createApp, ref, computed, onMounted } = Vue;
+
+createApp({
+    setup() {
+        const prd = ref(null);
+        const sections = ref([]);
+        const lastParsed = ref(null);
+        const instanceName = ref('');
+        const reloading = ref(false);
+
+        const totals = computed(() => {
+            let total = 0, pending = 0, in_progress = 0, merged = 0, obsolete = 0;
+            for (const s of sections.value) {
+                for (const t of s.tickets) {
+                    total += 1;
+                    if (t.obsolete_at) obsolete += 1;
+                    else if (t.status === 'pending_approval') pending += 1;
+                    else if (t.status === 'merged' || t.status === 'validation' || t.status === 'done') merged += 1;
+                    else in_progress += 1;
+                }
+            }
+            return {total, pending, in_progress, merged, obsolete};
+        });
+
+        function fmtDate(s) { return s ? new Date(s).toLocaleString() : ''; }
+
+        async function load() {
+            try {
+                const [prdResp, cfgResp] = await Promise.all([
+                    fetch('/api/prd'),
+                    fetch('/api/config'),
+                ]);
+                const data = await prdResp.json();
+                prd.value = data.prd;
+                sections.value = data.sections || [];
+                lastParsed.value = data.prd?.last_parsed_at;
+                const cfg = await cfgResp.json();
+                instanceName.value = cfg.job?.key || '';
+            } catch (e) { console.error(e); }
+        }
+
+        async function reload() {
+            reloading.value = true;
+            try {
+                const r = await fetch('/api/prd/reload', {method: 'POST'});
+                if (!r.ok) {
+                    const e = await r.json().catch(() => ({}));
+                    alert('Reload failed: ' + (e.error || r.statusText));
+                }
+                await load();
+            } finally { reloading.value = false; }
+        }
+
+        async function approve(key) {
+            const r = await fetch(`/api/tickets/${key}/approve`, {method: 'POST'});
+            if (!r.ok) { const e = await r.json().catch(() => ({})); alert('Approve failed: ' + (e.error || r.statusText)); }
+            load();
+        }
+
+        async function reject(key) {
+            if (!confirm(`Reject ${key}?`)) return;
+            const r = await fetch(`/api/tickets/${key}/reject`, {method: 'POST'});
+            if (!r.ok) { const e = await r.json().catch(() => ({})); alert('Reject failed: ' + (e.error || r.statusText)); }
+            load();
+        }
+
+        onMounted(() => {
+            load();
+            setInterval(load, 15000);
+        });
+
+        return { prd, sections, lastParsed, instanceName, reloading, totals,
+                 fmtDate, reload, approve, reject };
+    }
+}).mount('#app');
+</script>
+
+</body>
+</html>
