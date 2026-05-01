@@ -73,11 +73,35 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
          {{ totals.obsolete }} obsolete)
     </div>
 
+    <div v-if="postShippingFindings.length" class="card p-3 mb-4 border-amber-700">
+        <div class="text-xs font-bold text-amber-300 mb-1">Post-shipping cohesion review</div>
+        <div v-for="r in postShippingFindings.slice(0,1)" :key="r.id">
+            <div class="text-xs text-gray-400 mb-1">{{ fmtDate(r.created_at) }} — verdict: {{ r.verdict }}</div>
+            <ul class="text-xs space-y-1">
+                <li v-for="(f, i) in r.findings" :key="i" :class="severityClass(f.severity)">
+                    [{{ f.category }}] {{ f.message }}
+                    <span v-if="f.related_ticket_keys && f.related_ticket_keys.length" class="text-gray-500">
+                        (refs: {{ f.related_ticket_keys.join(', ') }})
+                    </span>
+                </li>
+            </ul>
+        </div>
+    </div>
+
     <div v-for="s in sections" :key="s.id" :class="['section-card', s.deleted_at ? 'deleted' : '']">
         <div class="flex items-baseline gap-3 mb-2">
             <h2 class="text-base font-bold">{{ s.header }}</h2>
             <span v-if="s.deleted_at" class="badge badge-obsolete" title="section removed from PRD">deleted from PRD</span>
             <span class="text-xs text-gray-500 ml-auto">{{ s.tickets.length }} ticket(s)</span>
+        </div>
+        <div v-if="s.pm_findings && s.pm_findings.length && s.pm_findings[0].findings.length"
+             class="card p-2 mb-2 border-amber-800">
+            <div class="text-xs font-bold text-amber-300 mb-1">PM ({{ s.pm_findings[0].checkpoint_type }})</div>
+            <ul class="text-xs space-y-1">
+                <li v-for="(f, i) in s.pm_findings[0].findings" :key="i" :class="severityClass(f.severity)">
+                    [{{ f.category }}] {{ f.message }}
+                </li>
+            </ul>
         </div>
         <div class="grid grid-cols-2 gap-4">
             <div class="card p-3 prd-content">{{ s.content }}</div>
@@ -111,9 +135,14 @@ createApp({
     setup() {
         const prd = ref(null);
         const sections = ref([]);
+        const postShippingFindings = ref([]);
         const lastParsed = ref(null);
         const instanceName = ref('');
         const reloading = ref(false);
+
+        function severityClass(s) {
+            return s === 'high' ? 'text-red-300' : s === 'warning' ? 'text-amber-200' : 'text-gray-300';
+        }
 
         const totals = computed(() => {
             let total = 0, pending = 0, in_progress = 0, merged = 0, obsolete = 0;
@@ -140,6 +169,7 @@ createApp({
                 const data = await prdResp.json();
                 prd.value = data.prd;
                 sections.value = data.sections || [];
+                postShippingFindings.value = data.post_shipping_findings || [];
                 lastParsed.value = data.prd?.last_parsed_at;
                 const cfg = await cfgResp.json();
                 instanceName.value = cfg.job?.key || '';
@@ -176,8 +206,8 @@ createApp({
             setInterval(load, 15000);
         });
 
-        return { prd, sections, lastParsed, instanceName, reloading, totals,
-                 fmtDate, reload, approve, reject };
+        return { prd, sections, postShippingFindings, lastParsed, instanceName, reloading, totals,
+                 fmtDate, severityClass, reload, approve, reject };
     }
 }).mount('#app');
 </script>

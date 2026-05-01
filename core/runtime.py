@@ -132,6 +132,16 @@ def _seed_recurring_schedules(instance_configs: list[dict]) -> None:
                                         cadence="daily_19pst", next_run_at=candidate)
         else:
             scheduler.delete(key, "timesheet_check")
+        pm_cfg = c.get("pm_agent") or {}
+        prd_enabled = (c.get("prd") or {}).get("enabled")
+        if pm_cfg.get("enabled", True) and prd_enabled:
+            cadence = pm_cfg.get("post_shipping_cadence", "weekly")
+            from datetime import timedelta as _td
+            next_fire = now_billing + (_td(weeks=1) if cadence == "weekly" else _td(days=1))
+            scheduler.upsert_recurring(key, "pm_post_shipping", "pm_post_shipping",
+                                        cadence=cadence, next_run_at=next_fire)
+        else:
+            scheduler.delete(key, "pm_post_shipping")
 
 
 def stop_events() -> None:
