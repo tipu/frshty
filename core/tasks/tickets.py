@@ -349,15 +349,18 @@ def validate_merged_ticket(ctx: TaskContext) -> TaskResult:
     ts = state.load_ticket(ctx.ticket_key) or {}
     if not ts:
         return TaskResult("failed", "ticket not found")
-    base_url = ctx.config.get("validation", {}).get("live_url") or ""
+    val_cfg = ctx.config.get("validation", {})
+    base_url = val_cfg.get("live_url") or ""
     if not base_url:
         log.emit("validation_skipped",
                  f"No [validation].live_url configured; skipping for {ctx.ticket_key}",
                  meta={"ticket": ctx.ticket_key})
         return TaskResult("ok", artifacts={"skipped": True})
+    persistent = bool(val_cfg.get("persistent_browser_context"))
     try:
         summary = validation.validate_merged(
             ctx.instance_key, ctx.ticket_key, ts, base_url,
+            persistent_context=persistent,
         )
         return TaskResult("ok", artifacts=summary)
     except Exception as e:
