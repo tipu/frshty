@@ -69,6 +69,10 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
                         {{ t.status }}<template v-if="['pr_ready','in_review','pr_failed'].includes(t.status)"> ({{ (t.prs || []).length }}/{{ t.repo_count || 0 }})</template>
                     </span>
                     <span v-if="t.pm_findings_count" class="badge bg-amber-900 text-amber-200" :title="`${t.pm_findings_count} PM finding(s)`">⚑ {{ t.pm_findings_count }}</span>
+                    <span v-if="t.validation_badge && t.validation_badge !== 'pending'" class="badge"
+                          :class="`badge-val-${t.validation_badge}`" :title="`validation: ${t.validation_badge}`">
+                        v: {{ t.validation_badge }}
+                    </span>
                     <span v-if="t.obsolete_at" class="badge badge-obsolete" title="obsolete">obsolete</span>
                 </div>
                 <div class="text-xs text-gray-400 mt-1">{{ t.branch || '' }}</div>
