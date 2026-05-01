@@ -1175,6 +1175,7 @@ def api_tickets_list():
         del tickets[k]
     instance_key = _config.get("job", {}).get("key", "")
     pm_counts: dict[str, int] = {}
+    val_badges: dict[str, str] = {}
     if instance_key:
         rows = _db.query_all(
             "SELECT ticket_key, findings FROM pm_review pr"
@@ -1192,12 +1193,15 @@ def api_tickets_list():
                 pm_counts[r["ticket_key"]] = len(f) if isinstance(f, list) else 0
             except (ValueError, TypeError):
                 pm_counts[r["ticket_key"]] = 0
+        from features import validation as _val
+        val_badges = _val.badges_bulk(instance_key)
     out = {}
     for k, v in tickets.items():
         if v.get("status") == "done":
             continue
         v["repo_count"] = _ticket_repo_count(v.get("slug", ""))
         v["pm_findings_count"] = pm_counts.get(k, 0)
+        v["validation_badge"] = val_badges.get(k, "pending")
         out[k] = v
     return out
 
