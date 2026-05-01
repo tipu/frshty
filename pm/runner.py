@@ -92,6 +92,160 @@ def run_pre_approval(instance_key: str, ticket_key: str, ticket_data: dict) -> d
     }
 
 
+def _shipped_tickets_for_section(instance_key: str, section_id: int) -> list[dict]:
+    rows = db.query_all(
+        "SELECT pst.ticket_key, t.status, t.data FROM prd_section_ticket pst"
+        " LEFT JOIN tickets t ON t.instance_key=pst.instance_key AND t.ticket_key=pst.ticket_key"
+        " WHERE pst.prd_section_id=? AND pst.instance_key=?",
+        (section_id, instance_key),
+    )
+    out: list[dict] = []
+    for r in rows:
+        if r["status"] not in ("merged", "validation", "done"):
+            continue
+        try:
+            d = json.loads(r["data"]) if r["data"] else {}
+        except (json.JSONDecodeError, ValueError):
+            d = {}
+        out.append({
+            "key": r["ticket_key"],
+            "status": r["status"],
+            "summary": d.get("summary") or "",
+            "description": (d.get("description") or "")[:500],
+        })
+    return out
+
+
+def run_prd_update(instance_key: str, section_id: int,
+                   old_section: dict, new_section: dict) -> dict | None:
+    from pm.prd_prompts import PRD_UPDATE
+    shipped = _shipped_tickets_for_section(instance_key, section_id)
+    payload = (
+        f"OLD SECTION (## {old_section['header']}):\n{old_section.get('content', '')}\n\n"
+        f"NEW SECTION (## {new_section['header']}):\n{new_section.get('content', '')}\n\n"
+        f"SHIPPED TICKETS FROM THIS SECTION:\n"
+        + ("\n".join(f"  - {t['key']} [{t['status']}]: {t['summary']}" for t in shipped)
+           or "  (none)")
+    )
+    raw = run_haiku(PRD_UPDATE + payload)
+    if not raw:
+        log.emit("pm_prd_update_failed", f"haiku empty for section {section_id}",
+                 meta={"section_id": section_id})
+        return None
+    parsed = extract_json(raw)
+    if not parsed or not isinstance(parsed.get("findings"), list):
+        log.emit("pm_prd_update_parse_failed", f"parse failed for section {section_id}",
+                 meta={"section_id": section_id, "raw": raw[:500]})
+        return None
+    db.execute(
+        "INSERT INTO pm_review"
+        "(instance_key, ticket_key, prd_section_id, checkpoint_type, verdict, findings, created_at)"
+        " VALUES (?, NULL, ?, 'prd_update', ?, ?, ?)",
+        (instance_key, section_id, parsed.get("verdict", "clean"),
+         json.dumps(parsed.get("findings", [])), _now()),
+    )
+    log.emit("pm_prd_update_complete",
+             f"[{instance_key}] section {section_id}: {parsed.get('verdict')}",
+             meta={"section_id": section_id})
+    return parsed
+
+
+def run_post_shipping(instance_key: str) -> dict | None:
+    from pm.prd_prompts import POST_SHIPPING_COHESION
+    prd_row = db.query_one(
+        "SELECT id FROM prd WHERE instance_key=?",
+        (instance_key,),
+    )
+    if not prd_row:
+        return None
+    sections = db.query_all(
+        "SELECT id, header, content FROM prd_section WHERE prd_id=? AND deleted_at IS NULL",
+        (prd_row["id"],),
+    )
+    if not sections:
+        return None
+    parts: list[str] = ["PRD:"]
+    for s in sections:
+        parts.append(f"\n## {s['header']}\n{s['content']}")
+    parts.append("\n\nSHIPPED TICKETS:")
+    rows = db.query_all(
+        "SELECT t.ticket_key, t.status, t.data FROM tickets t"
+        " WHERE t.instance_key=? AND t.source='prd' AND t.status IN ('merged','validation','done')"
+        " AND COALESCE(t.obsolete_at, '') = ''",
+        (instance_key,),
+    )
+    for r in rows:
+        try:
+            d = json.loads(r["data"]) if r["data"] else {}
+        except (json.JSONDecodeError, ValueError):
+            d = {}
+        parts.append(f"\n- {r['ticket_key']} [{r['status']}]: {d.get('summary','')}")
+    payload = "\n".join(parts)[:30000]
+    raw = run_haiku(POST_SHIPPING_COHESION + payload, timeout=300)
+    if not raw:
+        return None
+    parsed = extract_json(raw)
+    if not parsed or not isinstance(parsed.get("findings"), list):
+        return None
+    db.execute(
+        "INSERT INTO pm_review"
+        "(instance_key, ticket_key, prd_section_id, checkpoint_type, verdict, findings, created_at)"
+        " VALUES (?, NULL, NULL, 'post_shipping', ?, ?, ?)",
+        (instance_key, parsed.get("verdict", "clean"),
+         json.dumps(parsed.get("findings", [])), _now()),
+    )
+    log.emit("pm_post_shipping_complete",
+             f"[{instance_key}] post-shipping cohesion: {parsed.get('verdict')}",
+             meta={"findings_count": len(parsed.get('findings', []))})
+    return parsed
+
+
+def section_findings(instance_key: str, section_id: int, limit: int = 5) -> list[dict]:
+    rows = db.query_all(
+        "SELECT id, checkpoint_type, verdict, findings, created_at FROM pm_review"
+        " WHERE instance_key=? AND prd_section_id=?"
+        " ORDER BY created_at DESC LIMIT ?",
+        (instance_key, section_id, limit),
+    )
+    out: list[dict] = []
+    for r in rows:
+        try:
+            findings = json.loads(r["findings"]) if r["findings"] else []
+        except (json.JSONDecodeError, ValueError):
+            findings = []
+        out.append({
+            "id": r["id"],
+            "checkpoint_type": r["checkpoint_type"],
+            "verdict": r["verdict"],
+            "findings": findings,
+            "created_at": r["created_at"],
+        })
+    return out
+
+
+def post_shipping_findings(instance_key: str, limit: int = 5) -> list[dict]:
+    rows = db.query_all(
+        "SELECT id, checkpoint_type, verdict, findings, created_at FROM pm_review"
+        " WHERE instance_key=? AND checkpoint_type='post_shipping'"
+        " ORDER BY created_at DESC LIMIT ?",
+        (instance_key, limit),
+    )
+    out: list[dict] = []
+    for r in rows:
+        try:
+            findings = json.loads(r["findings"]) if r["findings"] else []
+        except (json.JSONDecodeError, ValueError):
+            findings = []
+        out.append({
+            "id": r["id"],
+            "checkpoint_type": r["checkpoint_type"],
+            "verdict": r["verdict"],
+            "findings": findings,
+            "created_at": r["created_at"],
+        })
+    return out
+
+
 def latest_findings(instance_key: str, ticket_key: str, limit: int = 20) -> list[dict]:
     rows = db.query_all(
         "SELECT id, checkpoint_type, verdict, findings, created_at FROM pm_review"

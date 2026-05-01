@@ -173,6 +173,12 @@ def scan(config: dict, instance_key: str) -> dict:
 
     for old, new in d["modified"]:
         sid = _save_section(prd_row["id"], new)
+        if (config.get("pm_agent") or {}).get("enabled", True):
+            q.enqueue_job(instance_key, "pm_prd_update", payload={
+                "section_id": sid,
+                "old": {"header": old["header"], "content": old["content"]},
+                "new": {"header": new["header"], "content": new["content"]},
+            })
         gen_tickets = generator.generate(new)
         for idx, gt in enumerate(gen_tickets, 1):
             existing = db.query_all(
@@ -239,6 +245,7 @@ def render_for_ui(instance_key: str) -> dict:
         " WHERE prd_id=? ORDER BY id",
         (prd_row["id"],),
     )
+    from pm import runner as pm_runner
     out_sections: list[dict] = []
     for s in sections:
         ticket_rows = db.query_all(
@@ -268,8 +275,10 @@ def render_for_ui(instance_key: str) -> dict:
             "content": s["content"],
             "deleted_at": s["deleted_at"],
             "tickets": tickets,
+            "pm_findings": pm_runner.section_findings(instance_key, s["id"]),
         })
     return {
         "prd": dict(prd_row),
         "sections": out_sections,
+        "post_shipping_findings": pm_runner.post_shipping_findings(instance_key),
     }
