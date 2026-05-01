@@ -95,8 +95,14 @@ class TestTransitionInvalidEnum:
 
 
 class TestAllowedGraph:
-    def test_merged_only_recovers_to_new(self):
-        assert _ALLOWED[TicketStatus.merged] == {TicketStatus.new}
+    def test_merged_proceeds_to_validation_or_recovers(self):
+        assert _ALLOWED[TicketStatus.merged] == {TicketStatus.validation, TicketStatus.new}
+
+    def test_validation_finishes_or_recovers(self):
+        assert _ALLOWED[TicketStatus.validation] == {TicketStatus.done, TicketStatus.new}
+
+    def test_pending_approval_approve_or_reject(self):
+        assert _ALLOWED[TicketStatus.pending_approval] == {TicketStatus.new, TicketStatus.done}
 
     def test_done_revivals(self):
         assert _ALLOWED[TicketStatus.done] == {TicketStatus.new, TicketStatus.pr_ready, TicketStatus.in_review}

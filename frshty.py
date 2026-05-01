@@ -1550,6 +1550,84 @@ def _events_enabled() -> bool:
         return False
 
 
+@app.post("/api/tickets/{key}/approve")
+def api_approve_ticket(key: str):
+    ts = state.load_ticket(key)
+    if not ts:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if ts.get("status") != "pending_approval":
+        return JSONResponse({"error": f"cannot approve from status {ts.get('status')}"}, status_code=400)
+    try:
+        state.transition_ticket(key, "new", approval_status="approved")
+    except state.TicketStateError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    log.emit("ticket_approved", f"Approved {key}",
+             links={"detail": f"{_config['_base_url']}/tickets/{key}"},
+             meta={"ticket": key})
+    return {"status": "new", "approval_status": "approved"}
+
+
+@app.post("/api/tickets/{key}/reject")
+def api_reject_ticket(key: str):
+    from datetime import datetime, timezone
+    ts = state.load_ticket(key)
+    if not ts:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if ts.get("status") != "pending_approval":
+        return JSONResponse({"error": f"cannot reject from status {ts.get('status')}"}, status_code=400)
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        state.transition_ticket(key, "done",
+                                approval_status="rejected",
+                                obsolete_at=now,
+                                done_at=now)
+    except state.TicketStateError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    log.emit("ticket_rejected", f"Rejected {key}",
+             links={"detail": f"{_config['_base_url']}/tickets/{key}"},
+             meta={"ticket": key})
+    return {"status": "done", "approval_status": "rejected"}
+
+
+@app.post("/api/tickets/{key}/obsolete")
+def api_obsolete_ticket(key: str):
+    from datetime import datetime, timezone
+    ts = state.load_ticket(key)
+    if not ts:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    now = datetime.now(timezone.utc).isoformat()
+    def _mutate(current: dict) -> dict:
+        if not current:
+            raise state.TicketStateError(f"ticket {key}: not found")
+        merged = dict(current)
+        merged["obsolete_at"] = now
+        return merged
+    state.update_ticket(key, _mutate)
+    try:
+        from features import validation as v
+        instance_key = _config.get("job", {}).get("key", "")
+        if instance_key:
+            v.remove_from_pool(instance_key, key)
+    except Exception as e:
+        log.emit("obsolete_pool_remove_failed", f"{type(e).__name__}: {e}",
+                 meta={"ticket": key})
+    log.emit("ticket_obsoleted", f"Marked obsolete {key}",
+             links={"detail": f"{_config['_base_url']}/tickets/{key}"},
+             meta={"ticket": key})
+    return {"obsolete_at": now}
+
+
+@app.get("/api/tickets/{key}/validation")
+def api_ticket_validation(key: str, limit: int = 50):
+    from features import validation as v
+    instance_key = _config.get("job", {}).get("key", "")
+    if not instance_key:
+        return {"badge": "pending", "runs": []}
+    runs = v.latest_runs(instance_key, key, limit)
+    badge = v.badge_for(instance_key, key)
+    return {"badge": badge, "runs": runs}
+
+
 @app.get("/api/tickets/{key}/jobs")
 def api_ticket_jobs(key: str, limit: int = 100):
     if not _events_enabled():

@@ -781,7 +781,7 @@ class TestCheckRequeue:
             tickets.check({**fake_config, "_base_url": "http://base"}, instance_key="inst")
         return state.load_ticket("PROJ-1"), menq
 
-    def test_same_external_status_skips(self, tmp_path, fake_config):
+    def test_same_external_status_enqueues_validation(self, tmp_path, fake_config):
         saved, menq = self._run_check(tmp_path, fake_config,
             saved_state={"status": "merged", "slug": "PROJ-1-slug", "branch": "PROJ-1-slug",
                          "merged_external_status": "QA"},
@@ -790,6 +790,17 @@ class TestCheckRequeue:
         assert saved["status"] == "merged"
         assert saved["merged_external_status"] == "QA"
         assert "reopened_count" not in saved
+        assert saved.get("validation_enqueued_at")
+        menq.assert_any_call("inst", "PROJ-1", "validate_merged_ticket")
+
+    def test_same_external_status_skips_after_validation_enqueued(self, tmp_path, fake_config):
+        saved, menq = self._run_check(tmp_path, fake_config,
+            saved_state={"status": "merged", "slug": "PROJ-1-slug", "branch": "PROJ-1-slug",
+                         "merged_external_status": "QA",
+                         "validation_enqueued_at": "2026-01-01T00:00:00+00:00"},
+            external_status="QA")
+        assert saved is not None
+        assert saved["status"] == "merged"
         menq.assert_not_called()
 
     def test_changed_external_status_reingests(self, tmp_path, fake_config):

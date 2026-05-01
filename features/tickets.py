@@ -33,6 +33,20 @@ def _enqueue_stage(instance_key: str, ticket_key: str, task_name: str) -> None:
     q.enqueue_job(instance_key, task_name, ticket_key=ticket_key)
 
 
+def _ticket_source(config: dict) -> str:
+    return config.get("job", {}).get("ticket_system") or "manual"
+
+
+def _approval_required(config: dict, source: str) -> bool:
+    cfg = config.get("ticket_approval") or {}
+    if not cfg.get("required"):
+        return False
+    sources = cfg.get("sources")
+    if sources is None:
+        return True
+    return source in sources
+
+
 def _image_filename(alt: str, url: str, seen: set | None = None) -> str:
     filename = re.sub(r'[^\w.\-]', '_', alt) if alt else url.split("/")[-1]
     if not filename.endswith(('.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp')):
@@ -484,12 +498,20 @@ def check(config: dict, instance_key: str = ""):
                     ts["merged_external_status"] = curr_ext
                     state.save_ticket(key, ts)
                     continue
-                if curr_ext == ts["merged_external_status"]:
+                if curr_ext != ts["merged_external_status"]:
+                    ts = _reingest_merged_ticket(config, ticket, ts, base_url)
+                    state.save_ticket(key, ts)
+                    if instance_key:
+                        _enqueue_stage(instance_key, key, "start_planning")
                     continue
-                ts = _reingest_merged_ticket(config, ticket, ts, base_url)
-                state.save_ticket(key, ts)
-                if instance_key:
-                    _enqueue_stage(instance_key, key, "start_planning")
+                if not ts.get("validation_enqueued_at") and instance_key:
+                    from datetime import datetime, timezone
+                    ts["validation_enqueued_at"] = datetime.now(timezone.utc).isoformat()
+                    state.save_ticket(key, ts)
+                    _enqueue_stage(instance_key, key, "validate_merged_ticket")
+                continue
+
+            if ts["status"] == TicketStatus.validation:
                 continue
 
             if ts["status"] == TicketStatus.pr_failed:
@@ -512,9 +534,29 @@ def check(config: dict, instance_key: str = ""):
                             ts[k] = new_ts[k]
 
             if ts["status"] == "new":
+                if "source" not in ts:
+                    ts["source"] = _ticket_source(config)
+                source = ts.get("source", _ticket_source(config))
+                if _approval_required(config, source) and ts.get("approval_status") not in ("approved", "rejected"):
+                    ts["status"] = TicketStatus.pending_approval.value
+                    ts["approval_status"] = "pending"
+                    if "discovered_at" not in ts:
+                        from datetime import datetime, timezone
+                        ts["discovered_at"] = datetime.now(timezone.utc).isoformat()
+                    state.save_ticket(key, ts)
+                    log.emit("ticket_pending_approval",
+                             f"Ticket {key} awaiting approval (source={source})",
+                             links={"detail": f"{base_url}/tickets/{key}"},
+                             meta={"ticket": key, "source": source})
+                    continue
                 ts = _setup_ticket(config, ticket, base_url)
+                if "source" not in ts:
+                    ts["source"] = source
                 if ts.get("discovered_at") and instance_key:
                     _enqueue_stage(instance_key, key, "start_planning")
+
+            if ts["status"] == "pending_approval":
+                continue
 
             if ts["status"] == "planning" and instance_key:
                 _enqueue_stage(instance_key, key, "start_planning")

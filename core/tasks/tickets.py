@@ -43,12 +43,31 @@ def scan_tickets(ctx: TaskContext) -> TaskResult:
       on_success_status="reviewing",
       timeout=PLAN_TIMEOUT)
 def start_planning(ctx: TaskContext) -> TaskResult:
+    from features import acceptance
     ticket_dir = _ticket_dir(ctx)
     if not ticket_dir.is_dir():
         return TaskResult("failed", f"ticket dir missing: {ticket_dir}")
+    if ctx.ticket_key:
+        ts = state.load_ticket(ctx.ticket_key) or {}
+        if ts:
+            before = bool(acceptance.is_structured(ts))
+            acceptance.ensure_structured(ts)
+            if not before and acceptance.is_structured(ts):
+                state.save_ticket(ctx.ticket_key, ts)
+                log.emit("ticket_acceptance_enriched",
+                         f"Structured criteria filled for {ctx.ticket_key}",
+                         meta={"ticket": ctx.ticket_key,
+                               "n_criteria": len(acceptance.all_criteria(ts))})
+    prompt = (
+        "Run /ctp docs/. The resulting docs/technical-plan.md MUST include a "
+        "'Test Plan' section listing unit, integration, and playwright tests for "
+        "each acceptance criterion. If the ticket has structured acceptance criteria "
+        "(in the ticket data), translate each criterion's playwright steps into a "
+        "concrete e2e test."
+    )
     log.emit("ticket_planning_started", f"Headless /ctp for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key})
-    result = run_claude_code("/ctp docs/", cwd=ticket_dir, timeout=PLAN_TIMEOUT)
+    result = run_claude_code(prompt, cwd=ticket_dir, timeout=PLAN_TIMEOUT)
     if result is None:
         return TaskResult("failed", "claude returned non-zero or empty")
     return TaskResult("ok")
@@ -313,3 +332,36 @@ def set_state(ctx: TaskContext) -> TaskResult:
     if not target:
         return TaskResult("failed", "target state missing")
     return TaskResult("ok", artifacts={"transitioned_to": target})
+
+
+VALIDATION_TIMEOUT = 1800
+
+
+@task("validate_merged_ticket",
+      preconditions=[status_is("merged", "validation")],
+      on_entry_status="validation",
+      on_success_status="done",
+      timeout=VALIDATION_TIMEOUT)
+def validate_merged_ticket(ctx: TaskContext) -> TaskResult:
+    from features import validation
+    if not ctx.ticket_key:
+        return TaskResult("failed", "ticket_key missing")
+    ts = state.load_ticket(ctx.ticket_key) or {}
+    if not ts:
+        return TaskResult("failed", "ticket not found")
+    base_url = ctx.config.get("validation", {}).get("live_url") or ""
+    if not base_url:
+        log.emit("validation_skipped",
+                 f"No [validation].live_url configured; skipping for {ctx.ticket_key}",
+                 meta={"ticket": ctx.ticket_key})
+        return TaskResult("ok", artifacts={"skipped": True})
+    try:
+        summary = validation.validate_merged(
+            ctx.instance_key, ctx.ticket_key, ts, base_url,
+        )
+        return TaskResult("ok", artifacts=summary)
+    except Exception as e:
+        log.emit("validation_error",
+                 f"[{ctx.instance_key}] {ctx.ticket_key}: {type(e).__name__}: {e}",
+                 meta={"ticket": ctx.ticket_key})
+        return TaskResult("failed", f"{type(e).__name__}: {e}")
