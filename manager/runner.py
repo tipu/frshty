@@ -41,7 +41,7 @@ def _resolve_priorities_path(config: dict) -> Path | None:
     return None
 
 
-def _load_priorities(config: dict) -> tuple[str, str]:
+def _load_priorities(config: dict, instance_key: str = "") -> tuple[str, str]:
     path = _resolve_priorities_path(config)
     if path and path.is_file():
         try:
@@ -49,7 +49,11 @@ def _load_priorities(config: dict) -> tuple[str, str]:
             return text, hashlib.sha256(text.encode("utf-8")).hexdigest()
         except (OSError, UnicodeDecodeError) as e:
             log.emit("manager_priorities_unreadable",
-                     f"Could not read {path}: {type(e).__name__}: {e}")
+                     f"[{instance_key}] could not read {path}: {type(e).__name__}: {e}")
+    elif (config.get("manager") or {}).get("priorities_file"):
+        log.emit("manager_priorities_missing",
+                 f"[{instance_key}] [manager].priorities_file set but file not found",
+                 meta={"configured_path": (config.get("manager") or {}).get("priorities_file")})
     return _DEFAULT_PRIORITY_FALLBACK, ""
 
 
@@ -58,8 +62,9 @@ def _summarize(candidate_set: dict, max_per_bucket: int = 10) -> dict:
 
 
 def run_daily_digest(instance_key: str, config: dict) -> dict | None:
-    priorities_text, priorities_hash = _load_priorities(config)
-    candidate_set = staleness.aggregate_all(instance_key)
+    priorities_text, priorities_hash = _load_priorities(config, instance_key)
+    thresholds = (config.get("manager") or {}).get("thresholds") or {}
+    candidate_set = staleness.aggregate_all(instance_key, thresholds=thresholds)
     counts = {k: len(v) for k, v in candidate_set.items()}
 
     if sum(counts.values()) == 0:
@@ -104,6 +109,11 @@ def run_daily_digest(instance_key: str, config: dict) -> dict | None:
         meta={"counts": counts},
     )
     return {"body_md": body_md, "counts": counts}
+
+
+def current_priorities_hash(config: dict) -> str:
+    text, h = _load_priorities(config, instance_key="")
+    return h
 
 
 def latest(instance_key: str) -> dict | None:

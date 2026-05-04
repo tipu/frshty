@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<meta charset="utf-8">
+<title>Today — frshty</title>
+<script src="/static/tailwind.js"></script>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<style>
+body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: #0a0a0a; color: #e0e0e0; }
+.card { background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; }
+.badge { display: inline-block; padding: 1px 8px; border-radius: 4px; font-size: 11px; }
+.badge-count-zero { background: #14532d; color: #86efac; }
+.badge-count-low { background: #1e3a5f; color: #93c5fd; }
+.badge-count-mid { background: #713f12; color: #fde047; }
+.badge-count-high { background: #7f1d1d; color: #fca5a5; }
+nav a { color: #888; padding: 4px 12px; border-radius: 4px; }
+nav a:hover, nav a.active { color: #fff; background: #222; }
+[v-cloak] { display: none; }
+.md-content h1 { font-size: 1.4em; font-weight: bold; margin: 16px 0 8px; color: #f0f0f0; }
+.md-content h2 { font-size: 1.15em; font-weight: bold; margin: 18px 0 6px; color: #d0d0d0; border-bottom: 1px solid #2a2a2a; padding-bottom: 4px; }
+.md-content h3 { font-size: 1.02em; font-weight: bold; margin: 12px 0 4px; color: #c0c0c0; }
+.md-content p { margin: 6px 0; line-height: 1.5; }
+.md-content ul, .md-content ol { margin: 6px 0; padding-left: 22px; }
+.md-content li { margin: 3px 0; line-height: 1.45; }
+.md-content code { background: #1a1a2a; padding: 1px 5px; border-radius: 3px; font-size: 0.9em; }
+.md-content pre { background: #1a1a2a; padding: 12px; border-radius: 6px; overflow-x: auto; margin: 8px 0; }
+.md-content strong { color: #fef9c3; }
+.md-content a { color: #60a5fa; text-decoration: underline; }
+.policy-stale { background: #4a3a0a; color: #fbbf24; }
+</style>
+</head>
+<body class="p-4 max-w-5xl mx-auto">
+
+<div id="app" v-cloak>
+
+<header class="flex items-center gap-4 mb-4 flex-wrap">
+    <div class="flex items-center gap-2">
+        <h1 class="text-lg font-bold">Today</h1>
+        <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700">{{ instanceName }}</span>
+    </div>
+    <nav class="flex gap-1 text-sm">
+        <a href="/">Feed</a>
+        <a href="/global">Global</a>
+        <a href="/reviews">Reviews</a>
+        <a href="/tickets">Tickets</a>
+        <a href="/today" class="active">Today</a>
+        <a href="/scheduled">Scheduled</a>
+        <a href="/config">Config</a>
+    </nav>
+    <div class="ml-auto flex items-center gap-3">
+        <span v-if="generatedAt" class="text-xs text-gray-500" :title="generatedAt">last digest {{ fmtRelative(generatedAt) }}</span>
+        <button @click="runNow" :disabled="running"
+                class="bg-green-700 hover:bg-green-600 disabled:bg-gray-700 text-white text-xs px-3 py-1 rounded">
+            {{ running ? 'running…' : 'run now' }}
+        </button>
+    </div>
+</header>
+
+<div v-if="empty" class="card p-6">
+    <div class="text-sm text-gray-400">No digest yet for <code class="bg-gray-800 px-1 rounded">{{ instanceName }}</code>. Either:</div>
+    <ul class="text-sm text-gray-400 list-disc ml-6 mt-2">
+        <li>The morning cron hasn't fired yet (next: 7am local).</li>
+        <li><code class="bg-gray-800 px-1 rounded">[manager].enabled</code> isn't set in this instance's config.</li>
+        <li>Click <strong>run now</strong> above to trigger one synchronously.</li>
+    </ul>
+</div>
+
+<div v-else>
+    <div class="flex items-center gap-2 mb-3 flex-wrap">
+        <template v-for="(count, key) in counts" :key="key">
+            <span class="badge" :class="badgeClass(count)" :title="key">
+                {{ formatBucketLabel(key) }}: {{ count }}
+            </span>
+        </template>
+        <span v-if="policyStale" class="badge policy-stale" title="priorities.md changed since last digest — run now to refresh">⚠ policy stale</span>
+    </div>
+
+    <div class="card p-6 md-content" v-html="renderedBody"></div>
+</div>
+
+</div>
+
+<script>
+const { createApp, ref, computed, onMounted } = Vue;
+
+createApp({
+    setup() {
+        const empty = ref(true);
+        const generatedAt = ref(null);
+        const counts = ref({});
+        const bodyMd = ref('');
+        const policyStale = ref(false);
+        const instanceName = ref('');
+        const running = ref(false);
+
+        const renderedBody = computed(() => bodyMd.value ? marked.parse(bodyMd.value) : '');
+
+        const BUCKET_LABELS = {
+            stale_own_prs: 'Stale PRs',
+            stale_tickets: 'Stale tickets',
+            stuck_in_review: 'Stuck in_review',
+            regressions_recent: 'Regressions',
+            pending_approvals_stuck: 'Pending approval stuck',
+        };
+
+        function formatBucketLabel(key) {
+            return BUCKET_LABELS[key] || key;
+        }
+
+        function badgeClass(count) {
+            if (!count) return 'badge-count-zero';
+            if (count <= 2) return 'badge-count-low';
+            if (count <= 6) return 'badge-count-mid';
+            return 'badge-count-high';
+        }
+
+        function fmtRelative(iso) {
+            if (!iso) return '';
+            const then = new Date(iso);
+            const ms = Date.now() - then.getTime();
+            const m = Math.floor(ms / 60000);
+            if (m < 1) return 'just now';
+            if (m < 60) return `${m}m ago`;
+            const h = Math.floor(m / 60);
+            if (h < 24) return `${h}h ago`;
+            const d = Math.floor(h / 24);
+            return `${d}d ago`;
+        }
+
+        async function load() {
+            try {
+                const [latestResp, statusResp, cfgResp] = await Promise.all([
+                    fetch('/api/manager/latest'),
+                    fetch('/api/manager/status'),
+                    fetch('/api/config'),
+                ]);
+                const latest = await latestResp.json();
+                if (latest.empty) {
+                    empty.value = true;
+                } else {
+                    empty.value = false;
+                    generatedAt.value = latest.generated_at;
+                    bodyMd.value = latest.body_md || '';
+                    counts.value = latest.candidate_counts || {};
+                }
+                if (statusResp.ok) {
+                    const s = await statusResp.json();
+                    policyStale.value = !!s.policy_stale;
+                }
+                const cfg = await cfgResp.json();
+                instanceName.value = cfg.job?.key || '';
+            } catch (e) { console.error('load failed', e); }
+        }
+
+        async function runNow() {
+            running.value = true;
+            try {
+                const r = await fetch('/api/manager/run-now', {method: 'POST'});
+                if (!r.ok) {
+                    const err = await r.json().catch(() => ({}));
+                    alert('Run failed: ' + (err.error || r.statusText));
+                }
+                await load();
+            } finally { running.value = false; }
+        }
+
+        onMounted(() => {
+            load();
+            setInterval(load, 30000);
+        });
+
+        return { empty, generatedAt, counts, policyStale, instanceName, running,
+                 renderedBody, formatBucketLabel, badgeClass, fmtRelative, runNow };
+    }
+}).mount('#app');
+</script>
+
+</body>
+</html>

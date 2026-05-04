@@ -132,11 +132,12 @@ def pending_approvals_stuck(instance_key: str, threshold_hours: int = 12) -> lis
     return out
 
 
-def aggregate_all(instance_key: str) -> dict:
+def aggregate_all(instance_key: str, thresholds: dict | None = None) -> dict:
+    t = thresholds or {}
     return {
-        "stale_own_prs":           stale_own_prs(instance_key),
-        "stale_tickets":           stale_tickets(instance_key),
+        "stale_own_prs":           stale_own_prs(instance_key, t.get("stale_pr_hours", 24)),
+        "stale_tickets":           stale_tickets(instance_key, t.get("stale_ticket_hours", 72)),
         "stuck_in_review":         stuck_in_review(instance_key),
-        "regressions_recent":      regressions_recent(instance_key),
-        "pending_approvals_stuck": pending_approvals_stuck(instance_key),
+        "regressions_recent":      regressions_recent(instance_key, t.get("regression_days", 7)),
+        "pending_approvals_stuck": pending_approvals_stuck(instance_key, t.get("pending_approval_hours", 12)),
     }
