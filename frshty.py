@@ -203,6 +203,11 @@ def prd_page():
     return _template("prd.html")
 
 
+@app.get("/today", response_class=HTMLResponse)
+def today_page():
+    return _template("today.html")
+
+
 @app.get("/slack", response_class=HTMLResponse)
 def slack_page():
     return _template("slack.html")
@@ -1707,6 +1712,25 @@ def api_manager_run_now():
     if out is None:
         return JSONResponse({"error": "haiku unavailable"}, status_code=503)
     return out
+
+
+@app.get("/api/manager/status")
+def api_manager_status():
+    from manager import runner
+    instance_key = _config.get("job", {}).get("key", "")
+    if not instance_key:
+        return {"enabled": False, "policy_stale": False}
+    enabled = bool((_config.get("manager") or {}).get("enabled"))
+    current_hash = runner.current_priorities_hash(_config)
+    latest = runner.latest(instance_key)
+    last_hash = (latest or {}).get("priorities_hash") or ""
+    policy_stale = bool(current_hash and last_hash and current_hash != last_hash)
+    return {
+        "enabled": enabled,
+        "policy_stale": policy_stale,
+        "current_priorities_hash": current_hash,
+        "last_digest_at": (latest or {}).get("generated_at"),
+    }
 
 
 @app.get("/api/tickets/{key}/jobs")
