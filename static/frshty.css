@@ -1,0 +1,66 @@
+body { font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; background: #0a0a0a; color: #e0e0e0; }
+
+[v-cloak] { display: none; }
+
+.card { background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; }
+.card-red { border-left: 3px solid #ef4444; }
+.card-green { border-left: 3px solid #22c55e; }
+.card-yellow { border-left: 3px solid #eab308; }
+
+.link { color: #60a5fa; text-decoration: none; }
+.link:hover { text-decoration: underline; }
+
+nav a { color: #888; padding: 4px 12px; border-radius: 4px; }
+nav a:hover, nav a.active { color: #fff; background: #222; }
+
+.badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; }
+
+.badge-red { background: #991b1b; color: #fca5a5; }
+.badge-green { background: #14532d; color: #86efac; }
+.badge-yellow { background: #713f12; color: #fde047; }
+.badge-blue { background: #1e3a5f; color: #93c5fd; }
+.badge-purple { background: #581c87; color: #c084fc; }
+
+.badge-new { background: #1e3a5f; color: #93c5fd; }
+.badge-pending_approval { background: #4a3a0a; color: #fbbf24; }
+.badge-planning { background: #713f12; color: #fde047; }
+.badge-reviewing { background: #713f12; color: #fde047; }
+.badge-pr_ready { background: #14532d; color: #86efac; }
+.badge-pr_created { background: #14532d; color: #86efac; }
+.badge-in_review { background: #1e3a5f; color: #93c5fd; }
+.badge-pr_failed { background: #7f1d1d; color: #fca5a5; }
+.badge-merged { background: #14532d; color: #86efac; }
+.badge-validation { background: #1e3a5f; color: #93c5fd; }
+.badge-done { background: #2a2a2a; color: #888; }
+.badge-obsolete { background: #444; color: #aaa; }
+
+.badge-val-pass { background: #14532d; color: #86efac; }
+.badge-val-fail { background: #7f1d1d; color: #fca5a5; }
+.badge-val-regression { background: #7f1d1d; color: #fcd34d; }
+
+.badge-blocking { background: #991b1b; color: #fca5a5; }
+.badge-suggestion { background: #713f12; color: #fde047; }
+.badge-question { background: #1e3a5f; color: #93c5fd; }
+.badge-mention { background: #1e3a5f; color: #93c5fd; }
+.badge-action { background: #713f12; color: #fde047; }
+.badge-digest { background: #581c87; color: #c084fc; }
+.badge-ci { background: #4c1d95; color: #c4b5fd; }
+.badge-recurring { background: #14532d; color: #86efac; }
+.badge-scheduled { background: #1e3a5f; color: #93c5fd; }
+.badge-virtual { background: #4a3a0a; color: #fbbf24; }
+.badge-instance { background: #1f2937; color: #9ca3af; }
+
+.msg { padding: 6px 12px; border-radius: 4px; font-size: 12px; margin-bottom: 8px; display: inline-block; }
+.msg-ok { background: #14532d; color: #86efac; }
+.msg-err { background: #7f1d1d; color: #fca5a5; }
+
+.md-content h1 { font-size: 1.4em; font-weight: bold; margin: 16px 0 8px; color: #f0f0f0; }
+.md-content h2 { font-size: 1.15em; font-weight: bold; margin: 18px 0 6px; color: #d0d0d0; border-bottom: 1px solid #2a2a2a; padding-bottom: 4px; }
+.md-content h3 { font-size: 1.02em; font-weight: bold; margin: 12px 0 4px; color: #c0c0c0; }
+.md-content p { margin: 6px 0; line-height: 1.5; }
+.md-content ul, .md-content ol { margin: 6px 0; padding-left: 22px; }
+.md-content li { margin: 3px 0; line-height: 1.45; }
+.md-content code { background: #1a1a2a; padding: 1px 5px; border-radius: 3px; font-size: 0.9em; }
+.md-content pre { background: #1a1a2a; padding: 12px; border-radius: 6px; overflow-x: auto; margin: 8px 0; }
+.md-content strong { color: #fef9c3; }
+.md-content a { color: #60a5fa; text-decoration: underline; }
