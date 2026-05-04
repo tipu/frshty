@@ -6,22 +6,16 @@
 <title>Slack — frshty</title>
 <script src="/static/tailwind.js"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="/static/frshty-nav.js"></script>
+<link rel="stylesheet" href="/static/frshty.css">
 <style>
-body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: #0a0a0a; color: #e0e0e0; }
-.card { background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; }
 .suggestion { background: #1a1a2a; border: 1px solid #2a2a4a; border-radius: 6px; white-space: pre-wrap; }
 .reply-input { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; }
 .reply-input:focus { border-color: #3b82f6; outline: none; }
 .send-btn { background: #2563eb; color: white; padding: 6px 16px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
 .send-btn:hover { background: #1d4ed8; }
 .send-btn.sent { background: #14532d; cursor: default; }
-.badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; }
-.badge-mention { background: #1e3a5f; color: #93c5fd; }
-.badge-action { background: #713f12; color: #fde047; }
 .badge-digest { background: #14532d; color: #86efac; }
-nav a { color: #888; padding: 4px 12px; border-radius: 4px; }
-nav a:hover, nav a.active { color: #fff; background: #222; }
-[v-cloak] { display: none; }
 </style>
 </head>
 <body class="p-4 max-w-7xl mx-auto">
@@ -33,18 +27,7 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
         <h1 class="text-lg font-bold">Slack</h1>
         <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700">{{ instanceName }}</span>
     </div>
-    <nav class="flex gap-1 text-sm">
-        <a href="/">Feed</a>
-        <a href="/global">Global</a>
-        <a href="/reviews">Reviews</a>
-        <a href="/today">Today</a>
-        <a href="/tickets">Tickets</a>
-        <a href="/scheduled">Scheduled</a>
-        <a href="/slack" class="active">Slack</a>
-        <a v-if="features.timesheet !== false" href="/timesheet">Timesheet</a>
-        <a v-if="features.billing !== false" href="/billing">Billing</a>
-        <a href="/config">Config</a>
-    </nav>
+    <frshty-nav :features="features" />
 </header>
 
 <section class="mb-6">
@@ -104,7 +87,7 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
 <script>
 const { createApp, ref, reactive, computed, onMounted } = Vue;
 
-createApp({
+frshtyApp({
     setup() {
         const events = ref([]);
         const slackData = ref({});
