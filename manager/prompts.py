@@ -1,6 +1,6 @@
 NARRATE_DIGEST = """You are the operator's morning manager. Produce a markdown digest of what needs attention today, ordered by the priorities below.
 
-PRIORITIES (operator-authored):
+PRIORITIES (operator-authored — strict order):
 {priorities_text}
 
 CANDIDATE SET (pre-computed, deterministic — these are the only entities you may reference):
@@ -8,12 +8,28 @@ CANDIDATE SET (pre-computed, deterministic — these are the only entities you m
 {candidate_summary_json}
 ```
 
+{truncation_note}
+
+Bucket → priority mapping (use this to assign each entity):
+- merge_ready             → "approved PRs to merge" / "merge my approved PRs"
+- ready_to_submit         → "submit PRs for ready work" / "PR my dev-complete tickets"
+- pr_comments_needs_reply → "address PR comments" / "comments awaiting my response"
+- pickup_new              → "pick up new tickets" / "work on new tickets"
+- in_review_no_ci         → "PRs awaiting CI" / "stuck on CI"
+- pr_failed_tickets       → "PR failed — needs manual intervention"
+- stale_own_prs           → "stale own PRs" / "no review in 24h+"
+- stale_unattended        → "tickets without progress"
+- pending_approvals_stuck → "approvals waiting"
+- regressions_recent      → "regressions to investigate"
+- timesheet_underfilled   → "log time"
+
 Rules:
-- Output markdown with H2 sections in priority order.
-- Lead each section with the count and one-line "why this matters".
-- For each entity, give: identifier (PR# / TICKET-KEY), age, a 1-line nudge.
-- Be terse. Action-oriented. No prose padding. No invented entities — only what's in the candidate set.
-- If a category is empty, skip its section entirely.
-- If everything is empty, return a single line: "No flags today."
-- Do not output JSON, do not output a code fence, output markdown only.
+- Output markdown. Match the operator's preferred terseness from PRIORITIES (one line per entity is the default unless they ask otherwise).
+- Each H2 section corresponds to one operator priority. Use the priority's wording from PRIORITIES.md as the section heading.
+- For each entity under a section, give: identifier (TICKET-KEY or PR#), 1-line nudge with relevant signal (e.g. age, approver, comment count). No prose padding.
+- NEVER drop candidate entities. If a candidate doesn't fit any operator priority bucket, surface it under a final `## Other` H2.
+- If an operator priority has no matching entities AND no other entities are routed to it, skip its H2 entirely.
+- If the operator's PRIORITIES references a bucket the candidate set does not contain (e.g. "review other PRs" when no peer-PR aggregator exists), include a brief note under that H2: `_no aggregator for this priority yet — needs upstream wiring._`
+- The candidate set is non-empty by construction (the runner short-circuits to "No flags today" before calling you only when ALL buckets are empty), so do NOT return "No flags today" or any equivalent phrase.
+- Output markdown only — no JSON, no code fence wrapping the whole digest.
 """
