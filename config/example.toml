@@ -104,3 +104,9 @@ billing = false
 # [prd]
 # enabled = true
 # file = "/abs/path/to/myapp-prd.md"
+
+# --- Manager (proactive daily digest) ---
+# [manager]
+# enabled = true
+# cadence = "daily_9_local"            # daily_<hour>_local; supports any hour 0-23
+# priorities_file = ""                 # default: <workspace.root>/priorities.md, then <first repo>/priorities.md
