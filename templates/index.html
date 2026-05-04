@@ -7,27 +7,15 @@
 <title>frshty</title>
 <script src="/static/tailwind.js"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="/static/frshty-nav.js"></script>
+<link rel="stylesheet" href="/static/frshty.css">
 <style>
-body { font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace; background: #0a0a0a; color: #e0e0e0; }
-.card { background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; }
-.card-red { border-left: 3px solid #ef4444; }
-.card-green { border-left: 3px solid #22c55e; }
-.card-yellow { border-left: 3px solid #eab308; }
 .unread { font-weight: 600; border-left: 3px solid #3b82f6; }
 .read { opacity: 0.4; }
 .pulse { animation: pulse 2s ease-in-out infinite; }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
-.link { color: #60a5fa; text-decoration: none; }
-.link:hover { text-decoration: underline; }
-.badge { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 11px; }
-.badge-red { background: #991b1b; color: #fca5a5; }
-.badge-green { background: #14532d; color: #86efac; }
-.badge-yellow { background: #713f12; color: #fde047; }
-.badge-blue { background: #1e3a5f; color: #93c5fd; }
 .dismiss-btn { cursor: pointer; opacity: 0.3; }
 .dismiss-btn:hover { opacity: 1; }
-nav a { color: #888; padding: 4px 12px; border-radius: 4px; }
-nav a:hover, nav a.active { color: #fff; background: #222; }
 .settings-panel { display: none; position: absolute; right: 0; top: 100%; background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 12px; z-index: 50; min-width: 200px; }
 .settings-panel.open { display: block; }
 .row-expand { cursor: pointer; color: #555; width: 12px; display: inline-block; text-align: center; }
@@ -35,7 +23,6 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
 .summary-full { display: none; white-space: pre-wrap; word-break: break-word; }
 .expanded .summary-line { display: none; }
 .expanded .summary-full { display: block; }
-[v-cloak] { display: none; }
 </style>
 </head>
 <body class="p-4 max-w-7xl mx-auto">
@@ -48,18 +35,7 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
             <h1 class="text-lg font-bold">frshty</h1>
             <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700">{{ instanceName }}</span>
         </div>
-        <nav class="flex gap-1 text-sm">
-            <a href="/" class="active">Feed</a>
-            <a href="/global">Global</a>
-            <a href="/reviews">Reviews</a>
-            <a href="/today">Today</a>
-            <a href="/tickets">Tickets</a>
-            <a href="/scheduled">Scheduled</a>
-            <a href="/slack">Slack</a>
-            <a v-if="features.timesheet !== false" href="/timesheet">Timesheet</a>
-            <a v-if="features.billing !== false" href="/billing">Billing</a>
-            <a href="/config">Config</a>
-        </nav>
+        <frshty-nav :features="features" />
     </div>
     <div class="relative text-sm text-gray-500">
         <button @click="pollNow" :disabled="polling" class="ml-3 text-xs bg-blue-900 hover:bg-blue-800 text-blue-300 px-3 py-1 rounded">{{ polling ? 'Polling...' : 'Poll Now' }}</button>
@@ -203,7 +179,7 @@ function isNoise(e) {
     return false;
 }
 
-createApp({
+frshtyApp({
     setup() {
         const events = ref([]);
         const status = ref({ unread_total: 0, slack_alive: false, counts: {} });

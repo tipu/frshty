@@ -6,9 +6,9 @@
 <title>Timesheet — frshty</title>
 <script src="/static/tailwind.js"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="/static/frshty-nav.js"></script>
+<link rel="stylesheet" href="/static/frshty.css">
 <style>
-body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: #0a0a0a; color: #e0e0e0; }
-.card { background: #141414; border: 1px solid #2a2a2a; border-radius: 8px; }
 table { border-collapse: collapse; width: 100%; }
 th, td { padding: 6px 10px; border: 1px solid #2a2a2a; text-align: left; font-size: 13px; vertical-align: top; }
 th { background: #1a1a1a; }
@@ -17,18 +17,12 @@ th { background: #1a1a1a; }
 .logged-partial { background: rgba(59, 130, 246, 0.1); }
 .missing { background: rgba(239, 68, 68, 0.1); }
 .total-row { background: #1a1a1a; font-weight: bold; }
-nav a { color: #888; padding: 4px 12px; border-radius: 4px; }
-nav a:hover, nav a.active { color: #fff; background: #222; }
 input, select { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
 button { cursor: pointer; }
 .btn { background: #1e3a5f; color: #93c5fd; border: none; padding: 2px 8px; border-radius: 4px; font-size: 11px; }
 .btn:hover { background: #2a4a6f; }
 .btn-purple { background: #581c87; color: #c084fc; }
 .btn-purple:hover { background: #6b21a8; }
-.msg { padding: 6px 12px; border-radius: 4px; font-size: 12px; margin-bottom: 8px; display: inline-block; }
-.msg-ok { background: #14532d; color: #86efac; }
-.msg-err { background: #7f1d1d; color: #fca5a5; }
-[v-cloak] { display: none; }
 </style>
 </head>
 <body class="p-4 max-w-7xl mx-auto">
@@ -40,18 +34,7 @@ button { cursor: pointer; }
         <h1 class="text-lg font-bold">Timesheet</h1>
         <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700">{{ instanceName }}</span>
     </div>
-    <nav class="flex gap-1 text-sm">
-        <a href="/">Feed</a>
-        <a href="/global">Global</a>
-        <a href="/reviews">Reviews</a>
-        <a href="/today">Today</a>
-        <a href="/tickets">Tickets</a>
-        <a href="/scheduled">Scheduled</a>
-        <a href="/slack">Slack</a>
-        <a v-if="features.timesheet !== false" href="/timesheet" class="active">Timesheet</a>
-        <a v-if="features.billing !== false" href="/billing">Billing</a>
-        <a href="/config">Config</a>
-    </nav>
+    <frshty-nav :features="features" />
 </header>
 
 <div class="flex items-center gap-3 mb-4">
@@ -91,7 +74,7 @@ button { cursor: pointer; }
             <tbody>
                 <tr v-for="row in rows" :key="row.ds" class="border-b border-gray-800/50" :class="row.rowClass">
                     <td class="font-mono text-xs whitespace-nowrap">
-                        {{ row.ds }}
+                        <span class="text-gray-500 inline-block w-9">{{ dow(row.ds) }}</span>{{ row.ds }}
                         <span v-if="!row.weekend" class="text-gray-600 hover:text-gray-300 cursor-pointer inline-block"
                               :class="{ 'animate-spin': row.refreshing }" @click="refreshDay(row.ds)">↻</span>
                     </td>
@@ -222,7 +205,7 @@ function parseTimeToHours(s) {
     return parseFloat(m[1] || 0) + parseFloat(m[2] || 0) / 60;
 }
 
-createApp({
+frshtyApp({
     setup() {
         const initial = getTwoMonthRange(0);
         const data = ref({});
@@ -560,6 +543,12 @@ createApp({
             } catch (e) {}
         }
 
+        function dow(ds) {
+            if (!ds) return '';
+            const [y, m, d] = ds.split('-').map(Number);
+            return new Date(y, m - 1, d).toLocaleDateString('en-US', { weekday: 'short' });
+        }
+
         onMounted(() => {
             loadConfig();
             generate(false);
@@ -572,6 +561,7 @@ createApp({
             hoverTicket, ticketByKey, rows, totalLogged, totalSuggest,
             generate, refreshDay, prevRange, nextRange,
             startEdit, cancelEdit, saveWl, logTime, logTimeManual,
+            dow,
         };
     },
 }).mount('#app');
