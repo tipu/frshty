@@ -14,7 +14,7 @@ from manager.prompts import NARRATE_DIGEST
 
 _PROMPT_BUDGET = 30000
 _DEFAULT_PRIORITY_FALLBACK = (
-    "(no priorities.md found — default order: stale own PRs, "
+    "(no PRIORITIES.md found — default order: stale own PRs, "
     "stale tickets, stuck in_review, regressions, pending approvals)"
 )
 
@@ -27,17 +27,19 @@ def _resolve_priorities_path(config: dict) -> Path | None:
     explicit = (config.get("manager") or {}).get("priorities_file")
     if explicit:
         return Path(explicit)
+    candidates: list[Path] = []
     ws = config.get("workspace") or {}
     root = ws.get("root")
     if root:
-        candidate = Path(root) / "priorities.md"
-        if candidate.is_file():
-            return candidate
+        candidates.append(Path(root) / "PRIORITIES.md")
+        candidates.append(Path(root) / "priorities.md")
     repos = get_repos(config)
     if repos:
-        candidate = Path(repos[0]["path"]) / "priorities.md"
-        if candidate.is_file():
-            return candidate
+        candidates.append(Path(repos[0]["path"]) / "PRIORITIES.md")
+        candidates.append(Path(repos[0]["path"]) / "priorities.md")
+    for c in candidates:
+        if c.is_file():
+            return c
     return None
 
 
@@ -64,7 +66,7 @@ def _summarize(candidate_set: dict, max_per_bucket: int = 10) -> dict:
 def run_daily_digest(instance_key: str, config: dict) -> dict | None:
     priorities_text, priorities_hash = _load_priorities(config, instance_key)
     thresholds = (config.get("manager") or {}).get("thresholds") or {}
-    candidate_set = staleness.aggregate_all(instance_key, thresholds=thresholds)
+    candidate_set = staleness.aggregate_all(instance_key, config=config, thresholds=thresholds)
     counts = {k: len(v) for k, v in candidate_set.items()}
 
     if sum(counts.values()) == 0:
@@ -80,15 +82,22 @@ def run_daily_digest(instance_key: str, config: dict) -> dict | None:
                  meta={"counts": counts})
         return {"body_md": body_md, "counts": counts, "empty": True}
 
-    summary = _summarize(candidate_set)
+    summary = _summarize(candidate_set, max_per_bucket=20)
     summary_json = json.dumps(summary, indent=2)
+    truncation_note = ""
+    if len(summary_json) > _PROMPT_BUDGET:
+        summary = _summarize(candidate_set, max_per_bucket=8)
+        summary_json = json.dumps(summary, indent=2)
+        truncation_note = "(some buckets truncated to 8 entries to fit budget)"
     if len(summary_json) > _PROMPT_BUDGET:
         summary = _summarize(candidate_set, max_per_bucket=3)
         summary_json = json.dumps(summary, indent=2)
+        truncation_note = "(buckets truncated to 3 entries to fit budget — surface the truncation explicitly)"
 
     prompt = NARRATE_DIGEST.format(
         priorities_text=priorities_text[:5000],
         candidate_summary_json=summary_json[:_PROMPT_BUDGET],
+        truncation_note=truncation_note,
     )
     body_md = run_haiku(prompt, timeout=180)
     if not body_md:

@@ -27,19 +27,45 @@ def check(config: dict):
     pr_state = state.load("own_prs")
     base_url = config["_base_url"]
 
+    active_keys: set[str] = set()
     for pr in my_prs:
         if (pr["repo"], pr["id"]) in ticket_prs:
             continue
         pr_key = f"{pr['repo']}/{pr['id']}"
+        active_keys.add(pr_key)
         seen = pr_state.get(pr_key, {})
 
+        _cache_pr_metadata(platform, pr, seen)
         _check_comments(config, instance_key, platform, pr, base_url)
         _check_ci(config, platform, pr, seen, base_url)
         _check_stale(pr, seen, base_url)
 
         pr_state[pr_key] = seen
 
+    for stale_key in [k for k in pr_state if k not in active_keys]:
+        del pr_state[stale_key]
+
     state.save("own_prs", pr_state)
+
+
+def _cache_pr_metadata(platform, pr: dict, seen: dict) -> None:
+    """Persist PR display + review state into the kv blob so the manager's
+    stale_own_prs aggregator has data to query without a live platform call.
+    """
+    seen["title"] = pr.get("title", "") or seen.get("title", "")
+    seen["url"] = pr.get("url", "") or seen.get("url", "")
+    seen["author"] = pr.get("author", "") or seen.get("author", "")
+    if pr.get("created_on"):
+        seen["created_on"] = pr["created_on"]
+    if pr.get("updated_on"):
+        seen["updated_on"] = pr["updated_on"]
+    try:
+        info = platform.get_pr_info(pr["repo"], pr["id"]) or {}
+    except Exception:
+        info = {}
+    approvers = info.get("approvers") or []
+    seen["approvers"] = approvers
+    seen["review_state"] = "approved" if approvers else "pending"
 
 
 def _check_comments(config, instance_key, platform, pr, base_url):

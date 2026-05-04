@@ -109,7 +109,7 @@ billing = false
 # [manager]
 # enabled = true
 # cadence = "daily_9_local"            # daily_<hour>_local; supports any hour 0-23
-# priorities_file = ""                 # default: <workspace.root>/priorities.md, then <first repo>/priorities.md
+# priorities_file = ""                 # default: <workspace.root>/PRIORITIES.md, then <first repo>/PRIORITIES.md (lowercase fallback also works)
 # [manager.thresholds]
 # stale_pr_hours = 24                  # own PR with no review >Nh = stale
 # stale_ticket_hours = 72              # ticket discovered >Nh ago, status=new/planning/reviewing
