@@ -1687,6 +1687,28 @@ def api_prd_reload():
     return summary
 
 
+@app.get("/api/manager/latest")
+def api_manager_latest():
+    from manager import runner
+    instance_key = _config.get("job", {}).get("key", "")
+    if not instance_key:
+        return {"empty": True}
+    out = runner.latest(instance_key)
+    return out or {"empty": True}
+
+
+@app.post("/api/manager/run-now")
+def api_manager_run_now():
+    from manager import runner
+    instance_key = _config.get("job", {}).get("key", "")
+    if not instance_key:
+        return JSONResponse({"error": "no instance"}, status_code=400)
+    out = runner.run_daily_digest(instance_key, _config)
+    if out is None:
+        return JSONResponse({"error": "haiku unavailable"}, status_code=503)
+    return out
+
+
 @app.get("/api/tickets/{key}/jobs")
 def api_ticket_jobs(key: str, limit: int = 100):
     if not _events_enabled():

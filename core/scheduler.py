@@ -212,6 +212,21 @@ def _advance_recurring(cadence: str, prev_run_at: datetime, now: datetime) -> da
             candidate = candidate + timedelta(days=1)
         return candidate
 
+    if cadence.startswith("daily_") and cadence.endswith("_local"):
+        try:
+            hour = int(cadence[len("daily_"):-len("_local")])
+        except ValueError:
+            return prev_run_at + timedelta(hours=1)
+        if not 0 <= hour <= 23:
+            return prev_run_at + timedelta(hours=1)
+        import core.tz as _ctz
+        tz = _ctz.local_tz()
+        local = prev_run_at.astimezone(tz) if prev_run_at.tzinfo else prev_run_at.replace(tzinfo=timezone.utc).astimezone(tz)
+        candidate = local.replace(hour=hour, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        while candidate.astimezone(timezone.utc) <= now:
+            candidate = candidate + timedelta(days=1)
+        return candidate
+
     return prev_run_at + timedelta(hours=1)
 
 
