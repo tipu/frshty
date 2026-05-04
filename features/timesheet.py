@@ -506,6 +506,7 @@ def _fetch_pr_reviews(config: dict, start: str, end: str) -> dict:
                 "pr": pr["id"],
                 "branch": _truncate_branch(pr.get("branch", "")),
                 "summary": body[:80],
+                "url": pr.get("url", ""),
             })
         if has_my_comments:
             prs_needing_diff.add((pr["repo"], pr["id"]))
