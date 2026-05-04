@@ -95,8 +95,8 @@ button { cursor: pointer; }
                         <div v-for="item in row.activityItems" :key="item.tid + ':' + (item.kind || '')"
                              class="flex items-center gap-1 mb-0.5"
                              @mouseenter="hoverTicket = ticketByKey[item.tid]">
-                            <span v-if="ticketByKey[item.tid]?.url">
-                                <a :href="ticketByKey[item.tid].url" target="_blank" class="text-blue-400 font-mono hover:underline">{{ item.tid }}</a>
+                            <span v-if="item.linkUrl">
+                                <a :href="item.linkUrl" target="_blank" :title="`open ${item.linkLabel}`" class="text-blue-400 font-mono hover:underline">{{ item.tid }}</a>
                                 <span v-if="ticketByKey[item.tid]?.assignee_id === data.userAccountId" class="text-xs text-gray-500"> (mine)</span>
                             </span>
                             <span v-else class="text-blue-400 font-mono">{{ item.tid }}</span>
@@ -431,6 +431,7 @@ frshtyApp({
                         reviewTickets.set(tid, {
                             repos: new Set([...(prev?.repos || []), r.repo]),
                             minutes: Math.max(prev?.minutes || 0, r.review_minutes || 30),
+                            prUrl: prev?.prUrl || r.url || '',
                         });
                     }
                 });
@@ -478,6 +479,9 @@ frshtyApp({
                     const ticketInfo = (d.tickets || []).find(t => t.key === tid) || {};
                     const titleText = ticketInfo.summary || '';
                     const activity = daySummary[tid] || '';
+                    const linkUrl = (isReview && !isDev && reviewInfo?.prUrl)
+                        ? reviewInfo.prUrl
+                        : (ticketInfo.url || '');
                     return {
                         tid,
                         kind: sources.join(','),
@@ -489,6 +493,8 @@ frshtyApp({
                         titleText,
                         activity,
                         activitySep: titleText && activity ? ' — ' : '',
+                        linkUrl,
+                        linkLabel: (isReview && !isDev) ? 'PR' : 'ticket',
                     };
                 });
 
