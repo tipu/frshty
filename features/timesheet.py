@@ -18,6 +18,7 @@ CACHE_FILE = None
 _day_cache = {}
 _ticket_cache = {}
 _analysis_cache = {}
+_review_minutes_cache: dict[tuple[str, int, str], int] = {}
 
 
 def _init_cache(config: dict):
@@ -124,10 +125,13 @@ def _auto_fill(config: dict):
     for r in data.get("prReviews", {}).get(today_str, []):
         tid = _extract_ticket(r.get("branch", ""))
         if tid and tid not in logged_tickets:
+            repo = r.get("repo", "")
             mins = r.get("review_minutes", 30)
-            review_tickets[tid] = max(review_tickets.get(tid, 0), mins)
+            per_repo = review_tickets.setdefault(tid, {})
+            per_repo[repo] = max(per_repo.get(repo, 0), mins)
 
-    for tid, mins in review_tickets.items():
+    for tid, repo_mins in review_tickets.items():
+        mins = sum(repo_mins.values())
         hours = round(mins / 60, 1)
         if hours > remaining:
             hours = remaining
@@ -483,7 +487,7 @@ def _fetch_pr_reviews(config: dict, start: str, end: str) -> dict:
     with ThreadPoolExecutor(max_workers=4) as pool:
         comment_results = list(pool.map(fetch_comments, eligible_prs))
 
-    prs_needing_diff = set()
+    prs_needing_diff: set[tuple[str, int, str]] = set()
     for pr, comments in comment_results:
         has_my_comments = False
         for c in comments:
@@ -509,14 +513,16 @@ def _fetch_pr_reviews(config: dict, start: str, end: str) -> dict:
                 "url": pr.get("url", ""),
             })
         if has_my_comments:
-            prs_needing_diff.add((pr["repo"], pr["id"]))
+            prs_needing_diff.add((pr["repo"], pr["id"], pr.get("updated_on", "") or ""))
 
-    pr_review_minutes = {}
-    diff_prs = [(r, pid) for r, pid in prs_needing_diff if f"{r}/{pid}" not in pr_review_minutes]
+    uncached = [k for k in prs_needing_diff if k not in _review_minutes_cache]
     with ThreadPoolExecutor(max_workers=4) as pool:
-        diff_results = list(pool.map(lambda args: (args, _estimate_review_minutes(platform, args[0], args[1])), diff_prs))
-    for (repo, pid), mins in diff_results:
-        pr_review_minutes[f"{repo}/{pid}"] = mins
+        diff_results = list(pool.map(lambda k: (k, _estimate_review_minutes(platform, k[0], k[1])), uncached))
+    for k, mins in diff_results:
+        _review_minutes_cache[k] = mins
+
+    pr_review_minutes = {f"{r}/{pid}": _review_minutes_cache.get((r, pid, upd), 30)
+                        for (r, pid, upd) in prs_needing_diff}
 
     for entries in result.values():
         for entry in entries:

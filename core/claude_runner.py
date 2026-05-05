@@ -10,6 +10,7 @@ from uuid import uuid4
 
 import core.db as _db
 import core.log as log
+import core.state as _state
 from core.job_logs import active_live_log_path, active_live_pid_path
 from core.state import _instance_key_cv
 
@@ -33,7 +34,9 @@ def _mark_running(inv_id: str | None) -> None:
 
 def _active_instance_key() -> str:
     k = _instance_key_cv.get()
-    return k if k is not None else ""
+    if k is not None:
+        return k
+    return _state._default_instance_key or ""
 
 
 def _active_job_key() -> str:
