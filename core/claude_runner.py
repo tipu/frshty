@@ -14,8 +14,21 @@ from core.job_logs import active_live_log_path, active_live_pid_path
 from core.state import _instance_key_cv
 
 
+_CLAUDE_MAX_CONCURRENT = int(os.environ.get("FRSHTY_CLAUDE_MAX_CONCURRENT", "5"))
+_claude_sem = threading.BoundedSemaphore(max(1, _CLAUDE_MAX_CONCURRENT))
+
+
 def _env():
     return {**os.environ, "CLAUDE_CODE_ENTRYPOINT": "cli"}
+
+
+def _mark_running(inv_id: str | None) -> None:
+    if inv_id is None:
+        return
+    try:
+        _db.execute("UPDATE claude_invocations SET status='running' WHERE id=?", (inv_id,))
+    except Exception as e:
+        log.emit("claude_invocation_log_failed", f"failed to mark running: {e}")
 
 
 def _active_instance_key() -> str:
@@ -54,7 +67,7 @@ def _record_start(function_name: str, model: str, prompt: str,
                 json.dumps(tools) if tools else None,
                 timeout,
                 started,
-                "running",
+                "queued",
             ),
         )
         return inv_id
@@ -88,38 +101,42 @@ def run_sonnet(prompt: str, worktree: Path | None = None, tools: list[str] | Non
             cmd += ["--allowedTools"] + tools
     inv_id = _record_start("run_sonnet", "claude-sonnet-4-6", prompt, worktree, tools, timeout)
     t0 = time.monotonic()
-    try:
-        result = subprocess.run(
-            cmd, input=prompt.encode(), capture_output=True, env=_env(), timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        _record_end(inv_id, t0, "timeout", None, None)
-        return None
-    output = result.stdout.decode() if result.stdout else ""
-    if result.returncode != 0 or not result.stdout:
-        _record_end(inv_id, t0, "error", result.returncode, output)
-        return None
-    _record_end(inv_id, t0, "success", result.returncode, output)
-    return output
+    with _claude_sem:
+        _mark_running(inv_id)
+        try:
+            result = subprocess.run(
+                cmd, input=prompt.encode(), capture_output=True, env=_env(), timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            _record_end(inv_id, t0, "timeout", None, None)
+            return None
+        output = result.stdout.decode() if result.stdout else ""
+        if result.returncode != 0 or not result.stdout:
+            _record_end(inv_id, t0, "error", result.returncode, output)
+            return None
+        _record_end(inv_id, t0, "success", result.returncode, output)
+        return output
 
 
 def run_haiku(prompt: str, timeout: int = 120) -> str | None:
     inv_id = _record_start("run_haiku", "claude-haiku-4-5-20251001", prompt, None, None, timeout)
     t0 = time.monotonic()
-    try:
-        result = subprocess.run(
-            ["claude", "-p", "-", "--model", "claude-haiku-4-5-20251001"],
-            input=prompt.encode(), capture_output=True, env=_env(), timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        _record_end(inv_id, t0, "timeout", None, None)
-        return None
-    output = result.stdout.decode().strip() if result.stdout else ""
-    if result.returncode != 0 or not result.stdout:
-        _record_end(inv_id, t0, "error", result.returncode, output)
-        return None
-    _record_end(inv_id, t0, "success", result.returncode, output)
-    return output
+    with _claude_sem:
+        _mark_running(inv_id)
+        try:
+            result = subprocess.run(
+                ["claude", "-p", "-", "--model", "claude-haiku-4-5-20251001"],
+                input=prompt.encode(), capture_output=True, env=_env(), timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            _record_end(inv_id, t0, "timeout", None, None)
+            return None
+        output = result.stdout.decode().strip() if result.stdout else ""
+        if result.returncode != 0 or not result.stdout:
+            _record_end(inv_id, t0, "error", result.returncode, output)
+            return None
+        _record_end(inv_id, t0, "success", result.returncode, output)
+        return output
 
 
 def _extract_text(evt: dict) -> str:
@@ -152,6 +169,8 @@ def run_claude_code(prompt: str, cwd: Path, timeout: int = 600) -> str | None:
     ]
     inv_id = _record_start("run_claude_code", "claude-code", prompt, cwd, None, timeout)
     t0 = time.monotonic()
+    _claude_sem.acquire()
+    _mark_running(inv_id)
     log_path = active_live_log_path()
     log_fh = None
     if log_path:
@@ -163,68 +182,71 @@ def run_claude_code(prompt: str, cwd: Path, timeout: int = 600) -> str | None:
         except OSError:
             log_fh = None
 
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        cwd=str(cwd), env=_env(), text=True, bufsize=1, errors="replace",
-        start_new_session=True,
-    )
-    pid_path = active_live_pid_path()
-    if pid_path is not None:
-        try:
-            pid_path.parent.mkdir(parents=True, exist_ok=True)
-            pid_path.write_text(str(proc.pid))
-        except OSError as e:
-            log.emit("job_pid_write_failed", f"Failed to write pid file: {e}")
-    parts: list[str] = []
-
-    def _drain():
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            try:
-                evt = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
-                continue
-            text = _extract_text(evt)
-            if not text:
-                continue
-            parts.append(text)
-            if log_fh is not None:
-                try:
-                    log_fh.write(text.encode("utf-8"))
-                except OSError as e:
-                    log.emit("job_log_write_failed", f"Failed to write to job log: {e}")
-
-    reader = threading.Thread(target=_drain, daemon=True)
-    reader.start()
-    timed_out = False
     try:
-        proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        proc.kill()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            pass
-    reader.join(timeout=5)
-    if log_fh is not None:
-        try:
-            if timed_out:
-                log_fh.write(f"\n[TIMEOUT after {timeout}s]\n".encode())
-            elif proc.returncode != 0:
-                log_fh.write(f"\n[EXIT code={proc.returncode}]\n".encode())
-        except OSError as e:
-            log.emit("job_log_write_failed", f"Failed to write job status to log: {e}")
-        try:
-            log_fh.close()
-        except OSError as e:
-            log.emit("job_log_close_failed", f"Failed to close job log: {e}")
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            cwd=str(cwd), env=_env(), text=True, bufsize=1, errors="replace",
+            start_new_session=True,
+        )
+        pid_path = active_live_pid_path()
+        if pid_path is not None:
+            try:
+                pid_path.parent.mkdir(parents=True, exist_ok=True)
+                pid_path.write_text(str(proc.pid))
+            except OSError as e:
+                log.emit("job_pid_write_failed", f"Failed to write pid file: {e}")
+        parts: list[str] = []
 
-    if pid_path is not None:
+        def _drain():
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                try:
+                    evt = json.loads(line)
+                except (json.JSONDecodeError, ValueError):
+                    continue
+                text = _extract_text(evt)
+                if not text:
+                    continue
+                parts.append(text)
+                if log_fh is not None:
+                    try:
+                        log_fh.write(text.encode("utf-8"))
+                    except OSError as e:
+                        log.emit("job_log_write_failed", f"Failed to write to job log: {e}")
+
+        reader = threading.Thread(target=_drain, daemon=True)
+        reader.start()
+        timed_out = False
         try:
-            pid_path.unlink(missing_ok=True)
-        except OSError as e:
-            log.emit("job_pid_unlink_failed", f"Failed to remove pid file: {e}")
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+        reader.join(timeout=5)
+        if log_fh is not None:
+            try:
+                if timed_out:
+                    log_fh.write(f"\n[TIMEOUT after {timeout}s]\n".encode())
+                elif proc.returncode != 0:
+                    log_fh.write(f"\n[EXIT code={proc.returncode}]\n".encode())
+            except OSError as e:
+                log.emit("job_log_write_failed", f"Failed to write job status to log: {e}")
+            try:
+                log_fh.close()
+            except OSError as e:
+                log.emit("job_log_close_failed", f"Failed to close job log: {e}")
+
+        if pid_path is not None:
+            try:
+                pid_path.unlink(missing_ok=True)
+            except OSError as e:
+                log.emit("job_pid_unlink_failed", f"Failed to remove pid file: {e}")
+    finally:
+        _claude_sem.release()
 
     output = "".join(parts)
     if timed_out:

@@ -231,6 +231,41 @@ def scan(config: dict, instance_key: str) -> dict:
     return summary
 
 
+def regenerate_section_tickets(instance_key: str, section_id: int, config: dict) -> dict:
+    """Re-run the generator for a single existing section and create tickets
+    with non-colliding keys. Returns counts; does not touch existing tickets."""
+    row = db.query_one(
+        "SELECT id, stable_key, header, content FROM prd_section WHERE id=?",
+        (section_id,),
+    )
+    if not row:
+        return {"error": "section not found"}
+    section = dict(row)
+    gen_tickets = generator.generate(section)
+    if not gen_tickets:
+        return {"created": 0, "section_id": section_id,
+                "reason": "generator returned no tickets"}
+    existing = db.query_all(
+        "SELECT ticket_key FROM prd_section_ticket"
+        " WHERE prd_section_id=? AND instance_key=?",
+        (section_id, instance_key),
+    )
+    existing_keys = {r["ticket_key"] for r in existing}
+    created = 0
+    next_idx = 1
+    for gt in gen_tickets:
+        while _generate_ticket_key(instance_key, section["stable_key"], next_idx) in existing_keys:
+            next_idx += 1
+        key = _create_generated_ticket(instance_key, section_id, section, gt, next_idx, config)
+        existing_keys.add(key)
+        created += 1
+        next_idx += 1
+    log.emit("prd_section_regenerated",
+             f"[{instance_key}] regenerated {created} tickets for section {section_id} ({section['stable_key']})",
+             meta={"section_id": section_id, "created": created})
+    return {"created": created, "section_id": section_id}
+
+
 def render_for_ui(instance_key: str) -> dict:
     """Snapshot for /api/prd: PRD metadata + sections + tickets per section."""
     prd_row = db.query_one(

@@ -7,11 +7,12 @@
 <script src="/static/tailwind.js"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <script src="/static/frshty-nav.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <link rel="stylesheet" href="/static/frshty.css">
 <style>
 .section-card { border-left: 3px solid #2a2a2a; padding-left: 12px; margin-bottom: 24px; }
 .section-card.deleted { border-left-color: #7f1d1d; opacity: 0.6; }
-.prd-content { white-space: pre-wrap; line-height: 1.5; font-size: 13px; }
+.prd-content { font-size: 13px; }
 </style>
 </head>
 <body class="p-4 max-w-7xl mx-auto">
@@ -79,9 +80,15 @@
             </ul>
         </div>
         <div class="grid grid-cols-2 gap-4">
-            <div class="card p-3 prd-content">{{ s.content }}</div>
+            <div class="card p-3 prd-content md-content" v-html="renderMd(s.content)"></div>
             <div>
-                <div v-if="!s.tickets.length" class="text-xs text-gray-500 italic">No tickets generated yet.</div>
+                <div v-if="!s.tickets.length" class="flex items-center gap-2 mb-2">
+                    <span class="text-xs text-gray-500 italic">No tickets generated yet.</span>
+                    <button @click="regenerate(s.id)" :disabled="regenerating[s.id]"
+                            class="bg-blue-800 hover:bg-blue-700 disabled:bg-gray-700 text-blue-100 text-xs px-2 py-0.5 rounded">
+                        {{ regenerating[s.id] ? 'generating…' : 'regenerate' }}
+                    </button>
+                </div>
                 <div v-for="t in s.tickets" :key="t.key" class="card p-2 mb-2 hover:border-gray-500">
                     <a :href="`/tickets/${t.key}`" class="block">
                         <div class="flex items-center gap-2 flex-wrap">
@@ -104,7 +111,7 @@
 </div>
 
 <script>
-const { createApp, ref, computed, onMounted } = Vue;
+const { createApp, ref, reactive, computed, onMounted } = Vue;
 
 frshtyApp({
     setup() {
@@ -114,6 +121,7 @@ frshtyApp({
         const lastParsed = ref(null);
         const instanceName = ref('');
         const reloading = ref(false);
+        const regenerating = reactive({});
 
         function severityClass(s) {
             return s === 'high' ? 'text-red-300' : s === 'warning' ? 'text-amber-200' : 'text-gray-300';
@@ -134,6 +142,7 @@ frshtyApp({
         });
 
         function fmtDate(s) { return s ? new Date(s).toLocaleString() : ''; }
+        function renderMd(s) { return s ? marked.parse(s) : ''; }
 
         async function load() {
             try {
@@ -169,6 +178,20 @@ frshtyApp({
             load();
         }
 
+        async function regenerate(sectionId) {
+            regenerating[sectionId] = true;
+            try {
+                const r = await fetch(`/api/prd/sections/${sectionId}/regenerate`, {method: 'POST'});
+                const j = await r.json().catch(() => ({}));
+                if (!r.ok) {
+                    alert('Regenerate failed: ' + (j.error || r.statusText));
+                } else if (j.created === 0) {
+                    alert('Generator returned 0 tickets: ' + (j.reason || 'unknown'));
+                }
+                await load();
+            } finally { regenerating[sectionId] = false; }
+        }
+
         async function reject(key) {
             if (!confirm(`Reject ${key}?`)) return;
             const r = await fetch(`/api/tickets/${key}/reject`, {method: 'POST'});
@@ -181,8 +204,8 @@ frshtyApp({
             setInterval(load, 15000);
         });
 
-        return { prd, sections, postShippingFindings, lastParsed, instanceName, reloading, totals,
-                 fmtDate, severityClass, reload, approve, reject };
+        return { prd, sections, postShippingFindings, lastParsed, instanceName, reloading, regenerating, totals,
+                 fmtDate, renderMd, severityClass, reload, approve, reject, regenerate };
     }
 }).mount('#app');
 </script>
