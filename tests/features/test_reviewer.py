@@ -2,6 +2,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 import time
 
+import core.state as state
 from features import reviewer
 from tests.conftest import make_pr
 
@@ -194,6 +195,34 @@ class TestExtractTicketFromPr:
         assert result == "JIRA-111"
 
 
+class TestPrNeedsTracking:
+    def test_tracks_unreviewed_pr(self):
+        pr = {"repo": "backend", "id": 123, "updated_on": "u1", "head_sha": "h1"}
+        assert reviewer._pr_needs_tracking({}, pr) is True
+
+    def test_skips_reviewed_unchanged_pr(self):
+        pr = {"repo": "backend", "id": 123, "updated_on": "u1", "head_sha": "h1"}
+        review_state = {
+            "backend/123": {
+                "reviewed": True,
+                "last_updated": "u1",
+                "last_head_sha": "h1",
+            }
+        }
+        assert reviewer._pr_needs_tracking(review_state, pr) is False
+
+    def test_tracks_reviewed_pr_when_head_changes(self):
+        pr = {"repo": "backend", "id": 123, "updated_on": "u1", "head_sha": "h2"}
+        review_state = {
+            "backend/123": {
+                "reviewed": True,
+                "last_updated": "u1",
+                "last_head_sha": "h1",
+            }
+        }
+        assert reviewer._pr_needs_tracking(review_state, pr) is True
+
+
 class TestTrackPendingPrs:
     def test_tracks_new_pr_for_ticket(self):
         pending = {}
@@ -201,7 +230,7 @@ class TestTrackPendingPrs:
         ticket_state = {"JIRA-456": {"prs": [{"repo": "backend", "id": 123}]}}
 
         with patch("features.reviewer.time.time", return_value=1000.0):
-            reviewer._track_pending_prs(pending, [pr], ticket_state)
+            reviewer._track_pending_prs(pending, [pr], ticket_state, {})
 
         assert "JIRA-456" in pending
         assert pending["JIRA-456"]["prs"] == [pr]
@@ -227,7 +256,7 @@ class TestTrackPendingPrs:
         }
 
         with patch("features.reviewer.time.time", return_value=1300.0):
-            reviewer._track_pending_prs(pending, [new_pr], ticket_state)
+            reviewer._track_pending_prs(pending, [new_pr], ticket_state, {})
 
         assert pending["JIRA-456"]["last_pr_at"] == 1300.0
         assert len(pending["JIRA-456"]["prs"]) == 2
@@ -244,9 +273,26 @@ class TestTrackPendingPrs:
         ticket_state = {"JIRA-456": {"prs": [{"repo": "backend", "id": 123}]}}
 
         with patch("features.reviewer.time.time", return_value=1100.0):
-            reviewer._track_pending_prs(pending, [same_pr], ticket_state)
+            reviewer._track_pending_prs(pending, [same_pr], ticket_state, {})
 
         assert len(pending["JIRA-456"]["prs"]) == 1
+
+    def test_skips_unchanged_reviewed_pr(self):
+        pending = {}
+        pr = {"repo": "backend", "id": 123, "updated_on": "u1", "head_sha": "h1"}
+        ticket_state = {"JIRA-456": {"prs": [{"repo": "backend", "id": 123}]}}
+        review_state = {
+            "backend/123": {
+                "reviewed": True,
+                "last_updated": "u1",
+                "last_head_sha": "h1",
+            }
+        }
+
+        with patch("features.reviewer.time.time", return_value=1000.0):
+            reviewer._track_pending_prs(pending, [pr], ticket_state, review_state)
+
+        assert pending == {}
 
 
 class TestProcessReadyTickets:
@@ -261,7 +307,7 @@ class TestProcessReadyTickets:
         config = {"_state_dir": tmp_path, "_base_url": "http://localhost"}
 
         with patch("features.reviewer.time.time", return_value=1950.0), \
-             patch("features.reviewer.review_ticket_prs") as mock_review:
+             patch("features.reviewer.review_ticket_prs", return_value=[]) as mock_review:
             reviewer._process_ready_tickets(config, pending)
 
         assert mock_review.called
@@ -283,3 +329,56 @@ class TestProcessReadyTickets:
 
         assert not mock_review.called
         assert "JIRA-456" in pending
+
+    def test_failed_ticket_enters_cooldown(self, tmp_path):
+        pending = {
+            "JIRA-456": {
+                "tracked_at": 1000.0,
+                "last_pr_at": 1000.0,
+                "prs": [{"repo": "backend", "id": 123}],
+            }
+        }
+        config = {"_state_dir": tmp_path, "_base_url": "http://localhost"}
+
+        with patch("features.reviewer.time.time", return_value=1950.0), \
+             patch("features.reviewer.review_ticket_prs", return_value=[{"repo": "backend", "id": 123}]):
+            reviewer._process_ready_tickets(config, pending)
+
+        assert "JIRA-456" in pending
+        assert pending["JIRA-456"]["retry_after"] == 1950.0 + reviewer.REVIEW_RETRY_COOLDOWN_SECONDS
+        assert pending["JIRA-456"]["prs"] == [{"repo": "backend", "id": 123}]
+
+
+class TestCheckPersistsReviews:
+    def test_check_does_not_clobber_reviews_written_by_review_ticket_prs(self, tmp_state, tmp_log):
+        state.save("tickets", {"JIRA-1": {"prs": [{"repo": "myrepo", "id": 7}]}})
+        state.save("reviews", {})
+        state.save("reviews_pending", {
+            "JIRA-1": {
+                "tracked_at": 0.0,
+                "last_pr_at": 0.0,
+                "prs": [{"repo": "myrepo", "id": 7, "url": "u", "branch": "b"}],
+            }
+        })
+
+        pr = make_pr(repo="myrepo", id=7, branch="b", url="u", head_sha="abc")
+        fake_platform = MagicMock()
+        fake_platform.list_review_prs.return_value = [pr]
+
+        def fake_review_ticket_prs(config, ticket_key, prs):
+            rs = state.load("reviews")
+            for p in prs:
+                rs[f"{p['repo']}/{p['id']}"] = {"reviewed": True, "ticket": ticket_key}
+            state.save("reviews", rs)
+            return []
+
+        config = {"_state_dir": tmp_state, "_base_url": "http://localhost"}
+
+        with patch("features.reviewer.make_platform", return_value=fake_platform), \
+             patch("features.reviewer.review_ticket_prs", side_effect=fake_review_ticket_prs), \
+             patch("features.reviewer.time.time", return_value=10_000.0):
+            reviewer.check(config)
+
+        saved = state.load("reviews")
+        assert "myrepo/7" in saved
+        assert saved["myrepo/7"]["reviewed"] is True
