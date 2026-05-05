@@ -427,13 +427,21 @@ frshtyApp({
                 reviews.forEach(r => {
                     const m = (r.branch || '').match(/\b([A-Z]+-\d{2,})\b/);
                     if (m) {
-                        const tid = m[1]; const prev = reviewTickets.get(tid);
-                        reviewTickets.set(tid, {
-                            repos: new Set([...(prev?.repos || []), r.repo]),
-                            minutes: Math.max(prev?.minutes || 0, r.review_minutes || 30),
-                            prUrl: prev?.prUrl || r.url || '',
-                        });
+                        const tid = m[1];
+                        let entry = reviewTickets.get(tid);
+                        if (!entry) {
+                            entry = { repoMinutes: new Map(), prUrl: '' };
+                            reviewTickets.set(tid, entry);
+                        }
+                        const repo = r.repo || '';
+                        const cur = entry.repoMinutes.get(repo) || 0;
+                        entry.repoMinutes.set(repo, Math.max(cur, r.review_minutes || 30));
+                        if (!entry.prUrl) entry.prUrl = r.url || '';
                     }
+                });
+                reviewTickets.forEach(entry => {
+                    entry.repos = new Set(entry.repoMinutes.keys());
+                    entry.minutes = [...entry.repoMinutes.values()].reduce((s, m) => s + m, 0);
                 });
                 const claudeTickets = new Set();
                 claude.forEach(s => {
