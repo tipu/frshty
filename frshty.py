@@ -1753,6 +1753,18 @@ def api_prd_reload():
     return summary
 
 
+@app.post("/api/prd/sections/{section_id}/regenerate")
+def api_prd_regenerate(section_id: int):
+    from prd import orchestrator
+    instance_key = _config.get("job", {}).get("key", "")
+    if not instance_key:
+        return JSONResponse({"error": "no instance"}, status_code=400)
+    out = orchestrator.regenerate_section_tickets(instance_key, section_id, _config)
+    if out.get("error"):
+        return JSONResponse(out, status_code=404)
+    return out
+
+
 @app.get("/api/manager/latest")
 def api_manager_latest():
     from manager import runner

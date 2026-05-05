@@ -72,6 +72,16 @@ def start_events(
         if _started:
             return _instances  # type: ignore[return-value]
         db.init(db_path, migrations_dir)
+        try:
+            db.execute(
+                "UPDATE claude_invocations SET status='error', finished_at=?, "
+                "output=COALESCE(output,'') || '[killed by restart]' "
+                "WHERE status IN ('running','queued')",
+                (datetime.now(timezone.utc).isoformat(),),
+            )
+        except Exception as e:
+            log.emit("claude_invocation_recovery_failed",
+                     f"could not mark stuck claude invocations: {e}")
         _instances = Instances()
         for c in instance_configs:
             _instances.add(c)
