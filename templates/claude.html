@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<meta charset="utf-8">
+<title>Claude Invocations — frshty</title>
+<script src="/static/tailwind.js"></script>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="/static/frshty-nav.js"></script>
+<link rel="stylesheet" href="/static/frshty.css">
+<style>
+.badge-success { background: #14532d; color: #86efac; }
+.badge-error { background: #7f1d1d; color: #fca5a5; }
+.badge-timeout { background: #713f12; color: #fde047; }
+.badge-running { background: #1e3a5f; color: #93c5fd; }
+.fn-tag { background: #1f2937; color: #93c5fd; }
+.model-tag { background: #1f2937; color: #c4b5fd; }
+pre.body { white-space: pre-wrap; word-break: break-word; }
+</style>
+</head>
+<body class="p-4 max-w-7xl mx-auto">
+
+<div id="app" v-cloak>
+
+<header class="flex items-center gap-4 mb-4">
+    <div class="flex items-center gap-2">
+        <h1 class="text-lg font-bold">Claude Invocations</h1>
+        <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700">{{ instanceName }}</span>
+    </div>
+    <frshty-nav :features="features" />
+</header>
+
+<div class="flex flex-wrap gap-2 mb-4 items-center text-xs">
+    <select v-model="filters.since_hours" @change="load" class="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-300">
+        <option :value="1">Last 1h</option>
+        <option :value="6">Last 6h</option>
+        <option :value="24">Last 24h</option>
+        <option :value="168">Last 7d</option>
+        <option :value="0">All</option>
+    </select>
+    <select v-model="filters.status" @change="load" class="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-300">
+        <option value="">all status</option>
+        <option value="success">success</option>
+        <option value="error">error</option>
+        <option value="timeout">timeout</option>
+        <option value="running">running</option>
+    </select>
+    <select v-model="filters.function" @change="load" class="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-300">
+        <option value="">all functions</option>
+        <option value="run_haiku">run_haiku</option>
+        <option value="run_sonnet">run_sonnet</option>
+        <option value="run_claude_code">run_claude_code</option>
+    </select>
+    <input type="text" v-model.lazy="filters.q" @change="load" placeholder="search prompt/output/job"
+           class="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-300 flex-1 min-w-[200px]" />
+    <button @click="load" class="bg-blue-800 hover:bg-blue-700 text-blue-200 px-3 py-1 rounded">Reload</button>
+    <span class="text-gray-500">{{ rows.length }} rows</span>
+</div>
+
+<div v-if="!rows.length" class="text-gray-500 text-sm">No invocations.</div>
+<table v-else class="w-full text-xs">
+    <thead class="text-gray-400 text-left">
+    <tr>
+        <th class="py-1 pr-2">Started</th>
+        <th class="py-1 pr-2">Function</th>
+        <th class="py-1 pr-2">Model</th>
+        <th class="py-1 pr-2">Status</th>
+        <th class="py-1 pr-2">Dur</th>
+        <th class="py-1 pr-2">Prompt</th>
+        <th class="py-1 pr-2">Job</th>
+    </tr>
+    </thead>
+    <tbody>
+    <template v-for="r in rows" :key="r.id">
+        <tr class="border-t border-gray-800 hover:bg-gray-800/50 cursor-pointer" @click="toggle(r.id)">
+            <td class="py-1 pr-2 text-gray-400 whitespace-nowrap">{{ fmtTime(r.started_at) }}</td>
+            <td class="py-1 pr-2"><span class="badge fn-tag">{{ r.function_name }}</span></td>
+            <td class="py-1 pr-2"><span class="badge model-tag">{{ r.model }}</span></td>
+            <td class="py-1 pr-2"><span :class="`badge badge-${r.status}`">{{ r.status }}</span></td>
+            <td class="py-1 pr-2 text-gray-400 whitespace-nowrap">{{ fmtDur(r.duration_ms) }}</td>
+            <td class="py-1 pr-2 text-gray-300 truncate max-w-[480px]" :title="r.prompt_preview">
+                <span class="text-gray-500">[{{ r.prompt_length }}b]</span> {{ r.prompt_preview }}
+            </td>
+            <td class="py-1 pr-2 text-gray-500">{{ r.job_key || '—' }}</td>
+        </tr>
+        <tr v-if="expanded[r.id]" class="border-t border-gray-800 bg-gray-900/50">
+            <td colspan="7" class="p-3">
+                <div v-if="!details[r.id]" class="text-gray-500">Loading…</div>
+                <div v-else class="grid gap-3">
+                    <div class="text-xs text-gray-500">
+                        id <span class="font-mono">{{ r.id }}</span>
+                        <span v-if="details[r.id].cwd"> · cwd {{ details[r.id].cwd }}</span>
+                        <span v-if="details[r.id].timeout_s"> · timeout {{ details[r.id].timeout_s }}s</span>
+                        <span v-if="details[r.id].exit_code !== null"> · exit {{ details[r.id].exit_code }}</span>
+                        <span v-if="details[r.id].tools"> · tools {{ details[r.id].tools }}</span>
+                    </div>
+                    <div>
+                        <div class="text-xs text-gray-400 mb-1">Prompt ({{ details[r.id].prompt_length }} chars)</div>
+                        <pre class="body text-xs bg-black p-2 rounded text-gray-200 max-h-[400px] overflow-auto">{{ details[r.id].prompt }}</pre>
+                    </div>
+                    <div v-if="details[r.id].output">
+                        <div class="text-xs text-gray-400 mb-1">Output ({{ details[r.id].output_length }} chars)</div>
+                        <pre class="body text-xs bg-black p-2 rounded text-gray-200 max-h-[400px] overflow-auto">{{ details[r.id].output }}</pre>
+                    </div>
+                </div>
+            </td>
+        </tr>
+    </template>
+    </tbody>
+</table>
+
+</div>
+
+<script>
+const { createApp, ref, reactive, onMounted } = Vue;
+
+frshtyApp({
+    setup() {
+        const rows = ref([]);
+        const features = ref({});
+        const instanceName = ref('');
+        const filters = reactive({ since_hours: 24, status: '', function: '', q: '' });
+        const expanded = reactive({});
+        const details = reactive({});
+
+        function fmtTime(iso) {
+            if (!iso) return '';
+            const d = new Date(iso);
+            return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit' });
+        }
+        function fmtDur(ms) {
+            if (ms === null || ms === undefined) return '';
+            if (ms < 1000) return `${ms}ms`;
+            if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+            return `${Math.floor(ms / 60000)}m${Math.floor((ms % 60000) / 1000)}s`;
+        }
+
+        async function load() {
+            const params = new URLSearchParams();
+            params.set('since_hours', String(filters.since_hours));
+            if (filters.status) params.set('status', filters.status);
+            if (filters.function) params.set('function', filters.function);
+            if (filters.q) params.set('q', filters.q);
+            params.set('limit', '500');
+            try {
+                const [r1, r2] = await Promise.all([
+                    fetch(`/api/claude/invocations?${params}`),
+                    fetch('/api/config'),
+                ]);
+                const j = await r1.json();
+                rows.value = j.invocations || [];
+                const cfg = await r2.json();
+                features.value = cfg.features || {};
+                instanceName.value = cfg.job?.key || '';
+            } catch (e) { console.error('load failed', e); }
+        }
+
+        async function toggle(id) {
+            expanded[id] = !expanded[id];
+            if (expanded[id] && !details[id]) {
+                try {
+                    const r = await fetch(`/api/claude/invocations/${id}`);
+                    details[id] = await r.json();
+                } catch (e) { console.error('detail load failed', e); }
+            }
+        }
+
+        onMounted(() => {
+            load();
+            setInterval(load, 10000);
+        });
+
+        return { rows, features, instanceName, filters, expanded, details, fmtTime, fmtDur, load, toggle };
+    },
+}).mount('#app');
+</script>
+</body>
+</html>

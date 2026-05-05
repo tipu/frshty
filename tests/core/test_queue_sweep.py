@@ -63,3 +63,30 @@ def test_sweep_stale_leaves_fresh_running_jobs_alone(tmp_path):
     assert reset == 0
     row = db.query_one("SELECT status FROM jobs WHERE id=?", (job_id,))
     assert row and row["status"] == "running"
+
+
+def test_claim_next_skips_duplicate_running_global_task(tmp_path):
+    db.init(tmp_path / "t.db", ROOT / "migrations")
+    now = datetime.now(timezone.utc).isoformat()
+    with db.tx() as c:
+        c.execute(
+            "INSERT INTO jobs(instance_key, task, status, enqueued_at, started_at)"
+            " VALUES (?, ?, 'running', ?, ?)",
+            ("inst", "poll_reviewer", now, now),
+        )
+        c.execute(
+            "INSERT INTO jobs(instance_key, task, status, enqueued_at)"
+            " VALUES (?, ?, 'queued', ?)",
+            ("inst", "poll_reviewer", now),
+        )
+        c.execute(
+            "INSERT INTO jobs(instance_key, task, ticket_key, status, enqueued_at)"
+            " VALUES (?, ?, ?, 'queued', ?)",
+            ("inst", "start_planning", "DEV-1", now),
+        )
+
+    claimed = q.claim_next()
+
+    assert claimed is not None
+    assert claimed["task"] == "start_planning"
+    assert claimed["ticket_key"] == "DEV-1"

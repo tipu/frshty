@@ -56,13 +56,13 @@
                 <span v-if="group.authors.length" class="text-gray-500">by {{ group.authors.join(', ') }}</span>
             </div>
             <div class="space-y-1">
-                <pr-card v-for="r in group.items" :key="r.repo + '/' + r.pr_id" :r="r" :bb="bbByKey[r.repo + '/' + r.pr_id]"></pr-card>
+                <pr-card v-for="r in group.items" :key="r.repo + '/' + r.pr_id" :r="r"></pr-card>
             </div>
         </div>
         <div v-if="ungrouped.length" class="mb-4">
             <div class="text-sm text-gray-400 mb-1">Other</div>
             <div class="space-y-1">
-                <pr-card v-for="r in ungrouped" :key="r.repo + '/' + r.pr_id" :r="r" :bb="bbByKey[r.repo + '/' + r.pr_id]"></pr-card>
+                <pr-card v-for="r in ungrouped" :key="r.repo + '/' + r.pr_id" :r="r"></pr-card>
             </div>
         </div>
     </template>
@@ -71,18 +71,7 @@
 </div>
 
 <script>
-const { createApp, ref, reactive, computed, onMounted } = Vue;
-
-function timeAgo(iso) {
-    if (!iso) return '';
-    const secs = Math.floor((Date.now() - new Date(iso)) / 1000);
-    if (secs < 60) return 'just now';
-    const mins = Math.floor(secs / 60);
-    if (mins < 60) return `${mins}m ago`;
-    const hrs = Math.floor(mins / 60);
-    if (hrs < 24) return `${hrs}h ago`;
-    return `${Math.floor(hrs / 24)}d ago`;
-}
+const { createApp, ref, reactive, computed, provide, inject, onMounted } = Vue;
 
 function extractTicket(branch) {
     const m = (branch || '').match(/dev-(\d+)/i);
@@ -94,8 +83,10 @@ function ticketLabel(branch) {
 }
 
 const PrCard = {
-    props: ['r', 'bb'],
+    props: ['r'],
     setup(props) {
+        const bbByKey = inject('bbByKey', {});
+        const bb = computed(() => bbByKey[`${props.r.repo}/${props.r.pr_id}`]);
         const reviewing = computed(() => props.r.branch && props.r.branch.startsWith('pending-'));
         const verdictCls = computed(() => {
             if (reviewing.value) return 'badge-yellow';
@@ -105,7 +96,7 @@ const PrCard = {
         });
         const stale = computed(() => !reviewing.value && props.r.updated_on && props.r.reviewed_at &&
             new Date(props.r.updated_on) > new Date(props.r.reviewed_at));
-        return { reviewing, verdictCls, stale, timeAgo };
+        return { bb, reviewing, verdictCls, stale };
     },
     template: `
         <div class="card p-4" :class="{ 'border-l-4 border-l-blue-500': reviewing }">
@@ -123,8 +114,8 @@ const PrCard = {
                     <template v-else>pending</template>
                 </span>
                 <span v-if="r.approved_by_me" class="badge badge-purple" title="you approved this PR on the platform">✓ you</span>
-                <span v-if="r.created_on" class="text-gray-600 text-xs">created {{ timeAgo(r.created_on) }}</span>
-                <span v-if="r.updated_on" class="text-gray-600 text-xs">updated {{ timeAgo(r.updated_on) }}</span>
+                <span v-if="r.created_on" class="text-gray-600 text-xs">created {{ $relTime(r.created_on) }}</span>
+                <span v-if="r.updated_on" class="text-gray-600 text-xs">updated {{ $relTime(r.updated_on) }}</span>
                 <span v-if="stale" class="badge badge-yellow text-xs">stale</span>
                 <span v-if="bb && bb.count" class="text-gray-400 text-xs ml-auto">💬 {{ bb.count }}<template v-if="bb.initials && bb.initials.length"> · {{ bb.initials.join(', ') }}</template></span>
             </div>
@@ -143,6 +134,7 @@ frshtyApp({
         const submitButtonLabel = ref('review');
         const pending = reactive({});
         const bbByKey = reactive({});
+        provide('bbByKey', bbByKey);
 
         const groups = computed(() => {
             const out = {};
@@ -230,7 +222,7 @@ frshtyApp({
 
         return {
             reviews, features, instanceName, prUrl, submitting, submitButtonLabel,
-            pendingList, groups, ungrouped, bbByKey,
+            pendingList, groups, ungrouped,
             submitReview,
         };
     },

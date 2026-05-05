@@ -38,10 +38,19 @@ def claim_next() -> dict | None:
             WHERE j.status = 'queued'
               AND NOT EXISTS (
                 SELECT 1 FROM jobs r
-                WHERE r.ticket_key IS NOT NULL
-                  AND r.ticket_key = j.ticket_key
-                  AND r.instance_key = j.instance_key
+                WHERE r.instance_key = j.instance_key
                   AND r.status = 'running'
+                  AND (
+                    (
+                      r.ticket_key IS NOT NULL
+                      AND r.ticket_key = j.ticket_key
+                    )
+                    OR (
+                      j.ticket_key IS NULL
+                      AND r.ticket_key IS NULL
+                      AND r.task = j.task
+                    )
+                  )
               )
             ORDER BY j.id
             LIMIT 1

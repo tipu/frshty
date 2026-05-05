@@ -233,6 +233,67 @@ def billing_page():
     return _template("billing.html")
 
 
+@app.get("/claude", response_class=HTMLResponse)
+def claude_page():
+    return _template("claude.html")
+
+
+@app.get("/api/claude/invocations")
+def api_claude_invocations(
+    limit: int = 200,
+    status: str = "",
+    function: str = "",
+    model: str = "",
+    q: str = "",
+    since_hours: int = 24,
+    all_instances: bool = False,
+):
+    from datetime import datetime, timezone, timedelta
+    import core.db as _db
+    where = ["1=1"]
+    params: list = []
+    if not all_instances:
+        instance_key = _config.get("job", {}).get("key", "")
+        where.append("instance_key = ?")
+        params.append(instance_key)
+    if since_hours and since_hours > 0:
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=since_hours)).isoformat()
+        where.append("started_at >= ?")
+        params.append(cutoff)
+    if status:
+        where.append("status = ?")
+        params.append(status)
+    if function:
+        where.append("function_name = ?")
+        params.append(function)
+    if model:
+        where.append("model = ?")
+        params.append(model)
+    if q:
+        where.append("(prompt LIKE ? OR output LIKE ? OR job_key LIKE ?)")
+        like = f"%{q}%"
+        params += [like, like, like]
+    sql = (
+        "SELECT id, instance_key, job_key, function_name, model, prompt_length, "
+        "cwd, tools, timeout_s, started_at, finished_at, duration_ms, status, "
+        "exit_code, output_length, substr(prompt, 1, 240) AS prompt_preview "
+        f"FROM claude_invocations WHERE {' AND '.join(where)} "
+        "ORDER BY started_at DESC LIMIT ?"
+    )
+    params.append(max(1, min(limit, 1000)))
+    rows = _db.query_all(sql, tuple(params))
+    return {"invocations": rows}
+
+
+@app.get("/api/claude/invocations/{inv_id}")
+def api_claude_invocation_detail(inv_id: str):
+    import core.db as _db
+    row = _db.query_one("SELECT * FROM claude_invocations WHERE id = ?", (inv_id,))
+    if not row:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    return row
+
+
 @app.get("/api/events")
 def api_events(limit: int = 100, after: str = "", unread: bool = False, since_hours: int = 0):
     if since_hours > 0 and not after:
