@@ -1660,7 +1660,19 @@ def api_approve_ticket(key: str):
     log.emit("ticket_approved", f"Approved {key}",
              links={"detail": f"{_config['_base_url']}/tickets/{key}"},
              meta={"ticket": key})
-    return {"status": "new", "approval_status": "approved"}
+    setup_enqueued = False
+    if ts.get("source") == "prd":
+        instance_key = _config.get("job", {}).get("key", "")
+        if instance_key:
+            try:
+                from features.tickets import _enqueue_stage
+                _enqueue_stage(instance_key, key, "setup_prd_ticket")
+                setup_enqueued = True
+            except Exception as e:
+                log.emit("prd_setup_enqueue_failed",
+                         f"failed to enqueue setup_prd_ticket for {key}: {type(e).__name__}: {e}",
+                         meta={"ticket": key})
+    return {"status": "new", "approval_status": "approved", "setup_enqueued": setup_enqueued}
 
 
 @app.post("/api/tickets/{key}/reject")

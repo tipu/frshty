@@ -36,6 +36,37 @@ def scan_tickets(ctx: TaskContext) -> TaskResult:
         return TaskResult("failed", f"{type(e).__name__}: {e}")
 
 
+@task("setup_prd_ticket",
+      preconditions=[status_is("new", "planning")],
+      postconditions=[file_exists("docs/ticket.md")],
+      timeout=300)
+def setup_prd_ticket(ctx: TaskContext) -> TaskResult:
+    """Materialize an approved PRD ticket: slug + branch + per-repo worktree(s)
+    + docs/ticket.md. Enqueues start_planning on success."""
+    import core.queue as q
+    from features import tickets as tix
+    if not ctx.ticket_key:
+        return TaskResult("failed", "ticket_key missing")
+    ts = state.load_ticket(ctx.ticket_key) or {}
+    if not ts:
+        return TaskResult("failed", "ticket not found")
+    if ts.get("source") != "prd":
+        return TaskResult("skipped", "not a PRD-source ticket")
+    if ts.get("approval_status") != "approved":
+        return TaskResult("skipped", "ticket not approved")
+    if ts.get("slug"):
+        return TaskResult("skipped", "ticket already materialized")
+    base_url = ctx.config.get("_base_url", "")
+    try:
+        updated = tix.materialize_prd_ticket(ctx.config, ctx.ticket_key, ts, base_url)
+    except RuntimeError as e:
+        return TaskResult("failed", str(e))
+    state.save_ticket(ctx.ticket_key, updated)
+    q.enqueue_job(ctx.instance_key, "start_planning", ticket_key=ctx.ticket_key)
+    return TaskResult("ok", artifacts={"slug": updated.get("slug"),
+                                        "branch": updated.get("branch")})
+
+
 @task("start_planning",
       preconditions=[status_is("new", "planning")],
       postconditions=[file_exists("docs/change-manifest.md")],

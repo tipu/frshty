@@ -421,6 +421,8 @@ def _process_ticket_comments(config: dict, key: str, ts: dict, ticket: dict, bas
 
 def check(config: dict, instance_key: str = ""):
     from datetime import datetime, timezone
+    if instance_key:
+        enqueue_prd_backfill(instance_key)
     assigned = _fetch_tickets(config)
     if not assigned:
         return
@@ -721,6 +723,127 @@ def _setup_ticket(config, ticket, base_url, comments=None) -> dict:
 
     return {"status": "new", "slug": slug, "branch": branch,
             "discovered_at": datetime.now(timezone.utc).isoformat()}
+
+
+def render_prd_ticket_md(ts: dict) -> str:
+    """Deterministic markdown for docs/ticket.md from a saved PRD ticket dict."""
+    title = ts.get("summary") or "Untitled"
+    description = ts.get("description") or ""
+    ac = ts.get("acceptance_criteria_json") or {}
+    source_text = ts.get("acceptance_criteria_source_text") or ""
+    parts: list[str] = [f"# {title}", ""]
+    if description:
+        parts += ["## Description", "", description, ""]
+    criteria = (ac.get("criteria") or []) if isinstance(ac, dict) else []
+    if criteria:
+        parts += ["## Acceptance Criteria", ""]
+        for i, c in enumerate(criteria, 1):
+            parts.append(f"{i}. {c.get('criterion', '').strip()}")
+            for step in c.get("playwright") or []:
+                parts.append(f"    - playwright: {step}")
+            for t in c.get("tests_required") or []:
+                parts.append(f"    - test: {t}")
+        parts.append("")
+    if source_text:
+        parts += ["## Source PRD section", "", source_text.rstrip(), ""]
+    return "\n".join(parts)
+
+
+def materialize_prd_ticket(config: dict, ticket_key: str, ts: dict, base_url: str) -> dict:
+    """Create slug + branch + per-repo worktree(s) + docs/ticket.md for an approved
+    PRD ticket. Returns updated ts dict (caller saves). Raises RuntimeError if no
+    worktree could be created, so the caller's task fails and the sweep retries."""
+    from datetime import datetime, timezone
+    summary = ts.get("summary") or ticket_key
+    description = ts.get("description") or ""
+    synthetic = {"key": ticket_key, "summary": summary, "description": description,
+                 "status": ts.get("status", "new"), "url": ""}
+    ws = config["workspace"]
+    repos = get_repos(config)
+    slug = _make_slug(ticket_key, summary)
+    branch = _make_branch(config, ticket_key, synthetic)
+
+    log.emit("prd_ticket_setup_started",
+             f"Materializing PRD ticket {ticket_key}",
+             links={"detail": f"{base_url}/tickets/{ticket_key}"},
+             meta={"ticket": ticket_key, "slug": slug})
+
+    any_worktree = False
+    for repo in repos:
+        wt_path = ticket_worktree_path(config, slug, repo["name"])
+        if (wt_path / ".git").is_file():
+            any_worktree = True
+            subprocess.run(["git", "fetch", "origin"], cwd=str(wt_path), capture_output=True, timeout=60)
+            subprocess.run(["git", "checkout", branch], cwd=str(wt_path), capture_output=True, timeout=60)
+            subprocess.run(["git", "reset", "--hard", f"origin/{ws['base_branch']}"], cwd=str(wt_path), capture_output=True, timeout=60)
+            subprocess.run(["git", "clean", "-fd"], cwd=str(wt_path), capture_output=True, timeout=60)
+            continue
+        wt_path.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "worktree", "prune"], cwd=str(repo["path"]), capture_output=True, timeout=60)
+        subprocess.run(["git", "fetch", "origin"], cwd=str(repo["path"]), capture_output=True, timeout=60)
+        existing_branches = subprocess.run(["git", "branch", "--list"], cwd=str(repo["path"]),
+                                            capture_output=True, text=True, timeout=60).stdout
+        if branch not in existing_branches.replace("* ", "").replace("  ", " ").split():
+            res = subprocess.run(["git", "branch", branch, f"origin/{ws['base_branch']}"],
+                                 cwd=str(repo["path"]), capture_output=True, timeout=60)
+            if res.returncode != 0:
+                subprocess.run(["git", "branch", branch, ws["base_branch"]],
+                               cwd=str(repo["path"]), capture_output=True, timeout=60)
+        wt_result = subprocess.run(["git", "worktree", "add", str(wt_path), branch],
+                                   cwd=str(repo["path"]), capture_output=True, text=True, timeout=60)
+        if wt_result.returncode != 0:
+            log.emit("prd_ticket_worktree_error",
+                     f"Failed to create worktree for {slug} in {repo['name']}: {wt_result.stderr.strip()}",
+                     meta={"ticket": ticket_key, "repo": repo["name"]})
+            continue
+        any_worktree = True
+        subprocess.run(["chown", "-R", "1000:1000", str(wt_path)], capture_output=True, timeout=60)
+        for dep in ws.get("dep_commands", []):
+            if dep["match"] == repo["name"]:
+                try:
+                    subprocess.run(dep["cmd"].split(), cwd=str(wt_path),
+                                   capture_output=True, timeout=300)
+                except FileNotFoundError:
+                    pass
+
+    if not any_worktree:
+        raise RuntimeError(f"no worktrees created for {slug}")
+
+    docs_path = ws["root"] / ws["tickets_dir"] / slug / "docs"
+    docs_path.mkdir(parents=True, exist_ok=True)
+    (docs_path / "ticket.md").write_text(render_prd_ticket_md(ts))
+    subprocess.run(["chown", "-R", "1000:1000", str(docs_path.parent)], capture_output=True, timeout=60)
+
+    out = dict(ts)
+    out["slug"] = slug
+    out["branch"] = branch
+    out.setdefault("discovered_at", datetime.now(timezone.utc).isoformat())
+
+    log.emit("prd_ticket_ready",
+             f"Workspace ready for PRD ticket {slug}",
+             links={"detail": f"{base_url}/tickets/{ticket_key}"},
+             meta={"ticket": ticket_key, "slug": slug, "branch": branch})
+    return out
+
+
+def enqueue_prd_backfill(instance_key: str) -> list[str]:
+    """Find approved PRD tickets with no slug; enqueue setup_prd_ticket per ticket.
+    Dedupes via _enqueue_stage. Returns list of newly-considered ticket keys."""
+    import core.db as _db
+    rows = _db.query_all(
+        "SELECT ticket_key FROM tickets"
+        " WHERE instance_key=? AND source='prd' AND status='new'"
+        "       AND approval_status='approved'"
+        "       AND (slug IS NULL OR slug='')"
+        " ORDER BY ticket_key",
+        (instance_key,),
+    )
+    enqueued: list[str] = []
+    for r in rows:
+        key = r["ticket_key"]
+        _enqueue_stage(instance_key, key, "setup_prd_ticket")
+        enqueued.append(key)
+    return enqueued
 
 
 def _summarize_pr_body(raw_body: str, ticket: dict) -> str:
