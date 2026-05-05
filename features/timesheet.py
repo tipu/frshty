@@ -1,9 +1,11 @@
 import json
 import re
 import subprocess
+import hashlib
 from datetime import datetime, timezone, date, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from threading import Lock, Event
 
 import httpx
 
@@ -18,6 +20,9 @@ CACHE_FILE = None
 _day_cache = {}
 _ticket_cache = {}
 _analysis_cache = {}
+_summarization_lock = Lock()
+_in_flight_summaries: dict[str, Event] = {}
+_summarization_results: dict[str, dict] = {}
 _review_minutes_cache: dict[tuple[str, int, str], int] = {}
 
 
@@ -41,6 +46,11 @@ def _save_cache():
         CACHE_FILE.write_text(json.dumps({"days": _day_cache, "tickets": _ticket_cache, "analysis": _analysis_cache}))
     except OSError:
         pass
+
+
+def _hash_activity(activity: dict) -> str:
+    s = json.dumps(activity, sort_keys=True)
+    return hashlib.sha256(s.encode()).hexdigest()[:16]
 
 
 def check(config: dict):
@@ -206,9 +216,10 @@ def build_timesheet(config: dict, start: str = "", end: str = "", force: bool = 
         end = today.isoformat()
 
     if force:
-        _day_cache.clear()
-        _ticket_cache.clear()
-        _analysis_cache.clear()
+        # Clear analysis for this specific range and days in range to force re-fetch
+        _analysis_cache.pop(f"{start}|{end}", None)
+        for d in all_days:
+            _day_cache.pop(d, None)
 
     start_date = date.fromisoformat(start)
     end_date = date.fromisoformat(end)
@@ -275,7 +286,25 @@ def build_timesheet(config: dict, start: str = "", end: str = "", force: bool = 
         daily_summaries = cached_analysis
     else:
         grouped = _group_daily_activity(final_commits, final_reviews, final_claude)
-        daily_summaries = _summarize_daily_activity(grouped)
+        daily_summaries = {}
+        to_summarize = {}
+
+        for day, activity in grouped.items():
+            h = _hash_activity(activity)
+            day_key = f"day|{day}|{h}"
+            if day_key in _analysis_cache and not force:
+                daily_summaries[day] = _analysis_cache[day_key]
+            else:
+                to_summarize[day] = activity
+
+        if to_summarize:
+            new_summaries = _summarize_daily_activity(to_summarize)
+            for day, summary in new_summaries.items():
+                activity = to_summarize[day]
+                h = _hash_activity(activity)
+                _analysis_cache[f"day|{day}|{h}"] = summary
+                daily_summaries[day] = summary
+
         if daily_summaries:
             _analysis_cache[analysis_key] = daily_summaries
 
@@ -344,9 +373,6 @@ def log_work(config: dict, ticket: str, date_str: str, time_str: str) -> dict:
         resp = client.post(url, json=payload)
         if resp.status_code in (200, 201):
             _day_cache.pop(date_str, None)
-            for k in list(_analysis_cache):
-                if date_str >= k.split("|")[0] and date_str <= k.split("|")[1]:
-                    _analysis_cache.pop(k, None)
             _save_cache()
             log.emit("timesheet_logged", f"Logged {time_str} on {ticket} for {date_str}",
                 meta={"ticket": ticket, "date": date_str, "time": time_str})
@@ -384,32 +410,73 @@ def _fetch_worklogs(config: dict, start_date: date, end_date: date) -> dict:
     if not base_url or not user or not token:
         return {}
 
-    jql = f"worklogAuthor = currentUser() AND worklogDate >= '{start_date}' AND worklogDate <= '{end_date}'"
-    url = f"{base_url}/rest/api/3/search/jql?jql={jql}&maxResults=100&fields=key,summary,worklog"
+    user_account_id = jira.get("user_account_id")
     result = {}
+    jql = f"worklogAuthor = currentUser() AND worklogDate >= '{start_date}' AND worklogDate <= '{end_date}'"
 
     with httpx.Client(auth=(user, token), timeout=30) as client:
-        resp = client.get(url)
-        if resp.status_code != 200:
-            return {}
-        for issue in resp.json().get("issues", []):
-            key = issue["key"]
-            summary = issue["fields"]["summary"]
-            for wl in issue["fields"].get("worklog", {}).get("worklogs", []):
-                author_email = wl.get("author", {}).get("emailAddress")
-                if author_email and author_email != user:
-                    continue
-                started = wl.get("started", "")[:10]
-                if started < str(start_date) or started > str(end_date):
-                    continue
-                seconds = wl.get("timeSpentSeconds", 0)
-                hours = round(seconds / 3600, 1)
-                result.setdefault(started, []).append({
-                    "ticket": key,
-                    "summary": summary,
-                    "hours": hours,
-                    "worklog_id": str(wl.get("id", "")),
-                })
+        start_at = 0
+        while True:
+            params = {
+                "jql": jql,
+                "maxResults": 50,
+                "startAt": start_at,
+                "fields": "key,summary,worklog"
+            }
+            resp = client.get(f"{base_url}/rest/api/3/search", params=params)
+            if resp.status_code != 200:
+                log.emit("fetch_worklogs_failed", f"Jira search failed: {resp.status_code} {resp.text}")
+                break
+            
+            data = resp.json()
+            issues = data.get("issues", [])
+            if not issues:
+                break
+                
+            for issue in issues:
+                key = issue["key"]
+                summary = issue["fields"]["summary"]
+                worklog_data = issue["fields"].get("worklog", {})
+                worklogs = worklog_data.get("worklogs", [])
+                total_wl = worklog_data.get("total", 0)
+                
+                if total_wl > len(worklogs):
+                    wl_resp = client.get(f"{base_url}/rest/api/3/issue/{key}/worklog")
+                    if wl_resp.status_code == 200:
+                        worklogs = wl_resp.json().get("worklogs", [])
+                
+                for wl in worklogs:
+                    author = wl.get("author", {})
+                    author_email = author.get("emailAddress")
+                    author_id = author.get("accountId")
+                    
+                    matches = False
+                    if user_account_id and author_id == user_account_id:
+                        matches = True
+                    elif author_email and user and author_email.lower() == user.lower():
+                        matches = True
+                    elif not author_email and not author_id:
+                        matches = True
+                        
+                    if not matches:
+                        continue
+                        
+                    started = wl.get("started", "")[:10]
+                    if started < str(start_date) or started > str(end_date):
+                        continue
+                        
+                    seconds = wl.get("timeSpentSeconds", 0)
+                    hours = round(seconds / 3600, 1)
+                    result.setdefault(started, []).append({
+                        "ticket": key,
+                        "summary": summary,
+                        "hours": hours,
+                        "worklog_id": str(wl.get("id", "")),
+                    })
+            
+            start_at += len(issues)
+            if start_at >= data.get("total", 0):
+                break
     return result
 
 
@@ -641,29 +708,71 @@ def _summarize_daily_activity(grouped: dict) -> dict:
     if not grouped:
         return {}
 
-    prompt = (
-        "Summarize daily developer activity grouped by ticket. "
-        "For each day+ticket, write ONE concise line (max 20 words) describing what was done. "
-        "Combine commits, reviews, and claude sessions into a single summary per ticket per day. "
-        'Return ONLY valid JSON: {"YYYY-MM-DD": {"TICKET": "summary", ...}, ...}\n\n'
-        + json.dumps(grouped)[:8000]
-    )
+    prompt_data = json.dumps(grouped, sort_keys=True)
+    prompt_hash = hashlib.sha256(prompt_data.encode()).hexdigest()
 
+    event = None
+    with _summarization_lock:
+        if prompt_hash in _summarization_results:
+            return _summarization_results[prompt_hash]
+        if prompt_hash in _in_flight_summaries:
+            event = _in_flight_summaries[prompt_hash]
+        else:
+            event = Event()
+            _in_flight_summaries[prompt_hash] = event
+
+    if event.is_set():
+        return _summarization_results.get(prompt_hash, {})
+
+    # If we are the ones who should run it (or wait for it)
+    # Actually, we need to know if WE created the event.
+    # Simple trick: the thread that sets the event is the one that ran it.
+    # But only one thread should run it.
+    
+    # Let's use a simpler "try to claim" pattern
+    mine = False
+    with _summarization_lock:
+        if not hasattr(event, "_claimed"):
+            event._claimed = True # type: ignore
+            mine = True
+    
+    if not mine:
+        event.wait(timeout=180)
+        return _summarization_results.get(prompt_hash, {})
+
+    # We are the ones running it
     try:
-        raw = run_haiku(prompt, timeout=180)
-        if raw:
-            result = extract_json(raw)
-            if result:
-                return result
-    except Exception:
-        pass
+        prompt = (
+            "Summarize daily developer activity grouped by ticket. "
+            "For each day+ticket, write ONE concise line (max 20 words) describing what was done. "
+            "Combine commits, reviews, and claude sessions into a single summary per ticket per day. "
+            'Return ONLY valid JSON: {"YYYY-MM-DD": {"TICKET": "summary", ...}, ...}\n\n'
+            + prompt_data[:8000]
+        )
 
-    fallback = {}
-    for day, tickets in grouped.items():
-        fallback[day] = {}
-        for tid, items in tickets.items():
-            fallback[day][tid] = items[0][:80]
-    return fallback
+        result = {}
+        try:
+            raw = run_haiku(prompt, timeout=180)
+            if raw:
+                parsed = extract_json(raw)
+                if parsed:
+                    result = parsed
+        except Exception:
+            pass
+
+        if not result:
+            # Fallback
+            for day, tickets in grouped.items():
+                result[day] = {}
+                for tid, items in tickets.items():
+                    result[day][tid] = items[0][:80]
+        
+        _summarization_results[prompt_hash] = result
+        return result
+    finally:
+        event.set()
+        with _summarization_lock:
+            _in_flight_summaries.pop(prompt_hash, None)
 
 
 def _fetch_ticket_info(config: dict, ticket_ids: list, worklogs: dict) -> list:
