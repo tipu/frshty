@@ -52,6 +52,7 @@ PERSONA_MAINTAINABILITY = (
 )
 
 PERSONAS = {"spec": PERSONA_SPEC, "breakage": PERSONA_BREAKAGE, "maintainability": PERSONA_MAINTAINABILITY}
+REVIEW_RETRY_COOLDOWN_SECONDS = 60 * 60
 
 JSON_OUTPUT_SCHEMA = (
     'OUTPUT FORMAT: Return a single JSON object (no markdown fences, no explanation) with this schema:\n'
@@ -87,11 +88,10 @@ def check(config: dict):
     review_state = state.load("reviews")
     pending = state.load("reviews_pending")
 
-    _track_pending_prs(pending, review_prs, ticket_state)
+    _track_pending_prs(pending, review_prs, ticket_state, review_state)
     _process_ready_tickets(config, pending)
 
     state.save("reviews_pending", pending)
-    state.save("reviews", review_state)
 
 
 
@@ -157,7 +157,13 @@ def _build_persona_prompt(persona_text, pr, diff_text, conventions, file_context
 def _run_single_persona(args):
     name, prompt, worktree = args
     tools = ["Read", "Glob", "Grep"] if worktree else None
-    output = run_sonnet(prompt, worktree=worktree, tools=tools)
+    try:
+        output = run_sonnet(prompt, worktree=worktree, tools=tools)
+    except subprocess.TimeoutExpired as e:
+        log.emit("review_persona_timeout",
+                 f"persona '{name}' timed out after {e.timeout}s",
+                 meta={"persona": name, "worktree": str(worktree) if worktree else ""})
+        return (name, None)
     if not output:
         return (name, None)
     data = extract_json(output)
@@ -493,16 +499,38 @@ def _extract_ticket_from_pr(pr: dict, ticket_state: dict) -> str | None:
 
     branch = pr.get("branch", "")
     if branch:
-        match = regex_module.match(r"([A-Z]+-\d+)", branch)
+        match = regex_module.search(r"(?i)\b([a-z]+-\d+)", branch)
         if match:
-            return match.group(1)
+            return match.group(1).upper()
 
     return None
 
 
-def _track_pending_prs(pending: dict, prs: list[dict], ticket_state: dict) -> dict:
+def _pr_needs_tracking(review_state: dict, pr: dict) -> bool:
+    pr_key = f"{pr.get('repo')}/{pr.get('id')}"
+    existing = review_state.get(pr_key, {})
+    if not existing.get("reviewed"):
+        return True
+
+    current_head = pr.get("head_sha") or ""
+    previous_head = existing.get("last_head_sha") or ""
+    if current_head and current_head != previous_head:
+        return True
+
+    current_updated = pr.get("updated_on") or ""
+    previous_updated = existing.get("last_updated") or ""
+    if current_updated and current_updated != previous_updated:
+        return True
+
+    return False
+
+
+def _track_pending_prs(pending: dict, prs: list[dict], ticket_state: dict, review_state: dict) -> dict:
     now = time.time()
     for pr in prs:
+        if not _pr_needs_tracking(review_state, pr):
+            continue
+
         ticket = _extract_ticket_from_pr(pr, ticket_state)
         if ticket is None:
             ticket = "__no_ticket__"
@@ -518,7 +546,8 @@ def _track_pending_prs(pending: dict, prs: list[dict], ticket_state: dict) -> di
             existing_keys = {(p.get("repo"), p.get("id")) for p in pending[ticket]["prs"]}
             if pr_key not in existing_keys:
                 pending[ticket]["prs"].append(pr)
-            pending[ticket]["last_pr_at"] = now
+                pending[ticket]["last_pr_at"] = now
+                pending[ticket].pop("retry_after", None)
 
     return pending
 
@@ -528,6 +557,9 @@ def _process_ready_tickets(config: dict, pending: dict) -> dict:
     ready_tickets = []
 
     for ticket_key in list(pending.keys()):
+        retry_after = pending[ticket_key].get("retry_after", 0)
+        if retry_after and now < retry_after:
+            continue
         last_pr_at = pending[ticket_key].get("last_pr_at", now)
         quiet_seconds = now - last_pr_at
         if quiet_seconds >= 900:
@@ -536,16 +568,22 @@ def _process_ready_tickets(config: dict, pending: dict) -> dict:
     for ticket_key in ready_tickets:
         prs = pending[ticket_key].get("prs", [])
         if prs:
-            review_ticket_prs(config, ticket_key, prs)
+            failed_prs = review_ticket_prs(config, ticket_key, prs)
+            if failed_prs:
+                pending[ticket_key]["prs"] = failed_prs
+                pending[ticket_key]["retry_after"] = now + REVIEW_RETRY_COOLDOWN_SECONDS
+                pending[ticket_key]["last_attempt_at"] = now
+                continue
         del pending[ticket_key]
 
     return pending
 
 
-def review_ticket_prs(config: dict, ticket_key: str, prs: list[dict]) -> None:
+def review_ticket_prs(config: dict, ticket_key: str, prs: list[dict]) -> list[dict]:
     platform = make_platform(config)
     review_state = state.load("reviews")
     base_url = config["_base_url"]
+    failed_prs: list[dict] = []
 
     for pr in prs:
         pr_key = f"{pr['repo']}/{pr['id']}"
@@ -578,8 +616,10 @@ def review_ticket_prs(config: dict, ticket_key: str, prs: list[dict]) -> None:
                     links={"detail": f"{base_url}/reviews/{pr['repo']}/{pr['id']}"},
                     meta={"repo": pr["repo"], "pr_id": pr["id"], "ticket": ticket_key})
         else:
-            log.emit("review_failed", f"Review failed for {pr['repo']}#{pr['id']} (will retry next cycle)",
+            log.emit("review_failed", f"Review failed for {pr['repo']}#{pr['id']} (cooldown before retry)",
                 links={"pr": pr["url"], "detail": f"{base_url}/reviews/{pr['repo']}/{pr['id']}"},
                 meta={"repo": pr["repo"], "pr_id": pr["id"], "ticket": ticket_key})
+            failed_prs.append(pr)
 
     state.save("reviews", review_state)
+    return failed_prs

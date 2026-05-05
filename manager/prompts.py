@@ -27,6 +27,7 @@ Rules:
 - Output markdown. Match the operator's preferred terseness from PRIORITIES (one line per entity is the default unless they ask otherwise).
 - Each H2 section corresponds to one operator priority. Use the priority's wording from PRIORITIES.md as the section heading.
 - For each entity under a section, give: identifier (TICKET-KEY or PR#), 1-line nudge with relevant signal (e.g. age, approver, comment count). No prose padding.
+- Render identifiers as markdown links when URLs are present in the entity. If the entity has both `url` (ticket URL) and a non-empty `prs` array with a `url`, format as `KEY ([PR](first-pr-url), [Ticket](url))`. If only `url` is present, format as `[KEY](url)`. If only `prs` urls are present, format as `KEY ([PR](first-pr-url))`. Never invent URLs that aren't in the candidate set.
 - NEVER drop candidate entities. If a candidate doesn't fit any operator priority bucket, surface it under a final `## Other` H2.
 - If an operator priority has no matching entities AND no other entities are routed to it, skip its H2 entirely.
 - If the operator's PRIORITIES references a bucket the candidate set does not contain (e.g. "review other PRs" when no peer-PR aggregator exists), include a brief note under that H2: `_no aggregator for this priority yet — needs upstream wiring._`

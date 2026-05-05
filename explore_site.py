@@ -1,135 +1,84 @@
-import asyncio
+import os, json, re
+from collections import Counter
 from pathlib import Path
-from playwright.async_api import async_playwright
-import json
 
-SCREENSHOTS_DIR = Path("/tmp/aimyable_screenshots")
-SCREENSHOTS_DIR.mkdir(exist_ok=True)
+projects_dir = Path('/home/tipu/.claude/projects')
 
-async def take_screenshot(page, name, description=""):
-    """Take a screenshot and return metadata"""
-    path = SCREENSHOTS_DIR / f"{name}.png"
-    await page.screenshot(path=str(path), full_page=True)
-    return {"file": str(path), "name": name, "description": description}
+all_jsonl = []
+for p in projects_dir.rglob('*.jsonl'):
+    try:
+        all_jsonl.append((p.stat().st_mtime, p))
+    except:
+        pass
 
-async def get_page_links(page):
-    """Extract all links from page"""
-    links = await page.evaluate("""() => {
-        return Array.from(document.querySelectorAll('a')).map(a => ({
-            text: a.textContent.trim(),
-            href: a.href,
-            title: a.title
-        }));
-    }""")
-    return links
+all_jsonl.sort(reverse=True)
+recent = [p for _, p in all_jsonl[:50]]
 
-async def get_page_buttons(page):
-    """Extract all buttons from page"""
-    buttons = await page.evaluate("""() => {
-        return Array.from(document.querySelectorAll('button')).map(b => ({
-            text: b.textContent.trim(),
-            class: b.className,
-            title: b.title
-        }));
-    }""")
-    return buttons
+bash_cmds = Counter()
+mcp_tools = Counter()
 
-async def get_form_inputs(page):
-    """Extract all form inputs"""
-    inputs = await page.evaluate("""() => {
-        return Array.from(document.querySelectorAll('input, select, textarea')).map(el => ({
-            type: el.type || el.tagName,
-            placeholder: el.placeholder,
-            name: el.name,
-            value: el.value,
-            label: document.querySelector(`label[for="${el.id}"]`)?.textContent.trim()
-        }));
-    }""")
-    return inputs
+def leading_token(cmd):
+    cmd = cmd.strip()
+    tokens = cmd.split()
+    i = 0
+    while i < len(tokens) and '=' in tokens[i] and not tokens[i].startswith('-'):
+        i += 1
+    if i >= len(tokens):
+        return ''
+    first = tokens[i]
+    if first in ('sudo', 'timeout') and i+1 < len(tokens):
+        i += 1
+        first = tokens[i]
+    return first
 
-async def main():
-    async with async_playwright() as p:
-        browser = await p.chromium.launch()
-        context = await browser.new_context(viewport={"width": 1920, "height": 1080})
-        page = await context.new_page()
-        
-        pages_to_explore = [
-            "/",
-            "/global",
-            "/reviews",
-            "/tickets",
-            "/slack",
-            "/config",
-        ]
-        
-        documentation = {}
-        
-        for page_path in pages_to_explore:
-            try:
-                url = f"https://aimyable.localhost{page_path}"
-                print(f"\n{'='*60}")
-                print(f"Exploring: {url}")
-                print(f"{'='*60}")
-                
-                await page.goto(url, wait_until="networkidle")
-                await page.wait_for_timeout(1000)  # Extra wait for JS to settle
-                
-                # Get page title and content
-                title = await page.title()
-                
-                # Take screenshot
-                screenshot = await take_screenshot(page, f"page_{page_path.replace('/', '_') or 'home'}", f"Page: {page_path}")
-                
-                # Get all interactive elements
-                links = await get_page_links(page)
-                buttons = await get_page_buttons(page)
-                inputs = await get_form_inputs(page)
-                
-                # Get page content
-                content = await page.content()
-                
-                page_doc = {
-                    "url": url,
-                    "title": title,
-                    "screenshot": screenshot,
-                    "links": links,
-                    "buttons": buttons,
-                    "form_inputs": inputs,
-                }
-                
-                documentation[page_path] = page_doc
-                
-                print(f"Title: {title}")
-                print(f"Links found: {len(links)}")
-                print(f"Buttons found: {len(buttons)}")
-                print(f"Form inputs: {len(inputs)}")
-                
-                if links:
-                    print("\nLinks:")
-                    for link in links[:10]:  # First 10
-                        print(f"  - {link['text']}: {link['href']}")
-                    if len(links) > 10:
-                        print(f"  ... and {len(links) - 10} more")
-                
-                if buttons:
-                    print("\nButtons:")
-                    for btn in buttons[:10]:
-                        print(f"  - {btn['text']}")
-                    if len(buttons) > 10:
-                        print(f"  ... and {len(buttons) - 10} more")
-                
-            except Exception as e:
-                print(f"Error exploring {page_path}: {e}")
-                documentation[page_path] = {"error": str(e)}
-        
-        await browser.close()
-        
-        # Save documentation
-        doc_file = SCREENSHOTS_DIR / "documentation.json"
-        with open(doc_file, "w") as f:
-            json.dump(documentation, f, indent=2, default=str)
-        
-        print(f"\n\nDocumentation saved to: {doc_file}")
-        print(f"Screenshots saved to: {SCREENSHOTS_DIR}")
+def cmd_key(cmd):
+    parts = re.split(r'[;&|]', cmd)
+    first = parts[0].strip()
+    tok = leading_token(first)
+    if not tok:
+        return ''
+    tokens = first.split()
+    try:
+        idx = next(i for i, t in enumerate(tokens) if t == tok)
+    except:
+        idx = 0
+    if tok in ('git', 'gh', 'docker', 'kubectl', 'npm', 'yarn', 'pnpm', 'bun', 'systemctl', 'launchctl', 'curl', 'psql') and idx+1 < len(tokens):
+        sub = tokens[idx+1]
+        if not sub.startswith('-'):
+            return tok + ' ' + sub
+    return tok
 
-asyncio.run(main())
+for jsonl_path in recent:
+    try:
+        with open(jsonl_path) as f:
+            for line in f:
+                try:
+                    obj = json.loads(line)
+                    if obj.get('type') != 'assistant':
+                        continue
+                    msg = obj.get('message', {})
+                    for item in msg.get('content', []):
+                        if item.get('type') != 'tool_use':
+                            continue
+                        name = item.get('name', '')
+                        inp = item.get('input', {})
+                        if name == 'Bash':
+                            cmd = inp.get('command', '')
+                            key = cmd_key(cmd)
+                            if key:
+                                bash_cmds[key] += 1
+                        elif name.startswith('mcp__'):
+                            mcp_tools[name] += 1
+                except:
+                    pass
+    except:
+        pass
+
+print('BASH COMMANDS')
+for cmd, count in bash_cmds.most_common(40):
+    print(f'{count:4d}  {cmd}')
+
+print()
+print('MCP TOOLS')
+for tool, count in mcp_tools.most_common(20):
+    print(f'{count:4d}  {tool}')

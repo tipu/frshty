@@ -91,7 +91,7 @@
                     <span v-if="hasMore(e)" class="row-expand" @click="toggleExpand(e.id)">▸</span>
                     <span v-else class="row-expand"></span>
                     <div class="flex-1 min-w-0">
-                        <span class="text-gray-500 text-xs">{{ fmtTime(e.ts) }}</span>
+                        <span class="text-gray-500 text-xs">{{ $relTime(e.ts) }}</span>
                         <span class="badge badge-red ml-2">{{ e.event }}</span>
                         <span class="summary-line ml-2">{{ firstLine(e) }}</span>
                         <span class="ml-2"><a v-for="[k, url] in linkPairs(e)" :key="k" :href="url" target="_blank" class="link">[→ {{ k }}]</a></span>
@@ -135,7 +135,7 @@
              class="feed-row px-2 py-1 hover:bg-gray-900 rounded"
              :class="[e.read ? 'read' : 'unread', { expanded: expandedRows.has(e.id) }]">
             <div class="flex items-center gap-2">
-                <span class="text-gray-600 w-16 shrink-0">{{ fmtTime(e.ts) }}</span>
+                <span class="text-gray-600 w-16 shrink-0">{{ $relTime(e.ts) }}</span>
                 <span>{{ e.read ? '○' : '●' }}</span>
                 <span v-if="hasMore(e)" class="row-expand shrink-0" @click="toggleExpand(e.id)">▸</span>
                 <span v-else class="row-expand shrink-0"></span>
@@ -276,18 +276,6 @@ frshtyApp({
             setTimeout(() => { fetchEvents(); fetchStatus(); }, 3000);
         }
 
-        function fmtTime(ts) {
-            const d = new Date(ts);
-            const secs = Math.floor((Date.now() - d.getTime()) / 1000);
-            if (secs < 60) return 'just now';
-            const mins = Math.floor(secs / 60);
-            if (mins < 60) return `${mins}m ago`;
-            const hrs = Math.floor(mins / 60);
-            if (hrs < 24) return `${hrs}h ago`;
-            const days = Math.floor(hrs / 24);
-            return `${days}d ago`;
-        }
-
         function firstLine(e) {
             return (e.summary || '').split('\n')[0];
         }
@@ -328,7 +316,7 @@ frshtyApp({
             setFilter, toggleCategory, toggleExpand,
             toggleFeature, pollNow,
             dismissEvent, dismissAll, dismissAttention,
-            fmtTime, firstLine, hasMore, linkPairs, badgeCls,
+            firstLine, hasMore, linkPairs, badgeCls,
         };
     },
 }).mount('#app');

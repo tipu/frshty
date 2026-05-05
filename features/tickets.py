@@ -460,6 +460,9 @@ def check(config: dict, instance_key: str = ""):
             existing = key in ticket_state
             ts = ticket_state.get(key, {"status": "new"})
             ts["external_status"] = ticket.get("status", "")
+            fresh_url = ticket.get("url") or ""
+            if fresh_url:
+                ts["url"] = fresh_url
             if ts.get("status") == "done":
                 ts.pop("done_at", None)
                 if ts.get("prs"):

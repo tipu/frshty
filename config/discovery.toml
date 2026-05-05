@@ -18,3 +18,9 @@ base_url = "https://nectar.localhost"
 platform = "github"
 ticket_system = "linear"
 
+[[instances.list]]
+key = "lumeninv"
+base_url = "https://lumeninv.localhost"
+platform = "github"
+ticket_system = "prd"
+

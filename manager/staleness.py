@@ -200,12 +200,17 @@ def pr_failed_tickets(instance_key: str) -> list[dict]:
     out: list[dict] = []
     for r in rows:
         d = _load_ticket_data(r)
+        prs = [
+            {"repo": p.get("repo"), "id": p.get("id"), "url": p.get("url")}
+            for p in (d.get("prs") or [])
+        ]
         out.append({
             "ticket_key": r["ticket_key"],
             "summary": (d.get("summary") or "")[:140],
             "discovered_at": d.get("discovered_at", ""),
             "ci_fix_attempts": d.get("ci_fix_attempts", 0),
             "url": d.get("url", ""),
+            "prs": prs,
         })
     return out
 
