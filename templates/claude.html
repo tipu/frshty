@@ -13,6 +13,7 @@
 .badge-error { background: #7f1d1d; color: #fca5a5; }
 .badge-timeout { background: #713f12; color: #fde047; }
 .badge-running { background: #1e3a5f; color: #93c5fd; }
+.badge-queued { background: #3f3f46; color: #d4d4d8; }
 .fn-tag { background: #1f2937; color: #93c5fd; }
 .model-tag { background: #1f2937; color: #c4b5fd; }
 pre.body { white-space: pre-wrap; word-break: break-word; }
@@ -44,6 +45,7 @@ pre.body { white-space: pre-wrap; word-break: break-word; }
         <option value="error">error</option>
         <option value="timeout">timeout</option>
         <option value="running">running</option>
+        <option value="queued">queued</option>
     </select>
     <select v-model="filters.function" @change="load" class="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-300">
         <option value="">all functions</option>
