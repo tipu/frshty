@@ -303,15 +303,19 @@ def update_ticket(key: str, mutate: Callable[[dict], dict | None]) -> dict | Non
         auto_pr = new.get("auto_pr")
         c.execute(
             "INSERT INTO tickets"
-            "(instance_key, ticket_key, status, slug, branch, url, external_status, auto_pr, data, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            "(instance_key, ticket_key, status, slug, branch, url, external_status, auto_pr,"
+            " source, approval_status, obsolete_at, data, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             " ON CONFLICT(instance_key, ticket_key) DO UPDATE SET"
             "  status=excluded.status, slug=excluded.slug, branch=excluded.branch, url=excluded.url,"
             "  external_status=excluded.external_status, auto_pr=excluded.auto_pr,"
+            "  source=excluded.source, approval_status=excluded.approval_status,"
+            "  obsolete_at=excluded.obsolete_at,"
             "  data=excluded.data, updated_at=excluded.updated_at",
             (instance, key, new.get("status", "new"), new.get("slug"), new.get("branch"),
              new.get("url"), new.get("external_status"),
              (1 if auto_pr else 0) if auto_pr is not None else None,
+             new.get("source", "jira"), new.get("approval_status"), new.get("obsolete_at"),
              json.dumps(new, default=str), now),
         )
         return new
@@ -343,14 +347,18 @@ def _save_tickets_dict(data: dict) -> None:
             auto_pr = v.get("auto_pr")
             c.execute(
                 "INSERT INTO tickets"
-                "(instance_key, ticket_key, status, slug, branch, url, external_status, auto_pr, data, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                "(instance_key, ticket_key, status, slug, branch, url, external_status, auto_pr,"
+                " source, approval_status, obsolete_at, data, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(instance_key, ticket_key) DO UPDATE SET"
                 "  status=excluded.status, slug=excluded.slug, branch=excluded.branch, url=excluded.url,"
                 "  external_status=excluded.external_status, auto_pr=excluded.auto_pr,"
+                "  source=excluded.source, approval_status=excluded.approval_status,"
+                "  obsolete_at=excluded.obsolete_at,"
                 "  data=excluded.data, updated_at=excluded.updated_at",
                 (instance, k, v.get("status", "new"), v.get("slug"), v.get("branch"),
                  v.get("url"), v.get("external_status"),
                  (1 if auto_pr else 0) if auto_pr is not None else None,
+                 v.get("source", "jira"), v.get("approval_status"), v.get("obsolete_at"),
                  json.dumps(v, default=str), now),
             )
