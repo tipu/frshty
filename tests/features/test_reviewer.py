@@ -1,6 +1,7 @@
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 import time
+import pytest
 
 import core.state as state
 from features import reviewer
@@ -382,3 +383,45 @@ class TestCheckPersistsReviews:
         saved = state.load("reviews")
         assert "myrepo/7" in saved
         assert saved["myrepo/7"]["reviewed"] is True
+
+class TestReviewTicketPrsPersistence:
+    def test_persists_when_later_pr_returns_none(self, tmp_state, tmp_log):
+        pr_a = make_pr(repo="r", id=1, branch="b1", url="u1", head_sha="sha-a")
+        pr_b = make_pr(repo="r", id=2, branch="b2", url="u2", head_sha="sha-b")
+        config = {"_state_dir": tmp_state, "_base_url": "http://localhost"}
+        ok = {"verdict": "approved", "issues": []}
+
+        with patch("features.reviewer.make_platform", return_value=MagicMock()), \
+             patch("features.reviewer.review_pr", side_effect=[ok, None]), \
+             patch("features.reviewer.time.time", return_value=1234.0):
+            failed = reviewer.review_ticket_prs(config, "JIRA-1", [pr_a, pr_b])
+
+        saved = state.load("reviews")
+        assert failed == [pr_b]
+        assert "r/1" in saved
+        assert saved["r/1"]["reviewed"] is True
+        assert saved["r/1"]["last_head_sha"] == "sha-a"
+        assert "r/2" not in saved
+
+    def test_persists_when_later_pr_raises(self, tmp_state, tmp_log):
+        pr_a = make_pr(repo="r", id=1, branch="b1", url="u1", head_sha="sha-a")
+        pr_b = make_pr(repo="r", id=2, branch="b2", url="u2", head_sha="sha-b")
+        config = {"_state_dir": tmp_state, "_base_url": "http://localhost"}
+        ok = {"verdict": "approved", "issues": []}
+
+        def fake_review_pr(config, platform, pr):
+            if pr["id"] == 1:
+                return ok
+            raise RuntimeError("rate limit")
+
+        with patch("features.reviewer.make_platform", return_value=MagicMock()), \
+             patch("features.reviewer.review_pr", side_effect=fake_review_pr), \
+             patch("features.reviewer.time.time", return_value=1234.0):
+            with pytest.raises(RuntimeError, match="rate limit"):
+                reviewer.review_ticket_prs(config, "JIRA-1", [pr_a, pr_b])
+
+        saved = state.load("reviews")
+        assert "r/1" in saved, "PR_A state lost when loop raised on PR_B"
+        assert saved["r/1"]["reviewed"] is True
+        assert saved["r/1"]["last_head_sha"] == "sha-a"
+        assert "r/2" not in saved
