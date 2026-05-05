@@ -606,6 +606,7 @@ def review_ticket_prs(config: dict, ticket_key: str, prs: list[dict]) -> list[di
                 "last_updated": pr.get("updated_on"),
                 "last_head_sha": head_sha,
             }
+            state.save("reviews", review_state)
             issues = result.get("issues", [])
             log.emit("review_complete", f"{pr['repo']}#{pr['id']}: Review done — {result.get('verdict', 'unknown')}, {len(issues)} issues",
                 links={"pr": pr["url"], "detail": f"{base_url}/reviews/{pr['repo']}/{pr['id']}"},
@@ -621,5 +622,4 @@ def review_ticket_prs(config: dict, ticket_key: str, prs: list[dict]) -> list[di
                 meta={"repo": pr["repo"], "pr_id": pr["id"], "ticket": ticket_key})
             failed_prs.append(pr)
 
-    state.save("reviews", review_state)
     return failed_prs
