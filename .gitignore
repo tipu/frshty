@@ -37,7 +37,4 @@ config/*.toml
 # Internal docs
 /docs/
 
-# Claude Code local files (keep tracked worktrees submodules)
-.claude/*
-!.claude/worktrees/
-!.claude/worktrees/**
+.claude/
