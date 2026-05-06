@@ -14,6 +14,7 @@ def load_config(path: str) -> dict:
     raw.setdefault("slack", {})
     raw.setdefault("timesheet", {})
     raw.setdefault("billing", {})
+    raw.setdefault("llm", {"provider": "claude"})
 
     ws = raw["workspace"]
     ws["root"] = Path(ws["root"])
