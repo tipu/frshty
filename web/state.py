@@ -48,3 +48,11 @@ def set_primary_config(c: dict) -> None:
 
 def primary_config() -> dict:
     return _primary_config
+
+
+def events_enabled() -> bool:
+    try:
+        import core.runtime as _rt
+        return _rt.instances() is not None
+    except Exception:
+        return False
