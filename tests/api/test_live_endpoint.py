@@ -10,9 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
-import frshty  # noqa: E402
-
-_trim = frshty._trim_to_utf8_boundary
+from web.observability import _trim_to_utf8_boundary as _trim  # noqa: E402
 
 
 class TestUtf8Boundary:

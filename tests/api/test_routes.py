@@ -25,7 +25,8 @@ def client(tmp_path):
         sys.argv = saved_argv
 
     from fastapi.testclient import TestClient
-    frshty._config = {
+    from web.state import set_primary_config
+    set_primary_config({
         "job": {"key": "test", "port": 8000, "platform": "github", "ticket_system": "jira"},
         "workspace": {
             "root": tmp_path,
@@ -39,7 +40,7 @@ def client(tmp_path):
         "_config_path": tmp_path / "config.toml",
         "_state_dir": tmp_path,
         "_base_url": "http://localhost:8000",
-    }
+    })
     (tmp_path / "config.toml").write_text("[job]\nkey = 'test'\n")
     return TestClient(frshty.app, raise_server_exceptions=False)
 
