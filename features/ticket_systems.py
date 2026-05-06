@@ -10,7 +10,42 @@ def make_ticket_system(config: dict):
         return JiraTicketSystem(config)
     if system == "linear":
         return LinearTicketSystem(config)
+    if system == "prd":
+        return PRDTicketSystem(config)
     return None
+
+
+class PRDTicketSystem:
+    def __init__(self, config: dict):
+        self.config = config
+
+    def fetch_tickets(self) -> list[dict]:
+        import core.state as state
+        all_tickets = state.list_tickets()
+        results = []
+        for key, ts in all_tickets.items():
+            if ts.get("source") != "prd":
+                continue
+            if ts.get("status") in ("done", "obsolete"):
+                continue
+            results.append({
+                "key": key,
+                "summary": ts.get("summary", ""),
+                "description": ts.get("description", ""),
+                "status": "",
+                "url": ts.get("url", ""),
+                "attachments": [],
+                "related": [],
+                "subtasks": [],
+                "estimate_seconds": 0,
+            })
+        return results
+
+    def fetch_comments(self, ticket_key: str) -> list[dict]:
+        return []
+
+    def get_comments(self, ticket_key: str) -> list[dict]:
+        return []
 
 
 class JiraTicketSystem:
