@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import asyncio
 import contextlib
 import json
 import multiprocessing
@@ -351,8 +352,7 @@ def _fetch_local_global_events(limit: int, unread_only: bool, after: str) -> lis
     return out
 
 
-def _fetch_remote_global_events(limit: int, unread_only: bool, since_hours: int) -> tuple[list[dict], dict[str, str]]:
-    import asyncio
+async def _fetch_remote_global_events(limit: int, unread_only: bool, since_hours: int) -> tuple[list[dict], dict[str, str]]:
     from core.discovery import discover_instances, call_instance
 
     local_key = _config.get("job", {}).get("key", "")
@@ -374,10 +374,7 @@ def _fetch_remote_global_events(limit: int, unread_only: bool, since_hours: int)
         result = await call_instance(inst["base_url"], "GET", path, timeout=3.0)
         return inst, result
 
-    async def _all():
-        return await asyncio.gather(*[_one(i) for i in remote], return_exceptions=True)
-
-    results = asyncio.run(_all())
+    results = await asyncio.gather(*[_one(i) for i in remote], return_exceptions=True)
     for item in results:
         if isinstance(item, Exception):
             continue
@@ -402,13 +399,13 @@ def _fetch_remote_global_events(limit: int, unread_only: bool, since_hours: int)
 
 
 @app.get("/api/global/events")
-def api_global_events(limit: int = 5000, unread: bool = False, since_hours: int = 8):
+async def api_global_events(limit: int = 5000, unread: bool = False, since_hours: int = 8):
     after = ""
     if since_hours > 0:
         from datetime import datetime, timezone, timedelta
         after = (datetime.now(timezone.utc) - timedelta(hours=since_hours)).isoformat()
     local_events = _fetch_local_global_events(limit=limit, unread_only=unread, after=after)
-    remote_events, errors = _fetch_remote_global_events(limit=limit, unread_only=unread, since_hours=since_hours)
+    remote_events, errors = await _fetch_remote_global_events(limit=limit, unread_only=unread, since_hours=since_hours)
     merged = local_events + remote_events
     merged.sort(key=lambda e: e.get("ts") or "", reverse=True)
     return {"events": merged[:limit], "errors": errors}
@@ -575,12 +572,15 @@ def api_ticket_pr_info(ticket_key: str):
 
 @app.post("/api/tickets/{ticket_key}/submit-pr")
 async def api_submit_pr(ticket_key: str, request: Request):
-    import features.tickets as tickets_mod
-
     try:
         data = await request.json()
     except json.JSONDecodeError:
         return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+    return await asyncio.to_thread(_submit_pr_sync, ticket_key, data)
+
+
+def _submit_pr_sync(ticket_key: str, data: dict):
+    import features.tickets as tickets_mod
 
     repos_in = data.get("repos") or []
     if not isinstance(repos_in, list) or not repos_in:
