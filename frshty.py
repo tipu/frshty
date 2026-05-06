@@ -48,52 +48,11 @@ from actions.schedule_pr import handle as _schedule_pr_action
 events.register_action("record_demo", _record_demo_action)
 events.register_action("schedule_pr", _schedule_pr_action)
 
-TEMPLATES_DIR = Path(__file__).parent / "templates"
 STATIC_DIR = Path(__file__).parent / "static"
 CUSTOM_CONTEXT_DIR = Path(__file__).parent / "docs" / "custom-context"
 
-from contextvars import ContextVar as _ContextVar
-_cv_config: _ContextVar[dict] = _ContextVar("frshty_config", default={})
-_primary_config: dict = {}  # module-level fallback: survives uvicorn reload subprocess boundaries
-
-
-class _ConfigView(dict):
-    """Dict-subclass proxy that resolves to the active config for the current request.
-
-    In --multi mode, the hostname middleware sets the contextvar per request. In
-    single-instance mode the module-level _primary_config is the fallback when
-    the contextvar's default ({}) is still in effect (e.g. uvicorn reload
-    subprocesses don't always inherit contextvar sets from module-import time).
-    dict is the base class so FastAPI handlers typed as `dict` accept the view.
-    """
-    def _d(self) -> dict:
-        v = _cv_config.get()
-        return v if v else _primary_config
-    def __getitem__(self, k): return self._d()[k]
-    def __setitem__(self, k, v): self._d()[k] = v
-    def __delitem__(self, k): del self._d()[k]
-    def __contains__(self, k): return k in self._d()
-    def __iter__(self): return iter(self._d())
-    def __len__(self): return len(self._d())
-    def __bool__(self): return bool(self._d())
-    def __repr__(self): return repr(self._d())
-    def get(self, k, default=None): return self._d().get(k, default)
-    def items(self): return self._d().items()  # type: ignore[override]
-    def keys(self): return self._d().keys()  # type: ignore[override]
-    def values(self): return self._d().values()  # type: ignore[override]
-    def setdefault(self, k, d=None): return self._d().setdefault(k, d)
-    def update(self, *a, **kw): return self._d().update(*a, **kw)
-    def pop(self, k, *a): return self._d().pop(k, *a)
-    def copy(self): return self._d().copy()
-
-
-_config: _ConfigView = _ConfigView()
-_configs_by_host: dict[str, dict] = {}
-
-def _set_primary_config(c: dict) -> None:
-    global _primary_config
-    _primary_config = c
-    _cv_config.set(c)
+from web.state import _cv_config, _config, _configs_by_host, primary_config as _primary_config, set_primary_config as _set_primary_config
+from web.pages import router as _pages_router
 
 
 if len(sys.argv) >= 2 and Path(sys.argv[1]).is_file():
@@ -164,83 +123,7 @@ async def profile_requests(request, call_next):
     return response
 
 
-def _template(name: str) -> HTMLResponse:
-    return HTMLResponse((TEMPLATES_DIR / name).read_text())
-
-
-@app.get("/", response_class=HTMLResponse)
-def dashboard():
-    return _template("index.html")
-
-
-@app.get("/global", response_class=HTMLResponse)
-def global_feed_page():
-    return _template("global.html")
-
-
-@app.get("/reviews", response_class=HTMLResponse)
-def reviews_list():
-    return _template("reviews.html")
-
-
-@app.get("/reviews/{repo}/{pr_id}", response_class=HTMLResponse)
-def review_detail(repo: str, pr_id: int):
-    return _template("review_detail.html")
-
-
-@app.get("/reviews/{repo}/{pr_id}/discuss", response_class=HTMLResponse)
-def review_discuss(repo: str, pr_id: int):
-    return _template("review_discuss.html")
-
-
-@app.get("/tickets", response_class=HTMLResponse)
-def tickets_page():
-    return _template("tickets.html")
-
-
-@app.get("/tickets/{key}", response_class=HTMLResponse)
-def ticket_detail(key: str):
-    return _template("ticket_detail.html")
-
-
-@app.get("/prd", response_class=HTMLResponse)
-def prd_page():
-    return _template("prd.html")
-
-
-@app.get("/today", response_class=HTMLResponse)
-def today_page():
-    return _template("today.html")
-
-
-@app.get("/slack", response_class=HTMLResponse)
-def slack_page():
-    return _template("slack.html")
-
-
-@app.get("/scheduled", response_class=HTMLResponse)
-def scheduled_page():
-    return _template("scheduled.html")
-
-
-@app.get("/config", response_class=HTMLResponse)
-def config_page():
-    return _template("config.html")
-
-
-@app.get("/timesheet", response_class=HTMLResponse)
-def timesheet_page():
-    return _template("timesheet.html")
-
-
-@app.get("/billing", response_class=HTMLResponse)
-def billing_page():
-    return _template("billing.html")
-
-
-@app.get("/claude", response_class=HTMLResponse)
-def claude_page():
-    return _template("claude.html")
+app.include_router(_pages_router)
 
 
 @app.get("/api/claude/invocations")
@@ -335,9 +218,10 @@ _GLOBAL_REMOTE_TTL = 3.0
 def _fetch_local_global_events(limit: int, unread_only: bool, after: str) -> list[dict]:
     out = []
     configs = list(_configs_by_host.values())
+    primary = _primary_config()
     # In single-instance mode, also include the primary config's events
-    if not configs and _primary_config:
-        configs = [_primary_config]
+    if not configs and primary:
+        configs = [primary]
     for config in configs:
         state_dir = config["_state_dir"]
         key = config["job"]["key"]
@@ -896,11 +780,6 @@ def api_review_diff(repo: str, pr_id: int):
     review_store.populate_repo_cache(platform, _config["_state_dir"], repo)
     diff = platform.get_pr_diff(repo, pr_id)
     return {"diff": diff or ""}
-
-
-@app.get("/reviews/{repo}/{pr_id}/walkthrough/{idx}", response_class=HTMLResponse)
-def review_walkthrough_page(repo: str, pr_id: int, idx: int):
-    return _template("review_walkthrough.html")
 
 
 @app.get("/api/reviews/{repo}/{pr_id}/walkthrough/{idx}")
