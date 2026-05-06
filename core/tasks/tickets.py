@@ -98,9 +98,34 @@ def start_planning(ctx: TaskContext) -> TaskResult:
     )
     log.emit("ticket_planning_started", f"Headless /ctp for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key})
-    result = run_claude_code(prompt, cwd=ticket_dir, timeout=PLAN_TIMEOUT)
-    if result is None:
-        return TaskResult("failed", "claude returned non-zero or empty")
+    if not (ticket_dir / "docs" / "technical-plan.md").exists():
+        result = run_claude_code(prompt, cwd=ticket_dir, timeout=PLAN_TIMEOUT)
+        if result is None:
+            return TaskResult("failed", "claude returned non-zero or empty")
+    else:
+        log.emit("ticket_planning_skipped_ctp",
+                 f"technical-plan.md exists, skipping /ctp for {ctx.ticket_key}",
+                 meta={"ticket": ctx.ticket_key})
+
+    change_manifest = ticket_dir / "docs" / "change-manifest.md"
+    technical_plan = ticket_dir / "docs" / "technical-plan.md"
+    if not change_manifest.exists() and technical_plan.exists():
+        log.emit("ticket_planning_recovery",
+                 f"change-manifest.md missing but technical-plan.md exists for "
+                 f"{ctx.ticket_key}; generating from existing docs",
+                 meta={"ticket": ctx.ticket_key})
+        recovery_prompt = (
+            "Read docs/technical-plan.md. Then write docs/change-manifest.md as a "
+            "change manifest at technical-product-owner altitude. Include capability "
+            "delivered, release-note framing, problem and approach, what changed by "
+            "area, new surfaces, changed surfaces, integration obligations, tradeoffs "
+            "accepted, what could break, what tests prove. Ground it in the actual "
+            "technical-plan content."
+        )
+        recovery_result = run_claude_code(recovery_prompt, cwd=ticket_dir, timeout=300)
+        if recovery_result is None:
+            return TaskResult("failed", "recovery: claude returned non-zero or empty "
+                                        "while generating change-manifest.md")
     return TaskResult("ok")
 
 
