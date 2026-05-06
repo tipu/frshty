@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 import contextlib
 import sys
-import time
 from pathlib import Path
-from uuid import uuid4
 
 import uvicorn
 from fastapi import FastAPI
@@ -20,9 +18,9 @@ events.register_action("record_demo", _record_demo_action)
 events.register_action("schedule_pr", _schedule_pr_action)
 
 STATIC_DIR = Path(__file__).parent / "static"
-CUSTOM_CONTEXT_DIR = Path(__file__).parent / "docs" / "custom-context"
 
-from web.state import _cv_config, _config, _configs_by_host, primary_config as _primary_config, set_primary_config as _set_primary_config, events_enabled as _events_enabled, ensure_path as _ensure_path
+from web.state import _config, _configs_by_host, set_primary_config as _set_primary_config, ensure_path as _ensure_path
+import web.middleware as _middleware
 from web.pages import router as _pages_router
 from web.slack import router as _slack_router
 from web.timesheet import router as _timesheet_router
@@ -53,55 +51,7 @@ async def _lifespan(a):
 
 app = FastAPI(lifespan=_lifespan)
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
-
-
-@app.middleware("http")
-async def resolve_instance_by_host(request, call_next):
-    """In --multi mode, pick the active config by matching the request Host header.
-
-    Unknown hosts fall through to whatever config is currently the contextvar
-    default (typically the primary). Single-instance mode is a no-op.
-    """
-    config_token = None
-    state_token = None
-    log_tokens = None
-    if _configs_by_host:
-        host = (request.headers.get("host") or "").split(":")[0].lower()
-        target = _configs_by_host.get(host)
-        if target is not None:
-            config_token = _cv_config.set(target)
-            state_token = state.use(target["_state_dir"])
-            log_tokens = log.use(target["_state_dir"], target["job"]["key"])
-    try:
-        response = await call_next(request)
-    finally:
-        if log_tokens is not None:
-            log.reset(log_tokens)
-        if state_token is not None:
-            state.reset(state_token)
-        if config_token is not None:
-            _cv_config.reset(config_token)
-    return response
-
-
-@app.middleware("http")
-async def profile_requests(request, call_next):
-    rid = uuid4().hex[:6]
-    path = request.url.path
-    method = request.method
-    t0 = time.time()
-    print(f"[REQ {rid}] {time.strftime('%H:%M:%S')} {method} {path} enter", flush=True)
-    try:
-        response = await call_next(request)
-    except Exception as e:
-        elapsed = time.time() - t0
-        print(f"[REQ {rid}] {time.strftime('%H:%M:%S')} {method} {path} ERROR after {elapsed:.2f}s: {e!r}", flush=True)
-        raise
-    elapsed = time.time() - t0
-    print(f"[REQ {rid}] {time.strftime('%H:%M:%S')} {method} {path} done {elapsed:.2f}s status={response.status_code}", flush=True)
-    response.headers["X-Response-Time"] = f"{elapsed:.3f}s"
-    return response
-
+_middleware.install(app)
 
 app.include_router(_pages_router)
 app.include_router(_slack_router)
