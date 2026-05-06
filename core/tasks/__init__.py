@@ -8,4 +8,5 @@ from core.tasks import slack  # noqa: F401
 from core.tasks import pm  # noqa: F401
 from core.tasks import prd  # noqa: F401
 from core.tasks import manager  # noqa: F401
+from core.tasks import autonomy  # noqa: F401
 from core.tasks import routes  # noqa: F401
