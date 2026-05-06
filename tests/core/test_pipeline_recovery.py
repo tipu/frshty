@@ -329,3 +329,293 @@ class TestEnqueueStageRetryBudget:
             with patch("core.queue.enqueue_job") as eq:
                 tix._enqueue_stage("inst", "T-NEW", "start_planning")
                 eq.assert_called_once()
+
+
+class TestStartReviewingRecovery:
+    """start_reviewing should recover when /tri-review produced a partial
+    tri-review.md without a VERDICT line."""
+
+    def test_reviews_normal_when_no_review_file(self, tmp_path, monkeypatch):
+        """When tri-review.md doesn't exist, run /tri-review normally."""
+        db.init(tmp_path / "t.db", ROOT / "migrations")
+        state.init(tmp_path / "state")
+
+        instance = "test"
+        ticket_key = "REV-1"
+        slug = "rev-1-slug"
+        _seed_ticket(instance, ticket_key, slug, "reviewing")
+
+        config = _make_config(tmp_path)
+        ticket_dir = config["workspace"]["root"] / "tickets" / slug
+        docs = ticket_dir / "docs"
+        docs.mkdir(parents=True)
+        (docs / "change-manifest.md").write_text("# Manifest\n")
+
+        def fake_run_claude(prompt, *, cwd=None, timeout=None):
+            tri = Path(cwd) / "docs" / "tri-review.md"
+            tri.write_text("VERDICT: PASS\n")
+            return "ok"
+
+        monkeypatch.setattr("core.tasks.tickets.run_claude_code", fake_run_claude)
+        from core import tasks as _tasks_import
+        _tasks_import.tickets
+
+        ctx = _task_ctx(ticket_key, config, task="start_reviewing", job_id=10)
+        result = run_task(ctx)
+
+        assert result.status == "ok", f"expected ok, got {result.status} ({result.reason})"
+        assert (docs / "tri-review.md").exists()
+
+    def test_reviews_when_review_file_missing_verdict(self, tmp_path, monkeypatch):
+        """When tri-review.md exists but lacks VERDICT, rerun /tri-review."""
+        db.init(tmp_path / "t.db", ROOT / "migrations")
+        state.init(tmp_path / "state")
+
+        instance = "test"
+        ticket_key = "REV-2"
+        slug = "rev-2-slug"
+        _seed_ticket(instance, ticket_key, slug, "reviewing")
+
+        config = _make_config(tmp_path)
+        ticket_dir = config["workspace"]["root"] / "tickets" / slug
+        docs = ticket_dir / "docs"
+        docs.mkdir(parents=True)
+        (docs / "change-manifest.md").write_text("# Manifest\n")
+        (docs / "tri-review.md").write_text("## Review\nSome findings but no verdict line\n")
+
+        def fake_run_claude(prompt, *, cwd=None, timeout=None):
+            tri = Path(cwd) / "docs" / "tri-review.md"
+            tri.write_text("## Review\n## Verdict\nVERDICT: PASS\n")
+            return "ok"
+
+        monkeypatch.setattr("core.tasks.tickets.run_claude_code", fake_run_claude)
+        from core import tasks as _tasks_import
+        _tasks_import.tickets
+
+        ctx = _task_ctx(ticket_key, config, task="start_reviewing", job_id=11)
+        result = run_task(ctx)
+
+        assert result.status == "ok", f"expected ok, got {result.status} ({result.reason})"
+        assert "VERDICT: PASS" in (docs / "tri-review.md").read_text()
+
+    def test_reviews_fails_when_claude_fails(self, tmp_path, monkeypatch):
+        """When /tri-review claude call returns None, should fail."""
+        db.init(tmp_path / "t.db", ROOT / "migrations")
+        state.init(tmp_path / "state")
+
+        instance = "test"
+        ticket_key = "REV-3"
+        slug = "rev-3-slug"
+        _seed_ticket(instance, ticket_key, slug, "reviewing")
+
+        config = _make_config(tmp_path)
+        ticket_dir = config["workspace"]["root"] / "tickets" / slug
+        docs = ticket_dir / "docs"
+        docs.mkdir(parents=True)
+        (docs / "change-manifest.md").write_text("# Manifest\n")
+
+        monkeypatch.setattr("core.tasks.tickets.run_claude_code", lambda prompt, **kw: None)
+        from core import tasks as _tasks_import
+        _tasks_import.tickets
+
+        ctx = _task_ctx(ticket_key, config, task="start_reviewing", job_id=12)
+        result = run_task(ctx)
+
+        assert result.status == "failed"
+        assert "claude returned non-zero or empty" in result.reason
+
+
+class TestFixReviewFindingsRecovery:
+    """fix_review_findings should recover when tri-review.md already exists
+    with VERDICT: FAIL."""
+
+    def test_fixes_when_verdict_is_fail(self, tmp_path, monkeypatch):
+        """Normal flow: tri-review.md has VERDICT: FAIL, fix it."""
+        db.init(tmp_path / "t.db", ROOT / "migrations")
+        state.init(tmp_path / "state")
+
+        instance = "test"
+        ticket_key = "FIX-1"
+        slug = "fix-1-slug"
+        _seed_ticket(instance, ticket_key, slug, "reviewing")
+
+        config = _make_config(tmp_path)
+        ticket_dir = config["workspace"]["root"] / "tickets" / slug
+        docs = ticket_dir / "docs"
+        docs.mkdir(parents=True)
+        (docs / "change-manifest.md").write_text("# Manifest\n")
+        (docs / "tri-review.md").write_text("## Verdict\nVERDICT: FAIL\n")
+
+        def fake_run_claude(prompt, *, cwd=None, timeout=None):
+            tri = Path(cwd) / "docs" / "tri-review.md"
+            tri.write_text("## Verdict\nVERDICT: PASS\n")
+            return "ok"
+
+        monkeypatch.setattr("core.tasks.tickets.run_claude_code", fake_run_claude)
+        from core import tasks as _tasks_import
+        _tasks_import.tickets
+
+        ctx = _task_ctx(ticket_key, config, task="fix_review_findings", job_id=20)
+        result = run_task(ctx)
+
+        assert result.status == "ok", f"expected ok, got {result.status} ({result.reason})"
+        assert "VERDICT: PASS" in (docs / "tri-review.md").read_text()
+
+    def test_fix_fails_when_claude_fails(self, tmp_path, monkeypatch):
+        """When fix claude call fails, should fail."""
+        db.init(tmp_path / "t.db", ROOT / "migrations")
+        state.init(tmp_path / "state")
+
+        instance = "test"
+        ticket_key = "FIX-2"
+        slug = "fix-2-slug"
+        _seed_ticket(instance, ticket_key, slug, "reviewing")
+
+        config = _make_config(tmp_path)
+        ticket_dir = config["workspace"]["root"] / "tickets" / slug
+        docs = ticket_dir / "docs"
+        docs.mkdir(parents=True)
+        (docs / "change-manifest.md").write_text("# Manifest\n")
+        (docs / "tri-review.md").write_text("## Verdict\nVERDICT: FAIL\n")
+
+        monkeypatch.setattr("core.tasks.tickets.run_claude_code", lambda prompt, **kw: None)
+        from core import tasks as _tasks_import
+        _tasks_import.tickets
+
+        ctx = _task_ctx(ticket_key, config, task="fix_review_findings", job_id=21)
+        result = run_task(ctx)
+
+        assert result.status == "failed"
+
+
+class TestValidationRetry:
+    """validate_merged_ticket should be retried when it fails, not stranded
+    at 'validation' status forever."""
+
+    def test_validation_enqueues_when_ticket_at_validation_and_has_failed_jobs(self, tmp_path):
+        """A ticket at 'validation' with a prior failed validate_merged_ticket
+        should re-enqueue the task (the bug: scan_tickets skips validation
+        status completely)."""
+        db.init(tmp_path / "t.db", ROOT / "migrations")
+        state.init(tmp_path / "state")
+        state.use("inst")
+        state.save_ticket("VAL-1", {
+            "status": "validation",
+            "slug": "val-1-slug",
+            "url": "https://example.com/issue/VAL-1",
+        })
+
+        _seed_job("inst", "validate_merged_ticket", "VAL-1", "failed")
+
+        from features import tickets as tix
+        with patch.object(tix, "MAX_STAGE_RETRIES", 5), \
+             patch("core.queue.enqueue_job") as eq:
+            tix._enqueue_stage("inst", "VAL-1", "validate_merged_ticket")
+            eq.assert_called_once_with("inst", "validate_merged_ticket", ticket_key="VAL-1")
+
+    def test_validation_skips_when_already_queued(self, tmp_path):
+        """Don't enqueue if a queued validate_merged_ticket already exists."""
+        db.init(tmp_path / "t.db", ROOT / "migrations")
+        state.init(tmp_path / "state")
+        state.use("inst")
+        state.save_ticket("VAL-2", {
+            "status": "validation",
+            "slug": "val-2-slug",
+        })
+
+        _seed_job("inst", "validate_merged_ticket", "VAL-2", "queued")
+
+        from features import tickets as tix
+        with patch.object(tix, "MAX_STAGE_RETRIES", 5), \
+             patch("core.queue.enqueue_job") as eq:
+            tix._enqueue_stage("inst", "VAL-2", "validate_merged_ticket")
+            eq.assert_not_called()
+
+    def test_validation_skips_after_max_retries(self, tmp_path):
+        """After MAX_STAGE_RETRIES consecutive failed validate_merged_ticket,
+        stop retrying."""
+        db.init(tmp_path / "t.db", ROOT / "migrations")
+        state.init(tmp_path / "state")
+        state.use("inst")
+        state.save_ticket("VAL-3", {
+            "status": "validation",
+            "slug": "val-3-slug",
+        })
+
+        for i in range(5):
+            _seed_job("inst", "validate_merged_ticket", "VAL-3", "failed")
+
+        from features import tickets as tix
+        with patch.object(tix, "MAX_STAGE_RETRIES", 5), \
+             patch("core.queue.enqueue_job") as eq:
+            tix._enqueue_stage("inst", "VAL-3", "validate_merged_ticket")
+            eq.assert_not_called()
+
+    def test_validation_runs_normally_when_no_history(self, tmp_path):
+        """First time at validation with no job history should enqueue."""
+        db.init(tmp_path / "t.db", ROOT / "migrations")
+        state.init(tmp_path / "state")
+        state.use("inst")
+        state.save_ticket("VAL-4", {
+            "status": "validation",
+            "slug": "val-4-slug",
+        })
+
+        from features import tickets as tix
+        with patch.object(tix, "MAX_STAGE_RETRIES", 5), \
+             patch("core.queue.enqueue_job") as eq:
+            tix._enqueue_stage("inst", "VAL-4", "validate_merged_ticket")
+            eq.assert_called_once()
+
+
+class TestScanTicketsValidationSkip:
+    """scan_tickets must not skip validation-status tickets — it needs to
+    re-enqueue validate_merged_ticket when it fails, not strand the ticket."""
+
+    def test_validation_not_skipped_by_scan(self, tmp_path, monkeypatch):
+        """scan_tickets must re-enqueue validate_merged_ticket for a ticket
+        at validation status with a prior failed job, instead of skipping it
+        unconditionally (the current bug)."""
+        db.init(tmp_path / "t.db", ROOT / "migrations")
+        state.init(tmp_path / "state")
+        state.use("inst")
+        state.save_ticket("VAL-SCAN-1", {
+            "status": "validation",
+            "slug": "val-scan-1-slug",
+            "url": "https://example.com/issue/VAL-SCAN-1",
+            "summary": "Test validation",
+            "validation_enqueued_at": "2026-05-01T00:00:00Z",
+        })
+
+        _seed_job("inst", "validate_merged_ticket", "VAL-SCAN-1", "failed")
+
+        from features import tickets as tix
+
+        enqueued = []
+        def track_enqueue(ik, task, **kw):
+            enqueued.append((ik, task, kw))
+
+        monkeypatch.setattr("core.queue.enqueue_job", track_enqueue)
+
+        config = _make_config(tmp_path)
+        config["job"]["ticket_system"] = "manual"
+        config["job"]["platform"] = "github"
+        config["_base_url"] = "http://localhost:8000"
+        config["_state_dir"] = tmp_path / ".frshty" / "test"
+        config["workspace"]["repos"] = ["lumeninv"]
+        (config["workspace"]["root"] / "lumeninv").mkdir(parents=True, exist_ok=True)
+        (config["workspace"]["root"] / "lumeninv" / ".git").mkdir(parents=True, exist_ok=True)
+        config["github"] = {"repo": "org/repo"}
+
+        monkeypatch.setattr(tix, "_fetch_open_prs", lambda c: [])
+        monkeypatch.setattr(tix, "enqueue_prd_backfill", lambda ik: None)
+
+        monkeypatch.setattr(tix, "_fetch_tickets", lambda cfg: [
+            {"key": "VAL-SCAN-1", "summary": "Test validation", "status": "done",
+             "url": "https://example.com/issue/VAL-SCAN-1", "attachments": [], "related": []},
+        ])
+
+        tix.check(config, "inst")
+
+        assert any(task == "validate_merged_ticket" for _, task, _ in enqueued), \
+            "scan_tickets must re-enqueue validate_merged_ticket when ticket is at validation status with prior failed job"

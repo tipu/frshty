@@ -528,6 +528,8 @@ def check(config: dict, instance_key: str = ""):
                 continue
 
             if ts["status"] == TicketStatus.validation:
+                if instance_key:
+                    _enqueue_stage(instance_key, key, "validate_merged_ticket")
                 continue
 
             if ts["status"] == TicketStatus.pr_failed:
