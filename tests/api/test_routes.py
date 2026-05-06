@@ -138,7 +138,7 @@ class TestTickets:
         docs_dir = tmp_path / "tickets" / slug / "docs"
         docs_dir.mkdir(parents=True)
         (docs_dir / "ticket.md").write_text("# T-1\n\nDescription")
-        with patch("frshty.terminal.session_healthy", return_value={"alive": False, "claude_running": False}):
+        with patch("web.tickets.terminal.session_healthy", return_value={"alive": False, "claude_running": False}):
             resp = client.get("/api/tickets/T-1/detail")
         assert resp.status_code == 200
         data = resp.json()
@@ -151,17 +151,17 @@ class TestTickets:
         assert resp.status_code == 404
 
     def test_kill_terminal(self, client):
-        with patch("frshty.terminal.kill_terminal") as mock_kill:
+        with patch("web.tickets.terminal.kill_terminal") as mock_kill:
             resp = client.delete("/api/tickets/T-1/terminal")
         assert resp.status_code == 200
         mock_kill.assert_called_once_with("T-1")
 
     def test_reset_terminal_kills_and_spawns_with_claude(self, client):
         state.save("tickets", {"T-1": {"status": "in_review", "slug": "T-1-s"}})
-        with patch("frshty.terminal.kill_terminal") as mock_kill, \
-             patch("frshty.terminal.ensure_session") as mock_ensure, \
-             patch("frshty.terminal.send_keys") as mock_send, \
-             patch("frshty.time.sleep"):
+        with patch("web.tickets.terminal.kill_terminal") as mock_kill, \
+             patch("web.tickets.terminal.ensure_session") as mock_ensure, \
+             patch("web.tickets.terminal.send_keys") as mock_send, \
+             patch("web.tickets.time.sleep"):
             resp = client.post("/api/tickets/T-1/terminal/reset")
         assert resp.status_code == 200
         mock_kill.assert_called_once_with("T-1")
@@ -256,7 +256,7 @@ class TestReviews:
         assert resp.status_code == 400
 
     def test_submit_valid_url(self, client):
-        with patch("frshty.multiprocessing.Process") as mock_proc:
+        with patch("web.reviews.multiprocessing.Process") as mock_proc:
             mock_proc.return_value = MagicMock()
             resp = client.post("/api/reviews/submit", json={"url": "https://github.com/org/repo/pull/123"})
         assert resp.status_code == 200

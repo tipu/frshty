@@ -50,7 +50,7 @@ def test_endpoints_round_trip(tmp_path):
     sys.argv = ["frshty.py", str(cfg_path)]
 
     for mod in list(sys.modules):
-        if mod == "frshty" or mod.startswith("core.") or mod == "core":
+        if mod == "frshty" or mod.startswith("core.") or mod == "core" or mod.startswith("web.") or mod == "web" or mod.startswith("services.") or mod == "services":
             sys.modules.pop(mod, None)
 
     import core.db as db
@@ -163,7 +163,7 @@ def test_multi_registers_all_instances(tmp_path):
     b = _write_config(tmp_path, "beta", 17002)
 
     for mod in list(sys.modules):
-        if mod == "frshty" or mod.startswith("core.") or mod == "core":
+        if mod == "frshty" or mod.startswith("core.") or mod == "core" or mod.startswith("web.") or mod == "web" or mod.startswith("services.") or mod == "services":
             sys.modules.pop(mod, None)
 
     import core.db as db
@@ -212,7 +212,7 @@ def test_multi_hostname_routing(tmp_path):
     b = _write_config(tmp_path, "beta", 17102)
 
     for mod in list(sys.modules):
-        if mod == "frshty" or mod.startswith("core.") or mod == "core":
+        if mod == "frshty" or mod.startswith("core.") or mod == "core" or mod.startswith("web.") or mod == "web" or mod.startswith("services.") or mod == "services":
             sys.modules.pop(mod, None)
 
     import core.db as db
@@ -288,7 +288,7 @@ def test_multi_rejects_duplicate_slack_workspace(tmp_path):
     b_path.write_text(b_content)
 
     for mod in list(sys.modules):
-        if mod == "frshty" or mod.startswith("core.") or mod == "core":
+        if mod == "frshty" or mod.startswith("core.") or mod == "core" or mod.startswith("web.") or mod == "web" or mod.startswith("services.") or mod == "services":
             sys.modules.pop(mod, None)
 
     import core.db as db
@@ -354,7 +354,7 @@ slack = false
 """)
 
     for mod in list(sys.modules):
-        if mod == "frshty" or mod.startswith("core.") or mod == "core":
+        if mod == "frshty" or mod.startswith("core.") or mod == "core" or mod.startswith("web.") or mod == "web" or mod.startswith("services.") or mod == "services":
             sys.modules.pop(mod, None)
 
     import core.db as db
