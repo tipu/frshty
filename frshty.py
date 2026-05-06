@@ -4,6 +4,7 @@ import json
 import multiprocessing
 import os
 import random
+import re
 import shlex
 import subprocess
 import sys
@@ -516,11 +517,11 @@ def api_ticket_pr_info(ticket_key: str):
         tickets = state.load("tickets")
         ticket = tickets.get(ticket_key)
         if not ticket:
-            return {"error": "Ticket not found"}, 404
+            return JSONResponse({"error": "Ticket not found"}, status_code=404)
 
         slug = ticket.get("slug", "")
         if not slug:
-            return {"error": "No slug found"}, 400
+            return JSONResponse({"error": "No slug found"}, status_code=400)
 
         ws = _config.get("workspace", {})
         base_branch = ws.get("base_branch", "main")
@@ -569,7 +570,7 @@ def api_ticket_pr_info(ticket_key: str):
         return {"repos": repos_out}
     except Exception as e:
         log.emit("pr_info_error", f"Error generating PR info: {e}", meta={"ticket": ticket_key})
-        return {"error": str(e)}, 500
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @app.post("/api/tickets/{ticket_key}/submit-pr")
@@ -578,28 +579,28 @@ async def api_submit_pr(ticket_key: str, request: Request):
 
     try:
         data = await request.json()
-    except:
-        return {"error": "Invalid JSON"}, 400
+    except json.JSONDecodeError:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
 
     repos_in = data.get("repos") or []
     if not isinstance(repos_in, list) or not repos_in:
-        return {"error": "repos required"}, 400
+        return JSONResponse({"error": "repos required"}, status_code=400)
     for r in repos_in:
         if not isinstance(r, dict) or not r.get("name") or not r.get("title") or not r.get("description"):
-            return {"error": "each repo needs name, title, description"}, 400
+            return JSONResponse({"error": "each repo needs name, title, description"}, status_code=400)
 
     tickets = state.load("tickets")
     ticket = tickets.get(ticket_key)
     if not ticket:
-        return {"error": "Ticket not found"}, 404
+        return JSONResponse({"error": "Ticket not found"}, status_code=404)
 
     if ticket.get("status") != "pr_ready":
-        return {"error": f"Ticket is {ticket.get('status')}, not pr_ready"}, 400
+        return JSONResponse({"error": f"Ticket is {ticket.get('status')}, not pr_ready"}, status_code=400)
 
     ws = _config.get("workspace", {})
     slug = ticket.get("slug", "")
     if not slug:
-        return {"error": "No slug found"}, 400
+        return JSONResponse({"error": "No slug found"}, status_code=400)
 
     platform = make_platform(_config)
     base_branch = ws.get("base_branch", "main")
@@ -609,7 +610,7 @@ async def api_submit_pr(ticket_key: str, request: Request):
         repo_name = r["name"]
         wt = tickets_mod.ticket_worktree_path(_config, slug, repo_name)
         if not wt.is_dir():
-            return {"error": f"worktree missing for {repo_name}"}, 400
+            return JSONResponse({"error": f"worktree missing for {repo_name}"}, status_code=400)
 
         subprocess.run(["git", "add", "-A"], cwd=str(wt), capture_output=True, timeout=60)
         subprocess.run(["git", "commit", "--no-verify", "-m", f"{ticket_key}: {ticket.get('summary', '')}"],
@@ -618,7 +619,7 @@ async def api_submit_pr(ticket_key: str, request: Request):
 
         files = _changed_files(wt, f"origin/{base_branch}")
         if not _is_meaningful_change(files):
-            return {"error": f"no meaningful changes in {repo_name}"}, 400
+            return JSONResponse({"error": f"no meaningful changes in {repo_name}"}, status_code=400)
 
         actual_branch = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
@@ -627,11 +628,11 @@ async def api_submit_pr(ticket_key: str, request: Request):
 
         pushed = platform.push_branch(wt, push_branch)
         if not pushed.get("ok"):
-            return {"error": f"Failed to push {repo_name}: {pushed.get('error', 'unknown')}"}, 400
+            return JSONResponse({"error": f"Failed to push {repo_name}: {pushed.get('error', 'unknown')}"}, status_code=400)
 
         result = platform.create_pr(repo_name, wt, push_branch, r["title"], r["description"], base_branch)
         if result.get("error"):
-            return {"error": f"Failed to create PR for {repo_name}: {result['error']}"}, 400
+            return JSONResponse({"error": f"Failed to create PR for {repo_name}: {result['error']}"}, status_code=400)
 
         pr_url = result.get("url", "")
         pr_id = result.get("id")
@@ -639,7 +640,7 @@ async def api_submit_pr(ticket_key: str, request: Request):
             prs.append({"repo": repo_name, "id": pr_id, "url": pr_url})
 
     if not prs:
-        return {"error": "No PRs were created"}, 400
+        return JSONResponse({"error": "No PRs were created"}, status_code=400)
 
     try:
         state.transition_ticket(ticket_key, "in_review", prs=prs)
@@ -647,7 +648,7 @@ async def api_submit_pr(ticket_key: str, request: Request):
         log.emit("ticket_pr_transition_failed",
                  f"PRs created for {ticket_key} but transition to in_review failed: {e}",
                  meta={"ticket": ticket_key, "prs": prs})
-        return {"error": f"PRs created but state transition failed: {e}", "prs": prs}, 500
+        return JSONResponse({"error": f"PRs created but state transition failed: {e}", "prs": prs}, status_code=500)
     log.emit("ticket_pr_created", f"PR submitted for {ticket_key}: {len(prs)} repo(s)",
              meta={"ticket": ticket_key, "repos": [p["repo"] for p in prs]})
     return {"status": "ok", "prs": prs}
@@ -658,7 +659,6 @@ def api_submit_review(body: dict):
     url = body.get("url", "").strip()
     if not url:
         return JSONResponse({"error": "url required"}, status_code=400)
-    import re
     m = re.match(r"https?://github\.com/([^/]+/[^/]+)/pull/(\d+)", url)
     if not m:
         return JSONResponse({"error": "invalid github PR url"}, status_code=400)
@@ -726,7 +726,6 @@ def api_settings(body: dict):
 
 
 def _populate_repo_cache(platform, repo: str):
-    import re
     reviews_dir = _config["_state_dir"] / "reviews" / repo
     if not reviews_dir.exists():
         return
@@ -1191,7 +1190,7 @@ def _extract_code_context(diff_text: str, target_file: str, target_line: int, co
             in_file = True
             continue
         if in_file and line.startswith('@@'):
-            m = __import__('re').match(r'@@ -\d+(?:,\d+)? \+(\d+)', line)
+            m = re.match(r'@@ -\d+(?:,\d+)? \+(\d+)', line)
             if m:
                 current_line_num = int(m.group(1))
             continue
@@ -1279,7 +1278,7 @@ def api_raw_tickets():
     from features.ticket_systems import make_ticket_system
     ts = make_ticket_system(_config)
     if not ts:
-        return {"error": "no ticket system configured"}
+        return JSONResponse({"error": "no ticket system configured"}, status_code=400)
     try:
         return ts.fetch_tickets()
     except Exception as e:
