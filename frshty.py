@@ -53,6 +53,12 @@ CUSTOM_CONTEXT_DIR = Path(__file__).parent / "docs" / "custom-context"
 
 from web.state import _cv_config, _config, _configs_by_host, primary_config as _primary_config, set_primary_config as _set_primary_config
 from web.pages import router as _pages_router
+from web.slack import router as _slack_router
+from web.timesheet import router as _timesheet_router
+from web.billing import router as _billing_router
+from web.scheduling import router as _scheduling_router
+from web.prd import router as _prd_router
+from web.manager import router as _manager_router
 
 
 if len(sys.argv) >= 2 and Path(sys.argv[1]).is_file():
@@ -124,6 +130,12 @@ async def profile_requests(request, call_next):
 
 
 app.include_router(_pages_router)
+app.include_router(_slack_router)
+app.include_router(_timesheet_router)
+app.include_router(_billing_router)
+app.include_router(_scheduling_router)
+app.include_router(_prd_router)
+app.include_router(_manager_router)
 
 
 @app.get("/api/claude/invocations")
@@ -1044,93 +1056,6 @@ def api_raw_prs():
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
-_WEEKDAY = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
-
-
-def _project_virtual_rows(config: dict, days: int = 7) -> list[dict]:
-    """Read-only projection of config-driven recurring entries for the next `days`.
-
-    Today this covers [timesheet].recurring. Rows carry source='config' and
-    mutable=False so any mutation route must refuse them.
-    """
-    from datetime import date, datetime, time, timedelta, timezone
-    from zoneinfo import ZoneInfo
-    pst = ZoneInfo("America/Los_Angeles")
-    out = []
-    recurring = config.get("timesheet", {}).get("recurring", []) or []
-    if not recurring:
-        return out
-    import core.tz as _ctz
-    today = _ctz.today_local()
-    for offset in range(days):
-        day = today + timedelta(days=offset)
-        for entry in recurring:
-            day_names = [d.lower() for d in entry.get("days", [])]
-            weekdays = {_WEEKDAY[n] for n in day_names if n in _WEEKDAY}
-            if day.weekday() not in weekdays:
-                continue
-            fire_pst = datetime.combine(day, time(19, 0), tzinfo=pst)
-            fire_utc = fire_pst.astimezone(timezone.utc)
-            if fire_utc < datetime.now(timezone.utc):
-                continue
-            out.append({
-                "key": f"config:timesheet:{entry.get('ticket','?')}:{day.isoformat()}",
-                "type": "recurring_virtual",
-                "source": "config",
-                "mutable": False,
-                "task": "log_worklog",
-                "run_at": fire_utc.isoformat(),
-                "ticket": entry.get("ticket", ""),
-                "time": entry.get("time", ""),
-                "label": entry.get("label", ""),
-            })
-    return out
-
-
-@app.get("/api/scheduled")
-def api_scheduled():
-    import core.scheduler as _sch
-    instance_key = _config.get("job", {}).get("key", "")
-    rows = _sch.list_all(instance_key) if instance_key else _sch.list_all()
-    items = []
-    for r in rows:
-        kind = r.get("kind") or "oneshot"
-        if kind == "recurring":
-            items.append({
-                "key": r["key"],
-                "type": "recurring",
-                "task": r.get("task"),
-                "cadence": r.get("cadence"),
-                "run_at": r["run_at"],
-                "last_run_at": r.get("last_run_at"),
-                "payload": r.get("payload", {}),
-                "source": "scheduler",
-                "mutable": True,
-            })
-        else:
-            items.append({
-                "key": r["key"],
-                "type": "scheduled_pr" if r.get("action") == "create_pr" else "oneshot",
-                "run_at": r["run_at"],
-                "scheduled_at": r.get("scheduled_at"),
-                "action": r.get("action"),
-                "meta": r.get("meta", {}),
-                "source": "scheduler",
-                "mutable": True,
-            })
-    items.extend(_project_virtual_rows(_config))
-    items.sort(key=lambda x: x.get("run_at") or "")
-    tickets = state.load("tickets")
-    for key, ts in tickets.items():
-        if (ts.get("status") == "in_review" and not ts.get("ci_passed")
-                and not ts.get("ci_fix_attempts")):
-            items.append({"key": key, "type": "ci_pending", "status": ts["status"],
-                          "checks_started_at": ts.get("checks_started_at"),
-                          "branch": ts.get("branch", ""),
-                          "prs": ts.get("prs", [])})
-    return items
-
-
 @app.get("/api/tickets/{key}/detail")
 def api_ticket_detail(key: str):
     tickets = state.load("tickets")
@@ -1496,78 +1421,6 @@ def api_ticket_pm_findings(key: str, limit: int = 20):
     return {"reviews": reviews}
 
 
-@app.get("/api/prd")
-def api_prd():
-    from prd import orchestrator
-    instance_key = _config.get("job", {}).get("key", "")
-    if not instance_key:
-        return {"prd": None, "sections": []}
-    return orchestrator.render_for_ui(instance_key)
-
-
-@app.post("/api/prd/reload")
-def api_prd_reload():
-    from prd import orchestrator
-    instance_key = _config.get("job", {}).get("key", "")
-    if not instance_key:
-        return JSONResponse({"error": "no instance"}, status_code=400)
-    summary = orchestrator.scan(_config, instance_key)
-    return summary
-
-
-@app.post("/api/prd/sections/{section_id}/regenerate")
-def api_prd_regenerate(section_id: int):
-    from prd import orchestrator
-    instance_key = _config.get("job", {}).get("key", "")
-    if not instance_key:
-        return JSONResponse({"error": "no instance"}, status_code=400)
-    out = orchestrator.regenerate_section_tickets(instance_key, section_id, _config)
-    if out.get("error"):
-        return JSONResponse(out, status_code=404)
-    return out
-
-
-@app.get("/api/manager/latest")
-def api_manager_latest():
-    from manager import runner
-    instance_key = _config.get("job", {}).get("key", "")
-    if not instance_key:
-        return {"empty": True}
-    out = runner.latest(instance_key)
-    return out or {"empty": True}
-
-
-@app.post("/api/manager/run-now")
-def api_manager_run_now():
-    from manager import runner
-    instance_key = _config.get("job", {}).get("key", "")
-    if not instance_key:
-        return JSONResponse({"error": "no instance"}, status_code=400)
-    out = runner.run_daily_digest(instance_key, _config)
-    if out is None:
-        return JSONResponse({"error": "haiku unavailable"}, status_code=503)
-    return out
-
-
-@app.get("/api/manager/status")
-def api_manager_status():
-    from manager import runner
-    instance_key = _config.get("job", {}).get("key", "")
-    if not instance_key:
-        return {"enabled": False, "policy_stale": False}
-    enabled = bool((_config.get("manager") or {}).get("enabled"))
-    current_hash = runner.current_priorities_hash(_config)
-    latest = runner.latest(instance_key)
-    last_hash = (latest or {}).get("priorities_hash") or ""
-    policy_stale = bool(current_hash and last_hash and current_hash != last_hash)
-    return {
-        "enabled": enabled,
-        "policy_stale": policy_stale,
-        "current_priorities_hash": current_hash,
-        "last_digest_at": (latest or {}).get("generated_at"),
-    }
-
-
 @app.get("/api/tickets/{key}/jobs")
 def api_ticket_jobs(key: str, limit: int = 100):
     if not _events_enabled():
@@ -1786,175 +1639,8 @@ def api_start_dev(key: str):
     return {"status": "started", "new_status": ts.get("status")}
 
 
-@app.post("/api/scheduled/{key}/reschedule")
-def api_reschedule(key: str, body: dict):
-    if key.startswith("config:"):
-        return JSONResponse(
-            {"error": "this row is derived from config (read-only); edit the TOML and restart"},
-            status_code=405,
-        )
-    import core.db as _db
-    instance_key = _config.get("job", {}).get("key", "")
-    row = _db.query_one(
-        "SELECT data FROM scheduler WHERE instance_key=? AND key=?",
-        (instance_key, key),
-    )
-    if not row:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    run_at = body.get("run_at", "")
-    if not run_at:
-        return JSONResponse({"error": "run_at required"}, status_code=400)
-    from datetime import datetime
-    try:
-        dt = datetime.fromisoformat(run_at)
-    except ValueError:
-        return JSONResponse({"error": "invalid datetime"}, status_code=400)
-    from core.scheduler import _to_utc_iso
-    _db.execute(
-        "UPDATE scheduler SET run_at=? WHERE instance_key=? AND key=?",
-        (_to_utc_iso(dt), instance_key, key),
-    )
-    log.emit("schedule_updated", f"Rescheduled {key} to {run_at}",
-        meta={"ticket": key, "run_at": run_at})
-    return {"status": "updated", "run_at": _to_utc_iso(dt)}
 
 
-@app.get("/api/slack/data")
-def api_slack_data():
-    return state.load("slack")
-
-
-@app.post("/api/slack/send/{reply_id}")
-def api_slack_send(reply_id: str, body: dict):
-    text = body.get("text", "")
-    if not text:
-        return JSONResponse({"error": "text required"}, status_code=400)
-
-    sl = state.load("slack")
-    replies = sl.get("replies", {})
-    ctx = replies.get(reply_id)
-    if not ctx:
-        return JSONResponse({"error": "reply_id not found"}, status_code=404)
-
-    workspace = ctx["workspace"]
-    channel = ctx["channel"]
-    thread_ts = ctx.get("thread_ts", "")
-
-    tokens_path = _config.get("slack", {}).get("raw_path", "")
-    if tokens_path:
-        tokens_file = str(Path(tokens_path).parent.parent / "tokens.json")
-        try:
-            tokens = json.loads(Path(tokens_file).read_text())
-        except (FileNotFoundError, json.JSONDecodeError):
-            return JSONResponse({"error": "tokens.json not found"}, status_code=500)
-        creds = tokens.get(workspace)
-        if not creds:
-            return JSONResponse({"error": f"no token for workspace {workspace}"}, status_code=400)
-
-        post_data = {"token": creds["token"], "channel": channel, "text": text}
-        if thread_ts:
-            post_data["thread_ts"] = thread_ts
-
-        req = urllib.request.Request(
-            f"https://{workspace}.slack.com/api/chat.postMessage",
-            urllib.parse.urlencode(post_data).encode(),
-            headers={"Cookie": creds["cookie"].replace(", ", "; ")},
-        )
-        resp = urllib.request.urlopen(req)
-        result = json.loads(resp.read())
-        if result.get("ok"):
-            log.emit("slack_reply_sent", f"Replied in {channel}: {text[:80]}",
-                links={"detail": f"{_config['_base_url']}/slack"},
-                meta={"channel": channel, "text": text, "reply_id": reply_id})
-            return {"status": "sent"}
-        return JSONResponse({"error": result.get("error", "unknown")}, status_code=400)
-
-    return JSONResponse({"error": "slack not configured"}, status_code=400)
-
-
-@app.get("/api/timesheet")
-def api_timesheet(start: str = "", end: str = "", force: bool = False):
-    return ts.build_timesheet(_config, start, end, force)
-
-
-@app.post("/api/timesheet/log")
-def api_timesheet_log(body: dict):
-    ticket = body.get("ticket", "")
-    date_str = body.get("date", "")
-    time_str = body.get("time", "")
-    if not ticket or not date_str or not time_str:
-        return JSONResponse({"error": "ticket, date, and time required"}, status_code=400)
-    result = ts.log_work(_config, ticket, date_str, time_str)
-    if result.get("error"):
-        return JSONResponse(result, status_code=400)
-    return result
-
-
-@app.put("/api/timesheet/worklog")
-def api_timesheet_worklog(body: dict):
-    ticket = body.get("ticket", "")
-    worklog_id = body.get("worklog_id", "")
-    time_str = body.get("time", "")
-    if not ticket or not worklog_id or not time_str:
-        return JSONResponse({"error": "ticket, worklog_id, and time required"}, status_code=400)
-    result = ts.update_worklog(_config, ticket, worklog_id, time_str)
-    if result.get("error"):
-        return JSONResponse(result, status_code=400)
-    return result
-
-
-@app.get("/api/billing/client")
-def api_billing_client():
-    return billing.get_client(_config)
-
-
-@app.get("/api/billing/schedule-status")
-async def api_billing_schedule_status():
-    return await billing.get_schedule_status(_config)
-
-
-@app.get("/api/billing/entries")
-def api_billing_entries(month: str = ""):
-    return billing.list_entries(_config, month)
-
-
-@app.post("/api/billing/entries")
-async def api_billing_upsert_entry(request: Request):
-    body = await request.json()
-    return billing.upsert_entries(_config, body)
-
-
-@app.delete("/api/billing/entries/{day}")
-def api_billing_delete_entry(day: str):
-    return billing.delete_entry(_config, day)
-
-
-@app.get("/api/billing/invoices")
-async def api_billing_invoices():
-    return await billing.list_invoices(_config)
-
-
-@app.post("/api/billing/invoices")
-async def api_billing_create_invoice(body: dict):
-    try:
-        return await billing.create_invoice(_config, body, source="manual")
-    except OverlapError as e:
-        return JSONResponse({"error": str(e), "conflict": e.conflict}, status_code=409)
-    except ValueError as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
-    except httpx.HTTPError as e:
-        log.emit("invoice_create_failed", f"bill.com create failed: {e}", meta={"err": str(e)[:200]})
-        return JSONResponse({"error": f"billcom failed: {e}"}, status_code=502)
-
-
-@app.get("/api/billing/next-invoice-number")
-async def api_billing_next_number():
-    return await billing.next_invoice_number(_config)
-
-
-@app.get("/api/billing/preview")
-def api_billing_preview(start: str, end: str):
-    return {"descriptions": billing.preview_descriptions(_config, start, end)}
 
 
 
