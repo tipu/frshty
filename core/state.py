@@ -222,19 +222,19 @@ def save_ticket(key: str, data: dict) -> None:
     db.execute(
         "INSERT INTO tickets"
         "(instance_key, ticket_key, status, slug, branch, url, external_status, auto_pr,"
-        " source, approval_status, obsolete_at, data, updated_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        " source, approval_status, obsolete_at, release_key, data, updated_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         " ON CONFLICT(instance_key, ticket_key) DO UPDATE SET"
         "  status=excluded.status, slug=excluded.slug, branch=excluded.branch, url=excluded.url,"
         "  external_status=excluded.external_status, auto_pr=excluded.auto_pr,"
         "  source=excluded.source, approval_status=excluded.approval_status,"
-        "  obsolete_at=excluded.obsolete_at,"
+        "  obsolete_at=excluded.obsolete_at, release_key=excluded.release_key,"
         "  data=excluded.data, updated_at=excluded.updated_at",
         (instance, key, data.get("status", "new"), data.get("slug"), data.get("branch"),
          data.get("url"), data.get("external_status"),
          (1 if auto_pr else 0) if auto_pr is not None else None,
          data.get("source", "jira"), data.get("approval_status"), data.get("obsolete_at"),
-         json.dumps(data, default=str), now),
+         data.get("release_key"), json.dumps(data, default=str), now),
     )
 
 
@@ -304,20 +304,36 @@ def update_ticket(key: str, mutate: Callable[[dict], dict | None]) -> dict | Non
         c.execute(
             "INSERT INTO tickets"
             "(instance_key, ticket_key, status, slug, branch, url, external_status, auto_pr,"
-            " source, approval_status, obsolete_at, data, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " source, approval_status, obsolete_at, release_key, data, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
             " ON CONFLICT(instance_key, ticket_key) DO UPDATE SET"
             "  status=excluded.status, slug=excluded.slug, branch=excluded.branch, url=excluded.url,"
             "  external_status=excluded.external_status, auto_pr=excluded.auto_pr,"
             "  source=excluded.source, approval_status=excluded.approval_status,"
-            "  obsolete_at=excluded.obsolete_at,"
+            "  obsolete_at=excluded.obsolete_at, release_key=excluded.release_key,"
             "  data=excluded.data, updated_at=excluded.updated_at",
             (instance, key, new.get("status", "new"), new.get("slug"), new.get("branch"),
              new.get("url"), new.get("external_status"),
              (1 if auto_pr else 0) if auto_pr is not None else None,
              new.get("source", "jira"), new.get("approval_status"), new.get("obsolete_at"),
-             json.dumps(new, default=str), now),
+             new.get("release_key"), json.dumps(new, default=str), now),
         )
+        prior_status = current.get("status") if current else None
+        new_status = new.get("status")
+        if prior_status != new_status:
+            try:
+                from features import releases as _releases
+                _releases.maybe_trigger_inspect(instance, key, new_status, prior_status)
+            except Exception as _e:
+                try:
+                    import core.log as _log
+                    _log.emit(
+                        "release_trigger_error",
+                        f"maybe_trigger_inspect failed for {key}: {type(_e).__name__}: {_e}",
+                        meta={"ticket": key},
+                    )
+                except Exception:
+                    pass
         return new
 
 
@@ -348,17 +364,17 @@ def _save_tickets_dict(data: dict) -> None:
             c.execute(
                 "INSERT INTO tickets"
                 "(instance_key, ticket_key, status, slug, branch, url, external_status, auto_pr,"
-                " source, approval_status, obsolete_at, data, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                " source, approval_status, obsolete_at, release_key, data, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 " ON CONFLICT(instance_key, ticket_key) DO UPDATE SET"
                 "  status=excluded.status, slug=excluded.slug, branch=excluded.branch, url=excluded.url,"
                 "  external_status=excluded.external_status, auto_pr=excluded.auto_pr,"
                 "  source=excluded.source, approval_status=excluded.approval_status,"
-                "  obsolete_at=excluded.obsolete_at,"
+                "  obsolete_at=excluded.obsolete_at, release_key=excluded.release_key,"
                 "  data=excluded.data, updated_at=excluded.updated_at",
                 (instance, k, v.get("status", "new"), v.get("slug"), v.get("branch"),
                  v.get("url"), v.get("external_status"),
                  (1 if auto_pr else 0) if auto_pr is not None else None,
                  v.get("source", "jira"), v.get("approval_status"), v.get("obsolete_at"),
-                 json.dumps(v, default=str), now),
+                 v.get("release_key"), json.dumps(v, default=str), now),
             )

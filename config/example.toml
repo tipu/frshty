@@ -56,6 +56,7 @@ tickets = true
 slack = false
 timesheet = false
 billing = false
+releases = false                  # tag tickets to a release; whole-release LLM inspection when all members reach merged/validation/done. optional release.md at <workspace.root>/releases/<release_key>/release.md guides the inspection prompt.
 
 # [slack]
 # raw_path = "/path/to/slack_int/messages/raw.jsonl"
