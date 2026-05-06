@@ -1026,14 +1026,23 @@ def _check_in_review(config, ticket, ts, base_url) -> dict:
         if not new_comments:
             continue
 
-        for comment in new_comments:
-            classification = run_haiku(
-                f"Is this PR review comment actionable (clear code change requested) or ambiguous (vague, question, opinion)?\n\n"
-                f"Comment: {comment['body']}\n\n"
-                f"Reply with JSON: {{\"actionable\": true/false, \"reason\": \"brief reason\"}}"
-            )
-            parsed = extract_json(classification) if classification else None
-            actionable = parsed.get("actionable", False) if parsed else False
+        batch_prompt = (
+            "Classify each PR review comment as actionable (clear code change requested) "
+            "or ambiguous (vague, question, opinion).\n\n"
+            "Comments:\n"
+            + "\n".join(f"[{i}] {c['body']}" for i, c in enumerate(new_comments))
+            + '\n\nReply with JSON: {"results":[{"i":0,"actionable":true|false}, ...]}'
+        )
+        batch_raw = run_haiku(batch_prompt)
+        batch_parsed = extract_json(batch_raw) if batch_raw else None
+        classifications: dict[int, bool] = {}
+        if isinstance(batch_parsed, dict) and isinstance(batch_parsed.get("results"), list):
+            for r in batch_parsed["results"]:
+                if isinstance(r, dict) and isinstance(r.get("i"), int):
+                    classifications[r["i"]] = bool(r.get("actionable"))
+
+        for idx, comment in enumerate(new_comments):
+            actionable = classifications.get(idx, False)
 
             entry = {
                 "id": comment["id"],
@@ -1054,17 +1063,26 @@ def _check_in_review(config, ticket, ts, base_url) -> dict:
                     if wt.is_dir():
                         subprocess.run(["git", "pull", "--rebase", "origin", ts["branch"]], cwd=str(wt), capture_output=True, timeout=60)
                         context = f"File: {comment.get('path', 'unknown')}\nLine: {comment.get('line', 'unknown')}\n\nReview comment: {comment['body']}\n\nFix this review comment."
-                        run_claude_code(context, wt)
+                        fix_result = run_claude_code(context, wt)
                         subprocess.run(["git", "add", "-A"], cwd=str(wt), capture_output=True, timeout=60)
-                        subprocess.run(["git", "commit", "-m", f"fix: address review comment on {comment.get('path', 'unknown')}"], cwd=str(wt), capture_output=True, timeout=60)
-                        platform.push_branch(wt, ts["branch"])
-                        ts.pop("ci_passed", None)
-                        ts.pop("checks_started_at", None)
-                        platform.resolve_comment(pr["repo"], pr["id"], comment["id"])
-                        entry["status"] = "addressed"
-                        log.emit("ticket_pr_comment_fixed", f"{_label(ticket['key'], ts)}: Fixed {comment['body'][:80]}",
-                            links={"detail": f"{base_url}/tickets/{ticket['key']}"},
-                            meta={"ticket": ticket["key"]})
+                        commit = subprocess.run(["git", "commit", "-m", f"fix: address review comment on {comment.get('path', 'unknown')}"], cwd=str(wt), capture_output=True, timeout=60)
+                        if fix_result and commit.returncode == 0:
+                            platform.push_branch(wt, ts["branch"])
+                            ts.pop("ci_passed", None)
+                            ts.pop("checks_started_at", None)
+                            platform.resolve_comment(pr["repo"], pr["id"], comment["id"])
+                            entry["status"] = "addressed"
+                            log.emit("ticket_pr_comment_fixed", f"{_label(ticket['key'], ts)}: Fixed {comment['body'][:80]}",
+                                links={"detail": f"{base_url}/tickets/{ticket['key']}"},
+                                meta={"ticket": ticket["key"]})
+                        else:
+                            entry["status"] = "fix_failed"
+                            log.emit("ticket_pr_comment_fix_failed",
+                                f"{_label(ticket['key'], ts)}: No code change produced for {comment['body'][:80]}",
+                                links={"detail": f"{base_url}/tickets/{ticket['key']}"},
+                                meta={"ticket": ticket["key"],
+                                      "claude_returned": bool(fix_result),
+                                      "commit_rc": commit.returncode})
             else:
                 suggested = run_haiku(
                     f"A reviewer left this comment on a PR:\n\n{comment['body']}\n\n"

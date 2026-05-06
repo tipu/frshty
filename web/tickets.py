@@ -467,7 +467,12 @@ def api_ticket_demo(key: str):
 
 @router.websocket("/ws/terminal/{key}")
 async def ws_terminal(websocket: WebSocket, key: str):
-    await terminal.terminal_handler(websocket, key, _config)
+    from web.state import multi_apply_host, multi_reset
+    tokens = multi_apply_host(websocket.headers.get("host"))
+    try:
+        await terminal.terminal_handler(websocket, key, _config)
+    finally:
+        multi_reset(tokens)
 
 
 @router.delete("/api/tickets/{key}/terminal")

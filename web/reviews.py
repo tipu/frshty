@@ -298,7 +298,12 @@ def api_start_discuss(repo: str, pr_id: int, body: dict):
 
 @router.websocket("/ws/discuss/{session_id}")
 async def ws_discuss(websocket: WebSocket, session_id: str):
-    await terminal.terminal_handler(websocket, session_id, _config)
+    from web.state import multi_apply_host, multi_reset
+    tokens = multi_apply_host(websocket.headers.get("host"))
+    try:
+        await terminal.terminal_handler(websocket, session_id, _config)
+    finally:
+        multi_reset(tokens)
 
 
 @router.get("/api/reviews/{repo}/{pr_id}/diff")
@@ -340,6 +345,10 @@ def api_review_walkthrough(repo: str, pr_id: int, idx: int):
             "file": comment.get("path", ""), "total": total, "idx": idx}
 
 
+_walkthrough_inflight: set[tuple[str, int]] = set()
+_walkthrough_inflight_lock = threading.Lock()
+
+
 @router.post("/api/reviews/{repo}/{pr_id}/walkthrough/preprocess")
 def api_walkthrough_preprocess(repo: str, pr_id: int):
     from concurrent.futures import ThreadPoolExecutor
@@ -357,6 +366,12 @@ def api_walkthrough_preprocess(repo: str, pr_id: int):
     if cache_file.exists():
         return {"status": "ok", "count": len(content_comments), "cached": True}
 
+    key = (repo, pr_id)
+    with _walkthrough_inflight_lock:
+        if key in _walkthrough_inflight:
+            return {"status": "in_progress", "count": len(content_comments), "cached": False}
+        _walkthrough_inflight.add(key)
+
     def preprocess_in_background():
         try:
             def compute_context(comment):
@@ -367,6 +382,9 @@ def api_walkthrough_preprocess(repo: str, pr_id: int):
             cache_file.write_text(json.dumps(contexts, indent=2))
         except Exception as e:
             log.emit("preprocess_comments_failed", f"Failed to preprocess comments: {e}")
+        finally:
+            with _walkthrough_inflight_lock:
+                _walkthrough_inflight.discard(key)
 
     threading.Thread(target=preprocess_in_background, daemon=True).start()
     return {"status": "ok", "count": len(content_comments), "cached": False}
