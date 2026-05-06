@@ -153,6 +153,21 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
             </div>
         </div>
 
+        <div v-if="pmFindings.length && pmFindings[0].findings.length" class="card p-3 border-amber-800">
+            <div class="text-xs font-bold text-amber-300 uppercase mb-2">
+                PM ({{ pmFindings[0].checkpoint_type }})
+                <span class="text-gray-500 normal-case font-normal ml-1">— {{ pmFindings[0].verdict }}</span>
+            </div>
+            <ul class="text-xs space-y-1">
+                <li v-for="(f, i) in pmFindings[0].findings" :key="i" :class="severityClass(f.severity)">
+                    [{{ f.category }}] {{ f.message }}
+                    <span v-if="f.related_ticket_keys && f.related_ticket_keys.length" class="text-gray-500">
+                        (refs: <a v-for="(rk, j) in f.related_ticket_keys" :key="rk" :href="`/tickets/${rk}`" class="link">{{ rk }}<span v-if="j < f.related_ticket_keys.length - 1">, </span></a>)
+                    </span>
+                </li>
+            </ul>
+        </div>
+
         <div class="card p-3">
             <div class="collapsible-header" :class="sections.context ? 'expanded' : 'collapsed'"
                  @click="sections.context = !sections.context">
@@ -389,6 +404,7 @@ frshtyApp({
         const comments = ref([]);
         const contextText = ref('');
         const noteText = ref('');
+        const pmFindings = ref([]);
         const activeTab = ref('docs');
         const maximized = ref(false);
         const resetting = ref(false);
@@ -675,6 +691,21 @@ frshtyApp({
                 const d = await r.json();
                 contextText.value = d.context || '';
             }
+        }
+
+        async function loadPmFindings() {
+            try {
+                const r = await fetch(`/api/tickets/${key}/pm-findings`);
+                if (!r.ok) return;
+                const d = await r.json();
+                pmFindings.value = Array.isArray(d.reviews) ? d.reviews : [];
+            } catch (e) {
+                console.warn('pm-findings fetch failed', e);
+            }
+        }
+
+        function severityClass(s) {
+            return s === 'high' ? 'text-red-300' : s === 'warning' ? 'text-amber-200' : 'text-gray-300';
         }
 
         async function saveContext() {
@@ -970,6 +1001,7 @@ frshtyApp({
             load();
             loadJobs();
             loadContext();
+            loadPmFindings();
             startTerminal();
             escListener = (e) => { if (e.key === 'Escape' && maximized.value) toggleMaximize(); };
             document.addEventListener('keydown', escListener);
@@ -984,7 +1016,7 @@ frshtyApp({
 
         return {
             key, ticket, features, runCommands, jobs, diffData, comments,
-            contextText, noteText, activeTab, maximized, resetting, eventFilter, setStateDdValue,
+            contextText, noteText, pmFindings, activeTab, maximized, resetting, eventFilter, setStateDdValue,
             loadError, sections, docExpanded, replyDrafts, jobOutput,
             prModalOpen, prRepos, prSubmitting,
             jobOutputEl, terminalContainer,
@@ -994,7 +1026,7 @@ frshtyApp({
             renderMarkdown, escHtml,
             jobStatusClass, jobReason, jobHasOutput,
             diffLineClass, diffLinePrefix, commentLabel, commentClass, commentBodyTextClass, commentBadgeStyle, flatCount,
-            load, loadJobs, switchTab, saveContext, deleteContext,
+            load, loadJobs, switchTab, saveContext, deleteContext, severityClass,
             setStatus, startDev, restartTicket, submitNote, onSetStateChange, toggleAutoPr,
             openPrModal, closePrModal, onPrSubmit,
             retryJob, postReply, viewJobOutput, closeJobOutput,
