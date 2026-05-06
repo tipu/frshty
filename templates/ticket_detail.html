@@ -153,6 +153,36 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
             </div>
         </div>
 
+        <div v-if="features.releases" class="card p-3">
+            <div class="text-xs font-bold text-gray-500 uppercase mb-2">Release</div>
+            <div class="flex items-center gap-2 flex-wrap">
+                <input v-model="releaseInput" placeholder="release_key (e.g. v1.4)"
+                       class="flex-1 px-2 py-1 bg-gray-900 border border-gray-700 rounded text-xs font-mono"
+                       style="min-width:140px;" />
+                <button @click="saveRelease" class="text-xs bg-blue-800 hover:bg-blue-700 text-blue-200 px-2 py-1 rounded">Save</button>
+                <button v-if="ticket.release" @click="clearRelease" class="text-xs bg-red-900 hover:bg-red-800 text-red-300 px-2 py-1 rounded">Unassign</button>
+            </div>
+            <div v-if="releaseError" class="text-xs text-red-400 mt-1">{{ releaseError }}</div>
+            <div v-if="ticket.release" class="mt-2 text-xs">
+                <div>
+                    <a :href="`/releases#${ticket.release.release_key}`" class="link font-mono">{{ ticket.release.release_key }}</a>
+                    <span class="text-gray-500 ml-1">— {{ ticket.release.terminal_count }}/{{ ticket.release.ticket_count }} terminal · status: {{ ticket.release.status }}</span>
+                </div>
+                <div v-if="ticket.release.latest_review" class="mt-1">
+                    <span :class="ticket.release.latest_review.verdict === 'pass' ? 'text-green-300' : 'text-red-300'">
+                        verdict: {{ ticket.release.latest_review.verdict }}
+                    </span>
+                    <span class="text-gray-500 ml-1">({{ (ticket.release.latest_review.findings || []).length }} findings · {{ ticket.release.latest_review.created_at }})</span>
+                    <ul v-if="(ticket.release.latest_review.findings || []).length" class="mt-1 space-y-1">
+                        <li v-for="(f, i) in ticket.release.latest_review.findings" :key="i" :class="severityClass(f.severity)">
+                            [{{ f.category }}] {{ f.message }}
+                        </li>
+                    </ul>
+                </div>
+                <button @click="reinspectRelease" class="text-xs bg-gray-800 hover:bg-gray-700 text-gray-300 px-2 py-1 rounded mt-2">Re-inspect</button>
+            </div>
+        </div>
+
         <div v-if="pmFindings.length && pmFindings[0].findings.length" class="card p-3 border-amber-800">
             <div class="text-xs font-bold text-amber-300 uppercase mb-2">
                 PM ({{ pmFindings[0].checkpoint_type }})
@@ -405,6 +435,8 @@ frshtyApp({
         const contextText = ref('');
         const noteText = ref('');
         const pmFindings = ref([]);
+        const releaseInput = ref('');
+        const releaseError = ref('');
         const activeTab = ref('docs');
         const maximized = ref(false);
         const resetting = ref(false);
@@ -690,6 +722,49 @@ frshtyApp({
             if (r.ok) {
                 const d = await r.json();
                 contextText.value = d.context || '';
+            }
+        }
+
+        async function saveRelease() {
+            releaseError.value = '';
+            const rk = (releaseInput.value || '').trim();
+            const r = await fetch(`/api/tickets/${key}/release`, {
+                method: 'POST', headers: {'content-type': 'application/json'},
+                body: JSON.stringify({release_key: rk || null}),
+            });
+            if (!r.ok) {
+                try { releaseError.value = (await r.json()).error || `error ${r.status}`; }
+                catch (e) { releaseError.value = `error ${r.status}`; }
+                return;
+            }
+            releaseInput.value = '';
+            await load();
+        }
+
+        async function clearRelease() {
+            releaseError.value = '';
+            const r = await fetch(`/api/tickets/${key}/release`, {
+                method: 'POST', headers: {'content-type': 'application/json'},
+                body: JSON.stringify({release_key: null}),
+            });
+            if (!r.ok) {
+                try { releaseError.value = (await r.json()).error || `error ${r.status}`; }
+                catch (e) { releaseError.value = `error ${r.status}`; }
+                return;
+            }
+            await load();
+        }
+
+        async function reinspectRelease() {
+            if (!ticket.value || !ticket.value.release) return;
+            const rk = ticket.value.release.release_key;
+            const r = await fetch(`/api/releases/${rk}/inspect`, {
+                method: 'POST', headers: {'content-type': 'application/json'},
+                body: JSON.stringify({force: true}),
+            });
+            if (!r.ok) {
+                try { releaseError.value = (await r.json()).error || `error ${r.status}`; }
+                catch (e) { releaseError.value = `error ${r.status}`; }
             }
         }
 
@@ -1016,7 +1091,8 @@ frshtyApp({
 
         return {
             key, ticket, features, runCommands, jobs, diffData, comments,
-            contextText, noteText, pmFindings, activeTab, maximized, resetting, eventFilter, setStateDdValue,
+            contextText, noteText, pmFindings, releaseInput, releaseError,
+            activeTab, maximized, resetting, eventFilter, setStateDdValue,
             loadError, sections, docExpanded, replyDrafts, jobOutput,
             prModalOpen, prRepos, prSubmitting,
             jobOutputEl, terminalContainer,
@@ -1027,6 +1103,7 @@ frshtyApp({
             jobStatusClass, jobReason, jobHasOutput,
             diffLineClass, diffLinePrefix, commentLabel, commentClass, commentBodyTextClass, commentBadgeStyle, flatCount,
             load, loadJobs, switchTab, saveContext, deleteContext, severityClass,
+            saveRelease, clearRelease, reinspectRelease,
             setStatus, startDev, restartTicket, submitNote, onSetStateChange, toggleAutoPr,
             openPrModal, closePrModal, onPrSubmit,
             retryJob, postReply, viewJobOutput, closeJobOutput,
