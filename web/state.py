@@ -51,6 +51,36 @@ def primary_config() -> dict:
     return _primary_config
 
 
+def multi_apply_host(host: str | None):
+    """Set per-instance contextvars from a Host header. Returns reset tokens or
+    None when --multi is inactive or the host is unknown. Caller MUST pass the
+    return value to multi_reset() in a finally block. Used by HTTP middleware
+    AND by WebSocket handlers (which bypass HTTP middleware)."""
+    if not _configs_by_host:
+        return None
+    key = (host or "").split(":")[0].lower()
+    target = _configs_by_host.get(key)
+    if target is None:
+        return None
+    import core.log as log
+    import core.state as state
+    config_token = _cv_config.set(target)
+    state_token = state.use(target["_state_dir"])
+    log_tokens = log.use(target["_state_dir"], target["job"]["key"])
+    return (config_token, state_token, log_tokens)
+
+
+def multi_reset(tokens) -> None:
+    if tokens is None:
+        return
+    import core.log as log
+    import core.state as state
+    config_token, state_token, log_tokens = tokens
+    log.reset(log_tokens)
+    state.reset(state_token)
+    _cv_config.reset(config_token)
+
+
 def events_enabled() -> bool:
     try:
         import core.runtime as _rt

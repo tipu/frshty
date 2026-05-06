@@ -1,9 +1,7 @@
 import time
 from uuid import uuid4
 
-import core.log as log
-import core.state as state
-from web.state import _configs_by_host, _cv_config
+from web.state import multi_apply_host, multi_reset
 
 
 def install(app):
@@ -14,25 +12,11 @@ def install(app):
         Unknown hosts fall through to whatever config is currently the contextvar
         default (typically the primary). Single-instance mode is a no-op.
         """
-        config_token = None
-        state_token = None
-        log_tokens = None
-        if _configs_by_host:
-            host = (request.headers.get("host") or "").split(":")[0].lower()
-            target = _configs_by_host.get(host)
-            if target is not None:
-                config_token = _cv_config.set(target)
-                state_token = state.use(target["_state_dir"])
-                log_tokens = log.use(target["_state_dir"], target["job"]["key"])
+        tokens = multi_apply_host(request.headers.get("host"))
         try:
             response = await call_next(request)
         finally:
-            if log_tokens is not None:
-                log.reset(log_tokens)
-            if state_token is not None:
-                state.reset(state_token)
-            if config_token is not None:
-                _cv_config.reset(config_token)
+            multi_reset(tokens)
         return response
 
     @app.middleware("http")
