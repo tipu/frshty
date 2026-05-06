@@ -41,6 +41,7 @@ import features.billing as billing
 from features.billing import OverlapError
 import core.events as events
 import core.scheduler as scheduler
+from services import review_store
 from actions.record_demo import handle as _record_demo_action
 from actions.schedule_pr import handle as _schedule_pr_action
 
@@ -725,24 +726,6 @@ def api_settings(body: dict):
     return {"status": "ok", "features": _config.get("features", {})}
 
 
-def _populate_repo_cache(platform, repo: str):
-    reviews_dir = _config["_state_dir"] / "reviews" / repo
-    if not reviews_dir.exists():
-        return
-    for branch_dir in reviews_dir.iterdir():
-        queued = branch_dir / "queued_comments.json"
-        if not queued.exists():
-            continue
-        comments = json.loads(queued.read_text())
-        if not comments:
-            continue
-        pr_url = comments[0].get("pr_url", "")
-        m = re.match(r"https?://github\.com/([^/]+/[^/]+)/pull/", pr_url)
-        if m:
-            platform._repo_cache[repo] = m.group(1)
-            return
-
-
 @app.get("/api/reviews")
 def api_reviews_list():
     reviews_dir = _config["_state_dir"] / "reviews"
@@ -812,50 +795,35 @@ def api_reviews_list():
 
 @app.get("/api/reviews/{repo}/{pr_id}/comments")
 def api_review_comments(repo: str, pr_id: int):
-    reviews_dir = _config["_state_dir"] / "reviews" / repo
-    if not reviews_dir.exists():
-        return []
-    for branch_dir in reviews_dir.iterdir():
-        queued = branch_dir / "queued_comments.json"
-        if not queued.exists():
-            continue
-        comments = json.loads(queued.read_text())
-        if comments and comments[0].get("pr_id") == pr_id:
-            return comments
-    return []
+    found = review_store.find_review(_config["_state_dir"], repo, pr_id)
+    return found[1] if found else []
 
 
 @app.get("/api/reviews/{repo}/{pr_id}/info")
 def api_review_info(repo: str, pr_id: int):
-    reviews_dir = _config["_state_dir"] / "reviews" / repo
-    if not reviews_dir.exists():
+    found = review_store.find_review(_config["_state_dir"], repo, pr_id)
+    if not found:
         return {}
-    for branch_dir in reviews_dir.iterdir():
-        queued = branch_dir / "queued_comments.json"
-        if not queued.exists():
-            continue
-        comments = json.loads(queued.read_text())
-        if comments and comments[0].get("pr_id") == pr_id:
-            review_json = branch_dir / "review.json"
-            review_data = json.loads(review_json.read_text()) if review_json.exists() else {}
-            result = {
-                "summary": review_data.get("summary", ""),
-                "verdict": review_data.get("verdict", ""),
-                "branch": review_data.get("source_branch", ""),
-                "author": review_data.get("author", ""),
-                "date": review_data.get("date", ""),
-                "pr_url": comments[0].get("pr_url", ""),
-                "pr_title": comments[0].get("pr_title", ""),
-            }
-            platform = make_platform(_config)
-            try:
-                pr_info = platform.get_pr_info(repo, pr_id)
-                result["pr_description"] = pr_info.get("description", "")
-                result["pr_title"] = pr_info.get("title", result["pr_title"])
-            except Exception as e:
-                log.emit("get_pr_info_failed", f"Failed to get PR info: {e}", meta={"repo": repo, "pr_id": pr_id})
-            return result
-    return {}
+    branch_dir, comments, _ = found
+    review_json = branch_dir / "review.json"
+    review_data = json.loads(review_json.read_text()) if review_json.exists() else {}
+    result = {
+        "summary": review_data.get("summary", ""),
+        "verdict": review_data.get("verdict", ""),
+        "branch": review_data.get("source_branch", ""),
+        "author": review_data.get("author", ""),
+        "date": review_data.get("date", ""),
+        "pr_url": comments[0].get("pr_url", ""),
+        "pr_title": comments[0].get("pr_title", ""),
+    }
+    platform = make_platform(_config)
+    try:
+        pr_info = platform.get_pr_info(repo, pr_id)
+        result["pr_description"] = pr_info.get("description", "")
+        result["pr_title"] = pr_info.get("title", result["pr_title"])
+    except Exception as e:
+        log.emit("get_pr_info_failed", f"Failed to get PR info: {e}", meta={"repo": repo, "pr_id": pr_id})
+    return result
 
 
 @app.post("/api/reviews/{repo}/{pr_id}/discuss")
@@ -880,20 +848,9 @@ def api_start_discuss(repo: str, pr_id: int, body: dict):
         context += "Help the reviewer understand and discuss this PR."
 
     review_dir = _config["_state_dir"] / "reviews" / repo
-    cwd = None
-    matched_dir = None
-    if review_dir.exists():
-        for branch_dir in review_dir.iterdir():
-            queued = branch_dir / "queued_comments.json"
-            if not queued.exists():
-                continue
-            comments = json.loads(queued.read_text())
-            if comments and comments[0].get("pr_id") == pr_id:
-                matched_dir = branch_dir
-                wt = branch_dir / "worktree"
-                if (wt / ".git").exists():
-                    cwd = str(wt)
-                break
+    found = review_store.find_review(_config["_state_dir"], repo, pr_id)
+    matched_dir = found[0] if found else None
+    cwd = str(found[2]) if found and found[2] else None
     if not cwd and matched_dir:
         review_json = matched_dir / "review.json"
         branch = None
@@ -913,7 +870,7 @@ def api_start_discuss(repo: str, pr_id: int, body: dict):
                     cwd = str(wt)
     if not cwd:
         platform = make_platform(_config)
-        _populate_repo_cache(platform, repo)
+        review_store.populate_repo_cache(platform, _config["_state_dir"], repo)
         worktree = review_dir / f"pr-{pr_id}" / "worktree"
         platform.ensure_pr_worktree(repo, pr_id, worktree)
         if (worktree / ".git").exists():
@@ -936,29 +893,9 @@ async def ws_discuss(websocket: WebSocket, session_id: str):
 @app.get("/api/reviews/{repo}/{pr_id}/diff")
 def api_review_diff(repo: str, pr_id: int):
     platform = make_platform(_config)
-    _populate_repo_cache(platform, repo)
+    review_store.populate_repo_cache(platform, _config["_state_dir"], repo)
     diff = platform.get_pr_diff(repo, pr_id)
     return {"diff": diff or ""}
-
-
-def _find_review_branch_dir(repo: str, pr_id: int):
-    """Return (branch_dir, worktree) or (None, None)."""
-    reviews_dir = _config["_state_dir"] / "reviews" / repo
-    if not reviews_dir.exists():
-        return None, None
-    for branch_dir in reviews_dir.iterdir():
-        queued = branch_dir / "queued_comments.json"
-        if not queued.exists():
-            continue
-        try:
-            comments = json.loads(queued.read_text())
-        except (json.JSONDecodeError, OSError):
-            continue
-        if comments and comments[0].get("pr_id") == pr_id:
-            wt = branch_dir / "worktree"
-            worktree = wt if (wt / ".git").exists() else None
-            return branch_dir, worktree
-    return None, None
 
 
 @app.get("/reviews/{repo}/{pr_id}/walkthrough/{idx}", response_class=HTMLResponse)
@@ -969,13 +906,10 @@ def review_walkthrough_page(repo: str, pr_id: int, idx: int):
 @app.get("/api/reviews/{repo}/{pr_id}/walkthrough/{idx}")
 def api_review_walkthrough(repo: str, pr_id: int, idx: int):
     from features.reviewer import build_walkthrough_context
-    branch_dir, worktree = _find_review_branch_dir(repo, pr_id)
-    if branch_dir is None:
+    found = review_store.find_review(_config["_state_dir"], repo, pr_id)
+    if not found:
         return JSONResponse({"error": "review not found"}, status_code=404)
-    try:
-        comments = json.loads((branch_dir / "queued_comments.json").read_text())
-    except (json.JSONDecodeError, OSError):
-        return JSONResponse({"error": "could not read comments"}, status_code=500)
+    branch_dir, comments, worktree = found
     content_comments = [c for c in comments if c.get("body")]
     total = len(content_comments)
     if total == 0:
@@ -1007,14 +941,10 @@ def api_walkthrough_preprocess(repo: str, pr_id: int):
     from concurrent.futures import ThreadPoolExecutor
     from features.reviewer import build_walkthrough_context
 
-    branch_dir, worktree = _find_review_branch_dir(repo, pr_id)
-    if branch_dir is None:
+    found = review_store.find_review(_config["_state_dir"], repo, pr_id)
+    if not found:
         return JSONResponse({"error": "review not found"}, status_code=404)
-    try:
-        comments = json.loads((branch_dir / "queued_comments.json").read_text())
-    except (json.JSONDecodeError, OSError):
-        return JSONResponse({"error": "could not read comments"}, status_code=500)
-
+    branch_dir, comments, worktree = found
     content_comments = [c for c in comments if c.get("body")]
     if not content_comments:
         return JSONResponse({"error": "no comments"}, status_code=404)
@@ -1053,104 +983,85 @@ def api_bb_comments(repo: str, pr_id: int):
 @app.post("/api/reviews/{repo}/{pr_id}/comments/{idx}/submit")
 def api_submit_comment(repo: str, pr_id: int, idx: int):
     platform = make_platform(_config)
-    _populate_repo_cache(platform, repo)
-    reviews_dir = _config["_state_dir"] / "reviews" / repo
-    for branch_dir in reviews_dir.iterdir():
-        queued = branch_dir / "queued_comments.json"
-        if not queued.exists():
-            continue
-        comments = json.loads(queued.read_text())
-        if not comments or comments[0].get("pr_id") != pr_id:
-            continue
-        if idx >= len(comments):
-            return JSONResponse({"error": "invalid index"}, status_code=400)
-        comment = comments[idx]
-        remote_id = comment.get("remote_id")
-        if remote_id:
-            result = platform.edit_pr_comment(repo, pr_id, remote_id, comment["body"])
-            if result.get("status") == "updated":
-                comments[idx]["status"] = "submitted"
-                queued.write_text(json.dumps(comments, indent=2))
-                log.emit("review_comment_edited", f"Edited comment on {repo} PR #{pr_id}",
-                    links={"pr": comment.get("pr_url", "")},
-                    meta={"repo": repo, "pr_id": pr_id})
-        else:
-            result = platform.post_pr_comment(repo, pr_id, comment["body"], comment.get("path"), comment.get("line"))
-            if result.get("status") == "posted":
-                comments[idx]["status"] = "submitted"
-                comments[idx]["remote_id"] = result.get("id")
-                queued.write_text(json.dumps(comments, indent=2))
-                log.emit("review_comment_submitted", f"Submitted comment on {repo} PR #{pr_id}",
-                    links={"pr": comment.get("pr_url", "")},
-                    meta={"repo": repo, "pr_id": pr_id})
-        return result
-    return JSONResponse({"error": "not found"}, status_code=404)
+    review_store.populate_repo_cache(platform, _config["_state_dir"], repo)
+    found = review_store.find_review(_config["_state_dir"], repo, pr_id)
+    if not found:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    branch_dir, comments, _ = found
+    queued = branch_dir / "queued_comments.json"
+    if idx >= len(comments):
+        return JSONResponse({"error": "invalid index"}, status_code=400)
+    comment = comments[idx]
+    remote_id = comment.get("remote_id")
+    if remote_id:
+        result = platform.edit_pr_comment(repo, pr_id, remote_id, comment["body"])
+        if result.get("status") == "updated":
+            comments[idx]["status"] = "submitted"
+            queued.write_text(json.dumps(comments, indent=2))
+            log.emit("review_comment_edited", f"Edited comment on {repo} PR #{pr_id}",
+                links={"pr": comment.get("pr_url", "")},
+                meta={"repo": repo, "pr_id": pr_id})
+    else:
+        result = platform.post_pr_comment(repo, pr_id, comment["body"], comment.get("path"), comment.get("line"))
+        if result.get("status") == "posted":
+            comments[idx]["status"] = "submitted"
+            comments[idx]["remote_id"] = result.get("id")
+            queued.write_text(json.dumps(comments, indent=2))
+            log.emit("review_comment_submitted", f"Submitted comment on {repo} PR #{pr_id}",
+                links={"pr": comment.get("pr_url", "")},
+                meta={"repo": repo, "pr_id": pr_id})
+    return result
 
 
 @app.post("/api/reviews/{repo}/{pr_id}/comments/new")
 def api_new_comment(repo: str, pr_id: int, body: dict):
-    reviews_dir = _config["_state_dir"] / "reviews" / repo
-    for branch_dir in reviews_dir.iterdir():
-        queued = branch_dir / "queued_comments.json"
-        if not queued.exists():
-            continue
-        comments = json.loads(queued.read_text())
-        if not comments or comments[0].get("pr_id") != pr_id:
-            continue
-        new_comment = {
-            "pr_id": pr_id,
-            "repo": repo,
-            "pr_url": comments[0].get("pr_url", ""),
-            "path": body.get("path"),
-            "line": body.get("line"),
-            "severity": body.get("severity", "suggestion"),
-            "persona": "manual",
-            "body": body.get("body", ""),
-            "status": "draft",
-        }
-        comments.append(new_comment)
-        queued.write_text(json.dumps(comments, indent=2))
-        return {"status": "ok", "idx": len(comments) - 1}
-    return JSONResponse({"error": "not found"}, status_code=404)
+    found = review_store.find_review(_config["_state_dir"], repo, pr_id)
+    if not found:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    branch_dir, comments, _ = found
+    new_comment = {
+        "pr_id": pr_id,
+        "repo": repo,
+        "pr_url": comments[0].get("pr_url", ""),
+        "path": body.get("path"),
+        "line": body.get("line"),
+        "severity": body.get("severity", "suggestion"),
+        "persona": "manual",
+        "body": body.get("body", ""),
+        "status": "draft",
+    }
+    comments.append(new_comment)
+    (branch_dir / "queued_comments.json").write_text(json.dumps(comments, indent=2))
+    return {"status": "ok", "idx": len(comments) - 1}
 
 
 @app.delete("/api/reviews/{repo}/{pr_id}/comments/{idx}")
 def api_delete_comment(repo: str, pr_id: int, idx: int):
-    reviews_dir = _config["_state_dir"] / "reviews" / repo
-    for branch_dir in reviews_dir.iterdir():
-        queued = branch_dir / "queued_comments.json"
-        if not queued.exists():
-            continue
-        comments = json.loads(queued.read_text())
-        if not comments or comments[0].get("pr_id") != pr_id:
-            continue
-        if idx >= len(comments):
-            return JSONResponse({"error": "invalid index"}, status_code=400)
-        comments.pop(idx)
-        queued.write_text(json.dumps(comments, indent=2))
-        return {"status": "ok"}
-    return JSONResponse({"error": "not found"}, status_code=404)
+    found = review_store.find_review(_config["_state_dir"], repo, pr_id)
+    if not found:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    branch_dir, comments, _ = found
+    if idx >= len(comments):
+        return JSONResponse({"error": "invalid index"}, status_code=400)
+    comments.pop(idx)
+    (branch_dir / "queued_comments.json").write_text(json.dumps(comments, indent=2))
+    return {"status": "ok"}
 
 
 @app.put("/api/reviews/{repo}/{pr_id}/comments/{idx}")
 def api_update_comment(repo: str, pr_id: int, idx: int, body: dict):
-    reviews_dir = _config["_state_dir"] / "reviews" / repo
-    for branch_dir in reviews_dir.iterdir():
-        queued = branch_dir / "queued_comments.json"
-        if not queued.exists():
-            continue
-        comments = json.loads(queued.read_text())
-        if not comments or comments[0].get("pr_id") != pr_id:
-            continue
-        if idx >= len(comments):
-            return JSONResponse({"error": "invalid index"}, status_code=400)
-        if "body" in body:
-            comments[idx]["body"] = body["body"]
-        if "line" in body:
-            comments[idx]["line"] = body["line"]
-        queued.write_text(json.dumps(comments, indent=2))
-        return {"status": "ok"}
-    return JSONResponse({"error": "not found"}, status_code=404)
+    found = review_store.find_review(_config["_state_dir"], repo, pr_id)
+    if not found:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    branch_dir, comments, _ = found
+    if idx >= len(comments):
+        return JSONResponse({"error": "invalid index"}, status_code=400)
+    if "body" in body:
+        comments[idx]["body"] = body["body"]
+    if "line" in body:
+        comments[idx]["line"] = body["line"]
+    (branch_dir / "queued_comments.json").write_text(json.dumps(comments, indent=2))
+    return {"status": "ok"}
 
 
 @app.post("/api/reviews/{repo}/{pr_id}/comments/{idx}/simplify")
@@ -1163,60 +1074,19 @@ def api_simplify_comment(repo: str, pr_id: int, idx: int, body: dict):
     file_path = body.get("path", "")
     line_num = body.get("line", 0)
 
-    # Fetch diff to get code context
     code_context = None
     if file_path:
         reviews_dir = _config["_state_dir"] / "reviews" / repo
-        for branch_dir in reviews_dir.iterdir():
-            diff_file = branch_dir / "diff.txt"
-            if diff_file.exists():
-                diff_text = diff_file.read_text()
-                code_context = _extract_code_context(diff_text, file_path, line_num)
-                break
+        if reviews_dir.exists():
+            for branch_dir in reviews_dir.iterdir():
+                diff_file = branch_dir / "diff.txt"
+                if diff_file.exists():
+                    diff_text = diff_file.read_text()
+                    code_context = review_store.extract_code_context(diff_text, file_path, line_num)
+                    break
 
     simplified = _simplify_body_with_context(comment_body, code_context, file_path, line_num)
     return {"simplified": simplified}
-
-
-def _extract_code_context(diff_text: str, target_file: str, target_line: int, context_lines: int = 5) -> str:
-    """Extract code around the target line from the diff."""
-    lines = diff_text.split('\n')
-    in_file = False
-    current_line_num = 0
-    context = []
-
-    for line in lines:
-        if line.startswith(f'+++ b/{target_file}'):
-            in_file = True
-            continue
-        if in_file and line.startswith('@@'):
-            m = re.match(r'@@ -\d+(?:,\d+)? \+(\d+)', line)
-            if m:
-                current_line_num = int(m.group(1))
-            continue
-        if in_file and line.startswith('diff --git'):
-            break
-        if not in_file:
-            continue
-
-        if line.startswith(('-', '+')):
-            content = line[1:]
-        elif line.startswith(' '):
-            content = line[1:]
-        else:
-            continue
-
-        if abs(current_line_num - target_line) <= context_lines:
-            prefix = '+ ' if line.startswith('+') else '  '
-            context.append(f"{current_line_num:4d} {prefix}{content}")
-
-        if not line.startswith('-'):
-            current_line_num += 1
-
-        if current_line_num > target_line + context_lines:
-            break
-
-    return '\n'.join(context) if context else None
 
 
 def _ticket_repo_count(slug: str) -> int:
