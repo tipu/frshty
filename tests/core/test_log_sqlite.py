@@ -209,12 +209,13 @@ class TestDismissSQLite:
 
     def test_dismiss_all_marks_all_events_as_read(self, tmp_log):
         """dismiss_all() marks all events in the current job as read."""
-        key = state._instance_key_cv.get()
-        r1 = log.emit("evt0", "msg_0")
-        r2 = log.emit("evt1", "msg_1")
-        r3 = log.emit("evt2", "msg_2")
-        r4 = log.emit("evt3", "msg_3")
-        r5 = log.emit("evt4", "msg_4")
+        key = f"dismiss_all_{id(object())}"
+        state._instance_key_cv.set(key)
+        log.emit("evt0", "msg_0")
+        log.emit("evt1", "msg_1")
+        log.emit("evt2", "msg_2")
+        log.emit("evt3", "msg_3")
+        log.emit("evt4", "msg_4")
 
         log.dismiss_all()
 
