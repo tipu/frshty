@@ -12,6 +12,7 @@ import core.config as cfg
 import core.log as log
 import core.state as state
 import core.terminal as terminal
+import features.releases as releases
 import features.tickets as _tickets_mod
 from core.claude_runner import run_haiku
 from core.config import get_repos
@@ -326,7 +327,128 @@ def api_ticket_detail(key: str):
     all_statuses = [s.value for s in TicketStatus]
     demo_video = (docs_dir / "demo.webm").exists() if docs_dir.is_dir() else False
     ts["repo_count"] = _ticket_repo_count(slug)
-    return {"key": key, "state": ts, "docs": docs, "history": history, "summary": summary, "terminal_alive": terminal_alive, "all_statuses": all_statuses, "demo_video": demo_video}
+    release_block = None
+    if (_config.get("features") or {}).get("releases"):
+        release_block = _release_block_for_ticket(key, ts)
+    return {"key": key, "state": ts, "docs": docs, "history": history, "summary": summary, "terminal_alive": terminal_alive, "all_statuses": all_statuses, "demo_video": demo_video, "release": release_block}
+
+
+def _release_block_for_ticket(ticket_key: str, ticket_state: dict) -> dict | None:
+    instance_key = _config.get("job", {}).get("key", "")
+    rk = ticket_state.get("release_key") or releases.ticket_release_key(instance_key, ticket_key)
+    if not rk:
+        return None
+    rel = releases.get_release_by_key(instance_key, rk)
+    if not rel:
+        return None
+    counts = {"ticket_count": 0, "terminal_count": 0}
+    for s in releases.list_summaries(instance_key):
+        if s["id"] == rel["id"]:
+            counts["ticket_count"] = s["ticket_count"]
+            counts["terminal_count"] = s["terminal_count"]
+            break
+    latest = releases.latest_review(rel["id"])
+    return {
+        "id": rel["id"],
+        "release_key": rel["release_key"],
+        "title": rel.get("title"),
+        "status": rel["status"],
+        "ticket_count": counts["ticket_count"],
+        "terminal_count": counts["terminal_count"],
+        "latest_review": latest and {
+            "verdict": latest["verdict"],
+            "findings": latest["findings"],
+            "created_at": latest["created_at"],
+        },
+    }
+
+
+def _releases_enabled() -> bool:
+    return bool((_config.get("features") or {}).get("releases"))
+
+
+@router.post("/api/tickets/{key}/release")
+def api_set_ticket_release(key: str, body: dict):
+    if not _releases_enabled():
+        return JSONResponse({"error": "releases feature disabled"}, status_code=404)
+    ts = state.load_ticket(key)
+    if not ts:
+        return JSONResponse({"error": "ticket not found"}, status_code=404)
+    raw = body.get("release_key")
+    release_key: str | None
+    if raw is None or raw == "":
+        release_key = None
+    elif isinstance(raw, str):
+        release_key = raw.strip() or None
+    else:
+        return JSONResponse({"error": "release_key must be string or null"}, status_code=400)
+    if release_key is not None and not releases.is_valid_release_key(release_key):
+        return JSONResponse({"error": f"invalid release_key: {release_key!r}"}, status_code=400)
+    instance_key = _config.get("job", {}).get("key", "")
+    title = body.get("title")
+    if release_key is not None and isinstance(title, str) and title.strip():
+        releases.upsert_release(instance_key, release_key, title=title.strip())
+    try:
+        updated = releases.assign_ticket(instance_key, key, release_key)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    if updated is None:
+        return JSONResponse({"error": "ticket not found"}, status_code=404)
+    log.emit("ticket_release_updated",
+             f"{key} → {release_key if release_key else '(unassigned)'}",
+             meta={"ticket": key, "release_key": release_key})
+    return {"status": "ok", "ticket_key": key,
+            "release": _release_block_for_ticket(key, updated)}
+
+
+@router.get("/api/releases")
+def api_list_releases():
+    if not _releases_enabled():
+        return JSONResponse({"error": "releases feature disabled"}, status_code=404)
+    instance_key = _config.get("job", {}).get("key", "")
+    return {"releases": releases.list_summaries(instance_key)}
+
+
+@router.get("/api/releases/{release_key}")
+def api_release_detail(release_key: str):
+    if not _releases_enabled():
+        return JSONResponse({"error": "releases feature disabled"}, status_code=404)
+    instance_key = _config.get("job", {}).get("key", "")
+    rel = releases.get_release_by_key(instance_key, release_key)
+    if not rel:
+        return JSONResponse({"error": "release not found"}, status_code=404)
+    tickets_in_release = releases.list_release_tickets(instance_key, rel["id"])
+    latest = releases.latest_review(rel["id"])
+    return {
+        "id": rel["id"],
+        "release_key": rel["release_key"],
+        "title": rel.get("title"),
+        "status": rel["status"],
+        "ticket_set_hash": rel.get("ticket_set_hash"),
+        "last_inspected_at": rel.get("last_inspected_at"),
+        "tickets": tickets_in_release,
+        "latest_review": latest,
+    }
+
+
+@router.post("/api/releases/{release_key}/inspect")
+def api_release_inspect(release_key: str, body: dict | None = None):
+    if not _releases_enabled():
+        return JSONResponse({"error": "releases feature disabled"}, status_code=404)
+    if not events_enabled():
+        return JSONResponse({"error": "events not enabled"}, status_code=400)
+    instance_key = _config.get("job", {}).get("key", "")
+    rel = releases.get_release_by_key(instance_key, release_key)
+    if not rel:
+        return JSONResponse({"error": "release not found"}, status_code=404)
+    force = bool((body or {}).get("force"))
+    import core.queue as q
+    q.enqueue_job(instance_key, "release_inspect",
+                  payload={"release_id": rel["id"], "force": force})
+    log.emit("release_inspect_enqueued",
+             f"manual inspect requested for {release_key} (force={force})",
+             meta={"release_key": release_key, "force": force})
+    return {"status": "enqueued", "release_key": release_key, "force": force}
 
 
 @router.get("/api/tickets/{key}/demo")
