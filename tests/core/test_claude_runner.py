@@ -15,6 +15,8 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 import core.job_logs as job_logs  # noqa: E402
+import core.llm as llm  # noqa: E402
+import core.state as state  # noqa: E402
 from core.claude_runner import run_claude_code  # noqa: E402
 
 
@@ -181,3 +183,31 @@ def test_run_claude_code_preserves_unicode_in_text_deltas(tmp_path, monkeypatch)
 
     assert out == "héllo — 世界"
     assert log_path.read_bytes() == "héllo — 世界".encode("utf-8")
+
+
+def test_run_claude_code_honors_instance_claude_config_dir(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    env_capture = tmp_path / "env.txt"
+    events_file = tmp_path / "events.ndjson"
+    events_file.write_text(_text_delta("ok") + "\n")
+    _install_fake_claude(
+        bin_dir,
+        f'printf "%s" "$CLAUDE_CONFIG_DIR" > "{env_capture}"\ncat "{events_file}"',
+    )
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+
+    prev_default = state._default_instance_key
+    llm._providers.pop("aimyable", None)
+    state._default_instance_key = "aimyable"
+    llm.configure({
+        "job": {"key": "aimyable"},
+        "llm": {"provider": "claude", "claude": {"config_dir": "~/.aimyable-claude"}},
+    })
+    try:
+        out = run_claude_code("hi", cwd=tmp_path, timeout=5)
+    finally:
+        state._default_instance_key = prev_default
+        llm._providers.pop("aimyable", None)
+
+    assert out == "ok"
+    assert env_capture.read_text() == str(Path("~/.aimyable-claude").expanduser())

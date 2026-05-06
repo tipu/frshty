@@ -415,24 +415,25 @@ def _fetch_worklogs(config: dict, start_date: date, end_date: date) -> dict:
     jql = f"worklogAuthor = currentUser() AND worklogDate >= '{start_date}' AND worklogDate <= '{end_date}'"
 
     with httpx.Client(auth=(user, token), timeout=30) as client:
-        start_at = 0
+        next_page_token = None
         while True:
             params = {
                 "jql": jql,
                 "maxResults": 50,
-                "startAt": start_at,
-                "fields": "key,summary,worklog"
+                "fields": "summary,worklog",
             }
-            resp = client.get(f"{base_url}/rest/api/3/search", params=params)
+            if next_page_token:
+                params["nextPageToken"] = next_page_token
+            resp = client.get(f"{base_url}/rest/api/3/search/jql", params=params)
             if resp.status_code != 200:
                 log.emit("fetch_worklogs_failed", f"Jira search failed: {resp.status_code} {resp.text}")
                 break
-            
+
             data = resp.json()
             issues = data.get("issues", [])
             if not issues:
                 break
-                
+
             for issue in issues:
                 key = issue["key"]
                 summary = issue["fields"]["summary"]
@@ -474,8 +475,8 @@ def _fetch_worklogs(config: dict, start_date: date, end_date: date) -> dict:
                         "worklog_id": str(wl.get("id", "")),
                     })
             
-            start_at += len(issues)
-            if start_at >= data.get("total", 0):
+            next_page_token = data.get("nextPageToken")
+            if data.get("isLast", True) or not next_page_token:
                 break
     return result
 

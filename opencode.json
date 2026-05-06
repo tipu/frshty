@@ -1,0 +1,26 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "*": {
+      "*": "allow"
+    }
+  },
+  "provider": {
+    "openrouter": {
+      "models": {
+        "deepseek/deepseek-v4-flash": {
+          "options": {
+            "extraBody": {
+              "provider": {
+                "order": [
+                  "AtlasCloud"
+                ],
+                "allow_fallbacks": false
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

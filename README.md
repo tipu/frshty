@@ -152,6 +152,19 @@ Three headless primitives:
 
 No tmux, no capture_pane polling. Tasks call these synchronously, wait for the subprocess to return, and postconditions assert the artifact. Claude's keychain/credentials come from whichever process started frshty (launchd on macOS, docker container env on Linux), which is why SSH-spawned ad-hoc invocations won't work for auth — enqueue a task instead.
 
+If an org uses a separate Claude Code account, configure that per instance under `[llm.claude]` instead of relying on a shell alias. Example:
+
+```toml
+[llm]
+provider = "claude"
+
+[llm.claude]
+config_dir = "~/.aimyable-claude"
+args = ["--dangerously-skip-permissions"]
+```
+
+This is the config-file equivalent of an alias like `cla="CLAUDE_CONFIG_DIR=~/.aimyable-claude claude --dangerously-skip-permissions"`. frshty invokes Claude via `subprocess` directly, so aliases from `.zshrc` are not loaded.
+
 ### Platform abstraction (`features/platforms.py`)
 
 `BitbucketPlatform` and `GitHubPlatform` implement a common interface: `list_review_prs`, `get_pr_info`, `get_pr_diff`, `get_pr_comments`, `post_pr_comment`, `get_pr_checks`, `get_failed_logs`, `create_pr`, `push_branch`, `merge_base`, `merge_pr`, `resolve_comment`. Platform choice comes from `job.platform`. Bitbucket uses the REST API with basic auth; GitHub uses the `gh` CLI.

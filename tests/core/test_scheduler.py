@@ -18,6 +18,7 @@ def _seed_oneshot(key: str, action: str, run_at: datetime, meta: dict | None = N
 
 class TestSchedule:
     def test_writes_scheduler_row(self, tmp_state):
+        state.use(tmp_state.name)
         run_at = datetime(2026, 4, 20, 10, 0, tzinfo=timezone.utc)
         _seed_oneshot("PROJ-1", "create_pr", run_at, meta={"slug": "s"})
 
@@ -32,6 +33,7 @@ class TestSchedule:
         assert data["meta"] == {"slug": "s"}
 
     def test_schedule_not_visible_through_kv_state_load(self, tmp_state):
+        state.use(tmp_state.name)
         run_at = datetime(2026, 4, 20, 10, 0, tzinfo=timezone.utc)
         _seed_oneshot("PROJ-1", "create_pr", run_at)
         assert state.load("scheduler") == {}, \
@@ -40,6 +42,7 @@ class TestSchedule:
 
 class TestCheckDue:
     def test_executes_due_oneshot(self, tmp_state):
+        state.use(tmp_state.name)
         past = datetime(2020, 1, 1, tzinfo=timezone.utc)
         _seed_oneshot("T-1", "create_pr", past)
 
@@ -55,6 +58,7 @@ class TestCheckDue:
         assert leftover is None, "fired oneshot row must be deleted"
 
     def test_skips_future_oneshot(self, tmp_state):
+        state.use(tmp_state.name)
         future = datetime(2099, 1, 1, tzinfo=timezone.utc)
         _seed_oneshot("T-1", "create_pr", future)
 
@@ -70,6 +74,7 @@ class TestCheckDue:
         assert row is not None, "future oneshot must remain"
 
     def test_check_due_ignores_recurring_even_if_past(self, tmp_state):
+        state.use(tmp_state.name)
         past = datetime(2020, 1, 1, tzinfo=timezone.utc)
         scheduler.upsert_recurring(tmp_state.name, "beat-1", "poll", "daily_19pst", past)
 
@@ -80,6 +85,7 @@ class TestCheckDue:
         mock_exec.assert_not_called()
 
     def test_empty_scheduler(self, tmp_state):
+        state.use(tmp_state.name)
         scheduler.check_due({})
 
 
@@ -162,6 +168,7 @@ class TestRecurring:
 
 class TestListAll:
     def test_list_all_ordered_by_run_at(self, tmp_state):
+        state.use(tmp_state.name)
         early = datetime(2026, 5, 1, 10, tzinfo=timezone.utc)
         late = datetime(2026, 6, 1, 10, tzinfo=timezone.utc)
         _seed_oneshot("late-one", "create_pr", late)
