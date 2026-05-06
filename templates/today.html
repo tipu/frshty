@@ -11,21 +11,25 @@
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <style>
 .badge { display: inline-block; padding: 1px 8px; border-radius: 4px; font-size: 11px; }
-.badge-count-zero { background: #14532d; color: #86efac; }
-.badge-count-low { background: #1e3a5f; color: #93c5fd; }
-.badge-count-mid { background: #713f12; color: #fde047; }
-.badge-count-high { background: #7f1d1d; color: #fca5a5; }
+.state-pill { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; background: #1e293b; color: #cbd5e1; font-family: ui-monospace, monospace; }
+.state-pill.target { background: #14532d; color: #86efac; }
+.state-pill.blocked { background: #7f1d1d; color: #fca5a5; }
+.state-pill.done { background: #1e3a5f; color: #93c5fd; }
+.goal-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid #1f2937; }
+.goal-row:last-child { border-bottom: none; }
+.goal-row.completed { opacity: 0.5; }
+.goal-key { font-family: ui-monospace, monospace; color: #93c5fd; min-width: 80px; }
+.q-card { background: #1f1408; border: 1px solid #7c3a08; padding: 12px; border-radius: 6px; margin-bottom: 10px; }
+.q-card .kind { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: #fbbf24; }
+.kbd-input { background: #0f172a; border: 1px solid #334155; color: #e2e8f0; padding: 4px 8px; border-radius: 4px; font-family: ui-monospace, monospace; }
+details.context { margin-top: 18px; }
+details.context summary { cursor: pointer; color: #6b7280; font-size: 12px; }
+.steer-btn { background: #1e293b; color: #cbd5e1; padding: 2px 8px; border-radius: 3px; font-size: 11px; border: 1px solid #334155; }
+.steer-btn:hover { background: #334155; }
 .md-content h1 { font-size: 1.4em; font-weight: bold; margin: 16px 0 8px; color: #f0f0f0; }
 .md-content h2 { font-size: 1.15em; font-weight: bold; margin: 18px 0 6px; color: #d0d0d0; border-bottom: 1px solid #2a2a2a; padding-bottom: 4px; }
-.md-content h3 { font-size: 1.02em; font-weight: bold; margin: 12px 0 4px; color: #c0c0c0; }
 .md-content p { margin: 6px 0; line-height: 1.5; }
 .md-content ul, .md-content ol { margin: 6px 0; padding-left: 22px; }
-.md-content li { margin: 3px 0; line-height: 1.45; }
-.md-content code { background: #1a1a2a; padding: 1px 5px; border-radius: 3px; font-size: 0.9em; }
-.md-content pre { background: #1a1a2a; padding: 12px; border-radius: 6px; overflow-x: auto; margin: 8px 0; }
-.md-content strong { color: #fef9c3; }
-.md-content a { color: #60a5fa; text-decoration: underline; }
-.policy-stale { background: #4a3a0a; color: #fbbf24; }
 </style>
 </head>
 <body class="p-4 max-w-5xl mx-auto">
@@ -37,37 +41,88 @@
         <h1 class="text-lg font-bold">Today</h1>
         <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700">{{ instanceName }}</span>
     </div>
-    <frshty-nav :features="features" />
+    <frshty-nav :features="features"></frshty-nav>
     <div class="ml-auto flex items-center gap-3">
-        <span v-if="generatedAt" class="text-xs text-gray-500" :title="generatedAt">last digest {{ fmtRelative(generatedAt) }}</span>
-        <button @click="runNow" :disabled="running"
+        <span v-if="generatedAt" class="text-xs text-gray-500" :title="generatedAt">plan {{ fmtRelative(generatedAt) }}</span>
+        <button @click="replan" :disabled="busy"
                 class="bg-green-700 hover:bg-green-600 disabled:bg-gray-700 text-white text-xs px-3 py-1 rounded">
-            {{ running ? 'running…' : 'run now' }}
+            {{ busy ? 'working…' : 'replan' }}
         </button>
+        <button v-if="!paused" @click="steer('pause')" class="steer-btn">pause</button>
+        <button v-else @click="steer('resume')" class="steer-btn">resume</button>
     </div>
 </header>
 
-<div v-if="empty" class="card p-6">
-    <div class="text-sm text-gray-400">No digest yet for <code class="bg-gray-800 px-1 rounded">{{ instanceName }}</code>. Either:</div>
-    <ul class="text-sm text-gray-400 list-disc ml-6 mt-2">
-        <li>The morning cron hasn't fired yet (next: 7am local).</li>
-        <li><code class="bg-gray-800 px-1 rounded">[manager].enabled</code> isn't set in this instance's config.</li>
-        <li>Click <strong>run now</strong> above to trigger one synchronously.</li>
-    </ul>
-</div>
-
-<div v-else>
-    <div class="flex items-center gap-2 mb-3 flex-wrap">
-        <template v-for="(count, key) in counts" :key="key">
-            <span class="badge" :class="badgeClass(count)" :title="key">
-                {{ formatBucketLabel(key) }}: {{ count }}
-            </span>
-        </template>
-        <span v-if="policyStale" class="badge policy-stale" title="priorities.md changed since last digest — run now to refresh">⚠ policy stale</span>
+<section v-if="questions.length" class="mb-4">
+    <div class="text-xs text-yellow-400 mb-2 uppercase tracking-wide">Questions ({{ questions.length }})</div>
+    <div v-for="q in questions" :key="q.job_id" class="q-card">
+        <div class="flex items-baseline gap-3 mb-2">
+            <span class="kind">{{ q.kind }}</span>
+            <span class="state-pill" v-if="q.ticket_key">{{ q.ticket_key }}</span>
+            <span class="text-xs text-gray-500 ml-auto">{{ fmtRelative(q.asked_at) }}</span>
+        </div>
+        <div class="text-sm text-gray-200 mb-3">{{ q.question || '(no question text)' }}</div>
+        <form @submit.prevent="answer(q)" class="flex gap-2 items-center">
+            <template v-if="q.expected_input === 'yes_no'">
+                <button type="button" @click="answer(q, 'yes')" class="steer-btn">yes</button>
+                <button type="button" @click="answer(q, 'no')" class="steer-btn">no</button>
+            </template>
+            <template v-else>
+                <input v-model="answers[q.job_id]"
+                       :placeholder="q.expected_input === 'typed_confirmation' ? 'type to confirm' : 'enter answer'"
+                       class="kbd-input flex-1" autocomplete="off" />
+                <button type="submit" class="bg-blue-700 hover:bg-blue-600 text-white text-xs px-3 py-1 rounded">submit</button>
+            </template>
+        </form>
     </div>
+</section>
 
-    <div class="card p-6 md-content" v-html="renderedBody"></div>
-</div>
+<section v-if="planEmpty" class="card p-6 mb-4">
+    <div class="text-sm text-gray-400">No plan yet for <code class="bg-gray-800 px-1 rounded">{{ instanceName }}</code>.</div>
+    <ul class="text-sm text-gray-400 list-disc ml-6 mt-2">
+        <li>The morning plan task hasn't fired yet (default: 8am local).</li>
+        <li><code class="bg-gray-800 px-1 rounded">[today_agent].enabled</code> can be set to false to disable.</li>
+        <li>Click <strong>replan</strong> above to build one synchronously.</li>
+    </ul>
+</section>
+
+<section v-else class="card mb-4">
+    <div class="px-4 py-2 text-xs uppercase tracking-wide text-gray-500 border-b border-gray-800 flex items-center justify-between">
+        <span>Plan ({{ goals.length }} goals)</span>
+        <span v-if="paused" class="text-yellow-400">PAUSED</span>
+    </div>
+    <div v-for="g in goals" :key="g.ticket_key" class="goal-row" :class="{ completed: g.completed }">
+        <a :href="`/tickets/${g.ticket_key}`" class="goal-key">{{ g.ticket_key }}</a>
+        <span class="state-pill">{{ g.current_state || '?' }}</span>
+        <span class="text-xs text-gray-500">→</span>
+        <span class="state-pill" :class="{ target: g.completed }">{{ g.target_state }}</span>
+        <span class="text-sm text-gray-300 flex-1 truncate" :title="g.rationale || g.summary">{{ g.rationale || g.summary }}</span>
+        <span class="text-xs text-gray-600">{{ g.source_bucket }}</span>
+        <button @click="skip(g)" class="steer-btn" title="skip today">skip</button>
+    </div>
+    <div v-if="!goals.length" class="px-4 py-6 text-sm text-gray-500 text-center">
+        No active goals. The day's work may be done — or the planner found nothing to focus on.
+    </div>
+</section>
+
+<section v-if="completed.length" class="mb-4">
+    <details>
+        <summary class="text-xs text-gray-500 cursor-pointer">Completed today ({{ completed.length }})</summary>
+        <div class="card mt-2">
+            <div v-for="g in completed" :key="g.ticket_key" class="goal-row completed">
+                <span class="goal-key">{{ g.ticket_key }}</span>
+                <span class="state-pill done">{{ g.current_state || g.target_state }}</span>
+                <span class="text-sm text-gray-400 flex-1 truncate">{{ g.rationale || g.summary }}</span>
+            </div>
+        </div>
+    </details>
+</section>
+
+<details class="context">
+    <summary>Manager digest (legacy view)</summary>
+    <div v-if="bodyMd" class="card p-6 md-content mt-2" v-html="renderedBody"></div>
+    <div v-else class="text-sm text-gray-500 mt-2">No digest available.</div>
+</details>
 
 </div>
 
@@ -76,34 +131,18 @@ const { createApp, ref, computed, onMounted } = Vue;
 
 frshtyApp({
     setup() {
-        const empty = ref(true);
+        const goals = ref([]);
+        const completed = ref([]);
+        const questions = ref([]);
+        const answers = ref({});
         const generatedAt = ref(null);
-        const counts = ref({});
-        const bodyMd = ref('');
-        const policyStale = ref(false);
+        const planEmpty = ref(true);
+        const paused = ref(false);
         const instanceName = ref('');
-        const running = ref(false);
+        const busy = ref(false);
+        const bodyMd = ref('');
 
         const renderedBody = computed(() => bodyMd.value ? marked.parse(bodyMd.value) : '');
-
-        const BUCKET_LABELS = {
-            stale_own_prs: 'Stale PRs',
-            stale_tickets: 'Stale tickets',
-            stuck_in_review: 'Stuck in_review',
-            regressions_recent: 'Regressions',
-            pending_approvals_stuck: 'Pending approval stuck',
-        };
-
-        function formatBucketLabel(key) {
-            return BUCKET_LABELS[key] || key;
-        }
-
-        function badgeClass(count) {
-            if (!count) return 'badge-count-zero';
-            if (count <= 2) return 'badge-count-low';
-            if (count <= 6) return 'badge-count-mid';
-            return 'badge-count-high';
-        }
 
         function fmtRelative(iso) {
             if (!iso) return '';
@@ -120,48 +159,89 @@ frshtyApp({
 
         async function load() {
             try {
-                const [latestResp, statusResp, cfgResp] = await Promise.all([
-                    fetch('/api/manager/latest'),
-                    fetch('/api/manager/status'),
+                const [planResp, qResp, cfgResp, latestResp] = await Promise.all([
+                    fetch('/api/today/plan'),
+                    fetch('/api/today/questions'),
                     fetch('/api/config'),
+                    fetch('/api/manager/latest'),
                 ]);
-                const latest = await latestResp.json();
-                if (latest.empty) {
-                    empty.value = true;
-                } else {
-                    empty.value = false;
-                    generatedAt.value = latest.generated_at;
-                    bodyMd.value = latest.body_md || '';
-                    counts.value = latest.candidate_counts || {};
-                }
-                if (statusResp.ok) {
-                    const s = await statusResp.json();
-                    policyStale.value = !!s.policy_stale;
-                }
+                const plan = await planResp.json();
+                planEmpty.value = !!plan.empty;
+                goals.value = plan.goals || [];
+                completed.value = plan.completed || [];
+                generatedAt.value = plan.generated_at;
+                paused.value = !!plan.paused;
+                const q = await qResp.json();
+                questions.value = q.questions || [];
                 const cfg = await cfgResp.json();
                 instanceName.value = cfg.job?.key || '';
+                if (latestResp.ok) {
+                    const latest = await latestResp.json();
+                    bodyMd.value = (latest && !latest.empty) ? (latest.body_md || '') : '';
+                }
             } catch (e) { console.error('load failed', e); }
         }
 
-        async function runNow() {
-            running.value = true;
+        async function replan() {
+            busy.value = true;
             try {
-                const r = await fetch('/api/manager/run-now', {method: 'POST'});
+                const r = await fetch('/api/today/steer', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({action: 'replan'}),
+                });
                 if (!r.ok) {
                     const err = await r.json().catch(() => ({}));
-                    alert('Run failed: ' + (err.error || r.statusText));
+                    alert('Replan failed: ' + (err.error || r.statusText));
                 }
                 await load();
-            } finally { running.value = false; }
+            } finally { busy.value = false; }
+        }
+
+        async function steer(action) {
+            await fetch('/api/today/steer', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({action}),
+            });
+            await load();
+        }
+
+        async function skip(g) {
+            const reason = prompt(`Why skip ${g.ticket_key} today?`, '') || '';
+            await fetch('/api/today/steer', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({action: 'skip', ticket_key: g.ticket_key, reason}),
+            });
+            await load();
+        }
+
+        async function answer(q, override) {
+            const ans = override !== undefined ? override : (answers.value[q.job_id] || '');
+            if (!ans && q.expected_input !== 'yes_no') return;
+            const r = await fetch('/api/today/answer', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({job_id: q.job_id, answer: ans}),
+            });
+            if (!r.ok) {
+                const err = await r.json().catch(() => ({}));
+                alert('Answer failed: ' + (err.error || r.statusText));
+                return;
+            }
+            delete answers.value[q.job_id];
+            await load();
         }
 
         onMounted(() => {
             load();
-            setInterval(load, 30000);
+            setInterval(load, 10000);
         });
 
-        return { empty, generatedAt, counts, policyStale, instanceName, running,
-                 renderedBody, formatBucketLabel, badgeClass, fmtRelative, runNow };
+        return { goals, completed, questions, answers, generatedAt,
+                 planEmpty, paused, instanceName, busy, bodyMd, renderedBody,
+                 fmtRelative, replan, steer, skip, answer };
     }
 }).mount('#app');
 </script>

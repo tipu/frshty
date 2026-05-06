@@ -1819,6 +1819,168 @@ def api_manager_status():
     }
 
 
+def _today_blob() -> dict:
+    import core.state as state
+    from core.tasks.autonomy import KV_KEY
+    return state.load(KV_KEY) or {}
+
+
+def _today_save(blob: dict) -> None:
+    import core.state as state
+    from core.tasks.autonomy import KV_KEY
+    state.save(KV_KEY, blob)
+
+
+def _ticket_status_safe(key: str) -> str | None:
+    import core.state as state
+    try:
+        t = state.load_ticket(key)
+    except Exception:
+        return None
+    return (t or {}).get("status") if t else None
+
+
+@app.get("/api/today/plan")
+def api_today_plan():
+    instance_key = _config.get("job", {}).get("key", "")
+    if not instance_key:
+        return {"empty": True}
+    blob = _today_blob()
+    plan = blob.get("plan") or {}
+    goals = plan.get("goals") or []
+    skipped_keys = set(blob.get("skipped") or [])
+    enriched = []
+    for g in goals:
+        tk = g.get("ticket_key")
+        if not tk or tk in skipped_keys:
+            continue
+        cur = _ticket_status_safe(tk)
+        enriched.append({**g, "current_state": cur,
+                         "completed": cur == g.get("target_state")})
+    return {
+        "empty": not enriched,
+        "instance_key": instance_key,
+        "date": plan.get("date"),
+        "generated_at": plan.get("generated_at"),
+        "goals": enriched,
+        "completed": plan.get("completed") or [],
+        "paused": bool(blob.get("paused")),
+        "skipped_keys": sorted(skipped_keys),
+        "bucket_counts": plan.get("bucket_counts") or {},
+    }
+
+
+@app.get("/api/today/questions")
+def api_today_questions():
+    import core.db as db
+    instance_key = _config.get("job", {}).get("key", "")
+    if not instance_key:
+        return {"questions": []}
+    rows = db.query_all(
+        "SELECT id, ticket_key, task, payload, response, finished_at"
+        " FROM jobs WHERE instance_key=? AND status='blocked'"
+        " ORDER BY finished_at DESC LIMIT 50",
+        (instance_key,),
+    )
+    out: list[dict] = []
+    for r in rows:
+        try:
+            resp = json.loads(r.get("response") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            resp = {}
+        artifacts = resp.get("artifacts") or {}
+        out.append({
+            "job_id": r["id"],
+            "ticket_key": r.get("ticket_key"),
+            "task": r.get("task"),
+            "question": resp.get("reason") or "",
+            "kind": artifacts.get("kind") or "ambiguity_blocking",
+            "expected_input": artifacts.get("expected_input") or "text",
+            "asked_at": r.get("finished_at"),
+        })
+    return {"questions": out}
+
+
+@app.post("/api/today/answer")
+async def api_today_answer(request: Request):
+    import core.db as db
+    import core.queue as q
+    import core.log as log
+    body = await request.json()
+    job_id = body.get("job_id")
+    answer = body.get("answer", "")
+    if not job_id:
+        return JSONResponse({"error": "job_id required"}, status_code=400)
+    row = db.query_one(
+        "SELECT id, instance_key, ticket_key, task, payload, response, status"
+        " FROM jobs WHERE id=?",
+        (job_id,),
+    )
+    if not row:
+        return JSONResponse({"error": "job not found"}, status_code=404)
+    if row.get("status") != "blocked":
+        return JSONResponse({"error": f"job not blocked (status={row.get('status')})"},
+                            status_code=409)
+    try:
+        resp = json.loads(row.get("response") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        resp = {}
+    artifacts = resp.get("artifacts") or {}
+    deferred = artifacts.get("deferred_payload") or {}
+    try:
+        original_payload = json.loads(row.get("payload") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        original_payload = {}
+    new_payload = {**original_payload, **deferred,
+                    "_resume_from_job": job_id, "_answer": answer}
+    db.execute(
+        "UPDATE jobs SET status='answered', response=? WHERE id=?",
+        (json.dumps({**resp, "answered_with": "<redacted>"}), job_id),
+    )
+    new_id = q.enqueue_job(row["instance_key"], row["task"], new_payload,
+                           ticket_key=row.get("ticket_key"))
+    log.emit("today_answered",
+             f"answered job {job_id} → re-enqueued as {new_id}",
+             meta={"ticket": row.get("ticket_key"), "task": row.get("task")})
+    return {"ok": True, "new_job_id": new_id}
+
+
+@app.post("/api/today/steer")
+async def api_today_steer(request: Request):
+    body = await request.json()
+    action = body.get("action") or ""
+    blob = _today_blob()
+    if action == "pause":
+        blob["paused"] = True
+    elif action == "resume":
+        blob["paused"] = False
+    elif action == "skip":
+        ticket = body.get("ticket_key")
+        reason = body.get("reason") or ""
+        if not ticket:
+            return JSONResponse({"error": "ticket_key required"}, status_code=400)
+        skipped = list(blob.get("skipped") or [])
+        if ticket not in skipped:
+            skipped.append(ticket)
+        blob["skipped"] = skipped
+        reasons = blob.get("skip_reasons") or {}
+        reasons[ticket] = reason
+        blob["skip_reasons"] = reasons
+    elif action == "replan":
+        instance_key = _config.get("job", {}).get("key", "")
+        if not instance_key:
+            return JSONResponse({"error": "no instance"}, status_code=400)
+        from manager.planner import build_plan
+        plan = build_plan(instance_key, _config,
+                          use_llm=(_config.get("today_agent") or {}).get("use_llm", True))
+        blob["plan"] = plan
+        blob["paused"] = False
+    else:
+        return JSONResponse({"error": f"unknown action: {action}"}, status_code=400)
+    _today_save(blob)
+    return {"ok": True}
+
+
 @app.get("/api/tickets/{key}/jobs")
 def api_ticket_jobs(key: str, limit: int = 100):
     if not _events_enabled():
