@@ -22,6 +22,9 @@ class MockPlatform:
         return self.ticket_comments
 
 
+_counter = 0
+
+
 @pytest.fixture
 def instance_key():
     return "test_instance"
@@ -34,7 +37,9 @@ def resource_type():
 
 @pytest.fixture
 def resource_id():
-    return "backend/123"
+    global _counter
+    _counter += 1
+    return f"backend/{_counter}"
 
 
 class TestDetectNewComments:
@@ -79,8 +84,8 @@ class TestDetectNewComments:
             ]
         )
         comments.fetch_and_detect_comments(instance_key, platform1, resource_type, resource_id)
-        for c in ["c1", "c2"]:
-            comments.mark_comment_processing(instance_key, resource_type, resource_id, c, "2026-04-28T10:00:00Z")
+        for c, ts in [("c1", "2026-04-28T10:00:00Z"), ("c2", "2026-04-28T11:00:00Z")]:
+            comments.mark_comment_processing(instance_key, resource_type, resource_id, c, ts)
             comments.mark_comment_processed(instance_key, resource_type, resource_id, c)
 
         # Now add a third comment
@@ -236,8 +241,9 @@ class TestDeletedComments:
         comments.mark_comment_deleted(instance_key, resource_type, resource_id, "c1")
 
         row = db.query_one(
-            "SELECT state, processed_at FROM comment_state WHERE comment_id = ?",
-            ("c1",),
+            "SELECT state, processed_at FROM comment_state"
+            " WHERE instance_key=? AND resource_type=? AND resource_id=? AND comment_id=?",
+            (instance_key, resource_type, resource_id, "c1"),
         )
         assert row["state"] == "deleted"
         assert row["processed_at"] is not None
@@ -276,8 +282,9 @@ class TestErrorHandling:
         comments.mark_comment_error(instance_key, resource_type, resource_id, "c1", "Test error 1")
 
         row = db.query_one(
-            "SELECT error_count, last_error, state FROM comment_state WHERE comment_id = ?",
-            ("c1",),
+            "SELECT error_count, last_error, state FROM comment_state"
+            " WHERE instance_key=? AND resource_type=? AND resource_id=? AND comment_id=?",
+            (instance_key, resource_type, resource_id, "c1"),
         )
         assert row["error_count"] == 1
         assert row["last_error"] == "Test error 1"
@@ -290,8 +297,9 @@ class TestErrorHandling:
         comments.mark_comment_error(instance_key, resource_type, resource_id, "c1", "Error 2")
 
         row = db.query_one(
-            "SELECT error_count FROM comment_state WHERE comment_id = ?",
-            ("c1",),
+            "SELECT error_count FROM comment_state"
+            " WHERE instance_key=? AND resource_type=? AND resource_id=? AND comment_id=?",
+            (instance_key, resource_type, resource_id, "c1"),
         )
         assert row["error_count"] == 2
 
@@ -303,8 +311,9 @@ class TestErrorHandling:
         comments.mark_comment_processed(instance_key, resource_type, resource_id, "c1")
 
         row = db.query_one(
-            "SELECT error_count, last_error FROM comment_state WHERE comment_id = ?",
-            ("c1",),
+            "SELECT error_count, last_error FROM comment_state"
+            " WHERE instance_key=? AND resource_type=? AND resource_id=? AND comment_id=?",
+            (instance_key, resource_type, resource_id, "c1"),
         )
         assert row["error_count"] == 0
         assert row["last_error"] is None
@@ -385,9 +394,11 @@ class TestTimestampNormalization:
         )
 
         comments.fetch_and_detect_comments(instance_key, platform, resource_type, resource_id)
+        comments.mark_comment_processing(instance_key, resource_type, resource_id, "c1", "2026-04-28T15:00:00Z")
         row = db.query_one(
-            "SELECT comment_edited_at FROM comment_state WHERE comment_id = ?",
-            ("c1",),
+            "SELECT comment_edited_at FROM comment_state"
+            " WHERE instance_key=? AND resource_type=? AND resource_id=? AND comment_id=?",
+            (instance_key, resource_type, resource_id, "c1"),
         )
         # Should store updated_at, not created_at
         assert row["comment_edited_at"] == "2026-04-28T15:00:00Z"
@@ -407,9 +418,11 @@ class TestTimestampNormalization:
         )
 
         comments.fetch_and_detect_comments(instance_key, platform, resource_type, resource_id)
+        comments.mark_comment_processing(instance_key, resource_type, resource_id, "c1", "2026-04-28T10:00:00Z")
         row = db.query_one(
-            "SELECT comment_edited_at FROM comment_state WHERE comment_id = ?",
-            ("c1",),
+            "SELECT comment_edited_at FROM comment_state"
+            " WHERE instance_key=? AND resource_type=? AND resource_id=? AND comment_id=?",
+            (instance_key, resource_type, resource_id, "c1"),
         )
         # Should store created_at
         assert row["comment_edited_at"] == "2026-04-28T10:00:00Z"
