@@ -1,3 +1,4 @@
+import os
 from contextvars import ContextVar
 from pathlib import Path
 
@@ -56,3 +57,14 @@ def events_enabled() -> bool:
         return _rt.instances() is not None
     except Exception:
         return False
+
+
+def ensure_path() -> None:
+    extra = [
+        os.path.expanduser("~/.local/bin"),
+        os.path.expanduser("~/.local/node/bin"),
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+    ]
+    current = os.environ.get("PATH", "/usr/bin:/bin")
+    os.environ["PATH"] = ":".join(extra) + ":" + current
