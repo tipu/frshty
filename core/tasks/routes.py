@@ -46,7 +46,14 @@ def _ui_notes(event: dict, registries: dict) -> list[dict]:
              "ticket_key": p.get("ticket_key")}]
 
 
+def _pm_findings_written(event: dict, registries: dict) -> list[dict]:
+    p = event.get("payload", {})
+    return [{"instance_key": event["instance_key"], "task": "address_pm_findings",
+             "payload": {}, "ticket_key": p.get("ticket_key")}]
+
+
 register(kind_is("cron_tick"), _cron_routes)
 register(kind_is("ui_retry"), _ui_retry)
 register(kind_is("ui_set_state"), _ui_set_state)
 register(kind_is("ui_notes"), _ui_notes)
+register(kind_is("pm_findings_written"), _pm_findings_written)

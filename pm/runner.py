@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 import core.db as db
 import core.log as log
+import core.queue as q
 from core.claude_runner import extract_json, run_haiku
 from pm.prompts import PRE_APPROVAL
 
@@ -83,6 +84,17 @@ def run_pre_approval(instance_key: str, ticket_key: str, ticket_data: dict) -> d
         f"[{instance_key}] {ticket_key} pre-approval: {verdict} ({len(findings)} findings)",
         meta={"ticket": ticket_key, "verdict": verdict, "findings_count": len(findings)},
     )
+    if findings:
+        q.emit_event(
+            source="pm",
+            kind="pm_findings_written",
+            payload={
+                "ticket_key": ticket_key,
+                "verdict": verdict,
+                "findings_count": len(findings),
+            },
+            instance_key=instance_key,
+        )
     return {
         "instance_key": instance_key,
         "ticket_key": ticket_key,
@@ -284,3 +296,25 @@ def findings_count(instance_key: str, ticket_key: str) -> int:
         return len(f) if isinstance(f, list) else 0
     except (json.JSONDecodeError, ValueError):
         return 0
+
+
+def latest_pre_approval_review(instance_key: str, ticket_key: str) -> dict | None:
+    rows = db.query_all(
+        "SELECT id, verdict, findings, created_at FROM pm_review"
+        " WHERE instance_key=? AND ticket_key=? AND checkpoint_type='pre_approval'"
+        " ORDER BY created_at DESC LIMIT 1",
+        (instance_key, ticket_key),
+    )
+    if not rows:
+        return None
+    r = rows[0]
+    try:
+        findings = json.loads(r["findings"]) if r["findings"] else []
+    except (json.JSONDecodeError, ValueError):
+        findings = []
+    return {
+        "id": r["id"],
+        "verdict": r["verdict"],
+        "findings": findings,
+        "created_at": r["created_at"],
+    }
