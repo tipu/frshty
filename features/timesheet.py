@@ -215,15 +215,15 @@ def build_timesheet(config: dict, start: str = "", end: str = "", force: bool = 
     if not end:
         end = today.isoformat()
 
+    start_date = date.fromisoformat(start)
+    end_date = date.fromisoformat(end)
+    all_days = _date_range(start, end)
+
     if force:
         # Clear analysis for this specific range and days in range to force re-fetch
         _analysis_cache.pop(f"{start}|{end}", None)
         for d in all_days:
             _day_cache.pop(d, None)
-
-    start_date = date.fromisoformat(start)
-    end_date = date.fromisoformat(end)
-    all_days = _date_range(start, end)
 
     cached_days = {d: _day_cache[d] for d in all_days if d in _day_cache}
     need_fetch = len(cached_days) < len(all_days)
