@@ -115,6 +115,9 @@ def run_sonnet(prompt: str, worktree: Path | None = None, tools: list[str] | Non
             return None
         output = result.stdout.decode() if result.stdout else ""
         if result.returncode != 0 or not result.stdout:
+            err = result.stderr.decode() if result.stderr else ""
+            if err:
+                output = output + "\n[stderr]\n" + err
             _record_end(inv_id, t0, "error", result.returncode, output)
             return None
         _record_end(inv_id, t0, "success", result.returncode, output)
@@ -136,6 +139,9 @@ def run_haiku(prompt: str, timeout: int = 120) -> str | None:
             return None
         output = result.stdout.decode().strip() if result.stdout else ""
         if result.returncode != 0 or not result.stdout:
+            err = result.stderr.decode() if result.stderr else ""
+            if err:
+                output = output + "\n[stderr]\n" + err
             _record_end(inv_id, t0, "error", result.returncode, output)
             return None
         _record_end(inv_id, t0, "success", result.returncode, output)
@@ -199,6 +205,7 @@ def run_claude_code(prompt: str, cwd: Path, timeout: int = 600) -> str | None:
             except OSError as e:
                 log.emit("job_pid_write_failed", f"Failed to write pid file: {e}")
         parts: list[str] = []
+        non_json: list[str] = []
 
         def _drain():
             assert proc.stdout is not None
@@ -206,6 +213,14 @@ def run_claude_code(prompt: str, cwd: Path, timeout: int = 600) -> str | None:
                 try:
                     evt = json.loads(line)
                 except (json.JSONDecodeError, ValueError):
+                    stripped = line.rstrip()
+                    if stripped:
+                        non_json.append(stripped)
+                        if log_fh is not None:
+                            try:
+                                log_fh.write((stripped + "\n").encode("utf-8"))
+                            except OSError as e:
+                                log.emit("job_log_write_failed", f"Failed to write to job log: {e}")
                     continue
                 text = _extract_text(evt)
                 if not text:
@@ -253,9 +268,13 @@ def run_claude_code(prompt: str, cwd: Path, timeout: int = 600) -> str | None:
 
     output = "".join(parts)
     if timed_out:
+        if non_json:
+            output = output + "\n[non-json output]\n" + "\n".join(non_json[-50:])
         _record_end(inv_id, t0, "timeout", None, output)
         return None
     if proc.returncode != 0:
+        if non_json:
+            output = output + "\n[non-json output]\n" + "\n".join(non_json[-50:])
         _record_end(inv_id, t0, "error", proc.returncode, output)
         return None
     _record_end(inv_id, t0, "success", proc.returncode, output)
