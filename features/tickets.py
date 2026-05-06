@@ -26,9 +26,20 @@ def _label(key: str, ts: dict) -> str:
 _VERDICT_RE = re.compile(r"^VERDICT:\s*(PASS|FAIL)\b", re.MULTILINE | re.IGNORECASE)
 
 
+MAX_STAGE_RETRIES = 5
+
+
 def _enqueue_stage(instance_key: str, ticket_key: str, task_name: str) -> None:
-    existing = q.jobs_for_ticket(instance_key, ticket_key, limit=20)
+    existing = q.jobs_for_ticket(instance_key, ticket_key, limit=max(20, MAX_STAGE_RETRIES + 1))
     if any(j["task"] == task_name and j["status"] in ("queued", "running") for j in existing):
+        return
+    consecutive = 0
+    for j in existing:
+        if j["task"] == task_name and j["status"] == "failed":
+            consecutive += 1
+        elif j["task"] == task_name and j["status"] in ("ok", "skipped"):
+            break
+    if consecutive >= MAX_STAGE_RETRIES:
         return
     q.enqueue_job(instance_key, task_name, ticket_key=ticket_key)
 
