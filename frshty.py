@@ -93,9 +93,11 @@ def _set_primary_config(c: dict) -> None:
     _cv_config.set(c)
 
 
-if len(sys.argv) >= 2 and Path(sys.argv[1]).exists():
+if len(sys.argv) >= 2 and Path(sys.argv[1]).is_file():
     _primary = cfg.load_config(sys.argv[1])
     _set_primary_config(_primary)
+    import core.llm as _llm
+    _llm.configure(_primary)
     state.init(_primary["_state_dir"])
     log.init(_primary["_state_dir"], _primary["job"]["key"])
     # db.init will be called by start_events() in main()
@@ -2279,6 +2281,9 @@ def main():
     _ensure_path()
 
     configs = [cfg.load_config(p) for p in (args.multi or [args.config])]
+    import core.llm as _llm
+    for c in configs:
+        _llm.configure(c)
     primary = configs[0]
     _set_primary_config(primary)
     # Fully event-driven: all periodic work via cron_tick -> Dispatcher -> WorkerPool

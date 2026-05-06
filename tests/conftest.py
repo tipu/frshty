@@ -60,6 +60,13 @@ def _restore_session_db(_isolated_db):
     db._MIGRATIONS_DIR = _SESSION_MIGRATIONS_DIR
     state._DB_INITIALIZED = True
     state._TICKETS_MIGRATED.clear()
+    state._instance_key_cv.set(None)
+    # Clear all test-modifiable tables to prevent state leakage between tests
+    for t in ("supervisor_actions", "supervisor_escalations"):
+        try:
+            db.execute(f"DELETE FROM {t}")
+        except Exception:
+            pass
     # Re-inject the session db/state module references into modules that
     # cache them at import-time (features.tickets in particular, since
     # hardening tests patch attributes via `features.tickets.state`).

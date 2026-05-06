@@ -569,6 +569,7 @@ class GitHubPlatform:
         return {"url": url, "id": pr_id}
 
     CI_TIMEOUT_SECS = 3600
+    NO_CI_GRACE_SECS = 300
 
     def monitor_ci(self, ticket, ts, base_url) -> dict:
         prs = ts.get("prs", [])
@@ -585,6 +586,15 @@ class GitHubPlatform:
 
             if verdict == "pending":
                 elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(ts["checks_started_at"])).total_seconds()
+                if not checks and elapsed > self.NO_CI_GRACE_SECS:
+                    if not ts.get("_ci_no_ci_logged"):
+                        log.emit("ticket_no_ci_configured",
+                            f"No CI checks for {ticket['key']} PR #{pr['id']} after {int(elapsed/60)}m, treating as passed",
+                            links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+                            meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"]})
+                        ts["_ci_no_ci_logged"] = True
+                    ts.pop("_ci_timeout_state", None)
+                    continue
                 if elapsed > self.CI_TIMEOUT_SECS:
                     elapsed_mins = int(elapsed / 60)
                     timeout_state = ts.get("_ci_timeout_state", {})
@@ -628,6 +638,7 @@ class GitHubPlatform:
         ts.pop("checks_started_at", None)
         ts.pop("ci_fix_attempts", None)
         ts.pop("_ci_timeout_state", None)
+        ts.pop("_ci_no_ci_logged", None)
         return ts
 
     def _evaluate_checks(self, checks: list[dict]) -> str:

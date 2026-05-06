@@ -62,6 +62,7 @@ def setup_prd_ticket(ctx: TaskContext) -> TaskResult:
     except RuntimeError as e:
         return TaskResult("failed", str(e))
     state.save_ticket(ctx.ticket_key, updated)
+    q.enqueue_job(ctx.instance_key, "address_pm_findings", ticket_key=ctx.ticket_key)
     q.enqueue_job(ctx.instance_key, "start_planning", ticket_key=ctx.ticket_key)
     return TaskResult("ok", artifacts={"slug": updated.get("slug"),
                                         "branch": updated.get("branch")})
@@ -94,7 +95,9 @@ def start_planning(ctx: TaskContext) -> TaskResult:
         "'Test Plan' section listing unit, integration, and playwright tests for "
         "each acceptance criterion. If the ticket has structured acceptance criteria "
         "(in the ticket data), translate each criterion's playwright steps into a "
-        "concrete e2e test."
+        "concrete e2e test. "
+        "If docs/pm-findings.md exists, read it and address each concern in "
+        "docs/technical-plan.md; if a concern is invalid, explain why."
     )
     log.emit("ticket_planning_started", f"Headless /ctp for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key})

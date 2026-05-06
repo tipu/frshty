@@ -1,0 +1,417 @@
+import json
+import os
+import re
+import subprocess
+import threading
+import time
+from abc import ABC, abstractmethod
+from datetime import datetime, timezone
+from pathlib import Path
+from uuid import uuid4
+
+import core.db as _db
+import core.log as log
+import core.state as _state
+from core.job_logs import active_live_log_path, active_live_pid_path
+from core.state import _instance_key_cv
+
+
+_CLAUDE_MAX_CONCURRENT = int(os.environ.get("FRSHTY_CLAUDE_MAX_CONCURRENT", "5"))
+_llm_sem = threading.BoundedSemaphore(max(1, _CLAUDE_MAX_CONCURRENT))
+
+
+_providers: dict[str, "LLMProvider"] = {}
+
+
+def _env():
+    return {**os.environ, "CLAUDE_CODE_ENTRYPOINT": "cli"}
+
+
+def _active_instance_key() -> str:
+    k = _instance_key_cv.get()
+    if k is not None:
+        return k
+    return _state._default_instance_key or ""
+
+
+def _active_job_key() -> str:
+    try:
+        from core.log import _job_key_cv
+        k = _job_key_cv.get()
+        return k if k is not None else ""
+    except (ImportError, LookupError):
+        return ""
+
+
+def _record_start(function_name: str, model: str, prompt: str,
+                  cwd: Path | None = None, tools: list[str] | None = None,
+                  timeout: int | None = None) -> str | None:
+    inv_id = uuid4().hex[:16]
+    started = datetime.now(timezone.utc).isoformat()
+    try:
+        _db.execute(
+            "INSERT INTO claude_invocations(id, instance_key, job_key, function_name, model, "
+            "prompt, prompt_length, cwd, tools, timeout_s, started_at, status) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                inv_id,
+                _active_instance_key(),
+                _active_job_key(),
+                function_name,
+                model,
+                prompt,
+                len(prompt),
+                str(cwd) if cwd is not None else None,
+                json.dumps(tools) if tools else None,
+                timeout,
+                started,
+                "queued",
+            ),
+        )
+        return inv_id
+    except Exception as e:
+        log.emit("claude_invocation_log_failed", f"failed to record claude start: {e}")
+        return None
+
+
+def _record_end(inv_id: str | None, started_ms: float, status: str,
+                exit_code: int | None, output: str | None) -> None:
+    if inv_id is None:
+        return
+    finished = datetime.now(timezone.utc).isoformat()
+    duration_ms = int((time.monotonic() - started_ms) * 1000)
+    out_text = output or ""
+    try:
+        _db.execute(
+            "UPDATE claude_invocations SET finished_at=?, duration_ms=?, status=?, "
+            "exit_code=?, output=?, output_length=? WHERE id=?",
+            (finished, duration_ms, status, exit_code, out_text, len(out_text), inv_id),
+        )
+    except Exception as e:
+        log.emit("claude_invocation_log_failed", f"failed to record claude end: {e}")
+
+
+class LLMProvider(ABC):
+    @abstractmethod
+    def thinking(self, prompt: str, *, cwd: Path | None = None,
+                 timeout: int = 600, **kwargs) -> str | None:
+        ...
+
+    @abstractmethod
+    def balanced(self, prompt: str, *, worktree: Path | None = None,
+                 tools: list[str] | None = None, timeout: int = 600,
+                 **kwargs) -> str | None:
+        ...
+
+    @abstractmethod
+    def fast(self, prompt: str, *, timeout: int = 120, **kwargs) -> str | None:
+        ...
+
+
+class ClaudeProvider(LLMProvider):
+    def __init__(self, config: dict | None = None):
+        llm_cfg = (config or {}).get("llm", {})
+        claude_cfg = llm_cfg.get("claude", {})
+        self.bin = claude_cfg.get("bin", "claude")
+        self.extra_args = list(claude_cfg.get("args", []))
+        self.env_overrides = {
+            str(k): str(v)
+            for k, v in claude_cfg.get("env", {}).items()
+        }
+        config_dir = claude_cfg.get("config_dir")
+        if config_dir and "CLAUDE_CONFIG_DIR" not in self.env_overrides:
+            self.env_overrides["CLAUDE_CONFIG_DIR"] = str(config_dir)
+
+    def _env(self) -> dict[str, str]:
+        env = _env()
+        for key, value in self.env_overrides.items():
+            env[key] = os.path.expanduser(value)
+        return env
+
+    def _cmd(self, *args: str) -> list[str]:
+        return [self.bin, *self.extra_args, *args]
+
+    def thinking(self, prompt: str, *, cwd: Path | None = None,
+                 timeout: int = 600, **kwargs) -> str | None:
+        cmd = self._cmd(
+            "-p", prompt,
+            "--dangerously-skip-permissions",
+            "--output-format", "stream-json",
+            "--include-partial-messages",
+            "--verbose",
+        )
+        inv_id = _record_start("run_claude_code", "claude-code", prompt, cwd, None, timeout)
+        t0 = time.monotonic()
+        _llm_sem.acquire()
+        _mark_running(inv_id)
+        log_path = active_live_log_path()
+        log_fh = None
+        if log_path:
+            try:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                if not log_path.exists():
+                    log_path.touch()
+                log_fh = open(log_path, "ab", buffering=0)
+            except OSError:
+                log_fh = None
+
+        try:
+            proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                cwd=str(cwd) if cwd else None, env=self._env(), text=True, bufsize=1, errors="replace",
+                start_new_session=True,
+            )
+            pid_path = active_live_pid_path()
+            if pid_path is not None:
+                try:
+                    pid_path.parent.mkdir(parents=True, exist_ok=True)
+                    pid_path.write_text(str(proc.pid))
+                except OSError as e:
+                    log.emit("job_pid_write_failed", f"Failed to write pid file: {e}")
+            parts: list[str] = []
+            non_json: list[str] = []
+
+            def _drain():
+                assert proc.stdout is not None
+                for line in proc.stdout:
+                    try:
+                        evt = json.loads(line)
+                    except (json.JSONDecodeError, ValueError):
+                        stripped = line.rstrip()
+                        if stripped:
+                            non_json.append(stripped)
+                        continue
+                    text = _extract_text(evt)
+                    if not text:
+                        continue
+                    parts.append(text)
+                    if log_fh is not None:
+                        try:
+                            log_fh.write(text.encode("utf-8"))
+                        except OSError as e:
+                            log.emit("job_log_write_failed", f"Failed to write to job log: {e}")
+
+            reader = threading.Thread(target=_drain, daemon=True)
+            reader.start()
+            timed_out = False
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                proc.kill()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+            reader.join(timeout=5)
+            if log_fh is not None:
+                try:
+                    if timed_out:
+                        log_fh.write(f"\n[TIMEOUT after {timeout}s]\n".encode())
+                    elif proc.returncode != 0:
+                        log_fh.write(f"\n[EXIT code={proc.returncode}]\n".encode())
+                except OSError as e:
+                    log.emit("job_log_write_failed", f"Failed to write job status to log: {e}")
+                try:
+                    log_fh.close()
+                except OSError as e:
+                    log.emit("job_log_close_failed", f"Failed to close job log: {e}")
+
+            if pid_path is not None:
+                try:
+                    pid_path.unlink(missing_ok=True)
+                except OSError as e:
+                    log.emit("job_pid_unlink_failed", f"Failed to remove pid file: {e}")
+        finally:
+            _llm_sem.release()
+
+        output = "".join(parts)
+        if timed_out:
+            if non_json:
+                output = output + "\n[non-json output]\n" + "\n".join(non_json[-50:])
+            _record_end(inv_id, t0, "timeout", None, output)
+            return None
+        if proc.returncode != 0:
+            if non_json:
+                output = output + "\n[non-json output]\n" + "\n".join(non_json[-50:])
+            _record_end(inv_id, t0, "error", proc.returncode, output)
+            return None
+        _record_end(inv_id, t0, "success", proc.returncode, output)
+        return output
+
+    def balanced(self, prompt: str, *, worktree: Path | None = None,
+                 tools: list[str] | None = None, timeout: int = 600,
+                 **kwargs) -> str | None:
+        cmd = self._cmd("-p", "-", "--model", "claude-sonnet-4-6")
+        if worktree and worktree.is_dir():
+            cmd += ["--dangerously-skip-permissions", "--add-dir", str(worktree)]
+            if tools:
+                cmd += ["--allowedTools"] + tools
+        inv_id = _record_start("run_sonnet", "claude-sonnet-4-6", prompt, worktree, tools, timeout)
+        t0 = time.monotonic()
+        with _llm_sem:
+            _mark_running(inv_id)
+            try:
+                result = subprocess.run(
+                    cmd, input=prompt.encode(), capture_output=True, env=self._env(), timeout=timeout,
+                )
+            except subprocess.TimeoutExpired:
+                _record_end(inv_id, t0, "timeout", None, None)
+                return None
+            output = result.stdout.decode() if result.stdout else ""
+            if result.returncode != 0 or not result.stdout:
+                err = result.stderr.decode() if result.stderr else ""
+                if err:
+                    output = output + "\n[stderr]\n" + err
+                _record_end(inv_id, t0, "error", result.returncode, output)
+                return None
+            _record_end(inv_id, t0, "success", result.returncode, output)
+            return output
+
+    def fast(self, prompt: str, *, timeout: int = 120, **kwargs) -> str | None:
+        inv_id = _record_start("run_haiku", "claude-haiku-4-5-20251001", prompt, None, None, timeout)
+        t0 = time.monotonic()
+        with _llm_sem:
+            _mark_running(inv_id)
+            try:
+                result = subprocess.run(
+                    self._cmd("-p", "-", "--model", "claude-haiku-4-5-20251001"),
+                    input=prompt.encode(), capture_output=True, env=self._env(), timeout=timeout,
+                )
+            except subprocess.TimeoutExpired:
+                _record_end(inv_id, t0, "timeout", None, None)
+                return None
+            output = result.stdout.decode().strip() if result.stdout else ""
+            if result.returncode != 0 or not result.stdout:
+                err = result.stderr.decode() if result.stderr else ""
+                if err:
+                    output = output + "\n[stderr]\n" + err
+                _record_end(inv_id, t0, "error", result.returncode, output)
+                return None
+            _record_end(inv_id, t0, "success", result.returncode, output)
+            return output
+
+
+class OpenCodeProvider(LLMProvider):
+    def __init__(self, config: dict):
+        oc = config.get("llm", {}).get("opencode", {})
+        self.model_thinking = oc.get("model_thinking", "openrouter/deepseek/deepseek-v4-pro")
+        self.model_balanced = oc.get("model_balanced", "openrouter/deepseek/deepseek-v4-flash")
+        self.model_fast = oc.get("model_fast", "openrouter/deepseek/deepseek-v4-flash")
+
+    def thinking(self, prompt: str, *, cwd: Path | None = None,
+                 timeout: int = 600, **kwargs) -> str | None:
+        cmd = ["opencode", "run", prompt, "--model", self.model_thinking,
+               "--dangerously-skip-permissions"]
+        return self._run(cmd, "run_thinking", self.model_thinking, prompt, cwd, timeout)
+
+    def balanced(self, prompt: str, *, worktree: Path | None = None,
+                 tools: list[str] | None = None, timeout: int = 600,
+                 **kwargs) -> str | None:
+        cmd = ["opencode", "run", prompt, "--model", self.model_balanced,
+               "--dangerously-skip-permissions"]
+        cwd = worktree if worktree and worktree.is_dir() else None
+        return self._run(cmd, "run_balanced", self.model_balanced, prompt, cwd, timeout)
+
+    def fast(self, prompt: str, *, timeout: int = 120, **kwargs) -> str | None:
+        cmd = ["opencode", "run", prompt, "--model", self.model_fast,
+               "--dangerously-skip-permissions"]
+        return self._run(cmd, "run_fast", self.model_fast, prompt, None, timeout)
+
+    def _run(self, cmd: list[str], fn_name: str, model: str, prompt: str,
+             cwd: Path | None, timeout: int) -> str | None:
+        inv_id = _record_start(fn_name, model, prompt, cwd, None, timeout)
+        t0 = time.monotonic()
+        with _llm_sem:
+            _mark_running(inv_id)
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, cwd=str(cwd) if cwd else None,
+                    timeout=timeout, env=os.environ,
+                )
+            except subprocess.TimeoutExpired:
+                _record_end(inv_id, t0, "timeout", None, None)
+                return None
+            output = result.stdout.decode().strip() if result.stdout else ""
+            if result.returncode != 0 or not result.stdout:
+                err = result.stderr.decode() if result.stderr else ""
+                if err:
+                    output = output + "\n[stderr]\n" + err
+                _record_end(inv_id, t0, "error", result.returncode, output)
+                return None
+            _record_end(inv_id, t0, "success", result.returncode, output)
+            return output
+
+
+def _mark_running(inv_id: str | None) -> None:
+    if inv_id is None:
+        return
+    try:
+        _db.execute("UPDATE claude_invocations SET status='running' WHERE id=?", (inv_id,))
+    except Exception as e:
+        log.emit("claude_invocation_log_failed", f"failed to mark running: {e}")
+
+
+def _extract_text(evt: dict) -> str:
+    if evt.get("type") != "stream_event":
+        return ""
+    inner = evt.get("event") or {}
+    if inner.get("type") != "content_block_delta":
+        return ""
+    delta = inner.get("delta") or {}
+    if delta.get("type") == "text_delta":
+        return delta.get("text") or ""
+    return ""
+
+
+def _get_provider() -> LLMProvider:
+    key = _active_instance_key()
+    if key not in _providers:
+        _providers[key] = ClaudeProvider()
+    return _providers[key]
+
+
+def configure(config: dict) -> None:
+    key = config["job"]["key"]
+    llm_cfg = config.get("llm", {})
+    provider_name = llm_cfg.get("provider", "claude")
+    if provider_name == "opencode":
+        _providers[key] = OpenCodeProvider(config)
+    else:
+        _providers[key] = ClaudeProvider(config)
+
+
+def run_thinking(prompt: str, *, cwd: Path | None = None,
+                 timeout: int = 600, **kwargs) -> str | None:
+    return _get_provider().thinking(prompt, cwd=cwd, timeout=timeout, **kwargs)
+
+
+def run_balanced(prompt: str, *, worktree: Path | None = None,
+                 tools: list[str] | None = None, timeout: int = 600,
+                 **kwargs) -> str | None:
+    return _get_provider().balanced(prompt, worktree=worktree, tools=tools,
+                                    timeout=timeout, **kwargs)
+
+
+def run_fast(prompt: str, *, timeout: int = 120, **kwargs) -> str | None:
+    return _get_provider().fast(prompt, timeout=timeout, **kwargs)
+
+
+def extract_json(text: str) -> dict | None:
+    m = re.search(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
+    raw = m.group(1) if m else text
+    try:
+        obj = json.loads(raw)
+        if isinstance(obj, dict):
+            return obj
+    except (json.JSONDecodeError, ValueError):
+        pass
+    for i in range(len(text) - 1, -1, -1):
+        if text[i] == "{":
+            try:
+                obj = json.loads(text[i:])
+                if isinstance(obj, dict):
+                    return obj
+            except (json.JSONDecodeError, ValueError):
+                continue
+    return None
