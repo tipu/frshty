@@ -30,7 +30,7 @@ MAX_STAGE_RETRIES = 5
 
 
 def _enqueue_stage(instance_key: str, ticket_key: str, task_name: str) -> None:
-    existing = q.jobs_for_ticket(instance_key, ticket_key, limit=max(20, MAX_STAGE_RETRIES + 1))
+    existing = q.jobs_for_ticket(instance_key, ticket_key, limit=max(200, MAX_STAGE_RETRIES + 1))
     if any(j["task"] == task_name and j["status"] in ("queued", "running") for j in existing):
         return
     consecutive = 0
@@ -1259,5 +1259,4 @@ def _make_branch(config, key: str, ticket: dict) -> str:
         bt = "bugfix" if branch_type and "bugfix" in branch_type.lower() else "feature"
         return f"{prefix}/{bt}/{slug}"
     return slug
-
 
