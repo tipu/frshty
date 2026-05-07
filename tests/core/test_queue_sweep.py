@@ -25,8 +25,7 @@ def _seed_running_job(instance_key: str, task_name: str, started_at_iso: str) ->
         return cur.lastrowid or 0
 
 
-def test_sweep_stale_resets_old_running_job(tmp_path):
-    db.init(tmp_path / "t.db", ROOT / "migrations")
+def test_sweep_stale_resets_old_running_job(fresh_db):
     old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
     job_id = _seed_running_job("inst", "start_planning", old)
 
@@ -37,11 +36,10 @@ def test_sweep_stale_resets_old_running_job(tmp_path):
     assert row and row["status"] == "queued"
 
 
-def test_sweep_stale_zero_age_resets_all_running_jobs(tmp_path):
+def test_sweep_stale_zero_age_resets_all_running_jobs(fresh_db):
     """Startup behavior: WorkerPool.start() calls sweep_stale(max_age_seconds=0)
     to reset every ghost 'running' row from a prior process. Must reset even
     seconds-old rows since no worker can actually be executing at startup."""
-    db.init(tmp_path / "t.db", ROOT / "migrations")
     started = (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
     job_id = _seed_running_job("inst", "start_planning", started)
 
@@ -52,9 +50,8 @@ def test_sweep_stale_zero_age_resets_all_running_jobs(tmp_path):
     assert row and row["status"] == "queued"
 
 
-def test_sweep_stale_leaves_fresh_running_jobs_alone(tmp_path):
+def test_sweep_stale_leaves_fresh_running_jobs_alone(fresh_db):
     """A job that just started should NOT be reset by a non-zero threshold."""
-    db.init(tmp_path / "t.db", ROOT / "migrations")
     fresh = datetime.now(timezone.utc).isoformat()
     job_id = _seed_running_job("inst", "start_planning", fresh)
 
@@ -65,8 +62,7 @@ def test_sweep_stale_leaves_fresh_running_jobs_alone(tmp_path):
     assert row and row["status"] == "running"
 
 
-def test_claim_next_skips_duplicate_running_global_task(tmp_path):
-    db.init(tmp_path / "t.db", ROOT / "migrations")
+def test_claim_next_skips_duplicate_running_global_task(fresh_db):
     now = datetime.now(timezone.utc).isoformat()
     with db.tx() as c:
         c.execute(

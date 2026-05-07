@@ -16,6 +16,10 @@ def tmp_state(tmp_path):
 
 
 def test_concurrent_state_no_corruption(tmp_state):
+    """state.save("module", dict) is racy by design (read-modify-write at the
+    app level). The guarantee here is "no JSON corruption" — see
+    test_state.TestConcurrency::test_atomic_update_ticket_no_lost_writes for
+    the no-lost-writes contract via state.update_ticket()."""
     def writer(key, value):
         for _ in range(50):
             d = state.load("shared")
@@ -28,8 +32,9 @@ def test_concurrent_state_no_corruption(tmp_state):
     t1.join(); t2.join()
 
     final = state.load("shared")
-    assert isinstance(final, dict), "state file must be valid JSON dict after concurrent writes"
-    assert "a" in final or "b" in final, "at least one writer's data must survive"
+    assert isinstance(final, dict), "JSON must not corrupt under concurrent writes"
+    assert final.get("a") == 1 or final.get("b") == 2, \
+        "at least one writer's data must land cleanly"
 
 
 def test_own_prs_worktree_uses_correct_repo(tmp_path):

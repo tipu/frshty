@@ -91,12 +91,11 @@ class TestStartPlanningPartialRecovery:
     """start_planning should recover when /ctp produced technical-plan.md
     but change-manifest.md is missing (the real-world bug on PRD-6_GAPS_RISKS-7)."""
 
-    def test_detects_partial_ctp_and_generates_missing_manifest(self, tmp_path, monkeypatch):
+    def test_detects_partial_ctp_and_generates_missing_manifest(self, fresh_db, tmp_path, monkeypatch):
         """Set up a ticket dir where technical-plan.md exists but
         change-manifest.md does not, simulate run_claude_code returning ok
         and writing the missing file, then verify the postcondition passes
         and the ticket transitions to 'reviewing'."""
-        db.init(tmp_path / "t.db", ROOT / "migrations")
         state.init(tmp_path / "state")
 
         instance = "test"
@@ -142,10 +141,9 @@ class TestStartPlanningPartialRecovery:
 
         assert len(calls) == 1, "should have made one call (recovery prompt only, /ctp skipped)"
 
-    def test_passes_through_when_both_files_exist(self, tmp_path, monkeypatch):
+    def test_passes_through_when_both_files_exist(self, fresh_db, tmp_path, monkeypatch):
         """If both technical-plan.md and change-manifest.md already exist,
         start_planning should still work (just runs /ctp as usual)."""
-        db.init(tmp_path / "t.db", ROOT / "migrations")
         state.init(tmp_path / "state")
 
         instance = "test"
@@ -168,11 +166,10 @@ class TestStartPlanningPartialRecovery:
 
         assert result.status == "ok", f"expected ok, got {result.status}"
 
-    def test_does_not_recover_when_technical_plan_also_missing(self, tmp_path, monkeypatch):
+    def test_does_not_recover_when_technical_plan_also_missing(self, fresh_db, tmp_path, monkeypatch):
         """If neither change-manifest.md nor technical-plan.md exist,
         start_planning should NOT try to recover (there's nothing to recover
         from) and should return failed."""
-        db.init(tmp_path / "t.db", ROOT / "migrations")
         state.init(tmp_path / "state")
 
         instance = "test"
@@ -195,10 +192,9 @@ class TestStartPlanningPartialRecovery:
             f"expected failed when claude returns None, got {result.status}"
         assert "claude returned non-zero or empty" in result.reason
 
-    def test_recovery_prompt_contains_technical_plan(self, tmp_path, monkeypatch):
+    def test_recovery_prompt_contains_technical_plan(self, fresh_db, tmp_path, monkeypatch):
         """When recovery fires, the prompt passed to run_claude_code for the
         recovery step should include the existing technical-plan.md content."""
-        db.init(tmp_path / "t.db", ROOT / "migrations")
         state.init(tmp_path / "state")
 
         instance = "test"
@@ -256,10 +252,9 @@ class TestEnqueueStageRetryBudget:
             tix._enqueue_stage("inst", "T-1", "start_planning")
             eq.assert_not_called()
 
-    def test_stops_retrying_after_max_consecutive_failures(self, tmp_path):
+    def test_stops_retrying_after_max_consecutive_failures(self, fresh_db, tmp_path):
         """After MAX_STAGE_RETRIES consecutive failures of the same task,
         _enqueue_stage must not enqueue another job."""
-        db.init(tmp_path / "t.db", ROOT / "migrations")
 
         from features import tickets as tix
 
@@ -271,10 +266,9 @@ class TestEnqueueStageRetryBudget:
                 tix._enqueue_stage("inst", "T-1", "start_planning")
                 eq.assert_not_called()
 
-    def test_enqueues_when_below_max_failures(self, tmp_path):
+    def test_enqueues_when_below_max_failures(self, fresh_db, tmp_path):
         """With fewer than MAX_STAGE_RETRIES consecutive failures,
         _enqueue_stage should still allow another attempt."""
-        db.init(tmp_path / "t.db", ROOT / "migrations")
 
         from features import tickets as tix
 
@@ -286,10 +280,9 @@ class TestEnqueueStageRetryBudget:
                 tix._enqueue_stage("inst", "T-1", "start_planning")
                 eq.assert_called_once()
 
-    def test_does_not_count_ok_jobs_as_failures(self, tmp_path):
+    def test_does_not_count_ok_jobs_as_failures(self, fresh_db, tmp_path):
         """A single 'ok' job in the recent history should reset the consecutive
         failure counter so _enqueue_stage allows a new enqueue."""
-        db.init(tmp_path / "t.db", ROOT / "migrations")
 
         from features import tickets as tix
 
@@ -303,10 +296,9 @@ class TestEnqueueStageRetryBudget:
                 tix._enqueue_stage("inst", "T-1", "start_planning")
                 eq.assert_called_once()
 
-    def test_diff_task_different_ticket_not_affected(self, tmp_path):
+    def test_diff_task_different_ticket_not_affected(self, fresh_db, tmp_path):
         """Retry budget for one task should not affect other tasks or
         other tickets."""
-        db.init(tmp_path / "t.db", ROOT / "migrations")
 
         from features import tickets as tix
 
@@ -318,10 +310,9 @@ class TestEnqueueStageRetryBudget:
                 tix._enqueue_stage("inst", "T-2", "start_planning")
                 eq.assert_called_once()
 
-    def test_lower_status_retries_doesnt_prevent_new_ticket(self, tmp_path):
+    def test_lower_status_retries_doesnt_prevent_new_ticket(self, fresh_db, tmp_path):
         """A ticket with no job history at all should always be enqueued
         regardless of retry budget."""
-        db.init(tmp_path / "t.db", ROOT / "migrations")
 
         from features import tickets as tix
 
@@ -335,9 +326,8 @@ class TestStartReviewingRecovery:
     """start_reviewing should recover when /tri-review produced a partial
     tri-review.md without a VERDICT line."""
 
-    def test_reviews_normal_when_no_review_file(self, tmp_path, monkeypatch):
+    def test_reviews_normal_when_no_review_file(self, fresh_db, tmp_path, monkeypatch):
         """When tri-review.md doesn't exist, run /tri-review normally."""
-        db.init(tmp_path / "t.db", ROOT / "migrations")
         state.init(tmp_path / "state")
 
         instance = "test"
@@ -366,9 +356,8 @@ class TestStartReviewingRecovery:
         assert result.status == "ok", f"expected ok, got {result.status} ({result.reason})"
         assert (docs / "tri-review.md").exists()
 
-    def test_reviews_when_review_file_missing_verdict(self, tmp_path, monkeypatch):
+    def test_reviews_when_review_file_missing_verdict(self, fresh_db, tmp_path, monkeypatch):
         """When tri-review.md exists but lacks VERDICT, rerun /tri-review."""
-        db.init(tmp_path / "t.db", ROOT / "migrations")
         state.init(tmp_path / "state")
 
         instance = "test"
@@ -398,9 +387,8 @@ class TestStartReviewingRecovery:
         assert result.status == "ok", f"expected ok, got {result.status} ({result.reason})"
         assert "VERDICT: PASS" in (docs / "tri-review.md").read_text()
 
-    def test_reviews_fails_when_claude_fails(self, tmp_path, monkeypatch):
+    def test_reviews_fails_when_claude_fails(self, fresh_db, tmp_path, monkeypatch):
         """When /tri-review claude call returns None, should fail."""
-        db.init(tmp_path / "t.db", ROOT / "migrations")
         state.init(tmp_path / "state")
 
         instance = "test"
@@ -429,9 +417,8 @@ class TestFixReviewFindingsRecovery:
     """fix_review_findings should recover when tri-review.md already exists
     with VERDICT: FAIL."""
 
-    def test_fixes_when_verdict_is_fail(self, tmp_path, monkeypatch):
+    def test_fixes_when_verdict_is_fail(self, fresh_db, tmp_path, monkeypatch):
         """Normal flow: tri-review.md has VERDICT: FAIL, fix it."""
-        db.init(tmp_path / "t.db", ROOT / "migrations")
         state.init(tmp_path / "state")
 
         instance = "test"
@@ -461,9 +448,8 @@ class TestFixReviewFindingsRecovery:
         assert result.status == "ok", f"expected ok, got {result.status} ({result.reason})"
         assert "VERDICT: PASS" in (docs / "tri-review.md").read_text()
 
-    def test_fix_fails_when_claude_fails(self, tmp_path, monkeypatch):
+    def test_fix_fails_when_claude_fails(self, fresh_db, tmp_path, monkeypatch):
         """When fix claude call fails, should fail."""
-        db.init(tmp_path / "t.db", ROOT / "migrations")
         state.init(tmp_path / "state")
 
         instance = "test"
@@ -492,11 +478,10 @@ class TestValidationRetry:
     """validate_merged_ticket should be retried when it fails, not stranded
     at 'validation' status forever."""
 
-    def test_validation_enqueues_when_ticket_at_validation_and_has_failed_jobs(self, tmp_path):
+    def test_validation_enqueues_when_ticket_at_validation_and_has_failed_jobs(self, fresh_db, tmp_path):
         """A ticket at 'validation' with a prior failed validate_merged_ticket
         should re-enqueue the task (the bug: scan_tickets skips validation
         status completely)."""
-        db.init(tmp_path / "t.db", ROOT / "migrations")
         state.init(tmp_path / "state")
         state.use("inst")
         state.save_ticket("VAL-1", {
@@ -513,9 +498,8 @@ class TestValidationRetry:
             tix._enqueue_stage("inst", "VAL-1", "validate_merged_ticket")
             eq.assert_called_once_with("inst", "validate_merged_ticket", ticket_key="VAL-1")
 
-    def test_validation_skips_when_already_queued(self, tmp_path):
+    def test_validation_skips_when_already_queued(self, fresh_db, tmp_path):
         """Don't enqueue if a queued validate_merged_ticket already exists."""
-        db.init(tmp_path / "t.db", ROOT / "migrations")
         state.init(tmp_path / "state")
         state.use("inst")
         state.save_ticket("VAL-2", {
@@ -531,10 +515,9 @@ class TestValidationRetry:
             tix._enqueue_stage("inst", "VAL-2", "validate_merged_ticket")
             eq.assert_not_called()
 
-    def test_validation_skips_after_max_retries(self, tmp_path):
+    def test_validation_skips_after_max_retries(self, fresh_db, tmp_path):
         """After MAX_STAGE_RETRIES consecutive failed validate_merged_ticket,
         stop retrying."""
-        db.init(tmp_path / "t.db", ROOT / "migrations")
         state.init(tmp_path / "state")
         state.use("inst")
         state.save_ticket("VAL-3", {
@@ -551,9 +534,8 @@ class TestValidationRetry:
             tix._enqueue_stage("inst", "VAL-3", "validate_merged_ticket")
             eq.assert_not_called()
 
-    def test_validation_runs_normally_when_no_history(self, tmp_path):
+    def test_validation_runs_normally_when_no_history(self, fresh_db, tmp_path):
         """First time at validation with no job history should enqueue."""
-        db.init(tmp_path / "t.db", ROOT / "migrations")
         state.init(tmp_path / "state")
         state.use("inst")
         state.save_ticket("VAL-4", {
@@ -572,11 +554,10 @@ class TestScanTicketsValidationSkip:
     """scan_tickets must not skip validation-status tickets — it needs to
     re-enqueue validate_merged_ticket when it fails, not strand the ticket."""
 
-    def test_validation_not_skipped_by_scan(self, tmp_path, monkeypatch):
+    def test_validation_not_skipped_by_scan(self, fresh_db, tmp_path, monkeypatch):
         """scan_tickets must re-enqueue validate_merged_ticket for a ticket
         at validation status with a prior failed job, instead of skipping it
         unconditionally (the current bug)."""
-        db.init(tmp_path / "t.db", ROOT / "migrations")
         state.init(tmp_path / "state")
         state.use("inst")
         state.save_ticket("VAL-SCAN-1", {

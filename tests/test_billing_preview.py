@@ -48,18 +48,13 @@ extras = {{ ai_tool = 20 }}
     return cfg_path, state_dir
 
 
-def test_preview_descriptions_matches_line_items(tmp_path):
-    for mod in list(sys.modules):
-        if mod == "frshty" or mod.startswith("core.") or mod.startswith("features.") or mod in ("core", "features"):
-            sys.modules.pop(mod, None)
-
+def test_preview_descriptions_matches_line_items(fresh_db, tmp_path):
     cfg_path, state_dir = _install_billing_config(tmp_path)
 
     import core.db as db
     import core.config as cfg_mod
     import core.state as state
 
-    db.init(tmp_path / "bp.db", ROOT / "migrations")
     state.init("bp")
 
     config = cfg_mod.load_config(str(cfg_path))
@@ -92,11 +87,7 @@ def test_preview_descriptions_matches_line_items(tmp_path):
     assert any("Monday" in d for d in descs2)
 
 
-def test_preview_endpoint_returns_descriptions(tmp_path):
-    for mod in list(sys.modules):
-        if mod == "frshty" or mod.startswith("core.") or mod.startswith("features.") or mod in ("core", "features"):
-            sys.modules.pop(mod, None)
-
+def test_preview_endpoint_returns_descriptions(fresh_db, tmp_path):
     cfg_path, state_dir = _install_billing_config(tmp_path)
     sys.argv = ["frshty.py", str(cfg_path)]
 
@@ -105,7 +96,6 @@ def test_preview_endpoint_returns_descriptions(tmp_path):
     import core.state as state
     import core.log as log
 
-    db.init(tmp_path / "bp.db", ROOT / "migrations")
     config = cfg_mod.load_config(str(cfg_path))
     state.init(config["_state_dir"])
     log.init(config["_state_dir"], config["job"]["key"])

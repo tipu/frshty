@@ -58,21 +58,13 @@ def test_status_change_to_terminal_triggers_inspection_via_task(_INST, monkeypat
 
     monkeypatch.setattr(q, "enqueue_job", _capture)
 
-    # Transition T-2 to terminal — should fire trigger
+    # Transition T-2 to terminal via save_ticket — the production hot path
+    # (features/tickets.py:_merge writes via save_ticket, not update_ticket).
     state.save_ticket("T-2", _ticket("T-2", "merged", release_key="v1.0"))
-
-    # Note: save_ticket bypasses the trigger (only update_ticket calls it).
-    # Use update_ticket to actually exercise the trigger hook.
-    def _to_done(cur):
-        cur = dict(cur)
-        cur["status"] = "done"
-        return cur
-
-    state.update_ticket("T-2", _to_done)
 
     inspect_jobs = [e for e in enqueued if e[1] == "release_inspect"]
     assert len(inspect_jobs) >= 1, \
-        f"expected release_inspect to be enqueued, got {enqueued}"
+        f"expected release_inspect to be enqueued via save_ticket, got {enqueued}"
     assert inspect_jobs[0][2]["release_id"] == rel["id"]
 
     # Now run the task with a mocked LLM
@@ -137,3 +129,46 @@ def test_trigger_no_op_when_feature_off(_INST, monkeypatch):
 
     state.update_ticket("T-1", _to_done)
     assert enqueued == [], "must not enqueue when feature flag is off"
+
+
+def test_save_ticket_fires_trigger_on_terminal_transition(_INST, monkeypatch):
+    """Regression for the bug where the trigger only fired from update_ticket.
+    The production hot path (features/tickets.py:_merge etc) writes via
+    save_ticket; if the trigger doesn't fire there, releases never inspect."""
+    _stub_runtime(monkeypatch, _INST, {"releases": True})
+
+    state.save_ticket("T-1", _ticket("T-1", "merged", release_key="v1.0"))
+    state.save_ticket("T-2", _ticket("T-2", "in_review", release_key="v1.0"))
+    rel = releases.upsert_release(_INST, "v1.0")
+
+    enqueued: list = []
+    monkeypatch.setattr(q, "enqueue_job",
+                        lambda *a, **k: enqueued.append((a, k)))
+
+    # Production path: save_ticket transitions T-2 to terminal — release now full
+    state.save_ticket("T-2", _ticket("T-2", "merged", release_key="v1.0"))
+
+    inspect_jobs = [e for e in enqueued
+                    if len(e[0]) >= 2 and e[0][1] == "release_inspect"]
+    assert len(inspect_jobs) == 1, \
+        f"save_ticket on the last terminal transition must enqueue exactly one " \
+        f"release_inspect, got {enqueued}"
+    payload = inspect_jobs[0][1].get("payload") or (
+        inspect_jobs[0][0][2] if len(inspect_jobs[0][0]) > 2 else {})
+    assert payload.get("release_id") == rel["id"]
+
+
+def test_save_ticket_no_op_when_status_unchanged(_INST, monkeypatch):
+    """save_ticket called with the same status must not fire the trigger."""
+    _stub_runtime(monkeypatch, _INST, {"releases": True})
+    state.save_ticket("T-1", _ticket("T-1", "merged", release_key="v1.0"))
+    releases.upsert_release(_INST, "v1.0")
+
+    enqueued: list = []
+    monkeypatch.setattr(q, "enqueue_job",
+                        lambda *a, **k: enqueued.append((a, k)))
+
+    # Re-save with same status — must not re-trigger
+    state.save_ticket("T-1", _ticket("T-1", "merged", release_key="v1.0",
+                                      slug="T-1-renamed"))
+    assert enqueued == [], "no transition → no trigger"

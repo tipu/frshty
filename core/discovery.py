@@ -29,8 +29,16 @@ def discover_instances() -> list[dict]:
                         "ticket_system": inst_config.get("ticket_system", ""),
                     })
                     seen_keys.add(inst_key)
-        except Exception:
-            pass
+        except Exception as e:
+            try:
+                import core.log as _log
+                _log.emit(
+                    "discovery_load_error",
+                    f"failed to parse {discovery_path}: {type(e).__name__}: {e}",
+                    meta={"path": str(discovery_path)},
+                )
+            except Exception:
+                pass
 
     for path in sorted(CONFIG_DIR.glob("*.toml")):
         if path.name in SKIP_CONFIGS:
@@ -52,7 +60,16 @@ def discover_instances() -> list[dict]:
                     "ticket_system": job.get("ticket_system", ""),
                 })
                 seen_keys.add(key)
-        except Exception:
+        except Exception as e:
+            try:
+                import core.log as _log
+                _log.emit(
+                    "discovery_load_error",
+                    f"failed to parse {path}: {type(e).__name__}: {e}",
+                    meta={"path": str(path)},
+                )
+            except Exception:
+                pass
             continue
 
     return instances

@@ -157,6 +157,10 @@ class TestSaveTicketInvariants:
 
 class TestConcurrency:
     def test_concurrent_writes_no_corruption(self, tmp_state):
+        """state.save("module", dict) is read-modify-write at the application
+        level (load → mutate → save). It does NOT guarantee atomic merge —
+        the last save wins. The guarantee here is "no JSON corruption" only.
+        For lost-write protection, use state.update_ticket() (atomic mutate)."""
         def writer(key, value):
             for _ in range(50):
                 d = state.load("shared")
@@ -169,5 +173,31 @@ class TestConcurrency:
         t1.join(); t2.join()
 
         final = state.load("shared")
-        assert isinstance(final, dict)
-        assert "a" in final or "b" in final
+        assert isinstance(final, dict), "JSON must not corrupt under concurrent writes"
+        assert final.get("a") == 1 or final.get("b") == 2, \
+            "at least one writer's data must land cleanly"
+
+    def test_atomic_update_ticket_no_lost_writes(self, tmp_state):
+        """update_ticket IS atomic — both writers' fields must survive."""
+        state.save_ticket("T-1", {"status": "new", "slug": "t1", "counters": {}})
+
+        def increment(key):
+            for _ in range(20):
+                def _mut(cur):
+                    new = dict(cur)
+                    counters = dict(new.get("counters") or {})
+                    counters[key] = counters.get(key, 0) + 1
+                    new["counters"] = counters
+                    return new
+                state.update_ticket("T-1", _mut)
+
+        t1 = threading.Thread(target=increment, args=("a",))
+        t2 = threading.Thread(target=increment, args=("b",))
+        t1.start(); t2.start()
+        t1.join(); t2.join()
+
+        final = state.load_ticket("T-1")
+        assert final["counters"]["a"] == 20, \
+            f"atomic update lost writes for 'a': {final['counters']}"
+        assert final["counters"]["b"] == 20, \
+            f"atomic update lost writes for 'b': {final['counters']}"

@@ -94,6 +94,48 @@ def tmp_state(tmp_path, _isolated_db):
 
 
 @pytest.fixture()
+def fresh_db(tmp_path, _restore_session_db):
+    """Per-test fresh DB at tmp_path. Saves the session DB path on entry,
+    initializes a new DB at tmp_path/t.db with the standard migrations, and
+    restores the session DB on teardown. Use this instead of bare
+    `db.init(tmp_path/...)` so module references and instance state are
+    properly preserved.
+
+    NOTE: depends on `_restore_session_db` so this fixture's setUp runs AFTER
+    the autouse session-restore. Otherwise the autouse fixture would override
+    our fresh DB path back to the session DB and the test would silently see
+    leaked state.
+
+    Returns the path to the fresh DB. The active state instance_key is reset
+    to None so tests can call `state.init(...)` themselves if they need a
+    specific key."""
+    saved_path = db._DB_PATH
+    saved_migrations = db._MIGRATIONS_DIR
+    saved_default_key = state._default_instance_key
+    saved_initialized = state._DB_INITIALIZED
+
+    migrations = saved_migrations or (
+        Path(__file__).resolve().parent.parent / "migrations"
+    )
+    db_path = tmp_path / "t.db"
+    db._DB_PATH = None
+    db._MIGRATIONS_DIR = None
+    state._DB_INITIALIZED = False
+    state._default_instance_key = None
+    state._TICKETS_MIGRATED.clear()
+    db.init(db_path, migrations)
+    state._DB_INITIALIZED = True
+
+    yield db_path
+
+    db._DB_PATH = saved_path
+    db._MIGRATIONS_DIR = saved_migrations
+    state._DB_INITIALIZED = saved_initialized
+    state._default_instance_key = saved_default_key
+    state._TICKETS_MIGRATED.clear()
+
+
+@pytest.fixture()
 def tmp_log(tmp_state):
     log.init(tmp_state, "test")
     return tmp_state

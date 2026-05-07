@@ -158,10 +158,148 @@ class TestReleaseMd:
         assert isinstance(h, str) and len(h) == 64
 
 
+class TestBuildInspectionPayload:
+    """Direct coverage for the LLM prompt builder. Regressions here silently
+    change the verdict the LLM produces, so we assert structure + truncation."""
+
+    def _release_dict(self, release_key="v1.0", title=None):
+        return {"release_key": release_key, "title": title}
+
+    def test_includes_release_key_and_optional_title(self, _INST, tmp_path):
+        cfg = {"workspace": {"root": tmp_path, "tickets_dir": "tickets"}}
+        out = releases.build_inspection_payload(
+            cfg, self._release_dict("v1.0", title="Auth"),
+            [{"ticket_key": "T-1", "status": "merged",
+              "summary": "Add login", "description": "", "slug": "T-1"}],
+            None,
+        )
+        assert "RELEASE: v1.0" in out
+        assert "TITLE: Auth" in out
+        assert "## T-1 [merged] — Add login" in out
+
+    def test_omits_title_when_absent(self, _INST, tmp_path):
+        cfg = {"workspace": {"root": tmp_path, "tickets_dir": "tickets"}}
+        out = releases.build_inspection_payload(
+            cfg, self._release_dict("v1.0"),
+            [{"ticket_key": "T-1", "status": "done", "summary": "x",
+              "description": "", "slug": "T-1"}],
+            None,
+        )
+        assert "TITLE:" not in out
+
+    def test_includes_release_md_when_provided(self, _INST, tmp_path):
+        cfg = {"workspace": {"root": tmp_path, "tickets_dir": "tickets"}}
+        out = releases.build_inspection_payload(
+            cfg, self._release_dict("v1.0"),
+            [{"ticket_key": "T-1", "status": "merged", "summary": "x",
+              "description": "", "slug": "T-1"}],
+            "FOCUS: ship logout flow safely",
+        )
+        assert "RELEASE.MD (focus):" in out
+        assert "FOCUS: ship logout flow safely" in out
+
+    def test_truncates_release_md_at_6000_chars(self, _INST, tmp_path):
+        cfg = {"workspace": {"root": tmp_path, "tickets_dir": "tickets"}}
+        long_md = "X" * 7000
+        out = releases.build_inspection_payload(
+            cfg, self._release_dict("v1.0"), [], long_md,
+        )
+        assert "... [truncated]" in out
+        assert out.count("X") == 6000
+
+    def test_truncates_description_at_1500_chars(self, _INST, tmp_path):
+        cfg = {"workspace": {"root": tmp_path, "tickets_dir": "tickets"}}
+        long_desc = "Y" * 2000
+        out = releases.build_inspection_payload(
+            cfg, self._release_dict("v1.0"),
+            [{"ticket_key": "T-1", "status": "merged", "summary": "x",
+              "description": long_desc, "slug": "T-1"}],
+            None,
+        )
+        assert out.count("Y") == 1500
+        assert "... [truncated]" in out
+
+    def test_reads_change_manifest_from_disk(self, _INST, tmp_path):
+        cfg = {"workspace": {"root": tmp_path, "tickets_dir": "tickets"}}
+        slug = "T-1-add-login"
+        docs = tmp_path / "tickets" / slug / "docs"
+        docs.mkdir(parents=True)
+        (docs / "change-manifest.md").write_text("## What changed\nLogin form")
+        out = releases.build_inspection_payload(
+            cfg, self._release_dict("v1.0"),
+            [{"ticket_key": "T-1", "status": "merged", "summary": "x",
+              "description": "", "slug": slug}],
+            None,
+        )
+        assert "change-manifest.md:" in out
+        assert "Login form" in out
+
+    def test_truncates_change_manifest_at_4000_chars(self, _INST, tmp_path):
+        cfg = {"workspace": {"root": tmp_path, "tickets_dir": "tickets"}}
+        slug = "T-1"
+        docs = tmp_path / "tickets" / slug / "docs"
+        docs.mkdir(parents=True)
+        (docs / "change-manifest.md").write_text("Z" * 5000)
+        out = releases.build_inspection_payload(
+            cfg, self._release_dict("v1.0"),
+            [{"ticket_key": "T-1", "status": "merged", "summary": "x",
+              "description": "", "slug": slug}],
+            None,
+        )
+        assert out.count("Z") == 4000
+        assert "... [truncated]" in out
+
+    def test_skips_manifest_when_file_missing(self, _INST, tmp_path):
+        cfg = {"workspace": {"root": tmp_path, "tickets_dir": "tickets"}}
+        out = releases.build_inspection_payload(
+            cfg, self._release_dict("v1.0"),
+            [{"ticket_key": "T-1", "status": "merged", "summary": "x",
+              "description": "no manifest here", "slug": "T-1-nope"}],
+            None,
+        )
+        assert "no manifest here" in out
+        assert "change-manifest.md:" not in out
+
+    def test_handles_str_workspace_root(self, _INST, tmp_path):
+        """workspace.root can be a string; must normalize to Path before joining."""
+        slug = "T-1"
+        docs = tmp_path / "tickets" / slug / "docs"
+        docs.mkdir(parents=True)
+        (docs / "change-manifest.md").write_text("from str root")
+        cfg = {"workspace": {"root": str(tmp_path), "tickets_dir": "tickets"}}
+        out = releases.build_inspection_payload(
+            cfg, self._release_dict("v1.0"),
+            [{"ticket_key": "T-1", "status": "merged", "summary": "x",
+              "description": "", "slug": slug}],
+            None,
+        )
+        assert "from str root" in out
+
+    def test_orders_tickets_as_provided(self, _INST, tmp_path):
+        """Runner passes sorted list; payload must preserve order (no incidental
+        re-sort) so the prompt is stable across runs."""
+        cfg = {"workspace": {"root": tmp_path, "tickets_dir": "tickets"}}
+        out = releases.build_inspection_payload(
+            cfg, self._release_dict("v1.0"),
+            [
+                {"ticket_key": "T-A", "status": "merged", "summary": "a",
+                 "description": "", "slug": "T-A"},
+                {"ticket_key": "T-B", "status": "done", "summary": "b",
+                 "description": "", "slug": "T-B"},
+            ],
+            None,
+        )
+        assert out.index("T-A") < out.index("T-B")
+
+
 class TestMaybeTriggerInspect:
-    def test_skipped_when_runtime_uninitialized(self, _INST):
-        # No runtime → no-op, no exception
+    def test_skipped_when_runtime_uninitialized(self, _INST, monkeypatch):
+        """Tighter than 'didn't raise': must not call enqueue_job either."""
+        captured: list = []
+        monkeypatch.setattr(q, "enqueue_job",
+                            lambda *a, **k: captured.append((a, k)))
         releases.maybe_trigger_inspect(_INST, "T-1", "merged", "in_review")
+        assert captured == [], "no runtime → no enqueue"
 
     def test_no_op_when_status_not_terminal(self, _INST, monkeypatch):
         called = {"n": 0}
@@ -213,3 +351,54 @@ class TestMaybeTriggerInspect:
 
         releases.maybe_trigger_inspect(_INST, "T-1", "merged", "in_review")
         assert captured == [], "feature flag off must prevent enqueue"
+
+    def test_state_outer_guard_logs_when_trigger_raises(self, _INST, monkeypatch):
+        """core.state._maybe_fire_release_trigger swallows trigger exceptions
+        and logs release_trigger_error. Verify the log fires so a broken
+        trigger doesn't die silently in production."""
+        # Make the trigger itself raise (e.g. an import error or surprise bug)
+        import features.releases as _releases_mod
+        monkeypatch.setattr(_releases_mod, "maybe_trigger_inspect",
+                            lambda *a, **kw: (_ for _ in ()).throw(
+                                RuntimeError("trigger broke")))
+
+        emitted: list = []
+        import core.log as _log
+        monkeypatch.setattr(_log, "emit",
+                            lambda event, *a, **kw: emitted.append(event))
+
+        # Drive a status transition through update_ticket — must NOT raise
+        state.save_ticket("T-1", _ticket("T-1", "in_review"))
+        state.update_ticket("T-1", lambda cur: {**cur, "status": "merged",
+                                                  "merged_external_status": "Done"})
+        assert "release_trigger_error" in emitted, \
+            f"expected release_trigger_error in emitted={emitted}"
+
+    def test_enqueue_failure_emits_log_event(self, _INST, monkeypatch):
+        """If q.enqueue_job raises, the trigger must catch it AND emit
+        release_inspect_enqueue_error so the failure is visible in the feed."""
+        state.save_ticket("T-1", _ticket("T-1", "merged", release_key="v1.0"))
+        releases.upsert_release(_INST, "v1.0")
+
+        class _Reg:
+            config = {"features": {"releases": True}}
+
+        class _Inst:
+            def keys(self): return [_INST]
+            def get(self, k): return _Reg()
+
+        import core.runtime as rt
+        monkeypatch.setattr(rt, "instances", lambda: _Inst())
+        monkeypatch.setattr(q, "enqueue_job",
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                RuntimeError("queue offline")))
+
+        emitted: list = []
+        import core.log as _log
+        monkeypatch.setattr(_log, "emit",
+                            lambda event, *a, **kw: emitted.append(event))
+
+        # Must not raise — the trigger swallows + logs
+        releases.maybe_trigger_inspect(_INST, "T-1", "merged", "in_review")
+        assert "release_inspect_enqueue_error" in emitted, \
+            f"expected release_inspect_enqueue_error in emitted={emitted}"

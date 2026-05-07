@@ -54,8 +54,7 @@ def _make_pool(tmp_path: Path, instance_key: str) -> WorkerPool:
     return WorkerPool(registries={instance_key: reg})
 
 
-def test_orphan_with_passing_postconditions_marks_done(tmp_path):
-    db.init(tmp_path / "t.db", ROOT / "migrations")
+def test_orphan_with_passing_postconditions_marks_done(fresh_db, tmp_path):
     state.init(tmp_path / "state")
 
     instance = "inst1"
@@ -81,12 +80,11 @@ def test_orphan_with_passing_postconditions_marks_done(tmp_path):
     assert t and t["status"] == "reviewing"
 
 
-def test_orphan_with_failing_postconditions_marks_failed_not_requeued(tmp_path):
+def test_orphan_with_failing_postconditions_marks_failed_not_requeued(fresh_db, tmp_path):
     """The bug we're fixing: under sweep_stale(0), this job would be reset
     to 'queued' and re-run, replaying /ctp on a worktree the killed claude
     already partially mutated. After the fix, an orphan with unmet
     postconditions is marked failed — surface, don't replay."""
-    db.init(tmp_path / "t.db", ROOT / "migrations")
     state.init(tmp_path / "state")
 
     instance = "inst1"
@@ -107,11 +105,10 @@ def test_orphan_with_failing_postconditions_marks_failed_not_requeued(tmp_path):
         "missing change-manifest.md must mark orphan failed, never requeue"
 
 
-def test_orphan_no_postconditions_marks_failed(tmp_path):
+def test_orphan_no_postconditions_marks_failed(fresh_db, tmp_path):
     """fix_reported_bug has no postconditions defined — we cannot prove
     completion, so it must be marked failed rather than left running or
     silently replayed."""
-    db.init(tmp_path / "t.db", ROOT / "migrations")
     state.init(tmp_path / "state")
 
     instance = "inst1"
@@ -132,10 +129,9 @@ def test_orphan_no_postconditions_marks_failed(tmp_path):
     assert "no postconditions" in (row["response"] or "")
 
 
-def test_live_job_is_skipped_by_orphan_poll(tmp_path):
+def test_live_job_is_skipped_by_orphan_poll(fresh_db, tmp_path):
     """The poll loop must NOT touch jobs being watched by an in-process
     worker thread, even if their pid is on disk and postconditions pass."""
-    db.init(tmp_path / "t.db", ROOT / "migrations")
     state.init(tmp_path / "state")
 
     instance = "inst1"

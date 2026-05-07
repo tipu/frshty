@@ -46,19 +46,14 @@ recurring = [
     return cfg_path
 
 
-def test_virtual_rows_populated_for_week(tmp_path):
+def test_virtual_rows_populated_for_week(fresh_db, tmp_path):
     cfg_path = _write_config(tmp_path)
     sys.argv = ["frshty.py", str(cfg_path)]
-    for mod in list(sys.modules):
-        if mod == "frshty" or mod.startswith("core.") or mod == "core":
-            sys.modules.pop(mod, None)
-
     import core.db as db
     import core.config as cfg_mod
     import core.state as state
     import core.log as log
 
-    db.init(tmp_path / "t.db", ROOT / "migrations")
     config = cfg_mod.load_config(str(cfg_path))
     state.init(config["_state_dir"])
     log.init(config["_state_dir"], config["job"]["key"])
@@ -89,19 +84,14 @@ def test_virtual_rows_populated_for_week(tmp_path):
     assert len(seen_dates) == len(virtuals), "one virtual row per weekday match"
 
 
-def test_virtual_row_mutation_rejected_with_405(tmp_path):
+def test_virtual_row_mutation_rejected_with_405(fresh_db, tmp_path):
     cfg_path = _write_config(tmp_path)
     sys.argv = ["frshty.py", str(cfg_path)]
-    for mod in list(sys.modules):
-        if mod == "frshty" or mod.startswith("core.") or mod == "core":
-            sys.modules.pop(mod, None)
-
     import core.db as db
     import core.config as cfg_mod
     import core.state as state
     import core.log as log
 
-    db.init(tmp_path / "t.db", ROOT / "migrations")
     config = cfg_mod.load_config(str(cfg_path))
     state.init(config["_state_dir"])
     log.init(config["_state_dir"], config["job"]["key"])
