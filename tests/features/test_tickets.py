@@ -538,7 +538,7 @@ class TestFixCiFailuresTask:
         mock_platform.get_failed_logs.return_value = "logs"
         mock_platform.get_pr_diff.return_value = "diff"
         with patch("core.tasks.tickets.make_platform", return_value=mock_platform), \
-             patch("features.pr_ci.run_haiku", return_value='{"caused_by_us": false, "reason": "flaky"}'), \
+             patch("features.pr_ci.run_sonnet", return_value='{"caused_by_us": false, "reason": "flaky"}'), \
              patch("features.pr_ci.run_claude_code") as rcc:
             result = fix_ci_failures(self._ctx(fake_config))
         assert result.status == "ok"
@@ -563,7 +563,7 @@ class TestFixCiFailuresTask:
         mock_platform.get_failed_logs.return_value = "logs"
         mock_platform.get_pr_diff.return_value = "diff"
         with patch("core.tasks.tickets.make_platform", return_value=mock_platform), \
-             patch("features.pr_ci.run_haiku",
+             patch("features.pr_ci.run_sonnet",
                    return_value='{"caused_by_us": true, "reason": "bad", "fix_hint": "fix it"}'), \
              patch("features.pr_ci.run_claude_code", return_value="ok"):
             result = fix_ci_failures(self._ctx(fake_config))

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import core.log as log
 import core.state as state
-from core.claude_runner import run_haiku
+from core.claude_runner import run_haiku, extract_json
 
 
 def _msg_ts_iso(record: dict) -> str:
@@ -174,7 +174,8 @@ def check(config: dict):
             f"Is this Slack thread message actionable for me (needs my response or action)? "
             f"Reply JSON: {{\"actionable\": true/false, \"reason\": \"brief\"}}\n\n{text}"
         )
-        if classification and '"actionable": true' in classification.lower():
+        parsed = extract_json(classification) if classification else None
+        if isinstance(parsed, dict) and parsed.get("actionable") is True:
             log.emit("slack_actionable_item", f"Actionable thread message: {text[:80]}",
                 links={"detail": f"{base_url}/slack"},
                 meta={"text": text[:200]})
