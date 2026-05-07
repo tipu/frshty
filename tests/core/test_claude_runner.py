@@ -211,3 +211,32 @@ def test_run_claude_code_honors_instance_claude_config_dir(tmp_path, monkeypatch
 
     assert out == "ok"
     assert env_capture.read_text() == str(Path("~/.aimyable-claude").expanduser())
+
+
+def test_run_claude_code_blocks_followup_after_usage_limit(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    attempts_file = tmp_path / "attempts.txt"
+    _install_fake_claude(
+        bin_dir,
+        f'echo x >> "{attempts_file}"\n'
+        'printf "%s\\n" "You\'re out of extra usage · resets 2:40pm (America/Los_Angeles)"\n'
+        "exit 1",
+    )
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+
+    prev_until = dict(llm._llm_blocked_until)
+    prev_reasons = dict(llm._llm_block_reasons)
+    llm._llm_blocked_until.clear()
+    llm._llm_block_reasons.clear()
+    try:
+        first = run_claude_code("hi", cwd=tmp_path, timeout=5)
+        second = run_claude_code("hi again", cwd=tmp_path, timeout=5)
+    finally:
+        llm._llm_blocked_until.clear()
+        llm._llm_blocked_until.update(prev_until)
+        llm._llm_block_reasons.clear()
+        llm._llm_block_reasons.update(prev_reasons)
+
+    assert first is None
+    assert second is None
+    assert attempts_file.read_text().splitlines() == ["x"]

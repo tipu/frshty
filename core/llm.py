@@ -16,11 +16,24 @@ from core.job_logs import active_live_log_path, active_live_pid_path
 from core.state import _instance_key_cv
 
 
-_CLAUDE_MAX_CONCURRENT = int(os.environ.get("FRSHTY_CLAUDE_MAX_CONCURRENT", "5"))
+_CLAUDE_MAX_CONCURRENT = int(os.environ.get("FRSHTY_CLAUDE_MAX_CONCURRENT", "15"))
+_LLM_LIMIT_COOLDOWN_SECONDS = int(os.environ.get("FRSHTY_LLM_LIMIT_COOLDOWN_SECONDS", "1800"))
 _llm_sem = threading.BoundedSemaphore(max(1, _CLAUDE_MAX_CONCURRENT))
+_llm_guard_lock = threading.Lock()
+_llm_blocked_until: dict[str, float] = {}
+_llm_block_reasons: dict[str, str] = {}
 
 
 _providers: dict[str, "LLMProvider"] = {}
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_LLM_LIMIT_PATTERNS = (
+    "out of extra usage",
+    "hit your org's monthly usage limit",
+    "hit your limit",
+    "key limit exceeded",
+    "requires more credits",
+    "monthly usage limit",
+)
 
 
 def _env():
@@ -41,6 +54,63 @@ def _active_job_key() -> str:
         return k if k is not None else ""
     except (ImportError, LookupError):
         return ""
+
+
+def _guard_key() -> str:
+    return _active_instance_key() or "__default__"
+
+
+def _strip_ansi(text: str) -> str:
+    return _ANSI_RE.sub("", text)
+
+
+def _llm_limit_reason(output: str | None) -> str | None:
+    if not output:
+        return None
+    cleaned = _strip_ansi(output).lower()
+    for pattern in _LLM_LIMIT_PATTERNS:
+        if pattern in cleaned:
+            return pattern
+    return None
+
+
+def _guard_status() -> tuple[bool, str, int]:
+    key = _guard_key()
+    now = time.monotonic()
+    with _llm_guard_lock:
+        blocked_until = _llm_blocked_until.get(key, 0.0)
+        if blocked_until <= now:
+            _llm_blocked_until.pop(key, None)
+            _llm_block_reasons.pop(key, None)
+            return False, "", 0
+        reason = _llm_block_reasons.get(key, "recent usage limit response")
+        return True, reason, max(1, int(blocked_until - now))
+
+
+def _trip_llm_guard(output: str | None) -> str | None:
+    reason = _llm_limit_reason(output)
+    if reason is None:
+        return None
+    key = _guard_key()
+    blocked_until = time.monotonic() + max(1, _LLM_LIMIT_COOLDOWN_SECONDS)
+    with _llm_guard_lock:
+        _llm_blocked_until[key] = blocked_until
+        _llm_block_reasons[key] = reason
+    log.emit(
+        "llm_guard_tripped",
+        f"[{_active_instance_key()}] blocking new LLM invocations for "
+        f"{_LLM_LIMIT_COOLDOWN_SECONDS}s after usage-limit response ({reason})",
+        meta={"instance_key": _active_instance_key(), "reason": reason,
+              "cooldown_s": _LLM_LIMIT_COOLDOWN_SECONDS},
+    )
+    return reason
+
+
+def _guard_block_output(reason: str, remaining_s: int) -> str:
+    return (
+        f"[guard] skipped LLM invocation: recent usage-limit response "
+        f"({reason}); cooldown {remaining_s}s remaining"
+    )
 
 
 def _record_start(function_name: str, model: str, prompt: str,
@@ -142,6 +212,15 @@ class ClaudeProvider(LLMProvider):
         )
         inv_id = _record_start("run_claude_code", "claude-code", prompt, cwd, None, timeout)
         t0 = time.monotonic()
+        blocked, reason, remaining_s = _guard_status()
+        if blocked:
+            _record_end(inv_id, t0, "blocked", None, _guard_block_output(reason, remaining_s))
+            log.emit("llm_guard_blocked",
+                     f"[{_active_instance_key()}] skipped Claude Code invocation "
+                     f"while cooldown active ({remaining_s}s left)",
+                     meta={"instance_key": _active_instance_key(),
+                           "reason": reason, "remaining_s": remaining_s})
+            return None
         _llm_sem.acquire()
         _mark_running(inv_id)
         log_path = active_live_log_path()
@@ -234,6 +313,7 @@ class ClaudeProvider(LLMProvider):
         if proc.returncode != 0:
             if non_json:
                 output = output + "\n[non-json output]\n" + "\n".join(non_json[-50:])
+            _trip_llm_guard(output)
             _record_end(inv_id, t0, "error", proc.returncode, output)
             return None
         _record_end(inv_id, t0, "success", proc.returncode, output)
@@ -249,6 +329,15 @@ class ClaudeProvider(LLMProvider):
                 cmd += ["--allowedTools"] + tools
         inv_id = _record_start("run_sonnet", "claude-sonnet-4-6", prompt, worktree, tools, timeout)
         t0 = time.monotonic()
+        blocked, reason, remaining_s = _guard_status()
+        if blocked:
+            _record_end(inv_id, t0, "blocked", None, _guard_block_output(reason, remaining_s))
+            log.emit("llm_guard_blocked",
+                     f"[{_active_instance_key()}] skipped Claude Sonnet invocation "
+                     f"while cooldown active ({remaining_s}s left)",
+                     meta={"instance_key": _active_instance_key(),
+                           "reason": reason, "remaining_s": remaining_s})
+            return None
         with _llm_sem:
             _mark_running(inv_id)
             try:
@@ -263,6 +352,7 @@ class ClaudeProvider(LLMProvider):
                 err = result.stderr.decode() if result.stderr else ""
                 if err:
                     output = output + "\n[stderr]\n" + err
+                _trip_llm_guard(output)
                 _record_end(inv_id, t0, "error", result.returncode, output)
                 return None
             _record_end(inv_id, t0, "success", result.returncode, output)
@@ -271,6 +361,15 @@ class ClaudeProvider(LLMProvider):
     def fast(self, prompt: str, *, timeout: int = 120, **kwargs) -> str | None:
         inv_id = _record_start("run_haiku", "claude-haiku-4-5-20251001", prompt, None, None, timeout)
         t0 = time.monotonic()
+        blocked, reason, remaining_s = _guard_status()
+        if blocked:
+            _record_end(inv_id, t0, "blocked", None, _guard_block_output(reason, remaining_s))
+            log.emit("llm_guard_blocked",
+                     f"[{_active_instance_key()}] skipped Claude Haiku invocation "
+                     f"while cooldown active ({remaining_s}s left)",
+                     meta={"instance_key": _active_instance_key(),
+                           "reason": reason, "remaining_s": remaining_s})
+            return None
         with _llm_sem:
             _mark_running(inv_id)
             try:
@@ -286,6 +385,7 @@ class ClaudeProvider(LLMProvider):
                 err = result.stderr.decode() if result.stderr else ""
                 if err:
                     output = output + "\n[stderr]\n" + err
+                _trip_llm_guard(output)
                 _record_end(inv_id, t0, "error", result.returncode, output)
                 return None
             _record_end(inv_id, t0, "success", result.returncode, output)
@@ -322,6 +422,15 @@ class OpenCodeProvider(LLMProvider):
              cwd: Path | None, timeout: int) -> str | None:
         inv_id = _record_start(fn_name, model, prompt, cwd, None, timeout)
         t0 = time.monotonic()
+        blocked, reason, remaining_s = _guard_status()
+        if blocked:
+            _record_end(inv_id, t0, "blocked", None, _guard_block_output(reason, remaining_s))
+            log.emit("llm_guard_blocked",
+                     f"[{_active_instance_key()}] skipped {model} invocation "
+                     f"while cooldown active ({remaining_s}s left)",
+                     meta={"instance_key": _active_instance_key(),
+                           "reason": reason, "remaining_s": remaining_s})
+            return None
         with _llm_sem:
             _mark_running(inv_id)
             try:
@@ -337,6 +446,7 @@ class OpenCodeProvider(LLMProvider):
                 err = result.stderr.decode() if result.stderr else ""
                 if err:
                     output = output + "\n[stderr]\n" + err
+                _trip_llm_guard(output)
                 _record_end(inv_id, t0, "error", result.returncode, output)
                 return None
             _record_end(inv_id, t0, "success", result.returncode, output)
