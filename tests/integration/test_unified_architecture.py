@@ -3,7 +3,15 @@ import subprocess
 import time
 from pathlib import Path
 
+import pytest
 
+
+_APEXCO = Path("config/apexco.toml")
+_nimbus = Path("config/nimbus.toml")
+
+
+@pytest.mark.skipif(not _APEXCO.exists(),
+                    reason="requires config/apexco.toml (not present in worktrees)")
 def test_auto_healing_without_frshty_events_env():
     """
     Verify that single-instance auto-healing works when:
@@ -56,6 +64,8 @@ def test_auto_healing_without_frshty_events_env():
             process.wait()
 
 
+@pytest.mark.skipif(not (_APEXCO.exists() and _nimbus.exists()),
+                    reason="requires config/apexco.toml + config/nimbus.toml")
 def test_multi_instance_unchanged():
     """
     Verify --multi mode still works identically as before.

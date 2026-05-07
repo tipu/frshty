@@ -164,25 +164,25 @@ class TestCreatePr:
 
 class TestResolveConflicts:
     def test_no_prs_noop(self, fake_config):
-        ts = make_ticket_state(status="pr_created")
+        ts = make_ticket_state(status="in_review")
         result = tickets._resolve_conflicts(fake_config, make_ticket(), ts, "http://base")
-        assert result["status"] == "pr_created"
+        assert result["status"] == "in_review"
 
     def test_not_conflicting_noop(self, fake_config):
         mock_platform = MagicMock()
         mock_platform.get_pr_info.return_value = {"mergeable": "MERGEABLE"}
-        ts = make_ticket_state(status="pr_created", prs=[{"repo": "r", "id": 1, "url": "http://u"}])
+        ts = make_ticket_state(status="in_review", prs=[{"repo": "r", "id": 1, "url": "http://u"}])
 
         with patch("features.tickets.make_platform", return_value=mock_platform):
             result = tickets._resolve_conflicts(fake_config, make_ticket(), ts, "http://base")
-        assert result["status"] == "pr_created"
+        assert result["status"] == "in_review"
 
     def test_max_attempts_transitions_to_failed(self, tmp_path, fake_config):
         fake_config["workspace"]["root"] = tmp_path
         mock_platform = MagicMock()
         mock_platform.get_pr_info.return_value = {"mergeable": "CONFLICTING"}
         ts = make_ticket_state(
-            status="pr_created",
+            status="in_review",
             slug="PROJ-1-slug",
             prs=[{"repo": "r", "id": 1, "url": "http://u"}],
             conflict_resolution_attempts=2,
@@ -200,7 +200,7 @@ class TestReconcilePrs:
             {"repo": "r", "id": 99, "branch": "other-branch", "url": "u1"},
             {"repo": "r", "id": 100, "branch": "PROJ-1-do-the-thing", "url": "u2"},
         ]
-        ts = make_ticket_state(status="pr_created", branch="PROJ-1-do-the-thing",
+        ts = make_ticket_state(status="in_review", branch="PROJ-1-do-the-thing",
                                prs=[{"repo": "r", "id": 100, "branch": "PROJ-1-do-the-thing", "url": "u2"}])
 
         result = tickets._reconcile_prs(ts, open_prs)
@@ -223,7 +223,7 @@ class TestReconcilePrs:
             {"repo": "b", "id": 2, "branch": "shared-branch", "url": "u2"},
             {"repo": "c", "id": 3, "branch": "other", "url": "u3"},
         ]
-        ts = make_ticket_state(status="pr_created", branch="shared-branch",
+        ts = make_ticket_state(status="in_review", branch="shared-branch",
                                prs=[{"repo": "a", "id": 1, "branch": "shared-branch", "url": "u1"},
                                     {"repo": "b", "id": 2, "branch": "shared-branch", "url": "u2"}])
 
@@ -242,7 +242,7 @@ class TestReconcilePrs:
 
         result = tickets._reconcile_prs(ts, open_prs)
 
-        assert result["status"] == "pr_created"
+        assert result["status"] == "in_review"
         assert result["conflict_resolution_attempts"] == 0
         assert result["ci_fix_attempts"] == 0
         assert "ci_passed" not in result
@@ -250,7 +250,7 @@ class TestReconcilePrs:
 
     def test_same_pr_same_status_preserves_counters(self):
         open_prs = [{"repo": "r", "id": 100, "branch": "PROJ-1", "url": "u"}]
-        ts = make_ticket_state(status="pr_created", branch="PROJ-1",
+        ts = make_ticket_state(status="in_review", branch="PROJ-1",
                                prs=[{"repo": "r", "id": 100, "branch": "PROJ-1", "url": "u"}])
         ts["conflict_resolution_attempts"] = 1
         ts["ci_fix_attempts"] = 1
@@ -262,7 +262,7 @@ class TestReconcilePrs:
 
     def test_new_pr_identity_resets_counters(self):
         open_prs = [{"repo": "r", "id": 200, "branch": "PROJ-1", "url": "u2"}]
-        ts = make_ticket_state(status="pr_created", branch="PROJ-1",
+        ts = make_ticket_state(status="in_review", branch="PROJ-1",
                                prs=[{"repo": "r", "id": 100, "branch": "PROJ-1", "url": "u1"}])
         ts["conflict_resolution_attempts"] = 2
         ts["ci_fix_attempts"] = 2
@@ -280,7 +280,7 @@ class TestMerge:
     def test_all_merged(self, fake_config):
         mock_platform = MagicMock()
         mock_platform.merge_pr.return_value = {"status": "merged"}
-        ts = make_ticket_state(status="pr_created", prs=[{"repo": "r", "id": 1, "url": "u"}])
+        ts = make_ticket_state(status="in_review", prs=[{"repo": "r", "id": 1, "url": "u"}])
 
         with patch("features.tickets.make_platform", return_value=mock_platform), \
              patch("features.tickets.log"):
@@ -290,22 +290,22 @@ class TestMerge:
     def test_merge_error_stays(self, fake_config):
         mock_platform = MagicMock()
         mock_platform.merge_pr.return_value = {"error": "conflict"}
-        ts = make_ticket_state(status="pr_created", prs=[{"repo": "r", "id": 1, "url": "u"}])
+        ts = make_ticket_state(status="in_review", prs=[{"repo": "r", "id": 1, "url": "u"}])
 
         with patch("features.tickets.make_platform", return_value=mock_platform), \
              patch("features.tickets.log"):
             result = tickets._merge(fake_config, make_ticket(), ts, "http://base")
-        assert result["status"] == "pr_created"
+        assert result["status"] == "in_review"
 
     def test_no_prs_noop(self, fake_config):
-        ts = make_ticket_state(status="pr_created")
+        ts = make_ticket_state(status="in_review")
         result = tickets._merge(fake_config, make_ticket(), ts, "http://base")
-        assert result["status"] == "pr_created"
+        assert result["status"] == "in_review"
 
 
 class TestHandleCiFailureStub:
     def test_sets_flag_and_enqueues(self):
-        ts = make_ticket_state(status="pr_created")
+        ts = make_ticket_state(status="in_review")
         pr = {"repo": "r", "id": 1, "url": "u"}
         checks = [{"name": "lint", "state": "FAILED"}]
         with patch("features.tickets._enqueue_stage") as eq, \
@@ -317,7 +317,7 @@ class TestHandleCiFailureStub:
 
     def test_does_not_double_enqueue_when_job_already_inflight(self):
         import core.queue as q
-        ts = make_ticket_state(status="pr_created", _ci_failed_pending=True)
+        ts = make_ticket_state(status="in_review", _ci_failed_pending=True)
         pr = {"repo": "r", "id": 1, "url": "u"}
         checks = [{"name": "lint", "state": "FAILED"}]
         with patch.object(q, "jobs_for_ticket",
@@ -328,7 +328,7 @@ class TestHandleCiFailureStub:
         eq.assert_not_called()
 
     def test_no_instance_key_does_not_enqueue(self):
-        ts = make_ticket_state(status="pr_created")
+        ts = make_ticket_state(status="in_review")
         pr = {"repo": "r", "id": 1, "url": "u"}
         checks = [{"name": "lint", "state": "FAILED"}]
         with patch("features.tickets._enqueue_stage") as eq, \
@@ -338,7 +338,7 @@ class TestHandleCiFailureStub:
         eq.assert_not_called()
 
     def test_max_attempts_transitions_pr_failed_and_clears_flag(self):
-        ts = make_ticket_state(status="pr_created", ci_fix_attempts=2, _ci_failed_pending=True)
+        ts = make_ticket_state(status="in_review", ci_fix_attempts=2, _ci_failed_pending=True)
         pr = {"repo": "r", "id": 1, "url": "u"}
         checks = [{"name": "lint", "state": "FAILED"}]
         with patch("features.tickets._enqueue_stage") as eq, \
@@ -500,7 +500,7 @@ class TestFixCiFailuresTask:
 
     def test_no_prs_fails_and_clears_flag(self, fake_config, tmp_state):
         from core.tasks.tickets import fix_ci_failures
-        self._seed(make_ticket_state(status="pr_created", _ci_failed_pending=True, prs=[]))
+        self._seed(make_ticket_state(status="in_review", _ci_failed_pending=True, prs=[]))
         result = fix_ci_failures(self._ctx(fake_config))
         assert result.status == "failed"
         import core.state as state
@@ -510,7 +510,7 @@ class TestFixCiFailuresTask:
     def test_worktree_missing_emits_skip(self, fake_config, tmp_state, tmp_log):
         from core.tasks.tickets import fix_ci_failures
         self._seed(make_ticket_state(
-            status="pr_created", _ci_failed_pending=True,
+            status="in_review", _ci_failed_pending=True,
             prs=[{"repo": "r", "id": 1, "url": "u"}],
         ))
         mock_platform = MagicMock()
@@ -527,7 +527,7 @@ class TestFixCiFailuresTask:
         from core.tasks.tickets import fix_ci_failures
         slug = "PROJ-1-do-the-thing"
         self._seed(make_ticket_state(
-            status="pr_created", _ci_failed_pending=True, slug=slug,
+            status="in_review", _ci_failed_pending=True, slug=slug,
             prs=[{"repo": "r", "id": 1, "url": "u"}],
         ))
         wt = fake_config["workspace"]["root"] / "tickets" / slug / "r"
@@ -552,7 +552,7 @@ class TestFixCiFailuresTask:
         from core.tasks.tickets import fix_ci_failures
         slug = "PROJ-1-do-the-thing"
         self._seed(make_ticket_state(
-            status="pr_created", _ci_failed_pending=True, slug=slug,
+            status="in_review", _ci_failed_pending=True, slug=slug,
             prs=[{"repo": "r", "id": 1, "url": "u"}],
         ))
         wt = fake_config["workspace"]["root"] / "tickets" / slug / "r"
@@ -577,7 +577,7 @@ class TestFixCiFailuresTask:
         from core.tasks.tickets import fix_ci_failures
         slug = "PROJ-1-do-the-thing"
         self._seed(make_ticket_state(
-            status="pr_created", _ci_failed_pending=True, slug=slug,
+            status="in_review", _ci_failed_pending=True, slug=slug,
             prs=[{"repo": "r", "id": 1, "url": "u"}],
         ))
         mock_platform = MagicMock()
@@ -631,7 +631,7 @@ class TestWriteCommentsMd:
 
 class TestMarkTicketMerged:
     def test_stores_snapshot(self, fake_config):
-        ts = {"status": "pr_created"}
+        ts = {"status": "in_review"}
         ticket = make_ticket()
         comments = [
             {"created_at": "2026-04-20T00:00:00Z", "body": "a"},
@@ -646,7 +646,7 @@ class TestMarkTicketMerged:
         assert "merged_at" in result
 
     def test_clears_ci_passed(self, fake_config):
-        ts = {"status": "pr_created", "ci_passed": True}
+        ts = {"status": "in_review", "ci_passed": True}
         with patch("features.tickets._fetch_ticket_comments", return_value=[]):
             result = tickets._mark_ticket_merged(fake_config, make_ticket(), ts)
         assert "ci_passed" not in result

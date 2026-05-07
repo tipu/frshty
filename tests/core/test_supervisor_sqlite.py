@@ -100,10 +100,13 @@ class TestSupervisorStateSQLite:
         try:
             db.execute("DROP TABLE supervisor_actions")
             db.execute("DROP TABLE supervisor_escalations")
-        except:
-            pass
-        state = _load_state()
-        assert state == {"actions": {}, "escalations": {}}
+            state = _load_state()
+            assert state == {"actions": {}, "escalations": {}}
+        finally:
+            db.execute("CREATE TABLE IF NOT EXISTS supervisor_actions ("
+                       "key TEXT PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0, ts REAL NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS supervisor_escalations ("
+                       "key TEXT PRIMARY KEY, ts REAL NOT NULL)")
 
     def test_save_state_uses_transaction(self, tmp_log):
         """_save_state() uses a transaction for atomicity."""

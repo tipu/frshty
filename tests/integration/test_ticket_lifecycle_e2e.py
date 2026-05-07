@@ -309,6 +309,8 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
     }
 
     def fake_run_haiku(prompt: str, timeout: int = 0) -> str:
+        if "Classify each PR review comment" in prompt:
+            return '{"results": [{"i": 0, "actionable": true}]}'
         if "Reply with JSON:" in prompt and "actionable" in prompt:
             return '{"actionable": true, "reason": "specific requested code change"}'
         if "Reply with EXACTLY one JSON object" in prompt and "caused_by_us" in prompt:
@@ -345,7 +347,7 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
             )
             return "review-fixed"
 
-        if "CI checks failed:" in prompt:
+        if "CI failed:" in prompt or "CI checks failed:" in prompt:
             repo = cwd
             branch = _git(repo, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
             (repo / "app.txt").write_text((repo / "app.txt").read_text() + "ci_fixed\n")

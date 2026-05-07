@@ -225,9 +225,15 @@ class TestJiraFetchComments:
         with patch("features.ticket_systems.httpx.Client", return_value=mock_client):
             comments = ts.fetch_comments("PROJ-1")
         assert len(comments) == 2
-        assert comments[0] == {"id": "10001", "author": "Alice", "body": "First\n\n",
-                               "created_at": "2026-04-20T18:00:00.000+0000"}
-        assert comments[1]["author"] == "Bob"
+        assert comments[0] == {
+            "id": "10001",
+            "author_id": "",
+            "author_name": "Alice",
+            "body": "First\n\n",
+            "created_at": "2026-04-20T18:00:00.000+0000",
+            "updated_at": None,
+        }
+        assert comments[1]["author_name"] == "Bob"
         call_url = mock_client.get.call_args[0][0]
         assert "/rest/api/3/issue/PROJ-1/comment" in call_url
 
@@ -243,8 +249,9 @@ class TestJiraFetchComments:
             assert ts.fetch_comments("PROJ-1") == []
 
     def test_exception_returns_empty(self):
+        import httpx as _httpx
         ts = self._make_ts()
-        with patch("features.ticket_systems.httpx.Client", side_effect=Exception("boom")):
+        with patch("features.ticket_systems.httpx.Client", side_effect=_httpx.HTTPError("boom")):
             assert ts.fetch_comments("PROJ-1") == []
 
 
@@ -278,9 +285,15 @@ class TestLinearFetchComments:
         with patch("features.ticket_systems.httpx.Client", return_value=mock_client):
             comments = ts.fetch_comments("LIN-1")
         assert len(comments) == 2
-        assert comments[0] == {"id": "c1", "author": "Alice", "body": "hi",
-                               "created_at": "2026-04-20T00:00:00Z"}
-        assert comments[1]["author"] == ""
+        assert comments[0] == {
+            "id": "c1",
+            "author_id": "",
+            "author_name": "Alice",
+            "body": "hi",
+            "created_at": "2026-04-20T00:00:00Z",
+            "updated_at": None,
+        }
+        assert comments[1]["author_name"] == ""
 
     def test_non_200_returns_empty(self):
         ts = self._make_ts()
