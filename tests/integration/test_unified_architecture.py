@@ -1,4 +1,5 @@
 import os
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -10,8 +11,31 @@ _APEXCO = Path("config/apexco.toml")
 _nimbus = Path("config/nimbus.toml")
 
 
+def _port_in_use(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _config_port(path: Path) -> int | None:
+    if not path.exists():
+        return None
+    for line in path.read_text().splitlines():
+        s = line.strip()
+        if s.startswith("port") and "=" in s:
+            try:
+                return int(s.split("=", 1)[1].strip())
+            except ValueError:
+                return None
+    return None
+
+
+_APEXCO_PORT = _config_port(_APEXCO)
+
+
 @pytest.mark.skipif(not _APEXCO.exists(),
                     reason="requires config/apexco.toml (not present in worktrees)")
+@pytest.mark.skipif(_APEXCO_PORT is not None and _port_in_use(_APEXCO_PORT),
+                    reason="apexco port already bound (frshty service running locally)")
 def test_auto_healing_without_frshty_events_env():
     """
     Verify that single-instance auto-healing works when:
@@ -66,6 +90,8 @@ def test_auto_healing_without_frshty_events_env():
 
 @pytest.mark.skipif(not (_APEXCO.exists() and _nimbus.exists()),
                     reason="requires config/apexco.toml + config/nimbus.toml")
+@pytest.mark.skipif(_APEXCO_PORT is not None and _port_in_use(_APEXCO_PORT),
+                    reason="apexco port already bound (frshty service running locally)")
 def test_multi_instance_unchanged():
     """
     Verify --multi mode still works identically as before.
