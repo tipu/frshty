@@ -91,6 +91,15 @@ def load(module: str) -> dict:
     try:
         val = json.loads(row["data"])
     except json.JSONDecodeError:
+        try:
+            import core.log as _log
+            _log.emit(
+                "state_load_corrupt",
+                f"kv['{module}'] for instance {_active_key()} is not valid JSON; returning empty dict",
+                meta={"module": module},
+            )
+        except Exception:
+            pass
         return {}
     return val if isinstance(val, dict) else {}
 
@@ -211,6 +220,29 @@ def _validate_ticket_invariants(data: dict, key: str = "") -> None:
         )
 
 
+def _maybe_fire_release_trigger(instance: str, key: str,
+                                new_status: str | None,
+                                prior_status: str | None) -> None:
+    """Fire the release-inspection trigger if status transitioned. Best-effort:
+    failures are logged but never raised so they can't break the ticket write.
+    Called from save_ticket, update_ticket, and _save_tickets_dict."""
+    if prior_status == new_status:
+        return
+    try:
+        from features import releases as _releases
+        _releases.maybe_trigger_inspect(instance, key, new_status, prior_status)
+    except Exception as _e:
+        try:
+            import core.log as _log
+            _log.emit(
+                "release_trigger_error",
+                f"maybe_trigger_inspect failed for {key}: {type(_e).__name__}: {_e}",
+                meta={"ticket": key},
+            )
+        except Exception:
+            pass
+
+
 def save_ticket(key: str, data: dict) -> None:
     _ensure_db()
     instance = _active_key()
@@ -219,6 +251,11 @@ def save_ticket(key: str, data: dict) -> None:
     _validate_ticket_invariants(data, key)
     now = datetime.now(timezone.utc).isoformat()
     auto_pr = data.get("auto_pr")
+    prior_row = db.query_one(
+        "SELECT status FROM tickets WHERE instance_key=? AND ticket_key=?",
+        (instance, key),
+    )
+    prior_status = prior_row.get("status") if prior_row else None
     db.execute(
         "INSERT INTO tickets"
         "(instance_key, ticket_key, status, slug, branch, url, external_status, auto_pr,"
@@ -236,6 +273,7 @@ def save_ticket(key: str, data: dict) -> None:
          data.get("source", "jira"), data.get("approval_status"), data.get("obsolete_at"),
          data.get("release_key"), json.dumps(data, default=str), now),
     )
+    _maybe_fire_release_trigger(instance, key, data.get("status", "new"), prior_status)
 
 
 def delete_ticket(key: str) -> None:
@@ -319,21 +357,7 @@ def update_ticket(key: str, mutate: Callable[[dict], dict | None]) -> dict | Non
              new.get("release_key"), json.dumps(new, default=str), now),
         )
         prior_status = current.get("status") if current else None
-        new_status = new.get("status")
-        if prior_status != new_status:
-            try:
-                from features import releases as _releases
-                _releases.maybe_trigger_inspect(instance, key, new_status, prior_status)
-            except Exception as _e:
-                try:
-                    import core.log as _log
-                    _log.emit(
-                        "release_trigger_error",
-                        f"maybe_trigger_inspect failed for {key}: {type(_e).__name__}: {_e}",
-                        meta={"ticket": key},
-                    )
-                except Exception:
-                    pass
+        _maybe_fire_release_trigger(instance, key, new.get("status"), prior_status)
         return new
 
 
