@@ -347,18 +347,21 @@ def test_empty_branch_falls_back_to_pr_id_slug(tmp_path):
 
     pr = {"repo": "myrepo", "id": 99, "branch": "", "url": "http://u", "updated_on": "x"}
     config = {"_state_dir": tmp_path, "workspace": {"root": tmp_path, "repos": []}}
+    platform = MagicMock()
+    platform.get_pr_diff.return_value = "diff --git a b\n"
 
     with patch("features.reviewer._ensure_review_worktree", return_value=None), \
          patch("features.reviewer._load_conventions", return_value=""), \
          patch("features.reviewer._run_all_personas", return_value=[("spec", {"issues": [], "verdict": "approved"})]), \
          patch("features.reviewer._merge_reviews", return_value={"issues": [], "verdict": "approved"}):
-        reviewer.review_pr(config, MagicMock(), pr)
+        reviewer.review_pr(config, platform, pr)
 
     expected_dir = tmp_path / "reviews" / "myrepo" / "pr-99"
     assert expected_dir.exists()
 
 
 def test_dismiss_all_truncates_log(tmp_state):
+    import core.db as db
     log.init(tmp_state, "testjob")
 
     over = log.MAX_LOG_LINES + 50
@@ -367,8 +370,11 @@ def test_dismiss_all_truncates_log(tmp_state):
 
     log.dismiss_all()
 
-    lines = (tmp_state / "logs" / "testjob.jsonl").read_text().splitlines()
-    assert len(lines) <= log.MAX_LOG_LINES
+    row = db.query_one(
+        "SELECT COUNT(*) AS n FROM log_events WHERE instance_key=? AND job=?",
+        (tmp_state.name, "testjob"),
+    )
+    assert (row["n"] if row else 0) <= log.MAX_LOG_LINES
 
 
 def test_ticket_status_transition_rejects_illegal():
