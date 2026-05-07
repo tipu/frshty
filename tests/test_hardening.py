@@ -191,17 +191,21 @@ def _make_conflicting_repo(tmp_path):
 
 
 def test_merge_base_resolves_conflicts_with_claude(tmp_path):
-    """When git merge has conflicts, merge_base should use Claude to resolve
-    the conflict markers, stage, commit, and return ok=True."""
+    """When git merge has conflicts, merge_base should invoke Claude Code in the
+    worktree, then verify no markers remain before committing and returning ok."""
+    import subprocess as sp
     from features.platforms import GitHubPlatform
 
     repo = _make_conflicting_repo(tmp_path)
 
-    def fake_haiku(prompt, timeout=60):
-        return "line1\nfeature-change\nline3\n"
+    def fake_claude_code(prompt, cwd=None, timeout=60):
+        target = Path(cwd) / "file.ts"
+        target.write_text("line1\nfeature-change\nline3\n")
+        sp.run(["git", "add", "file.ts"], cwd=str(cwd), capture_output=True)
+        return "resolved"
 
     platform = GitHubPlatform({"github": {"repo": "org/repo"}, "workspace": {"base_branch": "main"}})
-    with patch("features.platforms.run_haiku", side_effect=fake_haiku):
+    with patch("features.platforms.run_claude_code", side_effect=fake_claude_code):
         result = platform.merge_base(repo, "main")
 
     assert result["ok"], f"merge_base should resolve conflicts, got: {result}"

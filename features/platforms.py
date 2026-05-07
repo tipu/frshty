@@ -8,7 +8,7 @@ import httpx
 
 import core.log as log
 from core.config import resolve_env, get_repos
-from core.claude_runner import run_haiku
+from core.claude_runner import run_claude_code
 
 
 def make_platform(config: dict):
@@ -36,24 +36,50 @@ def _resolve_merge_conflicts(repo_path, base_branch: str) -> dict:
         _run_git(repo_path, ["merge", "--abort"])
         return {"ok": False, "error": "no conflicted files found"}
 
-    files = conflicted.stdout.strip().split("\n")
+    files = [f for f in conflicted.stdout.strip().split("\n") if f]
     for filepath in files:
-        full_path = Path(repo_path) / filepath
-        if not full_path.exists():
+        if not (Path(repo_path) / filepath).exists():
             _run_git(repo_path, ["merge", "--abort"])
             return {"ok": False, "error": f"conflicted file not found: {filepath}"}
 
-        content = full_path.read_text()
-        resolved = run_haiku(
-            f"This file has git merge conflicts. Resolve them by picking the correct code. "
-            f"Output ONLY the resolved file contents, no explanation, no markdown fences.\n\n{content}",
-            timeout=120,
-        )
-        if not resolved or "<<<<<<<" in resolved or ">>>>>>>" in resolved:
-            _run_git(repo_path, ["merge", "--abort"])
-            return {"ok": False, "error": f"failed to resolve conflicts in {filepath}"}
+    file_list = "\n".join(f"  - {f}" for f in files)
+    prompt = (
+        f"You are resolving a git merge of origin/{base_branch} into the current branch. "
+        f"Conflicted files:\n{file_list}\n\n"
+        "For each file:\n"
+        "1. Read it. Identify every <<<<<<< / ======= / >>>>>>> region.\n"
+        "2. Resolve by combining both sides where intents are compatible (union of imports, "
+        "both new functions/endpoints, etc.); only pick one side when they truly contradict.\n"
+        "3. Confirm zero conflict markers remain.\n"
+        "4. Run an appropriate syntax check (e.g. `python -c 'import ast; ast.parse(open(p).read())'` "
+        "for .py; `node --check p` for .js/.cjs; for .ts/.tsx use the project's typecheck if cheap, "
+        "else verify structurally). Fix any syntax error you introduce.\n"
+        "5. `git add <file>` once clean.\n\n"
+        "Do NOT run `git commit` — leave the resolved files staged. If you cannot resolve a file, "
+        "leave it conflicted and explain which file and why."
+    )
+    run_claude_code(prompt, cwd=Path(repo_path), timeout=900)
 
-        full_path.write_text(resolved)
+    still_conflicted = _run_git(repo_path, ["diff", "--name-only", "--diff-filter=U"])
+    if still_conflicted.stdout.strip():
+        _run_git(repo_path, ["merge", "--abort"])
+        return {"ok": False, "error": f"failed to resolve conflicts in {still_conflicted.stdout.strip()}"}
+
+    for filepath in files:
+        full_path = Path(repo_path) / filepath
+        if not full_path.exists():
+            continue
+        text = full_path.read_text(errors="replace")
+        if "<<<<<<<" in text or ">>>>>>>" in text:
+            _run_git(repo_path, ["merge", "--abort"])
+            return {"ok": False, "error": f"conflict markers remain in {filepath}"}
+        if filepath.endswith(".py"):
+            try:
+                import ast
+                ast.parse(text)
+            except SyntaxError as e:
+                _run_git(repo_path, ["merge", "--abort"])
+                return {"ok": False, "error": f"syntax error in {filepath}: {e}"}
         _run_git(repo_path, ["add", filepath])
 
     result = _run_git(repo_path, ["commit", "--no-edit"])
