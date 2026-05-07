@@ -165,17 +165,81 @@ class TestTicketDetailExtension:
 
 
 class TestManualInspect:
-    def test_inspect_404_when_no_release(self, client):
-        c, _ = client
-        resp = c.post("/api/releases/nope/inspect", json={})
-        # 404 (no release) takes precedence over 400 (events not enabled)
-        assert resp.status_code in (400, 404)
+    def test_inspect_404_when_release_disabled(self, client):
+        """Feature gate fires before events check."""
+        c, frshty = client
+        frshty["features"]["releases"] = False
+        resp = c.post("/api/releases/anything/inspect", json={})
+        assert resp.status_code == 404
+        assert resp.json()["error"] == "releases feature disabled"
 
-    def test_inspect_requires_events(self, client):
+    def test_inspect_requires_events_runtime(self, client):
         c, _ = client
         from features import releases as releases_mod
         releases_mod.upsert_release(state.active_instance_key(), "v1.0")
-        # _events_enabled returns False without runtime
+        # events_enabled() returns False without runtime started
         resp = c.post("/api/releases/v1.0/inspect", json={"force": True})
         assert resp.status_code == 400
         assert "events not enabled" in resp.json()["error"]
+
+    def test_inspect_404_when_release_missing(self, client, monkeypatch):
+        """With events on, missing release must 404 — not silently enqueue."""
+        c, _ = client
+        monkeypatch.setattr("web.tickets.events_enabled", lambda: True)
+        captured: list = []
+        monkeypatch.setattr("core.queue.enqueue_job",
+                            lambda *a, **kw: captured.append((a, kw)))
+        resp = c.post("/api/releases/nope/inspect", json={})
+        assert resp.status_code == 404
+        assert resp.json()["error"] == "release not found"
+        assert captured == [], "must not enqueue when release missing"
+
+    def test_inspect_enqueues_with_force_payload(self, client, monkeypatch):
+        """Happy path: enqueues release_inspect with release_id + force, emits log,
+        returns 200 with the contract response shape."""
+        c, _ = client
+        from features import releases as releases_mod
+        rel = releases_mod.upsert_release(state.active_instance_key(), "v2.0")
+
+        monkeypatch.setattr("web.tickets.events_enabled", lambda: True)
+        captured: list = []
+        monkeypatch.setattr("core.queue.enqueue_job",
+                            lambda instance, task, payload=None, **kw:
+                            captured.append((instance, task, payload, kw)))
+        emitted: list = []
+        import core.log as _log
+        original_emit = _log.emit
+        monkeypatch.setattr(_log, "emit",
+                            lambda event, *a, **kw: emitted.append(event)
+                            or original_emit(event, *a, **kw))
+
+        resp = c.post("/api/releases/v2.0/inspect", json={"force": True})
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body == {"status": "enqueued", "release_key": "v2.0", "force": True}
+
+        assert len(captured) == 1, f"expected exactly one enqueue, got {captured}"
+        instance, task, payload, _ = captured[0]
+        assert instance == state.active_instance_key()
+        assert task == "release_inspect"
+        assert payload == {"release_id": rel["id"], "force": True}
+
+        assert "release_inspect_enqueued" in emitted, \
+            "must emit release_inspect_enqueued log event"
+
+    def test_inspect_force_defaults_to_false(self, client, monkeypatch):
+        """Empty body → force=False in payload + response."""
+        c, _ = client
+        from features import releases as releases_mod
+        releases_mod.upsert_release(state.active_instance_key(), "v3.0")
+        monkeypatch.setattr("web.tickets.events_enabled", lambda: True)
+        captured: list = []
+        monkeypatch.setattr("core.queue.enqueue_job",
+                            lambda instance, task, payload=None, **kw:
+                            captured.append(payload))
+
+        resp = c.post("/api/releases/v3.0/inspect", json={})
+        assert resp.status_code == 200
+        assert resp.json()["force"] is False
+        assert captured[0]["force"] is False

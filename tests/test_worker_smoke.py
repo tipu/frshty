@@ -20,8 +20,7 @@ import core.tasks  # noqa: F401,E402   ensure routes register
 from core.tasks.registry import TaskContext, TaskResult, task, _REGISTRY  # noqa: E402
 
 
-def test_end_to_end(tmp_path):
-    db.init(tmp_path / "t.db", ROOT / "migrations")
+def test_end_to_end(fresh_db):
 
     @task("echo")
     def echo(ctx: TaskContext) -> TaskResult:
@@ -55,8 +54,7 @@ def test_end_to_end(tmp_path):
         _REGISTRY.pop("echo", None)
 
 
-def test_precondition_skip(tmp_path):
-    db.init(tmp_path / "t.db", ROOT / "migrations")
+def test_precondition_skip(fresh_db):
 
     @task("needs_true", preconditions=[lambda ctx: (False, "always fails")])
     def needs_true(ctx):
@@ -96,10 +94,9 @@ def _wait_job(job_id: int, timeout: float = 5.0) -> dict:
     raise AssertionError(f"job {job_id} did not finish within {timeout}s")
 
 
-def test_set_state_roundtrip(tmp_path):
+def test_set_state_roundtrip(fresh_db):
     """ui_set_state event routes to set_state task, which mutates state.save('tickets', ...)."""
     import core.state as state
-    db.init(tmp_path / "t.db", ROOT / "migrations")
     state.init("t")
     state.save("tickets", {"T-1": {"status": "pr_failed", "slug": "slug-1", "branch": "feat/t-1"}})
 
@@ -138,10 +135,9 @@ def test_set_state_roundtrip(tmp_path):
         pool.stop()
 
 
-def test_auto_pr_precondition_reads_per_ticket(tmp_path):
+def test_auto_pr_precondition_reads_per_ticket(fresh_db):
     """auto_pr_true precondition reads per-ticket auto_pr; missing inherits config."""
     import core.state as state
-    db.init(tmp_path / "t.db", ROOT / "migrations")
     state.init("t")
     state.save("tickets", {
         "T-A": {"status": "pr_ready"},
