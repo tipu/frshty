@@ -82,7 +82,7 @@ async def test_complete_lifecycle(e2e_env):
         "key": ticket_key,
         "summary": ticket["summary"],
         "description": ticket["description"],
-        "status": TicketStatus.pr_created.value,
+        "status": TicketStatus.in_review.value,
         "pr_number": None,
         "branch": f"auth-{ticket_key}",
         "assignee": "frshty",

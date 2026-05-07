@@ -1,4 +1,5 @@
 import os
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -10,8 +11,31 @@ _AIMYABLE = Path("config/aimyable.toml")
 _NECTAR = Path("config/nectar.toml")
 
 
+def _port_in_use(port: int) -> bool:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(("127.0.0.1", port)) == 0
+
+
+def _config_port(path: Path) -> int | None:
+    if not path.exists():
+        return None
+    for line in path.read_text().splitlines():
+        s = line.strip()
+        if s.startswith("port") and "=" in s:
+            try:
+                return int(s.split("=", 1)[1].strip())
+            except ValueError:
+                return None
+    return None
+
+
+_AIMYABLE_PORT = _config_port(_AIMYABLE)
+
+
 @pytest.mark.skipif(not _AIMYABLE.exists(),
                     reason="requires config/aimyable.toml (not present in worktrees)")
+@pytest.mark.skipif(_AIMYABLE_PORT is not None and _port_in_use(_AIMYABLE_PORT),
+                    reason="aimyable port already bound (frshty service running locally)")
 def test_auto_healing_without_frshty_events_env():
     """
     Verify that single-instance auto-healing works when:
@@ -66,6 +90,8 @@ def test_auto_healing_without_frshty_events_env():
 
 @pytest.mark.skipif(not (_AIMYABLE.exists() and _NECTAR.exists()),
                     reason="requires config/aimyable.toml + config/nectar.toml")
+@pytest.mark.skipif(_AIMYABLE_PORT is not None and _port_in_use(_AIMYABLE_PORT),
+                    reason="aimyable port already bound (frshty service running locally)")
 def test_multi_instance_unchanged():
     """
     Verify --multi mode still works identically as before.
