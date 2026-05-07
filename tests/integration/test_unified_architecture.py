@@ -3,7 +3,15 @@ import subprocess
 import time
 from pathlib import Path
 
+import pytest
 
+
+_AIMYABLE = Path("config/aimyable.toml")
+_NECTAR = Path("config/nectar.toml")
+
+
+@pytest.mark.skipif(not _AIMYABLE.exists(),
+                    reason="requires config/aimyable.toml (not present in worktrees)")
 def test_auto_healing_without_frshty_events_env():
     """
     Verify that single-instance auto-healing works when:
@@ -56,6 +64,8 @@ def test_auto_healing_without_frshty_events_env():
             process.wait()
 
 
+@pytest.mark.skipif(not (_AIMYABLE.exists() and _NECTAR.exists()),
+                    reason="requires config/aimyable.toml + config/nectar.toml")
 def test_multi_instance_unchanged():
     """
     Verify --multi mode still works identically as before.

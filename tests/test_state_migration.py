@@ -42,28 +42,34 @@ def test_log_contextvar_isolation(tmp_path):
     (dir_a / "logs").mkdir(parents=True)
     (dir_b / "logs").mkdir(parents=True)
 
+    state.init(dir_a)
     log.init(dir_a, "alpha")
     log.emit("event1", "from default alpha")
 
-    tokens = log.use(dir_b, "beta")
+    state_token = state.use(dir_b)
+    log_tokens = log.use(dir_b, "beta")
     try:
         log.emit("event2", "from contextvar beta")
     finally:
-        log.reset(tokens)
+        log.reset(log_tokens)
+        state.reset(state_token)
 
     log.emit("event3", "back to default alpha")
 
-    a_lines = (dir_a / "logs" / "alpha.jsonl").read_text().splitlines()
-    b_lines = (dir_b / "logs" / "beta.jsonl").read_text().splitlines()
+    a_rows = db.query_all(
+        "SELECT event, job FROM log_events WHERE job=? AND event IN (?,?,?) ORDER BY ts",
+        ("alpha", "event1", "event2", "event3"),
+    )
+    b_rows = db.query_all(
+        "SELECT event, job FROM log_events WHERE job=? AND event IN (?,?,?) ORDER BY ts",
+        ("beta", "event1", "event2", "event3"),
+    )
 
-    assert len(a_lines) == 2, f"alpha should have 2 entries, got {len(a_lines)}"
-    assert len(b_lines) == 1, f"beta should have 1 entry, got {len(b_lines)}"
-    a0 = json.loads(a_lines[0])
-    a1 = json.loads(a_lines[1])
-    b0 = json.loads(b_lines[0])
-    assert a0["event"] == "event1" and a0["job"] == "alpha"
-    assert a1["event"] == "event3" and a1["job"] == "alpha"
-    assert b0["event"] == "event2" and b0["job"] == "beta"
+    assert len(a_rows) == 2, f"alpha should have 2 entries, got {len(a_rows)}"
+    assert len(b_rows) == 1, f"beta should have 1 entry, got {len(b_rows)}"
+    assert a_rows[0]["event"] == "event1" and a_rows[0]["job"] == "alpha"
+    assert a_rows[1]["event"] == "event3" and a_rows[1]["job"] == "alpha"
+    assert b_rows[0]["event"] == "event2" and b_rows[0]["job"] == "beta"
 
 
 def test_per_row_ticket_api(tmp_state):
