@@ -156,18 +156,22 @@ def start_reviewing(ctx: TaskContext) -> TaskResult:
 @task("fix_review_findings",
       preconditions=[status_is("reviewing"),
                      file_contains("docs/tri-review.md", r"VERDICT:\s*FAIL")],
-      postconditions=[file_contains("docs/tri-review.md", r"VERDICT:\s*(PASS|FAIL)")],
+      postconditions=[file_contains("docs/tri-review.md", r"VERDICT:\s*PASS")],
       timeout=FIX_TIMEOUT)
 def fix_review_findings(ctx: TaskContext) -> TaskResult:
     ticket_dir = _ticket_dir(ctx)
     if not ticket_dir.is_dir():
         return TaskResult("failed", f"ticket dir missing: {ticket_dir}")
     prompt = (
-        "Read docs/tri-review.md. Fix all blocking findings in the workspace. "
-        "Run relevant tests to verify the fixes. Then re-run /tri-review and save "
-        "the full output to docs/tri-review.md, replacing the previous version, "
-        "with a line reading exactly 'VERDICT: PASS' or 'VERDICT: FAIL' in the "
-        "Verdict section."
+        "Read docs/tri-review.md and identify the blocking findings (those flagged as "
+        "blocking, not suggestions). Fix each one in the workspace. Run any tests directly "
+        "relevant to the changed files. Then update docs/tri-review.md: under the Verdict "
+        "section, replace the previous verdict with a single line. Write 'VERDICT: PASS' "
+        "if and only if every blocking finding from the original review has been addressed "
+        "by your changes. Otherwise list which blocking findings remain unfixed (one bullet "
+        "each, citing file:line) and write 'VERDICT: FAIL'. Do NOT re-run /tri-review or "
+        "spawn additional persona reviews — this is a focused verification of your own fix, "
+        "not a fresh review."
     )
     log.emit("ticket_review_fixing", f"Headless fix+rereview for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key})

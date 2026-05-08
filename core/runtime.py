@@ -6,6 +6,7 @@ the Instances registry, start the dispatcher, and start the worker pool.
 Safe to call once per process. Re-entrancy is guarded.
 """
 from __future__ import annotations
+import os
 import random
 import threading
 import time
@@ -63,7 +64,7 @@ def start_events(
     instance_configs: list[dict],
     db_path: Path = DEFAULT_DB_PATH,
     migrations_dir: Path = DEFAULT_MIGRATIONS,
-    worker_count: int = 4,
+    worker_count: int = int(os.environ.get("FRSHTY_WORKER_COUNT", "4")),
     cron_interval: int = 240,
     beat_interval: int = 60,
 ) -> Instances:
