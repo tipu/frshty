@@ -199,26 +199,42 @@ def fix_review_findings(ctx: TaskContext) -> TaskResult:
     ticket_dir = _ticket_dir(ctx)
     if not ticket_dir.is_dir():
         return TaskResult("failed", f"ticket dir missing: {ticket_dir}")
-    prompt = (
+
+    fix_prompt = (
         "Read docs/tri-review.md and identify the blocking findings (those flagged as "
         "blocking, not suggestions). Fix each one in the workspace. Run any tests directly "
-        "relevant to the changed files. Then update docs/tri-review.md: under the Verdict "
-        "section, replace the previous verdict with a single line. Write 'VERDICT: PASS' "
-        "if and only if every blocking finding from the original review has been addressed "
-        "by your changes. Otherwise list which blocking findings remain unfixed (one bullet "
-        "each, citing file:line) and write 'VERDICT: FAIL'. Do NOT re-run /tri-review or "
-        "spawn additional persona reviews — this is a focused verification of your own fix, "
-        "not a fresh review."
+        "relevant to the changed files. Do NOT modify docs/tri-review.md — leave the verdict "
+        "section untouched; a separate verifier will assess your work."
     )
-    log.emit("ticket_review_fixing", f"Headless fix+rereview for {ctx.ticket_key}",
+    log.emit("ticket_review_fixing", f"Apply fix for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key})
     sid, resume = _claim_session(ctx, "fix_review_findings")
-    result = run_claude_code(prompt, cwd=ticket_dir, timeout=FIX_TIMEOUT,
-                             session_id=sid, resume=resume)
-    if result is None:
+    fix_result = run_claude_code(fix_prompt, cwd=ticket_dir, timeout=FIX_TIMEOUT,
+                                 session_id=sid, resume=resume)
+    if fix_result is None:
         if resume:
             _drop_session(ctx, "fix_review_findings")
-        return TaskResult("failed", "claude returned non-zero or empty")
+        return TaskResult("failed", "fix step: claude returned non-zero or empty")
+
+    verify_prompt = (
+        "Independent verification step. Read docs/tri-review.md to see the original blocking "
+        "findings. Then run `git diff` (and `git diff --staged` if relevant) to see the changes "
+        "that were just made. For each blocking finding from the original review, decide whether "
+        "the diff actually addresses it — be skeptical, this is a fresh review, not a confirmation "
+        "of a prior judgement.\n\n"
+        "Update the Verdict section of docs/tri-review.md (replace whatever is there) with exactly "
+        "one of:\n"
+        "  VERDICT: PASS    — every blocking finding is genuinely addressed by the diff\n"
+        "  VERDICT: FAIL    — one or more blocking findings remain; list each unfixed finding as a "
+        "bullet citing file:line and what's missing\n\n"
+        "Do NOT re-run /tri-review and do NOT spawn persona sub-agents. Do NOT make any code edits. "
+        "This is verification only."
+    )
+    log.emit("ticket_review_verifying", f"Fresh verify for {ctx.ticket_key}",
+             meta={"ticket": ctx.ticket_key})
+    verify_result = run_claude_code(verify_prompt, cwd=ticket_dir, timeout=REVIEW_TIMEOUT)
+    if verify_result is None:
+        return TaskResult("failed", "verify step: claude returned non-zero or empty")
     return TaskResult("ok")
 
 
