@@ -993,17 +993,29 @@ def _check_in_review(config, ticket, ts, base_url) -> dict:
         return ts
 
     all_merged = True
+    closed_unmerged = []
     for pr in prs:
         pr_state = platform.get_pr_state(pr["repo"], pr["id"])
-        if pr_state != "MERGED":
-            all_merged = False
-            break
+        if pr_state == "MERGED":
+            continue
+        all_merged = False
+        if pr_state in ("CLOSED", "DECLINED", "DELETED"):
+            closed_unmerged.append((pr, pr_state))
 
     if all_merged:
         log.emit("ticket_merged", f"All PRs merged for {_label(ticket['key'], ts)}",
             links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
             meta={"ticket": ticket["key"]})
         return _mark_ticket_merged(config, ticket, ts)
+
+    if closed_unmerged:
+        for pr, pr_state in closed_unmerged:
+            log.emit("ticket_pr_closed_unmerged",
+                f"{_label(ticket['key'], ts)}: PR #{pr['id']} in {pr['repo']} is {pr_state} without merge; parking ticket at pr_failed",
+                links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+                meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"], "pr_state": pr_state})
+        ts["status"] = transition(ts["status"], "pr_failed")
+        return ts
 
     ts["status"] = transition(ts["status"], "in_review")
     platform_name = config["job"].get("platform", "")
