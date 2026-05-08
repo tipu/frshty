@@ -187,17 +187,32 @@ def _record_start(function_name: str, model: str, prompt: str,
 
 
 def _record_end(inv_id: str | None, started_ms: float, status: str,
-                exit_code: int | None, output: str | None) -> None:
+                exit_code: int | None, output: str | None,
+                usage: dict | None = None) -> None:
     if inv_id is None:
         return
     finished = datetime.now(timezone.utc).isoformat()
     duration_ms = int((time.monotonic() - started_ms) * 1000)
     out_text = output or ""
+    cost_usd = None
+    input_tokens = output_tokens = cc_tokens = cr_tokens = num_turns = None
+    if usage:
+        cost_usd = usage.get("total_cost_usd")
+        u = usage.get("usage") or {}
+        input_tokens = u.get("input_tokens")
+        output_tokens = u.get("output_tokens")
+        cc_tokens = u.get("cache_creation_input_tokens")
+        cr_tokens = u.get("cache_read_input_tokens")
+        num_turns = usage.get("num_turns")
     try:
         _db.execute(
             "UPDATE claude_invocations SET finished_at=?, duration_ms=?, status=?, "
-            "exit_code=?, output=?, output_length=? WHERE id=?",
-            (finished, duration_ms, status, exit_code, out_text, len(out_text), inv_id),
+            "exit_code=?, output=?, output_length=?, cost_usd=?, input_tokens=?, "
+            "output_tokens=?, cache_creation_input_tokens=?, "
+            "cache_read_input_tokens=?, num_turns=? WHERE id=?",
+            (finished, duration_ms, status, exit_code, out_text, len(out_text),
+             cost_usd, input_tokens, output_tokens, cc_tokens, cr_tokens, num_turns,
+             inv_id),
         )
     except Exception as e:
         log.emit("claude_invocation_log_failed", f"failed to record claude end: {e}")
@@ -298,8 +313,10 @@ class ClaudeProvider(LLMProvider):
                     log.emit("job_pid_write_failed", f"Failed to write pid file: {e}")
             parts: list[str] = []
             non_json: list[str] = []
+            result_event: dict | None = None
 
             def _drain():
+                nonlocal result_event
                 assert proc.stdout is not None
                 for line in proc.stdout:
                     try:
@@ -309,6 +326,8 @@ class ClaudeProvider(LLMProvider):
                         if stripped:
                             non_json.append(stripped)
                         continue
+                    if evt.get("type") == "result":
+                        result_event = evt
                     text = _extract_text(evt)
                     if not text:
                         continue
@@ -357,15 +376,15 @@ class ClaudeProvider(LLMProvider):
         if timed_out:
             if non_json:
                 output = output + "\n[non-json output]\n" + "\n".join(non_json[-50:])
-            _record_end(inv_id, t0, "timeout", None, output)
+            _record_end(inv_id, t0, "timeout", None, output, usage=result_event)
             return None
         if proc.returncode != 0:
             if non_json:
                 output = output + "\n[non-json output]\n" + "\n".join(non_json[-50:])
             _trip_llm_guard(output)
-            _record_end(inv_id, t0, "error", proc.returncode, output)
+            _record_end(inv_id, t0, "error", proc.returncode, output, usage=result_event)
             return None
-        _record_end(inv_id, t0, "success", proc.returncode, output)
+        _record_end(inv_id, t0, "success", proc.returncode, output, usage=result_event)
         return output
 
     def balanced(self, prompt: str, *, worktree: Path | None = None,

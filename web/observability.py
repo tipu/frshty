@@ -50,7 +50,9 @@ def api_claude_invocations(
     sql = (
         "SELECT id, instance_key, job_key, function_name, model, prompt_length, "
         "cwd, tools, timeout_s, started_at, finished_at, duration_ms, status, "
-        "exit_code, output_length, substr(prompt, 1, 240) AS prompt_preview "
+        "exit_code, output_length, cost_usd, input_tokens, output_tokens, "
+        "cache_creation_input_tokens, cache_read_input_tokens, num_turns, "
+        "substr(prompt, 1, 240) AS prompt_preview "
         f"FROM claude_invocations WHERE {' AND '.join(where)} "
         "ORDER BY started_at DESC LIMIT ?"
     )
