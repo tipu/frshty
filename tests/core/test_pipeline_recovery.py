@@ -112,7 +112,7 @@ class TestStartPlanningPartialRecovery:
 
         calls = []
 
-        def fake_run_claude(prompt, *, cwd=None, timeout=None):
+        def fake_run_claude(prompt, *, cwd=None, timeout=None, session_id=None, resume=False):
             calls.append({"prompt": prompt, "timeout": timeout})
             change_manifest = Path(cwd) / "docs" / "change-manifest.md"
             if not change_manifest.exists():
@@ -208,7 +208,7 @@ class TestStartPlanningPartialRecovery:
         docs.mkdir(parents=True)
         (docs / "technical-plan.md").write_text("# Technical Plan\n\nContent here\n")
 
-        def fake_run_claude(prompt, *, cwd=None, timeout=None):
+        def fake_run_claude(prompt, *, cwd=None, timeout=None, session_id=None, resume=False):
             change_manifest = Path(cwd) / "docs" / "change-manifest.md"
             if not change_manifest.exists():
                 change_manifest.parent.mkdir(parents=True, exist_ok=True)
@@ -341,7 +341,7 @@ class TestStartReviewingRecovery:
         docs.mkdir(parents=True)
         (docs / "change-manifest.md").write_text("# Manifest\n")
 
-        def fake_run_claude(prompt, *, cwd=None, timeout=None):
+        def fake_run_claude(prompt, *, cwd=None, timeout=None, session_id=None, resume=False):
             tri = Path(cwd) / "docs" / "tri-review.md"
             tri.write_text("VERDICT: PASS\n")
             return "ok"
@@ -372,7 +372,7 @@ class TestStartReviewingRecovery:
         (docs / "change-manifest.md").write_text("# Manifest\n")
         (docs / "tri-review.md").write_text("## Review\nSome findings but no verdict line\n")
 
-        def fake_run_claude(prompt, *, cwd=None, timeout=None):
+        def fake_run_claude(prompt, *, cwd=None, timeout=None, session_id=None, resume=False):
             tri = Path(cwd) / "docs" / "tri-review.md"
             tri.write_text("## Review\n## Verdict\nVERDICT: PASS\n")
             return "ok"
@@ -433,7 +433,7 @@ class TestFixReviewFindingsRecovery:
         (docs / "change-manifest.md").write_text("# Manifest\n")
         (docs / "tri-review.md").write_text("## Verdict\nVERDICT: FAIL\n")
 
-        def fake_run_claude(prompt, *, cwd=None, timeout=None):
+        def fake_run_claude(prompt, *, cwd=None, timeout=None, session_id=None, resume=False):
             tri = Path(cwd) / "docs" / "tri-review.md"
             tri.write_text("## Verdict\nVERDICT: PASS\n")
             return "ok"

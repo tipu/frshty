@@ -244,7 +244,8 @@ class ClaudeProvider(LLMProvider):
         return [self.bin, *self.extra_args, *args]
 
     def thinking(self, prompt: str, *, cwd: Path | None = None,
-                 timeout: int = 600, **kwargs) -> str | None:
+                 timeout: int = 600, session_id: str | None = None,
+                 resume: bool = False, **kwargs) -> str | None:
         cmd = self._cmd(
             "-p", prompt,
             "--model", _THINKING_MODEL,
@@ -253,6 +254,10 @@ class ClaudeProvider(LLMProvider):
             "--include-partial-messages",
             "--verbose",
         )
+        if session_id and resume:
+            cmd += ["--resume", session_id]
+        elif session_id:
+            cmd += ["--session-id", session_id]
         inv_id = _record_start("run_claude_code", _THINKING_MODEL, prompt, cwd, None, timeout)
         t0 = time.monotonic()
         blocked, reason, remaining_s = _guard_status()
