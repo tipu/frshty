@@ -177,8 +177,8 @@ def _mark_ticket_merged(config: dict, ticket: dict, ts: dict) -> dict:
     ts["status"] = transition(ts["status"], "merged")
     ts["merged_at"] = datetime.now(timezone.utc).isoformat()
     ts["merged_comment_snapshot"] = _comment_snapshot(comments)
-    if "merged_external_status" not in ts:
-        ts["merged_external_status"] = ticket.get("status", "") or ts.get("external_status", "")
+    if not ts.get("merged_external_status"):
+        ts["merged_external_status"] = ticket.get("status", "") or ts.get("external_status", "") or "_merged_"
     ts.pop("ci_passed", None)
     return ts
 
@@ -510,20 +510,17 @@ def check(config: dict, instance_key: str = ""):
 
             if ts["status"] == TicketStatus.merged:
                 curr_ext = ticket.get("status", "")
-                if "merged_external_status" not in ts:
-                    ts["merged_external_status"] = curr_ext
+                if not ts.get("merged_external_status"):
+                    ts["merged_external_status"] = curr_ext or "_merged_"
                     state.save_ticket(key, ts)
                     continue
-                if curr_ext != ts["merged_external_status"]:
+                if curr_ext and curr_ext != ts["merged_external_status"]:
                     ts = _reingest_merged_ticket(config, ticket, ts, base_url)
                     state.save_ticket(key, ts)
                     if instance_key:
                         _enqueue_stage(instance_key, key, "start_planning")
                     continue
-                if not ts.get("validation_enqueued_at") and instance_key:
-                    from datetime import datetime, timezone
-                    ts["validation_enqueued_at"] = datetime.now(timezone.utc).isoformat()
-                    state.save_ticket(key, ts)
+                if instance_key:
                     _enqueue_stage(instance_key, key, "validate_merged_ticket")
                 continue
 
@@ -614,8 +611,14 @@ def check(config: dict, instance_key: str = ""):
                 if result.get("_ci_failed"):
                     ts = _handle_ci_failure(ticket, ts, result["pr"], result["checks"], base_url, instance_key)
                 elif result.get("_ci_stalled"):
-                    ts["status"] = transition(ts["status"], "pr_failed")
+                    pr = result.get("pr") or {}
+                    log.emit("ticket_checks_stall_repolling",
+                        f"CI stalled for {_label(ticket['key'], ts)} PR #{pr.get('id', '?')}; "
+                        f"resetting checks window and re-polling on next cycle",
+                        links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+                        meta={"ticket": ticket["key"], "repo": pr.get("repo"), "pr_id": pr.get("id")})
                     ts.pop("_ci_timeout_state", None)
+                    ts.pop("checks_started_at", None)
                 else:
                     ts = result
 
@@ -1164,12 +1167,15 @@ def _resolve_conflicts(config, ticket, ts, base_url) -> dict:
         if not wt.is_dir():
             continue
 
-        result = platform.merge_base(wt, base_branch)
+        prev_error = ts.get("last_conflict_error")
+        result = platform.merge_base(wt, base_branch, prev_error=prev_error)
         if not result["ok"]:
-            log.emit("ticket_conflict_failed", f"Merge failed for {_label(ticket['key'], ts)} PR #{pr['id']}: {result.get('error', '')[:100]}",
+            error = result.get("error", "")
+            log.emit("ticket_conflict_failed", f"Merge failed for {_label(ticket['key'], ts)} PR #{pr['id']}: {error[:100]}",
                 links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
-                meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"], "error": result.get("error", "")})
+                meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"], "error": error})
             ts["conflict_resolution_attempts"] = attempts + 1
+            ts["last_conflict_error"] = error
             if attempts + 1 >= MAX_CONFLICT_ATTEMPTS:
                 ts["status"] = transition(ts["status"], "pr_failed")
             return ts
@@ -1184,6 +1190,7 @@ def _resolve_conflicts(config, ticket, ts, base_url) -> dict:
 
         ts.pop("ci_passed", None)
         ts.pop("checks_started_at", None)
+        ts.pop("last_conflict_error", None)
         ts["conflict_resolution_attempts"] = attempts + 1
 
         log.emit("ticket_conflict_resolved", f"Merged {base_branch} into {_label(ticket['key'], ts)} PR #{pr['id']}",

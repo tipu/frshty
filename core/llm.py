@@ -1,3 +1,4 @@
+import contextvars
 import json
 import os
 import re
@@ -5,7 +6,7 @@ import subprocess
 import threading
 import time
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -19,9 +20,25 @@ from core.state import _instance_key_cv
 _CLAUDE_MAX_CONCURRENT = int(os.environ.get("FRSHTY_CLAUDE_MAX_CONCURRENT", "15"))
 _LLM_LIMIT_COOLDOWN_SECONDS = int(os.environ.get("FRSHTY_LLM_LIMIT_COOLDOWN_SECONDS", "1800"))
 _llm_sem = threading.BoundedSemaphore(max(1, _CLAUDE_MAX_CONCURRENT))
-_llm_guard_lock = threading.Lock()
-_llm_blocked_until: dict[str, float] = {}
-_llm_block_reasons: dict[str, str] = {}
+
+_guard_blocked_cv: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "frshty_llm_guard_blocked", default=False
+)
+
+
+def reset_guard_blocked() -> None:
+    _guard_blocked_cv.set(False)
+
+
+def consume_guard_blocked() -> bool:
+    val = _guard_blocked_cv.get()
+    if val:
+        _guard_blocked_cv.set(False)
+    return val
+
+
+def _flag_guard_blocked() -> None:
+    _guard_blocked_cv.set(True)
 
 
 _providers: dict[str, "LLMProvider"] = {}
@@ -76,15 +93,29 @@ def _llm_limit_reason(output: str | None) -> str | None:
 
 def _guard_status() -> tuple[bool, str, int]:
     key = _guard_key()
-    now = time.monotonic()
-    with _llm_guard_lock:
-        blocked_until = _llm_blocked_until.get(key, 0.0)
-        if blocked_until <= now:
-            _llm_blocked_until.pop(key, None)
-            _llm_block_reasons.pop(key, None)
-            return False, "", 0
-        reason = _llm_block_reasons.get(key, "recent usage limit response")
-        return True, reason, max(1, int(blocked_until - now))
+    row = _db.query_one(
+        "SELECT data FROM kv WHERE instance_key=? AND key='llm_guard'",
+        (key,),
+    )
+    if not row or not row.get("data"):
+        return False, "", 0
+    try:
+        payload = json.loads(row["data"])
+        blocked_until = datetime.fromisoformat(payload["blocked_until"])
+        reason = payload.get("reason", "recent usage limit response")
+    except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+        _db.execute(
+            "DELETE FROM kv WHERE instance_key=? AND key='llm_guard'", (key,)
+        )
+        return False, "", 0
+    now = datetime.now(timezone.utc)
+    if blocked_until <= now:
+        _db.execute(
+            "DELETE FROM kv WHERE instance_key=? AND key='llm_guard'", (key,)
+        )
+        return False, "", 0
+    remaining_s = max(1, int((blocked_until - now).total_seconds()))
+    return True, reason, remaining_s
 
 
 def _trip_llm_guard(output: str | None) -> str | None:
@@ -92,10 +123,19 @@ def _trip_llm_guard(output: str | None) -> str | None:
     if reason is None:
         return None
     key = _guard_key()
-    blocked_until = time.monotonic() + max(1, _LLM_LIMIT_COOLDOWN_SECONDS)
-    with _llm_guard_lock:
-        _llm_blocked_until[key] = blocked_until
-        _llm_block_reasons[key] = reason
+    now = datetime.now(timezone.utc)
+    blocked_until = now + timedelta(seconds=max(1, _LLM_LIMIT_COOLDOWN_SECONDS))
+    payload = json.dumps({
+        "blocked_until": blocked_until.isoformat(),
+        "reason": reason,
+    })
+    _db.execute(
+        "INSERT INTO kv(instance_key, key, data, updated_at) "
+        "VALUES (?, 'llm_guard', ?, ?) "
+        "ON CONFLICT(instance_key, key) DO UPDATE SET "
+        "data=excluded.data, updated_at=excluded.updated_at",
+        (key, payload, now.isoformat()),
+    )
     log.emit(
         "llm_guard_tripped",
         f"[{_active_instance_key()}] blocking new LLM invocations for "
@@ -103,6 +143,7 @@ def _trip_llm_guard(output: str | None) -> str | None:
         meta={"instance_key": _active_instance_key(), "reason": reason,
               "cooldown_s": _LLM_LIMIT_COOLDOWN_SECONDS},
     )
+    _flag_guard_blocked()
     return reason
 
 
@@ -220,6 +261,7 @@ class ClaudeProvider(LLMProvider):
                      f"while cooldown active ({remaining_s}s left)",
                      meta={"instance_key": _active_instance_key(),
                            "reason": reason, "remaining_s": remaining_s})
+            _flag_guard_blocked()
             return None
         _llm_sem.acquire()
         _mark_running(inv_id)
@@ -337,6 +379,7 @@ class ClaudeProvider(LLMProvider):
                      f"while cooldown active ({remaining_s}s left)",
                      meta={"instance_key": _active_instance_key(),
                            "reason": reason, "remaining_s": remaining_s})
+            _flag_guard_blocked()
             return None
         with _llm_sem:
             _mark_running(inv_id)
@@ -369,6 +412,7 @@ class ClaudeProvider(LLMProvider):
                      f"while cooldown active ({remaining_s}s left)",
                      meta={"instance_key": _active_instance_key(),
                            "reason": reason, "remaining_s": remaining_s})
+            _flag_guard_blocked()
             return None
         with _llm_sem:
             _mark_running(inv_id)
@@ -430,6 +474,7 @@ class OpenCodeProvider(LLMProvider):
                      f"while cooldown active ({remaining_s}s left)",
                      meta={"instance_key": _active_instance_key(),
                            "reason": reason, "remaining_s": remaining_s})
+            _flag_guard_blocked()
             return None
         with _llm_sem:
             _mark_running(inv_id)

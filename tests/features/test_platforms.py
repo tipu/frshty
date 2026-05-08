@@ -166,6 +166,16 @@ class TestGitHubEvaluateChecks:
         p = GitHubPlatform(config)
         assert p._evaluate_checks([{"state": "SUCCESS"}, {"state": "PENDING"}]) == "pending"
 
+    def test_neutral_skipped_pass(self):
+        config = {"job": {"platform": "github"}, "github": {"repo": "org/r"}, "workspace": {"base_branch": "main"}}
+        p = GitHubPlatform(config)
+        assert p._evaluate_checks([{"state": "SUCCESS"}, {"state": "NEUTRAL"}, {"state": "SKIPPED"}]) == "passed"
+
+    def test_cancelled_is_failed(self):
+        config = {"job": {"platform": "github"}, "github": {"repo": "org/r"}, "workspace": {"base_branch": "main"}}
+        p = GitHubPlatform(config)
+        assert p._evaluate_checks([{"state": "SUCCESS"}, {"state": "CANCELLED"}]) == "failed"
+
 
 class TestGitHubPushBranch:
     def test_empty_branch_rejects(self):
