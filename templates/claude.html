@@ -56,7 +56,7 @@ pre.body { white-space: pre-wrap; word-break: break-word; }
     <input type="text" v-model.lazy="filters.q" @change="load" placeholder="search prompt/output/job"
            class="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-300 flex-1 min-w-[200px]" />
     <button @click="load" class="bg-blue-800 hover:bg-blue-700 text-blue-200 px-3 py-1 rounded">Reload</button>
-    <span class="text-gray-500">{{ rows.length }} rows</span>
+    <span class="text-gray-500">{{ rows.length }} rows · total {{ fmtCost(totalCost) }} · {{ fmtCostsByModel() }}</span>
 </div>
 
 <div v-if="!rows.length" class="text-gray-500 text-sm">No invocations.</div>
@@ -68,6 +68,8 @@ pre.body { white-space: pre-wrap; word-break: break-word; }
         <th class="py-1 pr-2">Model</th>
         <th class="py-1 pr-2">Status</th>
         <th class="py-1 pr-2">Dur</th>
+        <th class="py-1 pr-2">Cost</th>
+        <th class="py-1 pr-2">Tokens (cc/cr/out)</th>
         <th class="py-1 pr-2">Prompt</th>
         <th class="py-1 pr-2">Job</th>
     </tr>
@@ -80,13 +82,15 @@ pre.body { white-space: pre-wrap; word-break: break-word; }
             <td class="py-1 pr-2"><span class="badge model-tag">{{ r.model }}</span></td>
             <td class="py-1 pr-2"><span :class="`badge badge-${r.status}`">{{ r.status }}</span></td>
             <td class="py-1 pr-2 text-gray-400 whitespace-nowrap">{{ fmtDur(r.duration_ms) }}</td>
+            <td class="py-1 pr-2 text-emerald-300 whitespace-nowrap">{{ fmtCost(r.cost_usd) }}</td>
+            <td class="py-1 pr-2 text-gray-400 whitespace-nowrap text-[11px]">{{ fmtTokens(r) }}</td>
             <td class="py-1 pr-2 text-gray-300 truncate max-w-[480px]" :title="r.prompt_preview">
                 <span class="text-gray-500">[{{ r.prompt_length }}b]</span> {{ r.prompt_preview }}
             </td>
             <td class="py-1 pr-2 text-gray-500">{{ r.job_key || '—' }}</td>
         </tr>
         <tr v-if="expanded[r.id]" class="border-t border-gray-800 bg-gray-900/50">
-            <td colspan="7" class="p-3">
+            <td colspan="9" class="p-3">
                 <div v-if="!details[r.id]" class="text-gray-500">Loading…</div>
                 <div v-else class="grid gap-3">
                     <div class="text-xs text-gray-500">
@@ -124,6 +128,14 @@ frshtyApp({
         const filters = reactive({ since_hours: 24, status: '', function: '', q: '' });
         const expanded = reactive({});
         const details = reactive({});
+        const totalCost = Vue.computed(() => rows.value.reduce((s, r) => s + (r.cost_usd || 0), 0));
+        function fmtCostsByModel() {
+            const by = {};
+            for (const r of rows.value) {
+                if (r.cost_usd) by[r.model] = (by[r.model] || 0) + r.cost_usd;
+            }
+            return Object.entries(by).map(([m, c]) => `${m.replace('claude-','').slice(0,12)} ${fmtCost(c)}`).join(' · ');
+        }
 
         function fmtTime(iso) {
             if (!iso) return '';
@@ -135,6 +147,22 @@ frshtyApp({
             if (ms < 1000) return `${ms}ms`;
             if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
             return `${Math.floor(ms / 60000)}m${Math.floor((ms % 60000) / 1000)}s`;
+        }
+        function fmtCost(usd) {
+            if (usd === null || usd === undefined) return '—';
+            if (usd < 0.01) return `$${usd.toFixed(4)}`;
+            return `$${usd.toFixed(2)}`;
+        }
+        function fmtT(n) {
+            if (n === null || n === undefined) return '—';
+            if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+            if (n >= 1e3) return (n / 1e3).toFixed(0) + 'k';
+            return String(n);
+        }
+        function fmtTokens(r) {
+            const cc = r.cache_creation_input_tokens, cr = r.cache_read_input_tokens, ot = r.output_tokens;
+            if (cc === null && cr === null && ot === null) return '—';
+            return `${fmtT(cc)}/${fmtT(cr)}/${fmtT(ot)}`;
         }
 
         async function load() {
@@ -172,7 +200,8 @@ frshtyApp({
             setInterval(load, 10000);
         });
 
-        return { rows, features, instanceName, filters, expanded, details, fmtTime, fmtDur, load, toggle };
+        return { rows, features, instanceName, filters, expanded, details, totalCost,
+                 fmtTime, fmtDur, fmtCost, fmtTokens, fmtCostsByModel, load, toggle };
     },
 }).mount('#app');
 </script>
