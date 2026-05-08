@@ -1,4 +1,5 @@
 """Ticket pipeline tasks. Headless claude -p invocations, postcondition-gated."""
+import uuid
 from pathlib import Path
 
 import core.log as log
@@ -15,6 +16,42 @@ from features.platforms import make_platform
 PLAN_TIMEOUT = 1800
 REVIEW_TIMEOUT = 900
 FIX_TIMEOUT = 1800
+
+
+def _claim_session(ctx: TaskContext, task_name: str) -> tuple[str | None, bool]:
+    """Returns (session_id, resume). Reuses an existing UUID stored in ticket
+    state so subsequent calls for this (ticket, task) chain into the same
+    Claude CLI session and benefit from prior cache_creation. First call
+    creates a fresh UUID and stores it; later calls return resume=True."""
+    if not ctx.ticket_key:
+        return None, False
+    existing = state.load_ticket(ctx.ticket_key) or {}
+    sessions = existing.get("llm_sessions") or {}
+    sid = sessions.get(task_name)
+    if sid:
+        return sid, True
+    sid = str(uuid.uuid4())
+    def _set(t: dict) -> dict:
+        sess = dict(t.get("llm_sessions") or {})
+        sess[task_name] = sid
+        t["llm_sessions"] = sess
+        return t
+    state.update_ticket(ctx.ticket_key, _set)
+    return sid, False
+
+
+def _drop_session(ctx: TaskContext, task_name: str) -> None:
+    """Forget the stored session_id for (ticket, task) so the next call starts
+    fresh. Use after a resume=True call fails — the on-disk session may have
+    been cleaned up and continuing to --resume against it will error every time."""
+    if not ctx.ticket_key:
+        return
+    def _del(t: dict) -> dict:
+        sess = dict(t.get("llm_sessions") or {})
+        sess.pop(task_name, None)
+        t["llm_sessions"] = sess
+        return t
+    state.update_ticket(ctx.ticket_key, _del)
 
 
 def _ticket_dir(ctx: TaskContext) -> Path:
@@ -175,8 +212,12 @@ def fix_review_findings(ctx: TaskContext) -> TaskResult:
     )
     log.emit("ticket_review_fixing", f"Headless fix+rereview for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key})
-    result = run_claude_code(prompt, cwd=ticket_dir, timeout=FIX_TIMEOUT)
+    sid, resume = _claim_session(ctx, "fix_review_findings")
+    result = run_claude_code(prompt, cwd=ticket_dir, timeout=FIX_TIMEOUT,
+                             session_id=sid, resume=resume)
     if result is None:
+        if resume:
+            _drop_session(ctx, "fix_review_findings")
         return TaskResult("failed", "claude returned non-zero or empty")
     return TaskResult("ok")
 
