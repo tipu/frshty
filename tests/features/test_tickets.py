@@ -103,6 +103,24 @@ class TestEnqueueStage:
             tickets._enqueue_stage("inst", "T-1", "start_planning")
             eq.assert_called_once()
 
+    def test_caps_at_5_consecutive_recent_failures(self):
+        from datetime import datetime, timezone
+        recent = datetime.now(timezone.utc).isoformat()
+        jobs = [{"task": "non_llm_task", "status": "failed", "finished_at": recent}] * 5
+        with patch("core.queue.jobs_for_ticket", return_value=jobs), \
+             patch("core.queue.enqueue_job") as eq:
+            tickets._enqueue_stage("inst", "T-1", "non_llm_task")
+            eq.assert_not_called()
+
+    def test_old_failures_age_out_of_cap_window(self):
+        from datetime import datetime, timezone, timedelta
+        old = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+        jobs = [{"task": "non_llm_task", "status": "failed", "finished_at": old}] * 5
+        with patch("core.queue.jobs_for_ticket", return_value=jobs), \
+             patch("core.queue.enqueue_job") as eq:
+            tickets._enqueue_stage("inst", "T-1", "non_llm_task")
+            eq.assert_called_once()
+
 
 class TestCreatePr:
     def test_no_diff_marks_merged(self, tmp_path, fake_config):
