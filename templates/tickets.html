@@ -38,6 +38,10 @@
                         {{ t.status }}<template v-if="['pr_ready','in_review','pr_failed'].includes(t.status)"> ({{ (t.prs || []).length }}/{{ t.repo_count || 0 }})</template>
                     </span>
                     <span v-if="t.pm_findings_count" class="badge bg-amber-900 text-amber-200" :title="`${t.pm_findings_count} PM finding(s)`">⚑ {{ t.pm_findings_count }}</span>
+                    <span v-if="t.llm_invocations && t.llm_invocations.total" class="badge bg-purple-900 text-purple-200"
+                          :title="`LLM invocations: ${t.llm_invocations.ok} ok / ${t.llm_invocations.failed} failed / ${t.llm_invocations.blocked} blocked (${t.llm_invocations.total} total)`">
+                        ⚡ {{ t.llm_invocations.ok }}/{{ t.llm_invocations.failed }}/{{ t.llm_invocations.blocked }}
+                    </span>
                     <span v-if="t.validation_badge && t.validation_badge !== 'pending'" class="badge"
                           :class="`badge-val-${t.validation_badge}`" :title="`validation: ${t.validation_badge}`">
                         v: {{ t.validation_badge }}
@@ -49,15 +53,23 @@
                 <div v-if="t.pr_scheduled_at" class="text-xs text-yellow-400 mt-1">PR scheduled {{ fmtScheduled(t.pr_scheduled_at) }}</div>
                 <div v-if="t.external_status" class="text-xs text-gray-500 mt-1">{{ t.external_status }}</div>
             </a>
+            <div v-if="t.status === 'in_review' && (t.prs || []).length" class="mt-2 flex flex-wrap gap-1">
+                <a v-for="p in (t.prs || [])" :key="p.url" :href="p.url" target="_blank" rel="noopener"
+                   @click.stop class="text-xs text-blue-400 hover:text-blue-300 underline">
+                    {{ p.repo }}#{{ p.id }}
+                </a>
+            </div>
             <button v-if="t.status === 'pr_ready'" @click="submitPr(key)"
                     class="absolute top-2 right-2 bg-green-700 hover:bg-green-600 text-white text-xs px-2 py-1 rounded">Submit PR</button>
+            <button v-if="t.status === 'pr_failed'" @click="restart(key)"
+                    class="absolute top-2 right-2 bg-yellow-800 hover:bg-yellow-700 text-yellow-200 text-xs px-2 py-1 rounded">Restart</button>
             <div v-if="t.status === 'pending_approval'" class="absolute top-2 right-2 flex gap-1">
                 <button @click="approve(key)" class="bg-green-700 hover:bg-green-600 text-white text-xs px-2 py-1 rounded">Approve</button>
                 <button @click="reject(key)" class="bg-red-800 hover:bg-red-700 text-white text-xs px-2 py-1 rounded">Reject</button>
             </div>
             <button @click="discard(key)"
                     class="absolute right-2 text-gray-600 hover:text-red-400 text-xs hidden group-hover:block"
-                    :class="t.status === 'pr_ready' || t.status === 'pending_approval' ? 'bottom-2' : 'top-2'">discard</button>
+                    :class="['pr_ready', 'pr_failed', 'pending_approval'].includes(t.status) ? 'bottom-2' : 'top-2'">discard</button>
         </div>
     </div>
 </div>
@@ -146,6 +158,15 @@ frshtyApp({
             load();
         }
 
+        async function restart(key) {
+            const r = await fetch(`/api/tickets/${key}/restart`, {method: 'POST'});
+            if (!r.ok) {
+                const e = await r.json().catch(() => ({}));
+                alert('Restart failed: ' + (e.error || r.statusText));
+            }
+            load();
+        }
+
         async function submitPr(key) {
             currentTicketKey.value = key;
             const r = await fetch(`/api/tickets/${key}/pr-info`);
@@ -198,7 +219,7 @@ frshtyApp({
             visibleColumns,
             ticketsForColumn, prAuthors, fmtScheduled,
             discard, submitPr, closePrModal, onPrSubmit,
-            approve, reject,
+            approve, reject, restart,
         };
     },
 }).mount('#app');

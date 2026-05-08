@@ -5,6 +5,7 @@ import threading
 import time
 from datetime import datetime, timezone
 
+import core.llm as llm
 import core.log as log
 import core.queue as q
 import core.tasks.registry as registry
@@ -261,7 +262,15 @@ class WorkerPool:
             )
             log.emit("job_started", f"{job['task']} ticket={job['ticket_key']} job_id={job['id']}",
                      meta={"category": "noise"})
+            llm.reset_guard_blocked()
             result = registry.run_task(ctx)
+            if result.status == "failed" and llm.consume_guard_blocked():
+                result = registry.TaskResult(
+                    "skipped",
+                    f"llm_guard_blocked: {result.reason}" if result.reason else "llm_guard_blocked",
+                    artifacts=result.artifacts,
+                    next_events=result.next_events,
+                )
             response = {"reason": result.reason, "artifacts": result.artifacts}
             q.mark_done(job["id"], result.status, response)
             log.emit("job_finished",

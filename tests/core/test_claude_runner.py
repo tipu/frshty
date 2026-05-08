@@ -224,19 +224,88 @@ def test_run_claude_code_blocks_followup_after_usage_limit(tmp_path, monkeypatch
     )
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
 
-    prev_until = dict(llm._llm_blocked_until)
-    prev_reasons = dict(llm._llm_block_reasons)
-    llm._llm_blocked_until.clear()
-    llm._llm_block_reasons.clear()
+    import core.db as db
+    db.execute("DELETE FROM kv WHERE key='llm_guard'")
     try:
         first = run_claude_code("hi", cwd=tmp_path, timeout=5)
         second = run_claude_code("hi again", cwd=tmp_path, timeout=5)
     finally:
-        llm._llm_blocked_until.clear()
-        llm._llm_blocked_until.update(prev_until)
-        llm._llm_block_reasons.clear()
-        llm._llm_block_reasons.update(prev_reasons)
+        db.execute("DELETE FROM kv WHERE key='llm_guard'")
 
     assert first is None
     assert second is None
     assert attempts_file.read_text().splitlines() == ["x"]
+
+
+def test_llm_guard_persists_to_kv_table_after_trip(tmp_path, monkeypatch):
+    from datetime import datetime, timezone
+    bin_dir = tmp_path / "bin"
+    _install_fake_claude(
+        bin_dir,
+        'printf "%s\\n" "Key limit exceeded - please add credits"\n'
+        "exit 1",
+    )
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+
+    import core.db as db
+    db.execute("DELETE FROM kv WHERE key='llm_guard'")
+    try:
+        run_claude_code("hi", cwd=tmp_path, timeout=5)
+        row = db.query_one("SELECT data FROM kv WHERE key='llm_guard'")
+        assert row is not None
+        payload = json.loads(row["data"])
+        blocked_until = datetime.fromisoformat(payload["blocked_until"])
+        assert blocked_until > datetime.now(timezone.utc)
+        assert payload["reason"] == "key limit exceeded"
+    finally:
+        db.execute("DELETE FROM kv WHERE key='llm_guard'")
+
+
+def test_llm_guard_clears_after_cooldown_expires(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    bin_dir = tmp_path / "bin"
+    events_file = tmp_path / "events.ndjson"
+    events_file.write_text(_text_delta("ok") + "\n")
+    _install_fake_claude(bin_dir, f'cat "{events_file}"')
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+
+    import core.db as db
+    guard_key = llm._guard_key()
+    expired = (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat()
+    payload = json.dumps({"blocked_until": expired, "reason": "stale"})
+    db.execute(
+        "INSERT INTO kv(instance_key, key, data, updated_at) "
+        "VALUES (?, 'llm_guard', ?, ?) "
+        "ON CONFLICT(instance_key, key) DO UPDATE SET data=excluded.data",
+        (guard_key, payload, datetime.now(timezone.utc).isoformat()),
+    )
+    try:
+        out = run_claude_code("hi", cwd=tmp_path, timeout=5)
+    finally:
+        db.execute("DELETE FROM kv WHERE key='llm_guard'")
+
+    assert out == "ok"
+    row = db.query_one(
+        "SELECT data FROM kv WHERE instance_key=? AND key='llm_guard'",
+        (guard_key,),
+    )
+    assert row is None
+
+
+def test_llm_guard_scoped_per_instance(tmp_path):
+    import core.db as db
+    import core.state as _state
+    prev_default = _state._default_instance_key
+    db.execute("DELETE FROM kv WHERE key='llm_guard'")
+    try:
+        _state._default_instance_key = "alpha"
+        llm._trip_llm_guard("You're out of extra usage today")
+        blocked_a, _, _ = llm._guard_status()
+        assert blocked_a is True
+
+        _state._default_instance_key = "beta"
+        blocked_b, _, _ = llm._guard_status()
+        assert blocked_b is False
+    finally:
+        _state._default_instance_key = prev_default
+        db.execute("DELETE FROM kv WHERE key='llm_guard'")

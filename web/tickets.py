@@ -58,6 +58,67 @@ def _ticket_repo_count(slug: str) -> int:
     return n
 
 
+def _bucket_invocation_status(status: str) -> str:
+    if status == "success":
+        return "ok"
+    if status in ("error", "timeout"):
+        return "failed"
+    if status == "blocked":
+        return "blocked"
+    return "other"
+
+
+def _empty_llm_breakdown() -> dict:
+    return {"ok": 0, "failed": 0, "blocked": 0, "total": 0}
+
+
+def _llm_breakdowns_by_slug(instance_key: str, slugs: set[str]) -> dict[str, dict]:
+    if not instance_key or not slugs:
+        return {}
+    import core.db as _db
+    rows = _db.query_all(
+        "SELECT cwd, status, COUNT(*) AS n FROM claude_invocations"
+        " WHERE instance_key=? AND cwd IS NOT NULL AND cwd != ''"
+        " GROUP BY cwd, status",
+        (instance_key,),
+    )
+    out: dict[str, dict] = {s: _empty_llm_breakdown() for s in slugs}
+    for r in rows:
+        cwd = r["cwd"] or ""
+        for slug in slugs:
+            if not slug:
+                continue
+            needle_mid = f"/{slug}/"
+            needle_end = f"/{slug}"
+            if needle_mid in cwd or cwd.endswith(needle_end):
+                bucket = _bucket_invocation_status(r["status"])
+                bd = out[slug]
+                bd["total"] += r["n"]
+                if bucket in bd:
+                    bd[bucket] += r["n"]
+                break
+    return out
+
+
+def _llm_breakdown_for_slug(instance_key: str, slug: str) -> dict:
+    if not instance_key or not slug:
+        return _empty_llm_breakdown()
+    import core.db as _db
+    rows = _db.query_all(
+        "SELECT status, COUNT(*) AS n FROM claude_invocations"
+        " WHERE instance_key=? AND (cwd LIKE ? OR cwd LIKE ?)"
+        " GROUP BY status",
+        (instance_key, f"%/{slug}/%", f"%/{slug}"),
+    )
+    bd = _empty_llm_breakdown()
+    for r in rows:
+        bucket = _bucket_invocation_status(r["status"])
+        bd["total"] += r["n"]
+        if bucket in bd:
+            bd[bucket] += r["n"]
+    return bd
+
+
 def _local_worktree_diff(ts: dict) -> str:
     slug = ts.get("slug")
     if not slug:
@@ -252,13 +313,20 @@ def api_tickets_list():
         from features import validation as _val
         val_badges = _val.badges_bulk(instance_key)
     out = {}
+    slugs: set[str] = set()
     for k, v in tickets.items():
         if v.get("status") == "done":
             continue
-        v["repo_count"] = _ticket_repo_count(v.get("slug", ""))
+        slug = v.get("slug", "")
+        v["repo_count"] = _ticket_repo_count(slug)
         v["pm_findings_count"] = pm_counts.get(k, 0)
         v["validation_badge"] = val_badges.get(k, "pending")
+        if slug:
+            slugs.add(slug)
         out[k] = v
+    llm_by_slug = _llm_breakdowns_by_slug(instance_key, slugs)
+    for v in out.values():
+        v["llm_invocations"] = llm_by_slug.get(v.get("slug", ""), _empty_llm_breakdown())
     return out
 
 
@@ -330,7 +398,9 @@ def api_ticket_detail(key: str):
     release_block = None
     if (_config.get("features") or {}).get("releases"):
         release_block = _release_block_for_ticket(key, ts)
-    return {"key": key, "state": ts, "docs": docs, "history": history, "summary": summary, "terminal_alive": terminal_alive, "all_statuses": all_statuses, "demo_video": demo_video, "release": release_block}
+    instance_key = _config.get("job", {}).get("key", "")
+    llm_invocations = _llm_breakdown_for_slug(instance_key, slug)
+    return {"key": key, "state": ts, "docs": docs, "history": history, "summary": summary, "terminal_alive": terminal_alive, "all_statuses": all_statuses, "demo_video": demo_video, "release": release_block, "llm_invocations": llm_invocations}
 
 
 def _release_block_for_ticket(ticket_key: str, ticket_state: dict) -> dict | None:

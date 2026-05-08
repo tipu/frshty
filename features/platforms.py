@@ -30,7 +30,7 @@ def _run_git(cwd, args: list[str]) -> subprocess.CompletedProcess:
     )
 
 
-def _resolve_merge_conflicts(repo_path, base_branch: str) -> dict:
+def _resolve_merge_conflicts(repo_path, base_branch: str, prev_error: str | None = None) -> dict:
     conflicted = _run_git(repo_path, ["diff", "--name-only", "--diff-filter=U"])
     if conflicted.returncode != 0 or not conflicted.stdout.strip():
         _run_git(repo_path, ["merge", "--abort"])
@@ -43,7 +43,16 @@ def _resolve_merge_conflicts(repo_path, base_branch: str) -> dict:
             return {"ok": False, "error": f"conflicted file not found: {filepath}"}
 
     file_list = "\n".join(f"  - {f}" for f in files)
+    prev_attempt_block = ""
+    if prev_error:
+        prev_attempt_block = (
+            "PREVIOUS ATTEMPT FAILED post-checks with this error:\n"
+            f"  {prev_error[:400]}\n\n"
+            "Address that specific failure mode this time (e.g. if a file still had conflict markers, "
+            "actually remove them; if a syntax error remained, fix it before staging).\n\n"
+        )
     prompt = (
+        f"{prev_attempt_block}"
         f"You are resolving a git merge of origin/{base_branch} into the current branch. "
         f"Conflicted files:\n{file_list}\n\n"
         "For each file:\n"
@@ -283,12 +292,12 @@ class BitbucketPlatform:
             return {"ok": True}
         return {"ok": False, "error": result.stderr.strip()}
 
-    def merge_base(self, repo_path, base_branch: str) -> dict:
+    def merge_base(self, repo_path, base_branch: str, prev_error: str | None = None) -> dict:
         _run_git(repo_path, ["fetch", "origin", base_branch])
         result = _run_git(repo_path, ["merge", f"origin/{base_branch}", "--no-edit"])
         if result.returncode == 0:
             return {"ok": True}
-        return _resolve_merge_conflicts(repo_path, base_branch)
+        return _resolve_merge_conflicts(repo_path, base_branch, prev_error=prev_error)
 
     def create_pr(self, repo: str, repo_path, branch: str, title: str, body: str, base_branch: str) -> dict:
         url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests"
@@ -573,12 +582,12 @@ class GitHubPlatform:
             return {"ok": True}
         return {"ok": False, "error": result.stderr.strip()}
 
-    def merge_base(self, repo_path, base_branch: str) -> dict:
+    def merge_base(self, repo_path, base_branch: str, prev_error: str | None = None) -> dict:
         _run_git(repo_path, ["fetch", "origin", base_branch])
         result = _run_git(repo_path, ["merge", f"origin/{base_branch}", "--no-edit"])
         if result.returncode == 0:
             return {"ok": True}
-        return _resolve_merge_conflicts(repo_path, base_branch)
+        return _resolve_merge_conflicts(repo_path, base_branch, prev_error=prev_error)
 
     def create_pr(self, repo: str, repo_path, branch: str, title: str, body: str, base_branch: str) -> dict:
         full = self._resolve_repo(repo)
@@ -671,9 +680,9 @@ class GitHubPlatform:
         if not checks:
             return "pending"
         states = {c["state"].upper() for c in checks}
-        if "FAILURE" in states or "FAILED" in states:
+        if "FAILURE" in states or "FAILED" in states or "CANCELLED" in states or "TIMED_OUT" in states:
             return "failed"
-        if states <= {"SUCCESS"}:
+        if states <= {"SUCCESS", "NEUTRAL", "SKIPPED"}:
             return "passed"
         return "pending"
 

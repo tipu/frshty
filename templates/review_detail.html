@@ -28,8 +28,13 @@ nav a:hover, nav a.active { color: #fff; background: #222; }
 .diff-line-num:hover { color: #93c5fd; }
 body.moving .diff-line-num[data-line] { color: #60a5fa; cursor: crosshair; }
 body.moving .diff-line-num[data-line]:hover { background: #1e3a5f; color: #fff; }
-.diff-add { background: #0d2818; }
-.diff-del { background: #2d0f0f; }
+.diff-line.diff-add, .diff-line.diff-del { color: #e6edf3; }
+.diff-add { background: rgba(56, 139, 87, 0.55); }
+.diff-del { background: rgba(248, 81, 73, 0.45); }
+.diff-add .diff-line-num, .diff-del .diff-line-num { color: #c9d1d9; }
+.diff-add .hljs-comment, .diff-del .hljs-comment,
+.diff-add .hljs-meta, .diff-del .hljs-meta,
+.diff-add .hljs-attr, .diff-del .hljs-attr { color: #c9d1d9; }
 .diff-ctx { color: #888; }
 .comment-inline { background: #1c1c30; border-left: 3px solid #3b82f6; margin: 0; padding: 10px 12px; }
 .comment-inline.blocking { border-left-color: #ef4444; }

@@ -115,6 +115,11 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
               title="Automated CI fix attempts. Maxes out at 2 before status becomes pr_failed.">
             CI fixes: {{ state.ci_fix_attempts || 0 }}/2
         </span>
+        <span v-if="ticket && ticket.llm_invocations && ticket.llm_invocations.total"
+              class="text-xs text-purple-300"
+              :title="`LLM invocations across this ticket's worktree: ${ticket.llm_invocations.ok} ok / ${ticket.llm_invocations.failed} failed / ${ticket.llm_invocations.blocked} blocked (${ticket.llm_invocations.total} total)`">
+            ⚡ {{ ticket.llm_invocations.ok }} ok / {{ ticket.llm_invocations.failed }} failed / {{ ticket.llm_invocations.blocked }} blocked
+        </span>
         <span v-if="state.external_status" class="text-xs text-gray-500">{{ state.external_status }}</span>
         <span class="text-sm text-gray-400">branch: <code>{{ branch }}</code></span>
         <a v-for="pr in (state.prs || [])" :key="pr.url" :href="pr.url" target="_blank"
@@ -157,8 +162,12 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
             <div class="text-xs font-bold text-gray-500 uppercase mb-2">Release</div>
             <div class="flex items-center gap-2 flex-wrap">
                 <input v-model="releaseInput" placeholder="release_key (e.g. v1.4)"
+                       list="release-keys-datalist"
                        class="flex-1 px-2 py-1 bg-gray-900 border border-gray-700 rounded text-xs font-mono"
                        style="min-width:140px;" />
+                <datalist id="release-keys-datalist">
+                    <option v-for="rk in existingReleases" :key="rk" :value="rk"></option>
+                </datalist>
                 <button @click="saveRelease" class="text-xs bg-blue-800 hover:bg-blue-700 text-blue-200 px-2 py-1 rounded">Save</button>
                 <button v-if="ticket.release" @click="clearRelease" class="text-xs bg-red-900 hover:bg-red-800 text-red-300 px-2 py-1 rounded">Unassign</button>
             </div>
@@ -437,6 +446,7 @@ frshtyApp({
         const pmFindings = ref([]);
         const releaseInput = ref('');
         const releaseError = ref('');
+        const existingReleases = ref([]);
         const activeTab = ref('docs');
         const maximized = ref(false);
         const resetting = ref(false);
@@ -671,6 +681,15 @@ frshtyApp({
                 ticket.value = data;
                 features.value = cfg.features || {};
                 runCommands.value = cfg.run_commands || [];
+                if (features.value.releases) {
+                    try {
+                        const rr = await fetch('/api/releases');
+                        if (rr.ok) {
+                            const rd = await rr.json();
+                            existingReleases.value = (rd.releases || []).map(x => x.release_key);
+                        }
+                    } catch (e) { /* non-fatal */ }
+                }
                 // seed reply drafts from server-suggested replies on first load
                 for (const c of comments.value) {
                     if (replyDrafts[c.id] === undefined) replyDrafts[c.id] = c.suggested_reply || '';
@@ -1091,7 +1110,7 @@ frshtyApp({
 
         return {
             key, ticket, features, runCommands, jobs, diffData, comments,
-            contextText, noteText, pmFindings, releaseInput, releaseError,
+            contextText, noteText, pmFindings, releaseInput, releaseError, existingReleases,
             activeTab, maximized, resetting, eventFilter, setStateDdValue,
             loadError, sections, docExpanded, replyDrafts, jobOutput,
             prModalOpen, prRepos, prSubmitting,
