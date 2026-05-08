@@ -28,8 +28,22 @@ _VERDICT_RE = re.compile(r"^VERDICT:\s*(PASS|FAIL)\b", re.MULTILINE | re.IGNOREC
 
 MAX_STAGE_RETRIES = 5
 
+_LLM_BACKED_TASKS = frozenset({
+    "start_planning", "start_reviewing", "fix_review_findings",
+    "fix_ci_failures", "setup_prd_ticket", "fix_reported_bug",
+    "address_pm_findings", "validate_merged_ticket",
+})
+
 
 def _enqueue_stage(instance_key: str, ticket_key: str, task_name: str) -> None:
+    if task_name in _LLM_BACKED_TASKS:
+        from core.llm import _guard_status
+        try:
+            blocked, _, _ = _guard_status()
+        except Exception:
+            blocked = False
+        if blocked:
+            return
     existing = q.jobs_for_ticket(instance_key, ticket_key, limit=max(200, MAX_STAGE_RETRIES + 1))
     if any(j["task"] == task_name and j["status"] in ("queued", "running") for j in existing):
         return
