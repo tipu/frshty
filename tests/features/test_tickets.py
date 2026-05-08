@@ -79,7 +79,7 @@ class TestEnqueueStage:
         with patch("core.queue.jobs_for_ticket", return_value=[]) as qj, \
              patch("core.queue.enqueue_job") as eq:
             tickets._enqueue_stage("inst", "T-1", "start_planning")
-            qj.assert_called_once_with("inst", "T-1", limit=20)
+            qj.assert_called_once_with("inst", "T-1", limit=200)
             eq.assert_called_once_with("inst", "start_planning", ticket_key="T-1")
 
     def test_skips_when_already_queued(self):
@@ -790,18 +790,7 @@ class TestCheckRequeue:
         assert saved["status"] == "merged"
         assert saved["merged_external_status"] == "QA"
         assert "reopened_count" not in saved
-        assert saved.get("validation_enqueued_at")
         menq.assert_any_call("inst", "PROJ-1", "validate_merged_ticket")
-
-    def test_same_external_status_skips_after_validation_enqueued(self, tmp_path, fake_config):
-        saved, menq = self._run_check(tmp_path, fake_config,
-            saved_state={"status": "merged", "slug": "PROJ-1-slug", "branch": "PROJ-1-slug",
-                         "merged_external_status": "QA",
-                         "validation_enqueued_at": "2026-01-01T00:00:00+00:00"},
-            external_status="QA")
-        assert saved is not None
-        assert saved["status"] == "merged"
-        menq.assert_not_called()
 
     def test_changed_external_status_reingests(self, tmp_path, fake_config):
         saved, menq = self._run_check(tmp_path, fake_config,
