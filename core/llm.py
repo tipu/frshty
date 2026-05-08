@@ -19,6 +19,7 @@ from core.state import _instance_key_cv
 
 _CLAUDE_MAX_CONCURRENT = int(os.environ.get("FRSHTY_CLAUDE_MAX_CONCURRENT", "15"))
 _LLM_LIMIT_COOLDOWN_SECONDS = int(os.environ.get("FRSHTY_LLM_LIMIT_COOLDOWN_SECONDS", "1800"))
+_THINKING_MODEL = os.environ.get("FRSHTY_THINKING_MODEL", "claude-sonnet-4-6")
 _llm_sem = threading.BoundedSemaphore(max(1, _CLAUDE_MAX_CONCURRENT))
 
 _guard_blocked_cv: contextvars.ContextVar[bool] = contextvars.ContextVar(
@@ -246,12 +247,13 @@ class ClaudeProvider(LLMProvider):
                  timeout: int = 600, **kwargs) -> str | None:
         cmd = self._cmd(
             "-p", prompt,
+            "--model", _THINKING_MODEL,
             "--dangerously-skip-permissions",
             "--output-format", "stream-json",
             "--include-partial-messages",
             "--verbose",
         )
-        inv_id = _record_start("run_claude_code", "claude-code", prompt, cwd, None, timeout)
+        inv_id = _record_start("run_claude_code", _THINKING_MODEL, prompt, cwd, None, timeout)
         t0 = time.monotonic()
         blocked, reason, remaining_s = _guard_status()
         if blocked:
