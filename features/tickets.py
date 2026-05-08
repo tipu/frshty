@@ -1,6 +1,7 @@
 import json
 import re
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -27,12 +28,22 @@ _VERDICT_RE = re.compile(r"^VERDICT:\s*(PASS|FAIL)\b", re.MULTILINE | re.IGNOREC
 
 
 MAX_STAGE_RETRIES = 5
+STAGE_RETRY_WINDOW_HOURS = 2
 
 _LLM_BACKED_TASKS = frozenset({
     "start_planning", "start_reviewing", "fix_review_findings",
     "fix_ci_failures", "setup_prd_ticket", "fix_reported_bug",
     "address_pm_findings", "validate_merged_ticket",
 })
+
+
+def _parse_iso(ts: str | None) -> datetime | None:
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
 
 
 def _enqueue_stage(instance_key: str, ticket_key: str, task_name: str) -> None:
@@ -47,12 +58,18 @@ def _enqueue_stage(instance_key: str, ticket_key: str, task_name: str) -> None:
     existing = q.jobs_for_ticket(instance_key, ticket_key, limit=max(200, MAX_STAGE_RETRIES + 1))
     if any(j["task"] == task_name and j["status"] in ("queued", "running") for j in existing):
         return
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=STAGE_RETRY_WINDOW_HOURS)
     consecutive = 0
     for j in existing:
-        if j["task"] == task_name and j["status"] == "failed":
-            consecutive += 1
-        elif j["task"] == task_name and j["status"] in ("ok", "skipped"):
+        if j["task"] != task_name:
+            continue
+        if j["status"] in ("ok", "skipped"):
             break
+        if j["status"] == "failed":
+            finished = _parse_iso(j.get("finished_at"))
+            if finished is None or finished < cutoff:
+                break
+            consecutive += 1
     if consecutive >= MAX_STAGE_RETRIES:
         return
     q.enqueue_job(instance_key, task_name, ticket_key=ticket_key)
