@@ -263,10 +263,12 @@ class ClaudeProvider(LLMProvider):
 
     def thinking(self, prompt: str, *, cwd: Path | None = None,
                  timeout: int = 600, session_id: str | None = None,
-                 resume: bool = False, **kwargs) -> str | None:
+                 resume: bool = False, model: str | None = None,
+                 **kwargs) -> str | None:
+        chosen_model = model or _THINKING_MODEL
         cmd = self._cmd(
             "-p", prompt,
-            "--model", _THINKING_MODEL,
+            "--model", chosen_model,
             "--dangerously-skip-permissions",
             "--output-format", "stream-json",
             "--include-partial-messages",
@@ -276,7 +278,7 @@ class ClaudeProvider(LLMProvider):
             cmd += ["--resume", session_id]
         elif session_id:
             cmd += ["--session-id", session_id]
-        inv_id = _record_start("run_claude_code", _THINKING_MODEL, prompt, cwd, None, timeout)
+        inv_id = _record_start("run_claude_code", chosen_model, prompt, cwd, None, timeout)
         t0 = time.monotonic()
         blocked, reason, remaining_s = _guard_status()
         if blocked:
