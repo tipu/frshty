@@ -198,7 +198,7 @@ def test_merge_base_resolves_conflicts_with_claude(tmp_path):
 
     repo = _make_conflicting_repo(tmp_path)
 
-    def fake_claude_code(prompt, cwd=None, timeout=60):
+    def fake_claude_code(prompt, cwd=None, timeout=60, model=None, **kwargs):
         target = Path(cwd) / "file.ts"
         target.write_text("line1\nfeature-change\nline3\n")
         sp.run(["git", "add", "file.ts"], cwd=str(cwd), capture_output=True)

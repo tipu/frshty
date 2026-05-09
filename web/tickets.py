@@ -642,14 +642,17 @@ def api_restart_ticket(key: str):
             return ts
         ts.pop("ci_fix_attempts", None)
         ts.pop("pr_attempts", None)
+        ts.pop("conflict_resolution_attempts", None)
+        ts.pop("last_conflict_error", None)
         return ts
 
     ts = state.update_ticket(key, _reset)
     if not ts:
         return JSONResponse({"error": "not found"}, status_code=404)
     if ts.get("status") == TicketStatus.pr_failed.value:
+        target = "in_review" if ts.get("prs") else "pr_ready"
         try:
-            ts = state.transition_ticket(key, "pr_ready")
+            ts = state.transition_ticket(key, target)
         except state.TicketStateError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
     status = ts.get("status", "")
