@@ -148,6 +148,29 @@ class BitbucketPlatform:
                              meta={"repo": repo, "error": str(e)})
         return results
 
+    def list_pending_reviews_for_me(self) -> list[dict]:
+        if not self.user_account_id:
+            return []
+        results = []
+        q = f'state="OPEN" AND reviewers.account_id="{self.user_account_id}"'
+        with httpx.Client(auth=self._auth(), timeout=30) as client:
+            for repo in self.repos:
+                url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests"
+                resp = client.get(url, params={"q": q, "pagelen": 50})
+                if resp.status_code != 200:
+                    continue
+                for pr in resp.json().get("values", []):
+                    if pr.get("author", {}).get("account_id", "") == self.user_account_id:
+                        continue
+                    approved_by_me = any(
+                        p.get("approved") and p.get("user", {}).get("account_id", "") == self.user_account_id
+                        for p in (pr.get("participants") or [])
+                    )
+                    if approved_by_me:
+                        continue
+                    results.append(self._normalize_pr(pr, repo))
+        return results
+
     def get_pr_comments(self, repo: str, pr_id: int) -> list[dict]:
         url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}/comments?pagelen=100"
         with httpx.Client(auth=self._auth(), timeout=30) as client:
@@ -354,6 +377,7 @@ class GitHubPlatform:
         self.repos = [raw] if isinstance(raw, str) else list(raw)
         self.repo = self.repos[0]
         self.base_branch = config["workspace"].get("base_branch", "main")
+        self._me_login_cache: str | None = None
 
     def _run_gh(self, args: list[str]) -> subprocess.CompletedProcess:
         return subprocess.run(
@@ -384,6 +408,13 @@ class GitHubPlatform:
                 continue
             prs.extend(self._normalize_pr(pr, repo) for pr in json.loads(result.stdout))
         return prs
+
+    def _me_login(self) -> str:
+        if self._me_login_cache is not None:
+            return self._me_login_cache
+        result = self._run_gh(["api", "user", "--jq", ".login"])
+        self._me_login_cache = result.stdout.strip() if result.returncode == 0 else ""
+        return self._me_login_cache
 
     def list_review_prs(self) -> list[dict]:
         result = self._run_gh([
@@ -416,6 +447,15 @@ class GitHubPlatform:
                     if node.get("headRefOid"):
                         pr["head_sha"] = node["headRefOid"]
         return prs
+
+    def list_pending_reviews_for_me(self) -> list[dict]:
+        me = self._me_login()
+        out = []
+        for pr in self.list_review_prs():
+            if me and pr.get("author") == me:
+                continue
+            out.append(pr)
+        return out
 
     def get_pr_comments(self, repo: str, pr_id: int) -> list[dict]:
         full = self._resolve_repo(repo)
@@ -591,17 +631,68 @@ class GitHubPlatform:
 
     def create_pr(self, repo: str, repo_path, branch: str, title: str, body: str, base_branch: str) -> dict:
         full = self._resolve_repo(repo)
-        result = self._run_gh([
+        gh_args = [
             "pr", "create", "--repo", full,
             "--base", base_branch, "--head", branch,
             "--title", title, "--body", body,
-        ])
+        ]
+        result = self._run_gh(gh_args)
         if result.returncode != 0:
-            return {"error": result.stderr.strip()}
+            err = result.stderr.strip()
+            if self._is_repo_not_visible_error(err):
+                if self._try_recover_gh_auth(full, err):
+                    result = self._run_gh(gh_args)
+                    if result.returncode == 0:
+                        url = result.stdout.strip()
+                        m = re.search(r"/pull/(\d+)", url)
+                        return {"url": url, "id": int(m.group(1)) if m else None}
+                    err = result.stderr.strip()
+            return {"error": err}
         url = result.stdout.strip()
         m = re.search(r"/pull/(\d+)", url)
         pr_id = int(m.group(1)) if m else None
         return {"url": url, "id": pr_id}
+
+    @staticmethod
+    def _is_repo_not_visible_error(stderr: str) -> bool:
+        return ("Could not resolve to a Repository" in stderr
+                or "Not Found" in stderr
+                or "HTTP 404" in stderr)
+
+    def _try_recover_gh_auth(self, full_repo: str, original_err: str) -> bool:
+        """When gh can't see the repo, check whether one of the other logged-in
+        accounts can. If exactly one match exists and it's the repo owner,
+        switch to it and let the caller retry. Emits gh_auth_mismatch + (on
+        attempt) gh_auth_switched events for observability."""
+        from core.preflight import (
+            gh_active_account, gh_logged_in_accounts, gh_switch_to,
+            gh_repo_push_ok,
+        )
+        owner = full_repo.split("/", 1)[0] if "/" in full_repo else full_repo
+        active = gh_active_account() or "<none>"
+        accounts = gh_logged_in_accounts()
+        log.emit("gh_auth_mismatch",
+                 f"gh can't access {full_repo} as active account '{active}'. "
+                 f"Logged-in accounts: {accounts}. "
+                 f"Fix: gh auth switch -u <owner-account>",
+                 meta={"repo": full_repo, "active": active,
+                       "logged_in": accounts, "stderr": original_err[:300]})
+        if owner in accounts and owner != active:
+            ok, msg = gh_switch_to(owner)
+            if not ok:
+                log.emit("gh_auth_switch_failed",
+                         f"auto-switch to '{owner}' failed: {msg}",
+                         meta={"target": owner, "error": msg})
+                return False
+            new_active = gh_active_account() or "<none>"
+            push_ok, push_reason = gh_repo_push_ok(full_repo)
+            log.emit("gh_auth_switched",
+                     f"auto-switched gh active to '{new_active}' for {full_repo} "
+                     f"(push perm: {push_ok}, {push_reason})",
+                     meta={"from": active, "to": new_active,
+                           "repo": full_repo, "push_ok": push_ok})
+            return push_ok
+        return False
 
     CI_TIMEOUT_SECS = 3600
     NO_CI_GRACE_SECS = 300

@@ -87,6 +87,13 @@ def start_events(
         for c in instance_configs:
             _instances.add(c)
 
+        try:
+            from core.preflight import run_preflight
+            run_preflight(instance_configs)
+        except Exception as e:
+            log.emit("preflight_error",
+                     f"preflight stage crashed: {type(e).__name__}: {e}")
+
         _seed_recurring_schedules(instance_configs)
 
         registries_by_key = {k: _instances.get(k) for k in _instances.keys()}
