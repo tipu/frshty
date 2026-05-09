@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import subprocess
 from datetime import datetime, timezone, timedelta
@@ -9,6 +10,11 @@ import httpx
 import core.log as log
 from core.config import resolve_env, get_repos
 from core.claude_runner import run_claude_code
+
+
+_CONFLICT_RESOLVE_MODEL = os.environ.get(
+    "FRSHTY_CONFLICT_RESOLVE_MODEL", "claude-opus-4-7"
+)
 
 
 def make_platform(config: dict):
@@ -67,7 +73,8 @@ def _resolve_merge_conflicts(repo_path, base_branch: str, prev_error: str | None
         "Do NOT run `git commit` — leave the resolved files staged. If you cannot resolve a file, "
         "leave it conflicted and explain which file and why."
     )
-    run_claude_code(prompt, cwd=Path(repo_path), timeout=900)
+    run_claude_code(prompt, cwd=Path(repo_path), timeout=900,
+                    model=_CONFLICT_RESOLVE_MODEL)
 
     still_conflicted = _run_git(repo_path, ["diff", "--name-only", "--diff-filter=U"])
     if still_conflicted.stdout.strip():
