@@ -17,10 +17,13 @@ from core.job_logs import active_live_log_path, active_live_pid_path
 from core.state import _instance_key_cv
 
 
-_CLAUDE_MAX_CONCURRENT = int(os.environ.get("FRSHTY_CLAUDE_MAX_CONCURRENT", "15"))
+_LLM_MAX_CONCURRENT = int(os.environ.get(
+    "FRSHTY_MAX_CONCURRENT_LLM",
+    os.environ.get("FRSHTY_CLAUDE_MAX_CONCURRENT", "15"),
+))
 _LLM_LIMIT_COOLDOWN_SECONDS = int(os.environ.get("FRSHTY_LLM_LIMIT_COOLDOWN_SECONDS", "1800"))
 _THINKING_MODEL = os.environ.get("FRSHTY_THINKING_MODEL", "claude-sonnet-4-6")
-_llm_sem = threading.BoundedSemaphore(max(1, _CLAUDE_MAX_CONCURRENT))
+_llm_sem = threading.BoundedSemaphore(max(1, _LLM_MAX_CONCURRENT))
 
 _guard_blocked_cv: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "frshty_llm_guard_blocked", default=False
