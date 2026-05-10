@@ -69,3 +69,12 @@ def has_flag(name: str) -> Callable:
         val = bool(_ticket(ctx).get(name))
         return (val, f"flag {name}={val}")
     return check
+
+
+def repo_gate_clear(ctx) -> tuple[bool, str]:
+    """Per-repo serialization gate. Returns False if another ticket in the same
+    instance occupies the pipeline (status in planning/reviewing/pr_ready/in_review),
+    so the framework can mark this task `skipped` without flipping on_entry_status."""
+    from features.tickets import _repo_gate_blocked
+    blocker = _repo_gate_blocked(ctx.instance_key, ctx.ticket_key or "")
+    return (blocker is None, f"repo busy with {blocker}" if blocker else "repo gate clear")
