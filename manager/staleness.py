@@ -326,6 +326,81 @@ def pr_comments_needing_reply(instance_key: str, config: dict) -> list[dict]:
     return out
 
 
+def peer_pr_reviews(instance_key: str, config: dict | None = None) -> list[dict]:
+    """Open PRs where the operator is a requested reviewer (not author) and
+    has not yet approved. Live platform call.
+    Serves: 'review other PRs assigned to me'."""
+    if not config:
+        return []
+    try:
+        from features.platforms import make_platform
+        platform = make_platform(config)
+    except Exception:
+        return []
+    fn = getattr(platform, "list_pending_reviews_for_me", None)
+    if not fn:
+        return []
+    try:
+        prs = fn() or []
+    except Exception:
+        return []
+    out: list[dict] = []
+    for pr in prs[:_LIMIT]:
+        out.append({
+            "repo": pr.get("repo", ""),
+            "pr_id": pr.get("id"),
+            "title": (pr.get("title") or "")[:140],
+            "author": pr.get("author", ""),
+            "url": pr.get("url", ""),
+            "created_on": pr.get("created_on", ""),
+            "updated_on": pr.get("updated_on", ""),
+        })
+    return out
+
+
+def billcom_invoice_due(instance_key: str, config: dict) -> list[dict]:
+    """Surface 'last calendar month not yet invoiced' as a manual-action item.
+    Read-only — never sends or auto-creates. Checks both local cache AND live
+    bill.com so invoices created directly on bill.com count as covered."""
+    if not config.get("features", {}).get("billing"):
+        return []
+    b = config.get("billing") or {}
+    if not b.get("billcom_customer_id"):
+        return []
+    if b.get("billing_freq") != "monthly":
+        return []
+    from datetime import date
+    today = date.today()
+    if today.month == 1:
+        last_year, last_month = today.year - 1, 12
+    else:
+        last_year, last_month = today.year, today.month - 1
+    last_month_str = f"{last_year:04d}-{last_month:02d}"
+
+    invoices: list[dict] = []
+    try:
+        import asyncio
+        from features import billing
+        invoices = asyncio.run(billing.list_invoices(config)) or []
+    except Exception:
+        for inv in (state.load("billing_invoices") or {}).values():
+            if isinstance(inv, dict):
+                invoices.append(inv)
+
+    for inv in invoices:
+        start = (inv.get("start") or "")[:7]
+        end = (inv.get("end") or "")[:7]
+        if start == last_month_str or end == last_month_str:
+            return []
+    base_url = config.get("_base_url", "")
+    return [{
+        "month": last_month_str,
+        "create_url": f"{base_url}/billing" if base_url else "",
+        "billcom_url": "https://app.bill.com/neo/inbox",
+        "note": "draft locally if not started; verify SENT manually on bill.com (no auto-send)",
+    }]
+
+
 def timesheet_underfilled(instance_key: str, config: dict, target_hours: float = 8.0) -> list[dict]:
     """Last business day with < target_hours logged. Single-row return.
     Serves: 'last business day has 8h logged'."""
@@ -369,6 +444,7 @@ def aggregate_all(instance_key: str, config: dict | None = None,
         "merge_ready":            merge_ready_ticket_prs(instance_key, cfg),
         "ready_to_submit":        ready_to_submit_prs(instance_key),
         "pr_comments_needs_reply": pr_comments_needing_reply(instance_key, cfg),
+        "peer_pr_reviews":        peer_pr_reviews(instance_key, cfg),
         "pickup_new":             pickup_new_tickets(instance_key),
         "in_review_no_ci":        in_review_no_ci(instance_key),
         "pr_failed_tickets":      pr_failed_tickets(instance_key),
@@ -377,4 +453,5 @@ def aggregate_all(instance_key: str, config: dict | None = None,
         "pending_approvals_stuck": pending_approvals_stuck(instance_key, t.get("pending_approval_hours", 12)),
         "regressions_recent":     regressions_recent(instance_key, t.get("regression_days", 7)),
         "timesheet_underfilled":  timesheet_underfilled(instance_key, cfg),
+        "billcom_invoice_due":    billcom_invoice_due(instance_key, cfg),
     }
