@@ -322,7 +322,8 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
     def fake_extract_json(raw: str):
         return json.loads(raw)
 
-    def fake_run_claude_code(prompt: str, cwd: Path, timeout: int = 0):
+    def fake_run_claude_code(prompt: str, cwd: Path, timeout: int = 0,
+                              session_id: str | None = None, resume: bool = False):
         cwd = Path(cwd)
         if "/ctp docs/" in prompt:
             docs = cwd / "docs"
@@ -339,13 +340,16 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
             )
             return "review-fail"
 
-        if "Fix all blocking findings" in prompt:
+        if "Read docs/tri-review.md and identify the blocking findings" in prompt:
             repo = cwd / REPO_NAME
             (repo / "app.txt").write_text("base\ngenerated_feature\nreview_fixed\n")
+            return "review-fixed"
+
+        if "Independent verification step" in prompt:
             (cwd / "docs" / "tri-review.md").write_text(
                 "# Tri Review\n\nAll blocking findings addressed.\n\nVERDICT: PASS\n"
             )
-            return "review-fixed"
+            return "review-verified"
 
         if "CI failed:" in prompt or "CI checks failed:" in prompt:
             repo = cwd
