@@ -1,4 +1,5 @@
 """Ticket pipeline tasks. Headless claude -p invocations, postcondition-gated."""
+import subprocess
 import uuid
 from pathlib import Path
 
@@ -52,6 +53,68 @@ def _drop_session(ctx: TaskContext, task_name: str) -> None:
         t["llm_sessions"] = sess
         return t
     state.update_ticket(ctx.ticket_key, _del)
+
+
+_NOISE_ONLY = {"Pipfile", "Pipfile.lock"}
+
+
+def _dirty_workspace_repos(ticket_dir: Path) -> list[str]:
+    """Return names of workspace repos that have meaningful uncommitted changes
+    (excluding Pipfile / Pipfile.lock noise)."""
+    workspace = ticket_dir / "workspace"
+    search_root = workspace if workspace.is_dir() else ticket_dir
+    dirty: list[str] = []
+    for child in sorted(search_root.iterdir()):
+        if not (child.is_dir() and (child / ".git").exists()):
+            continue
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=child, capture_output=True, text=True,
+        )
+        lines = [l for l in status.stdout.splitlines() if l.strip()]
+        meaningful = [
+            l for l in lines
+            if Path(l[3:].split(" -> ")[-1]).name not in _NOISE_ONLY
+        ]
+        if meaningful:
+            dirty.append(child.name)
+    return dirty
+
+
+def _commit_workspace_changes(ticket_dir: Path, ticket_key: str) -> list[str]:
+    """Commit meaningful worktree changes left uncommitted by a Claude run.
+
+    Skips any repo whose only dirty files are Pipfile / Pipfile.lock — those
+    appear when pipenv resolves deps and carry no intentional code change.
+    Returns the list of repo names that were actually committed."""
+    candidates: list[Path] = []
+    workspace = ticket_dir / "workspace"
+    search_root = workspace if workspace.is_dir() else ticket_dir
+    for child in sorted(search_root.iterdir()):
+        if child.is_dir() and (child / ".git").exists():
+            candidates.append(child)
+
+    committed: list[str] = []
+    for repo_dir in candidates:
+        status = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=repo_dir, capture_output=True, text=True,
+        )
+        lines = [l for l in status.stdout.splitlines() if l.strip()]
+        meaningful = [
+            l for l in lines
+            if Path(l[3:].split(" -> ")[-1]).name not in _NOISE_ONLY
+        ]
+        if not meaningful:
+            continue
+        subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
+        subprocess.run(
+            ["git", "commit", "-m",
+             f"fix: address tri-review findings for {ticket_key}"],
+            cwd=repo_dir, check=True,
+        )
+        committed.append(repo_dir.name)
+    return committed
 
 
 def _ticket_dir(ctx: TaskContext) -> Path:
@@ -235,6 +298,11 @@ def fix_review_findings(ctx: TaskContext) -> TaskResult:
     verify_result = run_claude_code(verify_prompt, cwd=ticket_dir, timeout=REVIEW_TIMEOUT)
     if verify_result is None:
         return TaskResult("failed", "verify step: claude returned non-zero or empty")
+    committed = _commit_workspace_changes(ticket_dir, ctx.ticket_key or "")
+    if committed:
+        log.emit("ticket_review_committed",
+                 f"Committed fix changes for {ctx.ticket_key}: {', '.join(committed)}",
+                 meta={"ticket": ctx.ticket_key, "repos": committed})
     return TaskResult("ok")
 
 
@@ -355,6 +423,11 @@ def backfill_artifacts(ctx: TaskContext) -> TaskResult:
 def mark_ready(ctx: TaskContext) -> TaskResult:
     import core.events as events
     ts = state.load_ticket(ctx.ticket_key or "") or {}
+    ticket_dir = _ticket_dir(ctx)
+    dirty = _dirty_workspace_repos(ticket_dir)
+    if dirty:
+        return TaskResult("failed",
+                          f"worktree has uncommitted changes in: {', '.join(dirty)}")
     events.dispatch("ticket_dev_complete", {
         "ticket_key": ctx.ticket_key,
         "estimate_seconds": ts.get("estimate_seconds", 0),
@@ -407,6 +480,40 @@ def create_pr(ctx: TaskContext) -> TaskResult:
                 pass
         return TaskResult("failed", f"{type(e).__name__}: {e}",
                           artifacts={"transitioned_to": "pr_failed"})
+
+
+CONFLICT_RESOLVE_TIMEOUT = 1200
+
+
+@task("resolve_conflicts",
+      preconditions=[status_is("in_review")],
+      timeout=CONFLICT_RESOLVE_TIMEOUT)
+def resolve_conflicts(ctx: TaskContext) -> TaskResult:
+    from features import tickets as tix
+    if not ctx.ticket_key:
+        return TaskResult("failed", "ticket_key missing")
+    ts = state.load_ticket(ctx.ticket_key)
+    if ts is None:
+        return TaskResult("failed", "ticket not found")
+    ticket = {"key": ctx.ticket_key, "summary": ts.get("summary", ""),
+              "description": ts.get("description", ""), "url": ts.get("url", "")}
+    base_url = ctx.config.get("_base_url", "")
+    prior_status = ts.get("status")
+    prior_attempts = ts.get("conflict_resolution_attempts", 0)
+    try:
+        updated = tix._resolve_conflicts(ctx.config, ticket, ts, base_url)
+    except Exception as e:
+        log.emit("resolve_conflicts_error",
+                 f"[{ctx.instance_key}] {ctx.ticket_key}: {type(e).__name__}: {e}",
+                 meta={"ticket": ctx.ticket_key})
+        return TaskResult("failed", f"{type(e).__name__}: {e}")
+    state.save_ticket(ctx.ticket_key, updated)
+    return TaskResult("ok", artifacts={
+        "transitioned_to": updated.get("status"),
+        "status_changed": updated.get("status") != prior_status,
+        "attempts": updated.get("conflict_resolution_attempts", 0),
+        "attempts_delta": updated.get("conflict_resolution_attempts", 0) - prior_attempts,
+    })
 
 
 @task("apply_note_reset",
