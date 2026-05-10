@@ -212,6 +212,119 @@ class TestResolveConflicts:
         assert result["status"] == "pr_failed"
 
 
+class TestHasConflictingPr:
+    def test_no_prs_returns_false(self, fake_config):
+        assert tickets._has_conflicting_pr(fake_config, {"prs": []}) is False
+
+    def test_any_conflicting_returns_true(self, fake_config):
+        mock_platform = MagicMock()
+        mock_platform.get_pr_info.side_effect = [
+            {"mergeable": "MERGEABLE"},
+            {"mergeable": "CONFLICTING"},
+        ]
+        ts = {"prs": [{"repo": "r", "id": 1}, {"repo": "r", "id": 2}]}
+        with patch("features.tickets.make_platform", return_value=mock_platform):
+            assert tickets._has_conflicting_pr(fake_config, ts) is True
+
+    def test_all_clean_returns_false(self, fake_config):
+        mock_platform = MagicMock()
+        mock_platform.get_pr_info.return_value = {"mergeable": "MERGEABLE"}
+        ts = {"prs": [{"repo": "r", "id": 1}]}
+        with patch("features.tickets.make_platform", return_value=mock_platform):
+            assert tickets._has_conflicting_pr(fake_config, ts) is False
+
+    def test_get_pr_info_exception_does_not_crash(self, fake_config):
+        mock_platform = MagicMock()
+        mock_platform.get_pr_info.side_effect = RuntimeError("api down")
+        ts = {"prs": [{"repo": "r", "id": 1}]}
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.log"):
+            assert tickets._has_conflicting_pr(fake_config, ts) is False
+
+
+class TestResolveConflictsPending:
+    def test_no_instance_key_returns_false(self):
+        assert tickets._resolve_conflicts_pending("", "T-1") is False
+
+    def test_queued_resolve_conflicts_returns_true(self):
+        with patch("core.queue.jobs_for_ticket",
+                   return_value=[{"task": "resolve_conflicts", "status": "queued"}]):
+            assert tickets._resolve_conflicts_pending("inst", "T-1") is True
+
+    def test_running_resolve_conflicts_returns_true(self):
+        with patch("core.queue.jobs_for_ticket",
+                   return_value=[{"task": "resolve_conflicts", "status": "running"}]):
+            assert tickets._resolve_conflicts_pending("inst", "T-1") is True
+
+    def test_finished_resolve_conflicts_returns_false(self):
+        with patch("core.queue.jobs_for_ticket",
+                   return_value=[{"task": "resolve_conflicts", "status": "ok"}]):
+            assert tickets._resolve_conflicts_pending("inst", "T-1") is False
+
+    def test_other_task_inflight_returns_false(self):
+        with patch("core.queue.jobs_for_ticket",
+                   return_value=[{"task": "fix_ci_failures", "status": "running"}]):
+            assert tickets._resolve_conflicts_pending("inst", "T-1") is False
+
+
+class TestCheckEnqueuesResolveConflicts:
+    def test_in_review_with_conflicting_pr_enqueues_and_skips_ci(self, fake_config, tmp_state):
+        import core.state as state
+        from tests.conftest import make_ticket
+        slug = "PROJ-1-do-the-thing"
+        state.save_ticket("PROJ-1", make_ticket_state(
+            status="in_review", slug=slug, branch=slug,
+            prs=[{"repo": "r", "id": 1, "branch": slug, "url": "http://u"}],
+        ))
+        mock_platform = MagicMock()
+        mock_platform.get_pr_info.return_value = {"mergeable": "CONFLICTING"}
+
+        with patch("features.tickets._fetch_tickets",
+                   return_value=[make_ticket(status="In Progress")]), \
+             patch("features.tickets._fetch_open_prs",
+                   return_value=[{"repo": "r", "id": 1, "branch": slug, "url": "http://u"}]), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "r", "path": tmp_state / "r"}]), \
+             patch("features.tickets._resolve_status", return_value=None), \
+             patch("features.tickets._process_ticket_comments"), \
+             patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("features.tickets._enqueue_stage") as eq:
+            tickets.check({**fake_config, "_base_url": "http://base"}, instance_key="inst")
+        eq.assert_any_call("inst", "PROJ-1", "resolve_conflicts")
+        mock_platform.monitor_ci.assert_not_called()
+
+    def test_in_review_with_pending_resolve_skips_ci(self, fake_config, tmp_state):
+        import core.state as state
+        from tests.conftest import make_ticket
+        slug = "PROJ-1-do-the-thing"
+        state.save_ticket("PROJ-1", make_ticket_state(
+            status="in_review", slug=slug, branch=slug,
+            prs=[{"repo": "r", "id": 1, "branch": slug, "url": "http://u"}],
+        ))
+        mock_platform = MagicMock()
+
+        def jobs_for_ticket_fake(instance_key, ticket_key, limit=100):
+            return [{"task": "resolve_conflicts", "status": "queued",
+                     "id": 1, "enqueued_at": None, "started_at": None,
+                     "finished_at": None, "response": None, "payload": "{}"}]
+
+        with patch("features.tickets._fetch_tickets",
+                   return_value=[make_ticket(status="In Progress")]), \
+             patch("features.tickets._fetch_open_prs",
+                   return_value=[{"repo": "r", "id": 1, "branch": slug, "url": "http://u"}]), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "r", "path": tmp_state / "r"}]), \
+             patch("features.tickets._resolve_status", return_value=None), \
+             patch("features.tickets._process_ticket_comments"), \
+             patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("core.queue.jobs_for_ticket", side_effect=jobs_for_ticket_fake), \
+             patch("features.tickets._enqueue_stage"):
+            tickets.check({**fake_config, "_base_url": "http://base"}, instance_key="inst")
+        mock_platform.monitor_ci.assert_not_called()
+        mock_platform.get_pr_info.assert_not_called()
+
+
 class TestReconcilePrs:
     def test_match_by_branch_populates_prs(self):
         open_prs = [
