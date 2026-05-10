@@ -74,6 +74,124 @@ class TestLocalizeImages:
         assert "https://example.com/missing.png" in result
 
 
+class TestRepoGate:
+    """Per-repo serialization gate: at most one ticket per instance can occupy
+    the pipeline at a time (status in planning/reviewing/pr_ready/in_review).
+    Prevents concurrent PRs against the same base producing unresolvable merge conflicts.
+    """
+
+    def test_gate_clear_when_no_other_tickets(self, fresh_db):
+        import core.state as state
+        state.init("inst")
+        assert tickets._repo_gate_blocked("inst", "T-1") is None
+
+    def test_gate_clear_when_other_tickets_terminal(self, fresh_db):
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-2", {"status": "merged", "slug": "x", "branch": "x",
+                                   "merged_external_status": "Done"})
+        state.save_ticket("T-3", {"status": "done", "slug": "x", "branch": "x"})
+        state.save_ticket("T-4", {"status": "pr_failed", "slug": "x", "branch": "x"})
+        state.save_ticket("T-5", {"status": "new"})
+        assert tickets._repo_gate_blocked("inst", "T-1") is None
+
+    def test_gate_blocks_when_other_new_with_slug(self, fresh_db):
+        """A ticket whose worktree has been materialized (slug set) but whose
+        status is still "new" (start_planning hasn't fired yet) holds the gate.
+        Without this, two setup_prd_ticket workers can race past the gate."""
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-2", {"status": "new", "slug": "T-2-slug", "branch": "T-2"})
+        assert tickets._repo_gate_blocked("inst", "T-1") == "T-2"
+
+    def test_gate_blocked_when_other_in_planning(self, fresh_db):
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-2", {"status": "planning", "slug": "x", "branch": "x"})
+        assert tickets._repo_gate_blocked("inst", "T-1") == "T-2"
+
+    def test_gate_blocked_when_other_in_reviewing(self, fresh_db):
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-2", {"status": "reviewing", "slug": "x", "branch": "x"})
+        assert tickets._repo_gate_blocked("inst", "T-1") == "T-2"
+
+    def test_gate_blocked_when_other_in_pr_ready(self, fresh_db):
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-2", {"status": "pr_ready", "slug": "x", "branch": "x"})
+        assert tickets._repo_gate_blocked("inst", "T-1") == "T-2"
+
+    def test_gate_blocked_when_other_in_review(self, fresh_db):
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-2", {"status": "in_review", "slug": "x", "branch": "x"})
+        assert tickets._repo_gate_blocked("inst", "T-1") == "T-2"
+
+    def test_gate_excludes_self(self, fresh_db):
+        """A ticket already in the pipeline can advance — the gate only blocks
+        OTHER tickets, not the ticket itself transitioning further."""
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-1", {"status": "planning", "slug": "x", "branch": "x"})
+        assert tickets._repo_gate_blocked("inst", "T-1") is None
+
+    def test_gate_isolates_per_instance(self, fresh_db):
+        """A ticket in a different instance does not block this one."""
+        import core.state as state
+        state.init("inst-a")
+        state.save_ticket("T-A1", {"status": "planning", "slug": "x", "branch": "x"})
+        state.init("inst-b")
+        assert tickets._repo_gate_blocked("inst-b", "T-B1") is None
+
+    def test_enqueue_stage_skips_setup_prd_ticket_when_blocked(self, fresh_db):
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-2", {"status": "planning", "slug": "x", "branch": "x"})
+        with patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("core.queue.enqueue_job") as eq:
+            tickets._enqueue_stage("inst", "T-1", "setup_prd_ticket")
+            eq.assert_not_called()
+
+    def test_enqueue_stage_skips_start_planning_when_blocked(self, fresh_db):
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-2", {"status": "in_review", "slug": "x", "branch": "x"})
+        with patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("core.queue.enqueue_job") as eq:
+            tickets._enqueue_stage("inst", "T-1", "start_planning")
+            eq.assert_not_called()
+
+    def test_enqueue_stage_skips_mark_ready_when_blocked(self, fresh_db):
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-2", {"status": "in_review", "slug": "x", "branch": "x"})
+        with patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("core.queue.enqueue_job") as eq:
+            tickets._enqueue_stage("inst", "T-1", "mark_ready")
+            eq.assert_not_called()
+
+    def test_enqueue_stage_proceeds_when_gate_clear(self, fresh_db):
+        import core.state as state
+        state.init("inst")
+        with patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("core.queue.enqueue_job") as eq:
+            tickets._enqueue_stage("inst", "T-1", "start_planning")
+            eq.assert_called_once_with("inst", "start_planning", ticket_key="T-1")
+
+    def test_enqueue_stage_does_not_gate_non_pipeline_tasks(self, fresh_db):
+        """resolve_conflicts, fix_ci_failures etc. happen DURING in_review for
+        the active ticket — they must not be gated."""
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-1", {"status": "in_review", "slug": "x", "branch": "x"})
+        for task in ("resolve_conflicts", "fix_ci_failures", "validate_merged_ticket"):
+            with patch("core.queue.jobs_for_ticket", return_value=[]), \
+                 patch("core.queue.enqueue_job") as eq:
+                tickets._enqueue_stage("inst", "T-1", task)
+                eq.assert_called_once()
+
+
 class TestEnqueueStage:
     def test_enqueues_when_no_existing(self):
         with patch("core.queue.jobs_for_ticket", return_value=[]) as qj, \

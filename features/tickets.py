@@ -1,6 +1,7 @@
 import json
 import re
 import subprocess
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -36,6 +37,48 @@ _LLM_BACKED_TASKS = frozenset({
     "address_pm_findings", "validate_merged_ticket", "resolve_conflicts",
 })
 
+_REPO_GATED_TASKS = frozenset({
+    "setup_prd_ticket", "start_planning", "mark_ready", "create_pr",
+})
+
+_GATE_OCCUPYING_STATUSES = ("planning", "reviewing", "pr_ready", "in_review")
+
+_repo_gate_locks: dict[str, threading.Lock] = {}
+_repo_gate_locks_guard = threading.Lock()
+
+
+def _gate_lock_for(instance_key: str) -> threading.Lock:
+    with _repo_gate_locks_guard:
+        lock = _repo_gate_locks.get(instance_key)
+        if lock is None:
+            lock = threading.Lock()
+            _repo_gate_locks[instance_key] = lock
+        return lock
+
+
+def _repo_gate_blocked(instance_key: str, ticket_key: str) -> str | None:
+    """Per-repo serialization gate. Returns the ticket_key of another ticket
+    in the same instance that is currently materialized (slug set, source=prd)
+    OR whose status occupies the pipeline (planning, reviewing, pr_ready,
+    in_review). Returns None if the gate is clear.
+
+    Includes "new but slug set" so a ticket whose worktree has been created
+    via setup_prd_ticket (but whose start_planning has not yet flipped status)
+    still holds the gate. Without that, a second setup_prd_ticket between
+    the first ticket's setup completion and its start_planning entry would
+    see no occupant and slip through.
+    """
+    import core.db as _db
+    rows = _db.query_all(
+        "SELECT ticket_key FROM tickets"
+        " WHERE instance_key=? AND ticket_key<>?"
+        f"      AND ( status IN ({','.join('?' for _ in _GATE_OCCUPYING_STATUSES)})"
+        "             OR (status='new' AND slug IS NOT NULL AND slug<>'') )"
+        " ORDER BY updated_at ASC LIMIT 1",
+        (instance_key, ticket_key, *_GATE_OCCUPYING_STATUSES),
+    )
+    return rows[0]["ticket_key"] if rows else None
+
 
 def _parse_iso(ts: str | None) -> datetime | None:
     if not ts:
@@ -54,6 +97,9 @@ def _enqueue_stage(instance_key: str, ticket_key: str, task_name: str) -> None:
         except Exception:
             blocked = False
         if blocked:
+            return
+    if task_name in _REPO_GATED_TASKS:
+        if _repo_gate_blocked(instance_key, ticket_key):
             return
     existing = q.jobs_for_ticket(instance_key, ticket_key, limit=max(200, MAX_STAGE_RETRIES + 1))
     if any(j["task"] == task_name and j["status"] in ("queued", "running") for j in existing):
@@ -601,6 +647,9 @@ def check(config: dict, instance_key: str = ""):
                     if instance_key and (config.get("pm_agent") or {}).get("enabled", True):
                         _enqueue_stage(instance_key, key, "pm_pre_approval")
                     continue
+                if source == "prd":
+                    state.save_ticket(key, ts)
+                    continue
                 ts = _setup_ticket(config, ticket, base_url)
                 if "source" not in ts:
                     ts["source"] = source
@@ -631,6 +680,9 @@ def check(config: dict, instance_key: str = ""):
                     _enqueue_stage(instance_key, key, "start_reviewing")
 
             if ts["status"] == "pr_ready" and config.get("pr", {}).get("auto_pr") and not ts.get("pr_scheduled_at"):
+                if instance_key and _repo_gate_blocked(instance_key, key):
+                    state.save_ticket(key, ts)
+                    continue
                 ts = _create_pr(config, ticket, ts, base_url)
 
             if ts["status"] == "in_review":

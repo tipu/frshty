@@ -10,6 +10,7 @@ from core.config import ticket_worktree_path
 from core.tasks.registry import TaskContext, TaskResult, task
 from core.tasks.preconditions import (
     status_is, auto_pr_true, file_exists, file_contains, feature_enabled, has_flag,
+    repo_gate_clear,
 )
 from features.platforms import make_platform
 
@@ -137,7 +138,7 @@ def scan_tickets(ctx: TaskContext) -> TaskResult:
 
 
 @task("setup_prd_ticket",
-      preconditions=[status_is("new", "planning")],
+      preconditions=[status_is("new", "planning"), repo_gate_clear],
       postconditions=[file_exists("docs/ticket.md")],
       timeout=300)
 def setup_prd_ticket(ctx: TaskContext) -> TaskResult:
@@ -157,11 +158,15 @@ def setup_prd_ticket(ctx: TaskContext) -> TaskResult:
     if ts.get("slug"):
         return TaskResult("skipped", "ticket already materialized")
     base_url = ctx.config.get("_base_url", "")
-    try:
-        updated = tix.materialize_prd_ticket(ctx.config, ctx.ticket_key, ts, base_url)
-    except RuntimeError as e:
-        return TaskResult("failed", str(e))
-    state.save_ticket(ctx.ticket_key, updated)
+    with tix._gate_lock_for(ctx.instance_key):
+        blocker = tix._repo_gate_blocked(ctx.instance_key, ctx.ticket_key)
+        if blocker:
+            return TaskResult("skipped", f"repo busy with {blocker}")
+        try:
+            updated = tix.materialize_prd_ticket(ctx.config, ctx.ticket_key, ts, base_url)
+        except RuntimeError as e:
+            return TaskResult("failed", str(e))
+        state.save_ticket(ctx.ticket_key, updated)
     q.enqueue_job(ctx.instance_key, "address_pm_findings", ticket_key=ctx.ticket_key)
     q.enqueue_job(ctx.instance_key, "start_planning", ticket_key=ctx.ticket_key)
     return TaskResult("ok", artifacts={"slug": updated.get("slug"),
@@ -169,13 +174,21 @@ def setup_prd_ticket(ctx: TaskContext) -> TaskResult:
 
 
 @task("start_planning",
-      preconditions=[status_is("new", "planning")],
+      preconditions=[status_is("new", "planning"), repo_gate_clear],
       postconditions=[file_exists("docs/change-manifest.md")],
-      on_entry_status="planning",
       on_success_status="reviewing",
       timeout=PLAN_TIMEOUT)
 def start_planning(ctx: TaskContext) -> TaskResult:
     from features import acceptance
+    from features import tickets as tix
+    with tix._gate_lock_for(ctx.instance_key):
+        blocker = tix._repo_gate_blocked(ctx.instance_key, ctx.ticket_key or "")
+        if blocker:
+            return TaskResult("skipped", f"repo busy with {blocker}")
+        try:
+            state.transition_ticket(ctx.ticket_key or "", "planning")
+        except state.TicketStateError as e:
+            return TaskResult("failed", f"transition to planning: {e}")
     ticket_dir = _ticket_dir(ctx)
     if not ticket_dir.is_dir():
         return TaskResult("failed", f"ticket dir missing: {ticket_dir}")
