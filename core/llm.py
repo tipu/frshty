@@ -189,6 +189,19 @@ def _record_start(function_name: str, model: str, prompt: str,
         return None
 
 
+def _parse_claude_json_output(raw: str) -> tuple[str, dict | None]:
+    """Parse `claude -p --output-format json` stdout. Returns (text, usage_dict).
+    Falls back to (raw_stripped, None) if the payload isn't a result envelope."""
+    text = raw.strip()
+    try:
+        parsed = json.loads(text)
+    except (ValueError, TypeError):
+        return text, None
+    if not isinstance(parsed, dict) or parsed.get("type") != "result":
+        return text, None
+    return (parsed.get("result") or "").strip(), parsed
+
+
 def _record_end(inv_id: str | None, started_ms: float, status: str,
                 exit_code: int | None, output: str | None,
                 usage: dict | None = None) -> None:
@@ -395,7 +408,7 @@ class ClaudeProvider(LLMProvider):
     def balanced(self, prompt: str, *, worktree: Path | None = None,
                  tools: list[str] | None = None, timeout: int = 600,
                  **kwargs) -> str | None:
-        cmd = self._cmd("-p", "-", "--model", "claude-sonnet-4-6")
+        cmd = self._cmd("-p", "-", "--output-format", "json", "--model", "claude-sonnet-4-6")
         if worktree and worktree.is_dir():
             cmd += ["--dangerously-skip-permissions", "--add-dir", str(worktree)]
             if tools:
@@ -421,16 +434,17 @@ class ClaudeProvider(LLMProvider):
             except subprocess.TimeoutExpired:
                 _record_end(inv_id, t0, "timeout", None, None)
                 return None
-            output = result.stdout.decode() if result.stdout else ""
+            raw = result.stdout.decode() if result.stdout else ""
             if result.returncode != 0 or not result.stdout:
                 err = result.stderr.decode() if result.stderr else ""
                 if err:
-                    output = output + "\n[stderr]\n" + err
-                _trip_llm_guard(output)
-                _record_end(inv_id, t0, "error", result.returncode, output)
+                    raw = raw + "\n[stderr]\n" + err
+                _trip_llm_guard(raw)
+                _record_end(inv_id, t0, "error", result.returncode, raw)
                 return None
-            _record_end(inv_id, t0, "success", result.returncode, output)
-            return output
+            text, usage = _parse_claude_json_output(raw)
+            _record_end(inv_id, t0, "success", result.returncode, text, usage=usage)
+            return text
 
     def fast(self, prompt: str, *, timeout: int = 120, **kwargs) -> str | None:
         inv_id = _record_start("run_haiku", "claude-haiku-4-5-20251001", prompt, None, None, timeout)
@@ -449,22 +463,23 @@ class ClaudeProvider(LLMProvider):
             _mark_running(inv_id)
             try:
                 result = subprocess.run(
-                    self._cmd("-p", "-", "--model", "claude-haiku-4-5-20251001"),
+                    self._cmd("-p", "-", "--output-format", "json", "--model", "claude-haiku-4-5-20251001"),
                     input=prompt.encode(), capture_output=True, env=self._env(), timeout=timeout,
                 )
             except subprocess.TimeoutExpired:
                 _record_end(inv_id, t0, "timeout", None, None)
                 return None
-            output = result.stdout.decode().strip() if result.stdout else ""
+            raw = result.stdout.decode() if result.stdout else ""
             if result.returncode != 0 or not result.stdout:
                 err = result.stderr.decode() if result.stderr else ""
                 if err:
-                    output = output + "\n[stderr]\n" + err
-                _trip_llm_guard(output)
-                _record_end(inv_id, t0, "error", result.returncode, output)
+                    raw = raw + "\n[stderr]\n" + err
+                _trip_llm_guard(raw)
+                _record_end(inv_id, t0, "error", result.returncode, raw)
                 return None
-            _record_end(inv_id, t0, "success", result.returncode, output)
-            return output
+            text, usage = _parse_claude_json_output(raw)
+            _record_end(inv_id, t0, "success", result.returncode, text, usage=usage)
+            return text
 
 
 class OpenCodeProvider(LLMProvider):
