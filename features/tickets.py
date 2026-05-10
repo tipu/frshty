@@ -33,7 +33,7 @@ STAGE_RETRY_WINDOW_HOURS = 2
 _LLM_BACKED_TASKS = frozenset({
     "start_planning", "start_reviewing", "fix_review_findings",
     "fix_ci_failures", "setup_prd_ticket", "fix_reported_bug",
-    "address_pm_findings", "validate_merged_ticket",
+    "address_pm_findings", "validate_merged_ticket", "resolve_conflicts",
 })
 
 
@@ -634,7 +634,16 @@ def check(config: dict, instance_key: str = ""):
                 ts = _create_pr(config, ticket, ts, base_url)
 
             if ts["status"] == "in_review":
-                ts = _resolve_conflicts(config, ticket, ts, base_url)
+                if instance_key:
+                    if _resolve_conflicts_pending(instance_key, key):
+                        state.save_ticket(key, ts)
+                        continue
+                    if _has_conflicting_pr(config, ts):
+                        _enqueue_stage(instance_key, key, "resolve_conflicts")
+                        state.save_ticket(key, ts)
+                        continue
+                else:
+                    ts = _resolve_conflicts(config, ticket, ts, base_url)
 
             if ts["status"] == "in_review":
                 platform = make_platform(config)
@@ -1183,6 +1192,33 @@ def _reconcile_prs(ts: dict, open_prs: list[dict]) -> dict:
         ts.pop("checks_started_at", None)
 
     return ts
+
+
+def _has_conflicting_pr(config: dict, ts: dict) -> bool:
+    prs = ts.get("prs", [])
+    if not prs:
+        return False
+    platform = make_platform(config)
+    for pr in prs:
+        try:
+            info = platform.get_pr_info(pr["repo"], pr["id"])
+        except Exception as e:
+            log.emit("conflict_check_failed",
+                f"get_pr_info failed for {pr['repo']}#{pr['id']}: {e}",
+                meta={"repo": pr["repo"], "pr_id": pr["id"]})
+            continue
+        if info.get("mergeable") == "CONFLICTING":
+            return True
+    return False
+
+
+def _resolve_conflicts_pending(instance_key: str, ticket_key: str) -> bool:
+    if not instance_key:
+        return False
+    return any(
+        j["task"] == "resolve_conflicts" and j["status"] in ("queued", "running")
+        for j in q.jobs_for_ticket(instance_key, ticket_key)
+    )
 
 
 def _resolve_conflicts(config, ticket, ts, base_url) -> dict:
