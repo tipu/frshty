@@ -7,6 +7,7 @@ from pathlib import Path
 
 import httpx
 
+import core.db as db
 import core.log as log
 import core.queue as q
 import core.state as state
@@ -833,12 +834,60 @@ def _setup_ticket(config, ticket, base_url, comments=None) -> dict:
             "discovered_at": datetime.now(timezone.utc).isoformat()}
 
 
-def render_prd_ticket_md(ts: dict) -> str:
-    """Deterministic markdown for docs/ticket.md from a saved PRD ticket dict."""
-    title = ts.get("summary") or "Untitled"
+def render_prd_ticket_md(ts: dict, instance_key: str | None = None,
+                         ticket_key: str | None = None) -> str:
+    """Deterministic markdown for docs/ticket.md from a saved PRD ticket dict.
+    When the ts has no usable content, fall back to the linked prd_section
+    so a downstream planner has something to work against. Section is
+    located via ts['prd_section_id'] first; if absent, via the
+    prd_section_ticket link table using (instance_key, ticket_key).
+    Observed live: tickets created via _create_generated_ticket landed in
+    planning with docs/ticket.md == '# Untitled' because their content
+    fields were empty and prd_section_id had been dropped from tickets.data
+    but the link in prd_section_ticket was intact."""
+    summary = ts.get("summary") or ""
     description = ts.get("description") or ""
     ac = ts.get("acceptance_criteria_json") or {}
     source_text = ts.get("acceptance_criteria_source_text") or ""
+    section_id = ts.get("prd_section_id")
+    has_content = (summary.strip() or description.strip()
+                   or (isinstance(ac, dict) and ac.get("criteria"))
+                   or source_text.strip())
+    if not has_content and not section_id and instance_key and ticket_key:
+        try:
+            link = db.query_one(
+                "SELECT prd_section_id FROM prd_section_ticket "
+                "WHERE instance_key=? AND ticket_key=?",
+                (instance_key, ticket_key),
+            )
+            if link:
+                section_id = link["prd_section_id"]
+        except Exception as e:
+            log.emit("prd_ticket_md_link_lookup_failed",
+                     f"could not resolve prd_section via link table for "
+                     f"{instance_key}/{ticket_key}: {e}",
+                     meta={"instance_key": instance_key, "ticket_key": ticket_key})
+    if not has_content and section_id:
+        try:
+            row = db.query_one(
+                "SELECT header, content FROM prd_section WHERE id=?",
+                (section_id,),
+            )
+        except Exception as e:
+            log.emit("prd_ticket_md_section_lookup_failed",
+                     f"could not hydrate empty ts from prd_section {section_id}: {e}",
+                     meta={"prd_section_id": section_id})
+            row = None
+        if row:
+            summary = row["header"]
+            description = row["content"]
+            source_text = f"## {row['header']}\n{row['content']}"
+            log.emit("prd_ticket_md_hydrated_from_section",
+                     f"hydrated empty PRD ticket data from prd_section {section_id} "
+                     f"({len(row['content'])} chars)",
+                     meta={"prd_section_id": section_id,
+                           "ticket_key": ticket_key})
+    title = summary or "Untitled"
     parts: list[str] = [f"# {title}", ""]
     if description:
         parts += ["## Description", "", description, ""]
@@ -857,7 +906,8 @@ def render_prd_ticket_md(ts: dict) -> str:
     return "\n".join(parts)
 
 
-def materialize_prd_ticket(config: dict, ticket_key: str, ts: dict, base_url: str) -> dict:
+def materialize_prd_ticket(config: dict, ticket_key: str, ts: dict, base_url: str,
+                           instance_key: str | None = None) -> dict:
     """Create slug + branch + per-repo worktree(s) + docs/ticket.md for an approved
     PRD ticket. Returns updated ts dict (caller saves). Raises RuntimeError if no
     worktree could be created, so the caller's task fails and the sweep retries."""
@@ -919,7 +969,9 @@ def materialize_prd_ticket(config: dict, ticket_key: str, ts: dict, base_url: st
 
     docs_path = ws["root"] / ws["tickets_dir"] / slug / "docs"
     docs_path.mkdir(parents=True, exist_ok=True)
-    (docs_path / "ticket.md").write_text(render_prd_ticket_md(ts))
+    (docs_path / "ticket.md").write_text(
+        render_prd_ticket_md(ts, instance_key=instance_key, ticket_key=ticket_key)
+    )
     subprocess.run(["chown", "-R", "1000:1000", str(docs_path.parent)], capture_output=True, timeout=60)
 
     out = dict(ts)

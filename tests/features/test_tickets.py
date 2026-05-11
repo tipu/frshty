@@ -1053,3 +1053,107 @@ class TestCheckRequeue:
         assert saved["last_merged_external_status"] == "QA"
         assert "merged_external_status" not in saved
         menq.assert_any_call("inst", "PROJ-1", "start_planning")
+
+
+class TestRenderPrdTicketMd:
+    """Renderer must not produce a near-empty `# Untitled` ticket.md when the
+    saved ts dict has no usable content but is linked to a prd_section that
+    does. Observed live: PRD-5_MOCK_STUB_CATALOGUE-20 went into planning with
+    docs/ticket.md == '# Untitled\\n' (11 bytes) because gen_ticket landed
+    with empty summary/description/AC/source_text — the linked section had
+    4726 chars of content that never reached the worktree."""
+
+    def _seed_section(self, fresh_db, header: str, content: str) -> int:
+        import core.db as db
+        db.execute(
+            "INSERT INTO prd(instance_key, file_path) VALUES(?, ?)",
+            ("inst", "/tmp/prd.md"),
+        )
+        prd_row = db.query_one("SELECT id FROM prd WHERE instance_key='inst'")
+        db.execute(
+            "INSERT INTO prd_section(prd_id, stable_key, header, content, content_hash) "
+            "VALUES(?, ?, ?, ?, ?)",
+            (prd_row["id"], "5-mock-stub-catalogue", header, content, "h"),
+        )
+        row = db.query_one(
+            "SELECT id FROM prd_section WHERE prd_id=? AND stable_key=?",
+            (prd_row["id"], "5-mock-stub-catalogue"),
+        )
+        return row["id"]
+
+    def test_empty_ts_with_section_renders_section_content(self, fresh_db):
+        section_header = "5. Mock / stub catalogue"
+        section_content = (
+            "Need a single registry of mock vendors used across tests so we can "
+            "avoid duplication and divergence. Cover: payment provider mocks, "
+            "shipping provider mocks, identity provider mocks."
+        )
+        section_id = self._seed_section(fresh_db, section_header, section_content)
+        ts = {
+            "summary": "",
+            "description": "",
+            "acceptance_criteria_json": None,
+            "acceptance_criteria_source_text": "",
+            "prd_section_id": section_id,
+        }
+        md = tickets.render_prd_ticket_md(ts)
+        assert section_header in md, f"expected section header in ticket.md, got: {md!r}"
+        assert "Mock vendors" in md or "mock vendors" in md, \
+            f"expected section content in ticket.md, got: {md!r}"
+        assert md.strip() != "# Untitled", \
+            f"renderer fell back to # Untitled instead of using section: {md!r}"
+        assert len(md) > 200, \
+            f"ticket.md should have meaningful content, got {len(md)} chars: {md!r}"
+
+    def test_populated_ts_unaffected(self, fresh_db):
+        """When ts already has summary/description, renderer keeps using them
+        and does not overwrite with section content."""
+        section_id = self._seed_section(fresh_db, "Section header", "Section body")
+        ts = {
+            "summary": "Real ticket title",
+            "description": "Real ticket description",
+            "acceptance_criteria_json": {"criteria": [
+                {"criterion": "Real criterion", "playwright": [], "tests_required": []}
+            ]},
+            "acceptance_criteria_source_text": "Real source text",
+            "prd_section_id": section_id,
+        }
+        md = tickets.render_prd_ticket_md(ts)
+        assert "Real ticket title" in md
+        assert "Real ticket description" in md
+        assert "Real criterion" in md
+        assert "Real source text" in md
+        assert "Section body" not in md
+
+    def test_empty_ts_without_section_id_still_renders_safely(self, fresh_db):
+        """No prd_section_id and no content fields — renderer should still
+        return a non-crashing string. Documents the existing degenerate
+        behavior so we don't regress to crashes."""
+        ts = {"summary": "", "description": ""}
+        md = tickets.render_prd_ticket_md(ts)
+        assert isinstance(md, str)
+        assert "Untitled" in md
+
+    def test_hydrates_via_link_table_when_prd_section_id_missing(self, fresh_db):
+        """Observed live: tickets created via _create_generated_ticket lost
+        their prd_section_id field somewhere in the save/transition path —
+        e.g. PRD-5_MOCK_STUB_CATALOGUE-20 had no prd_section_id in
+        tickets.data but was linked in prd_section_ticket. Renderer must
+        find the section via that link table when given (instance_key,
+        ticket_key)."""
+        import core.db as db
+        section_header = "5. Mock / stub catalogue"
+        section_content = "Single registry of mock vendors. Cover payment, shipping, identity."
+        section_id = self._seed_section(fresh_db, section_header, section_content)
+        db.execute(
+            "INSERT INTO prd_section_ticket(prd_section_id, instance_key, ticket_key) "
+            "VALUES(?, ?, ?)",
+            (section_id, "lumeninv", "PRD-5_MOCK_STUB_CATALOGUE-20"),
+        )
+        ts = {"summary": "", "description": ""}
+        md = tickets.render_prd_ticket_md(
+            ts, instance_key="lumeninv", ticket_key="PRD-5_MOCK_STUB_CATALOGUE-20",
+        )
+        assert section_header in md, f"expected section header, got: {md!r}"
+        assert "Single registry of mock vendors" in md
+        assert md.strip() != "# Untitled"

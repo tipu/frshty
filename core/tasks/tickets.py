@@ -163,7 +163,10 @@ def setup_prd_ticket(ctx: TaskContext) -> TaskResult:
         if blocker:
             return TaskResult("skipped", f"repo busy with {blocker}")
         try:
-            updated = tix.materialize_prd_ticket(ctx.config, ctx.ticket_key, ts, base_url)
+            updated = tix.materialize_prd_ticket(
+                ctx.config, ctx.ticket_key, ts, base_url,
+                instance_key=ctx.instance_key,
+            )
         except RuntimeError as e:
             return TaskResult("failed", str(e))
         state.save_ticket(ctx.ticket_key, updated)
