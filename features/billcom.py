@@ -101,10 +101,13 @@ async def create_invoice(customer_id: str, invoice_number: str, due_date: str, l
         return r.json()
 
 
-async def list_invoices(max_results: int = 100) -> dict | list:
+async def list_invoices(max_results: int = 100, customer_id: str | None = None) -> dict | list:
     h = await _headers()
+    params: dict = {"max": max_results}
+    if customer_id:
+        params["filters"] = f"customerId:eq:{customer_id}"
     async with httpx.AsyncClient(timeout=30) as c:
-        r = await c.get(f"{BASE}/invoices", headers=h, params={"max": max_results})
+        r = await c.get(f"{BASE}/invoices", headers=h, params=params)
         r.raise_for_status()
         return r.json()
 
