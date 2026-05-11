@@ -90,10 +90,13 @@ def _save_local_invoices(invs: dict) -> None:
     state.save("billing_invoices", invs)
 
 
-def _normalize_remote_invoice(inv: dict, customer_id: str) -> dict | None:
+def _normalize_remote_invoice(inv: dict, customer_id: str, prefix: str = "") -> dict | None:
     cust = inv.get("customerId") or inv.get("customer", {}).get("id", "")
     if cust != customer_id:
         return None
+    if prefix:
+        if not re.match(re.escape(prefix) + r"-\d+$", inv.get("invoiceNumber", "")):
+            return None
     line_items = inv.get("invoiceLineItems", [])
     inv_date = inv.get("invoiceDate", inv.get("dueDate", ""))
     start, end = (None, None)
@@ -118,14 +121,23 @@ def _normalize_remote_invoice(inv: dict, customer_id: str) -> dict | None:
 async def list_invoices(config: dict) -> list[dict]:
     b = _billing_cfg(config)
     customer_id = b.get("billcom_customer_id", "")
+    prefix = b.get("invoice_prefix", "")
     result = []
+    archived_ids: set[str] = set()
+    archived_numbers: set[str] = set()
 
     if billcom.has_credentials() and customer_id:
         try:
-            data = await billcom.list_invoices()
+            data = await billcom.list_invoices(customer_id=customer_id)
             all_invoices = data.get("results", data) if isinstance(data, dict) else data
             for inv in all_invoices or []:
-                norm = _normalize_remote_invoice(inv, customer_id)
+                if inv.get("archived") or inv.get("recordStatus") == "INACTIVE":
+                    if inv.get("id"):
+                        archived_ids.add(inv["id"])
+                    if inv.get("invoiceNumber"):
+                        archived_numbers.add(inv["invoiceNumber"])
+                    continue
+                norm = _normalize_remote_invoice(inv, customer_id, prefix)
                 if norm:
                     result.append(norm)
         except httpx.HTTPError as e:
@@ -134,6 +146,8 @@ async def list_invoices(config: dict) -> list[dict]:
     remote_ids = {r["id"] for r in result}
     remote_numbers = {r["number"] for r in result if r.get("number")}
     for inv in _local_invoices().values():
+        if inv.get("id") in archived_ids or inv.get("number") in archived_numbers:
+            continue
         if inv.get("id") in remote_ids or inv.get("number") in remote_numbers:
             continue
         result.append({**inv, "source": inv.get("source", "local")})
@@ -155,7 +169,7 @@ async def next_invoice_number(config: dict) -> dict:
 
     if billcom.has_credentials() and customer_id:
         try:
-            data = await billcom.list_invoices()
+            data = await billcom.list_invoices(customer_id=customer_id)
             all_invoices = data.get("results", data) if isinstance(data, dict) else data
             pat = re.compile(re.escape(prefix) + r"-(\d+)$")
             for inv in all_invoices or []:
@@ -197,10 +211,16 @@ def _extras_apply(config: dict, start_str: str) -> bool:
     return date.fromisoformat(start_str).day <= 7
 
 
+def _cap_day_hours(hours: float) -> float:
+    """Days with 7+ hours of work bill flat 8h; partial days (<7h) pass
+    through unchanged. Over-time worked isn't billed extra."""
+    return 8.0 if hours >= 7 else hours
+
+
 def _totals(config: dict, work_entries: list[dict], start: str = "") -> tuple[float, float]:
     b = _billing_cfg(config)
     rate = b.get("rate", 0)
-    hours = sum(e.get("hours", 8) for e in work_entries)
+    hours = sum(_cap_day_hours(e.get("hours", 8)) for e in work_entries)
     extras = sum((b.get("extras") or {}).values()) if (not start or _extras_apply(config, start)) else 0
     amount = hours * rate + extras
     return hours, amount
@@ -209,7 +229,7 @@ def _totals(config: dict, work_entries: list[dict], start: str = "") -> tuple[fl
 def _build_line_items(config: dict, body: dict, work_entries: list[dict]) -> list[dict]:
     b = _billing_cfg(config)
     rate = b.get("rate", 0)
-    hours = sum(e.get("hours", 8) for e in work_entries)
+    hours = sum(_cap_day_hours(e.get("hours", 8)) for e in work_entries)
     items = []
 
     if b.get("include_daily_descriptions") and work_entries:
@@ -234,16 +254,18 @@ def _build_line_items(config: dict, body: dict, work_entries: list[dict]) -> lis
             logs = worklogs_by_date.get(e["date"]) or []
             if logs:
                 summary = "; ".join(f"{w['ticket']}: {w.get('summary','')}" for w in logs[:3])
+                qty = _cap_day_hours(sum(w.get("hours", 0) for w in logs) or e.get("hours", 8))
                 items.append({
-                    "quantity": sum(w.get("hours", 0) for w in logs) or e.get("hours", 8),
+                    "quantity": qty,
                     "price": rate,
                     "description": f"{pretty} — {summary}",
                 })
             else:
+                qty = _cap_day_hours(e.get("hours", 8))
                 items.append({
-                    "quantity": e.get("hours", 8),
+                    "quantity": qty,
                     "price": rate,
-                    "description": f"{pretty} · {e.get('hours', 8)}h",
+                    "description": f"{pretty} · {qty:g}h",
                 })
     else:
         if not work_entries:
@@ -252,7 +274,7 @@ def _build_line_items(config: dict, body: dict, work_entries: list[dict]) -> lis
             for e in work_entries:
                 d = date.fromisoformat(e["date"])
                 items.append({
-                    "quantity": e.get("hours", 8),
+                    "quantity": _cap_day_hours(e.get("hours", 8)),
                     "price": rate,
                     "description": f"{d.strftime('%A')}, {d.strftime('%B')} {d.day}",
                 })
