@@ -183,7 +183,7 @@ After fixing, the supervisor will restart affected instances automatically."""
     _record_escalation(state, ek)
 
     try:
-        result = run_claude_code(prompt, PROJECT_DIR, timeout=900)
+        result = run_claude_code(prompt, cwd=PROJECT_DIR, timeout=900)
         if result:
             log.info(f"[{inst_key}] Claude Code fix applied, output: {result[:200]}")
         else:

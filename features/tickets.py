@@ -1222,7 +1222,7 @@ def _check_in_review(config, ticket, ts, base_url) -> dict:
                     if wt.is_dir():
                         subprocess.run(["git", "pull", "--rebase", "origin", ts["branch"]], cwd=str(wt), capture_output=True, timeout=60)
                         context = f"File: {comment.get('path', 'unknown')}\nLine: {comment.get('line', 'unknown')}\n\nReview comment: {comment['body']}\n\nFix this review comment."
-                        fix_result = run_claude_code(context, wt)
+                        fix_result = run_claude_code(context, cwd=wt)
                         subprocess.run(["git", "add", "-A"], cwd=str(wt), capture_output=True, timeout=60)
                         commit = subprocess.run(["git", "commit", "-m", f"fix: address review comment on {comment.get('path', 'unknown')}"], cwd=str(wt), capture_output=True, timeout=60)
                         if fix_result and commit.returncode == 0:
