@@ -117,7 +117,7 @@ def _check_comments(config, instance_key, platform, pr, base_url):
             worktree = _ensure_worktree(config, pr)
             if worktree:
                 context = f"File: {comment.get('path', 'unknown')}\nLine: {comment.get('line', 'unknown')}\n\nReview comment: {comment['body']}\n\nFix this review comment."
-                result = run_claude_code(context, worktree)
+                result = run_claude_code(context, cwd=worktree)
                 if result is None:
                     log.emit("pr_comment_flagged_manual", f"{pr_ref}: Claude failed to fix — {comment['body'][:80]}", links=links, meta=meta)
                     comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "Claude failed to fix")
