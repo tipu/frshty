@@ -1255,12 +1255,9 @@ def _check_in_review(config, ticket, ts, base_url) -> dict:
 
             pr_comments.append(entry)
 
-        successful_ids = [
-            e["id"] for e in pr_comments[-len(new_comments):]
-            if e.get("status") != "fix_failed"
-        ]
-        if successful_ids:
-            last_comment_ids[pr_key] = max(last_seen, max(successful_ids))
+        batch_statuses = [e["status"] for e in pr_comments[-len(new_comments):]]
+        if "fix_failed" not in batch_statuses:
+            last_comment_ids[pr_key] = max(c["id"] for c in new_comments)
 
     ts["last_comment_ids"] = last_comment_ids
     _save_pr_comments(config, slug, pr_comments)

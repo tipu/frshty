@@ -1249,3 +1249,64 @@ class TestCheckInReviewFixFailedRetry:
                 "the previously fix_failed comments; got: "
                 f"{second_batch_prompt!r}"
             )
+
+    def test_mixed_outcomes_keep_failed_retryable_even_when_needs_reply_id_is_lower(
+        self, fresh_db, fake_config, tmp_state
+    ):
+        """Mirrors the DEV-467 shape: failed-id-A < needs_reply-id < failed-id-B
+        (bb returns ids 795535088 fix_failed, 795537065 needs_reply, 795537372
+        fix_failed). A cursor-advance-to-max-successful would set cursor to the
+        needs_reply id and permanently lock out the lower-id failed comment.
+        Required behavior: when any fix_failed is in the batch, do NOT advance
+        the cursor — both failed comments must reprocess on the next scan."""
+        slug = "PROJ-1-do-the-thing"
+        wt = self._setup_worktree(fake_config, slug)
+        ts = make_ticket_state(
+            status="in_review", slug=slug, branch=slug,
+            prs=[{"repo": "repo", "id": 99, "branch": slug, "url": "http://u"}],
+        )
+        ticket = {"key": "PROJ-1", "summary": "Do thing", "url": "http://j/PROJ-1"}
+        c_low_failed = self._make_pr_comment(
+            id=795535088, body="duplicate variable name on vpn-stack",
+        )
+        c_mid_ambiguous = self._make_pr_comment(
+            id=795537065, body="dangerous to change runtime of high-level constructs",
+        )
+        c_high_failed = self._make_pr_comment(
+            id=795537372, body="helper name is too generic on runtime-aspect",
+        )
+
+        mock_platform = MagicMock()
+        mock_platform.get_pr_state.return_value = "OPEN"
+        mock_platform.get_pr_comments.return_value = [
+            c_low_failed, c_mid_ambiguous, c_high_failed,
+        ]
+        haiku_classify = (
+            '{"results": ['
+            '{"i": 0, "actionable": true},'
+            '{"i": 1, "actionable": false},'
+            '{"i": 2, "actionable": true}'
+            ']}'
+        )
+        bb_config = {
+            **fake_config,
+            "job": {**fake_config["job"], "platform": "bitbucket"},
+            "bitbucket": {"org": "x", "user_account_id": "bot-self"},
+        }
+
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "repo", "path": wt.parent}]), \
+             patch("features.tickets.ticket_worktree_path", return_value=wt), \
+             patch("features.tickets.run_haiku", return_value=haiku_classify), \
+             patch("features.tickets.run_claude_code", return_value=None), \
+             patch("features.tickets.subprocess.run",
+                   return_value=MagicMock(returncode=0)):
+            ts = tickets._check_in_review(bb_config, ticket, ts, "http://base")
+
+        cursor = ts.get("last_comment_ids", {}).get("repo/99", 0)
+        assert cursor < c_low_failed["id"], (
+            "after fix_failed comments end a batch, the cursor must NOT advance "
+            "past the lowest failed id (or it locks the comment out of retry). "
+            f"got cursor={cursor}, lowest_failed_id={c_low_failed['id']}"
+        )
