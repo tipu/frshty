@@ -28,6 +28,7 @@ from web.billing import router as _billing_router
 from web.scheduling import router as _scheduling_router
 from web.prd import router as _prd_router
 from web.manager import router as _manager_router
+from web.today import router as _today_router
 from web.observability import router as _observability_router
 from web.reviews import router as _reviews_router
 from web.tickets import router as _tickets_router
@@ -60,6 +61,7 @@ app.include_router(_billing_router)
 app.include_router(_scheduling_router)
 app.include_router(_prd_router)
 app.include_router(_manager_router)
+app.include_router(_today_router)
 app.include_router(_observability_router)
 app.include_router(_reviews_router)
 app.include_router(_tickets_router)

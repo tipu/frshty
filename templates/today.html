@@ -26,6 +26,27 @@
 .md-content strong { color: #fef9c3; }
 .md-content a { color: #60a5fa; text-decoration: underline; }
 .policy-stale { background: #4a3a0a; color: #fbbf24; }
+.action-card { background: #161b22; border: 1px solid #2a2a2a; border-radius: 6px; padding: 10px 12px; display: flex; align-items: center; gap: 10px; }
+.action-card + .action-card { margin-top: 6px; }
+.section-h { font-size: 13px; font-weight: 600; color: #fbbf24; margin: 18px 0 6px; letter-spacing: 0.02em; }
+.btn-pri { background: #15803d; color: white; font-size: 12px; padding: 4px 10px; border-radius: 4px; }
+.btn-pri:hover:not(:disabled) { background: #16a34a; }
+.btn-pri:disabled { background: #374151; cursor: not-allowed; }
+.btn-sec { background: #1f2937; color: #d1d5db; font-size: 12px; padding: 4px 10px; border-radius: 4px; border: 1px solid #374151; }
+.btn-sec:hover { background: #374151; }
+.btn-danger { background: #991b1b; color: white; font-size: 12px; padding: 4px 10px; border-radius: 4px; }
+.btn-danger:hover { background: #b91c1c; }
+.btn-snooze { background: transparent; color: #6b7280; font-size: 11px; padding: 2px 8px; border-radius: 4px; border: 1px solid #374151; }
+.btn-snooze:hover { color: #d1d5db; border-color: #4b5563; }
+.tk-key { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; color: #93c5fd; }
+.tk-sum { color: #d1d5db; font-size: 12px; }
+.tk-meta { color: #6b7280; font-size: 11px; }
+.err-inline { color: #fca5a5; font-size: 11px; margin-top: 4px; }
+.reply-row { padding: 8px; border: 1px solid #2a2a2a; border-radius: 4px; margin-top: 6px; background: #0d1117; }
+.reply-row textarea { width: 100%; background: #0a0e13; color: #e5e7eb; border: 1px solid #374151; border-radius: 4px; padding: 6px; font-size: 12px; font-family: ui-monospace, monospace; resize: vertical; min-height: 60px; }
+.empty-state { padding: 24px; text-align: center; color: #6b7280; }
+details > summary { cursor: pointer; color: #9ca3af; font-size: 13px; padding: 6px 0; }
+details[open] > summary { color: #d1d5db; margin-bottom: 8px; }
 </style>
 </head>
 <body class="p-4 max-w-5xl mx-auto">
@@ -39,60 +60,333 @@
     </div>
     <frshty-nav :features="features" />
     <div class="ml-auto flex items-center gap-3">
-        <span v-if="generatedAt" class="text-xs text-gray-500" :title="generatedAt">last digest {{ fmtRelative(generatedAt) }}</span>
+        <span v-if="generatedAt" class="text-xs text-gray-500" :title="generatedAt">refreshed {{ fmtRelative(generatedAt) }}</span>
         <button @click="runNow" :disabled="running"
                 class="bg-green-700 hover:bg-green-600 disabled:bg-gray-700 text-white text-xs px-3 py-1 rounded">
-            {{ running ? 'running…' : 'run now' }}
+            {{ running ? 'narrating…' : 'run narrative' }}
         </button>
     </div>
 </header>
 
-<div v-if="empty" class="card p-6">
-    <div class="text-sm text-gray-400">No digest yet for <code class="bg-gray-800 px-1 rounded">{{ instanceName }}</code>. Either:</div>
-    <ul class="text-sm text-gray-400 list-disc ml-6 mt-2">
-        <li>The morning cron hasn't fired yet (next: 7am local).</li>
-        <li><code class="bg-gray-800 px-1 rounded">[manager].enabled</code> isn't set in this instance's config.</li>
-        <li>Click <strong>run now</strong> above to trigger one synchronously.</li>
-    </ul>
+<div class="flex items-center gap-2 mb-3 flex-wrap">
+    <template v-for="(count, key) in visibleCounts" :key="key">
+        <span class="badge" :class="badgeClass(count)" :title="key">
+            {{ formatBucketLabel(key) }}: {{ count }}
+        </span>
+    </template>
+    <span v-if="policyStale" class="badge policy-stale" title="priorities.md changed since last narrative — run narrative to refresh">⚠ policy stale</span>
 </div>
 
-<div v-else>
-    <div class="flex items-center gap-2 mb-3 flex-wrap">
-        <template v-for="(count, key) in counts" :key="key">
-            <span class="badge" :class="badgeClass(count)" :title="key">
-                {{ formatBucketLabel(key) }}: {{ count }}
-            </span>
-        </template>
-        <span v-if="policyStale" class="badge policy-stale" title="priorities.md changed since last digest — run now to refresh">⚠ policy stale</span>
+<div v-if="totalActive === 0 && !loadError" class="card empty-state">
+    🟢 Inbox zero — no open loops in any bucket. Nice.
+</div>
+
+<div v-if="loadError" class="card p-4 mb-3" style="border-color:#7f1d1d">
+    <div class="text-sm text-red-400">Failed to load loops: {{ loadError }}</div>
+</div>
+
+<!-- Merge approvals waiting -->
+<div v-if="visibleLoops.merge_ready && visibleLoops.merge_ready.length">
+    <div class="section-h">Merge approvals waiting ({{ visibleLoops.merge_ready.length }})</div>
+    <div v-for="e in visibleLoops.merge_ready" :key="'mr:' + e.ticket_key" class="action-card">
+        <div class="flex-1 min-w-0">
+            <div class="tk-key">{{ e.ticket_key }}</div>
+            <div class="tk-sum truncate">{{ e.summary }}</div>
+            <div v-for="pr in (e.prs || [])" :key="pr.repo + '/' + pr.id" class="tk-meta">
+                <a :href="pr.url" target="_blank" class="text-blue-400 hover:underline">{{ pr.repo }} #{{ pr.id }}</a> ·
+                {{ e.approval_status || 'approved' }}
+            </div>
+            <div v-if="cardError['mr:' + e.ticket_key]" class="err-inline">{{ cardError['mr:' + e.ticket_key] }}</div>
+        </div>
+        <button class="btn-pri" :disabled="busy['mr:' + e.ticket_key]"
+                @click="doAction('mr:' + e.ticket_key, 'POST', '/api/tickets/' + e.ticket_key + '/merge')">
+            {{ busy['mr:' + e.ticket_key] ? 'merging…' : 'Merge' }}
+        </button>
+        <button class="btn-snooze" @click="snooze('merge_ready', e.ticket_key)">Snooze</button>
     </div>
-
-    <div class="card p-6 md-content" v-html="renderedBody"></div>
 </div>
+
+<!-- Submit PR (ready_to_submit) -->
+<div v-if="visibleLoops.ready_to_submit && visibleLoops.ready_to_submit.length">
+    <div class="section-h">Ready to submit PR ({{ visibleLoops.ready_to_submit.length }})</div>
+    <div v-for="e in visibleLoops.ready_to_submit" :key="'rts:' + e.ticket_key" class="action-card">
+        <div class="flex-1 min-w-0">
+            <div class="tk-key"><a :href="'/tickets/' + e.ticket_key" class="hover:underline">{{ e.ticket_key }}</a></div>
+            <div class="tk-sum truncate">{{ e.summary }}</div>
+        </div>
+        <button class="btn-pri" @click="openSubmitPr(e.ticket_key)">Submit PR…</button>
+        <button class="btn-snooze" @click="snooze('ready_to_submit', e.ticket_key)">Snooze</button>
+    </div>
+</div>
+
+<!-- PR failed — needs restart -->
+<div v-if="visibleLoops.pr_failed_tickets && visibleLoops.pr_failed_tickets.length">
+    <div class="section-h">PR failed — needs restart ({{ visibleLoops.pr_failed_tickets.length }})</div>
+    <div v-for="e in visibleLoops.pr_failed_tickets" :key="'rs:' + e.ticket_key" class="action-card">
+        <div class="flex-1 min-w-0">
+            <div class="tk-key"><a :href="'/tickets/' + e.ticket_key" class="hover:underline">{{ e.ticket_key }}</a></div>
+            <div class="tk-sum truncate">{{ e.summary }}</div>
+            <div class="tk-meta">ci_fix_attempts: {{ e.ci_fix_attempts || 0 }}</div>
+            <div v-if="cardError['rs:' + e.ticket_key]" class="err-inline">{{ cardError['rs:' + e.ticket_key] }}</div>
+        </div>
+        <button class="btn-pri" :disabled="busy['rs:' + e.ticket_key]"
+                @click="doAction('rs:' + e.ticket_key, 'POST', '/api/tickets/' + e.ticket_key + '/restart')">
+            {{ busy['rs:' + e.ticket_key] ? 'restarting…' : 'Restart' }}
+        </button>
+        <button class="btn-snooze" @click="snooze('pr_failed_tickets', e.ticket_key)">Snooze</button>
+    </div>
+</div>
+
+<!-- Pending approvals + new pickup -->
+<div v-if="(visibleLoops.pending_approvals_stuck && visibleLoops.pending_approvals_stuck.length) || (visibleLoops.pickup_new && visibleLoops.pickup_new.length)">
+    <div class="section-h">Decisions — approve or pick up ({{ (visibleLoops.pending_approvals_stuck || []).length + (visibleLoops.pickup_new || []).length }})</div>
+    <div v-for="e in (visibleLoops.pending_approvals_stuck || [])" :key="'ap:' + e.ticket_key" class="action-card">
+        <div class="flex-1 min-w-0">
+            <div class="tk-key"><a :href="'/tickets/' + e.ticket_key" class="hover:underline">{{ e.ticket_key }}</a> <span class="tk-meta">· pending approval</span></div>
+            <div class="tk-sum truncate">{{ e.summary }}</div>
+            <div v-if="cardError['ap:' + e.ticket_key]" class="err-inline">{{ cardError['ap:' + e.ticket_key] }}</div>
+        </div>
+        <button class="btn-pri" :disabled="busy['ap:' + e.ticket_key]"
+                @click="doAction('ap:' + e.ticket_key, 'POST', '/api/tickets/' + e.ticket_key + '/approve')">Approve</button>
+        <button class="btn-danger" :disabled="busy['ap:' + e.ticket_key]"
+                @click="doAction('ap:' + e.ticket_key, 'POST', '/api/tickets/' + e.ticket_key + '/reject')">Reject</button>
+        <button class="btn-snooze" @click="snooze('pending_approvals_stuck', e.ticket_key)">Snooze</button>
+    </div>
+    <div v-for="e in (visibleLoops.pickup_new || [])" :key="'pn:' + e.ticket_key" class="action-card">
+        <div class="flex-1 min-w-0">
+            <div class="tk-key"><a :href="'/tickets/' + e.ticket_key" class="hover:underline">{{ e.ticket_key }}</a> <span class="tk-meta">· {{ e.status }}{{ e.approval_status ? ' · ' + e.approval_status : '' }}</span></div>
+            <div class="tk-sum truncate">{{ e.summary }}</div>
+        </div>
+        <a :href="'/tickets/' + e.ticket_key" class="btn-sec">Open</a>
+        <button class="btn-snooze" @click="snooze('pickup_new', e.ticket_key)">Snooze</button>
+    </div>
+</div>
+
+<!-- PR comments awaiting reply -->
+<div v-if="visibleLoops.pr_comments_needs_reply && visibleLoops.pr_comments_needs_reply.length">
+    <div class="section-h">PR comments awaiting reply ({{ totalReplyCount }})</div>
+    <div v-for="e in visibleLoops.pr_comments_needs_reply" :key="'cr:' + e.ticket_key" class="action-card flex-col items-stretch" style="align-items:stretch">
+        <div class="flex items-center gap-3">
+            <div class="flex-1 min-w-0">
+                <div class="tk-key"><a :href="'/tickets/' + e.ticket_key" class="hover:underline">{{ e.ticket_key }}</a> <span class="tk-meta">· {{ e.count }} needs reply</span></div>
+                <div class="tk-sum truncate">{{ e.summary }}</div>
+            </div>
+            <button class="btn-snooze" @click="snooze('pr_comments_needs_reply', e.ticket_key)">Snooze ticket</button>
+        </div>
+        <div v-for="(c, ci) in e.comments" :key="'crow:' + e.ticket_key + ':' + (c.id || ci)" class="reply-row">
+            <div class="tk-meta mb-1">{{ c.pr_repo }} #{{ c.pr_id }} · {{ c.path }}:{{ c.line }}</div>
+            <div class="tk-sum mb-2" style="white-space:pre-wrap">{{ c.body }}</div>
+            <textarea v-model="replyDraft[replyKey(e.ticket_key, c.id)]"
+                      :placeholder="c.suggested_reply || 'reply…'"></textarea>
+            <div class="flex items-center gap-2 mt-2">
+                <button class="btn-pri" :disabled="busy[replyKey(e.ticket_key, c.id)] || !replyDraft[replyKey(e.ticket_key, c.id)]"
+                        @click="sendReply(e.ticket_key, c.id)">
+                    {{ busy[replyKey(e.ticket_key, c.id)] ? 'sending…' : 'Reply' }}
+                </button>
+                <button class="btn-sec" @click="replyDraft[replyKey(e.ticket_key, c.id)] = c.suggested_reply || ''">Use suggestion</button>
+                <span v-if="cardError[replyKey(e.ticket_key, c.id)]" class="err-inline">{{ cardError[replyKey(e.ticket_key, c.id)] }}</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Peer PR reviews -->
+<div v-if="visibleLoops.peer_pr_reviews && visibleLoops.peer_pr_reviews.length">
+    <div class="section-h">Peer PRs awaiting your review ({{ visibleLoops.peer_pr_reviews.length }})</div>
+    <div v-for="e in visibleLoops.peer_pr_reviews" :key="'pr:' + e.repo + '/' + e.pr_id" class="action-card">
+        <div class="flex-1 min-w-0">
+            <div class="tk-key"><a :href="e.url" target="_blank" class="hover:underline">{{ e.repo }} #{{ e.pr_id }}</a></div>
+            <div class="tk-sum truncate">{{ e.title }}</div>
+            <div class="tk-meta">by {{ e.author }} · created {{ fmtRelative(e.created_on) }}</div>
+        </div>
+        <a :href="'/reviews'" class="btn-sec">Open in /reviews</a>
+        <button class="btn-snooze" @click="snooze('peer_pr_reviews', e.repo + '/' + e.pr_id)">Snooze</button>
+    </div>
+</div>
+
+<!-- Stale own PRs -->
+<div v-if="visibleLoops.stale_own_prs && visibleLoops.stale_own_prs.length">
+    <div class="section-h">Your stale PRs ({{ visibleLoops.stale_own_prs.length }})</div>
+    <div v-for="e in visibleLoops.stale_own_prs" :key="'sop:' + e.repo + '/' + e.pr_id" class="action-card">
+        <div class="flex-1 min-w-0">
+            <div class="tk-key"><a :href="e.url" target="_blank" class="hover:underline">{{ e.repo }} #{{ e.pr_id }}</a></div>
+            <div class="tk-sum truncate">{{ e.title }}</div>
+            <div class="tk-meta">{{ e.review_state || 'no reviews' }} · ci: {{ e.ci_state || 'unknown' }} · {{ fmtRelative(e.created_on) }}</div>
+        </div>
+        <a :href="e.url" target="_blank" class="btn-sec">Open</a>
+        <button class="btn-snooze" @click="snooze('stale_own_prs', e.repo + '/' + e.pr_id)">Snooze</button>
+    </div>
+</div>
+
+<!-- In-review without CI -->
+<div v-if="visibleLoops.in_review_no_ci && visibleLoops.in_review_no_ci.length">
+    <div class="section-h">In review · no CI signal ({{ visibleLoops.in_review_no_ci.length }})</div>
+    <div v-for="e in visibleLoops.in_review_no_ci" :key="'irnc:' + e.ticket_key" class="action-card">
+        <div class="flex-1 min-w-0">
+            <div class="tk-key"><a :href="'/tickets/' + e.ticket_key" class="hover:underline">{{ e.ticket_key }}</a></div>
+            <div class="tk-sum truncate">{{ e.summary }}</div>
+        </div>
+        <a :href="'/tickets/' + e.ticket_key" class="btn-sec">Open</a>
+        <button class="btn-snooze" @click="snooze('in_review_no_ci', e.ticket_key)">Snooze</button>
+    </div>
+</div>
+
+<!-- Stale unattended -->
+<div v-if="visibleLoops.stale_unattended && visibleLoops.stale_unattended.length">
+    <div class="section-h">Stale tickets · no progress ({{ visibleLoops.stale_unattended.length }})</div>
+    <div v-for="e in visibleLoops.stale_unattended" :key="'su:' + e.ticket_key" class="action-card">
+        <div class="flex-1 min-w-0">
+            <div class="tk-key"><a :href="'/tickets/' + e.ticket_key" class="hover:underline">{{ e.ticket_key }}</a></div>
+            <div class="tk-sum truncate">{{ e.summary }}</div>
+        </div>
+        <a :href="'/tickets/' + e.ticket_key" class="btn-sec">Open</a>
+        <button class="btn-snooze" @click="snooze('stale_unattended', e.ticket_key)">Snooze</button>
+    </div>
+</div>
+
+<!-- Regressions -->
+<div v-if="visibleLoops.regressions_recent && visibleLoops.regressions_recent.length">
+    <div class="section-h">Recent regressions ({{ visibleLoops.regressions_recent.length }})</div>
+    <div v-for="e in visibleLoops.regressions_recent" :key="'rg:' + e.ticket_key + '/' + (e.criterion_id || 'x')" class="action-card">
+        <div class="flex-1 min-w-0">
+            <div class="tk-key"><a :href="'/tickets/' + e.ticket_key" class="hover:underline">{{ e.ticket_key }}</a> <span class="tk-meta">· {{ e.criterion_id || '?' }}</span></div>
+            <div class="tk-sum truncate">{{ e.summary || e.note }}</div>
+        </div>
+        <a :href="'/tickets/' + e.ticket_key" class="btn-sec">Investigate</a>
+        <button class="btn-snooze" @click="snooze('regressions_recent', e.ticket_key + '/' + (e.criterion_id || 'x'))">Snooze</button>
+    </div>
+</div>
+
+<!-- Admin: timesheet + invoice -->
+<div v-if="(visibleLoops.timesheet_underfilled && visibleLoops.timesheet_underfilled.length) || (visibleLoops.billcom_invoice_due && visibleLoops.billcom_invoice_due.length)">
+    <div class="section-h">Admin</div>
+    <div v-for="e in (visibleLoops.timesheet_underfilled || [])" :key="'ts:' + e.date" class="action-card">
+        <div class="flex-1 min-w-0">
+            <div class="tk-key">Timesheet · {{ e.date }}</div>
+            <div class="tk-sum">{{ e.hours }}h logged of {{ e.target }}h ({{ e.shortfall }}h short)</div>
+        </div>
+        <a href="/timesheet" class="btn-pri">Open timesheet</a>
+        <button class="btn-snooze" @click="snooze('timesheet_underfilled', 'last-business-day:' + e.date)">Snooze</button>
+    </div>
+    <div v-for="e in (visibleLoops.billcom_invoice_due || [])" :key="'inv:' + e.month" class="action-card">
+        <div class="flex-1 min-w-0">
+            <div class="tk-key">Invoice · {{ e.month }}</div>
+            <div class="tk-sum">{{ e.note || 'last month not yet invoiced locally' }}</div>
+        </div>
+        <a v-if="e.create_url" :href="e.create_url" class="btn-pri">Draft</a>
+        <a v-if="e.billcom_url" :href="e.billcom_url" target="_blank" class="btn-sec">bill.com</a>
+        <button class="btn-snooze" @click="snooze('billcom_invoice_due', 'month:' + e.month)">Snooze</button>
+    </div>
+</div>
+
+<!-- Snoozed -->
+<details v-if="snoozed.length" class="mt-6">
+    <summary>Snoozed ({{ snoozed.length }})</summary>
+    <div v-for="s in snoozed" :key="'sn:' + s.loop_type + '/' + s.entity_id" class="action-card">
+        <div class="flex-1 min-w-0">
+            <div class="tk-meta">{{ formatBucketLabel(s.loop_type) }}</div>
+            <div class="tk-sum">{{ s.entity_id }}</div>
+            <div v-if="s.reason" class="tk-meta">reason: {{ s.reason }}</div>
+            <div class="tk-meta">snoozed {{ fmtRelative(s.created_at) }}{{ s.snooze_until ? ' until ' + s.snooze_until : ' (indefinite)' }}</div>
+        </div>
+        <button class="btn-sec" @click="unsnooze(s.loop_type, s.entity_id)">Unsnooze</button>
+    </div>
+</details>
+
+<!-- Why these were prioritized (legacy Haiku narrative) -->
+<details v-if="bodyMd" class="mt-6">
+    <summary>Why these were prioritized (narrative)</summary>
+    <div class="card p-6 md-content" v-html="renderedBody"></div>
+</details>
+
+<pr-submit-modal :open="submitPrOpen" :repos="submitPrRepos" :submitting="submitPrBusy"
+                  @close="submitPrOpen=false" @submit="confirmSubmitPr" />
 
 </div>
 
 <script>
-const { createApp, ref, computed, onMounted } = Vue;
+const { ref, computed, reactive, onMounted } = Vue;
+
+const BUCKET_LABELS = {
+    merge_ready: 'Merge ready',
+    ready_to_submit: 'Ready to submit',
+    pr_failed_tickets: 'PR failed',
+    pickup_new: 'Pickup new',
+    pending_approvals_stuck: 'Pending approval',
+    pr_comments_needs_reply: 'Replies needed',
+    peer_pr_reviews: 'Peer reviews',
+    stale_own_prs: 'Stale PRs',
+    stale_unattended: 'Stale unattended',
+    in_review_no_ci: 'No CI signal',
+    regressions_recent: 'Regressions',
+    timesheet_underfilled: 'Timesheet',
+    billcom_invoice_due: 'Invoice due',
+};
 
 frshtyApp({
     setup() {
-        const empty = ref(true);
-        const generatedAt = ref(null);
+        const loops = ref({});
         const counts = ref({});
+        const snoozed = ref([]);
+        const generatedAt = ref(null);
         const bodyMd = ref('');
         const policyStale = ref(false);
         const instanceName = ref('');
         const running = ref(false);
+        const loadError = ref('');
+        const busy = reactive({});
+        const cardError = reactive({});
+        const replyDraft = reactive({});
+        const submitPrOpen = ref(false);
+        const submitPrRepos = ref([]);
+        const submitPrBusy = ref(false);
+        const submitPrTicketKey = ref('');
 
         const renderedBody = computed(() => bodyMd.value ? marked.parse(bodyMd.value) : '');
 
-        const BUCKET_LABELS = {
-            stale_own_prs: 'Stale PRs',
-            stale_tickets: 'Stale tickets',
-            stuck_in_review: 'Stuck in_review',
-            regressions_recent: 'Regressions',
-            pending_approvals_stuck: 'Pending approval stuck',
+        const ENTITY_ID = {
+            merge_ready: e => e.ticket_key,
+            ready_to_submit: e => e.ticket_key,
+            pr_failed_tickets: e => e.ticket_key,
+            pickup_new: e => e.ticket_key,
+            pending_approvals_stuck: e => e.ticket_key,
+            pr_comments_needs_reply: e => e.ticket_key,
+            peer_pr_reviews: e => `${e.repo}/${e.pr_id}`,
+            stale_own_prs: e => `${e.repo}/${e.pr_id}`,
+            stale_unattended: e => e.ticket_key,
+            in_review_no_ci: e => e.ticket_key,
+            regressions_recent: e => `${e.ticket_key}/${e.criterion_id || 'x'}`,
+            timesheet_underfilled: e => `last-business-day:${e.date}`,
+            billcom_invoice_due: e => `month:${e.month}`,
         };
+
+        const snoozedKeys = computed(() => {
+            const s = new Set();
+            for (const sn of snoozed.value) s.add(`${sn.loop_type}:${sn.entity_id}`);
+            return s;
+        });
+
+        const visibleLoops = computed(() => {
+            const out = {};
+            for (const [k, items] of Object.entries(loops.value || {})) {
+                const fn = ENTITY_ID[k] || (e => e.ticket_key || '');
+                out[k] = (items || []).filter(e => !snoozedKeys.value.has(`${k}:${fn(e)}`));
+            }
+            return out;
+        });
+
+        const visibleCounts = computed(() => {
+            const out = {};
+            for (const [k, items] of Object.entries(visibleLoops.value)) out[k] = items.length;
+            return out;
+        });
+
+        const totalActive = computed(() =>
+            Object.values(visibleCounts.value).reduce((a, b) => a + (b || 0), 0)
+        );
+        const totalReplyCount = computed(() =>
+            (visibleLoops.value.pr_comments_needs_reply || []).reduce((a, e) => a + (e.count || 0), 0)
+        );
 
         function formatBucketLabel(key) {
             return BUCKET_LABELS[key] || key;
@@ -118,29 +412,143 @@ frshtyApp({
             return `${d}d ago`;
         }
 
+        function replyKey(ticketKey, commentId) {
+            return `reply:${ticketKey}:${commentId}`;
+        }
+
         async function load() {
             try {
-                const [latestResp, statusResp, cfgResp] = await Promise.all([
-                    fetch('/api/manager/latest'),
-                    fetch('/api/manager/status'),
+                const [loopsResp, cfgResp] = await Promise.all([
+                    fetch('/api/today/loops'),
                     fetch('/api/config'),
                 ]);
-                const latest = await latestResp.json();
-                if (latest.empty) {
-                    empty.value = true;
-                } else {
-                    empty.value = false;
-                    generatedAt.value = latest.generated_at;
-                    bodyMd.value = latest.body_md || '';
-                    counts.value = latest.candidate_counts || {};
+                if (!loopsResp.ok) {
+                    const err = await loopsResp.json().catch(() => ({}));
+                    loadError.value = err.error || `HTTP ${loopsResp.status}`;
+                    return;
                 }
-                if (statusResp.ok) {
-                    const s = await statusResp.json();
-                    policyStale.value = !!s.policy_stale;
-                }
+                loadError.value = '';
+                const data = await loopsResp.json();
+                loops.value = data.loops || {};
+                counts.value = data.counts || {};
+                snoozed.value = data.snoozed || [];
+                generatedAt.value = data.generated_at;
+                policyStale.value = !!data.policy_stale;
+                const ml = data.manager_latest;
+                bodyMd.value = ml && ml.body_md ? ml.body_md : '';
                 const cfg = await cfgResp.json();
                 instanceName.value = cfg.job?.key || '';
-            } catch (e) { console.error('load failed', e); }
+            } catch (e) {
+                loadError.value = e.message || String(e);
+            }
+        }
+
+        async function doAction(cardId, method, url, body) {
+            busy[cardId] = true;
+            cardError[cardId] = '';
+            try {
+                const opts = { method, headers: {'Content-Type': 'application/json'} };
+                if (body) opts.body = JSON.stringify(body);
+                const r = await fetch(url, opts);
+                if (!r.ok) {
+                    const j = await r.json().catch(() => ({}));
+                    cardError[cardId] = j.error || `HTTP ${r.status}`;
+                    return false;
+                }
+                await load();
+                return true;
+            } catch (e) {
+                cardError[cardId] = e.message || String(e);
+                return false;
+            } finally {
+                busy[cardId] = false;
+            }
+        }
+
+        async function snooze(loopType, entityId, snoozeUntil, reason) {
+            try {
+                await fetch('/api/today/snoozes', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        loop_type: loopType, entity_id: entityId,
+                        snooze_until: snoozeUntil || null,
+                        reason: reason || null,
+                    }),
+                });
+                await load();
+            } catch (e) { console.error('snooze failed', e); }
+        }
+
+        async function unsnooze(loopType, entityId) {
+            try {
+                await fetch(`/api/today/snoozes/${encodeURIComponent(loopType)}/${encodeURIComponent(entityId)}`, {method: 'DELETE'});
+                await load();
+            } catch (e) { console.error('unsnooze failed', e); }
+        }
+
+        async function sendReply(ticketKey, commentId) {
+            const key = replyKey(ticketKey, commentId);
+            const body = (replyDraft[key] || '').trim();
+            if (!body) {
+                cardError[key] = 'reply text required';
+                return;
+            }
+            busy[key] = true;
+            cardError[key] = '';
+            try {
+                const r = await fetch(`/api/tickets/${ticketKey}/pr-comments/${commentId}/reply`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({body}),
+                });
+                if (!r.ok) {
+                    const j = await r.json().catch(() => ({}));
+                    cardError[key] = j.error || `HTTP ${r.status}`;
+                    return;
+                }
+                replyDraft[key] = '';
+                await load();
+            } catch (e) {
+                cardError[key] = e.message || String(e);
+            } finally {
+                busy[key] = false;
+            }
+        }
+
+        async function openSubmitPr(ticketKey) {
+            try {
+                const r = await fetch(`/api/tickets/${ticketKey}/pr-info`);
+                if (!r.ok) {
+                    const j = await r.json().catch(() => ({}));
+                    alert('PR info failed: ' + (j.error || r.statusText));
+                    return;
+                }
+                const info = await r.json();
+                submitPrRepos.value = info.repos || [];
+                submitPrTicketKey.value = ticketKey;
+                submitPrOpen.value = true;
+            } catch (e) { alert('PR info error: ' + e.message); }
+        }
+
+        async function confirmSubmitPr(payload) {
+            submitPrBusy.value = true;
+            try {
+                const r = await fetch(`/api/tickets/${submitPrTicketKey.value}/submit-pr`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload),
+                });
+                if (!r.ok) {
+                    const j = await r.json().catch(() => ({}));
+                    alert('Submit failed: ' + (j.error || r.statusText));
+                    return;
+                }
+                submitPrOpen.value = false;
+                await load();
+            } finally {
+                submitPrBusy.value = false;
+            }
         }
 
         async function runNow() {
@@ -160,8 +568,15 @@ frshtyApp({
             setInterval(load, 30000);
         });
 
-        return { empty, generatedAt, counts, policyStale, instanceName, running,
-                 renderedBody, formatBucketLabel, badgeClass, fmtRelative, runNow };
+        return {
+            loops, counts, snoozed, generatedAt, bodyMd, policyStale, instanceName,
+            running, loadError, busy, cardError, replyDraft,
+            submitPrOpen, submitPrRepos, submitPrBusy,
+            renderedBody, totalActive, totalReplyCount,
+            visibleLoops, visibleCounts,
+            formatBucketLabel, badgeClass, fmtRelative, replyKey,
+            doAction, snooze, unsnooze, sendReply, openSubmitPr, confirmSubmitPr, runNow,
+        };
     }
 }).mount('#app');
 </script>

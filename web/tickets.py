@@ -633,6 +633,22 @@ def api_ticket_reply(key: str, comment_id: int, body: dict):
     return result
 
 
+@router.post("/api/tickets/{key}/merge")
+def api_merge_ticket(key: str):
+    ts = state.load_ticket(key)
+    if not ts:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if ts.get("status") != "in_review":
+        return JSONResponse({"error": f"ticket is {ts.get('status')}, not in_review"}, status_code=400)
+    if not ts.get("prs"):
+        return JSONResponse({"error": "no PRs to merge"}, status_code=400)
+    base_url = _config.get("_base_url", "")
+    ticket_payload = {"key": key, "summary": ts.get("summary", "")}
+    updated = _tickets_mod._merge(_config, ticket_payload, ts, base_url)
+    state.save_ticket(key, updated)
+    return {"status": "ok", "new_status": updated.get("status", ts.get("status"))}
+
+
 @router.post("/api/tickets/{key}/restart")
 def api_restart_ticket(key: str):
     import core.queue as q
