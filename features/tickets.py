@@ -609,7 +609,11 @@ def check(config: dict, instance_key: str = ""):
                 continue
 
             if ts["status"] == TicketStatus.pr_failed:
-                continue
+                if ts.get("prs"):
+                    ts = _recheck_pr_failed(config, ticket, ts, base_url)
+                    state.save_ticket(key, ts)
+                if ts["status"] == TicketStatus.pr_failed:
+                    continue
 
             if ts.get("branch"):
                 ts = _reconcile_prs(ts, open_prs)
@@ -1132,6 +1136,43 @@ def _save_pr_comments(config, slug, comments: list[dict]):
 
 
 MAX_PR_COMMENT_FIX_ATTEMPTS = 2
+
+
+def _recheck_pr_failed(config, ticket, ts, base_url) -> dict:
+    prs = ts.get("prs") or []
+    if not prs:
+        return ts
+    platform = make_platform(config)
+    all_merged = True
+    any_open = False
+    for pr in prs:
+        try:
+            info = platform.get_pr_info(pr["repo"], pr["id"]) or {}
+        except Exception:
+            return ts
+        pr_state = info.get("state", "")
+        if pr_state == "MERGED":
+            continue
+        all_merged = False
+        if pr_state == "OPEN":
+            any_open = True
+
+    if all_merged:
+        log.emit("ticket_pr_failed_recovered_merged",
+            f"{_label(ticket['key'], ts)}: tracked PR(s) now MERGED; recovering pr_failed → merged",
+            links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
+            meta={"ticket": ticket["key"]})
+        return _mark_ticket_merged(config, ticket, ts)
+
+    if any_open:
+        log.emit("ticket_pr_failed_recovered_open",
+            f"{_label(ticket['key'], ts)}: tracked PR now OPEN; recovering pr_failed → in_review",
+            links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
+            meta={"ticket": ticket["key"]})
+        ts["status"] = transition(ts["status"], "in_review")
+        return ts
+
+    return ts
 
 
 def _check_in_review(config, ticket, ts, base_url) -> dict:
