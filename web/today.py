@@ -25,13 +25,14 @@ def _now_iso() -> str:
 
 
 @router.get("/api/today/loops")
-def api_today_loops():
+def api_today_loops(live: int = 0):
     instance_key = _config.get("job", {}).get("key", "")
     if not instance_key:
         return JSONResponse({"error": "no instance"}, status_code=400)
     thresholds = (_config.get("manager") or {}).get("thresholds") or {}
     try:
-        loops = staleness.aggregate_all(instance_key, config=_config, thresholds=thresholds)
+        loops = staleness.aggregate_all(instance_key, config=_config,
+                                        thresholds=thresholds, live=bool(live))
     except Exception as e:
         log.emit("today_loops_aggregate_failed",
                  f"[{instance_key}] aggregate_all crashed: {type(e).__name__}: {e}")
@@ -53,6 +54,7 @@ def api_today_loops():
         "snoozed": snoozed,
         "policy_stale": policy_stale,
         "manager_latest": latest,
+        "live": bool(live),
         "errors": [],
     }
 

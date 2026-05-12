@@ -236,3 +236,95 @@ class TestPrCommentBucketIncludesId:
         assert entry["comments"]
         first = entry["comments"][0]
         assert first["id"] == 100, f"comment id missing from staleness output: {first}"
+
+
+class TestTodayDoesNotHitExternalsOnDefaultPoll:
+    """Regression guard: the default GET /api/today/loops (no ?live=1) must
+    not call into source-control or bill.com — those calls used to fire on
+    every 30s poll, multiplied across 4 instance tabs. Now they're cache-only
+    by default; live re-fetch happens only when the user hits Refresh."""
+
+    def test_merge_ready_reads_cached_approvers_not_live(self, client):
+        state.save_ticket("T-10", {
+            "status": "in_review",
+            "slug": "t10",
+            "source": "jira",
+            "summary": "approved already",
+            "discovered_at": "2025-01-01T00:00:00",
+            "ci_passed": 1,
+            "prs": [{"repo": "r", "id": 1, "url": "http://u",
+                     "author": "a", "approvers": ["reviewer1"]}],
+        })
+
+        with patch("features.platforms.make_platform") as mp:
+            resp = client.get("/api/today/loops")
+            assert resp.status_code == 200
+            mp.assert_not_called()
+
+        bucket = resp.json()["loops"]["merge_ready"]
+        entry = next(e for e in bucket if e["ticket_key"] == "T-10")
+        assert entry["prs"][0]["approvers"] == ["reviewer1"]
+
+    def test_peer_reviews_reads_state_cache_not_live(self, client):
+        state.save("peer_reviews", {
+            "items": [{"repo": "r", "pr_id": 9, "title": "fix bug",
+                       "author": "alice", "url": "http://u",
+                       "created_on": "2025-01-01", "updated_on": "2025-01-02"}],
+            "refreshed_at": "2025-01-02",
+        })
+        with patch("features.platforms.make_platform") as mp:
+            resp = client.get("/api/today/loops")
+            assert resp.status_code == 200
+            mp.assert_not_called()
+        bucket = resp.json()["loops"]["peer_pr_reviews"]
+        assert len(bucket) == 1
+        assert bucket[0]["pr_id"] == 9
+
+    def test_billing_snapshot_reads_cache_not_live(self, client):
+        from web.state import set_primary_config, _config
+        cfg = dict(_config)
+        cfg["features"] = {**cfg.get("features", {}), "billing": True}
+        cfg["billing"] = {"billcom_customer_id": "c1", "billing_freq": "monthly"}
+        set_primary_config(cfg)
+        state.save("billing_invoices_remote", {
+            "items": [{"start": "2026-04-01", "end": "2026-04-30",
+                       "id": "iv1", "status": "pending"}],
+            "refreshed_at": "2026-05-01",
+        })
+
+        with patch("features.billing.list_invoices") as live:
+            resp = client.get("/api/today/loops")
+            assert resp.status_code == 200
+            live.assert_not_called()
+
+        bucket = resp.json()["loops"]["billcom_invoice_due"]
+        assert bucket == [], f"April snapshot covers last month; bucket should be empty: {bucket}"
+
+
+class TestTodayLiveQueryParam:
+    def test_live_param_triggers_refresh_calls(self, client):
+        state.save_ticket("T-11", {
+            "status": "in_review",
+            "slug": "t11",
+            "source": "jira",
+            "summary": "live-only approver",
+            "discovered_at": "2025-01-01T00:00:00",
+            "ci_passed": 1,
+            "prs": [{"repo": "r", "id": 2, "url": "http://u",
+                     "author": "a", "approvers": []}],
+        })
+        from unittest.mock import MagicMock
+        fake_platform = MagicMock()
+        fake_platform.get_pr_info.return_value = {"approvers": ["fresh-reviewer"]}
+        fake_platform.list_pending_reviews_for_me.return_value = []
+
+        with patch("features.platforms.make_platform", return_value=fake_platform):
+            resp = client.get("/api/today/loops?live=1")
+            assert resp.status_code == 200
+
+        bucket = resp.json()["loops"]["merge_ready"]
+        entry = next(e for e in bucket if e["ticket_key"] == "T-11")
+        assert entry["prs"][0]["approvers"] == ["fresh-reviewer"], (
+            "live=1 must bypass cache and use the live get_pr_info result"
+        )
+        assert fake_platform.get_pr_info.call_count >= 1

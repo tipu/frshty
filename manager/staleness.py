@@ -57,9 +57,12 @@ def stale_own_prs(instance_key: str, threshold_hours: int = 24) -> list[dict]:
     return out[:_LIMIT]
 
 
-def merge_ready_ticket_prs(instance_key: str, config: dict | None = None) -> list[dict]:
-    """Tickets in_review with passing CI AND at least one approver. Live-fetches
-    approver state because tickets.data.prs doesn't cache it.
+def merge_ready_ticket_prs(instance_key: str, config: dict | None = None,
+                            live: bool = False) -> list[dict]:
+    """Tickets in_review with passing CI AND at least one approver. Reads
+    approver state cached in ts['prs'][i]['approvers'] by features.tickets._check_in_review.
+    Pass live=True to bypass cache and re-fetch from the platform (used by the
+    manual Refresh button on /today).
     Serves: 'get my approved PRs merged'."""
     rows = db.query_all(
         "SELECT ticket_key, slug, data FROM tickets"
@@ -72,7 +75,7 @@ def merge_ready_ticket_prs(instance_key: str, config: dict | None = None) -> lis
     if not rows:
         return []
     platform = None
-    if config:
+    if live and config:
         try:
             from features.platforms import make_platform
             platform = make_platform(config)
@@ -85,13 +88,13 @@ def merge_ready_ticket_prs(instance_key: str, config: dict | None = None) -> lis
         enriched: list[dict] = []
         any_approved = False
         for p in prs:
-            approvers: list = []
+            approvers = list(p.get("approvers") or [])
             if platform:
                 try:
                     info = platform.get_pr_info(p.get("repo", ""), p.get("id")) or {}
                     approvers = info.get("approvers") or []
                 except Exception:
-                    approvers = []
+                    pass
             if approvers:
                 any_approved = True
             enriched.append({
@@ -327,42 +330,29 @@ def pr_comments_needing_reply(instance_key: str, config: dict) -> list[dict]:
     return out
 
 
-def peer_pr_reviews(instance_key: str, config: dict | None = None) -> list[dict]:
+def peer_pr_reviews(instance_key: str, config: dict | None = None,
+                    live: bool = False) -> list[dict]:
     """Open PRs where the operator is a requested reviewer (not author) and
-    has not yet approved. Live platform call.
+    has not yet approved. Reads the state.load('peer_reviews') cache populated
+    by features.peer_reviews.refresh (scheduled as poll_peer_reviews).
+    Pass live=True to bypass cache and re-fetch (manual Refresh button).
     Serves: 'review other PRs assigned to me'."""
-    if not config:
-        return []
-    try:
-        from features.platforms import make_platform
-        platform = make_platform(config)
-    except Exception:
-        return []
-    fn = getattr(platform, "list_pending_reviews_for_me", None)
-    if not fn:
-        return []
-    try:
-        prs = fn() or []
-    except Exception:
-        return []
-    out: list[dict] = []
-    for pr in prs[:_LIMIT]:
-        out.append({
-            "repo": pr.get("repo", ""),
-            "pr_id": pr.get("id"),
-            "title": (pr.get("title") or "")[:140],
-            "author": pr.get("author", ""),
-            "url": pr.get("url", ""),
-            "created_on": pr.get("created_on", ""),
-            "updated_on": pr.get("updated_on", ""),
-        })
-    return out
+    from features import peer_reviews
+    if live and config:
+        try:
+            return peer_reviews.refresh(config)[:_LIMIT]
+        except Exception:
+            pass
+    return peer_reviews.cached()[:_LIMIT]
 
 
-def billcom_invoice_due(instance_key: str, config: dict) -> list[dict]:
+def billcom_invoice_due(instance_key: str, config: dict,
+                        live: bool = False) -> list[dict]:
     """Surface 'last calendar month not yet invoiced' as a manual-action item.
-    Read-only — never sends or auto-creates. Checks both local cache AND live
-    bill.com so invoices created directly on bill.com count as covered."""
+    Read-only — never sends or auto-creates. Defaults to the cached
+    state.load('billing_invoices') blob (populated by features.billing on
+    other code paths); pass live=True to force a bill.com round-trip (manual
+    Refresh button)."""
     if not config.get("features", {}).get("billing"):
         return []
     b = config.get("billing") or {}
@@ -379,14 +369,20 @@ def billcom_invoice_due(instance_key: str, config: dict) -> list[dict]:
     last_month_str = f"{last_year:04d}-{last_month:02d}"
 
     invoices: list[dict] = []
-    try:
-        import asyncio
-        from features import billing
-        invoices = asyncio.run(billing.list_invoices(config)) or []
-    except Exception:
-        for inv in (state.load("billing_invoices") or {}).values():
-            if isinstance(inv, dict):
-                invoices.append(inv)
+    snapshot = state.load("billing_invoices_remote") or {}
+    cached_invoices = list(snapshot.get("items") or [])
+    if live or not cached_invoices:
+        try:
+            import asyncio
+            from features import billing
+            invoices = asyncio.run(billing.list_invoices(config)) or []
+        except Exception:
+            invoices = cached_invoices or [
+                inv for inv in (state.load("billing_invoices") or {}).values()
+                if isinstance(inv, dict)
+            ]
+    else:
+        invoices = cached_invoices
 
     for inv in invoices:
         start = (inv.get("start") or "")[:7]
@@ -438,14 +434,14 @@ def timesheet_underfilled(instance_key: str, config: dict, target_hours: float =
 
 
 def aggregate_all(instance_key: str, config: dict | None = None,
-                  thresholds: dict | None = None) -> dict:
+                  thresholds: dict | None = None, live: bool = False) -> dict:
     t = thresholds or {}
     cfg = config or {}
     return {
-        "merge_ready":            merge_ready_ticket_prs(instance_key, cfg),
+        "merge_ready":            merge_ready_ticket_prs(instance_key, cfg, live=live),
         "ready_to_submit":        ready_to_submit_prs(instance_key),
         "pr_comments_needs_reply": pr_comments_needing_reply(instance_key, cfg),
-        "peer_pr_reviews":        peer_pr_reviews(instance_key, cfg),
+        "peer_pr_reviews":        peer_pr_reviews(instance_key, cfg, live=live),
         "pickup_new":             pickup_new_tickets(instance_key),
         "in_review_no_ci":        in_review_no_ci(instance_key),
         "pr_failed_tickets":      pr_failed_tickets(instance_key),
@@ -454,5 +450,5 @@ def aggregate_all(instance_key: str, config: dict | None = None,
         "pending_approvals_stuck": pending_approvals_stuck(instance_key, t.get("pending_approval_hours", 12)),
         "regressions_recent":     regressions_recent(instance_key, t.get("regression_days", 7)),
         "timesheet_underfilled":  timesheet_underfilled(instance_key, cfg),
-        "billcom_invoice_due":    billcom_invoice_due(instance_key, cfg),
+        "billcom_invoice_due":    billcom_invoice_due(instance_key, cfg, live=live),
     }
