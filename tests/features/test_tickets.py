@@ -1157,3 +1157,95 @@ class TestRenderPrdTicketMd:
         assert section_header in md, f"expected section header, got: {md!r}"
         assert "Single registry of mock vendors" in md
         assert md.strip() != "# Untitled"
+
+
+class TestCheckInReviewFixFailedRetry:
+    """Observed live on aimyable/root-cdk#23 (DEV-467 'update Lambda runtime
+    to Node.js 24'): 3 reviewer review comments from Trevin Avery were processed
+    in one scan after the run_thinking() positional-arg TypeError was fixed; 2
+    landed in fix_failed (Claude produced no code change for inline comments on
+    lib/runtime-aspect.ts:8 and lib/vpn-stack.ts:168) and 1 ambiguous->needs_reply.
+    Then features/tickets.py:1258 set last_comment_ids['root-cdk/23'] to
+    max(id)=795537372, so every subsequent scan filters all 3 comments out via
+    `c["id"] > last_seen` — fix_failed comments are permanently locked out of
+    retry, even if a future push to the PR would make a fix possible. Compare to
+    features/own_prs.py:_check_comments which uses the stateful core.comments
+    module (mark_comment_error reverts state to 'new') and naturally retries."""
+
+    def _make_pr_comment(self, **overrides):
+        base = {"id": 100, "body": "Please rename this variable",
+                "author_id": "reviewer1", "author_name": "Bob",
+                "path": "src/main.py", "line": 42, "parent_id": None,
+                "created_on": "2026-01-01T12:00:00Z",
+                "created_at": "2026-01-01T12:00:00Z",
+                "updated_at": "2026-01-01T12:00:00Z"}
+        base.update(overrides)
+        return base
+
+    def _setup_worktree(self, fake_config, slug):
+        ws_root = fake_config["workspace"]["root"]
+        wt = ws_root / "tickets" / slug / "repo"
+        wt.mkdir(parents=True, exist_ok=True)
+        (wt / ".git").mkdir(exist_ok=True)
+        return wt
+
+    def test_fix_failed_comment_reprocessed_on_next_scan(
+        self, fresh_db, fake_config, tmp_state
+    ):
+        """When run_claude_code returns None (no fix produced), the comment
+        lands at fix_failed. A subsequent _check_in_review on the same PR
+        must reprocess that comment — i.e. the classification batch_prompt
+        must include it again."""
+        slug = "PROJ-1-do-the-thing"
+        wt = self._setup_worktree(fake_config, slug)
+        ts = make_ticket_state(
+            status="in_review", slug=slug, branch=slug,
+            prs=[{"repo": "repo", "id": 99, "branch": slug, "url": "http://u"}],
+        )
+        ticket = {"key": "PROJ-1", "summary": "Do thing", "url": "http://j/PROJ-1"}
+        c1 = self._make_pr_comment(id=100, body="rename helper to something clearer")
+        c2 = self._make_pr_comment(id=200, body="this name is too generic")
+
+        mock_platform = MagicMock()
+        mock_platform.get_pr_state.return_value = "OPEN"
+        mock_platform.get_pr_comments.return_value = [c1, c2]
+        haiku_classify = (
+            '{"results": [{"i": 0, "actionable": true}, {"i": 1, "actionable": true}]}'
+        )
+        bb_config = {
+            **fake_config,
+            "job": {**fake_config["job"], "platform": "bitbucket"},
+            "bitbucket": {"org": "x", "user_account_id": "bot-self"},
+        }
+
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "repo", "path": wt.parent}]), \
+             patch("features.tickets.ticket_worktree_path", return_value=wt), \
+             patch("features.tickets.run_haiku", return_value=haiku_classify) as haiku, \
+             patch("features.tickets.run_claude_code", return_value=None), \
+             patch("features.tickets.subprocess.run",
+                   return_value=MagicMock(returncode=0)):
+            ts = tickets._check_in_review(bb_config, ticket, ts, "http://base")
+
+            assert haiku.call_count >= 1, (
+                "expected first scan to classify the 2 actionable comments"
+            )
+            first_batch_prompt = haiku.call_args_list[0].args[0]
+            assert "rename helper" in first_batch_prompt and "too generic" in first_batch_prompt, \
+                f"first batch should include both comments; got: {first_batch_prompt!r}"
+
+            haiku.reset_mock()
+            ts = tickets._check_in_review(bb_config, ticket, ts, "http://base")
+
+            assert haiku.call_count >= 1, (
+                "fix_failed comments must be reprocessed on subsequent scans, "
+                "but the second scan did not re-classify them — the cursor "
+                "advanced past fix_failed comments and locked them out of retry"
+            )
+            second_batch_prompt = haiku.call_args_list[0].args[0]
+            assert "rename helper" in second_batch_prompt or "too generic" in second_batch_prompt, (
+                "second scan's classification batch must include at least one of "
+                "the previously fix_failed comments; got: "
+                f"{second_batch_prompt!r}"
+            )
