@@ -6,6 +6,7 @@
 <title>Review Detail — frshty</title>
 <script src="/static/tailwind.js"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="/static/frshty-nav.js"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
@@ -74,18 +75,7 @@ textarea { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; }
 <header class="flex items-center gap-4 mb-4">
     <a href="/reviews" class="link text-sm">&larr; Reviews</a>
     <h1 class="text-lg font-bold">{{ info.pr_title || `${repo} PR #${prId}` }}</h1>
-    <nav class="flex gap-1 text-sm">
-        <a href="/">Feed</a>
-        <a href="/global">Global</a>
-        <a href="/reviews" class="active">Reviews</a>
-        <a href="/today">Today</a>
-        <a href="/tickets">Tickets</a>
-        <a href="/scheduled">Scheduled</a>
-        <a href="/slack">Slack</a>
-        <a v-if="features.timesheet !== false" href="/timesheet">Timesheet</a>
-        <a v-if="features.billing !== false" href="/billing">Billing</a>
-        <a href="/config">Config</a>
-    </nav>
+    <frshty-nav :features="features" />
     <div class="ml-auto flex items-center gap-2">
         <button @click="discussGeneral" class="bg-blue-700 hover:bg-blue-600 text-white px-3 py-1 rounded text-xs">Discuss PR</button>
         <button @click="startWalkthrough" :disabled="walkthroughBusy"
@@ -242,7 +232,7 @@ const CommentBlock = {
     `,
 };
 
-createApp({
+frshtyApp({
     components: { 'comment-block': CommentBlock },
     setup() {
         const pathParts = window.location.pathname.split('/');
