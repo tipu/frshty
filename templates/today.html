@@ -61,6 +61,11 @@ details[open] > summary { color: #d1d5db; margin-bottom: 8px; }
     <frshty-nav :features="features" />
     <div class="ml-auto flex items-center gap-3">
         <span v-if="generatedAt" class="text-xs text-gray-500" :title="generatedAt">refreshed {{ fmtRelative(generatedAt) }}</span>
+        <button @click="refreshLive" :disabled="refreshing"
+                title="bypass cache: re-fetch approvers, peer reviews, and bill.com live"
+                class="bg-blue-700 hover:bg-blue-600 disabled:bg-gray-700 text-white text-xs px-3 py-1 rounded">
+            {{ refreshing ? 'refreshing…' : 'refresh (live)' }}
+        </button>
         <button @click="runNow" :disabled="running"
                 class="bg-green-700 hover:bg-green-600 disabled:bg-gray-700 text-white text-xs px-3 py-1 rounded">
             {{ running ? 'narrating…' : 'run narrative' }}
@@ -333,6 +338,7 @@ frshtyApp({
         const policyStale = ref(false);
         const instanceName = ref('');
         const running = ref(false);
+        const refreshing = ref(false);
         const loadError = ref('');
         const busy = reactive({});
         const cardError = reactive({});
@@ -416,10 +422,11 @@ frshtyApp({
             return `reply:${ticketKey}:${commentId}`;
         }
 
-        async function load() {
+        async function load(live = false) {
             try {
+                const url = live ? '/api/today/loops?live=1' : '/api/today/loops';
                 const [loopsResp, cfgResp] = await Promise.all([
-                    fetch('/api/today/loops'),
+                    fetch(url),
                     fetch('/api/config'),
                 ]);
                 if (!loopsResp.ok) {
@@ -563,6 +570,11 @@ frshtyApp({
             } finally { running.value = false; }
         }
 
+        async function refreshLive() {
+            refreshing.value = true;
+            try { await load(true); } finally { refreshing.value = false; }
+        }
+
         onMounted(() => {
             load();
             setInterval(load, 30000);
@@ -570,12 +582,13 @@ frshtyApp({
 
         return {
             loops, counts, snoozed, generatedAt, bodyMd, policyStale, instanceName,
-            running, loadError, busy, cardError, replyDraft,
+            running, refreshing, loadError, busy, cardError, replyDraft,
             submitPrOpen, submitPrRepos, submitPrBusy,
             renderedBody, totalActive, totalReplyCount,
             visibleLoops, visibleCounts,
             formatBucketLabel, badgeClass, fmtRelative, replyKey,
             doAction, snooze, unsnooze, sendReply, openSubmitPr, confirmSubmitPr, runNow,
+            refreshLive,
         };
     }
 }).mount('#app');

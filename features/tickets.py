@@ -1143,7 +1143,13 @@ def _check_in_review(config, ticket, ts, base_url) -> dict:
     all_merged = True
     closed_unmerged = []
     for pr in prs:
-        pr_state = platform.get_pr_state(pr["repo"], pr["id"])
+        try:
+            info = platform.get_pr_info(pr["repo"], pr["id"]) or {}
+        except Exception:
+            info = {}
+        pr_state = info.get("state", "OPEN")
+        pr["approvers"] = info.get("approvers") or []
+        pr["approvers_checked_at"] = datetime.now(timezone.utc).isoformat()
         if pr_state == "MERGED":
             continue
         all_merged = False
