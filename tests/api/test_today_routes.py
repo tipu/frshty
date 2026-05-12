@@ -328,3 +328,51 @@ class TestTodayLiveQueryParam:
             "live=1 must bypass cache and use the live get_pr_info result"
         )
         assert fake_platform.get_pr_info.call_count >= 1
+
+
+class TestMergeReadyExcludesTicketsWithoutPrs:
+    def test_in_review_with_no_prs_excluded(self, client):
+        state.save_ticket("T-NOPRS", {
+            "status": "in_review",
+            "slug": "t-noprs",
+            "source": "jira",
+            "summary": "stale ci_passed but no tracked PRs",
+            "discovered_at": "2025-01-01T00:00:00",
+            "ci_passed": 1,
+        })
+        state.save_ticket("T-APPROVED", {
+            "status": "in_review",
+            "slug": "t-approved",
+            "source": "jira",
+            "summary": "real merge candidate",
+            "discovered_at": "2025-01-02T00:00:00",
+            "ci_passed": 1,
+            "prs": [{"repo": "r", "id": 1, "url": "http://u",
+                     "author": "a", "approvers": ["reviewer1"]}],
+        })
+
+        resp = client.get("/api/today/loops")
+        assert resp.status_code == 200
+        bucket = resp.json()["loops"]["merge_ready"]
+        keys = {e["ticket_key"] for e in bucket}
+        assert "T-NOPRS" not in keys, (
+            "ticket with no tracked PRs must not surface in merge_ready — "
+            "there is nothing to merge"
+        )
+        assert "T-APPROVED" in keys
+
+    def test_in_review_with_unapproved_prs_excluded(self, client):
+        state.save_ticket("T-UNAPPROVED", {
+            "status": "in_review",
+            "slug": "t-unapp",
+            "source": "jira",
+            "summary": "open PR with no approvers yet",
+            "discovered_at": "2025-01-01T00:00:00",
+            "ci_passed": 1,
+            "prs": [{"repo": "r", "id": 2, "url": "http://u",
+                     "author": "a", "approvers": []}],
+        })
+        resp = client.get("/api/today/loops")
+        assert resp.status_code == 200
+        keys = {e["ticket_key"] for e in resp.json()["loops"]["merge_ready"]}
+        assert "T-UNAPPROVED" not in keys
