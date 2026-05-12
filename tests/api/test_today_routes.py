@@ -214,7 +214,9 @@ class TestPrCommentBucketIncludesId:
         each comment's id so the reply endpoint URL can be built client-side."""
         state.save_ticket("T-7", {"status": "in_review",
                                    "slug": "T-7-fix",
-                                   "summary": "fix the thing"})
+                                   "summary": "fix the thing",
+                                   "prs": [{"repo": "r", "id": 5,
+                                            "url": "http://pr/5"}]})
         slug_dir = tmp_path / "tickets" / "T-7-fix"
         slug_dir.mkdir(parents=True, exist_ok=True)
         (slug_dir / "pr_comments.json").write_text(json.dumps([{
@@ -236,6 +238,60 @@ class TestPrCommentBucketIncludesId:
         assert entry["comments"]
         first = entry["comments"][0]
         assert first["id"] == 100, f"comment id missing from staleness output: {first}"
+        assert first["pr_url"] == "http://pr/5", \
+            f"pr_url missing from staleness output: {first}"
+
+
+class TestPrCommentBucketExcludesStalePrs:
+    """The DEV-441 case: ticket in_review but prs=[] (or PR no longer tracked)
+    while pr_comments.json still has stale needs_reply entries. Without this
+    filter, /today renders an 'awaiting reply' card for a PR the ticket no
+    longer owns."""
+
+    def test_comment_for_untracked_pr_is_filtered(self, client, tmp_path):
+        state.save_ticket("T-8", {"status": "in_review",
+                                   "slug": "T-8-fix",
+                                   "summary": "stale comments",
+                                   "prs": []})
+        slug_dir = tmp_path / "tickets" / "T-8-fix"
+        slug_dir.mkdir(parents=True, exist_ok=True)
+        (slug_dir / "pr_comments.json").write_text(json.dumps([{
+            "id": 200,
+            "status": "needs_reply",
+            "pr_repo": "saas-dashboard",
+            "pr_id": 115,
+            "path": "src/x.tsx",
+            "line": None,
+            "body": "still needed?",
+            "suggested_reply": "no, removed",
+        }]))
+
+        resp = client.get("/api/today/loops")
+        bucket = resp.json()["loops"]["pr_comments_needs_reply"]
+        assert not any(e["ticket_key"] == "T-8" for e in bucket), \
+            f"T-8 (prs=[]) should not surface in bucket: {bucket}"
+
+    def test_mixed_tracked_and_untracked_only_keeps_tracked(self, client, tmp_path):
+        state.save_ticket("T-9", {"status": "in_review",
+                                   "slug": "T-9-fix",
+                                   "summary": "one live, one stale",
+                                   "prs": [{"repo": "r", "id": 5,
+                                            "url": "http://pr/5"}]})
+        slug_dir = tmp_path / "tickets" / "T-9-fix"
+        slug_dir.mkdir(parents=True, exist_ok=True)
+        (slug_dir / "pr_comments.json").write_text(json.dumps([
+            {"id": 300, "status": "needs_reply", "pr_repo": "r", "pr_id": 5,
+             "path": "src/a.py", "line": 1, "body": "live", "suggested_reply": ""},
+            {"id": 301, "status": "needs_reply", "pr_repo": "r", "pr_id": 99,
+             "path": "src/b.py", "line": 2, "body": "stale", "suggested_reply": ""},
+        ]))
+
+        resp = client.get("/api/today/loops")
+        bucket = resp.json()["loops"]["pr_comments_needs_reply"]
+        entry = next(e for e in bucket if e["ticket_key"] == "T-9")
+        ids = [c["id"] for c in entry["comments"]]
+        assert ids == [300], f"expected only live comment 300, got {ids}"
+        assert entry["count"] == 1, f"count should reflect live comments only: {entry['count']}"
 
 
 class TestTodayDoesNotHitExternalsOnDefaultPoll:

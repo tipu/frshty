@@ -182,7 +182,11 @@ details[open] > summary { color: #d1d5db; margin-bottom: 8px; }
             <button class="btn-snooze" @click="snooze('pr_comments_needs_reply', e.ticket_key)">Snooze ticket</button>
         </div>
         <div v-for="(c, ci) in e.comments" :key="'crow:' + e.ticket_key + ':' + (c.id || ci)" class="reply-row">
-            <div class="tk-meta mb-1">{{ c.pr_repo }} #{{ c.pr_id }} · {{ c.path }}:{{ c.line }}</div>
+            <div class="tk-meta mb-1">
+                <a v-if="c.pr_url" :href="c.pr_url" target="_blank" class="hover:underline">{{ c.pr_repo }} #{{ c.pr_id }}</a>
+                <span v-else>{{ c.pr_repo }} #{{ c.pr_id }}</span>
+                · {{ c.path }}:{{ c.line }}
+            </div>
             <div class="tk-sum mb-2" style="white-space:pre-wrap">{{ c.body }}</div>
             <textarea v-model="replyDraft[replyKey(e.ticket_key, c.id)]"
                       :placeholder="c.suggested_reply || 'reply…'"></textarea>

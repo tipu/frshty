@@ -312,6 +312,14 @@ def pr_comments_needing_reply(instance_key: str, config: dict) -> list[dict]:
         if not needs_reply:
             continue
         d = _load_ticket_data(r)
+        pr_url_by_key = {
+            (p.get("repo"), p.get("id")): p.get("url", "")
+            for p in (d.get("prs") or [])
+            if isinstance(p, dict)
+        }
+        live_comments = [e for e in needs_reply if (e.get("pr_repo"), e.get("pr_id")) in pr_url_by_key]
+        if not live_comments:
+            continue
         out.append({
             "ticket_key": r["ticket_key"],
             "summary": (d.get("summary") or "")[:140],
@@ -319,12 +327,13 @@ def pr_comments_needing_reply(instance_key: str, config: dict) -> list[dict]:
                 "id": e.get("id"),
                 "pr_repo": e.get("pr_repo"),
                 "pr_id": e.get("pr_id"),
+                "pr_url": pr_url_by_key.get((e.get("pr_repo"), e.get("pr_id")), ""),
                 "path": e.get("path"),
                 "line": e.get("line"),
                 "body": (e.get("body") or "")[:200],
                 "suggested_reply": (e.get("suggested_reply") or "")[:200],
-            } for e in needs_reply[:5]],
-            "count": len(needs_reply),
+            } for e in live_comments[:5]],
+            "count": len(live_comments),
         })
         if len(out) >= _LIMIT:
             break
