@@ -119,10 +119,10 @@ class TestTransitionTicket:
         assert reloaded["slug"] == "t-1"
 
     def test_illegal_raises(self, tmp_state):
-        state.save_ticket("T-1", {"status": "pr_failed", "slug": "t-1"})
+        state.save_ticket("T-1", {"status": "new", "slug": "t-1"})
         with pytest.raises(TicketStateError):
             state.transition_ticket("T-1", "in_review")
-        assert state.load_ticket("T-1")["status"] == "pr_failed"
+        assert state.load_ticket("T-1")["status"] == "new"
 
     def test_missing_raises(self, tmp_state):
         with pytest.raises(TicketStateError):
