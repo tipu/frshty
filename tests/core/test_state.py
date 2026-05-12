@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import pytest
 
 import core.db as db
+import core.log as log
 import core.state as state
 from core.state import TicketStateError
 
@@ -201,3 +202,139 @@ class TestConcurrency:
             f"atomic update lost writes for 'a': {final['counters']}"
         assert final["counters"]["b"] == 20, \
             f"atomic update lost writes for 'b': {final['counters']}"
+
+
+class TestTransitionAudit:
+    def _rows(self, instance):
+        return db.query_all(
+            "SELECT prior_status, new_status, rejected, rejection_reason,"
+            " actor, reason, co_field_diff, ts"
+            " FROM ticket_transitions WHERE instance_key=? ORDER BY id ASC",
+            (instance,),
+        )
+
+    def test_migration_applied(self, tmp_state):
+        row = db.query_one(
+            "SELECT name FROM _migrations WHERE name=?",
+            ("012_ticket_transitions.sql",),
+        )
+        assert row is not None, (
+            "Migration 012_ticket_transitions.sql must be applied; "
+            "ticket_transitions table is required by all TestTransitionAudit cases"
+        )
+
+    def test_first_transition_writes_row(self, tmp_state):
+        state.save_ticket("T-1", {"status": "new", "slug": "t-1"})
+        before = self._rows(tmp_state.name)
+        state.transition_ticket("T-1", "planning")
+        after = self._rows(tmp_state.name)
+        new_rows = after[len(before):]
+        assert len(new_rows) == 1
+        r = new_rows[0]
+        assert r["prior_status"] == "new"
+        assert r["new_status"] == "planning"
+        assert r["rejected"] == 0
+        assert r["ts"]
+
+    def test_self_transition_writes_no_row(self, tmp_state):
+        state.save_ticket("T-1", {"status": "reviewing", "slug": "t-1"})
+        before = self._rows(tmp_state.name)
+        state.transition_ticket("T-1", "reviewing")
+        after = self._rows(tmp_state.name)
+        assert len(after) == len(before)
+
+    def test_rejected_transition_writes_row_and_raises(self, tmp_state):
+        state.save_ticket("T-1", {"status": "new", "slug": "t-1"})
+        before = self._rows(tmp_state.name)
+        with pytest.raises(TicketStateError):
+            state.transition_ticket("T-1", "in_review")
+        after = self._rows(tmp_state.name)
+        new_rows = after[len(before):]
+        assert len(new_rows) == 1
+        r = new_rows[0]
+        assert r["rejected"] == 1
+        assert "Illegal transition" in (r["rejection_reason"] or "")
+        assert r["new_status"] == "in_review"
+        assert state.load_ticket("T-1")["status"] == "new"
+
+    def test_save_ticket_status_change_writes_row_with_diff(self, tmp_state):
+        state.save_ticket("T-1", {"status": "pr_ready", "slug": "t-1", "prs": []})
+        before = self._rows(tmp_state.name)
+        state.save_ticket("T-1", {
+            "status": "in_review", "slug": "t-1",
+            "prs": [{"id": 1, "repo": "r"}],
+            "ci_passed": True,
+        })
+        after = self._rows(tmp_state.name)
+        new_rows = after[len(before):]
+        assert len(new_rows) == 1
+        r = new_rows[0]
+        assert r["prior_status"] == "pr_ready"
+        assert r["new_status"] == "in_review"
+        diff = json.loads(r["co_field_diff"])
+        assert diff.get("prs_count") == {"prior": 0, "new": 1}
+        assert diff.get("ci_passed") == {"prior": None, "new": True}
+
+    def test_save_ticket_no_status_change_writes_no_row(self, tmp_state):
+        state.save_ticket("T-1", {"status": "in_review", "slug": "t-1"})
+        before = self._rows(tmp_state.name)
+        state.save_ticket("T-1", {"status": "in_review", "slug": "t-1", "ci_passed": True})
+        after = self._rows(tmp_state.name)
+        assert len(after) == len(before)
+
+    def test_pr_scheduled_at_stripped_on_pr_failed(self, tmp_state):
+        state.save_ticket("T-1", {
+            "status": "pr_failed", "slug": "t-1",
+            "pr_scheduled_at": "2026-04-29T16:04:49+00:00",
+        })
+        reloaded = state.load_ticket("T-1")
+        assert "pr_scheduled_at" not in reloaded
+
+    def test_pr_scheduled_at_preserved_on_pr_ready(self, tmp_state):
+        state.save_ticket("T-1", {
+            "status": "pr_ready", "slug": "t-1",
+            "pr_scheduled_at": "2026-04-29T16:04:49+00:00",
+        })
+        reloaded = state.load_ticket("T-1")
+        assert reloaded.get("pr_scheduled_at") == "2026-04-29T16:04:49+00:00"
+
+    def test_reason_propagates_through_transition(self, tmp_state):
+        state.save_ticket("T-1", {"status": "in_review", "slug": "t-1"})
+        state.transition_ticket(
+            "T-1", "merged",
+            reason="manual merge button",
+            merged_external_status="Released",
+        )
+        after = self._rows(tmp_state.name)
+        assert after[-1]["new_status"] == "merged"
+        assert after[-1]["reason"] == "manual merge button"
+
+    def test_actor_captured_from_log_job_key(self, tmp_state):
+        tokens = log.use(tmp_state, "scan_tickets")
+        try:
+            state.save_ticket("T-1", {"status": "new", "slug": "t-1"})
+            state.transition_ticket("T-1", "planning")
+        finally:
+            log.reset(tokens)
+        after = self._rows(tmp_state.name)
+        assert after[-1]["actor"] == "scan_tickets"
+
+    def test_audit_failure_does_not_break_ticket_write(self, tmp_state, monkeypatch):
+        state.save_ticket("T-1", {"status": "new", "slug": "t-1"})
+        real_execute = db.execute
+
+        def flaky_execute(sql, params=()):
+            if "ticket_transitions" in sql:
+                raise RuntimeError("simulated audit failure")
+            return real_execute(sql, params)
+
+        monkeypatch.setattr("core.db.execute", flaky_execute)
+        state.save_ticket("T-1", {"status": "planning", "slug": "t-1"})
+        monkeypatch.undo()
+        reloaded = state.load_ticket("T-1")
+        assert reloaded["status"] == "planning"
+        rows = db.query_all(
+            "SELECT event FROM log_events WHERE event=?",
+            ("ticket_transition_log_failed",),
+        )
+        assert len(rows) >= 1

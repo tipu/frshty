@@ -166,13 +166,91 @@ _STALE_TICKET_KEYS = (
     "stuck_logged", "restart_count", "last_restart_at",
 )
 
+_PR_SCHEDULED_OWNERS = {"new", "planning", "reviewing", "pr_ready", "merged"}
+
 
 def _strip_stale(data: dict) -> dict:
     """Opportunistic removal of pre-refactor ticket fields. Converges old blobs
     to clean shape on next write; no migration script needed."""
     for k in _STALE_TICKET_KEYS:
         data.pop(k, None)
+    if (data.get("status") or "new") not in _PR_SCHEDULED_OWNERS:
+        data.pop("pr_scheduled_at", None)
     return data
+
+
+_AUDITED_CO_FIELDS = (
+    "ci_passed", "pr_scheduled_at", "external_status", "approval_status",
+    "obsolete_at", "merged_external_status",
+    "ci_fix_attempts", "conflict_resolution_attempts", "pr_attempts",
+)
+
+
+def _co_field_diff(prior: dict, new: dict) -> dict:
+    diff: dict = {}
+    p = prior or {}
+    n = new or {}
+    for f in _AUDITED_CO_FIELDS:
+        pv, nv = p.get(f), n.get(f)
+        if pv != nv:
+            diff[f] = {"prior": pv, "new": nv}
+    pp = len(p.get("prs") or [])
+    np_ = len(n.get("prs") or [])
+    if pp != np_:
+        diff["prs_count"] = {"prior": pp, "new": np_}
+    return diff
+
+
+def _record_transition(
+    instance: str,
+    key: str,
+    prior_status: str | None,
+    new_status: str,
+    prior: dict,
+    new: dict,
+    *,
+    rejected: bool = False,
+    rejection_reason: str = "",
+    reason: str = "",
+    conn=None,
+) -> None:
+    if not rejected and prior_status == new_status:
+        return
+    actor = ""
+    try:
+        import core.log as _log
+        actor = _log._active_job_key() or ""
+    except Exception:
+        pass
+    diff = {} if rejected else _co_field_diff(prior, new)
+    sql = (
+        "INSERT INTO ticket_transitions"
+        "(instance_key, ticket_key, prior_status, new_status, rejected,"
+        " rejection_reason, actor, reason, co_field_diff, ts) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    params = (
+        instance, key, prior_status, new_status,
+        1 if rejected else 0, rejection_reason or "",
+        actor, reason or "",
+        json.dumps(diff, default=str),
+        datetime.now(timezone.utc).isoformat(),
+    )
+    try:
+        if conn is not None:
+            conn.execute(sql, params)
+        else:
+            db.execute(sql, params)
+    except Exception as e:
+        try:
+            import core.log as _log
+            _log.emit(
+                "ticket_transition_log_failed",
+                f"audit insert failed for {key}: {type(e).__name__}: {e}",
+                meta={"ticket": key, "error": type(e).__name__},
+            )
+        except Exception:
+            pass
 
 
 def _row_to_ticket(row: dict) -> dict:
@@ -249,13 +327,15 @@ def save_ticket(key: str, data: dict) -> None:
     _migrate_kv_to_rows(instance)
     _strip_stale(data)
     _validate_ticket_invariants(data, key)
+    transition_reason = data.pop("_transition_reason", "")
     now = datetime.now(timezone.utc).isoformat()
     auto_pr = data.get("auto_pr")
     prior_row = db.query_one(
-        "SELECT status FROM tickets WHERE instance_key=? AND ticket_key=?",
+        "SELECT data, status FROM tickets WHERE instance_key=? AND ticket_key=?",
         (instance, key),
     )
     prior_status = prior_row.get("status") if prior_row else None
+    prior_data = _row_to_ticket(dict(prior_row)) if prior_row else {}
     db.execute(
         "INSERT INTO tickets"
         "(instance_key, ticket_key, status, slug, branch, url, external_status, auto_pr,"
@@ -272,6 +352,10 @@ def save_ticket(key: str, data: dict) -> None:
          (1 if auto_pr else 0) if auto_pr is not None else None,
          data.get("source", "jira"), data.get("approval_status"), data.get("obsolete_at"),
          data.get("release_key"), json.dumps(data, default=str), now),
+    )
+    _record_transition(
+        instance, key, prior_status, data.get("status", "new"),
+        prior_data, data, reason=transition_reason,
     )
     _maybe_fire_release_trigger(instance, key, data.get("status", "new"), prior_status)
 
@@ -293,13 +377,27 @@ def transition_ticket(key: str, new_status: str, *, reason: str = "", **fields) 
     TicketStateError if the ticket doesn't exist, the transition is illegal,
     or a required co-field is missing after the merge.
     """
-    def _mutate(current: dict) -> dict:
-        if not current:
+    current = load_ticket(key)
+    if current is None:
+        raise TicketStateError(f"ticket {key}: not found, cannot transition")
+    prior_status = current.get("status", "new")
+    try:
+        _transition(prior_status, new_status)
+    except ValueError as e:
+        _record_transition(
+            _active_key(), key, prior_status, new_status,
+            current, current,
+            rejected=True, rejection_reason=str(e), reason=reason,
+        )
+        raise TicketStateError(str(e)) from e
+
+    def _mutate(cur: dict) -> dict:
+        if not cur:
             raise TicketStateError(f"ticket {key}: not found, cannot transition")
-        merged = dict(current)
-        current_status = current.get("status", "new")
+        merged = dict(cur)
+        cur_status = cur.get("status", "new")
         try:
-            merged["status"] = _transition(current_status, new_status)
+            merged["status"] = _transition(cur_status, new_status)
         except ValueError as e:
             raise TicketStateError(str(e)) from e
         for k, v in fields.items():
@@ -307,6 +405,8 @@ def transition_ticket(key: str, new_status: str, *, reason: str = "", **fields) 
                 merged.pop(k, None)
             else:
                 merged[k] = v
+        if reason:
+            merged["_transition_reason"] = reason
         return merged
     result = update_ticket(key, _mutate)
     if result is None:
@@ -338,6 +438,7 @@ def update_ticket(key: str, mutate: Callable[[dict], dict | None]) -> dict | Non
             return None
         _strip_stale(new)
         _validate_ticket_invariants(new, key)
+        transition_reason = new.pop("_transition_reason", "")
         auto_pr = new.get("auto_pr")
         c.execute(
             "INSERT INTO tickets"
@@ -357,6 +458,10 @@ def update_ticket(key: str, mutate: Callable[[dict], dict | None]) -> dict | Non
              new.get("release_key"), json.dumps(new, default=str), now),
         )
         prior_status = current.get("status") if current else None
+        _record_transition(
+            instance, key, prior_status, new.get("status", "new"),
+            current, new, reason=transition_reason, conn=c,
+        )
         _maybe_fire_release_trigger(instance, key, new.get("status"), prior_status)
         return new
 

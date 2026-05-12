@@ -9,7 +9,9 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.websockets import WebSocket
 
 import core.config as cfg
+import core.db as db
 import core.log as log
+import core.scheduler as scheduler
 import core.state as state
 import core.terminal as terminal
 import features.releases as releases
@@ -270,7 +272,7 @@ def _submit_pr_sync(ticket_key: str, data: dict):
         return JSONResponse({"error": "No PRs were created"}, status_code=400)
 
     try:
-        state.transition_ticket(ticket_key, "in_review", prs=prs)
+        state.transition_ticket(ticket_key, "in_review", reason="manual create-pr", prs=prs)
     except state.TicketStateError as e:
         log.emit("ticket_pr_transition_failed",
                  f"PRs created for {ticket_key} but transition to in_review failed: {e}",
@@ -400,7 +402,36 @@ def api_ticket_detail(key: str):
         release_block = _release_block_for_ticket(key, ts)
     instance_key = _config.get("job", {}).get("key", "")
     llm_invocations = _llm_breakdown_for_slug(instance_key, slug)
-    return {"key": key, "state": ts, "docs": docs, "history": history, "summary": summary, "terminal_alive": terminal_alive, "all_statuses": all_statuses, "demo_video": demo_video, "release": release_block, "llm_invocations": llm_invocations}
+    active_key = state.active_instance_key()
+    transitions = _load_ticket_transitions(active_key, key)
+    scheduled_rows = scheduler.list_for_ticket(active_key, key)
+    return {"key": key, "state": ts, "docs": docs, "history": history, "summary": summary, "terminal_alive": terminal_alive, "all_statuses": all_statuses, "demo_video": demo_video, "release": release_block, "llm_invocations": llm_invocations, "transitions": transitions, "scheduled_rows": scheduled_rows}
+
+
+def _load_ticket_transitions(instance_key: str, key: str) -> list[dict]:
+    rows = db.query_all(
+        "SELECT prior_status, new_status, rejected, rejection_reason,"
+        " actor, reason, co_field_diff, ts"
+        " FROM ticket_transitions WHERE instance_key=? AND ticket_key=?"
+        " ORDER BY ts ASC, id ASC",
+        (instance_key, key),
+    )
+    out: list[dict] = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["co_field_diff"] = json.loads(d.get("co_field_diff") or "{}")
+        except Exception:
+            d["co_field_diff"] = {}
+        d["rejected"] = bool(d["rejected"])
+        out.append(d)
+    return out
+
+
+@router.get("/api/tickets/{key}/transitions")
+def api_ticket_transitions(key: str):
+    active_key = state.active_instance_key()
+    return {"key": key, "transitions": _load_ticket_transitions(active_key, key)}
 
 
 def _release_block_for_ticket(ticket_key: str, ticket_state: dict) -> dict | None:
@@ -668,7 +699,7 @@ def api_restart_ticket(key: str):
     if ts.get("status") == TicketStatus.pr_failed.value:
         target = "in_review" if ts.get("prs") else "pr_ready"
         try:
-            ts = state.transition_ticket(key, target)
+            ts = state.transition_ticket(key, target, reason="manual restart")
         except state.TicketStateError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
     status = ts.get("status", "")
@@ -700,7 +731,7 @@ def api_set_ticket_status(key: str, body: dict):
     if target == "merged" and not ts.get("merged_external_status"):
         fields["merged_external_status"] = ts.get("external_status", "")
     try:
-        state.transition_ticket(key, target, **fields)
+        state.transition_ticket(key, target, reason="manual status override", **fields)
     except state.TicketStateError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     log.emit("ticket_status_override", f"Manual override {old_status} → {target} for {key}",
@@ -757,7 +788,7 @@ def api_approve_ticket(key: str):
     if ts.get("status") != "pending_approval":
         return JSONResponse({"error": f"cannot approve from status {ts.get('status')}"}, status_code=400)
     try:
-        state.transition_ticket(key, "new", approval_status="approved")
+        state.transition_ticket(key, "new", reason="manual approve", approval_status="approved")
     except state.TicketStateError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     log.emit("ticket_approved", f"Approved {key}",
@@ -789,6 +820,7 @@ def api_reject_ticket(key: str):
     now = datetime.now(timezone.utc).isoformat()
     try:
         state.transition_ticket(key, "done",
+                                reason="manual reject",
                                 approval_status="rejected",
                                 obsolete_at=now,
                                 done_at=now)
