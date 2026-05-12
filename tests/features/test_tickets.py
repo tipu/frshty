@@ -1310,3 +1310,82 @@ class TestCheckInReviewFixFailedRetry:
             "past the lowest failed id (or it locks the comment out of retry). "
             f"got cursor={cursor}, lowest_failed_id={c_low_failed['id']}"
         )
+
+    def test_fix_failed_caps_after_max_attempts_and_advances_cursor(
+        self, fresh_db, fake_config, tmp_state
+    ):
+        """Observed live: DEV-467 surfaced ticket_pr_comment_fix_failed every 2 min
+        for the same 3 comments because commit 63dcebf parks the cursor at last_seen
+        whenever any comment in the batch ends fix_failed, with no upper bound. The
+        retry must be capped at MAX_PR_COMMENT_FIX_ATTEMPTS — once a comment has
+        burned its budget, the cursor advances past it, ticket_pr_comment_fix_capped
+        is emitted, and subsequent scans do NOT re-classify it."""
+        slug = "PROJ-1-do-the-thing"
+        wt = self._setup_worktree(fake_config, slug)
+        ts = make_ticket_state(
+            status="in_review", slug=slug, branch=slug,
+            prs=[{"repo": "repo", "id": 99, "branch": slug, "url": "http://u"}],
+        )
+        ticket = {"key": "PROJ-1", "summary": "Do thing", "url": "http://j/PROJ-1"}
+        c = self._make_pr_comment(id=100, body="rename this helper to something clearer")
+
+        mock_platform = MagicMock()
+        mock_platform.get_pr_state.return_value = "OPEN"
+        mock_platform.get_pr_comments.return_value = [c]
+        haiku_classify = '{"results": [{"i": 0, "actionable": true}]}'
+        bb_config = {
+            **fake_config,
+            "job": {**fake_config["job"], "platform": "bitbucket"},
+            "bitbucket": {"org": "x", "user_account_id": "bot-self"},
+        }
+
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "repo", "path": wt.parent}]), \
+             patch("features.tickets.ticket_worktree_path", return_value=wt), \
+             patch("features.tickets.run_haiku", return_value=haiku_classify) as haiku, \
+             patch("features.tickets.run_claude_code", return_value=None), \
+             patch("features.tickets.subprocess.run",
+                   return_value=MagicMock(returncode=0)), \
+             patch("features.tickets.log.emit") as emit:
+            for _ in range(tickets.MAX_PR_COMMENT_FIX_ATTEMPTS):
+                ts = tickets._check_in_review(bb_config, ticket, ts, "http://base")
+
+            cap_events = [
+                call for call in emit.call_args_list
+                if call.args and call.args[0] == "ticket_pr_comment_fix_capped"
+            ]
+            assert len(cap_events) == 1, (
+                "expected exactly one ticket_pr_comment_fix_capped after "
+                f"{tickets.MAX_PR_COMMENT_FIX_ATTEMPTS} failed attempts, "
+                f"got {len(cap_events)}"
+            )
+            assert cap_events[0].kwargs.get("meta", {}).get("comment_id") == c["id"]
+
+            cursor = ts.get("last_comment_ids", {}).get("repo/99", 0)
+            assert cursor >= c["id"], (
+                "after cap, cursor must advance past the capped comment so the "
+                f"next scan filters it out. got cursor={cursor}, comment_id={c['id']}"
+            )
+
+            attempts = ts.get("comment_fix_attempts", {}).get(f"repo/99/{c['id']}", 0)
+            assert attempts == tickets.MAX_PR_COMMENT_FIX_ATTEMPTS, (
+                f"expected attempts={tickets.MAX_PR_COMMENT_FIX_ATTEMPTS}, "
+                f"got {attempts}"
+            )
+
+            haiku.reset_mock()
+            emit.reset_mock()
+            ts = tickets._check_in_review(bb_config, ticket, ts, "http://base")
+            assert haiku.call_count == 0, (
+                "post-cap scan must NOT re-classify the comment via haiku "
+                f"(got {haiku.call_count} calls)"
+            )
+            new_fail_events = [
+                call for call in emit.call_args_list
+                if call.args and call.args[0] == "ticket_pr_comment_fix_failed"
+            ]
+            assert new_fail_events == [], (
+                "post-cap scan must NOT emit further ticket_pr_comment_fix_failed; "
+                f"got {len(new_fail_events)}"
+            )

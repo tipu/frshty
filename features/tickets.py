@@ -291,7 +291,8 @@ def _reingest_merged_ticket(config: dict, ticket: dict, ts: dict, base_url: str)
 
     for field in ("prs", "ci_fix_attempts", "pr_attempts", "ci_passed",
                   "checks_started_at", "_ci_failed_pending", "pr_scheduled_at",
-                  "conflict_resolution_attempts", "last_comment_ids", "done_at"):
+                  "conflict_resolution_attempts", "last_comment_ids",
+                  "comment_fix_attempts", "done_at"):
         ts.pop(field, None)
 
     ts["status"] = "new"
@@ -1130,6 +1131,9 @@ def _save_pr_comments(config, slug, comments: list[dict]):
     path.write_text(json.dumps(comments, indent=2, default=str))
 
 
+MAX_PR_COMMENT_FIX_ATTEMPTS = 2
+
+
 def _check_in_review(config, ticket, ts, base_url) -> dict:
     platform = make_platform(config)
     prs = ts.get("prs", [])
@@ -1171,6 +1175,7 @@ def _check_in_review(config, ticket, ts, base_url) -> dict:
         user_id = ""
     slug = ts["slug"]
     last_comment_ids = ts.get("last_comment_ids", {})
+    comment_fix_attempts = ts.setdefault("comment_fix_attempts", {})
     pr_comments = _load_pr_comments(config, slug)
 
     for pr in prs:
@@ -1236,12 +1241,25 @@ def _check_in_review(config, ticket, ts, base_url) -> dict:
                                 meta={"ticket": ticket["key"]})
                         else:
                             entry["status"] = "fix_failed"
+                            attempt_key = f"{pr_key}/{comment['id']}"
+                            attempts = comment_fix_attempts.get(attempt_key, 0) + 1
+                            comment_fix_attempts[attempt_key] = attempts
+                            entry["attempts"] = attempts
                             log.emit("ticket_pr_comment_fix_failed",
                                 f"{_label(ticket['key'], ts)}: No code change produced for {comment['body'][:80]}",
                                 links={"detail": f"{base_url}/tickets/{ticket['key']}"},
                                 meta={"ticket": ticket["key"],
                                       "claude_returned": bool(fix_result),
-                                      "commit_rc": commit.returncode})
+                                      "commit_rc": commit.returncode,
+                                      "attempts": attempts,
+                                      "max_attempts": MAX_PR_COMMENT_FIX_ATTEMPTS})
+                            if attempts >= MAX_PR_COMMENT_FIX_ATTEMPTS:
+                                log.emit("ticket_pr_comment_fix_capped",
+                                    f"{_label(ticket['key'], ts)}: Giving up on review comment after {attempts} attempts: {comment['body'][:80]}",
+                                    links={"detail": f"{base_url}/tickets/{ticket['key']}"},
+                                    meta={"ticket": ticket["key"],
+                                          "comment_id": comment["id"],
+                                          "attempts": attempts})
             else:
                 suggested = run_haiku(
                     f"A reviewer left this comment on a PR:\n\n{comment['body']}\n\n"
@@ -1255,8 +1273,12 @@ def _check_in_review(config, ticket, ts, base_url) -> dict:
 
             pr_comments.append(entry)
 
-        batch_statuses = [e["status"] for e in pr_comments[-len(new_comments):]]
-        if "fix_failed" not in batch_statuses:
+        batch_entries = pr_comments[-len(new_comments):]
+        retryable_failures = [
+            e for e in batch_entries
+            if e["status"] == "fix_failed" and e.get("attempts", 0) < MAX_PR_COMMENT_FIX_ATTEMPTS
+        ]
+        if not retryable_failures:
             last_comment_ids[pr_key] = max(c["id"] for c in new_comments)
 
     ts["last_comment_ids"] = last_comment_ids
