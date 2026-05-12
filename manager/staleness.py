@@ -104,13 +104,13 @@ def merge_ready_ticket_prs(instance_key: str, config: dict | None = None,
                 "author": p.get("author"),
                 "approvers": approvers,
             })
-        if not any_approved and prs:
+        if not prs or not any_approved:
             continue
         out.append({
             "ticket_key": r["ticket_key"],
             "summary": (d.get("summary") or "")[:140],
             "prs": enriched,
-            "approval_status": "approved" if any_approved else "no_prs" if not prs else "unknown",
+            "approval_status": "approved",
         })
     return out
 
