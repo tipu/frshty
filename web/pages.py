@@ -1,16 +1,37 @@
+import re
 from pathlib import Path
 
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
+
+from web.state import _config
 
 
 TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
 
 router = APIRouter()
 
+_TITLE_RE = re.compile(r"<title>([^<]*)</title>")
+
+
+def _rewrite_title(html: str) -> str:
+    key = (_config.get("job", {}) or {}).get("key", "") or ""
+    prefix = key.capitalize()
+    def _sub(m: "re.Match[str]") -> str:
+        body = m.group(1).strip()
+        if body == "frshty":
+            page = ""
+        elif " — frshty" in body:
+            page = body.split(" — frshty")[0].strip()
+        else:
+            page = body
+        new = f"{prefix} {page}".strip() if prefix else (page or "frshty")
+        return f"<title>{new}</title>"
+    return _TITLE_RE.sub(_sub, html, count=1)
+
 
 def _template(name: str) -> HTMLResponse:
-    return HTMLResponse((TEMPLATES_DIR / name).read_text())
+    return HTMLResponse(_rewrite_title((TEMPLATES_DIR / name).read_text()))
 
 
 @router.get("/", response_class=HTMLResponse)
