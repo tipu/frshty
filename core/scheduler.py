@@ -99,6 +99,19 @@ def list_all(instance_key: str | None = None) -> list[dict]:
     return out
 
 
+def list_for_ticket(instance_key: str, key: str) -> list[dict]:
+    rows = db.query_all(
+        "SELECT key, run_at, data FROM scheduler"
+        " WHERE instance_key=? AND key=? ORDER BY run_at, key",
+        (instance_key, key),
+    )
+    out = []
+    for r in rows:
+        data = db.load_json(r, "data")
+        out.append({"key": r["key"], "run_at": r["run_at"], **data})
+    return out
+
+
 def delete(instance_key: str, key: str) -> None:
     db.execute("DELETE FROM scheduler WHERE instance_key=? AND key=?", (instance_key, key))
 
