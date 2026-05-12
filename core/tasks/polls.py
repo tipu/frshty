@@ -16,10 +16,24 @@ def poll_reviewer(ctx: TaskContext) -> TaskResult:
     return TaskResult("ok")
 
 
+@task("poll_peer_reviews", preconditions=[feature_enabled("review_prs")], timeout=60)
+def poll_peer_reviews(ctx: TaskContext) -> TaskResult:
+    from features import peer_reviews
+    peer_reviews.refresh(ctx.config)
+    return TaskResult("ok")
+
+
 @task("timesheet_check", preconditions=[feature_enabled("timesheet")], timeout=120)
 def timesheet_check(ctx: TaskContext) -> TaskResult:
     from features import timesheet
     timesheet.check(ctx.config)
+    return TaskResult("ok")
+
+
+@task("poll_billing_invoices", preconditions=[feature_enabled("billing")], timeout=60)
+def poll_billing_invoices(ctx: TaskContext) -> TaskResult:
+    from features import billing_snapshot
+    billing_snapshot.refresh(ctx.config)
     return TaskResult("ok")
 
 
