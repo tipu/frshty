@@ -312,6 +312,7 @@ def pr_comments_needing_reply(instance_key: str, config: dict) -> list[dict]:
             "ticket_key": r["ticket_key"],
             "summary": (d.get("summary") or "")[:140],
             "comments": [{
+                "id": e.get("id"),
                 "pr_repo": e.get("pr_repo"),
                 "pr_id": e.get("pr_id"),
                 "path": e.get("path"),
