@@ -73,17 +73,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
 <header class="flex items-center gap-4 mb-4">
     <a href="/tickets" class="link text-sm">&larr; Tickets</a>
     <h1 class="text-lg font-bold">{{ key }}</h1>
-    <nav class="flex gap-1 text-sm">
-        <a href="/">Feed</a>
-        <a href="/global">Global</a>
-        <a href="/reviews">Reviews</a>
-        <a href="/tickets" class="active">Tickets</a>
-        <a href="/scheduled">Scheduled</a>
-        <a href="/slack">Slack</a>
-        <a v-if="features.timesheet !== false" href="/timesheet">Timesheet</a>
-        <a v-if="features.billing !== false" href="/billing">Billing</a>
-        <a href="/config">Config</a>
-    </nav>
+    <frshty-nav :features="features" />
 </header>
 
 <div v-if="loadError" class="text-red-400 mb-4">Ticket not found</div>
@@ -97,6 +87,12 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
         <span v-if="['pr_ready','in_review','pr_failed'].includes(status)" class="text-xs text-gray-400"
               title="PRs created out of repos with a worktree for this ticket">
             ({{ (state.prs || []).length }}/{{ state.repo_count || 0 }})
+        </span>
+        <span v-if="status === 'pr_failed' && state.pr_failed_reason"
+              class="text-xs px-2 py-0.5 rounded"
+              :class="state.pr_failed_reason === 'create_failed' || state.pr_failed_reason === 'ci_failed' ? 'bg-red-900 text-red-200' : 'bg-yellow-900 text-yellow-200'"
+              :title="prFailReasonTip">
+            {{ prFailReasonLabel }}
         </span>
         <span v-if="inProgress" class="flex items-center gap-1 text-xs" :class="terminalAlive ? 'text-green-400' : 'text-red-400'">
             <span class="w-2 h-2 rounded-full" :class="terminalAlive ? 'bg-green-400 animate-pulse' : 'bg-red-400'"></span>
@@ -514,6 +510,15 @@ frshtyApp({
         const hasPrs = computed(() => (state.value.prs || []).length > 0);
         const hasCode = computed(() => ['pr_ready', 'in_review', 'pr_failed', 'merged'].includes(status.value) || hasPrs.value);
         const lockedAutoPr = computed(() => LOCKED_AUTO_PR_STATES.has(status.value));
+
+        const PR_FAIL_REASONS = {
+            create_failed:   { label: 'create failed',   tip: 'PR creation failed 3× (push/auth/base-branch issue). No PR exists.' },
+            pr_rejected:     { label: 'PR rejected',     tip: 'PR was closed/declined/deleted on the platform without merging.' },
+            conflict_failed: { label: 'conflict failed', tip: 'Merge conflict resolution exhausted retries.' },
+            ci_failed:       { label: 'CI failed',       tip: 'CI checks kept failing after max auto-fix attempts.' },
+        };
+        const prFailReasonLabel = computed(() => (PR_FAIL_REASONS[state.value.pr_failed_reason] || {}).label || state.value.pr_failed_reason);
+        const prFailReasonTip = computed(() => (PR_FAIL_REASONS[state.value.pr_failed_reason] || {}).tip || '');
 
         const ticketUrl = computed(() => {
             const hist = (ticket.value && ticket.value.history) || [];
@@ -1148,6 +1153,7 @@ frshtyApp({
             prModalOpen, prRepos, prSubmitting,
             jobOutputEl, terminalContainer,
             state, status, branch, terminalAlive, inProgress, stalled, hasPrs, hasCode, lockedAutoPr,
+            prFailReasonLabel, prFailReasonTip,
             ticketUrl, prScheduledLabel, dropdownStates,
             sortedDocs, filteredHistory, parsedDiff, commentsByFile, unmatchedComments,
             renderMarkdown, escHtml,

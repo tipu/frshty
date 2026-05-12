@@ -691,6 +691,7 @@ def api_restart_ticket(key: str):
         ts.pop("pr_attempts", None)
         ts.pop("conflict_resolution_attempts", None)
         ts.pop("last_conflict_error", None)
+        ts.pop("pr_failed_reason", None)
         return ts
 
     ts = state.update_ticket(key, _reset)
