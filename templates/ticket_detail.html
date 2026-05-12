@@ -234,9 +234,14 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
     </div>
 
     <div class="space-y-4">
-        <div v-show="jobs.length" class="card p-3">
+        <div v-show="jobs.length || (ticket && ((ticket.transitions || []).length || (ticket.scheduled_rows || []).length))" class="card p-3">
             <div class="flex items-center justify-between mb-3 pb-3 border-b border-gray-700">
-                <span class="text-xs font-bold text-gray-500 uppercase">Jobs</span>
+                <span class="text-xs font-bold text-gray-500 uppercase">
+                    Jobs
+                    <span v-if="(ticket && (ticket.transitions || []).length)" class="ml-1 text-gray-600">
+                        + Status <span class="text-gray-500">({{ (ticket.transitions || []).length }})</span>
+                    </span>
+                </span>
                 <div class="flex gap-2">
                     <select v-model="eventFilter" class="text-xs bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-300">
                         <option value="all">All Events</option>
@@ -246,24 +251,49 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                     <button @click="loadJobs" class="text-xs text-gray-500 hover:text-gray-300">⟳</button>
                 </div>
             </div>
-            <div class="text-xs space-y-1 max-h-96 overflow-y-auto">
-                <div v-for="j in jobs" :key="j.id"
-                     class="cursor-pointer hover:bg-gray-800 p-2 rounded flex items-center gap-2"
-                     @click="viewJobOutput(j.id, j.task)">
-                    <span class="text-gray-500 flex-shrink-0">{{ j.finished_at || j.started_at || j.enqueued_at }} <span class="text-gray-600">({{ $relTime(j.finished_at || j.started_at || j.enqueued_at) }})</span></span>
-                    <span class="flex-shrink-0" :class="jobStatusClass(j.status)">{{ j.status }}</span>
-                    <span v-if="j.status === 'running'" class="text-xs px-1.5 py-0.5 rounded ml-1"
-                          :class="j.pid_alive ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'"
-                          :title="j.pid_alive ? 'claude pid alive' : 'claude pid dead — orphan, will be finalized on next poll'">
-                        {{ j.pid_alive ? '● alive' : '○ dead' }}
-                    </span>
-                    <span class="text-gray-300 flex-1">{{ j.task }}</span>
-                    <span v-if="jobHasOutput(j.task, j.status)" class="text-xs bg-green-900 text-green-300 px-1.5 py-0.5 rounded ml-1">📄</span>
-                    <span class="text-gray-500">{{ jobReason(j) }}</span>
-                    <button v-if="j.status === 'failed' || j.status === 'skipped'"
-                            @click.stop="retryJob(j.id)"
-                            class="ml-2 text-xs text-yellow-400 hover:text-yellow-200 underline">retry</button>
+            <div v-if="ticket && (ticket.scheduled_rows || []).length" class="mb-3 pb-3 border-b border-gray-800">
+                <div class="text-xs uppercase text-gray-500 mb-1">Currently scheduled</div>
+                <div v-for="(s, i) in (ticket.scheduled_rows || [])" :key="'sched-' + i" class="text-xs font-mono text-yellow-300">
+                    {{ s.run_at }} — {{ s.key }} <span v-if="s.action" class="text-gray-500">({{ s.action }})</span>
                 </div>
+            </div>
+            <div class="text-xs space-y-1 max-h-96 overflow-y-auto">
+                <template v-for="row in mergedJobsTransitions" :key="row._key">
+                    <div v-if="row.kind === 'job'"
+                         class="cursor-pointer hover:bg-gray-800 p-2 rounded flex items-center gap-2"
+                         @click="viewJobOutput(row.id, row.task)">
+                        <span class="text-gray-500 flex-shrink-0">{{ row.finished_at || row.started_at || row.enqueued_at }} <span class="text-gray-600">({{ $relTime(row.finished_at || row.started_at || row.enqueued_at) }})</span></span>
+                        <span class="flex-shrink-0" :class="jobStatusClass(row.status)">{{ row.status }}</span>
+                        <span v-if="row.status === 'running'" class="text-xs px-1.5 py-0.5 rounded ml-1"
+                              :class="row.pid_alive ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'"
+                              :title="row.pid_alive ? 'claude pid alive' : 'claude pid dead — orphan, will be finalized on next poll'">
+                            {{ row.pid_alive ? '● alive' : '○ dead' }}
+                        </span>
+                        <span class="text-gray-300 flex-1">{{ row.task }}</span>
+                        <span v-if="jobHasOutput(row.task, row.status)" class="text-xs bg-green-900 text-green-300 px-1.5 py-0.5 rounded ml-1">📄</span>
+                        <span class="text-gray-500">{{ jobReason(row) }}</span>
+                        <button v-if="row.status === 'failed' || row.status === 'skipped'"
+                                @click.stop="retryJob(row.id)"
+                                class="ml-2 text-xs text-yellow-400 hover:text-yellow-200 underline">retry</button>
+                    </div>
+                    <div v-else class="p-2 rounded flex items-center gap-2 border-l-2"
+                         :class="row.rejected ? 'border-red-700 bg-red-950/30' : 'border-blue-700 bg-blue-950/20'">
+                        <span class="text-gray-500 flex-shrink-0">{{ row.ts }} <span class="text-gray-600">({{ $relTime(row.ts) }})</span></span>
+                        <span class="text-xs px-1.5 py-0.5 rounded flex-shrink-0"
+                              :class="row.rejected ? 'bg-red-900 text-red-200' : 'bg-blue-900 text-blue-200'">
+                            {{ row.rejected ? 'rejected' : 'status' }}
+                        </span>
+                        <span class="font-mono flex-shrink-0" :class="row.rejected ? 'text-red-300' : 'text-gray-200'">
+                            {{ row.prior_status || '∅' }} → {{ row.new_status }}
+                        </span>
+                        <span v-if="row.actor" class="text-gray-500 text-xs">by {{ row.actor }}</span>
+                        <span v-if="row.reason" class="text-gray-400 text-xs">: {{ row.reason }}</span>
+                        <span v-if="row.rejection_reason" class="text-red-300 text-xs">— {{ row.rejection_reason }}</span>
+                        <span v-if="row.co_field_diff && Object.keys(row.co_field_diff).length" class="text-gray-500 text-xs flex-1 truncate" :title="formatCoFieldDiff(row.co_field_diff)">
+                            [{{ formatCoFieldDiff(row.co_field_diff) }}]
+                        </span>
+                    </div>
+                </template>
             </div>
             <div v-show="jobOutput.jobId !== null" class="border-t border-gray-700 pt-3 mt-3">
                 <div class="flex items-center justify-between mb-2">
@@ -288,38 +318,6 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                 </div>
                 <div class="collapsible-content" :class="docExpanded[name] ? 'expanded' : 'collapsed'">
                     <div class="md-content text-sm p-3 pt-2" v-html="renderMarkdown(content)"></div>
-                </div>
-            </div>
-        </div>
-
-        <div v-if="ticket && ((ticket.transitions || []).length || (ticket.scheduled_rows || []).length)" class="card p-3">
-            <div class="flex items-center justify-between mb-3 pb-3 border-b border-gray-700">
-                <div class="collapsible-header" :class="sections.transitions ? 'expanded' : 'collapsed'"
-                     @click="sections.transitions = !sections.transitions">
-                    <span class="text-xs font-bold text-gray-500 uppercase">Status History</span>
-                    <span class="ml-2 text-xs text-gray-500">({{ (ticket.transitions || []).length }})</span>
-                </div>
-            </div>
-            <div class="collapsible-content" :class="sections.transitions ? 'expanded' : 'collapsed'">
-                <div v-if="(ticket.scheduled_rows || []).length" class="mb-3 pb-3 border-b border-gray-800">
-                    <div class="text-xs uppercase text-gray-500 mb-1">Currently scheduled</div>
-                    <div v-for="(s, i) in (ticket.scheduled_rows || [])" :key="'sched-' + i" class="text-xs font-mono text-yellow-300">
-                        {{ s.run_at }} — {{ s.key }} <span v-if="s.action" class="text-gray-500">({{ s.action }})</span>
-                    </div>
-                </div>
-                <div class="space-y-1 text-xs">
-                    <div v-for="(t, i) in (ticket.transitions || [])" :key="'tr-' + i"
-                         :class="t.rejected ? 'text-red-400' : 'text-gray-300'">
-                        <span class="text-gray-600">{{ $relTime(t.ts) }}</span>
-                        <span class="ml-2 font-mono">{{ t.prior_status || '∅' }} → {{ t.new_status }}</span>
-                        <span v-if="t.rejected" class="ml-2 text-red-500 uppercase">rejected</span>
-                        <span v-if="t.actor" class="ml-2 text-gray-500">by {{ t.actor }}</span>
-                        <span v-if="t.reason" class="ml-2 text-gray-400">: {{ t.reason }}</span>
-                        <span v-if="t.rejection_reason" class="ml-2 text-red-300">— {{ t.rejection_reason }}</span>
-                        <span v-if="t.co_field_diff && Object.keys(t.co_field_diff).length" class="ml-2 text-gray-500">
-                            [{{ Object.entries(t.co_field_diff).map(([k,v]) => `${k}: ${JSON.stringify(v.prior)}→${JSON.stringify(v.new)}`).join(', ') }}]
-                        </span>
-                    </div>
                 </div>
             </div>
         </div>
@@ -484,7 +482,7 @@ frshtyApp({
         const prModalOpen = ref(false);
         const prRepos = ref([]);
         const prSubmitting = ref(false);
-        const sections = reactive({ context: true, notes: false, history: false, transitions: true });
+        const sections = reactive({ context: true, notes: false, history: false });
         const docExpanded = reactive({});
         const replyDrafts = reactive({});
         const jobOutput = reactive({ jobId: null, taskName: '', text: '', offset: 0 });
@@ -519,6 +517,36 @@ frshtyApp({
         };
         const prFailReasonLabel = computed(() => (PR_FAIL_REASONS[state.value.pr_failed_reason] || {}).label || state.value.pr_failed_reason);
         const prFailReasonTip = computed(() => (PR_FAIL_REASONS[state.value.pr_failed_reason] || {}).tip || '');
+
+        function formatCoFieldDiff(diff) {
+            return Object.entries(diff || {})
+                .map(([k, v]) => `${k}: ${JSON.stringify(v.prior)}→${JSON.stringify(v.new)}`)
+                .join(', ');
+        }
+
+        const mergedJobsTransitions = computed(() => {
+            const items = [];
+            for (const j of jobs.value) {
+                items.push({
+                    kind: 'job',
+                    ts: j.finished_at || j.started_at || j.enqueued_at || '',
+                    _key: 'j' + j.id,
+                    ...j,
+                });
+            }
+            const trs = (ticket.value && ticket.value.transitions) || [];
+            for (let i = 0; i < trs.length; i++) {
+                const t = trs[i];
+                items.push({
+                    kind: 'transition',
+                    ts: t.ts || '',
+                    _key: 't' + i + ':' + (t.ts || '') + ':' + (t.new_status || ''),
+                    ...t,
+                });
+            }
+            items.sort((a, b) => (b.ts || '').localeCompare(a.ts || ''));
+            return items;
+        });
 
         const ticketUrl = computed(() => {
             const hist = (ticket.value && ticket.value.history) || [];
@@ -1154,6 +1182,7 @@ frshtyApp({
             jobOutputEl, terminalContainer,
             state, status, branch, terminalAlive, inProgress, stalled, hasPrs, hasCode, lockedAutoPr,
             prFailReasonLabel, prFailReasonTip,
+            mergedJobsTransitions, formatCoFieldDiff,
             ticketUrl, prScheduledLabel, dropdownStates,
             sortedDocs, filteredHistory, parsedDiff, commentsByFile, unmatchedComments,
             renderMarkdown, escHtml,
