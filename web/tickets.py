@@ -727,7 +727,19 @@ def api_discard_ticket(key: str):
                 subprocess.run(["git", "worktree", "remove", "--force", str(wt_path)], cwd=str(repo["path"]), capture_output=True, timeout=60)
         ticket_dir = ws["root"] / ws["tickets_dir"] / slug
         if ticket_dir.is_dir():
-            shutil.rmtree(ticket_dir)
+            try:
+                shutil.rmtree(ticket_dir)
+            except PermissionError as e:
+                sudo_res = subprocess.run(
+                    ["sudo", "-n", "rm", "-rf", str(ticket_dir)],
+                    capture_output=True, timeout=60,
+                )
+                if sudo_res.returncode != 0 or ticket_dir.exists():
+                    log.emit("ticket_discard_cleanup_failed",
+                        f"Could not remove ticket dir for {key}: {e}",
+                        meta={"ticket": key, "path": str(ticket_dir),
+                              "sudo_rc": sudo_res.returncode,
+                              "sudo_stderr": sudo_res.stderr.decode("utf-8", "replace")[:500]})
         for repo in repos:
             subprocess.run(["git", "worktree", "prune"], cwd=str(repo["path"]), capture_output=True, timeout=60)
     instance_key = _config.get("job", {}).get("key", "")
