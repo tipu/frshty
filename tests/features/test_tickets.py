@@ -1,5 +1,7 @@
 from unittest.mock import patch, MagicMock
 
+import pytest
+
 from features import tickets
 from tests.conftest import make_ticket, make_ticket_state
 
@@ -1389,3 +1391,99 @@ class TestCheckInReviewFixFailedRetry:
                 "post-cap scan must NOT emit further ticket_pr_comment_fix_failed; "
                 f"got {len(new_fail_events)}"
             )
+
+
+class TestRecheckPrFailed:
+    """A pr_failed ticket must not be terminal in scan_tickets — observed on
+    nectar 2026-05-12: 13 pr_failed tickets in DB included NEC-3039 (PR #691
+    MERGED ~1h before the page load), NEC-3098 (PR #697 MERGED May 4, 8 days
+    stale), and NEC-3064 (PR #692 still OPEN). The check() loop short-circuits
+    at `if ts['status'] == TicketStatus.pr_failed: continue`, so a previously
+    closed PR that gets reopened or merged is never re-examined and the ticket
+    stays in pr_failed forever. _recheck_pr_failed re-fetches PR state on each
+    scan and transitions out of pr_failed when reality has moved on."""
+
+    def _ts(self, **overrides):
+        ts = make_ticket_state(
+            status="pr_failed",
+            prs=[{"repo": "repo", "id": 99, "branch": "PROJ-1", "url": "http://u/99"}],
+        )
+        ts.update(overrides)
+        return ts
+
+    def _ticket(self):
+        return {"key": "PROJ-1", "summary": "Do thing", "url": "http://j/PROJ-1",
+                "status": "In Review"}
+
+    def test_pr_now_merged_recovers_to_merged(self, fake_config):
+        ts = self._ts()
+        mock_platform = MagicMock()
+        mock_platform.get_pr_info.return_value = {"state": "MERGED", "approvers": []}
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets._fetch_ticket_comments", return_value=[]):
+            ts = tickets._recheck_pr_failed(fake_config, self._ticket(), ts, "http://b")
+        assert ts["status"] == "merged", (
+            "tracked PR is now MERGED on the platform; pr_failed ticket must "
+            f"recover to merged. got: {ts['status']}"
+        )
+
+    def test_pr_reopened_recovers_to_in_review(self, fake_config):
+        ts = self._ts()
+        mock_platform = MagicMock()
+        mock_platform.get_pr_info.return_value = {"state": "OPEN", "approvers": []}
+        with patch("features.tickets.make_platform", return_value=mock_platform):
+            ts = tickets._recheck_pr_failed(fake_config, self._ticket(), ts, "http://b")
+        assert ts["status"] == "in_review", (
+            "tracked PR is now OPEN (was previously closed); pr_failed ticket "
+            f"must recover to in_review so the normal review-loop picks it back "
+            f"up. got: {ts['status']}"
+        )
+
+    def test_still_closed_unmerged_stays_pr_failed(self, fake_config):
+        ts = self._ts()
+        mock_platform = MagicMock()
+        mock_platform.get_pr_info.return_value = {"state": "CLOSED", "approvers": []}
+        with patch("features.tickets.make_platform", return_value=mock_platform):
+            ts = tickets._recheck_pr_failed(fake_config, self._ticket(), ts, "http://b")
+        assert ts["status"] == "pr_failed", (
+            f"tracked PR is still CLOSED unmerged; ticket must stay pr_failed. "
+            f"got: {ts['status']}"
+        )
+
+    def test_no_prs_stays_pr_failed(self, fake_config):
+        ts = self._ts(prs=[])
+        mock_platform = MagicMock()
+        with patch("features.tickets.make_platform", return_value=mock_platform):
+            ts = tickets._recheck_pr_failed(fake_config, self._ticket(), ts, "http://b")
+        assert ts["status"] == "pr_failed"
+        assert mock_platform.get_pr_info.call_count == 0, (
+            "with no tracked PRs there's nothing to re-check; must not hit the platform"
+        )
+
+    def test_platform_error_stays_pr_failed(self, fake_config):
+        ts = self._ts()
+        mock_platform = MagicMock()
+        mock_platform.get_pr_info.side_effect = RuntimeError("boom")
+        with patch("features.tickets.make_platform", return_value=mock_platform):
+            ts = tickets._recheck_pr_failed(fake_config, self._ticket(), ts, "http://b")
+        assert ts["status"] == "pr_failed", (
+            "transient platform error must not cause spurious recovery; "
+            f"stay pr_failed and retry next scan. got: {ts['status']}"
+        )
+
+    def test_mixed_one_merged_one_open_recovers_to_in_review(self, fake_config):
+        ts = self._ts(prs=[
+            {"repo": "repo", "id": 99, "branch": "PROJ-1", "url": "http://u/99"},
+            {"repo": "repo2", "id": 42, "branch": "PROJ-1", "url": "http://u/42"},
+        ])
+        mock_platform = MagicMock()
+        def info(repo, pr_id):
+            return {"state": "MERGED" if pr_id == 99 else "OPEN", "approvers": []}
+        mock_platform.get_pr_info.side_effect = info
+        with patch("features.tickets.make_platform", return_value=mock_platform):
+            ts = tickets._recheck_pr_failed(fake_config, self._ticket(), ts, "http://b")
+        assert ts["status"] == "in_review", (
+            "with one MERGED and one OPEN, the ticket is not fully merged but "
+            "the other PR is healthy; recover to in_review so the normal "
+            f"review-loop picks it back up. got: {ts['status']}"
+        )

@@ -37,6 +37,9 @@ class TestTransitionValid:
     def test_pr_failed_to_pr_ready(self):
         assert transition("pr_failed", "pr_ready") == "pr_ready"
 
+    def test_pr_failed_to_in_review(self):
+        assert transition("pr_failed", "in_review") == "in_review"
+
 
 class TestTransitionDone:
     @pytest.mark.parametrize("status", [s.value for s in TicketStatus])

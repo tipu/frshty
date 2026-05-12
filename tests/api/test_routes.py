@@ -197,11 +197,11 @@ class TestTickets:
         assert "checks_started_at" not in ts
 
     def test_status_override_illegal_transition(self, client):
-        state.save("tickets", {"T-1": {"status": "pr_failed", "slug": "T-1-s"}})
+        state.save("tickets", {"T-1": {"status": "new", "slug": "T-1-s"}})
         resp = client.post("/api/tickets/T-1/status", json={"status": "in_review"})
         assert resp.status_code == 400, resp.text
         ts = state.load("tickets")["T-1"]
-        assert ts["status"] == "pr_failed"
+        assert ts["status"] == "new"
 
     def test_status_override_invalid(self, client):
         state.save("tickets", {"T-1": {"status": "pr_failed", "slug": "T-1-s"}})
