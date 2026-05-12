@@ -178,6 +178,60 @@ class TestTickets:
         assert resp.status_code == 200
         assert resp.json() == []
 
+    def test_detail_includes_transitions_and_scheduled_rows(self, client, tmp_path):
+        slug = "T-1-slug"
+        state.save("tickets", {"T-1": {"status": "new", "slug": slug}})
+        state.transition_ticket("T-1", "planning")
+        with patch("web.tickets.terminal.session_healthy", return_value={"alive": False, "claude_running": False}):
+            resp = client.get("/api/tickets/T-1/detail")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "transitions" in data
+        assert "scheduled_rows" in data
+        assert isinstance(data["transitions"], list)
+        assert isinstance(data["scheduled_rows"], list)
+        assert len(data["transitions"]) >= 1
+        last = data["transitions"][-1]
+        assert last["prior_status"] == "new"
+        assert last["new_status"] == "planning"
+        assert last["rejected"] is False
+
+    def test_detail_empty_transitions_and_scheduled_rows(self, client):
+        state.save("tickets", {"T-1": {"status": "new", "slug": "s"}})
+        with patch("web.tickets.terminal.session_healthy", return_value={"alive": False, "claude_running": False}):
+            resp = client.get("/api/tickets/T-1/detail")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["transitions"] == []
+        assert data["scheduled_rows"] == []
+
+    def test_transitions_endpoint_orders_ascending(self, client):
+        state.save("tickets", {"T-1": {"status": "new", "slug": "s"}})
+        state.transition_ticket("T-1", "planning")
+        state.transition_ticket("T-1", "reviewing")
+        resp = client.get("/api/tickets/T-1/transitions")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["key"] == "T-1"
+        assert [t["new_status"] for t in data["transitions"]] == ["planning", "reviewing"]
+
+    def test_transitions_endpoint_includes_rejected(self, client):
+        state.save("tickets", {"T-1": {"status": "new", "slug": "s"}})
+        with pytest.raises(state.TicketStateError):
+            state.transition_ticket("T-1", "in_review")
+        resp = client.get("/api/tickets/T-1/transitions")
+        assert resp.status_code == 200
+        data = resp.json()
+        rejected_rows = [t for t in data["transitions"] if t["rejected"]]
+        assert len(rejected_rows) == 1
+        assert "Illegal transition" in rejected_rows[0]["rejection_reason"]
+
+    def test_transitions_endpoint_empty(self, client):
+        state.save("tickets", {"T-1": {"status": "new", "slug": "s"}})
+        resp = client.get("/api/tickets/T-1/transitions")
+        assert resp.status_code == 200
+        assert resp.json() == {"key": "T-1", "transitions": []}
+
     def test_status_override_resets_counters(self, client):
         state.save("tickets", {"T-1": {
             "status": "in_review",

@@ -296,6 +296,38 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
             </div>
         </div>
 
+        <div v-if="ticket && ((ticket.transitions || []).length || (ticket.scheduled_rows || []).length)" class="card p-3">
+            <div class="flex items-center justify-between mb-3 pb-3 border-b border-gray-700">
+                <div class="collapsible-header" :class="sections.transitions ? 'expanded' : 'collapsed'"
+                     @click="sections.transitions = !sections.transitions">
+                    <span class="text-xs font-bold text-gray-500 uppercase">Status History</span>
+                    <span class="ml-2 text-xs text-gray-500">({{ (ticket.transitions || []).length }})</span>
+                </div>
+            </div>
+            <div class="collapsible-content" :class="sections.transitions ? 'expanded' : 'collapsed'">
+                <div v-if="(ticket.scheduled_rows || []).length" class="mb-3 pb-3 border-b border-gray-800">
+                    <div class="text-xs uppercase text-gray-500 mb-1">Currently scheduled</div>
+                    <div v-for="(s, i) in (ticket.scheduled_rows || [])" :key="'sched-' + i" class="text-xs font-mono text-yellow-300">
+                        {{ s.run_at }} — {{ s.key }} <span v-if="s.action" class="text-gray-500">({{ s.action }})</span>
+                    </div>
+                </div>
+                <div class="space-y-1 text-xs">
+                    <div v-for="(t, i) in (ticket.transitions || [])" :key="'tr-' + i"
+                         :class="t.rejected ? 'text-red-400' : 'text-gray-300'">
+                        <span class="text-gray-600">{{ $relTime(t.ts) }}</span>
+                        <span class="ml-2 font-mono">{{ t.prior_status || '∅' }} → {{ t.new_status }}</span>
+                        <span v-if="t.rejected" class="ml-2 text-red-500 uppercase">rejected</span>
+                        <span v-if="t.actor" class="ml-2 text-gray-500">by {{ t.actor }}</span>
+                        <span v-if="t.reason" class="ml-2 text-gray-400">: {{ t.reason }}</span>
+                        <span v-if="t.rejection_reason" class="ml-2 text-red-300">— {{ t.rejection_reason }}</span>
+                        <span v-if="t.co_field_diff && Object.keys(t.co_field_diff).length" class="ml-2 text-gray-500">
+                            [{{ Object.entries(t.co_field_diff).map(([k,v]) => `${k}: ${JSON.stringify(v.prior)}→${JSON.stringify(v.new)}`).join(', ') }}]
+                        </span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <div v-if="ticket && (ticket.history || []).length" class="card p-3">
             <div class="flex items-center justify-between mb-3 pb-3 border-b border-gray-700">
                 <div class="collapsible-header" :class="sections.history ? 'expanded' : 'collapsed'"
@@ -456,7 +488,7 @@ frshtyApp({
         const prModalOpen = ref(false);
         const prRepos = ref([]);
         const prSubmitting = ref(false);
-        const sections = reactive({ context: true, notes: false, history: false });
+        const sections = reactive({ context: true, notes: false, history: false, transitions: true });
         const docExpanded = reactive({});
         const replyDrafts = reactive({});
         const jobOutput = reactive({ jobId: null, taskName: '', text: '', offset: 0 });
