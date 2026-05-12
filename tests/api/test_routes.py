@@ -213,6 +213,85 @@ class TestTickets:
         assert resp.status_code == 404
 
 
+class TestDiscardTicket:
+    def test_discard_removes_dir_and_state(self, client, tmp_path):
+        slug = "T-1-thing"
+        state.save("tickets", {"T-1": {"status": "in_review", "slug": slug}})
+        ticket_dir = tmp_path / "tickets" / slug
+        ticket_dir.mkdir(parents=True)
+        (ticket_dir / "file.txt").write_text("hello")
+        with patch("web.tickets.terminal.kill_terminal"), \
+             patch("web.tickets.get_repos", return_value=[]), \
+             patch("core.scheduler.delete"):
+            resp = client.delete("/api/tickets/T-1")
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "discarded"}
+        assert not ticket_dir.exists()
+        assert "T-1" not in state.load("tickets")
+
+    def test_discard_not_found(self, client):
+        resp = client.delete("/api/tickets/NOPE")
+        assert resp.status_code == 404
+
+    def test_discard_falls_back_to_sudo_on_permission_error(self, client, tmp_path):
+        slug = "T-2-perm"
+        state.save("tickets", {"T-2": {"status": "in_review", "slug": slug}})
+        ticket_dir = tmp_path / "tickets" / slug
+        ticket_dir.mkdir(parents=True)
+
+        def fake_rmtree(path):
+            raise PermissionError(13, "Permission denied", str(path))
+
+        sudo_result = MagicMock(returncode=0, stderr=b"")
+
+        def fake_run(cmd, **kwargs):
+            if cmd[:3] == ["sudo", "-n", "rm"]:
+                Path(cmd[-1]).rmdir()
+                return sudo_result
+            return MagicMock(returncode=0, stderr=b"")
+
+        with patch("web.tickets.terminal.kill_terminal"), \
+             patch("web.tickets.get_repos", return_value=[]), \
+             patch("core.scheduler.delete"), \
+             patch("shutil.rmtree", side_effect=fake_rmtree), \
+             patch("web.tickets.subprocess.run", side_effect=fake_run) as mock_run:
+            resp = client.delete("/api/tickets/T-2")
+        assert resp.status_code == 200
+        sudo_calls = [c for c in mock_run.call_args_list if c.args[0][:3] == ["sudo", "-n", "rm"]]
+        assert len(sudo_calls) == 1
+        assert not ticket_dir.exists()
+        assert "T-2" not in state.load("tickets")
+
+    def test_discard_emits_event_when_cleanup_fully_fails(self, client, tmp_path):
+        slug = "T-3-stuck"
+        state.save("tickets", {"T-3": {"status": "in_review", "slug": slug}})
+        ticket_dir = tmp_path / "tickets" / slug
+        ticket_dir.mkdir(parents=True)
+        (ticket_dir / "stuck.txt").write_text("x")
+
+        def fake_rmtree(path):
+            raise PermissionError(13, "Permission denied", str(path))
+
+        def fake_run(cmd, **kwargs):
+            if cmd[:3] == ["sudo", "-n", "rm"]:
+                return MagicMock(returncode=1, stderr=b"sudo: a password is required\n")
+            return MagicMock(returncode=0, stderr=b"")
+
+        with patch("web.tickets.terminal.kill_terminal"), \
+             patch("web.tickets.get_repos", return_value=[]), \
+             patch("core.scheduler.delete"), \
+             patch("shutil.rmtree", side_effect=fake_rmtree), \
+             patch("web.tickets.subprocess.run", side_effect=fake_run):
+            resp = client.delete("/api/tickets/T-3")
+        assert resp.status_code == 200
+        assert "T-3" not in state.load("tickets")
+        events = client.get("/api/events").json()
+        cleanup_events = [e for e in events if e["event"] == "ticket_discard_cleanup_failed"]
+        assert len(cleanup_events) == 1
+        assert cleanup_events[0]["meta"]["ticket"] == "T-3"
+        assert cleanup_events[0]["meta"]["sudo_rc"] == 1
+
+
 class TestScheduled:
     def test_empty(self, client):
         resp = client.get("/api/scheduled")
