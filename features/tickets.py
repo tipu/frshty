@@ -1105,6 +1105,7 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
                 links={"detail": f"{base_url}/tickets/{ticket['key']}"},
                 meta={"ticket": ticket["key"]})
             ts["status"] = transition(ts["status"], "pr_failed")
+            ts["pr_failed_reason"] = "create_failed"
         else:
             log.emit("ticket_pr_error", f"No PRs created for {_label(ticket['key'], ts)}, attempt {ts['pr_attempts']}/3",
                 links={"detail": f"{base_url}/tickets/{ticket['key']}"},
@@ -1162,6 +1163,7 @@ def _recheck_pr_failed(config, ticket, ts, base_url) -> dict:
             f"{_label(ticket['key'], ts)}: tracked PR(s) now MERGED; recovering pr_failed → merged",
             links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
             meta={"ticket": ticket["key"]})
+        ts.pop("pr_failed_reason", None)
         return _mark_ticket_merged(config, ticket, ts)
 
     if any_open:
@@ -1170,6 +1172,7 @@ def _recheck_pr_failed(config, ticket, ts, base_url) -> dict:
             links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
             meta={"ticket": ticket["key"]})
         ts["status"] = transition(ts["status"], "in_review")
+        ts.pop("pr_failed_reason", None)
         return ts
 
     return ts
@@ -1210,6 +1213,7 @@ def _check_in_review(config, ticket, ts, base_url) -> dict:
                 links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
                 meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"], "pr_state": pr_state})
         ts["status"] = transition(ts["status"], "pr_failed")
+        ts["pr_failed_reason"] = "pr_rejected"
         return ts
 
     ts["status"] = transition(ts["status"], "in_review")
@@ -1415,6 +1419,7 @@ def _resolve_conflicts(config, ticket, ts, base_url) -> dict:
                 links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
                 meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"]})
             ts["status"] = transition(ts["status"], "pr_failed")
+            ts["pr_failed_reason"] = "conflict_failed"
             return ts
 
         wt = ticket_worktree_path(config, ts["slug"], pr["repo"])
@@ -1432,6 +1437,7 @@ def _resolve_conflicts(config, ticket, ts, base_url) -> dict:
             ts["last_conflict_error"] = error
             if attempts + 1 >= MAX_CONFLICT_ATTEMPTS:
                 ts["status"] = transition(ts["status"], "pr_failed")
+                ts["pr_failed_reason"] = "conflict_failed"
             return ts
 
         pushed = platform.push_branch(wt, ts["branch"])
@@ -1490,6 +1496,7 @@ def _handle_ci_failure(ticket, ts, pr, checks, base_url, instance_key="") -> dic
             links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
             meta={"ticket": ticket["key"], "failed_checks": failed_names})
         ts["status"] = transition(ts["status"], "pr_failed")
+        ts["pr_failed_reason"] = "ci_failed"
         ts.pop("_ci_failed_pending", None)
         return ts
 

@@ -212,6 +212,7 @@ def pr_failed_tickets(instance_key: str) -> list[dict]:
             "summary": (d.get("summary") or "")[:140],
             "discovered_at": d.get("discovered_at", ""),
             "ci_fix_attempts": d.get("ci_fix_attempts", 0),
+            "pr_failed_reason": d.get("pr_failed_reason", ""),
             "url": d.get("url", ""),
             "prs": prs,
         })

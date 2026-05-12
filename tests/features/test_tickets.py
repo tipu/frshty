@@ -1487,3 +1487,123 @@ class TestRecheckPrFailed:
             "the other PR is healthy; recover to in_review so the normal "
             f"review-loop picks it back up. got: {ts['status']}"
         )
+
+
+class TestPrFailedReason:
+    """pr_failed is overloaded — it covers four distinct failure modes that need
+    different remediation (no PR created vs. PR rejected vs. merge conflict
+    exhausted vs. CI exhausted). The pr_failed_reason field tags each transition
+    site so /today and the ticket detail can show the cause at a glance.
+    Clears on recovery (success, reopen, or manual Restart)."""
+
+    def test_create_failed_tags_reason(self, tmp_path, fake_config):
+        fake_config["workspace"]["root"] = tmp_path
+        slug = "PROJ-1-slug"
+        (tmp_path / "tickets" / slug / "myrepo").mkdir(parents=True)
+        ts = make_ticket_state(status="pr_ready", slug=slug, branch=slug, pr_attempts=2)
+
+        mock_platform = MagicMock()
+        mock_platform.push_branch.return_value = {"ok": True}
+        mock_platform.create_pr.return_value = {"error": "auth"}
+        diff_result = MagicMock(returncode=0, stdout="file.py | 5 +++++")
+
+        def fake_run(cmd, *a, **kw):
+            if "diff" in cmd:
+                return diff_result
+            return MagicMock(returncode=0, stdout=b"PROJ-1-slug\n")
+
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.get_repos", return_value=[{"name": "myrepo", "path": tmp_path / "myrepo"}]), \
+             patch("features.tickets.ticket_worktree_path", return_value=tmp_path / "tickets" / slug / "myrepo"), \
+             patch("features.tickets.subprocess.run", side_effect=fake_run), \
+             patch("features.tickets.run_haiku", return_value="Summary"), \
+             patch("features.tickets.log"):
+            result = tickets._create_pr(fake_config, make_ticket(), ts, "http://base")
+        assert result["status"] == "pr_failed"
+        assert result.get("pr_failed_reason") == "create_failed", (
+            "3× failed _create_pr must tag pr_failed_reason='create_failed' so /today shows "
+            f"the cause as a creation failure, not CI/conflict/rejection. got: {result.get('pr_failed_reason')!r}"
+        )
+
+    def test_pr_rejected_tags_reason(self, fake_config):
+        ts = make_ticket_state(
+            status="in_review",
+            prs=[{"repo": "r", "id": 1, "branch": "b", "url": "http://u/1"}],
+        )
+        mock_platform = MagicMock()
+        mock_platform.get_pr_info.return_value = {"state": "CLOSED", "approvers": []}
+        mock_platform.get_pr_comments.return_value = []
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.log"):
+            result = tickets._check_in_review(fake_config, make_ticket(), ts, "http://base")
+        assert result["status"] == "pr_failed"
+        assert result.get("pr_failed_reason") == "pr_rejected", (
+            "PR closed unmerged on the platform must tag pr_failed_reason='pr_rejected'. "
+            f"got: {result.get('pr_failed_reason')!r}"
+        )
+
+    def test_conflict_failed_tags_reason(self, tmp_path, fake_config):
+        fake_config["workspace"]["root"] = tmp_path
+        mock_platform = MagicMock()
+        mock_platform.get_pr_info.return_value = {"mergeable": "CONFLICTING"}
+        ts = make_ticket_state(
+            status="in_review",
+            slug="PROJ-1-slug",
+            prs=[{"repo": "r", "id": 1, "url": "http://u"}],
+            conflict_resolution_attempts=2,
+        )
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.log"):
+            result = tickets._resolve_conflicts(fake_config, make_ticket(), ts, "http://base")
+        assert result["status"] == "pr_failed"
+        assert result.get("pr_failed_reason") == "conflict_failed", (
+            "MAX_CONFLICT_ATTEMPTS reached must tag pr_failed_reason='conflict_failed'. "
+            f"got: {result.get('pr_failed_reason')!r}"
+        )
+
+    def test_ci_failed_tags_reason(self):
+        ts = make_ticket_state(status="in_review", ci_fix_attempts=2, _ci_failed_pending=True)
+        pr = {"repo": "r", "id": 1, "url": "u"}
+        checks = [{"name": "lint", "state": "FAILED"}]
+        with patch("features.tickets._enqueue_stage"), patch("features.tickets.log"):
+            result = tickets._handle_ci_failure(make_ticket(), ts, pr, checks, "http://base", "inst")
+        assert result["status"] == "pr_failed"
+        assert result.get("pr_failed_reason") == "ci_failed", (
+            "MAX_CI_FIX_ATTEMPTS reached must tag pr_failed_reason='ci_failed'. "
+            f"got: {result.get('pr_failed_reason')!r}"
+        )
+
+    def test_recovery_to_merged_clears_reason(self, fake_config):
+        ts = make_ticket_state(
+            status="pr_failed",
+            prs=[{"repo": "r", "id": 1, "branch": "b", "url": "http://u/1"}],
+            pr_failed_reason="ci_failed",
+        )
+        mock_platform = MagicMock()
+        mock_platform.get_pr_info.return_value = {"state": "MERGED", "approvers": []}
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets._fetch_ticket_comments", return_value=[]), \
+             patch("features.tickets.log"):
+            result = tickets._recheck_pr_failed(fake_config, {"key": "PROJ-1", "summary": "", "url": "", "status": ""}, ts, "http://b")
+        assert result["status"] == "merged"
+        assert "pr_failed_reason" not in result, (
+            "recovering pr_failed → merged must clear pr_failed_reason; a merged ticket "
+            f"has no failure cause. got reason still set: {result.get('pr_failed_reason')!r}"
+        )
+
+    def test_recovery_to_in_review_clears_reason(self, fake_config):
+        ts = make_ticket_state(
+            status="pr_failed",
+            prs=[{"repo": "r", "id": 1, "branch": "b", "url": "http://u/1"}],
+            pr_failed_reason="pr_rejected",
+        )
+        mock_platform = MagicMock()
+        mock_platform.get_pr_info.return_value = {"state": "OPEN", "approvers": []}
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.log"):
+            result = tickets._recheck_pr_failed(fake_config, {"key": "PROJ-1", "summary": "", "url": "", "status": ""}, ts, "http://b")
+        assert result["status"] == "in_review"
+        assert "pr_failed_reason" not in result, (
+            "recovering pr_failed → in_review (PR reopened) must clear pr_failed_reason. "
+            f"got reason still set: {result.get('pr_failed_reason')!r}"
+        )

@@ -129,7 +129,10 @@ details[open] > summary { color: #d1d5db; margin-bottom: 8px; }
     <div class="section-h">PR failed — needs restart ({{ visibleLoops.pr_failed_tickets.length }})</div>
     <div v-for="e in visibleLoops.pr_failed_tickets" :key="'rs:' + e.ticket_key" class="action-card">
         <div class="flex-1 min-w-0">
-            <div class="tk-key"><a :href="'/tickets/' + e.ticket_key" class="hover:underline">{{ e.ticket_key }}</a></div>
+            <div class="tk-key">
+                <a :href="'/tickets/' + e.ticket_key" class="hover:underline">{{ e.ticket_key }}</a>
+                <span v-if="e.pr_failed_reason" class="badge ml-2" :class="prFailReasonClass(e.pr_failed_reason)" :title="prFailReasonTip(e.pr_failed_reason)">{{ prFailReasonLabel(e.pr_failed_reason) }}</span>
+            </div>
             <div class="tk-sum truncate">{{ e.summary }}</div>
             <div class="tk-meta">ci_fix_attempts: {{ e.ci_fix_attempts || 0 }}</div>
             <div v-if="cardError['rs:' + e.ticket_key]" class="err-inline">{{ cardError['rs:' + e.ticket_key] }}</div>
@@ -405,6 +408,16 @@ frshtyApp({
             return 'badge-count-high';
         }
 
+        const PR_FAIL_REASONS = {
+            create_failed:   { label: 'create failed',   cls: 'badge-count-high', tip: 'PR creation failed 3× (push/auth/base-branch issue). No PR exists.' },
+            pr_rejected:     { label: 'PR rejected',     cls: 'badge-count-mid',  tip: 'PR was closed/declined/deleted on the platform without merging.' },
+            conflict_failed: { label: 'conflict failed', cls: 'badge-count-mid',  tip: 'Merge conflict resolution exhausted retries.' },
+            ci_failed:       { label: 'CI failed',       cls: 'badge-count-high', tip: 'CI checks kept failing after max auto-fix attempts.' },
+        };
+        function prFailReasonLabel(r) { return (PR_FAIL_REASONS[r] || {}).label || r; }
+        function prFailReasonClass(r) { return (PR_FAIL_REASONS[r] || {}).cls || 'badge-count-mid'; }
+        function prFailReasonTip(r)   { return (PR_FAIL_REASONS[r] || {}).tip || ''; }
+
         function fmtRelative(iso) {
             if (!iso) return '';
             const then = new Date(iso);
@@ -587,6 +600,7 @@ frshtyApp({
             renderedBody, totalActive, totalReplyCount,
             visibleLoops, visibleCounts,
             formatBucketLabel, badgeClass, fmtRelative, replyKey,
+            prFailReasonLabel, prFailReasonClass, prFailReasonTip,
             doAction, snooze, unsnooze, sendReply, openSubmitPr, confirmSubmitPr, runNow,
             refreshLive,
         };
