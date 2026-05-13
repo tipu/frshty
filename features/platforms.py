@@ -416,6 +416,46 @@ class GitHubPlatform:
             prs.extend(self._normalize_pr(pr, repo) for pr in json.loads(result.stdout))
         return prs
 
+    def find_merged_pr_by_key(self, key: str) -> dict | None:
+        if not key:
+            return None
+        candidates = []
+        for repo in self.repos:
+            result = self._run_gh([
+                "pr", "list", "--repo", repo, "--state", "merged",
+                "--search", f"{key} in:title",
+                "--json", "number,title,author,headRefName,baseRefName,mergedAt,url",
+                "--limit", "20",
+            ])
+            if result.returncode != 0:
+                continue
+            for pr in json.loads(result.stdout):
+                title = pr.get("title", "")
+                branch = pr.get("headRefName", "")
+                matches = (
+                    title.startswith(f"{key}:") or title.startswith(f"{key} ")
+                    or branch == key or branch.startswith(f"{key}-") or branch.startswith(f"{key}/")
+                )
+                if not matches:
+                    continue
+                merged_at = pr.get("mergedAt") or ""
+                if not merged_at:
+                    continue
+                candidates.append({
+                    "id": pr.get("number"),
+                    "repo": repo,
+                    "title": title,
+                    "branch": branch,
+                    "base": pr.get("baseRefName", ""),
+                    "author": (pr.get("author") or {}).get("login", ""),
+                    "merged_at": merged_at,
+                    "url": pr.get("url", ""),
+                })
+        if not candidates:
+            return None
+        candidates.sort(key=lambda p: p["merged_at"], reverse=True)
+        return candidates[0]
+
     def _me_login(self) -> str:
         if self._me_login_cache is not None:
             return self._me_login_cache

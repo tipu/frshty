@@ -158,6 +158,11 @@ def _handle_new_ticket(
             links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
             meta={"ticket": key})
     if not ts.get("discovered_at") and not ts.get("setup_failed_at"):
+        pre_merged = _t._find_pre_merged_pr(config, ticket)
+        if pre_merged:
+            ts = _t._short_circuit_to_merged(config, ticket, ts, pre_merged, base_url)
+            state.save_ticket(key, ts)
+            return ts, True
         ts = _t._setup_ticket(config, ticket, base_url)
     if "source" not in ts:
         ts["source"] = source

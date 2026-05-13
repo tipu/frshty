@@ -16,7 +16,7 @@ class TicketStatus(str, Enum):
 
 _ALLOWED: dict[TicketStatus, set[TicketStatus]] = {
     TicketStatus.pending_approval: {TicketStatus.new, TicketStatus.done},
-    TicketStatus.new:        {TicketStatus.planning},
+    TicketStatus.new:        {TicketStatus.planning, TicketStatus.merged},
     TicketStatus.planning:   {TicketStatus.reviewing},
     TicketStatus.reviewing:  {TicketStatus.pr_ready, TicketStatus.planning},
     TicketStatus.pr_ready:   {TicketStatus.reviewing, TicketStatus.in_review, TicketStatus.pr_failed, TicketStatus.merged},
