@@ -735,6 +735,100 @@ class TestCheckRebuildsMissingTicketDir:
         assert saved["status"] == "reviewing"
 
 
+class TestCheckEmitsTicketFoundOnce:
+    @staticmethod
+    def _found_calls(emit_mock):
+        return [c for c in emit_mock.call_args_list
+                if c.args and c.args[0] == "ticket_found"]
+
+    def test_fresh_ticket_emits_once(self, fake_config, tmp_state):
+        slug = "PROJ-1-do-the-thing"
+        with patch("features.tickets._fetch_tickets", return_value=[make_ticket()]), \
+             patch("features.tickets._fetch_open_prs", return_value=[]), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "myrepo", "path": tmp_state / "repo"}]), \
+             patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("features.tickets._setup_ticket",
+                   return_value={"status": "new", "slug": slug, "branch": slug,
+                                 "discovered_at": "2026-04-22T00:00:00Z"}), \
+             patch("features.tickets._enqueue_stage"), \
+             patch("features.tickets.log.emit") as emit:
+            tickets.check({**fake_config, "_base_url": "http://base"}, instance_key="inst")
+        found = self._found_calls(emit)
+        assert len(found) == 1, (
+            f"expected 1 ticket_found emit on first sighting, got {len(found)}: "
+            f"{emit.call_args_list}"
+        )
+
+    def test_existing_ticket_does_not_re_emit(self, fake_config, tmp_state):
+        import core.state as state
+        slug = "PROJ-1-do-the-thing"
+        state.save("tickets", {"PROJ-1": make_ticket_state(status="new", slug=slug)})
+        with patch("features.tickets._fetch_tickets", return_value=[make_ticket()]), \
+             patch("features.tickets._fetch_open_prs", return_value=[]), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "myrepo", "path": tmp_state / "repo"}]), \
+             patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("features.tickets._setup_ticket",
+                   return_value={"status": "new", "slug": slug, "branch": slug,
+                                 "discovered_at": "2026-04-22T00:00:00Z"}), \
+             patch("features.tickets._enqueue_stage"), \
+             patch("features.tickets.log.emit") as emit:
+            tickets.check({**fake_config, "_base_url": "http://base"}, instance_key="inst")
+        found = self._found_calls(emit)
+        assert len(found) == 0, (
+            f"expected 0 ticket_found emits for already-known ticket, "
+            f"got {len(found)}: {emit.call_args_list}"
+        )
+
+    def test_two_consecutive_check_cycles_emit_exactly_once(self, fake_config, tmp_state):
+        import core.state as state
+        slug = "PROJ-1-do-the-thing"
+        with patch("features.tickets._fetch_tickets", return_value=[make_ticket()]), \
+             patch("features.tickets._fetch_open_prs", return_value=[]), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "myrepo", "path": tmp_state / "repo"}]), \
+             patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("features.tickets._setup_ticket",
+                   return_value={"status": "new", "slug": slug, "branch": slug,
+                                 "discovered_at": "2026-04-22T00:00:00Z"}), \
+             patch("features.tickets._enqueue_stage"), \
+             patch("features.tickets.log.emit") as emit:
+            tickets.check({**fake_config, "_base_url": "http://base"}, instance_key="inst")
+            saved_after_first = state.load("tickets")
+            assert "PROJ-1" in saved_after_first, (
+                f"precondition broken: PROJ-1 not persisted after first check(), "
+                f"got keys={list(saved_after_first)}"
+            )
+            tickets.check({**fake_config, "_base_url": "http://base"}, instance_key="inst")
+        found = self._found_calls(emit)
+        assert len(found) == 1, (
+            f"expected exactly 1 ticket_found across two check() cycles, "
+            f"got {len(found)}: {emit.call_args_list}"
+        )
+
+    def test_rebuild_path_does_not_emit_ticket_found(self, fake_config, tmp_state):
+        import core.state as state
+        slug = "PROJ-1-do-the-thing"
+        state.save("tickets", {"PROJ-1": make_ticket_state(status="planning", slug=slug)})
+        with patch("features.tickets._fetch_tickets", return_value=[make_ticket()]), \
+             patch("features.tickets._fetch_open_prs", return_value=[]), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "myrepo", "path": tmp_state / "repo"}]), \
+             patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("features.tickets._setup_ticket",
+                   return_value={"status": "new", "slug": slug, "branch": slug,
+                                 "discovered_at": "2026-04-22T00:00:00Z"}), \
+             patch("features.tickets._enqueue_stage"), \
+             patch("features.tickets.log.emit") as emit:
+            tickets.check({**fake_config, "_base_url": "http://base"}, instance_key="inst")
+        found = self._found_calls(emit)
+        assert len(found) == 0, (
+            f"expected 0 ticket_found emits on ticket_dir_rebuild path, "
+            f"got {len(found)}: {emit.call_args_list}"
+        )
+
+
 class TestFixCiFailuresTask:
     def _ctx(self, config, ticket_key="PROJ-1"):
         from core.tasks.registry import TaskContext

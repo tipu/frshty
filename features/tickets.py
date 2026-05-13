@@ -656,6 +656,10 @@ def check(config: dict, instance_key: str = ""):
                 if source == "prd":
                     state.save_ticket(key, ts)
                     continue
+                if not existing:
+                    log.emit("ticket_found", f"New ticket: {key} — {ticket['summary']}",
+                        links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
+                        meta={"ticket": key})
                 ts = _setup_ticket(config, ticket, base_url)
                 if "source" not in ts:
                     ts["source"] = source
@@ -747,10 +751,6 @@ def _setup_ticket(config, ticket, base_url, comments=None) -> dict:
     key = ticket["key"]
     slug = _make_slug(key, ticket["summary"])
     branch = _make_branch(config, key, ticket)
-
-    log.emit("ticket_found", f"New ticket: {key} — {ticket['summary']}",
-        links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
-        meta={"ticket": key})
 
     any_worktree = False
     for repo in repos:
