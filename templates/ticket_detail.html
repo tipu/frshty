@@ -62,6 +62,8 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
 .collapsible-header.expanded::before { transform: rotate(90deg); }
 .collapsible-content { max-height: 600px; overflow: hidden; transition: max-height 0.2s ease-in-out; }
 .collapsible-content.collapsed { max-height: 0; opacity: 0; }
+.diff-file-sidebar { width: 240px; max-height: calc(100vh - 24px); overflow-y: auto; padding-right: 4px; }
+.diff-file-sidebar button { line-height: 1.4; }
 [v-cloak] { display: none; }
 </style>
 </head>
@@ -368,7 +370,25 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
         </button>
     </div>
     <div v-if="!parsedDiff.length && !filteredComments.length" class="text-gray-500 text-sm p-4">No diff or comments yet.</div>
-    <div v-for="file in parsedDiff" :key="file.header" class="diff-file">
+    <div class="flex gap-4 items-start">
+        <div v-if="parsedDiff.length" class="diff-file-sidebar text-xs flex-shrink-0 sticky top-2 self-start">
+            <div class="text-gray-500 uppercase tracking-wide mb-2 px-1">Files ({{ parsedDiff.length }})</div>
+            <button v-for="(file, idx) in parsedDiff" :key="file.header"
+                    @click="scrollToFile(idx)"
+                    :title="file.header"
+                    class="w-full text-left px-2 py-1 rounded hover:bg-gray-800 flex items-center gap-2">
+                <span class="font-mono truncate flex-1 text-gray-300">{{ file.header.split('/').pop() }}</span>
+                <span v-if="commentsByFile[file.header]" class="px-1.5 rounded bg-yellow-800 text-yellow-200 flex-shrink-0">{{ flatCount(commentsByFile[file.header]) }}</span>
+            </button>
+            <button v-if="unmatchedComments.length"
+                    @click="scrollToFile('unmatched')"
+                    class="w-full text-left px-2 py-1 rounded hover:bg-gray-800 flex items-center gap-2 mt-2 border-t border-gray-800 pt-2">
+                <span class="font-mono truncate flex-1 text-gray-400 italic">General Comments</span>
+                <span class="px-1.5 rounded bg-yellow-800 text-yellow-200 flex-shrink-0">{{ unmatchedComments.length }}</span>
+            </button>
+        </div>
+        <div class="flex-1 min-w-0">
+    <div v-for="(file, idx) in parsedDiff" :key="file.header" class="diff-file" :id="'diff-file-' + idx">
         <div class="diff-header">
             {{ file.header }}
             <span v-if="commentsByFile[file.header]" class="text-yellow-400 text-xs">({{ flatCount(commentsByFile[file.header]) }} comments)</span>
@@ -415,7 +435,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
             </div>
         </template>
     </div>
-    <div v-if="unmatchedComments.length" class="diff-file">
+    <div v-if="unmatchedComments.length" class="diff-file" id="diff-file-unmatched">
         <div class="diff-header">General Comments</div>
         <div v-for="c in unmatchedComments" :key="c.id" class="comment-inline" :class="commentClass(c)">
             <div class="flex items-center gap-2 text-xs mb-1">
@@ -432,6 +452,8 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
             </template>
         </div>
     </div>
+        </div><!-- /.flex-1 diff-content -->
+    </div><!-- /.flex diff-with-sidebar -->
 </div>
 
 </div><!-- /#content -->
@@ -793,6 +815,12 @@ frshtyApp({
 
         function flatCount(byLine) {
             return Object.values(byLine).reduce((a, b) => a + b.length, 0);
+        }
+
+        function scrollToFile(idx) {
+            const id = idx === 'unmatched' ? 'diff-file-unmatched' : 'diff-file-' + idx;
+            const el = document.getElementById(id);
+            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }
 
         async function load() {
@@ -1260,7 +1288,7 @@ frshtyApp({
             selectedRepo, repoTabs, filteredComments,
             renderMarkdown, escHtml,
             jobStatusClass, jobReason, jobHasOutput,
-            diffLineClass, diffLinePrefix, commentLabel, commentClass, commentBodyTextClass, commentBadgeStyle, flatCount,
+            diffLineClass, diffLinePrefix, commentLabel, commentClass, commentBodyTextClass, commentBadgeStyle, flatCount, scrollToFile,
             load, loadJobs, switchTab, saveContext, deleteContext, severityClass,
             saveRelease, clearRelease, reinspectRelease,
             setStatus, startDev, restartTicket, submitNote, onSetStateChange, toggleAutoPr,
