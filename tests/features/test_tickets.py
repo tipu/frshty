@@ -853,6 +853,30 @@ class TestCheckNewTicketIdempotency:
             f"log_events. emits={emit_summary}"
         )
 
+    def test_setup_ticket_not_re_invoked_after_persistent_failure(self, fake_config, tmp_state):
+        slug = "PROJ-1-do-the-thing"
+        with patch("features.tickets._fetch_tickets", return_value=[make_ticket()]), \
+             patch("features.tickets._fetch_open_prs", return_value=[]), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "myrepo", "path": tmp_state / "repo"}]), \
+             patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("features.tickets._setup_ticket",
+                   return_value={"status": "new", "slug": slug, "branch": slug,
+                                 "setup_failed_at": "2026-04-22T00:00:00Z"}) as setup, \
+             patch("features.tickets._enqueue_stage"), \
+             patch("features.tickets.log.emit") as emit:
+            tickets.check({**fake_config, "_base_url": "http://base"}, instance_key="inst")
+            tickets.check({**fake_config, "_base_url": "http://base"}, instance_key="inst")
+        emit_summary = [(c.args[0], c.kwargs.get("meta", {}).get("ticket"))
+                        for c in emit.call_args_list if c.args]
+        assert setup.call_count <= 1, (
+            f"_setup_ticket called {setup.call_count} times across two check() cycles "
+            f"for a ticket whose first setup FAILED (setup_failed_at set, no "
+            f"discovered_at); expected at most 1. Persistent worktree-creation "
+            f"failures (e.g. branch already exists) should not spam "
+            f"ticket_worktree_error every poll. emits={emit_summary}"
+        )
+
 
 class TestFixCiFailuresTask:
     def _ctx(self, config, ticket_key="PROJ-1"):
