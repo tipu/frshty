@@ -669,6 +669,68 @@ def _handle_in_review_ticket(
     return ts, False
 
 
+def _handle_merged_ticket(
+    config: dict,
+    ticket: dict,
+    ts: dict,
+    base_url: str,
+    instance_key: str,
+    existing: bool,
+) -> tuple[dict, bool]:
+    key = ticket["key"]
+    curr_ext = ticket.get("status", "")
+    if not ts.get("merged_external_status"):
+        ts["merged_external_status"] = curr_ext or "_merged_"
+        state.save_ticket(key, ts)
+        return ts, True
+    if curr_ext and curr_ext != ts["merged_external_status"]:
+        ts = _reingest_merged_ticket(config, ticket, ts, base_url)
+        state.save_ticket(key, ts)
+        if instance_key:
+            _enqueue_stage(instance_key, key, "start_planning")
+        return ts, True
+    if instance_key:
+        _enqueue_stage(instance_key, key, "validate_merged_ticket")
+    return ts, True
+
+
+def _handle_validation_ticket(
+    config: dict,
+    ticket: dict,
+    ts: dict,
+    base_url: str,
+    instance_key: str,
+    existing: bool,
+) -> tuple[dict, bool]:
+    if instance_key:
+        _enqueue_stage(instance_key, ticket["key"], "validate_merged_ticket")
+    return ts, True
+
+
+def _handle_pr_failed_ticket(
+    config: dict,
+    ticket: dict,
+    ts: dict,
+    base_url: str,
+    instance_key: str,
+    existing: bool,
+) -> tuple[dict, bool]:
+    key = ticket["key"]
+    if ts.get("prs"):
+        ts = _recheck_pr_failed(config, ticket, ts, base_url)
+        state.save_ticket(key, ts)
+    if ts["status"] == TicketStatus.pr_failed:
+        return ts, True
+    return ts, False
+
+
+_PRE_DISPATCH_HANDLERS = (
+    (TicketStatus.merged, _handle_merged_ticket),
+    (TicketStatus.validation, _handle_validation_ticket),
+    (TicketStatus.pr_failed, _handle_pr_failed_ticket),
+)
+
+
 _STATUS_HANDLERS = (
     ("new", _handle_new_ticket),
     ("pending_approval", _handle_pending_approval_ticket),
@@ -797,33 +859,14 @@ def check(config: dict, instance_key: str = ""):
                     state.save_ticket(key, ts)
                     continue
 
-            if ts["status"] == TicketStatus.merged:
-                curr_ext = ticket.get("status", "")
-                if not ts.get("merged_external_status"):
-                    ts["merged_external_status"] = curr_ext or "_merged_"
-                    state.save_ticket(key, ts)
+            pre_stop = False
+            for status, handler in _PRE_DISPATCH_HANDLERS:
+                if ts["status"] != status:
                     continue
-                if curr_ext and curr_ext != ts["merged_external_status"]:
-                    ts = _reingest_merged_ticket(config, ticket, ts, base_url)
-                    state.save_ticket(key, ts)
-                    if instance_key:
-                        _enqueue_stage(instance_key, key, "start_planning")
-                    continue
-                if instance_key:
-                    _enqueue_stage(instance_key, key, "validate_merged_ticket")
+                ts, pre_stop = handler(config, ticket, ts, base_url, instance_key, existing)
+                break
+            if pre_stop:
                 continue
-
-            if ts["status"] == TicketStatus.validation:
-                if instance_key:
-                    _enqueue_stage(instance_key, key, "validate_merged_ticket")
-                continue
-
-            if ts["status"] == TicketStatus.pr_failed:
-                if ts.get("prs"):
-                    ts = _recheck_pr_failed(config, ticket, ts, base_url)
-                    state.save_ticket(key, ts)
-                if ts["status"] == TicketStatus.pr_failed:
-                    continue
 
             if ts.get("branch"):
                 ts = _reconcile_prs(ts, open_prs)
