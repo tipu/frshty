@@ -604,13 +604,25 @@ def api_ticket_diff(key: str):
     tickets = state.load("tickets")
     ts = tickets.get(key)
     if not ts:
-        return {"diff": ""}
-    if ts.get("prs"):
-        platform = make_platform(_config)
-        pr = ts["prs"][0]
-        diff = platform.get_pr_diff(pr["repo"], pr["id"])
-        return {"diff": diff or ""}
-    return {"diff": _local_worktree_diff(ts)}
+        return {"repos": [], "diff": ""}
+    prs = ts.get("prs") or []
+    if not prs:
+        local = _local_worktree_diff(ts)
+        return {"repos": [{"repo": "", "pr_id": None, "url": "", "diff": local}], "diff": local}
+    platform = make_platform(_config)
+    repos_out = []
+    for pr in prs:
+        try:
+            d = platform.get_pr_diff(pr["repo"], pr["id"])
+        except Exception:
+            d = ""
+        repos_out.append({
+            "repo": pr["repo"],
+            "pr_id": pr["id"],
+            "url": pr.get("url", ""),
+            "diff": d or "",
+        })
+    return {"repos": repos_out, "diff": (repos_out[0]["diff"] if repos_out else "")}
 
 
 @router.get("/api/tickets/{key}/pr-comments")
