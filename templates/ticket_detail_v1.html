@@ -62,8 +62,6 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
 .collapsible-header.expanded::before { transform: rotate(90deg); }
 .collapsible-content { max-height: 600px; overflow: hidden; transition: max-height 0.2s ease-in-out; }
 .collapsible-content.collapsed { max-height: 0; opacity: 0; }
-.diff-file-sidebar { width: 240px; max-height: calc(100vh - 24px); overflow-y: auto; padding-right: 4px; }
-.diff-file-sidebar button { line-height: 1.4; }
 [v-cloak] { display: none; }
 </style>
 </head>
@@ -81,17 +79,6 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
 <div v-if="loadError" class="text-red-400 mb-4">Ticket not found</div>
 
 <div v-else-if="ticket" class="mb-4">
-    <div v-if="blockingBanner" class="card p-3 mb-2 border-l-4 flex items-start gap-3"
-         :class="blockingBanner.severity === 'red' ? 'border-red-500 bg-red-950/40' : blockingBanner.severity === 'yellow' ? 'border-yellow-500 bg-yellow-950/40' : 'border-blue-500 bg-blue-950/40'">
-        <div class="text-xl leading-none mt-0.5">{{ blockingBanner.icon }}</div>
-        <div class="flex-1">
-            <div class="text-sm font-semibold" :class="blockingBanner.severity === 'red' ? 'text-red-300' : blockingBanner.severity === 'yellow' ? 'text-yellow-300' : 'text-blue-300'">
-                {{ blockingBanner.title }}
-            </div>
-            <div class="text-xs text-gray-300 mt-0.5">{{ blockingBanner.detail }}</div>
-            <div v-if="blockingBanner.hint" class="text-xs text-gray-500 mt-1">{{ blockingBanner.hint }}</div>
-        </div>
-    </div>
     <div class="card p-4 flex items-center gap-4 flex-wrap">
         <select :value="status" @change="setStatus($event.target.value)"
                 class="bg-transparent border border-gray-700 rounded px-2 py-1 text-sm cursor-pointer" style="font-size:13px;">
@@ -123,23 +110,6 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
               :class="(state.ci_fix_attempts || 0) >= 2 ? 'text-red-400' : (state.ci_fix_attempts || 0) > 0 ? 'text-yellow-400' : 'text-gray-500'"
               title="Automated CI fix attempts. Maxes out at 2 before status becomes pr_failed.">
             CI fixes: {{ state.ci_fix_attempts || 0 }}/2
-        </span>
-        <span v-if="(state.pr_attempts || 0) > 0"
-              class="text-xs"
-              :class="(state.pr_attempts || 0) >= 3 ? 'text-red-400' : 'text-yellow-400'"
-              title="Failed PR creation attempts. Hits create_failed at 3.">
-            PR attempts: {{ state.pr_attempts }}/3
-        </span>
-        <span v-if="(state.conflict_resolution_attempts || 0) > 0"
-              class="text-xs"
-              :class="(state.conflict_resolution_attempts || 0) >= 3 ? 'text-red-400' : 'text-yellow-400'"
-              title="Merge conflict resolution attempts. Exhausts at 3.">
-            Conflicts: {{ state.conflict_resolution_attempts }}/3
-        </span>
-        <span v-if="(state.blocked_by || []).length"
-              class="text-xs px-2 py-0.5 rounded bg-orange-900 text-orange-200"
-              :title="`Blocked by: ${(state.blocked_by || []).join(', ')}. Waiting for these tickets to reach merged/done.`">
-            🔒 blocked by {{ (state.blocked_by || []).length }}
         </span>
         <span v-if="ticket && ticket.llm_invocations && ticket.llm_invocations.total"
               class="text-xs text-purple-300"
@@ -381,20 +351,6 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                 </div>
             </div>
         </div>
-
-        <div v-if="ticket" class="card p-3">
-            <div class="flex items-center justify-between mb-3 pb-3 border-b border-gray-700">
-                <div class="collapsible-header" :class="sections.rawState ? 'expanded' : 'collapsed'"
-                     @click="sections.rawState = !sections.rawState">
-                    <span class="text-xs font-bold text-gray-500 uppercase">Raw State</span>
-                </div>
-                <button v-if="sections.rawState" @click.stop="copyRawState"
-                        class="text-xs text-gray-500 hover:text-gray-300">{{ rawStateCopied ? '✓ copied' : 'copy' }}</button>
-            </div>
-            <div class="collapsible-content" :class="sections.rawState ? 'expanded' : 'collapsed'">
-                <pre class="text-xs text-gray-400 whitespace-pre-wrap break-all" style="max-height: 500px; overflow-y: auto;">{{ rawStateJson }}</pre>
-            </div>
-        </div>
     </div>
 </div>
 
@@ -412,25 +368,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
         </button>
     </div>
     <div v-if="!parsedDiff.length && !filteredComments.length" class="text-gray-500 text-sm p-4">No diff or comments yet.</div>
-    <div class="flex gap-4 items-start">
-        <div v-if="parsedDiff.length" class="diff-file-sidebar text-xs flex-shrink-0 sticky top-2 self-start">
-            <div class="text-gray-500 uppercase tracking-wide mb-2 px-1">Files ({{ parsedDiff.length }})</div>
-            <button v-for="(file, idx) in parsedDiff" :key="file.header"
-                    @click="scrollToFile(idx)"
-                    :title="file.header"
-                    class="w-full text-left px-2 py-1 rounded hover:bg-gray-800 flex items-center gap-2">
-                <span class="font-mono truncate flex-1 text-gray-300">{{ file.header.split('/').pop() }}</span>
-                <span v-if="commentsByFile[file.header]" class="px-1.5 rounded bg-yellow-800 text-yellow-200 flex-shrink-0">{{ flatCount(commentsByFile[file.header]) }}</span>
-            </button>
-            <button v-if="unmatchedComments.length"
-                    @click="scrollToFile('unmatched')"
-                    class="w-full text-left px-2 py-1 rounded hover:bg-gray-800 flex items-center gap-2 mt-2 border-t border-gray-800 pt-2">
-                <span class="font-mono truncate flex-1 text-gray-400 italic">General Comments</span>
-                <span class="px-1.5 rounded bg-yellow-800 text-yellow-200 flex-shrink-0">{{ unmatchedComments.length }}</span>
-            </button>
-        </div>
-        <div class="flex-1 min-w-0">
-    <div v-for="(file, idx) in parsedDiff" :key="file.header" class="diff-file" :id="'diff-file-' + idx">
+    <div v-for="file in parsedDiff" :key="file.header" class="diff-file">
         <div class="diff-header">
             {{ file.header }}
             <span v-if="commentsByFile[file.header]" class="text-yellow-400 text-xs">({{ flatCount(commentsByFile[file.header]) }} comments)</span>
@@ -477,7 +415,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
             </div>
         </template>
     </div>
-    <div v-if="unmatchedComments.length" class="diff-file" id="diff-file-unmatched">
+    <div v-if="unmatchedComments.length" class="diff-file">
         <div class="diff-header">General Comments</div>
         <div v-for="c in unmatchedComments" :key="c.id" class="comment-inline" :class="commentClass(c)">
             <div class="flex items-center gap-2 text-xs mb-1">
@@ -494,8 +432,6 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
             </template>
         </div>
     </div>
-        </div><!-- /.flex-1 diff-content -->
-    </div><!-- /.flex diff-with-sidebar -->
 </div>
 
 </div><!-- /#content -->
@@ -571,16 +507,7 @@ frshtyApp({
         const prModalOpen = ref(false);
         const prRepos = ref([]);
         const prSubmitting = ref(false);
-        const sections = reactive({ context: true, notes: false, history: false, rawState: false });
-        const rawStateCopied = ref(false);
-        const rawStateJson = computed(() => JSON.stringify(state.value || {}, null, 2));
-        function copyRawState() {
-            try {
-                navigator.clipboard.writeText(rawStateJson.value);
-                rawStateCopied.value = true;
-                setTimeout(() => { rawStateCopied.value = false; }, 1500);
-            } catch (e) { /* clipboard blocked — ignore */ }
-        }
+        const sections = reactive({ context: true, notes: false, history: false });
         const docExpanded = reactive({});
         const replyDrafts = reactive({});
         const jobOutput = reactive({ jobId: null, taskName: '', text: '', offset: 0 });
@@ -615,67 +542,6 @@ frshtyApp({
         };
         const prFailReasonLabel = computed(() => (PR_FAIL_REASONS[state.value.pr_failed_reason] || {}).label || state.value.pr_failed_reason);
         const prFailReasonTip = computed(() => (PR_FAIL_REASONS[state.value.pr_failed_reason] || {}).tip || '');
-
-        const blockingBanner = computed(() => {
-            const s = state.value;
-            const blockedBy = s.blocked_by || [];
-            if (status.value === 'pr_failed' && s.pr_failed_reason) {
-                const info = PR_FAIL_REASONS[s.pr_failed_reason] || {};
-                return {
-                    severity: 'red',
-                    icon: '🔴',
-                    title: `PR pipeline stuck: ${info.label || s.pr_failed_reason}`,
-                    detail: info.tip || '',
-                    hint: 'Use Restart, change Set State, or Discard.',
-                };
-            }
-            if (blockedBy.length) {
-                return {
-                    severity: 'yellow',
-                    icon: '🔒',
-                    title: `Waiting on ${blockedBy.length} ticket${blockedBy.length > 1 ? 's' : ''}: ${blockedBy.join(', ')}`,
-                    detail: 'LLM ranker marked these as foundations. Planning will start once they reach merged or done.',
-                    hint: s.blocked_by_ranked_at ? `Ranked at ${s.blocked_by_ranked_at.slice(0, 19).replace('T', ' ')} — auto-clears after 24h.` : '',
-                };
-            }
-            if (s.setup_failed_at) {
-                return {
-                    severity: 'red',
-                    icon: '⚠',
-                    title: 'Worktree setup failed',
-                    detail: `Failed at ${s.setup_failed_at.slice(0, 19).replace('T', ' ')}. Frshty will retry next scan.`,
-                    hint: '',
-                };
-            }
-            if (stalled.value) {
-                return {
-                    severity: 'yellow',
-                    icon: '⏸',
-                    title: 'Claude terminal stopped',
-                    detail: 'Ticket is in an active state but the LLM session is not running.',
-                    hint: 'Restart to resume.',
-                };
-            }
-            if (s._ci_failed_pending) {
-                return {
-                    severity: 'yellow',
-                    icon: '🟡',
-                    title: 'CI failures queued for auto-fix',
-                    detail: 'Frshty has detected failing CI and will run fix_ci_failures shortly.',
-                    hint: '',
-                };
-            }
-            if (status.value === 'pr_ready' && s.pr_scheduled_at) {
-                return {
-                    severity: 'blue',
-                    icon: '⏱',
-                    title: 'PR creation scheduled',
-                    detail: `Will fire at ${s.pr_scheduled_at.slice(0, 19).replace('T', ' ')}.`,
-                    hint: '',
-                };
-            }
-            return null;
-        });
 
         function formatCoFieldDiff(diff) {
             return Object.entries(diff || {})
@@ -927,12 +793,6 @@ frshtyApp({
 
         function flatCount(byLine) {
             return Object.values(byLine).reduce((a, b) => a + b.length, 0);
-        }
-
-        function scrollToFile(idx) {
-            const id = idx === 'unmatched' ? 'diff-file-unmatched' : 'diff-file-' + idx;
-            const el = document.getElementById(id);
-            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }
 
         async function load() {
@@ -1393,15 +1253,14 @@ frshtyApp({
             prModalOpen, prRepos, prSubmitting,
             jobOutputEl, terminalContainer,
             state, status, branch, terminalAlive, inProgress, stalled, hasPrs, hasCode, lockedAutoPr,
-            prFailReasonLabel, prFailReasonTip, blockingBanner,
-            rawStateJson, rawStateCopied, copyRawState,
+            prFailReasonLabel, prFailReasonTip,
             mergedJobsTransitions, formatCoFieldDiff,
             ticketUrl, prScheduledLabel, dropdownStates,
             sortedDocs, filteredHistory, parsedDiff, commentsByFile, unmatchedComments,
             selectedRepo, repoTabs, filteredComments,
             renderMarkdown, escHtml,
             jobStatusClass, jobReason, jobHasOutput,
-            diffLineClass, diffLinePrefix, commentLabel, commentClass, commentBodyTextClass, commentBadgeStyle, flatCount, scrollToFile,
+            diffLineClass, diffLinePrefix, commentLabel, commentClass, commentBodyTextClass, commentBadgeStyle, flatCount,
             load, loadJobs, switchTab, saveContext, deleteContext, severityClass,
             saveRelease, clearRelease, reinspectRelease,
             setStatus, startDev, restartTicket, submitNote, onSetStateChange, toggleAutoPr,
