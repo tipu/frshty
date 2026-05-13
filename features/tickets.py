@@ -71,7 +71,7 @@ _REPO_GATED_TASKS = frozenset({
     "setup_prd_ticket", "start_planning", "mark_ready", "create_pr",
 })
 
-_GATE_OCCUPYING_STATUSES = ("planning", "reviewing", "pr_ready", "in_review")
+_GATE_OCCUPYING_STATUSES = ("planning", "reviewing")
 
 _repo_gate_locks: dict[str, threading.Lock] = {}
 _repo_gate_locks_guard = threading.Lock()
@@ -88,22 +88,29 @@ def _gate_lock_for(instance_key: str) -> threading.Lock:
 
 def _repo_gate_blocked(instance_key: str, ticket_key: str) -> str | None:
     """Per-repo serialization gate. Returns the ticket_key of another ticket
-    in the same instance that is currently materialized (slug set, source=prd)
-    OR whose status occupies the pipeline (planning, reviewing, pr_ready,
-    in_review). Returns None if the gate is clear.
+    in the same instance whose status occupies the pipeline (planning,
+    reviewing). Returns None if the gate is clear.
 
-    Includes "new but slug set" so a ticket whose worktree has been created
-    via setup_prd_ticket (but whose start_planning has not yet flipped status)
-    still holds the gate. Without that, a second setup_prd_ticket between
-    the first ticket's setup completion and its start_planning entry would
-    see no occupant and slip through.
+    Only active-LLM-modifying states (planning, reviewing) occupy the gate.
+    pr_ready and in_review do not occupy the gate because the LLM has stopped
+    modifying the worktree by then — the PR is open and waiting for human
+    merge or external CI. Holding the gate through in_review caused a
+    deadlock on instances with auto_merge=false where every new ticket
+    accumulated in "new+slug" behind a permanently-in_review ticket.
+
+    The "new but slug set" clause was removed for the same reason: it
+    created mutual-blocking deadlock when multiple new tickets were
+    discovered in a single scan cycle. Concurrent start_planning is
+    prevented at runtime by core.tasks.tickets.start_planning's gate-lock
+    + status re-check (only one ticket can transition into "planning"
+    inside the threading.Lock), so the enqueue-time gate only needs to
+    block on already-active pipeline states.
     """
     import core.db as _db
     rows = _db.query_all(
         "SELECT ticket_key FROM tickets"
         " WHERE instance_key=? AND ticket_key<>?"
-        f"      AND ( status IN ({','.join('?' for _ in _GATE_OCCUPYING_STATUSES)})"
-        "             OR (status='new' AND slug IS NOT NULL AND slug<>'') )"
+        f"      AND status IN ({','.join('?' for _ in _GATE_OCCUPYING_STATUSES)})"
         " ORDER BY updated_at ASC LIMIT 1",
         (instance_key, ticket_key, *_GATE_OCCUPYING_STATUSES),
     )
