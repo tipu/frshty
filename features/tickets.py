@@ -660,7 +660,7 @@ def check(config: dict, instance_key: str = ""):
                     log.emit("ticket_found", f"New ticket: {key} — {ticket['summary']}",
                         links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
                         meta={"ticket": key})
-                if not ts.get("discovered_at"):
+                if not ts.get("discovered_at") and not ts.get("setup_failed_at"):
                     ts = _setup_ticket(config, ticket, base_url)
                 if "source" not in ts:
                     ts["source"] = source
@@ -792,7 +792,8 @@ def _setup_ticket(config, ticket, base_url, comments=None) -> dict:
     if not any_worktree:
         log.emit("ticket_worktree_error", f"No worktrees created for {slug}, staying at new",
             meta={"ticket": key})
-        return {"status": TicketStatus.new.value, "slug": slug, "branch": branch}
+        return {"status": TicketStatus.new.value, "slug": slug, "branch": branch,
+                "setup_failed_at": datetime.now(timezone.utc).isoformat()}
 
     docs_path = ws["root"] / ws["tickets_dir"] / slug / "docs"
     docs_path.mkdir(parents=True, exist_ok=True)
