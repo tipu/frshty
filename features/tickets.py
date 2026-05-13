@@ -660,7 +660,8 @@ def check(config: dict, instance_key: str = ""):
                     log.emit("ticket_found", f"New ticket: {key} — {ticket['summary']}",
                         links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
                         meta={"ticket": key})
-                ts = _setup_ticket(config, ticket, base_url)
+                if not ts.get("discovered_at"):
+                    ts = _setup_ticket(config, ticket, base_url)
                 if "source" not in ts:
                     ts["source"] = source
                 if ts.get("discovered_at") and instance_key:
