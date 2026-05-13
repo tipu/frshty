@@ -355,7 +355,19 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
 </div>
 
 <div v-show="activeTab === 'diff'">
-    <div v-if="!parsedDiff.length && !comments.length" class="text-gray-500 text-sm p-4">No diff or comments yet.</div>
+    <div v-if="repoTabs.length > 1" class="flex gap-1 text-xs mb-3 border-b border-gray-700 pb-2 flex-wrap">
+        <button v-for="rt in repoTabs" :key="rt.repo"
+                @click="selectedRepo = rt.repo"
+                :class="rt.repo === selectedRepo ? 'bg-blue-900 text-blue-100' : 'bg-gray-800 text-gray-400 hover:text-gray-200'"
+                class="px-3 py-1 rounded">
+            <span class="font-mono">{{ rt.repo }}</span>
+            <span v-if="rt.pr_id" class="text-gray-500 ml-1">#{{ rt.pr_id }}</span>
+            <span class="text-gray-500 ml-1">· {{ rt.fileCount }} files</span>
+            <span v-if="rt.needsReplyCount" class="ml-1 px-1.5 rounded bg-yellow-800 text-yellow-200">{{ rt.needsReplyCount }} reply</span>
+            <span v-else-if="rt.commentCount" class="ml-1 px-1.5 rounded bg-gray-700 text-gray-300">{{ rt.commentCount }}</span>
+        </button>
+    </div>
+    <div v-if="!parsedDiff.length && !filteredComments.length" class="text-gray-500 text-sm p-4">No diff or comments yet.</div>
     <div v-for="file in parsedDiff" :key="file.header" class="diff-file">
         <div class="diff-header">
             {{ file.header }}
@@ -477,7 +489,8 @@ frshtyApp({
         const features = ref({});
         const runCommands = ref([]);
         const jobs = ref([]);
-        const diffData = ref({ diff: '' });
+        const diffData = ref({ repos: [], diff: '' });
+        const selectedRepo = ref('');
         const comments = ref([]);
         const contextText = ref('');
         const noteText = ref('');
@@ -629,8 +642,38 @@ frshtyApp({
             return hist.filter(e => !isNoiseEvent(e));
         });
 
+        const filteredComments = computed(() => {
+            const repo = selectedRepo.value;
+            if (!repo) return comments.value;
+            return comments.value.filter(c => (c.pr_repo || '') === repo);
+        });
+
+        const repoTabs = computed(() => {
+            const repos = (diffData.value && diffData.value.repos) || [];
+            return repos.map(r => {
+                const repoComments = comments.value.filter(c => (c.pr_repo || '') === r.repo);
+                const needsReplyCount = repoComments.filter(c => (c.status || 'needs_reply') === 'needs_reply').length;
+                const fileCount = (r.diff || '').split('\n').filter(l => l.startsWith('diff --git')).length;
+                return {
+                    repo: r.repo,
+                    pr_id: r.pr_id,
+                    url: r.url,
+                    fileCount,
+                    commentCount: repoComments.length,
+                    needsReplyCount,
+                };
+            });
+        });
+
         const parsedDiff = computed(() => {
-            const raw = (diffData.value && diffData.value.diff) || '';
+            const repos = (diffData.value && diffData.value.repos) || [];
+            let raw = '';
+            if (repos.length) {
+                const match = repos.find(r => r.repo === selectedRepo.value);
+                raw = (match || repos[0] || {}).diff || '';
+            } else {
+                raw = (diffData.value && diffData.value.diff) || '';
+            }
             const files = [];
             let current = null;
             for (const line of raw.split('\n')) {
@@ -660,7 +703,7 @@ frshtyApp({
 
         const commentsByFile = computed(() => {
             const out = {};
-            for (const c of comments.value) {
+            for (const c of filteredComments.value) {
                 const k = c.path || '';
                 if (!out[k]) out[k] = {};
                 const ln = c.line || 0;
@@ -671,7 +714,7 @@ frshtyApp({
         });
 
         const unmatchedComments = computed(() =>
-            comments.value.filter(c => !parsedDiff.value.some(f => f.header === (c.path || '')))
+            filteredComments.value.filter(c => !parsedDiff.value.some(f => f.header === (c.path || '')))
         );
 
         function highlightFile(file) {
@@ -779,6 +822,14 @@ frshtyApp({
                 // seed reply drafts from server-suggested replies on first load
                 for (const c of comments.value) {
                     if (replyDrafts[c.id] === undefined) replyDrafts[c.id] = c.suggested_reply || '';
+                }
+                // seed selectedRepo: prefer repo with most needs_reply comments, else first
+                if (!selectedRepo.value) {
+                    const tabs = repoTabs.value;
+                    if (tabs.length) {
+                        const sorted = [...tabs].sort((a, b) => b.needsReplyCount - a.needsReplyCount);
+                        selectedRepo.value = sorted[0].repo;
+                    }
                 }
             } catch (e) {
                 console.error('load failed', e);
@@ -1206,6 +1257,7 @@ frshtyApp({
             mergedJobsTransitions, formatCoFieldDiff,
             ticketUrl, prScheduledLabel, dropdownStates,
             sortedDocs, filteredHistory, parsedDiff, commentsByFile, unmatchedComments,
+            selectedRepo, repoTabs, filteredComments,
             renderMarkdown, escHtml,
             jobStatusClass, jobReason, jobHasOutput,
             diffLineClass, diffLinePrefix, commentLabel, commentClass, commentBodyTextClass, commentBadgeStyle, flatCount,
