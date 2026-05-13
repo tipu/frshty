@@ -18,12 +18,74 @@ meta-invariant test that asserts a second check() cycle produces zero new
 log_events.
 """
 from datetime import datetime, timezone
+from typing import TypedDict
 
 import core.log as log
 import core.state as state
 from core.ticket_status import TicketStatus
 
 import features.tickets as _t
+
+
+class TicketState(TypedDict, total=False):
+    """Declared fields valid on a ticket-state dict.
+
+    All fields are optional (total=False) because tickets in different
+    statuses populate different subsets. This is a documentation/type-hint
+    layer only — there is no runtime enforcement. Treat the dispatcher's
+    docstring at features.tickets.check() as the canonical reference for
+    when each field is set and cleared.
+
+    Field categories:
+    - lifecycle: status, external_status, url, source, summary, description,
+      done_at, requeued_at, reopened_count, slug, branch
+    - setup markers: discovered_at, setup_failed_at
+    - approval markers: approval_status
+    - merge markers: merged_at, merged_external_status, merged_comment_snapshot,
+      last_merged_at, last_merged_external_status, last_merged_comment_snapshot,
+      ticket_comment_snapshot
+    - PR markers: prs, pr_scheduled_at, pr_attempts, pr_failed_reason
+    - conflict markers: conflict_resolution_attempts, last_conflict_error
+    - CI markers: ci_fix_attempts, ci_passed, checks_started_at,
+      _ci_failed_pending, _ci_timeout_state
+    - comment markers: last_comment_ids, comment_fix_attempts
+    - misc: llm_sessions
+    """
+    status: str
+    external_status: str
+    url: str
+    source: str
+    summary: str
+    description: str
+    done_at: str
+    requeued_at: str
+    reopened_count: int
+    slug: str
+    branch: str
+    discovered_at: str
+    setup_failed_at: str
+    approval_status: str
+    merged_at: str
+    merged_external_status: str
+    merged_comment_snapshot: dict
+    last_merged_at: str
+    last_merged_external_status: str
+    last_merged_comment_snapshot: dict
+    ticket_comment_snapshot: dict
+    prs: list
+    pr_scheduled_at: str
+    pr_attempts: int
+    pr_failed_reason: str
+    conflict_resolution_attempts: int
+    last_conflict_error: str
+    ci_fix_attempts: int
+    ci_passed: bool
+    checks_started_at: str
+    _ci_failed_pending: bool
+    _ci_timeout_state: dict
+    last_comment_ids: dict
+    comment_fix_attempts: dict
+    llm_sessions: dict
 
 
 def _handle_new_ticket(
