@@ -361,7 +361,6 @@ frshtyApp({
         async function load() {
             try {
                 client.value = await api('/api/billing/client');
-                document.title = `Billing · ${client.value.name || 'frshty'}`;
                 const calls = [
                     api('/api/billing/entries'),
                     api('/api/billing/invoices'),

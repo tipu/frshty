@@ -221,7 +221,6 @@ frshtyApp({
             const config = await resp.json();
             features.value = config.features || {};
             instanceName.value = config.job?.key || 'default';
-            document.title = `frshty — ${instanceName.value}`;
         }
 
         async function toggleFeature(key, enabled) {
