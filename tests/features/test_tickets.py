@@ -878,6 +878,45 @@ class TestCheckNewTicketIdempotency:
         )
 
 
+class TestEmitOnce:
+    def test_emits_on_first_call_and_sets_marker(self):
+        ts = {"status": "new"}
+        with patch("features.tickets.log.emit") as emit:
+            result = tickets.emit_once(
+                ts, "test_marker", "test_event", "summary",
+                links={"l": 1}, meta={"ticket": "T-1"},
+            )
+        assert result is True
+        assert emit.call_count == 1
+        call = emit.call_args_list[0]
+        assert call.args[0] == "test_event"
+        assert call.args[1] == "summary"
+        assert call.kwargs["links"] == {"l": 1}
+        assert call.kwargs["meta"] == {"ticket": "T-1"}
+        assert ts.get("test_marker"), "marker not set after emit"
+
+    def test_suppresses_on_second_call_with_same_marker(self):
+        ts = {"status": "new", "test_marker": "2026-01-01T00:00:00Z"}
+        with patch("features.tickets.log.emit") as emit:
+            result = tickets.emit_once(ts, "test_marker", "test_event", "summary")
+        assert result is False, "emit_once must return False when marker already set"
+        assert emit.call_count == 0, (
+            f"emit_once must not call log.emit when marker is set; "
+            f"got {emit.call_args_list}"
+        )
+        assert ts["test_marker"] == "2026-01-01T00:00:00Z", "existing marker overwritten"
+
+    def test_two_consecutive_calls_emit_exactly_once(self):
+        ts = {"status": "new"}
+        with patch("features.tickets.log.emit") as emit:
+            tickets.emit_once(ts, "marker_x", "event_x", "summary")
+            tickets.emit_once(ts, "marker_x", "event_x", "summary")
+        events = [c.args[0] for c in emit.call_args_list]
+        assert events == ["event_x"], (
+            f"expected exactly one event_x emit across two calls; got {events}"
+        )
+
+
 class TestCheckIdempotentSecondCycle:
     @pytest.mark.parametrize("status", ["new", "planning", "reviewing", "pr_ready", "in_review"])
     def test_second_check_cycle_emits_no_ticket_events(
