@@ -1024,6 +1024,155 @@ class TestFindPreMergedPr:
         assert "merged_pr_guard_error" in events
 
 
+class TestBreakCycles:
+    def test_keeps_non_cyclic_edges(self):
+        out = tickets._break_cycles({"B": ["A"], "C": ["A"]})
+        assert out == {"B": ["A"], "C": ["A"]}
+
+    def test_drops_direct_cycle(self):
+        out = tickets._break_cycles({"A": ["B"], "B": ["A"]})
+        assert out == {"A": ["B"]} or out == {"B": ["A"]}, (
+            "exactly one direction of a 2-node cycle should survive"
+        )
+
+    def test_drops_transitive_cycle(self):
+        out = tickets._break_cycles({"A": ["B"], "B": ["C"], "C": ["A"]})
+        edges = sum(len(v) for v in out.values())
+        assert edges == 2, f"3-node cycle should drop exactly one edge; got {out}"
+
+
+class TestDependencyBlocked:
+    def _save_ticket(self, key, status, blocked_by=None, ranked_at=None):
+        from core import state
+        ts = {"status": status, "summary": "x"}
+        if blocked_by is not None:
+            ts["blocked_by"] = blocked_by
+        if ranked_at is not None:
+            ts["blocked_by_ranked_at"] = ranked_at
+        if status == "merged":
+            ts["merged_external_status"] = "X"
+        state.save_ticket(key, ts)
+
+    def test_returns_none_when_no_blocked_by(self, tmp_state):
+        self._save_ticket("PROJ-1", "new")
+        assert tickets._dependency_blocked("test", "PROJ-1") is None
+
+    def test_returns_blocker_when_blocker_non_terminal(self, tmp_state):
+        from datetime import datetime, timezone
+        self._save_ticket("PROJ-A", "planning")
+        self._save_ticket("PROJ-B", "new", blocked_by=["PROJ-A"],
+                          ranked_at=datetime.now(timezone.utc).isoformat())
+        assert tickets._dependency_blocked("test", "PROJ-B") == "PROJ-A"
+
+    def test_returns_none_when_blocker_terminal(self, tmp_state):
+        from datetime import datetime, timezone
+        self._save_ticket("PROJ-A", "merged")
+        self._save_ticket("PROJ-B", "new", blocked_by=["PROJ-A"],
+                          ranked_at=datetime.now(timezone.utc).isoformat())
+        assert tickets._dependency_blocked("test", "PROJ-B") is None
+
+    def test_auto_clears_stale_blocked_by_after_timeout(self, tmp_state):
+        from datetime import datetime, timezone, timedelta
+        old_ts = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+        self._save_ticket("PROJ-A", "planning")
+        self._save_ticket("PROJ-B", "new", blocked_by=["PROJ-A"], ranked_at=old_ts)
+        with patch("features.tickets.log.emit") as emit:
+            result = tickets._dependency_blocked("test", "PROJ-B")
+        assert result is None, "stale blocked_by must be auto-cleared after 24h"
+        events = [c.args[0] for c in emit.call_args_list]
+        assert "blocked_by_auto_cleared" in events
+        from core import state
+        ts = state.load_ticket("PROJ-B")
+        assert ts["blocked_by"] == [], "blocked_by must be cleared on the row"
+
+
+class TestRankNewTickets:
+    def _save_new(self, key, summary, description=""):
+        from core import state
+        state.save_ticket(key, {"status": "new", "summary": summary, "description": description})
+
+    def test_no_op_when_no_new_tickets(self, tmp_state):
+        from core import state
+        result = tickets._rank_new_tickets(state._active_key())
+        assert result["ranked"] == 0
+        assert result["reason"] == "no_non_terminal_tickets"
+
+    def test_single_new_ticket_gets_empty_blocked_by(self, tmp_state):
+        from core import state
+        self._save_new("PROJ-1", "Lonely ticket")
+        with patch("features.tickets.run_haiku") as haiku:
+            result = tickets._rank_new_tickets(state._active_key())
+        assert haiku.call_count == 0, "should not call LLM when only one ticket"
+        from core import state
+        ts = state.load_ticket("PROJ-1")
+        assert ts["blocked_by"] == []
+        assert "blocked_by_ranked_at" in ts
+
+    def test_writes_blocked_by_from_llm_response(self, tmp_state):
+        from core import state
+        self._save_new("PROJ-A", "Add users table migration")
+        self._save_new("PROJ-B", "Add user filter API on top of users table")
+        llm_response = '{"dependencies": [{"key": "PROJ-B", "blocked_by": ["PROJ-A"], "reason": "needs table"}]}'
+        with patch("features.tickets.run_haiku", return_value=llm_response):
+            result = tickets._rank_new_tickets(state._active_key())
+        from core import state
+        a = state.load_ticket("PROJ-A")
+        b = state.load_ticket("PROJ-B")
+        assert a["blocked_by"] == []
+        assert b["blocked_by"] == ["PROJ-A"]
+        assert result["ranked"] >= 1
+
+    def test_only_mutates_status_new_tickets(self, tmp_state):
+        from core import state
+        self._save_new("PROJ-A", "foundation")
+        self._save_new("PROJ-X", "extra to force >1 in_scope")
+        state.save_ticket("PROJ-B", {"status": "planning", "summary": "feat B", "blocked_by": []})
+        llm_response = '{"dependencies": [{"key": "PROJ-B", "blocked_by": ["PROJ-A"], "reason": "x"}]}'
+        with patch("features.tickets.run_haiku", return_value=llm_response):
+            tickets._rank_new_tickets(state._active_key())
+        b = state.load_ticket("PROJ-B")
+        assert b["blocked_by"] == [], "blocked_by must be immutable once status leaves new"
+
+    def test_drops_unknown_keys_from_llm(self, tmp_state):
+        from core import state
+        self._save_new("PROJ-A", "real")
+        self._save_new("PROJ-B", "real")
+        llm_response = '{"dependencies": [{"key": "PROJ-B", "blocked_by": ["GHOST-99"], "reason": "x"}]}'
+        with patch("features.tickets.run_haiku", return_value=llm_response):
+            tickets._rank_new_tickets(state._active_key())
+        from core import state
+        b = state.load_ticket("PROJ-B")
+        assert b["blocked_by"] == [], "unknown blocker keys must be filtered out"
+
+
+class TestEnqueueStageDependencyGate:
+    def test_skip_start_planning_when_dependency_blocked(self, tmp_state):
+        from core import state
+        from datetime import datetime, timezone
+        state.save_ticket("PROJ-A", {"status": "planning", "summary": "x"})
+        state.save_ticket("PROJ-B", {"status": "new", "summary": "y",
+                                      "blocked_by": ["PROJ-A"],
+                                      "blocked_by_ranked_at": datetime.now(timezone.utc).isoformat()})
+        with patch("core.queue.enqueue_job") as enqueue, \
+             patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("features.tickets._repo_gate_blocked", return_value=None):
+            tickets._enqueue_stage("test", "PROJ-B", "start_planning")
+        assert enqueue.call_count == 0, "must NOT enqueue while blocked_by holds non-terminal blocker"
+
+    def test_enqueue_start_planning_when_blocker_terminal(self, tmp_state):
+        from core import state
+        from datetime import datetime, timezone
+        state.save_ticket("PROJ-A", {"status": "merged", "summary": "x", "merged_external_status": "X"})
+        state.save_ticket("PROJ-B", {"status": "new", "summary": "y",
+                                      "blocked_by": ["PROJ-A"],
+                                      "blocked_by_ranked_at": datetime.now(timezone.utc).isoformat()})
+        with patch("core.queue.enqueue_job") as enqueue, \
+             patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("features.tickets._repo_gate_blocked", return_value=None):
+            tickets._enqueue_stage("test", "PROJ-B", "start_planning")
+        assert enqueue.call_count == 1, "must enqueue once blocker reaches terminal status"
+
+
 class TestCheckIdempotentSecondCycle:
     @pytest.mark.parametrize("status", ["new", "planning", "reviewing", "pr_ready", "in_review"])
     def test_second_check_cycle_emits_no_ticket_events(
