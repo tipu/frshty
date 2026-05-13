@@ -137,6 +137,18 @@ def scan_tickets(ctx: TaskContext) -> TaskResult:
         return TaskResult("failed", f"{type(e).__name__}: {e}")
 
 
+@task("rank_new_tickets", preconditions=[feature_enabled("tickets")], timeout=90)
+def rank_new_tickets(ctx: TaskContext) -> TaskResult:
+    from features import tickets as tix
+    try:
+        result = tix._rank_new_tickets(ctx.instance_key)
+        return TaskResult("ok", artifacts=result)
+    except Exception as e:
+        log.emit("rank_new_tickets_error", f"[{ctx.instance_key}] {type(e).__name__}: {e}",
+                 meta={"error": type(e).__name__})
+        return TaskResult("failed", f"{type(e).__name__}: {e}")
+
+
 @task("setup_prd_ticket",
       preconditions=[status_is("new", "planning"), repo_gate_clear],
       postconditions=[file_exists("docs/ticket.md")],

@@ -73,6 +73,9 @@ _REPO_GATED_TASKS = frozenset({
 
 _GATE_OCCUPYING_STATUSES = ("planning", "reviewing")
 
+_TERMINAL_STATUSES = frozenset({"merged", "done"})
+_BLOCKED_BY_TIMEOUT_HOURS = 24
+
 _repo_gate_locks: dict[str, threading.Lock] = {}
 _repo_gate_locks_guard = threading.Lock()
 
@@ -126,6 +129,40 @@ def _parse_iso(ts: str | None) -> datetime | None:
         return None
 
 
+def _dependency_blocked(instance_key: str, ticket_key: str) -> str | None:
+    """Return the key of a non-terminal blocker for this ticket, or None.
+
+    Reads ticket.data.blocked_by. Auto-clears the field if it's older than
+    _BLOCKED_BY_TIMEOUT_HOURS to prevent permanent stalls from hallucinated
+    dependencies. Mutates the ticket row when clearing.
+    """
+    try:
+        ts = state.load_ticket(ticket_key) or {}
+    except RuntimeError:
+        return None
+    blocked_by = ts.get("blocked_by") or []
+    if not blocked_by:
+        return None
+    ranked_at = ts.get("blocked_by_ranked_at") or ""
+    if ranked_at:
+        ranked_dt = _parse_iso(ranked_at)
+        if ranked_dt is not None:
+            age_hours = (datetime.now(timezone.utc) - ranked_dt).total_seconds() / 3600.0
+            if age_hours > _BLOCKED_BY_TIMEOUT_HOURS:
+                ts["blocked_by"] = []
+                ts["blocked_by_cleared_at"] = datetime.now(timezone.utc).isoformat()
+                state.save_ticket(ticket_key, ts)
+                log.emit("blocked_by_auto_cleared",
+                         f"{ticket_key}: cleared stale blocked_by={blocked_by} after {age_hours:.0f}h",
+                         meta={"ticket": ticket_key, "stale_blockers": list(blocked_by), "age_hours": round(age_hours, 1)})
+                return None
+    for blocker_key in blocked_by:
+        blocker = state.load_ticket(blocker_key) or {}
+        if blocker.get("status") not in _TERMINAL_STATUSES:
+            return blocker_key
+    return None
+
+
 def _enqueue_stage(instance_key: str, ticket_key: str, task_name: str) -> None:
     if task_name in _LLM_BACKED_TASKS:
         from core.llm import _guard_status
@@ -134,6 +171,9 @@ def _enqueue_stage(instance_key: str, ticket_key: str, task_name: str) -> None:
         except Exception:
             blocked = False
         if blocked:
+            return
+    if task_name == "start_planning":
+        if _dependency_blocked(instance_key, ticket_key):
             return
     if task_name in _REPO_GATED_TASKS:
         if _repo_gate_blocked(instance_key, ticket_key):
@@ -156,6 +196,125 @@ def _enqueue_stage(instance_key: str, ticket_key: str, task_name: str) -> None:
     if consecutive >= MAX_STAGE_RETRIES:
         return
     q.enqueue_job(instance_key, task_name, ticket_key=ticket_key)
+
+
+_RANKER_PROMPT = """You are ranking software tickets for execution order. Each ticket below shows its key, title, and brief description.
+
+A ticket should be "blocked_by" another ONLY if the blocker is a structural foundation that must merge first — e.g., the blocker creates a service/table/schema/abstraction/migration that the dependent extends, or fixes a bug the dependent's tests would catch.
+
+Tickets that are independent or only loosely related (same area, similar topic) must NOT be marked blocked_by — false dependencies stall work.
+
+Tickets:
+{ticket_list}
+
+Reply with JSON only, no prose. Include ONLY tickets that have real dependencies; omit independent tickets:
+{{"dependencies": [{{"key": "<dependent_key>", "blocked_by": ["<blocker_key>"], "reason": "brief"}}]}}
+"""
+
+
+def _rank_new_tickets(instance_key: str) -> dict:
+    """Run a single haiku call to assign blocked_by on status=new tickets in this instance.
+
+    Considers all non-terminal tickets as potential blockers (because a foundation that's
+    already in planning still blocks a leaf that just arrived). Only mutates blocked_by on
+    tickets currently at status=new — once a ticket leaves new, its blocked_by is frozen.
+
+    Returns a result dict with counts for logging. Safe to no-op when nothing to rank.
+    """
+    import core.db as _db
+    rows = _db.query_all(
+        "SELECT ticket_key, status, data FROM tickets"
+        " WHERE instance_key=? AND status NOT IN ('merged','done','pending_approval')"
+        " ORDER BY updated_at ASC",
+        (instance_key,),
+    )
+    if not rows:
+        return {"ranked": 0, "reason": "no_non_terminal_tickets"}
+    in_scope = []
+    new_keys: set[str] = set()
+    for r in rows:
+        key = r["ticket_key"]
+        try:
+            data = json.loads(r["data"]) if r["data"] else {}
+        except (json.JSONDecodeError, TypeError):
+            data = {}
+        summary = (data.get("summary") or "").strip()
+        description = (data.get("description") or "").strip()[:400]
+        in_scope.append({"key": key, "status": r["status"], "summary": summary, "description": description})
+        if r["status"] == "new":
+            new_keys.add(key)
+    if not new_keys:
+        return {"ranked": 0, "reason": "no_new_tickets"}
+    if len(in_scope) < 2:
+        for key in new_keys:
+            ts = state.load_ticket(key) or {}
+            ts["blocked_by"] = []
+            ts["blocked_by_ranked_at"] = datetime.now(timezone.utc).isoformat()
+            state.save_ticket(key, ts)
+        return {"ranked": len(new_keys), "reason": "single_ticket_no_blockers"}
+    lines = [f"- {t['key']} [{t['status']}]: {t['summary']}\n  {t['description']}" for t in in_scope]
+    prompt = _RANKER_PROMPT.format(ticket_list="\n".join(lines))
+    raw = run_haiku(prompt, timeout=60)
+    parsed = extract_json(raw) if raw else None
+    deps_by_key: dict[str, list[str]] = {}
+    if isinstance(parsed, dict):
+        deps = parsed.get("dependencies") or []
+        if isinstance(deps, list):
+            valid_keys = {t["key"] for t in in_scope}
+            for entry in deps:
+                if not isinstance(entry, dict):
+                    continue
+                key = entry.get("key")
+                blockers = entry.get("blocked_by") or []
+                if key not in valid_keys or not isinstance(blockers, list):
+                    continue
+                filtered = [b for b in blockers if b in valid_keys and b != key]
+                if filtered:
+                    deps_by_key[key] = filtered
+    deps_by_key = _break_cycles(deps_by_key)
+    ranked_at = datetime.now(timezone.utc).isoformat()
+    mutated = 0
+    for key in new_keys:
+        ts = state.load_ticket(key) or {}
+        if ts.get("status") != "new":
+            continue
+        new_blockers = deps_by_key.get(key, [])
+        if ts.get("blocked_by") != new_blockers or not ts.get("blocked_by_ranked_at"):
+            ts["blocked_by"] = new_blockers
+            ts["blocked_by_ranked_at"] = ranked_at
+            state.save_ticket(key, ts)
+            mutated += 1
+            if new_blockers:
+                log.emit("ticket_blocked_by_assigned",
+                         f"{key}: blocked_by={new_blockers}",
+                         meta={"ticket": key, "blocked_by": new_blockers,
+                               "reason": next((e.get("reason", "") for e in (parsed or {}).get("dependencies") or []
+                                               if isinstance(e, dict) and e.get("key") == key), "")})
+    return {"ranked": mutated, "in_scope": len(in_scope), "new": len(new_keys), "deps": deps_by_key}
+
+
+def _break_cycles(deps: dict[str, list[str]]) -> dict[str, list[str]]:
+    """Remove edges that introduce cycles. Keeps the first edge seen during DFS."""
+    out: dict[str, list[str]] = {}
+    def has_path(start: str, target: str, seen: set) -> bool:
+        if start == target:
+            return True
+        if start in seen:
+            return False
+        seen.add(start)
+        for nxt in out.get(start, []):
+            if has_path(nxt, target, seen):
+                return True
+        return False
+    for key, blockers in deps.items():
+        kept = []
+        for b in blockers:
+            if has_path(b, key, set()):
+                continue
+            kept.append(b)
+        if kept:
+            out[key] = kept
+    return out
 
 
 def _ticket_source(config: dict) -> str:
@@ -821,6 +980,33 @@ def check(config: dict, instance_key: str = ""):
             log.emit("ticket_check_error", f"[{key}] {type(e).__name__}: {e}",
                 links={"detail": f"{base_url}/tickets/{key}"},
                 meta={"ticket": key, "error": type(e).__name__})
+
+    if instance_key:
+        _maybe_enqueue_ranker(instance_key)
+
+
+def _maybe_enqueue_ranker(instance_key: str) -> None:
+    """Enqueue rank_new_tickets when any status=new ticket has never been ranked.
+
+    Idempotent: skips if a queued/running rank_new_tickets job for this instance exists.
+    """
+    import core.db as _db
+    unranked = _db.query_one(
+        "SELECT 1 FROM tickets WHERE instance_key=? AND status='new'"
+        " AND (data NOT LIKE '%blocked_by_ranked_at%' OR json_extract(data,'$.blocked_by_ranked_at') IS NULL)"
+        " LIMIT 1",
+        (instance_key,),
+    )
+    if not unranked:
+        return
+    pending = _db.query_one(
+        "SELECT 1 FROM jobs WHERE instance_key=? AND task='rank_new_tickets'"
+        " AND status IN ('queued','running') LIMIT 1",
+        (instance_key,),
+    )
+    if pending:
+        return
+    q.enqueue_job(instance_key, "rank_new_tickets", ticket_key=None)
 
 
 def _fetch_tickets(config: dict) -> list[dict]:
