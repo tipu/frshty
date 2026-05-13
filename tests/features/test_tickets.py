@@ -77,9 +77,11 @@ class TestLocalizeImages:
 
 
 class TestRepoGate:
-    """Per-repo serialization gate: at most one ticket per instance can occupy
-    the pipeline at a time (status in planning/reviewing/pr_ready/in_review).
-    Prevents concurrent PRs against the same base producing unresolvable merge conflicts.
+    """Per-repo serialization gate: at most one ticket per instance can be in
+    an actively-LLM-modifying state (planning, reviewing). pr_ready and in_review
+    are waiting states (PR open, awaiting human merge or CI) and do not occupy
+    the gate — this prevents deadlock on instances with auto_merge=false where
+    in_review tickets accumulate indefinitely.
     """
 
     def test_gate_clear_when_no_other_tickets(self, fresh_db):
@@ -97,14 +99,16 @@ class TestRepoGate:
         state.save_ticket("T-5", {"status": "new"})
         assert tickets._repo_gate_blocked("inst", "T-1") is None
 
-    def test_gate_blocks_when_other_new_with_slug(self, fresh_db):
-        """A ticket whose worktree has been materialized (slug set) but whose
-        status is still "new" (start_planning hasn't fired yet) holds the gate.
-        Without this, two setup_prd_ticket workers can race past the gate."""
+    def test_gate_clear_when_other_new_with_slug(self, fresh_db):
+        """new+slug no longer occupies the gate — concurrent transition into
+        planning is prevented at runtime by start_planning's gate-lock +
+        status re-check inside the threading.Lock at core/tasks/tickets.py:187,
+        so the enqueue-time gate doesn't need to serialize new+slug states.
+        """
         import core.state as state
         state.init("inst")
         state.save_ticket("T-2", {"status": "new", "slug": "T-2-slug", "branch": "T-2"})
-        assert tickets._repo_gate_blocked("inst", "T-1") == "T-2"
+        assert tickets._repo_gate_blocked("inst", "T-1") is None
 
     def test_gate_blocked_when_other_in_planning(self, fresh_db):
         import core.state as state
@@ -118,17 +122,23 @@ class TestRepoGate:
         state.save_ticket("T-2", {"status": "reviewing", "slug": "x", "branch": "x"})
         assert tickets._repo_gate_blocked("inst", "T-1") == "T-2"
 
-    def test_gate_blocked_when_other_in_pr_ready(self, fresh_db):
+    def test_gate_clear_when_other_in_pr_ready(self, fresh_db):
+        """pr_ready is a brief waiting state between reviewing and PR creation;
+        the worktree is already final, so it does not occupy the gate."""
         import core.state as state
         state.init("inst")
         state.save_ticket("T-2", {"status": "pr_ready", "slug": "x", "branch": "x"})
-        assert tickets._repo_gate_blocked("inst", "T-1") == "T-2"
+        assert tickets._repo_gate_blocked("inst", "T-1") is None
 
-    def test_gate_blocked_when_other_in_review(self, fresh_db):
+    def test_gate_clear_when_other_in_review(self, fresh_db):
+        """in_review means the PR is open and awaiting human merge or external CI;
+        the LLM has stopped modifying the worktree, so it does not occupy the gate.
+        Without this, instances with auto_merge=false deadlocked because every
+        new ticket accumulated in new+slug behind a permanently-in_review ticket."""
         import core.state as state
         state.init("inst")
         state.save_ticket("T-2", {"status": "in_review", "slug": "x", "branch": "x"})
-        assert tickets._repo_gate_blocked("inst", "T-1") == "T-2"
+        assert tickets._repo_gate_blocked("inst", "T-1") is None
 
     def test_gate_excludes_self(self, fresh_db):
         """A ticket already in the pipeline can advance — the gate only blocks
@@ -158,7 +168,7 @@ class TestRepoGate:
     def test_enqueue_stage_skips_start_planning_when_blocked(self, fresh_db):
         import core.state as state
         state.init("inst")
-        state.save_ticket("T-2", {"status": "in_review", "slug": "x", "branch": "x"})
+        state.save_ticket("T-2", {"status": "planning", "slug": "x", "branch": "x"})
         with patch("core.queue.jobs_for_ticket", return_value=[]), \
              patch("core.queue.enqueue_job") as eq:
             tickets._enqueue_stage("inst", "T-1", "start_planning")
@@ -167,7 +177,7 @@ class TestRepoGate:
     def test_enqueue_stage_skips_mark_ready_when_blocked(self, fresh_db):
         import core.state as state
         state.init("inst")
-        state.save_ticket("T-2", {"status": "in_review", "slug": "x", "branch": "x"})
+        state.save_ticket("T-2", {"status": "reviewing", "slug": "x", "branch": "x"})
         with patch("core.queue.jobs_for_ticket", return_value=[]), \
              patch("core.queue.enqueue_job") as eq:
             tickets._enqueue_stage("inst", "T-1", "mark_ready")
