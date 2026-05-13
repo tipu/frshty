@@ -18,13 +18,46 @@ meta-invariant test that asserts a second check() cycle produces zero new
 log_events.
 """
 from datetime import datetime, timezone
-from typing import TypedDict
+from typing import Protocol, TypedDict
 
 import core.log as log
 import core.state as state
 from core.ticket_status import TicketStatus
 
 import features.tickets as _t
+
+
+class StateHandler(Protocol):
+    """Contract every per-status handler must satisfy.
+
+    A handler takes the dispatcher's per-ticket context (config, ticket,
+    ts, base_url, instance_key, existing) and returns (updated_ts, stop_ticket).
+    stop_ticket=True signals the dispatcher loop to break out of further
+    status-handler dispatch for this ticket — the dispatcher then
+    state.save_ticket()s and moves to the next ticket.
+
+    Idempotency contract: handlers MUST treat every side-effect emit as
+    "fire once per ticket lifetime" unless there is a documented reason
+    otherwise. Use emit_once(ts, marker_field, ...) from features.tickets
+    for the canonical pattern. The meta-invariant test
+    TestCheckIdempotentSecondCycle asserts that a second check() cycle
+    produces zero new log_events for any ticket in any non-terminal status.
+
+    Future direction: if the free-function handler style proves to need
+    more structure (e.g. distinct entry/tick/transitions methods to make
+    one-shot vs per-poll work explicit), upgrade individual handlers to
+    classes that implement this Protocol via __call__. The Protocol shape
+    lets free functions and classes coexist in the same dispatch tuple.
+    """
+    def __call__(
+        self,
+        config: dict,
+        ticket: dict,
+        ts: dict,
+        base_url: str,
+        instance_key: str,
+        existing: bool,
+    ) -> tuple[dict, bool]: ...
 
 
 class TicketState(TypedDict, total=False):
@@ -303,14 +336,14 @@ def _handle_pr_failed_ticket(
     return ts, False
 
 
-_PRE_DISPATCH_HANDLERS = (
+_PRE_DISPATCH_HANDLERS: tuple[tuple[str, StateHandler], ...] = (
     (TicketStatus.merged, _handle_merged_ticket),
     (TicketStatus.validation, _handle_validation_ticket),
     (TicketStatus.pr_failed, _handle_pr_failed_ticket),
 )
 
 
-_STATUS_HANDLERS = (
+_STATUS_HANDLERS: tuple[tuple[str, StateHandler], ...] = (
     ("new", _handle_new_ticket),
     ("pending_approval", _handle_pending_approval_ticket),
     ("planning", _handle_planning_ticket),
