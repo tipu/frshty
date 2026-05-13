@@ -829,6 +829,31 @@ class TestCheckEmitsTicketFoundOnce:
         )
 
 
+class TestCheckNewTicketIdempotency:
+    def test_setup_ticket_called_at_most_once_across_two_cycles(self, fake_config, tmp_state):
+        slug = "PROJ-1-do-the-thing"
+        with patch("features.tickets._fetch_tickets", return_value=[make_ticket()]), \
+             patch("features.tickets._fetch_open_prs", return_value=[]), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "myrepo", "path": tmp_state / "repo"}]), \
+             patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("features.tickets._setup_ticket",
+                   return_value={"status": "new", "slug": slug, "branch": slug,
+                                 "discovered_at": "2026-04-22T00:00:00Z"}) as setup, \
+             patch("features.tickets._enqueue_stage"), \
+             patch("features.tickets.log.emit") as emit:
+            tickets.check({**fake_config, "_base_url": "http://base"}, instance_key="inst")
+            tickets.check({**fake_config, "_base_url": "http://base"}, instance_key="inst")
+        emit_summary = [(c.args[0], c.kwargs.get("meta", {}).get("ticket"))
+                        for c in emit.call_args_list if c.args]
+        assert setup.call_count <= 1, (
+            f"_setup_ticket called {setup.call_count} times across two check() cycles "
+            f"for a ticket whose first setup succeeded (discovered_at set); expected at "
+            f"most 1. Each extra call re-emits ticket_worktree_created/error and spams "
+            f"log_events. emits={emit_summary}"
+        )
+
+
 class TestFixCiFailuresTask:
     def _ctx(self, config, ticket_key="PROJ-1"):
         from core.tasks.registry import TaskContext
