@@ -878,6 +878,80 @@ class TestCheckNewTicketIdempotency:
         )
 
 
+class TestCheckIdempotentSecondCycle:
+    @pytest.mark.parametrize("status", ["new", "planning", "reviewing", "pr_ready", "in_review"])
+    def test_second_check_cycle_emits_no_ticket_events(
+        self, status, fake_config, tmp_state, tmp_log
+    ):
+        import core.db as db
+        import core.state as state
+
+        slug = "PROJ-1-do-the-thing"
+        fake_config["pr"]["auto_pr"] = False
+        ticket_dir = fake_config["workspace"]["root"] / "tickets" / slug
+        ticket_dir.mkdir(parents=True, exist_ok=True)
+
+        if status != "new":
+            seeded = make_ticket_state(status=status, slug=slug, branch=slug)
+            if status == "in_review":
+                seeded["prs"] = [{"repo": "repo", "id": 99, "branch": slug, "url": "http://u"}]
+            state.save("tickets", {"PROJ-1": seeded})
+
+        def setup_ticket(*args, **kwargs):
+            tickets.log.emit(
+                "ticket_worktree_created",
+                f"Workspace ready for {slug}",
+                meta={"ticket": "PROJ-1", "slug": slug, "branch": slug},
+            )
+            return {
+                "status": "new",
+                "slug": slug,
+                "branch": slug,
+                "discovered_at": "2026-04-22T00:00:00Z",
+            }
+
+        mock_platform = MagicMock()
+        mock_platform.monitor_ci.side_effect = lambda _ticket, ts, _base_url: ts
+        mock_platform.get_pr_info.return_value = {"state": "OPEN", "approvers": [], "mergeable": "MERGEABLE"}
+        mock_platform.get_pr_comments.return_value = []
+        instance = state.active_instance_key()
+
+        with patch("features.tickets._fetch_tickets", return_value=[make_ticket()]), \
+             patch("features.tickets._fetch_open_prs", return_value=[]), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "repo", "path": tmp_state / "repo"}]), \
+             patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("core.queue.enqueue_job"), \
+             patch("features.tickets._setup_ticket", side_effect=setup_ticket), \
+             patch("features.tickets._process_ticket_comments"), \
+             patch("features.tickets.make_platform", return_value=mock_platform):
+            tickets.check({**fake_config, "_base_url": "http://base"}, instance_key="test")
+            after_first = db.query_all(
+                "SELECT id FROM log_events WHERE instance_key=? AND json_extract(meta, '$.ticket')=?",
+                (instance, "PROJ-1"),
+            )
+            expect_msg = (
+                f"first check() precondition failed for status={status}: "
+                "expected PROJ-1 to be persisted before the idempotency assertion"
+            )
+            assert state.load_ticket("PROJ-1") is not None, expect_msg
+
+            tickets.check({**fake_config, "_base_url": "http://base"}, instance_key="test")
+            after_second = db.query_all(
+                "SELECT event, summary, meta FROM log_events "
+                "WHERE instance_key=? AND json_extract(meta, '$.ticket')=? "
+                "AND id NOT IN ({}) ORDER BY ts ASC".format(
+                    ",".join("?" for _ in after_first) or "''"
+                ),
+                (instance, "PROJ-1", *(r["id"] for r in after_first)),
+            )
+
+        assert after_second == [], (
+            f"second check() cycle for status={status} emitted ticket log_events; "
+            f"expected zero. emits={after_second}"
+        )
+
+
 class TestFixCiFailuresTask:
     def _ctx(self, config, ticket_key="PROJ-1"):
         from core.tasks.registry import TaskContext

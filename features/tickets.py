@@ -509,7 +509,217 @@ def _process_ticket_comments(config: dict, key: str, ts: dict, ticket: dict, bas
     ts["ticket_comment_snapshot"] = new_snapshot
 
 
+def _handle_new_ticket(
+    config: dict,
+    ticket: dict,
+    ts: dict,
+    base_url: str,
+    instance_key: str,
+    existing: bool,
+) -> tuple[dict, bool]:
+    key = ticket["key"]
+    if "source" not in ts:
+        ts["source"] = _ticket_source(config)
+    source = ts.get("source", _ticket_source(config))
+    if _approval_required(config, source) and ts.get("approval_status") not in ("approved", "rejected"):
+        ts["status"] = TicketStatus.pending_approval.value
+        ts["approval_status"] = "pending"
+        if "discovered_at" not in ts:
+            ts["discovered_at"] = datetime.now(timezone.utc).isoformat()
+        if "summary" not in ts:
+            ts["summary"] = ticket.get("summary", "")
+        if "description" not in ts:
+            ts["description"] = ticket.get("description", "")
+        state.save_ticket(key, ts)
+        log.emit("ticket_pending_approval",
+                 f"Ticket {key} awaiting approval (source={source})",
+                 links={"detail": f"{base_url}/tickets/{key}"},
+                 meta={"ticket": key, "source": source})
+        if instance_key and (config.get("pm_agent") or {}).get("enabled", True):
+            _enqueue_stage(instance_key, key, "pm_pre_approval")
+        return ts, True
+    if source == "prd":
+        state.save_ticket(key, ts)
+        return ts, True
+    if not existing:
+        log.emit("ticket_found", f"New ticket: {key} — {ticket['summary']}",
+            links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
+            meta={"ticket": key})
+    if not ts.get("discovered_at") and not ts.get("setup_failed_at"):
+        ts = _setup_ticket(config, ticket, base_url)
+    if "source" not in ts:
+        ts["source"] = source
+    if ts.get("discovered_at") and instance_key:
+        if (config.get("pm_agent") or {}).get("enabled", True):
+            _enqueue_stage(instance_key, key, "pm_pre_approval")
+        _enqueue_stage(instance_key, key, "start_planning")
+    return ts, False
+
+
+def _handle_pending_approval_ticket(
+    config: dict,
+    ticket: dict,
+    ts: dict,
+    base_url: str,
+    instance_key: str,
+    existing: bool,
+) -> tuple[dict, bool]:
+    return ts, True
+
+
+def _handle_planning_ticket(
+    config: dict,
+    ticket: dict,
+    ts: dict,
+    base_url: str,
+    instance_key: str,
+    existing: bool,
+) -> tuple[dict, bool]:
+    if instance_key:
+        _enqueue_stage(instance_key, ticket["key"], "start_planning")
+    return ts, False
+
+
+def _handle_reviewing_ticket(
+    config: dict,
+    ticket: dict,
+    ts: dict,
+    base_url: str,
+    instance_key: str,
+    existing: bool,
+) -> tuple[dict, bool]:
+    if not instance_key:
+        return ts, False
+    key = ticket["key"]
+    ws = config["workspace"]
+    slug = ts.get("slug", "")
+    review_file = ws["root"] / ws["tickets_dir"] / slug / "docs" / "tri-review.md"
+    if review_file.exists():
+        verdict = _VERDICT_RE.search(review_file.read_text())
+        if verdict and verdict.group(1).upper() == "PASS":
+            _enqueue_stage(instance_key, key, "mark_ready")
+        elif verdict and verdict.group(1).upper() == "FAIL":
+            _enqueue_stage(instance_key, key, "fix_review_findings")
+        else:
+            _enqueue_stage(instance_key, key, "start_reviewing")
+    else:
+        _enqueue_stage(instance_key, key, "start_reviewing")
+    return ts, False
+
+
+def _handle_pr_ready_ticket(
+    config: dict,
+    ticket: dict,
+    ts: dict,
+    base_url: str,
+    instance_key: str,
+    existing: bool,
+) -> tuple[dict, bool]:
+    key = ticket["key"]
+    if config.get("pr", {}).get("auto_pr") and not ts.get("pr_scheduled_at"):
+        if instance_key and _repo_gate_blocked(instance_key, key):
+            state.save_ticket(key, ts)
+            return ts, True
+        ts = _create_pr(config, ticket, ts, base_url)
+    return ts, False
+
+
+def _handle_in_review_ticket(
+    config: dict,
+    ticket: dict,
+    ts: dict,
+    base_url: str,
+    instance_key: str,
+    existing: bool,
+) -> tuple[dict, bool]:
+    key = ticket["key"]
+    if instance_key:
+        if _resolve_conflicts_pending(instance_key, key):
+            state.save_ticket(key, ts)
+            return ts, True
+        if _has_conflicting_pr(config, ts):
+            _enqueue_stage(instance_key, key, "resolve_conflicts")
+            state.save_ticket(key, ts)
+            return ts, True
+    else:
+        ts = _resolve_conflicts(config, ticket, ts, base_url)
+
+    if ts["status"] == "in_review":
+        platform = make_platform(config)
+        result = platform.monitor_ci(ticket, ts, base_url)
+        if result.get("_ci_failed"):
+            ts = _handle_ci_failure(ticket, ts, result["pr"], result["checks"], base_url, instance_key)
+        elif result.get("_ci_stalled"):
+            pr = result.get("pr") or {}
+            log.emit("ticket_checks_stall_repolling",
+                f"CI stalled for {_label(ticket['key'], ts)} PR #{pr.get('id', '?')}; "
+                f"resetting checks window and re-polling on next cycle",
+                links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+                meta={"ticket": ticket["key"], "repo": pr.get("repo"), "pr_id": pr.get("id")})
+            ts.pop("_ci_timeout_state", None)
+            ts.pop("checks_started_at", None)
+        else:
+            ts = result
+
+    if ts["status"] == "in_review" and ts.get("ci_passed") and config.get("pr", {}).get("auto_merge"):
+        ts = _merge(config, ticket, ts, base_url)
+
+    if ts["status"] == "in_review":
+        ts = _check_in_review(config, ticket, ts, base_url)
+    return ts, False
+
+
+_STATUS_HANDLERS = (
+    ("new", _handle_new_ticket),
+    ("pending_approval", _handle_pending_approval_ticket),
+    ("planning", _handle_planning_ticket),
+    ("reviewing", _handle_reviewing_ticket),
+    ("pr_ready", _handle_pr_ready_ticket),
+    ("in_review", _handle_in_review_ticket),
+)
+
+
 def check(config: dict, instance_key: str = ""):
+    """Poll assigned tickets and dispatch each ticket to its status handler.
+
+    Ticket state remains a JSON-serializable dict. Valid state markers used by
+    this dispatcher and its handlers:
+    - status: current TicketStatus value.
+    - external_status: latest upstream ticket-system status text.
+    - url: latest upstream ticket URL.
+    - done_at: timestamp set when an unassigned ticket is marked done.
+    - slug: local ticket/worktree directory slug.
+    - branch: VCS branch name for ticket work.
+    - source: upstream source such as jira, linear, manual, or prd.
+    - approval_status: pending/approved/rejected ticket approval marker.
+    - discovered_at: successful worktree/materialization timestamp.
+    - setup_failed_at: failed worktree/materialization timestamp.
+    - summary: cached upstream ticket summary.
+    - description: cached upstream ticket description.
+    - prs: tracked pull requests for the ticket branch.
+    - merged_at: timestamp when all tracked PRs were marked merged.
+    - merged_comment_snapshot: upstream comment snapshot captured at merge.
+    - merged_external_status: upstream status observed at merge.
+    - requeued_at: timestamp when a merged ticket was reopened upstream.
+    - reopened_count: number of times a merged ticket was requeued.
+    - last_merged_at: previous merged_at retained after requeue.
+    - last_merged_comment_snapshot: previous merge comment snapshot.
+    - last_merged_external_status: previous merge external status.
+    - ticket_comment_snapshot: upstream ticket-comment id/date snapshot.
+    - pr_scheduled_at: marker for scheduled/manual PR creation.
+    - pr_attempts: failed PR creation attempt count.
+    - pr_failed_reason: reason tag for pr_failed status.
+    - conflict_resolution_attempts: merge-conflict fix attempt count.
+    - last_conflict_error: previous conflict error passed to the resolver.
+    - ci_fix_attempts: CI fix attempt count.
+    - ci_passed: marker from monitor_ci that checks passed.
+    - checks_started_at: CI monitoring window start timestamp.
+    - _ci_failed_pending: queued/running CI-fix marker.
+    - _ci_timeout_state: transient CI-stall state cleared before re-poll.
+    - last_comment_ids: per-PR review-comment cursor.
+    - comment_fix_attempts: per-review-comment fix attempt counts.
+    - llm_sessions: per-task Claude session ids used by task workers.
+    """
     from datetime import datetime, timezone
     if instance_key:
         enqueue_prd_backfill(instance_key)
@@ -631,105 +841,12 @@ def check(config: dict, instance_key: str = ""):
                         if new_ts.get(k):
                             ts[k] = new_ts[k]
 
-            if ts["status"] == "new":
-                if "source" not in ts:
-                    ts["source"] = _ticket_source(config)
-                source = ts.get("source", _ticket_source(config))
-                if _approval_required(config, source) and ts.get("approval_status") not in ("approved", "rejected"):
-                    ts["status"] = TicketStatus.pending_approval.value
-                    ts["approval_status"] = "pending"
-                    if "discovered_at" not in ts:
-                        from datetime import datetime, timezone
-                        ts["discovered_at"] = datetime.now(timezone.utc).isoformat()
-                    if "summary" not in ts:
-                        ts["summary"] = ticket.get("summary", "")
-                    if "description" not in ts:
-                        ts["description"] = ticket.get("description", "")
-                    state.save_ticket(key, ts)
-                    log.emit("ticket_pending_approval",
-                             f"Ticket {key} awaiting approval (source={source})",
-                             links={"detail": f"{base_url}/tickets/{key}"},
-                             meta={"ticket": key, "source": source})
-                    if instance_key and (config.get("pm_agent") or {}).get("enabled", True):
-                        _enqueue_stage(instance_key, key, "pm_pre_approval")
+            for status, handler in _STATUS_HANDLERS:
+                if ts["status"] != status:
                     continue
-                if source == "prd":
-                    state.save_ticket(key, ts)
-                    continue
-                if not existing:
-                    log.emit("ticket_found", f"New ticket: {key} — {ticket['summary']}",
-                        links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
-                        meta={"ticket": key})
-                if not ts.get("discovered_at") and not ts.get("setup_failed_at"):
-                    ts = _setup_ticket(config, ticket, base_url)
-                if "source" not in ts:
-                    ts["source"] = source
-                if ts.get("discovered_at") and instance_key:
-                    if (config.get("pm_agent") or {}).get("enabled", True):
-                        _enqueue_stage(instance_key, key, "pm_pre_approval")
-                    _enqueue_stage(instance_key, key, "start_planning")
-
-            if ts["status"] == "pending_approval":
-                continue
-
-            if ts["status"] == "planning" and instance_key:
-                _enqueue_stage(instance_key, key, "start_planning")
-
-            if ts["status"] == "reviewing" and instance_key:
-                ws = config["workspace"]
-                slug = ts.get("slug", "")
-                review_file = ws["root"] / ws["tickets_dir"] / slug / "docs" / "tri-review.md"
-                if review_file.exists():
-                    verdict = _VERDICT_RE.search(review_file.read_text())
-                    if verdict and verdict.group(1).upper() == "PASS":
-                        _enqueue_stage(instance_key, key, "mark_ready")
-                    elif verdict and verdict.group(1).upper() == "FAIL":
-                        _enqueue_stage(instance_key, key, "fix_review_findings")
-                    else:
-                        _enqueue_stage(instance_key, key, "start_reviewing")
-                else:
-                    _enqueue_stage(instance_key, key, "start_reviewing")
-
-            if ts["status"] == "pr_ready" and config.get("pr", {}).get("auto_pr") and not ts.get("pr_scheduled_at"):
-                if instance_key and _repo_gate_blocked(instance_key, key):
-                    state.save_ticket(key, ts)
-                    continue
-                ts = _create_pr(config, ticket, ts, base_url)
-
-            if ts["status"] == "in_review":
-                if instance_key:
-                    if _resolve_conflicts_pending(instance_key, key):
-                        state.save_ticket(key, ts)
-                        continue
-                    if _has_conflicting_pr(config, ts):
-                        _enqueue_stage(instance_key, key, "resolve_conflicts")
-                        state.save_ticket(key, ts)
-                        continue
-                else:
-                    ts = _resolve_conflicts(config, ticket, ts, base_url)
-
-            if ts["status"] == "in_review":
-                platform = make_platform(config)
-                result = platform.monitor_ci(ticket, ts, base_url)
-                if result.get("_ci_failed"):
-                    ts = _handle_ci_failure(ticket, ts, result["pr"], result["checks"], base_url, instance_key)
-                elif result.get("_ci_stalled"):
-                    pr = result.get("pr") or {}
-                    log.emit("ticket_checks_stall_repolling",
-                        f"CI stalled for {_label(ticket['key'], ts)} PR #{pr.get('id', '?')}; "
-                        f"resetting checks window and re-polling on next cycle",
-                        links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
-                        meta={"ticket": ticket["key"], "repo": pr.get("repo"), "pr_id": pr.get("id")})
-                    ts.pop("_ci_timeout_state", None)
-                    ts.pop("checks_started_at", None)
-                else:
-                    ts = result
-
-            if ts["status"] == "in_review" and ts.get("ci_passed") and config.get("pr", {}).get("auto_merge"):
-                ts = _merge(config, ticket, ts, base_url)
-
-            if ts["status"] == "in_review":
-                ts = _check_in_review(config, ticket, ts, base_url)
+                ts, stop_ticket = handler(config, ticket, ts, base_url, instance_key, existing)
+                if stop_ticket:
+                    break
 
             state.save_ticket(key, ts)
         except Exception as e:
@@ -1529,4 +1646,3 @@ def _make_branch(config, key: str, ticket: dict) -> str:
         bt = "bugfix" if branch_type and "bugfix" in branch_type.lower() else "feature"
         return f"{prefix}/{bt}/{slug}"
     return slug
-
