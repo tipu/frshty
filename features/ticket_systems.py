@@ -73,7 +73,7 @@ class JiraTicketSystem:
                 if self.account_id:
                     issues = [i for i in issues if (i.get("fields", {}).get("assignee") or {}).get("accountId") == self.account_id]
             else:
-                url = f"{self.base_url}/rest/api/3/search/jql?jql={self.jql}&maxResults=20&fields=key,summary,status,description,attachment,issuelinks,parent,subtasks,timeoriginalestimate"
+                url = f"{self.base_url}/rest/api/3/search/jql?jql={self.jql}&maxResults=20&fields=key,summary,status,description,attachment,issuelinks,parent,subtasks,timeoriginalestimate,updated"
                 resp = client.get(url)
                 if resp.status_code != 200:
                     return []
@@ -115,6 +115,7 @@ class JiraTicketSystem:
                     "status": status.get("name", "") if isinstance(status, dict) else str(status),
                     "description": _adf_to_text(fields.get("description")),
                     "url": f"{self.base_url.split('/rest')[0]}/browse/{i.get('key', '')}",
+                    "updated_at": fields.get("updated", ""),
                     "attachments": attachments,
                     "related": related,
                     "parent": parent_info,
@@ -168,7 +169,7 @@ class LinearTicketSystem:
           issues(
             filter: { assignee: { email: { eq: "%s" } } state: { name: { in: %s } } }
             first: 20 orderBy: updatedAt
-          ) { nodes { identifier title state { name } description url
+          ) { nodes { identifier title state { name } description url updatedAt
               project { name description }
               parent { identifier title description }
               attachments { nodes { title url } }
@@ -195,6 +196,7 @@ class LinearTicketSystem:
                     "status": n["state"]["name"],
                     "description": n.get("description", ""),
                     "url": n.get("url", ""),
+                    "updated_at": n.get("updatedAt", ""),
                     "project": n.get("project"),
                     "parent": n.get("parent"),
                     "attachments": attachments,
@@ -202,6 +204,46 @@ class LinearTicketSystem:
                     "subtasks": subtasks,
                 })
             return results
+
+    def fetch_state_history(self, ticket_key: str) -> list[dict]:
+        if not self.token or not ticket_key:
+            return []
+        query = '''
+        query {
+          issue(id: "%s") {
+            history(first: 50) {
+              nodes { createdAt fromState { name } toState { name } actor { id name email } }
+            }
+          }
+        }
+        ''' % ticket_key
+        try:
+            with httpx.Client(timeout=30, transport=httpx.HTTPTransport(retries=2)) as client:
+                resp = client.post("https://api.linear.app/graphql",
+                    json={"query": query},
+                    headers={"Authorization": self.token, "Content-Type": "application/json"})
+                if resp.status_code != 200:
+                    return []
+                issue = (resp.json().get("data") or {}).get("issue") or {}
+                nodes = (issue.get("history") or {}).get("nodes", [])
+                results = []
+                for n in nodes:
+                    to_state = n.get("toState")
+                    if not to_state:
+                        continue
+                    from_state = n.get("fromState") or {}
+                    actor = n.get("actor") or {}
+                    results.append({
+                        "created_at": n.get("createdAt", ""),
+                        "from_state": from_state.get("name", ""),
+                        "to_state": to_state.get("name", ""),
+                        "actor_email": actor.get("email", "") if actor else "",
+                        "actor_name": actor.get("name", "") if actor else "",
+                    })
+                return results
+        except (httpx.HTTPError, httpx.TimeoutException) as e:
+            log.emit("linear_fetch_history_failed", f"Failed to fetch history for {ticket_key}: {e}", meta={"ticket": ticket_key})
+            return []
 
     def fetch_comments(self, ticket_key: str) -> list[dict]:
         if not self.token or not ticket_key:

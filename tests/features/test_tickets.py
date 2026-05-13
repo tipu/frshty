@@ -927,6 +927,103 @@ class TestEmitOnce:
         )
 
 
+class TestHasHumanReopenAfter:
+    MERGED = "2026-05-04T23:20:07Z"
+
+    def test_no_reopen_when_history_empty(self):
+        assert tickets._has_human_reopen_after([], self.MERGED) is None
+
+    def test_no_reopen_when_only_pre_merge_transitions(self):
+        h = [{"created_at": "2026-05-04T20:00:00Z", "to_state": "In Progress", "actor_email": "u@x.com"}]
+        assert tickets._has_human_reopen_after(h, self.MERGED) is None
+
+    def test_no_reopen_when_actor_is_null_automation(self):
+        h = [{"created_at": "2026-05-05T10:00:00Z", "to_state": "In Progress", "actor_email": ""}]
+        assert tickets._has_human_reopen_after(h, self.MERGED) is None, (
+            "actor=null means Linear integration; should not count as reopen"
+        )
+
+    def test_no_reopen_when_human_moved_to_post_pr_state(self):
+        h = [{"created_at": "2026-05-12T16:00:00Z", "to_state": "QA", "actor_email": "danial@x.com"}]
+        assert tickets._has_human_reopen_after(h, self.MERGED) is None, (
+            "human moved to QA (post-PR wait state); not a reopen — this is the NEC-3100 case"
+        )
+
+    def test_detects_reopen_when_human_moves_to_active_work(self):
+        h = [{"created_at": "2026-05-06T10:00:00Z", "to_state": "In Progress",
+              "actor_email": "danial@x.com", "from_state": "Done"}]
+        match = tickets._has_human_reopen_after(h, self.MERGED)
+        assert match is not None and match["actor_email"] == "danial@x.com"
+
+
+class TestFindPreMergedPr:
+    def _ticket(self):
+        return {"key": "PROJ-1", "summary": "x", "status": "In Review", "url": ""}
+
+    def _make_platform(self, return_value):
+        plat = MagicMock()
+        type(plat).find_merged_pr_by_key = MagicMock(return_value=return_value)
+        return plat
+
+    def _make_ticket_system(self, history):
+        ts_sys = MagicMock()
+        type(ts_sys).fetch_state_history = MagicMock(return_value=history)
+        return ts_sys
+
+    def test_returns_pr_when_no_human_reopen_in_history(self):
+        pr = {"id": 702, "merged_at": "2026-05-04T23:20:07Z", "url": "u", "branch": "b", "repo": "r"}
+        history = [{"created_at": "2026-05-12T16:00:00Z", "to_state": "QA",
+                    "actor_email": "danial@x.com", "from_state": "In Review"}]
+        with patch("features.tickets.make_platform", return_value=self._make_platform(pr)), \
+             patch("features.tickets.make_ticket_system", return_value=self._make_ticket_system(history)):
+            result = tickets._find_pre_merged_pr({}, self._ticket())
+        assert result == pr, (
+            "guard must return PR when human only moved to post-PR states (NEC-3100 scenario)"
+        )
+
+    def test_returns_none_when_no_merged_pr_found(self):
+        with patch("features.tickets.make_platform", return_value=self._make_platform(None)):
+            result = tickets._find_pre_merged_pr({}, self._ticket())
+        assert result is None
+
+    def test_returns_none_when_human_reopened_to_active_state(self):
+        pr = {"id": 702, "merged_at": "2026-05-04T23:20:07Z", "url": "u", "branch": "b", "repo": "r"}
+        history = [{"created_at": "2026-05-06T10:00:00Z", "to_state": "In Progress",
+                    "actor_email": "danial@x.com", "from_state": "Done"}]
+        with patch("features.tickets.make_platform", return_value=self._make_platform(pr)), \
+             patch("features.tickets.make_ticket_system", return_value=self._make_ticket_system(history)), \
+             patch("features.tickets.log.emit") as emit:
+            result = tickets._find_pre_merged_pr({}, self._ticket())
+        assert result is None, "guard must skip when human moved to active-work state post-merge"
+        events = [c.args[0] for c in emit.call_args_list]
+        assert "merged_pr_guard_skipped_reopen" in events
+
+    def test_returns_pr_when_only_automation_changed_state_post_merge(self):
+        pr = {"id": 702, "merged_at": "2026-05-04T23:20:07Z", "url": "u", "branch": "b", "repo": "r"}
+        history = [{"created_at": "2026-05-05T14:31:00Z", "to_state": "In Progress",
+                    "actor_email": "", "from_state": "QA"}]
+        with patch("features.tickets.make_platform", return_value=self._make_platform(pr)), \
+             patch("features.tickets.make_ticket_system", return_value=self._make_ticket_system(history)):
+            result = tickets._find_pre_merged_pr({}, self._ticket())
+        assert result == pr, "guard must fire when only automation (actor=null) touched the ticket"
+
+    def test_returns_none_when_platform_has_no_finder(self):
+        plat = object()
+        with patch("features.tickets.make_platform", return_value=plat):
+            result = tickets._find_pre_merged_pr({}, self._ticket())
+        assert result is None
+
+    def test_returns_none_when_finder_raises(self):
+        plat = MagicMock()
+        type(plat).find_merged_pr_by_key = MagicMock(side_effect=RuntimeError("boom"))
+        with patch("features.tickets.make_platform", return_value=plat), \
+             patch("features.tickets.log.emit") as emit:
+            result = tickets._find_pre_merged_pr({}, self._ticket())
+        assert result is None
+        events = [c.args[0] for c in emit.call_args_list]
+        assert "merged_pr_guard_error" in events
+
+
 class TestCheckIdempotentSecondCycle:
     @pytest.mark.parametrize("status", ["new", "planning", "reviewing", "pr_ready", "in_review"])
     def test_second_check_cycle_emits_no_ticket_events(

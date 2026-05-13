@@ -297,6 +297,109 @@ def _mark_ticket_merged(config: dict, ticket: dict, ts: dict) -> dict:
     return ts
 
 
+_POST_PR_STATES = frozenset(s.lower() for s in (
+    "QA", "In Review", "Ready for Release", "Ready For Release",
+    "Done", "Cancelled", "Canceled", "Closed", "Released",
+))
+
+
+def _has_human_reopen_after(history: list[dict], merged_at: str) -> dict | None:
+    if not merged_at or not history:
+        return None
+    for h in history:
+        ts = h.get("created_at") or ""
+        if not ts or ts <= merged_at:
+            continue
+        if not h.get("actor_email"):
+            continue
+        to_state = (h.get("to_state") or "").strip().lower()
+        if not to_state or to_state in _POST_PR_STATES:
+            continue
+        return h
+    return None
+
+
+def _find_pre_merged_pr(config: dict, ticket: dict) -> dict | None:
+    """Guard: on first discovery, check if an external PR for this ticket key already merged.
+
+    Returns the PR dict if frshty should short-circuit to merged status. Returns None if:
+    - no matching merged PR exists
+    - the platform doesn't expose a merged-PR finder (e.g., Bitbucket)
+    - the ticket has a post-merge human-actor state transition into an active-work state (reopen)
+    """
+    key = ticket["key"]
+    platform = make_platform(config)
+    finder = getattr(type(platform), "find_merged_pr_by_key", None)
+    if finder is None:
+        return None
+    try:
+        pr = finder(platform, key)
+    except Exception as e:
+        log.emit("merged_pr_guard_error", f"find_merged_pr_by_key failed for {key}: {e!r}",
+                 meta={"ticket": key, "error": str(e)})
+        return None
+    if not isinstance(pr, dict):
+        return None
+    merged_at = pr.get("merged_at", "")
+    if not isinstance(merged_at, str) or not merged_at:
+        return None
+    ticket_system = make_ticket_system(config)
+    history_fn = getattr(type(ticket_system), "fetch_state_history", None)
+    history: list[dict] = []
+    if history_fn is not None:
+        try:
+            raw = history_fn(ticket_system, key)
+            if isinstance(raw, list):
+                history = raw
+        except Exception as e:
+            log.emit("merged_pr_guard_error", f"fetch_state_history failed for {key}: {e!r}",
+                     meta={"ticket": key, "error": str(e)})
+    reopen = _has_human_reopen_after(history, merged_at)
+    if reopen:
+        log.emit("merged_pr_guard_skipped_reopen",
+                 f"{key}: found merged PR #{pr.get('id')} but {reopen.get('actor_email')} moved to "
+                 f"{reopen.get('to_state')} after merge — treating as fresh",
+                 links={"pr": pr.get("url", "")},
+                 meta={"ticket": key, "pr_id": pr.get("id"), "merged_at": merged_at,
+                       "reopen_actor": reopen.get("actor_email"),
+                       "reopen_to_state": reopen.get("to_state"),
+                       "reopen_at": reopen.get("created_at")})
+        return None
+    return pr
+
+
+def _short_circuit_to_merged(config: dict, ticket: dict, ts: dict, pr: dict, base_url: str) -> dict:
+    key = ticket["key"]
+    ts.setdefault("status", TicketStatus.new.value)
+    ts["status"] = transition(ts["status"], TicketStatus.merged.value)
+    ts["merged_at"] = pr.get("merged_at", datetime.now(timezone.utc).isoformat())
+    ts["merged_external_status"] = ticket.get("status", "") or "_merged_"
+    ts["source"] = ts.get("source", _ticket_source(config))
+    ts["external_status"] = ticket.get("status", "")
+    ts["url"] = ticket.get("url", ts.get("url", ""))
+    ts["prs"] = [{
+        "id": pr.get("id"),
+        "repo": pr.get("repo", ""),
+        "title": pr.get("title", ""),
+        "branch": pr.get("branch", ""),
+        "base": pr.get("base", ""),
+        "author": pr.get("author", ""),
+        "url": pr.get("url", ""),
+        "merged_at": pr.get("merged_at", ""),
+    }]
+    if not ts.get("discovered_at"):
+        ts["discovered_at"] = datetime.now(timezone.utc).isoformat()
+    comments_list = _fetch_ticket_comments(config, key)
+    ts["merged_comment_snapshot"] = _comment_snapshot(comments_list)
+    log.emit("ticket_already_merged",
+             f"{key}: existing merged PR #{pr.get('id')} found at discovery — skipping fresh setup",
+             links={"ticket": ticket.get("url", ""), "pr": pr.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
+             meta={"ticket": key, "pr_id": pr.get("id"), "pr_branch": pr.get("branch", ""),
+                   "merged_at": pr.get("merged_at", ""),
+                   "merged_external_status": ts["merged_external_status"]})
+    return ts
+
+
 def _clear_reingest_docs(config: dict, slug: str) -> list[str]:
     ws = config["workspace"]
     docs = ws["root"] / ws["tickets_dir"] / slug / "docs"
