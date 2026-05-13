@@ -29,6 +29,35 @@ def _label(key: str, ts: dict) -> str:
 _VERDICT_RE = re.compile(r"^VERDICT:\s*(PASS|FAIL)\b", re.MULTILINE | re.IGNORECASE)
 
 
+def emit_once(
+    ts: dict,
+    marker_field: str,
+    event: str,
+    summary: str,
+    *,
+    links: dict | None = None,
+    meta: dict | None = None,
+) -> bool:
+    """Emit a log event exactly once per ticket state, guarded by a marker.
+
+    If ts[marker_field] is truthy, this is a no-op (returns False). Otherwise
+    log.emit(event, summary, ...) fires and ts[marker_field] is set to the
+    current ISO timestamp. The caller is responsible for persisting ts via
+    state.save_ticket() so the marker survives across poll cycles.
+
+    Use this for any side-effect-emitting line whose semantics are "this
+    event should fire once per (ticket, marker) lifetime". The recurring
+    bug shape that produced ed95f08 / 8510474 / c1b2022 was exactly the
+    absence of this pattern — emits fired unconditionally inside helpers
+    that were called every poll cycle.
+    """
+    if ts.get(marker_field):
+        return False
+    log.emit(event, summary, links=links or {}, meta=meta or {})
+    ts[marker_field] = datetime.now(timezone.utc).isoformat()
+    return True
+
+
 MAX_STAGE_RETRIES = 5
 STAGE_RETRY_WINDOW_HOURS = 2
 
@@ -781,6 +810,16 @@ def check(config: dict, instance_key: str = ""):
     - last_comment_ids: per-PR review-comment cursor.
     - comment_fix_attempts: per-review-comment fix attempt counts.
     - llm_sessions: per-task Claude session ids used by task workers.
+
+    Idempotency framework: any side-effect emit inside a handler whose
+    semantics are "fire once per ticket lifetime" should be issued via
+    emit_once(ts, marker_field, event, summary, ...) (defined above), which
+    consults ts[marker_field] and short-circuits subsequent calls. The
+    handler is responsible for picking a marker field name and persisting
+    ts via state.save_ticket() (the dispatcher does the final save). The
+    meta-invariant test at tests/features/test_tickets.py:TestCheckIdempotentSecondCycle
+    asserts a second check() cycle produces zero new log_events for any
+    ticket in any non-terminal status — that test is the structural backstop.
     """
     from datetime import datetime, timezone
     if instance_key:
