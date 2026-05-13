@@ -297,21 +297,22 @@ def api_tickets_list():
     pm_counts: dict[str, int] = {}
     val_badges: dict[str, str] = {}
     if instance_key:
-        rows = _db.query_all(
-            "SELECT ticket_key, findings FROM pm_review pr"
-            " WHERE instance_key=? AND checkpoint_type='pre_approval'"
-            " AND created_at = ("
-            "   SELECT MAX(created_at) FROM pm_review"
-            "   WHERE instance_key=? AND ticket_key=pr.ticket_key AND checkpoint_type='pre_approval'"
-            " )",
-            (instance_key, instance_key),
-        )
-        for r in rows:
-            try:
-                f = json.loads(r["findings"]) if r["findings"] else []
-                pm_counts[r["ticket_key"]] = len(f) if isinstance(f, list) else 0
-            except (ValueError, TypeError):
-                pm_counts[r["ticket_key"]] = 0
+        if (_config.get("pm_agent") or {}).get("enabled", True):
+            rows = _db.query_all(
+                "SELECT ticket_key, findings FROM pm_review pr"
+                " WHERE instance_key=? AND checkpoint_type='pre_approval'"
+                " AND created_at = ("
+                "   SELECT MAX(created_at) FROM pm_review"
+                "   WHERE instance_key=? AND ticket_key=pr.ticket_key AND checkpoint_type='pre_approval'"
+                " )",
+                (instance_key, instance_key),
+            )
+            for r in rows:
+                try:
+                    f = json.loads(r["findings"]) if r["findings"] else []
+                    pm_counts[r["ticket_key"]] = len(f) if isinstance(f, list) else 0
+                except (ValueError, TypeError):
+                    pm_counts[r["ticket_key"]] = 0
         from features import validation as _val
         val_badges = _val.badges_bulk(instance_key)
     out = {}
@@ -889,6 +890,8 @@ def api_ticket_pm_findings(key: str, limit: int = 20):
     from pm import runner
     instance_key = _config.get("job", {}).get("key", "")
     if not instance_key:
+        return {"reviews": []}
+    if not (_config.get("pm_agent") or {}).get("enabled", True):
         return {"reviews": []}
     reviews = runner.latest_findings(instance_key, key, limit)
     return {"reviews": reviews}
