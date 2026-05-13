@@ -20,12 +20,12 @@ def _rewrite_title(html: str) -> str:
     def _sub(m: "re.Match[str]") -> str:
         body = m.group(1).strip()
         if body == "frshty":
-            page = ""
+            page = "Dashboard"
         elif " — frshty" in body:
             page = body.split(" — frshty")[0].strip()
         else:
             page = body
-        new = f"{prefix} {page}".strip() if prefix else (page or "frshty")
+        new = f"{prefix} - {page}" if prefix else page
         return f"<title>{new}</title>"
     return _TITLE_RE.sub(_sub, html, count=1)
 
