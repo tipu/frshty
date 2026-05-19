@@ -257,7 +257,15 @@ frshtyApp({
                 }
 
                 const weekStart = fmtDate(monday), weekEnd = fmtDate(fri);
-                const inv = invoices.value.find(v => v.start && v.end && v.start <= weekEnd && v.end >= weekStart);
+                const monthY = monday.getUTCFullYear(), monthM = monday.getUTCMonth();
+                const endInMonth = v => {
+                    if (!v.start || !v.end) return false;
+                    const e = new Date(v.end + 'T00:00:00Z');
+                    return e.getUTCFullYear() === monthY && e.getUTCMonth() === monthM;
+                };
+                const inv = isMonthly
+                    ? invoices.value.find(v => endInMonth(v) && v.start <= weekEnd && v.end >= weekStart)
+                    : invoices.value.find(v => v.start && v.end && v.start <= weekEnd && v.end >= weekStart);
 
                 let invoiceTag = null;
                 if (isMonthly) {
@@ -279,7 +287,7 @@ frshtyApp({
                                 const ws = fmtDate(w);
                                 const wf = new Date(w); wf.setUTCDate(wf.getUTCDate() + 4);
                                 const we = fmtDate(wf);
-                                if (invoices.value.find(v => v.start && v.end && v.start <= we && v.end >= ws)) return;
+                                if (invoices.value.find(v => endInMonth(v) && v.start <= we && v.end >= ws)) return;
                                 for (let j = 0; j < 5; j++) {
                                     const dd = new Date(w); dd.setUTCDate(dd.getUTCDate() + j);
                                     const ee = entryByDate.value[fmtDate(dd)];
