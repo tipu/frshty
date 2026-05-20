@@ -1,4 +1,6 @@
 """Ticket pipeline tasks. Headless claude -p invocations, postcondition-gated."""
+import json
+import os
 import subprocess
 import uuid
 from pathlib import Path
@@ -18,6 +20,193 @@ from features.platforms import make_platform
 PLAN_TIMEOUT = 1800
 REVIEW_TIMEOUT = 900
 FIX_TIMEOUT = 1800
+TEST_PLAN_TIMEOUT = 1800
+TEST_WRITE_TIMEOUT = 3600
+TEST_RUN_TIMEOUT = 5400
+PROOF_TIMEOUT = 3600
+MIN_TESTING_MD_BYTES = 200
+
+
+def _testing_md_is_substantive(path: Path) -> bool:
+    """True iff TESTING.md exists, is a file, and has >= MIN_TESTING_MD_BYTES
+    of non-whitespace content."""
+    try:
+        if not path.is_file():
+            return False
+        content = path.read_text()
+    except OSError:
+        return False
+    return len(content.strip()) >= MIN_TESTING_MD_BYTES
+
+
+def _detect_runner(repo_dir: Path) -> tuple[list[str], dict[str, str]] | None:
+    """Return (cmd_argv, env_extras) for the repo's native test runner, or
+    None if no runner is detectable. package.json takes priority over
+    pyproject/go/cargo for polyglot repos."""
+    if (repo_dir / "package.json").exists():
+        try:
+            pkg = json.loads((repo_dir / "package.json").read_text())
+        except (json.JSONDecodeError, OSError):
+            pkg = {}
+        scripts = pkg.get("scripts", {}) if isinstance(pkg, dict) else {}
+        for candidate in ("test", "test:unit", "test:ci"):
+            if candidate in scripts:
+                if (repo_dir / "pnpm-lock.yaml").exists():
+                    return (["pnpm", "run", candidate], {})
+                if (repo_dir / "yarn.lock").exists():
+                    return (["yarn", "run", candidate], {})
+                return (["npm", "run", candidate], {})
+    if (repo_dir / "pyproject.toml").exists() or \
+       (repo_dir / "pytest.ini").exists() or \
+       (repo_dir / "tests").is_dir():
+        return (["pytest", "-q"], {})
+    if (repo_dir / "go.mod").exists():
+        return (["go", "test", "./..."], {})
+    if (repo_dir / "Cargo.toml").exists():
+        return (["cargo", "test", "--quiet"], {})
+    return None
+
+
+def _run_repo_tests(repo_dir: Path, cmd: list[str], env: dict[str, str],
+                    timeout: int) -> dict:
+    full_env = {**os.environ, **env}
+    try:
+        completed = subprocess.run(
+            cmd, cwd=repo_dir, capture_output=True, text=True,
+            timeout=timeout, env=full_env,
+        )
+    except subprocess.TimeoutExpired as e:
+        tail = (e.stdout or "")[-2000:] + "\n---STDERR---\n" + (e.stderr or "")[-1000:]
+        return {"result": "timeout", "exit_code": -1, "tail": tail}
+    except (FileNotFoundError, OSError) as e:
+        return {"result": "error", "exit_code": -1,
+                "tail": f"{type(e).__name__}: {e}"}
+    return {
+        "result": "pass" if completed.returncode == 0 else "fail",
+        "exit_code": completed.returncode,
+        "tail": (completed.stdout or "")[-3000:]
+                + "\n---STDERR---\n"
+                + (completed.stderr or "")[-1500:],
+    }
+
+
+def _write_test_runs(ticket_dir: Path, attempt: int,
+                     per_repo: list[dict], verdict: str) -> None:
+    lines = [
+        f"# Test runs — attempt {attempt}\n",
+        f"VERDICT: {verdict}\n\n",
+    ]
+    for r in per_repo:
+        lines.append(f"## {r['repo']}\n")
+        lines.append(f"- result: {r['result']}\n")
+        if r.get("cmd"):
+            lines.append(f"- command: `{r['cmd']}`\n")
+        if r.get("exit_code") is not None:
+            lines.append(f"- exit_code: {r['exit_code']}\n")
+        if r.get("tail"):
+            lines.append("\n```\n" + r["tail"] + "\n```\n")
+        lines.append("\n")
+    (ticket_dir / "docs" / "test-runs.md").write_text("".join(lines))
+
+
+def _build_fix_prompt(per_repo: list[dict]) -> str:
+    sections = []
+    for r in per_repo:
+        if r["result"] in ("pass", "no_runner"):
+            continue
+        sections.append(
+            f"--- {r['repo']} ({r['result']}, exit={r.get('exit_code', '?')}) ---\n"
+            f"command: {r.get('cmd', '?')}\n\n"
+            f"{r.get('tail', '')[:3500]}\n"
+        )
+    failures = "\n".join(sections) or "(no failure tails captured)"
+    return (
+        "The test runs below failed. Fix the failures by modifying the "
+        "PRODUCTION code in this worktree (not the tests, unless a test is "
+        "clearly wrong). Then commit your changes.\n\n"
+        "Constraint: do NOT introduce mocks, skip markers, or conditional "
+        "early returns to make failing tests pass. If a test reveals a real "
+        "product bug, fix the bug.\n\n"
+        f"{failures}"
+    )
+
+
+_PLAN_TESTS_PROMPT_TEMPLATE = """Read these files in order:
+- docs/ticket.md
+- docs/change-manifest.md
+- docs/tri-review.md
+
+{testing_md_section}
+
+Use any structured acceptance criteria enumerated in docs/ticket.md as the authoritative catalog. If absent, infer testable behavior from docs/change-manifest.md.
+
+Produce docs/test-plan.md listing automated test cases that cover PRODUCT edge cases. For each acceptance criterion, write 2-6 test cases.
+
+REQUIRED scope — test these:
+- form-validation edges (empty, max-length, special chars, mixed casing, unicode/RTL)
+- empty-state and zero-result UI paths
+- permission / role boundaries (viewer vs editor vs admin; cross-tenant denial)
+- pagination off-by-one (page 1, last page, page beyond last, page=0, negative)
+- state-machine corners (cancelling mid-flight, replaying completed action, double-submit)
+- business-logic boundaries (currency rounding at half-cent, integer overflow, date math at DST/month/year ends, sort stability with ties)
+- multi-actor races where two users touch the same record back-to-back
+
+EXPLICITLY OUT OF SCOPE — do NOT write tests for:
+- redis / cache disconnects or eviction
+- database connection drops, migration failures, lock timeouts
+- S3 / blob-store outages
+- network partitions, HTTP 5xx from upstream services, DNS failures
+- container restarts, OOM, signal handling, file descriptor exhaustion
+- TLS handshake failures, clock skew between hosts
+
+Those are infrastructure failure modes and belong in a separate non-functional test track. If you find yourself writing one, delete it.
+
+Output: one table row per test case:
+| # | Acceptance criterion | Layer | Repo | File path | Test name | Assertion (plain English) | Preconditions |
+
+Layer in {{unit, integration, e2e}}. Tests must FAIL on missing preconditions, never silently skip.
+
+Finish with: Layer counts: unit: N  integration: M  e2e: K  total: T
+
+If no testable product behavior exists, write a '## No Testable Criteria' section with rationale and counts 0/0/0/0.
+"""
+
+
+_PROVE_PROMPT_TEMPLATE = """A PROOF.md guide is provided below. Follow it.
+
+PROJECT PROOF GUIDE (from workspace.root/PROOF.md):
+{proof_md}
+END OF PROOF GUIDE
+
+The guide tells you (a) how to decide if this ticket's change is demoable / provable, and (b) if so, what concrete artifacts to produce (screenshots, recordings, traces, screen captures, exports, etc.).
+
+Per the guide, do exactly one of:
+  - Carry out the proof (capture whatever artifacts it asks for, save them under docs/ in this ticket directory).
+  - Decide it isn't demoable and record that decision.
+
+In every case, write a `docs/proof.md` summarizing what you did:
+- A first-line marker: `PROOF: DEMOED` or `PROOF: NOT_APPLICABLE`
+- A brief explanation (what you proved, or why no proof is applicable)
+- Paths to any artifacts you produced under docs/ (relative to the ticket dir)
+
+That `docs/proof.md` is the postcondition gate for this step.
+"""
+
+
+_WRITE_TESTS_PROMPT = """Read docs/test-plan.md. For each test case in the table, implement it in the repo's native framework. The test must be a real test the project's runner can discover.
+
+Per repo in workspace/<repo>/:
+1. Detect framework via repo-root files (package.json with vitest/jest/mocha/playwright; pyproject.toml or pytest.ini; go.mod; Cargo.toml).
+2. Place each test in the canonical location — sibling to existing tests. Grep the tree first.
+3. Reuse existing factories / fixtures / helpers. Only create new ones if there's a justified gap.
+4. Tests MUST FAIL on missing preconditions. Use explicit assertions; never `if (!items) return`.
+5. Do NOT modify production code yet. If a test fails because implementation is incomplete, that's fine — leave a one-line comment. The run_tests_and_fix loop iterates on production code afterwards.
+
+After writing, append one line per file written to docs/test-files-written.txt:
+    <repo>/<rel-path>
+
+That file is the postcondition gate.
+"""
 
 
 def _claim_session(ctx: TaskContext, task_name: str) -> tuple[str | None, bool]:
@@ -82,18 +271,25 @@ def _dirty_workspace_repos(ticket_dir: Path) -> list[str]:
     return dirty
 
 
-def _commit_workspace_changes(ticket_dir: Path, ticket_key: str) -> list[str]:
+def _commit_workspace_changes(ticket_dir: Path, ticket_key: str,
+                              message: str | None = None) -> list[str]:
     """Commit meaningful worktree changes left uncommitted by a Claude run.
 
     Skips any repo whose only dirty files are Pipfile / Pipfile.lock — those
     appear when pipenv resolves deps and carry no intentional code change.
-    Returns the list of repo names that were actually committed."""
+    Returns the list of repo names that were actually committed.
+
+    `message` defaults to the historical tri-review wording for backward-
+    compat with existing callers; new callers should pass an explicit message
+    that names the step (e.g. 'test: scaffold tests' / 'fix: failing tests')."""
     candidates: list[Path] = []
     workspace = ticket_dir / "workspace"
     search_root = workspace if workspace.is_dir() else ticket_dir
     for child in sorted(search_root.iterdir()):
         if child.is_dir() and (child / ".git").exists():
             candidates.append(child)
+
+    commit_msg = message or f"fix: address tri-review findings for {ticket_key}"
 
     committed: list[str] = []
     for repo_dir in candidates:
@@ -110,8 +306,7 @@ def _commit_workspace_changes(ticket_dir: Path, ticket_key: str) -> list[str]:
             continue
         subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
         subprocess.run(
-            ["git", "commit", "-m",
-             f"fix: address tri-review findings for {ticket_key}"],
+            ["git", "commit", "-m", commit_msg],
             cwd=repo_dir, check=True,
         )
         committed.append(repo_dir.name)
@@ -443,19 +638,179 @@ def backfill_artifacts(ctx: TaskContext) -> TaskResult:
     return TaskResult("ok")
 
 
-@task("mark_ready",
+@task("enter_testing",
       preconditions=[status_is("reviewing"),
                      file_contains("docs/tri-review.md", r"VERDICT:\s*PASS")],
-      on_success_status="pr_ready",
+      on_success_status="testing",
       timeout=15)
-def mark_ready(ctx: TaskContext) -> TaskResult:
-    import core.events as events
-    ts = state.load_ticket(ctx.ticket_key or "") or {}
+def enter_testing(ctx: TaskContext) -> TaskResult:
+    """Pure state transition reviewing → testing. TESTING.md is read later
+    by plan_tests as a hint, not as a gate — every ticket that passes
+    tri-review goes through the testing state."""
     ticket_dir = _ticket_dir(ctx)
     dirty = _dirty_workspace_repos(ticket_dir)
     if dirty:
         return TaskResult("failed",
                           f"worktree has uncommitted changes in: {', '.join(dirty)}")
+    return TaskResult("ok")
+
+
+@task("plan_tests",
+      preconditions=[status_is("testing"),
+                     file_exists("docs/change-manifest.md")],
+      postconditions=[file_exists("docs/test-plan.md")],
+      timeout=TEST_PLAN_TIMEOUT)
+def plan_tests(ctx: TaskContext) -> TaskResult:
+    ticket_dir = _ticket_dir(ctx)
+    if not ticket_dir.is_dir():
+        return TaskResult("failed", f"ticket dir missing: {ticket_dir}")
+    workspace_root = Path(ctx.config["workspace"]["root"])
+    testing_md_path = workspace_root / "TESTING.md"
+    prompt = _PLAN_TESTS_PROMPT_TEMPLATE.format(
+        testing_md_section=_render_testing_md_section(testing_md_path)
+    )
+    log.emit("ticket_test_planning_started",
+             f"Headless plan_tests for {ctx.ticket_key}",
+             meta={"ticket": ctx.ticket_key,
+                   "has_testing_guide": _testing_md_is_substantive(testing_md_path)})
+    result = run_claude_code(prompt, cwd=ticket_dir, timeout=TEST_PLAN_TIMEOUT)
+    if result is None:
+        return TaskResult("failed", "claude returned non-zero or empty")
+    return TaskResult("ok")
+
+
+def _render_testing_md_section(path: Path) -> str:
+    """Build the prompt's TESTING.md block. When the guide is substantive,
+    inline its content as authoritative. When it's missing or trivial, tell
+    claude to investigate the codebase itself."""
+    if _testing_md_is_substantive(path):
+        try:
+            content = path.read_text()
+        except OSError:
+            content = ""
+        return (
+            "PROJECT TESTING GUIDE (from workspace.root/TESTING.md):\n"
+            f"{content}\n"
+            "END OF TESTING GUIDE\n\n"
+            "Treat the testing guide above as authoritative for: which "
+            "frameworks to use, where tests live, what fixtures already "
+            "exist, what patterns are established. Prefer the guide over "
+            "general best practices when they conflict."
+        )
+    return (
+        "NO PROJECT TESTING GUIDE PROVIDED.\n\n"
+        "Investigate the workspace yourself before planning. For each "
+        "workspace/<repo>/ subdirectory:\n"
+        "- detect the language and test framework from repo-root files "
+        "(package.json devDependencies, pyproject.toml/pytest.ini, "
+        "go.mod, Cargo.toml)\n"
+        "- grep existing test files to learn the directory layout, "
+        "naming conventions, and which fixtures/factories already exist\n"
+        "- reuse those existing helpers rather than inventing parallel ones\n"
+        "Plan tests in whatever framework you find."
+    )
+
+
+@task("write_tests",
+      preconditions=[status_is("testing"),
+                     file_exists("docs/test-plan.md")],
+      postconditions=[file_exists("docs/test-files-written.txt")],
+      timeout=TEST_WRITE_TIMEOUT)
+def write_tests(ctx: TaskContext) -> TaskResult:
+    ticket_dir = _ticket_dir(ctx)
+    if not ticket_dir.is_dir():
+        return TaskResult("failed", f"ticket dir missing: {ticket_dir}")
+    log.emit("ticket_test_writing_started",
+             f"Headless write_tests for {ctx.ticket_key}",
+             meta={"ticket": ctx.ticket_key})
+    sid, resume = _claim_session(ctx, "write_tests")
+    result = run_claude_code(_WRITE_TESTS_PROMPT, cwd=ticket_dir,
+                             timeout=TEST_WRITE_TIMEOUT,
+                             session_id=sid, resume=resume)
+    if result is None:
+        if resume:
+            _drop_session(ctx, "write_tests")
+        return TaskResult("failed", "claude returned non-zero or empty")
+    _commit_workspace_changes(ticket_dir, ctx.ticket_key or "",
+                              message=f"test: scaffold tests for {ctx.ticket_key}")
+    return TaskResult("ok")
+
+
+@task("run_tests_and_fix",
+      preconditions=[status_is("testing"),
+                     file_exists("docs/test-plan.md")],
+      postconditions=[file_contains("docs/test-runs.md", r"VERDICT:\s*(PASS|FAIL)")],
+      timeout=TEST_RUN_TIMEOUT)
+def run_tests_and_fix(ctx: TaskContext) -> TaskResult:
+    """Run tests once per task invocation. If FAIL and cap not reached, ask
+    claude to fix and let the dispatcher re-enqueue us next cycle. Each
+    invocation writes a fresh VERDICT into docs/test-runs.md."""
+    from features.tickets import MAX_TEST_FIX_ATTEMPTS
+    ts = state.load_ticket(ctx.ticket_key or "") or {}
+    ticket_dir = _ticket_dir(ctx)
+    workspace = ticket_dir / "workspace"
+    if not workspace.is_dir():
+        workspace = ticket_dir
+
+    attempt = int(ts.get("test_fix_attempts", 0)) + 1
+
+    per_repo: list[dict] = []
+    for repo_dir in sorted(p for p in workspace.iterdir() if p.is_dir()):
+        if not (repo_dir / ".git").exists():
+            continue
+        runner = _detect_runner(repo_dir)
+        if runner is None:
+            per_repo.append({"repo": repo_dir.name, "result": "no_runner"})
+            log.emit("test_runner_not_detected",
+                     f"{ctx.ticket_key}/{repo_dir.name}: no runner detected",
+                     meta={"ticket": ctx.ticket_key, "repo": repo_dir.name})
+            continue
+        cmd, env = runner
+        outcome = _run_repo_tests(repo_dir, cmd, env,
+                                  timeout=TEST_RUN_TIMEOUT // 3)
+        outcome["repo"] = repo_dir.name
+        outcome["cmd"] = " ".join(cmd)
+        per_repo.append(outcome)
+
+    # Permissive verdict: PASS if nothing failed. Repos with no detectable
+    # runner don't count toward FAIL (otherwise testless workspaces would
+    # never make it to pr_ready). Pass through with a log event.
+    failures = [o for o in per_repo if o["result"] not in ("pass", "no_runner")]
+    overall_pass = not failures
+    verdict = "PASS" if overall_pass else "FAIL"
+
+    _write_test_runs(ticket_dir, attempt, per_repo, verdict)
+
+    if overall_pass:
+        return TaskResult("ok", artifacts={"attempt": attempt, "verdict": "PASS"})
+
+    state.update_ticket(ctx.ticket_key or "",
+                        lambda t: {**t, "test_fix_attempts": attempt} if t else t)
+
+    if attempt >= MAX_TEST_FIX_ATTEMPTS:
+        return TaskResult("ok", artifacts={"attempt": attempt, "verdict": "FAIL",
+                                            "cap_reached": True})
+
+    fix_prompt = _build_fix_prompt(per_repo)
+    sid, resume = _claim_session(ctx, "run_tests_and_fix")
+    fix_result = run_claude_code(fix_prompt, cwd=ticket_dir,
+                                 timeout=TEST_RUN_TIMEOUT,
+                                 session_id=sid, resume=resume)
+    if fix_result is None:
+        if resume:
+            _drop_session(ctx, "run_tests_and_fix")
+        return TaskResult("failed", "fix step: claude returned non-zero")
+
+    _commit_workspace_changes(
+        ticket_dir, ctx.ticket_key or "",
+        message=f"fix: address failing tests for {ctx.ticket_key} (attempt {attempt})")
+    return TaskResult("ok", artifacts={"attempt": attempt, "verdict": "FAIL",
+                                        "fix_dispatched": True})
+
+
+def _fire_ticket_dev_complete(ctx: TaskContext) -> None:
+    import core.events as events
+    ts = state.load_ticket(ctx.ticket_key or "") or {}
     events.dispatch("ticket_dev_complete", {
         "ticket_key": ctx.ticket_key,
         "estimate_seconds": ts.get("estimate_seconds", 0),
@@ -463,6 +818,97 @@ def mark_ready(ctx: TaskContext) -> TaskResult:
         "slug": ts.get("slug", ""),
         "branch": ts.get("branch", ""),
     }, ctx.config)
+
+
+def _enter_proving_target(ctx: TaskContext, result: TaskResult) -> str:
+    """Callable on_success_status for enter_proving: route to `proving` when
+    a PROOF.md exists at workspace.root, otherwise skip straight to
+    `pr_ready`. The body fires ticket_dev_complete only on the skip path so
+    the event is dispatched exactly once per ticket either way."""
+    return "proving" if result.artifacts.get("has_proof_md") else "pr_ready"
+
+
+@task("enter_proving",
+      preconditions=[status_is("testing"),
+                     file_contains("docs/test-runs.md", r"VERDICT:\s*PASS")],
+      on_success_status=_enter_proving_target,
+      timeout=15)
+def enter_proving(ctx: TaskContext) -> TaskResult:
+    """Bridge from testing to either proving (PROOF.md present) or pr_ready
+    (PROOF.md absent — skip the proof step). On the skip path, fires
+    ticket_dev_complete inline so downstream listeners (schedule_pr) trigger
+    immediately, matching the no-proof-needed flow."""
+    ticket_dir = _ticket_dir(ctx)
+    dirty = _dirty_workspace_repos(ticket_dir)
+    if dirty:
+        return TaskResult("failed",
+                          f"worktree has uncommitted changes in: {', '.join(dirty)}")
+    workspace_root = Path(ctx.config["workspace"]["root"])
+    proof_md = workspace_root / "PROOF.md"
+    has_proof = proof_md.is_file() and len(proof_md.read_text().strip()) > 0
+    if not has_proof:
+        _fire_ticket_dev_complete(ctx)
+        log.emit("ticket_proof_skipped",
+                 f"{ctx.ticket_key}: no PROOF.md at {workspace_root}; "
+                 f"skipping proof state",
+                 meta={"ticket": ctx.ticket_key,
+                       "proof_md_path": str(proof_md),
+                       "exists": proof_md.exists()})
+        return TaskResult("ok", artifacts={"has_proof_md": False})
+    return TaskResult("ok", artifacts={"has_proof_md": True})
+
+
+@task("prove",
+      preconditions=[status_is("proving")],
+      postconditions=[file_exists("docs/proof.md")],
+      timeout=PROOF_TIMEOUT)
+def prove(ctx: TaskContext) -> TaskResult:
+    ticket_dir = _ticket_dir(ctx)
+    if not ticket_dir.is_dir():
+        return TaskResult("failed", f"ticket dir missing: {ticket_dir}")
+    workspace_root = Path(ctx.config["workspace"]["root"])
+    proof_md_path = workspace_root / "PROOF.md"
+    try:
+        proof_md = proof_md_path.read_text() if proof_md_path.exists() else ""
+    except OSError:
+        proof_md = ""
+    if not proof_md.strip():
+        # Defensive: if PROOF.md vanished between enter_proving and prove,
+        # write a NOT_APPLICABLE proof.md and exit ok rather than spinning.
+        (ticket_dir / "docs" / "proof.md").write_text(
+            "PROOF: NOT_APPLICABLE\n\nPROOF.md disappeared between gate "
+            "evaluation and the prove step.\n"
+        )
+        return TaskResult("ok", artifacts={"skipped": True})
+    prompt = _PROVE_PROMPT_TEMPLATE.format(proof_md=proof_md)
+    log.emit("ticket_prove_started",
+             f"Headless prove for {ctx.ticket_key}",
+             meta={"ticket": ctx.ticket_key})
+    sid, resume = _claim_session(ctx, "prove")
+    result = run_claude_code(prompt, cwd=ticket_dir, timeout=PROOF_TIMEOUT,
+                             session_id=sid, resume=resume)
+    if result is None:
+        if resume:
+            _drop_session(ctx, "prove")
+        return TaskResult("failed", "claude returned non-zero or empty")
+    return TaskResult("ok")
+
+
+@task("mark_ready",
+      preconditions=[status_is("proving"),
+                     file_exists("docs/proof.md")],
+      on_success_status="pr_ready",
+      timeout=15)
+def mark_ready(ctx: TaskContext) -> TaskResult:
+    """Final gate: proving → pr_ready after proof is on disk. Fires
+    ticket_dev_complete. The skip-path version of the event (when there is
+    no PROOF.md) fires inside enter_proving instead."""
+    ticket_dir = _ticket_dir(ctx)
+    dirty = _dirty_workspace_repos(ticket_dir)
+    if dirty:
+        return TaskResult("failed",
+                          f"worktree has uncommitted changes in: {', '.join(dirty)}")
+    _fire_ticket_dev_complete(ctx)
     return TaskResult("ok")
 
 

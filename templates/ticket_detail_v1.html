@@ -317,12 +317,6 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
         </div>
 
         <div class="space-y-2">
-            <div v-if="ticket && ticket.demo_video" class="card p-4 mb-4">
-                <div class="text-xs font-bold text-gray-500 uppercase mb-2">Demo Recording</div>
-                <video controls class="w-full rounded" style="max-height:600px">
-                    <source :src="`/api/tickets/${key}/demo`" type="video/webm">
-                </video>
-            </div>
             <div v-for="[name, content] in sortedDocs" :key="name" class="card p-3">
                 <div class="collapsible-header" :class="docExpanded[name] ? 'expanded' : 'collapsed'"
                      @click="docExpanded[name] = !docExpanded[name]">
