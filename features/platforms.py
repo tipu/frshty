@@ -98,7 +98,10 @@ def _resolve_merge_conflicts(repo_path, base_branch: str, prev_error: str | None
                 return {"ok": False, "error": f"syntax error in {filepath}: {e}"}
         _run_git(repo_path, ["add", filepath])
 
-    result = _run_git(repo_path, ["commit", "--no-verify", "--no-edit"])
+    from core.git_util import commit_with_hooks
+    result = commit_with_hooks(
+        repo_path, message=None, extra_commit_args=["--no-edit"], timeout=300,
+    )
     if result.returncode != 0:
         _run_git(repo_path, ["merge", "--abort"])
         return {"ok": False, "error": result.stderr.strip()}
