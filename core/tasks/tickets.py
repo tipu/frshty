@@ -3,12 +3,13 @@ import json
 import os
 import subprocess
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import core.log as log
 import core.state as state
-from core.claude_runner import run_claude_code
-from core.config import ticket_worktree_path
+from core.claude_runner import run_claude_code, run_haiku, extract_json
+from core.config import get_repos, ticket_worktree_path
 from core.tasks.registry import TaskContext, TaskResult, task
 from core.tasks.preconditions import (
     status_is, auto_pr_true, file_exists, file_contains, feature_enabled, has_flag,
@@ -910,6 +911,139 @@ def mark_ready(ctx: TaskContext) -> TaskResult:
                           f"worktree has uncommitted changes in: {', '.join(dirty)}")
     _fire_ticket_dev_complete(ctx)
     return TaskResult("ok")
+
+
+_PR_DESCRIPTION_PROMPT = """You are writing a per-repo pull request description for ticket {ticket_key}.
+
+CONTEXT — full change manifest covering ALL repos this ticket touches (high-level summary; some parts may not apply to THIS repo):
+
+{manifest}
+
+THIS REPO is `{repo_name}`. Below is the unified diff of ONLY this repo's changes (other repos' diffs are not shown — write only about what this diff does).
+
+DIFF:
+
+{diff}
+
+Write a 3-5 sentence high-level description of what changed in `{repo_name}` specifically. Focus on:
+- What user-visible behavior or developer-facing capability changed (or is enabled by this repo's piece of the ticket)
+- The general shape of the change (new endpoint, schema migration, refactor, config flip, etc.)
+- Why this repo needed to change as part of the larger ticket — the integration role it plays
+
+Do NOT:
+- Walk through individual files or line numbers
+- Repeat verbatim what other repos in this ticket are doing
+- Use marketing language; be technical, direct, in plain prose
+- Exceed 5 sentences
+
+Output JSON only, no markdown fence:
+{{"title": "{ticket_key}: <one-line summary specific to this repo's changes>", "description": "<3-5 sentence markdown description>"}}
+"""
+
+
+PR_DESCRIPTION_TIMEOUT = 900
+
+
+@task("generate_pr_descriptions",
+      preconditions=[status_is("pr_ready"),
+                     file_exists("docs/change-manifest.md")],
+      timeout=PR_DESCRIPTION_TIMEOUT)
+def generate_pr_descriptions(ctx: TaskContext) -> TaskResult:
+    """Generate per-repo PR titles + descriptions and stash on the ticket
+    state under `pr_descriptions[<repo>] = {title, description, generated_at}`.
+
+    Drives the modal at /api/tickets/{key}/pr-info AND the headless
+    create_pr path in features.tickets:_create_pr, so manual and auto PRs
+    both see the same per-repo prose. Skips repos whose worktree has no
+    meaningful diff against the base branch. Re-runs are idempotent — only
+    missing repos are regenerated, so partial state from a crash recovers
+    cleanly."""
+    ts = state.load_ticket(ctx.ticket_key or "") or {}
+    slug = ts.get("slug", "")
+    if not slug:
+        return TaskResult("failed", "no slug")
+    ws = ctx.config["workspace"]
+    base_branch = ws.get("base_branch", "main")
+    ticket_dir = ws["root"] / ws["tickets_dir"] / slug
+    manifest_path = ticket_dir / "docs" / "change-manifest.md"
+    manifest = ""
+    if manifest_path.exists():
+        try:
+            manifest = manifest_path.read_text()[:6000]
+        except OSError:
+            manifest = ""
+
+    existing = dict(ts.get("pr_descriptions") or {})
+    generated: list[str] = []
+    skipped_empty: list[str] = []
+    skipped_no_worktree: list[str] = []
+    failed: list[str] = []
+
+    for repo in get_repos(ctx.config):
+        name = repo["name"]
+        if name in existing:
+            continue
+        wt = ticket_worktree_path(ctx.config, slug, name)
+        if not wt.is_dir():
+            skipped_no_worktree.append(name)
+            continue
+        diff_out = subprocess.run(
+            ["git", "diff", f"origin/{base_branch}...HEAD"],
+            cwd=str(wt), capture_output=True, text=True, timeout=30,
+        )
+        diff_text = diff_out.stdout
+        if not diff_text.strip():
+            skipped_empty.append(name)
+            continue
+        if len(diff_text) > 12000:
+            diff_text = diff_text[:12000] + "\n[diff truncated]"
+
+        prompt = _PR_DESCRIPTION_PROMPT.format(
+            ticket_key=ctx.ticket_key, repo_name=name,
+            manifest=manifest or "(no change-manifest available)",
+            diff=diff_text,
+        )
+        raw = run_haiku(prompt)
+        parsed = extract_json(raw) if raw else None
+        if not parsed or not isinstance(parsed, dict):
+            failed.append(name)
+            log.emit("pr_description_parse_failed",
+                     f"{ctx.ticket_key}/{name}: could not parse haiku output",
+                     meta={"ticket": ctx.ticket_key, "repo": name,
+                           "raw": (raw or "")[:500]})
+            continue
+
+        title = parsed.get("title") or f"{ctx.ticket_key}: changes in {name}"
+        description = parsed.get("description", "").strip()
+        if not description:
+            failed.append(name)
+            continue
+        existing[name] = {
+            "title": title,
+            "description": description,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        generated.append(name)
+
+    if generated or failed:
+        def _set(t):
+            if t is None:
+                return None
+            t["pr_descriptions"] = existing
+            return t
+        state.update_ticket(ctx.ticket_key or "", _set)
+
+    log.emit("ticket_pr_descriptions_generated",
+             f"{ctx.ticket_key}: generated={len(generated)} "
+             f"skipped_empty={len(skipped_empty)} failed={len(failed)}",
+             meta={"ticket": ctx.ticket_key,
+                   "generated": generated,
+                   "skipped_empty": skipped_empty,
+                   "skipped_no_worktree": skipped_no_worktree,
+                   "failed": failed})
+    if failed and not generated:
+        return TaskResult("failed", f"all repos failed: {failed}")
+    return TaskResult("ok", artifacts={"generated": generated, "failed": failed})
 
 
 @task("fix_reported_bug",
