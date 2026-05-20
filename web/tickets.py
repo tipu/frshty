@@ -168,7 +168,30 @@ def api_ticket_pr_info(ticket_key: str):
         base_branch = ws.get("base_branch", "main")
         ticket_dir = ws.get("root", Path(".")) / ws.get("tickets_dir", "tickets") / slug
         docs_dir = ticket_dir / "docs"
+        pr_descriptions = ticket.get("pr_descriptions") or {}
 
+        # Fast path: pre-generated descriptions cover every field the modal
+        # needs (title, description, branch, files_changed). Skip git fetches
+        # and the change-manifest haiku call — the cache was already populated
+        # by the generate_pr_descriptions task at pr_ready entry.
+        if pr_descriptions:
+            repos_out = [
+                {
+                    "name": name,
+                    "branch": entry.get("branch") or ticket.get("branch", ""),
+                    "files_changed": int(entry.get("files_changed", 0)),
+                    "title": entry.get("title", f"{ticket_key}: {name}"),
+                    "description": entry.get("description", ""),
+                    "generated": True,
+                    "generated_at": entry.get("generated_at", ""),
+                }
+                for name, entry in pr_descriptions.items()
+            ]
+            return {"repos": repos_out}
+
+        # Slow fallback: pre-feature tickets, or pr_ready entered moments ago
+        # before the task ran. Do the per-repo git fetch + summary haiku and
+        # serve the default title/description.
         ticket_summary = ""
         if docs_dir.is_dir():
             summary_cache = docs_dir / ".change-summary.txt"
@@ -185,7 +208,6 @@ def api_ticket_pr_info(ticket_key: str):
 
         default_title = f"{ticket_key}: {ticket_summary.split('.')[0] if ticket_summary else 'Work'}"
         default_description = ticket_summary if ticket_summary else f"Implementation for {ticket_key}"
-        pr_descriptions = ticket.get("pr_descriptions") or {}
 
         repos_out = []
         for repo in get_repos(_config):
@@ -201,14 +223,13 @@ def api_ticket_pr_info(ticket_key: str):
                 ["git", "rev-parse", "--abbrev-ref", "HEAD"],
                 cwd=str(wt), capture_output=True, text=True, timeout=10,
             ).stdout.strip() or ticket.get("branch", "")
-            entry = pr_descriptions.get(repo["name"]) or {}
             repos_out.append({
                 "name": repo["name"],
                 "branch": branch,
                 "files_changed": len(files),
-                "title": entry.get("title") or default_title,
-                "description": entry.get("description") or default_description,
-                "generated": bool(entry),
+                "title": default_title,
+                "description": default_description,
+                "generated": False,
             })
 
         return {"repos": repos_out}
