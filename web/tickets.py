@@ -1,6 +1,7 @@
 import asyncio
 import json
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -121,12 +122,17 @@ def _llm_breakdown_for_slug(instance_key: str, slug: str) -> dict:
     return bd
 
 
-def _local_worktree_diff(ts: dict) -> str:
+def _local_worktree_diff(ts: dict) -> list[dict]:
+    """Return one entry per repo with non-empty `git diff origin/<base>...HEAD`.
+
+    Shape matches the post-PR return shape from api_ticket_diff so the
+    frontend's per-repo tab UI works identically pre- and post-PR. Pre-PR
+    entries have pr_id=None and url='' (no PR yet)."""
     slug = ts.get("slug")
     if not slug:
-        return ""
+        return []
     base_branch = _config["workspace"].get("base_branch", "main")
-    parts = []
+    out: list[dict] = []
     for repo in get_repos(_config):
         wt = cfg.ticket_worktree_path(_config, slug, repo["name"])
         if not wt.is_dir():
@@ -134,9 +140,16 @@ def _local_worktree_diff(ts: dict) -> str:
         result = subprocess.run(
             ["git", "diff", f"origin/{base_branch}...HEAD"],
             cwd=str(wt), capture_output=True, text=True, timeout=30)
-        if result.stdout.strip():
-            parts.append(result.stdout)
-    return "\n".join(parts)
+        diff_text = result.stdout
+        if not diff_text.strip():
+            continue
+        out.append({
+            "repo": repo["name"],
+            "pr_id": None,
+            "url": "",
+            "diff": diff_text,
+        })
+    return out
 
 
 @router.get("/api/tickets/{ticket_key}/pr-info")
@@ -633,6 +646,69 @@ def api_reset_terminal(key: str):
     return {"status": "ok"}
 
 
+DISCUSS_KEY_SUFFIX = "-discuss"
+DISCUSS_LIFETIME_SECONDS = 8 * 3600
+
+_discuss_timers: dict[str, threading.Timer] = {}
+_discuss_timers_lock = threading.Lock()
+
+
+def _schedule_discuss_kill(discuss_key: str) -> None:
+    """Kill the discuss tmux session after DISCUSS_LIFETIME_SECONDS. Timer
+    is started once per session lifetime — repeat starts don't reset the
+    clock. Frshty restarts drop the timer (the session would then live
+    until the next start call observes it and re-arms)."""
+    with _discuss_timers_lock:
+        if discuss_key in _discuss_timers:
+            return
+        def _kill():
+            try:
+                terminal.kill_terminal(discuss_key)
+                log.emit("ticket_discuss_expired",
+                         f"discuss session {discuss_key} killed after "
+                         f"{DISCUSS_LIFETIME_SECONDS // 3600}h",
+                         meta={"discuss_key": discuss_key,
+                               "lifetime_seconds": DISCUSS_LIFETIME_SECONDS})
+            except Exception:
+                pass
+            with _discuss_timers_lock:
+                _discuss_timers.pop(discuss_key, None)
+        t = threading.Timer(DISCUSS_LIFETIME_SECONDS, _kill)
+        t.daemon = True
+        t.start()
+        _discuss_timers[discuss_key] = t
+
+
+@router.post("/api/tickets/{key}/discuss/start")
+def api_start_discuss(key: str):
+    """Ensure a separate `<key>-discuss` tmux session in the ticket's
+    worktree dir and seed it with `cl` (the user's claude alias). Keyed off
+    a distinct suffix so it never collides with the main dev terminal that
+    might already be running planning/reviewing claude in the same dir.
+    Session auto-expires after DISCUSS_LIFETIME_SECONDS (default 8h)."""
+    tickets = state.load("tickets")
+    ts = tickets.get(key)
+    if not ts:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    slug = ts.get("slug", "")
+    if not slug:
+        return JSONResponse({"error": "no slug"}, status_code=400)
+    ws = _config["workspace"]
+    ticket_dir = ws["root"] / ws["tickets_dir"] / slug
+    if not ticket_dir.is_dir():
+        return JSONResponse({"error": f"ticket dir missing: {ticket_dir}"}, status_code=400)
+    discuss_key = f"{key}{DISCUSS_KEY_SUFFIX}"
+    health = terminal.session_healthy(discuss_key)
+    if health.get("alive") and health.get("claude_running"):
+        _schedule_discuss_kill(discuss_key)
+        return {"status": "running", "discuss_key": discuss_key}
+    terminal.ensure_session(discuss_key, str(ticket_dir))
+    if not health.get("claude_running"):
+        terminal.send_keys(discuss_key, "cl")
+    _schedule_discuss_kill(discuss_key)
+    return {"status": "ok", "discuss_key": discuss_key}
+
+
 @router.get("/api/tickets/{key}/diff")
 def api_ticket_diff(key: str):
     tickets = state.load("tickets")
@@ -641,8 +717,9 @@ def api_ticket_diff(key: str):
         return {"repos": [], "diff": ""}
     prs = ts.get("prs") or []
     if not prs:
-        local = _local_worktree_diff(ts)
-        return {"repos": [{"repo": "", "pr_id": None, "url": "", "diff": local}], "diff": local}
+        repos_out = _local_worktree_diff(ts)
+        first_diff = repos_out[0]["diff"] if repos_out else ""
+        return {"repos": repos_out, "diff": first_diff}
     platform = make_platform(_config)
     repos_out = []
     for pr in prs:
