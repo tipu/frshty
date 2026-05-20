@@ -73,7 +73,9 @@ def api_submit_review(body: dict):
         return JSONResponse({"error": "url required"}, status_code=400)
     m = re.match(r"https?://github\.com/([^/]+/[^/]+)/pull/(\d+)", url)
     if not m:
-        return JSONResponse({"error": "invalid github PR url"}, status_code=400)
+        m = re.match(r"https?://bitbucket\.org/([^/]+/[^/]+)/pull-requests/(\d+)", url)
+    if not m:
+        return JSONResponse({"error": "invalid PR url (expected github.com/.../pull/N or bitbucket.org/.../pull-requests/N)"}, status_code=400)
     full_repo = m.group(1)
     repo_short = full_repo.split("/")[-1]
     pr_id = int(m.group(2))
@@ -161,8 +163,8 @@ def api_reviews_list():
                 "reviewed_at": review_data.get("date", ""),
                 "total_comments": len(comments),
                 "pending": sum(1 for c in comments if c.get("status") == "pending"),
-                "pr_url": first_comment.get("pr_url", ""),
-                "pr_id": first_comment.get("pr_id", 0),
+                "pr_url": first_comment.get("pr_url") or review_data.get("pr_url", ""),
+                "pr_id": first_comment.get("pr_id") or review_data.get("pr_id", 0),
                 "created_on": first_comment.get("created_at", ""),
             })
     platform = make_platform(_config)
@@ -224,8 +226,8 @@ def api_review_info(repo: str, pr_id: int):
         "branch": review_data.get("source_branch", ""),
         "author": review_data.get("author", ""),
         "date": review_data.get("date", ""),
-        "pr_url": comments[0].get("pr_url", ""),
-        "pr_title": comments[0].get("pr_title", ""),
+        "pr_url": (comments[0].get("pr_url", "") if comments else review_data.get("pr_url", "")),
+        "pr_title": comments[0].get("pr_title", "") if comments else "",
     }
     platform = make_platform(_config)
     try:
@@ -441,10 +443,15 @@ def api_new_comment(repo: str, pr_id: int, body: dict):
     if not found:
         return JSONResponse({"error": "not found"}, status_code=404)
     branch_dir, comments, _ = found
+    pr_url = comments[0].get("pr_url", "") if comments else ""
+    if not pr_url:
+        review_json = branch_dir / "review.json"
+        if review_json.exists():
+            pr_url = json.loads(review_json.read_text()).get("pr_url", "")
     new_comment = {
         "pr_id": pr_id,
         "repo": repo,
-        "pr_url": comments[0].get("pr_url", ""),
+        "pr_url": pr_url,
         "path": body.get("path"),
         "line": body.get("line"),
         "severity": body.get("severity", "suggestion"),

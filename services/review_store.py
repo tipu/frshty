@@ -19,7 +19,15 @@ def find_review(state_dir: Path, repo: str, pr_id: int):
             comments = json.loads(queued.read_text())
         except (json.JSONDecodeError, OSError):
             continue
-        if comments and comments[0].get("pr_id") == pr_id:
+        matched = bool(comments) and comments[0].get("pr_id") == pr_id
+        if not matched:
+            review_json = branch_dir / "review.json"
+            if review_json.exists():
+                try:
+                    matched = json.loads(review_json.read_text()).get("pr_id") == pr_id
+                except (json.JSONDecodeError, OSError):
+                    matched = False
+        if matched:
             wt = branch_dir / "worktree"
             worktree = wt if (wt / ".git").exists() else None
             return branch_dir, comments, worktree
