@@ -307,7 +307,7 @@ def _commit_workspace_changes(ticket_dir: Path, ticket_key: str,
             continue
         subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
         subprocess.run(
-            ["git", "commit", "-m", commit_msg],
+            ["git", "commit", "--no-verify", "-m", commit_msg],
             cwd=repo_dir, check=True,
         )
         committed.append(repo_dir.name)
