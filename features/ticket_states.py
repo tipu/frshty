@@ -214,13 +214,89 @@ def _handle_reviewing_ticket(
     if review_file.exists():
         verdict = _t._VERDICT_RE.search(review_file.read_text())
         if verdict and verdict.group(1).upper() == "PASS":
-            _t._enqueue_stage(instance_key, key, "mark_ready")
+            _t._enqueue_stage(instance_key, key, "enter_testing")
         elif verdict and verdict.group(1).upper() == "FAIL":
             _t._enqueue_stage(instance_key, key, "fix_review_findings")
         else:
             _t._enqueue_stage(instance_key, key, "start_reviewing")
     else:
         _t._enqueue_stage(instance_key, key, "start_reviewing")
+    return ts, False
+
+
+def _handle_testing_ticket(
+    config: dict,
+    ticket: dict,
+    ts: dict,
+    base_url: str,
+    instance_key: str,
+    existing: bool,
+) -> tuple[dict, bool]:
+    if not instance_key:
+        return ts, False
+    key = ticket["key"]
+    ws = config["workspace"]
+    slug = ts.get("slug", "")
+    docs = ws["root"] / ws["tickets_dir"] / slug / "docs"
+    test_plan = docs / "test-plan.md"
+    test_files = docs / "test-files-written.txt"
+    test_runs = docs / "test-runs.md"
+
+    if not test_plan.exists():
+        _t._enqueue_stage(instance_key, key, "plan_tests")
+        return ts, False
+    if not test_files.exists():
+        _t._enqueue_stage(instance_key, key, "write_tests")
+        return ts, False
+    if not test_runs.exists():
+        _t._enqueue_stage(instance_key, key, "run_tests_and_fix")
+        return ts, False
+
+    verdict_match = _t._VERDICT_RE.search(test_runs.read_text())
+    verdict = verdict_match.group(1).upper() if verdict_match else None
+
+    if verdict == "PASS":
+        _t._enqueue_stage(instance_key, key, "enter_proving")
+    elif verdict == "FAIL":
+        attempts = int(ts.get("test_fix_attempts", 0))
+        if attempts >= _t.MAX_TEST_FIX_ATTEMPTS:
+            try:
+                state.transition_ticket(key, "tests_failed")
+                ts["status"] = "tests_failed"
+                _t.emit_once(
+                    ts, "tests_failed_at", "ticket_tests_failed",
+                    f"{key}: tests failed after {attempts} attempts; "
+                    f"needs human review",
+                    links={"detail": f"{base_url}/tickets/{key}"},
+                    meta={"ticket": key, "attempts": attempts},
+                )
+            except state.TicketStateError:
+                pass
+        else:
+            _t._enqueue_stage(instance_key, key, "run_tests_and_fix")
+    else:
+        _t._enqueue_stage(instance_key, key, "run_tests_and_fix")
+    return ts, False
+
+
+def _handle_proving_ticket(
+    config: dict,
+    ticket: dict,
+    ts: dict,
+    base_url: str,
+    instance_key: str,
+    existing: bool,
+) -> tuple[dict, bool]:
+    if not instance_key:
+        return ts, False
+    key = ticket["key"]
+    ws = config["workspace"]
+    slug = ts.get("slug", "")
+    proof = ws["root"] / ws["tickets_dir"] / slug / "docs" / "proof.md"
+    if proof.exists():
+        _t._enqueue_stage(instance_key, key, "mark_ready")
+    else:
+        _t._enqueue_stage(instance_key, key, "prove")
     return ts, False
 
 
@@ -353,6 +429,8 @@ _STATUS_HANDLERS: tuple[tuple[str, StateHandler], ...] = (
     ("pending_approval", _handle_pending_approval_ticket),
     ("planning", _handle_planning_ticket),
     ("reviewing", _handle_reviewing_ticket),
+    ("testing", _handle_testing_ticket),
+    ("proving", _handle_proving_ticket),
     ("pr_ready", _handle_pr_ready_ticket),
     ("in_review", _handle_in_review_ticket),
 )
