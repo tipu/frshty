@@ -75,6 +75,9 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
 <header class="flex items-center gap-4 mb-4">
     <a href="/tickets" class="link text-sm">&larr; Tickets</a>
     <h1 class="text-lg font-bold">{{ key }}</h1>
+    <button @click="openDiscuss"
+            class="bg-purple-800 hover:bg-purple-700 text-purple-100 px-3 py-1 rounded text-xs"
+            title="Open a separate claude (cl) terminal in this ticket's worktree dir">Discuss</button>
     <frshty-nav :features="features" />
 </header>
 
@@ -402,29 +405,30 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
 </div>
 
 <div v-show="activeTab === 'diff'">
-    <div v-if="repoTabs.length > 1" class="flex gap-1 text-xs mb-3 border-b border-gray-700 pb-2 flex-wrap">
-        <button v-for="rt in repoTabs" :key="rt.repo"
-                @click="selectedRepo = rt.repo"
-                :class="rt.repo === selectedRepo ? 'bg-blue-900 text-blue-100' : 'bg-gray-800 text-gray-400 hover:text-gray-200'"
-                class="px-3 py-1 rounded">
-            <span class="font-mono">{{ rt.repo }}</span>
-            <span v-if="rt.pr_id" class="text-gray-500 ml-1">#{{ rt.pr_id }}</span>
-            <span class="text-gray-500 ml-1">· {{ rt.fileCount }} files</span>
-            <span v-if="rt.needsReplyCount" class="ml-1 px-1.5 rounded bg-yellow-800 text-yellow-200">{{ rt.needsReplyCount }} reply</span>
-            <span v-else-if="rt.commentCount" class="ml-1 px-1.5 rounded bg-gray-700 text-gray-300">{{ rt.commentCount }}</span>
-        </button>
-    </div>
     <div v-if="!parsedDiff.length && !filteredComments.length" class="text-gray-500 text-sm p-4">No diff or comments yet.</div>
     <div class="flex gap-4 items-start">
         <div v-if="parsedDiff.length" class="diff-file-sidebar text-xs flex-shrink-0 sticky top-2 self-start">
             <div class="text-gray-500 uppercase tracking-wide mb-2 px-1">Files ({{ parsedDiff.length }})</div>
-            <button v-for="(file, idx) in parsedDiff" :key="file.header"
-                    @click="scrollToFile(idx)"
-                    :title="file.header"
-                    class="w-full text-left px-2 py-1 rounded hover:bg-gray-800 flex items-center gap-2">
-                <span class="font-mono truncate flex-1 text-gray-300">{{ file.header.split('/').pop() }}</span>
-                <span v-if="commentsByFile[file.header]" class="px-1.5 rounded bg-yellow-800 text-yellow-200 flex-shrink-0">{{ flatCount(commentsByFile[file.header]) }}</span>
-            </button>
+            <template v-for="(row, ri) in fileTreeRows" :key="ri">
+                <div v-if="row.type === 'repo'"
+                     class="font-mono text-blue-300 mt-2 mb-0.5 px-1 first:mt-0">
+                    {{ row.name }}
+                    <span class="text-gray-500 font-sans">· {{ row.count }}</span>
+                </div>
+                <div v-else-if="row.type === 'dir'"
+                     :style="{ paddingLeft: (row.depth * 12) + 'px' }"
+                     class="font-mono text-gray-500 truncate px-1">
+                    {{ row.name }}/
+                </div>
+                <button v-else
+                        @click="scrollToFile(row.idx)"
+                        :title="row.header"
+                        :style="{ paddingLeft: (row.depth * 12 + 4) + 'px' }"
+                        class="w-full text-left pr-2 py-0.5 rounded hover:bg-gray-800 flex items-center gap-2">
+                    <span class="font-mono truncate flex-1 text-gray-300">{{ row.name }}</span>
+                    <span v-if="commentsByFile[row.header]" class="px-1.5 rounded bg-yellow-800 text-yellow-200 flex-shrink-0">{{ flatCount(commentsByFile[row.header]) }}</span>
+                </button>
+            </template>
             <button v-if="unmatchedComments.length"
                     @click="scrollToFile('unmatched')"
                     class="w-full text-left px-2 py-1 rounded hover:bg-gray-800 flex items-center gap-2 mt-2 border-t border-gray-800 pt-2">
@@ -433,9 +437,9 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
             </button>
         </div>
         <div class="flex-1 min-w-0">
-    <div v-for="(file, idx) in parsedDiff" :key="file.header" class="diff-file" :id="'diff-file-' + idx">
+    <div v-for="(file, idx) in parsedDiff" :key="idx" class="diff-file" :id="'diff-file-' + idx">
         <div class="diff-header">
-            {{ file.header }}
+            <span v-if="file.repo" class="text-blue-300">{{ file.repo }}</span><span v-if="file.repo" class="text-gray-500"> / </span>{{ file.header }}
             <span v-if="commentsByFile[file.header]" class="text-yellow-400 text-xs">({{ flatCount(commentsByFile[file.header]) }} comments)</span>
         </div>
         <template v-for="(line, i) in file.lines" :key="i">
@@ -779,11 +783,10 @@ frshtyApp({
             return hist.filter(e => !isNoiseEvent(e));
         });
 
-        const filteredComments = computed(() => {
-            const repo = selectedRepo.value;
-            if (!repo) return comments.value;
-            return comments.value.filter(c => (c.pr_repo || '') === repo);
-        });
+        // Show comments from every repo at once — the tree-style sidebar
+        // surfaces all files together so filtering by repo would hide
+        // comments from siblings the user can already see.
+        const filteredComments = computed(() => comments.value);
 
         const repoTabs = computed(() => {
             const repos = (diffData.value && diffData.value.repos) || [];
@@ -802,20 +805,12 @@ frshtyApp({
             });
         });
 
-        const parsedDiff = computed(() => {
-            const repos = (diffData.value && diffData.value.repos) || [];
-            let raw = '';
-            if (repos.length) {
-                const match = repos.find(r => r.repo === selectedRepo.value);
-                raw = (match || repos[0] || {}).diff || '';
-            } else {
-                raw = (diffData.value && diffData.value.diff) || '';
-            }
+        function _parseRepoDiff(raw, repoName) {
             const files = [];
             let current = null;
             for (const line of raw.split('\n')) {
                 if (line.startsWith('diff --git')) {
-                    current = { header: '', lines: [], _newLine: 1 };
+                    current = { header: '', repo: repoName, lines: [], _newLine: 1 };
                     files.push(current);
                 } else if (line.startsWith('+++ b/') && current) {
                     current.header = line.slice(6);
@@ -834,8 +829,70 @@ frshtyApp({
                     current.lines.push({ type, text: line.slice(1), newLine });
                 }
             }
-            for (const f of files) highlightFile(f);
             return files;
+        }
+
+        const parsedDiff = computed(() => {
+            const repos = (diffData.value && diffData.value.repos) || [];
+            const out = [];
+            if (repos.length) {
+                for (const r of repos) {
+                    out.push(..._parseRepoDiff(r.diff || '', r.repo || ''));
+                }
+            } else {
+                out.push(..._parseRepoDiff((diffData.value && diffData.value.diff) || '', ''));
+            }
+            for (const f of out) highlightFile(f);
+            return out;
+        });
+
+        // Tree of repo → directory → file built from parsedDiff. Rendered as
+        // a flat list with explicit depth so we don't need a recursive Vue
+        // component. Each file row carries the index it maps to in parsedDiff
+        // so clicking it can scroll the content area to that file.
+        const fileTreeRows = computed(() => {
+            const files = parsedDiff.value;
+            const byRepo = new Map();
+            files.forEach((f, idx) => {
+                const repo = f.repo || '(workspace)';
+                if (!byRepo.has(repo)) byRepo.set(repo, []);
+                byRepo.get(repo).push({ idx, path: f.header || '(unnamed)' });
+            });
+            const rows = [];
+            for (const [repo, entries] of byRepo) {
+                rows.push({ type: 'repo', name: repo, depth: 0, count: entries.length });
+                const tree = {};
+                for (const e of entries) {
+                    const parts = e.path.split('/');
+                    let node = tree;
+                    for (let i = 0; i < parts.length - 1; i++) {
+                        const seg = parts[i];
+                        if (!node[seg]) node[seg] = { __children: {}, __isDir: true };
+                        node = node[seg].__children;
+                    }
+                    const file = parts[parts.length - 1];
+                    node[file] = { __idx: e.idx, __header: e.path, __isDir: false };
+                }
+                function walk(node, depth) {
+                    const keys = Object.keys(node).sort((a, b) => {
+                        const da = node[a].__isDir, db = node[b].__isDir;
+                        if (da !== db) return da ? -1 : 1; // dirs first
+                        return a.localeCompare(b);
+                    });
+                    for (const k of keys) {
+                        const child = node[k];
+                        if (child.__isDir) {
+                            rows.push({ type: 'dir', name: k, depth });
+                            walk(child.__children, depth + 1);
+                        } else {
+                            rows.push({ type: 'file', name: k, header: child.__header,
+                                        idx: child.__idx, depth });
+                        }
+                    }
+                }
+                walk(tree, 1);
+            }
+            return rows;
         });
 
         const commentsByFile = computed(() => {
@@ -1291,6 +1348,10 @@ frshtyApp({
             setTimeout(startTerminal, 1500);
         }
 
+        function openDiscuss() {
+            window.open(`/tickets/${key}/discuss`, '_blank', 'width=1200,height=800');
+        }
+
         function toggleMaximize() {
             maximized.value = !maximized.value;
             if (fitAddon) setTimeout(() => fitAddon.fit(), 50);
@@ -1400,7 +1461,7 @@ frshtyApp({
             rawStateJson, rawStateCopied, copyRawState,
             mergedJobsTransitions, formatCoFieldDiff,
             ticketUrl, prScheduledLabel, dropdownStates,
-            sortedDocs, filteredHistory, parsedDiff, commentsByFile, unmatchedComments,
+            sortedDocs, filteredHistory, parsedDiff, fileTreeRows, commentsByFile, unmatchedComments,
             selectedRepo, repoTabs, filteredComments,
             renderMarkdown, escHtml,
             jobStatusClass, jobReason, jobHasOutput,
@@ -1410,7 +1471,7 @@ frshtyApp({
             setStatus, startDev, restartTicket, submitNote, onSetStateChange, toggleAutoPr,
             openPrModal, closePrModal, onPrSubmit,
             retryJob, postReply, viewJobOutput, closeJobOutput,
-            runServices, resetTerminal, toggleMaximize,
+            runServices, resetTerminal, openDiscuss, toggleMaximize,
         };
     },
 }).mount('#app');

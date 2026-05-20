@@ -74,6 +74,11 @@ def ticket_detail(key: str):
     return _template("ticket_detail.html")
 
 
+@router.get("/tickets/{key}/discuss", response_class=HTMLResponse)
+def ticket_discuss(key: str):
+    return _template("ticket_discuss.html")
+
+
 @router.get("/tickets2/{key}", response_class=HTMLResponse)
 def ticket_detail_v1(key: str):
     return _template("ticket_detail_v1.html")
