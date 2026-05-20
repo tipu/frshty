@@ -185,6 +185,7 @@ def api_ticket_pr_info(ticket_key: str):
 
         default_title = f"{ticket_key}: {ticket_summary.split('.')[0] if ticket_summary else 'Work'}"
         default_description = ticket_summary if ticket_summary else f"Implementation for {ticket_key}"
+        pr_descriptions = ticket.get("pr_descriptions") or {}
 
         repos_out = []
         for repo in get_repos(_config):
@@ -200,12 +201,14 @@ def api_ticket_pr_info(ticket_key: str):
                 ["git", "rev-parse", "--abbrev-ref", "HEAD"],
                 cwd=str(wt), capture_output=True, text=True, timeout=10,
             ).stdout.strip() or ticket.get("branch", "")
+            entry = pr_descriptions.get(repo["name"]) or {}
             repos_out.append({
                 "name": repo["name"],
                 "branch": branch,
                 "files_changed": len(files),
-                "title": default_title,
-                "description": default_description,
+                "title": entry.get("title") or default_title,
+                "description": entry.get("description") or default_description,
+                "generated": bool(entry),
             })
 
         return {"repos": repos_out}

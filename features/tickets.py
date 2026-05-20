@@ -67,6 +67,7 @@ _LLM_BACKED_TASKS = frozenset({
     "address_pm_findings", "validate_merged_ticket", "resolve_conflicts",
     "plan_tests", "write_tests", "run_tests_and_fix",
     "prove",
+    "generate_pr_descriptions",
 })
 
 _REPO_GATED_TASKS = frozenset({
@@ -1311,6 +1312,7 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
     manifest = ticket_dir / "docs" / "change-manifest.md"
     raw_body = manifest.read_text() if manifest.exists() else ticket.get("description", "")
     pr_body = _summarize_pr_body(raw_body, ticket)
+    pr_descriptions = ts.get("pr_descriptions") or {}
 
     prs = []
     any_diff = False
@@ -1341,8 +1343,10 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
                 meta={"ticket": ticket["key"], "repo": repo["name"], "branch": branch, "error": pushed.get("error", "")})
             continue
 
-        title = f"{ticket['key']}: {ticket['summary']}"
-        result = platform.create_pr(repo["name"], wt, push_branch, title, pr_body, ws["base_branch"])
+        per_repo = pr_descriptions.get(repo["name"]) or {}
+        title = per_repo.get("title") or f"{ticket['key']}: {ticket['summary']}"
+        body_for_repo = per_repo.get("description") or pr_body
+        result = platform.create_pr(repo["name"], wt, push_branch, title, body_for_repo, ws["base_branch"])
 
         if result.get("error"):
             err = result["error"]
