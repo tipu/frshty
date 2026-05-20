@@ -306,10 +306,8 @@ def _commit_workspace_changes(ticket_dir: Path, ticket_key: str,
         if not meaningful:
             continue
         subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
-        subprocess.run(
-            ["git", "commit", "--no-verify", "-m", commit_msg],
-            cwd=repo_dir, check=True,
-        )
+        from core.git_util import commit_with_hooks
+        commit_with_hooks(repo_dir, message=commit_msg, check=True, timeout=900)
         committed.append(repo_dir.name)
     return committed
 
