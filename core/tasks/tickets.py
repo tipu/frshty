@@ -529,7 +529,7 @@ def fix_review_findings(ctx: TaskContext) -> TaskResult:
 
 
 @task("fix_ci_failures",
-      preconditions=[status_is("pr_created", "in_review"),
+      preconditions=[status_is("in_review"),
                      has_flag("_ci_failed_pending")],
       timeout=FIX_TIMEOUT)
 def fix_ci_failures(ctx: TaskContext) -> TaskResult:

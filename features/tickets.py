@@ -406,12 +406,28 @@ def _localize_images(md: str, docs_path: Path) -> str:
     return re.sub(r'!\[([^\]]*)\]\((https?://[^)]+)\)', _replace, md)
 
 
+_logged_invalid_status_map: set[tuple[str, str, str]] = set()
+
+
 def _resolve_status(config: dict, external_status: str) -> str | None:
     system = config["job"].get("ticket_system", "")
     status_map = config.get(system, {}).get("status_map", {})
     if not status_map:
         return None
-    return status_map.get(external_status)
+    mapped = status_map.get(external_status)
+    if mapped is None:
+        return None
+    try:
+        return TicketStatus(mapped).value
+    except ValueError:
+        key = (system, external_status, mapped)
+        if key not in _logged_invalid_status_map:
+            _logged_invalid_status_map.add(key)
+            valid = ", ".join(s.value for s in TicketStatus)
+            log.emit("invalid_status_map_entry",
+                f"status_map[{system}][{external_status!r}]={mapped!r} is not a valid TicketStatus; treating as unmapped (valid: {valid})",
+                meta={"system": system, "external_status": external_status, "mapped": mapped})
+        return None
 
 
 def _fetch_ticket_comments(config: dict, key: str) -> list[dict]:
@@ -945,7 +961,7 @@ def check(config: dict, instance_key: str = ""):
                 ts["slug"] = _make_slug(key, ticket["summary"])
                 ts["branch"] = _make_branch(config, key, ticket)
                 ts["url"] = ticket.get("url", "")
-                ts["status"] = TicketStatus(mapped).value
+                ts["status"] = mapped
                 if mapped not in ("new", "planning", "reviewing"):
                     state.save_ticket(key, ts)
                     continue
@@ -1429,6 +1445,7 @@ def _recheck_pr_failed(config, ticket, ts, base_url) -> dict:
     platform = make_platform(config)
     all_merged = True
     any_open = False
+    any_open_healthy = False
     for pr in prs:
         try:
             info = platform.get_pr_info(pr["repo"], pr["id"]) or {}
@@ -1440,6 +1457,8 @@ def _recheck_pr_failed(config, ticket, ts, base_url) -> dict:
         all_merged = False
         if pr_state == "OPEN":
             any_open = True
+            if info.get("mergeable") != "CONFLICTING":
+                any_open_healthy = True
 
     if all_merged:
         log.emit("ticket_pr_failed_recovered_merged",
@@ -1450,12 +1469,17 @@ def _recheck_pr_failed(config, ticket, ts, base_url) -> dict:
         return _mark_ticket_merged(config, ticket, ts)
 
     if any_open:
+        if ts.get("pr_failed_reason") == "conflict_failed" and not any_open_healthy:
+            return ts
+
         log.emit("ticket_pr_failed_recovered_open",
             f"{_label(ticket['key'], ts)}: tracked PR now OPEN; recovering pr_failed → in_review",
             links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
             meta={"ticket": ticket["key"]})
         ts["status"] = transition(ts["status"], "in_review")
         ts.pop("pr_failed_reason", None)
+        ts["conflict_resolution_attempts"] = 0
+        ts.pop("last_conflict_error", None)
         return ts
 
     return ts
