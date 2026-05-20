@@ -2119,3 +2119,153 @@ class TestPrFailedReason:
             "recovering pr_failed → in_review (PR reopened) must clear pr_failed_reason. "
             f"got reason still set: {result.get('pr_failed_reason')!r}"
         )
+
+
+class TestRecheckPrFailedConflictLoop:
+    """Observed live on atropos 2026-05-20: FRG-186 PR #1180 bounced between
+    in_review and pr_failed every 5-7m for 1h+. _resolve_conflicts hit
+    MAX_CONFLICT_ATTEMPTS=2 with the PR still CONFLICTING → pr_failed
+    (reason=conflict_failed). _recheck_pr_failed then saw the PR still OPEN
+    and transitioned back to in_review without resetting
+    conflict_resolution_attempts — next scan re-triggered the cap check and
+    bounced again. Fix: if the failure was conflict-related and the PR is
+    still CONFLICTING, stay parked; only recover when the underlying state
+    actually changed. When recovery does fire, reset the attempts counter so
+    a fresh round is available if needed."""
+
+    def _ticket(self):
+        return {"key": "FRG-186", "summary": "Stuck conflict", "url": "http://j/FRG-186",
+                "status": "In Review"}
+
+    def test_conflict_failed_still_conflicting_stays_pr_failed(self, fake_config):
+        ts = make_ticket_state(
+            status="pr_failed",
+            prs=[{"repo": "r", "id": 1, "branch": "b", "url": "http://u/1"}],
+            pr_failed_reason="conflict_failed",
+            conflict_resolution_attempts=2,
+        )
+        mock_platform = MagicMock()
+        mock_platform.get_pr_info.return_value = {
+            "state": "OPEN", "mergeable": "CONFLICTING", "approvers": [],
+        }
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.log"):
+            result = tickets._recheck_pr_failed(fake_config, self._ticket(), ts, "http://b")
+        assert result["status"] == "pr_failed", (
+            "PR is OPEN but still CONFLICTING and the failure cause was "
+            "conflict_failed; recovery would just bounce back into the same "
+            f"failure on the next _resolve_conflicts tick. got: {result['status']}"
+        )
+        assert result.get("pr_failed_reason") == "conflict_failed", (
+            "non-recovery must leave pr_failed_reason intact for /today display"
+        )
+        assert result.get("conflict_resolution_attempts") == 2, (
+            "non-recovery must not reset attempts — counter only resets when "
+            "the ticket actually moves out of pr_failed"
+        )
+
+    def test_conflict_failed_now_mergeable_recovers_and_resets(self, fake_config):
+        ts = make_ticket_state(
+            status="pr_failed",
+            prs=[{"repo": "r", "id": 1, "branch": "b", "url": "http://u/1"}],
+            pr_failed_reason="conflict_failed",
+            conflict_resolution_attempts=2,
+            last_conflict_error="merge boom",
+        )
+        mock_platform = MagicMock()
+        mock_platform.get_pr_info.return_value = {
+            "state": "OPEN", "mergeable": "MERGEABLE", "approvers": [],
+        }
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.log"):
+            result = tickets._recheck_pr_failed(fake_config, self._ticket(), ts, "http://b")
+        assert result["status"] == "in_review", (
+            "PR conflict has been resolved upstream (mergeable=MERGEABLE); "
+            f"recover to in_review. got: {result['status']}"
+        )
+        assert result.get("conflict_resolution_attempts") == 0, (
+            "recovery must reset conflict_resolution_attempts so the ticket "
+            "gets a fresh budget if a future conflict re-occurs"
+        )
+        assert "last_conflict_error" not in result, (
+            "recovery must clear last_conflict_error — the cause is gone"
+        )
+        assert "pr_failed_reason" not in result
+
+    def test_non_conflict_failure_recovers_even_if_conflicting(self, fake_config):
+        ts = make_ticket_state(
+            status="pr_failed",
+            prs=[{"repo": "r", "id": 1, "branch": "b", "url": "http://u/1"}],
+            pr_failed_reason="pr_rejected",
+            conflict_resolution_attempts=0,
+        )
+        mock_platform = MagicMock()
+        mock_platform.get_pr_info.return_value = {
+            "state": "OPEN", "mergeable": "CONFLICTING", "approvers": [],
+        }
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.log"):
+            result = tickets._recheck_pr_failed(fake_config, self._ticket(), ts, "http://b")
+        assert result["status"] == "in_review", (
+            "the still-CONFLICTING guard must only apply to conflict_failed "
+            "tickets; a pr_rejected→reopened ticket must still recover even "
+            f"if mergeable=CONFLICTING. got: {result['status']}"
+        )
+
+    def test_mixed_one_conflicting_one_healthy_recovers(self, fake_config):
+        ts = make_ticket_state(
+            status="pr_failed",
+            prs=[
+                {"repo": "r1", "id": 1, "branch": "b", "url": "http://u/1"},
+                {"repo": "r2", "id": 2, "branch": "b", "url": "http://u/2"},
+            ],
+            pr_failed_reason="conflict_failed",
+            conflict_resolution_attempts=2,
+        )
+        mock_platform = MagicMock()
+        def info(repo, pr_id):
+            return {
+                "state": "OPEN",
+                "mergeable": "CONFLICTING" if pr_id == 1 else "MERGEABLE",
+                "approvers": [],
+            }
+        mock_platform.get_pr_info.side_effect = info
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.log"):
+            result = tickets._recheck_pr_failed(fake_config, self._ticket(), ts, "http://b")
+        assert result["status"] == "in_review", (
+            "at least one PR is healthy (not CONFLICTING); recover so the "
+            f"normal in_review loop picks the ticket back up. got: {result['status']}"
+        )
+
+
+class TestResolveStatusInvalidEntry:
+    """The pr_created state was removed in 31e69ac (collapsed into in_review),
+    but a stale status_map entry mapping an external status to 'pr_created'
+    crashed the per-ticket scan loop with ValueError. _resolve_status must
+    validate the mapped value against TicketStatus and treat invalid entries
+    as unmapped (with a one-time log) so a stale config doesn't take down
+    ticket processing."""
+
+    def test_invalid_mapped_returns_none(self):
+        config = {"job": {"ticket_system": "jira"}, "jira": {"status_map": {"Foo": "pr_created"}}}
+        with patch("features.tickets.log"):
+            tickets._logged_invalid_status_map.clear()
+            assert tickets._resolve_status(config, "Foo") is None
+
+    def test_invalid_mapped_logs_once_per_unique_entry(self):
+        config = {"job": {"ticket_system": "jira"}, "jira": {"status_map": {"Foo": "pr_created"}}}
+        tickets._logged_invalid_status_map.clear()
+        with patch("features.tickets.log") as mock_log:
+            tickets._resolve_status(config, "Foo")
+            tickets._resolve_status(config, "Foo")
+            tickets._resolve_status(config, "Foo")
+        emit_calls = [c for c in mock_log.emit.call_args_list if c.args[0] == "invalid_status_map_entry"]
+        assert len(emit_calls) == 1, (
+            "must log once per unique (system, external, mapped) triple to "
+            f"avoid spamming the event feed on every scan. got: {len(emit_calls)}"
+        )
+
+    def test_valid_mapped_still_works(self):
+        config = {"job": {"ticket_system": "jira"}, "jira": {"status_map": {"In Progress": "planning"}}}
+        assert tickets._resolve_status(config, "In Progress") == "planning"
