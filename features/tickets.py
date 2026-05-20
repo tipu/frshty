@@ -19,7 +19,7 @@ from features.platforms import make_platform
 from features.ticket_systems import make_ticket_system
 
 
-STATES = ["new", "planning", "reviewing", "pr_ready", "in_review", "merged"]
+STATES = ["new", "planning", "reviewing", "testing", "proving", "pr_ready", "in_review", "merged"]
 
 
 def _label(key: str, ts: dict) -> str:
@@ -65,13 +65,19 @@ _LLM_BACKED_TASKS = frozenset({
     "start_planning", "start_reviewing", "fix_review_findings",
     "fix_ci_failures", "setup_prd_ticket", "fix_reported_bug",
     "address_pm_findings", "validate_merged_ticket", "resolve_conflicts",
+    "plan_tests", "write_tests", "run_tests_and_fix",
+    "prove",
 })
 
 _REPO_GATED_TASKS = frozenset({
     "setup_prd_ticket", "start_planning", "mark_ready", "create_pr",
+    "plan_tests", "write_tests", "run_tests_and_fix",
+    "prove",
 })
 
-_GATE_OCCUPYING_STATUSES = ("planning", "reviewing")
+_GATE_OCCUPYING_STATUSES = ("planning", "reviewing", "testing", "proving")
+
+MAX_TEST_FIX_ATTEMPTS = 3
 
 _TERMINAL_STATUSES = frozenset({"merged", "done"})
 _BLOCKED_BY_TIMEOUT_HOURS = 24

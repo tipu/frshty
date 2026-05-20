@@ -11,10 +11,8 @@ import core.config as cfg
 import core.events as events
 import core.log as log
 import core.state as state
-from actions.record_demo import handle as _record_demo_action
 from actions.schedule_pr import handle as _schedule_pr_action
 
-events.register_action("record_demo", _record_demo_action)
 events.register_action("schedule_pr", _schedule_pr_action)
 
 STATIC_DIR = Path(__file__).parent / "static"

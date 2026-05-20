@@ -82,7 +82,7 @@
 <script>
 const { createApp, ref, computed, onMounted } = Vue;
 
-const COLUMNS = ['pending_approval', 'new', 'planning', 'reviewing', 'pr_ready', 'in_review', 'pr_failed', 'merged', 'validation'];
+const COLUMNS = ['pending_approval', 'new', 'planning', 'reviewing', 'testing', 'proving', 'pr_ready', 'in_review', 'pr_failed', 'tests_failed', 'merged', 'validation'];
 const HELP = {
     pending_approval: 'Awaiting human approve/reject before entering the pipeline (gated by [ticket_approval] config).',
     pr_ready: 'Branch pushed and work finished. Waiting for the scheduler (or auto_pr) to open the PR on the platform.',

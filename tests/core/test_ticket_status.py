@@ -108,11 +108,126 @@ class TestAllowedGraph:
         assert _ALLOWED[TicketStatus.pending_approval] == {TicketStatus.new, TicketStatus.done}
 
     def test_done_revivals(self):
-        assert _ALLOWED[TicketStatus.done] == {TicketStatus.new, TicketStatus.pr_ready, TicketStatus.in_review}
+        assert _ALLOWED[TicketStatus.done] == {TicketStatus.new, TicketStatus.pr_ready, TicketStatus.testing, TicketStatus.proving, TicketStatus.in_review}
 
     def test_all_states_have_entries(self):
         for s in TicketStatus:
             assert s in _ALLOWED
+
+
+class TestTestingState:
+    """New tests state inserted between reviewing and pr_ready.
+
+    Acceptance criteria 1-2, 9 from docs/technical-plan.md.
+    """
+
+    def test_testing_status_in_enum(self):
+        assert TicketStatus.testing.value == "testing"
+
+    def test_tests_failed_status_in_enum(self):
+        assert TicketStatus.tests_failed.value == "tests_failed"
+
+    def test_reviewing_to_testing(self):
+        assert transition("reviewing", "testing") == "testing"
+
+    def test_reviewing_to_pr_ready_still_legal_for_backward_compat(self):
+        """Pre-feature in-flight tickets and manual operator overrides need
+        this edge preserved."""
+        assert transition("reviewing", "pr_ready") == "pr_ready"
+
+    def test_testing_to_pr_ready(self):
+        assert transition("testing", "pr_ready") == "pr_ready"
+
+    def test_testing_to_tests_failed(self):
+        assert transition("testing", "tests_failed") == "tests_failed"
+
+    def test_testing_to_reviewing_for_regress(self):
+        """Manual operator path: send back to reviewing if the test plan
+        revealed a real design issue."""
+        assert transition("testing", "reviewing") == "reviewing"
+
+    def test_tests_failed_to_testing_retry(self):
+        assert transition("tests_failed", "testing") == "testing"
+
+    def test_tests_failed_to_reviewing(self):
+        assert transition("tests_failed", "reviewing") == "reviewing"
+
+    def test_tests_failed_to_pr_ready_force_through(self):
+        """Operator decision: ship without tests."""
+        assert transition("tests_failed", "pr_ready") == "pr_ready"
+
+    def test_tests_failed_to_done(self):
+        assert transition("tests_failed", "done") == "done"
+
+    def test_pr_ready_to_testing_manual_recycle(self):
+        """Operator can send a ready ticket back through tests."""
+        assert transition("pr_ready", "testing") == "testing"
+
+    def test_done_to_testing_for_revival(self):
+        """Mirrors existing `done → pr_ready` revival edge."""
+        assert transition("done", "testing") == "testing"
+
+    def test_illegal_testing_to_planning(self):
+        """testing only routes to pr_ready, tests_failed, reviewing —
+        never directly back to planning."""
+        with pytest.raises(ValueError, match="Illegal transition"):
+            transition("testing", "planning")
+
+    def test_illegal_planning_to_testing(self):
+        """planning still only flows to reviewing."""
+        with pytest.raises(ValueError, match="Illegal transition"):
+            transition("planning", "testing")
+
+    def test_illegal_new_to_testing(self):
+        with pytest.raises(ValueError, match="Illegal transition"):
+            transition("new", "testing")
+
+
+class TestProvingState:
+    """New proving state inserted between testing and pr_ready when a
+    PROOF.md exists at workspace.root. AC 11."""
+
+    def test_proving_status_in_enum(self):
+        assert TicketStatus.proving.value == "proving"
+
+    def test_testing_to_proving(self):
+        assert transition("testing", "proving") == "proving"
+
+    def test_testing_to_pr_ready_still_legal_for_skip_path(self):
+        """When PROOF.md is absent, enter_proving routes testing → pr_ready
+        directly without entering the proving state."""
+        assert transition("testing", "pr_ready") == "pr_ready"
+
+    def test_proving_to_pr_ready(self):
+        assert transition("proving", "pr_ready") == "pr_ready"
+
+    def test_proving_to_testing_for_regress(self):
+        """Operator path: send back to testing if proof reveals a real
+        product issue."""
+        assert transition("proving", "testing") == "testing"
+
+    def test_proving_to_reviewing_for_regress(self):
+        assert transition("proving", "reviewing") == "reviewing"
+
+    def test_pr_ready_to_proving_manual_recycle(self):
+        assert transition("pr_ready", "proving") == "proving"
+
+    def test_done_to_proving_revival(self):
+        assert transition("done", "proving") == "proving"
+
+    def test_illegal_proving_to_planning(self):
+        with pytest.raises(ValueError, match="Illegal transition"):
+            transition("proving", "planning")
+
+    def test_illegal_new_to_proving(self):
+        with pytest.raises(ValueError, match="Illegal transition"):
+            transition("new", "proving")
+
+    def test_illegal_reviewing_to_proving(self):
+        """Proving is only reached via testing (with a passing test run),
+        never directly from reviewing."""
+        with pytest.raises(ValueError, match="Illegal transition"):
+            transition("reviewing", "proving")
 
 
 class TestFullMatrix:

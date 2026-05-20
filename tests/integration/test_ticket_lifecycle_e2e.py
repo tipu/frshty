@@ -368,6 +368,22 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
                 (repo / "app.txt").write_text(existing + "review_comment_fixed\n")
             return "comment-fixed"
 
+        if "Produce docs/test-plan.md" in prompt:
+            (cwd / "docs" / "test-plan.md").write_text(
+                "# Test Plan\n\n"
+                "| # | Acceptance criterion | Layer | Repo | File path | Test name | Assertion | Preconditions |\n"
+                "|---|---|---|---|---|---|---|---|\n"
+                "| 1 | feature works | unit | app | tests/test_feature.py | test_feature_works | feature returns expected | none |\n\n"
+                "Layer counts: unit: 1  integration: 0  e2e: 0  total: 1\n"
+            )
+            return "test-plan-written"
+
+        if "Read docs/test-plan.md" in prompt:
+            (cwd / "docs" / "test-files-written.txt").write_text(
+                f"{REPO_NAME}/tests/test_feature.py\n"
+            )
+            return "tests-written"
+
         raise AssertionError(f"unexpected prompt: {prompt}")
 
     registry = SimpleNamespace(instance_key=instance_key, config=config, base_url=config["_base_url"])
@@ -404,8 +420,37 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
             assert "review_fixed\n" in (ticket_dir / REPO_NAME / "app.txt").read_text()
 
             _enqueue_and_wait(instance_key, "scan_tickets")
-            mark_ready = _wait_for_job("mark_ready", TICKET_KEY)
-            assert mark_ready["status"] == "ok"
+            # Every PASS ticket now walks the testing state: enter_testing →
+            # plan_tests → write_tests → run_tests_and_fix → mark_ready. The
+            # synthetic repo here has no detectable test runner; the
+            # permissive verdict (no failures + no_runner = PASS) lets the
+            # ticket complete the gate without a real test runner.
+            enter_testing_job = _wait_for_job("enter_testing", TICKET_KEY)
+            assert enter_testing_job["status"] == "ok"
+            assert _ticket()["status"] == "testing"
+
+            _enqueue_and_wait(instance_key, "scan_tickets")
+            _wait_for_job("plan_tests", TICKET_KEY)
+            assert (ticket_dir / "docs" / "test-plan.md").exists()
+
+            _enqueue_and_wait(instance_key, "scan_tickets")
+            _wait_for_job("write_tests", TICKET_KEY)
+            assert (ticket_dir / "docs" / "test-files-written.txt").exists()
+
+            _enqueue_and_wait(instance_key, "scan_tickets")
+            run_tests_job = _wait_for_job("run_tests_and_fix", TICKET_KEY)
+            assert run_tests_job["status"] == "ok"
+            test_runs = (ticket_dir / "docs" / "test-runs.md").read_text()
+            assert "VERDICT: PASS" in test_runs
+
+            # No PROOF.md at workspace.root → enter_proving takes the skip
+            # path: fires ticket_dev_complete inline and transitions
+            # testing → pr_ready directly. The previous mark_ready step is
+            # now reached only when a PROOF.md gates a ticket through the
+            # proving state; covered separately in unit tests.
+            _enqueue_and_wait(instance_key, "scan_tickets")
+            enter_proving_job = _wait_for_job("enter_proving", TICKET_KEY)
+            assert enter_proving_job["status"] == "ok"
             assert _ticket()["status"] == "pr_ready"
 
             _enqueue_and_wait(instance_key, "scan_tickets")

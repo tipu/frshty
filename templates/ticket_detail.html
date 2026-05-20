@@ -347,11 +347,14 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
         </div>
 
         <div class="space-y-2">
-            <div v-if="ticket && ticket.demo_video" class="card p-4 mb-4">
-                <div class="text-xs font-bold text-gray-500 uppercase mb-2">Demo Recording</div>
-                <video controls class="w-full rounded" style="max-height:600px">
-                    <source :src="`/api/tickets/${key}/demo`" type="video/webm">
-                </video>
+            <div v-if="ticket && (ticket.proof_videos || []).length" class="card p-4 mb-4">
+                <div class="text-xs font-bold text-gray-500 uppercase mb-2">Proof</div>
+                <div v-for="name in (ticket.proof_videos || [])" :key="name" class="mb-3 last:mb-0">
+                    <div class="text-xs text-gray-400 mb-1">{{ name }}</div>
+                    <video controls class="w-full rounded" style="max-height:600px">
+                        <source :src="`/api/tickets/${key}/docs/${encodeURIComponent(name)}`">
+                    </video>
+                </div>
             </div>
             <div v-for="[name, content] in sortedDocs" :key="name" class="card p-3">
                 <div class="collapsible-header" :class="docExpanded[name] ? 'expanded' : 'collapsed'"
@@ -523,7 +526,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
 <script>
 const { createApp, ref, reactive, computed, watch, onMounted, onUnmounted, nextTick } = Vue;
 
-const ALL_STATES = ['new','planning','reviewing','pr_ready','in_review','merged','pr_failed','done'];
+const ALL_STATES = ['new','planning','reviewing','testing','proving','pr_ready','in_review','merged','pr_failed','tests_failed','validation','done'];
 const LOCKED_AUTO_PR_STATES = new Set(['in_review','merged','done']);
 const EXT_LANG = {py:'python',js:'javascript',ts:'typescript',tsx:'tsx',jsx:'jsx',java:'java',rb:'ruby',go:'go',rs:'rust',css:'css',html:'html',json:'json',yml:'yaml',yaml:'yaml',sh:'bash',sql:'sql',md:'markdown'};
 const OUTPUT_TASKS = ['start_planning', 'start_reviewing', 'fix_review_findings', 'confer'];
