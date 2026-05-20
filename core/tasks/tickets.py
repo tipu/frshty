@@ -987,6 +987,10 @@ def generate_pr_descriptions(ctx: TaskContext) -> TaskResult:
         if not wt.is_dir():
             skipped_no_worktree.append(name)
             continue
+        # Fetch base once so the diff and file count are against current origin,
+        # not whatever the worktree was last seeded with.
+        subprocess.run(["git", "fetch", "origin", base_branch],
+                       cwd=str(wt), capture_output=True, timeout=60)
         diff_out = subprocess.run(
             ["git", "diff", f"origin/{base_branch}...HEAD"],
             cwd=str(wt), capture_output=True, text=True, timeout=30,
@@ -995,6 +999,13 @@ def generate_pr_descriptions(ctx: TaskContext) -> TaskResult:
         if not diff_text.strip():
             skipped_empty.append(name)
             continue
+        files_changed_count = sum(
+            1 for line in diff_text.splitlines() if line.startswith("diff --git")
+        )
+        current_branch = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=str(wt), capture_output=True, text=True, timeout=10,
+        ).stdout.strip() or ts.get("branch", "")
         if len(diff_text) > 12000:
             diff_text = diff_text[:12000] + "\n[diff truncated]"
 
@@ -1021,6 +1032,8 @@ def generate_pr_descriptions(ctx: TaskContext) -> TaskResult:
         existing[name] = {
             "title": title,
             "description": description,
+            "branch": current_branch,
+            "files_changed": files_changed_count,
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
         generated.append(name)
