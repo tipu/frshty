@@ -118,6 +118,9 @@ def review_pr(config: dict, platform, pr: dict) -> dict | None:
     branch_slug = pr["branch"].replace("/", "-") if pr.get("branch") else f"pr-{pr['id']}"
     review_dir = config["_state_dir"] / "reviews" / pr["repo"] / branch_slug
     review_dir.mkdir(parents=True, exist_ok=True)
+    merged["pr_id"] = pr["id"]
+    merged["pr_url"] = pr.get("url", "")
+    merged["repo"] = pr["repo"]
     (review_dir / "review.json").write_text(json.dumps(merged, indent=2))
     (review_dir / "diff.txt").write_text(diff_text)
 
@@ -515,11 +518,6 @@ def _pr_needs_tracking(review_state: dict, pr: dict) -> bool:
     current_head = pr.get("head_sha") or ""
     previous_head = existing.get("last_head_sha") or ""
     if current_head and current_head != previous_head:
-        return True
-
-    current_updated = pr.get("updated_on") or ""
-    previous_updated = existing.get("last_updated") or ""
-    if current_updated and current_updated != previous_updated:
         return True
 
     return False

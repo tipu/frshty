@@ -97,7 +97,7 @@ textarea { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; }
         <div class="space-y-1">
             <div v-for="(c, i) in allComments" :key="i"
                  class="sidebar-item"
-                 :class="{ published: c.status === 'submitted' }"
+                 :class="{ published: c.status === 'submitted', active: activeIdx === i }"
                  @click="jumpTo(i)">
                 <span class="badge" :class="`badge-${c.severity || 'suggestion'}`" style="font-size:9px">{{ (c.severity || 'suggestion')[0].toUpperCase() }}</span>
                 <span class="text-gray-400">{{ commentFile(c) }}{{ c.line ? ':' + c.line : '' }}</span>
@@ -247,6 +247,7 @@ frshtyApp({
         const movingIdx = ref(null);
         const walkthroughBusy = ref(false);
         const discussPanels = reactive({});
+        const activeIdx = ref(null);
 
         const prLink = computed(() => info.value.pr_url || (allComments.value[0] && allComments.value[0].pr_url) || '');
         const activeCount = computed(() => allComments.value.filter(c => c.status !== 'submitted').length);
@@ -353,6 +354,7 @@ frshtyApp({
         }
 
         function jumpTo(idx) {
+            activeIdx.value = idx;
             const el = document.getElementById(`comment-${idx}`);
             if (el) {
                 el.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -560,7 +562,7 @@ frshtyApp({
 
         return {
             repo, prId,
-            allComments, info, features, drafts, walkthroughBusy, discussPanels,
+            allComments, info, features, drafts, walkthroughBusy, discussPanels, activeIdx,
             prLink, activeCount, parsedDiff, commentsByFile, generalComments,
             commentFile, commentCountFor, unmatchedFor,
             diffLineClass, diffLinePrefix, escHtml,
