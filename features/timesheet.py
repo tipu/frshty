@@ -9,6 +9,8 @@ from threading import Lock, Event
 
 import httpx
 
+from core import external_log
+
 import core.log as log
 import core.state as state
 import core.tz as tz
@@ -369,7 +371,7 @@ def log_work(config: dict, ticket: str, date_str: str, time_str: str) -> dict:
         "timeSpentSeconds": seconds,
         "started": f"{date_str}T09:00:00.000+0000",
     }
-    with httpx.Client(auth=(user, token), timeout=30) as client:
+    with external_log.client("jira", auth=(user, token), timeout=30) as client:
         resp = client.post(url, json=payload)
         if resp.status_code in (200, 201):
             _day_cache.pop(date_str, None)
@@ -393,7 +395,7 @@ def update_worklog(config: dict, ticket: str, worklog_id: str, time_str: str) ->
         return {"error": f"invalid time format: {time_str}"}
 
     url = f"{base_url}/rest/api/3/issue/{ticket}/worklog/{worklog_id}"
-    with httpx.Client(auth=(user, token), timeout=30) as client:
+    with external_log.client("jira", auth=(user, token), timeout=30) as client:
         resp = client.put(url, json={"timeSpentSeconds": seconds})
         if resp.status_code in (200, 201):
             _day_cache.clear()
@@ -414,7 +416,7 @@ def _fetch_worklogs(config: dict, start_date: date, end_date: date) -> dict:
     result = {}
     jql = f"worklogAuthor = currentUser() AND worklogDate >= '{start_date}' AND worklogDate <= '{end_date}'"
 
-    with httpx.Client(auth=(user, token), timeout=30) as client:
+    with external_log.client("jira", auth=(user, token), timeout=30) as client:
         next_page_token = None
         while True:
             params = {
@@ -791,7 +793,7 @@ def _fetch_ticket_info(config: dict, ticket_ids: list, worklogs: dict) -> list:
 
     tickets = []
     fetched = set()
-    with httpx.Client(auth=(user, token), timeout=30) as client:
+    with external_log.client("jira", auth=(user, token), timeout=30) as client:
         for i in range(0, len(ticket_ids), 50):
             batch = ticket_ids[i:i + 50]
             jql = f"issueKey in ({','.join(batch)})"
@@ -861,7 +863,7 @@ def _fetch_ticket_worklogs_today(config: dict, ticket: str, today_str: str) -> l
         return []
     started_after = int(datetime.strptime(today_str, "%Y-%m-%d").timestamp() * 1000)
     url = f"{base_url}/rest/api/3/issue/{ticket}/worklog?startedAfter={started_after}"
-    with httpx.Client(auth=(user, token), timeout=30) as client:
+    with external_log.client("jira", auth=(user, token), timeout=30) as client:
         resp = client.get(url)
         if resp.status_code != 200:
             return []

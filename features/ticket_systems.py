@@ -1,6 +1,7 @@
 import httpx
 
 import core.log as log
+from core import external_log
 from core.config import resolve_env
 
 
@@ -63,7 +64,7 @@ class JiraTicketSystem:
             return []
         if not self.board_id and not self.jql:
             return []
-        with httpx.Client(auth=(self.user, self.token), timeout=30) as client:
+        with external_log.client("jira", auth=(self.user, self.token), timeout=30) as client:
             if self.board_id:
                 url = f"{self.base_url}/rest/agile/1.0/board/{self.board_id}/issue?maxResults=100"
                 resp = client.get(url)
@@ -129,7 +130,7 @@ class JiraTicketSystem:
             return []
         url = f"{self.base_url}/rest/api/3/issue/{ticket_key}/comment?maxResults=100&orderBy=created"
         try:
-            with httpx.Client(auth=(self.user, self.token), timeout=30) as client:
+            with external_log.client("jira", auth=(self.user, self.token), timeout=30) as client:
                 resp = client.get(url)
                 if resp.status_code != 200:
                     return []
@@ -178,7 +179,7 @@ class LinearTicketSystem:
           } }
         }
         ''' % (self.email, states_str)
-        with httpx.Client(timeout=30, transport=httpx.HTTPTransport(retries=2)) as client:
+        with external_log.client("linear", timeout=30, transport=httpx.HTTPTransport(retries=2)) as client:
             resp = client.post("https://api.linear.app/graphql",
                 json={"query": query},
                 headers={"Authorization": self.token, "Content-Type": "application/json"})
@@ -218,7 +219,7 @@ class LinearTicketSystem:
         }
         ''' % ticket_key
         try:
-            with httpx.Client(timeout=30, transport=httpx.HTTPTransport(retries=2)) as client:
+            with external_log.client("linear", timeout=30, transport=httpx.HTTPTransport(retries=2)) as client:
                 resp = client.post("https://api.linear.app/graphql",
                     json={"query": query},
                     headers={"Authorization": self.token, "Content-Type": "application/json"})
@@ -258,7 +259,7 @@ class LinearTicketSystem:
         }
         ''' % ticket_key
         try:
-            with httpx.Client(timeout=30, transport=httpx.HTTPTransport(retries=2)) as client:
+            with external_log.client("linear", timeout=30, transport=httpx.HTTPTransport(retries=2)) as client:
                 resp = client.post("https://api.linear.app/graphql",
                     json={"query": query},
                     headers={"Authorization": self.token, "Content-Type": "application/json"})
