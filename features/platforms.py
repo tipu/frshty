@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 
 import core.log as log
+from core import external_log
 from core.config import resolve_env, get_repos
 from core.claude_runner import run_claude_code
 
@@ -126,7 +127,7 @@ class BitbucketPlatform:
 
     def list_my_open_prs(self) -> list[dict]:
         results = []
-        with httpx.Client(auth=self._auth(), timeout=30) as client:
+        with external_log.client("bitbucket", auth=self._auth(), timeout=30) as client:
             for repo in self.repos:
                 url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests?state=OPEN&pagelen=50"
                 resp = client.get(url)
@@ -142,7 +143,7 @@ class BitbucketPlatform:
     def list_review_prs(self) -> list[dict]:
         import core.log as log
         results = []
-        with httpx.Client(auth=self._auth(), timeout=30) as client:
+        with external_log.client("bitbucket", auth=self._auth(), timeout=30) as client:
             for repo in self.repos:
                 url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests?state=OPEN"
                 resp = client.get(url)
@@ -163,7 +164,7 @@ class BitbucketPlatform:
             return []
         results = []
         q = f'state="OPEN" AND reviewers.account_id="{self.user_account_id}"'
-        with httpx.Client(auth=self._auth(), timeout=30) as client:
+        with external_log.client("bitbucket", auth=self._auth(), timeout=30) as client:
             for repo in self.repos:
                 url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests"
                 resp = client.get(url, params={"q": q, "pagelen": 50})
@@ -183,7 +184,7 @@ class BitbucketPlatform:
 
     def get_pr_comments(self, repo: str, pr_id: int) -> list[dict]:
         url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}/comments?pagelen=100"
-        with httpx.Client(auth=self._auth(), timeout=30) as client:
+        with external_log.client("bitbucket", auth=self._auth(), timeout=30) as client:
             resp = client.get(url)
             if resp.status_code != 200:
                 return []
@@ -205,7 +206,7 @@ class BitbucketPlatform:
 
     def get_pr_diff(self, repo: str, pr_id: int) -> str | None:
         url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}/diff"
-        with httpx.Client(auth=self._auth(), timeout=30, follow_redirects=True) as client:
+        with external_log.client("bitbucket", auth=self._auth(), timeout=30, follow_redirects=True) as client:
             resp = client.get(url)
             if resp.status_code != 200:
                 return None
@@ -213,7 +214,7 @@ class BitbucketPlatform:
 
     def get_pr_checks(self, repo: str, pr_id: int) -> list[dict]:
         url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}/statuses?pagelen=50"
-        with httpx.Client(auth=self._auth(), timeout=30) as client:
+        with external_log.client("bitbucket", auth=self._auth(), timeout=30) as client:
             resp = client.get(url)
             if resp.status_code != 200:
                 return []
@@ -235,7 +236,7 @@ class BitbucketPlatform:
 
     def get_pr_info(self, repo: str, pr_id: int) -> dict:
         url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}"
-        with httpx.Client(auth=self._auth(), timeout=30) as client:
+        with external_log.client("bitbucket", auth=self._auth(), timeout=30) as client:
             resp = client.get(url)
             if resp.status_code == 404:
                 return {"state": "DELETED", "updated_on": "", "mergeable": "UNKNOWN"}
@@ -264,7 +265,7 @@ class BitbucketPlatform:
             payload["inline"] = {"path": path, "to": line}
         if parent_id:
             payload["parent"] = {"id": parent_id}
-        with httpx.Client(auth=self._auth(), timeout=30) as client:
+        with external_log.client("bitbucket", auth=self._auth(), timeout=30) as client:
             resp = client.post(url, json=payload)
             if resp.status_code in (200, 201):
                 return {"status": "posted", "id": resp.json().get("id")}
@@ -272,7 +273,7 @@ class BitbucketPlatform:
 
     def edit_pr_comment(self, repo: str, pr_id: int, comment_id: int, body: str) -> dict:
         url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}/comments/{comment_id}"
-        with httpx.Client(auth=self._auth(), timeout=30) as client:
+        with external_log.client("bitbucket", auth=self._auth(), timeout=30) as client:
             resp = client.put(url, json={"content": {"raw": body}})
             if resp.status_code in (200, 201):
                 return {"status": "updated"}
@@ -280,14 +281,14 @@ class BitbucketPlatform:
 
     def resolve_comment(self, repo: str, pr_id: int, comment_id: int) -> dict:
         url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}/comments/{comment_id}"
-        with httpx.Client(auth=self._auth(), timeout=30) as client:
+        with external_log.client("bitbucket", auth=self._auth(), timeout=30) as client:
             resp = client.put(url, json={"resolution": {"type": "RESOLVED"}})
             if resp.status_code in (200, 201):
                 return {"status": "resolved"}
             return {"status": "error", "detail": resp.text}
 
     def get_pr_branch(self, repo: str, pr_id: int) -> str:
-        with httpx.Client(auth=self._auth(), timeout=30) as client:
+        with external_log.client("bitbucket", auth=self._auth(), timeout=30) as client:
             resp = client.get(f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}")
             if resp.status_code == 200:
                 return resp.json().get("source", {}).get("branch", {}).get("name", "")
@@ -305,7 +306,7 @@ class BitbucketPlatform:
         if result.returncode != 0:
             return False
         branch = ""
-        with httpx.Client(auth=self._auth(), timeout=30) as client:
+        with external_log.client("bitbucket", auth=self._auth(), timeout=30) as client:
             resp = client.get(f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}")
             if resp.status_code == 200:
                 branch = resp.json().get("source", {}).get("branch", {}).get("name", "")
@@ -340,7 +341,7 @@ class BitbucketPlatform:
             "source": {"branch": {"name": branch}},
             "destination": {"branch": {"name": base_branch}},
         }
-        with httpx.Client(auth=self._auth(), timeout=30) as client:
+        with external_log.client("bitbucket", auth=self._auth(), timeout=30) as client:
             resp = client.post(url, json=payload)
             if resp.status_code in (200, 201):
                 data = resp.json()
@@ -355,7 +356,7 @@ class BitbucketPlatform:
         strategy = self.config.get("pr", {}).get("merge_strategy", "squash")
         url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}/merge"
         payload = {"merge_strategy": strategy}
-        with httpx.Client(auth=self._auth(), timeout=30) as client:
+        with external_log.client("bitbucket", auth=self._auth(), timeout=30) as client:
             resp = client.post(url, json=payload)
             if resp.status_code in (200, 201):
                 return {"status": "merged"}

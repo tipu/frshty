@@ -5,6 +5,8 @@ from datetime import date
 
 import httpx
 
+from core import external_log
+
 MONTHS = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
     "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
@@ -69,7 +71,7 @@ async def _get_session() -> str:
     global _session_id, _session_ts
     if _session_id and (time.time() - _session_ts) < SESSION_TTL:
         return _session_id
-    async with httpx.AsyncClient(timeout=30) as c:
+    async with external_log.aclient("billcom", timeout=30) as c:
         r = await c.post(f"{BASE}/login", json={
             "username": os.environ.get("BILLCOM_EMAIL", ""),
             "password": os.environ.get("BILLCOM_PASSWORD", ""),
@@ -89,7 +91,7 @@ async def _headers() -> dict:
 
 async def create_invoice(customer_id: str, invoice_number: str, due_date: str, line_items: list) -> dict:
     h = await _headers()
-    async with httpx.AsyncClient(timeout=30) as c:
+    async with external_log.aclient("billcom", timeout=30) as c:
         r = await c.post(f"{BASE}/invoices", headers=h, json={
             "customer": {"id": customer_id},
             "invoiceNumber": invoice_number,
@@ -106,7 +108,7 @@ async def list_invoices(max_results: int = 100, customer_id: str | None = None) 
     params: dict = {"max": max_results}
     if customer_id:
         params["filters"] = f"customerId:eq:{customer_id}"
-    async with httpx.AsyncClient(timeout=30) as c:
+    async with external_log.aclient("billcom", timeout=30) as c:
         r = await c.get(f"{BASE}/invoices", headers=h, params=params)
         r.raise_for_status()
         return r.json()
@@ -114,7 +116,7 @@ async def list_invoices(max_results: int = 100, customer_id: str | None = None) 
 
 async def get_invoice(invoice_id: str) -> dict:
     h = await _headers()
-    async with httpx.AsyncClient(timeout=30) as c:
+    async with external_log.aclient("billcom", timeout=30) as c:
         r = await c.get(f"{BASE}/invoices/{invoice_id}", headers=h)
         r.raise_for_status()
         return r.json()
@@ -122,7 +124,7 @@ async def get_invoice(invoice_id: str) -> dict:
 
 async def list_customers(max_results: int = 100) -> dict | list:
     h = await _headers()
-    async with httpx.AsyncClient(timeout=30) as c:
+    async with external_log.aclient("billcom", timeout=30) as c:
         r = await c.get(f"{BASE}/customers", headers=h, params={"max": max_results})
         r.raise_for_status()
         return r.json()
