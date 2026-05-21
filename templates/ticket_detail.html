@@ -350,8 +350,11 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
         </div>
 
         <div class="space-y-2">
-            <div v-if="ticket && (ticket.proof_videos || []).length" class="card p-4 mb-4">
+            <div v-if="ticket && (proofMdContent || (ticket.proof_videos || []).length)" class="card p-4 mb-4">
                 <div class="text-xs font-bold text-gray-500 uppercase mb-2">Proof</div>
+                <div v-if="proofMdContent" class="mb-3 last:mb-0">
+                    <div class="md-content text-sm" v-html="renderMarkdown(proofMdContent)"></div>
+                </div>
                 <div v-for="name in (ticket.proof_videos || [])" :key="name" class="mb-3 last:mb-0">
                     <div class="text-xs text-gray-400 mb-1">{{ name }}</div>
                     <video controls class="w-full rounded" style="max-height:600px">
@@ -769,11 +772,16 @@ frshtyApp({
         const sortedDocs = computed(() => {
             const docs = (ticket.value && ticket.value.docs) || {};
             const order = ['ticket.md', 'epic.md', 'plan.md', 'technical-plan.md', 'change-manifest.md', 'tri-review.md'];
-            return Object.entries(docs).sort((a, b) => {
+            return Object.entries(docs).filter(([name]) => name !== 'proof.md').sort((a, b) => {
                 const ai = order.indexOf(a[0]);
                 const bi = order.indexOf(b[0]);
                 return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
             });
+        });
+
+        const proofMdContent = computed(() => {
+            const docs = (ticket.value && ticket.value.docs) || {};
+            return docs['proof.md'] || '';
         });
 
         const filteredHistory = computed(() => {
@@ -1461,7 +1469,7 @@ frshtyApp({
             rawStateJson, rawStateCopied, copyRawState,
             mergedJobsTransitions, formatCoFieldDiff,
             ticketUrl, prScheduledLabel, dropdownStates,
-            sortedDocs, filteredHistory, parsedDiff, fileTreeRows, commentsByFile, unmatchedComments,
+            sortedDocs, proofMdContent, filteredHistory, parsedDiff, fileTreeRows, commentsByFile, unmatchedComments,
             selectedRepo, repoTabs, filteredComments,
             renderMarkdown, escHtml,
             jobStatusClass, jobReason, jobHasOutput,
