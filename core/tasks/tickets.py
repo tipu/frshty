@@ -85,6 +85,25 @@ def _detect_runner(repo_dir: Path) -> tuple[list[str], dict[str, str]] | None:
     return None
 
 
+def _repo_has_changes_vs_base(repo_dir: Path, base_branch: str) -> bool:
+    """True iff `git diff --name-only origin/<base>...HEAD` lists any file.
+
+    Used by run_tests_and_fix to skip repos the current ticket never touched,
+    so DEV-475's verdict isn't blocked by pre-existing test failures in a repo
+    DEV-475 has zero commits in. Falls back to True on any git error (safer to
+    run a test than silently skip a repo we couldn't introspect)."""
+    try:
+        result = subprocess.run(
+            ["git", "diff", "--name-only", f"origin/{base_branch}...HEAD"],
+            cwd=str(repo_dir), capture_output=True, text=True, timeout=30,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return True
+    if result.returncode != 0:
+        return True
+    return any(line.strip() for line in result.stdout.splitlines())
+
+
 def _run_repo_tests(repo_dir: Path, cmd: list[str], env: dict[str, str],
                     timeout: int) -> dict:
     full_env = {**os.environ, **env}
@@ -136,7 +155,7 @@ def _write_test_runs(ticket_dir: Path, attempt: int,
 def _build_fix_prompt(per_repo: list[dict]) -> str:
     sections = []
     for r in per_repo:
-        if r["result"] in ("pass", "no_runner"):
+        if r["result"] in ("pass", "no_runner", "skipped"):
             continue
         sections.append(
             f"--- {r['repo']} ({r['result']}, exit={r.get('exit_code', '?')}) ---\n"
@@ -775,10 +794,16 @@ def run_tests_and_fix(ctx: TaskContext) -> TaskResult:
         workspace = ticket_dir
 
     attempt = int(ts.get("test_fix_attempts", 0)) + 1
+    base_branch = ctx.config["workspace"].get("base_branch", "main")
 
     per_repo: list[dict] = []
     for repo_dir in sorted(p for p in workspace.iterdir() if p.is_dir()):
         if not (repo_dir / ".git").exists():
+            continue
+        if not _repo_has_changes_vs_base(repo_dir, base_branch):
+            per_repo.append({"repo": repo_dir.name, "result": "skipped",
+                             "tail": f"no changes vs origin/{base_branch} — "
+                             f"out of scope for this ticket"})
             continue
         runner = _detect_runner(repo_dir)
         if runner is None:
@@ -809,8 +834,11 @@ def run_tests_and_fix(ctx: TaskContext) -> TaskResult:
 
     # Permissive verdict: PASS if nothing failed. Repos with no detectable
     # runner don't count toward FAIL (otherwise testless workspaces would
-    # never make it to pr_ready). Pass through with a log event.
-    failures = [o for o in per_repo if o["result"] not in ("pass", "no_runner")]
+    # never make it to pr_ready). Repos with no changes vs base ("skipped")
+    # don't count either — they're out of scope for this ticket. Pass
+    # through with a log event.
+    failures = [o for o in per_repo
+                if o["result"] not in ("pass", "no_runner", "skipped")]
     overall_pass = not failures
     verdict = "PASS" if overall_pass else "FAIL"
 
