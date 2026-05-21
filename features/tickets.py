@@ -12,6 +12,7 @@ import core.log as log
 import core.queue as q
 import core.state as state
 import core.comments as comments
+from core import external_log
 from core.config import get_repos, ticket_worktree_path, resolve_env
 from core.claude_runner import run_haiku, run_claude_code, extract_json
 from core.ticket_status import TicketStatus, transition
@@ -381,7 +382,7 @@ def _download_attachments(config, ticket, docs_path):
         return
 
     att_dir.mkdir(exist_ok=True)
-    with httpx.Client(timeout=60, follow_redirects=True) as client:
+    with external_log.client(ticket_system or "unknown", timeout=60, follow_redirects=True) as client:
         for filename, url in all_downloads:
             if not url or not filename:
                 continue
