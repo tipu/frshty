@@ -40,10 +40,18 @@ def _testing_md_is_substantive(path: Path) -> bool:
     return len(content.strip()) >= MIN_TESTING_MD_BYTES
 
 
+_NO_LOCAL_PY_VENV_SENTINEL = "__NO_LOCAL_PY_VENV__"
+
+
 def _detect_runner(repo_dir: Path) -> tuple[list[str], dict[str, str]] | None:
     """Return (cmd_argv, env_extras) for the repo's native test runner, or
     None if no runner is detectable. package.json takes priority over
-    pyproject/go/cargo for polyglot repos."""
+    pyproject/go/cargo for polyglot repos. For Python: never falls back to
+    a system-PATH `pytest` — if the repo has Python test indicators but no
+    discoverable local venv (.venv/bin/pytest) and no recognized env-manager
+    lockfile (Pipfile, uv.lock, poetry.lock), returns a sentinel cmd so the
+    caller can record a loud failure rather than silently invoking a system
+    pytest that almost certainly lacks the repo's deps."""
     if (repo_dir / "package.json").exists():
         try:
             pkg = json.loads((repo_dir / "package.json").read_text())
@@ -60,7 +68,16 @@ def _detect_runner(repo_dir: Path) -> tuple[list[str], dict[str, str]] | None:
     if (repo_dir / "pyproject.toml").exists() or \
        (repo_dir / "pytest.ini").exists() or \
        (repo_dir / "tests").is_dir():
-        return (["pytest", "-q"], {})
+        venv_pytest = repo_dir / ".venv" / "bin" / "pytest"
+        if venv_pytest.exists():
+            return ([str(venv_pytest), "-q"], {})
+        if (repo_dir / "Pipfile").exists():
+            return (["pipenv", "run", "pytest", "-q"], {})
+        if (repo_dir / "uv.lock").exists():
+            return (["uv", "run", "pytest", "-q"], {})
+        if (repo_dir / "poetry.lock").exists():
+            return (["poetry", "run", "pytest", "-q"], {})
+        return ([_NO_LOCAL_PY_VENV_SENTINEL], {})
     if (repo_dir / "go.mod").exists():
         return (["go", "test", "./..."], {})
     if (repo_dir / "Cargo.toml").exists():
@@ -82,8 +99,14 @@ def _run_repo_tests(repo_dir: Path, cmd: list[str], env: dict[str, str],
     except (FileNotFoundError, OSError) as e:
         return {"result": "error", "exit_code": -1,
                 "tail": f"{type(e).__name__}: {e}"}
+    if completed.returncode == 0:
+        result = "pass"
+    elif completed.returncode == 5:
+        result = "no_runner"
+    else:
+        result = "fail"
     return {
-        "result": "pass" if completed.returncode == 0 else "fail",
+        "result": result,
         "exit_code": completed.returncode,
         "tail": (completed.stdout or "")[-3000:]
                 + "\n---STDERR---\n"
@@ -765,6 +788,19 @@ def run_tests_and_fix(ctx: TaskContext) -> TaskResult:
                      meta={"ticket": ctx.ticket_key, "repo": repo_dir.name})
             continue
         cmd, env = runner
+        if cmd and cmd[0] == _NO_LOCAL_PY_VENV_SENTINEL:
+            msg = (f"{ctx.ticket_key}/{repo_dir.name}: Python tests detected "
+                   f"but no local virtualenv solution found. Expected one of: "
+                   f".venv/bin/pytest, Pipfile, uv.lock, poetry.lock. Refusing "
+                   f"to invoke system pytest (deps almost certainly missing). "
+                   f"Install dependencies into a local .venv before retrying.")
+            log.emit("test_runner_no_local_venv", msg,
+                     meta={"ticket": ctx.ticket_key, "repo": repo_dir.name,
+                           "repo_dir": str(repo_dir)})
+            per_repo.append({"repo": repo_dir.name, "result": "fail",
+                             "exit_code": -1, "cmd": "(no local venv)",
+                             "tail": msg})
+            continue
         outcome = _run_repo_tests(repo_dir, cmd, env,
                                   timeout=TEST_RUN_TIMEOUT // 3)
         outcome["repo"] = repo_dir.name
