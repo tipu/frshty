@@ -8,7 +8,7 @@ returns.
 import json
 import pytest
 
-from core.tasks.tickets import _detect_runner
+from core.tasks.tickets import _NO_LOCAL_PY_VENV_SENTINEL, _detect_runner
 
 
 def _write(path, content):
@@ -61,20 +61,62 @@ class TestPackageJson:
 
 
 class TestPython:
-    def test_pyproject_toml(self, tmp_path):
+    """Python repos must use a per-repo virtualenv solution; system pytest
+    is never invoked because it almost certainly lacks the repo's deps."""
+
+    def test_in_project_venv_pytest_preferred(self, tmp_path):
+        _write(tmp_path / "pyproject.toml", "[project]\nname='x'\n")
+        venv_bin = tmp_path / ".venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        venv_pytest = venv_bin / "pytest"
+        venv_pytest.write_text("#!/usr/bin/env python\n")
+        venv_pytest.chmod(0o755)
+        cmd, _ = _detect_runner(tmp_path)
+        assert cmd == [str(venv_pytest), "-q"]
+
+    def test_pipfile_falls_back_to_pipenv_run(self, tmp_path):
+        _write(tmp_path / "pyproject.toml", "[project]\nname='x'\n")
+        _write(tmp_path / "Pipfile", "[packages]\npytest = \"*\"\n")
+        cmd, _ = _detect_runner(tmp_path)
+        assert cmd == ["pipenv", "run", "pytest", "-q"]
+
+    def test_uv_lockfile_falls_back_to_uv_run(self, tmp_path):
+        _write(tmp_path / "pyproject.toml", "[project]\nname='x'\n")
+        _write(tmp_path / "uv.lock", "# uv lockfile\n")
+        cmd, _ = _detect_runner(tmp_path)
+        assert cmd == ["uv", "run", "pytest", "-q"]
+
+    def test_poetry_lockfile_falls_back_to_poetry_run(self, tmp_path):
+        _write(tmp_path / "pyproject.toml", "[project]\nname='x'\n")
+        _write(tmp_path / "poetry.lock", "# poetry lockfile\n")
+        cmd, _ = _detect_runner(tmp_path)
+        assert cmd == ["poetry", "run", "pytest", "-q"]
+
+    def test_pyproject_with_no_local_solution_returns_sentinel(self, tmp_path):
         _write(tmp_path / "pyproject.toml", "[project]\nname='x'\n")
         cmd, _ = _detect_runner(tmp_path)
-        assert cmd == ["pytest", "-q"]
+        assert cmd == [_NO_LOCAL_PY_VENV_SENTINEL]
 
-    def test_pytest_ini(self, tmp_path):
+    def test_pytest_ini_with_no_local_solution_returns_sentinel(self, tmp_path):
         _write(tmp_path / "pytest.ini", "[pytest]\n")
         cmd, _ = _detect_runner(tmp_path)
-        assert cmd == ["pytest", "-q"]
+        assert cmd == [_NO_LOCAL_PY_VENV_SENTINEL]
 
-    def test_bare_tests_directory(self, tmp_path):
+    def test_bare_tests_directory_with_no_local_solution_returns_sentinel(self, tmp_path):
         (tmp_path / "tests").mkdir()
         cmd, _ = _detect_runner(tmp_path)
-        assert cmd == ["pytest", "-q"]
+        assert cmd == [_NO_LOCAL_PY_VENV_SENTINEL]
+
+    def test_venv_pytest_takes_priority_over_pipfile(self, tmp_path):
+        _write(tmp_path / "pyproject.toml", "[project]\nname='x'\n")
+        _write(tmp_path / "Pipfile", "[packages]\npytest = \"*\"\n")
+        venv_bin = tmp_path / ".venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        venv_pytest = venv_bin / "pytest"
+        venv_pytest.write_text("#!/usr/bin/env python\n")
+        venv_pytest.chmod(0o755)
+        cmd, _ = _detect_runner(tmp_path)
+        assert cmd == [str(venv_pytest), "-q"]
 
 
 class TestGo:
