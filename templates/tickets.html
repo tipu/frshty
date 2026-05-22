@@ -30,10 +30,12 @@
             {{ col }}<span v-if="HELP[col]" class="text-gray-600 hover:text-gray-300 cursor-help ml-1" :title="HELP[col]">&#9432;</span>
         </div>
         <div v-for="[key, t] in ticketsForColumn(col)" :key="key"
+             :style="epicCardStyle(t)"
              class="card p-3 mb-2 hover:border-gray-500 transition-colors relative group">
             <a :href="`/tickets/${key}`" class="block">
                 <div class="flex items-center gap-2 flex-wrap">
                     <span class="font-bold text-sm">{{ key }}</span>
+                    <span v-if="t.issue_type === 'Epic'" class="badge bg-indigo-900 text-indigo-200" title="Epic: tracked for grouping only, never planned">Epic</span>
                     <span class="badge" :class="`badge-${t.status}`">
                         {{ t.status }}<template v-if="['pr_ready','in_review','pr_failed'].includes(t.status)"> ({{ (t.prs || []).length }}/{{ t.repo_count || 0 }})</template>
                     </span>
@@ -49,6 +51,9 @@
                     <span v-if="t.obsolete_at" class="badge badge-obsolete" title="obsolete">obsolete</span>
                 </div>
                 <div class="text-xs text-gray-400 mt-1">{{ t.branch || '' }}</div>
+                <div v-if="t.parent_key" class="text-xs text-gray-500 mt-1" :title="t.parent_summary || ''">
+                    ↳ {{ t.parent_key }}<span v-if="t.parent_summary"> — {{ t.parent_summary }}</span>
+                </div>
                 <div v-if="prAuthors(t).length" class="text-xs text-gray-500 mt-1">by {{ prAuthors(t).join(', ') }}</div>
                 <div v-if="t.pr_scheduled_at" class="text-xs text-yellow-400 mt-1">PR scheduled {{ fmtScheduled(t.pr_scheduled_at) }}</div>
                 <div v-if="t.external_status" class="text-xs text-gray-500 mt-1">{{ t.external_status }}</div>
@@ -82,14 +87,45 @@
 <script>
 const { createApp, ref, computed, onMounted } = Vue;
 
-const COLUMNS = ['pending_approval', 'new', 'planning', 'reviewing', 'testing', 'proving', 'pr_ready', 'in_review', 'pr_failed', 'tests_failed', 'merged', 'validation'];
+const COLUMNS = ['epic', 'pending_approval', 'new', 'planning', 'reviewing', 'testing', 'proving', 'pr_ready', 'in_review', 'pr_failed', 'tests_failed', 'merged', 'validation'];
 const HELP = {
+    epic: 'Container issues (Jira Epic / Linear Project). Tracked for grouping only — frshty never plans, codes, or PRs them. Their child stories are processed normally and share this card\'s background tint.',
     pending_approval: 'Awaiting human approve/reject before entering the pipeline (gated by [ticket_approval] config).',
     pr_ready: 'Branch pushed and work finished. Waiting for the scheduler (or auto_pr) to open the PR on the platform.',
     in_review: 'PR open, not all merged. Each cycle: poll CI, resolve conflicts, read review comments, check merge state.',
     pr_failed: 'CI or conflict resolution exhausted retries. Needs manual intervention — restart the ticket to retry.',
     validation: 'Post-merge playwright validation running against the live app. Replays the regression pool too.',
 };
+
+// Deterministic HSL hash for epic-group background tint. Same input → same
+// output across reloads and across tickets that share a parent. Stories that
+// belong to the same epic and the epic card itself get the identical hue.
+function _hueFromKey(key) {
+    let h = 0;
+    for (let i = 0; i < key.length; i++) {
+        h = (h * 31 + key.charCodeAt(i)) >>> 0;
+    }
+    return h % 360;
+}
+
+function epicGroupKey(t) {
+    // Stories use parent_key; epics themselves use their own key so the epic
+    // card matches its children.
+    if (t.parent_key) return t.parent_key;
+    if (t.issue_type === 'Epic') return t.key;
+    return null;
+}
+
+function epicCardStyle(t) {
+    const group = epicGroupKey(t);
+    if (!group) return {};
+    const hue = _hueFromKey(group);
+    // Very low saturation + low alpha so it's a tint, not a flag.
+    return {
+        backgroundColor: `hsla(${hue}, 35%, 35%, 0.18)`,
+        borderLeft: `3px solid hsla(${hue}, 55%, 55%, 0.65)`,
+    };
+}
 
 frshtyApp({
     setup() {
@@ -106,7 +142,17 @@ frshtyApp({
         );
 
         function ticketsForColumn(col) {
-            return Object.entries(tickets.value).filter(([_, t]) => t.status === col);
+            // Sort so tickets sharing an epic group sit next to each other
+            // within their status column — visually adjacent tints reinforce
+            // the grouping signal.
+            return Object.entries(tickets.value)
+                .filter(([_, t]) => t.status === col)
+                .sort(([ak, a], [bk, b]) => {
+                    const ag = epicGroupKey(a) || '~' + ak;  // ungrouped sort last
+                    const bg = epicGroupKey(b) || '~' + bk;
+                    if (ag !== bg) return ag < bg ? -1 : 1;
+                    return ak < bk ? -1 : 1;
+                });
         }
 
         function prAuthors(t) {
@@ -218,6 +264,7 @@ frshtyApp({
             prModalOpen, prRepos, prSubmitting,
             visibleColumns,
             ticketsForColumn, prAuthors, fmtScheduled,
+            epicCardStyle,
             discard, submitPr, closePrModal, onPrSubmit,
             approve, reject, restart,
         };
