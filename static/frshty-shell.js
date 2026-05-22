@@ -18,6 +18,7 @@
 		{ title: 'Work', links: [
 			{ href: '/reviews', label: 'Reviews', icon: '◐' },
 			{ href: '/today', label: 'Today', icon: '☉' },
+			{ href: '/wizard', label: 'Wizard', icon: '✦' },
 			{ href: '/tickets', label: 'Tickets', icon: '◑' },
 			{ href: '/prd', label: 'PRD', icon: '▤' },
 			{ href: '/scheduled', label: 'Scheduled', icon: '◔' },
@@ -45,6 +46,7 @@
 		'/global': ['Workspace', 'Global'],
 		'/reviews': ['Work', 'Reviews'],
 		'/today': ['Work', 'Today'],
+		'/wizard': ['Work', 'Wizard'],
 		'/tickets': ['Work', 'Tickets'],
 		'/prd': ['Work', 'PRD'],
 		'/scheduled': ['Work', 'Scheduled'],
