@@ -389,11 +389,17 @@ def test_dismiss_all_truncates_log(tmp_state):
 def test_ticket_status_transition_rejects_illegal():
     from core.ticket_status import transition
 
+    # new → reviewing skips the planning gate; not legal.
     with pytest.raises(ValueError, match="Illegal transition"):
-        transition("new", "merged")
+        transition("new", "reviewing")
 
+    # merged → planning would rewind through the merge; not legal.
     with pytest.raises(ValueError, match="Illegal transition"):
         transition("merged", "planning")
+
+    # epic is terminal — can't go back to planning.
+    with pytest.raises(ValueError, match="Illegal transition"):
+        transition("epic", "planning")
 
     assert transition("pr_failed", "pr_ready") == "pr_ready"
 

@@ -935,6 +935,13 @@ def check(config: dict, instance_key: str = ""):
             fresh_url = ticket.get("url") or ""
             if fresh_url:
                 ts["url"] = fresh_url
+            issue_type = ticket.get("issue_type", "")
+            if issue_type:
+                ts["issue_type"] = issue_type
+            parent = ticket.get("parent")
+            if parent and parent.get("key"):
+                ts["parent_key"] = parent["key"]
+                ts["parent_summary"] = parent.get("summary", "")
             if ts.get("status") == "done":
                 ts.pop("done_at", None)
                 if ts.get("prs"):

@@ -158,8 +158,11 @@ def _on_response(provider: str):
 
 def _wrap_with_failure_log(client: httpx.Client, provider: str) -> httpx.Client:
 	"""Patch client.send so transport failures (no response object) still get
-	a row in the jsonl with error=<class>: <message>."""
-	original_send = client.send
+	a row in the jsonl with error=<class>: <message>. No-op for test doubles
+	that don't expose .send — those tests aren't exercising real transport."""
+	original_send = getattr(client, "send", None)
+	if original_send is None:
+		return client
 
 	def send_with_log(request, *args, **kwargs):
 		start = time.monotonic()
@@ -196,8 +199,11 @@ def client(provider: str, **kwargs: Any) -> httpx.Client:
 
 
 def _wrap_async_with_failure_log(client: httpx.AsyncClient, provider: str) -> httpx.AsyncClient:
-	"""Async analogue of _wrap_with_failure_log."""
-	original_send = client.send
+	"""Async analogue of _wrap_with_failure_log. No-op for test doubles that
+	don't expose .send."""
+	original_send = getattr(client, "send", None)
+	if original_send is None:
+		return client
 
 	async def send_with_log(request, *args, **kwargs):
 		start = time.monotonic()

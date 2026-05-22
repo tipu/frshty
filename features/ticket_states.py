@@ -130,6 +130,27 @@ def _handle_new_ticket(
     existing: bool,
 ) -> tuple[dict, bool]:
     key = ticket["key"]
+    # Epics (Jira) / projects (Linear) are container issues, not units of work.
+    # frshty tracks them so the UI can group their child stories together but
+    # never plans / codes / PRs them. Short-circuit before any pipeline kicks
+    # in: park them in the terminal `epic` status, record the summary so the
+    # UI can render the epic header, and return without enqueueing.
+    if ticket.get("issue_type") == "Epic":
+        if ts.get("status") != "epic":
+            try:
+                state.transition_ticket(key, "epic", reason="auto: issue_type=Epic")
+            except state.TicketStateError:
+                ts["status"] = "epic"
+            if not existing:
+                log.emit("epic_found",
+                         f"Epic tracked (not planned): {key} — {ticket.get('summary', '')}",
+                         links={"ticket": ticket.get("url", ""),
+                                "detail": f"{base_url}/tickets/{key}"},
+                         meta={"ticket": key, "issue_type": "Epic"})
+        if "summary" not in ts:
+            ts["summary"] = ticket.get("summary", "")
+        state.save_ticket(key, ts)
+        return ts, True
     if "source" not in ts:
         ts["source"] = _t._ticket_source(config)
     source = ts.get("source", _t._ticket_source(config))
