@@ -4,6 +4,7 @@ per-repo serialization gate, all 10 land at pr_failed because their concurrent
 PRs conflict on the shared file."""
 import json
 import subprocess
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -66,6 +67,17 @@ class FakePlatform:
         self.bot_user = bot_user
         self._next_pr_id = 1
         self.prs: dict[int, dict] = {}
+        # Production BitbucketPlatform.merge_pr is a single HTTP call so it
+        # serialises naturally at the API layer. Our fake performs three git
+        # commands against a SHARED local clone (fetch → checkout main →
+        # merge → push); without a lock, two in_review tickets reaching
+        # merge_pr concurrently race on .git/index and the second one's
+        # `git checkout main` fails with "Another git process seems to be
+        # running" or similar. The per-repo gate intentionally excludes
+        # pr_ready/in_review (see _GATE_OCCUPYING_STATUSES) to prevent a
+        # deadlock with auto_merge=false, so the fake has to do the
+        # serialisation itself.
+        self._merge_lock = threading.Lock()
 
     def list_my_open_prs(self) -> list[dict]:
         return [
@@ -138,15 +150,22 @@ class FakePlatform:
         return ts
 
     def merge_pr(self, repo: str, pr_id: int) -> dict:
-        self.prs[pr_id]["state"] = "MERGED"
-        # Apply merge to local main so subsequent worktree fetches see latest
-        pr = self.prs[pr_id]
-        _git(self.repo_path, "fetch", "origin", pr["branch"])
-        _git(self.repo_path, "checkout", "main")
-        _git(self.repo_path, "merge", "--no-edit", "--no-ff",
-             f"origin/{pr['branch']}")
-        _git(self.repo_path, "push", "origin", "main")
-        return {"status": "merged"}
+        with self._merge_lock:
+            pr = self.prs[pr_id]
+            # Idempotent: the dispatcher's done-ticket revival path
+            # (check() ~ts.status==done with prs → in_review) re-invokes
+            # _merge → merge_pr on every poll. Real Bitbucket/GitHub return
+            # "already merged" immediately; we mirror that so the fake doesn't
+            # try to fetch a deleted branch on each revival cycle.
+            if pr["state"] == "MERGED":
+                return {"status": "merged"}
+            pr["state"] = "MERGED"
+            _git(self.repo_path, "fetch", "origin", pr["branch"])
+            _git(self.repo_path, "checkout", "main")
+            _git(self.repo_path, "merge", "--no-edit", "--no-ff",
+                 f"origin/{pr['branch']}")
+            _git(self.repo_path, "push", "origin", "main")
+            return {"status": "merged"}
 
 
 def test_ten_concurrent_prd_tickets_serialize_and_complete(tmp_path):
@@ -212,6 +231,18 @@ def test_ten_concurrent_prd_tickets_serialize_and_complete(tmp_path):
             return '{"actionable": false, "reason": "no comment"}'
         if "caused_by_us" in prompt:
             return '{"caused_by_us": false, "reason": "ci passed"}'
+        if "ranking software tickets" in prompt:
+            # _RANKER_PROMPT in features/tickets.py — features.tickets.extract_json
+            # is patched to a strict json.loads (no fallback), so any non-JSON
+            # response triggers JSONDecodeError → rank_new_tickets fails on
+            # every dispatcher tick. Return an empty dependency graph so each
+            # PRD ticket's blocked_by stays [] (which is what this test expects
+            # — none of the tickets depend on each other).
+            return '{"dependencies": []}'
+        if "per-repo pull request description" in prompt:
+            # _PR_DESCRIPTION_PROMPT in core/tasks/tickets.py — fake_extract_json
+            # uses strict json.loads so a plain "ok" would JSONDecode-fail.
+            return '{"title": "Test PR", "description": "Sequential test fixture."}'
         if prompt.startswith("Summarize this PR description"):
             return "Sequential implementation."
         return "ok"
@@ -249,6 +280,25 @@ def test_ten_concurrent_prd_tickets_serialize_and_complete(tmp_path):
                 "# Tri Review\n\nVerified.\n\nVERDICT: PASS\n"
             )
             return "verified"
+        if "Produce docs/test-plan.md" in prompt:
+            # plan_tests postcondition is file_exists("docs/test-plan.md").
+            (cwd / "docs" / "test-plan.md").write_text(
+                "# Test Plan\n\n| # | Test | Layer |\n|---|---|---|\n"
+                "| 1 | smoke | unit |\n"
+            )
+            return "test-plan-written"
+        if "Read docs/test-plan.md" in prompt:
+            # write_tests postcondition is file_exists("docs/test-files-written.txt").
+            (cwd / "docs" / "test-files-written.txt").write_text(
+                f"{REPO_NAME}/tests/smoke.txt\n"
+            )
+            return "test-files-written"
+        if "A PROOF.md guide is provided" in prompt:
+            # prove writes docs/proof.md; the test workspace has no PROOF.md so
+            # the real prove() short-circuits to NOT_APPLICABLE before calling
+            # Claude — but in case it's invoked anyway, emit a NOT_APPLICABLE.
+            (cwd / "docs" / "proof.md").write_text("PROOF: NOT_APPLICABLE\n")
+            return "proof-written"
         return "ok"
 
     registry = SimpleNamespace(instance_key=instance_key, config=config,
@@ -271,6 +321,8 @@ def test_ten_concurrent_prd_tickets_serialize_and_complete(tmp_path):
          patch("core.tasks.tickets.make_platform", return_value=platform), \
          patch("features.tickets.run_haiku", side_effect=fake_run_haiku), \
          patch("features.tickets.extract_json", side_effect=fake_extract_json), \
+         patch("core.tasks.tickets.run_haiku", side_effect=fake_run_haiku), \
+         patch("core.tasks.tickets.extract_json", side_effect=fake_extract_json), \
          patch("features.pr_ci.run_sonnet", side_effect=fake_run_haiku), \
          patch("features.pr_ci.extract_json", side_effect=fake_extract_json), \
          patch("features.pr_ci.run_claude_code", side_effect=fake_run_claude_code), \
@@ -278,7 +330,12 @@ def test_ten_concurrent_prd_tickets_serialize_and_complete(tmp_path):
          patch("features.tickets.run_claude_code", side_effect=fake_run_claude_code):
         pool.start()
         try:
-            deadline = time.time() + 90
+            # 10 tickets serialized through the per-repo gate at ~6s/ticket
+            # (plan_tests → write_tests → run_tests_and_fix → enter_proving →
+            # mark_ready → pr_ready → create_pr → in_review → merge) needs at
+            # least ~60s wall-clock even with the fakes returning instantly;
+            # 180s buffer for dispatcher poll interval + scan_tickets cadence.
+            deadline = time.time() + 180
             last_kick = 0.0
             while time.time() < deadline:
                 occupancy_snapshots.append(snapshot_occupancy())

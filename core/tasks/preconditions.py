@@ -76,5 +76,5 @@ def repo_gate_clear(ctx) -> tuple[bool, str]:
     instance occupies the pipeline (status in planning/reviewing/pr_ready/in_review),
     so the framework can mark this task `skipped` without flipping on_entry_status."""
     from features.tickets import _repo_gate_blocked
-    blocker = _repo_gate_blocked(ctx.instance_key, ctx.ticket_key or "")
+    blocker = _repo_gate_blocked(ctx.instance_key, ctx.ticket_key or "", ctx.config)
     return (blocker is None, f"repo busy with {blocker}" if blocker else "repo gate clear")
