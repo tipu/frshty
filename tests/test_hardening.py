@@ -147,8 +147,8 @@ def test_reviewing_fail_verdict_enqueues_fix(tmp_path):
          patch("features.tickets.make_platform"), \
          patch("features.tickets._fetch_open_prs", return_value=[]), \
          patch("features.tickets._reconcile_prs", side_effect=lambda ts, _: ts), \
-         patch("features.tickets._resolve_conflicts", side_effect=lambda c, t, ts, u: ts), \
-         patch("features.tickets._check_in_review", side_effect=lambda c, t, ts, u: ts), \
+         patch("features.tickets._resolve_conflicts", side_effect=lambda c, t, ts, u, **kw: ts), \
+         patch("features.tickets._check_in_review", side_effect=lambda c, t, ts, u, **kw: ts), \
          patch("features.tickets.log"), \
          patch("features.tickets._enqueue_stage") as enq:
         tickets.check(config, "inst")
@@ -288,8 +288,8 @@ def test_done_ticket_with_prs_preserves_state_on_rediscovery(tmp_path):
          patch("features.tickets.make_platform") as mock_platform, \
          patch("features.tickets._fetch_open_prs", return_value=[]), \
          patch("features.tickets._reconcile_prs", side_effect=lambda ts, _: ts), \
-         patch("features.tickets._resolve_conflicts", side_effect=lambda c, t, ts, u: ts), \
-         patch("features.tickets._check_in_review", side_effect=lambda c, t, ts, u: ts), \
+         patch("features.tickets._resolve_conflicts", side_effect=lambda c, t, ts, u, **kw: ts), \
+         patch("features.tickets._check_in_review", side_effect=lambda c, t, ts, u, **kw: ts), \
          patch("features.tickets.subprocess.run") as mock_run, \
          patch("features.tickets.log"):
         mock_run.return_value = MagicMock(returncode=0, stdout="main\n", stderr="")
@@ -340,8 +340,8 @@ def test_done_ticket_without_prs_restarts_fresh(tmp_path):
          patch("features.tickets.make_platform"), \
          patch("features.tickets._fetch_open_prs", return_value=[]), \
          patch("features.tickets._reconcile_prs", side_effect=lambda ts, _: ts), \
-         patch("features.tickets._resolve_conflicts", side_effect=lambda c, t, ts, u: ts), \
-         patch("features.tickets._check_in_review", side_effect=lambda c, t, ts, u: ts), \
+         patch("features.tickets._resolve_conflicts", side_effect=lambda c, t, ts, u, **kw: ts), \
+         patch("features.tickets._check_in_review", side_effect=lambda c, t, ts, u, **kw: ts), \
          patch("features.tickets.subprocess.run") as mock_run, \
          patch("features.tickets.log"):
         mock_run.return_value = MagicMock(returncode=0, stdout="main\n", stderr="")

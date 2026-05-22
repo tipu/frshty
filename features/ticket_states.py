@@ -172,6 +172,18 @@ def _handle_new_ticket(
             _t._enqueue_stage(instance_key, key, "pm_pre_approval")
         return ts, True
     if source == "prd":
+        # PRD tickets are materialized by setup_prd_ticket (not by the
+        # _setup_ticket path that jira/linear use). setup_prd_ticket
+        # populates slug + enqueues start_planning exactly once. But if that
+        # start_planning is skipped (e.g. repo gate is busy with a sibling
+        # PRD ticket) nothing re-enqueues it — the PRD ticket sits in "new"
+        # until the next process restart. Re-enqueue on every dispatcher tick
+        # when the ticket has been materialized but hasn't moved out of "new".
+        # _enqueue_stage dedupes against queued/running jobs and the
+        # consecutive-failure cap, so this is a no-op when planning is already
+        # in flight or already gave up.
+        if instance_key and ts.get("slug"):
+            _t._enqueue_stage(instance_key, key, "start_planning")
         state.save_ticket(key, ts)
         return ts, True
     if not existing:
@@ -333,7 +345,7 @@ def _handle_pr_ready_ticket(
     if instance_key and not ts.get("pr_descriptions"):
         _t._enqueue_stage(instance_key, key, "generate_pr_descriptions")
     if config.get("pr", {}).get("auto_pr") and not ts.get("pr_scheduled_at"):
-        if instance_key and _t._repo_gate_blocked(instance_key, key):
+        if instance_key and _t._repo_gate_blocked(instance_key, key, config):
             state.save_ticket(key, ts)
             return ts, True
         ts = _t._create_pr(config, ticket, ts, base_url)
@@ -349,16 +361,19 @@ def _handle_in_review_ticket(
     existing: bool,
 ) -> tuple[dict, bool]:
     key = ticket["key"]
+    if instance_key and _t._resolve_conflicts_pending(instance_key, key):
+        state.save_ticket(key, ts)
+        return ts, True
+
+    pr_info_map = _t._build_pr_info_map(_t.make_platform(config), ts.get("prs", []))
+
     if instance_key:
-        if _t._resolve_conflicts_pending(instance_key, key):
-            state.save_ticket(key, ts)
-            return ts, True
-        if _t._has_conflicting_pr(config, ts):
+        if _t._has_conflicting_pr(config, ts, pr_info_map=pr_info_map):
             _t._enqueue_stage(instance_key, key, "resolve_conflicts")
             state.save_ticket(key, ts)
             return ts, True
     else:
-        ts = _t._resolve_conflicts(config, ticket, ts, base_url)
+        ts = _t._resolve_conflicts(config, ticket, ts, base_url, pr_info_map=pr_info_map)
 
     if ts["status"] == "in_review":
         platform = _t.make_platform(config)
@@ -381,7 +396,7 @@ def _handle_in_review_ticket(
         ts = _t._merge(config, ticket, ts, base_url)
 
     if ts["status"] == "in_review":
-        ts = _t._check_in_review(config, ticket, ts, base_url)
+        ts = _t._check_in_review(config, ticket, ts, base_url, pr_info_map=pr_info_map)
     return ts, False
 
 
