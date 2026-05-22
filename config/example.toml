@@ -134,3 +134,11 @@ releases = false                  # tag tickets to a release; whole-release LLM 
 # stale_ticket_hours = 72              # ticket discovered >Nh ago, status=new/planning/reviewing
 # regression_days = 7                  # validation_run regression in last N days
 # pending_approval_hours = 12          # pending_approval ticket sitting >Nh
+
+# --- Wizard (one-card PR-unblock surface) ---
+# Maps github logins to Slack targets so /wizard can draft and send pings.
+# slack_int's HTTP bridge (127.0.0.1:8900) does the actual sending.
+# [slack_targets.octocat]
+# workspace = "tipucorp"
+# slack_user_id = "U01ABC"
+# dm_channel_id = "D01XYZ"
