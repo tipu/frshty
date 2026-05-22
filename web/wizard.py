@@ -17,8 +17,14 @@ from web.state import _config
 router = APIRouter()
 
 
-_SLACK_BRIDGE_URL = "http://127.0.0.1:8900/send"
+_SLACK_BRIDGE_URL_DEFAULT = "http://127.0.0.1:8900/send"
 _COMMENT_DRAFT_CAP = 3
+
+
+def _bridge_settings() -> tuple[str, str]:
+    cfg = _config.get("slack_bridge") or {}
+    return (cfg.get("url") or _SLACK_BRIDGE_URL_DEFAULT,
+            (cfg.get("token") or "").strip())
 
 
 def _now_iso() -> str:
@@ -30,9 +36,15 @@ def _resolve_slack_target(login: str) -> dict | None:
     target = targets.get(login)
     if not target:
         return None
-    if not target.get("workspace") or not target.get("dm_channel_id"):
+    if not target.get("workspace"):
+        return None
+    if not target.get("slack_user_id") and not target.get("dm_channel_id"):
         return None
     return target
+
+
+def _target_channel(target: dict) -> str:
+    return target.get("dm_channel_id") or target.get("slack_user_id") or ""
 
 
 def _slack_ping_action(login: str, ctx: dict) -> dict:
@@ -52,7 +64,7 @@ def _slack_ping_action(login: str, ctx: dict) -> dict:
         "payload": {
             "github_login": login,
             "draft_text": "",
-            "target": {"workspace": target["workspace"], "channel": target["dm_channel_id"]},
+            "target": {"workspace": target["workspace"], "channel": _target_channel(target)},
             "thread_ts": None,
             "context": {
                 "pr_url": ctx.get("pr_url", ""),
@@ -350,19 +362,18 @@ def api_wizard_draft_ping(body: dict):
     ))
     return {
         "text": (drafted or "").strip(),
-        "target": ({"workspace": target["workspace"], "channel": target["dm_channel_id"]}
+        "target": ({"workspace": target["workspace"], "channel": _target_channel(target)}
                    if target else None),
     }
 
 
 def _post_slack_bridge(payload: dict) -> dict:
+    url, token = _bridge_settings()
     data = json.dumps(payload).encode()
-    req = urllib.request.Request(
-        _SLACK_BRIDGE_URL,
-        data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return json.loads(resp.read().decode("utf-8"))
@@ -396,7 +407,7 @@ def api_wizard_slack_ping(body: dict):
 
     payload = {
         "workspace": target["workspace"],
-        "channel": target["dm_channel_id"],
+        "channel": _target_channel(target),
         "text": text,
     }
     thread_ts = body.get("thread_ts")
