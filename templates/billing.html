@@ -7,7 +7,9 @@
 <script src="/static/tailwind.js"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <script src="/static/frshty-nav.js"></script>
+<script src="/static/frshty-shell.js"></script>
 <link rel="stylesheet" href="/static/frshty.css">
+<link rel="stylesheet" href="/static/frshty-v2.css">
 <style>
 .subtitle { font-size: 13px; color: #666; }
 .legend { display: flex; gap: 20px; margin-bottom: 16px; font-size: 12px; }
@@ -50,17 +52,13 @@
 .msg { padding: 5px 12px; border-radius: 4px; font-size: 12px; display: inline-block; }
 </style>
 </head>
-<body class="p-4 max-w-7xl mx-auto">
+<body>
 
 <div id="app" v-cloak>
+<frshty-shell :features="features" :instance="instanceName"><div class="ln-page">
 
-<header class="flex items-center gap-4 mb-4">
-    <div class="flex items-center gap-2">
-        <h1 class="text-lg font-bold">Billing</h1>
-        <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700">{{ instanceName }}</span>
-    </div>
-    <frshty-nav :features="features" />
-</header>
+
+
 
 <div class="card p-4 mb-4">
     <div v-if="!client" class="subtitle">Loading…</div>
@@ -139,6 +137,8 @@
     </div>
 </div>
 
+
+</div></frshty-shell>
 </div>
 
 <script>

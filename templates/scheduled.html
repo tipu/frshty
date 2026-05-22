@@ -7,24 +7,22 @@
 <script src="/static/tailwind.js"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <script src="/static/frshty-nav.js"></script>
+<script src="/static/frshty-shell.js"></script>
 <link rel="stylesheet" href="/static/frshty.css">
+<link rel="stylesheet" href="/static/frshty-v2.css">
 <style>
 .badge-scheduled { background: #713f12; color: #fde047; }
 .badge-ci { background: #1e3a5f; color: #93c5fd; }
 .badge-virtual { background: #4b3a1a; color: #fcd34d; }
 </style>
 </head>
-<body class="p-4 max-w-7xl mx-auto">
+<body>
 
 <div id="app" v-cloak>
+<frshty-shell :features="features" :instance="instanceName"><div class="ln-page ln-page-wide">
 
-<header class="flex items-center gap-4 mb-4">
-    <div class="flex items-center gap-2">
-        <h1 class="text-lg font-bold">Scheduled</h1>
-        <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700">{{ instanceName }}</span>
-    </div>
-    <frshty-nav :features="features" />
-</header>
+
+
 
 <div v-if="!items.length" class="text-gray-500 text-sm">Nothing pending.</div>
 <div v-else class="grid gap-3 max-w-2xl">
@@ -87,6 +85,8 @@
     </template>
 </div>
 
+
+</div></frshty-shell>
 </div>
 
 <script>

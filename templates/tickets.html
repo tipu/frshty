@@ -7,268 +7,323 @@
 <script src="/static/tailwind.js"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <script src="/static/frshty-nav.js"></script>
+<script src="/static/frshty-shell.js"></script>
 <link rel="stylesheet" href="/static/frshty.css">
-<style>
-.col { min-width: 180px; }
-</style>
+<link rel="stylesheet" href="/static/frshty-v2.css">
 </head>
-<body class="p-4 max-w-7xl mx-auto">
+<body>
 
 <div id="app" v-cloak>
+<frshty-shell :features="features" :instance="instanceName">
+	<div class="ln-page">
+		<div class="ln-topbar">
+			<div class="ln-breadcrumb">
+				<span>Workspace</span>
+				<span class="ln-bc-sep">/</span>
+				<span class="ln-bc-active">Tickets</span>
+			</div>
+			<div class="ln-topbar-actions">
+				<button class="ln-btn ln-btn-ghost">Filter</button>
+				<button class="ln-btn ln-btn-ghost">Sort</button>
+			</div>
+		</div>
 
-<header class="flex items-center gap-4 mb-4">
-    <div class="flex items-center gap-2">
-        <h1 class="text-lg font-bold">Tickets</h1>
-        <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700">{{ instanceName }}</span>
-    </div>
-    <frshty-nav :features="features" />
-</header>
+		<div class="ln-hero">
+			<div>
+				<h1 class="ln-title">Your tickets</h1>
+				<p class="ln-subtitle">
+					{{ totalCount }} ticket<span v-if="totalCount !== 1">s</span> active
+					<span v-if="instanceName"> · {{ instanceName }}</span>
+					· click any ticket to open detail
+				</p>
+			</div>
+		</div>
 
-<div class="flex gap-4 overflow-x-auto pb-4">
-    <div v-for="col in visibleColumns" :key="col" class="col flex-1">
-        <div class="text-xs font-bold text-gray-500 uppercase mb-2">
-            {{ col }}<span v-if="HELP[col]" class="text-gray-600 hover:text-gray-300 cursor-help ml-1" :title="HELP[col]">&#9432;</span>
-        </div>
-        <div v-for="[key, t] in ticketsForColumn(col)" :key="key"
-             :style="epicCardStyle(t)"
-             class="card p-3 mb-2 hover:border-gray-500 transition-colors relative group">
-            <a :href="`/tickets/${key}`" class="block">
-                <div class="flex items-center gap-2 flex-wrap">
-                    <span class="font-bold text-sm">{{ key }}</span>
-                    <span v-if="t.issue_type === 'Epic'" class="badge bg-indigo-900 text-indigo-200" title="Epic: tracked for grouping only, never planned">Epic</span>
-                    <span class="badge" :class="`badge-${t.status}`">
-                        {{ t.status }}<template v-if="['pr_ready','in_review','pr_failed'].includes(t.status)"> ({{ (t.prs || []).length }}/{{ t.repo_count || 0 }})</template>
-                    </span>
-                    <span v-if="t.pm_findings_count" class="badge bg-amber-900 text-amber-200" :title="`${t.pm_findings_count} PM finding(s)`">⚑ {{ t.pm_findings_count }}</span>
-                    <span v-if="t.llm_invocations && t.llm_invocations.total" class="badge bg-purple-900 text-purple-200"
-                          :title="`LLM invocations: ${t.llm_invocations.ok} ok / ${t.llm_invocations.failed} failed / ${t.llm_invocations.blocked} blocked (${t.llm_invocations.total} total)`">
-                        ⚡ {{ t.llm_invocations.ok }}/{{ t.llm_invocations.failed }}/{{ t.llm_invocations.blocked }}
-                    </span>
-                    <span v-if="t.validation_badge && t.validation_badge !== 'pending'" class="badge"
-                          :class="`badge-val-${t.validation_badge}`" :title="`validation: ${t.validation_badge}`">
-                        v: {{ t.validation_badge }}
-                    </span>
-                    <span v-if="t.obsolete_at" class="badge badge-obsolete" title="obsolete">obsolete</span>
-                </div>
-                <div class="text-xs text-gray-400 mt-1">{{ t.branch || '' }}</div>
-                <div v-if="t.parent_key" class="text-xs text-gray-500 mt-1" :title="t.parent_summary || ''">
-                    ↳ {{ t.parent_key }}<span v-if="t.parent_summary"> — {{ t.parent_summary }}</span>
-                </div>
-                <div v-if="prAuthors(t).length" class="text-xs text-gray-500 mt-1">by {{ prAuthors(t).join(', ') }}</div>
-                <div v-if="t.pr_scheduled_at" class="text-xs text-yellow-400 mt-1">PR scheduled {{ fmtScheduled(t.pr_scheduled_at) }}</div>
-                <div v-if="t.external_status" class="text-xs text-gray-500 mt-1">{{ t.external_status }}</div>
-            </a>
-            <div v-if="t.status === 'in_review' && (t.prs || []).length" class="mt-2 flex flex-wrap gap-1">
-                <a v-for="p in (t.prs || [])" :key="p.url" :href="p.url" target="_blank" rel="noopener"
-                   @click.stop class="text-xs text-blue-400 hover:text-blue-300 underline">
-                    {{ p.repo }}#{{ p.id }}
-                </a>
-            </div>
-            <button v-if="t.status === 'pr_ready'" @click="submitPr(key)"
-                    class="absolute top-2 right-2 bg-green-700 hover:bg-green-600 text-white text-xs px-2 py-1 rounded">Submit PR</button>
-            <button v-if="t.status === 'pr_failed'" @click="restart(key)"
-                    class="absolute top-2 right-2 bg-yellow-800 hover:bg-yellow-700 text-yellow-200 text-xs px-2 py-1 rounded">Restart</button>
-            <div v-if="t.status === 'pending_approval'" class="absolute top-2 right-2 flex gap-1">
-                <button @click="approve(key)" class="bg-green-700 hover:bg-green-600 text-white text-xs px-2 py-1 rounded">Approve</button>
-                <button @click="reject(key)" class="bg-red-800 hover:bg-red-700 text-white text-xs px-2 py-1 rounded">Reject</button>
-            </div>
-            <button @click="discard(key)"
-                    class="absolute right-2 text-gray-600 hover:text-red-400 text-xs hidden group-hover:block"
-                    :class="['pr_ready', 'pr_failed', 'pending_approval'].includes(t.status) ? 'bottom-2' : 'top-2'">discard</button>
-        </div>
-    </div>
-</div>
+		<div class="ln-kanban">
+			<div v-for="col in visibleColumns" :key="col" class="ln-kan-col">
+				<div class="ln-kan-head">
+					<span>
+						{{ COLUMN_LABELS[col] || col }}
+						<span v-if="HELP[col]" class="ln-help" :title="HELP[col]">&#9432;</span>
+					</span>
+					<span class="ln-count-chip">{{ ticketsForColumn(col).length }}</span>
+				</div>
+				<div v-for="[key, t] in ticketsForColumn(col)" :key="key"
+						 :style="epicCardStyle(t)"
+						 class="ln-tkt"
+						 @click="openTicket(key)"
+						 role="button" tabindex="0">
+					<div class="ln-tkt-head">
+						<span class="ln-mono ln-tkt-key">{{ key }}</span>
+						<span class="ln-pill" :class="`ln-pill-status-${pillStatus(t.status)}`">
+							{{ COLUMN_LABELS[t.status] || t.status }}<template v-if="['pr_ready','in_review','pr_failed'].includes(t.status)"> ({{ (t.prs || []).length }}/{{ t.repo_count || 0 }})</template>
+						</span>
+						<span v-if="t.issue_type === 'Epic'" class="ln-pill ln-pill-violet" title="Epic: tracked for grouping only, never planned">Epic</span>
+					</div>
+					<div class="ln-tkt-title">{{ t.summary || t.branch || key }}</div>
+					<div v-if="t.branch" class="ln-mono ln-tkt-branch">{{ t.branch }}</div>
+					<div v-if="t.parent_key" class="ln-tkt-parent" :title="t.parent_summary || ''">
+						↳ {{ t.parent_key }}<span v-if="t.parent_summary"> — {{ t.parent_summary }}</span>
+					</div>
+					<div class="ln-tkt-foot">
+						<template v-if="prAuthors(t).length">
+							<div class="ln-avatar ln-avatar-sm">{{ initials(prAuthors(t)[0]) }}</div>
+							<span class="ln-muted ln-small">{{ prAuthors(t)[0] }}</span>
+						</template>
+						<span v-else-if="t.external_status" class="ln-muted ln-small">{{ t.external_status }}</span>
+						<span class="ln-grow"></span>
+						<span v-if="t.pm_findings_count" class="ln-pill ln-pill-amber" :title="`${t.pm_findings_count} PM finding(s)`">⚑ {{ t.pm_findings_count }}</span>
+						<span v-if="t.llm_invocations && t.llm_invocations.total" class="ln-pill ln-pill-violet"
+									:title="`LLM invocations: ${t.llm_invocations.ok} ok / ${t.llm_invocations.failed} failed / ${t.llm_invocations.blocked} blocked (${t.llm_invocations.total} total)`">
+							⚡ {{ t.llm_invocations.ok }}/{{ t.llm_invocations.failed }}/{{ t.llm_invocations.blocked }}
+						</span>
+						<span v-if="t.validation_badge && t.validation_badge !== 'pending'" class="ln-pill"
+									:class="`ln-pill-val-${t.validation_badge}`" :title="`validation: ${t.validation_badge}`">
+							v: {{ t.validation_badge }}
+						</span>
+					</div>
+					<div v-if="t.pr_scheduled_at" class="ln-tkt-scheduled ln-small">
+						PR scheduled {{ fmtScheduled(t.pr_scheduled_at) }}
+					</div>
+					<div v-if="t.status === 'in_review' && (t.prs || []).length" class="ln-tkt-prs">
+						<a v-for="p in (t.prs || [])" :key="p.url" :href="p.url" target="_blank" rel="noopener"
+							 @click.stop class="ln-tkt-prlink">{{ p.repo }}#{{ p.id }}</a>
+					</div>
+					<div v-if="hasActions(t)" class="ln-tkt-actions">
+						<button v-if="t.status === 'pr_ready'" @click.stop="submitPr(key)"
+										class="ln-btn ln-btn-primary ln-btn-sm">Submit PR</button>
+						<button v-if="t.status === 'pr_failed'" @click.stop="restart(key)"
+										class="ln-btn ln-btn-stalled ln-btn-sm">Restart</button>
+						<template v-if="t.status === 'pending_approval'">
+							<button @click.stop="approve(key)" class="ln-btn ln-btn-primary ln-btn-sm">Approve</button>
+							<button @click.stop="reject(key)" class="ln-btn ln-btn-stalled ln-btn-sm">Reject</button>
+						</template>
+						<button @click.stop="discard(key)" class="ln-link ln-small ln-tkt-discard">discard</button>
+					</div>
+				</div>
+				<div v-if="ticketsForColumn(col).length === 0" class="ln-kan-empty">No tickets</div>
+			</div>
+		</div>
+	</div>
+</frshty-shell>
 
 <pr-submit-modal :open="prModalOpen" :repos="prRepos" :submitting="prSubmitting"
-                 @close="closePrModal" @submit="onPrSubmit" />
-
+								 @close="closePrModal" @submit="onPrSubmit" />
 </div>
 
 <script>
 const { createApp, ref, computed, onMounted } = Vue;
 
-const COLUMNS = ['epic', 'pending_approval', 'new', 'planning', 'reviewing', 'testing', 'proving', 'pr_ready', 'in_review', 'pr_failed', 'tests_failed', 'merged', 'validation'];
+const COLUMNS = ['epic', 'pending_approval', 'new', 'planning', 'reviewing', 'testing', 'tests_failed', 'proving', 'pr_ready', 'in_review', 'pr_failed', 'merged', 'validation'];
+const COLUMN_LABELS = {
+	epic: 'Epics',
+	pending_approval: 'Pending approval',
+	new: 'New',
+	planning: 'Planning',
+	reviewing: 'Reviewing',
+	testing: 'Testing',
+	tests_failed: 'Tests failed',
+	proving: 'Proving',
+	pr_ready: 'PR ready',
+	in_review: 'In review',
+	pr_failed: 'PR failed',
+	merged: 'Merged',
+	validation: 'Validation',
+};
 const HELP = {
-    epic: 'Container issues (Jira Epic / Linear Project). Tracked for grouping only — frshty never plans, codes, or PRs them. Their child stories are processed normally and share this card\'s background tint.',
-    pending_approval: 'Awaiting human approve/reject before entering the pipeline (gated by [ticket_approval] config).',
-    pr_ready: 'Branch pushed and work finished. Waiting for the scheduler (or auto_pr) to open the PR on the platform.',
-    in_review: 'PR open, not all merged. Each cycle: poll CI, resolve conflicts, read review comments, check merge state.',
-    pr_failed: 'CI or conflict resolution exhausted retries. Needs manual intervention — restart the ticket to retry.',
-    validation: 'Post-merge playwright validation running against the live app. Replays the regression pool too.',
+	epic: 'Container issues (Jira Epic / Linear Project). Tracked for grouping only — frshty never plans, codes, or PRs them. Their child stories are processed normally and share this card\'s background tint.',
+	pending_approval: 'Awaiting human approve/reject before entering the pipeline (gated by [ticket_approval] config).',
+	pr_ready: 'Branch pushed and work finished. Waiting for the scheduler (or auto_pr) to open the PR on the platform.',
+	in_review: 'PR open, not all merged. Each cycle: poll CI, resolve conflicts, read review comments, check merge state.',
+	pr_failed: 'CI or conflict resolution exhausted retries. Needs manual intervention — restart the ticket to retry.',
+	validation: 'Post-merge playwright validation running against the live app. Replays the regression pool too.',
 };
 
-// Deterministic HSL hash for epic-group background tint. Same input → same
-// output across reloads and across tickets that share a parent. Stories that
-// belong to the same epic and the epic card itself get the identical hue.
 function _hueFromKey(key) {
-    let h = 0;
-    for (let i = 0; i < key.length; i++) {
-        h = (h * 31 + key.charCodeAt(i)) >>> 0;
-    }
-    return h % 360;
+	let h = 0;
+	for (let i = 0; i < key.length; i++) {
+		h = (h * 31 + key.charCodeAt(i)) >>> 0;
+	}
+	return h % 360;
 }
 
 function epicGroupKey(t) {
-    // Stories use parent_key; epics themselves use their own key so the epic
-    // card matches its children.
-    if (t.parent_key) return t.parent_key;
-    if (t.issue_type === 'Epic') return t.key;
-    return null;
+	if (t.parent_key) return t.parent_key;
+	if (t.issue_type === 'Epic') return t.key;
+	return null;
 }
 
 function epicCardStyle(t) {
-    const group = epicGroupKey(t);
-    if (!group) return {};
-    const hue = _hueFromKey(group);
-    // Very low saturation + low alpha so it's a tint, not a flag.
-    return {
-        backgroundColor: `hsla(${hue}, 35%, 35%, 0.18)`,
-        borderLeft: `3px solid hsla(${hue}, 55%, 55%, 0.65)`,
-    };
+	const group = epicGroupKey(t);
+	if (!group) return {};
+	const hue = _hueFromKey(group);
+	return {
+		borderLeft: `3px solid hsla(${hue}, 55%, 60%, 0.7)`,
+	};
+}
+
+// Map our status enum to the mockup's pill suffix (which strips underscores
+// and lowercases — see .ln-pill-status-* CSS hooks). Falls back to the raw
+// status if no special case is needed.
+function pillStatus(s) {
+	return (s || '').toLowerCase().replace(/_/g, '');
 }
 
 frshtyApp({
-    setup() {
-        const tickets = ref({});
-        const features = ref({});
-        const instanceName = ref('');
-        const prModalOpen = ref(false);
-        const prRepos = ref([]);
-        const prSubmitting = ref(false);
-        const currentTicketKey = ref(null);
+	setup() {
+		const tickets = ref({});
+		const features = ref({});
+		const instanceName = ref('');
+		const prModalOpen = ref(false);
+		const prRepos = ref([]);
+		const prSubmitting = ref(false);
+		const currentTicketKey = ref(null);
 
-        const visibleColumns = computed(() =>
-            COLUMNS.filter(col => Object.values(tickets.value).some(t => t.status === col))
-        );
+		const visibleColumns = computed(() =>
+			COLUMNS.filter(col => Object.values(tickets.value).some(t => t.status === col))
+		);
 
-        function ticketsForColumn(col) {
-            // Sort so tickets sharing an epic group sit next to each other
-            // within their status column — visually adjacent tints reinforce
-            // the grouping signal.
-            return Object.entries(tickets.value)
-                .filter(([_, t]) => t.status === col)
-                .sort(([ak, a], [bk, b]) => {
-                    const ag = epicGroupKey(a) || '~' + ak;  // ungrouped sort last
-                    const bg = epicGroupKey(b) || '~' + bk;
-                    if (ag !== bg) return ag < bg ? -1 : 1;
-                    return ak < bk ? -1 : 1;
-                });
-        }
+		const totalCount = computed(() => Object.keys(tickets.value).length);
 
-        function prAuthors(t) {
-            const authors = (t.prs || []).map(p => p.author).filter(a => a);
-            return [...new Set(authors)];
-        }
+		function ticketsForColumn(col) {
+			return Object.entries(tickets.value)
+				.filter(([_, t]) => t.status === col)
+				.sort(([ak, a], [bk, b]) => {
+					const ag = epicGroupKey(a) || '~' + ak;
+					const bg = epicGroupKey(b) || '~' + bk;
+					if (ag !== bg) return ag < bg ? -1 : 1;
+					return ak < bk ? -1 : 1;
+				});
+		}
 
-        function fmtScheduled(ts) {
-            return new Date(ts).toLocaleDateString('en-US', {
-                weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
-            });
-        }
+		function prAuthors(t) {
+			const authors = (t.prs || []).map(p => p.author).filter(a => a);
+			return [...new Set(authors)];
+		}
 
-        async function load() {
-            try {
-                const [ticketsResp, configResp] = await Promise.all([
-                    fetch('/api/tickets/list'),
-                    fetch('/api/config'),
-                ]);
-                tickets.value = await ticketsResp.json();
-                const cfg = await configResp.json();
-                features.value = cfg.features || {};
-                instanceName.value = cfg.job?.key || '';
-            } catch (e) { console.error('load failed', e); }
-        }
+		function initials(name) {
+			if (!name) return '?';
+			return name.trim().split(/\s+/).map(p => p[0]).join('').toUpperCase().slice(0, 2);
+		}
 
-        async function discard(key) {
-            if (!confirm(`Discard ${key}? It will be picked up fresh on next poll.`)) return;
-            await fetch(`/api/tickets/${key}`, {method: 'DELETE'});
-            load();
-        }
+		function fmtScheduled(ts) {
+			return new Date(ts).toLocaleDateString('en-US', {
+				weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+			});
+		}
 
-        async function approve(key) {
-            const r = await fetch(`/api/tickets/${key}/approve`, {method: 'POST'});
-            if (!r.ok) {
-                const e = await r.json().catch(() => ({}));
-                alert('Approve failed: ' + (e.error || r.statusText));
-            }
-            load();
-        }
+		function openTicket(key) {
+			window.location.href = `/tickets/${key}`;
+		}
 
-        async function reject(key) {
-            if (!confirm(`Reject ${key}?`)) return;
-            const r = await fetch(`/api/tickets/${key}/reject`, {method: 'POST'});
-            if (!r.ok) {
-                const e = await r.json().catch(() => ({}));
-                alert('Reject failed: ' + (e.error || r.statusText));
-            }
-            load();
-        }
+		function hasActions(t) {
+			return ['pr_ready', 'pr_failed', 'pending_approval'].includes(t.status);
+		}
 
-        async function restart(key) {
-            const r = await fetch(`/api/tickets/${key}/restart`, {method: 'POST'});
-            if (!r.ok) {
-                const e = await r.json().catch(() => ({}));
-                alert('Restart failed: ' + (e.error || r.statusText));
-            }
-            load();
-        }
+		async function load() {
+			try {
+				const [ticketsResp, configResp] = await Promise.all([
+					fetch('/api/tickets/list'),
+					fetch('/api/config'),
+				]);
+				tickets.value = await ticketsResp.json();
+				const cfg = await configResp.json();
+				features.value = cfg.features || {};
+				instanceName.value = cfg.job?.key || '';
+			} catch (e) { console.error('load failed', e); }
+		}
 
-        async function submitPr(key) {
-            currentTicketKey.value = key;
-            const r = await fetch(`/api/tickets/${key}/pr-info`);
-            if (!r.ok) {
-                alert('Failed to load PR info');
-                return;
-            }
-            const data = await r.json();
-            prRepos.value = data.repos || [];
-            prModalOpen.value = true;
-        }
+		async function discard(key) {
+			if (!confirm(`Discard ${key}? It will be picked up fresh on next poll.`)) return;
+			await fetch(`/api/tickets/${key}`, {method: 'DELETE'});
+			load();
+		}
 
-        function closePrModal() {
-            prModalOpen.value = false;
-            currentTicketKey.value = null;
-            prRepos.value = [];
-        }
+		async function approve(key) {
+			const r = await fetch(`/api/tickets/${key}/approve`, {method: 'POST'});
+			if (!r.ok) {
+				const e = await r.json().catch(() => ({}));
+				alert('Approve failed: ' + (e.error || r.statusText));
+			}
+			load();
+		}
 
-        async function onPrSubmit(payload) {
-            if (!currentTicketKey.value || !payload.repos.length) return;
-            prSubmitting.value = true;
-            try {
-                const resp = await fetch(`/api/tickets/${currentTicketKey.value}/submit-pr`, {
-                    method: 'POST',
-                    headers: {'Content-Type': 'application/json'},
-                    body: JSON.stringify(payload),
-                });
-                if (resp.ok) {
-                    closePrModal();
-                    load();
-                } else {
-                    const err = await resp.json();
-                    alert('Error: ' + (err.error || 'Unknown error'));
-                }
-            } catch (e) {
-                alert('Error: ' + e.message);
-            } finally {
-                prSubmitting.value = false;
-            }
-        }
+		async function reject(key) {
+			if (!confirm(`Reject ${key}?`)) return;
+			const r = await fetch(`/api/tickets/${key}/reject`, {method: 'POST'});
+			if (!r.ok) {
+				const e = await r.json().catch(() => ({}));
+				alert('Reject failed: ' + (e.error || r.statusText));
+			}
+			load();
+		}
 
-        onMounted(() => {
-            load();
-            setInterval(load, 10000);
-        });
+		async function restart(key) {
+			const r = await fetch(`/api/tickets/${key}/restart`, {method: 'POST'});
+			if (!r.ok) {
+				const e = await r.json().catch(() => ({}));
+				alert('Restart failed: ' + (e.error || r.statusText));
+			}
+			load();
+		}
 
-        return {
-            tickets, features, instanceName, HELP,
-            prModalOpen, prRepos, prSubmitting,
-            visibleColumns,
-            ticketsForColumn, prAuthors, fmtScheduled,
-            epicCardStyle,
-            discard, submitPr, closePrModal, onPrSubmit,
-            approve, reject, restart,
-        };
-    },
+		async function submitPr(key) {
+			currentTicketKey.value = key;
+			const r = await fetch(`/api/tickets/${key}/pr-info`);
+			if (!r.ok) {
+				alert('Failed to load PR info');
+				return;
+			}
+			const data = await r.json();
+			prRepos.value = data.repos || [];
+			prModalOpen.value = true;
+		}
+
+		function closePrModal() {
+			prModalOpen.value = false;
+			currentTicketKey.value = null;
+			prRepos.value = [];
+		}
+
+		async function onPrSubmit(payload) {
+			if (!currentTicketKey.value || !payload.repos.length) return;
+			prSubmitting.value = true;
+			try {
+				const resp = await fetch(`/api/tickets/${currentTicketKey.value}/submit-pr`, {
+					method: 'POST',
+					headers: {'Content-Type': 'application/json'},
+					body: JSON.stringify(payload),
+				});
+				if (resp.ok) {
+					closePrModal();
+					load();
+				} else {
+					const err = await resp.json();
+					alert('Error: ' + (err.error || 'Unknown error'));
+				}
+			} catch (e) {
+				alert('Error: ' + e.message);
+			} finally {
+				prSubmitting.value = false;
+			}
+		}
+
+		onMounted(() => {
+			load();
+			setInterval(load, 10000);
+		});
+
+		return {
+			tickets, features, instanceName, HELP, COLUMN_LABELS,
+			prModalOpen, prRepos, prSubmitting,
+			visibleColumns, totalCount,
+			ticketsForColumn, prAuthors, fmtScheduled, initials, openTicket,
+			hasActions, pillStatus,
+			epicCardStyle,
+			discard, submitPr, closePrModal, onPrSubmit,
+			approve, reject, restart,
+		};
+	},
 }).mount('#app');
 </script>
 </body>

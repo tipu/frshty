@@ -8,7 +8,9 @@
 <script src="/static/tailwind.js"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <script src="/static/frshty-nav.js"></script>
+<script src="/static/frshty-shell.js"></script>
 <link rel="stylesheet" href="/static/frshty.css">
+<link rel="stylesheet" href="/static/frshty-v2.css">
 <style>
 .unread { font-weight: 600; border-left: 3px solid #3b82f6; }
 .read { opacity: 0.4; }
@@ -25,30 +27,13 @@
 .expanded .summary-full { display: block; }
 </style>
 </head>
-<body class="p-4 max-w-7xl mx-auto">
+<body>
 
 <div id="app" v-cloak>
+<frshty-shell :features="features" :instance="instanceName"><div class="ln-page">
 
-<header class="flex items-center justify-between mb-4">
-    <div class="flex items-center gap-4">
-        <div class="flex items-center gap-2">
-            <h1 class="text-lg font-bold">frshty</h1>
-            <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700">{{ instanceName }}</span>
-        </div>
-        <frshty-nav :features="features" />
-    </div>
-    <div class="relative text-sm text-gray-500">
-        <button @click="pollNow" :disabled="polling" class="ml-3 text-xs bg-blue-900 hover:bg-blue-800 text-blue-300 px-3 py-1 rounded">{{ polling ? 'Polling...' : 'Poll Now' }}</button>
-        <button @click="settingsOpen = !settingsOpen" class="ml-3 text-gray-400 hover:text-white">⚙</button>
-        <div class="settings-panel" :class="{ open: settingsOpen }">
-            <div class="text-xs text-gray-400 mb-2 uppercase tracking-wider">Features</div>
-            <label v-for="(val, key) in features" :key="key" class="flex items-center gap-2 mb-1 cursor-pointer text-sm">
-                <input type="checkbox" :checked="val" @change="toggleFeature(key, $event.target.checked)">
-                {{ key }}
-            </label>
-        </div>
-    </div>
-</header>
+
+
 
 <div class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4">
     <div class="card p-3 cursor-pointer hover:border-gray-500" @click="setFilter('unread')">
@@ -149,6 +134,8 @@
     </div>
 </section>
 
+
+</div></frshty-shell>
 </div>
 
 <script>

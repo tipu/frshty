@@ -7,7 +7,9 @@
 <script src="/static/tailwind.js"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <script src="/static/frshty-nav.js"></script>
+<script src="/static/frshty-shell.js"></script>
 <link rel="stylesheet" href="/static/frshty.css">
+<link rel="stylesheet" href="/static/frshty-v2.css">
 <style>
 .badge-success { background: #14532d; color: #86efac; }
 .badge-error { background: #7f1d1d; color: #fca5a5; }
@@ -19,17 +21,13 @@
 pre.body { white-space: pre-wrap; word-break: break-word; }
 </style>
 </head>
-<body class="p-4 max-w-7xl mx-auto">
+<body>
 
 <div id="app" v-cloak>
+<frshty-shell :features="features" :instance="instanceName"><div class="ln-page ln-page-wide">
 
-<header class="flex items-center gap-4 mb-4">
-    <div class="flex items-center gap-2">
-        <h1 class="text-lg font-bold">Claude Invocations</h1>
-        <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700">{{ instanceName }}</span>
-    </div>
-    <frshty-nav :features="features" />
-</header>
+
+
 
 <div class="flex flex-wrap gap-2 mb-4 items-center text-xs">
     <select v-model="filters.since_hours" @change="load" class="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-300">
@@ -115,6 +113,8 @@ pre.body { white-space: pre-wrap; word-break: break-word; }
     </tbody>
 </table>
 
+
+</div></frshty-shell>
 </div>
 
 <script>

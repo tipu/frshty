@@ -7,6 +7,8 @@
 <script src="/static/tailwind.js"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <script src="/static/frshty-nav.js"></script>
+<script src="/static/frshty-shell.js"></script>
+<link rel="stylesheet" href="/static/frshty-v2.css">
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
@@ -67,19 +69,24 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
 [v-cloak] { display: none; }
 </style>
 </head>
-<body class="p-4 max-w-full">
+<body>
 
 <div id="app" v-cloak>
+<frshty-shell :features="features" :instance="instanceName">
+<div class="ln-page ln-page-wide">
 
 <div id="content">
-<header class="flex items-center gap-4 mb-4">
-    <a href="/tickets" class="link text-sm">&larr; Tickets</a>
-    <h1 class="text-lg font-bold">{{ key }}</h1>
-    <button @click="openDiscuss"
-            class="bg-purple-800 hover:bg-purple-700 text-purple-100 px-3 py-1 rounded text-xs"
-            title="Open a separate claude (cl) terminal in this ticket's worktree dir">Discuss</button>
-    <frshty-nav :features="features" />
-</header>
+<div class="ln-topbar">
+    <div class="ln-breadcrumb">
+        <a href="/tickets" class="ln-link">Tickets</a>
+        <span class="ln-bc-sep">/</span>
+        <span class="ln-bc-active ln-mono">{{ key }}</span>
+    </div>
+    <div class="ln-topbar-actions">
+        <button @click="openDiscuss" class="ln-btn ln-btn-discuss"
+                title="Open a separate claude (cl) terminal in this ticket's worktree dir">💬 Discuss</button>
+    </div>
+</div>
 
 <div v-if="loadError" class="text-red-400 mb-4">Ticket not found</div>
 
@@ -528,6 +535,8 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
 <pr-submit-modal :open="prModalOpen" :repos="prRepos" :submitting="prSubmitting"
                  @close="closePrModal" @submit="onPrSubmit" />
 
+</div><!-- /.ln-page -->
+</frshty-shell>
 </div><!-- /#app -->
 
 <script>

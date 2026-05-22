@@ -7,7 +7,9 @@
 <script src="/static/tailwind.js"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <script src="/static/frshty-nav.js"></script>
+<script src="/static/frshty-shell.js"></script>
 <link rel="stylesheet" href="/static/frshty.css">
+<link rel="stylesheet" href="/static/frshty-v2.css">
 <style>
 .editor { width: 100%; min-height: 600px; background: #0d0d0d; color: #e0e0e0; border: 1px solid #2a2a2a; border-radius: 6px; padding: 12px; font-family: 'SF Mono', 'Cascadia Code', monospace; font-size: 13px; line-height: 1.5; resize: vertical; tab-size: 4; }
 .editor:focus { outline: none; border-color: #444; }
@@ -17,17 +19,13 @@
 .msg { font-size: 12px; padding: 4px 10px; border-radius: 4px; display: inline-block; }
 </style>
 </head>
-<body class="p-4 max-w-4xl mx-auto">
+<body>
 
 <div id="app" v-cloak>
+<frshty-shell :features="features" :instance="instanceName"><div class="ln-page">
 
-<header class="flex items-center gap-4 mb-4">
-    <div class="flex items-center gap-2">
-        <h1 class="text-lg font-bold">Config</h1>
-        <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700">{{ instanceName }}</span>
-    </div>
-    <frshty-nav :features="features" />
-</header>
+
+
 
 <div class="flex items-center gap-3 mb-3">
     <span class="text-xs text-gray-500">{{ configPath }}</span>
@@ -39,6 +37,8 @@
 
 <textarea v-model="content" @keydown="onKey" spellcheck="false" class="editor"></textarea>
 
+
+</div></frshty-shell>
 </div>
 
 <script>
