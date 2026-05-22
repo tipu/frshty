@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<meta charset="utf-8">
+<title>Wizard — frshty</title>
+<script src="/static/tailwind.js"></script>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="/static/frshty-nav.js"></script>
+<script src="/static/frshty-shell.js"></script>
+<link rel="stylesheet" href="/static/frshty.css">
+<link rel="stylesheet" href="/static/frshty-v2.css">
+<style>
+.wizard-shell { max-width: 880px; margin: 0 auto; }
+.wizard-card { background: #161b22; border: 1px solid #2a2a2a; border-radius: 8px; padding: 20px; margin-top: 16px; }
+.wizard-meta { color: #6b7280; font-size: 12px; }
+.wizard-title { color: #e5e7eb; font-size: 16px; font-weight: 600; margin-bottom: 6px; }
+.wizard-pr-link { color: #60a5fa; font-size: 12px; text-decoration: underline; }
+.block-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+.block-awaiting_merge { background: #14532d; color: #86efac; }
+.block-ci_failing { background: #7f1d1d; color: #fca5a5; }
+.block-needs_review_response { background: #713f12; color: #fde047; }
+.block-awaiting_approval { background: #581c87; color: #d8b4fe; }
+.block-stale_no_activity { background: #1e3a5f; color: #93c5fd; }
+.action-row { padding: 10px 12px; border: 1px solid #2a2a2a; border-radius: 6px; margin-top: 10px; background: #0d1117; }
+.action-row .label { font-size: 12px; color: #d1d5db; margin-bottom: 6px; display: flex; justify-content: space-between; }
+.action-row textarea { width: 100%; background: #0a0e13; color: #e5e7eb; border: 1px solid #374151; border-radius: 4px; padding: 6px; font-size: 12px; font-family: ui-monospace, monospace; resize: vertical; min-height: 60px; }
+.action-row .comment-context { color: #9ca3af; font-size: 11px; font-style: italic; padding: 6px 0; border-left: 2px solid #374151; padding-left: 8px; margin-bottom: 6px; max-height: 100px; overflow-y: auto; white-space: pre-wrap; }
+.btn-pri { background: #15803d; color: white; font-size: 12px; padding: 4px 10px; border-radius: 4px; }
+.btn-pri:hover:not(:disabled) { background: #16a34a; }
+.btn-pri:disabled { background: #374151; cursor: not-allowed; }
+.btn-sec { background: #1f2937; color: #d1d5db; font-size: 12px; padding: 4px 10px; border-radius: 4px; border: 1px solid #374151; }
+.btn-sec:hover { background: #374151; }
+.btn-snooze { background: transparent; color: #6b7280; font-size: 11px; padding: 2px 8px; border-radius: 4px; border: 1px solid #374151; }
+.btn-snooze:hover { color: #d1d5db; border-color: #4b5563; }
+.kbd { display: inline-block; padding: 1px 5px; border-radius: 3px; background: #1f2937; color: #9ca3af; font-family: ui-monospace, monospace; font-size: 10px; border: 1px solid #374151; }
+.progress { color: #9ca3af; font-size: 12px; }
+.empty-state { padding: 48px; text-align: center; color: #6b7280; }
+.empty-state h2 { color: #d1d5db; font-size: 18px; font-weight: 600; margin-bottom: 8px; }
+.dry-run-on { background: #4a3a0a; color: #fbbf24; }
+.dry-run-off { background: #1e3a5f; color: #93c5fd; }
+.err-inline { color: #fca5a5; font-size: 11px; margin-top: 6px; }
+.cli-hint { font-family: ui-monospace, monospace; font-size: 12px; color: #d1d5db; background: #0a0e13; padding: 6px 8px; border-radius: 4px; border: 1px solid #374151; }
+</style>
+</head>
+<body>
+
+<div id="app" v-cloak>
+<frshty-shell :features="features" :instance="instanceName" width="wide">
+
+<div class="wizard-shell">
+
+<div v-if="loadError" class="err-inline">{{ loadError }}</div>
+
+<div v-if="!loaded" class="empty-state">Loading…</div>
+
+<div v-else-if="items.length === 0" class="empty-state">
+    <h2>Inbox zero</h2>
+    <p>No blocked PRs right now. Take a break.</p>
+</div>
+
+<div v-else>
+    <div class="flex items-center justify-between mt-4">
+        <div class="progress">
+            <span class="kbd">j</span>/<span class="kbd">k</span> nav ·
+            <span class="kbd">s</span> ping ·
+            <span class="kbd">r</span> reply ·
+            <span class="kbd">m</span> merge ·
+            <span class="kbd">n</span> snooze
+        </div>
+        <div class="flex items-center gap-3">
+            <span class="progress">{{ currentIndex + 1 }} / {{ items.length }}</span>
+            <button class="btn-sec" :class="dryRun ? 'dry-run-on' : 'dry-run-off'"
+                    @click="toggleDryRun" :title="'Slack pings ' + (dryRun ? 'do NOT send' : 'WILL send')">
+                Dry-run: {{ dryRun ? 'ON' : 'OFF' }}
+            </button>
+        </div>
+    </div>
+
+    <div class="wizard-card" v-if="current">
+        <div class="flex items-start justify-between gap-4">
+            <div class="flex-1 min-w-0">
+                <div class="wizard-title">{{ current.title }}</div>
+                <div class="wizard-meta">
+                    <span v-if="current.ticket_key">{{ current.ticket_key }}</span>
+                    <span v-if="current.ticket_key && current.url"> · </span>
+                    <a v-if="current.url" :href="current.url" target="_blank" class="wizard-pr-link">
+                        {{ current.repo }}#{{ current.pr_id }}
+                    </a>
+                </div>
+            </div>
+            <div class="flex items-center gap-2">
+                <span class="block-badge" :class="'block-' + current.block_reason">{{ blockLabel(current.block_reason) }}</span>
+                <button class="btn-snooze" @click="snoozeCurrent" title="Snooze (n)">Snooze</button>
+            </div>
+        </div>
+
+        <div v-if="current.block_detail.pr_failed_reason" class="wizard-meta mt-2">
+            Failure: {{ current.block_detail.pr_failed_reason }} ({{ current.block_detail.ci_fix_attempts || 0 }} fix attempts)
+        </div>
+        <div v-if="current.block_detail.review_state" class="wizard-meta mt-2">
+            Review: {{ current.block_detail.review_state }} · CI: {{ current.block_detail.ci_state || 'unknown' }}
+        </div>
+
+        <div v-if="current.actions.length === 0" class="wizard-meta mt-3">
+            No actions available; snooze and move on.
+        </div>
+
+        <div v-for="(action, idx) in current.actions" :key="action.action_type + ':' + idx" class="action-row">
+            <div class="label">
+                <span>{{ action.label }}</span>
+                <span v-if="action.action_type === 'merge'" class="kbd">m</span>
+                <span v-else-if="action.action_type === 'rerun_ci'" class="kbd">m</span>
+                <span v-else-if="action.action_type === 'post_reply' && idx === firstActionIdx('post_reply')" class="kbd">r</span>
+                <span v-else-if="action.action_type === 'slack_ping' && idx === firstActionIdx('slack_ping')" class="kbd">s</span>
+            </div>
+
+            <div v-if="action.action_type === 'post_reply'">
+                <div class="comment-context">{{ action.payload.comment_body }}</div>
+                <textarea v-model="action.payload.draft_text"
+                          :placeholder="loadingDraft[draftKey(action)] ? 'drafting…' : 'Type a reply…'"
+                          @focus="ensureReplyDraft(action)"></textarea>
+                <div class="mt-2 flex items-center gap-2">
+                    <button class="btn-pri"
+                            :disabled="!action.payload.draft_text || busy[draftKey(action)]"
+                            @click="postReply(action)">
+                        Post reply
+                    </button>
+                    <button class="btn-sec" @click="ensureReplyDraft(action, true)">Re-draft</button>
+                    <span v-if="actionErr[draftKey(action)]" class="err-inline">{{ actionErr[draftKey(action)] }}</span>
+                </div>
+            </div>
+
+            <div v-else-if="action.action_type === 'slack_ping'">
+                <textarea v-model="action.payload.draft_text"
+                          :placeholder="loadingDraft[draftKey(action)] ? 'drafting…' : 'Type a Slack DM…'"
+                          @focus="ensurePingDraft(action)"></textarea>
+                <div class="mt-2 flex items-center gap-2">
+                    <button class="btn-pri"
+                            :disabled="!action.payload.draft_text || busy[draftKey(action)]"
+                            @click="sendPing(action)">
+                        {{ dryRun ? 'Preview send' : 'Send' }} to {{ action.payload.github_login }}
+                    </button>
+                    <button class="btn-sec" @click="ensurePingDraft(action, true)">Re-draft</button>
+                    <span class="wizard-meta">→ {{ action.payload.target.workspace }} / {{ action.payload.target.channel }}</span>
+                    <span v-if="actionErr[draftKey(action)]" class="err-inline">{{ actionErr[draftKey(action)] }}</span>
+                </div>
+                <div v-if="lastSendPreview[draftKey(action)]" class="wizard-meta mt-2">
+                    {{ lastSendPreview[draftKey(action)] }}
+                </div>
+            </div>
+
+            <div v-else-if="action.action_type === 'merge' || action.action_type === 'rerun_ci'">
+                <button class="btn-pri" :disabled="busy[draftKey(action)]" @click="fireEndpoint(action)">
+                    {{ action.action_type === 'merge' ? 'Merge now' : 'Rerun CI / review' }}
+                </button>
+                <span v-if="actionErr[draftKey(action)]" class="err-inline">{{ actionErr[draftKey(action)] }}</span>
+            </div>
+
+            <div v-else-if="action.action_type === 'request_re_review'">
+                <div class="cli-hint">{{ action.payload.cli_hint }}</div>
+                <div class="wizard-meta mt-2">No slack_targets mapping for {{ action.payload.github_login }} — paste the command into a terminal.</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+</div>
+
+</frshty-shell>
+</div>
+
+<script>
+const { ref, computed, reactive, onMounted, onUnmounted } = Vue;
+
+const BLOCK_LABELS = {
+    awaiting_merge: 'Merge ready',
+    ci_failing: 'CI failing',
+    needs_review_response: 'Reviewer waiting',
+    awaiting_approval: 'Needs approval',
+    stale_no_activity: 'No activity',
+};
+
+frshtyApp({
+    setup() {
+        const items = ref([]);
+        const currentIndex = ref(0);
+        const loaded = ref(false);
+        const loadError = ref('');
+        const instanceName = ref('');
+        const dryRun = ref(localStorage.getItem('wizard.dryRun') !== 'false');
+        const busy = reactive({});
+        const loadingDraft = reactive({});
+        const actionErr = reactive({});
+        const lastSendPreview = reactive({});
+
+        const current = computed(() => items.value[currentIndex.value] || null);
+
+        function blockLabel(reason) { return BLOCK_LABELS[reason] || reason; }
+
+        function draftKey(action) {
+            const c = current.value;
+            if (!c) return action.action_type;
+            if (action.action_type === 'post_reply')  return `${c.id}:reply:${action.payload.comment_id}`;
+            if (action.action_type === 'slack_ping')  return `${c.id}:ping:${action.payload.github_login}`;
+            return `${c.id}:${action.action_type}`;
+        }
+
+        function firstActionIdx(type) {
+            const c = current.value;
+            if (!c) return -1;
+            return c.actions.findIndex(a => a.action_type === type);
+        }
+
+        function toggleDryRun() {
+            dryRun.value = !dryRun.value;
+            localStorage.setItem('wizard.dryRun', dryRun.value ? 'true' : 'false');
+        }
+
+        async function load() {
+            try {
+                const [qResp, cfgResp] = await Promise.all([
+                    fetch('/api/wizard/queue'),
+                    fetch('/api/config'),
+                ]);
+                if (!qResp.ok) {
+                    const err = await qResp.json().catch(() => ({}));
+                    loadError.value = err.error || `HTTP ${qResp.status}`;
+                    return;
+                }
+                loadError.value = '';
+                const data = await qResp.json();
+                items.value = data.items || [];
+                if (currentIndex.value >= items.value.length) currentIndex.value = Math.max(0, items.value.length - 1);
+                const cfg = await cfgResp.json();
+                instanceName.value = cfg.job?.key || '';
+            } catch (e) {
+                loadError.value = e.message || String(e);
+            } finally {
+                loaded.value = true;
+            }
+        }
+
+        async function ensureReplyDraft(action, force) {
+            const k = draftKey(action);
+            if (!force && action.payload.draft_text) return;
+            loadingDraft[k] = true;
+            actionErr[k] = '';
+            try {
+                const r = await fetch('/api/wizard/draft_reply', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        repo: current.value.repo,
+                        pr_id: current.value.pr_id,
+                        comment_id: action.payload.comment_id,
+                    }),
+                });
+                const j = await r.json();
+                if (r.ok) {
+                    action.payload.draft_text = j.text || '';
+                } else {
+                    actionErr[k] = j.error || `HTTP ${r.status}`;
+                }
+            } catch (e) {
+                actionErr[k] = e.message || String(e);
+            } finally {
+                loadingDraft[k] = false;
+            }
+        }
+
+        async function ensurePingDraft(action, force) {
+            const k = draftKey(action);
+            if (!force && action.payload.draft_text) return;
+            loadingDraft[k] = true;
+            actionErr[k] = '';
+            try {
+                const r = await fetch('/api/wizard/draft_ping', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        github_login: action.payload.github_login,
+                        pr_url: action.payload.context?.pr_url || current.value.url || '',
+                        pr_title: action.payload.context?.pr_title || current.value.title || '',
+                        context: '',
+                    }),
+                });
+                const j = await r.json();
+                if (r.ok) {
+                    action.payload.draft_text = j.text || '';
+                } else {
+                    actionErr[k] = j.error || `HTTP ${r.status}`;
+                }
+            } catch (e) {
+                actionErr[k] = e.message || String(e);
+            } finally {
+                loadingDraft[k] = false;
+            }
+        }
+
+        function advance() {
+            if (currentIndex.value < items.value.length - 1) currentIndex.value++;
+        }
+        function back() {
+            if (currentIndex.value > 0) currentIndex.value--;
+        }
+
+        async function fireEndpoint(action) {
+            const k = draftKey(action);
+            busy[k] = true;
+            actionErr[k] = '';
+            try {
+                const r = await fetch(action.payload.endpoint, {
+                    method: action.payload.method || 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                });
+                if (!r.ok) {
+                    const j = await r.json().catch(() => ({}));
+                    actionErr[k] = j.error || `HTTP ${r.status}`;
+                    return;
+                }
+                await load();
+                advance();
+            } catch (e) {
+                actionErr[k] = e.message || String(e);
+            } finally {
+                busy[k] = false;
+            }
+        }
+
+        async function postReply(action) {
+            const k = draftKey(action);
+            const text = (action.payload.draft_text || '').trim();
+            if (!text) return;
+            busy[k] = true;
+            actionErr[k] = '';
+            try {
+                const r = await fetch(action.payload.endpoint, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({body: text}),
+                });
+                const j = await r.json().catch(() => ({}));
+                if (!r.ok || j.status === 'error') {
+                    actionErr[k] = j.error || j.detail || `HTTP ${r.status}`;
+                    return;
+                }
+                await load();
+                advance();
+            } catch (e) {
+                actionErr[k] = e.message || String(e);
+            } finally {
+                busy[k] = false;
+            }
+        }
+
+        async function sendPing(action) {
+            const k = draftKey(action);
+            const text = (action.payload.draft_text || '').trim();
+            if (!text) return;
+            busy[k] = true;
+            actionErr[k] = '';
+            lastSendPreview[k] = '';
+            try {
+                const r = await fetch('/api/wizard/slack_ping', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        github_login: action.payload.github_login,
+                        text: text,
+                        thread_ts: action.payload.thread_ts || null,
+                        dry_run: dryRun.value,
+                    }),
+                });
+                const j = await r.json();
+                if (!r.ok) {
+                    actionErr[k] = j.error || `HTTP ${r.status}`;
+                    return;
+                }
+                if (j.would_send) {
+                    lastSendPreview[k] = `dry-run preview → ${j.would_send.workspace} / ${j.would_send.channel}`;
+                    return;
+                }
+                lastSendPreview[k] = j.ok ? `sent (ts=${j.ts || '?'})` : `slack returned: ${j.error || 'unknown'}`;
+                if (j.ok) advance();
+            } catch (e) {
+                actionErr[k] = e.message || String(e);
+            } finally {
+                busy[k] = false;
+            }
+        }
+
+        async function snoozeCurrent() {
+            const c = current.value;
+            if (!c) return;
+            try {
+                await fetch('/api/today/snoozes', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        loop_type: c.source_loop,
+                        entity_id: c.snooze_entity_id,
+                        snooze_until: null,
+                        reason: 'snoozed from wizard',
+                    }),
+                });
+                await load();
+                if (currentIndex.value >= items.value.length) currentIndex.value = Math.max(0, items.value.length - 1);
+            } catch (e) {
+                loadError.value = e.message || String(e);
+            }
+        }
+
+        function handleKey(e) {
+            if (!current.value) return;
+            const t = e.target;
+            if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT')) return;
+            if (e.key === 'j') { advance(); e.preventDefault(); return; }
+            if (e.key === 'k') { back(); e.preventDefault(); return; }
+            if (e.key === 'n') { snoozeCurrent(); e.preventDefault(); return; }
+            const c = current.value;
+            if (e.key === 'm') {
+                const a = c.actions.find(a => a.action_type === 'merge')
+                       || c.actions.find(a => a.action_type === 'rerun_ci');
+                if (a) { fireEndpoint(a); e.preventDefault(); }
+                return;
+            }
+            if (e.key === 'r') {
+                const a = c.actions.find(a => a.action_type === 'post_reply');
+                if (a) { ensureReplyDraft(a).then(() => postReply(a)); e.preventDefault(); }
+                return;
+            }
+            if (e.key === 's') {
+                const a = c.actions.find(a => a.action_type === 'slack_ping');
+                if (a) { ensurePingDraft(a).then(() => sendPing(a)); e.preventDefault(); }
+                return;
+            }
+        }
+
+        onMounted(() => {
+            load();
+            window.addEventListener('keydown', handleKey);
+        });
+        onUnmounted(() => {
+            window.removeEventListener('keydown', handleKey);
+        });
+
+        return {
+            items, currentIndex, current, loaded, loadError, instanceName,
+            dryRun, busy, loadingDraft, actionErr, lastSendPreview,
+            blockLabel, draftKey, firstActionIdx, toggleDryRun,
+            ensureReplyDraft, ensurePingDraft,
+            fireEndpoint, postReply, sendPing, snoozeCurrent,
+        };
+    }
+}).mount('#app');
+</script>
+
+</body>
+</html>
