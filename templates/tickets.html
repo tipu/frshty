@@ -15,18 +15,10 @@
 
 <div id="app" v-cloak>
 <frshty-shell :features="features" :instance="instanceName">
-	<div class="ln-page">
-		<div class="ln-topbar">
-			<div class="ln-breadcrumb">
-				<span>Workspace</span>
-				<span class="ln-bc-sep">/</span>
-				<span class="ln-bc-active">Tickets</span>
-			</div>
-			<div class="ln-topbar-actions">
-				<button class="ln-btn ln-btn-ghost">Filter</button>
-				<button class="ln-btn ln-btn-ghost">Sort</button>
-			</div>
-		</div>
+		<template #actions>
+			<button class="ln-btn ln-btn-ghost">Filter</button>
+			<button class="ln-btn ln-btn-ghost">Sort</button>
+		</template>
 
 		<div class="ln-hero">
 			<div>
