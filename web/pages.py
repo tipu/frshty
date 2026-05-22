@@ -94,6 +94,11 @@ def today_page():
     return _template("today.html")
 
 
+@router.get("/wizard", response_class=HTMLResponse)
+def wizard_page():
+    return _template("wizard.html")
+
+
 @router.get("/slack", response_class=HTMLResponse)
 def slack_page():
     return _template("slack.html")
