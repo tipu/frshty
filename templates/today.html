@@ -7,7 +7,9 @@
 <script src="/static/tailwind.js"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <script src="/static/frshty-nav.js"></script>
+<script src="/static/frshty-shell.js"></script>
 <link rel="stylesheet" href="/static/frshty.css">
+<link rel="stylesheet" href="/static/frshty-v2.css">
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 <style>
 .badge { display: inline-block; padding: 1px 8px; border-radius: 4px; font-size: 11px; }
@@ -49,29 +51,13 @@ details > summary { cursor: pointer; color: #9ca3af; font-size: 13px; padding: 6
 details[open] > summary { color: #d1d5db; margin-bottom: 8px; }
 </style>
 </head>
-<body class="p-4 max-w-5xl mx-auto">
+<body>
 
 <div id="app" v-cloak>
+<frshty-shell :features="features" :instance="instanceName"><div class="ln-page ln-page-wide">
 
-<header class="flex items-center gap-4 mb-4 flex-wrap">
-    <div class="flex items-center gap-2">
-        <h1 class="text-lg font-bold">Today</h1>
-        <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700">{{ instanceName }}</span>
-    </div>
-    <frshty-nav :features="features" />
-    <div class="ml-auto flex items-center gap-3">
-        <span v-if="generatedAt" class="text-xs text-gray-500" :title="generatedAt">refreshed {{ fmtRelative(generatedAt) }}</span>
-        <button @click="refreshLive" :disabled="refreshing"
-                title="bypass cache: re-fetch approvers, peer reviews, and bill.com live"
-                class="bg-blue-700 hover:bg-blue-600 disabled:bg-gray-700 text-white text-xs px-3 py-1 rounded">
-            {{ refreshing ? 'refreshing…' : 'refresh (live)' }}
-        </button>
-        <button @click="runNow" :disabled="running"
-                class="bg-green-700 hover:bg-green-600 disabled:bg-gray-700 text-white text-xs px-3 py-1 rounded">
-            {{ running ? 'narrating…' : 'run narrative' }}
-        </button>
-    </div>
-</header>
+
+
 
 <div class="flex items-center gap-2 mb-3 flex-wrap">
     <template v-for="(count, key) in visibleCounts" :key="key">
@@ -314,6 +300,8 @@ details[open] > summary { color: #d1d5db; margin-bottom: 8px; }
 <pr-submit-modal :open="submitPrOpen" :repos="submitPrRepos" :submitting="submitPrBusy"
                   @close="submitPrOpen=false" @submit="confirmSubmitPr" />
 
+
+</div></frshty-shell>
 </div>
 
 <script>

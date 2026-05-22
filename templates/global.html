@@ -8,7 +8,9 @@
 <script src="/static/tailwind.js"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <script src="/static/frshty-nav.js"></script>
+<script src="/static/frshty-shell.js"></script>
 <link rel="stylesheet" href="/static/frshty.css">
+<link rel="stylesheet" href="/static/frshty-v2.css">
 <style>
 .unread { font-weight: 600; border-left: 3px solid #3b82f6; }
 .read { opacity: 0.4; }
@@ -23,40 +25,13 @@
 .expanded .summary-full { display: block; }
 </style>
 </head>
-<body class="p-4 max-w-7xl mx-auto">
+<body>
 
 <div id="app" v-cloak>
+<frshty-shell :features="features" :instance="instanceName"><div class="ln-page ln-page-wide">
 
-<header class="flex items-center justify-between mb-4">
-    <div class="flex items-center gap-4">
-        <div class="flex items-center gap-2">
-            <h1 class="text-lg font-bold">Global Feed</h1>
-            <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700">{{ instanceName }}</span>
-        </div>
-        <frshty-nav :features="features" />
-    </div>
-    <div class="flex gap-2 text-xs items-center">
-        <select v-model="instanceFilter" class="bg-gray-900 border border-gray-700 text-gray-300 text-xs px-1 py-0.5 rounded">
-            <option value="">all instances</option>
-            <option v-for="k in instanceOptions" :key="k" :value="k">{{ k }}</option>
-        </select>
-        <select v-model="noiseMode" class="bg-gray-900 border border-gray-700 text-gray-300 text-xs px-1 py-0.5 rounded">
-            <option value="useful">useful</option>
-            <option value="noise">noise</option>
-        </select>
-        <select v-model.number="timeWindow" class="bg-gray-900 border border-gray-700 text-gray-300 text-xs px-1 py-0.5 rounded">
-            <option :value="8">8h</option>
-            <option :value="16">16h</option>
-            <option :value="24">24h</option>
-        </select>
-        <span class="text-gray-700">|</span>
-        <label class="flex items-center gap-1 text-gray-400">
-            <input type="checkbox" v-model="showDismissed" />
-            show dismissed
-        </label>
-        <button @click="clearDismissed" class="text-gray-600 hover:text-red-400">clear dismissed</button>
-    </div>
-</header>
+
+
 
 <div v-if="errorKeys.length" class="card card-red px-3 py-2 mb-3 text-sm">
     <div class="text-red-300">⚠ {{ errorKeys.length }} instance(s) unreachable:
@@ -86,6 +61,8 @@
     </div>
 </div>
 
+
+</div></frshty-shell>
 </div>
 
 <script>
