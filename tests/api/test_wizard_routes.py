@@ -51,7 +51,11 @@ def client(tmp_path):
         "pr": {"auto_pr": True},
         "slack": {},
         "slack_targets": {
-            "alice": {"workspace": "tipucorp", "slack_user_id": "U1", "dm_channel_id": "D1"},
+            "alice": {"workspace": "tipucorp", "slack_user_id": "U1"},
+        },
+        "slack_bridge": {
+            "url": "http://127.0.0.1:8900/send",
+            "token": "test-bearer",
         },
         "_config_path": tmp_path / "config.toml",
         "_state_dir": tmp_path,
@@ -176,7 +180,7 @@ class TestReviewerMappingFallback:
         actions = items[0]["actions"]
         assert len(actions) == 1
         assert actions[0]["action_type"] == "slack_ping"
-        assert actions[0]["payload"]["target"] == {"workspace": "tipucorp", "channel": "D1"}
+        assert actions[0]["payload"]["target"] == {"workspace": "tipucorp", "channel": "U1"}
 
 
 class TestSlackPing:
@@ -186,20 +190,20 @@ class TestSlackPing:
                 "github_login": "alice", "text": "hello", "dry_run": True,
             })
         assert resp.status_code == 200, resp.text
-        assert resp.json() == {"would_send": {"workspace": "tipucorp", "channel": "D1", "text": "hello"}}
+        assert resp.json() == {"would_send": {"workspace": "tipucorp", "channel": "U1", "text": "hello"}}
         bridge.assert_not_called()
 
     def test_real_send_forwards_to_bridge_and_returns_its_response(self, client):
         with patch("web.wizard._post_slack_bridge",
-                   return_value={"ok": True, "ts": "1234.5678", "channel": "D1"}) as bridge:
+                   return_value={"ok": True, "ts": "1234.5678", "channel": "U1"}) as bridge:
             resp = client.post("/api/wizard/slack_ping", json={
                 "github_login": "alice", "text": "real ping", "dry_run": False,
             })
         assert resp.status_code == 200, resp.text
-        assert resp.json() == {"ok": True, "ts": "1234.5678", "channel": "D1"}
+        assert resp.json() == {"ok": True, "ts": "1234.5678", "channel": "U1"}
         bridge.assert_called_once()
         payload = bridge.call_args[0][0]
-        assert payload == {"workspace": "tipucorp", "channel": "D1", "text": "real ping"}
+        assert payload == {"workspace": "tipucorp", "channel": "U1", "text": "real ping"}
 
     def test_bridge_unavailable_returns_502(self, client):
         with patch("web.wizard._post_slack_bridge",
@@ -244,7 +248,7 @@ class TestDraftPing:
                 "github_login": "alice", "pr_url": "u", "pr_title": "t", "context": "",
             })
         body = resp.json()
-        assert body["target"] == {"workspace": "tipucorp", "channel": "D1"}
+        assert body["target"] == {"workspace": "tipucorp", "channel": "U1"}
         assert body["text"] == "ping text"
 
 
