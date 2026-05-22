@@ -7,7 +7,9 @@
 <script src="/static/tailwind.js"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
 <script src="/static/frshty-nav.js"></script>
+<script src="/static/frshty-shell.js"></script>
 <link rel="stylesheet" href="/static/frshty.css">
+<link rel="stylesheet" href="/static/frshty-v2.css">
 <style>
 table { border-collapse: collapse; width: 100%; }
 th, td { padding: 6px 10px; border: 1px solid #2a2a2a; text-align: left; font-size: 13px; vertical-align: top; }
@@ -25,17 +27,13 @@ button { cursor: pointer; }
 .btn-purple:hover { background: #6b21a8; }
 </style>
 </head>
-<body class="p-4 max-w-7xl mx-auto">
+<body>
 
 <div id="app" v-cloak>
+<frshty-shell :features="features" :instance="instanceName"><div class="ln-page ln-page-wide">
 
-<header class="flex items-center gap-4 mb-4">
-    <div class="flex items-center gap-2">
-        <h1 class="text-lg font-bold">Timesheet</h1>
-        <span class="text-xs font-mono bg-gray-800 text-gray-300 px-2 py-1 rounded border border-gray-700">{{ instanceName }}</span>
-    </div>
-    <frshty-nav :features="features" />
-</header>
+
+
 
 <div class="flex items-center gap-3 mb-4">
     <input type="date" v-model="startDate" />
@@ -182,6 +180,8 @@ button { cursor: pointer; }
     </div>
 </div>
 
+
+</div></frshty-shell>
 </div>
 
 <script>
