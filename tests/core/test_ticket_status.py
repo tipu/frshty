@@ -49,12 +49,13 @@ class TestTransitionDone:
 
 class TestTransitionIllegal:
     @pytest.mark.parametrize("current,target", [
-        ("new", "merged"),
         ("new", "reviewing"),
         ("new", "pr_ready"),
         ("planning", "pr_ready"),
         ("planning", "merged"),
         ("merged", "planning"),
+        ("epic", "planning"),  # epics are terminal — can only reach done
+        ("epic", "reviewing"),
     ])
     def test_illegal_raises(self, current, target):
         with pytest.raises(ValueError, match="Illegal transition"):
@@ -82,6 +83,8 @@ class TestTransitionLegalized:
         ("done", "new"),           # revive on upstream reopen
         ("done", "pr_ready"),      # revive with slug
         ("done", "in_review"),     # revive with PRs
+        ("new", "merged"),         # pre-merged short-circuit (existing PRs)
+        ("new", "epic"),           # issue_type=Epic detected at discovery time
     ])
     def test_now_legal(self, current, target):
         assert transition(current, target) == target

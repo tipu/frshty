@@ -74,7 +74,7 @@ class JiraTicketSystem:
                 if self.account_id:
                     issues = [i for i in issues if (i.get("fields", {}).get("assignee") or {}).get("accountId") == self.account_id]
             else:
-                url = f"{self.base_url}/rest/api/3/search/jql?jql={self.jql}&maxResults=20&fields=key,summary,status,description,attachment,issuelinks,parent,subtasks,timeoriginalestimate,updated"
+                url = f"{self.base_url}/rest/api/3/search/jql?jql={self.jql}&maxResults=20&fields=key,summary,status,description,attachment,issuelinks,parent,subtasks,timeoriginalestimate,updated,issuetype"
                 resp = client.get(url)
                 if resp.status_code != 200:
                     return []
@@ -110,6 +110,9 @@ class JiraTicketSystem:
                 for st_item in fields.get("subtasks", []):
                     subtasks.append({"key": st_item.get("key", ""), "summary": st_item.get("fields", {}).get("summary", "")})
 
+                issuetype = fields.get("issuetype") or {}
+                issue_type_name = issuetype.get("name", "") if isinstance(issuetype, dict) else str(issuetype)
+
                 results.append({
                     "key": i.get("key", ""),
                     "summary": fields.get("summary", ""),
@@ -122,6 +125,7 @@ class JiraTicketSystem:
                     "parent": parent_info,
                     "subtasks": subtasks,
                     "estimate_seconds": fields.get("timeoriginalestimate", 0) or 0,
+                    "issue_type": issue_type_name,
                 })
             return results
 

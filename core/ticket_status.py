@@ -15,11 +15,16 @@ class TicketStatus(str, Enum):
     validation = "validation"
     pr_failed = "pr_failed"
     done = "done"
+    # Container issues (Jira Epic, Linear Project, etc.) — frshty tracks them
+    # for UI grouping of their child stories but never plans / codes / PRs them.
+    # Terminal: the only legal transition out is `done` (handled implicitly by
+    # `transition()` so every status can reach done).
+    epic = "epic"
 
 
 _ALLOWED: dict[TicketStatus, set[TicketStatus]] = {
     TicketStatus.pending_approval: {TicketStatus.new, TicketStatus.done},
-    TicketStatus.new:        {TicketStatus.planning, TicketStatus.merged},
+    TicketStatus.new:        {TicketStatus.planning, TicketStatus.merged, TicketStatus.epic},
     TicketStatus.planning:   {TicketStatus.reviewing},
     TicketStatus.reviewing:  {TicketStatus.testing, TicketStatus.pr_ready, TicketStatus.planning},
     TicketStatus.testing:    {TicketStatus.proving, TicketStatus.pr_ready, TicketStatus.tests_failed, TicketStatus.reviewing},
@@ -31,6 +36,7 @@ _ALLOWED: dict[TicketStatus, set[TicketStatus]] = {
     TicketStatus.validation: {TicketStatus.done, TicketStatus.new},
     TicketStatus.pr_failed:  {TicketStatus.pr_ready, TicketStatus.in_review, TicketStatus.merged},
     TicketStatus.done:       {TicketStatus.new, TicketStatus.pr_ready, TicketStatus.testing, TicketStatus.proving, TicketStatus.in_review},
+    TicketStatus.epic:       set(),  # epic is terminal; transition() still permits → done universally
 }
 
 
