@@ -8,6 +8,7 @@ without crashing under each invocation pattern", not "real configs work".
 import os
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -99,7 +100,7 @@ def test_auto_healing_without_frshty_events_env(tmp_path):
     env.pop("FRSHTY_EVENTS", None)
 
     process = subprocess.Popen(
-        ["python", "frshty.py", str(cfg)],
+        [sys.executable, "frshty.py", str(cfg)],
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -136,7 +137,7 @@ def test_multi_instance_unchanged(tmp_path):
     )
 
     process = subprocess.Popen(
-        ["python", "frshty.py", "--multi", str(cfg_a), str(cfg_b)],
+        [sys.executable, "frshty.py", "--multi", str(cfg_a), str(cfg_b)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

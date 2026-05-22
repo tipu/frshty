@@ -145,7 +145,7 @@ class BitbucketPlatform:
         results = []
         with external_log.client("bitbucket", auth=self._auth(), timeout=30) as client:
             for repo in self.repos:
-                url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests?state=OPEN"
+                url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests?state=OPEN&pagelen=50"
                 resp = client.get(url)
                 if resp.status_code != 200:
                     log.emit("poll_error", f"Failed to fetch PRs from {repo}: HTTP {resp.status_code}",

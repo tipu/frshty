@@ -407,7 +407,7 @@ def setup_prd_ticket(ctx: TaskContext) -> TaskResult:
         return TaskResult("skipped", "ticket already materialized")
     base_url = ctx.config.get("_base_url", "")
     with tix._gate_lock_for(ctx.instance_key):
-        blocker = tix._repo_gate_blocked(ctx.instance_key, ctx.ticket_key)
+        blocker = tix._repo_gate_blocked(ctx.instance_key, ctx.ticket_key, ctx.config)
         if blocker:
             return TaskResult("skipped", f"repo busy with {blocker}")
         try:
@@ -433,7 +433,7 @@ def start_planning(ctx: TaskContext) -> TaskResult:
     from features import acceptance
     from features import tickets as tix
     with tix._gate_lock_for(ctx.instance_key):
-        blocker = tix._repo_gate_blocked(ctx.instance_key, ctx.ticket_key or "")
+        blocker = tix._repo_gate_blocked(ctx.instance_key, ctx.ticket_key or "", ctx.config)
         if blocker:
             return TaskResult("skipped", f"repo busy with {blocker}")
         try:
@@ -443,6 +443,29 @@ def start_planning(ctx: TaskContext) -> TaskResult:
     ticket_dir = _ticket_dir(ctx)
     if not ticket_dir.is_dir():
         return TaskResult("failed", f"ticket dir missing: {ticket_dir}")
+    # Refresh every per-repo worktree onto the latest origin/<base_branch>
+    # before Claude starts editing. Without this, a ticket whose worktree was
+    # created earlier (e.g., concurrent PRD intake) ends up with a stale base
+    # — when it later opens a PR, the auto-merge step hits a conflict against
+    # whatever sibling tickets merged in between. The per-repo gate
+    # serialises planning/reviewing/testing/proving but the worktree itself
+    # only gets seeded once at setup time; refresh here closes that gap.
+    if ctx.ticket_key:
+        ts = state.load_ticket(ctx.ticket_key) or {}
+        slug = ts.get("slug", "")
+        if slug:
+            ws = ctx.config["workspace"]
+            base_branch = ws.get("base_branch", "main")
+            for repo in get_repos(ctx.config):
+                wt = ticket_worktree_path(ctx.config, slug, repo["name"])
+                if not wt.is_dir():
+                    continue
+                subprocess.run(["git", "fetch", "origin", base_branch],
+                               cwd=str(wt), capture_output=True, timeout=60)
+                subprocess.run(["git", "reset", "--hard", f"origin/{base_branch}"],
+                               cwd=str(wt), capture_output=True, timeout=60)
+                subprocess.run(["git", "clean", "-fd"],
+                               cwd=str(wt), capture_output=True, timeout=60)
     if ctx.ticket_key:
         ts = state.load_ticket(ctx.ticket_key) or {}
         if ts:

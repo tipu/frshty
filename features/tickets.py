@@ -78,6 +78,15 @@ _REPO_GATED_TASKS = frozenset({
 })
 
 _GATE_OCCUPYING_STATUSES = ("planning", "reviewing", "testing", "proving")
+# When the instance auto-merges, pr_ready/in_review are SHORT-LIVED transitional
+# states (PR opens, CI runs, merge fires within a poll cycle), so we extend the
+# gate through them. This prevents a sibling ticket from refreshing its
+# worktree off origin/main while a held ticket's branch is mid-merge — without
+# this, two tickets editing the same hot-spot file race the merge and the
+# second one's PR can't fast-forward. With auto_merge=false the gate intentionally
+# stops at "proving" (see docstring on _repo_gate_blocked) because in_review
+# can linger indefinitely waiting for a human to merge.
+_GATE_OCCUPYING_AUTO_MERGE = _GATE_OCCUPYING_STATUSES + ("pr_ready", "in_review")
 
 MAX_TEST_FIX_ATTEMPTS = 3
 
@@ -97,33 +106,40 @@ def _gate_lock_for(instance_key: str) -> threading.Lock:
         return lock
 
 
-def _repo_gate_blocked(instance_key: str, ticket_key: str) -> str | None:
+def _repo_gate_blocked(instance_key: str, ticket_key: str, config: dict | None = None) -> str | None:
     """Per-repo serialization gate. Returns the ticket_key of another ticket
-    in the same instance whose status occupies the pipeline (planning,
-    reviewing). Returns None if the gate is clear.
+    in the same instance whose status occupies the pipeline. Returns None if
+    the gate is clear.
 
-    Only active-LLM-modifying states (planning, reviewing) occupy the gate.
-    pr_ready and in_review do not occupy the gate because the LLM has stopped
-    modifying the worktree by then — the PR is open and waiting for human
-    merge or external CI. Holding the gate through in_review caused a
-    deadlock on instances with auto_merge=false where every new ticket
-    accumulated in "new+slug" behind a permanently-in_review ticket.
+    Active-LLM-modifying states (planning, reviewing, testing, proving) always
+    occupy the gate. pr_ready and in_review additionally occupy the gate when
+    the instance is configured with auto_merge=true — those states are
+    short-lived under auto_merge (PR opens → CI passes → merge fires within a
+    poll cycle), and excluding them lets a sibling ticket refresh its worktree
+    from origin/main while the held ticket's branch is mid-merge, which races
+    the merge on shared hot-spot files.
 
-    The "new but slug set" clause was removed for the same reason: it
-    created mutual-blocking deadlock when multiple new tickets were
-    discovered in a single scan cycle. Concurrent start_planning is
-    prevented at runtime by core.tasks.tickets.start_planning's gate-lock
-    + status re-check (only one ticket can transition into "planning"
-    inside the threading.Lock), so the enqueue-time gate only needs to
-    block on already-active pipeline states.
+    Without auto_merge the gate stops at "proving" because in_review can sit
+    indefinitely waiting for a human to merge — extending the gate would cause
+    deadlock where every new ticket accumulated in "new+slug" behind a
+    permanently-in_review ticket.
+
+    The "new but slug set" clause was removed for the same reason: it created
+    mutual-blocking deadlock when multiple new tickets were discovered in a
+    single scan cycle. Concurrent start_planning is prevented at runtime by
+    core.tasks.tickets.start_planning's gate-lock + status re-check (only one
+    ticket can transition into "planning" inside the threading.Lock), so the
+    enqueue-time gate only needs to block on already-active pipeline states.
     """
     import core.db as _db
+    auto_merge = bool((config or {}).get("pr", {}).get("auto_merge"))
+    statuses = _GATE_OCCUPYING_AUTO_MERGE if auto_merge else _GATE_OCCUPYING_STATUSES
     rows = _db.query_all(
         "SELECT ticket_key FROM tickets"
         " WHERE instance_key=? AND ticket_key<>?"
-        f"      AND status IN ({','.join('?' for _ in _GATE_OCCUPYING_STATUSES)})"
+        f"      AND status IN ({','.join('?' for _ in statuses)})"
         " ORDER BY updated_at ASC LIMIT 1",
-        (instance_key, ticket_key, *_GATE_OCCUPYING_STATUSES),
+        (instance_key, ticket_key, *statuses),
     )
     return rows[0]["ticket_key"] if rows else None
 
@@ -776,7 +792,14 @@ def _process_ticket_comments(config: dict, key: str, ts: dict, ticket: dict, bas
     if not slug:
         return
 
+    last_checked = ts.get("comments_checked_issue_updated_at", "")
+    current_updated = ticket.get("updated_at", "")
+    if last_checked and current_updated and current_updated == last_checked:
+        return
+
     comments_data = _fetch_ticket_comments(config, key)
+    if current_updated:
+        ts["comments_checked_issue_updated_at"] = current_updated
     if not comments_data:
         ts["ticket_comment_snapshot"] = _comment_snapshot([])
         return
@@ -1493,7 +1516,29 @@ def _recheck_pr_failed(config, ticket, ts, base_url) -> dict:
     return ts
 
 
-def _check_in_review(config, ticket, ts, base_url) -> dict:
+def _get_pr_info(platform, pr_info_map, repo: str, pr_id) -> dict:
+    if pr_info_map is not None:
+        return pr_info_map.get((repo, pr_id)) or {}
+    try:
+        return platform.get_pr_info(repo, pr_id) or {}
+    except Exception:
+        return {}
+
+
+def _build_pr_info_map(platform, prs: list[dict]) -> dict:
+    out = {}
+    for pr in prs:
+        key = (pr["repo"], pr["id"])
+        if key in out:
+            continue
+        try:
+            out[key] = platform.get_pr_info(pr["repo"], pr["id"]) or {}
+        except Exception:
+            out[key] = {}
+    return out
+
+
+def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
     platform = make_platform(config)
     prs = ts.get("prs", [])
     if not prs:
@@ -1502,10 +1547,7 @@ def _check_in_review(config, ticket, ts, base_url) -> dict:
     all_merged = True
     closed_unmerged = []
     for pr in prs:
-        try:
-            info = platform.get_pr_info(pr["repo"], pr["id"]) or {}
-        except Exception:
-            info = {}
+        info = _get_pr_info(platform, pr_info_map, pr["repo"], pr["id"])
         pr_state = info.get("state", "OPEN")
         pr["approvers"] = info.get("approvers") or []
         pr["approvers_checked_at"] = datetime.now(timezone.utc).isoformat()
@@ -1693,19 +1735,22 @@ def _reconcile_prs(ts: dict, open_prs: list[dict]) -> dict:
     return ts
 
 
-def _has_conflicting_pr(config: dict, ts: dict) -> bool:
+def _has_conflicting_pr(config: dict, ts: dict, pr_info_map=None) -> bool:
     prs = ts.get("prs", [])
     if not prs:
         return False
-    platform = make_platform(config)
+    platform = make_platform(config) if pr_info_map is None else None
     for pr in prs:
-        try:
-            info = platform.get_pr_info(pr["repo"], pr["id"])
-        except Exception as e:
-            log.emit("conflict_check_failed",
-                f"get_pr_info failed for {pr['repo']}#{pr['id']}: {e}",
-                meta={"repo": pr["repo"], "pr_id": pr["id"]})
-            continue
+        if pr_info_map is not None:
+            info = pr_info_map.get((pr["repo"], pr["id"])) or {}
+        else:
+            try:
+                info = platform.get_pr_info(pr["repo"], pr["id"])
+            except Exception as e:
+                log.emit("conflict_check_failed",
+                    f"get_pr_info failed for {pr['repo']}#{pr['id']}: {e}",
+                    meta={"repo": pr["repo"], "pr_id": pr["id"]})
+                continue
         if info.get("mergeable") == "CONFLICTING":
             return True
     return False
@@ -1720,7 +1765,7 @@ def _resolve_conflicts_pending(instance_key: str, ticket_key: str) -> bool:
     )
 
 
-def _resolve_conflicts(config, ticket, ts, base_url) -> dict:
+def _resolve_conflicts(config, ticket, ts, base_url, pr_info_map=None) -> dict:
     platform = make_platform(config)
     prs = ts.get("prs", [])
     if not prs:
@@ -1729,7 +1774,10 @@ def _resolve_conflicts(config, ticket, ts, base_url) -> dict:
     base_branch = config["workspace"].get("base_branch", "main")
 
     for pr in prs:
-        info = platform.get_pr_info(pr["repo"], pr["id"])
+        if pr_info_map is not None:
+            info = pr_info_map.get((pr["repo"], pr["id"])) or {}
+        else:
+            info = platform.get_pr_info(pr["repo"], pr["id"])
         if info.get("mergeable") != "CONFLICTING":
             continue
 
