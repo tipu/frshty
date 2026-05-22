@@ -36,6 +36,33 @@
 		return path === href || path.indexOf(href + '/') === 0;
 	}
 
+	// Map URL paths back to the breadcrumb crumbs the topbar renders. Looking up
+	// by current path keeps the topbar consistent across pages without each
+	// page having to know its own breadcrumb. Each entry is [section, page] —
+	// the rail's section header is reused as the breadcrumb root.
+	const CRUMBS = {
+		'/': ['Workspace', 'Inbox'],
+		'/global': ['Workspace', 'Global'],
+		'/reviews': ['Work', 'Reviews'],
+		'/today': ['Work', 'Today'],
+		'/tickets': ['Work', 'Tickets'],
+		'/prd': ['Work', 'PRD'],
+		'/scheduled': ['Work', 'Scheduled'],
+		'/slack': ['Work', 'Slack'],
+		'/timesheet': ['Admin', 'Timesheet'],
+		'/billing': ['Admin', 'Billing'],
+		'/claude': ['Admin', 'Claude'],
+		'/config': ['Admin', 'Config'],
+	};
+
+	function crumbsForPath(path) {
+		if (CRUMBS[path]) return CRUMBS[path];
+		// Detail routes — /tickets/DEV-475 → ["Work", "Tickets", "DEV-475"]
+		const m = path.match(/^(\/tickets|\/reviews|\/prd)\/(.+?)\/?$/);
+		if (m && CRUMBS[m[1]]) return [...CRUMBS[m[1]], m[2]];
+		return ['Workspace', 'Home'];
+	}
+
 	const FrshtyShell = {
 		props: {
 			features: { type: Object, default: () => ({}) },
@@ -43,6 +70,12 @@
 			userInitials: { type: String, default: 'DJ' },
 			userName: { type: String, default: 'danial jaffry' },
 			counts: { type: Object, default: () => ({}) },
+			// Pages can override the breadcrumb (e.g., ticket_detail wants
+			// "Tickets / DEV-475" with a clickable Tickets link rather than
+			// the auto-derived 3-segment crumb).
+			crumbs: { type: Array, default: null },
+			// "wide" → no max-width on .ln-page-wide, for table-dense pages.
+			width: { type: String, default: 'normal' },
 		},
 		computed: {
 			sections() {
@@ -57,6 +90,9 @@
 							count: this.counts[l.label.toLowerCase()] || 0,
 						})),
 				}));
+			},
+			breadcrumbs() {
+				return this.crumbs || crumbsForPath(window.location.pathname);
 			},
 		},
 		template: `
@@ -94,7 +130,23 @@
 					</div>
 				</aside>
 				<main class="ln-main">
-					<slot></slot>
+					<div :class="['ln-page', width === 'wide' ? 'ln-page-wide' : '']">
+						<div class="ln-topbar">
+							<div class="ln-breadcrumb">
+								<template v-for="(crumb, i) in breadcrumbs" :key="i">
+									<span class="ln-bc-sep" v-if="i > 0">/</span>
+									<span :class="i === breadcrumbs.length - 1 ? 'ln-bc-active' : ''">{{ crumb }}</span>
+								</template>
+							</div>
+							<div class="ln-topbar-actions">
+								<slot name="actions">
+									<button class="ln-btn ln-btn-ghost" title="Filter view (not wired)">Filter</button>
+									<button class="ln-btn ln-btn-ghost" title="Display options (not wired)">Display</button>
+								</slot>
+							</div>
+						</div>
+						<slot></slot>
+					</div>
 				</main>
 			</div>
 		`,

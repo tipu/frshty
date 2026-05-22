@@ -72,21 +72,13 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
 <body>
 
 <div id="app" v-cloak>
-<frshty-shell :features="features" :instance="instanceName">
-<div class="ln-page ln-page-wide">
-
-<div id="content">
-<div class="ln-topbar">
-    <div class="ln-breadcrumb">
-        <a href="/tickets" class="ln-link">Tickets</a>
-        <span class="ln-bc-sep">/</span>
-        <span class="ln-bc-active ln-mono">{{ key }}</span>
-    </div>
-    <div class="ln-topbar-actions">
+<frshty-shell :features="features" :instance="instanceName" width="wide" :crumbs="['Tickets', key]">
+    <template #actions>
         <button @click="openDiscuss" class="ln-btn ln-btn-discuss"
                 title="Open a separate claude (cl) terminal in this ticket's worktree dir">💬 Discuss</button>
-    </div>
-</div>
+    </template>
+
+<div id="content">
 
 <div v-if="loadError" class="text-red-400 mb-4">Ticket not found</div>
 
