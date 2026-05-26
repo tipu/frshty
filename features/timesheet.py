@@ -17,6 +17,7 @@ import core.tz as tz
 from core.config import resolve_env, get_repos
 from core.claude_runner import run_haiku, extract_json
 from features.platforms import make_platform
+from features import timesheet_select as tsel
 
 CACHE_FILE = None
 _day_cache = {}
@@ -91,6 +92,83 @@ def check(config: dict):
     _auto_fill(config)
 
 
+def _build_candidates(data: dict, user_account_id: str) -> list:
+    tickets = {t["key"]: t for t in data.get("tickets", [])}
+    activity: dict[str, dict[str, dict]] = {}
+    commit_dates: dict[str, list] = {}
+
+    def _act(tid: str, day: str) -> dict:
+        return activity.setdefault(tid, {}).setdefault(
+            day, {"commit": 0, "review": 0, "session": 0, "summary": False})
+
+    for day, commits in data.get("gitCommits", {}).items():
+        for c in commits:
+            tid = _extract_ticket(c.get("branch", "") or c.get("message", ""))
+            if not tid:
+                continue
+            _act(tid, day)["commit"] += 1
+            try:
+                commit_dates.setdefault(tid, []).append(date.fromisoformat(day))
+            except ValueError:
+                pass
+    for day, reviews in data.get("prReviews", {}).items():
+        for r in reviews:
+            tid = _extract_ticket(r.get("branch", ""))
+            if tid:
+                _act(tid, day)["review"] += r.get("review_minutes", 30)
+    for day, sessions in data.get("claudeSessions", {}).items():
+        for s in sessions:
+            src = (s.get("cwd", "") or "") + " " + (s.get("prompt", "") or "")
+            m = re.search(r"\b([A-Z]+-\d{2,})\b", src, re.IGNORECASE)
+            if m:
+                _act(m.group(1).upper(), day)["session"] += 1
+    for day, summaries in data.get("dailySummaries", {}).items():
+        for tid in summaries.keys():
+            if tid != "general" and re.match(r"[A-Z]+-\d{2,}", tid):
+                _act(tid, day)["summary"] = True
+
+    candidates = []
+    for tid, days_act in activity.items():
+        t = tickets.get(tid)
+        if not t or t.get("assignee_id") != user_account_id:
+            continue
+        cds = sorted(commit_dates.get(tid, []))
+        first_commit = cds[0] if cds else None
+        last_commit = cds[-1] if cds else None
+        ip_raw = t.get("in_progress_at") or ""
+        try:
+            in_progress = date.fromisoformat(ip_raw) if ip_raw else first_commit
+        except ValueError:
+            in_progress = first_commit
+        spent = t.get("hoursSpentTotal")
+        logged = spent if spent is not None else t.get("hoursLogged", 0.0)
+        abd = {day: tsel.TicketDayActivity(
+                    commit_count=v["commit"], review_minutes=v["review"],
+                    session_count=v["session"], summary_present=v["summary"])
+               for day, v in days_act.items()}
+        candidates.append(tsel.Candidate(
+            ticket=tid, summary=t.get("summary", ""), status=t.get("status", ""),
+            assignee_id=t.get("assignee_id", ""), estimate_hours=t.get("hoursEstimated"),
+            logged_hours=logged or 0.0, in_progress_at=in_progress,
+            last_commit_date=last_commit, activity_by_day=abd))
+    return candidates
+
+
+def _build_demands(data: dict, fill_target: float, days: list) -> list:
+    worklogs = data.get("worklogs", {})
+    recurring = data.get("recurring", {})
+    demands = []
+    for day in days:
+        logged = sum(w.get("hours", 0) for w in worklogs.get(day, []))
+        pending = 0.0
+        for r in recurring.get(day, []):
+            if not r.get("logged"):
+                pending += (_parse_time(r["time"]) or 0) / 3600
+        demands.append(tsel.Demand(day=day, target_hours=fill_target,
+                                   already_logged_hours=logged, recurring_pending_hours=pending))
+    return demands
+
+
 def _auto_fill(config: dict):
     ts_config = config.get("timesheet", {})
     if not ts_config.get("auto_fill"):
@@ -110,83 +188,25 @@ def _auto_fill(config: dict):
     if fill_state.get(today_str):
         return
 
+    cfg = _selection_config(config)
     fill_target = ts_config.get("fill_target", 8)
-    data = build_timesheet(config, today_str, today_str)
+    window_start = (today - timedelta(days=cfg.recency_days)).isoformat()
+    data = build_timesheet(config, window_start, today_str)
     user_id = data.get("userAccountId", "")
     ticket_map = {t["key"]: t for t in data.get("tickets", [])}
 
-    day_wl = data.get("worklogs", {}).get(today_str, [])
-    logged_hours = sum(w.get("hours", 0) for w in day_wl)
-    logged_tickets = {w["ticket"] for w in day_wl}
-
-    recurring_pending = 0
-    for r in data.get("recurring", {}).get(today_str, []):
-        if not r.get("logged"):
-            secs = _parse_time(r["time"]) or 0
-            recurring_pending += secs / 3600
-
-    remaining = round(fill_target - logged_hours - recurring_pending, 1)
+    demands = _build_demands(data, fill_target, [today_str])
+    today_demand = demands[0]
+    remaining = round(today_demand.target_hours - today_demand.already_logged_hours
+                      - today_demand.recurring_pending_hours, 1)
     if remaining <= 0:
         fill_state[today_str] = {"filled": True, "entries": []}
         state.save("timesheet_fill", fill_state)
         return
 
-    entries = []
-
-    review_tickets = {}
-    for r in data.get("prReviews", {}).get(today_str, []):
-        tid = _extract_ticket(r.get("branch", ""))
-        if tid and tid not in logged_tickets:
-            repo = r.get("repo", "")
-            mins = r.get("review_minutes", 30)
-            per_repo = review_tickets.setdefault(tid, {})
-            per_repo[repo] = max(per_repo.get(repo, 0), mins)
-
-    for tid, repo_mins in review_tickets.items():
-        mins = sum(repo_mins.values())
-        hours = round(mins / 60, 1)
-        if hours > remaining:
-            hours = remaining
-        if hours <= 0:
-            break
-        entries.append({"ticket": tid, "hours": hours, "source": "review"})
-        remaining = round(remaining - hours, 1)
-
-    if remaining > 0:
-        dev_tickets = set()
-        for c in data.get("gitCommits", {}).get(today_str, []):
-            tid = _extract_ticket(c.get("branch", "") or c.get("message", ""))
-            if tid:
-                dev_tickets.add(tid)
-        for s in data.get("claudeSessions", {}).get(today_str, []):
-            src = (s.get("cwd", "") or "") + " " + (s.get("prompt", "") or "")
-            m = re.search(r"\b([A-Z]+-\d{2,})\b", src, re.IGNORECASE)
-            if m:
-                dev_tickets.add(m.group(1).upper())
-        for tid in data.get("dailySummaries", {}).get(today_str, {}).keys():
-            if tid != "general" and re.match(r"[A-Z]+-\d{2,}", tid):
-                dev_tickets.add(tid)
-
-        dev_tickets -= logged_tickets
-        dev_tickets -= set(review_tickets.keys())
-        mine = [t for t in dev_tickets if ticket_map.get(t, {}).get("assignee_id") == user_id]
-
-        if not mine:
-            lookback = build_timesheet(config, (today - timedelta(days=7)).isoformat(), (today - timedelta(days=1)).isoformat())
-            lb_ticket_map = {t["key"]: t for t in lookback.get("tickets", [])}
-            for day_str in sorted(lookback.get("worklogs", {}).keys(), reverse=True):
-                for w in lookback["worklogs"][day_str]:
-                    info = lb_ticket_map.get(w["ticket"], {})
-                    if info.get("assignee_id") == user_id:
-                        mine = [w["ticket"]]
-                        break
-                if mine:
-                    break
-
-        if mine:
-            per_ticket = round(remaining / len(mine), 1)
-            for tid in mine:
-                entries.append({"ticket": tid, "hours": per_ticket, "source": "dev"})
+    candidates = _build_candidates(data, user_id)
+    allocations = tsel.select_allocations([today_str], candidates, demands, cfg)
+    entries = [{"ticket": a.ticket, "hours": a.hours, "source": a.tier} for a in allocations]
 
     fill_state[today_str] = {"filled": True, "entries": [{"ticket": e["ticket"], "hours": e["hours"]} for e in entries]}
     state.save("timesheet_fill", fill_state)
@@ -203,8 +223,59 @@ def _auto_fill(config: dict):
                 meta={"ticket": entry["ticket"], "hours": entry["hours"], "date": today_str})
 
     if not entries:
-        log.emit("auto_fill_skipped", "No eligible tickets found for auto-fill",
+        log.emit("auto_fill_skipped", "No eligible tickets found for auto-fill (accepted the gap)",
             meta={"date": today_str})
+
+
+def backtest_timesheet_selection(config: dict, start: str, end: str, force: bool = False) -> dict:
+    try:
+        start_d = date.fromisoformat(start)
+        end_d = date.fromisoformat(end)
+    except ValueError:
+        return {"error": "invalid date range"}
+    if end_d < start_d:
+        return {"error": "invalid date range"}
+
+    data = build_timesheet(config, start, end, force=force)
+    user_id = data.get("userAccountId", "")
+    cfg = _selection_config(config)
+    fill_target = config.get("timesheet", {}).get("fill_target", 8)
+    weekdays = [d for d in _date_range(start, end) if date.fromisoformat(d).weekday() < 5]
+
+    candidates = _build_candidates(data, user_id)
+    demands = _build_demands(data, fill_target, weekdays)
+    allocations = tsel.select_allocations(weekdays, candidates, demands, cfg)
+
+    predicted: dict[str, set] = {}
+    for a in allocations:
+        predicted.setdefault(a.day, set()).add(a.ticket)
+
+    compared = 0
+    matched = 0
+    per_day = []
+    for day in weekdays:
+        actual = {w["ticket"] for w in data.get("worklogs", {}).get(day, [])}
+        pred = predicted.get(day, set())
+        if not actual and not pred:
+            continue
+        compared += 1
+        overlap = bool(actual & pred)
+        if overlap:
+            matched += 1
+        per_day.append({"day": day, "actual": sorted(actual),
+                        "predicted": sorted(pred), "match": overlap})
+
+    return {
+        "start": start,
+        "end": end,
+        "weekdays": len(weekdays),
+        "compared_days": compared,
+        "matched_days": matched,
+        "agreement": round(matched / compared, 3) if compared else 0.0,
+        "per_day": per_day,
+        "allocations": [{"day": a.day, "ticket": a.ticket, "hours": a.hours, "tier": a.tier}
+                        for a in allocations],
+    }
 
 
 def build_timesheet(config: dict, start: str = "", end: str = "", force: bool = False) -> dict:
@@ -787,7 +858,9 @@ def _fetch_ticket_info(config: dict, ticket_ids: list, worklogs: dict) -> list:
     user = resolve_env(config, "jira", "user_env")
     token = resolve_env(config, "jira", "token_env")
     if not base_url or not user or not token:
-        return [{"key": t, "summary": "?", "status": "?"} for t in ticket_ids]
+        return [{"key": t, "summary": "?", "status": "?", "in_progress_at": ""} for t in ticket_ids]
+
+    in_progress_statuses = _selection_config(config).in_progress_statuses
 
     hours_by_ticket = {}
     for entries in worklogs.values():
@@ -802,30 +875,81 @@ def _fetch_ticket_info(config: dict, ticket_ids: list, worklogs: dict) -> list:
             jql = f"issueKey in ({','.join(batch)})"
             try:
                 resp = client.get(f"{base_url}/rest/api/3/search/jql",
-                                  params={"jql": jql, "maxResults": 50,
-                                          "fields": "summary,status,timeoriginalestimate,assignee"})
+                                  params={"jql": jql, "maxResults": 50, "expand": "changelog",
+                                          "fields": "summary,status,timeoriginalestimate,timespent,assignee"})
                 if resp.status_code == 200:
                     for issue in resp.json().get("issues", []):
                         tid = issue["key"]
                         fetched.add(tid)
                         estimate_secs = issue["fields"].get("timeoriginalestimate")
+                        spent_secs = issue["fields"].get("timespent")
                         assignee = issue["fields"].get("assignee")
                         assignee_id = assignee.get("accountId", "") if assignee else ""
+                        in_progress_at = _extract_in_progress_at(
+                            issue.get("changelog", {}), in_progress_statuses)
                         tickets.append({
                             "key": tid,
                             "summary": issue["fields"]["summary"],
                             "status": issue["fields"]["status"]["name"],
                             "url": f"{base_url}/browse/{tid}",
                             "hoursLogged": round(hours_by_ticket.get(tid, 0), 1),
+                            "hoursSpentTotal": round(spent_secs / 3600, 1) if spent_secs else None,
                             "hoursEstimated": round(estimate_secs / 3600, 1) if estimate_secs else None,
                             "assignee_id": assignee_id,
+                            "in_progress_at": in_progress_at.isoformat() if in_progress_at else "",
                         })
             except Exception:
                 pass
         for tid in ticket_ids:
             if tid not in fetched:
-                tickets.append({"key": tid, "summary": "?", "status": "?"})
+                tickets.append({"key": tid, "summary": "?", "status": "?", "in_progress_at": ""})
     return tickets
+
+
+def _extract_in_progress_at(changelog: dict, in_progress_statuses) -> date | None:
+    earliest = None
+    for history in changelog.get("histories", []):
+        created = history.get("created", "")
+        for item in history.get("items", []):
+            if item.get("field") != "status":
+                continue
+            if (item.get("toString", "") or "").strip().lower() not in in_progress_statuses:
+                continue
+            try:
+                d = date.fromisoformat(created[:10])
+            except ValueError:
+                continue
+            if earliest is None or d < earliest:
+                earliest = d
+    return earliest
+
+
+def _selection_config(config: dict) -> "tsel.SelectionConfig":
+    ts = config.get("timesheet", {})
+    sel = ts.get("selection", {}) if isinstance(ts.get("selection"), dict) else {}
+    defaults = tsel.SelectionConfig()
+
+    def _statuses(key, fallback):
+        vals = sel.get(key)
+        if isinstance(vals, list) and vals:
+            return frozenset(s.strip().lower() for s in vals if isinstance(s, str))
+        return fallback
+
+    def _num(key, fallback):
+        v = sel.get(key)
+        return v if isinstance(v, (int, float)) and not isinstance(v, bool) else fallback
+
+    return tsel.SelectionConfig(
+        terminal_statuses=_statuses("terminal_statuses", defaults.terminal_statuses),
+        in_progress_statuses=_statuses("in_progress_statuses", defaults.in_progress_statuses),
+        recency_days=int(_num("recency_days", defaults.recency_days)),
+        max_chunk_hours=float(_num("max_chunk_hours", defaults.max_chunk_hours)),
+        w_review=float(_num("w_review", defaults.w_review)),
+        w_commit=float(_num("w_commit", defaults.w_commit)),
+        w_session=float(_num("w_session", defaults.w_session)),
+        w_headroom=float(_num("w_headroom", defaults.w_headroom)),
+        w_recency=float(_num("w_recency", defaults.w_recency)),
+    )
 
 
 def _get_recurring(config: dict, start_date: date, end_date: date) -> dict:

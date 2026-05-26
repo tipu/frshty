@@ -13,6 +13,14 @@ def api_timesheet(start: str = "", end: str = "", force: bool = False):
     return ts.build_timesheet(_config, start, end, force)
 
 
+@router.get("/api/timesheet/backtest")
+def api_timesheet_backtest(start: str, end: str, force: bool = False):
+    result = ts.backtest_timesheet_selection(_config, start, end, force)
+    if result.get("error"):
+        return JSONResponse(result, status_code=400)
+    return result
+
+
 @router.post("/api/timesheet/log")
 def api_timesheet_log(body: dict):
     ticket = body.get("ticket", "")
