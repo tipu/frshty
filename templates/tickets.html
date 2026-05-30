@@ -16,6 +16,7 @@
 <div id="app" v-cloak>
 <frshty-shell :features="features" :instance="instanceName">
 		<template #actions>
+			<label class="ln-show-ignored"><input type="checkbox" v-model="showIgnored"> show ignored</label>
 			<button class="ln-btn ln-btn-ghost">Filter</button>
 			<button class="ln-btn ln-btn-ghost">Sort</button>
 		</template>
@@ -90,7 +91,11 @@
 							<button @click.stop="approve(key)" class="ln-btn ln-btn-primary ln-btn-sm">Approve</button>
 							<button @click.stop="reject(key)" class="ln-btn ln-btn-stalled ln-btn-sm">Reject</button>
 						</template>
-						<button @click.stop="discard(key)" class="ln-link ln-small ln-tkt-discard">discard</button>
+						<button v-if="t.status === 'ignored'" @click.stop="unignore(key)" class="ln-link ln-small ln-tkt-discard">un-ignore</button>
+						<template v-else>
+							<button @click.stop="ignore(key)" class="ln-link ln-small ln-tkt-ignore">ignore</button>
+							<button @click.stop="discard(key)" class="ln-link ln-small ln-tkt-discard">discard</button>
+						</template>
 					</div>
 				</div>
 				<div v-if="ticketsForColumn(col).length === 0" class="ln-kan-empty">No tickets</div>
@@ -121,6 +126,7 @@ const COLUMN_LABELS = {
 	pr_failed: 'PR failed',
 	merged: 'Merged',
 	validation: 'Validation',
+	ignored: 'Ignored',
 };
 const HELP = {
 	epic: 'Container issues (Jira Epic / Linear Project). Tracked for grouping only — frshty never plans, codes, or PRs them. Their child stories are processed normally and share this card\'s background tint.',
@@ -171,9 +177,12 @@ frshtyApp({
 		const prSubmitting = ref(false);
 		const currentTicketKey = ref(null);
 
-		const visibleColumns = computed(() =>
-			COLUMNS.filter(col => Object.values(tickets.value).some(t => t.status === col))
-		);
+		const showIgnored = ref(false);
+		const visibleColumns = computed(() => {
+			const cols = COLUMNS.filter(col => Object.values(tickets.value).some(t => t.status === col));
+			if (showIgnored.value) cols.push('ignored');
+			return cols;
+		});
 
 		const totalCount = computed(() => Object.keys(tickets.value).length);
 
@@ -228,6 +237,25 @@ frshtyApp({
 		async function discard(key) {
 			if (!confirm(`Discard ${key}? It will be picked up fresh on next poll.`)) return;
 			await fetch(`/api/tickets/${key}`, {method: 'DELETE'});
+			load();
+		}
+
+		async function ignore(key) {
+			if (!confirm(`Ignore ${key} forever? It will never be processed again until you un-ignore it.`)) return;
+			const r = await fetch(`/api/tickets/${key}/ignore`, {method: 'POST'});
+			if (!r.ok) {
+				const e = await r.json().catch(() => ({}));
+				alert('Ignore failed: ' + (e.error || r.statusText));
+			}
+			load();
+		}
+
+		async function unignore(key) {
+			const r = await fetch(`/api/tickets/${key}/unignore`, {method: 'POST'});
+			if (!r.ok) {
+				const e = await r.json().catch(() => ({}));
+				alert('Un-ignore failed: ' + (e.error || r.statusText));
+			}
 			load();
 		}
 
@@ -314,6 +342,7 @@ frshtyApp({
 			epicCardStyle,
 			discard, submitPr, closePrModal, onPrSubmit,
 			approve, reject, restart,
+			showIgnored, ignore, unignore,
 		};
 	},
 }).mount('#app');
