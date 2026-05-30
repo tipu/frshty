@@ -20,6 +20,10 @@ class TicketStatus(str, Enum):
     # Terminal: the only legal transition out is `done` (handled implicitly by
     # `transition()` so every status can reach done).
     epic = "epic"
+    # Manually ignored. Terminal except for an explicit un-ignore back to new.
+    # check() never dispatches it (no status handler) and discovery never
+    # resurrects it because its row stays in state.
+    ignored = "ignored"
 
 
 _ALLOWED: dict[TicketStatus, set[TicketStatus]] = {
@@ -37,6 +41,7 @@ _ALLOWED: dict[TicketStatus, set[TicketStatus]] = {
     TicketStatus.pr_failed:  {TicketStatus.pr_ready, TicketStatus.in_review, TicketStatus.merged},
     TicketStatus.done:       {TicketStatus.new, TicketStatus.pr_ready, TicketStatus.testing, TicketStatus.proving, TicketStatus.in_review},
     TicketStatus.epic:       set(),  # epic is terminal; transition() still permits → done universally
+    TicketStatus.ignored:    {TicketStatus.new},  # only legal exit is un-ignore → new
 }
 
 
