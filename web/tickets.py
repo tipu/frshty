@@ -928,6 +928,43 @@ def api_discard_ticket(key: str):
     return {"status": "discarded"}
 
 
+@router.post("/api/tickets/{key}/ignore")
+def api_ignore_ticket(key: str):
+    from datetime import datetime, timezone
+    import core.scheduler as scheduler
+    ts = state.load_ticket(key)
+    if ts is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    terminal.kill_terminal(key)
+    old_status = ts.get("status", "")
+    ts["status"] = "ignored"
+    ts["ignored_at"] = datetime.now(timezone.utc).isoformat()
+    state.save_ticket(key, ts)
+    instance_key = _config.get("job", {}).get("key", "")
+    if instance_key:
+        scheduler.delete(instance_key, key)
+    log.emit("ticket_ignored", f"Ignored {key}",
+        links={"detail": f"{_config['_base_url']}/tickets/{key}"},
+        meta={"ticket": key, "old_status": old_status})
+    return {"status": "ignored", "old_status": old_status}
+
+
+@router.post("/api/tickets/{key}/unignore")
+def api_unignore_ticket(key: str):
+    ts = state.load_ticket(key)
+    if ts is None:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    if ts.get("status") != "ignored":
+        return JSONResponse({"error": "ticket is not ignored"}, status_code=400)
+    ts["status"] = "new"
+    ts.pop("ignored_at", None)
+    state.save_ticket(key, ts)
+    log.emit("ticket_unignored", f"Un-ignored {key}",
+        links={"detail": f"{_config['_base_url']}/tickets/{key}"},
+        meta={"ticket": key})
+    return {"status": "new"}
+
+
 @router.post("/api/tickets/{key}/approve")
 def api_approve_ticket(key: str):
     ts = state.load_ticket(key)

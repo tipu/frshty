@@ -929,7 +929,7 @@ def check(config: dict, instance_key: str = ""):
 
     platform = None
     for key, ts in list(ticket_state.items()):
-        if key in assigned_keys or ts.get("status") == TicketStatus.done:
+        if key in assigned_keys or ts.get("status") in (TicketStatus.done, "done", "ignored"):
             continue
         prs = ts.get("prs", [])
         if prs and not discovery_only:
@@ -954,6 +954,8 @@ def check(config: dict, instance_key: str = ""):
                     continue
             existing = key in ticket_state
             ts = ticket_state.get(key, {"status": "new"})
+            if ts.get("status") == "ignored":
+                continue
             ts["external_status"] = ticket.get("status", "")
             fresh_url = ticket.get("url") or ""
             if fresh_url:
