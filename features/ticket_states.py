@@ -18,6 +18,7 @@ meta-invariant test that asserts a second check() cycle produces zero new
 log_events.
 """
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Protocol, TypedDict
 
 import core.log as log
@@ -333,6 +334,13 @@ def _handle_proving_ticket(
     return ts, False
 
 
+def _change_manifest_exists(config: dict, ts: dict, key: str) -> bool:
+    ws = config["workspace"]
+    slug = ts.get("slug") or key
+    root = Path(ws["root"]) if isinstance(ws["root"], str) else ws["root"]
+    return (root / ws["tickets_dir"] / slug / "docs" / "change-manifest.md").exists()
+
+
 def _handle_pr_ready_ticket(
     config: dict,
     ticket: dict,
@@ -342,7 +350,7 @@ def _handle_pr_ready_ticket(
     existing: bool,
 ) -> tuple[dict, bool]:
     key = ticket["key"]
-    if instance_key and not ts.get("pr_descriptions"):
+    if instance_key and not ts.get("pr_descriptions") and _change_manifest_exists(config, ts, key):
         _t._enqueue_stage(instance_key, key, "generate_pr_descriptions")
     if config.get("pr", {}).get("auto_pr") and not ts.get("pr_scheduled_at"):
         if instance_key and _t._repo_gate_blocked(instance_key, key, config):

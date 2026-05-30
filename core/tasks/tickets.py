@@ -1130,15 +1130,14 @@ def generate_pr_descriptions(ctx: TaskContext) -> TaskResult:
             t["pr_descriptions"] = existing
             return t
         state.update_ticket(ctx.ticket_key or "", _set)
-
-    log.emit("ticket_pr_descriptions_generated",
-             f"{ctx.ticket_key}: generated={len(generated)} "
-             f"skipped_empty={len(skipped_empty)} failed={len(failed)}",
-             meta={"ticket": ctx.ticket_key,
-                   "generated": generated,
-                   "skipped_empty": skipped_empty,
-                   "skipped_no_worktree": skipped_no_worktree,
-                   "failed": failed})
+        log.emit("ticket_pr_descriptions_generated",
+                 f"{ctx.ticket_key}: generated={len(generated)} "
+                 f"skipped_empty={len(skipped_empty)} failed={len(failed)}",
+                 meta={"ticket": ctx.ticket_key,
+                       "generated": generated,
+                       "skipped_empty": skipped_empty,
+                       "skipped_no_worktree": skipped_no_worktree,
+                       "failed": failed})
     if failed and not generated:
         return TaskResult("failed", f"all repos failed: {failed}")
     return TaskResult("ok", artifacts={"generated": generated, "failed": failed})
