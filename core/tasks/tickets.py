@@ -10,6 +10,7 @@ import core.log as log
 import core.state as state
 from core.claude_runner import run_claude_code, run_haiku, extract_json
 from core.config import get_repos, ticket_worktree_path
+from core.consensus_plan import run_consensus_plan
 from core.tasks.registry import TaskContext, TaskResult, task
 from core.tasks.preconditions import (
     status_is, auto_pr_true, file_exists, file_contains, feature_enabled, has_flag,
@@ -477,24 +478,18 @@ def start_planning(ctx: TaskContext) -> TaskResult:
                          f"Structured criteria filled for {ctx.ticket_key}",
                          meta={"ticket": ctx.ticket_key,
                                "n_criteria": len(acceptance.all_criteria(ts))})
-    prompt = (
-        "Run /ctp docs/. The resulting docs/technical-plan.md MUST include a "
-        "'Test Plan' section listing unit, integration, and playwright tests for "
-        "each acceptance criterion. If the ticket has structured acceptance criteria "
-        "(in the ticket data), translate each criterion's playwright steps into a "
-        "concrete e2e test. "
-        "If docs/pm-findings.md exists, read it and address each concern in "
-        "docs/technical-plan.md; if a concern is invalid, explain why."
-    )
-    log.emit("ticket_planning_started", f"Headless /ctp for {ctx.ticket_key}",
+    ts = state.load_ticket(ctx.ticket_key or "") or {}
+    slug = ts.get("slug") or (ctx.ticket_key or "")
+    log.emit("ticket_planning_started", f"Consensus planning for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key})
     if not (ticket_dir / "docs" / "technical-plan.md").exists():
-        result = run_claude_code(prompt, cwd=ticket_dir, timeout=PLAN_TIMEOUT)
-        if result is None:
-            return TaskResult("failed", "claude returned non-zero or empty")
+        ok, reason = run_consensus_plan(ctx.config, ticket_dir, slug,
+                                        ticket_key=ctx.ticket_key or "")
+        if not ok:
+            return TaskResult("failed", reason)
     else:
         log.emit("ticket_planning_skipped_ctp",
-                 f"technical-plan.md exists, skipping /ctp for {ctx.ticket_key}",
+                 f"technical-plan.md exists, skipping consensus plan for {ctx.ticket_key}",
                  meta={"ticket": ctx.ticket_key})
 
     change_manifest = ticket_dir / "docs" / "change-manifest.md"
