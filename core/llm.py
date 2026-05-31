@@ -55,6 +55,7 @@ _LLM_LIMIT_PATTERNS = (
     "requires more credits",
     "monthly usage limit",
 )
+_MIN_PLAN_BYTES = int(os.environ.get("FRSHTY_MIN_PLAN_BYTES", "400"))
 
 
 def _env():
@@ -596,6 +597,73 @@ def run_balanced(prompt: str, *, worktree: Path | None = None,
 
 def run_fast(prompt: str, *, timeout: int = 120, **kwargs) -> str | None:
     return _get_provider().fast(prompt, timeout=timeout, **kwargs)
+
+
+def validate_model_output(text: str | None, *, exit_code: int | None = 0,
+                          min_bytes: int = _MIN_PLAN_BYTES) -> tuple[bool, str]:
+    """Sanity-gate a model's plan output before it feeds consensus.
+
+    Structural only — no content matching, so a plan that legitimately
+    discusses error strings ("permission denied", etc.) is never false-rejected.
+    The observed failure captures (PATH error, rate-limit banner, empty/truncated
+    output) all fail on exit code or size: a non-zero exit, or output shorter
+    than a real plan. Returns (ok, reason)."""
+    if exit_code not in (0, None):
+        return False, f"exit_code={exit_code}"
+    if not text or not text.strip():
+        return False, "empty output"
+    stripped = text.strip()
+    if len(stripped) < min_bytes:
+        return False, f"too short ({len(stripped)}B < {min_bytes}B)"
+    return True, "ok"
+
+
+def run_external_model(cmd: list[str], *, fn_name: str, model: str, prompt: str,
+                       cwd: Path | None = None, timeout: int = 600,
+                       env_extra: dict[str, str] | None = None,
+                       last_message_file: Path | None = None,
+                       transcript_file: Path | None = None) -> tuple[str | None, int | None]:
+    """Run a non-Claude model CLI (codex, gemini) under the same invocation
+    logging as Claude. Returns (text, exit_code); text is None on timeout.
+
+    Prefers `last_message_file` (e.g. codex `-o`) when it holds content, else
+    falls back to stdout. The full stdout+stderr is written to
+    `transcript_file` for debugging — callers must read the returned text, not
+    the transcript. Vendor usage limits do NOT trip the shared Claude guard;
+    they surface to the caller via validate_model_output instead."""
+    inv_id = _record_start(fn_name, model, prompt, cwd, None, timeout)
+    t0 = time.monotonic()
+    env = {**os.environ, **(env_extra or {})}
+    _mark_running(inv_id)
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, cwd=str(cwd) if cwd else None,
+            env=env, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        _record_end(inv_id, t0, "timeout", None, None)
+        return None, None
+    stdout = result.stdout.decode(errors="replace") if result.stdout else ""
+    stderr = result.stderr.decode(errors="replace") if result.stderr else ""
+    if transcript_file is not None:
+        try:
+            transcript_file.parent.mkdir(parents=True, exist_ok=True)
+            transcript_file.write_text(stdout + ("\n[stderr]\n" + stderr if stderr else ""))
+        except OSError as e:
+            log.emit("external_model_transcript_failed",
+                     f"failed to write transcript for {model}: {e}")
+    text = ""
+    if last_message_file is not None:
+        try:
+            if last_message_file.is_file():
+                text = last_message_file.read_text()
+        except OSError:
+            text = ""
+    if not text.strip():
+        text = stdout
+    status = "success" if result.returncode == 0 else "error"
+    _record_end(inv_id, t0, status, result.returncode, text)
+    return text, result.returncode
 
 
 def extract_json(text: str) -> dict | None:
