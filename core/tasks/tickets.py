@@ -632,7 +632,14 @@ def fix_ci_failures(ctx: TaskContext) -> TaskResult:
                          f"CI failure for {slug or ctx.ticket_key} not caused by our changes: "
                          f"{outcome.get('reason','')[:100]}",
                          links=pr_link, meta={**meta, "reason": outcome.get("reason", "")})
-            elif kind == "fixed":
+            elif kind in ("fixed", "fix_failed", "haiku_empty", "haiku_parse_error"):
+                # Every outcome that burned a real fix cycle counts toward the
+                # cap — not just successful sends. Otherwise a CI failure the
+                # auto-fixer can't resolve (fix_failed/haiku_*) loops forever,
+                # never increments ci_fix_attempts, never trips
+                # MAX_CI_FIX_ATTEMPTS in _handle_ci_failure, and wedges the
+                # repo gate indefinitely. 'unrelated' and 'no_failing' don't
+                # count (nothing of ours was attempted).
                 def _bump(current):
                     if not current:
                         return None
@@ -642,12 +649,18 @@ def fix_ci_failures(ctx: TaskContext) -> TaskResult:
                     return current
                 updated = state.update_ticket(ctx.ticket_key or "", _bump) or {}
                 ts = updated
-                log.emit("ticket_ci_fix_sent",
-                         f"Sent CI fix to {slug or ctx.ticket_key} (attempt "
-                         f"{updated.get('ci_fix_attempts', 0)}): {outcome.get('fix_hint','')[:80]}",
-                         links=pr_link,
-                         meta={**meta, "fix_hint": outcome.get("fix_hint", "")})
-            # no_failing / capped / haiku_* / fix_failed: silent by design
+                if kind == "fixed":
+                    log.emit("ticket_ci_fix_sent",
+                             f"Sent CI fix to {slug or ctx.ticket_key} (attempt "
+                             f"{updated.get('ci_fix_attempts', 0)}): {outcome.get('fix_hint','')[:80]}",
+                             links=pr_link,
+                             meta={**meta, "fix_hint": outcome.get("fix_hint", "")})
+                else:
+                    log.emit("ticket_ci_fix_attempt_failed",
+                             f"CI fix attempt for {slug or ctx.ticket_key} did not produce a fix "
+                             f"({kind}, attempt {updated.get('ci_fix_attempts', 0)}/{MAX_CI_FIX_ATTEMPTS})",
+                             links=pr_link, meta={**meta, "kind": kind})
+            # no_failing / capped / unrelated / worktree_missing: don't count toward cap
 
         return TaskResult("ok", artifacts={"ci_fix_attempts": ts.get("ci_fix_attempts", 0)})
     finally:
