@@ -26,8 +26,6 @@ from web.state import _config, events_enabled
 
 router = APIRouter()
 
-CUSTOM_CONTEXT_DIR = Path(__file__).parent.parent / "docs" / "custom-context"
-
 _LOCKFILE_NOISE = frozenset({
     "Pipfile.lock", "poetry.lock", "uv.lock",
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "npm-shrinkwrap.json",
@@ -1115,27 +1113,6 @@ def api_ticket_notes(key: str, body: dict):
                  payload={"note": note, "ticket_key": key},
                  instance_key=instance_key)
     return {"status": "enqueued"}
-
-
-@router.get("/api/tickets/{key}/context")
-def api_ticket_context_get(key: str):
-    f = CUSTOM_CONTEXT_DIR / f"{key}.md"
-    return {"context": f.read_text() if f.exists() else ""}
-
-
-@router.put("/api/tickets/{key}/context")
-def api_ticket_context_put(key: str, body: dict):
-    CUSTOM_CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
-    (CUSTOM_CONTEXT_DIR / f"{key}.md").write_text(body.get("context", ""))
-    return {"status": "saved"}
-
-
-@router.delete("/api/tickets/{key}/context")
-def api_ticket_context_delete(key: str):
-    f = CUSTOM_CONTEXT_DIR / f"{key}.md"
-    if f.exists():
-        f.unlink()
-    return {"status": "deleted"}
 
 
 @router.post("/api/tickets/{key}/set-state")
