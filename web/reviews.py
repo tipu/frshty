@@ -16,6 +16,7 @@ import core.terminal as terminal
 import features.reviewer as reviewer
 from core.config import get_repos
 from features.platforms import make_platform
+from features.ticket_systems import make_ticket_system
 from services import review_store
 from web.state import _config
 
@@ -220,15 +221,28 @@ def api_review_info(repo: str, pr_id: int):
     branch_dir, comments, _ = found
     review_json = branch_dir / "review.json"
     review_data = json.loads(review_json.read_text()) if review_json.exists() else {}
+    branch = review_data.get("source_branch", "")
     result = {
         "summary": review_data.get("summary", ""),
         "verdict": review_data.get("verdict", ""),
-        "branch": review_data.get("source_branch", ""),
+        "branch": branch,
         "author": review_data.get("author", ""),
         "date": review_data.get("date", ""),
         "pr_url": (comments[0].get("pr_url", "") if comments else review_data.get("pr_url", "")),
         "pr_title": comments[0].get("pr_title", "") if comments else "",
     }
+    m = re.search(r"[A-Za-z]+-\d+", branch)
+    ticket_key = m.group().upper() if m else ""
+    ticket_url = ""
+    if ticket_key:
+        ticket = state.load("tickets").get(ticket_key) or {}
+        ticket_url = ticket.get("url", "")
+        if not ticket_url:
+            ts = make_ticket_system(_config)
+            if ts:
+                ticket_url = ts.ticket_url(ticket_key)
+    result["ticket_key"] = ticket_key
+    result["ticket_url"] = ticket_url
     platform = make_platform(_config)
     try:
         pr_info = platform.get_pr_info(repo, pr_id)

@@ -78,6 +78,15 @@ textarea { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; }
 
 
 
+<div v-if="info.pr_title || info.ticket_key || info.pr_url" class="card p-3 mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm">
+    <a v-if="info.ticket_key && info.ticket_url" :href="info.ticket_url" target="_blank" class="link hover:underline">{{ info.ticket_key }}</a>
+    <span v-else-if="info.ticket_key" class="text-gray-500">{{ info.ticket_key }}</span>
+    <span v-if="info.pr_title" class="text-gray-200 font-medium">{{ info.pr_title }}</span>
+    <span class="ml-auto flex gap-3 text-xs">
+        <a v-if="info.pr_url" :href="info.pr_url" target="_blank" class="link hover:underline">{{ repo }}#{{ prId }} →</a>
+    </span>
+</div>
+
 <div v-if="info.summary || info.pr_description" class="mb-4">
     <div class="card p-4 space-y-2">
         <div v-if="info.pr_description" class="text-sm text-gray-300">{{ info.pr_description }}</div>
