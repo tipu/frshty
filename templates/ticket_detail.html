@@ -235,22 +235,6 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
             </ul>
         </div>
 
-        <div class="card p-3">
-            <div class="collapsible-header" :class="sections.context ? 'expanded' : 'collapsed'"
-                 @click="sections.context = !sections.context">
-                <span class="text-xs font-bold text-gray-500 uppercase">Context</span>
-            </div>
-            <div class="collapsible-content" :class="sections.context ? 'expanded' : 'collapsed'">
-                <textarea v-model="contextText" rows="4"
-                          class="w-full mt-2 p-2 bg-gray-900 border border-gray-700 rounded text-xs font-mono"
-                          placeholder="Context for AI tools — saved to docs/custom-context/{key}.md"></textarea>
-                <div class="flex gap-2 mt-2">
-                    <button @click="saveContext" class="text-xs bg-blue-800 hover:bg-blue-700 text-blue-200 px-2 py-1 rounded flex-1">Save</button>
-                    <button @click="deleteContext" class="text-xs bg-red-900 hover:bg-red-800 text-red-300 px-2 py-1 rounded flex-1">Delete</button>
-                </div>
-            </div>
-        </div>
-
         <div v-if="jobs.length" class="card p-3">
             <div class="collapsible-header" :class="sections.notes ? 'expanded' : 'collapsed'"
                  @click="sections.notes = !sections.notes">
@@ -567,7 +551,6 @@ frshtyApp({
         const diffData = ref({ repos: [], diff: '' });
         const selectedRepo = ref('');
         const comments = ref([]);
-        const contextText = ref('');
         const noteText = ref('');
         const pmFindings = ref([]);
         const releaseInput = ref('');
@@ -582,7 +565,7 @@ frshtyApp({
         const prModalOpen = ref(false);
         const prRepos = ref([]);
         const prSubmitting = ref(false);
-        const sections = reactive({ context: true, notes: false, history: false, rawState: false });
+        const sections = reactive({ notes: false, history: false, rawState: false });
         const rawStateCopied = ref(false);
         const rawStateJson = computed(() => JSON.stringify(state.value || {}, null, 2));
         function copyRawState() {
@@ -1082,14 +1065,6 @@ frshtyApp({
             if (tab === 'diff') loadDiff();
         }
 
-        async function loadContext() {
-            const r = await fetch(`/api/tickets/${key}/context`);
-            if (r.ok) {
-                const d = await r.json();
-                contextText.value = d.context || '';
-            }
-        }
-
         async function saveRelease() {
             releaseError.value = '';
             const rk = (releaseInput.value || '').trim();
@@ -1146,20 +1121,6 @@ frshtyApp({
 
         function severityClass(s) {
             return s === 'high' ? 'text-red-300' : s === 'warning' ? 'text-amber-200' : 'text-gray-300';
-        }
-
-        async function saveContext() {
-            await fetch(`/api/tickets/${key}/context`, {
-                method: 'PUT',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({context: contextText.value}),
-            });
-        }
-
-        async function deleteContext() {
-            if (!confirm('Delete context file?')) return;
-            await fetch(`/api/tickets/${key}/context`, {method: 'DELETE'});
-            contextText.value = '';
         }
 
         async function setStatus(newStatus) {
@@ -1444,7 +1405,6 @@ frshtyApp({
         onMounted(() => {
             load();
             loadJobs();
-            loadContext();
             loadPmFindings();
             startTerminal();
             escListener = (e) => { if (e.key === 'Escape' && maximized.value) toggleMaximize(); };
@@ -1460,7 +1420,7 @@ frshtyApp({
 
         return {
             key, ticket, features, runCommands, jobs, diffData, comments,
-            contextText, noteText, pmFindings, releaseInput, releaseError, existingReleases,
+            noteText, pmFindings, releaseInput, releaseError, existingReleases,
             activeTab, maximized, resetting, eventFilter, setStateDdValue,
             loadError, sections, docExpanded, replyDrafts, jobOutput,
             prModalOpen, prRepos, prSubmitting,
@@ -1475,7 +1435,7 @@ frshtyApp({
             renderMarkdown, escHtml,
             jobStatusClass, jobReason, jobHasOutput,
             diffLineClass, diffLinePrefix, commentLabel, commentClass, commentBodyTextClass, commentBadgeStyle, flatCount, scrollToFile,
-            load, loadJobs, switchTab, saveContext, deleteContext, severityClass,
+            load, loadJobs, switchTab, severityClass,
             saveRelease, clearRelease, reinspectRelease,
             setStatus, startDev, restartTicket, submitNote, onSetStateChange, toggleAutoPr,
             openPrModal, closePrModal, onPrSubmit,
