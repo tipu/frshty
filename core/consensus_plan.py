@@ -225,8 +225,24 @@ def run_consensus_plan(config: dict, ticket_dir: Path, slug: str, *,
              meta={"ticket": ticket_key, "valid": valid, "dropped": dropped})
 
     if len(valid) < 2:
-        return False, (f"consensus quorum not met: only {len(valid)} valid "
-                       f"plan(s) ({valid}); dropped {dropped}")
+        # Fan-out drops are availability/quality failures (non-zero exit,
+        # empty, truncated) — never content disagreement, which is resolved
+        # later in synthesis. So when the 2-model quorum can't be met because
+        # external vendors were simply unreachable (e.g. a daily quota 429 or
+        # a CLI timeout), don't deadlock the whole pipeline: fall back to a
+        # claude-only plan as long as claude itself produced a valid one.
+        # Loud log so the degraded run is visible. The full cross-check resumes
+        # automatically on the next ticket once a second vendor is reachable.
+        if "claude" in valid:
+            log.emit("ctp_quorum_degraded",
+                     f"[{ticket_key}] consensus quorum not met "
+                     f"({len(valid)} valid: {valid}); other planners "
+                     f"unavailable: {dropped}. Proceeding claude-only.",
+                     meta={"ticket": ticket_key, "valid": valid,
+                           "dropped": dropped, "degraded": True})
+        else:
+            return False, (f"consensus quorum not met and claude plan invalid: "
+                           f"valid={valid}; dropped {dropped}")
 
     plan_files = [run_dir / f"{name}-plan.md" for name in valid]
     if not _synthesize_and_implement(ticket_dir, plan_files, BUILD_TIMEOUT):
