@@ -18,6 +18,7 @@ import core.log as log
 import core.queue as q
 import core.scheduler as scheduler
 import core.tasks  # noqa: F401  (registers tasks + routes)
+import core.tz as _ctz
 from core.beat import BeatThread
 from core.event_bus import Dispatcher
 from core.registry import Instances
@@ -42,17 +43,87 @@ def pool() -> WorkerPool | None:
     return _pool
 
 
+_DEFAULT_QUIET_HOURS = (20, 7)
+_DEFAULT_QUIET_CADENCE = 1800
+# Active-hours base cadence. Historically the ticker emitted on a fixed
+# random 300-420s wake; _DEFAULT_TICK_INTERVAL preserves that ~6 min default.
+# A workspace can opt into a faster pulse with [job].tick_interval (seconds).
+_DEFAULT_TICK_INTERVAL = 360
+# Floor on how often the ticker thread itself wakes. The base sleep is the
+# smallest per-instance interval, clamped here so a misconfigured 1s value
+# can't busy-spin the thread.
+_MIN_TICK_FLOOR = 15
+
+
+def _quiet_hours_for(config: dict) -> tuple[int, int] | None:
+    raw = (config.get("job") or {}).get("quiet_hours", list(_DEFAULT_QUIET_HOURS))
+    if not raw:
+        return None
+    return (int(raw[0]), int(raw[1]))
+
+
+def _quiet_cadence_for(config: dict) -> int:
+    return int((config.get("job") or {}).get("quiet_cadence", _DEFAULT_QUIET_CADENCE))
+
+
+def _tick_interval_for(config: dict) -> int:
+    return int((config.get("job") or {}).get("tick_interval", _DEFAULT_TICK_INTERVAL))
+
+
+def _in_quiet_hours(now_local: datetime, quiet: tuple[int, int]) -> bool:
+    start, end = quiet
+    if start == end:
+        return False
+    h = now_local.hour
+    if start < end:
+        return start <= h < end
+    return h >= start or h < end
+
+
+def _should_emit_cron(config: dict, last_emit_ts: float, now_ts: float, now_local: datetime) -> bool:
+    quiet = _quiet_hours_for(config)
+    elapsed = now_ts - last_emit_ts
+    if quiet is None or not _in_quiet_hours(now_local, quiet):
+        # Active hours: honour the per-workspace tick interval so a fast
+        # workspace (e.g. tick_interval=30) emits every ~30s while a default
+        # one stays at ~6 min, even though the ticker thread wakes more often.
+        return elapsed >= _tick_interval_for(config)
+    return elapsed >= _quiet_cadence_for(config)
+
+
+def _ticker_sleep_seconds() -> int:
+    """Base sleep for the ticker thread: the smallest per-instance tick
+    interval (so the fastest workspace can actually fire at its cadence),
+    floored to avoid busy-spinning. Each instance is still gated by
+    _should_emit_cron, so waking often is cheap when nothing is due."""
+    intervals = [_DEFAULT_TICK_INTERVAL]
+    if _instances is not None:
+        for k in _instances.keys():
+            try:
+                intervals.append(_tick_interval_for(_instances.get(k).config))
+            except Exception:
+                pass
+    return max(_MIN_TICK_FLOOR, min(intervals))
+
+
 def _cron_ticker(interval: int = 240) -> None:
+    last_emit: dict[str, float] = {}
     while not _cron_stop.is_set():
         if _instances is not None:
+            now_ts = time.time()
+            now_local = datetime.now(_ctz.local_tz())
             for instance_key in _instances.keys():
                 try:
+                    config = _instances.get(instance_key).config
+                    if not _should_emit_cron(config, last_emit.get(instance_key, 0.0), now_ts, now_local):
+                        continue
                     q.emit_event(source="cron", kind="cron_tick",
                                   payload={"at": datetime.now(timezone.utc).isoformat()},
                                   instance_key=instance_key)
+                    last_emit[instance_key] = now_ts
                 except Exception as e:
                     log.emit("cron_emit_error", f"{type(e).__name__}: {e}")
-        wait_time = random.randint(300, 420) if interval > 0 else interval
+        wait_time = _ticker_sleep_seconds() if interval > 0 else interval
         if _cron_stop.wait(wait_time):
             return
 
