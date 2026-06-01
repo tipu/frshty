@@ -73,12 +73,37 @@ def test_fanout_builds_expected_commands(tmp_path, monkeypatch):
     assert "--skip-git-repo-check" in cdx["cmd"] and "-o" in cdx["cmd"]
 
 
-def test_quorum_fails_with_one_valid(tmp_path, monkeypatch):
+def test_quorum_degrades_to_claude_only_when_others_unavailable(tmp_path, monkeypatch):
+    # When only claude's plan is valid (others dropped for availability:
+    # non-zero exit, empty), proceed claude-only rather than deadlocking the
+    # pipeline. The 2-model cross-check resumes once a vendor is reachable.
     monkeypatch.setattr(cp.log, "emit", lambda *a, **k: None)
     monkeypatch.setattr(cp, "_capture_baselines",
                         lambda config, slug: {"repo": (tmp_path, "abc123")})
     monkeypatch.setattr(cp, "_fan_out", lambda *a, **k: {
         "claude": {"text": REAL_PLAN, "valid": True, "reason": "ok"},
+        "codex": {"text": None, "valid": False, "reason": "exit_code=127"},
+        "gemini": {"text": "", "valid": False, "reason": "empty output"},
+    })
+    synth_called = {"hit": False}
+    monkeypatch.setattr(cp, "_synthesize_and_implement",
+                        lambda *a, **k: synth_called.__setitem__("hit", True) or True)
+    monkeypatch.setattr(cp, "_assemble_diff", lambda *a, **k: (tmp_path / "p.patch", ["repo"]))
+    monkeypatch.setattr(cp, "_write_manifest", lambda *a, **k: True)
+    (tmp_path / "p.patch").write_text("diff")
+
+    ok, reason = cp.run_consensus_plan({}, tmp_path, "slug", ticket_key="T-1")
+    assert ok
+    assert synth_called["hit"] is True
+
+
+def test_quorum_fails_when_claude_plan_invalid(tmp_path, monkeypatch):
+    # If claude itself is invalid, there's nothing to fall back to -> fail.
+    monkeypatch.setattr(cp.log, "emit", lambda *a, **k: None)
+    monkeypatch.setattr(cp, "_capture_baselines",
+                        lambda config, slug: {"repo": (tmp_path, "abc123")})
+    monkeypatch.setattr(cp, "_fan_out", lambda *a, **k: {
+        "claude": {"text": None, "valid": False, "reason": "exit_code=1"},
         "codex": {"text": None, "valid": False, "reason": "exit_code=127"},
         "gemini": {"text": "", "valid": False, "reason": "empty output"},
     })

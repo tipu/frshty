@@ -65,11 +65,54 @@ def _apply_status(ctx: TaskContext, target: str) -> TaskResult | None:
     if not ctx.ticket_key or not target:
         return None
     import core.state as state
+    fields: dict = {}
+    if target == "done":
+        from datetime import datetime, timezone
+        fields["done_at"] = datetime.now(timezone.utc).isoformat()
     try:
-        state.transition_ticket(ctx.ticket_key, target)
+        state.transition_ticket(ctx.ticket_key, target, **fields)
     except state.TicketStateError as e:
         return TaskResult("failed", f"transition to {target}: {e}")
     return None
+
+
+# Iterative fix/retry tasks that the status dispatcher re-enqueues while the
+# ticket stays in its gate status (e.g. fix_review_findings keeps running as
+# long as tri-review.md reads VERDICT: FAIL). A "failed" result from one of
+# these is a normal not-yet-converged step, NOT a wedge — moving the ticket to
+# `blocked` would sever the re-enqueue loop and strand it. Leave them in place
+# so the dispatcher retries on the next cycle.
+_RETRY_LOOP_TASKS = frozenset({
+    "fix_review_findings", "run_tests_and_fix", "fix_ci_failures",
+    "resolve_conflicts",
+})
+
+
+def _release_gate_on_failure(ctx: TaskContext, result: TaskResult) -> TaskResult:
+    """When a pipeline task hard-fails it can leave a ticket stuck in an
+    LLM-active status (planning/reviewing/testing/proving) that occupies the
+    per-repo serialization gate, starving every sibling ticket on that repo.
+    Move such a ticket to `blocked` so the gate clears and the ticket surfaces
+    for a manual restart. Best-effort: it never masks or alters the original
+    failure result that is returned to the caller.
+
+    Exempts the iterative fix/retry tasks (_RETRY_LOOP_TASKS): those are
+    re-enqueued by the dispatcher while the ticket holds its gate status, so
+    blocking them would break convergence of the review/test fix loops."""
+    if result.status != "failed" or not ctx.ticket_key:
+        return result
+    if ctx.task in _RETRY_LOOP_TASKS:
+        return result
+    import core.state as state
+    from features.tickets import _GATE_OCCUPYING_STATUSES
+    cur = (state.load_ticket(ctx.ticket_key) or {}).get("status")
+    if cur in _GATE_OCCUPYING_STATUSES:
+        try:
+            state.transition_ticket(ctx.ticket_key, "blocked",
+                                    reason=f"task {ctx.task} failed; releasing repo gate")
+        except state.TicketStateError:
+            pass
+    return result
 
 
 def run_task(ctx: TaskContext) -> TaskResult:
@@ -91,7 +134,7 @@ def run_task(ctx: TaskContext) -> TaskResult:
     if on_entry:
         err = _apply_status(ctx, on_entry)
         if err is not None:
-            return err
+            return _release_gate_on_failure(ctx, err)
     try:
         result = fn(ctx)
         if result is None:
@@ -99,24 +142,24 @@ def run_task(ctx: TaskContext) -> TaskResult:
         elif not isinstance(result, TaskResult):
             result = TaskResult("ok", artifacts={"return": result})
     except Exception as e:
-        return TaskResult("failed", f"{type(e).__name__}: {e}",
-                          artifacts={"traceback": traceback.format_exc()})
+        return _release_gate_on_failure(ctx, TaskResult("failed", f"{type(e).__name__}: {e}",
+                          artifacts={"traceback": traceback.format_exc()}))
     if result.status != "ok":
-        return result
+        return _release_gate_on_failure(ctx, result)
     for p in postconds:
         try:
             ok, reason = p(ctx)
         except Exception as e:
-            return TaskResult("failed", f"postcondition errored: {type(e).__name__}: {e}",
-                              artifacts=result.artifacts, next_events=result.next_events)
+            return _release_gate_on_failure(ctx, TaskResult("failed", f"postcondition errored: {type(e).__name__}: {e}",
+                              artifacts=result.artifacts, next_events=result.next_events))
         if not ok:
-            return TaskResult("failed", f"postcondition: {reason}",
-                              artifacts=result.artifacts, next_events=result.next_events)
+            return _release_gate_on_failure(ctx, TaskResult("failed", f"postcondition: {reason}",
+                              artifacts=result.artifacts, next_events=result.next_events))
     if on_success is not None:
         target = on_success(ctx, result) if callable(on_success) else on_success
         if target:
             err = _apply_status(ctx, target)
             if err is not None:
-                return TaskResult("failed", err.reason,
-                                  artifacts=result.artifacts, next_events=result.next_events)
+                return _release_gate_on_failure(ctx, TaskResult("failed", err.reason,
+                                  artifacts=result.artifacts, next_events=result.next_events))
     return result

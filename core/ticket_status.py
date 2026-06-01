@@ -14,6 +14,7 @@ class TicketStatus(str, Enum):
     merged = "merged"
     validation = "validation"
     pr_failed = "pr_failed"
+    blocked = "blocked"
     done = "done"
     # Container issues (Jira Epic, Linear Project, etc.) — frshty tracks them
     # for UI grouping of their child stories but never plans / codes / PRs them.
@@ -29,11 +30,11 @@ class TicketStatus(str, Enum):
 _ALLOWED: dict[TicketStatus, set[TicketStatus]] = {
     TicketStatus.pending_approval: {TicketStatus.new, TicketStatus.done},
     TicketStatus.new:        {TicketStatus.planning, TicketStatus.merged, TicketStatus.epic},
-    TicketStatus.planning:   {TicketStatus.reviewing},
-    TicketStatus.reviewing:  {TicketStatus.testing, TicketStatus.pr_ready, TicketStatus.planning},
-    TicketStatus.testing:    {TicketStatus.proving, TicketStatus.pr_ready, TicketStatus.tests_failed, TicketStatus.reviewing},
+    TicketStatus.planning:   {TicketStatus.reviewing, TicketStatus.blocked},
+    TicketStatus.reviewing:  {TicketStatus.testing, TicketStatus.pr_ready, TicketStatus.planning, TicketStatus.blocked},
+    TicketStatus.testing:    {TicketStatus.proving, TicketStatus.pr_ready, TicketStatus.tests_failed, TicketStatus.reviewing, TicketStatus.blocked},
     TicketStatus.tests_failed: {TicketStatus.testing, TicketStatus.reviewing, TicketStatus.pr_ready, TicketStatus.done},
-    TicketStatus.proving:    {TicketStatus.pr_ready, TicketStatus.testing, TicketStatus.reviewing},
+    TicketStatus.proving:    {TicketStatus.pr_ready, TicketStatus.testing, TicketStatus.reviewing, TicketStatus.blocked},
     TicketStatus.pr_ready:   {TicketStatus.testing, TicketStatus.proving, TicketStatus.reviewing, TicketStatus.in_review, TicketStatus.pr_failed, TicketStatus.merged},
     TicketStatus.in_review:  {TicketStatus.merged, TicketStatus.in_review, TicketStatus.pr_failed},
     TicketStatus.merged:     {TicketStatus.validation, TicketStatus.new},
@@ -42,6 +43,7 @@ _ALLOWED: dict[TicketStatus, set[TicketStatus]] = {
     TicketStatus.done:       {TicketStatus.new, TicketStatus.pr_ready, TicketStatus.testing, TicketStatus.proving, TicketStatus.in_review},
     TicketStatus.epic:       set(),  # epic is terminal; transition() still permits → done universally
     TicketStatus.ignored:    {TicketStatus.new},  # only legal exit is un-ignore → new
+    TicketStatus.blocked:    {TicketStatus.new},
 }
 
 
