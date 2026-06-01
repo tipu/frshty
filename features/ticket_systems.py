@@ -48,6 +48,9 @@ class PRDTicketSystem:
     def get_comments(self, ticket_key: str) -> list[dict]:
         return []
 
+    def ticket_url(self, key: str) -> str:
+        raise NotImplementedError("PRD tickets have no external ticket URL; implement ticket_url for PRDTicketSystem")
+
 
 class JiraTicketSystem:
     def __init__(self, config: dict):
@@ -58,6 +61,11 @@ class JiraTicketSystem:
         self.board_id = jira.get("board_id")
         self.account_id = jira.get("user_account_id", "")
         self.jql = jira.get("jql", "")
+
+    def ticket_url(self, key: str) -> str:
+        if not self.base_url or not key:
+            return ""
+        return f"{self.base_url.split('/rest')[0]}/browse/{key}"
 
     def fetch_tickets(self) -> list[dict]:
         if not self.base_url or not self.user or not self.token:
@@ -164,6 +172,19 @@ class LinearTicketSystem:
         self.token = resolve_env(config, "linear", "token_env")
         self.email = linear.get("assignee_email", "")
         self.states = linear.get("states", ["In Progress", "Prioritized"])
+
+    def ticket_url(self, key: str) -> str:
+        if not self.token or not key:
+            return ""
+        query = 'query { issue(id: "%s") { url } }' % key
+        with external_log.client("linear", timeout=30, transport=httpx.HTTPTransport(retries=2)) as client:
+            resp = client.post("https://api.linear.app/graphql",
+                json={"query": query},
+                headers={"Authorization": self.token, "Content-Type": "application/json"})
+            if resp.status_code != 200:
+                return ""
+            issue = (resp.json().get("data") or {}).get("issue") or {}
+            return issue.get("url", "")
 
     def fetch_tickets(self) -> list[dict]:
         if not self.token or not self.email:
