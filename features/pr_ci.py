@@ -12,7 +12,12 @@ from core.claude_runner import run_sonnet, run_claude_code, extract_json
 
 
 FIX_TIMEOUT = 1800
-FAILED_STATES = ("FAILURE", "FAILED", "STOPPED")
+# Must stay in sync with GitHubPlatform._evaluate_checks' failure set in
+# features/platforms.py — otherwise monitor_ci flags a PR as CI-failed and
+# enqueues fix_ci_failures, but triage sees no "failed" checks (no_failing),
+# never fixes or counts an attempt, and the ticket loops in_review forever
+# holding the repo gate. CANCELLED/TIMED_OUT are real failures GH reports.
+FAILED_STATES = ("FAILURE", "FAILED", "STOPPED", "CANCELLED", "TIMED_OUT")
 
 
 def triage_and_fix_pr(platform, repo: str, pr_id: int, label: str,
