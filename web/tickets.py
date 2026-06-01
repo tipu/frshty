@@ -326,7 +326,7 @@ def api_tickets_list():
     import core.db as _db
     tickets = state.list_tickets()
     cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-    expired = [k for k, v in tickets.items() if v.get("status") == "done" and v.get("done_at", "") < cutoff]
+    expired = [k for k, v in tickets.items() if v.get("status") == "done" and v.get("done_at") and v.get("done_at") < cutoff]
     for k in expired:
         state.delete_ticket(k)
         del tickets[k]
@@ -848,6 +848,11 @@ def api_restart_ticket(key: str):
         target = "in_review" if ts.get("prs") else "pr_ready"
         try:
             ts = state.transition_ticket(key, target, reason="manual restart")
+        except state.TicketStateError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+    if ts.get("status") == TicketStatus.blocked.value:
+        try:
+            ts = state.transition_ticket(key, "new", reason="manual restart")
         except state.TicketStateError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
     status = ts.get("status", "")
