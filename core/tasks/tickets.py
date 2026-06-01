@@ -177,6 +177,7 @@ def _build_fix_prompt(per_repo: list[dict]) -> str:
 
 _PLAN_TESTS_PROMPT_TEMPLATE = """Read these files in order:
 - docs/ticket.md
+- docs/notes/*.md (human guidance, if present)
 - docs/change-manifest.md
 - docs/tri-review.md
 
@@ -1246,10 +1247,9 @@ def apply_note_reset(ctx: TaskContext) -> TaskResult:
     now = datetime.now(timezone.utc).isoformat()
     archived_to = None
     if note:
-        ticket_md = docs / "ticket.md"
-        ticket_md.parent.mkdir(parents=True, exist_ok=True)
-        with ticket_md.open("a") as f:
-            f.write(f"\n\n## Note ({now})\n{note}\n")
+        notes_dir = docs / "notes"
+        notes_dir.mkdir(parents=True, exist_ok=True)
+        (notes_dir / f"note-{now.replace(':', '-')}.md").write_text(f"# Note ({now})\n\n{note}\n")
     archive = docs / "archive" / now.replace(":", "-")
     moved = []
     for fname in ("change-manifest.md", "tri-review.md", "technical-plan.md"):

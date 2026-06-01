@@ -47,7 +47,7 @@ OUTPUT CONTRACT (this overrides anything else):
 - Cite file:line evidence for every claim about existing code.
 
 You are responsible for:
-- Reading the requirement files under docs/ (e.g. docs/ticket.md, docs/technical-plan.md if present, docs/pm-findings.md if present).
+- Reading the requirement files under docs/ (e.g. docs/ticket.md, docs/technical-plan.md if present, docs/pm-findings.md if present, and any docs/notes/*.md human guidance that overrides or refines the ticket).
 - Exploring the repository worktree(s) in this directory yourself with grep/read/find.
 
 Produce a plan with these sections:
@@ -136,7 +136,9 @@ def _synthesize_and_implement(ticket_dir: Path, plan_files: list[Path],
         f"You have {len(plan_files)} independent technical plans saved at:\n"
         f"{listing}\n\n"
         "Step 1 — Synthesize: Read all of those plan files plus the "
-        "requirements under docs/. Reconcile them into one consensus plan; "
+        "requirements under docs/ (including any docs/notes/*.md human "
+        "guidance, which is authoritative and overrides the ticket where they "
+        "conflict). Reconcile them into one consensus plan; "
         "where they disagree on architecture, data model, or API, pick the "
         "better-evidenced option and note why. Write the result to "
         "docs/technical-plan.md. It MUST include a 'Test Plan' section listing "
