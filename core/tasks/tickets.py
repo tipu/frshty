@@ -1231,7 +1231,6 @@ def resolve_conflicts(ctx: TaskContext) -> TaskResult:
 
 
 @task("apply_note_reset",
-      on_success_status="new",
       timeout=30)
 def apply_note_reset(ctx: TaskContext) -> TaskResult:
     import shutil
@@ -1261,6 +1260,8 @@ def apply_note_reset(ctx: TaskContext) -> TaskResult:
     if moved:
         archived_to = str(archive)
 
+    state.reset_ticket(ctx.ticket_key or "", target="new",
+                       reason="note added; re-plan from scratch")
     return TaskResult("ok", artifacts={"archived_to": archived_to, "moved": moved})
 
 

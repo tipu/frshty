@@ -142,6 +142,27 @@ class TestTransitionTicket:
         assert state.load_ticket("T-1")["merged_external_status"] == "Released"
 
 
+class TestResetTicket:
+    def test_bypasses_illegal_transition(self, tmp_state):
+        state.save_ticket("T-1", {"status": "pr_ready", "slug": "t-1",
+                                  "branch": "b", "prs": [{"id": 1, "repo": "r"}]})
+        with pytest.raises(TicketStateError):
+            state.transition_ticket("T-1", "new")
+        result = state.reset_ticket("T-1", target="new", reason="note")
+        assert result["status"] == "new"
+        assert result["branch"] == "b"
+        assert state.load_ticket("T-1")["status"] == "new"
+
+    def test_still_enforces_invariants(self, tmp_state):
+        state.save_ticket("T-1", {"status": "pr_ready", "slug": "t-1"})
+        with pytest.raises(TicketStateError, match="merged_external_status"):
+            state.reset_ticket("T-1", target="merged")
+
+    def test_missing_raises(self, tmp_state):
+        with pytest.raises(TicketStateError):
+            state.reset_ticket("NOPE", target="new")
+
+
 class TestSaveTicketInvariants:
     def test_save_ticket_merged_without_external_status_raises(self, tmp_state):
         with pytest.raises(TicketStateError, match="merged_external_status"):

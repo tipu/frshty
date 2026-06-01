@@ -414,6 +414,38 @@ def transition_ticket(key: str, new_status: str, *, reason: str = "", **fields) 
     return result
 
 
+def reset_ticket(key: str, *, target: str = "new", reason: str = "", **fields) -> dict:
+    """Force a ticket to an earlier status WITHOUT the legal-transition check.
+
+    For explicit user-initiated resets (add-note, restart) where the re-plan
+    pipeline's own preconditions/postconditions are the real correctness gate,
+    not the forward-pipeline transition graph. Per-status invariants are still
+    enforced and the transition is still recorded (via update_ticket).
+    """
+    current = load_ticket(key)
+    if current is None:
+        raise TicketStateError(f"ticket {key}: not found, cannot reset")
+
+    def _mutate(cur: dict) -> dict:
+        if not cur:
+            raise TicketStateError(f"ticket {key}: not found, cannot reset")
+        merged = dict(cur)
+        merged["status"] = target
+        for k, v in fields.items():
+            if v is None:
+                merged.pop(k, None)
+            else:
+                merged[k] = v
+        if reason:
+            merged["_transition_reason"] = reason
+        return merged
+
+    result = update_ticket(key, _mutate)
+    if result is None:
+        raise TicketStateError(f"ticket {key}: vanished during reset")
+    return result
+
+
 def update_ticket(key: str, mutate: Callable[[dict], dict | None]) -> dict | None:
     """Transactional read-modify-write on a single ticket. Atomic against
     other update_ticket / save_ticket calls. Pass a mutator that takes the
