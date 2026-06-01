@@ -960,6 +960,10 @@ def check(config: dict, instance_key: str = ""):
             fresh_url = ticket.get("url") or ""
             if fresh_url:
                 ts["url"] = fresh_url
+            if ticket.get("summary"):
+                ts["summary"] = ticket["summary"]
+            if ticket.get("description"):
+                ts["description"] = ticket["description"]
             issue_type = ticket.get("issue_type", "")
             if issue_type:
                 ts["issue_type"] = issue_type
