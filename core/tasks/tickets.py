@@ -1282,6 +1282,15 @@ def set_state(ctx: TaskContext) -> TaskResult:
     return TaskResult("ok", artifacts={"transitioned_to": target})
 
 
+@task("advance_ticket", timeout=30)
+def advance_ticket(ctx: TaskContext) -> TaskResult:
+    if not ctx.ticket_key:
+        return TaskResult("ok", artifacts={"skipped": "no ticket_key"})
+    from features import tickets as tix
+    tix.advance_ticket(ctx.config, ctx.instance_key, ctx.ticket_key)
+    return TaskResult("ok", artifacts={"advanced": ctx.ticket_key})
+
+
 VALIDATION_TIMEOUT = 1800
 
 
