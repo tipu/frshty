@@ -1075,6 +1075,18 @@ frshtyApp({
             }
         }
 
+        async function loadPrComments() {
+            try {
+                const r = await fetch(`/api/tickets/${key}/pr-comments`);
+                if (!r.ok) return;
+                const data = await r.json();
+                comments.value = Array.isArray(data) ? data : [];
+                for (const c of comments.value) {
+                    if (replyDrafts[c.id] === undefined) replyDrafts[c.id] = c.suggested_reply || '';
+                }
+            } catch (e) { console.warn('pr-comments fetch failed', e); }
+        }
+
         function switchTab(tab) {
             activeTab.value = tab;
             if (tab === 'diff') loadDiff();
@@ -1421,6 +1433,7 @@ frshtyApp({
             load();
             loadJobs();
             loadPmFindings();
+            loadPrComments();
             startTerminal();
             escListener = (e) => { if (e.key === 'Escape' && maximized.value) toggleMaximize(); };
             document.addEventListener('keydown', escListener);
