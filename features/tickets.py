@@ -876,7 +876,8 @@ def advance_ticket(config: dict, instance_key: str = "", key: str = "") -> None:
         return
     if status in (TicketStatus.new.value, "new") and not ts.get("discovered_at"):
         return
-    if any(j["status"] == "running" for j in q.jobs_for_ticket(instance_key, key)):
+    if any(j["status"] == "running" and j["task"] != "advance_ticket"
+           for j in q.jobs_for_ticket(instance_key, key)):
         return
     base_url = config["_base_url"]
     ticket = {
