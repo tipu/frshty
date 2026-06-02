@@ -142,6 +142,18 @@ class TestTransitionTicket:
         assert state.load_ticket("T-1")["merged_external_status"] == "Released"
 
 
+class TestCorruptTicketRow:
+    def test_corrupt_json_logs_and_returns_empty(self, tmp_state):
+        state.save_ticket("T-1", {"status": "planning", "slug": "t-1"})
+        db.execute("UPDATE tickets SET data=? WHERE ticket_key=?", ("{not valid json", "T-1"))
+        result = state.load_ticket("T-1")
+        assert result == {}
+        rows = db.query_all(
+            "SELECT event FROM log_events WHERE event=?", ("ticket_state_corrupt",)
+        )
+        assert len(rows) >= 1
+
+
 class TestResetTicket:
     def test_bypasses_illegal_transition(self, tmp_state):
         state.save_ticket("T-1", {"status": "pr_ready", "slug": "t-1",
