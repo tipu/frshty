@@ -135,6 +135,44 @@ def test_set_state_roundtrip(fresh_db):
         pool.stop()
 
 
+def test_set_state_bypasses_illegal_transition(fresh_db):
+    """set_state is an explicit user action: it forces the target status even
+    when the forward-pipeline FSM has no edge for it (e.g. pr_ready -> new)."""
+    import core.state as state
+    state.init("t")
+    state.save("tickets", {"T-1": {"status": "pr_ready", "slug": "slug-1", "branch": "feat/t-1"}})
+
+    class FakeRegistry:
+        def __init__(self):
+            self.instance_key = "t"
+            self.config = {}
+            self.base_url = ""
+
+    registries = {"t": FakeRegistry()}
+    pool = worker_mod.WorkerPool(registries, size=1, poll_interval=0.1)
+    dispatcher = bus.Dispatcher(registries, poll_interval=0.1)
+    pool.start()
+    dispatcher.start()
+    try:
+        q.emit_event(
+            source="ui", kind="ui_set_state",
+            payload={"target": "new", "ticket_key": "T-1"},
+            instance_key="t",
+        )
+        deadline = time.time() + 5
+        tickets = {}
+        while time.time() < deadline:
+            tickets = state.load("tickets")
+            if tickets.get("T-1", {}).get("status") == "new":
+                break
+            time.sleep(0.1)
+        assert tickets.get("T-1", {}).get("status") == "new", f"got {tickets}"
+        assert tickets["T-1"].get("branch") == "feat/t-1"
+    finally:
+        dispatcher.stop()
+        pool.stop()
+
+
 def test_auto_pr_precondition_reads_per_ticket(fresh_db):
     """auto_pr_true precondition reads per-ticket auto_pr; missing inherits config."""
     import core.state as state
@@ -168,7 +206,8 @@ def test_auto_pr_precondition_reads_per_ticket(fresh_db):
 if __name__ == "__main__":
     import tempfile
     tests = [test_end_to_end, test_precondition_skip,
-             test_set_state_roundtrip, test_auto_pr_precondition_reads_per_ticket]
+             test_set_state_roundtrip, test_set_state_bypasses_illegal_transition,
+             test_auto_pr_precondition_reads_per_ticket]
     for t in tests:
         with tempfile.TemporaryDirectory() as d:
             t(Path(d))
