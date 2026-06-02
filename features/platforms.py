@@ -212,12 +212,12 @@ class BitbucketPlatform:
                 return None
             return resp.text
 
-    def get_pr_checks(self, repo: str, pr_id: int) -> list[dict]:
+    def get_pr_checks(self, repo: str, pr_id: int) -> list[dict] | None:
         url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}/statuses?pagelen=50"
         with external_log.client("bitbucket", auth=self._auth(), timeout=30) as client:
             resp = client.get(url)
             if resp.status_code != 200:
-                return []
+                return None
             return [
                 {
                     "name": s.get("name", ""),
@@ -539,22 +539,37 @@ class GitHubPlatform:
             return None
         return result.stdout
 
-    def get_pr_checks(self, repo: str, pr_id: int) -> list[dict]:
+    def get_pr_checks(self, repo: str, pr_id: int) -> list[dict] | None:
+        """Returns the check list, [] when the PR genuinely has no checks, or
+        None when the fetch itself failed (auth/rate-limit/network). Callers
+        must treat None as "unknown - retry", never as "no CI -> passed". With
+        --json, gh exits 0 and emits the JSON for pass/fail/pending alike; a
+        missing-checks PR exits non-zero with empty stdout and a "no checks
+        reported" stderr, while a real error has empty stdout and other stderr."""
         full = self._resolve_repo(repo)
         result = self._run_gh([
             "pr", "checks", str(pr_id), "--repo", full,
             "--json", "name,state,link",
         ])
-        if result.returncode != 0:
+        out = result.stdout.strip()
+        if out:
+            try:
+                data = json.loads(out)
+            except json.JSONDecodeError:
+                return None
+            return [
+                {"name": c["name"], "state": c["state"], "url": c.get("link", "")}
+                for c in data
+            ]
+        if "no checks reported" in (result.stderr or "").lower():
             return []
-        return [
-            {"name": c["name"], "state": c["state"], "url": c.get("link", "")}
-            for c in json.loads(result.stdout)
-        ]
+        if result.returncode == 0:
+            return []
+        return None
 
     def get_failed_logs(self, repo: str, pr_id: int) -> str:
         full = self._resolve_repo(repo)
-        checks = self.get_pr_checks(repo, pr_id)
+        checks = self.get_pr_checks(repo, pr_id) or []
         run_ids = set()
         for c in checks:
             if c["state"] == "FAILURE" and c.get("url"):
@@ -759,6 +774,16 @@ class GitHubPlatform:
         all_passed = True
         for pr in prs:
             checks = self.get_pr_checks(pr["repo"], pr["id"])
+            if checks is None:
+                if not ts.get("_ci_fetch_failed_logged"):
+                    log.emit("ticket_ci_fetch_failed",
+                        f"Could not fetch CI checks for {ticket['key']} PR #{pr['id']}; holding (not treating as passed)",
+                        links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+                        meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"]})
+                    ts["_ci_fetch_failed_logged"] = True
+                all_passed = False
+                continue
+            ts.pop("_ci_fetch_failed_logged", None)
             verdict = self._evaluate_checks(checks)
 
             if verdict == "pending":

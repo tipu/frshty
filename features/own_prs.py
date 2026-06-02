@@ -99,9 +99,10 @@ def _check_comments(config, instance_key, platform, pr, base_url):
         comment_id = str(comment["id"])
         edited_at = comment.get("updated_at") or comment.get("created_at")
 
+        classified = i in classifications
         cls = classifications.get(i, {})
         actionable = cls.get("actionable", False)
-        reason = cls.get("reason", "failed to classify")
+        reason = cls.get("reason", "")
 
         links = {
             "pr": pr["url"],
@@ -112,6 +113,13 @@ def _check_comments(config, instance_key, platform, pr, base_url):
         pr_ref = f"{pr['repo']}#{pr['id']}"
 
         comments.mark_comment_processing(instance_key, "pr", pr_key, comment_id, edited_at)
+
+        if not classified:
+            log.emit("pr_comment_classify_failed",
+                     f"{pr_ref}: Could not classify (LLM empty/unparseable), will retry — {comment['body'][:80]}",
+                     links=links, meta=meta)
+            comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "classification failed")
+            continue
 
         if actionable:
             worktree = _ensure_worktree(config, pr)
@@ -139,6 +147,8 @@ def _check_ci(config, platform, pr, seen, base_url):
     from features.pr_ci import triage_and_fix_pr, FAILED_STATES
 
     checks = platform.get_pr_checks(pr["repo"], pr["id"])
+    if checks is None:
+        return
     failing = [c for c in checks if c.get("state", "").upper() in FAILED_STATES]
     if not failing:
         # CI is clean on this PR — reset the per-sha dedup AND attempt counter

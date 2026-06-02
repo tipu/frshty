@@ -185,6 +185,53 @@ class TestGitHubPushBranch:
         assert result["ok"] is False
 
 
+def _gh_platform():
+    config = {"job": {"platform": "github"}, "github": {"repo": "org/r"}, "workspace": {"base_branch": "main"}}
+    return GitHubPlatform(config)
+
+
+def _gh_result(stdout="", stderr="", returncode=0):
+    r = MagicMock()
+    r.stdout = stdout
+    r.stderr = stderr
+    r.returncode = returncode
+    return r
+
+
+class TestGitHubGetPrChecks:
+    def test_valid_json_returns_list_even_on_failing_checks(self):
+        p = _gh_platform()
+        out = '[{"name": "build", "state": "FAILURE", "link": "u"}]'
+        with patch.object(p, "_run_gh", return_value=_gh_result(stdout=out, returncode=0)):
+            checks = p.get_pr_checks("repo", 1)
+        assert checks == [{"name": "build", "state": "FAILURE", "url": "u"}]
+
+    def test_no_checks_reported_is_empty_list(self):
+        p = _gh_platform()
+        with patch.object(p, "_run_gh", return_value=_gh_result(
+                stderr="no checks reported on the 'feat/x' branch", returncode=1)):
+            assert p.get_pr_checks("repo", 1) == []
+
+    def test_fetch_error_is_none_not_empty(self):
+        p = _gh_platform()
+        with patch.object(p, "_run_gh", return_value=_gh_result(
+                stderr="GraphQL: Could not resolve to a PullRequest", returncode=1)):
+            assert p.get_pr_checks("repo", 1) is None
+
+    def test_unparseable_stdout_is_none(self):
+        p = _gh_platform()
+        with patch.object(p, "_run_gh", return_value=_gh_result(stdout="not json", returncode=0)):
+            assert p.get_pr_checks("repo", 1) is None
+
+    def test_monitor_ci_does_not_pass_on_fetch_failure(self):
+        p = _gh_platform()
+        ts = {"prs": [{"repo": "r", "id": 1, "url": "u"}], "status": "in_review"}
+        with patch.object(p, "get_pr_checks", return_value=None), \
+             patch("features.platforms.log"):
+            result = p.monitor_ci({"key": "T-1"}, ts, "http://base")
+        assert result.get("ci_passed") is not True
+
+
 class TestBitbucketChecksNormalization:
     def test_successful_becomes_success(self):
         config = {"job": {"platform": "bitbucket"}, "bitbucket": {"org": "o"}, "workspace": {"repos": []}}
