@@ -89,8 +89,7 @@ class TestCheckComments:
         config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
 
         with patch("features.own_prs.comments") as mock_comments, \
-             patch("features.own_prs.run_haiku", return_value='[{"id": 0, "actionable": true, "reason": "clear"}]'), \
-             patch("features.own_prs.extract_json", return_value=[{"id": 0, "actionable": True, "reason": "clear"}]), \
+             patch("features.own_prs.run_haiku", return_value='{"results": [{"id": 0, "actionable": true, "reason": "clear"}]}'), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
              patch("features.own_prs.run_claude_code", return_value="done"), \
              patch("features.own_prs.log"):
