@@ -1266,12 +1266,19 @@ def apply_note_reset(ctx: TaskContext) -> TaskResult:
 
 
 @task("set_state",
-      on_success_status=lambda ctx, _r: ctx.payload.get("target", "") or None,
       timeout=15)
 def set_state(ctx: TaskContext) -> TaskResult:
     target = ctx.payload.get("target", "")
     if not target:
         return TaskResult("failed", "target state missing")
+    fields: dict = {}
+    if target == "done":
+        fields["done_at"] = datetime.now(timezone.utc).isoformat()
+    try:
+        state.reset_ticket(ctx.ticket_key or "", target=target,
+                           reason="manual set-state", **fields)
+    except state.TicketStateError as e:
+        return TaskResult("failed", str(e))
     return TaskResult("ok", artifacts={"transitioned_to": target})
 
 
