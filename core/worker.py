@@ -284,6 +284,13 @@ class WorkerPool:
                                  instance_key=ev.get("instance_key", instance_key))
                 except Exception as e:
                     log.emit("worker_next_event_error", f"{type(e).__name__}: {e}")
+            if result.status == "ok" and job["ticket_key"] and job["task"] != "advance_ticket":
+                try:
+                    q.emit_event(source="task", kind="ticket_advance",
+                                 payload={"ticket_key": job["ticket_key"]},
+                                 instance_key=instance_key)
+                except Exception as e:
+                    log.emit("ticket_advance_emit_error", f"{type(e).__name__}: {e}")
         finally:
             log_path = job_logs.job_log_path(instance_key, job["id"])
             if log_path.exists() and log_path.stat().st_size == 0:
