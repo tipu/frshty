@@ -82,7 +82,7 @@ def _check_comments(config, instance_key, platform, pr, base_url):
     batch_prompt = (
         "Classify each PR review comment as actionable (clear code change requested) or ambiguous (vague, question, opinion).\n\n"
         f"{comment_list}\n\n"
-        'Reply with JSON array: [{"id": 0, "actionable": true/false, "reason": "brief reason"}, ...]'
+        'Reply with JSON: {"results": [{"id": 0, "actionable": true, "reason": "brief reason"}, ...]}'
     )
     batch_raw = run_haiku(batch_prompt, timeout=60)
     classifications = {}
