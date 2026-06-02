@@ -154,6 +154,18 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
            class="link text-sm">{{ pr.repo }} PR #{{ pr.id }} &nearr;</a>
         <a v-if="ticketUrl" :href="ticketUrl" target="_blank" class="link text-sm ml-auto">Open Ticket &nearr;</a>
     </div>
+    <div v-if="needsReplyComments.length" class="card p-4 mt-2 border-l-2 border-yellow-500">
+        <div class="text-xs font-bold text-yellow-500 uppercase mb-2">Review comments needing reply ({{ needsReplyComments.length }})</div>
+        <div v-for="c in needsReplyComments" :key="c.id" class="mb-3 pb-3 border-b border-gray-800">
+            <div class="flex items-center gap-2 text-xs text-gray-500 mb-1">
+                <span v-if="c.pr_repo">{{ c.pr_repo }}#{{ c.pr_id }}</span>
+                <span v-if="c.path">{{ c.path }}{{ c.line ? ':' + c.line : '' }}</span>
+            </div>
+            <div class="text-sm text-gray-200 mb-1">{{ c.body }}</div>
+            <textarea v-model="replyDrafts[c.id]" rows="3" class="reply-box w-full p-2 rounded text-sm mb-1"></textarea>
+            <button @click="postReply(c.id)" class="bg-green-700 hover:bg-green-600 text-white px-3 py-1 rounded text-xs">Post Reply</button>
+        </div>
+    </div>
     <div v-if="ticket.summary" class="card p-4 mt-2 border-l-2 border-blue-500">
         <div class="text-xs font-bold text-gray-500 uppercase mb-1">Change Summary</div>
         <div class="text-sm text-gray-300">{{ ticket.summary }}</div>
@@ -779,6 +791,9 @@ frshtyApp({
         // surfaces all files together so filtering by repo would hide
         // comments from siblings the user can already see.
         const filteredComments = computed(() => comments.value);
+
+        const needsReplyComments = computed(() =>
+            comments.value.filter(c => (c.status || 'needs_reply') === 'needs_reply'));
 
         const repoTabs = computed(() => {
             const repos = (diffData.value && diffData.value.repos) || [];
@@ -1431,7 +1446,7 @@ frshtyApp({
             mergedJobsTransitions, formatCoFieldDiff,
             ticketUrl, prScheduledLabel, dropdownStates,
             sortedDocs, proofMdContent, filteredHistory, parsedDiff, fileTreeRows, commentsByFile, unmatchedComments,
-            selectedRepo, repoTabs, filteredComments,
+            selectedRepo, repoTabs, filteredComments, needsReplyComments,
             renderMarkdown, escHtml,
             jobStatusClass, jobReason, jobHasOutput,
             diffLineClass, diffLinePrefix, commentLabel, commentClass, commentBodyTextClass, commentBadgeStyle, flatCount, scrollToFile,

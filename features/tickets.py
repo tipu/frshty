@@ -14,7 +14,7 @@ import core.state as state
 import core.comments as comments
 from core import external_log
 from core.config import get_repos, ticket_worktree_path, resolve_env
-from core.claude_runner import run_haiku, run_claude_code, extract_json
+from core.claude_runner import run_haiku, run_sonnet, run_claude_code, extract_json
 from core.ticket_status import TicketStatus, transition
 from features.platforms import make_platform
 from features.ticket_systems import make_ticket_system
@@ -1512,6 +1512,47 @@ def _save_pr_comments(config, slug, comments: list[dict]):
     path.write_text(json.dumps(comments, indent=2, default=str))
 
 
+def _draft_comment_reply(config, slug, ticket, comment, pr) -> str:
+    """Draft a reply to a PR review comment grounded in the ticket, the actual
+    branch code the comment points at, and the comment itself — so the reply is
+    specific instead of "I'd need to see the code"."""
+    ws = config["workspace"]
+    ticket_md = ws["root"] / ws["tickets_dir"] / slug / "docs" / "ticket.md"
+    try:
+        ticket_ctx = ticket_md.read_text()[:2000]
+    except OSError:
+        ticket_ctx = f"{ticket.get('summary', '')}\n{ticket.get('description', '')}"[:2000]
+
+    path = comment.get("path")
+    code_ctx = "(no file path on this comment)"
+    if path:
+        wt = ticket_worktree_path(config, slug, pr["repo"])
+        try:
+            lines = (wt / path).read_text().splitlines()
+            ln = comment.get("line")
+            if isinstance(ln, int) and ln > 0:
+                lo, hi = max(0, ln - 40), min(len(lines), ln + 20)
+            else:
+                lo, hi = 0, min(len(lines), 120)
+            snippet = "\n".join(f"{i + 1}: {lines[i]}" for i in range(lo, hi))
+            code_ctx = f"{path} ({pr['repo']}):\n{snippet}"
+        except OSError:
+            code_ctx = f"(could not read {path} in {pr['repo']})"
+
+    prompt = (
+        "You are the PR author replying to a code-review comment. Write a SPECIFIC, "
+        "accurate reply grounded in the ticket and the actual code below. If the comment "
+        "requests or suggests a change, state clearly whether you will make it and why; if "
+        "it is a question, answer it directly from the code. 2-4 sentences. Do NOT say you "
+        "need more context.\n\n"
+        f"TICKET:\n{ticket_ctx}\n\n"
+        f"CODE:\n{code_ctx}\n\n"
+        f"REVIEWER COMMENT (on {path}:{comment.get('line')}):\n{comment['body']}\n\n"
+        "Reply:"
+    )
+    return run_sonnet(prompt) or ""
+
+
 MAX_PR_COMMENT_FIX_ATTEMPTS = 2
 
 
@@ -1727,12 +1768,9 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                                           "comment_id": comment["id"],
                                           "attempts": attempts})
             else:
-                suggested = run_haiku(
-                    f"A reviewer left this comment on a PR:\n\n{comment['body']}\n\n"
-                    f"Write a brief, direct reply that addresses their concern. 1-2 sentences max."
-                )
+                suggested = _draft_comment_reply(config, slug, ticket, comment, pr)
                 entry["status"] = "needs_reply"
-                entry["suggested_reply"] = suggested or ""
+                entry["suggested_reply"] = suggested
                 log.emit("ticket_pr_comment_needs_reply", f"{_label(ticket['key'], ts)}: Reply needed {comment['body'][:80]}",
                     links={"detail": f"{base_url}/tickets/{ticket['key']}"},
                     meta={"ticket": ticket["key"]})
