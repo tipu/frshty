@@ -1251,7 +1251,8 @@ def apply_note_reset(ctx: TaskContext) -> TaskResult:
         (notes_dir / f"note-{now.replace(':', '-')}.md").write_text(f"# Note ({now})\n\n{note}\n")
     archive = docs / "archive" / now.replace(":", "-")
     moved = []
-    for fname in ("change-manifest.md", "tri-review.md", "technical-plan.md"):
+    for fname in ("change-manifest.md", "tri-review.md", "technical-plan.md",
+                  "test-plan.md", "test-files-written.txt", "test-runs.md"):
         src = docs / fname
         if src.exists():
             archive.mkdir(parents=True, exist_ok=True)
