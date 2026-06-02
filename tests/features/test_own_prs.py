@@ -101,6 +101,23 @@ class TestCheckComments:
         platform.push_branch.assert_called_once()
         platform.resolve_comment.assert_called_once()
 
+    def test_classifier_failure_retries_not_finalize(self, tmp_path):
+        platform = MagicMock()
+        pr = make_pr()
+        config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
+
+        with patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.run_haiku", return_value=""), \
+             patch("features.own_prs.log"):
+            mock_comments.fetch_and_detect_comments.return_value = {
+                "new": [make_comment(id=10, author_id="reviewer1", body="Restore the pluralize please")],
+                "edited": [],
+            }
+            own_prs._check_comments(config, "test", platform, pr, "http://base")
+        mock_comments.mark_comment_error.assert_called_once()
+        mock_comments.mark_comment_processed.assert_not_called()
+        platform.push_branch.assert_not_called()
+
 
 class TestEnsureWorktree:
     def test_uses_correct_repo(self, tmp_path):

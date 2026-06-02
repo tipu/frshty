@@ -1658,6 +1658,13 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                 if isinstance(r, dict) and isinstance(r.get("i"), int):
                     classifications[r["i"]] = bool(r.get("actionable"))
 
+        if new_comments and not classifications:
+            log.emit("ticket_pr_comment_classify_failed",
+                f"{_label(ticket['key'], ts)}: Could not classify {len(new_comments)} review comment(s) (LLM empty/unparseable), will retry",
+                links={"detail": f"{base_url}/tickets/{ticket['key']}"},
+                meta={"ticket": ticket["key"], "pr_id": pr["id"], "count": len(new_comments)})
+            continue
+
         for idx, comment in enumerate(new_comments):
             actionable = classifications.get(idx, False)
 
@@ -1736,7 +1743,8 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
             e for e in batch_entries
             if e["status"] == "fix_failed" and e.get("attempts", 0) < MAX_PR_COMMENT_FIX_ATTEMPTS
         ]
-        if not retryable_failures:
+        all_classified = all(i in classifications for i in range(len(new_comments)))
+        if not retryable_failures and all_classified:
             last_comment_ids[pr_key] = max(c["id"] for c in new_comments)
 
     ts["last_comment_ids"] = last_comment_ids
