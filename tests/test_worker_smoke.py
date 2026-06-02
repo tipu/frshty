@@ -173,6 +173,49 @@ def test_set_state_bypasses_illegal_transition(fresh_db):
         pool.stop()
 
 
+def test_completed_ticket_task_emits_advance(fresh_db):
+    """A successful ticket-scoped task emits a ticket_advance event so the next
+    stage chains immediately for that ticket (no cron_tick wait). The
+    advance_ticket task itself must not re-emit (no self-loop)."""
+    import core.state as state
+    state.init("t")
+
+    @task("noop_stage")
+    def noop_stage(ctx: TaskContext) -> TaskResult:
+        return TaskResult("ok")
+
+    class FakeRegistry:
+        def __init__(self):
+            self.instance_key = "t"
+            self.config = {}
+            self.base_url = ""
+
+    registries = {"t": FakeRegistry()}
+    pool = worker_mod.WorkerPool(registries, size=1, poll_interval=0.1)
+    pool.start()
+    try:
+        q.enqueue_job("t", "noop_stage", ticket_key="T-1")
+        deadline = time.time() + 5
+        rows = []
+        while time.time() < deadline:
+            rows = db.query_all(
+                "SELECT payload FROM events WHERE kind='ticket_advance'", ()
+            )
+            if rows:
+                break
+            time.sleep(0.1)
+        assert rows, "expected a ticket_advance event after the ticket task"
+        assert json.loads(rows[0]["payload"]).get("ticket_key") == "T-1"
+
+        # advance_ticket must not itself emit a ticket_advance (self-loop guard)
+        q.enqueue_job("t", "advance_ticket", ticket_key="T-1")
+        time.sleep(1)
+        after = db.query_all("SELECT id FROM events WHERE kind='ticket_advance'", ())
+        assert len(after) == len(rows), "advance_ticket should not re-emit advance"
+    finally:
+        pool.stop()
+
+
 def test_auto_pr_precondition_reads_per_ticket(fresh_db):
     """auto_pr_true precondition reads per-ticket auto_pr; missing inherits config."""
     import core.state as state
@@ -207,6 +250,7 @@ if __name__ == "__main__":
     import tempfile
     tests = [test_end_to_end, test_precondition_skip,
              test_set_state_roundtrip, test_set_state_bypasses_illegal_transition,
+             test_completed_ticket_task_emits_advance,
              test_auto_pr_precondition_reads_per_ticket]
     for t in tests:
         with tempfile.TemporaryDirectory() as d:

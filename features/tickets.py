@@ -855,6 +855,45 @@ def _process_ticket_comments(config: dict, key: str, ts: dict, ticket: dict, bas
 
 
 
+def advance_ticket(config: dict, instance_key: str = "", key: str = "") -> None:
+    """Run the forward stage dispatch for a single ticket immediately.
+
+    Chains a finished stage into the next one for just this ticket, without
+    waiting for the next cron_tick scan of the whole instance. Operates on
+    stored state only (no external fetch) and runs only the forward status
+    handlers (new..in_review); merged/validation/pr_failed reconciliation
+    stays poll-owned because it depends on freshly fetched upstream PR state.
+    """
+    from features.ticket_states import _STATUS_HANDLERS
+    if not instance_key or not key:
+        return
+    ts = state.load_ticket(key)
+    if not ts:
+        return
+    status = ts.get("status", "")
+    if status in (TicketStatus.done.value, "done", "ignored", "epic",
+                  TicketStatus.pending_approval.value, TicketStatus.blocked.value):
+        return
+    if status in (TicketStatus.new.value, "new") and not ts.get("discovered_at"):
+        return
+    if any(j["status"] == "running" for j in q.jobs_for_ticket(instance_key, key)):
+        return
+    base_url = config["_base_url"]
+    ticket = {
+        "key": key,
+        "summary": ts.get("summary", ""),
+        "description": ts.get("description", ""),
+        "url": ts.get("url", ""),
+        "status": ts.get("external_status", ""),
+    }
+    for st, handler in _STATUS_HANDLERS:
+        if ts["status"] != st:
+            continue
+        ts, _stop = handler(config, ticket, ts, base_url, instance_key, True)
+        break
+    state.save_ticket(key, ts)
+
+
 def check(config: dict, instance_key: str = ""):
     """Poll assigned tickets and dispatch each ticket to its status handler.
 
