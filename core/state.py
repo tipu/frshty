@@ -253,14 +253,26 @@ def _record_transition(
             pass
 
 
-def _row_to_ticket(row: dict) -> dict:
+def _row_to_ticket(row: dict, key: str = "") -> dict:
     raw = row.get("data") or "{}"
+    corrupt = False
     try:
         v = json.loads(raw)
     except json.JSONDecodeError:
-        v = {}
+        v, corrupt = {}, True
     if not isinstance(v, dict):
-        v = {}
+        v, corrupt = {}, True
+    if corrupt:
+        try:
+            import core.log as _log
+            _log.emit(
+                "ticket_state_corrupt",
+                f"ticket {key or row.get('ticket_key') or '?'} for instance {_active_key()} "
+                f"has unreadable state; NOT treating as a fresh ticket",
+                meta={"ticket": key or row.get("ticket_key", ""), "raw": str(raw)[:300]},
+            )
+        except Exception:
+            pass
     return v
 
 
@@ -272,7 +284,7 @@ def load_ticket(key: str) -> dict | None:
         "SELECT data FROM tickets WHERE instance_key=? AND ticket_key=?",
         (instance, key),
     )
-    return _row_to_ticket(row) if row else None
+    return _row_to_ticket(row, key) if row else None
 
 
 def list_tickets() -> dict:
@@ -283,7 +295,7 @@ def list_tickets() -> dict:
         "SELECT ticket_key, data FROM tickets WHERE instance_key=?",
         (instance,),
     )
-    return {r["ticket_key"]: _row_to_ticket(r) for r in rows}
+    return {r["ticket_key"]: _row_to_ticket(r, r["ticket_key"]) for r in rows}
 
 
 class TicketStateError(ValueError):
