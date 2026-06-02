@@ -191,6 +191,21 @@ class TestRepoGate:
             tickets._enqueue_stage("inst", "T-1", "start_planning")
             eq.assert_called_once_with("inst", "start_planning", ticket_key="T-1")
 
+    def test_advance_ticket_not_blocked_by_own_running_job(self, fresh_db):
+        """advance_ticket runs as a job that is itself 'running'; that must not
+        trip the running-job guard, or chaining is a silent no-op."""
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-1", {"status": "planning", "slug": "t-1",
+                                  "discovered_at": "2026-01-01T00:00:00+00:00"})
+        calls = []
+        with patch("core.queue.jobs_for_ticket",
+                   return_value=[{"task": "advance_ticket", "status": "running"}]), \
+             patch.object(tickets, "_enqueue_stage",
+                          side_effect=lambda i, k, t: calls.append(t)):
+            tickets.advance_ticket({"_base_url": "http://b", "workspace": {}}, "inst", "T-1")
+        assert "start_planning" in calls
+
     def test_enqueue_stage_does_not_gate_non_pipeline_tasks(self, fresh_db):
         """resolve_conflicts, fix_ci_failures etc. happen DURING in_review for
         the active ticket — they must not be gated."""
