@@ -1688,13 +1688,22 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
             continue
 
         batch_prompt = (
-            "Classify each PR review comment as actionable (clear code change requested) "
-            "or ambiguous (vague, question, opinion).\n\n"
-            "Comments:\n"
-            + "\n".join(f"[{i}] {c['body']}" for i, c in enumerate(new_comments))
+            "Triage each PR review comment using the CODE it is anchored to. "
+            "actionable=true when it requests a concrete code change — including terse "
+            "directives grounded in the code, e.g. 'Move to global.', 'Sanitize this', "
+            "'Use X instead', 'Add a test for Y', 'Rename to Z', 'This should be debug'. "
+            "actionable=false ONLY for genuine open questions, opinions, or discussion with "
+            "no concrete change to make, e.g. 'Why did we pick this approach?', 'Looks good'. "
+            "When a comment implies a specific change to the code shown, choose true.\n\n"
+            + "\n\n".join(
+                f"[{i}] {c.get('path', '')}:{c.get('line', '')}\n"
+                f"CODE:\n{(c.get('diff_hunk') or '(no hunk)')[:600]}\n"
+                f"COMMENT: {c['body']}"
+                for i, c in enumerate(new_comments)
+            )
             + '\n\nReply with JSON: {"results":[{"i":0,"actionable":true|false}, ...]}'
         )
-        batch_raw = run_haiku(batch_prompt)
+        batch_raw = run_sonnet(batch_prompt)
         batch_parsed = extract_json(batch_raw) if batch_raw else None
         classifications: dict[int, bool] = {}
         if isinstance(batch_parsed, dict) and isinstance(batch_parsed.get("results"), list):
