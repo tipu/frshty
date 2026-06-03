@@ -806,7 +806,7 @@ frshtyApp({
         const filteredComments = computed(() => comments.value);
 
         const needsReplyComments = computed(() =>
-            comments.value.filter(c => (c.status || 'needs_reply') === 'needs_reply'));
+            comments.value.filter(c => c.status === 'needs_reply'));
 
         const repoTabs = computed(() => {
             const repos = (diffData.value && diffData.value.repos) || [];
