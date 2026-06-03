@@ -1539,6 +1539,7 @@ def _draft_comment_reply(config, slug, ticket, comment, pr) -> str:
         except OSError:
             code_ctx = f"(could not read {path} in {pr['repo']})"
 
+    hunk = comment.get("diff_hunk") or ""
     prompt = (
         "You are the PR author replying to a code-review comment. Write a SPECIFIC, "
         "accurate reply grounded in the ticket and the actual code below. If the comment "
@@ -1547,7 +1548,8 @@ def _draft_comment_reply(config, slug, ticket, comment, pr) -> str:
         "need more context.\n\n"
         f"TICKET:\n{ticket_ctx}\n\n"
         f"CODE:\n{code_ctx}\n\n"
-        f"REVIEWER COMMENT (on {path}:{comment.get('line')}):\n{comment['body']}\n\n"
+        + (f"REVIEWED HUNK:\n{hunk}\n\n" if hunk else "")
+        + f"REVIEWER COMMENT (on {path}:{comment.get('line')}):\n{comment['body']}\n\n"
         "Reply:"
     )
     return run_sonnet(prompt) or ""
@@ -1717,6 +1719,7 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                 "body": comment["body"],
                 "path": comment.get("path"),
                 "line": comment.get("line"),
+                "diff_hunk": comment.get("diff_hunk", ""),
                 "status": "new",
                 "suggested_reply": "",
             }
