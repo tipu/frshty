@@ -1720,6 +1720,7 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                 "path": comment.get("path"),
                 "line": comment.get("line"),
                 "diff_hunk": comment.get("diff_hunk", ""),
+                "created_at": comment.get("created_at") or comment.get("created_on") or "",
                 "status": "new",
                 "suggested_reply": "",
             }
