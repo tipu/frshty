@@ -1751,7 +1751,7 @@ class TestCheckInReviewFixFailedRetry:
              patch("features.tickets.get_repos",
                    return_value=[{"name": "repo", "path": wt.parent}]), \
              patch("features.tickets.ticket_worktree_path", return_value=wt), \
-             patch("features.tickets.run_haiku", return_value=haiku_classify) as haiku, \
+             patch("features.tickets.run_sonnet", return_value=haiku_classify) as haiku, \
              patch("features.tickets.run_claude_code", return_value=None), \
              patch("features.tickets.subprocess.run",
                    return_value=MagicMock(returncode=0)):
@@ -1827,7 +1827,7 @@ class TestCheckInReviewFixFailedRetry:
              patch("features.tickets.get_repos",
                    return_value=[{"name": "repo", "path": wt.parent}]), \
              patch("features.tickets.ticket_worktree_path", return_value=wt), \
-             patch("features.tickets.run_haiku", return_value=haiku_classify), \
+             patch("features.tickets.run_sonnet", return_value=haiku_classify), \
              patch("features.tickets.run_claude_code", return_value=None), \
              patch("features.tickets.subprocess.run",
                    return_value=MagicMock(returncode=0)):
@@ -1872,7 +1872,7 @@ class TestCheckInReviewFixFailedRetry:
              patch("features.tickets.get_repos",
                    return_value=[{"name": "repo", "path": wt.parent}]), \
              patch("features.tickets.ticket_worktree_path", return_value=wt), \
-             patch("features.tickets.run_haiku", return_value=haiku_classify) as haiku, \
+             patch("features.tickets.run_sonnet", return_value=haiku_classify) as haiku, \
              patch("features.tickets.run_claude_code", return_value=None), \
              patch("features.tickets.subprocess.run",
                    return_value=MagicMock(returncode=0)), \

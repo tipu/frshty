@@ -89,7 +89,7 @@ class TestCheckComments:
         config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
 
         with patch("features.own_prs.comments") as mock_comments, \
-             patch("features.own_prs.run_haiku", return_value='{"results": [{"id": 0, "actionable": true, "reason": "clear"}]}'), \
+             patch("features.own_prs.run_sonnet", return_value='{"results": [{"id": 0, "actionable": true, "reason": "clear"}]}'), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
              patch("features.own_prs.run_claude_code", return_value="done"), \
              patch("features.own_prs.log"):
@@ -107,7 +107,7 @@ class TestCheckComments:
         config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
 
         with patch("features.own_prs.comments") as mock_comments, \
-             patch("features.own_prs.run_haiku", return_value=""), \
+             patch("features.own_prs.run_sonnet", return_value=""), \
              patch("features.own_prs.log"):
             mock_comments.fetch_and_detect_comments.return_value = {
                 "new": [make_comment(id=10, author_id="reviewer1", body="Restore the pluralize please")],

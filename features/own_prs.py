@@ -5,7 +5,7 @@ from pathlib import Path
 import core.log as log
 import core.state as state
 import core.comments as comments
-from core.claude_runner import run_claude_code, run_haiku, extract_json
+from core.claude_runner import run_claude_code, run_haiku, run_sonnet, extract_json
 from core.config import get_repos
 from features.platforms import make_platform
 
@@ -78,13 +78,23 @@ def _check_comments(config, instance_key, platform, pr, base_url):
     if not all_to_process:
         return
 
-    comment_list = "\n".join(f"[{i}] {c['body'][:200]}" for i, c in enumerate(all_to_process))
+    comment_list = "\n\n".join(
+        f"[{i}] {c.get('path', '')}:{c.get('line', '')}\n"
+        f"CODE:\n{(c.get('diff_hunk') or '(no hunk)')[:600]}\n"
+        f"COMMENT: {c['body'][:300]}"
+        for i, c in enumerate(all_to_process)
+    )
     batch_prompt = (
-        "Classify each PR review comment as actionable (clear code change requested) or ambiguous (vague, question, opinion).\n\n"
+        "Triage each PR review comment using the CODE it is anchored to. "
+        "actionable=true when it requests a concrete code change — including terse directives "
+        "grounded in the code, e.g. 'Move to global.', 'Sanitize this', 'Use X instead', "
+        "'Add a test for Y', 'Rename to Z', 'This should be debug'. actionable=false ONLY for "
+        "genuine open questions, opinions, or discussion with no concrete change to make. "
+        "When a comment implies a specific change to the code shown, choose true.\n\n"
         f"{comment_list}\n\n"
         'Reply with JSON: {"results": [{"id": 0, "actionable": true, "reason": "brief reason"}, ...]}'
     )
-    batch_raw = run_haiku(batch_prompt, timeout=60)
+    batch_raw = run_sonnet(batch_prompt, timeout=120)
     classifications = {}
     if batch_raw:
         parsed_batch = extract_json(batch_raw)
