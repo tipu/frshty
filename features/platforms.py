@@ -525,6 +525,7 @@ class GitHubPlatform:
                 "author_name": c.get("user", {}).get("login", ""),
                 "path": c.get("path"),
                 "line": c.get("line"),
+                "diff_hunk": c.get("diff_hunk", ""),
                 "created_on": c.get("created_at", ""),
                 "created_at": c.get("created_at", ""),
                 "updated_at": c.get("updated_at", c.get("created_at", "")),
