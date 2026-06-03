@@ -161,6 +161,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                 <span v-if="c.pr_repo">{{ c.pr_repo }}#{{ c.pr_id }}</span>
                 <span v-if="c.path">{{ c.path }}{{ c.line ? ':' + c.line : '' }}</span>
             </div>
+            <pre v-if="c.diff_hunk" class="text-xs bg-gray-900 border border-gray-800 rounded p-2 overflow-x-auto mb-1 whitespace-pre text-gray-400" style="max-height:180px">{{ c.diff_hunk }}</pre>
             <div class="text-sm text-gray-200 mb-1">{{ c.body }}</div>
             <textarea v-model="replyDrafts[c.id]" rows="3" class="reply-box w-full p-2 rounded text-sm mb-1"></textarea>
             <button @click="postReply(c.id)" class="bg-green-700 hover:bg-green-600 text-white px-3 py-1 rounded text-xs">Post Reply</button>
