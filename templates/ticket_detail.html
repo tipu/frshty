@@ -163,9 +163,14 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                 <span v-if="c.path">{{ c.path }}{{ c.line ? ':' + c.line : '' }}</span>
                 <span v-if="c.created_at" class="ml-auto text-gray-600">{{ formatCommentDate(c.created_at) }}</span>
             </div>
-            <div v-if="c.diff_hunk" class="text-xs bg-gray-900 border border-gray-800 rounded overflow-x-auto mb-1" style="max-height:200px">
-                <div v-for="(l, li) in hunkLines(c)" :key="li" class="diff-line" :class="[diffLineClass(l.type), l.target ? 'comment-target-line' : '']">
-                    <span class="diff-line-num">{{ l.marker }}</span><span v-html="l.html"></span>
+            <div v-if="c.diff_hunk" class="mb-1">
+                <div @click="hunkCollapsed[c.id] = !hunkCollapsed[c.id]" class="text-xs text-gray-500 cursor-pointer select-none hover:text-gray-300 mb-1">
+                    {{ hunkCollapsed[c.id] ? '▸' : '▾' }} code
+                </div>
+                <div v-show="!hunkCollapsed[c.id]" class="text-xs bg-gray-900 border border-gray-800 rounded">
+                    <div v-for="(l, li) in hunkLines(c)" :key="li" class="diff-line" :class="[diffLineClass(l.type), l.target ? 'comment-target-line' : '']">
+                        <span class="diff-line-num">{{ l.marker }}</span><span v-html="l.html"></span>
+                    </div>
                 </div>
             </div>
             <div class="text-sm text-gray-200 mb-1">{{ c.body }}</div>
@@ -596,6 +601,7 @@ frshtyApp({
         }
         const docExpanded = reactive({});
         const replyDrafts = reactive({});
+        const hunkCollapsed = reactive({});
         const jobOutput = reactive({ jobId: null, taskName: '', text: '', offset: 0 });
 
         const jobOutputEl = ref(null);
@@ -1505,7 +1511,7 @@ frshtyApp({
             selectedRepo, repoTabs, filteredComments, needsReplyComments,
             renderMarkdown, escHtml,
             jobStatusClass, jobReason, jobHasOutput,
-            diffLineClass, diffLinePrefix, hunkLines, formatCommentDate, commentLabel, commentClass, commentBodyTextClass, commentBadgeStyle, flatCount, scrollToFile,
+            diffLineClass, diffLinePrefix, hunkLines, formatCommentDate, hunkCollapsed, commentLabel, commentClass, commentBodyTextClass, commentBadgeStyle, flatCount, scrollToFile,
             load, loadJobs, switchTab, severityClass,
             saveRelease, clearRelease, reinspectRelease,
             setStatus, startDev, restartTicket, submitNote, onSetStateChange, toggleAutoPr,
