@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<title>Work — frshty</title>
+<script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xterm-addon-web-links@0.9.0/lib/xterm-addon-web-links.js"></script>
+<style>
+html, body { margin: 0; padding: 0; height: 100%; background: #0a0a0f; color: #e2e8f0; font-family: 'JetBrains Mono', 'Fira Code', Menlo, monospace; }
+#header { display: flex; align-items: center; gap: 12px; padding: 8px 14px; background: #141425; border-bottom: 1px solid #2a2a2a; font-size: 12px; }
+#header a { color: #93c5fd; text-decoration: none; }
+#header a:hover { text-decoration: underline; }
+#header .ticket-key { color: #c084fc; font-weight: bold; }
+#header .status { color: #6b7280; }
+#term { position: absolute; top: 36px; bottom: 0; left: 0; right: 0; padding: 6px; }
+#term .xterm { height: 100%; }
+</style>
+</head>
+<body>
+<div id="header">
+    <a href="/today" id="back">&larr; Today</a>
+    <span class="ticket-key" id="work-key"></span>
+    <span class="status" id="status">starting…</span>
+</div>
+<div id="term"></div>
+<script>
+const pathParts = location.pathname.split('/').filter(Boolean);
+const WORK_KEY = decodeURIComponent(pathParts[pathParts.length - 1] || '');
+document.title = `Work — ${WORK_KEY}`;
+document.getElementById('work-key').textContent = WORK_KEY;
+
+const statusEl = document.getElementById('status');
+function setStatus(s) { statusEl.textContent = s; }
+
+let term, fitAddon, ws, reconnectDelay = 0;
+const MAX_RECONNECT_DELAY = 8000;
+
+function connect() {
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${protocol}//${location.host}/ws/terminal/${encodeURIComponent(WORK_KEY)}`);
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = () => {
+        reconnectDelay = 0;
+        setStatus('connected');
+        if (fitAddon) fitAddon.fit();
+        if (term) ws.send(JSON.stringify({type: 'resize', cols: term.cols, rows: term.rows}));
+    };
+    ws.onmessage = (event) => {
+        const data = event.data instanceof ArrayBuffer ? new Uint8Array(event.data) : event.data;
+        if (term) term.write(data);
+    };
+    ws.onclose = (event) => {
+        if (!term) return;
+        if (event.code === 1008) {
+            term.write('\r\n\x1b[31m[terminal unavailable]\x1b[0m\r\n');
+            setStatus('unavailable');
+            return;
+        }
+        reconnectDelay = Math.min(reconnectDelay ? reconnectDelay * 2 : 500, MAX_RECONNECT_DELAY);
+        setStatus(`reconnecting in ${reconnectDelay}ms…`);
+        setTimeout(() => { if (term) { term.reset(); connect(); } }, reconnectDelay);
+    };
+}
+
+async function start() {
+    setStatus('launching claude…');
+    try {
+        const resp = await fetch('/api/today/launch', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({key: WORK_KEY}),
+        });
+        if (!resp.ok) {
+            const e = await resp.json().catch(() => ({}));
+            setStatus(`error: ${e.error || resp.statusText}`);
+            return;
+        }
+    } catch (e) {
+        setStatus(`error: ${e.message}`);
+        return;
+    }
+    term = new Terminal({
+        cursorBlink: true,
+        fontSize: 14,
+        fontFamily: "'JetBrains Mono', 'Fira Code', Menlo, monospace",
+        theme: { background: '#0a0a0f', foreground: '#e2e8f0', cursor: '#e2e8f0', selectionBackground: '#334155' },
+    });
+    fitAddon = new FitAddon.FitAddon();
+    term.loadAddon(fitAddon);
+    term.loadAddon(new WebLinksAddon.WebLinksAddon());
+    term.open(document.getElementById('term'));
+    fitAddon.fit();
+    connect();
+    term.onData(data => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(data); });
+    new ResizeObserver(() => {
+        if (fitAddon) fitAddon.fit();
+        if (ws && ws.readyState === WebSocket.OPEN && term) {
+            ws.send(JSON.stringify({type: 'resize', cols: term.cols, rows: term.rows}));
+        }
+    }).observe(document.getElementById('term'));
+}
+
+start();
+</script>
+</body>
+</html>
