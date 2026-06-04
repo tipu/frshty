@@ -40,6 +40,9 @@
 .btn-danger:hover { background: #b91c1c; }
 .btn-snooze { background: transparent; color: #6b7280; font-size: 11px; padding: 2px 8px; border-radius: 4px; border: 1px solid #374151; }
 .btn-snooze:hover { color: #d1d5db; border-color: #4b5563; }
+.btn-claude { background: #4c1d95; color: #ede9fe; font-size: 12px; padding: 4px 10px; border-radius: 4px; border: 1px solid #6d28d9; white-space: nowrap; }
+.btn-claude:hover:not(:disabled) { background: #5b21b6; }
+.btn-claude:disabled { opacity: 0.5; cursor: not-allowed; }
 .tk-key { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; color: #93c5fd; }
 .tk-sum { color: #d1d5db; font-size: 12px; }
 .tk-meta { color: #6b7280; font-size: 11px; }
@@ -93,6 +96,7 @@ details[open] > summary { color: #d1d5db; margin-bottom: 8px; }
                 @click="doAction('mr:' + e.ticket_key, 'POST', '/api/tickets/' + e.ticket_key + '/merge')">
             {{ busy['mr:' + e.ticket_key] ? 'merging…' : 'Merge' }}
         </button>
+        <button class="btn-claude" :disabled="busy['launch:merge_ready:' + e.ticket_key]" @click="launchClaude('merge_ready', e)">Claude</button>
         <button class="btn-snooze" @click="snooze('merge_ready', e.ticket_key)">Snooze</button>
     </div>
 </div>
@@ -106,6 +110,7 @@ details[open] > summary { color: #d1d5db; margin-bottom: 8px; }
             <div class="tk-sum truncate">{{ e.summary }}</div>
         </div>
         <button class="btn-pri" @click="openSubmitPr(e.ticket_key)">Submit PR…</button>
+        <button class="btn-claude" :disabled="busy['launch:ready_to_submit:' + e.ticket_key]" @click="launchClaude('ready_to_submit', e)">Claude</button>
         <button class="btn-snooze" @click="snooze('ready_to_submit', e.ticket_key)">Snooze</button>
     </div>
 </div>
@@ -127,6 +132,7 @@ details[open] > summary { color: #d1d5db; margin-bottom: 8px; }
                 @click="doAction('rs:' + e.ticket_key, 'POST', '/api/tickets/' + e.ticket_key + '/restart')">
             {{ busy['rs:' + e.ticket_key] ? 'restarting…' : 'Restart' }}
         </button>
+        <button class="btn-claude" :disabled="busy['launch:pr_failed_tickets:' + e.ticket_key]" @click="launchClaude('pr_failed_tickets', e)">Claude</button>
         <button class="btn-snooze" @click="snooze('pr_failed_tickets', e.ticket_key)">Snooze</button>
     </div>
 </div>
@@ -144,6 +150,7 @@ details[open] > summary { color: #d1d5db; margin-bottom: 8px; }
                 @click="doAction('ap:' + e.ticket_key, 'POST', '/api/tickets/' + e.ticket_key + '/approve')">Approve</button>
         <button class="btn-danger" :disabled="busy['ap:' + e.ticket_key]"
                 @click="doAction('ap:' + e.ticket_key, 'POST', '/api/tickets/' + e.ticket_key + '/reject')">Reject</button>
+        <button class="btn-claude" :disabled="busy['launch:pending_approvals_stuck:' + e.ticket_key]" @click="launchClaude('pending_approvals_stuck', e)">Claude</button>
         <button class="btn-snooze" @click="snooze('pending_approvals_stuck', e.ticket_key)">Snooze</button>
     </div>
     <div v-for="e in (visibleLoops.pickup_new || [])" :key="'pn:' + e.ticket_key" class="action-card">
@@ -152,6 +159,7 @@ details[open] > summary { color: #d1d5db; margin-bottom: 8px; }
             <div class="tk-sum truncate">{{ e.summary }}</div>
         </div>
         <a :href="'/tickets/' + e.ticket_key" class="btn-sec">Open</a>
+        <button class="btn-claude" :disabled="busy['launch:pickup_new:' + e.ticket_key]" @click="launchClaude('pickup_new', e)">Claude</button>
         <button class="btn-snooze" @click="snooze('pickup_new', e.ticket_key)">Snooze</button>
     </div>
 </div>
@@ -165,6 +173,7 @@ details[open] > summary { color: #d1d5db; margin-bottom: 8px; }
                 <div class="tk-key"><a :href="'/tickets/' + e.ticket_key" class="hover:underline">{{ e.ticket_key }}</a> <span class="tk-meta">· {{ e.count }} needs reply</span></div>
                 <div class="tk-sum truncate">{{ e.summary }}</div>
             </div>
+            <button class="btn-claude" :disabled="busy['launch:pr_comments_needs_reply:' + e.ticket_key]" @click="launchClaude('pr_comments_needs_reply', e)">Reply in Claude</button>
             <button class="btn-snooze" @click="snooze('pr_comments_needs_reply', e.ticket_key)">Snooze ticket</button>
         </div>
         <div v-for="(c, ci) in e.comments" :key="'crow:' + e.ticket_key + ':' + (c.id || ci)" class="reply-row">
@@ -198,6 +207,7 @@ details[open] > summary { color: #d1d5db; margin-bottom: 8px; }
             <div class="tk-meta">by {{ e.author }} · created {{ fmtRelative(e.created_on) }}</div>
         </div>
         <a :href="'/reviews'" class="btn-sec">Open in /reviews</a>
+        <button class="btn-claude" :disabled="busy['launch:peer_pr_reviews:' + e.repo + '/' + e.pr_id]" @click="launchClaude('peer_pr_reviews', e)">Claude</button>
         <button class="btn-snooze" @click="snooze('peer_pr_reviews', e.repo + '/' + e.pr_id)">Snooze</button>
     </div>
 </div>
@@ -212,6 +222,7 @@ details[open] > summary { color: #d1d5db; margin-bottom: 8px; }
             <div class="tk-meta">{{ e.review_state || 'no reviews' }} · ci: {{ e.ci_state || 'unknown' }} · {{ fmtRelative(e.created_on) }}</div>
         </div>
         <a :href="e.url" target="_blank" class="btn-sec">Open</a>
+        <button class="btn-claude" :disabled="busy['launch:stale_own_prs:' + e.repo + '/' + e.pr_id]" @click="launchClaude('stale_own_prs', e)">Claude</button>
         <button class="btn-snooze" @click="snooze('stale_own_prs', e.repo + '/' + e.pr_id)">Snooze</button>
     </div>
 </div>
@@ -225,6 +236,7 @@ details[open] > summary { color: #d1d5db; margin-bottom: 8px; }
             <div class="tk-sum truncate">{{ e.summary }}</div>
         </div>
         <a :href="'/tickets/' + e.ticket_key" class="btn-sec">Open</a>
+        <button class="btn-claude" :disabled="busy['launch:in_review_no_ci:' + e.ticket_key]" @click="launchClaude('in_review_no_ci', e)">Claude</button>
         <button class="btn-snooze" @click="snooze('in_review_no_ci', e.ticket_key)">Snooze</button>
     </div>
 </div>
@@ -580,6 +592,32 @@ frshtyApp({
             try { await load(true); } finally { refreshing.value = false; }
         }
 
+        async function launchClaude(loopType, e) {
+            const fn = ENTITY_ID[loopType] || (x => x.ticket_key || '');
+            const cardId = `launch:${loopType}:${fn(e)}`;
+            busy[cardId] = true;
+            cardError[cardId] = '';
+            try {
+                const r = await fetch('/api/today/launch', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({
+                        loop_type: loopType,
+                        ticket_key: e.ticket_key || null,
+                        repo: e.repo || null,
+                        pr_id: e.pr_id ?? null,
+                    }),
+                });
+                const j = await r.json().catch(() => ({}));
+                if (!r.ok) { cardError[cardId] = j.error || `HTTP ${r.status}`; return; }
+                window.open('/today/work/' + encodeURIComponent(j.key), '_blank');
+            } catch (err) {
+                cardError[cardId] = err.message || String(err);
+            } finally {
+                busy[cardId] = false;
+            }
+        }
+
         onMounted(() => {
             load();
             setInterval(load, 30000);
@@ -594,7 +632,7 @@ frshtyApp({
             formatBucketLabel, badgeClass, fmtRelative, replyKey,
             prFailReasonLabel, prFailReasonClass, prFailReasonTip,
             doAction, snooze, unsnooze, sendReply, openSubmitPr, confirmSubmitPr, runNow,
-            refreshLive,
+            refreshLive, launchClaude,
         };
     }
 }).mount('#app');

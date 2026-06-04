@@ -94,6 +94,11 @@ def today_page():
     return _template("today.html")
 
 
+@router.get("/today/work/{key}", response_class=HTMLResponse)
+def today_work_page(key: str):
+    return _template("today_work.html")
+
+
 @router.get("/wizard", response_class=HTMLResponse)
 def wizard_page():
     return _template("wizard.html")

@@ -1,5 +1,6 @@
 import os
 import re
+import shlex
 import shutil
 import pty
 import json
@@ -15,6 +16,7 @@ import core.state as state
 
 MAX_SCROLLBACK = 1024 * 1024
 TMUX_SOCKET = os.path.expanduser("~/.frshty-tmux")
+LAUNCH_CONTEXT_DIR = os.path.expanduser("~/.frshty/launch")
 def _tmux_bin():
     return shutil.which("tmux") or "tmux"
 
@@ -109,6 +111,31 @@ def send_keys(ticket_key: str, keys: str):
         [_tmux_bin(), "-S", TMUX_SOCKET, "send-keys", "-t", session_name, keys, "Enter"],
         capture_output=True,
     )
+
+
+def launch_claude(key: str, cwd: str, session_uuid: str, context: str, first_run: bool):
+    """Start (or resume) a Claude conversation in the `key` tmux session.
+
+    First launch pins a deterministic --session-id and seeds context via
+    --append-system-prompt; later launches resume the same id so closing the
+    browser (or the process dying) returns to the same conversation. No-op if
+    Claude is already running in the pane — the websocket just reattaches."""
+    ensure_session(key, cwd)
+    if session_healthy(key).get("claude_running"):
+        return
+    if first_run:
+        os.makedirs(LAUNCH_CONTEXT_DIR, exist_ok=True)
+        ctx_path = os.path.join(LAUNCH_CONTEXT_DIR, f"{session_uuid}.md")
+        with open(ctx_path, "w") as f:
+            f.write(context or "")
+        cmd = (
+            f"claude --session-id {shlex.quote(session_uuid)} "
+            f"--dangerously-skip-permissions "
+            f"--append-system-prompt \"$(cat {shlex.quote(ctx_path)})\""
+        )
+    else:
+        cmd = f"claude --resume {shlex.quote(session_uuid)} --dangerously-skip-permissions"
+    send_keys(key, cmd)
 
 
 def _get_or_spawn(ticket_key: str, cwd: str):
