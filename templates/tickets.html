@@ -111,7 +111,7 @@
 <script>
 const { createApp, ref, computed, onMounted } = Vue;
 
-const COLUMNS = ['epic', 'pending_approval', 'new', 'planning', 'reviewing', 'testing', 'tests_failed', 'proving', 'pr_ready', 'in_review', 'pr_failed', 'merged', 'validation'];
+const COLUMNS = ['epic', 'pending_approval', 'new', 'planning', 'reviewing', 'testing', 'tests_failed', 'proving', 'pr_ready', 'in_review', 'pr_failed', 'blocked', 'merged', 'validation'];
 const COLUMN_LABELS = {
 	epic: 'Epics',
 	pending_approval: 'Pending approval',
@@ -124,6 +124,7 @@ const COLUMN_LABELS = {
 	pr_ready: 'PR ready',
 	in_review: 'In review',
 	pr_failed: 'PR failed',
+	blocked: 'Blocked',
 	merged: 'Merged',
 	validation: 'Validation',
 	ignored: 'Ignored',
@@ -134,6 +135,7 @@ const HELP = {
 	pr_ready: 'Branch pushed and work finished. Waiting for the scheduler (or auto_pr) to open the PR on the platform.',
 	in_review: 'PR open, not all merged. Each cycle: poll CI, resolve conflicts, read review comments, check merge state.',
 	pr_failed: 'CI or conflict resolution exhausted retries. Needs manual intervention — restart the ticket to retry.',
+	blocked: 'Stuck on a gate (e.g. a sibling repo not ready). frshty will not progress it; the only exit is a manual reset to New.',
 	validation: 'Post-merge playwright validation running against the live app. Replays the regression pool too.',
 };
 
