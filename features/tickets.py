@@ -14,6 +14,7 @@ import core.state as state
 import core.comments as comments
 from core import external_log
 from core.config import get_repos, ticket_worktree_path, resolve_env
+from core.deps import run_dep_command, relink_shared_venv
 from core.claude_runner import run_haiku, run_sonnet, run_claude_code, extract_json
 from core.ticket_status import TicketStatus, transition
 from features.platforms import make_platform
@@ -724,6 +725,7 @@ def _ensure_worktree(config: dict, ticket_key: str, slug: str) -> dict | None:
                         cwd=str(wt_path), capture_output=True, timeout=60
                     )
                     subprocess.run(["git", "clean", "-fd"], cwd=str(wt_path), capture_output=True, timeout=60)
+                relink_shared_venv(config, repo["name"], wt_path)
                 synced = True
             else:
                 wt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1133,6 +1135,7 @@ def _setup_ticket(config, ticket, base_url, comments=None) -> dict:
             subprocess.run(["git", "checkout", branch], cwd=str(wt_path), capture_output=True, timeout=60)
             subprocess.run(["git", "reset", "--hard", f"origin/{ws['base_branch']}"], cwd=str(wt_path), capture_output=True, timeout=60)
             subprocess.run(["git", "clean", "-fd"], cwd=str(wt_path), capture_output=True, timeout=60)
+            relink_shared_venv(config, repo["name"], wt_path)
             continue
         wt_path.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "worktree", "prune"], cwd=str(repo["path"]), capture_output=True, timeout=60)
@@ -1155,10 +1158,7 @@ def _setup_ticket(config, ticket, base_url, comments=None) -> dict:
 
         for dep in ws.get("dep_commands", []):
             if dep["match"] == repo["name"]:
-                try:
-                    subprocess.run(dep["cmd"].split(), cwd=str(wt_path), capture_output=True, timeout=300)
-                except FileNotFoundError:
-                    pass
+                run_dep_command(config, repo["name"], wt_path, dep["cmd"])
 
     if not any_worktree:
         log.emit("ticket_worktree_error", f"No worktrees created for {slug}, staying at new",
@@ -1313,6 +1313,7 @@ def materialize_prd_ticket(config: dict, ticket_key: str, ts: dict, base_url: st
             subprocess.run(["git", "checkout", branch], cwd=str(wt_path), capture_output=True, timeout=60)
             subprocess.run(["git", "reset", "--hard", f"origin/{ws['base_branch']}"], cwd=str(wt_path), capture_output=True, timeout=60)
             subprocess.run(["git", "clean", "-fd"], cwd=str(wt_path), capture_output=True, timeout=60)
+            relink_shared_venv(config, repo["name"], wt_path)
             continue
         wt_path.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "worktree", "prune"], cwd=str(repo["path"]), capture_output=True, timeout=60)
@@ -1336,11 +1337,7 @@ def materialize_prd_ticket(config: dict, ticket_key: str, ts: dict, base_url: st
         subprocess.run(["chown", "-R", "1000:1000", str(wt_path)], capture_output=True, timeout=60)
         for dep in ws.get("dep_commands", []):
             if dep["match"] == repo["name"]:
-                try:
-                    subprocess.run(dep["cmd"].split(), cwd=str(wt_path),
-                                   capture_output=True, timeout=300)
-                except FileNotFoundError:
-                    pass
+                run_dep_command(config, repo["name"], wt_path, dep["cmd"])
 
     if not any_worktree:
         raise RuntimeError(f"no worktrees created for {slug}")

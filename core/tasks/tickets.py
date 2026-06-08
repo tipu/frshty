@@ -10,6 +10,7 @@ import core.log as log
 import core.state as state
 from core.claude_runner import run_claude_code, run_haiku, extract_json
 from core.config import get_repos, ticket_worktree_path
+from core.deps import relink_shared_venv
 from core.consensus_plan import run_consensus_plan
 from core.tasks.registry import TaskContext, TaskResult, task
 from core.tasks.preconditions import (
@@ -468,6 +469,7 @@ def start_planning(ctx: TaskContext) -> TaskResult:
                                cwd=str(wt), capture_output=True, timeout=60)
                 subprocess.run(["git", "clean", "-fd"],
                                cwd=str(wt), capture_output=True, timeout=60)
+                relink_shared_venv(ctx.config, repo["name"], wt)
     if ctx.ticket_key:
         ts = state.load_ticket(ctx.ticket_key) or {}
         if ts:

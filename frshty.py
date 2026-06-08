@@ -11,6 +11,7 @@ import core.config as cfg
 import core.events as events
 import core.log as log
 import core.state as state
+from core.deps import export_pnpm_store
 from actions.schedule_pr import handle as _schedule_pr_action
 
 events.register_action("schedule_pr", _schedule_pr_action)
@@ -89,6 +90,7 @@ def main():
         _llm.configure(c)
     primary = configs[0]
     _set_primary_config(primary)
+    export_pnpm_store(primary)
     # Fully event-driven: all periodic work via cron_tick -> Dispatcher -> WorkerPool
     try:
         import core.runtime as _rt
