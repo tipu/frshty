@@ -1014,6 +1014,10 @@ def check(config: dict, instance_key: str = ""):
                 ts["parent_key"] = parent["key"]
                 ts["parent_summary"] = parent.get("summary", "")
             if ts.get("status") == "done":
+                merged_ext = ts.get("merged_external_status")
+                if merged_ext and ticket.get("status", "") == merged_ext:
+                    state.save_ticket(key, ts)
+                    continue
                 ts.pop("done_at", None)
                 if ts.get("prs"):
                     ts["status"] = "in_review"

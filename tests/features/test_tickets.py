@@ -667,6 +667,41 @@ class TestCheckSkipsBusyTicket:
             tickets.check(fake_config, instance_key="inst")
 
 
+class TestCheckDoneTicketResurrection:
+    """A ticket frshty merged and marked done must stay done while its upstream
+    status is unchanged; it may only be revived into the active pipeline when
+    the external status moves (a genuine reopen)."""
+
+    def _run(self, fake_config, tmp_state, external_status):
+        import core.state as state
+        slug = "PROJ-1-do-the-thing"
+        state.save_ticket("PROJ-1", make_ticket_state(
+            status="done", slug=slug, branch=slug,
+            merged_external_status="In Review",
+            prs=[{"repo": "r", "id": 1, "branch": slug, "url": "http://u"}],
+        ))
+        with patch("features.tickets._fetch_tickets",
+                   return_value=[make_ticket(status=external_status)]), \
+             patch("features.tickets._fetch_open_prs", return_value=[]), \
+             patch("features.tickets.get_repos", return_value=[]), \
+             patch("features.tickets._process_ticket_comments"), \
+             patch("features.tickets._resolve_status", return_value=None), \
+             patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("features.tickets._enqueue_stage") as eq:
+            tickets.check({**fake_config, "_base_url": "http://base"},
+                          instance_key="inst")
+        return state.load_ticket("PROJ-1"), eq
+
+    def test_stays_done_when_external_status_unchanged(self, fake_config, tmp_state):
+        saved, eq = self._run(fake_config, tmp_state, "In Review")
+        assert saved["status"] == "done"
+        eq.assert_not_called()
+
+    def test_revives_when_external_status_changed(self, fake_config, tmp_state):
+        saved, eq = self._run(fake_config, tmp_state, "In Progress")
+        assert saved["status"] != "done"
+
+
 class TestCheckRebuildsMissingTicketDir:
     def test_planning_with_missing_dir_triggers_setup(self, fake_config, tmp_state):
         import core.state as state
