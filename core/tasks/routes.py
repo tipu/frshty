@@ -27,6 +27,7 @@ def _cron_routes(event: dict, registries: dict) -> list[dict]:
         # thread in core/beat.py owns their firing via the scheduler table.
         # scheduler_check handles legacy oneshot rows that aren't recurring.
         jobs.append({"instance_key": instance_key, "task": "scheduler_check"})
+        jobs.append({"instance_key": instance_key, "task": "dep_store_gc"})
     return jobs
 
 

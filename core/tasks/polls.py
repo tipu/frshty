@@ -42,3 +42,10 @@ def scheduler_check(ctx: TaskContext) -> TaskResult:
     from core import scheduler
     scheduler.check_due(ctx.config)
     return TaskResult("ok")
+
+
+@task("dep_store_gc", timeout=600)
+def dep_store_gc(ctx: TaskContext) -> TaskResult:
+    from core import deps
+    result = deps.gc_dep_stores(ctx.config)
+    return TaskResult("ok", artifacts=result)
