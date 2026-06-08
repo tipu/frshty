@@ -158,6 +158,87 @@ def test_reviewing_fail_verdict_enqueues_fix(tmp_path):
         f"expected fix_review_findings in {tasks_enqueued}"
 
 
+def _run_reviewing_check(tmp_path, ts_extra):
+    from features import tickets
+    slug = "PROJ-9-flow"
+    (tmp_path / "tickets" / slug / "docs").mkdir(parents=True)
+    state.init(tmp_path)
+    state.save("tickets", {"PROJ-9": {"status": "reviewing", "slug": slug,
+                                      "branch": "feat/flow", **ts_extra}})
+    config = {
+        "_base_url": "http://test",
+        "job": {"ticket_system": "", "platform": "github"},
+        "workspace": {"root": tmp_path, "tickets_dir": "tickets",
+                      "base_branch": "main", "ticket_layout": "flat"},
+        "github": {"repo": "org/backend"}, "pr": {}, "features": {},
+    }
+    assigned = [{"key": "PROJ-9", "summary": "flow", "status": "In Progress",
+                 "url": "", "description": "", "attachments": [], "related": [],
+                 "subtasks": []}]
+    with patch("features.tickets._fetch_tickets", return_value=assigned), \
+         patch("features.tickets.get_repos",
+               return_value=[{"name": "backend", "path": tmp_path}]), \
+         patch("features.tickets.make_platform"), \
+         patch("features.tickets._fetch_open_prs", return_value=[]), \
+         patch("features.tickets._reconcile_prs", side_effect=lambda ts, _: ts), \
+         patch("features.tickets._resolve_conflicts", side_effect=lambda c, t, ts, u, **kw: ts), \
+         patch("features.tickets.log"), \
+         patch("features.tickets._enqueue_stage") as enq:
+        tickets.check(config, "inst")
+    return [c.args[2] for c in enq.call_args_list], slug
+
+
+def test_reviewing_first_entry_generates_flow_before_review(tmp_path):
+    """First time in reviewing (change-manifest done, no tri-review yet),
+    the flow doc is requested once and start_reviewing is deferred."""
+    enqueued, slug = _run_reviewing_check(tmp_path, {})
+    assert "generate_flow_doc" in enqueued
+    assert "start_reviewing" not in enqueued
+    assert state.load_ticket("PROJ-9").get("flow_doc_requested") is True
+
+
+def test_reviewing_proceeds_after_flow_requested(tmp_path):
+    """Once the flow doc has been requested, review proceeds even if FLOW.html
+    was never produced — the doc is best-effort and must not block the pipeline."""
+    enqueued, _ = _run_reviewing_check(tmp_path, {"flow_doc_requested": True})
+    assert "start_reviewing" in enqueued
+    assert "generate_flow_doc" not in enqueued
+
+
+def test_reviewing_skips_flow_when_already_built(tmp_path):
+    from features import tickets
+    slug = "PROJ-9-flow"
+    docs = tmp_path / "tickets" / slug / "docs"
+    docs.mkdir(parents=True)
+    (docs / "FLOW.html").write_text("<html></html>")
+    state.init(tmp_path)
+    state.save("tickets", {"PROJ-9": {"status": "reviewing", "slug": slug,
+                                      "branch": "feat/flow"}})
+    config = {
+        "_base_url": "http://test",
+        "job": {"ticket_system": "", "platform": "github"},
+        "workspace": {"root": tmp_path, "tickets_dir": "tickets",
+                      "base_branch": "main", "ticket_layout": "flat"},
+        "github": {"repo": "org/backend"}, "pr": {}, "features": {},
+    }
+    assigned = [{"key": "PROJ-9", "summary": "flow", "status": "In Progress",
+                 "url": "", "description": "", "attachments": [], "related": [],
+                 "subtasks": []}]
+    with patch("features.tickets._fetch_tickets", return_value=assigned), \
+         patch("features.tickets.get_repos",
+               return_value=[{"name": "backend", "path": tmp_path}]), \
+         patch("features.tickets.make_platform"), \
+         patch("features.tickets._fetch_open_prs", return_value=[]), \
+         patch("features.tickets._reconcile_prs", side_effect=lambda ts, _: ts), \
+         patch("features.tickets._resolve_conflicts", side_effect=lambda c, t, ts, u, **kw: ts), \
+         patch("features.tickets.log"), \
+         patch("features.tickets._enqueue_stage") as enq:
+        tickets.check(config, "inst")
+    enqueued = [c.args[2] for c in enq.call_args_list]
+    assert "start_reviewing" in enqueued
+    assert "generate_flow_doc" not in enqueued
+
+
 def _make_conflicting_repo(tmp_path):
     """Create a bare 'origin' repo and a worktree clone with a feature branch
     that conflicts with main."""
