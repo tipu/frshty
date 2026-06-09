@@ -82,7 +82,7 @@ class JiraTicketSystem:
                 if self.account_id:
                     issues = [i for i in issues if (i.get("fields", {}).get("assignee") or {}).get("accountId") == self.account_id]
             else:
-                url = f"{self.base_url}/rest/api/3/search/jql?jql={self.jql}&maxResults=20&fields=key,summary,status,description,attachment,issuelinks,parent,subtasks,timeoriginalestimate,updated,issuetype"
+                url = f"{self.base_url}/rest/api/3/search/jql?jql={self.jql}&maxResults=100&fields=key,summary,status,description,attachment,issuelinks,parent,subtasks,timeoriginalestimate,updated,issuetype"
                 resp = client.get(url)
                 if resp.status_code != 200:
                     return []
