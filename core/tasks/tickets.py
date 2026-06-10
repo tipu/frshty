@@ -178,6 +178,7 @@ def _build_fix_prompt(per_repo: list[dict]) -> str:
 
 _PLAN_TESTS_PROMPT_TEMPLATE = """Read these files in order:
 - docs/ticket.md
+- docs/comments.md (upstream reviewer/QA discussion, if present)
 - docs/notes/*.md (human guidance, if present)
 - docs/change-manifest.md
 - docs/tri-review.md
@@ -698,7 +699,7 @@ def backfill_artifacts(ctx: TaskContext) -> TaskResult:
         f"- PR branch checked out at ./{repo}/ (git worktree)\n"
         f"- Current dir has docs/ and {repo}/ as siblings\n\n"
         f"Tasks in order:\n"
-        f"1. Read docs/ticket.md for ticket context.\n"
+        f"1. Read docs/ticket.md (and docs/comments.md if present, for upstream reviewer/QA context) for ticket context.\n"
         f"2. Examine PR changes: cd {repo}/ && git diff --stat origin/main...HEAD ; git diff origin/main...HEAD\n"
         f"3. Write docs/technical-plan.md as a retrospective technical plan explaining the approach in this PR. Cover architecture, data flow, files modified, key types/interfaces.\n"
         f"4. Write docs/change-manifest.md as a change manifest at technical-product-owner altitude. Include capability delivered, release-note framing, problem and approach, what changed by area, new surfaces, changed surfaces, integration obligations, tradeoffs accepted, what could break, what tests prove. Ground it in the actual diff.\n"
