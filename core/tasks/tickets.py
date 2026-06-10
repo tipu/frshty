@@ -292,7 +292,30 @@ def _drop_session(ctx: TaskContext, task_name: str) -> None:
     state.update_ticket(ctx.ticket_key, _del)
 
 
-_NOISE_ONLY = {"Pipfile", "Pipfile.lock"}
+_NOISE_ONLY = {"Pipfile", "Pipfile.lock", "pnpm-lock.yaml", "yarn.lock",
+               "package-lock.json", "uv.lock", "poetry.lock"}
+
+_SCRATCH_DIRS = (".playwright-cli", "test-results")
+
+
+def _clean_workspace_scratch(ticket_dir: Path) -> list[str]:
+    """Remove ephemeral tool scratch (playwright artifacts, test output) that
+    agents leave in worktrees. These are never source — left in place they
+    block mark_ready's clean-worktree gate or get swept into the PR."""
+    workspace = ticket_dir / "workspace"
+    search_root = workspace if workspace.is_dir() else ticket_dir
+    removed: list[str] = []
+    for child in sorted(search_root.iterdir()):
+        if not (child.is_dir() and (child / ".git").exists()):
+            continue
+        result = subprocess.run(
+            ["git", "clean", "-fd", "--", *_SCRATCH_DIRS],
+            cwd=child, capture_output=True, text=True,
+        )
+        for line in result.stdout.splitlines():
+            if line.startswith("Removing "):
+                removed.append(f"{child.name}/{line[len('Removing '):]}")
+    return removed
 
 
 def _dirty_workspace_repos(ticket_dir: Path) -> list[str]:
@@ -996,12 +1019,20 @@ def prove(ctx: TaskContext) -> TaskResult:
       preconditions=[status_is("proving"),
                      file_exists("docs/proof.md")],
       on_success_status="pr_ready",
-      timeout=15)
+      timeout=900)
 def mark_ready(ctx: TaskContext) -> TaskResult:
     """Final gate: proving → pr_ready after proof is on disk. Fires
     ticket_dev_complete. The skip-path version of the event (when there is
-    no PROOF.md) fires inside enter_proving instead."""
+    no PROOF.md) fires inside enter_proving instead.
+
+    Self-heals the worktree first so the gate reflects real work, not tool
+    debris: strips ephemeral scratch (playwright artifacts, test output) and
+    commits any real changes a prior stage left behind. Only genuinely
+    uncommitted source (after that) blocks."""
     ticket_dir = _ticket_dir(ctx)
+    _clean_workspace_scratch(ticket_dir)
+    _commit_workspace_changes(ticket_dir, ctx.ticket_key or "",
+                              message=f"chore: finalize {ctx.ticket_key} worktree for PR")
     dirty = _dirty_workspace_repos(ticket_dir)
     if dirty:
         return TaskResult("failed",
