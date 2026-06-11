@@ -623,7 +623,7 @@ frshtyApp({
         const inProgress = computed(() => ['planning', 'reviewing'].includes(status.value));
         const stalled = computed(() => inProgress.value && !terminalAlive.value);
         const hasPrs = computed(() => (state.value.prs || []).length > 0);
-        const hasCode = computed(() => ['pr_ready', 'in_review', 'pr_failed', 'merged'].includes(status.value) || hasPrs.value);
+        const hasCode = computed(() => ['pr_ready', 'in_review', 'pr_failed', 'merged', 'blocked'].includes(status.value) || hasPrs.value);
         const lockedAutoPr = computed(() => LOCKED_AUTO_PR_STATES.has(status.value));
 
         const PR_FAIL_REASONS = {
@@ -736,6 +736,8 @@ frshtyApp({
         });
 
         const ticketUrl = computed(() => {
+            const su = state.value && state.value.url;
+            if (su) return su;
             const hist = (ticket.value && ticket.value.history) || [];
             for (const e of hist) {
                 const u = (e.links || {}).ticket;
