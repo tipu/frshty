@@ -5,6 +5,7 @@ from pathlib import Path
 import core.log as log
 import core.state as state
 import core.comments as comments
+import core.git_util as git_util
 from core.claude_runner import run_claude_code, run_haiku, run_sonnet, extract_json
 from core.config import get_repos
 from features.platforms import make_platform
@@ -137,7 +138,7 @@ def _check_comments(config, instance_key, platform, pr, base_url):
                 context = f"File: {comment.get('path', 'unknown')}\nLine: {comment.get('line', 'unknown')}\n\nReview comment: {comment['body']}\n\nFix this review comment."
                 result = run_claude_code(context, cwd=worktree)
                 if result is None:
-                    log.emit("pr_comment_flagged_manual", f"{pr_ref}: Claude failed to fix — {comment['body'][:80]}", links=links, meta=meta)
+                    log.emit("pr_comment_blocked", f"{pr_ref}: Claude failed to fix — {comment['body'][:80]}", links=links, meta={**meta, "reason": "Claude failed to fix"})
                     comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "Claude failed to fix")
                     continue
                 platform.push_branch(worktree, pr["branch"])
@@ -145,7 +146,7 @@ def _check_comments(config, instance_key, platform, pr, base_url):
                 log.emit("pr_comment_addressed", f"{pr_ref}: Fixed — {comment['body'][:80]}", links=links, meta=meta)
                 comments.mark_comment_processed(instance_key, "pr", pr_key, comment_id)
             else:
-                log.emit("pr_comment_flagged_manual", f"{pr_ref}: Could not create worktree — {comment['body'][:80]}", links=links, meta=meta)
+                log.emit("pr_comment_blocked", f"{pr_ref}: Could not create worktree — {comment['body'][:80]}", links=links, meta={**meta, "reason": "Could not create worktree"})
                 comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "Could not create worktree")
         else:
             log.emit("pr_comment_flagged_manual", f"{pr_ref}: Ambiguous ({reason}) — {comment['body'][:80]}", links=links, meta=meta)
@@ -256,13 +257,5 @@ def _ensure_worktree(config, pr) -> Path | None:
         subprocess.run(["git", "reset", "--hard", f"origin/{pr['branch']}"], cwd=str(worktree_path), capture_output=True, timeout=60)
         return worktree_path
 
-    worktree_path.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "fetch", "origin", pr["branch"]], cwd=str(repo_path), capture_output=True, timeout=60)
-    subprocess.run(["git", "worktree", "prune"], cwd=str(repo_path), capture_output=True, timeout=60)
-    result = subprocess.run(
-        ["git", "worktree", "add", str(worktree_path), pr["branch"]],
-        cwd=str(repo_path), capture_output=True, text=True, timeout=60,
-    )
-    if result.returncode == 0:
-        return worktree_path
-    return None
+    base_branch = config.get("workspace", {}).get("base_branch", "main")
+    return git_util.add_or_reuse_worktree(repo_path, worktree_path, pr["branch"], base_branch=base_branch)

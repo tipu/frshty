@@ -33,6 +33,66 @@ import core.log as log
 PRE_COMMIT_TIMEOUT = 600
 
 
+def _worktree_holding_branch(repo_path: Path, branch: str) -> Path | None:
+    """Return the path of the existing worktree that currently has `branch`
+    checked out, or None. Parses `git worktree list --porcelain`."""
+    result = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=str(repo_path), capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        return None
+    current = None
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            current = line[len("worktree "):].strip()
+        elif line.startswith("branch ") and current:
+            ref = line[len("branch "):].strip()
+            if ref == f"refs/heads/{branch}":
+                return Path(current)
+    return None
+
+
+def add_or_reuse_worktree(repo_path: Path, worktree_path: Path, branch: str,
+                          base_branch: str = "main", timeout: int = 60) -> Path | None:
+    """Create a worktree for `branch` at `worktree_path`, or reuse the worktree
+    that already has it checked out.
+
+    `git worktree add` exits non-zero when `branch` is already checked out by
+    another worktree (typically a per-ticket workspace under projects/).
+    Resolution: if the holder is the canonical repo checkout (`repo_path`
+    itself), free it by checking out `base_branch` there and retry the add;
+    otherwise reuse the holder worktree directly. Returns the usable worktree
+    path, or None if it could not be resolved."""
+    worktree_path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "fetch", "origin", branch], cwd=str(repo_path), capture_output=True, timeout=timeout)
+    subprocess.run(["git", "worktree", "prune"], cwd=str(repo_path), capture_output=True, timeout=timeout)
+    result = subprocess.run(
+        ["git", "worktree", "add", str(worktree_path), branch],
+        cwd=str(repo_path), capture_output=True, text=True, timeout=timeout,
+    )
+    if result.returncode == 0:
+        return worktree_path
+
+    holder = _worktree_holding_branch(repo_path, branch)
+    if holder is None:
+        return None
+    if holder.resolve() == Path(repo_path).resolve():
+        freed = subprocess.run(
+            ["git", "checkout", base_branch],
+            cwd=str(repo_path), capture_output=True, text=True, timeout=timeout,
+        )
+        if freed.returncode != 0:
+            return None
+        subprocess.run(["git", "worktree", "prune"], cwd=str(repo_path), capture_output=True, timeout=timeout)
+        retry = subprocess.run(
+            ["git", "worktree", "add", str(worktree_path), branch],
+            cwd=str(repo_path), capture_output=True, text=True, timeout=timeout,
+        )
+        return worktree_path if retry.returncode == 0 else None
+    return holder
+
+
 def _find_pre_commit(repo_dir: Path) -> Path | None:
     """Return the path to a usable pre-commit binary, or None.
 

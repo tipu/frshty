@@ -22,6 +22,43 @@ def _load_ticket_data(row: dict) -> dict:
         return {}
 
 
+def blocked_pr_comments(instance_key: str) -> list[dict]:
+    """PR review comments frshty tried to auto-fix but couldn't (worktree,
+    Claude, or push failure). Surfaced from comment_state rows stuck in a
+    non-processed state with repeated errors. Self-clears once the comment is
+    finally processed. Serves: catastrophic blockers that would otherwise sit
+    silent in the event log."""
+    rows = db.query_all(
+        "SELECT resource_id, comment_id, error_count, last_error, last_checked_at"
+        " FROM comment_state"
+        " WHERE instance_key=? AND resource_type='pr'"
+        " AND state != 'processed' AND error_count >= 2"
+        " AND COALESCE(last_error, '') != ''"
+        " ORDER BY error_count DESC LIMIT ?",
+        (instance_key, _LIMIT),
+    )
+    if not rows:
+        return []
+    pr_state = state.load("own_prs") or {}
+    out: list[dict] = []
+    for r in rows:
+        resource_id = r["resource_id"]
+        repo, _, pr_id = resource_id.partition("/")
+        seen = pr_state.get(resource_id)
+        seen = seen if isinstance(seen, dict) else {}
+        out.append({
+            "repo": repo,
+            "pr_id": pr_id,
+            "comment_id": r["comment_id"],
+            "attempts": r["error_count"],
+            "reason": r["last_error"],
+            "title": seen.get("title", ""),
+            "url": seen.get("url", ""),
+            "last_checked_at": r["last_checked_at"],
+        })
+    return out
+
+
 def stale_own_prs(instance_key: str, threshold_hours: int = 24) -> list[dict]:
     """Own PRs older than threshold with no review/approval signal.
     Reads from kv blob (state.save('own_prs', ...) — features/own_prs.py:42)."""
@@ -448,6 +485,7 @@ def aggregate_all(instance_key: str, config: dict | None = None,
     t = thresholds or {}
     cfg = config or {}
     return {
+        "blocked_pr_comments":    blocked_pr_comments(instance_key),
         "merge_ready":            merge_ready_ticket_prs(instance_key, cfg, live=live),
         "ready_to_submit":        ready_to_submit_prs(instance_key),
         "pr_comments_needs_reply": pr_comments_needing_reply(instance_key, cfg),

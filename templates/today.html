@@ -79,6 +79,20 @@ details[open] > summary { color: #d1d5db; margin-bottom: 8px; }
     <div class="text-sm text-red-400">Failed to load loops: {{ loadError }}</div>
 </div>
 
+<!-- Blocked PR comments — frshty tried to auto-fix and couldn't -->
+<div v-if="visibleLoops.blocked_pr_comments && visibleLoops.blocked_pr_comments.length">
+    <div class="section-h" style="color:#fca5a5">⛔ Blocked — frshty couldn't auto-fix ({{ visibleLoops.blocked_pr_comments.length }})</div>
+    <div v-for="e in visibleLoops.blocked_pr_comments" :key="'blk:' + e.repo + '/' + e.pr_id + '/' + e.comment_id" class="action-card" style="border-color:#7f1d1d">
+        <div class="flex-1 min-w-0">
+            <div class="tk-key"><a :href="e.url" target="_blank" class="hover:underline">{{ e.repo }} #{{ e.pr_id }}</a></div>
+            <div class="tk-sum truncate">{{ e.title }}</div>
+            <div class="tk-meta">{{ e.reason }} · {{ e.attempts }} attempts · {{ fmtRelative(e.last_checked_at) }}</div>
+        </div>
+        <a :href="e.url" target="_blank" class="btn-sec">Open</a>
+        <button class="btn-snooze" @click="snooze('blocked_pr_comments', e.repo + '/' + e.pr_id + '/' + e.comment_id)">Snooze</button>
+    </div>
+</div>
+
 <!-- Merge approvals waiting -->
 <div v-if="visibleLoops.merge_ready && visibleLoops.merge_ready.length">
     <div class="section-h">Merge approvals waiting ({{ visibleLoops.merge_ready.length }})</div>
@@ -320,6 +334,7 @@ details[open] > summary { color: #d1d5db; margin-bottom: 8px; }
 const { ref, computed, reactive, onMounted } = Vue;
 
 const BUCKET_LABELS = {
+    blocked_pr_comments: 'Blocked',
     merge_ready: 'Merge ready',
     ready_to_submit: 'Ready to submit',
     pr_failed_tickets: 'PR failed',
@@ -358,6 +373,7 @@ frshtyApp({
         const renderedBody = computed(() => bodyMd.value ? marked.parse(bodyMd.value) : '');
 
         const ENTITY_ID = {
+            blocked_pr_comments: e => `${e.repo}/${e.pr_id}/${e.comment_id}`,
             merge_ready: e => e.ticket_key,
             ready_to_submit: e => e.ticket_key,
             pr_failed_tickets: e => e.ticket_key,
