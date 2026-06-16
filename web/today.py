@@ -19,6 +19,7 @@ from web.state import _config
 router = APIRouter()
 
 _ALLOWED_LOOPS = frozenset({
+    "blocked_pr_comments",
     "merge_ready", "ready_to_submit", "pr_comments_needs_reply",
     "peer_pr_reviews", "pickup_new", "in_review_no_ci", "pr_failed_tickets",
     "stale_own_prs", "stale_unattended", "pending_approvals_stuck",
