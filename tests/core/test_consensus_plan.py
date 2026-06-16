@@ -90,11 +90,33 @@ def test_quorum_degrades_to_claude_only_when_others_unavailable(tmp_path, monkey
                         lambda *a, **k: synth_called.__setitem__("hit", True) or True)
     monkeypatch.setattr(cp, "_assemble_diff", lambda *a, **k: (tmp_path / "p.patch", ["repo"]))
     monkeypatch.setattr(cp, "_write_manifest", lambda *a, **k: True)
+    monkeypatch.setattr(cp, "_write_explainer", lambda *a, **k: True)
     (tmp_path / "p.patch").write_text("diff")
 
     ok, reason = cp.run_consensus_plan({}, tmp_path, "slug", ticket_key="T-1")
     assert ok
     assert synth_called["hit"] is True
+
+
+def test_explainer_failure_does_not_fail_run(tmp_path, monkeypatch):
+    # The explainer page is a human-facing artifact; only the manifest gates
+    # the pipeline. A missing explainer is logged and the run still succeeds.
+    monkeypatch.setattr(cp.log, "emit", lambda *a, **k: None)
+    monkeypatch.setattr(cp, "_capture_baselines",
+                        lambda config, slug: {"repo": (tmp_path, "abc123")})
+    monkeypatch.setattr(cp, "_fan_out", lambda *a, **k: {
+        "claude": {"text": REAL_PLAN, "valid": True, "reason": "ok"},
+        "codex": {"text": REAL_PLAN, "valid": True, "reason": "ok"},
+        "gemini": {"text": "", "valid": False, "reason": "empty output"},
+    })
+    monkeypatch.setattr(cp, "_synthesize_and_implement", lambda *a, **k: True)
+    monkeypatch.setattr(cp, "_assemble_diff", lambda *a, **k: (tmp_path / "p.patch", ["repo"]))
+    monkeypatch.setattr(cp, "_write_manifest", lambda *a, **k: True)
+    monkeypatch.setattr(cp, "_write_explainer", lambda *a, **k: False)
+    (tmp_path / "p.patch").write_text("diff")
+
+    ok, reason = cp.run_consensus_plan({}, tmp_path, "slug", ticket_key="T-1")
+    assert ok
 
 
 def test_quorum_fails_when_claude_plan_invalid(tmp_path, monkeypatch):
