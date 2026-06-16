@@ -2,7 +2,7 @@
 
 [[instances.list]]
 key = "apexco"
-base_url = "https://apexco.localhost"
+base_url = "https://apexco.frshty.localhost"
 platform = "bitbucket"
 ticket_system = "jira"
 
@@ -14,13 +14,19 @@ ticket_system = "jira"
 
 [[instances.list]]
 key = "nimbus"
-base_url = "https://nimbus.localhost"
+base_url = "https://nimbus.frshty.localhost"
 platform = "github"
 ticket_system = "linear"
 
 [[instances.list]]
 key = "lynxinv"
-base_url = "https://lynxinv.localhost"
+base_url = "https://lynxinv.frshty.localhost"
+platform = "github"
+ticket_system = "prd"
+
+[[instances.list]]
+key = "bolt"
+base_url = "https://bolt.frshty.localhost"
 platform = "github"
 ticket_system = "prd"
 
