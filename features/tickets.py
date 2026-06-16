@@ -1765,9 +1765,9 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                             entry["fix_commit"] = sha
                             entry["fix_files"] = changed_files
                             log.emit("ticket_pr_comment_fixed",
-                                f"{_label(ticket['key'], ts)}: Fixed \"{comment['body'][:60]}\" — changed {files_label or 'files'} ({sha[:7]})",
-                                links={"detail": f"{base_url}/tickets/{ticket['key']}", "commit": commit_url},
-                                meta={"ticket": ticket["key"], "comment_id": comment["id"], "commit": sha, "files": changed_files})
+                                f"{_label(ticket['key'], ts)} · {pr['repo']}: Fixed \"{comment['body'][:60]}\" — changed {files_label or 'files'} ({sha[:7]})",
+                                links={"detail": f"{base_url}/tickets/{ticket['key']}", "commit": commit_url, "comment": comment.get("html_url", "")},
+                                meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"], "commit": sha, "files": changed_files})
                         else:
                             entry["status"] = "fix_failed"
                             attempt_key = f"{pr_key}/{comment['id']}"
