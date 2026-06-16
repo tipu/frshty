@@ -6,6 +6,7 @@ from pathlib import Path
 
 import core.log as log
 import core.state as state
+import core.git_util as git_util
 from core.claude_runner import run_sonnet, run_haiku, extract_json
 from core.config import get_repos
 from features.platforms import make_platform
@@ -435,14 +436,8 @@ def _ensure_review_worktree(config, pr) -> Path | None:
         subprocess.run(["git", "reset", "--hard", f"origin/{pr['branch']}"], cwd=str(worktree_path), capture_output=True, timeout=60)
         return worktree_path
 
-    worktree_path.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "fetch", "origin", pr["branch"]], cwd=str(repo_path), capture_output=True, timeout=60)
-    subprocess.run(["git", "worktree", "prune"], cwd=str(repo_path), capture_output=True, timeout=60)
-    result = subprocess.run(
-        ["git", "worktree", "add", str(worktree_path), pr["branch"]],
-        cwd=str(repo_path), capture_output=True, text=True, timeout=60,
-    )
-    return worktree_path if result.returncode == 0 else None
+    base_branch = config.get("workspace", {}).get("base_branch", "main")
+    return git_util.add_or_reuse_worktree(repo_path, worktree_path, pr["branch"], base_branch=base_branch)
 
 
 def _load_conventions(config, repo_name) -> str:
