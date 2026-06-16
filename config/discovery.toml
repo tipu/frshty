@@ -2,7 +2,7 @@
 
 [[instances.list]]
 key = "aimyable"
-base_url = "https://aimyable.localhost"
+base_url = "https://aimyable.frshty.localhost"
 platform = "bitbucket"
 ticket_system = "jira"
 
@@ -14,13 +14,19 @@ ticket_system = "jira"
 
 [[instances.list]]
 key = "nectar"
-base_url = "https://nectar.localhost"
+base_url = "https://nectar.frshty.localhost"
 platform = "github"
 ticket_system = "linear"
 
 [[instances.list]]
 key = "lumeninv"
-base_url = "https://lumeninv.localhost"
+base_url = "https://lumeninv.frshty.localhost"
+platform = "github"
+ticket_system = "prd"
+
+[[instances.list]]
+key = "bh"
+base_url = "https://bh.frshty.localhost"
 platform = "github"
 ticket_system = "prd"
 

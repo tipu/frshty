@@ -431,6 +431,7 @@ def api_ticket_detail(key: str):
 
     all_statuses = [s.value for s in TicketStatus]
     proof_videos = _list_proof_videos(docs_dir)
+    has_explainer = (docs_dir / "change-explainer.html").is_file()
     ts["repo_count"] = _ticket_repo_count(slug)
     release_block = None
     if (_config.get("features") or {}).get("releases"):
@@ -440,7 +441,7 @@ def api_ticket_detail(key: str):
     active_key = state.active_instance_key()
     transitions = _load_ticket_transitions(active_key, key)
     scheduled_rows = scheduler.list_for_ticket(active_key, key)
-    return {"key": key, "state": ts, "docs": docs, "history": history, "summary": summary, "terminal_alive": terminal_alive, "all_statuses": all_statuses, "proof_videos": proof_videos, "release": release_block, "llm_invocations": llm_invocations, "transitions": transitions, "scheduled_rows": scheduled_rows}
+    return {"key": key, "state": ts, "docs": docs, "history": history, "summary": summary, "terminal_alive": terminal_alive, "all_statuses": all_statuses, "proof_videos": proof_videos, "has_explainer": has_explainer, "release": release_block, "llm_invocations": llm_invocations, "transitions": transitions, "scheduled_rows": scheduled_rows}
 
 
 PROOF_VIDEO_EXTS = {".webm", ".mp4", ".mov", ".mkv"}
@@ -602,22 +603,24 @@ def api_release_inspect(release_key: str, body: dict | None = None):
     return {"status": "enqueued", "release_key": release_key, "force": force}
 
 
-_VIDEO_MIME = {
+_DOC_MIME = {
     ".webm": "video/webm",
     ".mp4": "video/mp4",
     ".mov": "video/quicktime",
     ".mkv": "video/x-matroska",
+    ".html": "text/html",
 }
 
 
 @router.get("/api/tickets/{key}/docs/{filename}")
-def api_ticket_docs_video(key: str, filename: str):
-    """Serve a video artifact from a ticket's docs/ directory. Whitelisted
-    by extension; filename cannot contain path separators."""
+def api_ticket_docs_file(key: str, filename: str):
+    """Serve an artifact (video or html page) from a ticket's docs/
+    directory. Whitelisted by extension; filename cannot contain path
+    separators."""
     if "/" in filename or "\\" in filename or ".." in filename:
         return JSONResponse({"error": "invalid filename"}, status_code=400)
     suffix = Path(filename).suffix.lower()
-    if suffix not in _VIDEO_MIME:
+    if suffix not in _DOC_MIME:
         return JSONResponse({"error": "unsupported file type"}, status_code=400)
     tickets = state.load("tickets")
     ts = tickets.get(key)
@@ -631,7 +634,7 @@ def api_ticket_docs_video(key: str, filename: str):
         return JSONResponse({"error": "invalid path"}, status_code=400)
     if not target.is_file():
         return JSONResponse({"error": "file not found"}, status_code=404)
-    return FileResponse(str(target), media_type=_VIDEO_MIME[suffix])
+    return FileResponse(str(target), media_type=_DOC_MIME[suffix])
 
 
 @router.websocket("/ws/terminal/{key}")

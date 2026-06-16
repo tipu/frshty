@@ -70,17 +70,28 @@ def _venv_ready(venv: Path) -> bool:
     return (venv / "bin" / "python").exists()
 
 
+def _clear_worktree_venv(wt_path: Path) -> None:
+    """Remove `<worktree>/.venv` whether it is a stale symlink or a real
+    directory left by the clone/setup, so pipenv redirects into the store
+    instead of resolving a project-local venv."""
+    link = wt_path / ".venv"
+    if link.is_symlink():
+        link.unlink(missing_ok=True)
+    elif link.is_dir():
+        shutil.rmtree(link, ignore_errors=True)
+    elif link.exists():
+        link.unlink(missing_ok=True)
+
+
 def _link(wt_path: Path, venv: Path) -> None:
-    """Point `<worktree>/.venv` at the shared venv. A real (non-symlink)
-    .venv directory is left alone — it belongs to the repo or the agent."""
+    """Point `<worktree>/.venv` at the shared venv, replacing whatever is
+    there now (a wrong-target symlink or a real `.venv` from the clone) so
+    pipenv resolves the shared store rather than a project-local venv."""
     link = wt_path / ".venv"
     try:
-        if link.is_symlink():
-            if link.readlink() == venv:
-                return
-            link.unlink()
-        elif link.exists():
+        if link.is_symlink() and link.readlink() == venv:
             return
+        _clear_worktree_venv(wt_path)
         link.symlink_to(venv)
     except OSError as e:
         log.emit("dep_venv_link_failed",
@@ -102,10 +113,6 @@ def ensure_shared_venv(config: dict, repo_name: str, wt_path: Path,
     store.mkdir(parents=True, exist_ok=True)
     venv = store / name
 
-    link = wt_path / ".venv"
-    if link.is_symlink() and link.readlink() != venv:
-        link.unlink(missing_ok=True)
-
     lock_path = store / f".{name}.lock"
     with open(lock_path, "w") as lf:
         fcntl.flock(lf, fcntl.LOCK_EX)
@@ -113,6 +120,7 @@ def ensure_shared_venv(config: dict, repo_name: str, wt_path: Path,
             if not _venv_ready(venv):
                 if venv.exists():
                     shutil.rmtree(venv, ignore_errors=True)
+                _clear_worktree_venv(wt_path)
                 env = {**os.environ,
                        "PIPENV_CUSTOM_VENV_NAME": name,
                        "WORKON_HOME": str(store),

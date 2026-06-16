@@ -9,10 +9,10 @@ when a probabilistic Claude instance interpreted the markdown (PATH errors,
 rate-limit banners stored as the plan, missing gemini flags, unchecked
 captures).
 
-A headless Claude instance is invoked only for the two judgment steps that code
+A headless Claude instance is invoked only for the judgment steps that code
 cannot do: synthesizing the validated plans into docs/technical-plan.md while
 implementing them into the worktrees, and writing the prose change manifest
-grounded in the real diff.
+plus the interactive change-explainer page grounded in the real diff.
 
 The whole flow must fit inside the caller's task timeout (start_planning's
 PLAN_TIMEOUT), which the worker enforces with a hard SIGKILL — so the fan-out
@@ -36,6 +36,7 @@ from core.llm import (
 FANOUT_TIMEOUT = 600
 BUILD_TIMEOUT = 900
 MANIFEST_TIMEOUT = 240
+EXPLAINER_TIMEOUT = 1200
 MIN_TECHNICAL_PLAN_BYTES = 400
 
 
@@ -203,6 +204,39 @@ def _write_manifest(ticket_dir: Path, patch: Path, timeout: int) -> bool:
     return cm.is_file()
 
 
+EXPLAINER_DIRECTIVE = """Build docs/change-explainer.html: a single self-contained interactive HTML page (inline CSS/JS only, zero external dependencies, must work opened from file://) that explains the code changes in the ACTUAL diff at {patch}. Read docs/ticket.md plus any follow-up context files next to it (docs/comments.md, docs/notes/*.md if present) as the source of truth for the goal; every blurb and role description must tie back to them, naming the specific requirement or acceptance criterion served — never generic.
+
+DATA GATHERING (do all of this before writing any HTML):
+1. Parse the patch into per-file unified diffs.
+2. In the repository worktree subdirectories of this ticket directory, grep for every key changed/added function to get its REAL file:line and full signature, plus its call sites (what it calls, what calls it).
+3. Capture the FULL source of every key changed file — do not truncate.
+4. Embed everything as JS consts: TITLE, STAGES, CATS, FILES, FUNCS, TREE, DIFFS (path -> unified diff text), SRC (path -> full source). Render the page from these consts with plain JS DOM-building functions — no framework.
+
+THEME: GitHub-dark via CSS variables: --bg:#0d1117 --panel:#161b22 --line:#30363d --text:#e6edf3 --dim:#8b949e --accent:#58a6ff --green:#3fb950 --purple:#bc8cff --teal:#39c5cf --pink:#f778ba --amber:#d29922. Monospace for code, paths, and signatures.
+
+PAGE LAYOUT, single scrolling page top-to-bottom (no top-level tabs):
+1. Header — page title, ticket key, one-line stat strip (files changed, +adds/-dels, repos).
+2. Goal panel — what the ticket asks for and why, with acceptance criteria; fold in comments.md follow-up context.
+3. Call-flow overview — one bordered group per scenario (e.g. startup / user action / data flow), each an indented call tree built with two helpers: f(id, children) for clickable function nodes (colored chip per pipeline stage, name + file:line tag) and p(label, note, children) for gray non-clickable plain steps (IPC hops, library calls, timers).
+4. Pipeline strip — the STAGES as numbered colored blocks (id, title, color, one-line description); clicking a stage spotlights the matching file cards.
+5. Category filter chips with counts, then file cards grouped by category: each card shows filename, repo, new/modified dot, a bar sized by lines added, +N/-N counts, and a one-sentence why-it-matters blurb tied to the ticket. Clicking a card opens its diff modal.
+
+THREE OVERLAY MODALS (Esc or click-outside closes the topmost):
+A. Diff modal — path header, colored unified diff (green added / red removed / blue hunk headers), why-it-matters footer.
+B. Function detail modal — name, stage-colored role badge, signature rendered as code, file:line, a 'how it contributes' paragraph naming the ticket requirement/criterion it serves plus any comments.md context, 'calls ->' and '<- called by' pills that navigate directly to other function modals, and a View code button.
+C. Code viewer modal — the file's FULL source from SRC, line numbers, syntax highlighting via a hand-rolled regex highlighter (keyword/type/string/comment/number/function-name colors, per-language keyword sets for the languages present, stateful handling of block comments and template literals), auto-scrolled to the function's line with that line highlighted.
+
+QUALITY BAR: every function in TREE must exist in FUNCS with a real file:line you verified by grep; calls/calledBy pills must navigate; DIFFS and SRC must be complete, not samples. The reference for this style scored 'made really well' — match it.
+
+Write only docs/change-explainer.html. Build it incrementally in several smaller writes (initial skeleton, then append each data const and section separately) rather than one single giant write. Do not modify code in the repository worktrees."""
+
+
+def _write_explainer(ticket_dir: Path, patch: Path, timeout: int) -> bool:
+    prompt = EXPLAINER_DIRECTIVE.format(patch=patch)
+    run_thinking(prompt, cwd=ticket_dir, timeout=timeout)
+    return (ticket_dir / "docs" / "change-explainer.html").is_file()
+
+
 def run_consensus_plan(config: dict, ticket_dir: Path, slug: str, *,
                        ticket_key: str = "") -> tuple[bool, str]:
     """Plan via validated multi-model consensus, implement, and manifest.
@@ -255,8 +289,26 @@ def run_consensus_plan(config: dict, ticket_dir: Path, slug: str, *,
     if patch is None:
         return False, "implementation produced no diff in any repo"
 
-    if not _write_manifest(ticket_dir, patch, MANIFEST_TIMEOUT):
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        manifest_fut = pool.submit(_write_manifest, ticket_dir, patch,
+                                   MANIFEST_TIMEOUT)
+        explainer_fut = pool.submit(_write_explainer, ticket_dir, patch,
+                                    EXPLAINER_TIMEOUT)
+        manifest_ok = manifest_fut.result()
+        try:
+            explainer_ok = explainer_fut.result()
+        except Exception as e:
+            explainer_ok = False
+            log.emit("ctp_explainer_error",
+                     f"[{ticket_key}] explainer step raised: {type(e).__name__}: {e}",
+                     meta={"ticket": ticket_key})
+    if not manifest_ok:
         return False, "manifest step did not produce docs/change-manifest.md"
+    if not explainer_ok:
+        log.emit("ctp_explainer_missing",
+                 f"[{ticket_key}] explainer step did not produce "
+                 f"docs/change-explainer.html; continuing without it",
+                 meta={"ticket": ticket_key})
 
     log.emit("ctp_complete",
              f"[{ticket_key}] consensus plan implemented; repos changed: {changed}",

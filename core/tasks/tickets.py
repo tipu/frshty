@@ -20,7 +20,7 @@ from core.tasks.preconditions import (
 from features.platforms import make_platform
 
 
-PLAN_TIMEOUT = 1800
+PLAN_TIMEOUT = 3000
 REVIEW_TIMEOUT = 900
 FIX_TIMEOUT = 1800
 TEST_PLAN_TIMEOUT = 1800
@@ -1285,8 +1285,9 @@ def apply_note_reset(ctx: TaskContext) -> TaskResult:
         (notes_dir / f"note-{now.replace(':', '-')}.md").write_text(f"# Note ({now})\n\n{note}\n")
     archive = docs / "archive" / now.replace(":", "-")
     moved = []
-    for fname in ("change-manifest.md", "tri-review.md", "technical-plan.md",
-                  "test-plan.md", "test-files-written.txt", "test-runs.md"):
+    for fname in ("change-manifest.md", "change-explainer.html", "tri-review.md",
+                  "technical-plan.md", "test-plan.md", "test-files-written.txt",
+                  "test-runs.md"):
         src = docs / fname
         if src.exists():
             archive.mkdir(parents=True, exist_ok=True)

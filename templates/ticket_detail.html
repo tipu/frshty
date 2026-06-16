@@ -65,6 +65,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
 .collapsible-header.expanded::before { transform: rotate(90deg); }
 .collapsible-content { max-height: 600px; overflow: hidden; transition: max-height 0.2s ease-in-out; }
 .collapsible-content.collapsed { max-height: 0; opacity: 0; }
+.collapsible-content.expanded { max-height: none; overflow: visible; }
 .diff-file-sidebar { width: 240px; max-height: calc(100vh - 24px); overflow-y: auto; padding-right: 4px; }
 .diff-file-sidebar button { line-height: 1.4; }
 [v-cloak] { display: none; }
@@ -187,6 +188,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
 <div v-if="hasCode" class="flex gap-2 mb-4">
     <button class="tab-btn" :class="{ active: activeTab === 'docs' }" @click="activeTab = 'docs'">Docs</button>
     <button class="tab-btn" :class="{ active: activeTab === 'diff' }" @click="switchTab('diff')">Diff &amp; Comments</button>
+    <button v-if="ticket.has_explainer" class="tab-btn" :class="{ active: activeTab === 'explainer' }" @click="activeTab = 'explainer'">Explainer</button>
 </div>
 
 <div v-show="activeTab === 'docs'" class="layout-main">
@@ -514,6 +516,12 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
     </div>
         </div><!-- /.flex-1 diff-content -->
     </div><!-- /.flex diff-with-sidebar -->
+</div>
+
+<div v-show="activeTab === 'explainer'">
+    <iframe v-if="ticket.has_explainer"
+            :src="`/api/tickets/${key}/docs/change-explainer.html`"
+            style="width: 100%; height: calc(100vh - 180px); border: 0; border-radius: 6px; background: #0d1117;"></iframe>
 </div>
 
 </div><!-- /#content -->
