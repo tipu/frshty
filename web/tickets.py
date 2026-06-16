@@ -408,8 +408,7 @@ def api_ticket_detail(key: str):
             if f.is_file() and f.suffix == ".md":
                 docs[f.name] = f.read_text()
 
-    events = log.get_events(limit=200)
-    history = [e for e in events if key in e.get("summary", "") or key in str(e.get("meta", {}))]
+    history = log.get_events_for_ticket(key, limit=200)
 
     terminal_alive = False
     if ts.get("status") in ("planning", "reviewing", "in_review"):

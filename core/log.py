@@ -111,6 +111,42 @@ def get_events(limit: int = 100, after: str | None = None, unread_only: bool = F
     return events[:limit]
 
 
+def get_events_for_ticket(ticket_key: str, limit: int = 200) -> list[dict]:
+    """Events that reference a ticket, filtered at the SQL level so they are
+    found regardless of how many unrelated (mostly noise) events were emitted
+    since. get_events() fetches the globally-most-recent N then filters in
+    Python, which loses a ticket's events behind the firehose of job churn.
+    Excludes category=noise job churn so meaningful events aren't crowded out."""
+    instance_key = _active_instance_key()
+    job = _active_job_key()
+    if not instance_key or not job:
+        return []
+    like = f"%{ticket_key}%"
+    rows = _db.query_all(
+        """
+        SELECT e.id, e.job, e.event, e.summary, e.ts,
+               COALESCE(json_extract(e.links, '$'), '{}') as links,
+               COALESCE(json_extract(e.meta, '$'), '{}') as meta,
+               (r.event_id IS NOT NULL) as read
+        FROM log_events e
+        LEFT JOIN log_read_state r ON r.instance_key=e.instance_key AND r.event_id=e.id
+        WHERE e.instance_key=? AND e.job=?
+          AND (e.summary LIKE ? OR e.meta LIKE ?)
+          AND COALESCE(json_extract(e.meta, '$.category'), '') != 'noise'
+        ORDER BY e.ts DESC LIMIT ?
+        """,
+        (instance_key, job, like, like, limit),
+    )
+    events = []
+    for row in rows:
+        ev = dict(row)
+        ev["links"] = json.loads(ev.get("links") or "{}")
+        ev["meta"] = json.loads(ev.get("meta") or "{}")
+        ev["read"] = bool(ev["read"])
+        events.append(ev)
+    return events
+
+
 def dismiss(event_id: str):
     _dismiss_ids({event_id})
 

@@ -393,6 +393,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                         <span class="text-gray-600">{{ $relTime(e.ts) }}</span>
                         <span class="ml-2">{{ e.event }}</span>
                         <span class="ml-2">{{ (e.summary || '').split('\n')[0] }}</span>
+                        <a v-if="e.links && e.links.commit" :href="e.links.commit" target="_blank" class="ml-2 text-blue-400 hover:underline">commit</a>
                     </div>
                 </div>
             </div>

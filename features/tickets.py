@@ -1757,9 +1757,17 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                             ts.pop("checks_started_at", None)
                             platform.resolve_comment(pr["repo"], pr["id"], comment["id"])
                             entry["status"] = "addressed"
-                            log.emit("ticket_pr_comment_fixed", f"{_label(ticket['key'], ts)}: Fixed {comment['body'][:80]}",
-                                links={"detail": f"{base_url}/tickets/{ticket['key']}"},
-                                meta={"ticket": ticket["key"]})
+                            sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(wt), capture_output=True, text=True, timeout=30).stdout.strip()
+                            stat = subprocess.run(["git", "show", "--stat", "--format=", "HEAD"], cwd=str(wt), capture_output=True, text=True, timeout=30).stdout.strip()
+                            changed_files = [ln.split("|")[0].strip() for ln in stat.splitlines() if "|" in ln]
+                            files_label = ", ".join(changed_files[:5]) + (f" +{len(changed_files) - 5} more" if len(changed_files) > 5 else "")
+                            commit_url = pr["url"].split("/pull/")[0] + f"/commit/{sha}" if sha and "/pull/" in pr.get("url", "") else ""
+                            entry["fix_commit"] = sha
+                            entry["fix_files"] = changed_files
+                            log.emit("ticket_pr_comment_fixed",
+                                f"{_label(ticket['key'], ts)}: Fixed \"{comment['body'][:60]}\" — changed {files_label or 'files'} ({sha[:7]})",
+                                links={"detail": f"{base_url}/tickets/{ticket['key']}", "commit": commit_url},
+                                meta={"ticket": ticket["key"], "comment_id": comment["id"], "commit": sha, "files": changed_files})
                         else:
                             entry["status"] = "fix_failed"
                             attempt_key = f"{pr_key}/{comment['id']}"
