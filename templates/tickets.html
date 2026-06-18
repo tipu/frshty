@@ -16,6 +16,7 @@
 <div id="app" v-cloak>
 <frshty-shell :features="features" :instance="instanceName">
 		<template #actions>
+			<label class="ln-show-ignored"><input type="checkbox" v-model="showDone"> show done</label>
 			<label class="ln-show-ignored"><input type="checkbox" v-model="showIgnored"> show ignored</label>
 			<button class="ln-btn ln-btn-ghost">Filter</button>
 			<button class="ln-btn ln-btn-ghost">Sort</button>
@@ -128,6 +129,7 @@ const COLUMN_LABELS = {
 	blocked: 'Blocked',
 	merged: 'Merged',
 	validation: 'Validation',
+	done: 'Done',
 	ignored: 'Ignored',
 };
 const HELP = {
@@ -182,8 +184,10 @@ frshtyApp({
 		const currentTicketKey = ref(null);
 
 		const showIgnored = ref(false);
+		const showDone = ref(false);
 		const visibleColumns = computed(() => {
 			const cols = COLUMNS.filter(col => Object.values(tickets.value).some(t => t.status === col));
+			if (showDone.value) cols.push('done');
 			if (showIgnored.value) cols.push('ignored');
 			return cols;
 		});
@@ -346,7 +350,7 @@ frshtyApp({
 			epicCardStyle,
 			discard, submitPr, closePrModal, onPrSubmit,
 			approve, reject, restart,
-			showIgnored, ignore, unignore,
+			showIgnored, showDone, ignore, unignore,
 		};
 	},
 }).mount('#app');
