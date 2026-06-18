@@ -111,11 +111,12 @@
 <script>
 const { createApp, ref, computed, onMounted } = Vue;
 
-const COLUMNS = ['epic', 'pending_approval', 'new', 'planning', 'reviewing', 'testing', 'tests_failed', 'proving', 'pr_ready', 'in_review', 'pr_failed', 'blocked', 'merged', 'validation'];
+const COLUMNS = ['epic', 'pending_approval', 'new', 'researching', 'planning', 'reviewing', 'testing', 'tests_failed', 'proving', 'pr_ready', 'in_review', 'pr_failed', 'blocked', 'merged', 'validation'];
 const COLUMN_LABELS = {
 	epic: 'Epics',
 	pending_approval: 'Pending approval',
 	new: 'New',
+	researching: 'Researching',
 	planning: 'Planning',
 	reviewing: 'Reviewing',
 	testing: 'Testing',
@@ -131,6 +132,7 @@ const COLUMN_LABELS = {
 };
 const HELP = {
 	epic: 'Container issues (Jira Epic / Linear Project). Tracked for grouping only — frshty never plans, codes, or PRs them. Their child stories are processed normally and share this card\'s background tint.',
+	researching: 'Research/spike ticket: frshty investigates and writes docs/research.md only — no code, no branch, no PR, no ticket-system writes — then goes straight to Done.',
 	pending_approval: 'Awaiting human approve/reject before entering the pipeline (gated by [ticket_approval] config).',
 	pr_ready: 'Branch pushed and work finished. Waiting for the scheduler (or auto_pr) to open the PR on the platform.',
 	in_review: 'PR open, not all merged. Each cycle: poll CI, resolve conflicts, read review comments, check merge state.',
