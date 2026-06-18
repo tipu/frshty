@@ -22,8 +22,9 @@ body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: #0a0a0a; 
 .link:hover { text-decoration: underline; }
 nav a { color: #888; padding: 4px 12px; border-radius: 4px; }
 nav a:hover, nav a.active { color: #fff; background: #222; }
-.diff-file { border: 1px solid #2a2a2a; border-radius: 6px; overflow: hidden; margin-bottom: 16px; }
-.diff-header { background: #1a1a2a; padding: 8px 12px; font-size: 13px; color: #93c5fd; border-bottom: 1px solid #2a2a2a; cursor: pointer; }
+.diff-file { border: 1px solid #2a2a2a; border-radius: 6px; overflow: visible; margin-bottom: 16px; }
+.diff-header { position: sticky; top: 72px; z-index: 5; background: #1a1a2a; padding: 8px 12px; font-size: 13px; color: #93c5fd; border-bottom: 1px solid #2a2a2a; }
+.diff-file-desc { font-size: 11px; font-weight: normal; color: #8b95a6; margin-top: 3px; }
 .diff-header:hover { background: #222244; }
 .diff-hunk { background: #1a1a2a; color: #7c8da6; padding: 2px 12px; font-size: 12px; }
 .diff-line { font-size: 13px; line-height: 20px; white-space: pre-wrap; word-break: break-all; }
@@ -111,8 +112,11 @@ textarea { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; }
     <div class="flex-1 min-w-0">
         <div v-for="file in parsedDiff" :key="file.header" class="diff-file">
             <div class="diff-header">
-                {{ file.header }}
-                <span v-if="commentCountFor(file.header)" class="text-yellow-400 text-xs">({{ commentCountFor(file.header) }} comments)</span>
+                <div>
+                    {{ file.header }}
+                    <span v-if="commentCountFor(file.header)" class="text-yellow-400 text-xs">({{ commentCountFor(file.header) }} comments)</span>
+                </div>
+                <div v-if="fileSummaries[file.header]" class="diff-file-desc">{{ fileSummaries[file.header] }}</div>
             </div>
             <template v-for="(line, li) in file.lines" :key="li">
                 <div v-if="line.type === 'hunk'" class="diff-hunk">{{ line.text }}</div>
@@ -248,6 +252,7 @@ frshtyApp({
         const info = ref({});
         const features = ref({});
         const rawDiff = ref('');
+        const fileSummaries = reactive({});
         const drafts = reactive({});
         const movingIdx = ref(null);
         const walkthroughBusy = ref(false);
@@ -356,6 +361,15 @@ frshtyApp({
                 features.value = cfg.features || {};
                 allComments.value.forEach((c, i) => { drafts[i] = c.body || ''; });
             } catch (e) { console.error('review_detail load failed', e); }
+            loadFileSummaries();
+        }
+
+        async function loadFileSummaries() {
+            try {
+                const resp = await fetch(`/api/reviews/${repo}/${prId}/file-summaries`);
+                const data = await resp.json();
+                if (data && typeof data === 'object') Object.assign(fileSummaries, data);
+            } catch (e) { /* descriptions are best-effort */ }
         }
 
         function jumpTo(idx) {
@@ -568,6 +582,7 @@ frshtyApp({
         return {
             repo, prId,
             allComments, info, features, drafts, walkthroughBusy, discussPanels, activeIdx,
+            fileSummaries,
             prLink, activeCount, parsedDiff, commentsByFile, generalComments,
             commentFile, commentCountFor, unmatchedFor,
             diffLineClass, diffLinePrefix, escHtml,
