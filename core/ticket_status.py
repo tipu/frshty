@@ -4,6 +4,7 @@ from enum import Enum
 class TicketStatus(str, Enum):
     pending_approval = "pending_approval"
     new = "new"
+    researching = "researching"
     planning = "planning"
     reviewing = "reviewing"
     testing = "testing"
@@ -29,7 +30,8 @@ class TicketStatus(str, Enum):
 
 _ALLOWED: dict[TicketStatus, set[TicketStatus]] = {
     TicketStatus.pending_approval: {TicketStatus.new, TicketStatus.done},
-    TicketStatus.new:        {TicketStatus.planning, TicketStatus.merged, TicketStatus.epic},
+    TicketStatus.new:        {TicketStatus.planning, TicketStatus.researching, TicketStatus.merged, TicketStatus.epic},
+    TicketStatus.researching: {TicketStatus.done, TicketStatus.new},
     TicketStatus.planning:   {TicketStatus.reviewing, TicketStatus.blocked},
     TicketStatus.reviewing:  {TicketStatus.testing, TicketStatus.pr_ready, TicketStatus.planning, TicketStatus.blocked},
     TicketStatus.testing:    {TicketStatus.proving, TicketStatus.pr_ready, TicketStatus.tests_failed, TicketStatus.reviewing, TicketStatus.blocked},

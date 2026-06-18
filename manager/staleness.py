@@ -22,6 +22,29 @@ def _load_ticket_data(row: dict) -> dict:
         return {}
 
 
+def needs_classification(instance_key: str) -> list[dict]:
+    """Tickets the work-type classifier flagged 'unknown' — held at 'new' with
+    no pipeline task until a human tags them code or research."""
+    rows = db.query_all(
+        "SELECT ticket_key, slug, data FROM tickets"
+        " WHERE instance_key=? AND status='new'"
+        " AND json_extract(data, '$.work_type')='unknown'"
+        " AND COALESCE(obsolete_at, '') = ''"
+        " ORDER BY json_extract(data, '$.discovered_at') ASC LIMIT ?",
+        (instance_key, _LIMIT),
+    )
+    out: list[dict] = []
+    for r in rows:
+        d = _load_ticket_data(r)
+        out.append({
+            "ticket_key": r["ticket_key"],
+            "summary": (d.get("summary") or "")[:140],
+            "url": d.get("url", ""),
+            "classified_at": d.get("work_type_classified_at", ""),
+        })
+    return out
+
+
 def blocked_pr_comments(instance_key: str) -> list[dict]:
     """PR review comments frshty tried to auto-fix but couldn't (worktree,
     Claude, or push failure). Surfaced from comment_state rows stuck in a
@@ -485,6 +508,7 @@ def aggregate_all(instance_key: str, config: dict | None = None,
     t = thresholds or {}
     cfg = config or {}
     return {
+        "needs_classification":   needs_classification(instance_key),
         "blocked_pr_comments":    blocked_pr_comments(instance_key),
         "merge_ready":            merge_ready_ticket_prs(instance_key, cfg, live=live),
         "ready_to_submit":        ready_to_submit_prs(instance_key),

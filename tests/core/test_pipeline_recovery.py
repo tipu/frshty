@@ -189,8 +189,11 @@ class TestStartPlanningPartialRecovery:
         result = run_task(ctx)
 
         assert result.status == "failed", \
-            f"expected failed when claude returns None, got {result.status}"
-        assert "claude returned non-zero or empty" in result.reason
+            f"expected failed when planning cannot proceed, got {result.status}"
+        # The key invariant: with no technical-plan.md to recover from, the
+        # recovery branch must NOT fabricate a change-manifest.
+        assert not (docs / "change-manifest.md").exists(), \
+            "recovery must not run when there is nothing to recover from"
 
     def test_recovery_prompt_contains_technical_plan(self, fresh_db, tmp_path, monkeypatch):
         """When recovery fires, the prompt passed to run_claude_code for the
