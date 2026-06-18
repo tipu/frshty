@@ -11,6 +11,7 @@ CANDIDATE SET (pre-computed, deterministic — these are the only entities you m
 {truncation_note}
 
 Bucket → priority mapping (use this to assign each entity):
+- needs_classification    → "tickets to classify as code or research — needs you"
 - blocked_pr_comments     → "PR comments frshty couldn't auto-fix — needs you" / "blocked work"
 - merge_ready             → "approved PRs to merge" / "merge my approved PRs"
 - ready_to_submit         → "submit PRs for ready work" / "PR my dev-complete tickets"

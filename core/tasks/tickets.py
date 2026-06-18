@@ -1330,6 +1330,63 @@ def advance_ticket(ctx: TaskContext) -> TaskResult:
 VALIDATION_TIMEOUT = 1800
 
 
+RESEARCH_TIMEOUT = 1800
+
+
+@task("do_research",
+      preconditions=[status_is("new", "researching")],
+      postconditions=[file_exists("docs/research.md")],
+      on_entry_status="researching",
+      on_success_status="done",
+      timeout=RESEARCH_TIMEOUT)
+def do_research(ctx: TaskContext) -> TaskResult:
+    """Research-only path: investigate the ticket and produce docs/research.md.
+    No code changes, no branch push, no PR, no ticket-system writes — the only
+    output is the research write-up, then the ticket goes straight to done."""
+    ts = state.load_ticket(ctx.ticket_key or "") or {}
+    if ts.get("work_type") != "research":
+        return TaskResult("skipped", "not a research ticket")
+    ticket_dir = _ticket_dir(ctx)
+    if not ticket_dir.is_dir():
+        return TaskResult("failed", f"ticket dir missing: {ticket_dir}")
+    slug = ts.get("slug", "")
+    if slug:
+        base_branch = ctx.config["workspace"].get("base_branch", "main")
+        for repo in get_repos(ctx.config):
+            wt = ticket_worktree_path(ctx.config, slug, repo["name"])
+            if not wt.is_dir():
+                continue
+            subprocess.run(["git", "fetch", "origin", base_branch],
+                           cwd=str(wt), capture_output=True, timeout=60)
+            subprocess.run(["git", "reset", "--hard", f"origin/{base_branch}"],
+                           cwd=str(wt), capture_output=True, timeout=60)
+    log.emit("ticket_research_started", f"Research spike for {ctx.ticket_key}",
+             meta={"ticket": ctx.ticket_key})
+    prompt = (
+        "This is a RESEARCH spike, not a coding task. Investigate the question below "
+        "by reading the relevant code in the per-repo subdirectories of this workspace, "
+        "then write your findings to docs/research.md.\n\n"
+        "STRICT RULES:\n"
+        "- Do NOT modify, create, or delete any source code.\n"
+        "- Do NOT run git, commit, push, or open a pull request.\n"
+        "- Your ONLY output is the file docs/research.md.\n\n"
+        "docs/research.md must contain: the question restated, what you found (with "
+        "concrete file:line references), the options and their tradeoffs, and a clear "
+        "recommendation.\n\n"
+        f"Research question:\n{ts.get('summary', '')}\n\n{ts.get('description', '')}"
+    )
+    result = run_claude_code(prompt, cwd=ticket_dir, timeout=RESEARCH_TIMEOUT)
+    if result is None:
+        return TaskResult("failed", "research: claude returned non-zero or empty")
+    if not (ticket_dir / "docs" / "research.md").exists():
+        return TaskResult("failed", "research: docs/research.md not produced")
+    log.emit("ticket_research_complete",
+             f"Research written for {ctx.ticket_key}: docs/research.md",
+             links={"detail": f"{ctx.config.get('_base_url', '')}/tickets/{ctx.ticket_key}"},
+             meta={"ticket": ctx.ticket_key})
+    return TaskResult("ok")
+
+
 @task("validate_merged_ticket",
       preconditions=[status_is("merged", "validation")],
       on_entry_status="validation",

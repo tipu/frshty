@@ -201,9 +201,17 @@ def _handle_new_ticket(
     if "source" not in ts:
         ts["source"] = source
     if ts.get("discovered_at") and instance_key:
-        if (config.get("pm_agent") or {}).get("enabled", True):
-            _t._enqueue_stage(instance_key, key, "pm_pre_approval")
-        _t._enqueue_stage(instance_key, key, "start_planning")
+        work_type = _t._ensure_work_type(config, ticket, ts)
+        if work_type == "research":
+            _t._enqueue_stage(instance_key, key, "do_research")
+        elif work_type == "unknown":
+            # Held for manual classification; surfaced via the
+            # needs_classification Today bucket. No pipeline task is enqueued.
+            pass
+        else:
+            if (config.get("pm_agent") or {}).get("enabled", True):
+                _t._enqueue_stage(instance_key, key, "pm_pre_approval")
+            _t._enqueue_stage(instance_key, key, "start_planning")
     return ts, False
 
 

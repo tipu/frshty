@@ -79,6 +79,20 @@ details[open] > summary { color: #d1d5db; margin-bottom: 8px; }
     <div class="text-sm text-red-400">Failed to load loops: {{ loadError }}</div>
 </div>
 
+<!-- Needs classification — work type unknown, held for manual tagging -->
+<div v-if="visibleLoops.needs_classification && visibleLoops.needs_classification.length">
+    <div class="section-h" style="color:#d8b4fe">🏷️ Needs classification — code or research? ({{ visibleLoops.needs_classification.length }})</div>
+    <div v-for="e in visibleLoops.needs_classification" :key="'nc:' + e.ticket_key" class="action-card" style="border-color:#6b21a8">
+        <div class="flex-1 min-w-0">
+            <div class="tk-key"><a :href="e.url || ('/tickets/' + e.ticket_key)" target="_blank" class="hover:underline">{{ e.ticket_key }}</a></div>
+            <div class="tk-sum truncate">{{ e.summary }}</div>
+        </div>
+        <button class="btn-sec" :disabled="busy['classify:' + e.ticket_key]" @click="classifyTicket(e.ticket_key, 'code')">Code</button>
+        <button class="btn-sec" :disabled="busy['classify:' + e.ticket_key]" @click="classifyTicket(e.ticket_key, 'research')">Research</button>
+        <button class="btn-snooze" @click="snooze('needs_classification', e.ticket_key)">Snooze</button>
+    </div>
+</div>
+
 <!-- Blocked PR comments — frshty tried to auto-fix and couldn't -->
 <div v-if="visibleLoops.blocked_pr_comments && visibleLoops.blocked_pr_comments.length">
     <div class="section-h" style="color:#fca5a5">⛔ Blocked — frshty couldn't auto-fix ({{ visibleLoops.blocked_pr_comments.length }})</div>
@@ -334,6 +348,7 @@ details[open] > summary { color: #d1d5db; margin-bottom: 8px; }
 const { ref, computed, reactive, onMounted } = Vue;
 
 const BUCKET_LABELS = {
+    needs_classification: 'Classify',
     blocked_pr_comments: 'Blocked',
     merge_ready: 'Merge ready',
     ready_to_submit: 'Ready to submit',
@@ -373,6 +388,7 @@ frshtyApp({
         const renderedBody = computed(() => bodyMd.value ? marked.parse(bodyMd.value) : '');
 
         const ENTITY_ID = {
+            needs_classification: e => e.ticket_key,
             blocked_pr_comments: e => `${e.repo}/${e.pr_id}/${e.comment_id}`,
             merge_ready: e => e.ticket_key,
             ready_to_submit: e => e.ticket_key,
@@ -527,6 +543,19 @@ frshtyApp({
             } catch (e) { console.error('unsnooze failed', e); }
         }
 
+        async function classifyTicket(ticketKey, workType) {
+            busy['classify:' + ticketKey] = true;
+            try {
+                await fetch(`/api/tickets/${encodeURIComponent(ticketKey)}/classify`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ work_type: workType }),
+                });
+                await load();
+            } catch (e) { console.error('classify failed', e); }
+            finally { busy['classify:' + ticketKey] = false; }
+        }
+
         async function sendReply(ticketKey, commentId) {
             const key = replyKey(ticketKey, commentId);
             const body = (replyDraft[key] || '').trim();
@@ -648,7 +677,7 @@ frshtyApp({
             formatBucketLabel, badgeClass, fmtRelative, replyKey,
             prFailReasonLabel, prFailReasonClass, prFailReasonTip,
             doAction, snooze, unsnooze, sendReply, openSubmitPr, confirmSubmitPr, runNow,
-            refreshLive, launchClaude,
+            refreshLive, launchClaude, classifyTicket,
         };
     }
 }).mount('#app');

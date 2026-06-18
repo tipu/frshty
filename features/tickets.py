@@ -70,6 +70,7 @@ _LLM_BACKED_TASKS = frozenset({
     "plan_tests", "write_tests", "run_tests_and_fix",
     "prove",
     "generate_pr_descriptions",
+    "do_research",
 })
 
 _REPO_GATED_TASKS = frozenset({
@@ -92,6 +93,44 @@ _GATE_OCCUPYING_AUTO_MERGE = _GATE_OCCUPYING_STATUSES + ("pr_ready", "in_review"
 MAX_TEST_FIX_ATTEMPTS = 3
 
 _TERMINAL_STATUSES = frozenset({"merged", "done"})
+
+
+def _ensure_work_type(config: dict, ticket: dict, ts: dict) -> str:
+    """Classify a ticket as 'code', 'research', or 'unknown' exactly once and
+    persist it on ts['work_type']. 'code' runs the normal pipeline, 'research'
+    is routed to the side-effect-free research path, 'unknown' is held for
+    manual classification. PRD tickets are always 'code'."""
+    wt = ts.get("work_type")
+    if wt in ("code", "research", "unknown"):
+        return wt
+    if ts.get("source") == "prd":
+        ts["work_type"] = "code"
+        state.save_ticket(ticket["key"], ts)
+        return "code"
+    text = f"{ticket.get('summary', '')}\n\n{ticket.get('description', '')}".strip()[:3000]
+    result = ""
+    if text:
+        prompt = (
+            "Classify this engineering ticket as exactly one of: code, research, unknown.\n"
+            "- code: implement a feature, fix a bug, refactor, or otherwise write/modify code or config.\n"
+            "- research: a spike/investigation whose deliverable is a written finding or recommendation, "
+            "NOT code (e.g. 'Spike: evaluate X', 'investigate the feasibility of Y').\n"
+            "- unknown: genuinely ambiguous which of the two it is.\n\n"
+            f"Ticket:\n{text}\n\n"
+            "Answer with exactly one word: code, research, or unknown."
+        )
+        raw = (run_haiku(prompt) or "").strip().lower()
+        first = raw.split()[0].strip(".,!:\"'") if raw.split() else ""
+        if first in ("code", "research", "unknown"):
+            result = first
+    if result not in ("code", "research", "unknown"):
+        result = "unknown"
+    ts["work_type"] = result
+    ts["work_type_classified_at"] = datetime.now(timezone.utc).isoformat()
+    state.save_ticket(ticket["key"], ts)
+    log.emit("ticket_classified", f"{ticket['key']}: work_type={result}",
+             meta={"ticket": ticket["key"], "work_type": result})
+    return result
 _BLOCKED_BY_TIMEOUT_HOURS = 24
 
 _repo_gate_locks: dict[str, threading.Lock] = {}
