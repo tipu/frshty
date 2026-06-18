@@ -14,6 +14,7 @@ import core.log as log
 import core.state as state
 import core.terminal as terminal
 import features.reviewer as reviewer
+from core.claude_runner import run_haiku, extract_json
 from core.config import get_repos
 from features.platforms import make_platform
 from features.ticket_systems import make_ticket_system
@@ -251,6 +252,100 @@ def api_review_info(repo: str, pr_id: int):
     except Exception as e:
         log.emit("get_pr_info_failed", f"Failed to get PR info: {e}", meta={"repo": repo, "pr_id": pr_id})
     return result
+
+
+def _resolve_ticket_goal(branch: str, repo: str, pr_id: int) -> str:
+    m = re.search(r"[A-Za-z]+-\d+", branch or "")
+    key = m.group().upper() if m else ""
+    if key:
+        t = state.load("tickets").get(key) or {}
+        parts = [t.get("summary", ""), t.get("description", "")]
+        ac = (t.get("acceptance_criteria_json") or {}).get("source_text", "")
+        if ac:
+            parts.append(ac)
+        goal = "\n".join(p for p in parts if p).strip()
+        if goal:
+            return goal[:4000]
+    try:
+        info = make_platform(_config).get_pr_info(repo, pr_id) or {}
+        return f"{info.get('title', '')}\n{info.get('description', '')}".strip()[:4000]
+    except Exception:
+        return ""
+
+
+def _split_diff_by_file(diff_text: str, max_files: int = 40, per_file_chars: int = 2500) -> dict:
+    files: dict[str, list[str]] = {}
+    current = None
+    for line in (diff_text or "").split("\n"):
+        if line.startswith("+++ b/"):
+            current = line[6:]
+            files[current] = []
+        elif current is not None:
+            files[current].append(line)
+    out = {}
+    for p, ls in files.items():
+        if not p or p == "/dev/null":
+            continue
+        out[p] = "\n".join(ls)[:per_file_chars]
+        if len(out) >= max_files:
+            break
+    return out
+
+
+def _generate_file_summaries(goal: str, per_file: dict) -> dict:
+    listing = "\n\n".join(f"### {p}\n{d}" for p, d in per_file.items())[:25000]
+    prompt = (
+        "You are reviewing a pull request. The goal of the work:\n"
+        f"{goal or '(no ticket goal available; infer it from the changes)'}\n\n"
+        "For each changed file below, write ONE concise, specific, technical sentence on how "
+        "that file contributes to the goal. No fluff, no restating the filename.\n\n"
+        f"{listing}\n\n"
+        'Reply with JSON only, mapping each exact file path to its sentence: '
+        '{"path/to/file": "one sentence", ...}'
+    )
+    raw = run_haiku(prompt)
+    parsed = extract_json(raw) if raw else None
+    if isinstance(parsed, dict):
+        return {k: str(v) for k, v in parsed.items() if k in per_file and v}
+    return {}
+
+
+@router.get("/api/reviews/{repo}/{pr_id}/file-summaries")
+def api_review_file_summaries(repo: str, pr_id: int):
+    """Per-file 'how it contributes to the ticket goal' blurbs, generated once
+    from the ticket goal + the diff and cached next to the review."""
+    found = review_store.find_review(_config["_state_dir"], repo, pr_id)
+    if not found:
+        return {}
+    branch_dir, _comments, _ = found
+    cache = branch_dir / "file_summaries.json"
+    if cache.exists():
+        try:
+            return json.loads(cache.read_text())
+        except (OSError, ValueError):
+            pass
+
+    review_json = branch_dir / "review.json"
+    review_data = json.loads(review_json.read_text()) if review_json.exists() else {}
+    branch = review_data.get("source_branch", "")
+
+    diff_path = branch_dir / "diff.txt"
+    diff_text = diff_path.read_text() if diff_path.exists() else ""
+    if not diff_text:
+        platform = make_platform(_config)
+        review_store.populate_repo_cache(platform, _config["_state_dir"], repo)
+        diff_text = platform.get_pr_diff(repo, pr_id) or ""
+    per_file = _split_diff_by_file(diff_text)
+    if not per_file:
+        return {}
+
+    goal = _resolve_ticket_goal(branch, repo, pr_id)
+    summaries = _generate_file_summaries(goal, per_file)
+    try:
+        cache.write_text(json.dumps(summaries, indent=2))
+    except OSError:
+        pass
+    return summaries
 
 
 @router.post("/api/reviews/{repo}/{pr_id}/discuss")
