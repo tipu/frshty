@@ -479,6 +479,28 @@ def _load_ticket_transitions(instance_key: str, key: str) -> list[dict]:
     return out
 
 
+@router.post("/api/tickets/{key}/classify")
+def api_classify_ticket(key: str, body: dict):
+    """Manually set a held ticket's work type and route it: 'code' enters the
+    normal pipeline, 'research' enters the research path."""
+    work_type = (body.get("work_type") or "").strip().lower()
+    if work_type not in ("code", "research"):
+        return JSONResponse({"error": "work_type must be 'code' or 'research'"}, status_code=400)
+    ts = state.load_ticket(key)
+    if not ts:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    ts["work_type"] = work_type
+    state.save_ticket(key, ts)
+    instance_key = state.active_instance_key()
+    if work_type == "research":
+        _tickets_mod._enqueue_stage(instance_key, key, "do_research")
+    else:
+        _tickets_mod._enqueue_stage(instance_key, key, "start_planning")
+    log.emit("ticket_classified_manual", f"{key}: work_type set to {work_type} (manual)",
+             meta={"ticket": key, "work_type": work_type})
+    return {"status": "classified", "work_type": work_type}
+
+
 @router.get("/api/tickets/{key}/transitions")
 def api_ticket_transitions(key: str):
     active_key = state.active_instance_key()

@@ -342,10 +342,16 @@ class TestTodayDoesNotHitExternalsOnDefaultPoll:
         cfg["features"] = {**cfg.get("features", {}), "billing": True}
         cfg["billing"] = {"billcom_customer_id": "c1", "billing_freq": "monthly"}
         set_primary_config(cfg)
+        from datetime import date
+        today = date.today()
+        ly, lm = (today.year - 1, 12) if today.month == 1 else (today.year, today.month - 1)
+        # Seed an invoice that covers LAST month relative to now, so the bucket
+        # (which surfaces "last month not yet invoiced") stays empty regardless
+        # of when the test runs.
         state.save("billing_invoices_remote", {
-            "items": [{"start": "2026-04-01", "end": "2026-04-30",
+            "items": [{"start": f"{ly:04d}-{lm:02d}-01", "end": f"{ly:04d}-{lm:02d}-28",
                        "id": "iv1", "status": "pending"}],
-            "refreshed_at": "2026-05-01",
+            "refreshed_at": f"{ly:04d}-{lm:02d}-01",
         })
 
         with patch("features.billing.list_invoices") as live:
