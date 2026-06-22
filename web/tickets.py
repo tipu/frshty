@@ -796,6 +796,11 @@ def api_ticket_pr_comments(key: str):
     return json.loads(path.read_text())
 
 
+@router.get("/api/tickets/{key}/pr-comments/{comment_id}/timeline")
+def api_ticket_comment_timeline(key: str, comment_id: int):
+    return {"timeline": log.get_events_for_comment(str(comment_id), limit=100)}
+
+
 @router.post("/api/tickets/{key}/pr-comments/{comment_id}/reply")
 def api_ticket_reply(key: str, comment_id: int, body: dict):
     body = body.get("body", "")

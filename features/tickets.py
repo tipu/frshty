@@ -1727,6 +1727,18 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
         if not new_comments:
             continue
 
+        log.emit("ticket_pr_comments_detected",
+            f"{_label(ticket['key'], ts)} · {pr['repo']}: {len(new_comments)} new comment(s)",
+            links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+            meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"], "count": len(new_comments),
+                  "comments": [
+                      {"comment_id": c["id"],
+                       "author": c.get("author_id", ""),
+                       "loc": f"{c.get('path', '')}:{c.get('line', '')}".strip(":"),
+                       "snippet": c["body"][:120]}
+                      for c in new_comments
+                  ]})
+
         batch_prompt = (
             "Triage each PR review comment using the CODE it is anchored to. "
             "actionable=true when it requests a concrete code change — including terse "
@@ -1774,6 +1786,11 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                 "suggested_reply": "",
             }
 
+            log.emit("ticket_pr_comment_registered",
+                f"{_label(ticket['key'], ts)} · {pr['repo']}: Comment registered — {comment['body'][:80]}",
+                links={"detail": f"{base_url}/tickets/{ticket['key']}", "comment": comment.get("html_url", "")},
+                meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"]})
+
             if actionable:
                 repos = get_repos(config)
                 repo_match = next((r for r in repos if r["name"] == pr["repo"]), None)
@@ -1791,6 +1808,10 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                             timeout=900,
                         )
                         if fix_result and commit.returncode == 0:
+                            log.emit("ticket_pr_comment_code_written",
+                                f"{_label(ticket['key'], ts)} · {pr['repo']}: Code written — {comment['body'][:60]}",
+                                links={"detail": f"{base_url}/tickets/{ticket['key']}", "comment": comment.get("html_url", "")},
+                                meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"]})
                             platform.push_branch(wt, ts["branch"])
                             ts.pop("ci_passed", None)
                             ts.pop("checks_started_at", None)
@@ -1833,8 +1854,8 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                 entry["status"] = "needs_reply"
                 entry["suggested_reply"] = suggested
                 log.emit("ticket_pr_comment_needs_reply", f"{_label(ticket['key'], ts)}: Reply needed {comment['body'][:80]}",
-                    links={"detail": f"{base_url}/tickets/{ticket['key']}"},
-                    meta={"ticket": ticket["key"]})
+                    links={"detail": f"{base_url}/tickets/{ticket['key']}", "comment": comment.get("html_url", "")},
+                    meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"]})
 
             pr_comments.append(entry)
 
