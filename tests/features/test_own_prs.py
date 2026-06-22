@@ -119,6 +119,46 @@ class TestCheckComments:
         platform.push_branch.assert_not_called()
 
 
+    def test_emits_detection_event_with_count(self, tmp_path):
+        platform = MagicMock()
+        pr = make_pr()
+        config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
+
+        with patch("features.own_prs.comments"), \
+             patch("features.own_prs.run_sonnet", return_value='{"results": [{"id": 0, "actionable": false, "reason": "q"}, {"id": 1, "actionable": false, "reason": "q"}]}'), \
+             patch("features.own_prs.log.emit") as mock_emit:
+            with patch("features.own_prs.comments.fetch_and_detect_comments", return_value={
+                "new": [make_comment(id=10, author_id="r1", body="one"), make_comment(id=11, author_id="r2", body="two")],
+                "edited": [],
+            }):
+                own_prs._check_comments(config, "test", platform, pr, "http://base")
+
+        detected = [c for c in mock_emit.call_args_list if c[0][0] == "pr_comments_detected"]
+        assert len(detected) == 1
+        assert detected[0][1]["meta"]["count"] == 2
+        assert len(detected[0][1]["meta"]["comments"]) == 2
+
+    def test_emits_code_written_before_addressed(self, tmp_path):
+        platform = MagicMock()
+        pr = make_pr()
+        config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
+
+        with patch("features.own_prs.run_sonnet", return_value='{"results": [{"id": 0, "actionable": true, "reason": "clear"}]}'), \
+             patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs.run_claude_code", return_value="done"), \
+             patch("features.own_prs.log.emit") as mock_emit:
+            with patch("features.own_prs.comments.fetch_and_detect_comments", return_value={
+                "new": [make_comment(id=10, author_id="reviewer1", body="Fix this function")],
+                "edited": [],
+            }), patch("features.own_prs.comments.mark_comment_processing"), \
+                 patch("features.own_prs.comments.mark_comment_processed"):
+                own_prs._check_comments(config, "test", platform, pr, "http://base")
+
+        events = [c[0][0] for c in mock_emit.call_args_list]
+        assert "pr_comment_code_written" in events
+        assert events.index("pr_comment_code_written") < events.index("pr_comment_addressed")
+
+
 class TestEnsureWorktree:
     def test_uses_correct_repo(self, tmp_path):
         repo_a = tmp_path / "repo-a"

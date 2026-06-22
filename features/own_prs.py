@@ -79,6 +79,23 @@ def _check_comments(config, instance_key, platform, pr, base_url):
     if not all_to_process:
         return
 
+    pr_ref = f"{pr['repo']}#{pr['id']}"
+    detected_meta = [
+        {
+            "comment_id": str(c["id"]),
+            "author": c.get("author_id", ""),
+            "loc": f"{c.get('path', '')}:{c.get('line', '')}".strip(":"),
+            "snippet": c["body"][:120],
+        }
+        for c in all_to_process
+    ]
+    log.emit(
+        "pr_comments_detected",
+        f"{pr_ref}: {len(all_to_process)} new comment(s)",
+        links={"pr": pr["url"], "detail": f"{base_url}/"},
+        meta={"repo": pr["repo"], "pr_id": pr["id"], "count": len(all_to_process), "comments": detected_meta},
+    )
+
     comment_list = "\n\n".join(
         f"[{i}] {c.get('path', '')}:{c.get('line', '')}\n"
         f"CODE:\n{(c.get('diff_hunk') or '(no hunk)')[:600]}\n"
@@ -121,9 +138,9 @@ def _check_comments(config, instance_key, platform, pr, base_url):
         }
         meta = {"repo": pr["repo"], "pr_id": pr["id"], "comment_id": comment_id}
 
-        pr_ref = f"{pr['repo']}#{pr['id']}"
-
         comments.mark_comment_processing(instance_key, "pr", pr_key, comment_id, edited_at)
+
+        log.emit("pr_comment_registered", f"{pr_ref}: Comment registered — {comment['body'][:80]}", links=links, meta=meta)
 
         if not classified:
             log.emit("pr_comment_classify_failed",
@@ -141,9 +158,10 @@ def _check_comments(config, instance_key, platform, pr, base_url):
                     log.emit("pr_comment_blocked", f"{pr_ref}: Claude failed to fix — {comment['body'][:80]}", links=links, meta={**meta, "reason": "Claude failed to fix"})
                     comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "Claude failed to fix")
                     continue
+                log.emit("pr_comment_code_written", f"{pr_ref}: Code written — {comment['body'][:80]}", links=links, meta=meta)
                 platform.push_branch(worktree, pr["branch"])
                 platform.resolve_comment(pr["repo"], pr["id"], int(comment_id))
-                log.emit("pr_comment_addressed", f"{pr_ref}: Fixed — {comment['body'][:80]}", links=links, meta=meta)
+                log.emit("pr_comment_addressed", f"{pr_ref}: Fixed & pushed — {comment['body'][:80]}", links=links, meta=meta)
                 comments.mark_comment_processed(instance_key, "pr", pr_key, comment_id)
             else:
                 log.emit("pr_comment_blocked", f"{pr_ref}: Could not create worktree — {comment['body'][:80]}", links=links, meta={**meta, "reason": "Could not create worktree"})

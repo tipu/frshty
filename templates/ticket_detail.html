@@ -470,6 +470,16 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                             <span class="text-gray-500">{{ c.path ? c.path + ':' + (c.line || '') : '' }}</span>
                         </div>
                         <div class="text-sm" :class="commentBodyTextClass(c)">{{ c.body }}</div>
+                        <div class="mt-1">
+                            <button @click="toggleTimeline(c.id)" class="text-xs text-blue-400 hover:underline">{{ timelineOpen[c.id] ? '▾' : '▸' }} Track</button>
+                            <div v-if="timelineOpen[c.id]" class="mt-1 border-l-2 border-gray-700 pl-2">
+                                <div v-for="ev in (commentTimelines[c.id] || [])" :key="ev.id" class="text-xs text-gray-400 py-0.5">
+                                    <span class="text-gray-600">{{ (ev.ts || '').slice(5,16).replace('T',' ') }}</span>
+                                    <span class="text-gray-300 ml-1">{{ ev.event }}</span>
+                                </div>
+                                <div v-if="(commentTimelines[c.id] || []).length === 0" class="text-xs text-gray-600 py-0.5">No tracked events yet.</div>
+                            </div>
+                        </div>
                         <template v-if="commentLabel(c) === 'replied'">
                             <div class="text-sm text-gray-500 mt-1 italic">Reply: {{ c.suggested_reply || '' }}</div>
                         </template>
@@ -488,6 +498,16 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                     <span class="text-gray-500">{{ c.path ? c.path + ':' + (c.line || '') : '' }}</span>
                 </div>
                 <div class="text-sm" :class="commentBodyTextClass(c)">{{ c.body }}</div>
+                <div class="mt-1">
+                    <button @click="toggleTimeline(c.id)" class="text-xs text-blue-400 hover:underline">{{ timelineOpen[c.id] ? '▾' : '▸' }} Track</button>
+                    <div v-if="timelineOpen[c.id]" class="mt-1 border-l-2 border-gray-700 pl-2">
+                        <div v-for="ev in (commentTimelines[c.id] || [])" :key="ev.id" class="text-xs text-gray-400 py-0.5">
+                            <span class="text-gray-600">{{ (ev.ts || '').slice(5,16).replace('T',' ') }}</span>
+                            <span class="text-gray-300 ml-1">{{ ev.event }}</span>
+                        </div>
+                        <div v-if="(commentTimelines[c.id] || []).length === 0" class="text-xs text-gray-600 py-0.5">No tracked events yet.</div>
+                    </div>
+                </div>
                 <template v-if="commentLabel(c) === 'replied'">
                     <div class="text-sm text-gray-500 mt-1 italic">Reply: {{ c.suggested_reply || '' }}</div>
                 </template>
@@ -611,6 +631,8 @@ frshtyApp({
         }
         const docExpanded = reactive({});
         const replyDrafts = reactive({});
+        const commentTimelines = reactive({});
+        const timelineOpen = reactive({});
         const hunkCollapsed = reactive({});
         const jobOutput = reactive({ jobId: null, taskName: '', text: '', offset: 0 });
 
@@ -1340,6 +1362,14 @@ frshtyApp({
             if (r.ok) loadDiff();
         }
 
+        async function toggleTimeline(commentId) {
+            timelineOpen[commentId] = !timelineOpen[commentId];
+            if (timelineOpen[commentId] && !commentTimelines[commentId]) {
+                const r = await fetch(`/api/tickets/${key}/pr-comments/${commentId}/timeline`);
+                if (r.ok) commentTimelines[commentId] = (await r.json()).timeline || [];
+            }
+        }
+
         function viewJobOutput(jobId, taskName) {
             jobOutput.jobId = jobId;
             jobOutput.taskName = taskName;
@@ -1528,7 +1558,7 @@ frshtyApp({
             saveRelease, clearRelease, reinspectRelease,
             setStatus, startDev, restartTicket, submitNote, onSetStateChange, toggleAutoPr,
             openPrModal, closePrModal, onPrSubmit,
-            retryJob, postReply, viewJobOutput, closeJobOutput,
+            retryJob, postReply, toggleTimeline, commentTimelines, timelineOpen, viewJobOutput, closeJobOutput,
             runServices, resetTerminal, openDiscuss, toggleMaximize,
         };
     },
