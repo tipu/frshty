@@ -52,6 +52,29 @@ class TestGetEvents:
         assert events[0]["event"] == "second"
 
 
+class TestGetEventsForComment:
+    def test_empty(self, tmp_log):
+        assert log.get_events_for_comment("c1") == []
+
+    def test_filters_by_comment_id(self, tmp_log):
+        log.emit("registered", "came up", meta={"comment_id": "c1"})
+        log.emit("registered", "other", meta={"comment_id": "c2"})
+        log.emit("addressed", "fixed", meta={"comment_id": "c1"})
+        events = log.get_events_for_comment("c1")
+        assert [e["event"] for e in events] == ["registered", "addressed"]
+
+    def test_ordered_oldest_first(self, tmp_log):
+        log.emit("registered", "1", meta={"comment_id": "c9"})
+        log.emit("code_written", "2", meta={"comment_id": "c9"})
+        log.emit("addressed", "3", meta={"comment_id": "c9"})
+        events = log.get_events_for_comment("c9")
+        assert [e["event"] for e in events] == ["registered", "code_written", "addressed"]
+
+    def test_accepts_int_comment_id(self, tmp_log):
+        log.emit("registered", "via int", meta={"comment_id": "12345"})
+        assert len(log.get_events_for_comment(12345)) == 1
+
+
 class TestDismiss:
     def test_marks_as_read(self, tmp_log):
         r = log.emit("evt", "msg")

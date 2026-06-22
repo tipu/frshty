@@ -147,6 +147,39 @@ def get_events_for_ticket(ticket_key: str, limit: int = 200) -> list[dict]:
     return events
 
 
+def get_events_for_comment(comment_id: str, limit: int = 100) -> list[dict]:
+    """Events for a single comment ('sub-ticket'), assembled from log_events
+    whose meta.comment_id matches. This is the per-comment lifecycle timeline
+    (detected -> code written -> pushed -> resolved). Ordered oldest-first so
+    the UI reads top-to-bottom as the work progressed."""
+    instance_key = _active_instance_key()
+    job = _active_job_key()
+    if not instance_key or not job:
+        return []
+    rows = _db.query_all(
+        """
+        SELECT e.id, e.job, e.event, e.summary, e.ts,
+               COALESCE(json_extract(e.links, '$'), '{}') as links,
+               COALESCE(json_extract(e.meta, '$'), '{}') as meta,
+               (r.event_id IS NOT NULL) as read
+        FROM log_events e
+        LEFT JOIN log_read_state r ON r.instance_key=e.instance_key AND r.event_id=e.id
+        WHERE e.instance_key=? AND e.job=?
+          AND json_extract(e.meta, '$.comment_id') = ?
+        ORDER BY e.ts ASC LIMIT ?
+        """,
+        (instance_key, job, str(comment_id), limit),
+    )
+    events = []
+    for row in rows:
+        ev = dict(row)
+        ev["links"] = json.loads(ev.get("links") or "{}")
+        ev["meta"] = json.loads(ev.get("meta") or "{}")
+        ev["read"] = bool(ev["read"])
+        events.append(ev)
+    return events
+
+
 def dismiss(event_id: str):
     _dismiss_ids({event_id})
 
