@@ -8,6 +8,7 @@ def fetch_and_detect_comments(
     platform,
     resource_type: str,
     resource_id: str,
+    platform_comments: list | None = None,
 ) -> dict:
     """
     Fetch comments from platform and detect new, edited, and deleted comments.
@@ -26,13 +27,14 @@ def fetch_and_detect_comments(
             "unchanged_count": 10
         }
     """
-    # Fetch all comments from platform
-    if resource_type == "pr":
-        platform_comments = platform.get_pr_comments(resource_id.split("/")[0], int(resource_id.split("/")[1]))
-    elif resource_type == "ticket":
-        platform_comments = platform.get_ticket_comments(resource_id)
-    else:
-        raise ValueError(f"Unknown resource_type: {resource_type}")
+    # Fetch all comments from platform (unless caller already fetched them)
+    if platform_comments is None:
+        if resource_type == "pr":
+            platform_comments = platform.get_pr_comments(resource_id.split("/")[0], int(resource_id.split("/")[1]))
+        elif resource_type == "ticket":
+            platform_comments = platform.get_ticket_comments(resource_id)
+        else:
+            raise ValueError(f"Unknown resource_type: {resource_type}")
 
     # Get current state from database
     existing = db.query_all(
@@ -181,7 +183,7 @@ def get_unprocessed_comments(
     """Get all unprocessed comments for a resource."""
     return db.query_all(
         """
-        SELECT comment_id, comment_edited_at, state, error_count
+        SELECT comment_id, comment_edited_at, state, error_count, last_checked_at
         FROM comment_state
         WHERE instance_key = ? AND resource_type = ? AND resource_id = ?
         AND state IN ('new', 'processing')

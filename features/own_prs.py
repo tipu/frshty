@@ -1,14 +1,19 @@
 import subprocess
+import traceback
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import core.log as log
+import core.queue as q
 import core.state as state
 import core.comments as comments
 import core.git_util as git_util
 from core.claude_runner import run_claude_code, run_haiku, run_sonnet, extract_json
 from core.config import get_repos
 from features.platforms import make_platform
+
+RECLAIM_STALE_SECONDS = 1200
+MAX_COMMENT_RETRIES = 3
 
 
 def check(config: dict):
@@ -72,14 +77,22 @@ def _cache_pr_metadata(platform, pr: dict, seen: dict) -> None:
 def _check_comments(config, instance_key, platform, pr, base_url):
     user_id = config.get("bitbucket", {}).get("user_account_id", "")
     pr_key = f"{pr['repo']}/{pr['id']}"
+    pr_ref = f"{pr['repo']}#{pr['id']}"
 
-    detection = comments.fetch_and_detect_comments(instance_key, platform, "pr", pr_key)
+    platform_comments = platform.get_pr_comments(pr["repo"], pr["id"])
+    by_id = {str(c["id"]): c for c in platform_comments}
+    detection = comments.fetch_and_detect_comments(instance_key, platform, "pr", pr_key, platform_comments=platform_comments)
     all_to_process = [c for c in detection["new"] + detection["edited"] if c.get("author_id") != user_id]
 
-    if not all_to_process:
-        return
+    handled = set()
+    if all_to_process:
+        _process_detected_comments(config, instance_key, platform, pr, pr_ref, base_url, all_to_process, handled)
 
-    pr_ref = f"{pr['repo']}#{pr['id']}"
+    _reclaim_stuck_comments(instance_key, pr, pr_key, pr_ref, base_url, by_id, user_id, handled)
+
+
+def _process_detected_comments(config, instance_key, platform, pr, pr_ref, base_url, all_to_process, handled):
+    pr_key = f"{pr['repo']}/{pr['id']}"
     detected_meta = [
         {
             "comment_id": str(c["id"]),
@@ -126,6 +139,7 @@ def _check_comments(config, instance_key, platform, pr, base_url):
     for i, comment in enumerate(all_to_process):
         comment_id = str(comment["id"])
         edited_at = comment.get("updated_at") or comment.get("created_at")
+        handled.add(comment_id)
 
         classified = i in classifications
         cls = classifications.get(i, {})
@@ -150,25 +164,100 @@ def _check_comments(config, instance_key, platform, pr, base_url):
             continue
 
         if actionable:
-            worktree = _ensure_worktree(config, pr)
-            if worktree:
-                context = f"File: {comment.get('path', 'unknown')}\nLine: {comment.get('line', 'unknown')}\n\nReview comment: {comment['body']}\n\nFix this review comment."
-                result = run_claude_code(context, cwd=worktree)
-                if result is None:
-                    log.emit("pr_comment_blocked", f"{pr_ref}: Claude failed to fix — {comment['body'][:80]}", links=links, meta={**meta, "reason": "Claude failed to fix"})
-                    comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "Claude failed to fix")
-                    continue
-                log.emit("pr_comment_code_written", f"{pr_ref}: Code written — {comment['body'][:80]}", links=links, meta=meta)
-                platform.push_branch(worktree, pr["branch"])
-                platform.resolve_comment(pr["repo"], pr["id"], int(comment_id))
-                log.emit("pr_comment_addressed", f"{pr_ref}: Fixed & pushed — {comment['body'][:80]}", links=links, meta=meta)
-                comments.mark_comment_processed(instance_key, "pr", pr_key, comment_id)
-            else:
-                log.emit("pr_comment_blocked", f"{pr_ref}: Could not create worktree — {comment['body'][:80]}", links=links, meta={**meta, "reason": "Could not create worktree"})
-                comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "Could not create worktree")
+            q.enqueue_job(instance_key, "fix_pr_comment", payload={"pr": pr, "comment": comment})
+            log.emit("pr_comment_queued", f"{pr_ref}: Queued fix — {comment['body'][:80]}", links=links, meta=meta)
         else:
             log.emit("pr_comment_flagged_manual", f"{pr_ref}: Ambiguous ({reason}) — {comment['body'][:80]}", links=links, meta=meta)
             comments.mark_comment_processed(instance_key, "pr", pr_key, comment_id)
+
+
+def _is_stale(ts, now, seconds) -> bool:
+    if not ts:
+        return True
+    try:
+        t = datetime.fromisoformat(ts)
+    except ValueError:
+        return True
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
+    return (now - t).total_seconds() > seconds
+
+
+def _reclaim_stuck_comments(instance_key, pr, pr_key, pr_ref, base_url, by_id, user_id, handled):
+    now = datetime.now(timezone.utc)
+    for row in comments.get_unprocessed_comments(instance_key, "pr", pr_key):
+        comment_id = str(row["comment_id"])
+        if comment_id in handled:
+            continue
+        comment = by_id.get(comment_id)
+        if comment is None:
+            comments.mark_comment_deleted(instance_key, "pr", pr_key, comment_id)
+            continue
+        if comment.get("author_id") == user_id:
+            continue
+
+        error_count = row.get("error_count") or 0
+        if row.get("state") == "processing":
+            if not _is_stale(row.get("last_checked_at"), now, RECLAIM_STALE_SECONDS):
+                continue
+            note = "orphaned mid-fix"
+        elif error_count > MAX_COMMENT_RETRIES:
+            continue
+        else:
+            note = f"retry {error_count}/{MAX_COMMENT_RETRIES}"
+
+        links = {"pr": pr["url"], "detail": f"{base_url}/"}
+        meta = {"repo": pr["repo"], "pr_id": pr["id"], "comment_id": comment_id, "reason": note}
+        edited_at = comment.get("updated_at") or comment.get("created_at")
+        comments.mark_comment_processing(instance_key, "pr", pr_key, comment_id, edited_at)
+        q.enqueue_job(instance_key, "fix_pr_comment", payload={"pr": pr, "comment": comment})
+        log.emit("pr_comment_reclaimed", f"{pr_ref}: Re-queued ({note}) — {comment['body'][:80]}", links=links, meta=meta)
+
+
+def fix_comment(config, payload) -> tuple[bool, str | None]:
+    instance_key = config.get("instance_key", "default")
+    platform = make_platform(config)
+    pr = payload["pr"]
+    comment = payload["comment"]
+    pr_key = f"{pr['repo']}/{pr['id']}"
+    pr_ref = f"{pr['repo']}#{pr['id']}"
+    comment_id = str(comment["id"])
+    links = {"pr": pr["url"], "detail": f"{config['_base_url']}/"}
+    meta = {"repo": pr["repo"], "pr_id": pr["id"], "comment_id": comment_id}
+
+    try:
+        worktree = _ensure_worktree(config, pr)
+        if not worktree:
+            log.emit("pr_comment_blocked", f"{pr_ref}: Could not create worktree — {comment['body'][:80]}", links=links, meta={**meta, "reason": "Could not create worktree"})
+            comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "Could not create worktree")
+            return False, "Could not create worktree"
+
+        context = f"File: {comment.get('path', 'unknown')}\nLine: {comment.get('line', 'unknown')}\n\nReview comment: {comment['body']}\n\nFix this review comment."
+        result = run_claude_code(context, cwd=worktree, timeout=600)
+        if result is None:
+            log.emit("pr_comment_blocked", f"{pr_ref}: Claude failed to fix — {comment['body'][:80]}", links=links, meta={**meta, "reason": "Claude failed to fix"})
+            comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "Claude failed to fix")
+            return False, "Claude failed to fix"
+
+        log.emit("pr_comment_code_written", f"{pr_ref}: Code written — {comment['body'][:80]}", links=links, meta=meta)
+        push = platform.push_branch(worktree, pr["branch"])
+        if isinstance(push, dict) and not push.get("ok", True):
+            log.emit("pr_comment_blocked", f"{pr_ref}: Push failed — {comment['body'][:80]}", links=links, meta={**meta, "reason": "push failed"})
+            comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "push failed")
+            return False, "push failed"
+
+        platform.resolve_comment(pr["repo"], pr["id"], int(comment_id))
+        log.emit("pr_comment_addressed", f"{pr_ref}: Fixed & pushed — {comment['body'][:80]}", links=links, meta=meta)
+        comments.mark_comment_processed(instance_key, "pr", pr_key, comment_id)
+        return True, None
+    except Exception as e:
+        reason = f"{type(e).__name__}: {e}"
+        log.emit("pr_comment_error",
+                 f"{pr_ref}: Unexpected error fixing comment — {reason[:120]}",
+                 links=links,
+                 meta={**meta, "reason": reason[:200], "traceback": traceback.format_exc()[-1500:]})
+        comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, reason[:200])
+        return False, reason
 
 
 def _check_ci(config, platform, pr, seen, base_url):

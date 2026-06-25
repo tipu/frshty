@@ -9,6 +9,13 @@ def poll_own_prs(ctx: TaskContext) -> TaskResult:
     return TaskResult("ok")
 
 
+@task("fix_pr_comment", preconditions=[feature_enabled("review_prs")], timeout=900)
+def fix_pr_comment(ctx: TaskContext) -> TaskResult:
+    from features import own_prs
+    ok, reason = own_prs.fix_comment(ctx.config, ctx.payload)
+    return TaskResult("ok") if ok else TaskResult("failed", reason)
+
+
 @task("poll_reviewer", preconditions=[feature_enabled("review_prs")], timeout=120)
 def poll_reviewer(ctx: TaskContext) -> TaskResult:
     from features import reviewer
