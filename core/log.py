@@ -165,7 +165,7 @@ def get_events_for_comment(comment_id: str, limit: int = 100) -> list[dict]:
         FROM log_events e
         LEFT JOIN log_read_state r ON r.instance_key=e.instance_key AND r.event_id=e.id
         WHERE e.instance_key=? AND e.job=?
-          AND json_extract(e.meta, '$.comment_id') = ?
+          AND CAST(json_extract(e.meta, '$.comment_id') AS TEXT) = ?
         ORDER BY e.ts ASC LIMIT ?
         """,
         (instance_key, job, str(comment_id), limit),

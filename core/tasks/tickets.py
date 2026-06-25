@@ -240,6 +240,15 @@ That `docs/proof.md` is the postcondition gate for this step.
 """
 
 
+_PROVE_FEEDBACK_BLOCK = """
+
+REVISION FEEDBACK — a human reviewed your previous proof and is asking you to redo it. Address this specifically:
+{feedback}
+
+Your previous proof.md has been moved to docs/proof.prev.md for reference. Produce a fresh docs/proof.md and save any artifacts the feedback asks for under docs/ (relative paths referenced from proof.md).
+"""
+
+
 _WRITE_TESTS_PROMPT = """Read docs/test-plan.md. For each test case in the table, implement it in the repo's native framework. The test must be a real test the project's runner can discover.
 
 Per repo in workspace/<repo>/:
@@ -1002,9 +1011,13 @@ def prove(ctx: TaskContext) -> TaskResult:
         )
         return TaskResult("ok", artifacts={"skipped": True})
     prompt = _PROVE_PROMPT_TEMPLATE.format(proof_md=proof_md)
+    ts = state.load_ticket(ctx.ticket_key or "") or {}
+    feedback = (ts.get("proof_feedback") or "").strip()
+    if feedback:
+        prompt += _PROVE_FEEDBACK_BLOCK.format(feedback=feedback)
     log.emit("ticket_prove_started",
              f"Headless prove for {ctx.ticket_key}",
-             meta={"ticket": ctx.ticket_key})
+             meta={"ticket": ctx.ticket_key, "feedback": bool(feedback)})
     sid, resume = _claim_session(ctx, "prove")
     result = run_claude_code(prompt, cwd=ticket_dir, timeout=PROOF_TIMEOUT,
                              session_id=sid, resume=resume)
@@ -1012,6 +1025,11 @@ def prove(ctx: TaskContext) -> TaskResult:
         if resume:
             _drop_session(ctx, "prove")
         return TaskResult("failed", "claude returned non-zero or empty")
+    if feedback:
+        def _clear_feedback(t: dict) -> dict:
+            t.pop("proof_feedback", None)
+            return t
+        state.update_ticket(ctx.ticket_key, _clear_feedback)
     return TaskResult("ok")
 
 
