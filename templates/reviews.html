@@ -45,8 +45,17 @@
     </div>
 </div>
 
+<div class="flex items-center gap-2 mb-3">
+    <button @click="ignoreMyPrs = !ignoreMyPrs"
+            :class="ignoreMyPrs ? 'badge-purple' : 'text-gray-500 border border-gray-700'"
+            class="badge cursor-pointer flex items-center gap-1.5"
+            title="hide PRs you authored">
+        <span>{{ ignoreMyPrs ? '☑' : '☐' }}</span> ignore my PRs
+    </button>
+</div>
+
 <div class="space-y-3">
-    <div v-if="!reviews.length" class="text-gray-600">No reviews queued.</div>
+    <div v-if="!visibleReviews.length" class="text-gray-600">No reviews queued.</div>
     <template v-else>
         <div v-for="(group, ticket) in groups" :key="ticket" class="mb-4">
             <div class="text-sm text-gray-400 mb-1">
@@ -134,11 +143,15 @@ frshtyApp({
         const submitButtonLabel = ref('review');
         const pending = reactive({});
         const bbByKey = reactive({});
+        const ignoreMyPrs = ref(true);
         provide('bbByKey', bbByKey);
+
+        const visibleReviews = computed(() =>
+            ignoreMyPrs.value ? reviews.value.filter(r => !r.is_mine) : reviews.value);
 
         const groups = computed(() => {
             const out = {};
-            for (const r of reviews.value) {
+            for (const r of visibleReviews.value) {
                 const t = extractTicket(r.branch);
                 if (!t) continue;
                 if (!out[t]) out[t] = { label: ticketLabel(r.branch), items: [], authors: new Set() };
@@ -152,7 +165,7 @@ frshtyApp({
             return result;
         });
 
-        const ungrouped = computed(() => reviews.value.filter(r => !extractTicket(r.branch)));
+        const ungrouped = computed(() => visibleReviews.value.filter(r => !extractTicket(r.branch)));
 
         const pendingList = computed(() => Object.values(pending));
 
@@ -222,7 +235,7 @@ frshtyApp({
 
         return {
             reviews, features, instanceName, prUrl, submitting, submitButtonLabel,
-            pendingList, groups, ungrouped,
+            pendingList, groups, ungrouped, ignoreMyPrs, visibleReviews,
             submitReview,
         };
     },

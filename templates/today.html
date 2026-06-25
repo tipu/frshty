@@ -116,7 +116,7 @@ details[open] > summary { color: #d1d5db; margin-bottom: 8px; }
             <div class="tk-sum truncate">{{ e.summary }}</div>
             <div v-for="pr in (e.prs || [])" :key="pr.repo + '/' + pr.id" class="tk-meta">
                 <a :href="pr.url" target="_blank" class="text-blue-400 hover:underline">{{ pr.repo }} #{{ pr.id }}</a> ·
-                {{ e.approval_status || 'approved' }}
+                {{ (pr.approvers && pr.approvers.length) ? 'approved' : 'awaiting approval' }}
             </div>
             <div v-if="cardError['mr:' + e.ticket_key]" class="err-inline">{{ cardError['mr:' + e.ticket_key] }}</div>
         </div>
