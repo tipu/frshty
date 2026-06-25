@@ -405,8 +405,16 @@ def api_ticket_detail(key: str):
     docs_dir = ticket_dir / "docs"
     if docs_dir.is_dir():
         for f in docs_dir.iterdir():
-            if f.is_file() and f.suffix == ".md":
-                docs[f.name] = f.read_text()
+            if not (f.is_file() and not f.name.startswith(".")
+                    and f.suffix in (".md", ".json", ".txt")):
+                continue
+            try:
+                if f.stat().st_size <= 512 * 1024:
+                    docs[f.name] = f.read_text()
+                else:
+                    docs[f.name] = f"[artifact too large to inline: {f.stat().st_size} bytes]"
+            except (OSError, UnicodeDecodeError):
+                pass
 
     history = log.get_events_for_ticket(key, limit=200)
 
@@ -889,6 +897,38 @@ def api_restart_ticket(key: str):
     elif instance_key and status == "reviewing":
         q.enqueue_job(instance_key, "start_reviewing", ticket_key=key)
     return {"status": "restarted"}
+
+
+@router.post("/api/tickets/{key}/redo-proof")
+def api_redo_proof(key: str, body: dict):
+    feedback = (body.get("feedback") or "").strip()
+    tickets = state.load("tickets")
+    ts = tickets.get(key)
+    if not ts:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    ws = _config["workspace"]
+    slug = ts.get("slug", "")
+    docs_dir = ws["root"] / ws["tickets_dir"] / slug / "docs"
+    proof = docs_dir / "proof.md"
+    if proof.exists():
+        try:
+            proof.replace(docs_dir / "proof.prev.md")
+        except OSError:
+            pass
+
+    def _set(t: dict) -> dict:
+        t["proof_feedback"] = feedback
+        sess = dict(t.get("llm_sessions") or {})
+        sess.pop("prove", None)
+        t["llm_sessions"] = sess
+        return t
+
+    state.update_ticket(key, _set)
+    try:
+        state.transition_ticket(key, "proving", reason="manual redo proof")
+    except state.TicketStateError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return {"status": "redoing", "feedback": bool(feedback)}
 
 
 @router.post("/api/tickets/{key}/status")

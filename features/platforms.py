@@ -255,6 +255,7 @@ class BitbucketPlatform:
                 "title": data.get("title", ""),
                 "description": (data.get("description", "") or ""),
                 "author": data.get("author", {}).get("display_name", ""),
+                "author_id": data.get("author", {}).get("account_id", ""),
                 "mergeable": "CONFLICTING" if data.get("has_conflicts") else "MERGEABLE",
                 "approvers": approvers,
             }
@@ -609,6 +610,7 @@ class GitHubPlatform:
             "state": data.get("state", "OPEN"),
             "updated_on": data.get("updatedAt", ""),
             "author": data.get("author", {}).get("login", ""),
+            "author_id": data.get("author", {}).get("login", ""),
             "mergeable": data.get("mergeable", "UNKNOWN"),
             "approvers": approvers,
         }
