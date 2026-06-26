@@ -24,18 +24,20 @@ def check(config: dict):
         return
 
     ticket_state = state.load("tickets")
-    ticket_prs = set()
-    for ts in ticket_state.values():
+    ticket_prs = {}
+    for ticket_key, ts in ticket_state.items():
         for p in ts.get("prs", []):
             if p.get("repo") and p.get("id"):
-                ticket_prs.add((p["repo"], p["id"]))
+                ticket_prs[(p["repo"], p["id"])] = ticket_key
 
     pr_state = state.load("own_prs")
     base_url = config["_base_url"]
 
     active_keys: set[str] = set()
     for pr in my_prs:
-        if (pr["repo"], pr["id"]) in ticket_prs:
+        linked_ticket = ticket_prs.get((pr["repo"], pr["id"]))
+        if linked_ticket is not None:
+            _check_comments(config, instance_key, platform, pr, base_url, ticket_key=linked_ticket)
             continue
         pr_key = f"{pr['repo']}/{pr['id']}"
         active_keys.add(pr_key)
@@ -74,7 +76,7 @@ def _cache_pr_metadata(platform, pr: dict, seen: dict) -> None:
     seen["review_state"] = "approved" if approvers else "pending"
 
 
-def _check_comments(config, instance_key, platform, pr, base_url):
+def _check_comments(config, instance_key, platform, pr, base_url, ticket_key=None):
     user_id = config.get("bitbucket", {}).get("user_account_id", "")
     pr_key = f"{pr['repo']}/{pr['id']}"
     pr_ref = f"{pr['repo']}#{pr['id']}"
@@ -86,12 +88,12 @@ def _check_comments(config, instance_key, platform, pr, base_url):
 
     handled = set()
     if all_to_process:
-        _process_detected_comments(config, instance_key, platform, pr, pr_ref, base_url, all_to_process, handled)
+        _process_detected_comments(config, instance_key, platform, pr, pr_ref, base_url, all_to_process, handled, ticket_key)
 
-    _reclaim_stuck_comments(instance_key, pr, pr_key, pr_ref, base_url, by_id, user_id, handled)
+    _reclaim_stuck_comments(instance_key, pr, pr_key, pr_ref, base_url, by_id, user_id, handled, ticket_key)
 
 
-def _process_detected_comments(config, instance_key, platform, pr, pr_ref, base_url, all_to_process, handled):
+def _process_detected_comments(config, instance_key, platform, pr, pr_ref, base_url, all_to_process, handled, ticket_key=None):
     pr_key = f"{pr['repo']}/{pr['id']}"
     detected_meta = [
         {
@@ -164,7 +166,7 @@ def _process_detected_comments(config, instance_key, platform, pr, pr_ref, base_
             continue
 
         if actionable:
-            q.enqueue_job(instance_key, "fix_pr_comment", payload={"pr": pr, "comment": comment})
+            q.enqueue_job(instance_key, "fix_pr_comment", payload={"pr": pr, "comment": comment}, ticket_key=ticket_key)
             log.emit("pr_comment_queued", f"{pr_ref}: Queued fix — {comment['body'][:80]}", links=links, meta=meta)
         else:
             log.emit("pr_comment_flagged_manual", f"{pr_ref}: Ambiguous ({reason}) — {comment['body'][:80]}", links=links, meta=meta)
@@ -183,7 +185,7 @@ def _is_stale(ts, now, seconds) -> bool:
     return (now - t).total_seconds() > seconds
 
 
-def _reclaim_stuck_comments(instance_key, pr, pr_key, pr_ref, base_url, by_id, user_id, handled):
+def _reclaim_stuck_comments(instance_key, pr, pr_key, pr_ref, base_url, by_id, user_id, handled, ticket_key=None):
     now = datetime.now(timezone.utc)
     for row in comments.get_unprocessed_comments(instance_key, "pr", pr_key):
         comment_id = str(row["comment_id"])
@@ -210,7 +212,7 @@ def _reclaim_stuck_comments(instance_key, pr, pr_key, pr_ref, base_url, by_id, u
         meta = {"repo": pr["repo"], "pr_id": pr["id"], "comment_id": comment_id, "reason": note}
         edited_at = comment.get("updated_at") or comment.get("created_at")
         comments.mark_comment_processing(instance_key, "pr", pr_key, comment_id, edited_at)
-        q.enqueue_job(instance_key, "fix_pr_comment", payload={"pr": pr, "comment": comment})
+        q.enqueue_job(instance_key, "fix_pr_comment", payload={"pr": pr, "comment": comment}, ticket_key=ticket_key)
         log.emit("pr_comment_reclaimed", f"{pr_ref}: Re-queued ({note}) — {comment['body'][:80]}", links=links, meta=meta)
 
 

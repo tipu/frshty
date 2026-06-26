@@ -103,7 +103,24 @@ class TestCheckComments:
         mock_enqueue.assert_called_once()
         assert mock_enqueue.call_args[0][1] == "fix_pr_comment"
         assert str(mock_enqueue.call_args[1]["payload"]["comment"]["id"]) == "10"
+        assert mock_enqueue.call_args[1]["ticket_key"] is None
         platform.push_branch.assert_not_called()
+
+    def test_ticket_linked_pr_serializes_fix_on_ticket(self, tmp_path):
+        platform = MagicMock()
+        comment = make_comment(id=10, author_id="reviewer1", body="Fix this function")
+        platform.get_pr_comments.return_value = [comment]
+        pr = make_pr()
+        config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
+
+        with patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.run_sonnet", return_value='{"results": [{"id": 0, "actionable": true, "reason": "clear"}]}'), \
+             patch("features.own_prs.q.enqueue_job") as mock_enqueue, \
+             patch("features.own_prs.log"):
+            mock_comments.fetch_and_detect_comments.return_value = {"new": [comment], "edited": []}
+            mock_comments.get_unprocessed_comments.return_value = []
+            own_prs._check_comments(config, "test", platform, pr, "http://base", ticket_key="DEV-512")
+        assert mock_enqueue.call_args[1]["ticket_key"] == "DEV-512"
 
     def test_classifier_failure_retries_not_finalize(self, tmp_path):
         platform = MagicMock()
@@ -223,7 +240,7 @@ class TestFixComment:
     def test_emits_code_written_before_addressed(self, tmp_path):
         platform = MagicMock()
         platform.push_branch.return_value = {"ok": True}
-        config = {"_state_dir": tmp_path, "_base_url": "http://base", "instance_key": "test"}
+        config = {"_state_dir": tmp_path, "_base_url": "http://base", "job": {"key": "test"}}
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
@@ -240,7 +257,7 @@ class TestFixComment:
 
     def test_no_push_when_claude_fails(self, tmp_path):
         platform = MagicMock()
-        config = {"_state_dir": tmp_path, "_base_url": "http://base", "instance_key": "test"}
+        config = {"_state_dir": tmp_path, "_base_url": "http://base", "job": {"key": "test"}}
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
@@ -256,7 +273,7 @@ class TestFixComment:
 
     def test_worktree_failure_marks_error(self, tmp_path):
         platform = MagicMock()
-        config = {"_state_dir": tmp_path, "_base_url": "http://base", "instance_key": "test"}
+        config = {"_state_dir": tmp_path, "_base_url": "http://base", "job": {"key": "test"}}
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=None), \
@@ -271,7 +288,7 @@ class TestFixComment:
     def test_push_failure_marks_error_not_resolved(self, tmp_path):
         platform = MagicMock()
         platform.push_branch.return_value = {"ok": False, "error": "remote rejected"}
-        config = {"_state_dir": tmp_path, "_base_url": "http://base", "instance_key": "test"}
+        config = {"_state_dir": tmp_path, "_base_url": "http://base", "job": {"key": "test"}}
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
@@ -287,7 +304,7 @@ class TestFixComment:
 
     def test_exception_marks_error(self, tmp_path):
         platform = MagicMock()
-        config = {"_state_dir": tmp_path, "_base_url": "http://base", "instance_key": "test"}
+        config = {"_state_dir": tmp_path, "_base_url": "http://base", "job": {"key": "test"}}
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", side_effect=RuntimeError("boom")), \
