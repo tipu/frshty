@@ -36,9 +36,7 @@ def check(config: dict):
 
     active_keys: set[str] = set()
     for pr in my_prs:
-        linked_ticket = ticket_prs.get((pr["repo"], pr["id"]))
-        if linked_ticket is not None:
-            _check_comments(config, instance_key, platform, pr, base_url, ticket_key=linked_ticket)
+        if (pr["repo"], pr["id"]) in ticket_prs:
             continue
         pr_key = f"{pr['repo']}/{pr['id']}"
         active_keys.add(pr_key)
