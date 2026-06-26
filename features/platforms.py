@@ -282,9 +282,9 @@ class BitbucketPlatform:
             return {"status": "error", "detail": resp.text}
 
     def resolve_comment(self, repo: str, pr_id: int, comment_id: int) -> dict:
-        url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}/comments/{comment_id}"
+        url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}/comments/{comment_id}/resolve"
         with external_log.client("bitbucket", auth=self._auth(), timeout=30) as client:
-            resp = client.put(url, json={"resolution": {"type": "RESOLVED"}})
+            resp = client.post(url)
             if resp.status_code in (200, 201):
                 return {"status": "resolved"}
             return {"status": "error", "detail": resp.text}
