@@ -122,6 +122,30 @@ class TestCheckComments:
             own_prs._check_comments(config, "test", platform, pr, "http://base", ticket_key="DEV-512")
         assert mock_enqueue.call_args[1]["ticket_key"] == "DEV-512"
 
+    def test_first_sight_baselines_old_keeps_recent(self, tmp_path):
+        platform = MagicMock()
+        old = make_comment(id=1, author_id="reviewer1", body="old", created_at="2020-01-01T00:00:00+00:00")
+        recent_ts = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        recent = make_comment(id=2, author_id="reviewer1", body="recent", created_at=recent_ts)
+        platform.get_pr_comments.return_value = [old, recent]
+        pr = make_pr()
+        config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
+
+        with patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.run_sonnet", return_value='{"results": [{"id": 0, "actionable": false, "reason": "q"}]}'), \
+             patch("features.own_prs.q.enqueue_job"), \
+             patch("features.own_prs.log"):
+            mock_comments.has_comment_state.return_value = False
+            mock_comments.fetch_and_detect_comments.return_value = {"new": [old, recent], "edited": []}
+            mock_comments.get_unprocessed_comments.return_value = []
+            own_prs._check_comments(config, "test", platform, pr, "http://base")
+
+        seen_ids = [c[0][3] for c in mock_comments.mark_comment_seen.call_args_list]
+        processing_ids = [c[0][3] for c in mock_comments.mark_comment_processing.call_args_list]
+        assert seen_ids == ["1"]
+        assert "2" in processing_ids
+        assert "1" not in processing_ids
+
     def test_classifier_failure_retries_not_finalize(self, tmp_path):
         platform = MagicMock()
         comment = make_comment(id=10, author_id="reviewer1", body="Restore the pluralize please")
@@ -254,6 +278,25 @@ class TestFixComment:
         platform.resolve_comment.assert_called_once()
         events = [c[0][0] for c in mock_emit.call_args_list]
         assert events.index("pr_comment_code_written") < events.index("pr_comment_addressed")
+
+    def test_resolve_failure_marks_error_not_processed(self, tmp_path):
+        platform = MagicMock()
+        platform.push_branch.return_value = {"ok": True}
+        platform.resolve_comment.return_value = {"status": "error", "detail": "boom"}
+        config = {"_state_dir": tmp_path, "_base_url": "http://base", "job": {"key": "test"}}
+
+        with patch("features.own_prs.make_platform", return_value=platform), \
+             patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs.run_claude_code", return_value="done"), \
+             patch("features.own_prs.comments.mark_comment_error") as mock_err, \
+             patch("features.own_prs.comments.mark_comment_processed") as mock_proc, \
+             patch("features.own_prs.log.emit"):
+            ok, reason = own_prs.fix_comment(config, self._payload())
+
+        assert ok is False
+        assert reason == "resolve failed"
+        mock_err.assert_called_once()
+        mock_proc.assert_not_called()
 
     def test_no_push_when_claude_fails(self, tmp_path):
         platform = MagicMock()

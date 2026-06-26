@@ -175,6 +175,45 @@ def mark_comment_deleted(
     )
 
 
+def has_comment_state(
+    instance_key: str,
+    resource_type: str,
+    resource_id: str,
+) -> bool:
+    """True if any comment for this resource has been seen before."""
+    rows = db.query_all(
+        "SELECT 1 FROM comment_state "
+        "WHERE instance_key = ? AND resource_type = ? AND resource_id = ? LIMIT 1",
+        (instance_key, resource_type, resource_id),
+    )
+    return bool(rows)
+
+
+def mark_comment_seen(
+    instance_key: str,
+    resource_type: str,
+    resource_id: str,
+    comment_id: str,
+    edited_at: str | None = None,
+) -> None:
+    """Baseline a pre-existing comment as processed without acting on it."""
+    now = datetime.now(timezone.utc).isoformat()
+
+    with db.tx() as conn:
+        conn.execute(
+            """
+            INSERT INTO comment_state (
+                instance_key, resource_type, resource_id, comment_id,
+                comment_edited_at, last_checked_at, state, processed_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 'processed', ?)
+            ON CONFLICT(instance_key, resource_type, resource_id, comment_id)
+            DO UPDATE SET state = 'processed', last_checked_at = ?, comment_edited_at = ?, processed_at = ?
+            """,
+            (instance_key, resource_type, resource_id, comment_id, edited_at, now, now, now, edited_at, now),
+        )
+
+
 def get_unprocessed_comments(
     instance_key: str,
     resource_type: str,

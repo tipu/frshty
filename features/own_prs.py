@@ -14,6 +14,7 @@ from features.platforms import make_platform
 
 RECLAIM_STALE_SECONDS = 1200
 MAX_COMMENT_RETRIES = 3
+NEW_COMMENT_BASELINE_HOURS = 24
 
 
 def check(config: dict):
@@ -83,14 +84,30 @@ def _check_comments(config, instance_key, platform, pr, base_url, ticket_key=Non
 
     platform_comments = platform.get_pr_comments(pr["repo"], pr["id"])
     by_id = {str(c["id"]): c for c in platform_comments}
+    first_sight = not comments.has_comment_state(instance_key, "pr", pr_key)
     detection = comments.fetch_and_detect_comments(instance_key, platform, "pr", pr_key, platform_comments=platform_comments)
     all_to_process = [c for c in detection["new"] + detection["edited"] if c.get("author_id") != user_id]
+    if first_sight:
+        all_to_process = _baseline_existing_comments(instance_key, pr_key, all_to_process)
 
     handled = set()
     if all_to_process:
         _process_detected_comments(config, instance_key, platform, pr, pr_ref, base_url, all_to_process, handled, ticket_key)
 
     _reclaim_stuck_comments(instance_key, pr, pr_key, pr_ref, base_url, by_id, user_id, handled, ticket_key)
+
+
+def _baseline_existing_comments(instance_key, pr_key, candidates):
+    now = datetime.now(timezone.utc)
+    window = NEW_COMMENT_BASELINE_HOURS * 3600
+    recent = []
+    for c in candidates:
+        edited_at = c.get("updated_at") or c.get("created_at")
+        if _is_stale(edited_at, now, window):
+            comments.mark_comment_seen(instance_key, "pr", pr_key, str(c["id"]), edited_at)
+        else:
+            recent.append(c)
+    return recent
 
 
 def _process_detected_comments(config, instance_key, platform, pr, pr_ref, base_url, all_to_process, handled, ticket_key=None):
@@ -248,7 +265,13 @@ def fix_comment(config, payload) -> tuple[bool, str | None]:
             comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "push failed")
             return False, "push failed"
 
-        platform.resolve_comment(pr["repo"], pr["id"], int(comment_id))
+        resolution = platform.resolve_comment(pr["repo"], pr["id"], int(comment_id))
+        if isinstance(resolution, dict) and resolution.get("status") != "resolved":
+            detail = str(resolution.get("detail", ""))[:200]
+            log.emit("pr_comment_blocked", f"{pr_ref}: Resolve failed — {comment['body'][:80]}", links=links, meta={**meta, "reason": "resolve failed", "detail": detail})
+            comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "resolve failed")
+            return False, "resolve failed"
+
         log.emit("pr_comment_addressed", f"{pr_ref}: Fixed & pushed — {comment['body'][:80]}", links=links, meta=meta)
         comments.mark_comment_processed(instance_key, "pr", pr_key, comment_id)
         return True, None
