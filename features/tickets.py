@@ -14,6 +14,7 @@ import core.state as state
 import core.comments as comments
 from core import external_log
 from core.config import get_repos, ticket_worktree_path, resolve_env
+from core.git_util import commit_with_hooks
 from core.deps import run_dep_command, relink_shared_venv
 from core.claude_runner import run_haiku, run_sonnet, run_claude_code, extract_json
 from core.ticket_status import TicketStatus, transition
@@ -1770,6 +1771,12 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                 meta={"ticket": ticket["key"], "pr_id": pr["id"], "count": len(new_comments)})
             continue
 
+        repos = get_repos(config)
+        repo_match = next((r for r in repos if r["name"] == pr["repo"]), None)
+        wt = ticket_worktree_path(config, slug, pr["repo"]) if repo_match else None
+        to_resolve = []
+        made_commit = False
+
         for idx, comment in enumerate(new_comments):
             actionable = classifications.get(idx, False)
 
@@ -1791,65 +1798,68 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                 links={"detail": f"{base_url}/tickets/{ticket['key']}", "comment": comment.get("html_url", "")},
                 meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"]})
 
-            if actionable:
-                repos = get_repos(config)
-                repo_match = next((r for r in repos if r["name"] == pr["repo"]), None)
-                if repo_match:
-                    wt = ticket_worktree_path(config, slug, pr["repo"])
-                    if wt.is_dir():
-                        subprocess.run(["git", "pull", "--rebase", "origin", ts["branch"]], cwd=str(wt), capture_output=True, timeout=60)
-                        context = f"File: {comment.get('path', 'unknown')}\nLine: {comment.get('line', 'unknown')}\n\nReview comment: {comment['body']}\n\nFix this review comment."
-                        fix_result = run_claude_code(context, cwd=wt)
-                        subprocess.run(["git", "add", "-A"], cwd=str(wt), capture_output=True, timeout=60)
-                        from core.git_util import commit_with_hooks
-                        commit = commit_with_hooks(
-                            wt,
-                            message=f"fix: address review comment on {comment.get('path', 'unknown')}",
-                            timeout=900,
-                        )
-                        if fix_result and commit.returncode == 0:
-                            log.emit("ticket_pr_comment_code_written",
-                                f"{_label(ticket['key'], ts)} · {pr['repo']}: Code written — {comment['body'][:60]}",
-                                links={"detail": f"{base_url}/tickets/{ticket['key']}", "comment": comment.get("html_url", "")},
-                                meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"]})
-                            platform.push_branch(wt, ts["branch"])
-                            ts.pop("ci_passed", None)
-                            ts.pop("checks_started_at", None)
-                            platform.resolve_comment(pr["repo"], pr["id"], comment["id"])
-                            entry["status"] = "addressed"
-                            sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(wt), capture_output=True, text=True, timeout=30).stdout.strip()
-                            stat = subprocess.run(["git", "show", "--stat", "--format=", "HEAD"], cwd=str(wt), capture_output=True, text=True, timeout=30).stdout.strip()
-                            changed_files = [ln.split("|")[0].strip() for ln in stat.splitlines() if "|" in ln]
-                            files_label = ", ".join(changed_files[:5]) + (f" +{len(changed_files) - 5} more" if len(changed_files) > 5 else "")
-                            commit_url = pr["url"].split("/pull/")[0] + f"/commit/{sha}" if sha and "/pull/" in pr.get("url", "") else ""
-                            entry["fix_commit"] = sha
-                            entry["fix_files"] = changed_files
-                            log.emit("ticket_pr_comment_fixed",
-                                f"{_label(ticket['key'], ts)} · {pr['repo']}: Fixed \"{comment['body'][:60]}\" — changed {files_label or 'files'} ({sha[:7]})",
-                                links={"detail": f"{base_url}/tickets/{ticket['key']}", "commit": commit_url, "comment": comment.get("html_url", "")},
-                                meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"], "commit": sha, "files": changed_files})
-                        else:
-                            entry["status"] = "fix_failed"
-                            attempt_key = f"{pr_key}/{comment['id']}"
-                            attempts = comment_fix_attempts.get(attempt_key, 0) + 1
-                            comment_fix_attempts[attempt_key] = attempts
-                            entry["attempts"] = attempts
-                            log.emit("ticket_pr_comment_fix_failed",
-                                f"{_label(ticket['key'], ts)}: No code change produced for {comment['body'][:80]}",
-                                links={"detail": f"{base_url}/tickets/{ticket['key']}"},
-                                meta={"ticket": ticket["key"],
-                                      "claude_returned": bool(fix_result),
-                                      "commit_rc": commit.returncode,
-                                      "attempts": attempts,
-                                      "max_attempts": MAX_PR_COMMENT_FIX_ATTEMPTS})
-                            if attempts >= MAX_PR_COMMENT_FIX_ATTEMPTS:
-                                log.emit("ticket_pr_comment_fix_capped",
-                                    f"{_label(ticket['key'], ts)}: Giving up on review comment after {attempts} attempts: {comment['body'][:80]}",
-                                    links={"detail": f"{base_url}/tickets/{ticket['key']}"},
-                                    meta={"ticket": ticket["key"],
-                                          "comment_id": comment["id"],
-                                          "attempts": attempts})
-            else:
+            if actionable and wt is not None and wt.is_dir():
+                subprocess.run(["git", "pull", "--rebase", "origin", ts["branch"]], cwd=str(wt), capture_output=True, timeout=60)
+                context = f"File: {comment.get('path', 'unknown')}\nLine: {comment.get('line', 'unknown')}\n\nReview comment: {comment['body']}\n\nFix this review comment."
+                fix_result = run_claude_code(context, cwd=wt)
+                subprocess.run(["git", "add", "-A"], cwd=str(wt), capture_output=True, timeout=60)
+                staged = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=str(wt)).returncode != 0
+                commit_rc = None
+                fix_ok = False
+                if fix_result and staged:
+                    commit = commit_with_hooks(
+                        wt,
+                        message=f"fix: address review comment on {comment.get('path', 'unknown')}",
+                        timeout=900,
+                    )
+                    commit_rc = commit.returncode
+                    if commit_rc == 0:
+                        fix_ok = True
+                        made_commit = True
+                        to_resolve.append(comment["id"])
+                        entry["status"] = "addressed"
+                        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(wt), capture_output=True, text=True, timeout=30).stdout.strip()
+                        stat = subprocess.run(["git", "show", "--stat", "--format=", "HEAD"], cwd=str(wt), capture_output=True, text=True, timeout=30).stdout.strip()
+                        changed_files = [ln.split("|")[0].strip() for ln in stat.splitlines() if "|" in ln]
+                        files_label = ", ".join(changed_files[:5]) + (f" +{len(changed_files) - 5} more" if len(changed_files) > 5 else "")
+                        commit_url = pr["url"].split("/pull/")[0] + f"/commit/{sha}" if sha and "/pull/" in pr.get("url", "") else ""
+                        entry["fix_commit"] = sha
+                        entry["fix_files"] = changed_files
+                        log.emit("ticket_pr_comment_fixed",
+                            f"{_label(ticket['key'], ts)} · {pr['repo']}: Fixed \"{comment['body'][:60]}\" — changed {files_label or 'files'} ({sha[:7]})",
+                            links={"detail": f"{base_url}/tickets/{ticket['key']}", "commit": commit_url, "comment": comment.get("html_url", "")},
+                            meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"], "commit": sha, "files": changed_files})
+                elif fix_result and not staged:
+                    fix_ok = True
+                    to_resolve.append(comment["id"])
+                    entry["status"] = "addressed"
+                    log.emit("ticket_pr_comment_already_addressed",
+                        f"{_label(ticket['key'], ts)} · {pr['repo']}: Already addressed (no change needed) — {comment['body'][:60]}",
+                        links={"detail": f"{base_url}/tickets/{ticket['key']}", "comment": comment.get("html_url", "")},
+                        meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"]})
+
+                if not fix_ok:
+                    entry["status"] = "fix_failed"
+                    attempt_key = f"{pr_key}/{comment['id']}"
+                    attempts = comment_fix_attempts.get(attempt_key, 0) + 1
+                    comment_fix_attempts[attempt_key] = attempts
+                    entry["attempts"] = attempts
+                    log.emit("ticket_pr_comment_fix_failed",
+                        f"{_label(ticket['key'], ts)}: No code change produced for {comment['body'][:80]}",
+                        links={"detail": f"{base_url}/tickets/{ticket['key']}"},
+                        meta={"ticket": ticket["key"],
+                              "claude_returned": bool(fix_result),
+                              "commit_rc": commit_rc,
+                              "attempts": attempts,
+                              "max_attempts": MAX_PR_COMMENT_FIX_ATTEMPTS})
+                    if attempts >= MAX_PR_COMMENT_FIX_ATTEMPTS:
+                        log.emit("ticket_pr_comment_fix_capped",
+                            f"{_label(ticket['key'], ts)}: Giving up on review comment after {attempts} attempts: {comment['body'][:80]}",
+                            links={"detail": f"{base_url}/tickets/{ticket['key']}"},
+                            meta={"ticket": ticket["key"],
+                                  "comment_id": comment["id"],
+                                  "attempts": attempts})
+            elif not actionable:
                 suggested = _draft_comment_reply(config, slug, ticket, comment, pr)
                 entry["status"] = "needs_reply"
                 entry["suggested_reply"] = suggested
@@ -1858,6 +1868,13 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                     meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"]})
 
             pr_comments.append(entry)
+
+        if made_commit:
+            platform.push_branch(wt, ts["branch"])
+            ts.pop("ci_passed", None)
+            ts.pop("checks_started_at", None)
+        for cid in to_resolve:
+            platform.resolve_comment(pr["repo"], pr["id"], cid)
 
         batch_entries = pr_comments[-len(new_comments):]
         retryable_failures = [
