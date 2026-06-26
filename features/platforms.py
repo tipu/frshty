@@ -285,7 +285,7 @@ class BitbucketPlatform:
         url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}/comments/{comment_id}/resolve"
         with external_log.client("bitbucket", auth=self._auth(), timeout=30) as client:
             resp = client.post(url)
-            if resp.status_code in (200, 201):
+            if resp.status_code in (200, 201, 409):
                 return {"status": "resolved"}
             return {"status": "error", "detail": resp.text}
 
