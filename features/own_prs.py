@@ -17,7 +17,7 @@ MAX_COMMENT_RETRIES = 3
 
 
 def check(config: dict):
-    instance_key = config.get("instance_key", "default")
+    instance_key = config["job"]["key"]
     platform = make_platform(config)
     my_prs = platform.list_my_open_prs()
     if not my_prs:
@@ -215,7 +215,7 @@ def _reclaim_stuck_comments(instance_key, pr, pr_key, pr_ref, base_url, by_id, u
 
 
 def fix_comment(config, payload) -> tuple[bool, str | None]:
-    instance_key = config.get("instance_key", "default")
+    instance_key = config["job"]["key"]
     platform = make_platform(config)
     pr = payload["pr"]
     comment = payload["comment"]
