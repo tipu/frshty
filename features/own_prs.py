@@ -84,7 +84,8 @@ def _check_comments(config, instance_key, platform, pr, base_url, ticket_key=Non
     by_id = {str(c["id"]): c for c in platform_comments}
     first_sight = not comments.has_comment_state(instance_key, "pr", pr_key)
     detection = comments.fetch_and_detect_comments(instance_key, platform, "pr", pr_key, platform_comments=platform_comments)
-    all_to_process = [c for c in detection["new"] + detection["edited"] if c.get("author_id") != user_id]
+    all_to_process = [c for c in detection["new"] + detection["edited"]
+                      if c.get("author_id") != user_id and not c.get("resolved")]
     if first_sight:
         all_to_process = _baseline_existing_comments(instance_key, pr_key, all_to_process)
 
@@ -211,6 +212,9 @@ def _reclaim_stuck_comments(instance_key, pr, pr_key, pr_ref, base_url, by_id, u
             comments.mark_comment_deleted(instance_key, "pr", pr_key, comment_id)
             continue
         if comment.get("author_id") == user_id:
+            continue
+        if comment.get("resolved"):
+            comments.mark_comment_processed(instance_key, "pr", pr_key, comment_id)
             continue
 
         error_count = row.get("error_count") or 0

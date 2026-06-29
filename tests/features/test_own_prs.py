@@ -237,6 +237,43 @@ class TestCheckComments:
             own_prs._check_comments(config, "test", platform, pr, "http://base")
         mock_enqueue.assert_not_called()
 
+    def test_resolved_comment_not_processed(self, tmp_path):
+        platform = MagicMock()
+        comment = make_comment(id=10, author_id="reviewer1", body="Fix this", resolved=True)
+        platform.get_pr_comments.return_value = [comment]
+        pr = make_pr()
+        config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
+
+        with patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.run_sonnet") as mock_sonnet, \
+             patch("features.own_prs.q.enqueue_job") as mock_enqueue, \
+             patch("features.own_prs.log"):
+            mock_comments.fetch_and_detect_comments.return_value = {"new": [comment], "edited": []}
+            mock_comments.get_unprocessed_comments.return_value = []
+            own_prs._check_comments(config, "test", platform, pr, "http://base")
+        mock_sonnet.assert_not_called()
+        mock_enqueue.assert_not_called()
+        mock_comments.mark_comment_processing.assert_not_called()
+
+    def test_reclaim_marks_resolved_processed(self, tmp_path):
+        platform = MagicMock()
+        comment = make_comment(id=10, author_id="reviewer1", body="Fix this", resolved=True)
+        platform.get_pr_comments.return_value = [comment]
+        pr = make_pr()
+        config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
+        stale = (datetime.now(timezone.utc) - timedelta(seconds=own_prs.RECLAIM_STALE_SECONDS + 60)).isoformat()
+
+        with patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.q.enqueue_job") as mock_enqueue, \
+             patch("features.own_prs.log"):
+            mock_comments.fetch_and_detect_comments.return_value = {"new": [], "edited": []}
+            mock_comments.get_unprocessed_comments.return_value = [
+                {"comment_id": "10", "state": "processing", "error_count": 0, "last_checked_at": stale},
+            ]
+            own_prs._check_comments(config, "test", platform, pr, "http://base")
+        mock_comments.mark_comment_processed.assert_called_once()
+        mock_enqueue.assert_not_called()
+
     def test_reclaim_marks_deleted_when_gone_upstream(self, tmp_path):
         platform = MagicMock()
         platform.get_pr_comments.return_value = []
