@@ -24,8 +24,21 @@ from typing import Protocol, TypedDict
 import core.log as log
 import core.state as state
 from core.ticket_status import TicketStatus
+from pm import runner as pm_runner
 
 import features.tickets as _t
+
+
+def _pm_pre_approval_needed(config: dict, instance_key: str, key: str) -> bool:
+    """Pre-approval PM review is a once-per-ticket gate. A ticket sits in
+    pending_approval until a human acts, and _enqueue_stage does not block
+    re-enqueue after a successful run, so enqueuing it every dispatcher tick
+    re-runs the LLM review and rewrites pm-findings.md on a loop. Only enqueue
+    when no pre_approval review exists yet (a failed run writes no row, so it
+    still retries until one succeeds)."""
+    if not instance_key or not (config.get("pm_agent") or {}).get("enabled", True):
+        return False
+    return pm_runner.latest_pre_approval_review(instance_key, key) is None
 
 
 class StateHandler(Protocol):
@@ -169,7 +182,7 @@ def _handle_new_ticket(
                  f"Ticket {key} awaiting approval (source={source})",
                  links={"detail": f"{base_url}/tickets/{key}"},
                  meta={"ticket": key, "source": source})
-        if instance_key and (config.get("pm_agent") or {}).get("enabled", True):
+        if _pm_pre_approval_needed(config, instance_key, key):
             _t._enqueue_stage(instance_key, key, "pm_pre_approval")
         return ts, True
     if source == "prd":
@@ -209,7 +222,7 @@ def _handle_new_ticket(
             # needs_classification Today bucket. No pipeline task is enqueued.
             pass
         else:
-            if (config.get("pm_agent") or {}).get("enabled", True):
+            if _pm_pre_approval_needed(config, instance_key, key):
                 _t._enqueue_stage(instance_key, key, "pm_pre_approval")
             _t._enqueue_stage(instance_key, key, "start_planning")
     return ts, False
