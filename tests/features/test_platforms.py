@@ -249,3 +249,101 @@ class TestBitbucketChecksNormalization:
         with patch("features.platforms.httpx.Client", return_value=mock_client):
             checks = p.get_pr_checks("repo", 1)
         assert checks[0]["state"] == "SUCCESS"
+
+
+def _bb_platform():
+    config = {"job": {"platform": "bitbucket"}, "bitbucket": {"org": "o"}, "workspace": {"repos": []}}
+    with patch("features.platforms.resolve_env", return_value="x"), \
+         patch("features.platforms.get_repos", return_value=[]):
+        return BitbucketPlatform(config)
+
+
+def _bb_get(json_value):
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = json_value
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+    mock_client.get.return_value = mock_resp
+    return mock_client
+
+
+_THREADS_RESPONSE = {
+    "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": [
+        {"id": "T_unresolved", "isResolved": False, "comments": {"nodes": [
+            {"databaseId": 11, "body": "fix this", "path": "a.py", "line": 5,
+             "originalLine": 5, "diffHunk": "@@", "url": "http://c/11",
+             "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
+             "author": {"login": "alice"}, "replyTo": None},
+        ]}},
+        {"id": "T_resolved", "isResolved": True, "comments": {"nodes": [
+            {"databaseId": 22, "body": "done", "path": "b.py", "line": None,
+             "originalLine": 9, "diffHunk": "@@", "url": "http://c/22",
+             "createdAt": "2026-01-02T00:00:00Z", "updatedAt": "2026-01-02T00:00:00Z",
+             "author": {"login": "bob"}, "replyTo": {"databaseId": 11}},
+        ]}},
+    ]}}}}
+}
+
+
+class TestGitHubGetPrComments:
+    def test_flattens_threads_with_resolution(self):
+        p = _gh_platform()
+        import json as _json
+        with patch.object(p, "_run_gh", return_value=_gh_result(stdout=_json.dumps(_THREADS_RESPONSE))):
+            comments = p.get_pr_comments("r", 1)
+        assert [c["id"] for c in comments] == [11, 22]
+        first, second = comments
+        assert first["resolved"] is False and first["thread_id"] == "T_unresolved"
+        assert first["author_id"] == "alice" and first["diff_hunk"] == "@@"
+        assert second["resolved"] is True and second["thread_id"] == "T_resolved"
+        assert second["line"] == 9
+        assert second["parent_id"] == 11
+
+    def test_fetch_failure_is_empty(self):
+        p = _gh_platform()
+        with patch.object(p, "_run_gh", return_value=_gh_result(stderr="boom", returncode=1)):
+            assert p.get_pr_comments("r", 1) == []
+
+
+class TestGitHubResolveComment:
+    def test_resolves_owning_thread(self):
+        p = _gh_platform()
+        import json as _json
+        calls = []
+
+        def fake_run(args):
+            calls.append(args)
+            if "mutation" in args[3]:
+                return _gh_result(returncode=0)
+            return _gh_result(stdout=_json.dumps(_THREADS_RESPONSE))
+
+        with patch.object(p, "_run_gh", side_effect=fake_run):
+            result = p.resolve_comment("r", 1, 22)
+        assert result == {"status": "resolved"}
+        assert any("T_resolved" in a for call in calls for a in call)
+
+    def test_unknown_comment_errors_without_mutation(self):
+        p = _gh_platform()
+        import json as _json
+        with patch.object(p, "_run_gh", return_value=_gh_result(stdout=_json.dumps(_THREADS_RESPONSE))) as run:
+            result = p.resolve_comment("r", 1, 999)
+        assert result["status"] == "error"
+        assert run.call_count == 1
+
+
+class TestBitbucketGetPrComments:
+    def test_maps_resolution_to_resolved_flag(self):
+        p = _bb_platform()
+        values = {"values": [
+            {"id": 1, "content": {"raw": "open"}, "user": {"account_id": "u1", "display_name": "U1"},
+             "created_on": "2026-01-01T00:00:00Z"},
+            {"id": 2, "content": {"raw": "closed"}, "user": {"account_id": "u2", "display_name": "U2"},
+             "created_on": "2026-01-01T00:00:00Z",
+             "resolution": {"type": "pullrequest_comment_resolution"}},
+        ]}
+        with patch("features.platforms.httpx.Client", return_value=_bb_get(values)):
+            comments = p.get_pr_comments("repo", 1)
+        assert comments[0]["resolved"] is False
+        assert comments[1]["resolved"] is True
