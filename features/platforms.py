@@ -201,6 +201,7 @@ class BitbucketPlatform:
                     "created_at": c["created_on"],
                     "updated_at": c.get("updated_on", c["created_on"]),
                     "parent_id": c.get("parent", {}).get("id") if c.get("parent") else None,
+                    "resolved": bool(c.get("resolution")),
                 }
                 for c in resp.json().get("values", [])
             ]
@@ -397,6 +398,19 @@ class GitHubPlatform:
             ["gh"] + args, capture_output=True, text=True, timeout=60,
         )
 
+    def _graphql(self, query: str, **variables) -> dict | None:
+        args = ["api", "graphql", "-f", f"query={query}"]
+        for k, v in variables.items():
+            flag = "-F" if isinstance(v, int) and not isinstance(v, bool) else "-f"
+            args += [flag, f"{k}={v}"]
+        result = self._run_gh(args)
+        if result.returncode != 0:
+            return None
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return None
+
     _repo_cache: dict[str, str] = {}
 
     def _resolve_repo(self, short_name: str) -> str:
@@ -510,32 +524,51 @@ class GitHubPlatform:
             out.append(pr)
         return out
 
-    def get_pr_comments(self, repo: str, pr_id: int) -> list[dict]:
+    _REVIEW_THREADS_QUERY = (
+        "query($owner:String!,$name:String!,$number:Int!){"
+        " repository(owner:$owner,name:$name){"
+        " pullRequest(number:$number){"
+        " reviewThreads(first:100){nodes{"
+        " id isResolved"
+        " comments(first:100){nodes{"
+        " databaseId body path line originalLine diffHunk url createdAt updatedAt"
+        " author{login} replyTo{databaseId}"
+        "}}}}}}}"
+    )
+
+    def _review_threads(self, repo: str, pr_id: int) -> list[dict]:
         full = self._resolve_repo(repo)
-        result = self._run_gh([
-            "api", f"repos/{full}/pulls/{pr_id}/comments",
-            "--jq", ".",
-        ])
-        if result.returncode != 0:
+        owner, _, name = full.partition("/")
+        data = self._graphql(self._REVIEW_THREADS_QUERY, owner=owner, name=name, number=pr_id)
+        if not data:
             return []
-        comments = json.loads(result.stdout)
-        return [
-            {
-                "id": c["id"],
-                "body": c["body"],
-                "author_id": c.get("user", {}).get("login", ""),
-                "author_name": c.get("user", {}).get("login", ""),
-                "path": c.get("path"),
-                "line": c.get("line"),
-                "diff_hunk": c.get("diff_hunk", ""),
-                "html_url": c.get("html_url", ""),
-                "created_on": c.get("created_at", ""),
-                "created_at": c.get("created_at", ""),
-                "updated_at": c.get("updated_at", c.get("created_at", "")),
-                "parent_id": c.get("in_reply_to_id"),
-            }
-            for c in comments
-        ]
+        pr = (((data.get("data") or {}).get("repository") or {}).get("pullRequest") or {})
+        return (pr.get("reviewThreads") or {}).get("nodes") or []
+
+    def get_pr_comments(self, repo: str, pr_id: int) -> list[dict]:
+        out: list[dict] = []
+        for t in self._review_threads(repo, pr_id):
+            resolved = bool(t.get("isResolved"))
+            thread_id = t.get("id", "")
+            for c in (t.get("comments") or {}).get("nodes") or []:
+                created = c.get("createdAt", "")
+                out.append({
+                    "id": c.get("databaseId"),
+                    "body": c.get("body", ""),
+                    "author_id": (c.get("author") or {}).get("login", ""),
+                    "author_name": (c.get("author") or {}).get("login", ""),
+                    "path": c.get("path"),
+                    "line": c.get("line") if c.get("line") is not None else c.get("originalLine"),
+                    "diff_hunk": c.get("diffHunk", ""),
+                    "html_url": c.get("url", ""),
+                    "created_on": created,
+                    "created_at": created,
+                    "updated_at": c.get("updatedAt", created),
+                    "parent_id": (c.get("replyTo") or {}).get("databaseId"),
+                    "resolved": resolved,
+                    "thread_id": thread_id,
+                })
+        return out
 
     def get_pr_diff(self, repo: str, pr_id: int) -> str | None:
         result = self._run_gh(["pr", "diff", str(pr_id), "--repo", self._resolve_repo(repo)])
@@ -652,8 +685,22 @@ class GitHubPlatform:
         return {"status": "error", "detail": result.stderr}
 
     def resolve_comment(self, repo: str, pr_id: int, comment_id: int) -> dict:
+        thread_id = ""
+        for t in self._review_threads(repo, pr_id):
+            for c in (t.get("comments") or {}).get("nodes") or []:
+                if c.get("databaseId") == comment_id:
+                    thread_id = t.get("id", "")
+                    break
+            if thread_id:
+                break
+        if not thread_id:
+            return {"status": "error", "detail": f"no review thread for comment {comment_id}"}
+        mutation = (
+            "mutation($threadId:ID!){"
+            " resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}}"
+        )
         result = self._run_gh([
-            "api", "graphql", "-f", f'query=mutation {{ minimizeComment(input: {{subjectId: "{comment_id}", classifier: RESOLVED}}) {{ minimizedComment {{ isMinimized }} }} }}',
+            "api", "graphql", "-f", f"query={mutation}", "-f", f"threadId={thread_id}",
         ])
         if result.returncode == 0:
             return {"status": "resolved"}
