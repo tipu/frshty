@@ -257,7 +257,7 @@ def _read_function_context(worktree: Path, file_path: str, target_line: int) -> 
         return ""
     try:
         lines = fp.read_text().splitlines()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return ""
     start = max(0, target_line - 60)
     end = min(len(lines), target_line + 60)
@@ -470,7 +470,7 @@ def _read_changed_files(diff_text: str, worktree_path: Path) -> str:
             if size > 60_000:
                 continue
             content = fp.read_text()
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             continue
         parts.append(f"--- FILE: {p} ---\n{content}")
         total += len(content)
