@@ -81,7 +81,7 @@ BODY_RULES = (
 
 def check(config: dict):
     platform = make_platform(config)
-    review_prs = platform.list_review_prs()
+    review_prs = platform.list_pending_reviews_for_me()
     if not review_prs:
         return
 

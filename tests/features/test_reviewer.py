@@ -364,7 +364,7 @@ class TestCheckPersistsReviews:
 
         pr = make_pr(repo="myrepo", id=7, branch="b", url="u", head_sha="abc")
         fake_platform = MagicMock()
-        fake_platform.list_review_prs.return_value = [pr]
+        fake_platform.list_pending_reviews_for_me.return_value = [pr]
 
         def fake_review_ticket_prs(config, ticket_key, prs):
             rs = state.load("reviews")
