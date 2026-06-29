@@ -2,7 +2,7 @@
 
 The gate is structural (exit code + size) so real plans that merely mention
 error strings are never rejected; the quorum requires >=2 valid plans before
-any judgment step runs; the fan-out must build codex/gemini commands with the
+any judgment step runs; the fan-out must build codex/agy commands with the
 flags that keep them from silently failing.
 """
 import sys
@@ -62,12 +62,12 @@ def test_fanout_builds_expected_commands(tmp_path, monkeypatch):
 
     assert results["claude"]["valid"]
     assert results["codex"]["valid"]
-    assert results["gemini"]["valid"]
+    assert results["agy"]["valid"]
 
-    gem = recorded["gemini"]
-    assert "--yolo" in gem["cmd"]
-    assert "--include-directories" in gem["cmd"]
-    assert gem["kw"]["env_extra"]["GEMINI_CLI_TRUST_WORKSPACE"] == "true"
+    agy = recorded["agy"]
+    assert "--dangerously-skip-permissions" in agy["cmd"]
+    assert "--add-dir" in agy["cmd"]
+    assert str(tmp_path) in agy["cmd"]
 
     cdx = recorded["codex"]
     assert "--skip-git-repo-check" in cdx["cmd"] and "-o" in cdx["cmd"]
@@ -83,7 +83,7 @@ def test_quorum_degrades_to_claude_only_when_others_unavailable(tmp_path, monkey
     monkeypatch.setattr(cp, "_fan_out", lambda *a, **k: {
         "claude": {"text": REAL_PLAN, "valid": True, "reason": "ok"},
         "codex": {"text": None, "valid": False, "reason": "exit_code=127"},
-        "gemini": {"text": "", "valid": False, "reason": "empty output"},
+        "agy": {"text": "", "valid": False, "reason": "empty output"},
     })
     synth_called = {"hit": False}
     monkeypatch.setattr(cp, "_synthesize_and_implement",
@@ -107,7 +107,7 @@ def test_explainer_failure_does_not_fail_run(tmp_path, monkeypatch):
     monkeypatch.setattr(cp, "_fan_out", lambda *a, **k: {
         "claude": {"text": REAL_PLAN, "valid": True, "reason": "ok"},
         "codex": {"text": REAL_PLAN, "valid": True, "reason": "ok"},
-        "gemini": {"text": "", "valid": False, "reason": "empty output"},
+        "agy": {"text": "", "valid": False, "reason": "empty output"},
     })
     monkeypatch.setattr(cp, "_synthesize_and_implement", lambda *a, **k: True)
     monkeypatch.setattr(cp, "_assemble_diff", lambda *a, **k: (tmp_path / "p.patch", ["repo"]))
@@ -127,7 +127,7 @@ def test_quorum_fails_when_claude_plan_invalid(tmp_path, monkeypatch):
     monkeypatch.setattr(cp, "_fan_out", lambda *a, **k: {
         "claude": {"text": None, "valid": False, "reason": "exit_code=1"},
         "codex": {"text": None, "valid": False, "reason": "exit_code=127"},
-        "gemini": {"text": "", "valid": False, "reason": "empty output"},
+        "agy": {"text": "", "valid": False, "reason": "empty output"},
     })
     synth_called = {"hit": False}
     monkeypatch.setattr(cp, "_synthesize_and_implement",
@@ -146,7 +146,7 @@ def test_quorum_proceeds_with_two_valid(tmp_path, monkeypatch):
     monkeypatch.setattr(cp, "_fan_out", lambda *a, **k: {
         "claude": {"text": REAL_PLAN, "valid": True, "reason": "ok"},
         "codex": {"text": REAL_PLAN, "valid": True, "reason": "ok"},
-        "gemini": {"text": "", "valid": False, "reason": "empty output"},
+        "agy": {"text": "", "valid": False, "reason": "empty output"},
     })
     seen = {}
 
