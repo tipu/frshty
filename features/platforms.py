@@ -110,6 +110,21 @@ def _resolve_merge_conflicts(repo_path, base_branch: str, prev_error: str | None
     return {"ok": True}
 
 
+def _bb_thread_resolved(comment: dict, by_id: dict) -> bool:
+    cur = comment
+    seen = set()
+    while cur is not None:
+        cid = str(cur["id"])
+        if cur.get("resolved"):
+            return True
+        if cid in seen:
+            return False
+        seen.add(cid)
+        parent_id = cur.get("parent_id")
+        cur = by_id.get(str(parent_id)) if parent_id is not None else None
+    return False
+
+
 class BitbucketPlatform:
     BASE_URL = "https://api.bitbucket.org/2.0"
 
@@ -188,7 +203,7 @@ class BitbucketPlatform:
             resp = client.get(url)
             if resp.status_code != 200:
                 return []
-            return [
+            out = [
                 {
                     "id": c["id"],
                     "body": c["content"]["raw"],
@@ -201,10 +216,14 @@ class BitbucketPlatform:
                     "created_at": c["created_on"],
                     "updated_at": c.get("updated_on", c["created_on"]),
                     "parent_id": c.get("parent", {}).get("id") if c.get("parent") else None,
-                    "resolved": bool(c.get("resolution")),
+                    "resolved": c.get("resolution") is not None,
                 }
                 for c in resp.json().get("values", [])
             ]
+            by_id = {str(c["id"]): c for c in out}
+            for c in out:
+                c["resolved"] = _bb_thread_resolved(c, by_id)
+            return out
 
     def get_pr_diff(self, repo: str, pr_id: int) -> str | None:
         url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}/diff"
