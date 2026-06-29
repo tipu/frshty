@@ -115,7 +115,9 @@ def _run_repo_tests(repo_dir: Path, cmd: list[str], env: dict[str, str],
             timeout=timeout, env=full_env,
         )
     except subprocess.TimeoutExpired as e:
-        tail = (e.stdout or "")[-2000:] + "\n---STDERR---\n" + (e.stderr or "")[-1000:]
+        out = e.stdout.decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        err = e.stderr.decode("utf-8", "replace") if isinstance(e.stderr, bytes) else (e.stderr or "")
+        tail = out[-2000:] + "\n---STDERR---\n" + err[-1000:]
         return {"result": "timeout", "exit_code": -1, "tail": tail}
     except (FileNotFoundError, OSError) as e:
         return {"result": "error", "exit_code": -1,
