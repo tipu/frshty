@@ -8,6 +8,7 @@ import core.queue as q
 import core.state as state
 import core.comments as comments
 import core.git_util as git_util
+import core.branch_sync as branch_sync
 from core.claude_runner import run_claude_code, run_haiku, run_sonnet, extract_json
 from core.config import get_repos
 from features.platforms import make_platform
@@ -15,7 +16,6 @@ from features.platforms import make_platform
 RECLAIM_STALE_SECONDS = 1200
 MAX_COMMENT_RETRIES = 3
 NEW_COMMENT_BASELINE_HOURS = 24
-MAX_BASE_SYNC_ATTEMPTS = 2
 
 
 def check(config: dict):
@@ -370,77 +370,33 @@ def _repo_path_for(config, pr):
     return None
 
 
-def _ls_remote_sha(repo_path, base_branch):
-    result = subprocess.run(["git", "ls-remote", "origin", base_branch],
-                            cwd=str(repo_path), capture_output=True, text=True, timeout=30)
-    if result.returncode != 0 or not result.stdout.strip():
-        return ""
-    return result.stdout.split()[0]
-
-
 def _check_base_fresh(config, platform, pr, seen, base_url):
     if not config.get("pr", {}).get("auto_update_branch"):
         return
     base_branch = pr.get("base") or config.get("workspace", {}).get("base_branch", "")
     repo_path = _repo_path_for(config, pr)
-    if not base_branch or not repo_path:
-        return
-
-    base_sha = _ls_remote_sha(repo_path, base_branch)
-    if not base_sha:
-        return
-    if seen.get("base_sync_sha") != base_sha:
-        seen["base_sync_sha"] = base_sha
-        seen["base_sync_attempts"] = 0
-        seen.pop("base_synced", None)
-        seen.pop("last_base_error", None)
-    if seen.get("base_synced"):
-        return
-    attempts = seen.get("base_sync_attempts", 0)
-    if attempts >= MAX_BASE_SYNC_ATTEMPTS:
-        return
-
-    worktree = _ensure_worktree(config, pr)
-    if not worktree:
-        return
-    fetch = subprocess.run(["git", "fetch", "origin", base_branch],
-                           cwd=str(worktree), capture_output=True, text=True, timeout=60)
-    if fetch.returncode != 0:
-        return
-    behind = subprocess.run(["git", "rev-list", "--count", f"HEAD..origin/{base_branch}"],
-                            cwd=str(worktree), capture_output=True, text=True, timeout=10).stdout.strip()
-
     pr_ref = f"{pr['repo']}#{pr['id']}"
     links = {"pr": pr["url"], "detail": f"{base_url}/"}
     meta = {"repo": pr["repo"], "pr_id": pr["id"], "base": base_branch}
 
-    if behind == "0":
-        seen["base_synced"] = True
-        return
+    outcome = branch_sync.sync_branch_with_base(
+        platform, repo_path, base_branch, pr["branch"], seen,
+        lambda: _ensure_worktree(config, pr))
+    result = outcome["result"]
 
-    result = platform.merge_base(worktree, base_branch, prev_error=seen.get("last_base_error"))
-    if not result.get("ok"):
-        seen["base_sync_attempts"] = attempts + 1
-        seen["last_base_error"] = result.get("error", "")
-        if attempts + 1 >= MAX_BASE_SYNC_ATTEMPTS:
-            log.emit("pr_base_sync_failed",
-                     f"{pr_ref}: could not merge {base_branch} after {attempts + 1} attempts: {result.get('error', '')[:100]}",
-                     links=links, meta={**meta, "error": result.get("error", "")})
-        return
-
-    pushed = platform.push_branch(worktree, pr["branch"])
-    if not pushed.get("ok"):
-        seen["base_sync_attempts"] = attempts + 1
+    if result == "synced":
+        seen.pop("ci_fix_sha", None)
+        seen.pop("ci_unrelated_sha", None)
+        log.emit("pr_base_synced", f"{pr_ref}: merged {base_branch} into PR branch",
+                 links=links, meta=meta)
+    elif result == "merge_failed" and outcome.get("capped"):
+        log.emit("pr_base_sync_failed",
+                 f"{pr_ref}: could not merge {base_branch} after {outcome['attempts']} attempts: {outcome.get('error', '')[:100]}",
+                 links=links, meta={**meta, "error": outcome.get("error", "")})
+    elif result == "push_failed":
         log.emit("pr_base_sync_push_failed",
-                 f"{pr_ref}: merged {base_branch} but push failed: {pushed.get('error', '')[:100]}",
-                 links=links, meta={**meta, "error": pushed.get("error", "")})
-        return
-
-    seen["base_synced"] = True
-    seen.pop("ci_fix_sha", None)
-    seen.pop("ci_unrelated_sha", None)
-    log.emit("pr_base_synced", f"{pr_ref}: merged {base_branch} into PR branch",
-             links=links, meta=meta)
+                 f"{pr_ref}: merged {base_branch} but push failed: {outcome.get('error', '')[:100]}",
+                 links=links, meta={**meta, "error": outcome.get("error", "")})
 
 
 def _check_stale(pr, seen, base_url):

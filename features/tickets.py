@@ -12,6 +12,7 @@ import core.log as log
 import core.queue as q
 import core.state as state
 import core.comments as comments
+import core.branch_sync as branch_sync
 from core import external_log
 from core.config import get_repos, ticket_worktree_path, resolve_env
 from core.git_util import commit_with_hooks
@@ -2020,6 +2021,70 @@ def _resolve_conflicts(config, ticket, ts, base_url, pr_info_map=None) -> dict:
 
 
 MAX_CI_FIX_ATTEMPTS = 2
+
+
+def _ticket_repo_path(config, repo_name):
+    return next((r["path"] for r in get_repos(config) if r["name"] == repo_name), None)
+
+
+def _pr_base_moved(config, ts) -> bool:
+    base_branch = config["workspace"].get("base_branch", "main")
+    sync_state = ts.get("base_sync", {})
+    for pr in ts.get("prs", []):
+        repo_path = _ticket_repo_path(config, pr["repo"])
+        if not repo_path:
+            continue
+        base_sha = branch_sync.ls_remote_sha(repo_path, base_branch)
+        if not base_sha:
+            continue
+        st = sync_state.get(f"{pr['repo']}/{pr['id']}", {})
+        if not st.get("base_synced") or st.get("base_sync_sha") != base_sha:
+            return True
+    return False
+
+
+def _sync_pr_base(config, ticket, ts, base_url) -> dict:
+    if not config.get("pr", {}).get("auto_update_branch"):
+        return ts
+    prs = ts.get("prs", [])
+    branch = ts.get("branch", "")
+    if not prs or not branch:
+        return ts
+    platform = make_platform(config)
+    base_branch = config["workspace"].get("base_branch", "main")
+    slug = ts.get("slug", "")
+    key = ticket["key"]
+    sync_state = ts.setdefault("base_sync", {})
+
+    for pr in prs:
+        repo_path = _ticket_repo_path(config, pr["repo"])
+        if not repo_path:
+            continue
+        wt = ticket_worktree_path(config, slug, pr["repo"])
+        st = sync_state.setdefault(f"{pr['repo']}/{pr['id']}", {})
+        outcome = branch_sync.sync_branch_with_base(
+            platform, repo_path, base_branch, branch, st,
+            lambda wt=wt: wt if wt.is_dir() else None)
+        result = outcome["result"]
+        links = {"detail": f"{base_url}/tickets/{key}", "pr": pr.get("url", "")}
+        meta = {"ticket": key, "repo": pr["repo"], "pr_id": pr["id"], "base": base_branch}
+        if result == "synced":
+            ts.pop("ci_passed", None)
+            ts.pop("checks_started_at", None)
+            log.emit("ticket_base_synced",
+                     f"Merged {base_branch} into {_label(key, ts)} PR #{pr['id']}",
+                     links=links, meta=meta)
+        elif result == "merge_failed" and outcome.get("capped"):
+            log.emit("ticket_base_sync_failed",
+                     f"Could not merge {base_branch} into {_label(key, ts)} PR #{pr['id']} "
+                     f"after {outcome['attempts']} attempts: {outcome.get('error', '')[:100]}",
+                     links=links, meta={**meta, "error": outcome.get("error", "")})
+        elif result == "push_failed":
+            log.emit("ticket_base_sync_push_failed",
+                     f"Merged {base_branch} into {_label(key, ts)} PR #{pr['id']} "
+                     f"but push failed: {outcome.get('error', '')[:100]}",
+                     links=links, meta={**meta, "error": outcome.get("error", "")})
+    return ts
 
 
 def _merge(config, ticket, ts, base_url) -> dict:
