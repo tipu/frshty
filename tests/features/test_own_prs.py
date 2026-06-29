@@ -73,6 +73,73 @@ class TestCheckCi:
         platform.push_branch.assert_not_called()
 
 
+class TestCheckBaseFresh:
+    def _cfg(self, enabled=True):
+        return {"_state_dir": "/tmp", "pr": {"auto_update_branch": enabled},
+                "workspace": {"repos": [], "base_branch": "main"}}
+
+    def test_disabled_flag_noop(self):
+        platform = MagicMock()
+        own_prs._check_base_fresh(self._cfg(enabled=False), platform, make_pr(), {}, "http://base")
+        platform.merge_base.assert_not_called()
+
+    def test_up_to_date_marks_synced_without_merge(self, tmp_path):
+        platform = MagicMock()
+        seen = {}
+        fetch_ok = MagicMock(returncode=0, stdout="")
+        rev_list = MagicMock(returncode=0, stdout="0\n")
+        with patch("features.own_prs._repo_path_for", return_value=tmp_path), \
+             patch("features.own_prs._ls_remote_sha", return_value="basesha"), \
+             patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs.subprocess.run", side_effect=[fetch_ok, rev_list]), \
+             patch("features.own_prs.log"):
+            own_prs._check_base_fresh(self._cfg(), platform, make_pr(), seen, "http://base")
+        platform.merge_base.assert_not_called()
+        platform.push_branch.assert_not_called()
+        assert seen["base_synced"] is True
+
+    def test_behind_merges_and_pushes(self, tmp_path):
+        platform = MagicMock()
+        platform.merge_base.return_value = {"ok": True}
+        platform.push_branch.return_value = {"ok": True}
+        seen = {}
+        fetch_ok = MagicMock(returncode=0, stdout="")
+        rev_list = MagicMock(returncode=0, stdout="3\n")
+        with patch("features.own_prs._repo_path_for", return_value=tmp_path), \
+             patch("features.own_prs._ls_remote_sha", return_value="basesha"), \
+             patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs.subprocess.run", side_effect=[fetch_ok, rev_list]), \
+             patch("features.own_prs.log"):
+            own_prs._check_base_fresh(self._cfg(), platform, make_pr(), seen, "http://base")
+        platform.merge_base.assert_called_once()
+        platform.push_branch.assert_called_once()
+        assert seen["base_synced"] is True
+
+    def test_conflict_increments_attempts_no_push(self, tmp_path):
+        platform = MagicMock()
+        platform.merge_base.return_value = {"ok": False, "error": "conflict in a.py"}
+        seen = {}
+        fetch_ok = MagicMock(returncode=0, stdout="")
+        rev_list = MagicMock(returncode=0, stdout="3\n")
+        with patch("features.own_prs._repo_path_for", return_value=tmp_path), \
+             patch("features.own_prs._ls_remote_sha", return_value="basesha"), \
+             patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs.subprocess.run", side_effect=[fetch_ok, rev_list]), \
+             patch("features.own_prs.log"):
+            own_prs._check_base_fresh(self._cfg(), platform, make_pr(), seen, "http://base")
+        platform.push_branch.assert_not_called()
+        assert seen["base_sync_attempts"] == 1
+        assert seen.get("base_synced") is not True
+
+    def test_already_synced_sha_skips(self):
+        platform = MagicMock()
+        seen = {"base_sync_sha": "basesha", "base_synced": True}
+        with patch("features.own_prs._repo_path_for", return_value="/repo"), \
+             patch("features.own_prs._ls_remote_sha", return_value="basesha"):
+            own_prs._check_base_fresh(self._cfg(), platform, make_pr(), seen, "http://base")
+        platform.merge_base.assert_not_called()
+
+
 class TestCheckComments:
     def test_no_new_comments_noop(self):
         platform = MagicMock()
