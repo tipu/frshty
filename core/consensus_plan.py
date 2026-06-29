@@ -2,11 +2,11 @@
 the `/ctp` markdown command).
 
 frshty owns the mechanical orchestration here — baseline capture, a
-byte-identical path-only prompt, the parallel fan-out to codex/gemini/claude
+byte-identical path-only prompt, the parallel fan-out to codex/agy/claude
 with correct flags, per-model output sanity-gating, and assembling the change
 manifest from a real git diff. Those are exactly the steps that failed silently
 when a probabilistic Claude instance interpreted the markdown (PATH errors,
-rate-limit banners stored as the plan, missing gemini flags, unchecked
+rate-limit banners stored as the plan, missing agy flags, unchecked
 captures).
 
 A headless Claude instance is invoked only for the judgment steps that code
@@ -82,7 +82,7 @@ def _capture_baselines(config: dict, slug: str) -> dict[str, tuple[Path, str]]:
 
 def _fan_out(prompt: str, ticket_dir: Path, run_dir: Path,
              include_dirs: list[str], timeout: int) -> dict[str, dict]:
-    """Run the same prompt through codex, gemini, and claude in parallel.
+    """Run the same prompt through codex, agy, and claude in parallel.
     Returns {model: {"text", "valid", "reason"}}."""
 
     def _claude() -> tuple[str | None, int | None]:
@@ -98,18 +98,19 @@ def _fan_out(prompt: str, ticket_dir: Path, run_dir: Path,
             transcript_file=run_dir / "codex-transcript.txt",
         )
 
-    def _gemini() -> tuple[str | None, int | None]:
+    def _agy() -> tuple[str | None, int | None]:
+        cmd = ["agy", "--dangerously-skip-permissions"]
+        for d in include_dirs:
+            cmd += ["--add-dir", d]
+        cmd += ["-p", prompt]
         return run_external_model(
-            ["gemini", "--yolo",
-             "--include-directories", ",".join(include_dirs),
-             "-o", "text", "-p", prompt],
-            fn_name="ctp_gemini", model="gemini", prompt=prompt,
+            cmd,
+            fn_name="ctp_agy", model="agy", prompt=prompt,
             cwd=ticket_dir, timeout=timeout,
-            env_extra={"GEMINI_CLI_TRUST_WORKSPACE": "true"},
-            transcript_file=run_dir / "gemini-transcript.txt",
+            transcript_file=run_dir / "agy-transcript.txt",
         )
 
-    runners = {"claude": _claude, "codex": _codex, "gemini": _gemini}
+    runners = {"claude": _claude, "codex": _codex, "agy": _agy}
     results: dict[str, dict] = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
         futures = {pool.submit(fn): name for name, fn in runners.items()}

@@ -623,7 +623,7 @@ def run_external_model(cmd: list[str], *, fn_name: str, model: str, prompt: str,
                        env_extra: dict[str, str] | None = None,
                        last_message_file: Path | None = None,
                        transcript_file: Path | None = None) -> tuple[str | None, int | None]:
-    """Run a non-Claude model CLI (codex, gemini) under the same invocation
+    """Run a non-Claude model CLI (codex, agy) under the same invocation
     logging as Claude. Returns (text, exit_code); text is None on timeout.
 
     Prefers `last_message_file` (e.g. codex `-o`) when it holds content, else
