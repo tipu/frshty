@@ -391,6 +391,13 @@ def _handle_in_review_ticket(
     else:
         ts = _t._resolve_conflicts(config, ticket, ts, base_url, pr_info_map=pr_info_map)
 
+    if (ts["status"] == "in_review" and instance_key
+            and config.get("pr", {}).get("auto_update_branch")
+            and _t._pr_base_moved(config, ts)):
+        _t._enqueue_stage(instance_key, key, "sync_pr_base")
+        state.save_ticket(key, ts)
+        return ts, True
+
     if ts["status"] == "in_review":
         platform = _t.make_platform(config)
         result = platform.monitor_ci(ticket, ts, base_url)
