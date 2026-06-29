@@ -347,3 +347,22 @@ class TestBitbucketGetPrComments:
             comments = p.get_pr_comments("repo", 1)
         assert comments[0]["resolved"] is False
         assert comments[1]["resolved"] is True
+
+    def test_empty_resolution_dict_and_reply_inherit_root(self):
+        p = _bb_platform()
+        values = {"values": [
+            {"id": 10, "content": {"raw": "root resolved"}, "user": {"account_id": "u1", "display_name": "U1"},
+             "created_on": "2026-01-01T00:00:00Z", "resolution": {}},
+            {"id": 11, "content": {"raw": "reply"}, "user": {"account_id": "u2", "display_name": "U2"},
+             "created_on": "2026-01-01T00:00:00Z", "parent": {"id": 10}},
+            {"id": 20, "content": {"raw": "open root"}, "user": {"account_id": "u1", "display_name": "U1"},
+             "created_on": "2026-01-01T00:00:00Z", "resolution": None},
+            {"id": 21, "content": {"raw": "open reply"}, "user": {"account_id": "u2", "display_name": "U2"},
+             "created_on": "2026-01-01T00:00:00Z", "parent": {"id": 20}},
+        ]}
+        with patch("features.platforms.httpx.Client", return_value=_bb_get(values)):
+            by_id = {c["id"]: c for c in p.get_pr_comments("repo", 1)}
+        assert by_id[10]["resolved"] is True
+        assert by_id[11]["resolved"] is True
+        assert by_id[20]["resolved"] is False
+        assert by_id[21]["resolved"] is False
