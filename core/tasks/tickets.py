@@ -1282,6 +1282,30 @@ def resolve_conflicts(ctx: TaskContext) -> TaskResult:
     })
 
 
+@task("sync_pr_base",
+      preconditions=[status_is("in_review")],
+      timeout=CONFLICT_RESOLVE_TIMEOUT)
+def sync_pr_base(ctx: TaskContext) -> TaskResult:
+    from features import tickets as tix
+    if not ctx.ticket_key:
+        return TaskResult("failed", "ticket_key missing")
+    ts = state.load_ticket(ctx.ticket_key)
+    if ts is None:
+        return TaskResult("failed", "ticket not found")
+    ticket = {"key": ctx.ticket_key, "summary": ts.get("summary", ""),
+              "description": ts.get("description", ""), "url": ts.get("url", "")}
+    base_url = ctx.config.get("_base_url", "")
+    try:
+        updated = tix._sync_pr_base(ctx.config, ticket, ts, base_url)
+    except Exception as e:
+        log.emit("sync_pr_base_error",
+                 f"[{ctx.instance_key}] {ctx.ticket_key}: {type(e).__name__}: {e}",
+                 meta={"ticket": ctx.ticket_key})
+        return TaskResult("failed", f"{type(e).__name__}: {e}")
+    state.save_ticket(ctx.ticket_key, updated)
+    return TaskResult("ok")
+
+
 @task("apply_note_reset",
       timeout=30)
 def apply_note_reset(ctx: TaskContext) -> TaskResult:
