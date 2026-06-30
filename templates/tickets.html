@@ -103,10 +103,9 @@
 			</div>
 		</div>
 	</div>
-</frshty-shell>
-
-<pr-submit-modal :open="prModalOpen" :repos="prRepos" :submitting="prSubmitting"
+<pr-submit-modal :open="prModalOpen" :repos="prRepos" :submitting="prSubmitting" :ticket-key="currentTicketKey"
 								 @close="closePrModal" @submit="onPrSubmit" />
+</frshty-shell>
 </div>
 
 <script>
@@ -343,7 +342,7 @@ frshtyApp({
 
 		return {
 			tickets, features, instanceName, HELP, COLUMN_LABELS,
-			prModalOpen, prRepos, prSubmitting,
+			prModalOpen, prRepos, prSubmitting, currentTicketKey,
 			visibleColumns, totalCount,
 			ticketsForColumn, prAuthors, fmtScheduled, initials, openTicket,
 			hasActions, pillStatus,
