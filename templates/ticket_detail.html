@@ -597,7 +597,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
     <div ref="terminalContainer" id="terminal-container" style="height: 500px; padding: 4px;"></div>
 </div>
 
-<pr-submit-modal :open="prModalOpen" :repos="prRepos" :submitting="prSubmitting"
+<pr-submit-modal :open="prModalOpen" :repos="prRepos" :submitting="prSubmitting" :ticket-key="key"
                  @close="closePrModal" @submit="onPrSubmit" />
 
 </div><!-- /.ln-page -->
