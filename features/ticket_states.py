@@ -371,7 +371,7 @@ def _handle_pr_ready_ticket(
     existing: bool,
 ) -> tuple[dict, bool]:
     key = ticket["key"]
-    if instance_key and not ts.get("pr_descriptions") and _change_manifest_exists(config, ts, key):
+    if instance_key and not ts.get("pr_descriptions_generated_at") and _change_manifest_exists(config, ts, key):
         _t._enqueue_stage(instance_key, key, "generate_pr_descriptions")
     if config.get("pr", {}).get("auto_pr") and not ts.get("pr_scheduled_at"):
         if instance_key and _t._repo_gate_blocked(instance_key, key, config):
