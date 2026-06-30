@@ -1987,6 +1987,18 @@ def _resolve_conflicts(config, ticket, ts, base_url, pr_info_map=None) -> dict:
             continue
 
         prev_error = ts.get("last_conflict_error")
+        synced = platform.sync_remote_branch(wt, ts["branch"])
+        if not synced["ok"]:
+            error = synced.get("error", "")
+            log.emit("ticket_conflict_failed", f"Remote branch sync failed for {_label(ticket['key'], ts)} PR #{pr['id']}: {error[:100]}",
+                links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+                meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"], "error": error})
+            ts["conflict_resolution_attempts"] = attempts + 1
+            ts["last_conflict_error"] = error
+            if attempts + 1 >= MAX_CONFLICT_ATTEMPTS:
+                ts["status"] = transition(ts["status"], "pr_failed")
+                ts["pr_failed_reason"] = "conflict_failed"
+            return ts
         result = platform.merge_base(wt, base_branch, prev_error=prev_error)
         if not result["ok"]:
             error = result.get("error", "")
