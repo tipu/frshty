@@ -12,6 +12,7 @@ from starlette.websockets import WebSocket
 import core.config as cfg
 import core.db as db
 import core.log as log
+import core.queue as q
 import core.scheduler as scheduler
 import core.state as state
 import core.terminal as terminal
@@ -234,6 +235,29 @@ def api_ticket_pr_info(ticket_key: str):
     except Exception as e:
         log.emit("pr_info_error", f"Error generating PR info: {e}", meta={"ticket": ticket_key})
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@router.post("/api/tickets/{ticket_key}/pr-info/regenerate")
+def api_regenerate_pr_info(ticket_key: str):
+    instance_key = _config.get("job", {}).get("key", "")
+    ts = state.load_ticket(ticket_key)
+    if not ts:
+        return JSONResponse({"error": "Ticket not found"}, status_code=404)
+    if ts.get("status") != "pr_ready":
+        return JSONResponse({"error": f"Ticket is {ts.get('status')}, not pr_ready"}, status_code=400)
+
+    def _clear(t):
+        if t is None:
+            return None
+        t.pop("pr_descriptions", None)
+        t.pop("pr_descriptions_generated_at", None)
+        return t
+
+    state.update_ticket(ticket_key, _clear)
+    job_id = q.enqueue_job(instance_key, "generate_pr_descriptions", ticket_key=ticket_key)
+    log.emit("pr_descriptions_regenerate", f"Manual PR body regenerate for {ticket_key}",
+             meta={"ticket": ticket_key, "job_id": job_id})
+    return {"status": "queued", "job_id": job_id}
 
 
 @router.post("/api/tickets/{ticket_key}/submit-pr")
