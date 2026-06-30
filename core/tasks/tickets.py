@@ -1186,13 +1186,14 @@ def generate_pr_descriptions(ctx: TaskContext) -> TaskResult:
         }
         generated.append(name)
 
+    def _set(t):
+        if t is None:
+            return None
+        t["pr_descriptions"] = existing
+        t["pr_descriptions_generated_at"] = datetime.now(timezone.utc).isoformat()
+        return t
+    state.update_ticket(ctx.ticket_key or "", _set)
     if generated or failed:
-        def _set(t):
-            if t is None:
-                return None
-            t["pr_descriptions"] = existing
-            return t
-        state.update_ticket(ctx.ticket_key or "", _set)
         log.emit("ticket_pr_descriptions_generated",
                  f"{ctx.ticket_key}: generated={len(generated)} "
                  f"skipped_empty={len(skipped_empty)} failed={len(failed)}",
