@@ -392,6 +392,71 @@ def api_tickets_list():
     return out
 
 
+def _pr_comment_breakdown(entries: list[dict], repo: str, pr_id) -> dict:
+    done = not_done = discuss = 0
+    for e in entries:
+        if e.get("pr_repo") != repo or e.get("pr_id") != pr_id:
+            continue
+        st = e.get("status")
+        if st in ("addressed", "replied"):
+            done += 1
+        elif st == "needs_reply":
+            discuss += 1
+        else:
+            not_done += 1
+    return {"done": done, "not_done": not_done, "discuss": discuss}
+
+
+def _pr_court(breakdown: dict, ci: str, mergeable: str) -> str:
+    if breakdown["not_done"] or breakdown["discuss"]:
+        return "your_court"
+    if ci == "failing" or mergeable == "CONFLICTING":
+        return "your_court"
+    return "reviewer"
+
+
+@router.get("/api/tickets/pr-board")
+def api_tickets_pr_board():
+    tickets = state.list_tickets()
+    out = []
+    for key, ts in tickets.items():
+        if ts.get("status") not in ("in_review", "pr_failed"):
+            continue
+        prs = ts.get("prs") or []
+        if not prs:
+            continue
+        slug = ts.get("slug", "")
+        entries = _tickets_mod._load_pr_comments(_config, slug) if slug else []
+        rows = []
+        for pr in prs:
+            if pr.get("pr_state") == "MERGED":
+                continue
+            ci = pr.get("ci", "unknown")
+            mergeable = pr.get("mergeable", "UNKNOWN")
+            breakdown = _pr_comment_breakdown(entries, pr["repo"], pr["id"])
+            rows.append({
+                "repo": pr["repo"],
+                "id": pr["id"],
+                "url": pr.get("url", ""),
+                "ci": ci,
+                "mergeable": mergeable,
+                "approvers": pr.get("approvers", []),
+                "comments": breakdown,
+                "court": _pr_court(breakdown, ci, mergeable),
+                "poll_count": pr.get("poll_count", 0),
+                "last_polled_at": pr.get("last_polled_at", ""),
+            })
+        if rows:
+            out.append({
+                "ticket_key": key,
+                "summary": ts.get("summary", ""),
+                "status": ts.get("status"),
+                "prs": rows,
+            })
+    out.sort(key=lambda t: t["ticket_key"])
+    return {"tickets": out}
+
+
 @router.get("/api/raw/tickets")
 def api_raw_tickets():
     from features.ticket_systems import make_ticket_system
