@@ -83,7 +83,8 @@ textarea { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; }
     <a v-if="info.ticket_key && info.ticket_url" :href="info.ticket_url" target="_blank" class="link hover:underline">{{ info.ticket_key }}</a>
     <span v-else-if="info.ticket_key" class="text-gray-500">{{ info.ticket_key }}</span>
     <span v-if="info.pr_title" class="text-gray-200 font-medium">{{ info.pr_title }}</span>
-    <span class="ml-auto flex gap-3 text-xs">
+    <span class="ml-auto flex items-center gap-3 text-xs">
+        <a :href="'/reviews/' + repo + '/' + prId + '/presentation'" class="badge badge-question hover:opacity-80" title="guided slide walkthrough">▶ Presentation</a>
         <a v-if="info.pr_url" :href="info.pr_url" target="_blank" class="link hover:underline">{{ repo }}#{{ prId }} →</a>
     </span>
 </div>
