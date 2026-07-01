@@ -52,7 +52,8 @@
 						<tr style="text-align:left;color:var(--ln-muted,#8a8a99)">
 							<th style="padding:6px 10px">PR</th>
 							<th style="padding:6px 10px">CI</th>
-							<th style="padding:6px 10px">Mergeable</th>
+							<th style="padding:6px 10px" title="Green only when approved, CI green, and no conflicts">Mergeable</th>
+							<th style="padding:6px 10px" title="Whether the PR conflicts with its destination branch">Conflict</th>
 							<th style="padding:6px 10px">Approved</th>
 							<th style="padding:6px 10px">Comments</th>
 							<th style="padding:6px 10px">Status</th>
@@ -65,7 +66,8 @@
 								<a :href="pr.url" target="_blank" rel="noopener" class="ln-mono ln-tkt-prlink">{{ pr.repo }} #{{ pr.id }}</a>
 							</td>
 							<td style="padding:6px 10px" :title="pr.ci">{{ ciGlyph(pr.ci) }}</td>
-							<td style="padding:6px 10px" :title="pr.mergeable">{{ mergeGlyph(pr.mergeable) }}</td>
+							<td style="padding:6px 10px" :title="mergeReadyReason(pr)">{{ mergeReadyGlyph(pr) }}</td>
+							<td style="padding:6px 10px" :title="pr.mergeable">{{ conflictGlyph(pr.mergeable) }}</td>
 							<td style="padding:6px 10px">{{ approvedLabel(pr.approvers) }}</td>
 							<td style="padding:6px 10px">{{ commentsLabel(pr.comments) }}</td>
 							<td style="padding:6px 10px">
@@ -322,10 +324,24 @@ frshtyApp({
 			return {passing: '🟢', failing: '🔴', pending: '🟡', none: '⚪ none', unknown: '⚪ ?'}[ci] || '⚪ ?';
 		}
 
-		function mergeGlyph(m) {
-			if (m === 'MERGEABLE') return '✅';
-			if (m === 'CONFLICTING') return '⛔';
-			return '—';
+		function mergeReadyGlyph(pr) {
+			const approved = (pr.approvers || []).length > 0;
+			const ready = approved && pr.ci === 'passing' && pr.mergeable !== 'CONFLICTING';
+			return ready ? '🟢' : '⚪';
+		}
+
+		function mergeReadyReason(pr) {
+			const missing = [];
+			if (!(pr.approvers || []).length) missing.push('not approved');
+			if (pr.ci !== 'passing') missing.push(`CI ${pr.ci || 'unknown'}`);
+			if (pr.mergeable === 'CONFLICTING') missing.push('conflicts');
+			return missing.length ? 'Not ready: ' + missing.join(', ') : 'Ready to merge';
+		}
+
+		function conflictGlyph(m) {
+			if (m === 'CONFLICTING') return '🔴 conflict';
+			if (m === 'MERGEABLE') return '—';
+			return '?';
 		}
 
 		function approvedLabel(approvers) {
@@ -454,7 +470,7 @@ frshtyApp({
 
 		return {
 			view, prBoard, prBoardCount, tabStyle, selectView,
-			ciGlyph, mergeGlyph, approvedLabel, commentsLabel, courtLabel, pollWarn,
+			ciGlyph, mergeReadyGlyph, mergeReadyReason, conflictGlyph, approvedLabel, commentsLabel, courtLabel, pollWarn,
 			tickets, features, instanceName, HELP, COLUMN_LABELS,
 			prModalOpen, prRepos, prSubmitting, currentTicketKey,
 			visibleColumns, totalCount,
