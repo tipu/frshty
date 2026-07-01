@@ -265,7 +265,7 @@ class BitbucketPlatform:
                 return {"state": "OPEN", "updated_on": "", "mergeable": "UNKNOWN"}
             data = resp.json()
             approvers = [
-                p.get("user", {}).get("account_id", "")
+                p.get("user", {}).get("display_name") or p.get("user", {}).get("account_id", "")
                 for p in (data.get("participants") or [])
                 if p.get("approved")
             ]

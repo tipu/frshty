@@ -18,6 +18,22 @@ FIX_TIMEOUT = 1800
 # never fixes or counts an attempt, and the ticket loops in_review forever
 # holding the repo gate. CANCELLED/TIMED_OUT are real failures GH reports.
 FAILED_STATES = ("FAILURE", "FAILED", "STOPPED", "CANCELLED", "TIMED_OUT")
+PENDING_STATES = ("PENDING", "QUEUED", "IN_PROGRESS", "INPROGRESS", "WAITING", "REQUESTED", "EXPECTED")
+
+
+def ci_summary(checks) -> str:
+    """Collapse a get_pr_checks() result into one display state for the PR board:
+    'unknown' (fetch failed), 'none' (no checks), 'failing', 'pending', 'passing'."""
+    if checks is None:
+        return "unknown"
+    if not checks:
+        return "none"
+    states = [c.get("state", "").upper() for c in checks]
+    if any(s in FAILED_STATES for s in states):
+        return "failing"
+    if any(s in PENDING_STATES for s in states):
+        return "pending"
+    return "passing"
 
 
 def triage_and_fix_pr(platform, repo: str, pr_id: int, label: str,

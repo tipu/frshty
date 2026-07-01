@@ -20,6 +20,7 @@ from core.deps import run_dep_command, relink_shared_venv
 from core.claude_runner import run_haiku, run_sonnet, run_claude_code, extract_json
 from core.ticket_status import TicketStatus, transition
 from features.platforms import make_platform
+from features.pr_ci import ci_summary
 from features.ticket_systems import make_ticket_system
 
 
@@ -1100,7 +1101,7 @@ def check(config: dict, instance_key: str = ""):
                 continue
 
             if ts.get("branch"):
-                ts = _reconcile_prs(ts, open_prs)
+                ts = _reconcile_prs(ts, open_prs, key)
 
             if ts["status"] in ("planning", "reviewing") and ts.get("slug"):
                 ws = config["workspace"]
@@ -1614,6 +1615,7 @@ def _recheck_pr_failed(config, ticket, ts, base_url) -> dict:
         except Exception:
             return ts
         pr_state = info.get("state", "")
+        _cache_pr_health(platform, pr, info)
         if pr_state == "MERGED":
             continue
         all_merged = False
@@ -1669,6 +1671,25 @@ def _build_pr_info_map(platform, prs: list[dict]) -> dict:
     return out
 
 
+def _cache_pr_health(platform, pr: dict, info: dict) -> None:
+    """Persist per-PR review/CI state onto the ticket's pr entry so the PR board
+    serves from cache without live platform calls, and bump poll_count — a high
+    count against an unmerged PR flags a stuck poll loop (e.g. CI never recovers).
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    pr["approvers"] = info.get("approvers") or []
+    pr["approvers_checked_at"] = now
+    pr["mergeable"] = info.get("mergeable", "UNKNOWN")
+    pr["pr_state"] = info.get("state", "OPEN")
+    pr["poll_count"] = pr.get("poll_count", 0) + 1
+    pr["last_polled_at"] = now
+    try:
+        pr["ci"] = ci_summary(platform.get_pr_checks(pr["repo"], pr["id"]))
+    except Exception:
+        pr["ci"] = "unknown"
+    pr["ci_checked_at"] = now
+
+
 def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
     platform = make_platform(config)
     prs = ts.get("prs", [])
@@ -1680,8 +1701,7 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
     for pr in prs:
         info = _get_pr_info(platform, pr_info_map, pr["repo"], pr["id"])
         pr_state = info.get("state", "OPEN")
-        pr["approvers"] = info.get("approvers") or []
-        pr["approvers_checked_at"] = datetime.now(timezone.utc).isoformat()
+        _cache_pr_health(platform, pr, info)
         if pr_state == "MERGED":
             continue
         all_merged = False
@@ -1903,8 +1923,14 @@ def _fetch_open_prs(config) -> list[dict]:
         return []
 
 
-def _reconcile_prs(ts: dict, open_prs: list[dict]) -> dict:
+def _reconcile_prs(ts: dict, open_prs: list[dict], key: str = "") -> dict:
     matches = [p for p in open_prs if p.get("branch") == ts.get("branch")]
+    if not matches and key:
+        pat = re.compile(rf"{re.escape(key)}(?![0-9])")
+        matches = [
+            p for p in open_prs
+            if pat.search(p.get("branch", "") or "") or pat.search(p.get("title", "") or "")
+        ]
     if not matches:
         return ts
 

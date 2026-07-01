@@ -64,8 +64,18 @@ def review_walkthrough_page(repo: str, pr_id: int, idx: int):
     return _template("review_walkthrough.html")
 
 
+@router.get("/reviews/{repo}/{pr_id}/presentation", response_class=HTMLResponse)
+def review_presentation_page(repo: str, pr_id: int):
+    return _template("review_presentation.html")
+
+
 @router.get("/tickets", response_class=HTMLResponse)
 def tickets_page():
+    return _template("tickets.html")
+
+
+@router.get("/tickets/pr", response_class=HTMLResponse)
+def tickets_pr_page():
     return _template("tickets.html")
 
 

@@ -551,6 +551,28 @@ class TestReconcilePrs:
         assert result["ci_fix_attempts"] == 0
         assert "ci_passed" not in result
 
+    def test_key_fallback_matches_diverged_branch(self):
+        open_prs = [
+            {"repo": "r", "id": 147, "branch": "danial/feature/PROJ-1-realtime", "title": "PROJ-1: rework", "url": "u"},
+        ]
+        ts = make_ticket_state(status="pr_ready", branch="danial/feature/PROJ-1-old-name")
+
+        result = tickets._reconcile_prs(ts, open_prs, "PROJ-1")
+
+        assert result["status"] == "in_review"
+        assert result["prs"][0]["id"] == 147
+
+    def test_key_fallback_ignores_numeric_prefix_collision(self):
+        open_prs = [
+            {"repo": "r", "id": 5, "branch": "danial/feature/PROJ-10-other", "title": "PROJ-10: x", "url": "u"},
+        ]
+        ts = make_ticket_state(status="pr_ready", branch="danial/feature/PROJ-1-old")
+
+        result = tickets._reconcile_prs(ts, open_prs, "PROJ-1")
+
+        assert "prs" not in result
+        assert result["status"] == "pr_ready"
+
 
 class TestMerge:
     def test_all_merged(self, fake_config):
@@ -737,7 +759,7 @@ class TestCheckRebuildsMissingTicketDir:
              patch("features.tickets.get_repos",
                    return_value=[{"name": "myrepo", "path": tmp_state / "repo"}]), \
              patch("core.queue.jobs_for_ticket", return_value=[]), \
-             patch("features.tickets._reconcile_prs", side_effect=lambda ts, _prs: ts), \
+             patch("features.tickets._reconcile_prs", side_effect=lambda ts, _prs, *_a: ts), \
              patch("features.tickets._setup_ticket") as setup, \
              patch("features.tickets._enqueue_stage") as eq:
             tickets.check({**fake_config, "_base_url": "http://base"}, instance_key="inst")
@@ -759,7 +781,7 @@ class TestCheckRebuildsMissingTicketDir:
              patch("features.tickets.get_repos",
                    return_value=[{"name": "myrepo", "path": tmp_state / "repo"}]), \
              patch("core.queue.jobs_for_ticket", return_value=[]), \
-             patch("features.tickets._reconcile_prs", side_effect=lambda ts, _prs: ts), \
+             patch("features.tickets._reconcile_prs", side_effect=lambda ts, _prs, *_a: ts), \
              patch("features.tickets._setup_ticket",
                    return_value={"status": "new", "slug": slug, "branch": slug,
                                  "discovered_at": "2026-04-22T00:00:00Z"}) as setup, \
