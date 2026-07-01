@@ -33,7 +33,54 @@
 			</div>
 		</div>
 
-		<div class="ln-kanban">
+		<div class="ln-tabs" style="display:flex;gap:4px;border-bottom:1px solid var(--ln-border,#2a2a35);margin-bottom:16px;">
+			<button class="ln-tab" :class="{'ln-tab-active': view==='board'}" @click="selectView('board')"
+							:style="tabStyle(view==='board')">Board</button>
+			<button class="ln-tab" :class="{'ln-tab-active': view==='prs'}" @click="selectView('prs')"
+							:style="tabStyle(view==='prs')">PRs<span v-if="prBoardCount" class="ln-count-chip" style="margin-left:6px">{{ prBoardCount }}</span></button>
+		</div>
+
+		<div v-show="view==='prs'" class="ln-pr-board">
+			<div v-if="!prBoard.length" class="ln-kan-empty">No open PRs in review</div>
+			<div v-for="grp in prBoard" :key="grp.ticket_key" style="margin-bottom:28px">
+				<div style="display:flex;align-items:baseline;gap:10px;margin-bottom:6px">
+					<a :href="`/tickets/${grp.ticket_key}`" class="ln-mono ln-tkt-key" style="font-weight:600">{{ grp.ticket_key }}</a>
+					<span class="ln-muted ln-small">{{ grp.summary }}</span>
+				</div>
+				<table class="ln-pr-table" style="width:100%;border-collapse:collapse;font-size:13px">
+					<thead>
+						<tr style="text-align:left;color:var(--ln-muted,#8a8a99)">
+							<th style="padding:6px 10px">PR</th>
+							<th style="padding:6px 10px">CI</th>
+							<th style="padding:6px 10px">Mergeable</th>
+							<th style="padding:6px 10px">Approved</th>
+							<th style="padding:6px 10px">Comments</th>
+							<th style="padding:6px 10px">Status</th>
+							<th style="padding:6px 10px" title="Times this PR was polled while unmerged — a high count with red CI flags a stuck loop">Polls</th>
+						</tr>
+					</thead>
+					<tbody>
+						<tr v-for="pr in grp.prs" :key="pr.repo + pr.id" style="border-top:1px solid var(--ln-border,#2a2a35)">
+							<td style="padding:6px 10px">
+								<a :href="pr.url" target="_blank" rel="noopener" class="ln-mono ln-tkt-prlink">{{ pr.repo }} #{{ pr.id }}</a>
+							</td>
+							<td style="padding:6px 10px" :title="pr.ci">{{ ciGlyph(pr.ci) }}</td>
+							<td style="padding:6px 10px" :title="pr.mergeable">{{ mergeGlyph(pr.mergeable) }}</td>
+							<td style="padding:6px 10px">{{ approvedLabel(pr.approvers) }}</td>
+							<td style="padding:6px 10px">{{ commentsLabel(pr.comments) }}</td>
+							<td style="padding:6px 10px">
+								<span class="ln-pill" :class="pr.court==='your_court' ? 'ln-pill-amber' : ''">{{ courtLabel(pr.court) }}</span>
+							</td>
+							<td style="padding:6px 10px" :class="{'ln-pr-poll-warn': pollWarn(pr)}"
+									:style="pollWarn(pr) ? 'color:#e5534b;font-weight:600' : ''"
+									:title="pr.last_polled_at ? ('last polled ' + pr.last_polled_at) : ''">{{ pr.poll_count }}</td>
+						</tr>
+					</tbody>
+				</table>
+			</div>
+		</div>
+
+		<div v-show="view==='board'" class="ln-kanban">
 			<div v-for="col in visibleColumns" :key="col" class="ln-kan-col">
 				<div class="ln-kan-head">
 					<span>
@@ -182,6 +229,10 @@ frshtyApp({
 		const prSubmitting = ref(false);
 		const currentTicketKey = ref(null);
 
+		const view = ref(window.location.pathname.replace(/\/$/, '').endsWith('/tickets/pr') ? 'prs' : 'board');
+		const prBoard = ref([]);
+		const prBoardCount = computed(() => prBoard.value.reduce((n, g) => n + g.prs.length, 0));
+
 		const showIgnored = ref(false);
 		const showDone = ref(false);
 		const visibleColumns = computed(() => {
@@ -239,6 +290,64 @@ frshtyApp({
 				features.value = cfg.features || {};
 				instanceName.value = cfg.job?.key || '';
 			} catch (e) { console.error('load failed', e); }
+			loadPrBoard();
+		}
+
+		async function loadPrBoard() {
+			try {
+				const r = await fetch('/api/tickets/pr-board');
+				prBoard.value = (await r.json()).tickets || [];
+			} catch (e) { console.error('pr-board load failed', e); }
+		}
+
+		function selectView(v) {
+			view.value = v;
+			const path = v === 'prs' ? '/tickets/pr' : '/tickets';
+			if (window.location.pathname.replace(/\/$/, '') !== path) {
+				window.history.pushState({view: v}, '', path);
+			}
+			if (v === 'prs') loadPrBoard();
+		}
+
+		function tabStyle(active) {
+			return {
+				padding: '8px 14px', cursor: 'pointer', background: 'none', border: 'none',
+				borderBottom: active ? '2px solid var(--ln-accent,#5e6ad2)' : '2px solid transparent',
+				color: active ? 'var(--ln-text,#e6e6ef)' : 'var(--ln-muted,#8a8a99)',
+				fontWeight: active ? '600' : '400',
+			};
+		}
+
+		function ciGlyph(ci) {
+			return {passing: '🟢', failing: '🔴', pending: '🟡', none: '⚪ none', unknown: '⚪ ?'}[ci] || '⚪ ?';
+		}
+
+		function mergeGlyph(m) {
+			if (m === 'MERGEABLE') return '✅';
+			if (m === 'CONFLICTING') return '⛔';
+			return '—';
+		}
+
+		function approvedLabel(approvers) {
+			if (!approvers || !approvers.length) return '—';
+			return '✅ ' + approvers.join(', ');
+		}
+
+		function commentsLabel(c) {
+			if (!c) return 'none';
+			const parts = [];
+			if (c.done) parts.push(`${c.done} done`);
+			if (c.not_done) parts.push(`${c.not_done} not done`);
+			if (c.discuss) parts.push(`${c.discuss} discuss`);
+			return parts.length ? parts.join(', ') : 'none';
+		}
+
+		function courtLabel(court) {
+			return court === 'your_court' ? 'Your court' : 'Reviewer';
+		}
+
+		function pollWarn(pr) {
+			return pr.poll_count >= 8 && (pr.ci === 'failing' || pr.mergeable === 'CONFLICTING');
 		}
 
 		async function discard(key) {
@@ -338,9 +447,14 @@ frshtyApp({
 		onMounted(() => {
 			load();
 			setInterval(load, 10000);
+			window.addEventListener('popstate', () => {
+				view.value = window.location.pathname.replace(/\/$/, '').endsWith('/tickets/pr') ? 'prs' : 'board';
+			});
 		});
 
 		return {
+			view, prBoard, prBoardCount, tabStyle, selectView,
+			ciGlyph, mergeGlyph, approvedLabel, commentsLabel, courtLabel, pollWarn,
 			tickets, features, instanceName, HELP, COLUMN_LABELS,
 			prModalOpen, prRepos, prSubmitting, currentTicketKey,
 			visibleColumns, totalCount,
