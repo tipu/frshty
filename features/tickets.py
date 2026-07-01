@@ -1925,12 +1925,14 @@ def _fetch_open_prs(config) -> list[dict]:
 
 def _reconcile_prs(ts: dict, open_prs: list[dict], key: str = "") -> dict:
     matches = [p for p in open_prs if p.get("branch") == ts.get("branch")]
-    if not matches and key:
+    if key:
         pat = re.compile(rf"{re.escape(key)}(?![0-9])")
-        matches = [
-            p for p in open_prs
-            if pat.search(p.get("branch", "") or "") or pat.search(p.get("title", "") or "")
-        ]
+        seen = {(p["repo"], p["id"]) for p in matches}
+        for p in open_prs:
+            if (p["repo"], p["id"]) in seen:
+                continue
+            if pat.search(p.get("branch", "") or "") or pat.search(p.get("title", "") or ""):
+                matches.append(p)
     if not matches:
         return ts
 

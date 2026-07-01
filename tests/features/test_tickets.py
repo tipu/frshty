@@ -562,6 +562,18 @@ class TestReconcilePrs:
         assert result["status"] == "in_review"
         assert result["prs"][0]["id"] == 147
 
+    def test_union_exact_branch_and_key_on_other_branch(self):
+        open_prs = [
+            {"repo": "a", "id": 1, "branch": "DSC-127-main", "title": "", "url": "u1"},
+            {"repo": "b", "id": 2, "branch": "DSC-127-ui-variant", "title": "", "url": "u2"},
+            {"repo": "c", "id": 3, "branch": "unrelated", "title": "", "url": "u3"},
+        ]
+        ts = make_ticket_state(status="in_review", branch="DSC-127-main")
+
+        result = tickets._reconcile_prs(ts, open_prs, "DSC-127")
+
+        assert {p["id"] for p in result["prs"]} == {1, 2}
+
     def test_key_fallback_ignores_numeric_prefix_collision(self):
         open_prs = [
             {"repo": "r", "id": 5, "branch": "danial/feature/PROJ-10-other", "title": "PROJ-10: x", "url": "u"},
