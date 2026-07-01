@@ -69,7 +69,14 @@
 							<td style="padding:6px 10px" :title="mergeReadyReason(pr)">{{ mergeReadyGlyph(pr) }}</td>
 							<td style="padding:6px 10px" :title="pr.mergeable">{{ conflictGlyph(pr.mergeable) }}</td>
 							<td style="padding:6px 10px">{{ approvedLabel(pr.approvers) }}</td>
-							<td style="padding:6px 10px">{{ commentsLabel(pr.comments) }}</td>
+							<td style="padding:6px 10px">
+								<span>{{ commentsLabel(pr.comments) }}</span>
+								<template v-if="(pr.unresolved || []).length">
+									<span class="ln-muted ln-small" style="margin-left:8px">{{ pr.unresolved.length }} unresolved:</span>
+									<a v-for="(u, i) in pr.unresolved" :key="i" :href="u.url" target="_blank" rel="noopener"
+										 class="ln-tkt-prlink" style="margin-left:5px" :title="(u.loc ? u.loc + ' — ' : '') + u.snippet">↗{{ i + 1 }}</a>
+								</template>
+							</td>
 							<td style="padding:6px 10px">
 								<span class="ln-pill" :class="pr.court==='your_court' ? 'ln-pill-amber' : ''">{{ courtLabel(pr.court) }}</span>
 							</td>
