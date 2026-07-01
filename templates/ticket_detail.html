@@ -198,7 +198,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
 <div v-if="hasCode" class="flex gap-2 mb-4">
     <button class="tab-btn" :class="{ active: activeTab === 'docs' }" @click="activeTab = 'docs'">Docs</button>
     <button class="tab-btn" :class="{ active: activeTab === 'diff' }" @click="switchTab('diff')">Diff &amp; Comments</button>
-    <button v-if="ticket.has_explainer" class="tab-btn" :class="{ active: activeTab === 'explainer' }" @click="activeTab = 'explainer'">Explainer</button>
+    <button v-if="ticket && ticket.has_explainer" class="tab-btn" :class="{ active: activeTab === 'explainer' }" @click="activeTab = 'explainer'">Explainer</button>
 </div>
 
 <div v-show="activeTab === 'docs'" class="layout-main">
@@ -233,10 +233,10 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                     <option v-for="rk in existingReleases" :key="rk" :value="rk"></option>
                 </datalist>
                 <button @click="saveRelease" class="text-xs bg-blue-800 hover:bg-blue-700 text-blue-200 px-2 py-1 rounded">Save</button>
-                <button v-if="ticket.release" @click="clearRelease" class="text-xs bg-red-900 hover:bg-red-800 text-red-300 px-2 py-1 rounded">Unassign</button>
+                <button v-if="ticket && ticket.release" @click="clearRelease" class="text-xs bg-red-900 hover:bg-red-800 text-red-300 px-2 py-1 rounded">Unassign</button>
             </div>
             <div v-if="releaseError" class="text-xs text-red-400 mt-1">{{ releaseError }}</div>
-            <div v-if="ticket.release" class="mt-2 text-xs">
+            <div v-if="ticket && ticket.release" class="mt-2 text-xs">
                 <div>
                     <a :href="`/releases#${ticket.release.release_key}`" class="link font-mono">{{ ticket.release.release_key }}</a>
                     <span class="text-gray-500 ml-1">— {{ ticket.release.terminal_count }}/{{ ticket.release.ticket_count }} terminal · status: {{ ticket.release.status }}</span>
@@ -374,7 +374,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                 <div v-if="proofMdContent" class="mb-3 last:mb-0">
                     <div class="md-content text-sm" v-html="renderMarkdown(proofMdContent)"></div>
                 </div>
-                <div v-for="name in (ticket.proof_videos || [])" :key="name" class="mb-3 last:mb-0">
+                <div v-for="name in ((ticket && ticket.proof_videos) || [])" :key="name" class="mb-3 last:mb-0">
                     <div class="text-xs text-gray-400 mb-1">{{ name }}</div>
                     <video controls class="w-full rounded" style="max-height:600px">
                         <source :src="`/api/tickets/${key}/docs/${encodeURIComponent(name)}`">
@@ -575,7 +575,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
 </div>
 
 <div v-show="activeTab === 'explainer'">
-    <iframe v-if="ticket.has_explainer"
+    <iframe v-if="ticket && ticket.has_explainer"
             :src="`/api/tickets/${key}/docs/change-explainer.html`"
             style="width: 100%; height: calc(100vh - 180px); border: 0; border-radius: 6px; background: #0d1117;"></iframe>
 </div>

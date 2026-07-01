@@ -387,6 +387,55 @@ def build_walkthrough_context(comment: dict, worktree: Path | None) -> dict:
     }
 
 
+def build_presentation(ticket_goal: str, diff_text: str, worktree: Path | None) -> dict:
+    if not diff_text:
+        return {}
+    tools = ["Read", "Glob", "Grep"] if worktree else None
+    has_tools = worktree is not None
+    grounding = (
+        "You have read-only access to the PR's checked-out branch. Use Read/Grep/Glob to open the "
+        "full files and the code around each change so your flow ordering and correctness checks are "
+        "grounded in the real code, not just the diff.\n\n"
+        if has_tools else ""
+    )
+    prompt = (
+        "You are preparing a guided, slide-by-slide PRESENTATION that walks a reviewer through a pull "
+        "request so they can understand it and validate its correctness quickly.\n\n"
+        f"TICKET / GOAL:\n{ticket_goal or '(no ticket goal provided; infer the intent from the diff)'}\n\n"
+        + grounding +
+        "Produce these parts:\n"
+        "1. problem: 2-4 plain-language sentences framing the problem this PR solves.\n"
+        "2. approach: 1-2 sentences on the strategy the PR takes to solve it.\n"
+        "3. steps: an ORDERED list that walks the change the way the code actually EXECUTES, beginning "
+        "to end (entry point -> downstream calls -> data/state changes -> result). Break it into SMALL, "
+        "digestible steps; each step covers one coherent chunk (a function, a block, one key change). "
+        "Never dump a whole file. For each step provide:\n"
+        "   - title: a short label for this step\n"
+        "   - file: the file path\n"
+        "   - code: ONLY the relevant lines, each prefixed 'NUM: ' with the real line number, kept short\n"
+        "   - narrative: 2-4 sentences on what this code does and how it fits the end-to-end flow\n"
+        "   - check: 'ok' if this chunk is correct and on-purpose, or 'concern' if anything looks wrong, "
+        "risky, destructive, dead/unused, or unrelated to the goal\n"
+        "   - check_note: one sentence justifying the check — confirm it is correct and relevant, or name "
+        "the problem (errant, destructive, dead/benign, or does not advance the goal)\n"
+        "4. verdict: an object with solves_problem (true/false), summary (3-5 sentences on whether the PR "
+        "correctly and completely solves the goal with no errant, destructive, or dead code), and concerns "
+        "(array of short strings, empty if none).\n\n"
+        "Order steps by execution flow, NOT by file or diff order. Aim for 4-10 steps.\n\n"
+        'Return ONLY valid JSON (no markdown fences): '
+        '{"problem":"...","approach":"...","steps":[{"title":"...","file":"...","code":"NUM: ...","narrative":"...","check":"ok|concern","check_note":"..."}],'
+        '"verdict":{"solves_problem":true,"summary":"...","concerns":["..."]}}\n\n'
+        f"--- DIFF START ---\n{diff_text[:60000]}\n--- DIFF END ---"
+    )
+    output = run_sonnet(prompt, worktree=worktree, tools=tools, timeout=600)
+    if not output:
+        return {}
+    parsed = extract_json(output)
+    if not isinstance(parsed, dict):
+        return {}
+    return parsed
+
+
 def _simplify_all_issues(issues: list[dict]) -> list[dict]:
     with ThreadPoolExecutor(max_workers=10) as pool:
         bodies = list(pool.map(lambda i: _simplify_body(i["body"]), issues))

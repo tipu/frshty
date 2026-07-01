@@ -114,7 +114,10 @@ const PrCard = {
                     <a :href="'/reviews/' + r.repo + '/' + r.pr_id" class="link font-semibold text-base hover:text-blue-300">{{ r.repo }}#{{ r.pr_id }}</a>
                     <div class="text-gray-400 text-sm mt-1 line-clamp-2">{{ r.title || '' }}</div>
                 </div>
-                <a :href="r.pr_url" target="_blank" class="link text-xs ml-3 whitespace-nowrap hover:underline">[open →]</a>
+                <div class="flex items-center gap-3 ml-3 flex-shrink-0">
+                    <a :href="'/reviews/' + r.repo + '/' + r.pr_id + '/presentation'" class="badge badge-purple whitespace-nowrap hover:opacity-80" title="guided slide walkthrough">▶ present</a>
+                    <a :href="r.pr_url" target="_blank" class="link text-xs whitespace-nowrap hover:underline">[open →]</a>
+                </div>
             </div>
             <div class="flex flex-wrap gap-2 items-center mt-3 pt-3 border-t border-gray-800">
                 <span class="badge" :class="verdictCls" title="LLM verdict">
