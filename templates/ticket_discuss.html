@@ -68,9 +68,10 @@ function connect() {
 }
 
 async function start() {
-    setStatus('starting cl…');
+    const wantContinue = new URLSearchParams(location.search).get('continue') === '1';
+    setStatus(wantContinue ? 'starting cl --continue…' : 'starting cl…');
     try {
-        const resp = await fetch(`/api/tickets/${TICKET_KEY}/discuss/start`, {method: 'POST'});
+        const resp = await fetch(`/api/tickets/${TICKET_KEY}/discuss/start${wantContinue ? '?cont=1' : ''}`, {method: 'POST'});
         if (!resp.ok) {
             const e = await resp.json().catch(() => ({}));
             setStatus(`error: ${e.error || resp.statusText}`);

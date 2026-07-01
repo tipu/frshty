@@ -824,7 +824,7 @@ def _schedule_discuss_kill(discuss_key: str) -> None:
 
 
 @router.post("/api/tickets/{key}/discuss/start")
-def api_start_discuss(key: str):
+def api_start_discuss(key: str, cont: bool = False):
     """Ensure a separate `<key>-discuss` tmux session in the ticket's
     worktree dir and seed it with `cl` (the user's claude alias). Keyed off
     a distinct suffix so it never collides with the main dev terminal that
@@ -848,7 +848,7 @@ def api_start_discuss(key: str):
         return {"status": "running", "discuss_key": discuss_key}
     terminal.ensure_session(discuss_key, str(ticket_dir))
     if not health.get("claude_running"):
-        terminal.send_keys(discuss_key, "cl")
+        terminal.send_keys(discuss_key, "cl --continue" if cont else "cl")
     _schedule_discuss_kill(discuss_key)
     return {"status": "ok", "discuss_key": discuss_key}
 

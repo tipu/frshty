@@ -46,6 +46,9 @@
 				<div style="display:flex;align-items:baseline;gap:10px;margin-bottom:6px">
 					<a :href="`/tickets/${grp.ticket_key}`" class="ln-mono ln-tkt-key" style="font-weight:600">{{ grp.ticket_key }}</a>
 					<span class="ln-muted ln-small">{{ grp.summary }}</span>
+					<span class="ln-grow"></span>
+					<button class="ln-btn ln-btn-ghost ln-btn-sm" @click="openDiscuss(grp.ticket_key)"
+									title="Open a terminal in the ticket dir running cl --continue">Discuss</button>
 				</div>
 				<table class="ln-pr-table" style="width:100%;border-collapse:collapse;font-size:13px">
 					<thead>
@@ -294,6 +297,10 @@ frshtyApp({
 			window.location.href = `/tickets/${key}`;
 		}
 
+		function openDiscuss(key) {
+			window.open(`/tickets/${key}/discuss?continue=1`, '_blank', 'noopener');
+		}
+
 		function hasActions(t) {
 			return ['pr_ready', 'pr_failed', 'pending_approval'].includes(t.status);
 		}
@@ -492,7 +499,7 @@ frshtyApp({
 			prModalOpen, prRepos, prSubmitting, currentTicketKey,
 			visibleColumns, totalCount,
 			ticketsForColumn, prAuthors, fmtScheduled, initials, openTicket,
-			hasActions, pillStatus,
+			hasActions, pillStatus, openDiscuss,
 			epicCardStyle,
 			discard, submitPr, closePrModal, onPrSubmit,
 			approve, reject, restart,
