@@ -1741,6 +1741,15 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
         pr_key = f"{pr['repo']}/{pr['id']}"
         last_seen = last_comment_ids.get(pr_key, 0)
         comments = platform.get_pr_comments(pr["repo"], pr["id"])
+        pr["unresolved_comments"] = [
+            {
+                "url": c.get("html_url", ""),
+                "loc": f"{c.get('path', '')}:{c.get('line', '')}".strip(":"),
+                "snippet": (c.get("body", "") or "")[:100],
+            }
+            for c in comments
+            if not c.get("resolved") and c["author_id"] != user_id and not c.get("parent_id")
+        ]
         new_comments = [
             c for c in comments
             if c["id"] > last_seen and c["author_id"] != user_id and not c.get("parent_id")

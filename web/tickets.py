@@ -442,6 +442,7 @@ def api_tickets_pr_board():
                 "mergeable": mergeable,
                 "approvers": pr.get("approvers", []),
                 "comments": breakdown,
+                "unresolved": [u for u in (pr.get("unresolved_comments") or []) if u.get("url")],
                 "court": _pr_court(breakdown, ci, mergeable),
                 "poll_count": pr.get("poll_count", 0),
                 "last_polled_at": pr.get("last_polled_at", ""),
