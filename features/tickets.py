@@ -1745,7 +1745,8 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
             {
                 "url": c.get("html_url", ""),
                 "loc": f"{c.get('path', '')}:{c.get('line', '')}".strip(":"),
-                "snippet": (c.get("body", "") or "")[:100],
+                "author": c.get("author_name") or c.get("author_id", ""),
+                "snippet": (c.get("body", "") or "")[:280],
             }
             for c in comments
             if not c.get("resolved") and c["author_id"] != user_id and not c.get("parent_id")

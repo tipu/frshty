@@ -61,29 +61,39 @@
 						</tr>
 					</thead>
 					<tbody>
-						<tr v-for="pr in grp.prs" :key="pr.repo + pr.id" style="border-top:1px solid var(--ln-border,#2a2a35)">
-							<td style="padding:6px 10px">
-								<a :href="pr.url" target="_blank" rel="noopener" class="ln-mono ln-tkt-prlink">{{ pr.repo }} #{{ pr.id }}</a>
-							</td>
-							<td style="padding:6px 10px" :title="pr.ci">{{ ciGlyph(pr.ci) }}</td>
-							<td style="padding:6px 10px" :title="mergeReadyReason(pr)">{{ mergeReadyGlyph(pr) }}</td>
-							<td style="padding:6px 10px" :title="pr.mergeable">{{ conflictGlyph(pr.mergeable) }}</td>
-							<td style="padding:6px 10px">{{ approvedLabel(pr.approvers) }}</td>
-							<td style="padding:6px 10px">
-								<span>{{ commentsLabel(pr.comments) }}</span>
-								<template v-if="(pr.unresolved || []).length">
-									<span class="ln-muted ln-small" style="margin-left:8px">{{ pr.unresolved.length }} unresolved:</span>
-									<a v-for="(u, i) in pr.unresolved" :key="i" :href="u.url" target="_blank" rel="noopener"
-										 class="ln-tkt-prlink" style="margin-left:5px" :title="(u.loc ? u.loc + ' — ' : '') + u.snippet">↗{{ i + 1 }}</a>
-								</template>
-							</td>
-							<td style="padding:6px 10px">
-								<span class="ln-pill" :class="pr.court==='your_court' ? 'ln-pill-amber' : ''">{{ courtLabel(pr.court) }}</span>
-							</td>
-							<td style="padding:6px 10px" :class="{'ln-pr-poll-warn': pollWarn(pr)}"
-									:style="pollWarn(pr) ? 'color:#e5534b;font-weight:600' : ''"
-									:title="pr.last_polled_at ? ('last polled ' + pr.last_polled_at) : ''">{{ pr.poll_count }}</td>
-						</tr>
+						<template v-for="pr in grp.prs" :key="pr.repo + pr.id">
+							<tr style="border-top:1px solid var(--ln-border,#2a2a35)">
+								<td style="padding:6px 10px">
+									<a :href="pr.url" target="_blank" rel="noopener" class="ln-mono ln-tkt-prlink">{{ pr.repo }} #{{ pr.id }}</a>
+								</td>
+								<td style="padding:6px 10px" :title="pr.ci">{{ ciGlyph(pr.ci) }}</td>
+								<td style="padding:6px 10px" :title="mergeReadyReason(pr)">{{ mergeReadyGlyph(pr) }}</td>
+								<td style="padding:6px 10px" :title="pr.mergeable">{{ conflictGlyph(pr.mergeable) }}</td>
+								<td style="padding:6px 10px">{{ approvedLabel(pr.approvers) }}</td>
+								<td style="padding:6px 10px">
+									<span>{{ commentsLabel(pr.comments) }}</span>
+									<span v-if="(pr.unresolved || []).length" class="ln-muted ln-small" style="margin-left:6px">· {{ pr.unresolved.length }} unresolved</span>
+								</td>
+								<td style="padding:6px 10px">
+									<span class="ln-pill" :class="pr.court==='your_court' ? 'ln-pill-amber' : ''">{{ courtLabel(pr.court) }}</span>
+								</td>
+								<td style="padding:6px 10px" :class="{'ln-pr-poll-warn': pollWarn(pr)}"
+										:style="pollWarn(pr) ? 'color:#e5534b;font-weight:600' : ''"
+										:title="pr.last_polled_at ? ('last polled ' + pr.last_polled_at) : ''">{{ pr.poll_count }}</td>
+							</tr>
+							<tr v-if="(pr.unresolved || []).length">
+								<td colspan="8" style="padding:2px 10px 10px 26px">
+									<div v-for="(u, i) in pr.unresolved.slice(0, 5)" :key="i" class="ln-small" style="padding:3px 0;display:flex;gap:8px;align-items:baseline">
+										<a :href="u.url" target="_blank" rel="noopener" class="ln-tkt-prlink" title="Open comment">↗</a>
+										<span class="ln-mono ln-muted" v-if="u.loc" style="white-space:nowrap">{{ u.loc }}</span>
+										<span><b v-if="u.author">{{ u.author }}:</b> {{ u.snippet }}</span>
+									</div>
+									<div v-if="pr.unresolved.length > 5" class="ln-muted ln-small" style="padding:3px 0 0 22px">
+										+{{ pr.unresolved.length - 5 }} more unresolved
+									</div>
+								</td>
+							</tr>
+						</template>
 					</tbody>
 				</table>
 			</div>
