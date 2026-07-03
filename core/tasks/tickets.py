@@ -9,7 +9,7 @@ from pathlib import Path
 import core.log as log
 import core.state as state
 from core.claude_runner import run_claude_code, run_haiku, extract_json
-from core.config import get_repos, ticket_worktree_path
+from core.config import base_branch_for, get_repos, ticket_worktree_path
 from core.deps import relink_shared_venv
 from core.consensus_plan import run_consensus_plan
 from core.tasks.registry import TaskContext, TaskResult, task
@@ -494,12 +494,11 @@ def start_planning(ctx: TaskContext) -> TaskResult:
         ts = state.load_ticket(ctx.ticket_key) or {}
         slug = ts.get("slug", "")
         if slug:
-            ws = ctx.config["workspace"]
-            base_branch = ws.get("base_branch", "main")
             for repo in get_repos(ctx.config):
                 wt = ticket_worktree_path(ctx.config, slug, repo["name"])
                 if not wt.is_dir():
                     continue
+                base_branch = base_branch_for(ctx.config, repo["name"])
                 subprocess.run(["git", "fetch", "origin", base_branch],
                                cwd=str(wt), capture_output=True, timeout=60)
                 subprocess.run(["git", "reset", "--hard", f"origin/{base_branch}"],
@@ -875,12 +874,12 @@ def run_tests_and_fix(ctx: TaskContext) -> TaskResult:
         workspace = ticket_dir
 
     attempt = int(ts.get("test_fix_attempts", 0)) + 1
-    base_branch = ctx.config["workspace"].get("base_branch", "main")
 
     per_repo: list[dict] = []
     for repo_dir in sorted(p for p in workspace.iterdir() if p.is_dir()):
         if not (repo_dir / ".git").exists():
             continue
+        base_branch = base_branch_for(ctx.config, repo_dir.name)
         if not _repo_has_changes_vs_base(repo_dir, base_branch):
             per_repo.append({"repo": repo_dir.name, "result": "skipped",
                              "tail": f"no changes vs origin/{base_branch} — "
@@ -1123,7 +1122,6 @@ def generate_pr_descriptions(ctx: TaskContext) -> TaskResult:
     if not slug:
         return TaskResult("failed", "no slug")
     ws = ctx.config["workspace"]
-    base_branch = ws.get("base_branch", "main")
     ticket_dir = ws["root"] / ws["tickets_dir"] / slug
     manifest_path = ticket_dir / "docs" / "change-manifest.md"
     manifest = ""
@@ -1147,6 +1145,7 @@ def generate_pr_descriptions(ctx: TaskContext) -> TaskResult:
         if not wt.is_dir():
             skipped_no_worktree.append(name)
             continue
+        base_branch = base_branch_for(ctx.config, name)
         # Fetch base once so the diff and file count are against current origin,
         # not whatever the worktree was last seeded with.
         subprocess.run(["git", "fetch", "origin", base_branch],
@@ -1408,11 +1407,11 @@ def do_research(ctx: TaskContext) -> TaskResult:
         return TaskResult("failed", f"ticket dir missing: {ticket_dir}")
     slug = ts.get("slug", "")
     if slug:
-        base_branch = ctx.config["workspace"].get("base_branch", "main")
         for repo in get_repos(ctx.config):
             wt = ticket_worktree_path(ctx.config, slug, repo["name"])
             if not wt.is_dir():
                 continue
+            base_branch = base_branch_for(ctx.config, repo["name"])
             subprocess.run(["git", "fetch", "origin", base_branch],
                            cwd=str(wt), capture_output=True, timeout=60)
             subprocess.run(["git", "reset", "--hard", f"origin/{base_branch}"],

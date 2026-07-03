@@ -16,8 +16,8 @@ import core.queue as q
 import core.scheduler as scheduler
 import core.state as state
 import core.terminal as terminal
+import features.presentation as presentation
 import features.releases as releases
-import features.reviewer as reviewer
 import features.tickets as _tickets_mod
 from core.claude_runner import run_haiku
 from core.config import get_repos
@@ -131,12 +131,12 @@ def _local_worktree_diff(ts: dict) -> list[dict]:
     slug = ts.get("slug")
     if not slug:
         return []
-    base_branch = _config["workspace"].get("base_branch", "main")
     out: list[dict] = []
     for repo in get_repos(_config):
         wt = cfg.ticket_worktree_path(_config, slug, repo["name"])
         if not wt.is_dir():
             continue
+        base_branch = cfg.base_branch_for(_config, repo["name"])
         result = subprocess.run(
             ["git", "diff", f"origin/{base_branch}...HEAD"],
             cwd=str(wt), capture_output=True, text=True, timeout=30)
@@ -165,7 +165,6 @@ def api_ticket_pr_info(ticket_key: str):
             return JSONResponse({"error": "No slug found"}, status_code=400)
 
         ws = _config.get("workspace", {})
-        base_branch = ws.get("base_branch", "main")
         ticket_dir = ws.get("root", Path(".")) / ws.get("tickets_dir", "tickets") / slug
         docs_dir = ticket_dir / "docs"
         pr_descriptions = ticket.get("pr_descriptions") or {}
@@ -214,6 +213,7 @@ def api_ticket_pr_info(ticket_key: str):
             wt = _tickets_mod.ticket_worktree_path(_config, slug, repo["name"])
             if not wt.is_dir():
                 continue
+            base_branch = cfg.base_branch_for(_config, repo["name"])
             subprocess.run(["git", "fetch", "origin", base_branch],
                            cwd=str(wt), capture_output=True, timeout=60)
             files = _changed_files(wt, f"origin/{base_branch}")
@@ -286,13 +286,11 @@ def _submit_pr_sync(ticket_key: str, data: dict):
     if ticket.get("status") != "pr_ready":
         return JSONResponse({"error": f"Ticket is {ticket.get('status')}, not pr_ready"}, status_code=400)
 
-    ws = _config.get("workspace", {})
     slug = ticket.get("slug", "")
     if not slug:
         return JSONResponse({"error": "No slug found"}, status_code=400)
 
     platform = make_platform(_config)
-    base_branch = ws.get("base_branch", "main")
     prs = []
 
     for r in repos_in:
@@ -300,6 +298,7 @@ def _submit_pr_sync(ticket_key: str, data: dict):
         wt = _tickets_mod.ticket_worktree_path(_config, slug, repo_name)
         if not wt.is_dir():
             return JSONResponse({"error": f"worktree missing for {repo_name}"}, status_code=400)
+        base_branch = cfg.base_branch_for(_config, repo_name)
 
         subprocess.run(["git", "add", "-A"], cwd=str(wt), capture_output=True, timeout=60)
         subprocess.run(["git", "commit", "--no-verify", "-m", f"{ticket_key}: {ticket.get('summary', '')}"],
@@ -881,65 +880,18 @@ def api_ticket_diff(key: str):
     return {"repos": repos_out, "diff": (repos_out[0]["diff"] if repos_out else "")}
 
 
-_ticket_presentation_inflight: set[str] = set()
-_ticket_presentation_inflight_lock = threading.Lock()
-
-
-def _ticket_presentation_cache(ts: dict) -> Path | None:
-    slug = ts.get("slug")
-    if not slug:
-        return None
-    ws = _config["workspace"]
-    return ws["root"] / ws["tickets_dir"] / slug / "presentation_cache.json"
-
-
 @router.post("/api/tickets/{key}/presentation/preprocess")
 def api_ticket_presentation_preprocess(key: str):
     tickets = state.load("tickets")
-    ts = tickets.get(key)
-    if not ts:
+    if not tickets.get(key):
         return JSONResponse({"error": "ticket not found"}, status_code=404)
-    cache_file = _ticket_presentation_cache(ts)
-    if not cache_file:
+    result = presentation.spawn_ticket_build(_config, key)
+    if result == "unavailable":
         return JSONResponse({"error": "ticket has no slug"}, status_code=400)
-    if cache_file.exists():
+    if result == "cached":
         return {"status": "ok", "cached": True}
-
-    with _ticket_presentation_inflight_lock:
-        if key in _ticket_presentation_inflight:
-            return {"status": "in_progress", "cached": False}
-        _ticket_presentation_inflight.add(key)
-
-    def preprocess_in_background():
-        try:
-            repos_out = api_ticket_diff(key).get("repos") or []
-            diff_text = "\n".join(r["diff"] for r in repos_out if r.get("diff"))
-            if not diff_text:
-                return
-            slug = ts.get("slug", "")
-            wt = None
-            for r in repos_out:
-                p = cfg.ticket_worktree_path(_config, slug, r["repo"])
-                if p.is_dir():
-                    wt = p
-                    break
-            parts = [ts.get("summary", ""), ts.get("description", "")]
-            ac = (ts.get("acceptance_criteria_json") or {}).get("source_text", "")
-            if ac:
-                parts.append(ac)
-            goal = "\n".join(p for p in parts if p).strip()[:4000]
-            presentation = reviewer.build_presentation(goal, diff_text, wt)
-            if presentation:
-                cache_file.parent.mkdir(parents=True, exist_ok=True)
-                cache_file.write_text(json.dumps(presentation, indent=2))
-        except Exception as e:
-            log.emit("presentation_failed", f"Failed to build ticket presentation: {e}",
-                meta={"ticket": key})
-        finally:
-            with _ticket_presentation_inflight_lock:
-                _ticket_presentation_inflight.discard(key)
-
-    threading.Thread(target=preprocess_in_background, daemon=True).start()
+    if result == "in_progress":
+        return {"status": "in_progress", "cached": False}
     return {"status": "ok", "cached": False}
 
 
@@ -949,16 +901,15 @@ def api_ticket_presentation(key: str):
     ts = tickets.get(key)
     if not ts:
         return {"status": "not_found"}
-    cache_file = _ticket_presentation_cache(ts)
+    cache_file = presentation.ticket_cache_file(_config, ts)
+    building = presentation.is_building(("ticket", key))
     if not cache_file or not cache_file.exists():
-        with _ticket_presentation_inflight_lock:
-            building = key in _ticket_presentation_inflight
         return {"status": "building" if building else "missing"}
     try:
         data = json.loads(cache_file.read_text())
     except (OSError, ValueError):
         return {"status": "missing"}
-    return {"status": "ok", "presentation": data}
+    return {"status": "ok", "presentation": data, "building": building}
 
 
 @router.get("/api/tickets/{key}/pr-comments")

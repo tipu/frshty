@@ -10,7 +10,7 @@ import core.comments as comments
 import core.git_util as git_util
 import core.branch_sync as branch_sync
 from core.claude_runner import run_claude_code, run_haiku, run_sonnet, extract_json
-from core.config import get_repos
+from core.config import base_branch_for, get_repos
 from features.platforms import make_platform
 
 RECLAIM_STALE_SECONDS = 1200
@@ -373,7 +373,7 @@ def _repo_path_for(config, pr):
 def _check_base_fresh(config, platform, pr, seen, base_url):
     if not config.get("pr", {}).get("auto_update_branch"):
         return
-    base_branch = pr.get("base") or config.get("workspace", {}).get("base_branch", "")
+    base_branch = pr.get("base") or base_branch_for(config, pr["repo"])
     repo_path = _repo_path_for(config, pr)
     pr_ref = f"{pr['repo']}#{pr['id']}"
     links = {"pr": pr["url"], "detail": f"{base_url}/"}
@@ -429,5 +429,5 @@ def _ensure_worktree(config, pr) -> Path | None:
         subprocess.run(["git", "reset", "--hard", f"origin/{pr['branch']}"], cwd=str(worktree_path), capture_output=True, timeout=60)
         return worktree_path
 
-    base_branch = config.get("workspace", {}).get("base_branch", "main")
+    base_branch = base_branch_for(config, pr["repo"])
     return git_util.add_or_reuse_worktree(repo_path, worktree_path, pr["branch"], base_branch=base_branch)

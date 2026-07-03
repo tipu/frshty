@@ -84,6 +84,7 @@ textarea { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; }
     <span v-else-if="info.ticket_key" class="text-gray-500">{{ info.ticket_key }}</span>
     <span v-if="info.pr_title" class="text-gray-200 font-medium">{{ info.pr_title }}</span>
     <span class="ml-auto flex items-center gap-3 text-xs">
+        <span v-if="presentationBuilding" class="badge badge-question animate-pulse" title="the slide deck is being rebuilt in the background">⏳ presentation building…</span>
         <a :href="'/reviews/' + repo + '/' + prId + '/presentation'" class="badge badge-question hover:opacity-80" title="guided slide walkthrough">▶ Presentation</a>
         <a v-if="info.pr_url" :href="info.pr_url" target="_blank" class="link hover:underline">{{ repo }}#{{ prId }} →</a>
     </span>
@@ -578,10 +579,23 @@ frshtyApp({
             document.body.classList.toggle('moving', v !== null);
         });
 
-        onMounted(load);
+        const presentationBuilding = ref(false);
+        async function pollPresentationStatus() {
+            try {
+                const r = await fetch(`/api/reviews/${repo}/${prId}/presentation`);
+                const d = await r.json();
+                presentationBuilding.value = d.status === 'building' || !!d.building;
+            } catch (e) {}
+        }
+
+        onMounted(() => {
+            load();
+            pollPresentationStatus();
+            setInterval(pollPresentationStatus, 10000);
+        });
 
         return {
-            repo, prId,
+            repo, prId, presentationBuilding,
             allComments, info, features, drafts, walkthroughBusy, discussPanels, activeIdx,
             fileSummaries,
             prLink, activeCount, parsedDiff, commentsByFile, generalComments,
