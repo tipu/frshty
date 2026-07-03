@@ -76,6 +76,8 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
 <div id="app" v-cloak>
 <frshty-shell :features="features" :instance="instanceName" width="wide" :crumbs="['Tickets', key]">
     <template #actions>
+        <a :href="`/tickets/${key}/presentation`" class="ln-btn ln-btn-discuss"
+           title="guided slide walkthrough">▶ Present</a>
         <button @click="openDiscuss" class="ln-btn ln-btn-discuss"
                 title="Open a separate claude (cl) terminal in this ticket's worktree dir">💬 Discuss</button>
     </template>
