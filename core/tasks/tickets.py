@@ -402,9 +402,11 @@ def _ticket_dir(ctx: TaskContext) -> Path:
 
 @task("scan_tickets", preconditions=[feature_enabled("tickets")], timeout=120)
 def scan_tickets(ctx: TaskContext) -> TaskResult:
+    from features import presentation
     from features import tickets as tix
     try:
         tix.check(ctx.config, ctx.instance_key)
+        presentation.reconcile_tickets(ctx.config)
         return TaskResult("ok")
     except Exception as e:
         log.emit("scan_tickets_error", f"[{ctx.instance_key}] {type(e).__name__}: {e}")
@@ -666,6 +668,15 @@ def fix_ci_failures(ctx: TaskContext) -> TaskResult:
                          f"Skipped CI fix for {slug or ctx.ticket_key}/{pr['repo']}: worktree missing",
                          links=ticket_link, meta={**meta, "reason": "worktree_missing"})
             elif kind == "unrelated":
+                def _memo(current, names=failed_names):
+                    if not current:
+                        return None
+                    seen = set(current.get("ci_unrelated_checks") or [])
+                    current["ci_unrelated_checks"] = sorted(seen | set(names))
+                    return current
+                updated = state.update_ticket(ctx.ticket_key or "", _memo)
+                if updated:
+                    ts = updated
                 log.emit("ticket_checks_unrelated",
                          f"CI failure for {slug or ctx.ticket_key} not caused by our changes: "
                          f"{outcome.get('reason','')[:100]}",
@@ -684,6 +695,7 @@ def fix_ci_failures(ctx: TaskContext) -> TaskResult:
                     current["ci_fix_attempts"] = current.get("ci_fix_attempts", 0) + 1
                     current.pop("ci_passed", None)
                     current.pop("checks_started_at", None)
+                    current.pop("ci_unrelated_checks", None)
                     return current
                 updated = state.update_ticket(ctx.ticket_key or "", _bump) or {}
                 ts = updated

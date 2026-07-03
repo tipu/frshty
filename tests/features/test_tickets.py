@@ -674,6 +674,29 @@ class TestHandleCiFailureStub:
             tickets._handle_ci_failure(make_ticket(), ts, pr, checks, "http://base", "inst")
         eq.assert_called_once_with("inst", "fix_ci_failures", ticket_key="PROJ-1")
 
+    def test_unrelated_verdict_skips_retriage(self):
+        ts = make_ticket_state(status="in_review",
+                                ci_unrelated_checks=["lint", "coverage"])
+        pr = {"repo": "r", "id": 1, "url": "u"}
+        checks = [{"name": "lint", "state": "FAILED"}]
+        with patch("features.tickets._enqueue_stage") as eq, \
+             patch("features.tickets.log"):
+            result = tickets._handle_ci_failure(make_ticket(), ts, pr, checks, "http://base", "inst")
+        assert "_ci_failed_pending" not in result
+        assert result["status"] == "in_review"
+        eq.assert_not_called()
+
+    def test_new_failing_check_beyond_unrelated_set_retriages(self):
+        ts = make_ticket_state(status="in_review", ci_unrelated_checks=["lint"])
+        pr = {"repo": "r", "id": 1, "url": "u"}
+        checks = [{"name": "lint", "state": "FAILED"},
+                  {"name": "tests", "state": "FAILURE"}]
+        with patch("features.tickets._enqueue_stage") as eq, \
+             patch("features.tickets.log"):
+            result = tickets._handle_ci_failure(make_ticket(), ts, pr, checks, "http://base", "inst")
+        assert result["_ci_failed_pending"] is True
+        eq.assert_called_once_with("inst", "PROJ-1", "fix_ci_failures")
+
 
 class TestCheckSkipsBusyTicket:
     def test_skips_ticket_with_running_job(self, fake_config, tmp_state):

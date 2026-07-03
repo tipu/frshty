@@ -672,6 +672,7 @@ def _reingest_merged_ticket(config: dict, ticket: dict, ts: dict, base_url: str)
 
     for field in ("prs", "ci_fix_attempts", "pr_attempts", "ci_passed",
                   "checks_started_at", "_ci_failed_pending", "pr_scheduled_at",
+                  "ci_unrelated_checks",
                   "conflict_resolution_attempts", "last_comment_ids",
                   "comment_fix_attempts", "done_at"):
         ts.pop(field, None)
@@ -974,6 +975,9 @@ def check(config: dict, instance_key: str = ""):
     - ci_fix_attempts: CI fix attempt count.
     - ci_passed: marker from monitor_ci that checks passed.
     - checks_started_at: CI monitoring window start timestamp.
+    - ci_unrelated_checks: check names triaged as not caused by our changes;
+      _handle_ci_failure skips re-triage while the failing set is covered,
+      cleared whenever a new commit is pushed.
     - _ci_failed_pending: queued/running CI-fix marker.
     - _ci_timeout_state: transient CI-stall state cleared before re-poll.
     - last_comment_ids: per-PR review-comment cursor.
@@ -1904,6 +1908,7 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
             platform.push_branch(wt, ts["branch"])
             ts.pop("ci_passed", None)
             ts.pop("checks_started_at", None)
+            ts.pop("ci_unrelated_checks", None)
         for cid in to_resolve:
             platform.resolve_comment(pr["repo"], pr["id"], cid)
 
@@ -1961,6 +1966,7 @@ def _reconcile_prs(ts: dict, open_prs: list[dict], key: str = "") -> dict:
         ts["ci_fix_attempts"] = 0
         ts.pop("ci_passed", None)
         ts.pop("checks_started_at", None)
+        ts.pop("ci_unrelated_checks", None)
 
     return ts
 
@@ -2060,6 +2066,7 @@ def _resolve_conflicts(config, ticket, ts, base_url, pr_info_map=None) -> dict:
 
         ts.pop("ci_passed", None)
         ts.pop("checks_started_at", None)
+        ts.pop("ci_unrelated_checks", None)
         ts.pop("last_conflict_error", None)
         ts["conflict_resolution_attempts"] = attempts + 1
 
@@ -2121,6 +2128,7 @@ def _sync_pr_base(config, ticket, ts, base_url) -> dict:
         if result == "synced":
             ts.pop("ci_passed", None)
             ts.pop("checks_started_at", None)
+            ts.pop("ci_unrelated_checks", None)
             log.emit("ticket_base_synced",
                      f"Merged {base_branch} into {_label(key, ts)} PR #{pr['id']}",
                      links=links, meta=meta)
@@ -2164,6 +2172,9 @@ def _merge(config, ticket, ts, base_url) -> dict:
 def _handle_ci_failure(ticket, ts, pr, checks, base_url, instance_key="") -> dict:
     failed_names = [c["name"] for c in checks if c["state"].upper() in ("FAILURE", "FAILED")]
     fix_attempts = ts.get("ci_fix_attempts", 0)
+
+    if failed_names and set(failed_names) <= set(ts.get("ci_unrelated_checks") or []):
+        return ts
 
     if fix_attempts >= MAX_CI_FIX_ATTEMPTS:
         log.emit("ticket_checks_failed", f"CI failed for {_label(ticket['key'], ts)} after {fix_attempts} fix attempts: {', '.join(failed_names)}",
