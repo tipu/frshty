@@ -76,6 +76,8 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
 <div id="app" v-cloak>
 <frshty-shell :features="features" :instance="instanceName" width="wide" :crumbs="['Tickets', key]">
     <template #actions>
+        <span v-if="presentationBuilding" class="text-xs text-purple-300 animate-pulse self-center"
+              title="the slide deck is being rebuilt in the background">⏳ presentation building…</span>
         <a :href="`/tickets/${key}/presentation`" class="ln-btn ln-btn-discuss"
            title="guided slide walkthrough">▶ Present</a>
         <button @click="openDiscuss" class="ln-btn ln-btn-discuss"
@@ -1587,12 +1589,24 @@ frshtyApp({
             document.body.classList.toggle('maximized', v);
         });
 
+        const presentationBuilding = ref(false);
+        let presentationPollTimer = null;
+        async function pollPresentationStatus() {
+            try {
+                const r = await fetch(`/api/tickets/${key}/presentation`);
+                const d = await r.json();
+                presentationBuilding.value = d.status === 'building' || !!d.building;
+            } catch (e) {}
+        }
+
         onMounted(() => {
             load();
             loadJobs();
             loadPmFindings();
             loadPrComments();
             startTerminal();
+            pollPresentationStatus();
+            presentationPollTimer = setInterval(pollPresentationStatus, 10000);
             escListener = (e) => { if (e.key === 'Escape' && maximized.value) toggleMaximize(); };
             document.addEventListener('keydown', escListener);
         });
@@ -1602,10 +1616,11 @@ frshtyApp({
             if (resizeObserver) resizeObserver.disconnect();
             if (escListener) document.removeEventListener('keydown', escListener);
             if (jobOutputPollTimer) clearTimeout(jobOutputPollTimer);
+            if (presentationPollTimer) clearInterval(presentationPollTimer);
         });
 
         return {
-            key, ticket, features, runCommands, jobs, diffData, comments,
+            key, ticket, features, runCommands, jobs, diffData, comments, presentationBuilding,
             noteText, pmFindings, releaseInput, releaseError, existingReleases,
             activeTab, maximized, resetting, eventFilter, setStateDdValue,
             redoProofOpen, redoProofFeedback, redoProofSubmitting, submitRedoProof, prettyJson,
