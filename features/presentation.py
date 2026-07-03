@@ -79,7 +79,7 @@ def build_presentation(ticket_goal: str, diff_text: str, worktree: Path | None) 
         '"verdict":{"solves_problem":true,"summary":"...","concerns":["..."]}}\n\n'
         f"--- DIFF START ---\n{diff_text[:60000]}\n--- DIFF END ---"
     )
-    output = run_sonnet(prompt, worktree=worktree, tools=tools, timeout=600)
+    output = run_sonnet(prompt, worktree=worktree, tools=tools, timeout=900)
     if not output:
         return {}
     parsed = extract_json(output)
