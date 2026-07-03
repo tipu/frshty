@@ -14,7 +14,7 @@ import core.state as state
 import core.comments as comments
 import core.branch_sync as branch_sync
 from core import external_log
-from core.config import get_repos, ticket_worktree_path, resolve_env
+from core.config import base_branch_for, get_repos, ticket_worktree_path, resolve_env
 from core.git_util import commit_with_hooks
 from core.deps import run_dep_command, relink_shared_venv
 from core.claude_runner import run_haiku, run_sonnet, run_claude_code, extract_json
@@ -746,7 +746,6 @@ def _is_issue_comment(body: str, ticket_summary: str, last_comments: list[dict])
 def _ensure_worktree(config: dict, ticket_key: str, slug: str) -> dict | None:
     ws = config["workspace"]
     repos = get_repos(config)
-    base_branch = ws.get("base_branch", "main")
 
     created = False
     synced = False
@@ -754,6 +753,7 @@ def _ensure_worktree(config: dict, ticket_key: str, slug: str) -> dict | None:
 
     for repo in repos:
         wt_path = ticket_worktree_path(config, slug, repo["name"])
+        base_branch = base_branch_for(config, repo["name"])
         try:
             if (wt_path / ".git").is_file():
                 subprocess.run(["git", "fetch", "origin"], cwd=str(wt_path), capture_output=True, timeout=60)
@@ -1179,11 +1179,12 @@ def _setup_ticket(config, ticket, base_url, comments=None) -> dict:
     any_worktree = False
     for repo in repos:
         wt_path = ticket_worktree_path(config, slug, repo["name"])
+        base_branch = base_branch_for(config, repo["name"])
         if (wt_path / ".git").is_file():
             any_worktree = True
             subprocess.run(["git", "fetch", "origin"], cwd=str(wt_path), capture_output=True, timeout=60)
             subprocess.run(["git", "checkout", branch], cwd=str(wt_path), capture_output=True, timeout=60)
-            subprocess.run(["git", "reset", "--hard", f"origin/{ws['base_branch']}"], cwd=str(wt_path), capture_output=True, timeout=60)
+            subprocess.run(["git", "reset", "--hard", f"origin/{base_branch}"], cwd=str(wt_path), capture_output=True, timeout=60)
             subprocess.run(["git", "clean", "-fd"], cwd=str(wt_path), capture_output=True, timeout=60)
             relink_shared_venv(config, repo["name"], wt_path)
             continue
@@ -1192,9 +1193,9 @@ def _setup_ticket(config, ticket, base_url, comments=None) -> dict:
         subprocess.run(["git", "fetch", "origin"], cwd=str(repo["path"]), capture_output=True, timeout=60)
         branches = subprocess.run(["git", "branch", "--list"], cwd=str(repo["path"]), capture_output=True, text=True, timeout=60).stdout
         if branch not in branches.replace("* ", "").replace("  ", " ").split():
-            result = subprocess.run(["git", "branch", branch, f"origin/{ws['base_branch']}"], cwd=str(repo["path"]), capture_output=True, timeout=60)
+            result = subprocess.run(["git", "branch", branch, f"origin/{base_branch}"], cwd=str(repo["path"]), capture_output=True, timeout=60)
             if result.returncode != 0:
-                subprocess.run(["git", "branch", branch, ws["base_branch"]], cwd=str(repo["path"]), capture_output=True, timeout=60)
+                subprocess.run(["git", "branch", branch, base_branch], cwd=str(repo["path"]), capture_output=True, timeout=60)
         wt_result = subprocess.run(["git", "worktree", "add", str(wt_path), branch], cwd=str(repo["path"]), capture_output=True, text=True, timeout=60)
         if wt_result.returncode != 0:
             log.emit("ticket_worktree_error", f"Failed to create worktree for {slug} in {repo['name']}: {wt_result.stderr.strip()}",
@@ -1357,11 +1358,12 @@ def materialize_prd_ticket(config: dict, ticket_key: str, ts: dict, base_url: st
     any_worktree = False
     for repo in repos:
         wt_path = ticket_worktree_path(config, slug, repo["name"])
+        base_branch = base_branch_for(config, repo["name"])
         if (wt_path / ".git").is_file():
             any_worktree = True
             subprocess.run(["git", "fetch", "origin"], cwd=str(wt_path), capture_output=True, timeout=60)
             subprocess.run(["git", "checkout", branch], cwd=str(wt_path), capture_output=True, timeout=60)
-            subprocess.run(["git", "reset", "--hard", f"origin/{ws['base_branch']}"], cwd=str(wt_path), capture_output=True, timeout=60)
+            subprocess.run(["git", "reset", "--hard", f"origin/{base_branch}"], cwd=str(wt_path), capture_output=True, timeout=60)
             subprocess.run(["git", "clean", "-fd"], cwd=str(wt_path), capture_output=True, timeout=60)
             relink_shared_venv(config, repo["name"], wt_path)
             continue
@@ -1371,10 +1373,10 @@ def materialize_prd_ticket(config: dict, ticket_key: str, ts: dict, base_url: st
         existing_branches = subprocess.run(["git", "branch", "--list"], cwd=str(repo["path"]),
                                             capture_output=True, text=True, timeout=60).stdout
         if branch not in existing_branches.replace("* ", "").replace("  ", " ").split():
-            res = subprocess.run(["git", "branch", branch, f"origin/{ws['base_branch']}"],
+            res = subprocess.run(["git", "branch", branch, f"origin/{base_branch}"],
                                  cwd=str(repo["path"]), capture_output=True, timeout=60)
             if res.returncode != 0:
-                subprocess.run(["git", "branch", branch, ws["base_branch"]],
+                subprocess.run(["git", "branch", branch, base_branch],
                                cwd=str(repo["path"]), capture_output=True, timeout=60)
         wt_result = subprocess.run(["git", "worktree", "add", str(wt_path), branch],
                                    cwd=str(repo["path"]), capture_output=True, text=True, timeout=60)
@@ -1463,9 +1465,10 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
         subprocess.run(["git", "add", "-A"], cwd=str(wt), capture_output=True, timeout=60)
         subprocess.run(["git", "commit", "--no-verify", "-m", f"{ticket['key']}: {ticket['summary']}"], cwd=str(wt), capture_output=True, timeout=60)
 
-        subprocess.run(["git", "fetch", "origin", ws["base_branch"]], cwd=str(wt), capture_output=True, timeout=60)
+        base_branch = base_branch_for(config, repo["name"])
+        subprocess.run(["git", "fetch", "origin", base_branch], cwd=str(wt), capture_output=True, timeout=60)
         diff_check = subprocess.run(
-            ["git", "diff", f"origin/{ws['base_branch']}..HEAD", "--stat"],
+            ["git", "diff", f"origin/{base_branch}..HEAD", "--stat"],
             cwd=str(wt), capture_output=True, text=True, timeout=30)
         if not diff_check.stdout.strip():
             continue
@@ -1486,7 +1489,7 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
         per_repo = pr_descriptions.get(repo["name"]) or {}
         title = per_repo.get("title") or f"{ticket['key']}: {ticket['summary']}"
         body_for_repo = per_repo.get("description") or pr_body
-        result = platform.create_pr(repo["name"], wt, push_branch, title, body_for_repo, ws["base_branch"])
+        result = platform.create_pr(repo["name"], wt, push_branch, title, body_for_repo, base_branch)
 
         if result.get("error"):
             err = result["error"]
@@ -2007,9 +2010,8 @@ def _resolve_conflicts(config, ticket, ts, base_url, pr_info_map=None) -> dict:
     if not prs:
         return ts
 
-    base_branch = config["workspace"].get("base_branch", "main")
-
     for pr in prs:
+        base_branch = base_branch_for(config, pr["repo"])
         if pr_info_map is not None:
             info = pr_info_map.get((pr["repo"], pr["id"])) or {}
         else:
@@ -2085,13 +2087,12 @@ def _ticket_repo_path(config, repo_name):
 
 
 def _pr_base_moved(config, ts) -> bool:
-    base_branch = config["workspace"].get("base_branch", "main")
     sync_state = ts.get("base_sync", {})
     for pr in ts.get("prs", []):
         repo_path = _ticket_repo_path(config, pr["repo"])
         if not repo_path:
             continue
-        base_sha = branch_sync.ls_remote_sha(repo_path, base_branch)
+        base_sha = branch_sync.ls_remote_sha(repo_path, base_branch_for(config, pr["repo"]))
         if not base_sha:
             continue
         st = sync_state.get(f"{pr['repo']}/{pr['id']}", {})
@@ -2108,7 +2109,6 @@ def _sync_pr_base(config, ticket, ts, base_url) -> dict:
     if not prs or not branch:
         return ts
     platform = make_platform(config)
-    base_branch = config["workspace"].get("base_branch", "main")
     slug = ts.get("slug", "")
     key = ticket["key"]
     sync_state = ts.setdefault("base_sync", {})
@@ -2117,6 +2117,7 @@ def _sync_pr_base(config, ticket, ts, base_url) -> dict:
         repo_path = _ticket_repo_path(config, pr["repo"])
         if not repo_path:
             continue
+        base_branch = base_branch_for(config, pr["repo"])
         wt = ticket_worktree_path(config, slug, pr["repo"])
         st = sync_state.setdefault(f"{pr['repo']}/{pr['id']}", {})
         outcome = branch_sync.sync_branch_with_base(

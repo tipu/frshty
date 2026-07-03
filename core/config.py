@@ -69,6 +69,12 @@ def get_repos(config: dict) -> list[dict]:
     return []
 
 
+def base_branch_for(config: dict, repo_name: str) -> str:
+    ws = config["workspace"]
+    overrides = ws.get("base_branches") or {}
+    return overrides.get(repo_name, ws.get("base_branch", "main"))
+
+
 def ticket_worktree_path(config: dict, ticket_slug: str, repo_name: str) -> Path:
     ws = config["workspace"]
     root = ws["root"]

@@ -13,6 +13,7 @@ import core.config as cfg
 import core.log as log
 import core.state as state
 import core.terminal as terminal
+import features.presentation as presentation
 import features.reviewer as reviewer
 from core.claude_runner import run_haiku, extract_json
 from core.config import get_repos
@@ -256,22 +257,7 @@ def api_review_info(repo: str, pr_id: int):
 
 
 def _resolve_ticket_goal(branch: str, repo: str, pr_id: int) -> str:
-    m = re.search(r"[A-Za-z]+-\d+", branch or "")
-    key = m.group().upper() if m else ""
-    if key:
-        t = state.load("tickets").get(key) or {}
-        parts = [t.get("summary", ""), t.get("description", "")]
-        ac = (t.get("acceptance_criteria_json") or {}).get("source_text", "")
-        if ac:
-            parts.append(ac)
-        goal = "\n".join(p for p in parts if p).strip()
-        if goal:
-            return goal[:4000]
-    try:
-        info = make_platform(_config).get_pr_info(repo, pr_id) or {}
-        return f"{info.get('title', '')}\n{info.get('description', '')}".strip()[:4000]
-    except Exception:
-        return ""
+    return presentation.resolve_ticket_goal(_config, branch, repo, pr_id)
 
 
 def _split_diff_by_file(diff_text: str, max_files: int = 40, per_file_chars: int = 2500) -> dict:
@@ -502,74 +488,15 @@ def api_walkthrough_preprocess(repo: str, pr_id: int):
     return {"status": "ok", "count": len(content_comments), "cached": False}
 
 
-def _ensure_review_worktree(repo: str, pr_id: int, branch_dir, branch: str):
-    wt = branch_dir / "worktree"
-    if (wt / ".git").exists():
-        return wt
-    repos = get_repos(_config)
-    matching = [r for r in repos if r["name"] == repo]
-    if branch and matching:
-        repo_path = matching[0]["path"]
-        wt.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["git", "fetch", "origin", branch], cwd=str(repo_path), capture_output=True, timeout=60)
-        subprocess.run(["git", "worktree", "prune"], cwd=str(repo_path), capture_output=True, timeout=60)
-        subprocess.run(["git", "worktree", "add", str(wt), branch], cwd=str(repo_path), capture_output=True, timeout=60)
-        if (wt / ".git").exists():
-            return wt
-    platform = make_platform(_config)
-    review_store.populate_repo_cache(platform, _config["_state_dir"], repo)
-    fallback = _config["_state_dir"] / "reviews" / repo / f"pr-{pr_id}" / "worktree"
-    platform.ensure_pr_worktree(repo, pr_id, fallback)
-    return fallback if (fallback / ".git").exists() else None
-
-
-_presentation_inflight: set[tuple[str, int]] = set()
-_presentation_inflight_lock = threading.Lock()
-
-
 @router.post("/api/reviews/{repo}/{pr_id}/presentation/preprocess")
 def api_presentation_preprocess(repo: str, pr_id: int):
-    found = review_store.find_review(_config["_state_dir"], repo, pr_id)
-    if not found:
+    result = presentation.spawn_review_build(_config, repo, pr_id)
+    if result == "unavailable":
         return JSONResponse({"error": "review not found"}, status_code=404)
-    branch_dir, _comments, worktree = found
-    cache_file = branch_dir / "presentation_cache.json"
-    if cache_file.exists():
+    if result == "cached":
         return {"status": "ok", "cached": True}
-
-    key = (repo, pr_id)
-    with _presentation_inflight_lock:
-        if key in _presentation_inflight:
-            return {"status": "in_progress", "cached": False}
-        _presentation_inflight.add(key)
-
-    review_json = branch_dir / "review.json"
-    review_data = json.loads(review_json.read_text()) if review_json.exists() else {}
-    branch = review_data.get("source_branch", "")
-
-    def preprocess_in_background():
-        try:
-            diff_path = branch_dir / "diff.txt"
-            diff_text = diff_path.read_text() if diff_path.exists() else ""
-            if not diff_text:
-                platform = make_platform(_config)
-                review_store.populate_repo_cache(platform, _config["_state_dir"], repo)
-                diff_text = platform.get_pr_diff(repo, pr_id) or ""
-            if not diff_text:
-                return
-            wt = worktree or _ensure_review_worktree(repo, pr_id, branch_dir, branch)
-            goal = _resolve_ticket_goal(branch, repo, pr_id)
-            presentation = reviewer.build_presentation(goal, diff_text, wt)
-            if presentation:
-                cache_file.write_text(json.dumps(presentation, indent=2))
-        except Exception as e:
-            log.emit("presentation_failed", f"Failed to build presentation: {e}",
-                meta={"repo": repo, "pr_id": pr_id})
-        finally:
-            with _presentation_inflight_lock:
-                _presentation_inflight.discard(key)
-
-    threading.Thread(target=preprocess_in_background, daemon=True).start()
+    if result == "in_progress":
+        return {"status": "in_progress", "cached": False}
     return {"status": "ok", "cached": False}
 
 
@@ -580,15 +507,14 @@ def api_presentation(repo: str, pr_id: int):
         return {"status": "not_found"}
     branch_dir, _comments, _ = found
     cache_file = branch_dir / "presentation_cache.json"
+    building = presentation.is_building(("review", repo, pr_id))
     if not cache_file.exists():
-        with _presentation_inflight_lock:
-            building = (repo, pr_id) in _presentation_inflight
         return {"status": "building" if building else "missing"}
     try:
         data = json.loads(cache_file.read_text())
     except (OSError, ValueError):
         return {"status": "missing"}
-    return {"status": "ok", "presentation": data}
+    return {"status": "ok", "presentation": data, "building": building}
 
 
 @router.get("/api/reviews/{repo}/{pr_id}/bb-comments")
