@@ -17,6 +17,7 @@ import core.scheduler as scheduler
 import core.state as state
 import core.terminal as terminal
 import features.releases as releases
+import features.reviewer as reviewer
 import features.tickets as _tickets_mod
 from core.claude_runner import run_haiku
 from core.config import get_repos
@@ -878,6 +879,86 @@ def api_ticket_diff(key: str):
             "diff": d or "",
         })
     return {"repos": repos_out, "diff": (repos_out[0]["diff"] if repos_out else "")}
+
+
+_ticket_presentation_inflight: set[str] = set()
+_ticket_presentation_inflight_lock = threading.Lock()
+
+
+def _ticket_presentation_cache(ts: dict) -> Path | None:
+    slug = ts.get("slug")
+    if not slug:
+        return None
+    ws = _config["workspace"]
+    return ws["root"] / ws["tickets_dir"] / slug / "presentation_cache.json"
+
+
+@router.post("/api/tickets/{key}/presentation/preprocess")
+def api_ticket_presentation_preprocess(key: str):
+    tickets = state.load("tickets")
+    ts = tickets.get(key)
+    if not ts:
+        return JSONResponse({"error": "ticket not found"}, status_code=404)
+    cache_file = _ticket_presentation_cache(ts)
+    if not cache_file:
+        return JSONResponse({"error": "ticket has no slug"}, status_code=400)
+    if cache_file.exists():
+        return {"status": "ok", "cached": True}
+
+    with _ticket_presentation_inflight_lock:
+        if key in _ticket_presentation_inflight:
+            return {"status": "in_progress", "cached": False}
+        _ticket_presentation_inflight.add(key)
+
+    def preprocess_in_background():
+        try:
+            repos_out = api_ticket_diff(key).get("repos") or []
+            diff_text = "\n".join(r["diff"] for r in repos_out if r.get("diff"))
+            if not diff_text:
+                return
+            slug = ts.get("slug", "")
+            wt = None
+            for r in repos_out:
+                p = cfg.ticket_worktree_path(_config, slug, r["repo"])
+                if p.is_dir():
+                    wt = p
+                    break
+            parts = [ts.get("summary", ""), ts.get("description", "")]
+            ac = (ts.get("acceptance_criteria_json") or {}).get("source_text", "")
+            if ac:
+                parts.append(ac)
+            goal = "\n".join(p for p in parts if p).strip()[:4000]
+            presentation = reviewer.build_presentation(goal, diff_text, wt)
+            if presentation:
+                cache_file.parent.mkdir(parents=True, exist_ok=True)
+                cache_file.write_text(json.dumps(presentation, indent=2))
+        except Exception as e:
+            log.emit("presentation_failed", f"Failed to build ticket presentation: {e}",
+                meta={"ticket": key})
+        finally:
+            with _ticket_presentation_inflight_lock:
+                _ticket_presentation_inflight.discard(key)
+
+    threading.Thread(target=preprocess_in_background, daemon=True).start()
+    return {"status": "ok", "cached": False}
+
+
+@router.get("/api/tickets/{key}/presentation")
+def api_ticket_presentation(key: str):
+    tickets = state.load("tickets")
+    ts = tickets.get(key)
+    if not ts:
+        return {"status": "not_found"}
+    cache_file = _ticket_presentation_cache(ts)
+    if not cache_file or not cache_file.exists():
+        with _ticket_presentation_inflight_lock:
+            building = key in _ticket_presentation_inflight
+        return {"status": "building" if building else "missing"}
+    try:
+        data = json.loads(cache_file.read_text())
+    except (OSError, ValueError):
+        return {"status": "missing"}
+    return {"status": "ok", "presentation": data}
 
 
 @router.get("/api/tickets/{key}/pr-comments")

@@ -47,6 +47,8 @@
 					<a :href="`/tickets/${grp.ticket_key}`" class="ln-mono ln-tkt-key" style="font-weight:600">{{ grp.ticket_key }}</a>
 					<span class="ln-muted ln-small">{{ grp.summary }}</span>
 					<span class="ln-grow"></span>
+					<a :href="`/tickets/${grp.ticket_key}/presentation`" class="ln-btn ln-btn-ghost ln-btn-sm"
+						 title="guided slide walkthrough">▶ Present</a>
 					<button class="ln-btn ln-btn-ghost ln-btn-sm" @click="openDiscuss(grp.ticket_key)"
 									title="Open a terminal in the ticket dir running cl --continue">Discuss</button>
 				</div>
@@ -135,6 +137,8 @@
 						</template>
 						<span v-else-if="t.external_status" class="ln-muted ln-small">{{ t.external_status }}</span>
 						<span class="ln-grow"></span>
+						<a v-if="canPresent(t)" :href="`/tickets/${key}/presentation`" @click.stop
+							 class="ln-tkt-prlink ln-small" title="guided slide walkthrough">▶ present</a>
 						<span v-if="t.pm_findings_count" class="ln-pill ln-pill-amber" :title="`${t.pm_findings_count} PM finding(s)`">⚑ {{ t.pm_findings_count }}</span>
 						<span v-if="t.llm_invocations && t.llm_invocations.total" class="ln-pill ln-pill-violet"
 									:title="`LLM invocations: ${t.llm_invocations.ok} ok / ${t.llm_invocations.failed} failed / ${t.llm_invocations.blocked} blocked (${t.llm_invocations.total} total)`">
@@ -303,6 +307,10 @@ frshtyApp({
 
 		function hasActions(t) {
 			return ['pr_ready', 'pr_failed', 'pending_approval'].includes(t.status);
+		}
+
+		function canPresent(t) {
+			return (t.prs || []).length > 0 || ['pr_ready', 'in_review', 'pr_failed', 'merged', 'validation'].includes(t.status);
 		}
 
 		async function load() {
@@ -499,7 +507,7 @@ frshtyApp({
 			prModalOpen, prRepos, prSubmitting, currentTicketKey,
 			visibleColumns, totalCount,
 			ticketsForColumn, prAuthors, fmtScheduled, initials, openTicket,
-			hasActions, pillStatus, openDiscuss,
+			hasActions, canPresent, pillStatus, openDiscuss,
 			epicCardStyle,
 			discard, submitPr, closePrModal, onPrSubmit,
 			approve, reject, restart,
