@@ -723,6 +723,32 @@ def _reingest_merged_ticket(config: dict, ticket: dict, ts: dict, base_url: str)
     return ts
 
 
+def _done_ticket_has_new_comments(config: dict, key: str, ts: dict, ticket: dict) -> bool:
+    """Reopen signal for done tickets whose upstream status matches the value
+    recorded at merge time, so the status-change check alone cannot see the
+    reopen (e.g. a rework PR merged while QA still said "Testing Failed", then
+    QA failed it again). Compares fresh upstream comments against the
+    merge-time snapshot. Gated on the upstream updated_at marker so the scan
+    does not refetch comments for every done ticket on every tick.
+    """
+    snapshot = ts.get("merged_comment_snapshot")
+    if not snapshot:
+        return False
+    current_updated = ticket.get("updated_at", "")
+    last_checked = ts.get("done_reopen_checked_updated_at", "")
+    if last_checked and current_updated and current_updated == last_checked:
+        return False
+    comments_list = _fetch_ticket_comments(config, key)
+    if current_updated:
+        ts["done_reopen_checked_updated_at"] = current_updated
+    current = _comment_snapshot(comments_list)
+    snap_latest = snapshot.get("latest_created_at")
+    cur_latest = current.get("latest_created_at")
+    return current.get("count", 0) > snapshot.get("count", 0) or (
+        cur_latest is not None and snap_latest is not None and cur_latest > snap_latest
+    )
+
+
 def _is_issue_comment(body: str, ticket_summary: str, last_comments: list[dict]) -> bool:
     if not body:
         return False
@@ -949,6 +975,8 @@ def check(config: dict, instance_key: str = ""):
     - external_status: latest upstream ticket-system status text.
     - url: latest upstream ticket URL.
     - done_at: timestamp set when an unassigned ticket is marked done.
+    - done_reopen_checked_updated_at: upstream updated_at last seen by the
+      done-ticket new-comment reopen check; gates comment refetches.
     - slug: local ticket/worktree directory slug.
     - branch: VCS branch name for ticket work.
     - source: upstream source such as jira, linear, manual, or prd.
@@ -1061,10 +1089,17 @@ def check(config: dict, instance_key: str = ""):
                 ts["parent_summary"] = parent.get("summary", "")
             if ts.get("status") == "done":
                 merged_ext = ts.get("merged_external_status")
-                if merged_ext and ticket.get("status", "") == merged_ext:
+                if (merged_ext and ticket.get("status", "") == merged_ext
+                        and not _done_ticket_has_new_comments(config, key, ts, ticket)):
                     state.save_ticket(key, ts)
                     continue
                 ts.pop("done_at", None)
+                if ts.get("merged_at"):
+                    ts = _reingest_merged_ticket(config, ticket, ts, base_url)
+                    state.save_ticket(key, ts)
+                    if instance_key:
+                        _enqueue_stage(instance_key, key, "start_planning")
+                    continue
                 if ts.get("prs"):
                     ts["status"] = "in_review"
                 elif ts.get("slug"):

@@ -727,36 +727,103 @@ class TestCheckSkipsBusyTicket:
 class TestCheckDoneTicketResurrection:
     """A ticket frshty merged and marked done must stay done while its upstream
     status is unchanged; it may only be revived into the active pipeline when
-    the external status moves (a genuine reopen)."""
+    the external status moves or new upstream comments arrive (a genuine
+    reopen). A revived ticket whose PRs already merged must go through the
+    merged reingest path, not in_review."""
 
-    def _run(self, fake_config, tmp_state, external_status):
+    def _run(self, fake_config, tmp_state, external_status, extra_state=None,
+             ticket_overrides=None, fetch_comments=None):
         import core.state as state
         slug = "PROJ-1-do-the-thing"
         state.save_ticket("PROJ-1", make_ticket_state(
             status="done", slug=slug, branch=slug,
             merged_external_status="In Review",
             prs=[{"repo": "r", "id": 1, "branch": slug, "url": "http://u"}],
+            **(extra_state or {}),
         ))
         with patch("features.tickets._fetch_tickets",
-                   return_value=[make_ticket(status=external_status)]), \
+                   return_value=[make_ticket(status=external_status,
+                                             **(ticket_overrides or {}))]), \
              patch("features.tickets._fetch_open_prs", return_value=[]), \
              patch("features.tickets.get_repos", return_value=[]), \
              patch("features.tickets._process_ticket_comments"), \
              patch("features.tickets._resolve_status", return_value=None), \
+             patch("features.tickets._fetch_ticket_comments",
+                   return_value=fetch_comments or []) as fc, \
+             patch("features.tickets._reingest_merged_ticket",
+                   side_effect=lambda c, t, ts, u: {**ts, "status": "new"}) as ri, \
              patch("core.queue.jobs_for_ticket", return_value=[]), \
              patch("features.tickets._enqueue_stage") as eq:
             tickets.check({**fake_config, "_base_url": "http://base"},
                           instance_key="inst")
-        return state.load_ticket("PROJ-1"), eq
+        return state.load_ticket("PROJ-1"), eq, ri, fc
 
     def test_stays_done_when_external_status_unchanged(self, fake_config, tmp_state):
-        saved, eq = self._run(fake_config, tmp_state, "In Review")
+        saved, eq, ri, fc = self._run(fake_config, tmp_state, "In Review")
         assert saved["status"] == "done"
         eq.assert_not_called()
 
     def test_revives_when_external_status_changed(self, fake_config, tmp_state):
-        saved, eq = self._run(fake_config, tmp_state, "In Progress")
+        saved, eq, ri, fc = self._run(fake_config, tmp_state, "In Progress")
         assert saved["status"] != "done"
+
+    def test_status_change_with_merged_prs_reingests(self, fake_config, tmp_state):
+        saved, eq, ri, fc = self._run(
+            fake_config, tmp_state, "In Progress",
+            extra_state={"merged_at": "2026-06-29T00:00:00+00:00"})
+        ri.assert_called_once()
+        assert saved["status"] == "new"
+        eq.assert_called_once_with("inst", "PROJ-1", "start_planning")
+
+    def test_new_comment_reopens_when_status_unchanged(self, fake_config, tmp_state):
+        saved, eq, ri, fc = self._run(
+            fake_config, tmp_state, "In Review",
+            extra_state={
+                "merged_at": "2026-06-29T00:00:00+00:00",
+                "merged_comment_snapshot": {
+                    "count": 1, "latest_created_at": "2026-06-29T00:00:00+00:00",
+                    "comment_ids": ["1"]},
+            },
+            ticket_overrides={"updated_at": "2026-07-01T00:00:00+00:00"},
+            fetch_comments=[
+                {"id": "1", "created_at": "2026-06-29T00:00:00+00:00", "body": "a"},
+                {"id": "2", "created_at": "2026-07-01T00:00:00+00:00", "body": "qa failed"},
+            ])
+        ri.assert_called_once()
+        assert saved["status"] == "new"
+        eq.assert_called_once_with("inst", "PROJ-1", "start_planning")
+
+    def test_no_new_comment_stays_done_and_marks_checked(self, fake_config, tmp_state):
+        saved, eq, ri, fc = self._run(
+            fake_config, tmp_state, "In Review",
+            extra_state={
+                "merged_at": "2026-06-29T00:00:00+00:00",
+                "merged_comment_snapshot": {
+                    "count": 1, "latest_created_at": "2026-06-29T00:00:00+00:00",
+                    "comment_ids": ["1"]},
+            },
+            ticket_overrides={"updated_at": "2026-07-01T00:00:00+00:00"},
+            fetch_comments=[
+                {"id": "1", "created_at": "2026-06-29T00:00:00+00:00", "body": "a"},
+            ])
+        assert saved["status"] == "done"
+        assert saved["done_reopen_checked_updated_at"] == "2026-07-01T00:00:00+00:00"
+        ri.assert_not_called()
+        eq.assert_not_called()
+
+    def test_comment_check_gated_on_updated_at_marker(self, fake_config, tmp_state):
+        saved, eq, ri, fc = self._run(
+            fake_config, tmp_state, "In Review",
+            extra_state={
+                "merged_at": "2026-06-29T00:00:00+00:00",
+                "merged_comment_snapshot": {
+                    "count": 1, "latest_created_at": "2026-06-29T00:00:00+00:00",
+                    "comment_ids": ["1"]},
+                "done_reopen_checked_updated_at": "2026-07-01T00:00:00+00:00",
+            },
+            ticket_overrides={"updated_at": "2026-07-01T00:00:00+00:00"})
+        assert saved["status"] == "done"
+        fc.assert_not_called()
 
 
 class TestCheckRebuildsMissingTicketDir:

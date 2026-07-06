@@ -105,6 +105,7 @@ class TicketState(TypedDict, total=False):
     summary: str
     description: str
     done_at: str
+    done_reopen_checked_updated_at: str
     requeued_at: str
     reopened_count: int
     slug: str
