@@ -1872,7 +1872,7 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                 meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"]})
 
             if actionable and wt is not None and wt.is_dir():
-                subprocess.run(["git", "pull", "--rebase", "origin", ts["branch"]], cwd=str(wt), capture_output=True, timeout=60)
+                subprocess.run(["git", "pull", "--rebase", "origin", pr.get("branch") or ts["branch"]], cwd=str(wt), capture_output=True, timeout=60)
                 context = f"File: {comment.get('path', 'unknown')}\nLine: {comment.get('line', 'unknown')}\n\nReview comment: {comment['body']}\n\nFix this review comment."
                 fix_result = run_claude_code(context, cwd=wt)
                 subprocess.run(["git", "add", "-A"], cwd=str(wt), capture_output=True, timeout=60)
@@ -1943,7 +1943,13 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
             pr_comments.append(entry)
 
         if made_commit:
-            platform.push_branch(wt, ts["branch"])
+            pushed = platform.push_branch(wt, pr.get("branch") or ts["branch"])
+            if not pushed.get("ok"):
+                log.emit("ticket_pr_comment_push_failed",
+                    f"{_label(ticket['key'], ts)} · {pr['repo']}: Comment fixes committed but push failed; leaving comments unresolved: {pushed.get('error', '')[:100]}",
+                    links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+                    meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"], "error": pushed.get("error", "")})
+                to_resolve = []
             ts.pop("ci_passed", None)
             ts.pop("checks_started_at", None)
             ts.pop("ci_unrelated_checks", None)
