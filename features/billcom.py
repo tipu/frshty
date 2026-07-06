@@ -20,6 +20,7 @@ _RANGE_RE = re.compile(rf"({_MONTH_PAT})\s+(\d{{1,2}})\s*[-–]\s*(\d{{1,2}})", 
 _RANGE_CROSS_RE = re.compile(rf"({_MONTH_PAT})\s+(\d{{1,2}})\s*[-–]\s*({_MONTH_PAT})\s+(\d{{1,2}})", re.IGNORECASE)
 
 BASE = "https://gateway.prod.bill.com/connect/v3"
+PDF_SERVLET = "https://api.bill.com/Invoice2PdfServlet"
 SESSION_TTL = 1800
 
 _session_id = None
@@ -120,6 +121,20 @@ async def get_invoice(invoice_id: str) -> dict:
         r = await c.get(f"{BASE}/invoices/{invoice_id}", headers=h)
         r.raise_for_status()
         return r.json()
+
+
+async def get_invoice_pdf(invoice_id: str) -> bytes:
+    """Fetch the rendered invoice PDF via the legacy v2 servlet. The v3 API
+    only exposes a PDF once BILL has sent the invoice (invoicePdfId stays all
+    zeros on drafts), while this servlet renders drafts too and accepts the
+    v3 gateway session."""
+    h = await _headers()
+    async with external_log.aclient("billcom", timeout=60, follow_redirects=True) as c:
+        r = await c.get(PDF_SERVLET,
+                        headers={"devKey": h["devKey"], "sessionId": h["sessionId"]},
+                        params={"Id": invoice_id, "PresentationType": "PDF"})
+        r.raise_for_status()
+        return r.content
 
 
 async def list_customers(max_results: int = 100) -> dict | list:

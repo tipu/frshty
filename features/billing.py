@@ -156,6 +156,12 @@ async def list_invoices(config: dict) -> list[dict]:
     return result
 
 
+async def invoice_pdf(config: dict, invoice_id: str) -> bytes:
+    if not billcom.has_credentials():
+        raise ValueError("billcom not configured")
+    return await billcom.get_invoice_pdf(invoice_id)
+
+
 async def next_invoice_number(config: dict) -> dict:
     b = _billing_cfg(config)
     prefix = b.get("invoice_prefix", "INV")
