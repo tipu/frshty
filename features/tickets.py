@@ -2156,7 +2156,7 @@ def _sync_pr_base(config, ticket, ts, base_url) -> dict:
         wt = ticket_worktree_path(config, slug, pr["repo"])
         st = sync_state.setdefault(f"{pr['repo']}/{pr['id']}", {})
         outcome = branch_sync.sync_branch_with_base(
-            platform, repo_path, base_branch, branch, st,
+            platform, repo_path, base_branch, pr.get("branch") or branch, st,
             lambda wt=wt: wt if wt.is_dir() else None)
         result = outcome["result"]
         links = {"detail": f"{base_url}/tickets/{key}", "pr": pr.get("url", "")}

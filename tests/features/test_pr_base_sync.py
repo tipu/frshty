@@ -52,6 +52,20 @@ class TestSyncPrBase:
         assert "ci_passed" not in ts and "checks_started_at" not in ts
         assert any(c.args[0] == "ticket_base_synced" for c in mock_emit.call_args_list)
 
+    def test_pushes_pr_branch_when_pr_has_own_branch(self):
+        ts = _ts(prs=[{"repo": "myrepo", "id": 7, "url": "http://pr/7",
+                       "branch": "t-1-other-branch"},
+                      {"repo": "repo2", "id": 8, "url": "http://pr/8"}])
+        with patch("features.tickets.make_platform", return_value=MagicMock()), \
+             patch("features.tickets._ticket_repo_path", return_value="/repo"), \
+             patch("features.tickets.ticket_worktree_path", return_value=MagicMock()), \
+             patch("features.tickets.branch_sync.sync_branch_with_base",
+                   return_value={"result": "skip"}) as mock_sync, \
+             patch("features.tickets.log.emit"):
+            tickets._sync_pr_base(_cfg(), {"key": "T-1", "summary": "x"}, ts, "http://base")
+        branches = [c.args[3] for c in mock_sync.call_args_list]
+        assert branches == ["t-1-other-branch", "t-1-branch"]
+
     def test_capped_merge_failure_logs(self):
         with patch("features.tickets.make_platform", return_value=MagicMock()), \
              patch("features.tickets._ticket_repo_path", return_value="/repo"), \
