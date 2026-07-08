@@ -86,6 +86,8 @@ textarea { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; }
     <span class="ml-auto flex items-center gap-3 text-xs">
         <span v-if="presentationBuilding" class="badge badge-question animate-pulse" title="the slide deck is being rebuilt in the background">⏳ presentation building…</span>
         <a :href="'/reviews/' + repo + '/' + prId + '/presentation'" class="badge badge-question hover:opacity-80" title="guided slide walkthrough">▶ Presentation</a>
+        <button @click="rerunReview" :class="{'animate-pulse': rerunning}" class="badge badge-question hover:opacity-80" :title="rerunning ? 'the review is being redone in the background' : 'redo this review from scratch with fresh ticket context'">{{ rerunning ? '⏳ re-reviewing…' : '↻ Refresh' }}</button>
+        <button @click="discussGeneral" class="badge badge-question hover:opacity-80" title="open a claude terminal with this PR's worktree and context">💬 Discuss</button>
         <a v-if="info.pr_url" :href="info.pr_url" target="_blank" class="link hover:underline">{{ repo }}#{{ prId }} →</a>
     </span>
 </div>
@@ -258,6 +260,7 @@ frshtyApp({
         const drafts = reactive({});
         const movingIdx = ref(null);
         const walkthroughBusy = ref(false);
+        const rerunning = ref(false);
         const discussPanels = reactive({});
         const activeIdx = ref(null);
 
@@ -362,8 +365,25 @@ frshtyApp({
                 const cfg = await configResp.json();
                 features.value = cfg.features || {};
                 allComments.value.forEach((c, i) => { drafts[i] = c.body || ''; });
+                if (info.value.rerunning) { rerunning.value = true; pollRerun(); }
             } catch (e) { console.error('review_detail load failed', e); }
             loadFileSummaries();
+        }
+
+        async function rerunReview() {
+            if (rerunning.value) return;
+            if (!confirm('Redo this review from scratch? Existing comments and drafts on this page will be regenerated.')) return;
+            const r = await fetch(`/api/reviews/${repo}/${prId}/rerun`, {method: 'POST'});
+            if (r.ok) { rerunning.value = true; pollRerun(); }
+        }
+
+        function pollRerun() {
+            const t = setInterval(async () => {
+                try {
+                    const d = await (await fetch(`/api/reviews/${repo}/${prId}/info`)).json();
+                    if (!d.rerunning) { clearInterval(t); window.location.reload(); }
+                } catch (e) { /* keep polling */ }
+            }, 8000);
         }
 
         async function loadFileSummaries() {
@@ -601,7 +621,7 @@ frshtyApp({
             prLink, activeCount, parsedDiff, commentsByFile, generalComments,
             commentFile, commentCountFor, unmatchedFor,
             diffLineClass, diffLinePrefix, escHtml,
-            jumpTo, nextComment,
+            jumpTo, nextComment, rerunReview, rerunning,
             saveComment, simplifyComment, publishComment, dismissComment,
             moveLine, placeOrAdd,
             toggleDiscuss, toggleFullscreen,
