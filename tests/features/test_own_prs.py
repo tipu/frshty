@@ -346,6 +346,7 @@ class TestFixComment:
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
              patch("features.own_prs.run_claude_code", return_value="done"), \
+             patch("features.own_prs._commit_fix", return_value=(True, "")), \
              patch("features.own_prs.comments.mark_comment_processed"), \
              patch("features.own_prs.log.emit") as mock_emit:
             ok, _ = own_prs.fix_comment(config, self._payload())
@@ -365,6 +366,7 @@ class TestFixComment:
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
              patch("features.own_prs.run_claude_code", return_value="done"), \
+             patch("features.own_prs._commit_fix", return_value=(True, "")), \
              patch("features.own_prs.comments.mark_comment_error") as mock_err, \
              patch("features.own_prs.comments.mark_comment_processed") as mock_proc, \
              patch("features.own_prs.log.emit"):
@@ -413,12 +415,51 @@ class TestFixComment:
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
              patch("features.own_prs.run_claude_code", return_value="done"), \
+             patch("features.own_prs._commit_fix", return_value=(True, "")), \
              patch("features.own_prs.comments.mark_comment_error") as mock_err, \
              patch("features.own_prs.log.emit"):
             ok, reason = own_prs.fix_comment(config, self._payload())
 
         assert ok is False
         assert reason == "push failed"
+        platform.resolve_comment.assert_not_called()
+        mock_err.assert_called_once()
+
+    def test_no_changes_marks_error_not_resolved(self, tmp_path):
+        platform = MagicMock()
+        config = {"_state_dir": tmp_path, "_base_url": "http://base", "job": {"key": "test"}}
+
+        with patch("features.own_prs.make_platform", return_value=platform), \
+             patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs.run_claude_code", return_value="done"), \
+             patch("features.own_prs._commit_fix", return_value=(False, "no changes produced")), \
+             patch("features.own_prs.comments.mark_comment_error") as mock_err, \
+             patch("features.own_prs.comments.mark_comment_processed") as mock_proc, \
+             patch("features.own_prs.log.emit"):
+            ok, reason = own_prs.fix_comment(config, self._payload())
+
+        assert ok is False
+        assert reason == "no changes produced"
+        platform.push_branch.assert_not_called()
+        platform.resolve_comment.assert_not_called()
+        mock_err.assert_called_once()
+        mock_proc.assert_not_called()
+
+    def test_commit_failure_marks_error_not_resolved(self, tmp_path):
+        platform = MagicMock()
+        config = {"_state_dir": tmp_path, "_base_url": "http://base", "job": {"key": "test"}}
+
+        with patch("features.own_prs.make_platform", return_value=platform), \
+             patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs.run_claude_code", return_value="done"), \
+             patch("features.own_prs._commit_fix", return_value=(False, "commit failed: hook rejected")), \
+             patch("features.own_prs.comments.mark_comment_error") as mock_err, \
+             patch("features.own_prs.log.emit"):
+            ok, reason = own_prs.fix_comment(config, self._payload())
+
+        assert ok is False
+        assert reason == "commit failed: hook rejected"
+        platform.push_branch.assert_not_called()
         platform.resolve_comment.assert_not_called()
         mock_err.assert_called_once()
 
@@ -435,6 +476,41 @@ class TestFixComment:
         assert ok is False
         assert "RuntimeError" in reason
         mock_err.assert_called_once()
+
+
+class TestCommitFix:
+    def _init_repo(self, path):
+        import subprocess
+        path.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=str(path), check=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=str(path), check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=str(path), check=True)
+        (path / "a.txt").write_text("one\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(path), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=str(path), check=True)
+        return path
+
+    def test_commits_dirty_worktree(self, tmp_path):
+        import subprocess
+        repo = self._init_repo(tmp_path / "repo")
+        (repo / "a.txt").write_text("two\n")
+
+        ok, reason = own_prs._commit_fix(repo, {"path": "a.txt"})
+
+        assert ok is True
+        assert reason == ""
+        status = subprocess.run(["git", "status", "--porcelain"], cwd=str(repo), capture_output=True, text=True)
+        assert status.stdout.strip() == ""
+        msg = subprocess.run(["git", "log", "-1", "--format=%s"], cwd=str(repo), capture_output=True, text=True).stdout
+        assert "a.txt" in msg
+
+    def test_clean_worktree_reports_no_changes(self, tmp_path):
+        repo = self._init_repo(tmp_path / "repo")
+
+        ok, reason = own_prs._commit_fix(repo, {"path": "a.txt"})
+
+        assert ok is False
+        assert reason == "no changes produced"
 
 
 class TestEnsureWorktree:
