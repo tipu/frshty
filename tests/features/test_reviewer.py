@@ -524,6 +524,19 @@ class TestSplitIssuesByPr:
         assert [i["body"] for i in out["backend/1"]] == ["x"]
 
 
+class TestReviewerModel:
+    def test_defaults_to_none(self):
+        assert reviewer._reviewer_model({}) is None
+
+    def test_reads_config_knob(self):
+        assert reviewer._reviewer_model({"reviewer": {"model": "claude-opus-4-8"}}) == "claude-opus-4-8"
+
+    def test_persona_run_passes_model(self):
+        with patch("features.reviewer.run_sonnet", return_value=None) as mock_run:
+            reviewer._run_single_persona(("spec", "prompt", None, "claude-opus-4-8"))
+        assert mock_run.call_args.kwargs["model"] == "claude-opus-4-8"
+
+
 class TestReviewTicket:
     def test_single_pass_splits_and_writes_artifacts(self, tmp_state, tmp_log):
         prs = [{"repo": "backend", "id": 1, "branch": "JIRA-9-x", "url": "u1"},
