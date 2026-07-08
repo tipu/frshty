@@ -27,6 +27,7 @@ import core.state as state
 from core.claude_runner import run_balanced, extract_json
 from core.config import get_repos
 from features.platforms import make_platform
+from features.ticket_systems import make_ticket_system
 from services import review_store
 
 
@@ -96,6 +97,15 @@ def resolve_ticket_goal(config: dict, branch: str, repo: str, pr_id: int) -> str
         goal = _goal_from_ticket_state(t)
         if goal:
             return goal
+        try:
+            ts_sys = make_ticket_system(config)
+            ticket = ts_sys.fetch_ticket(key) if ts_sys else None
+        except Exception:
+            ticket = None
+        if ticket:
+            goal = "\n".join(p for p in [ticket.get("summary", ""), ticket.get("description", "")] if p).strip()[:4000]
+            if goal:
+                return f"{key}: {goal}"
     try:
         info = make_platform(config).get_pr_info(repo, pr_id) or {}
         return f"{info.get('title', '')}\n{info.get('description', '')}".strip()[:4000]
