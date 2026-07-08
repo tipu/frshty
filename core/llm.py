@@ -408,13 +408,14 @@ class ClaudeProvider(LLMProvider):
 
     def balanced(self, prompt: str, *, worktree: Path | None = None,
                  tools: list[str] | None = None, timeout: int = 600,
-                 **kwargs) -> str | None:
-        cmd = self._cmd("-p", "-", "--output-format", "json", "--model", "claude-sonnet-4-6")
+                 model: str | None = None, **kwargs) -> str | None:
+        chosen_model = model or "claude-sonnet-4-6"
+        cmd = self._cmd("-p", "-", "--output-format", "json", "--model", chosen_model)
         if worktree and worktree.is_dir():
             cmd += ["--dangerously-skip-permissions", "--add-dir", str(worktree)]
             if tools:
                 cmd += ["--allowedTools"] + tools
-        inv_id = _record_start("run_sonnet", "claude-sonnet-4-6", prompt, worktree, tools, timeout)
+        inv_id = _record_start("run_sonnet", chosen_model, prompt, worktree, tools, timeout)
         t0 = time.monotonic()
         blocked, reason, remaining_s = _guard_status()
         if blocked:

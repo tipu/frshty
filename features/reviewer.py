@@ -107,7 +107,8 @@ def review_pr(config: dict, platform, pr: dict, ticket_context: str = "",
     conventions = _load_conventions(config, pr["repo"])
     file_context = _read_changed_files(diff_text, worktree) if worktree else ""
 
-    persona_results = _run_all_personas(pr, diff_text, conventions, file_context, worktree, ticket_context)
+    persona_results = _run_all_personas(pr, diff_text, conventions, file_context, worktree, ticket_context,
+                                        model=_reviewer_model(config))
     successful = [(name, data) for name, data in persona_results if data is not None]
     if not successful:
         return None
@@ -173,11 +174,15 @@ def _build_persona_prompt(persona_text, pr, diff_text, conventions, file_context
     return "\n".join(parts)
 
 
+def _reviewer_model(config) -> str | None:
+    return (config.get("reviewer") or {}).get("model")
+
+
 def _run_single_persona(args):
-    name, prompt, worktree = args
+    name, prompt, worktree, model = args
     tools = ["Read", "Glob", "Grep"] if worktree else None
     try:
-        output = run_sonnet(prompt, worktree=worktree, tools=tools)
+        output = run_sonnet(prompt, worktree=worktree, tools=tools, model=model)
     except subprocess.TimeoutExpired as e:
         log.emit("review_persona_timeout",
                  f"persona '{name}' timed out after {e.timeout}s",
@@ -193,11 +198,11 @@ def _run_single_persona(args):
     return (name, data)
 
 
-def _run_all_personas(pr, diff_text, conventions, file_context, worktree, ticket_context=""):
+def _run_all_personas(pr, diff_text, conventions, file_context, worktree, ticket_context="", model=None):
     tasks = []
     for persona_name, persona_text in PERSONAS.items():
         prompt = _build_persona_prompt(persona_text, pr, diff_text, conventions, file_context, worktree is not None, ticket_context)
-        tasks.append((persona_name, prompt, worktree))
+        tasks.append((persona_name, prompt, worktree, model))
 
     with ThreadPoolExecutor(max_workers=3) as pool:
         results = list(pool.map(_run_single_persona, tasks))
@@ -711,7 +716,7 @@ def review_ticket(config: dict, ticket_key: str, prs: list[dict]) -> dict[str, d
     tasks = []
     for persona_name, persona_text in PERSONAS.items():
         prompt = _build_ticket_persona_prompt(persona_text, ticket_key, goal, sections, has_tools)
-        tasks.append((persona_name, prompt, cwd if has_tools else None))
+        tasks.append((persona_name, prompt, cwd if has_tools else None, _reviewer_model(config)))
     with ThreadPoolExecutor(max_workers=3) as pool:
         persona_results = list(pool.map(_run_single_persona, tasks))
     successful = [(name, data) for name, data in persona_results if data is not None]
