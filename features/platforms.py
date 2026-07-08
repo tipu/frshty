@@ -37,11 +37,13 @@ def _run_git(cwd, args: list[str]) -> subprocess.CompletedProcess:
     )
 
 
-def _resolve_merge_conflicts(repo_path, base_branch: str, prev_error: str | None = None) -> dict:
+def _resolve_merge_conflicts(repo_path, base_branch: str, prev_error: str | None = None,
+                             merge_error: str = "") -> dict:
     conflicted = _run_git(repo_path, ["diff", "--name-only", "--diff-filter=U"])
     if conflicted.returncode != 0 or not conflicted.stdout.strip():
         _run_git(repo_path, ["merge", "--abort"])
-        return {"ok": False, "error": "no conflicted files found"}
+        detail = (merge_error or "").strip()[:300]
+        return {"ok": False, "error": f"no conflicted files found: {detail}" if detail else "no conflicted files found"}
 
     files = [f for f in conflicted.stdout.strip().split("\n") if f]
     for filepath in files:
@@ -365,7 +367,7 @@ class BitbucketPlatform:
         result = _run_git(repo_path, ["merge", f"origin/{base_branch}", "--no-edit"])
         if result.returncode == 0:
             return {"ok": True}
-        return _resolve_merge_conflicts(repo_path, base_branch, prev_error=prev_error)
+        return _resolve_merge_conflicts(repo_path, base_branch, prev_error=prev_error, merge_error=result.stderr)
 
     def sync_remote_branch(self, repo_path, branch: str) -> dict:
         fetched = _run_git(repo_path, ["fetch", "origin", branch])
@@ -374,7 +376,7 @@ class BitbucketPlatform:
         result = _run_git(repo_path, ["merge", f"origin/{branch}", "--no-edit"])
         if result.returncode == 0:
             return {"ok": True}
-        return _resolve_merge_conflicts(repo_path, branch)
+        return _resolve_merge_conflicts(repo_path, branch, merge_error=result.stderr)
 
     def create_pr(self, repo: str, repo_path, branch: str, title: str, body: str, base_branch: str) -> dict:
         url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests"
@@ -785,7 +787,7 @@ class GitHubPlatform:
         result = _run_git(repo_path, ["merge", f"origin/{base_branch}", "--no-edit"])
         if result.returncode == 0:
             return {"ok": True}
-        return _resolve_merge_conflicts(repo_path, base_branch, prev_error=prev_error)
+        return _resolve_merge_conflicts(repo_path, base_branch, prev_error=prev_error, merge_error=result.stderr)
 
     def sync_remote_branch(self, repo_path, branch: str) -> dict:
         fetched = _run_git(repo_path, ["fetch", "origin", branch])
@@ -794,7 +796,7 @@ class GitHubPlatform:
         result = _run_git(repo_path, ["merge", f"origin/{branch}", "--no-edit"])
         if result.returncode == 0:
             return {"ok": True}
-        return _resolve_merge_conflicts(repo_path, branch)
+        return _resolve_merge_conflicts(repo_path, branch, merge_error=result.stderr)
 
     def create_pr(self, repo: str, repo_path, branch: str, title: str, body: str, base_branch: str) -> dict:
         full = self._resolve_repo(repo)
