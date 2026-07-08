@@ -122,15 +122,17 @@ class TestCheckComments:
         with patch("features.own_prs.comments") as mock_comments:
             mock_comments.fetch_and_detect_comments.return_value = {"new": [], "edited": []}
             mock_comments.get_unprocessed_comments.return_value = []
+            mock_comments.get_deferred_comments.return_value = []
             own_prs._check_comments(config, "test", platform, pr, "http://base")
         platform.push_branch.assert_not_called()
 
-    def test_actionable_comment_enqueues_fix_job(self, tmp_path):
+    def test_actionable_comment_defers_and_starts_window(self, tmp_path):
         platform = MagicMock()
         comment = make_comment(id=10, author_id="reviewer1", body="Fix this function")
         platform.get_pr_comments.return_value = [comment]
         pr = make_pr()
         config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
+        seen = {}
 
         with patch("features.own_prs.comments") as mock_comments, \
              patch("features.own_prs.run_sonnet", return_value='{"results": [{"id": 0, "actionable": true, "reason": "clear"}]}'), \
@@ -138,28 +140,100 @@ class TestCheckComments:
              patch("features.own_prs.log"):
             mock_comments.fetch_and_detect_comments.return_value = {"new": [comment], "edited": []}
             mock_comments.get_unprocessed_comments.return_value = []
-            own_prs._check_comments(config, "test", platform, pr, "http://base")
-        mock_comments.mark_comment_processing.assert_called_once()
+            mock_comments.get_deferred_comments.return_value = [
+                {"comment_id": "10", "state": "deferred", "error_count": 0, "last_checked_at": None},
+            ]
+            own_prs._check_comments(config, "test", platform, pr, "http://base", seen=seen)
+        mock_comments.mark_comment_deferred.assert_called_once()
+        assert mock_comments.mark_comment_deferred.call_args[0][3] == "10"
+        mock_enqueue.assert_not_called()
+        assert datetime.fromisoformat(seen["fix_deadline"]) > datetime.now(timezone.utc)
+        platform.push_branch.assert_not_called()
+
+    def test_new_comment_pushes_existing_window(self, tmp_path):
+        platform = MagicMock()
+        comment = make_comment(id=11, author_id="reviewer1", body="Also fix this")
+        platform.get_pr_comments.return_value = [comment]
+        pr = make_pr()
+        config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
+        old_deadline = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+        seen = {"fix_deadline": old_deadline}
+
+        with patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.run_sonnet", return_value='{"results": [{"id": 0, "actionable": true, "reason": "clear"}]}'), \
+             patch("features.own_prs.q.enqueue_job") as mock_enqueue, \
+             patch("features.own_prs.log"):
+            mock_comments.fetch_and_detect_comments.return_value = {"new": [comment], "edited": []}
+            mock_comments.get_unprocessed_comments.return_value = []
+            mock_comments.get_deferred_comments.return_value = [
+                {"comment_id": "10", "state": "deferred", "error_count": 0, "last_checked_at": None},
+                {"comment_id": "11", "state": "deferred", "error_count": 0, "last_checked_at": None},
+            ]
+            own_prs._check_comments(config, "test", platform, pr, "http://base", seen=seen)
+        assert datetime.fromisoformat(seen["fix_deadline"]) > datetime.fromisoformat(old_deadline)
+        mock_enqueue.assert_not_called()
+
+    def test_expired_window_flushes_single_batch_job(self, tmp_path):
+        platform = MagicMock()
+        c1 = make_comment(id=10, author_id="reviewer1", body="Fix this")
+        c2 = make_comment(id=11, author_id="reviewer1", body="Fix that")
+        platform.get_pr_comments.return_value = [c1, c2]
+        pr = make_pr()
+        config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
+        seen = {"fix_deadline": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()}
+
+        with patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.q.enqueue_job") as mock_enqueue, \
+             patch("features.own_prs.log"):
+            mock_comments.fetch_and_detect_comments.return_value = {"new": [], "edited": []}
+            mock_comments.get_unprocessed_comments.return_value = []
+            mock_comments.get_deferred_comments.return_value = [
+                {"comment_id": "10", "state": "deferred", "error_count": 0, "last_checked_at": None},
+                {"comment_id": "11", "state": "deferred", "error_count": 0, "last_checked_at": None},
+            ]
+            own_prs._check_comments(config, "test", platform, pr, "http://base", seen=seen)
         mock_enqueue.assert_called_once()
-        assert mock_enqueue.call_args[0][1] == "fix_pr_comment"
-        assert str(mock_enqueue.call_args[1]["payload"]["comment"]["id"]) == "10"
-        assert mock_enqueue.call_args[1]["ticket_key"] is None
-        platform.push_branch.assert_not_called()
+        assert mock_enqueue.call_args[0][1] == "fix_pr_comments"
+        assert mock_enqueue.call_args[1]["payload"]["comment_ids"] == ["10", "11"]
+        assert "fix_deadline" not in seen
 
-    def test_ticket_linked_pr_serializes_fix_on_ticket(self, tmp_path):
+    def test_unexpired_window_does_not_flush(self, tmp_path):
         platform = MagicMock()
-        comment = make_comment(id=10, author_id="reviewer1", body="Fix this function")
-        platform.get_pr_comments.return_value = [comment]
+        c1 = make_comment(id=10, author_id="reviewer1", body="Fix this")
+        platform.get_pr_comments.return_value = [c1]
         pr = make_pr()
         config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
+        seen = {"fix_deadline": (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()}
 
         with patch("features.own_prs.comments") as mock_comments, \
-             patch("features.own_prs.run_sonnet", return_value='{"results": [{"id": 0, "actionable": true, "reason": "clear"}]}'), \
              patch("features.own_prs.q.enqueue_job") as mock_enqueue, \
              patch("features.own_prs.log"):
-            mock_comments.fetch_and_detect_comments.return_value = {"new": [comment], "edited": []}
+            mock_comments.fetch_and_detect_comments.return_value = {"new": [], "edited": []}
             mock_comments.get_unprocessed_comments.return_value = []
-            own_prs._check_comments(config, "test", platform, pr, "http://base", ticket_key="DEV-512")
+            mock_comments.get_deferred_comments.return_value = [
+                {"comment_id": "10", "state": "deferred", "error_count": 0, "last_checked_at": None},
+            ]
+            own_prs._check_comments(config, "test", platform, pr, "http://base", seen=seen)
+        mock_enqueue.assert_not_called()
+        assert seen["fix_deadline"]
+
+    def test_flush_carries_ticket_key(self, tmp_path):
+        platform = MagicMock()
+        c1 = make_comment(id=10, author_id="reviewer1", body="Fix this")
+        platform.get_pr_comments.return_value = [c1]
+        pr = make_pr()
+        config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
+        seen = {"fix_deadline": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()}
+
+        with patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.q.enqueue_job") as mock_enqueue, \
+             patch("features.own_prs.log"):
+            mock_comments.fetch_and_detect_comments.return_value = {"new": [], "edited": []}
+            mock_comments.get_unprocessed_comments.return_value = []
+            mock_comments.get_deferred_comments.return_value = [
+                {"comment_id": "10", "state": "deferred", "error_count": 0, "last_checked_at": None},
+            ]
+            own_prs._check_comments(config, "test", platform, pr, "http://base", seen=seen, ticket_key="DEV-512")
         assert mock_enqueue.call_args[1]["ticket_key"] == "DEV-512"
 
     def test_first_sight_baselines_old_keeps_recent(self, tmp_path):
@@ -178,6 +252,7 @@ class TestCheckComments:
             mock_comments.has_comment_state.return_value = False
             mock_comments.fetch_and_detect_comments.return_value = {"new": [old, recent], "edited": []}
             mock_comments.get_unprocessed_comments.return_value = []
+            mock_comments.get_deferred_comments.return_value = []
             own_prs._check_comments(config, "test", platform, pr, "http://base")
 
         seen_ids = [c[0][3] for c in mock_comments.mark_comment_seen.call_args_list]
@@ -198,6 +273,7 @@ class TestCheckComments:
              patch("features.own_prs.log"):
             mock_comments.fetch_and_detect_comments.return_value = {"new": [comment], "edited": []}
             mock_comments.get_unprocessed_comments.return_value = []
+            mock_comments.get_deferred_comments.return_value = []
             own_prs._check_comments(config, "test", platform, pr, "http://base")
         mock_comments.mark_comment_error.assert_called_once()
         mock_comments.mark_comment_processed.assert_not_called()
@@ -216,6 +292,7 @@ class TestCheckComments:
              patch("features.own_prs.log.emit") as mock_emit:
             mock_comments.fetch_and_detect_comments.return_value = {"new": [c1, c2], "edited": []}
             mock_comments.get_unprocessed_comments.return_value = []
+            mock_comments.get_deferred_comments.return_value = []
             own_prs._check_comments(config, "test", platform, pr, "http://base")
 
         detected = [c for c in mock_emit.call_args_list if c[0][0] == "pr_comments_detected"]
@@ -238,9 +315,14 @@ class TestCheckComments:
             mock_comments.get_unprocessed_comments.return_value = [
                 {"comment_id": "10", "state": "processing", "error_count": 0, "last_checked_at": stale},
             ]
+            mock_comments.get_deferred_comments.return_value = [
+                {"comment_id": "10", "state": "deferred", "error_count": 0, "last_checked_at": None},
+            ]
             own_prs._check_comments(config, "test", platform, pr, "http://base")
+        mock_comments.mark_comment_deferred.assert_called_once()
         mock_enqueue.assert_called_once()
-        assert mock_enqueue.call_args[0][1] == "fix_pr_comment"
+        assert mock_enqueue.call_args[0][1] == "fix_pr_comments"
+        assert mock_enqueue.call_args[1]["payload"]["comment_ids"] == ["10"]
 
     def test_skips_fresh_processing_comment(self, tmp_path):
         platform = MagicMock()
@@ -257,6 +339,7 @@ class TestCheckComments:
             mock_comments.get_unprocessed_comments.return_value = [
                 {"comment_id": "10", "state": "processing", "error_count": 0, "last_checked_at": fresh},
             ]
+            mock_comments.get_deferred_comments.return_value = []
             own_prs._check_comments(config, "test", platform, pr, "http://base")
         mock_enqueue.assert_not_called()
 
@@ -274,6 +357,7 @@ class TestCheckComments:
             mock_comments.get_unprocessed_comments.return_value = [
                 {"comment_id": "10", "state": "new", "error_count": own_prs.MAX_COMMENT_RETRIES + 1, "last_checked_at": None},
             ]
+            mock_comments.get_deferred_comments.return_value = []
             own_prs._check_comments(config, "test", platform, pr, "http://base")
         mock_enqueue.assert_not_called()
 
@@ -290,6 +374,7 @@ class TestCheckComments:
              patch("features.own_prs.log"):
             mock_comments.fetch_and_detect_comments.return_value = {"new": [comment], "edited": []}
             mock_comments.get_unprocessed_comments.return_value = []
+            mock_comments.get_deferred_comments.return_value = []
             own_prs._check_comments(config, "test", platform, pr, "http://base")
         mock_sonnet.assert_not_called()
         mock_enqueue.assert_not_called()
@@ -310,6 +395,7 @@ class TestCheckComments:
             mock_comments.get_unprocessed_comments.return_value = [
                 {"comment_id": "10", "state": "processing", "error_count": 0, "last_checked_at": stale},
             ]
+            mock_comments.get_deferred_comments.return_value = []
             own_prs._check_comments(config, "test", platform, pr, "http://base")
         mock_comments.mark_comment_processed.assert_called_once()
         mock_enqueue.assert_not_called()
@@ -327,6 +413,7 @@ class TestCheckComments:
             mock_comments.get_unprocessed_comments.return_value = [
                 {"comment_id": "99", "state": "new", "error_count": 1, "last_checked_at": None},
             ]
+            mock_comments.get_deferred_comments.return_value = []
             own_prs._check_comments(config, "test", platform, pr, "http://base")
         mock_comments.mark_comment_deleted.assert_called_once()
         mock_enqueue.assert_not_called()
@@ -478,6 +565,107 @@ class TestFixComment:
         mock_err.assert_called_once()
 
 
+class TestFixCommentsBatch:
+    def _payload(self, ids=("10", "11")):
+        return {"pr": make_pr(), "comment_ids": list(ids)}
+
+    def _config(self, tmp_path):
+        return {"_state_dir": tmp_path, "_base_url": "http://base", "job": {"key": "test"}}
+
+    def test_single_commit_resolves_all(self, tmp_path):
+        platform = MagicMock()
+        platform.get_pr_comments.return_value = [
+            make_comment(id=10, author_id="r1", body="Fix this"),
+            make_comment(id=11, author_id="r1", body="Fix that"),
+        ]
+        platform.push_branch.return_value = {"ok": True}
+        platform.resolve_comment.return_value = {"status": "resolved"}
+
+        with patch("features.own_prs.make_platform", return_value=platform), \
+             patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs.run_claude_code", return_value="done") as mock_claude, \
+             patch("features.own_prs._commit_fix", return_value=(True, "")) as mock_commit, \
+             patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.log.emit"):
+            ok, reason = own_prs.fix_comments_batch(self._config(tmp_path), self._payload())
+
+        assert ok is True
+        mock_claude.assert_called_once()
+        assert "Fix this" in mock_claude.call_args[0][0]
+        assert "Fix that" in mock_claude.call_args[0][0]
+        mock_commit.assert_called_once()
+        assert "2 review comments" in mock_commit.call_args[0][1]
+        platform.push_branch.assert_called_once()
+        assert platform.resolve_comment.call_count == 2
+        assert mock_comments.mark_comment_processed.call_count == 2
+
+    def test_no_changes_marks_all_error(self, tmp_path):
+        platform = MagicMock()
+        platform.get_pr_comments.return_value = [
+            make_comment(id=10, author_id="r1", body="Fix this"),
+            make_comment(id=11, author_id="r1", body="Fix that"),
+        ]
+
+        with patch("features.own_prs.make_platform", return_value=platform), \
+             patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs.run_claude_code", return_value="done"), \
+             patch("features.own_prs._commit_fix", return_value=(False, "no changes produced")), \
+             patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.log.emit"):
+            ok, reason = own_prs.fix_comments_batch(self._config(tmp_path), self._payload())
+
+        assert ok is False
+        assert reason == "no changes produced"
+        platform.push_branch.assert_not_called()
+        platform.resolve_comment.assert_not_called()
+        assert mock_comments.mark_comment_error.call_count == 2
+
+    def test_skips_resolved_and_deleted_comments(self, tmp_path):
+        platform = MagicMock()
+        platform.get_pr_comments.return_value = [
+            make_comment(id=10, author_id="r1", body="Fix this", resolved=True),
+        ]
+
+        with patch("features.own_prs.make_platform", return_value=platform), \
+             patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs.run_claude_code") as mock_claude, \
+             patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.log.emit"):
+            ok, reason = own_prs.fix_comments_batch(self._config(tmp_path), self._payload(ids=("10", "99")))
+
+        assert ok is True
+        assert reason == "nothing left to fix"
+        mock_claude.assert_not_called()
+        platform.push_branch.assert_not_called()
+        mock_comments.mark_comment_processed.assert_called_once()
+        mock_comments.mark_comment_deleted.assert_called_once()
+
+    def test_partial_resolve_failure(self, tmp_path):
+        platform = MagicMock()
+        platform.get_pr_comments.return_value = [
+            make_comment(id=10, author_id="r1", body="Fix this"),
+            make_comment(id=11, author_id="r1", body="Fix that"),
+        ]
+        platform.push_branch.return_value = {"ok": True}
+        platform.resolve_comment.side_effect = [
+            {"status": "resolved"},
+            {"status": "error", "detail": "boom"},
+        ]
+
+        with patch("features.own_prs.make_platform", return_value=platform), \
+             patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs.run_claude_code", return_value="done"), \
+             patch("features.own_prs._commit_fix", return_value=(True, "")), \
+             patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.log.emit"):
+            ok, reason = own_prs.fix_comments_batch(self._config(tmp_path), self._payload())
+
+        assert ok is False
+        assert reason == "resolve failed"
+        mock_comments.mark_comment_processed.assert_called_once()
+        mock_comments.mark_comment_error.assert_called_once()
+
+
 class TestCommitFix:
     def _init_repo(self, path):
         import subprocess
@@ -495,7 +683,7 @@ class TestCommitFix:
         repo = self._init_repo(tmp_path / "repo")
         (repo / "a.txt").write_text("two\n")
 
-        ok, reason = own_prs._commit_fix(repo, {"path": "a.txt"})
+        ok, reason = own_prs._commit_fix(repo, "fix: address review comment on a.txt")
 
         assert ok is True
         assert reason == ""
@@ -507,7 +695,7 @@ class TestCommitFix:
     def test_clean_worktree_reports_no_changes(self, tmp_path):
         repo = self._init_repo(tmp_path / "repo")
 
-        ok, reason = own_prs._commit_fix(repo, {"path": "a.txt"})
+        ok, reason = own_prs._commit_fix(repo, "fix: address review comment on a.txt")
 
         assert ok is False
         assert reason == "no changes produced"
