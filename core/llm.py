@@ -415,7 +415,7 @@ class ClaudeProvider(LLMProvider):
             cmd += ["--dangerously-skip-permissions", "--add-dir", str(worktree)]
             if tools:
                 cmd += ["--allowedTools"] + tools
-        inv_id = _record_start("run_sonnet", chosen_model, prompt, worktree, tools, timeout)
+        inv_id = _record_start("run_balanced", chosen_model, prompt, worktree, tools, timeout)
         t0 = time.monotonic()
         blocked, reason, remaining_s = _guard_status()
         if blocked:

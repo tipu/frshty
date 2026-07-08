@@ -394,7 +394,7 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
          patch("core.tasks.tickets.make_platform", return_value=platform), \
          patch("features.tickets.run_haiku", side_effect=fake_run_haiku), \
          patch("features.tickets.extract_json", side_effect=fake_extract_json), \
-         patch("features.pr_ci.run_sonnet", side_effect=fake_run_haiku), \
+         patch("features.pr_ci.run_balanced", side_effect=fake_run_haiku), \
          patch("features.pr_ci.extract_json", side_effect=fake_extract_json), \
          patch("features.pr_ci.run_claude_code", side_effect=fake_run_claude_code), \
          patch("core.tasks.tickets.run_claude_code", side_effect=fake_run_claude_code), \

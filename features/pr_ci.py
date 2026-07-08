@@ -8,7 +8,7 @@ changes, attempt cap enforced by the caller.
 import json
 from pathlib import Path
 
-from core.claude_runner import run_sonnet, run_claude_code, extract_json
+from core.claude_runner import run_balanced, run_claude_code, extract_json
 
 
 FIX_TIMEOUT = 1800
@@ -73,7 +73,7 @@ def triage_and_fix_pr(platform, repo: str, pr_id: int, label: str,
         "Reply with EXACTLY one JSON object:\n"
         '{"caused_by_us": true/false, "reason": "brief explanation", "fix_hint": "what to change if caused_by_us"}'
     )
-    classification = run_sonnet(causality_prompt, timeout=180)
+    classification = run_balanced(causality_prompt, timeout=180)
     if not classification:
         return {"result": "haiku_empty", "attempts": attempts, "failed_names": failed_names}
     try:

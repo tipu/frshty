@@ -7,7 +7,7 @@ from pathlib import Path
 import core.log as log
 import core.state as state
 import core.git_util as git_util
-from core.claude_runner import run_sonnet, run_haiku, extract_json
+from core.claude_runner import run_balanced, run_haiku, extract_json
 from core.config import base_branch_for, get_repos
 import features.presentation as presentation
 from features.platforms import make_platform
@@ -182,7 +182,7 @@ def _run_single_persona(args):
     name, prompt, worktree, model = args
     tools = ["Read", "Glob", "Grep"] if worktree else None
     try:
-        output = run_sonnet(prompt, worktree=worktree, tools=tools, model=model)
+        output = run_balanced(prompt, worktree=worktree, tools=tools, model=model)
     except subprocess.TimeoutExpired as e:
         log.emit("review_persona_timeout",
                  f"persona '{name}' timed out after {e.timeout}s",
@@ -306,7 +306,7 @@ def _validate_single(args):
         f"FILE: {path}, LINE: {line}\n\n"
         f"CODE CONTEXT:\n{context}\n"
     )
-    output = run_sonnet(prompt, timeout=120)
+    output = run_balanced(prompt, timeout=120)
     if not output:
         return issue
 

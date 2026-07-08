@@ -17,7 +17,7 @@ from core import external_log
 from core.config import base_branch_for, get_repos, ticket_worktree_path, resolve_env
 from core.git_util import commit_with_hooks
 from core.deps import run_dep_command, relink_shared_venv
-from core.claude_runner import run_haiku, run_sonnet, run_claude_code, extract_json
+from core.claude_runner import run_haiku, run_balanced, run_claude_code, extract_json
 from core.ticket_status import TicketStatus, transition
 from features.platforms import make_platform
 from features.pr_ci import ci_summary
@@ -1637,7 +1637,7 @@ def _draft_comment_reply(config, slug, ticket, comment, pr) -> str:
         + f"REVIEWER COMMENT (on {path}:{comment.get('line')}):\n{comment['body']}\n\n"
         "Reply:"
     )
-    return run_sonnet(prompt) or ""
+    return run_balanced(prompt) or ""
 
 
 MAX_PR_COMMENT_FIX_ATTEMPTS = 2
@@ -1829,7 +1829,7 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
             )
             + '\n\nReply with JSON: {"results":[{"i":0,"actionable":true|false}, ...]}'
         )
-        batch_raw = run_sonnet(batch_prompt)
+        batch_raw = run_balanced(batch_prompt)
         batch_parsed = extract_json(batch_raw) if batch_raw else None
         classifications: dict[int, bool] = {}
         if isinstance(batch_parsed, dict) and isinstance(batch_parsed.get("results"), list):

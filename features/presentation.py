@@ -24,7 +24,7 @@ from pathlib import Path
 import core.config as cfg
 import core.log as log
 import core.state as state
-from core.claude_runner import run_sonnet, extract_json
+from core.claude_runner import run_balanced, extract_json
 from core.config import get_repos
 from features.platforms import make_platform
 from services import review_store
@@ -79,7 +79,7 @@ def build_presentation(ticket_goal: str, diff_text: str, worktree: Path | None) 
         '"verdict":{"solves_problem":true,"summary":"...","concerns":["..."]}}\n\n'
         f"--- DIFF START ---\n{diff_text[:60000]}\n--- DIFF END ---"
     )
-    output = run_sonnet(prompt, worktree=worktree, tools=tools, timeout=900)
+    output = run_balanced(prompt, worktree=worktree, tools=tools, timeout=900)
     if not output:
         return {}
     parsed = extract_json(output)
