@@ -1,4 +1,5 @@
 import subprocess
+import threading
 import traceback
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -16,6 +17,16 @@ from features.platforms import make_platform
 RECLAIM_STALE_SECONDS = 1200
 MAX_COMMENT_RETRIES = 3
 NEW_COMMENT_BASELINE_HOURS = 24
+
+# _ensure_worktree resets the shared PR worktree to origin, so concurrent
+# jobs on the same PR silently destroy each other's uncommitted work.
+_worktree_locks: dict[str, threading.Lock] = {}
+_worktree_locks_guard = threading.Lock()
+
+
+def _worktree_lock(pr_key: str) -> threading.Lock:
+    with _worktree_locks_guard:
+        return _worktree_locks.setdefault(pr_key, threading.Lock())
 
 
 def check(config: dict):
@@ -237,6 +248,22 @@ def _reclaim_stuck_comments(instance_key, pr, pr_key, pr_ref, base_url, by_id, u
         log.emit("pr_comment_reclaimed", f"{pr_ref}: Re-queued ({note}) — {comment['body'][:80]}", links=links, meta=meta)
 
 
+def _commit_fix(worktree, comment) -> tuple[bool, str]:
+    subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True, timeout=60)
+    staged = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=str(worktree), capture_output=True, timeout=60).returncode != 0
+    if not staged:
+        return False, "no changes produced"
+    commit = git_util.commit_with_hooks(
+        worktree,
+        message=f"fix: address review comment on {comment.get('path', 'unknown')}",
+        timeout=900,
+    )
+    if commit.returncode != 0:
+        detail = (commit.stderr or commit.stdout or "").strip()[:200]
+        return False, f"commit failed: {detail}"
+    return True, ""
+
+
 def fix_comment(config, payload) -> tuple[bool, str | None]:
     instance_key = config["job"]["key"]
     platform = make_platform(config)
@@ -249,25 +276,32 @@ def fix_comment(config, payload) -> tuple[bool, str | None]:
     meta = {"repo": pr["repo"], "pr_id": pr["id"], "comment_id": comment_id}
 
     try:
-        worktree = _ensure_worktree(config, pr)
-        if not worktree:
-            log.emit("pr_comment_blocked", f"{pr_ref}: Could not create worktree — {comment['body'][:80]}", links=links, meta={**meta, "reason": "Could not create worktree"})
-            comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "Could not create worktree")
-            return False, "Could not create worktree"
+        with _worktree_lock(pr_key):
+            worktree = _ensure_worktree(config, pr)
+            if not worktree:
+                log.emit("pr_comment_blocked", f"{pr_ref}: Could not create worktree — {comment['body'][:80]}", links=links, meta={**meta, "reason": "Could not create worktree"})
+                comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "Could not create worktree")
+                return False, "Could not create worktree"
 
-        context = f"File: {comment.get('path', 'unknown')}\nLine: {comment.get('line', 'unknown')}\n\nReview comment: {comment['body']}\n\nFix this review comment."
-        result = run_claude_code(context, cwd=worktree, timeout=600)
-        if result is None:
-            log.emit("pr_comment_blocked", f"{pr_ref}: Claude failed to fix — {comment['body'][:80]}", links=links, meta={**meta, "reason": "Claude failed to fix"})
-            comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "Claude failed to fix")
-            return False, "Claude failed to fix"
+            context = f"File: {comment.get('path', 'unknown')}\nLine: {comment.get('line', 'unknown')}\n\nReview comment: {comment['body']}\n\nFix this review comment."
+            result = run_claude_code(context, cwd=worktree, timeout=600)
+            if result is None:
+                log.emit("pr_comment_blocked", f"{pr_ref}: Claude failed to fix — {comment['body'][:80]}", links=links, meta={**meta, "reason": "Claude failed to fix"})
+                comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "Claude failed to fix")
+                return False, "Claude failed to fix"
 
-        log.emit("pr_comment_code_written", f"{pr_ref}: Code written — {comment['body'][:80]}", links=links, meta=meta)
-        push = platform.push_branch(worktree, pr["branch"])
-        if isinstance(push, dict) and not push.get("ok", True):
-            log.emit("pr_comment_blocked", f"{pr_ref}: Push failed — {comment['body'][:80]}", links=links, meta={**meta, "reason": "push failed"})
-            comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "push failed")
-            return False, "push failed"
+            committed, commit_reason = _commit_fix(worktree, comment)
+            if not committed:
+                log.emit("pr_comment_blocked", f"{pr_ref}: {commit_reason} — {comment['body'][:80]}", links=links, meta={**meta, "reason": commit_reason})
+                comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, commit_reason)
+                return False, commit_reason
+
+            log.emit("pr_comment_code_written", f"{pr_ref}: Code written — {comment['body'][:80]}", links=links, meta=meta)
+            push = platform.push_branch(worktree, pr["branch"])
+            if isinstance(push, dict) and not push.get("ok", True):
+                log.emit("pr_comment_blocked", f"{pr_ref}: Push failed — {comment['body'][:80]}", links=links, meta={**meta, "reason": "push failed"})
+                comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "push failed")
+                return False, "push failed"
 
         resolution = platform.resolve_comment(pr["repo"], pr["id"], int(comment_id))
         if isinstance(resolution, dict) and resolution.get("status") != "resolved":
@@ -306,61 +340,67 @@ def _check_ci(config, platform, pr, seen, base_url):
         seen.pop("ci_cap_emitted", None)
         return
 
-    worktree = _ensure_worktree(config, pr)
-    if not worktree:
+    lock = _worktree_lock(f"{pr['repo']}/{pr['id']}")
+    if not lock.acquire(blocking=False):
         return
+    try:
+        worktree = _ensure_worktree(config, pr)
+        if not worktree:
+            return
 
-    head = subprocess.run(["git", "rev-parse", "HEAD"],
-                          cwd=str(worktree), capture_output=True, text=True, timeout=10).stdout.strip()
-    # Don't re-triage the same commit we already acted on (either fixed or
-    # classified as unrelated). New commits reset this.
-    if seen.get("ci_fix_sha") == head or seen.get("ci_unrelated_sha") == head:
-        return
+        head = subprocess.run(["git", "rev-parse", "HEAD"],
+                              cwd=str(worktree), capture_output=True, text=True, timeout=10).stdout.strip()
+        # Don't re-triage the same commit we already acted on (either fixed or
+        # classified as unrelated). New commits reset this.
+        if seen.get("ci_fix_sha") == head or seen.get("ci_unrelated_sha") == head:
+            return
 
-    attempts = seen.get("ci_fix_attempts", 0)
-    pr_ref = f"{pr['repo']}#{pr['id']}"
-    pr_link = {"pr": pr["url"], "detail": f"{base_url}/"}
-    meta = {"repo": pr["repo"], "pr_id": pr["id"],
-            "failed_checks": [c["name"] for c in failing]}
+        attempts = seen.get("ci_fix_attempts", 0)
+        pr_ref = f"{pr['repo']}#{pr['id']}"
+        pr_link = {"pr": pr["url"], "detail": f"{base_url}/"}
+        meta = {"repo": pr["repo"], "pr_id": pr["id"],
+                "failed_checks": [c["name"] for c in failing]}
 
-    outcome = triage_and_fix_pr(platform, pr["repo"], pr["id"], label=pr_ref,
-                                  worktree=worktree,
-                                  attempts=attempts,
-                                  max_attempts=MAX_CI_FIX_ATTEMPTS)
-    kind = outcome["result"]
-    failed_names = outcome.get("failed_names", [])
+        outcome = triage_and_fix_pr(platform, pr["repo"], pr["id"], label=pr_ref,
+                                      worktree=worktree,
+                                      attempts=attempts,
+                                      max_attempts=MAX_CI_FIX_ATTEMPTS)
+        kind = outcome["result"]
+        failed_names = outcome.get("failed_names", [])
 
-    if kind == "capped":
-        if not seen.get("ci_cap_emitted"):
-            log.emit("pr_checks_failed",
-                     f"CI failed on {pr_ref} after {attempts} fix attempts: {', '.join(failed_names)}",
-                     links=pr_link, meta=meta)
-            seen["ci_cap_emitted"] = True
-        return
+        if kind == "capped":
+            if not seen.get("ci_cap_emitted"):
+                log.emit("pr_checks_failed",
+                         f"CI failed on {pr_ref} after {attempts} fix attempts: {', '.join(failed_names)}",
+                         links=pr_link, meta=meta)
+                seen["ci_cap_emitted"] = True
+            return
 
-    if kind == "unrelated":
-        log.emit("pr_checks_unrelated",
-                 f"CI failure on {pr_ref} not caused by our changes: {outcome.get('reason','')[:100]}",
-                 links=pr_link,
-                 meta={**meta, "reason": outcome.get("reason", "")})
-        seen["ci_unrelated_sha"] = head
-        return
+        if kind == "unrelated":
+            log.emit("pr_checks_unrelated",
+                     f"CI failure on {pr_ref} not caused by our changes: {outcome.get('reason','')[:100]}",
+                     links=pr_link,
+                     meta={**meta, "reason": outcome.get("reason", "")})
+            seen["ci_unrelated_sha"] = head
+            return
 
-    if kind == "fixed":
-        platform.push_branch(worktree, pr["branch"])
-        new_head = subprocess.run(["git", "rev-parse", "HEAD"],
-                                    cwd=str(worktree), capture_output=True, text=True, timeout=10).stdout.strip()
-        seen["ci_fix_sha"] = new_head
-        seen["ci_fix_attempts"] = outcome["attempts"]
-        seen.pop("ci_cap_emitted", None)
-        log.emit("pr_ci_fix_sent",
-                 f"{pr_ref}: Sent CI fix (attempt {outcome['attempts']}/{MAX_CI_FIX_ATTEMPTS}): {outcome.get('fix_hint','')[:80]}",
-                 links=pr_link,
-                 meta={**meta, "fix_hint": outcome.get("fix_hint", "")})
-        return
+        if kind == "fixed":
+            platform.push_branch(worktree, pr["branch"])
+            new_head = subprocess.run(["git", "rev-parse", "HEAD"],
+                                        cwd=str(worktree), capture_output=True, text=True, timeout=10).stdout.strip()
+            seen["ci_fix_sha"] = new_head
+            seen["ci_fix_attempts"] = outcome["attempts"]
+            seen.pop("ci_cap_emitted", None)
+            log.emit("pr_ci_fix_sent",
+                     f"{pr_ref}: Sent CI fix (attempt {outcome['attempts']}/{MAX_CI_FIX_ATTEMPTS}): {outcome.get('fix_hint','')[:80]}",
+                     links=pr_link,
+                     meta={**meta, "fix_hint": outcome.get("fix_hint", "")})
+            return
 
-    # haiku_empty, haiku_parse_error, fix_failed, no_failing, worktree_missing:
-    # no action — we'll retry next cycle (possibly against a new sha).
+        # haiku_empty, haiku_parse_error, fix_failed, no_failing, worktree_missing:
+        # no action — we'll retry next cycle (possibly against a new sha).
+    finally:
+        lock.release()
 
 
 def _repo_path_for(config, pr):
@@ -379,9 +419,15 @@ def _check_base_fresh(config, platform, pr, seen, base_url):
     links = {"pr": pr["url"], "detail": f"{base_url}/"}
     meta = {"repo": pr["repo"], "pr_id": pr["id"], "base": base_branch}
 
-    outcome = branch_sync.sync_branch_with_base(
-        platform, repo_path, base_branch, pr["branch"], seen,
-        lambda: _ensure_worktree(config, pr))
+    lock = _worktree_lock(f"{pr['repo']}/{pr['id']}")
+    if not lock.acquire(blocking=False):
+        return
+    try:
+        outcome = branch_sync.sync_branch_with_base(
+            platform, repo_path, base_branch, pr["branch"], seen,
+            lambda: _ensure_worktree(config, pr))
+    finally:
+        lock.release()
     result = outcome["result"]
 
     if result == "synced":
