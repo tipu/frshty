@@ -97,8 +97,9 @@ def check(config: dict):
 
 
 
-def review_pr(config: dict, platform, pr: dict) -> dict | None:
-    diff_text = platform.get_pr_diff(pr["repo"], pr["id"])
+def review_pr(config: dict, platform, pr: dict, ticket_context: str = "",
+              prefetched_diff: str | None = None) -> dict | None:
+    diff_text = prefetched_diff if prefetched_diff is not None else platform.get_pr_diff(pr["repo"], pr["id"])
     if not diff_text:
         return None
 
@@ -106,7 +107,7 @@ def review_pr(config: dict, platform, pr: dict) -> dict | None:
     conventions = _load_conventions(config, pr["repo"])
     file_context = _read_changed_files(diff_text, worktree) if worktree else ""
 
-    persona_results = _run_all_personas(pr, diff_text, conventions, file_context, worktree)
+    persona_results = _run_all_personas(pr, diff_text, conventions, file_context, worktree, ticket_context)
     successful = [(name, data) for name, data in persona_results if data is not None]
     if not successful:
         return None
@@ -140,12 +141,22 @@ def review_pr(config: dict, platform, pr: dict) -> dict | None:
     return merged
 
 
-def _build_persona_prompt(persona_text, pr, diff_text, conventions, file_context, has_tools):
+def _build_persona_prompt(persona_text, pr, diff_text, conventions, file_context, has_tools, ticket_context=""):
     parts = [
         f"You are reviewing pull request #{pr['id']} in repository '{pr['repo']}' (branch: {pr['branch']}).\n",
         persona_text + "\n",
         JSON_OUTPUT_SCHEMA, LINE_NUMBER_RULES, BODY_RULES,
     ]
+    if ticket_context:
+        parts.append(
+            "This PR is part of a larger ticket. The ticket goal and the full diffs of its "
+            "sibling PRs (in other repositories) are provided below so you review this PR in "
+            "the context of the whole change. A requirement implemented in a sibling PR is NOT "
+            "missing from this PR. Flag cross-PR inconsistencies (mismatched API contracts, "
+            "producer/consumer drift, a change here that breaks code changed in a sibling) as "
+            "issues on this PR only when the fix belongs in this repository; otherwise raise "
+            "them as questions. Only report issues anchored to files in THIS PR's diff.\n"
+            f"--- TICKET CONTEXT ---\n{ticket_context}\n--- END TICKET CONTEXT ---\n")
     if conventions:
         parts.append("Review against the project conventions provided. Only flag conventions that are explicitly stated in the conventions text. Do not infer or assume unwritten rules.\n")
     if has_tools:
@@ -179,10 +190,10 @@ def _run_single_persona(args):
     return (name, data)
 
 
-def _run_all_personas(pr, diff_text, conventions, file_context, worktree):
+def _run_all_personas(pr, diff_text, conventions, file_context, worktree, ticket_context=""):
     tasks = []
     for persona_name, persona_text in PERSONAS.items():
-        prompt = _build_persona_prompt(persona_text, pr, diff_text, conventions, file_context, worktree is not None)
+        prompt = _build_persona_prompt(persona_text, pr, diff_text, conventions, file_context, worktree is not None, ticket_context)
         tasks.append((persona_name, prompt, worktree))
 
     with ThreadPoolExecutor(max_workers=3) as pool:
@@ -573,11 +584,46 @@ def _process_ready_tickets(config: dict, pending: dict) -> dict:
     return pending
 
 
+SIBLING_DIFF_CHAR_CAP = 60000
+
+
+def _fetch_ticket_diffs(platform, prs: list[dict]) -> dict[str, str]:
+    diffs = {}
+    for pr in prs:
+        try:
+            diffs[f"{pr['repo']}/{pr['id']}"] = platform.get_pr_diff(pr["repo"], pr["id"]) or ""
+        except Exception:
+            diffs[f"{pr['repo']}/{pr['id']}"] = ""
+    return diffs
+
+
+def _ticket_context_for(config, pr: dict, ticket_key: str, prs: list[dict],
+                        diffs: dict[str, str]) -> str:
+    goal = presentation.resolve_ticket_goal(config, pr.get("branch", ""), pr["repo"], pr["id"])
+    parts = []
+    if goal:
+        label = ticket_key if ticket_key != "__no_ticket__" else "unknown"
+        parts.append(f"Ticket {label}:\n{goal}\n")
+    if ticket_key == "__no_ticket__":
+        return "\n".join(parts)
+    for sibling in prs:
+        if sibling.get("repo") == pr.get("repo") and sibling.get("id") == pr.get("id"):
+            continue
+        d = diffs.get(f"{sibling['repo']}/{sibling['id']}", "")
+        if len(d) > SIBLING_DIFF_CHAR_CAP:
+            d = d[:SIBLING_DIFF_CHAR_CAP] + "\n... [diff truncated]"
+        parts.append(
+            f"=== Sibling PR #{sibling['id']} in '{sibling['repo']}' "
+            f"(branch: {sibling.get('branch', '')}) ===\n{d or '[diff unavailable]'}\n")
+    return "\n".join(parts)
+
+
 def review_ticket_prs(config: dict, ticket_key: str, prs: list[dict]) -> list[dict]:
     platform = make_platform(config)
     review_state = state.load("reviews")
     base_url = config["_base_url"]
     failed_prs: list[dict] = []
+    diffs = _fetch_ticket_diffs(platform, prs)
 
     for pr in prs:
         pr_key = f"{pr['repo']}/{pr['id']}"
@@ -590,7 +636,9 @@ def review_ticket_prs(config: dict, ticket_key: str, prs: list[dict]) -> list[di
             links={"pr": pr["url"], "detail": f"{base_url}/reviews/{pr['repo']}/{pr['id']}"},
             meta={"repo": pr["repo"], "pr_id": pr["id"], "ticket": ticket_key, "re_review": re_review})
 
-        result = review_pr(config, platform, pr)
+        ticket_context = _ticket_context_for(config, pr, ticket_key, prs, diffs)
+        result = review_pr(config, platform, pr, ticket_context=ticket_context,
+                           prefetched_diff=diffs.get(pr_key))
         if result:
             review_state[pr_key] = {
                 "reviewed": True,

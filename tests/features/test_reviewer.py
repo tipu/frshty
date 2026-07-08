@@ -84,6 +84,51 @@ class TestBuildPersonaPrompt:
         prompt = reviewer._build_persona_prompt("p", pr, "diff", "", "", True)
         assert "read-only access" in prompt
 
+    def test_includes_ticket_context_when_given(self):
+        pr = make_pr()
+        prompt = reviewer._build_persona_prompt("p", pr, "diff", "", "", False,
+                                                ticket_context="TICKET GOAL + SIBLING DIFFS")
+        assert "TICKET GOAL + SIBLING DIFFS" in prompt
+        assert "--- TICKET CONTEXT ---" in prompt
+
+    def test_no_ticket_context_block_when_empty(self):
+        pr = make_pr()
+        prompt = reviewer._build_persona_prompt("p", pr, "diff", "", "", False)
+        assert "TICKET CONTEXT" not in prompt
+
+
+class TestTicketContextFor:
+    def _prs(self):
+        return [
+            {"repo": "backend", "id": 1, "branch": "JIRA-9-x"},
+            {"repo": "frontend", "id": 2, "branch": "JIRA-9-x"},
+        ]
+
+    def test_includes_goal_and_sibling_diffs(self, tmp_path):
+        prs = self._prs()
+        diffs = {"backend/1": "backend diff", "frontend/2": "frontend diff"}
+        with patch("features.reviewer.presentation.resolve_ticket_goal", return_value="the goal"):
+            ctx = reviewer._ticket_context_for({}, prs[0], "JIRA-9", prs, diffs)
+        assert "the goal" in ctx
+        assert "frontend diff" in ctx
+        assert "backend diff" not in ctx
+
+    def test_no_ticket_skips_sibling_diffs(self, tmp_path):
+        prs = self._prs()
+        diffs = {"backend/1": "backend diff", "frontend/2": "frontend diff"}
+        with patch("features.reviewer.presentation.resolve_ticket_goal", return_value="the goal"):
+            ctx = reviewer._ticket_context_for({}, prs[0], "__no_ticket__", prs, diffs)
+        assert "the goal" in ctx
+        assert "frontend diff" not in ctx
+
+    def test_truncates_huge_sibling_diff(self, tmp_path):
+        prs = self._prs()
+        diffs = {"backend/1": "d", "frontend/2": "x" * (reviewer.SIBLING_DIFF_CHAR_CAP + 100)}
+        with patch("features.reviewer.presentation.resolve_ticket_goal", return_value=""):
+            ctx = reviewer._ticket_context_for({}, prs[0], "JIRA-9", prs, diffs)
+        assert "[diff truncated]" in ctx
+        assert len(ctx) < reviewer.SIBLING_DIFF_CHAR_CAP + 500
+
 
 class TestMergeReviews:
     def test_single_result_wraps_agreed_by(self):
@@ -409,7 +454,7 @@ class TestReviewTicketPrsPersistence:
         config = {"_state_dir": tmp_state, "_base_url": "http://localhost"}
         ok = {"verdict": "approved", "issues": []}
 
-        def fake_review_pr(config, platform, pr):
+        def fake_review_pr(config, platform, pr, **kwargs):
             if pr["id"] == 1:
                 return ok
             raise RuntimeError("rate limit")
