@@ -135,7 +135,7 @@ class TestCheckComments:
         seen = {}
 
         with patch("features.own_prs.comments") as mock_comments, \
-             patch("features.own_prs.run_sonnet", return_value='{"results": [{"id": 0, "actionable": true, "reason": "clear"}]}'), \
+             patch("features.own_prs.run_balanced", return_value='{"results": [{"id": 0, "actionable": true, "reason": "clear"}]}'), \
              patch("features.own_prs.q.enqueue_job") as mock_enqueue, \
              patch("features.own_prs.log"):
             mock_comments.fetch_and_detect_comments.return_value = {"new": [comment], "edited": []}
@@ -160,7 +160,7 @@ class TestCheckComments:
         seen = {"fix_deadline": old_deadline}
 
         with patch("features.own_prs.comments") as mock_comments, \
-             patch("features.own_prs.run_sonnet", return_value='{"results": [{"id": 0, "actionable": true, "reason": "clear"}]}'), \
+             patch("features.own_prs.run_balanced", return_value='{"results": [{"id": 0, "actionable": true, "reason": "clear"}]}'), \
              patch("features.own_prs.q.enqueue_job") as mock_enqueue, \
              patch("features.own_prs.log"):
             mock_comments.fetch_and_detect_comments.return_value = {"new": [comment], "edited": []}
@@ -246,7 +246,7 @@ class TestCheckComments:
         config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
 
         with patch("features.own_prs.comments") as mock_comments, \
-             patch("features.own_prs.run_sonnet", return_value='{"results": [{"id": 0, "actionable": false, "reason": "q"}]}'), \
+             patch("features.own_prs.run_balanced", return_value='{"results": [{"id": 0, "actionable": false, "reason": "q"}]}'), \
              patch("features.own_prs.q.enqueue_job"), \
              patch("features.own_prs.log"):
             mock_comments.has_comment_state.return_value = False
@@ -269,7 +269,7 @@ class TestCheckComments:
         config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
 
         with patch("features.own_prs.comments") as mock_comments, \
-             patch("features.own_prs.run_sonnet", return_value=""), \
+             patch("features.own_prs.run_balanced", return_value=""), \
              patch("features.own_prs.log"):
             mock_comments.fetch_and_detect_comments.return_value = {"new": [comment], "edited": []}
             mock_comments.get_unprocessed_comments.return_value = []
@@ -288,7 +288,7 @@ class TestCheckComments:
         config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
 
         with patch("features.own_prs.comments") as mock_comments, \
-             patch("features.own_prs.run_sonnet", return_value='{"results": [{"id": 0, "actionable": false, "reason": "q"}, {"id": 1, "actionable": false, "reason": "q"}]}'), \
+             patch("features.own_prs.run_balanced", return_value='{"results": [{"id": 0, "actionable": false, "reason": "q"}, {"id": 1, "actionable": false, "reason": "q"}]}'), \
              patch("features.own_prs.log.emit") as mock_emit:
             mock_comments.fetch_and_detect_comments.return_value = {"new": [c1, c2], "edited": []}
             mock_comments.get_unprocessed_comments.return_value = []
@@ -369,7 +369,7 @@ class TestCheckComments:
         config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
 
         with patch("features.own_prs.comments") as mock_comments, \
-             patch("features.own_prs.run_sonnet") as mock_sonnet, \
+             patch("features.own_prs.run_balanced") as mock_sonnet, \
              patch("features.own_prs.q.enqueue_job") as mock_enqueue, \
              patch("features.own_prs.log"):
             mock_comments.fetch_and_detect_comments.return_value = {"new": [comment], "edited": []}

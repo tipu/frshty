@@ -1084,7 +1084,7 @@ DIFF:
 
 {diff}
 
-Write a 3-5 sentence high-level description of what changed in `{repo_name}` specifically. Focus on:
+Write a 2-4 sentence high-level, succinct, terse description of what changed in `{repo_name}` specifically. Focus on:
 - What user-visible behavior or developer-facing capability changed (or is enabled by this repo's piece of the ticket)
 - The general shape of the change (new endpoint, schema migration, refactor, config flip, etc.)
 - Why this repo needed to change as part of the larger ticket — the integration role it plays
@@ -1092,15 +1092,36 @@ Write a 3-5 sentence high-level description of what changed in `{repo_name}` spe
 Do NOT:
 - Walk through individual files or line numbers
 - Repeat verbatim what other repos in this ticket are doing
-- Use marketing language; be technical, direct, in plain prose
-- Exceed 5 sentences
+- Use marketing language; be technical, direct, in plain prose; no filler
+- Exceed 4 sentences
 
 Output JSON only, no markdown fence:
-{{"title": "{ticket_key}: <one-line summary specific to this repo's changes>", "description": "<3-5 sentence markdown description>"}}
+{{"title": "{ticket_key}: <one-line summary specific to this repo's changes>", "description": "<2-4 sentence markdown description>"}}
 """
 
 
-PR_DESCRIPTION_TIMEOUT = 900
+_PR_DESCRIPTIONS_SESSION_PROMPT = """You are writing pull request titles and descriptions for ticket {ticket_key}. The work is complete and about to become one PR per repo — your prose is what reviewers read first, so ground it in the full pipeline context, not just the diff.
+
+Repos needing a description (each is a git worktree directory next to docs/):
+{repo_lines}
+
+Gather context before writing:
+1. Read the pipeline artifacts in docs/ — whichever of these exist: ticket.md (the original ask), technical-plan.md (approach and tradeoffs), change-manifest.md (what changed by area), tri-review.md (review findings and how they were resolved), test-plan.md, test-runs.md and proof.md (what is verified and how).
+2. For each repo listed above, inspect its full final diff: cd into the repo directory and run `git diff origin/<base>...HEAD --stat` then `git diff origin/<base>...HEAD`.
+
+Then write docs/pr-descriptions.json — a single JSON object (no markdown fence, no other keys) mapping each repo name to its PR prose:
+{{"<repo>": {{"title": "{ticket_key}: <one-line summary specific to this repo's changes>", "description": "<2-4 sentence high-level description>"}}}}
+
+Rules for each description:
+- High level, succinct, terse: what capability or behavior changed, the general shape of the change (new endpoint, schema migration, refactor, config flip, etc.), why this repo needed to change as part of the larger ticket, and what tests or proof cover it
+- Write only about that repo's own diff; do not repeat what sibling repos are doing
+- Do not walk through individual files or line numbers; no marketing language; every sentence must carry information, no filler
+- 2-4 sentences per description, plain prose
+"""
+
+
+PR_DESCRIPTION_TIMEOUT = 1200
+PR_DESCRIPTION_SESSION_TIMEOUT = 600
 
 
 @task("generate_pr_descriptions",
@@ -1113,7 +1134,12 @@ def generate_pr_descriptions(ctx: TaskContext) -> TaskResult:
 
     Drives the modal at /api/tickets/{key}/pr-info AND the headless
     create_pr path in features.tickets:_create_pr, so manual and auto PRs
-    both see the same per-repo prose. Skips repos whose worktree has no
+    both see the same per-repo prose. A single Claude Code session runs in
+    the ticket workspace with the full pipeline context — docs/ticket.md,
+    technical-plan.md, change-manifest.md, tri-review.md, test/proof docs —
+    plus each repo's complete final diff, and writes
+    docs/pr-descriptions.json. Repos the session misses fall back to the
+    old per-repo haiku-over-diff path. Skips repos whose worktree has no
     meaningful diff against the base branch. Re-runs are idempotent — only
     missing repos are regenerated, so partial state from a crash recovers
     cleanly."""
@@ -1136,6 +1162,7 @@ def generate_pr_descriptions(ctx: TaskContext) -> TaskResult:
     skipped_empty: list[str] = []
     skipped_no_worktree: list[str] = []
     failed: list[str] = []
+    pending: list[dict] = []
 
     for repo in get_repos(ctx.config):
         name = repo["name"]
@@ -1165,34 +1192,78 @@ def generate_pr_descriptions(ctx: TaskContext) -> TaskResult:
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             cwd=str(wt), capture_output=True, text=True, timeout=10,
         ).stdout.strip() or ts.get("branch", "")
-        if len(diff_text) > 12000:
-            diff_text = diff_text[:12000] + "\n[diff truncated]"
+        pending.append({
+            "name": name,
+            "base_branch": base_branch,
+            "branch": current_branch,
+            "files_changed": files_changed_count,
+            "diff": diff_text,
+        })
 
-        prompt = _PR_DESCRIPTION_PROMPT.format(
-            ticket_key=ctx.ticket_key, repo_name=name,
-            manifest=manifest or "(no change-manifest available)",
-            diff=diff_text,
+    session_out: dict = {}
+    if pending:
+        repo_lines = "\n".join(
+            f"- ./{p['name']}/ (branch {p['branch']}, base origin/{p['base_branch']}, "
+            f"{p['files_changed']} files changed)"
+            for p in pending
         )
-        raw = run_haiku(prompt)
-        parsed = extract_json(raw) if raw else None
-        if not parsed or not isinstance(parsed, dict):
-            failed.append(name)
-            log.emit("pr_description_parse_failed",
-                     f"{ctx.ticket_key}/{name}: could not parse haiku output",
-                     meta={"ticket": ctx.ticket_key, "repo": name,
-                           "raw": (raw or "")[:500]})
-            continue
+        out_path = ticket_dir / "docs" / "pr-descriptions.json"
+        out_path.unlink(missing_ok=True)
+        session_prompt = _PR_DESCRIPTIONS_SESSION_PROMPT.format(
+            ticket_key=ctx.ticket_key, repo_lines=repo_lines,
+        )
+        run_claude_code(session_prompt, cwd=ticket_dir,
+                        timeout=PR_DESCRIPTION_SESSION_TIMEOUT)
+        if out_path.exists():
+            try:
+                parsed_file = json.loads(out_path.read_text())
+                if isinstance(parsed_file, dict):
+                    session_out = parsed_file
+            except (OSError, json.JSONDecodeError):
+                session_out = {}
+        if not session_out:
+            log.emit("pr_descriptions_session_fallback",
+                     f"{ctx.ticket_key}: full-context session produced no usable "
+                     f"pr-descriptions.json, falling back to per-repo haiku",
+                     meta={"ticket": ctx.ticket_key,
+                           "repos": [p["name"] for p in pending]})
 
-        title = parsed.get("title") or f"{ctx.ticket_key}: changes in {name}"
-        description = parsed.get("description", "").strip()
+    for p in pending:
+        name = p["name"]
+        entry = session_out.get(name)
+        title = ""
+        description = ""
+        if isinstance(entry, dict):
+            title = str(entry.get("title") or "").strip()
+            description = str(entry.get("description") or "").strip()
+        if not description:
+            diff_text = p["diff"]
+            if len(diff_text) > 12000:
+                diff_text = diff_text[:12000] + "\n[diff truncated]"
+            prompt = _PR_DESCRIPTION_PROMPT.format(
+                ticket_key=ctx.ticket_key, repo_name=name,
+                manifest=manifest or "(no change-manifest available)",
+                diff=diff_text,
+            )
+            raw = run_haiku(prompt)
+            parsed = extract_json(raw) if raw else None
+            if not parsed or not isinstance(parsed, dict):
+                failed.append(name)
+                log.emit("pr_description_parse_failed",
+                         f"{ctx.ticket_key}/{name}: could not parse haiku output",
+                         meta={"ticket": ctx.ticket_key, "repo": name,
+                               "raw": (raw or "")[:500]})
+                continue
+            title = parsed.get("title") or ""
+            description = str(parsed.get("description") or "").strip()
         if not description:
             failed.append(name)
             continue
         existing[name] = {
-            "title": title,
+            "title": title or f"{ctx.ticket_key}: changes in {name}",
             "description": description,
-            "branch": current_branch,
-            "files_changed": files_changed_count,
+            "branch": p["branch"],
+            "files_changed": p["files_changed"],
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
         generated.append(name)
@@ -1343,7 +1414,7 @@ def apply_note_reset(ctx: TaskContext) -> TaskResult:
     moved = []
     for fname in ("change-manifest.md", "change-explainer.html", "tri-review.md",
                   "technical-plan.md", "test-plan.md", "test-files-written.txt",
-                  "test-runs.md"):
+                  "test-runs.md", "pr-descriptions.json"):
         src = docs / fname
         if src.exists():
             archive.mkdir(parents=True, exist_ok=True)

@@ -155,7 +155,7 @@ class TestValidateSingle:
         f = tmp_path / "test.py"
         f.write_text("\n".join([f"line{i}" for i in range(200)]))
         issue = {"body": "problem", "severity": "blocking", "path": "test.py", "line": 50}
-        with patch("features.reviewer.run_sonnet", return_value='{"decision": "false_positive", "reason": "guard clause"}'), \
+        with patch("features.reviewer.run_balanced", return_value='{"decision": "false_positive", "reason": "guard clause"}'), \
              patch("features.reviewer.extract_json", return_value={"decision": "false_positive", "reason": "guard clause"}), \
              patch("features.reviewer.log"):
             result = reviewer._validate_single((issue, tmp_path))
@@ -165,7 +165,7 @@ class TestValidateSingle:
         f = tmp_path / "test.py"
         f.write_text("\n".join([f"line{i}" for i in range(200)]))
         issue = {"body": "problem", "severity": "blocking", "path": "test.py", "line": 50}
-        with patch("features.reviewer.run_sonnet", return_value='{"decision": "valid", "reason": "real"}'), \
+        with patch("features.reviewer.run_balanced", return_value='{"decision": "valid", "reason": "real"}'), \
              patch("features.reviewer.extract_json", return_value={"decision": "valid", "reason": "real"}):
             result = reviewer._validate_single((issue, tmp_path))
         assert result == issue
@@ -532,7 +532,7 @@ class TestReviewerModel:
         assert reviewer._reviewer_model({"reviewer": {"model": "claude-opus-4-8"}}) == "claude-opus-4-8"
 
     def test_persona_run_passes_model(self):
-        with patch("features.reviewer.run_sonnet", return_value=None) as mock_run:
+        with patch("features.reviewer.run_balanced", return_value=None) as mock_run:
             reviewer._run_single_persona(("spec", "prompt", None, "claude-opus-4-8"))
         assert mock_run.call_args.kwargs["model"] == "claude-opus-4-8"
 

@@ -10,7 +10,7 @@ import core.state as state
 import core.comments as comments
 import core.git_util as git_util
 import core.branch_sync as branch_sync
-from core.claude_runner import run_claude_code, run_haiku, run_sonnet, extract_json
+from core.claude_runner import run_claude_code, run_haiku, run_balanced, extract_json
 from core.config import base_branch_for, get_repos
 from features.platforms import make_platform
 
@@ -170,7 +170,7 @@ def _process_detected_comments(config, instance_key, platform, pr, pr_ref, base_
         f"{comment_list}\n\n"
         'Reply with JSON: {"results": [{"id": 0, "actionable": true, "reason": "brief reason"}, ...]}'
     )
-    batch_raw = run_sonnet(batch_prompt, timeout=120)
+    batch_raw = run_balanced(batch_prompt, timeout=120)
     classifications = {}
     if batch_raw:
         parsed_batch = extract_json(batch_raw)
