@@ -323,7 +323,7 @@ def test_ten_concurrent_prd_tickets_serialize_and_complete(tmp_path):
          patch("features.tickets.extract_json", side_effect=fake_extract_json), \
          patch("core.tasks.tickets.run_haiku", side_effect=fake_run_haiku), \
          patch("core.tasks.tickets.extract_json", side_effect=fake_extract_json), \
-         patch("features.pr_ci.run_sonnet", side_effect=fake_run_haiku), \
+         patch("features.pr_ci.run_balanced", side_effect=fake_run_haiku), \
          patch("features.pr_ci.extract_json", side_effect=fake_extract_json), \
          patch("features.pr_ci.run_claude_code", side_effect=fake_run_claude_code), \
          patch("core.tasks.tickets.run_claude_code", side_effect=fake_run_claude_code), \
