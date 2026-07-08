@@ -1650,7 +1650,7 @@ def _recheck_pr_failed(config, ticket, ts, base_url) -> dict:
     platform = make_platform(config)
     all_merged = True
     any_open = False
-    any_open_healthy = False
+    any_open_conflicting = False
     for pr in prs:
         try:
             info = platform.get_pr_info(pr["repo"], pr["id"]) or {}
@@ -1663,8 +1663,8 @@ def _recheck_pr_failed(config, ticket, ts, base_url) -> dict:
         all_merged = False
         if pr_state == "OPEN":
             any_open = True
-            if info.get("mergeable") != "CONFLICTING":
-                any_open_healthy = True
+            if info.get("mergeable") == "CONFLICTING":
+                any_open_conflicting = True
 
     if all_merged:
         log.emit("ticket_pr_failed_recovered_merged",
@@ -1675,7 +1675,7 @@ def _recheck_pr_failed(config, ticket, ts, base_url) -> dict:
         return _mark_ticket_merged(config, ticket, ts)
 
     if any_open:
-        if ts.get("pr_failed_reason") == "conflict_failed" and not any_open_healthy:
+        if ts.get("pr_failed_reason") == "conflict_failed" and any_open_conflicting:
             return ts
 
         log.emit("ticket_pr_failed_recovered_open",
@@ -2072,6 +2072,11 @@ def _resolve_conflicts(config, ticket, ts, base_url, pr_info_map=None) -> dict:
         wt = ticket_worktree_path(config, ts["slug"], pr["repo"])
         if not wt.is_dir():
             continue
+
+        # Stray uncommitted edits (leftovers from killed jobs) make `git merge`
+        # refuse to start, which surfaces as "no conflicted files found". At
+        # in_review everything intentional is committed and pushed.
+        subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=str(wt), capture_output=True, timeout=60)
 
         prev_error = ts.get("last_conflict_error")
         synced = platform.sync_remote_branch(wt, ts["branch"])

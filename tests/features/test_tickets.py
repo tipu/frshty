@@ -357,6 +357,42 @@ class TestResolveConflicts:
         assert result["status"] == "pr_failed"
 
 
+    def test_dirty_worktree_reset_before_merge(self, tmp_path, fake_config):
+        import subprocess as sp
+        repo = tmp_path / "wt"
+        repo.mkdir()
+        sp.run(["git", "init", "-q"], cwd=str(repo), check=True)
+        sp.run(["git", "config", "user.email", "t@t"], cwd=str(repo), check=True)
+        sp.run(["git", "config", "user.name", "t"], cwd=str(repo), check=True)
+        (repo / "a.txt").write_text("one\n")
+        sp.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        sp.run(["git", "commit", "-q", "-m", "base"], cwd=str(repo), check=True)
+        (repo / "a.txt").write_text("stray uncommitted edit\n")
+
+        mock_platform = MagicMock()
+        mock_platform.get_pr_info.return_value = {"mergeable": "CONFLICTING"}
+        mock_platform.sync_remote_branch.return_value = {"ok": True}
+        mock_platform.merge_base.return_value = {"ok": True}
+        mock_platform.push_branch.return_value = {"ok": True}
+        ts = make_ticket_state(
+            status="in_review",
+            slug="PROJ-1-slug",
+            prs=[{"repo": "r", "id": 1, "url": "http://u"}],
+        )
+
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.ticket_worktree_path", return_value=repo), \
+             patch("features.tickets.log"):
+            tickets._resolve_conflicts(fake_config, make_ticket(), ts, "http://base")
+
+        assert (repo / "a.txt").read_text() == "one\n", (
+            "observed live on atropos 2026-07-07 (DSC-127 analysis_dev#589): stray "
+            "uncommitted edits make `git merge` refuse to start, surfacing as "
+            "'no conflicted files found' until the attempts cap; the worktree must "
+            "be reset to HEAD before conflict resolution"
+        )
+
+
 class TestHasConflictingPr:
     def test_no_prs_returns_false(self, fake_config):
         assert tickets._has_conflicting_pr(fake_config, {"prs": []}) is False
@@ -2386,7 +2422,7 @@ class TestRecheckPrFailedConflictLoop:
             f"if mergeable=CONFLICTING. got: {result['status']}"
         )
 
-    def test_mixed_one_conflicting_one_healthy_recovers(self, fake_config):
+    def test_mixed_one_conflicting_one_healthy_stays_pr_failed(self, fake_config):
         ts = make_ticket_state(
             status="pr_failed",
             prs=[
@@ -2407,10 +2443,14 @@ class TestRecheckPrFailedConflictLoop:
         with patch("features.tickets.make_platform", return_value=mock_platform), \
              patch("features.tickets.log"):
             result = tickets._recheck_pr_failed(fake_config, self._ticket(), ts, "http://b")
-        assert result["status"] == "in_review", (
-            "at least one PR is healthy (not CONFLICTING); recover so the "
-            f"normal in_review loop picks the ticket back up. got: {result['status']}"
+        assert result["status"] == "pr_failed", (
+            "observed live on atropos 2026-07-07 (DSC-127): recovering on 'any "
+            "healthy open PR' resets the attempts counter while the conflicted "
+            "PR is unchanged, so the ticket bounces in_review ↔ pr_failed every "
+            "scan; stay parked until NO open PR is conflicting. "
+            f"got: {result['status']}"
         )
+        assert result.get("conflict_resolution_attempts") == 2
 
 
 class TestResolveStatusInvalidEntry:
