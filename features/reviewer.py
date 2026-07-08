@@ -59,7 +59,7 @@ REVIEW_RETRY_COOLDOWN_SECONDS = 60 * 60
 JSON_OUTPUT_SCHEMA = (
     'OUTPUT FORMAT: Return a single JSON object (no markdown fences, no explanation) with this schema:\n'
     '{"verdict":"approved"|"changes_requested","author":"...","source_branch":"...","destination_branch":"...",'
-    '"date":"YYYY-MM-DD","summary":"...","issues":[{"severity":"blocking"|"suggestion"|"question",'
+    '"date":"YYYY-MM-DD","summary":"...","issues":[{"repo":"repository-name","severity":"blocking"|"suggestion"|"question",'
     '"path":"file/path","line":123,"start_line":120,"body":"markdown description"}],'
     '"blocking_summary":["..."],"suggestions_summary":["..."],"questions_summary":["..."]}\n'
 )
@@ -118,6 +118,11 @@ def review_pr(config: dict, platform, pr: dict, ticket_context: str = "",
         merged["issues"] = _simplify_all_issues(merged["issues"])
         merged["issues"] = _style_match_all(config, merged["issues"])
 
+    _write_review_artifacts(config, pr, merged, diff_text)
+    return merged
+
+
+def _write_review_artifacts(config, pr, merged: dict, diff_text: str) -> None:
     branch_slug = pr["branch"].replace("/", "-") if pr.get("branch") else f"pr-{pr['id']}"
     review_dir = config["_state_dir"] / "reviews" / pr["repo"] / branch_slug
     review_dir.mkdir(parents=True, exist_ok=True)
@@ -129,7 +134,7 @@ def review_pr(config: dict, platform, pr: dict, ticket_context: str = "",
 
     queued = [
         {
-            "pr_id": pr["id"], "repo": pr["repo"], "pr_url": pr["url"],
+            "pr_id": pr["id"], "repo": pr["repo"], "pr_url": pr.get("url", ""),
             "path": issue.get("path"), "line": issue.get("line"),
             "body": issue["body"], "severity": issue.get("severity", "suggestion"),
             "persona": issue.get("persona", ""), "status": "pending",
@@ -137,8 +142,6 @@ def review_pr(config: dict, platform, pr: dict, ticket_context: str = "",
         for issue in merged.get("issues", [])
     ]
     (review_dir / "queued_comments.json").write_text(json.dumps(queued, indent=2))
-
-    return merged
 
 
 def _build_persona_prompt(persona_text, pr, diff_text, conventions, file_context, has_tools, ticket_context=""):
@@ -210,7 +213,7 @@ def _merge_reviews(results: list[tuple[str, dict]]) -> dict:
 
     merge_input = json.dumps({name: data for name, data in results}, indent=2)
     merge_prompt = (
-        "You are merging code review results from three reviewer personas that each looked at the same PR diff "
+        "You are merging code review results from three reviewer personas that each looked at the same change "
         "through a different lens. Below are the individual reviews as JSON.\n\n"
         "The personas:\n"
         "- spec: checked if the diff satisfies the ticket/PR requirements\n"
@@ -618,27 +621,153 @@ def _ticket_context_for(config, pr: dict, ticket_key: str, prs: list[dict],
     return "\n".join(parts)
 
 
+def _build_ticket_persona_prompt(persona_text, ticket_key, goal, sections, has_tools):
+    parts = [
+        f"You are reviewing ALL the pull requests of ticket {ticket_key} together, as one change. "
+        "The PRs may span multiple repositories; every PR's diff is below. Review the change as a "
+        "whole: a requirement satisfied in any of the PRs is satisfied, and inconsistencies between "
+        "PRs (mismatched API contracts, producer/consumer drift) are issues.\n",
+        persona_text + "\n",
+        JSON_OUTPUT_SCHEMA, LINE_NUMBER_RULES, BODY_RULES,
+        'Every issue MUST carry a "repo" field naming the repository it anchors to, and its "path" '
+        "must be a file present in that repository's diff below.\n",
+    ]
+    if goal:
+        parts.append(f"--- TICKET GOAL ---\n{goal}\n--- END TICKET GOAL ---\n")
+    if has_tools:
+        parts.append("You have read-only access to checkouts of the repositories; each PR section "
+                     "notes its worktree path. Use your tools with those absolute paths to verify "
+                     "issues when the diffs alone are ambiguous.\n")
+    parts.extend(sections)
+    parts.append("\nIMPORTANT: Your entire response must be the JSON object and nothing else. No summary, no explanation, no markdown fences.")
+    return "\n".join(parts)
+
+
+def _split_issues_by_pr(issues: list[dict], prs: list[dict], diffs: dict[str, str]) -> dict[str, list[dict]]:
+    """Attribute each merged issue to one PR: by its 'repo' field when the path
+    matches that repo's diff, else by unique path match across diffs. Issues
+    that fit nowhere are dropped (logged) rather than posted to the wrong PR."""
+    paths_by_key = {
+        f"{p['repo']}/{p['id']}": set(_extract_changed_paths(diffs.get(f"{p['repo']}/{p['id']}", "")))
+        for p in prs
+    }
+    key_by_repo = {p["repo"]: f"{p['repo']}/{p['id']}" for p in prs}
+    out: dict[str, list[dict]] = {k: [] for k in paths_by_key}
+    for issue in issues:
+        path = issue.get("path") or ""
+        key = key_by_repo.get(issue.get("repo") or "")
+        if key and (not path or path in paths_by_key[key]):
+            out[key].append(issue)
+            continue
+        matches = [k for k, ps in paths_by_key.items() if path and path in ps]
+        if len(matches) == 1:
+            out[matches[0]].append(issue)
+            continue
+        if key:
+            out[key].append(issue)
+            continue
+        log.emit("review_issue_unattributed",
+                 f"Dropped review issue that matched no PR: {path or '(no path)'}",
+                 meta={"path": path, "repo": issue.get("repo", ""), "body": issue.get("body", "")[:200]})
+    return out
+
+
+def review_ticket(config: dict, ticket_key: str, prs: list[dict]) -> dict[str, dict | None]:
+    """Single persona pass over the combined diffs of all the ticket's PRs.
+    Returns {repo/id: per-PR merged review or None} and writes each PR's
+    review artifacts, so the per-PR pages and comment queues work unchanged."""
+    platform = make_platform(config)
+    diffs = _fetch_ticket_diffs(platform, prs)
+    none_result: dict[str, dict | None] = {f"{p['repo']}/{p['id']}": None for p in prs}
+    live = [p for p in prs if diffs.get(f"{p['repo']}/{p['id']}")]
+    if not live:
+        return none_result
+
+    goal = presentation.resolve_ticket_goal(
+        config, live[0].get("branch", ""), live[0]["repo"], live[0]["id"])
+    worktrees, sections = {}, []
+    for pr in live:
+        key = f"{pr['repo']}/{pr['id']}"
+        wt = _ensure_review_worktree(config, pr)
+        worktrees[key] = wt
+        d = diffs[key]
+        if len(d) > SIBLING_DIFF_CHAR_CAP:
+            d = d[:SIBLING_DIFF_CHAR_CAP] + "\n... [diff truncated]"
+        conv = _load_conventions(config, pr["repo"])
+        fctx = _read_changed_files(diffs[key], wt) if wt else ""
+        sec = [f"=== PR #{pr['id']} in repository '{pr['repo']}' (branch: {pr.get('branch', '')}) ==="]
+        if wt:
+            sec.append(f"worktree (read-only checkout): {wt}")
+        if conv:
+            sec.append(f"--- CONVENTIONS ({pr['repo']}) ---\n{conv}\n--- END CONVENTIONS ---")
+        if fctx:
+            sec.append(f"--- CHANGED FILES ({pr['repo']}) ---\n{fctx}\n--- END CHANGED FILES ---")
+        sec.append(f"--- DIFF ({key}) ---\n{d}\n--- DIFF END ---")
+        sections.append("\n".join(sec))
+
+    has_tools = any(worktrees.values())
+    cwd = config["_state_dir"] / "reviews"
+    cwd.mkdir(parents=True, exist_ok=True)
+    tasks = []
+    for persona_name, persona_text in PERSONAS.items():
+        prompt = _build_ticket_persona_prompt(persona_text, ticket_key, goal, sections, has_tools)
+        tasks.append((persona_name, prompt, cwd if has_tools else None))
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        persona_results = list(pool.map(_run_single_persona, tasks))
+    successful = [(name, data) for name, data in persona_results if data is not None]
+    if not successful:
+        return none_result
+
+    merged = _merge_reviews(successful)
+    issues_by_key = _split_issues_by_pr(merged.get("issues", []), live, diffs)
+    results: dict[str, dict | None] = dict(none_result)
+    shared = {k: v for k, v in merged.items() if k != "issues"}
+    for pr in live:
+        key = f"{pr['repo']}/{pr['id']}"
+        issues = issues_by_key.get(key, [])
+        if issues:
+            issues = _validate_issues(issues, worktrees[key])
+            issues = _simplify_all_issues(issues)
+            issues = _style_match_all(config, issues)
+        per = {
+            **shared,
+            "issues": issues,
+            "verdict": "changes_requested" if any(i.get("severity") == "blocking" for i in issues) else "approved",
+            "source_branch": pr.get("branch") or shared.get("source_branch", ""),
+        }
+        _write_review_artifacts(config, pr, per, diffs[key])
+        results[key] = per
+    return results
+
+
 def review_ticket_prs(config: dict, ticket_key: str, prs: list[dict]) -> list[dict]:
     platform = make_platform(config)
     review_state = state.load("reviews")
     base_url = config["_base_url"]
     failed_prs: list[dict] = []
-    diffs = _fetch_ticket_diffs(platform, prs)
+
+    if ticket_key == "__no_ticket__":
+        results = {}
+        for pr in prs:
+            pr_key = f"{pr['repo']}/{pr['id']}"
+            re_review = review_state.get(pr_key, {}).get("reviewed", False)
+            label = "Re-reviewing" if re_review else "Reviewing"
+            log.emit("review_started", f"{label} PR #{pr['id']} in {pr['repo']}",
+                links={"pr": pr["url"], "detail": f"{base_url}/reviews/{pr['repo']}/{pr['id']}"},
+                meta={"repo": pr["repo"], "pr_id": pr["id"], "ticket": ticket_key, "re_review": re_review})
+            ticket_context = _ticket_context_for(config, pr, ticket_key, prs, {})
+            results[pr_key] = review_pr(config, platform, pr, ticket_context=ticket_context)
+    else:
+        log.emit("review_started",
+            f"Reviewing ticket {ticket_key}: {len(prs)} PR(s) as one change",
+            links={"detail": f"{base_url}/reviews/{prs[0]['repo']}/{prs[0]['id']}"},
+            meta={"ticket": ticket_key, "prs": [f"{p['repo']}/{p['id']}" for p in prs]})
+        results = review_ticket(config, ticket_key, prs)
 
     for pr in prs:
         pr_key = f"{pr['repo']}/{pr['id']}"
-        existing = review_state.get(pr_key, {})
         head_sha = pr.get("head_sha", "")
-
-        re_review = existing.get("reviewed", False)
-        label = "Re-reviewing" if re_review else "Reviewing"
-        log.emit("review_started", f"{label} PR #{pr['id']} in {pr['repo']} (ticket: {ticket_key})",
-            links={"pr": pr["url"], "detail": f"{base_url}/reviews/{pr['repo']}/{pr['id']}"},
-            meta={"repo": pr["repo"], "pr_id": pr["id"], "ticket": ticket_key, "re_review": re_review})
-
-        ticket_context = _ticket_context_for(config, pr, ticket_key, prs, diffs)
-        result = review_pr(config, platform, pr, ticket_context=ticket_context,
-                           prefetched_diff=diffs.get(pr_key))
+        result = results.get(pr_key)
         if result:
             review_state[pr_key] = {
                 "reviewed": True,

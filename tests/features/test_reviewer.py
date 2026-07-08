@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 import time
@@ -430,14 +431,14 @@ class TestCheckPersistsReviews:
         assert saved["myrepo/7"]["reviewed"] is True
 
 class TestReviewTicketPrsPersistence:
-    def test_persists_when_later_pr_returns_none(self, tmp_state, tmp_log):
+    def test_persists_reviewed_prs_and_fails_unreviewed(self, tmp_state, tmp_log):
         pr_a = make_pr(repo="r", id=1, branch="b1", url="u1", head_sha="sha-a")
         pr_b = make_pr(repo="r", id=2, branch="b2", url="u2", head_sha="sha-b")
         config = {"_state_dir": tmp_state, "_base_url": "http://localhost"}
         ok = {"verdict": "approved", "issues": []}
 
         with patch("features.reviewer.make_platform", return_value=MagicMock()), \
-             patch("features.reviewer.review_pr", side_effect=[ok, None]), \
+             patch("features.reviewer.review_ticket", return_value={"r/1": ok, "r/2": None}), \
              patch("features.reviewer.time.time", return_value=1234.0):
             failed = reviewer.review_ticket_prs(config, "JIRA-1", [pr_a, pr_b])
 
@@ -448,25 +449,112 @@ class TestReviewTicketPrsPersistence:
         assert saved["r/1"]["last_head_sha"] == "sha-a"
         assert "r/2" not in saved
 
-    def test_persists_when_later_pr_raises(self, tmp_state, tmp_log):
+    def test_no_ticket_bucket_reviews_prs_individually(self, tmp_state, tmp_log):
         pr_a = make_pr(repo="r", id=1, branch="b1", url="u1", head_sha="sha-a")
-        pr_b = make_pr(repo="r", id=2, branch="b2", url="u2", head_sha="sha-b")
+        pr_b = make_pr(repo="r2", id=2, branch="b2", url="u2", head_sha="sha-b")
         config = {"_state_dir": tmp_state, "_base_url": "http://localhost"}
         ok = {"verdict": "approved", "issues": []}
 
-        def fake_review_pr(config, platform, pr, **kwargs):
-            if pr["id"] == 1:
-                return ok
-            raise RuntimeError("rate limit")
+        with patch("features.reviewer.make_platform", return_value=MagicMock()), \
+             patch("features.reviewer.review_pr", return_value=ok) as mock_review, \
+             patch("features.reviewer.review_ticket") as mock_ticket, \
+             patch("features.reviewer._ticket_context_for", return_value="goal"), \
+             patch("features.reviewer.time.time", return_value=1234.0):
+            failed = reviewer.review_ticket_prs(config, "__no_ticket__", [pr_a, pr_b])
+
+        assert failed == []
+        assert mock_review.call_count == 2
+        mock_ticket.assert_not_called()
+        saved = state.load("reviews")
+        assert saved["r/1"]["reviewed"] is True and saved["r2/2"]["reviewed"] is True
+
+    def test_ticket_reviewed_in_single_pass(self, tmp_state, tmp_log):
+        pr_a = make_pr(repo="r", id=1, branch="b1", url="u1", head_sha="sha-a")
+        pr_b = make_pr(repo="r2", id=2, branch="b2", url="u2", head_sha="sha-b")
+        config = {"_state_dir": tmp_state, "_base_url": "http://localhost"}
+        ok = {"verdict": "approved", "issues": []}
 
         with patch("features.reviewer.make_platform", return_value=MagicMock()), \
-             patch("features.reviewer.review_pr", side_effect=fake_review_pr), \
+             patch("features.reviewer.review_pr") as mock_review, \
+             patch("features.reviewer.review_ticket", return_value={"r/1": ok, "r2/2": ok}) as mock_ticket, \
              patch("features.reviewer.time.time", return_value=1234.0):
-            with pytest.raises(RuntimeError, match="rate limit"):
-                reviewer.review_ticket_prs(config, "JIRA-1", [pr_a, pr_b])
+            failed = reviewer.review_ticket_prs(config, "JIRA-1", [pr_a, pr_b])
 
+        assert failed == []
+        mock_ticket.assert_called_once()
+        mock_review.assert_not_called()
         saved = state.load("reviews")
-        assert "r/1" in saved, "PR_A state lost when loop raised on PR_B"
-        assert saved["r/1"]["reviewed"] is True
-        assert saved["r/1"]["last_head_sha"] == "sha-a"
-        assert "r/2" not in saved
+        assert saved["r/1"]["reviewed"] is True and saved["r2/2"]["reviewed"] is True
+
+
+class TestSplitIssuesByPr:
+    def _setup(self):
+        prs = [{"repo": "backend", "id": 1}, {"repo": "frontend", "id": 2}]
+        diffs = {
+            "backend/1": "diff --git a/api/views.py b/api/views.py\n+x\n",
+            "frontend/2": "diff --git a/src/App.tsx b/src/App.tsx\n+y\n",
+        }
+        return prs, diffs
+
+    def test_attributes_by_repo_field(self):
+        prs, diffs = self._setup()
+        issues = [{"repo": "backend", "path": "api/views.py", "body": "a"},
+                  {"repo": "frontend", "path": "src/App.tsx", "body": "b"}]
+        out = reviewer._split_issues_by_pr(issues, prs, diffs)
+        assert [i["body"] for i in out["backend/1"]] == ["a"]
+        assert [i["body"] for i in out["frontend/2"]] == ["b"]
+
+    def test_falls_back_to_unique_path_match(self):
+        prs, diffs = self._setup()
+        issues = [{"repo": "", "path": "src/App.tsx", "body": "b"}]
+        out = reviewer._split_issues_by_pr(issues, prs, diffs)
+        assert [i["body"] for i in out["frontend/2"]] == ["b"]
+        assert out["backend/1"] == []
+
+    def test_drops_unattributable_issue(self, tmp_log):
+        prs, diffs = self._setup()
+        issues = [{"repo": "", "path": "nowhere.py", "body": "x"}]
+        out = reviewer._split_issues_by_pr(issues, prs, diffs)
+        assert out["backend/1"] == [] and out["frontend/2"] == []
+
+    def test_wrong_path_stays_with_named_repo(self):
+        prs, diffs = self._setup()
+        issues = [{"repo": "backend", "path": "not/in/diff.py", "body": "x"}]
+        out = reviewer._split_issues_by_pr(issues, prs, diffs)
+        assert [i["body"] for i in out["backend/1"]] == ["x"]
+
+
+class TestReviewTicket:
+    def test_single_pass_splits_and_writes_artifacts(self, tmp_state, tmp_log):
+        prs = [{"repo": "backend", "id": 1, "branch": "JIRA-9-x", "url": "u1"},
+               {"repo": "frontend", "id": 2, "branch": "JIRA-9-x", "url": "u2"}]
+        diffs = {"backend/1": "diff --git a/api/views.py b/api/views.py\n+x\n",
+                 "frontend/2": "diff --git a/src/App.tsx b/src/App.tsx\n+y\n"}
+        persona_data = {
+            "verdict": "changes_requested", "summary": "s", "date": "2026-01-01",
+            "issues": [{"repo": "backend", "path": "api/views.py", "line": 1,
+                        "severity": "blocking", "body": "bad"}],
+        }
+        config = {"_state_dir": tmp_state, "_base_url": "http://localhost"}
+
+        with patch("features.reviewer.make_platform", return_value=MagicMock()), \
+             patch("features.reviewer._fetch_ticket_diffs", return_value=diffs), \
+             patch("features.reviewer.presentation.resolve_ticket_goal", return_value="the goal"), \
+             patch("features.reviewer._ensure_review_worktree", return_value=None), \
+             patch("features.reviewer._load_conventions", return_value=""), \
+             patch("features.reviewer._run_single_persona",
+                   side_effect=lambda args: (args[0], dict(persona_data))), \
+             patch("features.reviewer._merge_reviews", return_value=dict(persona_data)), \
+             patch("features.reviewer._simplify_all_issues", side_effect=lambda i: i), \
+             patch("features.reviewer._style_match_all", side_effect=lambda c, i: i):
+            results = reviewer.review_ticket(config, "JIRA-9", prs)
+
+        assert results["backend/1"]["verdict"] == "changes_requested"
+        assert len(results["backend/1"]["issues"]) == 1
+        assert results["frontend/2"]["verdict"] == "approved"
+        assert results["frontend/2"]["issues"] == []
+        backend_review = tmp_state / "reviews" / "backend" / "JIRA-9-x" / "review.json"
+        frontend_review = tmp_state / "reviews" / "frontend" / "JIRA-9-x" / "review.json"
+        assert backend_review.exists() and frontend_review.exists()
+        queued = json.loads((tmp_state / "reviews" / "backend" / "JIRA-9-x" / "queued_comments.json").read_text())
+        assert len(queued) == 1 and queued[0]["path"] == "api/views.py"

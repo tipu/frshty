@@ -153,61 +153,41 @@ def api_rerun_review(repo: str, pr_id: int):
     branch = review_data.get("source_branch", "") or branch_dir.name
     pr_url = (comments[0].get("pr_url", "") if comments else "") or review_data.get("pr_url", "")
 
-    key = (repo, pr_id)
-    with _rerun_inflight_lock:
-        if key in _rerun_inflight:
-            return {"status": "in_progress"}
-        _rerun_inflight.add(key)
-
-    pr = {"id": pr_id, "repo": repo, "url": pr_url, "branch": branch,
-          "base": "", "title": "", "author": "", "created_on": "", "updated_on": ""}
     cfg = active_config()
-    base_url = cfg["_base_url"]
+    m = re.search(r"[A-Za-z]+-\d+", branch)
+    ticket_key = m.group().upper() if m else "__no_ticket__"
+    prs = _stored_prs_for_ticket(cfg["_state_dir"], ticket_key) if ticket_key != "__no_ticket__" else []
+    if not any(p["repo"] == repo and p["id"] == pr_id for p in prs):
+        prs.append({"repo": repo, "id": pr_id, "branch": branch, "url": pr_url, "head_sha": ""})
+
+    keys = [(p["repo"], p["id"]) for p in prs]
+    with _rerun_inflight_lock:
+        if any(k in _rerun_inflight for k in keys):
+            return {"status": "in_progress"}
+        _rerun_inflight.update(keys)
 
     def rerun_in_background():
         state.use(cfg["_state_dir"])
         log.use(cfg["_state_dir"], cfg["job"]["key"])
         try:
             platform = make_platform(cfg)
-            m = re.search(r"[A-Za-z]+-\d+", branch)
-            ticket_key = m.group().upper() if m else "__no_ticket__"
-            prs = _stored_prs_for_ticket(cfg["_state_dir"], ticket_key) if ticket_key != "__no_ticket__" else []
-            if not any(p["repo"] == repo and p["id"] == pr_id for p in prs):
-                prs.append({"repo": repo, "id": pr_id, "branch": branch, "url": pr_url, "head_sha": ""})
             for p in prs:
                 review_store.populate_repo_cache(platform, cfg["_state_dir"], p["repo"])
-            diffs = reviewer._fetch_ticket_diffs(platform, prs)
-            ticket_context = reviewer._ticket_context_for(cfg, pr, ticket_key, prs, diffs)
-            log.emit("review_started", f"Re-reviewing {repo} PR #{pr_id} (manual refresh)",
-                links={"pr": pr_url, "detail": f"{base_url}/reviews/{repo}/{pr_id}"},
-                meta={"repo": repo, "pr_id": pr_id, "ticket": ticket_key, "re_review": True})
-            result = reviewer.review_pr(cfg, platform, pr, ticket_context=ticket_context,
-                                        prefetched_diff=diffs.get(f"{repo}/{pr_id}"))
-            if result:
-                for name in ("walkthrough_cache.json", "presentation_cache.json",
-                             "presentation_meta.json", "file_summaries.json"):
-                    (branch_dir / name).unlink(missing_ok=True)
-                review_state = state.load("reviews")
-                review_state[f"{repo}/{pr_id}"] = {"reviewed": True, "branch": branch,
-                                                   "ticket": ticket_key,
-                                                   "last_updated": pr.get("updated_on")}
-                state.save("reviews", review_state)
-                issues = result.get("issues", [])
-                log.emit("review_complete", f"{repo}#{pr_id}: Re-review done — {result.get('verdict', 'unknown')}, {len(issues)} issues",
-                    links={"pr": pr_url, "detail": f"{base_url}/reviews/{repo}/{pr_id}"},
-                    meta={"repo": repo, "pr_id": pr_id, "verdict": result.get("verdict"), "issue_count": len(issues)})
-            else:
-                log.emit("cycle_error", f"Manual re-review failed for {repo} PR #{pr_id}",
-                    meta={"repo": repo, "pr_id": pr_id})
+                f = review_store.find_review(cfg["_state_dir"], p["repo"], p["id"])
+                if f:
+                    for name in ("walkthrough_cache.json", "presentation_cache.json",
+                                 "presentation_meta.json", "file_summaries.json"):
+                        (f[0] / name).unlink(missing_ok=True)
+            reviewer.review_ticket_prs(cfg, ticket_key, prs)
         except Exception as e:
             log.emit("cycle_error", f"Manual re-review crashed for {repo} PR #{pr_id}: {type(e).__name__}: {e}",
                 meta={"repo": repo, "pr_id": pr_id})
         finally:
             with _rerun_inflight_lock:
-                _rerun_inflight.discard(key)
+                _rerun_inflight.difference_update(keys)
 
     threading.Thread(target=rerun_in_background, daemon=True).start()
-    return {"status": "started", "repo": repo, "pr_id": pr_id}
+    return {"status": "started", "repo": repo, "pr_id": pr_id, "ticket": ticket_key, "pr_count": len(prs)}
 
 
 @router.put("/api/settings")
