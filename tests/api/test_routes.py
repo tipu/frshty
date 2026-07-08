@@ -396,3 +396,43 @@ class TestReviews:
         data = resp.json()
         assert data["pr_id"] == 123
         assert data["repo"] == "org/repo"
+
+
+class TestRerunReview:
+    def test_rerun_missing_review_404(self, client):
+        resp = client.post("/api/reviews/norepo/999/rerun")
+        assert resp.status_code == 404
+
+    def test_rerun_starts_background_review(self, client, tmp_path):
+        branch_dir = tmp_path / "reviews" / "myrepo" / "JIRA-7-branch"
+        branch_dir.mkdir(parents=True)
+        (branch_dir / "queued_comments.json").write_text(json.dumps(
+            [{"pr_id": 5, "repo": "myrepo", "pr_url": "http://pr/5", "status": "pending"}]))
+        (branch_dir / "review.json").write_text(json.dumps(
+            {"source_branch": "JIRA-7-branch", "pr_url": "http://pr/5", "pr_id": 5}))
+        with patch("web.reviews.threading.Thread") as mock_thread:
+            mock_thread.return_value = MagicMock()
+            resp = client.post("/api/reviews/myrepo/5/rerun")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "started"
+        mock_thread.assert_called_once()
+
+    def test_rerun_inflight_reported_in_info(self, client, tmp_path):
+        import web.reviews as wr
+        branch_dir = tmp_path / "reviews" / "myrepo" / "JIRA-8-branch"
+        branch_dir.mkdir(parents=True)
+        (branch_dir / "queued_comments.json").write_text(json.dumps(
+            [{"pr_id": 6, "repo": "myrepo", "pr_url": "http://pr/6", "status": "pending"}]))
+        (branch_dir / "review.json").write_text(json.dumps({"source_branch": "JIRA-8-branch"}))
+        with wr._rerun_inflight_lock:
+            wr._rerun_inflight.add(("myrepo", 6))
+        try:
+            with patch("web.reviews.make_platform", return_value=MagicMock()), \
+                 patch("web.reviews.make_ticket_system", return_value=None):
+                resp = client.get("/api/reviews/myrepo/6/info")
+            assert resp.json()["rerunning"] is True
+            resp = client.post("/api/reviews/myrepo/6/rerun")
+            assert resp.json()["status"] == "in_progress"
+        finally:
+            with wr._rerun_inflight_lock:
+                wr._rerun_inflight.discard(("myrepo", 6))

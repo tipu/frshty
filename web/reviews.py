@@ -92,13 +92,11 @@ def api_submit_review(body: dict):
     return {"status": "started", "repo": full_repo, "pr_id": pr_id}
 
 
-@router.post("/api/reviews/rerun-ticket/{ticket_key}")
-def api_rerun_ticket_review(ticket_key: str):
+def _stored_prs_for_ticket(ticket_key: str) -> list[dict]:
     reviews_dir = _config["_state_dir"] / "reviews"
-    if not reviews_dir.exists():
-        return JSONResponse({"error": "No reviews found"}, status_code=404)
-
     prs = []
+    if not reviews_dir.exists():
+        return prs
     for repo_dir in reviews_dir.iterdir():
         if not repo_dir.is_dir():
             continue
@@ -127,12 +125,86 @@ def api_rerun_ticket_review(ticket_key: str):
                             })
                 except (json.JSONDecodeError, IndexError, KeyError, TypeError):
                     pass
+    return prs
 
+
+@router.post("/api/reviews/rerun-ticket/{ticket_key}")
+def api_rerun_ticket_review(ticket_key: str):
+    prs = _stored_prs_for_ticket(ticket_key)
     if not prs:
         return JSONResponse({"error": f"No pending reviews found for {ticket_key}"}, status_code=404)
 
     reviewer.review_ticket_prs(_config, ticket_key, prs)
     return {"status": "review_started", "ticket": ticket_key, "pr_count": len(prs)}
+
+
+_rerun_inflight: set[tuple[str, int]] = set()
+_rerun_inflight_lock = threading.Lock()
+
+
+@router.post("/api/reviews/{repo}/{pr_id}/rerun")
+def api_rerun_review(repo: str, pr_id: int):
+    found = review_store.find_review(_config["_state_dir"], repo, pr_id)
+    if not found:
+        return JSONResponse({"error": "review not found"}, status_code=404)
+    branch_dir, comments, _ = found
+    review_json = branch_dir / "review.json"
+    review_data = json.loads(review_json.read_text()) if review_json.exists() else {}
+    branch = review_data.get("source_branch", "") or branch_dir.name
+    pr_url = (comments[0].get("pr_url", "") if comments else "") or review_data.get("pr_url", "")
+
+    key = (repo, pr_id)
+    with _rerun_inflight_lock:
+        if key in _rerun_inflight:
+            return {"status": "in_progress"}
+        _rerun_inflight.add(key)
+
+    pr = {"id": pr_id, "repo": repo, "url": pr_url, "branch": branch,
+          "base": "", "title": "", "author": "", "created_on": "", "updated_on": ""}
+    base_url = _config["_base_url"]
+
+    def rerun_in_background():
+        try:
+            platform = make_platform(_config)
+            m = re.search(r"[A-Za-z]+-\d+", branch)
+            ticket_key = m.group().upper() if m else "__no_ticket__"
+            prs = _stored_prs_for_ticket(ticket_key) if ticket_key != "__no_ticket__" else []
+            if not any(p["repo"] == repo and p["id"] == pr_id for p in prs):
+                prs.append({"repo": repo, "id": pr_id, "branch": branch, "url": pr_url, "head_sha": ""})
+            for p in prs:
+                review_store.populate_repo_cache(platform, _config["_state_dir"], p["repo"])
+            diffs = reviewer._fetch_ticket_diffs(platform, prs)
+            ticket_context = reviewer._ticket_context_for(_config, pr, ticket_key, prs, diffs)
+            log.emit("review_started", f"Re-reviewing {repo} PR #{pr_id} (manual refresh)",
+                links={"pr": pr_url, "detail": f"{base_url}/reviews/{repo}/{pr_id}"},
+                meta={"repo": repo, "pr_id": pr_id, "ticket": ticket_key, "re_review": True})
+            result = reviewer.review_pr(_config, platform, pr, ticket_context=ticket_context,
+                                        prefetched_diff=diffs.get(f"{repo}/{pr_id}"))
+            if result:
+                for name in ("walkthrough_cache.json", "presentation_cache.json",
+                             "presentation_meta.json", "file_summaries.json"):
+                    (branch_dir / name).unlink(missing_ok=True)
+                review_state = state.load("reviews")
+                review_state[f"{repo}/{pr_id}"] = {"reviewed": True, "branch": branch,
+                                                   "ticket": ticket_key,
+                                                   "last_updated": pr.get("updated_on")}
+                state.save("reviews", review_state)
+                issues = result.get("issues", [])
+                log.emit("review_complete", f"{repo}#{pr_id}: Re-review done — {result.get('verdict', 'unknown')}, {len(issues)} issues",
+                    links={"pr": pr_url, "detail": f"{base_url}/reviews/{repo}/{pr_id}"},
+                    meta={"repo": repo, "pr_id": pr_id, "verdict": result.get("verdict"), "issue_count": len(issues)})
+            else:
+                log.emit("cycle_error", f"Manual re-review failed for {repo} PR #{pr_id}",
+                    meta={"repo": repo, "pr_id": pr_id})
+        except Exception as e:
+            log.emit("cycle_error", f"Manual re-review crashed for {repo} PR #{pr_id}: {type(e).__name__}: {e}",
+                meta={"repo": repo, "pr_id": pr_id})
+        finally:
+            with _rerun_inflight_lock:
+                _rerun_inflight.discard(key)
+
+    threading.Thread(target=rerun_in_background, daemon=True).start()
+    return {"status": "started", "repo": repo, "pr_id": pr_id}
 
 
 @router.put("/api/settings")
@@ -246,6 +318,8 @@ def api_review_info(repo: str, pr_id: int):
                 ticket_url = ts.ticket_url(ticket_key)
     result["ticket_key"] = ticket_key
     result["ticket_url"] = ticket_url
+    with _rerun_inflight_lock:
+        result["rerunning"] = (repo, pr_id) in _rerun_inflight
     platform = make_platform(_config)
     try:
         pr_info = platform.get_pr_info(repo, pr_id)
