@@ -119,6 +119,49 @@ def mark_comment_processing(
         )
 
 
+def mark_comment_deferred(
+    instance_key: str,
+    resource_type: str,
+    resource_id: str,
+    comment_id: str,
+    edited_at: str | None = None,
+) -> None:
+    """Park a comment in the debounce pool awaiting a batched fix."""
+    now = datetime.now(timezone.utc).isoformat()
+
+    with db.tx() as conn:
+        conn.execute(
+            """
+            INSERT INTO comment_state (
+                instance_key, resource_type, resource_id, comment_id,
+                comment_edited_at, last_checked_at, state
+            )
+            VALUES (?, ?, ?, ?, ?, ?, 'deferred')
+            ON CONFLICT(instance_key, resource_type, resource_id, comment_id)
+            DO UPDATE SET state = 'deferred', last_checked_at = ?, comment_edited_at = ?
+            """,
+            (instance_key, resource_type, resource_id, comment_id, edited_at, now, now, edited_at),
+        )
+
+
+def get_deferred_comments(
+    instance_key: str,
+    resource_type: str,
+    resource_id: str,
+) -> list[dict]:
+    """Get all comments parked in the debounce pool for a resource."""
+    return db.query_all(
+        """
+        SELECT comment_id, comment_edited_at, state, error_count, last_checked_at
+        FROM comment_state
+        WHERE instance_key = ? AND resource_type = ? AND resource_id = ?
+        AND state = 'deferred'
+        ORDER BY comment_edited_at ASC
+        """,
+        (instance_key, resource_type, resource_id),
+    )
+
+
 def mark_comment_processed(
     instance_key: str,
     resource_type: str,

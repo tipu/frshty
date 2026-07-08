@@ -16,6 +16,13 @@ def fix_pr_comment(ctx: TaskContext) -> TaskResult:
     return TaskResult("ok") if ok else TaskResult("failed", reason)
 
 
+@task("fix_pr_comments", preconditions=[feature_enabled("review_prs")], timeout=1800)
+def fix_pr_comments(ctx: TaskContext) -> TaskResult:
+    from features import own_prs
+    ok, reason = own_prs.fix_comments_batch(ctx.config, ctx.payload)
+    return TaskResult("ok", reason or "") if ok else TaskResult("failed", reason)
+
+
 @task("poll_reviewer", preconditions=[feature_enabled("review_prs")], timeout=120)
 def poll_reviewer(ctx: TaskContext) -> TaskResult:
     from features import reviewer
