@@ -107,3 +107,34 @@ class TestEnabled:
 
     def test_flag_on(self):
         assert presentation.enabled({"features": {"presentations": True}})
+
+
+class TestResolveTicketGoal:
+    def _patches(self, own_ticket=None, system_ticket=None, pr_info=None):
+        from unittest.mock import patch, MagicMock
+        sys_mock = MagicMock()
+        sys_mock.fetch_ticket.return_value = system_ticket
+        platform = MagicMock()
+        platform.get_pr_info.return_value = pr_info or {}
+        return (
+            patch("core.state.load", return_value={"DEV-9": own_ticket} if own_ticket else {}),
+            patch("features.presentation.make_ticket_system",
+                  return_value=sys_mock if system_ticket is not None else None),
+            patch("features.presentation.make_platform", return_value=platform),
+        )
+
+    def test_prefers_own_ticket_state(self):
+        p1, p2, p3 = self._patches(own_ticket={"summary": "our goal", "description": ""})
+        with p1, p2, p3:
+            assert presentation.resolve_ticket_goal({}, "DEV-9-x", "r", 1) == "our goal"
+
+    def test_falls_back_to_ticket_system_for_foreign_tickets(self):
+        p1, p2, p3 = self._patches(system_ticket={"summary": "Chunk documents", "description": "Split uploads"})
+        with p1, p2, p3:
+            goal = presentation.resolve_ticket_goal({}, "jwd/dev-9-chunking", "r", 1)
+        assert goal == "DEV-9: Chunk documents\nSplit uploads"
+
+    def test_falls_back_to_pr_info_when_system_has_nothing(self):
+        p1, p2, p3 = self._patches(pr_info={"title": "the pr title", "description": "d"})
+        with p1, p2, p3:
+            assert presentation.resolve_ticket_goal({}, "jwd/dev-9-x", "r", 1) == "the pr title\nd"

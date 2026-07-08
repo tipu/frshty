@@ -48,6 +48,13 @@ class PRDTicketSystem:
     def get_comments(self, ticket_key: str) -> list[dict]:
         return []
 
+    def fetch_ticket(self, key: str) -> dict | None:
+        import core.state as state
+        ts = state.list_tickets().get(key)
+        if not ts:
+            return None
+        return {"key": key, "summary": ts.get("summary", ""), "description": ts.get("description", "")}
+
     def ticket_url(self, key: str) -> str:
         raise NotImplementedError("PRD tickets have no external ticket URL; implement ticket_url for PRDTicketSystem")
 
@@ -165,6 +172,25 @@ class JiraTicketSystem:
     def get_comments(self, ticket_key: str) -> list[dict]:
         return self.fetch_comments(ticket_key)
 
+    def fetch_ticket(self, key: str) -> dict | None:
+        if not self.base_url or not self.user or not self.token or not key:
+            return None
+        url = f"{self.base_url}/rest/api/3/issue/{key}?fields=summary,description"
+        try:
+            with external_log.client("jira", auth=(self.user, self.token), timeout=30) as client:
+                resp = client.get(url)
+                if resp.status_code != 200:
+                    return None
+                fields = resp.json().get("fields") or {}
+                return {
+                    "key": key,
+                    "summary": fields.get("summary", ""),
+                    "description": _adf_to_text(fields.get("description")),
+                }
+        except (httpx.HTTPError, httpx.TimeoutException) as e:
+            log.emit("jira_fetch_ticket_failed", f"Failed to fetch {key}: {e}", meta={"ticket": key})
+            return None
+
 
 class LinearTicketSystem:
     def __init__(self, config: dict):
@@ -230,6 +256,29 @@ class LinearTicketSystem:
                     "subtasks": subtasks,
                 })
             return results
+
+    def fetch_ticket(self, key: str) -> dict | None:
+        if not self.token or not key:
+            return None
+        query = 'query { issue(id: "%s") { identifier title description } }' % key
+        try:
+            with external_log.client("linear", timeout=30, transport=httpx.HTTPTransport(retries=2)) as client:
+                resp = client.post("https://api.linear.app/graphql",
+                    json={"query": query},
+                    headers={"Authorization": self.token, "Content-Type": "application/json"})
+                if resp.status_code != 200:
+                    return None
+                issue = (resp.json().get("data") or {}).get("issue") or {}
+                if not issue:
+                    return None
+                return {
+                    "key": issue.get("identifier", key),
+                    "summary": issue.get("title", ""),
+                    "description": issue.get("description", "") or "",
+                }
+        except (httpx.HTTPError, httpx.TimeoutException) as e:
+            log.emit("linear_fetch_ticket_failed", f"Failed to fetch {key}: {e}", meta={"ticket": key})
+            return None
 
     def fetch_state_history(self, ticket_key: str) -> list[dict]:
         if not self.token or not ticket_key:
