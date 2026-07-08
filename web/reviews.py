@@ -20,7 +20,7 @@ from core.config import get_repos
 from features.platforms import make_platform
 from features.ticket_systems import make_ticket_system
 from services import review_store
-from web.state import _config
+from web.state import _config, active_config
 
 
 router = APIRouter()
@@ -92,8 +92,8 @@ def api_submit_review(body: dict):
     return {"status": "started", "repo": full_repo, "pr_id": pr_id}
 
 
-def _stored_prs_for_ticket(ticket_key: str) -> list[dict]:
-    reviews_dir = _config["_state_dir"] / "reviews"
+def _stored_prs_for_ticket(state_dir, ticket_key: str) -> list[dict]:
+    reviews_dir = state_dir / "reviews"
     prs = []
     if not reviews_dir.exists():
         return prs
@@ -130,7 +130,7 @@ def _stored_prs_for_ticket(ticket_key: str) -> list[dict]:
 
 @router.post("/api/reviews/rerun-ticket/{ticket_key}")
 def api_rerun_ticket_review(ticket_key: str):
-    prs = _stored_prs_for_ticket(ticket_key)
+    prs = _stored_prs_for_ticket(_config["_state_dir"], ticket_key)
     if not prs:
         return JSONResponse({"error": f"No pending reviews found for {ticket_key}"}, status_code=404)
 
@@ -161,24 +161,27 @@ def api_rerun_review(repo: str, pr_id: int):
 
     pr = {"id": pr_id, "repo": repo, "url": pr_url, "branch": branch,
           "base": "", "title": "", "author": "", "created_on": "", "updated_on": ""}
-    base_url = _config["_base_url"]
+    cfg = active_config()
+    base_url = cfg["_base_url"]
 
     def rerun_in_background():
+        state.use(cfg["_state_dir"])
+        log.use(cfg["_state_dir"], cfg["job"]["key"])
         try:
-            platform = make_platform(_config)
+            platform = make_platform(cfg)
             m = re.search(r"[A-Za-z]+-\d+", branch)
             ticket_key = m.group().upper() if m else "__no_ticket__"
-            prs = _stored_prs_for_ticket(ticket_key) if ticket_key != "__no_ticket__" else []
+            prs = _stored_prs_for_ticket(cfg["_state_dir"], ticket_key) if ticket_key != "__no_ticket__" else []
             if not any(p["repo"] == repo and p["id"] == pr_id for p in prs):
                 prs.append({"repo": repo, "id": pr_id, "branch": branch, "url": pr_url, "head_sha": ""})
             for p in prs:
-                review_store.populate_repo_cache(platform, _config["_state_dir"], p["repo"])
+                review_store.populate_repo_cache(platform, cfg["_state_dir"], p["repo"])
             diffs = reviewer._fetch_ticket_diffs(platform, prs)
-            ticket_context = reviewer._ticket_context_for(_config, pr, ticket_key, prs, diffs)
+            ticket_context = reviewer._ticket_context_for(cfg, pr, ticket_key, prs, diffs)
             log.emit("review_started", f"Re-reviewing {repo} PR #{pr_id} (manual refresh)",
                 links={"pr": pr_url, "detail": f"{base_url}/reviews/{repo}/{pr_id}"},
                 meta={"repo": repo, "pr_id": pr_id, "ticket": ticket_key, "re_review": True})
-            result = reviewer.review_pr(_config, platform, pr, ticket_context=ticket_context,
+            result = reviewer.review_pr(cfg, platform, pr, ticket_context=ticket_context,
                                         prefetched_diff=diffs.get(f"{repo}/{pr_id}"))
             if result:
                 for name in ("walkthrough_cache.json", "presentation_cache.json",

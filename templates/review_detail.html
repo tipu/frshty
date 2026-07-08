@@ -375,6 +375,7 @@ frshtyApp({
             if (!confirm('Redo this review from scratch? Existing comments and drafts on this page will be regenerated.')) return;
             const r = await fetch(`/api/reviews/${repo}/${prId}/rerun`, {method: 'POST'});
             if (r.ok) { rerunning.value = true; pollRerun(); }
+            else { alert(`Re-review failed to start (HTTP ${r.status})`); }
         }
 
         function pollRerun() {

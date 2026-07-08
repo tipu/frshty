@@ -51,6 +51,14 @@ def primary_config() -> dict:
     return _primary_config
 
 
+def active_config() -> dict:
+    """The real config dict for the current request context. Capture this
+    BEFORE spawning a thread: contextvars don't propagate to new threads, so
+    _config inside a thread silently falls back to the primary instance."""
+    v = _cv_config.get()
+    return v if v else _primary_config
+
+
 def multi_apply_host(host: str | None):
     """Set per-instance contextvars from a Host header. Returns reset tokens or
     None when --multi is inactive or the host is unknown. Caller MUST pass the
