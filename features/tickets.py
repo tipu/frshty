@@ -1473,6 +1473,7 @@ def _summarize_pr_body(raw_body: str, ticket: dict) -> str:
         return f"Implemented {ticket['key']}: {ticket.get('summary', '')}"
     result = run_haiku(
         f"Summarize this PR description in 3-5 plain sentences. No bullet points, no headers, no markdown formatting. "
+        f"Write in Caterpillar Technical English: short sentences, active voice, one idea per sentence. "
         f"Just say what changed and why.\n\nTicket: {ticket['key']} — {ticket['summary']}\n\n{raw_body[:3000]}"
     )
     return result if result and len(result) > 10 else f"Implemented {ticket['key']}: {ticket.get('summary', '')}"
@@ -1629,8 +1630,9 @@ def _draft_comment_reply(config, slug, ticket, comment, pr) -> str:
         "You are the PR author replying to a code-review comment. Write a SPECIFIC, "
         "accurate reply grounded in the ticket and the actual code below. If the comment "
         "requests or suggests a change, state clearly whether you will make it and why; if "
-        "it is a question, answer it directly from the code. 2-4 sentences. Do NOT say you "
-        "need more context.\n\n"
+        "it is a question, answer it directly from the code. 2-4 sentences. Write in "
+        "Caterpillar Technical English: short sentences, active voice, one idea per "
+        "sentence. Do NOT say you need more context.\n\n"
         f"TICKET:\n{ticket_ctx}\n\n"
         f"CODE:\n{code_ctx}\n\n"
         + (f"REVIEWED HUNK:\n{hunk}\n\n" if hunk else "")
