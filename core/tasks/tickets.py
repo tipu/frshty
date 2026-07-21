@@ -1084,7 +1084,7 @@ DIFF:
 
 {diff}
 
-Write a 2-4 sentence high-level, succinct, terse description of what changed in `{repo_name}` specifically. Focus on:
+Write a 2-4 sentence high-level, succinct, terse description of what changed in `{repo_name}` specifically. Write in Caterpillar Technical English: short sentences, active voice, one idea per sentence, the same word for the same thing every time. Focus on:
 - What user-visible behavior or developer-facing capability changed (or is enabled by this repo's piece of the ticket)
 - The general shape of the change (new endpoint, schema migration, refactor, config flip, etc.)
 - Why this repo needed to change as part of the larger ticket — the integration role it plays
@@ -1116,6 +1116,7 @@ Rules for each description:
 - High level, succinct, terse: what capability or behavior changed, the general shape of the change (new endpoint, schema migration, refactor, config flip, etc.), why this repo needed to change as part of the larger ticket, and what tests or proof cover it
 - Write only about that repo's own diff; do not repeat what sibling repos are doing
 - Do not walk through individual files or line numbers; no marketing language; every sentence must carry information, no filler
+- Write in Caterpillar Technical English: short sentences, active voice, one idea per sentence, the same word for the same thing every time
 - 2-4 sentences per description, plain prose
 """
 
