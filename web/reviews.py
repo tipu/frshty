@@ -265,15 +265,26 @@ def api_reviews_list():
     return list(seen.values())
 
 
+@router.get("/api/reviews/experiment")
+def api_review_experiment():
+    import core.db as _db
+    rows = _db.query_all(
+        "SELECT json_extract(meta,'$.provider') AS provider, json_extract(meta,'$.action') AS action, "
+        "count(*) AS n FROM log_events WHERE event='review_ab_action' GROUP BY provider, action",
+        (),
+    )
+    return [dict(r) for r in rows]
+
+
 @router.get("/api/reviews/{repo}/{pr_id}/comments")
-def api_review_comments(repo: str, pr_id: int):
-    found = review_store.find_review(_config["_state_dir"], repo, pr_id)
+def api_review_comments(repo: str, pr_id: int, provider: str = "claude"):
+    found = review_store.find_review(_config["_state_dir"], repo, pr_id, provider=provider)
     return found[1] if found else []
 
 
 @router.get("/api/reviews/{repo}/{pr_id}/info")
-def api_review_info(repo: str, pr_id: int):
-    found = review_store.find_review(_config["_state_dir"], repo, pr_id)
+def api_review_info(repo: str, pr_id: int, provider: str = "claude"):
+    found = review_store.find_review(_config["_state_dir"], repo, pr_id, provider=provider)
     if not found:
         return {}
     branch_dir, comments, _ = found
@@ -587,14 +598,14 @@ def api_bb_comments(repo: str, pr_id: int):
 
 
 @router.post("/api/reviews/{repo}/{pr_id}/comments/{idx}/submit")
-def api_submit_comment(repo: str, pr_id: int, idx: int):
+def api_submit_comment(repo: str, pr_id: int, idx: int, provider: str = "claude"):
     platform = make_platform(_config)
     review_store.populate_repo_cache(platform, _config["_state_dir"], repo)
-    found = review_store.find_review(_config["_state_dir"], repo, pr_id)
+    found = review_store.find_review(_config["_state_dir"], repo, pr_id, provider=provider)
     if not found:
         return JSONResponse({"error": "not found"}, status_code=404)
     branch_dir, comments, _ = found
-    queued = branch_dir / "queued_comments.json"
+    queued = branch_dir / f"queued_comments{review_store.provider_suffix(provider)}.json"
     if idx >= len(comments):
         return JSONResponse({"error": "invalid index"}, status_code=400)
     comment = comments[idx]
@@ -616,18 +627,20 @@ def api_submit_comment(repo: str, pr_id: int, idx: int):
             log.emit("review_comment_submitted", f"Submitted comment on {repo} PR #{pr_id}",
                 links={"pr": comment.get("pr_url", "")},
                 meta={"repo": repo, "pr_id": pr_id})
+    log.emit("review_ab_action", f"{provider} comment submit on {repo}#{pr_id}",
+        meta={"repo": repo, "pr_id": pr_id, "provider": provider, "action": "submit"})
     return result
 
 
 @router.post("/api/reviews/{repo}/{pr_id}/comments/new")
-def api_new_comment(repo: str, pr_id: int, body: dict):
-    found = review_store.find_review(_config["_state_dir"], repo, pr_id)
+def api_new_comment(repo: str, pr_id: int, body: dict, provider: str = "claude"):
+    found = review_store.find_review(_config["_state_dir"], repo, pr_id, provider=provider)
     if not found:
         return JSONResponse({"error": "not found"}, status_code=404)
     branch_dir, comments, _ = found
     pr_url = comments[0].get("pr_url", "") if comments else ""
     if not pr_url:
-        review_json = branch_dir / "review.json"
+        review_json = branch_dir / f"review{review_store.provider_suffix(provider)}.json"
         if review_json.exists():
             pr_url = json.loads(review_json.read_text()).get("pr_url", "")
     new_comment = {
@@ -642,26 +655,28 @@ def api_new_comment(repo: str, pr_id: int, body: dict):
         "status": "draft",
     }
     comments.append(new_comment)
-    (branch_dir / "queued_comments.json").write_text(json.dumps(comments, indent=2))
+    (branch_dir / f"queued_comments{review_store.provider_suffix(provider)}.json").write_text(json.dumps(comments, indent=2))
     return {"status": "ok", "idx": len(comments) - 1}
 
 
 @router.delete("/api/reviews/{repo}/{pr_id}/comments/{idx}")
-def api_delete_comment(repo: str, pr_id: int, idx: int):
-    found = review_store.find_review(_config["_state_dir"], repo, pr_id)
+def api_delete_comment(repo: str, pr_id: int, idx: int, provider: str = "claude"):
+    found = review_store.find_review(_config["_state_dir"], repo, pr_id, provider=provider)
     if not found:
         return JSONResponse({"error": "not found"}, status_code=404)
     branch_dir, comments, _ = found
     if idx >= len(comments):
         return JSONResponse({"error": "invalid index"}, status_code=400)
     comments.pop(idx)
-    (branch_dir / "queued_comments.json").write_text(json.dumps(comments, indent=2))
+    (branch_dir / f"queued_comments{review_store.provider_suffix(provider)}.json").write_text(json.dumps(comments, indent=2))
+    log.emit("review_ab_action", f"{provider} comment delete on {repo}#{pr_id}",
+        meta={"repo": repo, "pr_id": pr_id, "provider": provider, "action": "delete"})
     return {"status": "ok"}
 
 
 @router.put("/api/reviews/{repo}/{pr_id}/comments/{idx}")
-def api_update_comment(repo: str, pr_id: int, idx: int, body: dict):
-    found = review_store.find_review(_config["_state_dir"], repo, pr_id)
+def api_update_comment(repo: str, pr_id: int, idx: int, body: dict, provider: str = "claude"):
+    found = review_store.find_review(_config["_state_dir"], repo, pr_id, provider=provider)
     if not found:
         return JSONResponse({"error": "not found"}, status_code=404)
     branch_dir, comments, _ = found
@@ -671,7 +686,9 @@ def api_update_comment(repo: str, pr_id: int, idx: int, body: dict):
         comments[idx]["body"] = body["body"]
     if "line" in body:
         comments[idx]["line"] = body["line"]
-    (branch_dir / "queued_comments.json").write_text(json.dumps(comments, indent=2))
+    (branch_dir / f"queued_comments{review_store.provider_suffix(provider)}.json").write_text(json.dumps(comments, indent=2))
+    log.emit("review_ab_action", f"{provider} comment edit on {repo}#{pr_id}",
+        meta={"repo": repo, "pr_id": pr_id, "provider": provider, "action": "edit"})
     return {"status": "ok"}
 
 

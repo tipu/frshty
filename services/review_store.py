@@ -3,16 +3,21 @@ import re
 from pathlib import Path
 
 
-def find_review(state_dir: Path, repo: str, pr_id: int):
+def provider_suffix(provider: str) -> str:
+    return "" if provider == "claude" else f".{provider}"
+
+
+def find_review(state_dir: Path, repo: str, pr_id: int, provider: str = "claude"):
     """Return (branch_dir, comments, worktree_or_None) or None if not found.
 
     Worktree is returned when a `.git` exists under branch_dir/worktree, else None.
     """
+    suffix = provider_suffix(provider)
     reviews_dir = state_dir / "reviews" / repo
     if not reviews_dir.exists():
         return None
     for branch_dir in reviews_dir.iterdir():
-        queued = branch_dir / "queued_comments.json"
+        queued = branch_dir / f"queued_comments{suffix}.json"
         if not queued.exists():
             continue
         try:
@@ -21,7 +26,7 @@ def find_review(state_dir: Path, repo: str, pr_id: int):
             continue
         matched = bool(comments) and comments[0].get("pr_id") == pr_id
         if not matched:
-            review_json = branch_dir / "review.json"
+            review_json = branch_dir / f"review{suffix}.json"
             if review_json.exists():
                 try:
                     matched = json.loads(review_json.read_text()).get("pr_id") == pr_id
