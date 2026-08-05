@@ -84,6 +84,14 @@ textarea { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; }
     <span v-else-if="info.ticket_key" class="text-gray-500">{{ info.ticket_key }}</span>
     <span v-if="info.pr_title" class="text-gray-200 font-medium">{{ info.pr_title }}</span>
     <span class="ml-auto flex items-center gap-3 text-xs">
+        <span class="flex items-center gap-1 border border-gray-700 rounded px-2 py-0.5" title="which review provider's comments are shown; actions are logged per provider for the A/B experiment">
+            <label class="flex items-center gap-1 cursor-pointer" :class="provider === 'claude' ? 'text-green-400' : 'text-gray-500'">
+                <input type="radio" value="claude" v-model="provider" class="accent-green-500"> claude
+            </label>
+            <label class="flex items-center gap-1 cursor-pointer" :class="provider === 'codex' ? 'text-blue-400' : 'text-gray-500'">
+                <input type="radio" value="codex" v-model="provider" class="accent-blue-500"> codex
+            </label>
+        </span>
         <span v-if="presentationBuilding" class="badge badge-question animate-pulse" title="the slide deck is being rebuilt in the background">⏳ presentation building…</span>
         <a :href="'/reviews/' + repo + '/' + prId + '/presentation'" class="badge badge-question hover:opacity-80" title="guided slide walkthrough">▶ Presentation</a>
         <button @click="rerunReview" :class="{'animate-pulse': rerunning}" class="badge badge-question hover:opacity-80" :title="rerunning ? 'the review is being redone in the background' : 'redo this review from scratch with fresh ticket context'">{{ rerunning ? '⏳ re-reviewing…' : '↻ Refresh' }}</button>
@@ -251,6 +259,8 @@ frshtyApp({
         const pathParts = window.location.pathname.split('/');
         const repo = pathParts[2];
         const prId = parseInt(pathParts[3]);
+        const provider = ref(new URLSearchParams(location.search).get('provider') || 'claude');
+        const pq = () => `provider=${provider.value}`;
 
         const allComments = ref([]);
         const info = ref({});
@@ -354,9 +364,9 @@ frshtyApp({
         async function load() {
             try {
                 const [commentsResp, diffResp, infoResp, configResp] = await Promise.all([
-                    fetch(`/api/reviews/${repo}/${prId}/comments`),
+                    fetch(`/api/reviews/${repo}/${prId}/comments?${pq()}`),
                     fetch(`/api/reviews/${repo}/${prId}/diff`),
-                    fetch(`/api/reviews/${repo}/${prId}/info`),
+                    fetch(`/api/reviews/${repo}/${prId}/info?${pq()}`),
                     fetch('/api/config'),
                 ]);
                 allComments.value = await commentsResp.json();
@@ -416,7 +426,7 @@ frshtyApp({
         }
 
         async function saveComment(idx) {
-            await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}`, {
+            await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}?${pq()}`, {
                 method: 'PUT', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({body: drafts[idx] || ''}),
             });
@@ -440,17 +450,17 @@ frshtyApp({
             const file = c.path ? c.path.split('/').pop() : 'general';
             const lineSuffix = c.line ? `:${c.line}` : '';
             if (!confirm(`Publish comment on ${file}${lineSuffix}?\n\n${body.substring(0, 100)}${body.length > 100 ? '...' : ''}`)) return;
-            await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}`, {
+            await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}?${pq()}`, {
                 method: 'PUT', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({body}),
             });
-            await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}/submit`, {method: 'POST'});
+            await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}/submit?${pq()}`, {method: 'POST'});
             load();
         }
 
         async function dismissComment(idx) {
             if (!confirm('Delete this comment?')) return;
-            await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}`, {method: 'DELETE'});
+            await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}?${pq()}`, {method: 'DELETE'});
             load();
         }
 
@@ -472,14 +482,14 @@ frshtyApp({
                 const idx = movingIdx.value;
                 movingIdx.value = null;
                 document.querySelectorAll('.move-active').forEach(el => el.classList.remove('move-active'));
-                await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}`, {
+                await fetch(`/api/reviews/${repo}/${prId}/comments/${idx}?${pq()}`, {
                     method: 'PUT', headers: {'Content-Type': 'application/json'},
                     body: JSON.stringify({line: lineNum}),
                 });
                 load();
                 return;
             }
-            const resp = await fetch(`/api/reviews/${repo}/${prId}/comments/new`, {
+            const resp = await fetch(`/api/reviews/${repo}/${prId}/comments/new?${pq()}`, {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({path: filePath, line: lineNum, body: '', severity: 'suggestion'}),
             });
@@ -609,6 +619,13 @@ frshtyApp({
             } catch (e) {}
         }
 
+        watch(provider, () => {
+            const url = new URL(location.href);
+            url.searchParams.set('provider', provider.value);
+            history.replaceState(null, '', url);
+            load();
+        });
+
         onMounted(() => {
             load();
             pollPresentationStatus();
@@ -616,6 +633,7 @@ frshtyApp({
         });
 
         return {
+            provider,
             repo, prId, presentationBuilding,
             allComments, info, features, drafts, walkthroughBusy, discussPanels, activeIdx,
             fileSummaries,
