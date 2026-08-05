@@ -687,6 +687,7 @@ frshtyApp({
         let reconnectDelay = 0;
         const MAX_RECONNECT_DELAY = 10000;
         let jobOutputPollTimer = null;
+        let dismissedJobId = null;
         let resizeObserver = null;
         let escListener = null;
 
@@ -1207,8 +1208,15 @@ frshtyApp({
                         autoStart = { id: j.id, task: j.task };
                     }
                 }
-                if (autoStart && jobOutput.jobId === null) {
-                    setTimeout(() => viewJobOutput(autoStart.id, autoStart.task), 500);
+                if (autoStart && autoStart.id !== dismissedJobId && autoStart.id !== jobOutput.jobId) {
+                    const selectedRow = jobs.value.find(j => j.id === jobOutput.jobId);
+                    const selectedIdle = jobOutput.jobId === null || (selectedRow && selectedRow.status !== 'running');
+                    if (selectedIdle) {
+                        const expected = jobOutput.jobId;
+                        setTimeout(() => {
+                            if (jobOutput.jobId === expected) viewJobOutput(autoStart.id, autoStart.task);
+                        }, 500);
+                    }
                 }
             } catch (e) {
                 console.warn('jobs fetch failed', e);
@@ -1488,6 +1496,7 @@ frshtyApp({
         }
 
         function closeJobOutput() {
+            dismissedJobId = jobOutput.jobId;
             jobOutput.jobId = null;
             if (jobOutputPollTimer) clearTimeout(jobOutputPollTimer);
         }
@@ -1591,6 +1600,7 @@ frshtyApp({
 
         const presentationBuilding = ref(false);
         let presentationPollTimer = null;
+        let jobsPollTimer = null;
         async function pollPresentationStatus() {
             try {
                 const r = await fetch(`/api/tickets/${key}/presentation`);
@@ -1607,6 +1617,7 @@ frshtyApp({
             startTerminal();
             pollPresentationStatus();
             presentationPollTimer = setInterval(pollPresentationStatus, 10000);
+            jobsPollTimer = setInterval(loadJobs, 15000);
             escListener = (e) => { if (e.key === 'Escape' && maximized.value) toggleMaximize(); };
             document.addEventListener('keydown', escListener);
         });
@@ -1617,6 +1628,7 @@ frshtyApp({
             if (escListener) document.removeEventListener('keydown', escListener);
             if (jobOutputPollTimer) clearTimeout(jobOutputPollTimer);
             if (presentationPollTimer) clearInterval(presentationPollTimer);
+            if (jobsPollTimer) clearInterval(jobsPollTimer);
         });
 
         return {
