@@ -36,6 +36,9 @@ class BeatThread:
                              f"[{f['instance_key']}] {f['task']} next={f['next_run_at']}",
                              meta=f)
             except Exception as e:
-                log.emit("beat_error", f"{type(e).__name__}: {e}")
+                try:
+                    log.emit("beat_error", f"{type(e).__name__}: {e}")
+                except Exception:
+                    pass
             if self._stop.wait(self.interval):
                 return
