@@ -124,7 +124,8 @@ def ensure_shared_venv(config: dict, repo_name: str, wt_path: Path,
                 env = {**os.environ,
                        "PIPENV_CUSTOM_VENV_NAME": name,
                        "WORKON_HOME": str(store),
-                       "PIPENV_IGNORE_VIRTUALENVS": "1"}
+                       "PIPENV_IGNORE_VIRTUALENVS": "1",
+                       "PIPENV_DONT_LOAD_ENV": "1"}
                 argv = shlex.split(dep_cmd or "pipenv install --dev")
                 try:
                     result = subprocess.run(
