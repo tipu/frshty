@@ -21,7 +21,7 @@ from features.platforms import make_platform
 
 
 PLAN_TIMEOUT = 3000
-REVIEW_TIMEOUT = 900
+REVIEW_TIMEOUT = 1800
 FIX_TIMEOUT = 1800
 TEST_PLAN_TIMEOUT = 1800
 TEST_WRITE_TIMEOUT = 3600
@@ -304,7 +304,7 @@ def _drop_session(ctx: TaskContext, task_name: str) -> None:
 
 
 _NOISE_ONLY = {"Pipfile", "Pipfile.lock", "pnpm-lock.yaml", "yarn.lock",
-               "package-lock.json", "uv.lock", "poetry.lock"}
+               "package-lock.json", "uv.lock", "poetry.lock", ".venv"}
 
 _SCRATCH_DIRS = (".playwright-cli", "test-results")
 
@@ -390,6 +390,13 @@ def _commit_workspace_changes(ticket_dir: Path, ticket_key: str,
         commit_with_hooks(repo_dir, message=commit_msg, check=True, timeout=900)
         committed.append(repo_dir.name)
     return committed
+
+
+def _kill_stray_recorders() -> None:
+    """Kill orphaned x11grab ffmpeg recorders on the agent displays. A prove
+    run that dies mid-recording leaves its screen capture running; the orphan
+    keeps writing into the ticket's demo file and corrupts later runs."""
+    subprocess.run(["pkill", "-f", r"x11grab.*:9[89]"], capture_output=True)
 
 
 def _ticket_dir(ctx: TaskContext) -> Path:
@@ -578,7 +585,7 @@ def start_reviewing(ctx: TaskContext) -> TaskResult:
       preconditions=[status_is("reviewing"),
                      file_contains("docs/tri-review.md", r"VERDICT:\s*FAIL")],
       postconditions=[file_contains("docs/tri-review.md", r"VERDICT:\s*PASS")],
-      timeout=FIX_TIMEOUT)
+      timeout=FIX_TIMEOUT + REVIEW_TIMEOUT + 300)
 def fix_review_findings(ctx: TaskContext) -> TaskResult:
     ticket_dir = _ticket_dir(ctx)
     if not ticket_dir.is_dir():
@@ -1031,9 +1038,13 @@ def prove(ctx: TaskContext) -> TaskResult:
     log.emit("ticket_prove_started",
              f"Headless prove for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key, "feedback": bool(feedback)})
+    _kill_stray_recorders()
     sid, resume = _claim_session(ctx, "prove")
-    result = run_claude_code(prompt, cwd=ticket_dir, timeout=PROOF_TIMEOUT,
-                             session_id=sid, resume=resume)
+    try:
+        result = run_claude_code(prompt, cwd=ticket_dir, timeout=PROOF_TIMEOUT,
+                                 session_id=sid, resume=resume)
+    finally:
+        _kill_stray_recorders()
     if result is None:
         if resume:
             _drop_session(ctx, "prove")
