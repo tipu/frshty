@@ -304,8 +304,9 @@ class ClaudeProvider(LLMProvider):
                            "reason": reason, "remaining_s": remaining_s})
             _flag_guard_blocked()
             return None
+        acquire_start = time.monotonic()
         _llm_sem.acquire()
-        _mark_running(inv_id)
+        _mark_running(inv_id, queued_s=time.monotonic() - acquire_start)
         log_path = active_live_log_path()
         log_fh = None
         if log_path:
@@ -427,8 +428,9 @@ class ClaudeProvider(LLMProvider):
                            "reason": reason, "remaining_s": remaining_s})
             _flag_guard_blocked()
             return None
+        acquire_start = time.monotonic()
         with _llm_sem:
-            _mark_running(inv_id)
+            _mark_running(inv_id, queued_s=time.monotonic() - acquire_start)
             try:
                 result = subprocess.run(
                     cmd, input=prompt.encode(), capture_output=True, env=self._env(), timeout=timeout,
@@ -461,8 +463,9 @@ class ClaudeProvider(LLMProvider):
                            "reason": reason, "remaining_s": remaining_s})
             _flag_guard_blocked()
             return None
+        acquire_start = time.monotonic()
         with _llm_sem:
-            _mark_running(inv_id)
+            _mark_running(inv_id, queued_s=time.monotonic() - acquire_start)
             try:
                 result = subprocess.run(
                     self._cmd("-p", "-", "--output-format", "json", "--model", "claude-haiku-4-5-20251001"),
@@ -524,8 +527,9 @@ class OpenCodeProvider(LLMProvider):
                            "reason": reason, "remaining_s": remaining_s})
             _flag_guard_blocked()
             return None
+        acquire_start = time.monotonic()
         with _llm_sem:
-            _mark_running(inv_id)
+            _mark_running(inv_id, queued_s=time.monotonic() - acquire_start)
             try:
                 result = subprocess.run(
                     cmd, capture_output=True, cwd=str(cwd) if cwd else None,
@@ -546,13 +550,18 @@ class OpenCodeProvider(LLMProvider):
             return output
 
 
-def _mark_running(inv_id: str | None) -> None:
+def _mark_running(inv_id: str | None, queued_s: float | None = None) -> None:
     if inv_id is None:
         return
     try:
-        _db.execute("UPDATE claude_invocations SET status='running' WHERE id=?", (inv_id,))
+        _db.execute("UPDATE claude_invocations SET status='running', running_at=? WHERE id=?",
+                    (datetime.now(timezone.utc).isoformat(), inv_id))
     except Exception as e:
         log.emit("claude_invocation_log_failed", f"failed to mark running: {e}")
+    if queued_s is not None and queued_s >= 30:
+        log.emit("llm_sem_wait",
+                 f"invocation {inv_id} waited {queued_s:.0f}s for an LLM slot before starting",
+                 meta={"invocation_id": inv_id, "queued_s": round(queued_s)})
 
 
 def _extract_text(evt: dict) -> str:
