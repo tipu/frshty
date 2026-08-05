@@ -8,6 +8,7 @@ import core.log as log
 import core.state as state
 import core.git_util as git_util
 from core.claude_runner import run_balanced, run_haiku, extract_json
+from core.llm import run_external_model
 from core.config import base_branch_for, get_repos
 import features.presentation as presentation
 from features.platforms import make_platform
@@ -123,14 +124,17 @@ def review_pr(config: dict, platform, pr: dict, ticket_context: str = "",
     return merged
 
 
-def _write_review_artifacts(config, pr, merged: dict, diff_text: str) -> None:
+def _write_review_artifacts(config, pr, merged: dict, diff_text: str,
+                            provider: str = "claude") -> None:
     branch_slug = pr["branch"].replace("/", "-") if pr.get("branch") else f"pr-{pr['id']}"
     review_dir = config["_state_dir"] / "reviews" / pr["repo"] / branch_slug
     review_dir.mkdir(parents=True, exist_ok=True)
     merged["pr_id"] = pr["id"]
     merged["pr_url"] = pr.get("url", "")
     merged["repo"] = pr["repo"]
-    (review_dir / "review.json").write_text(json.dumps(merged, indent=2))
+    merged["provider"] = provider
+    suffix = "" if provider == "claude" else f".{provider}"
+    (review_dir / f"review{suffix}.json").write_text(json.dumps(merged, indent=2))
     (review_dir / "diff.txt").write_text(diff_text)
 
     queued = [
@@ -142,7 +146,7 @@ def _write_review_artifacts(config, pr, merged: dict, diff_text: str) -> None:
         }
         for issue in merged.get("issues", [])
     ]
-    (review_dir / "queued_comments.json").write_text(json.dumps(queued, indent=2))
+    (review_dir / f"queued_comments{suffix}.json").write_text(json.dumps(queued, indent=2))
 
 
 def _build_persona_prompt(persona_text, pr, diff_text, conventions, file_context, has_tools, ticket_context=""):
@@ -195,6 +199,44 @@ def _run_single_persona(args):
         for issue in data.get("issues", []):
             issue["persona"] = name
             issue["tool_assisted"] = worktree is not None
+    return (name, data)
+
+
+CODEX_REVIEW_TIMEOUT = 1200
+
+
+def _run_codex_persona(args):
+    name, prompt, cwd, ticket_key = args
+    run_dir = cwd / ".codex-runs" / ticket_key.replace("/", "-")
+    run_dir.mkdir(parents=True, exist_ok=True)
+    last = run_dir / f"{name}-last.md"
+    try:
+        text, exit_code = run_external_model(
+            ["codex", "exec", "--skip-git-repo-check",
+             "-c", 'model_reasoning_effort="medium"',
+             "-o", str(last), prompt],
+            fn_name="review_codex", model="codex", prompt=prompt,
+            cwd=cwd, timeout=CODEX_REVIEW_TIMEOUT,
+            last_message_file=last,
+            transcript_file=run_dir / f"{name}-transcript.txt",
+        )
+    except subprocess.TimeoutExpired:
+        log.emit("review_persona_timeout",
+                 f"codex persona '{name}' timed out after {CODEX_REVIEW_TIMEOUT}s",
+                 meta={"persona": name, "provider": "codex"})
+        return (name, None)
+    except OSError as e:
+        log.emit("review_persona_error",
+                 f"codex persona '{name}' could not run: {type(e).__name__}: {e}",
+                 meta={"persona": name, "provider": "codex"})
+        return (name, None)
+    if exit_code != 0 or not text:
+        return (name, None)
+    data = extract_json(text)
+    if data:
+        for issue in data.get("issues", []):
+            issue["persona"] = name
+            issue["tool_assisted"] = True
     return (name, data)
 
 
@@ -713,35 +755,47 @@ def review_ticket(config: dict, ticket_key: str, prs: list[dict]) -> dict[str, d
     has_tools = any(worktrees.values())
     cwd = config["_state_dir"] / "reviews"
     cwd.mkdir(parents=True, exist_ok=True)
-    tasks = []
-    for persona_name, persona_text in PERSONAS.items():
-        prompt = _build_ticket_persona_prompt(persona_text, ticket_key, goal, sections, has_tools)
-        tasks.append((persona_name, prompt, cwd if has_tools else None, _reviewer_model(config)))
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        persona_results = list(pool.map(_run_single_persona, tasks))
-    successful = [(name, data) for name, data in persona_results if data is not None]
-    if not successful:
-        return none_result
+    prompts = {name: _build_ticket_persona_prompt(text, ticket_key, goal, sections, has_tools)
+               for name, text in PERSONAS.items()}
+    tasks = [(name, prompt, cwd if has_tools else None, _reviewer_model(config))
+             for name, prompt in prompts.items()]
+    codex_tasks = [(name, prompt, cwd, ticket_key) for name, prompt in prompts.items()]
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        claude_futs = [pool.submit(_run_single_persona, t) for t in tasks]
+        codex_futs = [pool.submit(_run_codex_persona, t) for t in codex_tasks]
+        persona_results = [f.result() for f in claude_futs]
+        codex_results = [f.result() for f in codex_futs]
 
-    merged = _merge_reviews(successful)
-    issues_by_key = _split_issues_by_pr(merged.get("issues", []), live, diffs)
     results: dict[str, dict | None] = dict(none_result)
-    shared = {k: v for k, v in merged.items() if k != "issues"}
-    for pr in live:
-        key = f"{pr['repo']}/{pr['id']}"
-        issues = issues_by_key.get(key, [])
-        if issues:
-            issues = _validate_issues(issues, worktrees[key])
-            issues = _simplify_all_issues(issues)
-            issues = _style_match_all(config, issues)
-        per = {
-            **shared,
-            "issues": issues,
-            "verdict": "changes_requested" if any(i.get("severity") == "blocking" for i in issues) else "approved",
-            "source_branch": pr.get("branch") or shared.get("source_branch", ""),
-        }
-        _write_review_artifacts(config, pr, per, diffs[key])
-        results[key] = per
+    provider_sets = [("claude", persona_results), ("codex", codex_results)]
+    for provider, presults in provider_sets:
+        successful = [(name, data) for name, data in presults if data is not None]
+        if not successful:
+            log.emit("review_provider_empty",
+                     f"{ticket_key}: no valid {provider} persona output",
+                     meta={"ticket": ticket_key, "provider": provider})
+            continue
+        merged = _merge_reviews(successful)
+        issues_by_key = _split_issues_by_pr(merged.get("issues", []), live, diffs)
+        shared = {k: v for k, v in merged.items() if k != "issues"}
+        for pr in live:
+            key = f"{pr['repo']}/{pr['id']}"
+            issues = issues_by_key.get(key, [])
+            if issues:
+                issues = _validate_issues(issues, worktrees[key])
+                issues = _simplify_all_issues(issues)
+                issues = _style_match_all(config, issues)
+            per = {
+                **shared,
+                "issues": issues,
+                "verdict": "changes_requested" if any(i.get("severity") == "blocking" for i in issues) else "approved",
+                "source_branch": pr.get("branch") or shared.get("source_branch", ""),
+            }
+            _write_review_artifacts(config, pr, per, diffs[key], provider=provider)
+            if provider == "claude":
+                results[key] = per
+    if all(v is None for v in results.values()):
+        return none_result
     return results
 
 
