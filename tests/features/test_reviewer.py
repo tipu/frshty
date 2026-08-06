@@ -571,3 +571,30 @@ class TestReviewTicket:
         assert backend_review.exists() and frontend_review.exists()
         queued = json.loads((tmp_state / "reviews" / "backend" / "JIRA-9-x" / "queued_comments.json").read_text())
         assert len(queued) == 1 and queued[0]["path"] == "api/views.py"
+
+
+class TestReviewedSiblingSections:
+    def test_open_reviewed_sibling_joins_as_context(self, tmp_state):
+        state.save("reviews", {
+            "backend/7": {"ticket": "JIRA-9", "reviewed": True},
+            "frontend/2": {"ticket": "JIRA-9", "reviewed": True},
+            "other/5": {"ticket": "JIRA-8", "reviewed": True},
+        })
+        platform = MagicMock()
+        platform.get_pr_info.return_value = {"state": "OPEN"}
+        platform.get_pr_diff.return_value = "diff --git a/x b/x\n+z\n"
+
+        sections = reviewer._reviewed_sibling_sections({}, platform, "JIRA-9", {"frontend/2"})
+
+        assert len(sections) == 1
+        assert "ALREADY-REVIEWED PR #7" in sections[0]
+        assert "backend/7" in sections[0]
+        platform.get_pr_diff.assert_called_once_with("backend", 7)
+
+    def test_closed_sibling_is_skipped(self, tmp_state):
+        state.save("reviews", {"backend/7": {"ticket": "JIRA-9", "reviewed": True}})
+        platform = MagicMock()
+        platform.get_pr_info.return_value = {"state": "MERGED"}
+
+        assert reviewer._reviewed_sibling_sections({}, platform, "JIRA-9", set()) == []
+        platform.get_pr_diff.assert_not_called()
