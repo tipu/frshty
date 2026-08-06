@@ -182,6 +182,10 @@ def _reviewer_model(config) -> str | None:
     return (config.get("reviewer") or {}).get("model")
 
 
+def _review_providers(config) -> list[str]:
+    return (config.get("reviewer") or {}).get("providers") or ["claude"]
+
+
 def _run_single_persona(args):
     name, prompt, worktree, model = args
     tools = ["Read", "Glob", "Grep"] if worktree else None
@@ -719,6 +723,45 @@ def _split_issues_by_pr(issues: list[dict], prs: list[dict], diffs: dict[str, st
     return out
 
 
+def _reviewed_sibling_sections(config: dict, platform, ticket_key: str,
+                               active_keys: set[str]) -> list[str]:
+    """Context-only prompt sections for the ticket's already-reviewed open PRs.
+    A PR reviewed in an earlier batch is not re-reviewed, but its diff rejoins
+    the joint prompt so cross-PR inconsistencies with the PRs under review
+    still surface."""
+    review_state = state.load("reviews")
+    sections = []
+    for key, entry in review_state.items():
+        if entry.get("ticket") != ticket_key or not entry.get("reviewed"):
+            continue
+        if key in active_keys:
+            continue
+        repo, _, pr_id_str = key.rpartition("/")
+        try:
+            pr_id = int(pr_id_str)
+        except ValueError:
+            continue
+        try:
+            info = platform.get_pr_info(repo, pr_id) or {}
+        except Exception:
+            continue
+        if info.get("state") != "OPEN":
+            continue
+        diff = platform.get_pr_diff(repo, pr_id) or ""
+        if not diff:
+            continue
+        if len(diff) > SIBLING_DIFF_CHAR_CAP:
+            diff = diff[:SIBLING_DIFF_CHAR_CAP] + "\n... [diff truncated]"
+        sections.append(
+            f"=== ALREADY-REVIEWED PR #{pr_id} in repository '{repo}' (context only) ===\n"
+            "This sibling PR of the same ticket was reviewed in an earlier batch. Do NOT "
+            "raise issues against its files. Use it as context for the PRs under review: "
+            "flag any inconsistency between them and this PR (mismatched API contracts, "
+            "producer/consumer drift) as an issue on the PR under review.\n"
+            f"--- DIFF ({key}) ---\n{diff}\n--- DIFF END ---")
+    return sections
+
+
 def review_ticket(config: dict, ticket_key: str, prs: list[dict]) -> dict[str, dict | None]:
     """Single persona pass over the combined diffs of all the ticket's PRs.
     Returns {repo/id: per-PR merged review or None} and writes each PR's
@@ -755,6 +798,9 @@ def review_ticket(config: dict, ticket_key: str, prs: list[dict]) -> dict[str, d
     has_tools = any(worktrees.values())
     cwd = config["_state_dir"] / "reviews"
     cwd.mkdir(parents=True, exist_ok=True)
+    sections.extend(_reviewed_sibling_sections(config, platform, ticket_key,
+                                               {f"{p['repo']}/{p['id']}" for p in live}))
+    providers = _review_providers(config)
     prompts = {name: _build_ticket_persona_prompt(text, ticket_key, goal, sections, has_tools)
                for name, text in PERSONAS.items()}
     tasks = [(name, prompt, cwd if has_tools else None, _reviewer_model(config))
@@ -762,12 +808,15 @@ def review_ticket(config: dict, ticket_key: str, prs: list[dict]) -> dict[str, d
     codex_tasks = [(name, prompt, cwd, ticket_key) for name, prompt in prompts.items()]
     with ThreadPoolExecutor(max_workers=6) as pool:
         claude_futs = [pool.submit(_run_single_persona, t) for t in tasks]
-        codex_futs = [pool.submit(_run_codex_persona, t) for t in codex_tasks]
+        codex_futs = ([pool.submit(_run_codex_persona, t) for t in codex_tasks]
+                      if "codex" in providers else [])
         persona_results = [f.result() for f in claude_futs]
         codex_results = [f.result() for f in codex_futs]
 
     results: dict[str, dict | None] = dict(none_result)
-    provider_sets = [("claude", persona_results), ("codex", codex_results)]
+    provider_sets = [("claude", persona_results)]
+    if "codex" in providers:
+        provider_sets.append(("codex", codex_results))
     for provider, presults in provider_sets:
         successful = [(name, data) for name, data in presults if data is not None]
         if not successful:
