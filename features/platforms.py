@@ -354,7 +354,7 @@ class BitbucketPlatform:
     def push_branch(self, repo_path, branch: str, force: bool = False) -> dict:
         if not branch.strip():
             return {"ok": False, "error": "empty branch name"}
-        args = ["push", "-u", "origin", branch]
+        args = ["push", "-u", "origin", f"HEAD:refs/heads/{branch}"]
         if force:
             args.insert(1, "--force-with-lease")
         result = _run_git(repo_path, args)
@@ -774,7 +774,7 @@ class GitHubPlatform:
     def push_branch(self, repo_path, branch: str, force: bool = False) -> dict:
         if not branch.strip():
             return {"ok": False, "error": "empty branch name"}
-        args = ["push", "-u", "origin", branch]
+        args = ["push", "-u", "origin", f"HEAD:refs/heads/{branch}"]
         if force:
             args.insert(1, "--force-with-lease")
         result = _run_git(repo_path, args)
