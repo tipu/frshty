@@ -571,6 +571,10 @@ def _check_base_fresh(config, platform, pr, seen, base_url):
         seen.pop("ci_unrelated_sha", None)
         log.emit("pr_base_synced", f"{pr_ref}: merged {base_branch} into PR branch",
                  links=links, meta=meta)
+    elif result == "dirty_worktree":
+        log.emit("pr_base_sync_blocked",
+                 f"{pr_ref}: cannot merge {base_branch}: {outcome.get('error', '')[:160]}",
+                 links=links, meta={**meta, "error": outcome.get("error", "")})
     elif result == "merge_failed" and outcome.get("capped"):
         log.emit("pr_base_sync_failed",
                  f"{pr_ref}: could not merge {base_branch} after {outcome['attempts']} attempts: {outcome.get('error', '')[:100]}",
