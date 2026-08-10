@@ -2144,8 +2144,13 @@ def _pr_base_moved(config, ts) -> bool:
         if not base_sha:
             continue
         st = sync_state.get(f"{pr['repo']}/{pr['id']}", {})
-        if not st.get("base_synced") or st.get("base_sync_sha") != base_sha:
+        if st.get("base_sync_sha") != base_sha:
             return True
+        if st.get("base_synced"):
+            continue
+        if st.get("base_sync_attempts", 0) >= branch_sync.MAX_BASE_SYNC_ATTEMPTS:
+            continue
+        return True
     return False
 
 
@@ -2181,6 +2186,11 @@ def _sync_pr_base(config, ticket, ts, base_url) -> dict:
             log.emit("ticket_base_synced",
                      f"Merged {base_branch} into {_label(key, ts)} PR #{pr['id']}",
                      links=links, meta=meta)
+        elif result == "dirty_worktree":
+            log.emit("ticket_base_sync_blocked",
+                     f"Cannot merge {base_branch} into {_label(key, ts)} PR #{pr['id']}: "
+                     f"{outcome.get('error', '')[:160]}",
+                     links=links, meta={**meta, "error": outcome.get("error", "")})
         elif result == "merge_failed" and outcome.get("capped"):
             log.emit("ticket_base_sync_failed",
                      f"Could not merge {base_branch} into {_label(key, ts)} PR #{pr['id']} "

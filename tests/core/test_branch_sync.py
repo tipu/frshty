@@ -10,11 +10,12 @@ def _platform(merge_ok=True, push_ok=True, error=""):
     return p
 
 
-def _sync(platform, st, base_sha="basesha", behind="3", worktree="/wt", fetch_rc=0):
+def _sync(platform, st, base_sha="basesha", behind="3", worktree="/wt", fetch_rc=0, dirty=""):
     fetch = MagicMock(returncode=fetch_rc, stdout="")
     rev = MagicMock(returncode=0, stdout=f"{behind}\n")
+    status = MagicMock(returncode=0, stdout=dirty)
     with patch("core.branch_sync.ls_remote_sha", return_value=base_sha), \
-         patch("core.branch_sync.subprocess.run", side_effect=[fetch, rev]):
+         patch("core.branch_sync.subprocess.run", side_effect=[fetch, rev, status]):
         return branch_sync.sync_branch_with_base(
             platform, "/repo", "main", "feature", st, lambda: worktree)
 
@@ -96,3 +97,30 @@ class TestSyncBranchWithBase:
         assert out["result"] == "uptodate"
         assert st["base_sync_sha"] == "newsha"
         assert st["base_sync_attempts"] == 0
+
+
+class TestDirtyWorktree:
+    def test_dirty_worktree_blocks_merge_and_caps(self, tmp_path):
+        import core.branch_sync as bs
+        platform = MagicMock()
+        st = {}
+
+        def fake_run(cmd, **kw):
+            out = MagicMock(returncode=0, stdout="", stderr="")
+            if cmd[:2] == ["git", "rev-list"]:
+                out.stdout = "3"
+            elif cmd[:3] == ["git", "status", "--porcelain"]:
+                out.stdout = " M package.json\n M pnpm-lock.yaml\n"
+            return out
+
+        with patch("core.branch_sync.ls_remote_sha", return_value="sha1"), \
+             patch("core.branch_sync.subprocess.run", side_effect=fake_run):
+            out = bs.sync_branch_with_base(platform, "/repo", "main", "br", st,
+                                           lambda: tmp_path)
+
+        assert out["result"] == "dirty_worktree"
+        assert out["capped"] is True
+        assert "package.json" in out["error"]
+        assert st["base_sync_attempts"] == bs.MAX_BASE_SYNC_ATTEMPTS
+        assert not st.get("base_synced")
+        platform.merge_base.assert_not_called()

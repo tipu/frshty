@@ -29,7 +29,8 @@ def sync_branch_with_base(platform, repo_path, base_branch: str, branch: str,
     so the common no-op tick costs a single ls-remote.
 
     Returns {"result": one of skip|capped|no_base|ls_remote_failed|
-    no_worktree|fetch_failed|uptodate|merge_failed|push_failed|synced, ...}.
+    no_worktree|dirty_worktree|fetch_failed|uptodate|merge_failed|push_failed|
+    synced, ...}.
     """
     if not base_branch or not repo_path:
         return {"result": "no_base"}
@@ -59,6 +60,16 @@ def sync_branch_with_base(platform, repo_path, base_branch: str, branch: str,
     if behind == "0":
         st["base_synced"] = True
         return {"result": "uptodate"}
+
+    dirty = subprocess.run(["git", "status", "--porcelain"], cwd=str(worktree),
+                           capture_output=True, text=True, timeout=30).stdout.strip()
+    if dirty:
+        files = ", ".join(ln.strip().split(maxsplit=1)[-1] for ln in dirty.splitlines()[:5])
+        error = f"worktree has uncommitted changes ({files}); merge would overwrite them"
+        st["base_sync_attempts"] = MAX_BASE_SYNC_ATTEMPTS
+        st["last_base_error"] = error
+        return {"result": "dirty_worktree", "error": error,
+                "attempts": MAX_BASE_SYNC_ATTEMPTS, "capped": True}
 
     merged = platform.merge_base(worktree, base_branch, prev_error=st.get("last_base_error"))
     if not merged.get("ok"):
