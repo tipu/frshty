@@ -242,6 +242,34 @@ That `docs/proof.md` is the postcondition gate for this step.
 """
 
 
+_PROVE_BROWSER_BLOCK_HEADER = """
+
+BROWSER RECORDINGS: if any part of this proof drives a browser (Playwright, Puppeteer, or similar), install the click indicator below before navigating. It draws a brief red ring at each click so a viewer can see what is being clicked in the recording.
+
+Playwright: `await context.addInitScript(SCRIPT)` on the BrowserContext before the first `goto`. It re-applies on every navigation, including SPA route changes. Register it on the context, not the page.
+Puppeteer: `await page.evaluateOnNewDocument(SCRIPT)`.
+
+This is a recording aid. Do NOT mention it in docs/proof.md and do NOT describe it as a feature of the change under test.
+
+--- CLICK INDICATOR SCRIPT ---
+"""
+
+_PROVE_BROWSER_BLOCK_FOOTER = """
+--- END CLICK INDICATOR SCRIPT ---
+"""
+
+
+def _click_indicator_script() -> str:
+    """The click-visualisation script injected into browser-driven proofs.
+    Kept as an asset rather than inline so it stays editable and testable on
+    its own; returns "" if the asset is missing so proof never hard-fails."""
+    path = Path(__file__).resolve().parent.parent.parent / "assets" / "click-indicator.js"
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return ""
+
+
 _PROVE_FEEDBACK_BLOCK = """
 
 REVISION FEEDBACK — a human reviewed your previous proof and is asking you to redo it. Address this specifically:
@@ -1031,6 +1059,9 @@ def prove(ctx: TaskContext) -> TaskResult:
         )
         return TaskResult("ok", artifacts={"skipped": True})
     prompt = _PROVE_PROMPT_TEMPLATE.format(proof_md=proof_md)
+    indicator = _click_indicator_script()
+    if indicator:
+        prompt += _PROVE_BROWSER_BLOCK_HEADER + indicator + _PROVE_BROWSER_BLOCK_FOOTER
     ts = state.load_ticket(ctx.ticket_key or "") or {}
     feedback = (ts.get("proof_feedback") or "").strip()
     if feedback:
