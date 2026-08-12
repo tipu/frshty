@@ -28,6 +28,9 @@ class TestTransitionValid:
     def test_in_review_to_merged(self):
         assert transition("in_review", "merged") == "merged"
 
+    def test_in_review_to_proving(self):
+        assert transition("in_review", "proving") == "proving"
+
     def test_in_review_self_loop(self):
         assert transition("in_review", "in_review") == "in_review"
 
