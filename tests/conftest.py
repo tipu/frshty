@@ -1,5 +1,6 @@
 import json
 import sys
+import types
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -13,6 +14,32 @@ import core.log as log
 _SESSION_DB_PATH = None
 _SESSION_MIGRATIONS_DIR = None
 
+
+
+def _reinject_core_modules() -> None:
+    """Point every loaded frshty module back at the session core.state/db/log.
+
+    test_http_endpoints and test_tz pop core.* out of sys.modules and
+    re-import, which leaves already-imported features.* modules bound to a
+    core.state that is no longer initialized. Rebinding by name rather than
+    from a fixed list keeps new modules covered automatically.
+    """
+    targets = (("state", state, "core.state"), ("db", db, "core.db"), ("log", log, "core.log"))
+    core_pkg = sys.modules.get("core")
+    if core_pkg is not None:
+        for attr, replacement, _ in targets:
+            setattr(core_pkg, attr, replacement)
+    for mod_name, mod in list(sys.modules.items()):
+        if mod is None:
+            continue
+        if not (mod_name == "frshty" or mod_name.startswith("features.")
+                or mod_name.startswith("core.") or mod_name.startswith("web.")
+                or mod_name.startswith("services.")):
+            continue
+        for attr, replacement, expected in targets:
+            current = getattr(mod, attr, None)
+            if isinstance(current, types.ModuleType) and current.__name__ == expected:
+                setattr(mod, attr, replacement)
 
 @pytest.fixture(scope="session", autouse=True)
 def _isolated_db(tmp_path_factory):
@@ -70,17 +97,7 @@ def _restore_session_db(_isolated_db):
     # Re-inject the session db/state module references into modules that
     # cache them at import-time (features.tickets in particular, since
     # hardening tests patch attributes via `features.tickets.state`).
-    for mod_name in ("features.tickets", "features.billing", "features.reviewer",
-                     "features.own_prs", "features.ticket_systems", "frshty"):
-        mod = sys.modules.get(mod_name)
-        if mod is None:
-            continue
-        if hasattr(mod, "state"):
-            mod.state = state
-        if hasattr(mod, "db"):
-            mod.db = db
-        if hasattr(mod, "log"):
-            mod.log = log
+    _reinject_core_modules()
     yield
 
 
