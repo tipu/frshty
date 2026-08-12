@@ -379,7 +379,11 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                     <div class="md-content text-sm" v-html="renderMarkdown(proofMdContent)"></div>
                 </div>
                 <div v-for="name in ((ticket && ticket.proof_videos) || [])" :key="name" class="mb-3 last:mb-0">
-                    <div class="text-xs text-gray-400 mb-1">{{ name }}</div>
+                    <div class="flex items-center gap-2 mb-1">
+                        <code class="text-xs text-gray-400 font-mono select-all break-all">{{ proofPath(name) }}</code>
+                        <button @click="copyText(proofPath(name))" class="text-xs text-gray-500 hover:text-gray-300 shrink-0"
+                                :title="'copy ' + proofPath(name)">{{ copiedPath === proofPath(name) ? '✓ copied' : '⧉ copy' }}</button>
+                    </div>
                     <video controls class="w-full rounded" style="max-height:600px">
                         <source :src="`/api/tickets/${key}/docs/${encodeURIComponent(name)}`">
                     </video>
@@ -669,6 +673,18 @@ frshtyApp({
                 navigator.clipboard.writeText(rawStateJson.value);
                 rawStateCopied.value = true;
                 setTimeout(() => { rawStateCopied.value = false; }, 1500);
+            } catch (e) { /* clipboard blocked — ignore */ }
+        }
+        const copiedPath = ref('');
+        function proofPath(name) {
+            const dir = (ticket.value && ticket.value.docs_dir) || '';
+            return dir ? `${dir}/${name}` : name;
+        }
+        function copyText(text) {
+            try {
+                navigator.clipboard.writeText(text);
+                copiedPath.value = text;
+                setTimeout(() => { copiedPath.value = ''; }, 1500);
             } catch (e) { /* clipboard blocked — ignore */ }
         }
         const docExpanded = reactive({});
@@ -1653,6 +1669,7 @@ frshtyApp({
             saveRelease, clearRelease, reinspectRelease,
             setStatus, startDev, restartTicket, submitNote, onSetStateChange, toggleAutoPr,
             openPrModal, closePrModal, onPrSubmit,
+            proofPath, copyText, copiedPath,
             retryJob, postReply, toggleTimeline, commentTimelines, timelineOpen, viewJobOutput, closeJobOutput,
             runServices, resetTerminal, openDiscuss, toggleMaximize,
         };

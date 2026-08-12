@@ -539,7 +539,7 @@ def api_ticket_detail(key: str):
     active_key = state.active_instance_key()
     transitions = _load_ticket_transitions(active_key, key)
     scheduled_rows = scheduler.list_for_ticket(active_key, key)
-    return {"key": key, "state": ts, "docs": docs, "history": history, "summary": summary, "terminal_alive": terminal_alive, "all_statuses": all_statuses, "proof_videos": proof_videos, "has_explainer": has_explainer, "release": release_block, "llm_invocations": llm_invocations, "transitions": transitions, "scheduled_rows": scheduled_rows}
+    return {"key": key, "state": ts, "docs": docs, "history": history, "summary": summary, "terminal_alive": terminal_alive, "all_statuses": all_statuses, "proof_videos": proof_videos, "docs_dir": str(docs_dir), "has_explainer": has_explainer, "release": release_block, "llm_invocations": llm_invocations, "transitions": transitions, "scheduled_rows": scheduled_rows}
 
 
 PROOF_VIDEO_EXTS = {".webm", ".mp4", ".mov", ".mkv"}
