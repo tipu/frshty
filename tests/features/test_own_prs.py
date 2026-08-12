@@ -707,7 +707,7 @@ class TestEnsureWorktree:
         repo_b = tmp_path / "repo-b"
         repo_a.mkdir(); repo_b.mkdir()
 
-        config = {"_state_dir": tmp_path}
+        config = {"_state_dir": tmp_path, "workspace": {"base_branch": "main"}}
         repos = [{"name": "repo-a", "path": repo_a}, {"name": "repo-b", "path": repo_b}]
         pr = make_pr(repo="repo-b", branch="fix/thing")
 

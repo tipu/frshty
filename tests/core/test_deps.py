@@ -133,7 +133,7 @@ class TestEnsureSharedVenv:
         assert build_log.read_text().count("build") == 1, \
             "flock must serialize the first build so the loser skips it"
 
-    def test_preserves_real_venv_directory(self, fake_config, tmp_path, monkeypatch):
+    def test_replaces_real_venv_directory_with_store_symlink(self, fake_config, tmp_path, monkeypatch):
         build_log = tmp_path / "builds.log"
         monkeypatch.setenv("BUILD_LOG", str(build_log))
         wt = _make_worktree(tmp_path, "a")
@@ -142,8 +142,11 @@ class TestEnsureSharedVenv:
         (real / "marker").touch()
 
         assert deps.ensure_shared_venv(fake_config, "repo", wt, dep_cmd=STUB_BUILD)
-        assert not real.is_symlink()
-        assert (real / "marker").exists()
+
+        link = wt / ".venv"
+        assert link.is_symlink(), "a project-local .venv must be replaced so pipenv resolves the store"
+        assert link.readlink() == deps.venv_store_dir(fake_config) / deps.shared_venv_name("repo", wt)
+        assert not (link / "marker").exists()
 
 
 class TestRelink:

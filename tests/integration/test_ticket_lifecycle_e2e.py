@@ -322,6 +322,20 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
     def fake_extract_json(raw: str):
         return json.loads(raw)
 
+    def fake_consensus_plan(config, ticket_dir: Path, slug: str, *, ticket_key: str = ""):
+        """start_planning delegates planning to core.consensus_plan, which fans
+        out to claude/codex/agy. Stub the subsystem at its boundary: this test
+        covers the lifecycle, not consensus internals."""
+        ticket_dir = Path(ticket_dir)
+        docs = ticket_dir / "docs"
+        docs.mkdir(parents=True, exist_ok=True)
+        (docs / "technical-plan.md").write_text("# Plan\n\nImplement lifecycle flow.\n")
+        (docs / "change-manifest.md").write_text("# Change Manifest\n\nGenerated lifecycle implementation.\n")
+        repo = ticket_dir / REPO_NAME
+        if repo.is_dir():
+            (repo / "app.txt").write_text("base\ngenerated_feature\n")
+        return True, ""
+
     def fake_run_claude_code(prompt: str, cwd: Path, timeout: int = 0,
                               session_id: str | None = None, resume: bool = False):
         cwd = Path(cwd)
@@ -398,7 +412,10 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
          patch("features.pr_ci.extract_json", side_effect=fake_extract_json), \
          patch("features.pr_ci.run_claude_code", side_effect=fake_run_claude_code), \
          patch("core.tasks.tickets.run_claude_code", side_effect=fake_run_claude_code), \
-         patch("features.tickets.run_claude_code", side_effect=fake_run_claude_code):
+         patch("features.tickets.run_claude_code", side_effect=fake_run_claude_code), \
+         patch("core.tasks.tickets.run_consensus_plan", side_effect=fake_consensus_plan), \
+         patch("features.acceptance.run_haiku", side_effect=fake_run_haiku), \
+         patch("features.acceptance.extract_json", side_effect=lambda raw: None):
         pool.start()
         try:
             _enqueue_and_wait(instance_key, "scan_tickets")
