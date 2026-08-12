@@ -44,7 +44,7 @@ def test_own_prs_worktree_uses_correct_repo(tmp_path):
     repo_b = tmp_path / "repo-b"
     repo_a.mkdir(); repo_b.mkdir()
 
-    config = {"_state_dir": tmp_path}
+    config = {"_state_dir": tmp_path, "workspace": {"base_branch": "main"}}
     repos = [{"name": "repo-a", "path": repo_a}, {"name": "repo-b", "path": repo_b}]
     pr = {"repo": "repo-b", "id": 42, "branch": "fix/thing", "url": ""}
 
@@ -146,7 +146,7 @@ def test_reviewing_fail_verdict_enqueues_fix(tmp_path):
          patch("features.tickets.get_repos", return_value=[{"name": "backend", "path": tmp_path}]), \
          patch("features.tickets.make_platform"), \
          patch("features.tickets._fetch_open_prs", return_value=[]), \
-         patch("features.tickets._reconcile_prs", side_effect=lambda ts, _: ts), \
+         patch("features.tickets._reconcile_prs", side_effect=lambda ts, _prs, _key="": ts), \
          patch("features.tickets._resolve_conflicts", side_effect=lambda c, t, ts, u, **kw: ts), \
          patch("features.tickets._check_in_review", side_effect=lambda c, t, ts, u, **kw: ts), \
          patch("features.tickets.log"), \
@@ -287,7 +287,7 @@ def test_done_ticket_with_prs_preserves_state_on_rediscovery(tmp_path):
          patch("features.tickets.get_repos", return_value=[{"name": "backend", "path": tmp_path}]), \
          patch("features.tickets.make_platform") as mock_platform, \
          patch("features.tickets._fetch_open_prs", return_value=[]), \
-         patch("features.tickets._reconcile_prs", side_effect=lambda ts, _: ts), \
+         patch("features.tickets._reconcile_prs", side_effect=lambda ts, _prs, _key="": ts), \
          patch("features.tickets._resolve_conflicts", side_effect=lambda c, t, ts, u, **kw: ts), \
          patch("features.tickets._check_in_review", side_effect=lambda c, t, ts, u, **kw: ts), \
          patch("features.tickets.subprocess.run") as mock_run, \
@@ -339,7 +339,7 @@ def test_done_ticket_without_prs_restarts_fresh(tmp_path):
          patch("features.tickets.get_repos", return_value=[{"name": "backend", "path": tmp_path}]), \
          patch("features.tickets.make_platform"), \
          patch("features.tickets._fetch_open_prs", return_value=[]), \
-         patch("features.tickets._reconcile_prs", side_effect=lambda ts, _: ts), \
+         patch("features.tickets._reconcile_prs", side_effect=lambda ts, _prs, _key="": ts), \
          patch("features.tickets._resolve_conflicts", side_effect=lambda c, t, ts, u, **kw: ts), \
          patch("features.tickets._check_in_review", side_effect=lambda c, t, ts, u, **kw: ts), \
          patch("features.tickets.subprocess.run") as mock_run, \
