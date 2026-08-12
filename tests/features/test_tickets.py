@@ -6,6 +6,17 @@ from features import tickets
 from tests.conftest import make_ticket, make_ticket_state
 
 
+@pytest.fixture(autouse=True)
+def _stub_work_type_classifier():
+    """check() classifies work_type through run_haiku, which shells out to the
+    claude CLI. Unstubbed, these tests pass only on machines where that binary
+    exists and fail on CI with FileNotFoundError, which check() swallows into
+    ticket_check_error so nothing persists. Tests that assert on the
+    classification patch run_haiku themselves; that patch nests inside this."""
+    with patch("features.tickets.run_haiku", return_value="code"):
+        yield
+
+
 class TestMakeSlug:
     def test_basic(self):
         assert tickets._make_slug("PROJ-1", "Fix the login bug") == "PROJ-1-fix-the-login-bug"
