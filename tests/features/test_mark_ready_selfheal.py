@@ -60,6 +60,25 @@ class TestCleanScratch:
         assert removed
         assert _dirty_workspace_repos(ticket_dir) == []
 
+    def test_removes_scratch_that_gitignore_hides(self, tmp_path):
+        ticket_dir = tmp_path / "tickets" / "PROJ-1-x"
+        repo = _make_repo(ticket_dir, "saas-dashboard")
+        (repo / ".gitignore").write_text(".playwright-cli/\ntest-results/\nnode_modules/\n")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "ignore scratch")
+        (repo / ".playwright-cli").mkdir()
+        (repo / ".playwright-cli" / "page.yml").write_text("snap\n")
+        (repo / "test-results").mkdir()
+        (repo / "test-results" / "out.txt").write_text("x\n")
+        (repo / "node_modules").mkdir()
+        (repo / "node_modules" / "dep.js").write_text("m\n")
+
+        _clean_workspace_scratch(ticket_dir)
+
+        assert not (repo / ".playwright-cli").exists()
+        assert not (repo / "test-results").exists()
+        assert (repo / "node_modules" / "dep.js").exists()
+
     def test_leaves_real_untracked_source(self, tmp_path):
         ticket_dir = tmp_path / "tickets" / "PROJ-1-x"
         repo = _make_repo(ticket_dir, "saas-dashboard")
