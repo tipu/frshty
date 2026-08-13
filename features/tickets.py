@@ -13,6 +13,7 @@ import core.queue as q
 import core.state as state
 import core.comments as comments
 import core.branch_sync as branch_sync
+import core.git_util as git_util
 from core import external_log
 from core.config import base_branch_for, get_repos, ticket_worktree_path, resolve_env
 from core.git_util import commit_with_hooks
@@ -782,18 +783,12 @@ def _ensure_worktree(config: dict, ticket_key: str, slug: str) -> dict | None:
         base_branch = base_branch_for(config, repo["name"])
         try:
             if (wt_path / ".git").is_file():
-                subprocess.run(["git", "fetch", "origin"], cwd=str(wt_path), capture_output=True, timeout=60)
-                result = subprocess.run(
-                    ["git", "merge", f"origin/{base_branch}"],
-                    cwd=str(wt_path), capture_output=True, text=True, timeout=60
-                )
-                if result.returncode != 0:
-                    subprocess.run(["git", "merge", "--abort"], cwd=str(wt_path), capture_output=True, timeout=60)
-                    subprocess.run(
-                        ["git", "reset", "--hard", f"origin/{base_branch}"],
-                        cwd=str(wt_path), capture_output=True, timeout=60
-                    )
-                    subprocess.run(["git", "clean", "-fd"], cwd=str(wt_path), capture_output=True, timeout=60)
+                outcome = git_util.refresh_worktree_onto_base(wt_path, base_branch)
+                if outcome["result"] == "merge_failed":
+                    log.emit("worktree_base_merge_conflict",
+                             f"{repo['name']} conflicts with origin/{base_branch}; leaving the branch as it is",
+                             meta={"ticket": ticket_key, "repo": repo["name"],
+                                   "ahead": outcome["ahead"], "error": outcome.get("error", "")})
                 relink_shared_venv(config, repo["name"], wt_path)
                 synced = True
             else:
@@ -1406,9 +1401,9 @@ def materialize_prd_ticket(config: dict, ticket_key: str, ts: dict, base_url: st
             outcome = git_util.refresh_worktree_onto_base(wt_path, base_branch)
             if outcome["result"] in ("merged", "merge_failed"):
                 log.emit("ticket_worktree_preserved",
-                         f"{key}: kept {outcome['ahead']} existing commit(s) in the "
+                         f"{ticket_key}: kept {outcome['ahead']} existing commit(s) in the "
                          f"{repo['name']} worktree instead of resetting to {base_branch}",
-                         meta={"ticket": key, "repo": repo["name"],
+                         meta={"ticket": ticket_key, "repo": repo["name"],
                                "ahead": outcome["ahead"], "result": outcome["result"]})
             relink_shared_venv(config, repo["name"], wt_path)
             continue
