@@ -255,6 +255,8 @@ This is a recording aid. Do NOT mention it in docs/proof.md and do NOT describe 
 
 Before you finish, VERIFY the indicator actually rendered: after a click, query the page for `.frshty-click-ring` and confirm at least one element exists. If it does not, the injection failed — fix it and re-record. Never state in proof.md that the indicator was used; it is invisible to the reader either way, and an unverified claim there is worse than silence.
 
+The recording must come from the driver script you leave behind in docs/. Run that exact file and keep the video it produces. A script that fails to start is the usual reason a recording has no indicator in it: the installed Playwright is CommonJS, so `import { chromium } from '.../playwright/index.js'` throws at load, and a hard-coded browser path under ~/.cache/ms-playwright goes stale on every Playwright upgrade. Use `createRequire(import.meta.url)('playwright')` and let Playwright resolve its own browser, or resolve the newest installed one at runtime.
+
 RECORDING LENGTH: keep the finished recording under 90 seconds. Show the change and stop. Do not record login, dependency installs, page loads, or idle waiting — trim them out or start the capture after them. A reviewer should see the whole proof without seeking.
 
 --- CLICK INDICATOR SCRIPT ---
