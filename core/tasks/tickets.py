@@ -356,7 +356,7 @@ def _clean_workspace_scratch(ticket_dir: Path) -> list[str]:
         if not (child.is_dir() and (child / ".git").exists()):
             continue
         result = subprocess.run(
-            ["git", "clean", "-fd", "--", *_SCRATCH_DIRS],
+            ["git", "clean", "-fdx", "--", *_SCRATCH_DIRS],
             cwd=child, capture_output=True, text=True,
         )
         for line in result.stdout.splitlines():
