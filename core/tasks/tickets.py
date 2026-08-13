@@ -6,6 +6,8 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import core.git_util as git_util
+
 import core.log as log
 import core.state as state
 from core.claude_runner import run_claude_code, run_haiku, extract_json
@@ -250,6 +252,10 @@ Playwright: `await context.addInitScript(SCRIPT)` on the BrowserContext before t
 Puppeteer: `await page.evaluateOnNewDocument(SCRIPT)`.
 
 This is a recording aid. Do NOT mention it in docs/proof.md and do NOT describe it as a feature of the change under test.
+
+Before you finish, VERIFY the indicator actually rendered: after a click, query the page for `.frshty-click-ring` and confirm at least one element exists. If it does not, the injection failed — fix it and re-record. Never state in proof.md that the indicator was used; it is invisible to the reader either way, and an unverified claim there is worse than silence.
+
+RECORDING LENGTH: keep the finished recording under 90 seconds. Show the change and stop. Do not record login, dependency installs, page loads, or idle waiting — trim them out or start the capture after them. A reviewer should see the whole proof without seeking.
 
 --- CLICK INDICATOR SCRIPT ---
 """
@@ -534,12 +540,20 @@ def start_planning(ctx: TaskContext) -> TaskResult:
                 if not wt.is_dir():
                     continue
                 base_branch = base_branch_for(ctx.config, repo["name"])
-                subprocess.run(["git", "fetch", "origin", base_branch],
-                               cwd=str(wt), capture_output=True, timeout=60)
-                subprocess.run(["git", "reset", "--hard", f"origin/{base_branch}"],
-                               cwd=str(wt), capture_output=True, timeout=60)
-                subprocess.run(["git", "clean", "-fd"],
-                               cwd=str(wt), capture_output=True, timeout=60)
+                outcome = git_util.refresh_worktree_onto_base(wt, base_branch)
+                if outcome["result"] == "merged":
+                    log.emit("ticket_worktree_rebased",
+                             f"{ctx.ticket_key}: merged {base_branch} into {repo['name']} "
+                             f"worktree, preserving {outcome['ahead']} commit(s)",
+                             meta={"ticket": ctx.ticket_key, "repo": repo["name"],
+                                   "ahead": outcome["ahead"]})
+                elif outcome["result"] == "merge_failed":
+                    log.emit("ticket_worktree_rebase_failed",
+                             f"{ctx.ticket_key}: could not merge {base_branch} into "
+                             f"{repo['name']} worktree, leaving its {outcome['ahead']} "
+                             f"commit(s) intact: {outcome.get('error', '')[:120]}",
+                             meta={"ticket": ctx.ticket_key, "repo": repo["name"],
+                                   "ahead": outcome["ahead"]})
                 relink_shared_venv(ctx.config, repo["name"], wt)
     if ctx.ticket_key:
         ts = state.load_ticket(ctx.ticket_key) or {}
@@ -1526,10 +1540,7 @@ def do_research(ctx: TaskContext) -> TaskResult:
             if not wt.is_dir():
                 continue
             base_branch = base_branch_for(ctx.config, repo["name"])
-            subprocess.run(["git", "fetch", "origin", base_branch],
-                           cwd=str(wt), capture_output=True, timeout=60)
-            subprocess.run(["git", "reset", "--hard", f"origin/{base_branch}"],
-                           cwd=str(wt), capture_output=True, timeout=60)
+            git_util.refresh_worktree_onto_base(wt, base_branch)
     log.emit("ticket_research_started", f"Research spike for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key})
     prompt = (

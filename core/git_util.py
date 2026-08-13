@@ -203,3 +203,40 @@ def commit_with_hooks(repo_dir: Path,
         args, cwd=str(repo_dir), capture_output=True, text=True,
         check=check, timeout=timeout, env=env,
     )
+
+
+def refresh_worktree_onto_base(worktree, base_branch: str) -> dict:
+    """Bring a ticket worktree up to date with its base without destroying work.
+
+    A plain `reset --hard origin/<base>` is correct only when the branch has no
+    commits of its own. When it does — a replan, a note-reset, or any re-entry
+    into planning after implementation — the reset deletes them, and unpushed
+    commits survive only in the reflog. Merge instead in that case, which
+    achieves the same fresh base and keeps the work.
+
+    Returns {"result": reset|merged|merge_failed|no_base, "ahead": int}.
+    """
+    wt = str(worktree)
+    fetch = subprocess.run(["git", "fetch", "origin", base_branch],
+                           cwd=wt, capture_output=True, text=True, timeout=60)
+    if fetch.returncode != 0:
+        return {"result": "no_base", "ahead": 0, "error": (fetch.stderr or "").strip()[:200]}
+
+    counted = subprocess.run(["git", "rev-list", "--count", f"origin/{base_branch}..HEAD"],
+                             cwd=wt, capture_output=True, text=True, timeout=30)
+    raw = (counted.stdout or "").strip()
+    ahead = int(raw) if raw.isdigit() else 0
+
+    if ahead == 0:
+        subprocess.run(["git", "reset", "--hard", f"origin/{base_branch}"],
+                       cwd=wt, capture_output=True, timeout=60)
+        subprocess.run(["git", "clean", "-fd"], cwd=wt, capture_output=True, timeout=60)
+        return {"result": "reset", "ahead": 0}
+
+    merged = subprocess.run(["git", "merge", f"origin/{base_branch}", "--no-edit"],
+                            cwd=wt, capture_output=True, text=True, timeout=120)
+    if merged.returncode != 0:
+        subprocess.run(["git", "merge", "--abort"], cwd=wt, capture_output=True, timeout=60)
+        return {"result": "merge_failed", "ahead": ahead,
+                "error": (merged.stderr or merged.stdout or "").strip()[:200]}
+    return {"result": "merged", "ahead": ahead}

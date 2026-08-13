@@ -1219,8 +1219,13 @@ def _setup_ticket(config, ticket, base_url, comments=None) -> dict:
             any_worktree = True
             subprocess.run(["git", "fetch", "origin"], cwd=str(wt_path), capture_output=True, timeout=60)
             subprocess.run(["git", "checkout", branch], cwd=str(wt_path), capture_output=True, timeout=60)
-            subprocess.run(["git", "reset", "--hard", f"origin/{base_branch}"], cwd=str(wt_path), capture_output=True, timeout=60)
-            subprocess.run(["git", "clean", "-fd"], cwd=str(wt_path), capture_output=True, timeout=60)
+            outcome = git_util.refresh_worktree_onto_base(wt_path, base_branch)
+            if outcome["result"] in ("merged", "merge_failed"):
+                log.emit("ticket_worktree_preserved",
+                         f"{key}: kept {outcome['ahead']} existing commit(s) in the "
+                         f"{repo['name']} worktree instead of resetting to {base_branch}",
+                         meta={"ticket": key, "repo": repo["name"],
+                               "ahead": outcome["ahead"], "result": outcome["result"]})
             relink_shared_venv(config, repo["name"], wt_path)
             continue
         wt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1398,8 +1403,13 @@ def materialize_prd_ticket(config: dict, ticket_key: str, ts: dict, base_url: st
             any_worktree = True
             subprocess.run(["git", "fetch", "origin"], cwd=str(wt_path), capture_output=True, timeout=60)
             subprocess.run(["git", "checkout", branch], cwd=str(wt_path), capture_output=True, timeout=60)
-            subprocess.run(["git", "reset", "--hard", f"origin/{base_branch}"], cwd=str(wt_path), capture_output=True, timeout=60)
-            subprocess.run(["git", "clean", "-fd"], cwd=str(wt_path), capture_output=True, timeout=60)
+            outcome = git_util.refresh_worktree_onto_base(wt_path, base_branch)
+            if outcome["result"] in ("merged", "merge_failed"):
+                log.emit("ticket_worktree_preserved",
+                         f"{key}: kept {outcome['ahead']} existing commit(s) in the "
+                         f"{repo['name']} worktree instead of resetting to {base_branch}",
+                         meta={"ticket": key, "repo": repo["name"],
+                               "ahead": outcome["ahead"], "result": outcome["result"]})
             relink_shared_venv(config, repo["name"], wt_path)
             continue
         wt_path.parent.mkdir(parents=True, exist_ok=True)
