@@ -14,6 +14,7 @@ import core.state as state
 import core.comments as comments
 import core.branch_sync as branch_sync
 import core.git_util as git_util
+import features.defence as defence
 from core import external_log
 from core.config import base_branch_for, get_repos, ticket_worktree_path, resolve_env
 from core.git_util import commit_with_hooks
@@ -1647,6 +1648,32 @@ def _draft_comment_reply(config, slug, ticket, comment, pr) -> str:
     return run_balanced(prompt) or ""
 
 
+def _substantiate_reply(config, slug, ticket, comment, pr, suggested: str) -> dict:
+    """Try to back a drafted reply with a test result.
+
+    The draft above is one model call with nothing behind it, which is why every
+    reply gets re-checked by hand. This runs a named test with the branch's source
+    change in place and again with it reversed, so the reply carries evidence or
+    says plainly that it has none. Never raises: a reply with no evidence is still
+    a reply, and losing the comment would be worse than losing the proof.
+    """
+    if not config.get("features", {}).get("defence"):
+        return {"verdict": defence.INCONCLUSIVE, "reason": "features.defence disabled"}
+    if not suggested.strip():
+        return {"verdict": defence.INCONCLUSIVE, "reason": "no drafted reply to substantiate"}
+    try:
+        wt = ticket_worktree_path(config, slug, pr["repo"])
+        if not (wt / ".git").exists():
+            return {"verdict": defence.INCONCLUSIVE, "reason": f"no worktree for {pr['repo']}"}
+        result = defence.substantiate(config, suggested.strip(), pr["repo"], wt,
+                                      base_branch_for(config, pr["repo"]))
+        return result.to_dict()
+    except Exception as e:
+        log.emit("defence_error", f"{ticket['key']}: substantiation failed: {type(e).__name__}: {e}",
+                 meta={"ticket": ticket["key"], "repo": pr["repo"]})
+        return {"verdict": defence.INCONCLUSIVE, "reason": f"{type(e).__name__}: {e}"[:200]}
+
+
 MAX_PR_COMMENT_FIX_ATTEMPTS = 2
 
 
@@ -1943,6 +1970,7 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                 suggested = _draft_comment_reply(config, slug, ticket, comment, pr)
                 entry["status"] = "needs_reply"
                 entry["suggested_reply"] = suggested
+                entry["defence"] = _substantiate_reply(config, slug, ticket, comment, pr, suggested)
                 log.emit("ticket_pr_comment_needs_reply", f"{_label(ticket['key'], ts)}: Reply needed {comment['body'][:80]}",
                     links={"detail": f"{base_url}/tickets/{ticket['key']}", "comment": comment.get("html_url", "")},
                     meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"]})
