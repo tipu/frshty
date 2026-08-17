@@ -45,6 +45,16 @@ REAL_TEST = (
 
 TAUTOLOGY_TEST = "def test_add():\n    assert True\n"
 
+STATEFUL_TEST = (
+    "from pathlib import Path\n\n"
+    "def test_add():\n"
+    "    marker = Path('.defence-first-run')\n"
+    "    if not marker.exists():\n"
+    "        marker.write_text('seen')\n"
+    "        return\n"
+    "    raise AssertionError('fails only because it already ran once')\n"
+)
+
 REVISION_TEST = (
     "import subprocess\n\n"
     "def test_add():\n"
@@ -92,6 +102,17 @@ class TestDifferential:
                                  "test_name": "test_add"})
         assert r.with_change_exit == 0
         assert r.without_change_exit == 0, "HEAD must be identical across both runs"
+        assert r.verdict == defence.INCONCLUSIVE
+
+    def test_rejects_a_test_that_only_remembers_it_already_ran(self, tmp_path):
+        """The marker exploit. It measures nothing, but writing a file on the first
+        run and failing on the second produced the exact pass-then-fail pattern the
+        gate accepts, back when both runs shared one directory."""
+        repo = _repo(tmp_path, STATEFUL_TEST)
+        r = _substantiate(repo, {"can_prove": True, "test_file": "tests/test_add.py",
+                                 "test_name": "test_add"})
+        assert r.with_change_exit == 0
+        assert r.without_change_exit == 0, "a separate checkout must not see the first run's marker"
         assert r.verdict == defence.INCONCLUSIVE
 
     def test_rejects_a_test_that_does_not_pass_on_the_branch(self, tmp_path):
@@ -188,3 +209,36 @@ class TestRender:
         assert "VERDICT: SUBSTANTIATED" in out
         assert "PROOF: t.py::t with_change=0 without_change=1" in out
         assert "JUDGE: codex=SUBSTANTIATED" in out
+
+
+class TestOnlyAnAssertionFailureCounts:
+    """Any non-zero used to count as proof. A timeout, an import error and a
+    collection error all exit non-zero without the test deciding anything."""
+
+    def test_a_timeout_is_not_evidence(self):
+        ok, why = defence._is_assertion_failure(None, "")
+        assert not ok and "did not finish" in why
+
+    def test_a_pass_is_not_evidence(self):
+        ok, why = defence._is_assertion_failure(0, "1 passed")
+        assert not ok and "does not measure" in why
+
+    def test_pytest_exit_5_nothing_collected_is_not_evidence(self):
+        ok, why = defence._is_assertion_failure(5, "no tests ran")
+        assert not ok and "runner error" in why
+
+    def test_pytest_exit_4_usage_error_is_not_evidence(self):
+        ok, why = defence._is_assertion_failure(4, "usage: pytest")
+        assert not ok and "runner error" in why
+
+    def test_a_collection_error_disguised_as_exit_1_is_not_evidence(self):
+        ok, why = defence._is_assertion_failure(1, "ERROR collecting tests/test_a.py")
+        assert not ok and "setup failure" in why
+
+    def test_an_import_error_is_not_evidence(self):
+        ok, why = defence._is_assertion_failure(1, "ModuleNotFoundError: no module named x")
+        assert not ok and "setup failure" in why
+
+    def test_a_real_assertion_failure_is_evidence(self):
+        ok, why = defence._is_assertion_failure(1, "1 failed\nE  assert 0 == 5")
+        assert ok and why == ""
