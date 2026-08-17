@@ -53,7 +53,8 @@ class PRDTicketSystem:
         ts = state.list_tickets().get(key)
         if not ts:
             return None
-        return {"key": key, "summary": ts.get("summary", ""), "description": ts.get("description", "")}
+        return {"key": key, "summary": ts.get("summary", ""), "description": ts.get("description", ""),
+                "status": ts.get("external_status", "")}
 
     def ticket_url(self, key: str) -> str:
         raise NotImplementedError("PRD tickets have no external ticket URL; implement ticket_url for PRDTicketSystem")
@@ -175,7 +176,7 @@ class JiraTicketSystem:
     def fetch_ticket(self, key: str) -> dict | None:
         if not self.base_url or not self.user or not self.token or not key:
             return None
-        url = f"{self.base_url}/rest/api/3/issue/{key}?fields=summary,description"
+        url = f"{self.base_url}/rest/api/3/issue/{key}?fields=summary,description,status"
         try:
             with external_log.client("jira", auth=(self.user, self.token), timeout=30) as client:
                 resp = client.get(url)
@@ -186,6 +187,7 @@ class JiraTicketSystem:
                     "key": key,
                     "summary": fields.get("summary", ""),
                     "description": _adf_to_text(fields.get("description")),
+                    "status": (fields.get("status") or {}).get("name", ""),
                 }
         except (httpx.HTTPError, httpx.TimeoutException) as e:
             log.emit("jira_fetch_ticket_failed", f"Failed to fetch {key}: {e}", meta={"ticket": key})
@@ -260,7 +262,7 @@ class LinearTicketSystem:
     def fetch_ticket(self, key: str) -> dict | None:
         if not self.token or not key:
             return None
-        query = 'query { issue(id: "%s") { identifier title description } }' % key
+        query = 'query { issue(id: "%s") { identifier title description state { name } } }' % key
         try:
             with external_log.client("linear", timeout=30, transport=httpx.HTTPTransport(retries=2)) as client:
                 resp = client.post("https://api.linear.app/graphql",
@@ -275,6 +277,7 @@ class LinearTicketSystem:
                     "key": issue.get("identifier", key),
                     "summary": issue.get("title", ""),
                     "description": issue.get("description", "") or "",
+                    "status": ((issue.get("state") or {}).get("name") or ""),
                 }
         except (httpx.HTTPError, httpx.TimeoutException) as e:
             log.emit("linear_fetch_ticket_failed", f"Failed to fetch {key}: {e}", meta={"ticket": key})

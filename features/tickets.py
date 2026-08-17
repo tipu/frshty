@@ -1053,8 +1053,15 @@ def check(config: dict, instance_key: str = ""):
             except Exception as e:
                 log.emit("check_pr_state_failed", f"Failed to check PR state: {e}", meta={"ticket": key})
                 continue
+        upstream = _upstream_status(config, key)
+        if upstream is None or not _is_terminal_upstream(config, upstream):
+            _note_unresolved_sweep(key, ts, upstream)
+            state.save_ticket(key, ts)
+            continue
         ts["status"] = transition(ts.get("status", "new"), "done")
+        ts["external_status"] = upstream
         ts["done_at"] = datetime.now(timezone.utc).isoformat()
+        ts.pop("sweep_unresolved_status", None)
         state.save_ticket(key, ts)
 
     for ticket in assigned:
@@ -1190,6 +1197,65 @@ def _maybe_enqueue_ranker(instance_key: str) -> None:
     if pending:
         return
     q.enqueue_job(instance_key, "rank_new_tickets", ticket_key=None)
+
+
+_TERMINAL_UPSTREAM = ("done", "cancelled", "canceled", "closed", "resolved",
+                      "won't do", "wont do", "released", "rejected", "duplicate")
+
+
+def _terminal_upstream_names(config: dict) -> tuple[str, ...]:
+    configured = config.get("tickets", {}).get("terminal_statuses")
+    if isinstance(configured, list) and configured:
+        return tuple(str(s).strip().lower() for s in configured if str(s).strip())
+    return _TERMINAL_UPSTREAM
+
+
+def _is_terminal_upstream(config: dict, status_name: str) -> bool:
+    return (status_name or "").strip().lower() in _terminal_upstream_names(config)
+
+
+def _upstream_status(config: dict, key: str) -> str | None:
+    """The ticket's real status upstream, or None when it cannot be determined.
+
+    The sweep over locally-known tickets used to read absence from the query as
+    proof of completion. It is not: a ticket leaves the query whenever its status
+    moves outside the configured window, which includes states that mean the
+    opposite of finished. DEV-636 was closed out from pr_ready while Jira held it
+    at "Changes Requested". Ask the source instead of inferring.
+    """
+    system = make_ticket_system(config)
+    if not system:
+        return None
+    try:
+        fetched = system.fetch_ticket(key)
+    except Exception as e:
+        log.emit("sweep_status_fetch_failed", f"Could not read upstream status for {key}: {e}",
+                 meta={"ticket": key})
+        return None
+    if not isinstance(fetched, dict):
+        return None
+    status = str(fetched.get("status") or "").strip()
+    return status or None
+
+
+def _note_unresolved_sweep(key: str, ts: dict, upstream: str | None) -> None:
+    """Record that a ticket left the query without being finished.
+
+    Logged once per distinct upstream status rather than once per scan, because a
+    line emitted every cycle is how this codebase has produced dispatcher loops
+    before. The ticket keeps its local status: closing it would lose the work, and
+    forcing it to a terminal state to free the repo gate is what caused the defect
+    this guards against.
+    """
+    marker = upstream or "unknown"
+    if ts.get("sweep_unresolved_status") == marker:
+        return
+    ts["sweep_unresolved_status"] = marker
+    log.emit("ticket_left_query_unfinished",
+             f"{key} is no longer returned by the ticket query but is not finished "
+             f"upstream (status: {marker}); leaving it at {ts.get('status', 'new')}",
+             meta={"ticket": key, "upstream_status": marker,
+                   "local_status": ts.get("status", "new")})
 
 
 def _fetch_tickets(config: dict) -> list[dict]:
@@ -1500,6 +1566,7 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
 
     prs = []
     any_diff = False
+    diff_undetermined = False
     for repo in repos:
         wt = ticket_worktree_path(config, slug, repo["name"])
         if not wt.is_dir():
@@ -1512,6 +1579,15 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
         diff_check = subprocess.run(
             ["git", "diff", f"origin/{base_branch}..HEAD", "--stat"],
             cwd=str(wt), capture_output=True, text=True, timeout=30)
+        if diff_check.returncode != 0:
+            diff_undetermined = True
+            log.emit("ticket_diff_check_failed",
+                     f"{_label(ticket['key'], ts)}: could not diff {repo['name']} against "
+                     f"origin/{base_branch}; not treating this as 'no changes'",
+                     meta={"ticket": ticket["key"], "repo": repo["name"],
+                           "base_branch": base_branch,
+                           "error": (diff_check.stderr or "").strip()[:200]})
+            continue
         if not diff_check.stdout.strip():
             continue
         any_diff = True
@@ -1559,6 +1635,14 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
             except Exception as e:
                 log.emit("get_pr_info_failed", f"Failed to get PR info: {e}", meta={"repo": repo["name"], "pr_id": pr_id})
             prs.append({"repo": repo["name"], "id": pr_id, "url": pr_url, "author": author})
+
+    if not any_diff and diff_undetermined:
+        log.emit("ticket_no_changes_undetermined",
+            f"{_label(ticket['key'], ts)}: found no changes, but at least one repo could not be "
+            f"diffed, so 'no changes' is not established; leaving the ticket alone",
+            links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{ticket['key']}"},
+            meta={"ticket": ticket["key"]})
+        return ts
 
     if not any_diff:
         log.emit("ticket_no_changes", f"No code changes needed for {_label(ticket['key'], ts)}, marking as merged",
