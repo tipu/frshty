@@ -22,6 +22,21 @@ def _is_usage_worthy(path: str) -> bool:
 
 def install(app):
     @app.middleware("http")
+    async def revalidate_static(request, call_next):
+        """Make the browser check /static before reusing it.
+
+        StaticFiles sends ETag and Last-Modified but no Cache-Control, so a
+        browser is free to reuse a cached copy without asking. A shipped fix to
+        frshty-nav.js then stays invisible until a hard reload. no-cache still
+        allows caching; it only requires revalidation, so the usual answer is a
+        304 and nothing is re-downloaded.
+        """
+        response = await call_next(request)
+        if request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
+
+    @app.middleware("http")
     async def resolve_instance_by_host(request, call_next):
         """In --multi mode, pick the active config by matching the request Host header.
 
