@@ -61,6 +61,7 @@ body.maximized #terminal-container { flex: 1; height: auto !important; }
 .defence.SUBSTANTIATED { background: #0f2a17; border: 1px solid #22c55e; color: #b7f0c7; }
 .defence.REFUTED { background: #2a0f12; border: 1px solid #ef4444; color: #f3b8bc; }
 .defence.INCONCLUSIVE { background: #2a2410; border: 1px solid #eab308; color: #f0e0b0; }
+.defence.PENDING { background: #14202b; border: 1px solid #3b82f6; color: #bcd7f0; }
 .defence .d-head { font-weight: 600; letter-spacing: 0.03em; }
 .defence .d-proof { opacity: 0.85; font-family: ui-monospace, monospace; font-size: 11px; }
 <div v-if="c.defence" class="defence" :class="c.defence.verdict">
@@ -1183,6 +1184,7 @@ frshtyApp({
             if (!d) return '';
             if (d.verdict === 'SUBSTANTIATED') return 'VERIFIED — a test in this branch backs this reply';
             if (d.verdict === 'REFUTED') return 'REFUTED — the evidence contradicts this reply';
+            if (d.verdict === 'PENDING') return 'CHECKING — an evidence run is queued for this reply';
             return 'UNVERIFIED — nothing backs this reply, check it yourself';
         }
 

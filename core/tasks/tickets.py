@@ -15,6 +15,7 @@ from core.config import base_branch_for, get_repos, ticket_worktree_path
 from core.deps import relink_shared_venv
 from core.consensus_plan import run_consensus_plan
 from core.tasks.registry import TaskContext, TaskResult, task
+import features.defence as defence
 from core.tasks.preconditions import (
     status_is, auto_pr_true, file_exists, file_contains, feature_enabled, has_flag,
     repo_gate_clear,
@@ -1601,3 +1602,59 @@ def validate_merged_ticket(ctx: TaskContext) -> TaskResult:
                  f"[{ctx.instance_key}] {ctx.ticket_key}: {type(e).__name__}: {e}",
                  meta={"ticket": ctx.ticket_key})
         return TaskResult("failed", f"{type(e).__name__}: {e}")
+
+
+@task("substantiate_reply", preconditions=[feature_enabled("defence")],
+      timeout=defence.TEST_TIMEOUT * 2 + 600)
+def substantiate_reply(ctx: TaskContext) -> TaskResult:
+    """Back one drafted reply with a test result, off the comment poll.
+
+    The evidence run executes two test suites, so it cannot sit inside the poll
+    that walks every comment on every ticket. It runs here and writes the verdict
+    back onto the comment when it is done.
+    """
+    import features.tickets as ft
+
+    slug = ctx.payload.get("slug", "")
+    repo = ctx.payload.get("repo", "")
+    comment_id = ctx.payload.get("comment_id")
+    if not slug or not repo or comment_id is None:
+        return TaskResult("failed", "substantiate_reply needs slug, repo and comment_id")
+
+    path = ft._pr_comments_path(ctx.config, slug)
+    if not path.exists():
+        return TaskResult("skipped", "the comment file is gone")
+    try:
+        rows = json.loads(path.read_text())
+    except (OSError, ValueError) as e:
+        return TaskResult("failed", f"unreadable comment file: {type(e).__name__}: {e}")
+
+    entry = next((r for r in rows if str(r.get("id")) == str(comment_id)), None)
+    if not entry:
+        return TaskResult("skipped", f"comment {comment_id} is no longer tracked")
+    claim = (entry.get("suggested_reply") or "").strip()
+    if not claim:
+        ft.record_defence_result(ctx.config, slug, comment_id,
+                                 {"verdict": defence.INCONCLUSIVE,
+                                  "reason": "no drafted reply to substantiate"})
+        return TaskResult("ok", artifacts={"verdict": defence.INCONCLUSIVE})
+
+    wt = ticket_worktree_path(ctx.config, slug, repo)
+    if not (wt / ".git").exists():
+        ft.record_defence_result(ctx.config, slug, comment_id,
+                                 {"verdict": defence.INCONCLUSIVE,
+                                  "reason": f"no worktree for {repo}"})
+        return TaskResult("ok", artifacts={"verdict": defence.INCONCLUSIVE})
+
+    try:
+        result = defence.substantiate(ctx.config, claim, repo, wt,
+                                      base_branch_for(ctx.config, repo)).to_dict()
+    except Exception as e:
+        log.emit("defence_error",
+                 f"[{ctx.instance_key}] {ctx.ticket_key}: substantiation failed: "
+                 f"{type(e).__name__}: {e}",
+                 meta={"ticket": ctx.ticket_key, "repo": repo})
+        result = {"verdict": defence.INCONCLUSIVE, "reason": f"{type(e).__name__}: {e}"[:200]}
+
+    ft.record_defence_result(ctx.config, slug, comment_id, result)
+    return TaskResult("ok", artifacts={"verdict": result.get("verdict", defence.INCONCLUSIVE)})

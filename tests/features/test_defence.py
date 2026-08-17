@@ -242,3 +242,74 @@ class TestOnlyAnAssertionFailureCounts:
     def test_a_real_assertion_failure_is_evidence(self):
         ok, why = defence._is_assertion_failure(1, "1 failed\nE  assert 0 == 5")
         assert ok and why == ""
+
+
+class TestSubstantiationIsQueuedNotInline:
+    """Two test suites with a ten-minute ceiling each cannot run inside the comment
+    poll: comments are processed one after another, so one slow repo would stall
+    every later comment on every later ticket."""
+
+    def _draft(self, features_on=True, instance_key="aimyable"):
+        import features.tickets as ft
+        cfg = {"features": {"defence": True} if features_on else {},
+               "job": {"key": instance_key}}
+        with patch.object(ft, "q") as q, patch.object(ft, "log"):
+            out = ft._substantiate_reply(cfg, "DEV-1-x", {"key": "DEV-1"},
+                                         {"id": 77}, {"repo": "r"}, "a claim")
+        return out, q
+
+    def test_the_poll_enqueues_and_returns_immediately(self):
+        out, q = self._draft()
+        assert out["verdict"] == defence.PENDING
+        q.enqueue_job.assert_called_once()
+        args, kwargs = q.enqueue_job.call_args
+        assert args[1] == "substantiate_reply"
+        assert kwargs["payload"] == {"slug": "DEV-1-x", "repo": "r", "comment_id": 77}
+        assert kwargs["ticket_key"] == "DEV-1"
+
+    def test_the_poll_never_runs_the_evidence_itself(self):
+        import features.tickets as ft
+        cfg = {"features": {"defence": True}, "job": {"key": "aimyable"}}
+        with patch.object(ft, "q"), patch.object(ft, "log"), \
+             patch.object(defence, "substantiate") as ran:
+            ft._substantiate_reply(cfg, "DEV-1-x", {"key": "DEV-1"},
+                                   {"id": 77}, {"repo": "r"}, "a claim")
+        ran.assert_not_called()
+
+    def test_the_flag_off_queues_nothing(self):
+        out, q = self._draft(features_on=False)
+        assert out["verdict"] == defence.INCONCLUSIVE
+        q.enqueue_job.assert_not_called()
+
+    def test_a_missing_instance_key_queues_nothing(self):
+        out, q = self._draft(instance_key="")
+        assert out["verdict"] == defence.INCONCLUSIVE
+        q.enqueue_job.assert_not_called()
+
+
+class TestResultIsWrittenBackToTheComment:
+    def test_the_verdict_lands_on_the_right_comment(self, tmp_path):
+        import features.tickets as ft
+        import json as js
+        d = tmp_path / "tickets" / "DEV-1-x"
+        d.mkdir(parents=True)
+        (d / "pr_comments.json").write_text(js.dumps(
+            [{"id": 1, "suggested_reply": "a"}, {"id": 77, "suggested_reply": "b"}]))
+        cfg = {"workspace": {"root": tmp_path, "tickets_dir": "tickets"}}
+        assert ft.record_defence_result(cfg, "DEV-1-x", 77,
+                                        {"verdict": defence.SUBSTANTIATED}) is True
+        rows = js.loads((d / "pr_comments.json").read_text())
+        assert rows[1]["defence"]["verdict"] == defence.SUBSTANTIATED
+        assert "defence" not in rows[0]
+
+    def test_a_comment_the_poll_dropped_is_not_recreated(self, tmp_path):
+        """The poll rewrites this file while the queued run works, so the entry
+        can be gone by the time the verdict arrives."""
+        import features.tickets as ft
+        import json as js
+        d = tmp_path / "tickets" / "DEV-1-x"
+        d.mkdir(parents=True)
+        (d / "pr_comments.json").write_text(js.dumps([{"id": 1}]))
+        cfg = {"workspace": {"root": tmp_path, "tickets_dir": "tickets"}}
+        assert ft.record_defence_result(cfg, "DEV-1-x", 77, {"verdict": "X"}) is False
+        assert js.loads((d / "pr_comments.json").read_text()) == [{"id": 1}]
