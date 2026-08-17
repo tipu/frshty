@@ -169,13 +169,17 @@ def api_ticket_pr_info(ticket_key: str):
         docs_dir = ticket_dir / "docs"
         pr_descriptions = ticket.get("pr_descriptions") or {}
 
-        # Fast path: pre-generated descriptions cover every field the modal
-        # needs (title, description, branch, files_changed). Skip git fetches
-        # and the change-manifest haiku call — the cache was already populated
-        # by the generate_pr_descriptions task at pr_ready entry.
+        # Fast path: pre-generated descriptions carry the title and description,
+        # so the change-manifest haiku call is skipped. The file count is NOT
+        # taken from the cache. It was written once at pr_ready entry and says
+        # nothing about the branch now: DEV-636's cache still advertised two
+        # changed files in websocket-server days after a replan reset wiped that
+        # commit, so the modal offered a PR for code the branch no longer had.
+        # Recount against the worktree, and mark any repo with nothing to push.
         if pr_descriptions:
-            repos_out = [
-                {
+            repos_out = []
+            for name, entry in pr_descriptions.items():
+                row = {
                     "name": name,
                     "branch": entry.get("branch") or ticket.get("branch", ""),
                     "files_changed": int(entry.get("files_changed", 0)),
@@ -183,9 +187,26 @@ def api_ticket_pr_info(ticket_key: str):
                     "description": entry.get("description", ""),
                     "generated": True,
                     "generated_at": entry.get("generated_at", ""),
+                    "has_changes": True,
+                    "stale_reason": "",
                 }
-                for name, entry in pr_descriptions.items()
-            ]
+                wt = _tickets_mod.ticket_worktree_path(_config, slug, name)
+                if not wt.is_dir():
+                    row.update(files_changed=0, has_changes=False,
+                               stale_reason="no worktree for this repo")
+                else:
+                    files = _changed_files(wt, f"origin/{cfg.base_branch_for(_config, name)}")
+                    row["files_changed"] = len(files)
+                    if not _is_meaningful_change(files):
+                        row.update(has_changes=False,
+                                   stale_reason="branch has no commits against its base")
+                repos_out.append(row)
+            if any(not r["has_changes"] for r in repos_out):
+                log.emit("pr_info_stale_repo",
+                         f"{ticket_key}: PR cache lists "
+                         f"{[r['name'] for r in repos_out if not r['has_changes']]} "
+                         "with nothing to push",
+                         meta={"ticket": ticket_key})
             return {"repos": repos_out}
 
         # Slow fallback: pre-feature tickets, or pr_ready entered moments ago
