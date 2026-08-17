@@ -1670,6 +1670,29 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
     return ts
 
 
+def record_defence_result(config, slug: str, comment_id, result: dict) -> bool:
+    """Write a finished evidence run back onto its comment.
+
+    Re-reads the file rather than holding the entry, because the comment poll
+    rewrites pr_comments.json while the queued run is still working.
+    """
+    path = _pr_comments_path(config, slug)
+    if not path.exists():
+        return False
+    try:
+        rows = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return False
+    hit = False
+    for row in rows:
+        if str(row.get("id")) == str(comment_id):
+            row["defence"] = result
+            hit = True
+    if hit:
+        path.write_text(json.dumps(rows, indent=2, default=str))
+    return hit
+
+
 def _pr_comments_path(config, slug):
     ws = config["workspace"]
     return ws["root"] / ws["tickets_dir"] / slug / "pr_comments.json"
@@ -1733,29 +1756,31 @@ def _draft_comment_reply(config, slug, ticket, comment, pr) -> str:
 
 
 def _substantiate_reply(config, slug, ticket, comment, pr, suggested: str) -> dict:
-    """Try to back a drafted reply with a test result.
+    """Queue the evidence run for a drafted reply and return its pending marker.
 
-    The draft above is one model call with nothing behind it, which is why every
-    reply gets re-checked by hand. This runs a named test with the branch's source
-    change in place and again with it reversed, so the reply carries evidence or
-    says plainly that it has none. Never raises: a reply with no evidence is still
-    a reply, and losing the comment would be worse than losing the proof.
+    The check runs two test suites, each with a ten-minute ceiling. Doing that
+    inline would hold the comment poll for as long as it takes, and comments are
+    processed one after another, so one slow repo would stall every later comment
+    on every later ticket. The work goes on the queue instead and writes its
+    verdict back into pr_comments.json when it finishes.
     """
     if not config.get("features", {}).get("defence"):
         return {"verdict": defence.INCONCLUSIVE, "reason": "features.defence disabled"}
     if not suggested.strip():
         return {"verdict": defence.INCONCLUSIVE, "reason": "no drafted reply to substantiate"}
+    instance_key = (config.get("job") or {}).get("key") or ""
+    if not instance_key:
+        return {"verdict": defence.INCONCLUSIVE, "reason": "no instance key to queue against"}
     try:
-        wt = ticket_worktree_path(config, slug, pr["repo"])
-        if not (wt / ".git").exists():
-            return {"verdict": defence.INCONCLUSIVE, "reason": f"no worktree for {pr['repo']}"}
-        result = defence.substantiate(config, suggested.strip(), pr["repo"], wt,
-                                      base_branch_for(config, pr["repo"]))
-        return result.to_dict()
+        q.enqueue_job(instance_key, "substantiate_reply",
+                      payload={"slug": slug, "repo": pr["repo"], "comment_id": comment["id"]},
+                      ticket_key=ticket["key"])
     except Exception as e:
-        log.emit("defence_error", f"{ticket['key']}: substantiation failed: {type(e).__name__}: {e}",
+        log.emit("defence_enqueue_failed",
+                 f"{ticket['key']}: could not queue substantiation: {type(e).__name__}: {e}",
                  meta={"ticket": ticket["key"], "repo": pr["repo"]})
-        return {"verdict": defence.INCONCLUSIVE, "reason": f"{type(e).__name__}: {e}"[:200]}
+        return {"verdict": defence.INCONCLUSIVE, "reason": f"could not queue: {type(e).__name__}"}
+    return {"verdict": defence.PENDING, "reason": "evidence run queued"}
 
 
 MAX_PR_COMMENT_FIX_ATTEMPTS = 2
