@@ -71,9 +71,12 @@
                 activeName.value = localRepos.value[0]?.name || null;
             }, { immediate: true });
             const active = computed(() => localRepos.value.find(r => r.name === activeName.value));
+            const submittable = computed(() => localRepos.value.filter(r => r.has_changes !== false));
             function submit() {
                 ctx.emit('submit', {
-                    repos: localRepos.value.map(r => ({ name: r.name, title: r.title, description: r.description })),
+                    repos: localRepos.value
+                        .filter(r => r.has_changes !== false)
+                        .map(r => ({ name: r.name, title: r.title, description: r.description })),
                 });
             }
             function close() { ctx.emit('close'); }
@@ -108,7 +111,7 @@
                     regenerating.value = false;
                 }
             }
-            return { localRepos, activeName, active, submit, close, regenerating, regenError, regenerate };
+            return { localRepos, activeName, active, submittable, submit, close, regenerating, regenError, regenerate };
         },
         template: `
             <teleport to="body">
@@ -134,11 +137,16 @@
                                 <button v-for="r in localRepos" :key="r.name" @click="activeName = r.name"
                                         class="px-3 py-2 text-sm border-b-2"
                                         :class="r.name === activeName ? 'border-blue-500 text-white' : 'border-transparent text-gray-400 hover:text-gray-200'">
-                                    {{ r.name }} <span class="text-xs text-gray-500">({{ r.files_changed }} files)</span>
+                                    {{ r.name }}
+                                    <span v-if="r.has_changes === false" class="text-xs text-yellow-400" title="Nothing to push from this branch">(nothing to push)</span>
+                                    <span v-else class="text-xs text-gray-500">({{ r.files_changed }} files)</span>
                                 </button>
                             </div>
                             <div v-if="active" class="flex-1 flex flex-col overflow-hidden">
                                 <div class="mb-1 text-xs text-gray-500">{{ active.name }} → {{ active.branch }}</div>
+                                <div v-if="active.has_changes === false" class="mb-3 px-3 py-2 rounded text-xs" style="background:#2a2410;border:1px solid #eab308;color:#f0e0b0">
+                                    This repo will not be submitted: {{ active.stale_reason }}. The title and description below were written when the branch still had changes.
+                                </div>
                                 <div class="mb-3">
                                     <label class="text-xs font-bold text-gray-400 block mb-2">Title</label>
                                     <input type="text" v-model="active.title" v-autofocus
@@ -153,10 +161,10 @@
                             </div>
                         </template>
                         <div class="flex gap-2 mt-4 pt-4 border-t border-gray-700">
-                            <button @click="submit" :disabled="submitting || !localRepos.length"
+                            <button @click="submit" :disabled="submitting || !submittable.length"
                                     class="flex-1 bg-green-700 hover:bg-green-600 text-white text-sm px-4 py-2 rounded"
-                                    :class="{ 'opacity-50 cursor-not-allowed': submitting || !localRepos.length }">
-                                {{ submitting ? 'Submitting…' : 'Submit' }}
+                                    :class="{ 'opacity-50 cursor-not-allowed': submitting || !submittable.length }">
+                                {{ submitting ? 'Submitting…' : (submittable.length < localRepos.length ? 'Submit ' + submittable.length + ' of ' + localRepos.length : 'Submit') }}
                             </button>
                             <button @click="close" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white text-sm px-4 py-2 rounded">Cancel</button>
                         </div>
