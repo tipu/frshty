@@ -103,30 +103,66 @@ def detect_runner(worktree: Path, test_file: str, test_name: str) -> list[str] |
     return None
 
 
-def source_diff(worktree: Path, base_branch: str) -> str:
+def source_diff(worktree: Path, base_branch: str, head: str = "HEAD") -> str:
     """The branch's diff against its base, with test files excluded.
 
     Excluding tests is deliberate. The differential run must keep the branch's
     test in place while removing the source it exercises; reversing the test
     itself would delete the probe along with the behaviour.
+
+    `head` is pinned by the caller so the diff, the checkouts and the recorded sha
+    all describe one commit. Resolving HEAD separately per command lets a commit
+    landing mid-run leave the three disagreeing.
     """
-    merge_base = subprocess.run(
-        ["git", "merge-base", f"origin/{base_branch}", "HEAD"],
-        cwd=str(worktree), capture_output=True, text=True, timeout=60,
-    ).stdout.strip()
-    if not merge_base:
+    merged = subprocess.run(
+        ["git", "merge-base", f"origin/{base_branch}", head],
+        cwd=str(worktree), capture_output=True, text=True, timeout=60)
+    merge_base = (merged.stdout or "").strip()
+    if merged.returncode != 0 or not merge_base:
         return ""
-    names = subprocess.run(
-        ["git", "diff", "--name-only", merge_base, "HEAD"],
-        cwd=str(worktree), capture_output=True, text=True, timeout=60,
-    ).stdout.splitlines()
-    sources = [n for n in names if n.strip() and not is_test_path(n.strip())]
+    listed = subprocess.run(
+        ["git", "diff", "--name-only", merge_base, head],
+        cwd=str(worktree), capture_output=True, text=True, timeout=60)
+    if listed.returncode != 0:
+        return ""
+    sources = [n for n in listed.stdout.splitlines() if n.strip() and not is_test_path(n.strip())]
     if not sources:
         return ""
-    return subprocess.run(
-        ["git", "diff", merge_base, "HEAD", "--", *sources],
-        cwd=str(worktree), capture_output=True, text=True, timeout=120,
-    ).stdout
+    produced = subprocess.run(
+        ["git", "diff", "--binary", "--full-index", merge_base, head, "--", *sources],
+        cwd=str(worktree), capture_output=True, text=True, timeout=120)
+    return produced.stdout if produced.returncode == 0 else ""
+
+
+_NOT_AN_ASSERTION = (
+    "ERROR collecting", "INTERNALERROR", "ImportError", "ModuleNotFoundError",
+    "no tests ran", "No test files found", "usage:", "unrecognized arguments",
+    "SyntaxError", "fatal:",
+)
+
+
+def _is_assertion_failure(exit_code: int | None, output: str) -> tuple[bool, str]:
+    """Whether the second run failed because the assertion failed.
+
+    Any non-zero exit used to count as evidence. It should not. A timeout, an
+    import error, a collection error, pytest's exit 4 for a usage mistake and its
+    exit 5 for "nothing collected" all produce a non-zero code without the test
+    ever deciding anything. Only exit 1 means the test ran and its assertion
+    failed, and even then a collection error can masquerade as one.
+    """
+    if exit_code is None:
+        return False, "the run without the change did not finish, so it proves nothing"
+    if exit_code == 0:
+        return False, ("the test passes with the source change reversed, so it does not "
+                       "measure the change")
+    if exit_code != 1:
+        return False, (f"the run without the change exited {exit_code}, which is a runner "
+                       "error rather than a failed assertion")
+    for marker in _NOT_AN_ASSERTION:
+        if marker in output:
+            return False, (f"the run without the change reported '{marker}', which is a "
+                           "setup failure rather than a failed assertion")
+    return True, ""
 
 
 def _run_test(cmd: list[str], cwd: Path) -> tuple[int | None, str]:
@@ -246,17 +282,26 @@ def substantiate(config: dict, claim: str, repo_name: str, worktree: Path,
                  base_branch: str) -> DefenceResult:
     """Decide whether a claim about this branch is supported by a test.
 
-    Runs one named test twice inside a scratch checkout of HEAD: once as the
-    branch stands, and once with the branch's source hunks reversed. A claim is
-    SUBSTANTIATED only when the test passes with the change, fails without it, and
-    an independent judge accepts the captured output.
+    Runs one named test in two separate checkouts of the same commit: one as the
+    branch stands, one with the branch's source hunks reversed. A claim is
+    SUBSTANTIATED only when the test passes with the change, fails by assertion
+    without it, and an independent judge accepts the captured output.
+
+    Both checkouts sit at the same pinned commit, so a test that reads the
+    revision instead of the behaviour passes in both and proves nothing. They are
+    separate directories, so a test cannot leave itself a marker in the first run
+    and read it in the second: sharing one directory made that trick produce the
+    pass-then-fail pattern for any claim at all.
     """
     result = DefenceResult(claim=claim)
-    result.head_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=str(worktree),
-        capture_output=True, text=True, timeout=30).stdout.strip()
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(worktree),
+                          capture_output=True, text=True, timeout=30)
+    result.head_sha = (head.stdout or "").strip()
+    if head.returncode != 0 or not result.head_sha:
+        result.reason = "could not resolve the branch head"
+        return result
 
-    diff = source_diff(worktree, base_branch)
+    diff = source_diff(worktree, base_branch, result.head_sha)
     if not diff.strip():
         result.reason = "branch has no source changes against its base"
         return result
@@ -271,45 +316,53 @@ def substantiate(config: dict, claim: str, repo_name: str, worktree: Path,
     if not test_file or not test_name or not (worktree / test_file).is_file():
         result.reason = f"proposed test does not exist in the branch: {test_file}::{test_name}"
         return result
-
-    cmd = detect_runner(worktree, test_file, test_name)
-    if not cmd:
-        result.reason = f"no known test runner for {test_file}"
+    if not is_test_path(test_file):
+        result.reason = f"proposed probe is not a test file: {test_file}"
         return result
     result.test_id = f"{test_file}::{test_name}"
 
     scratch = Path(tempfile.mkdtemp(prefix="frshty-defence-"))
-    checkout = scratch / "wt"
+    with_dir, without_dir = scratch / "with", scratch / "without"
     try:
-        add = subprocess.run(["git", "worktree", "add", "--detach", str(checkout), "HEAD"],
-                             cwd=str(worktree), capture_output=True, text=True, timeout=180)
-        if add.returncode != 0:
-            result.reason = f"could not create scratch checkout: {(add.stderr or '').strip()[:200]}"
-            return result
-        relink_shared_venv(config, repo_name, checkout)
-
-        result.with_change_exit, result.with_change_output = _run_test(cmd, checkout)
-        if result.with_change_exit != 0:
-            result.reason = "the proposed test does not pass on this branch"
-            return result
+        for target in (with_dir, without_dir):
+            add = subprocess.run(
+                ["git", "worktree", "add", "--detach", str(target), result.head_sha],
+                cwd=str(worktree), capture_output=True, text=True, timeout=180)
+            if add.returncode != 0:
+                result.reason = f"could not create scratch checkout: {(add.stderr or '').strip()[:200]}"
+                return result
+            relink_shared_venv(config, repo_name, target)
 
         patch = scratch / "source.patch"
         patch.write_text(diff)
-        rev = subprocess.run(["git", "apply", "-R", str(patch)], cwd=str(checkout),
+        rev = subprocess.run(["git", "apply", "-R", str(patch)], cwd=str(without_dir),
                              capture_output=True, text=True, timeout=120)
         if rev.returncode != 0:
             result.reason = f"could not reverse the source change: {(rev.stderr or '').strip()[:200]}"
             return result
 
-        result.without_change_exit, result.without_change_output = _run_test(cmd, checkout)
+        cmd = detect_runner(with_dir, test_file, test_name)
+        if not cmd:
+            result.reason = f"no known test runner for {test_file}"
+            return result
+
+        result.with_change_exit, result.with_change_output = _run_test(cmd, with_dir)
+        if result.with_change_exit != 0:
+            result.reason = "the proposed test does not pass on this branch"
+            return result
+
+        without_cmd = detect_runner(without_dir, test_file, test_name)
+        result.without_change_exit, result.without_change_output = _run_test(
+            without_cmd or cmd, without_dir)
     finally:
-        subprocess.run(["git", "worktree", "remove", "--force", str(checkout)],
-                       cwd=str(worktree), capture_output=True, timeout=120)
+        for target in (with_dir, without_dir):
+            subprocess.run(["git", "worktree", "remove", "--force", str(target)],
+                           cwd=str(worktree), capture_output=True, timeout=120)
         shutil.rmtree(scratch, ignore_errors=True)
 
-    if result.without_change_exit == 0:
-        result.reason = ("the test passes with the source change reversed, so it does not "
-                         "measure the change")
+    ok, why = _is_assertion_failure(result.without_change_exit, result.without_change_output)
+    if not ok:
+        result.reason = why
         return result
 
     judge, verdict, reason = _judge_blind(config, claim, diff, result, worktree)

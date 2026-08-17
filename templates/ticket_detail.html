@@ -57,6 +57,18 @@ body.maximized #terminal-container { flex: 1; height: auto !important; }
 .comment-inline.addressed { border-left-color: #22c55e; opacity: 0.5; }
 .comment-inline.needs_reply { border-left-color: #eab308; }
 .comment-inline.replied { border-left-color: #22c55e; opacity: 0.5; }
+.defence { margin-top: 6px; padding: 6px 8px; border-radius: 4px; font-size: 12px; line-height: 1.45; }
+.defence.SUBSTANTIATED { background: #0f2a17; border: 1px solid #22c55e; color: #b7f0c7; }
+.defence.REFUTED { background: #2a0f12; border: 1px solid #ef4444; color: #f3b8bc; }
+.defence.INCONCLUSIVE { background: #2a2410; border: 1px solid #eab308; color: #f0e0b0; }
+.defence .d-head { font-weight: 600; letter-spacing: 0.03em; }
+.defence .d-proof { opacity: 0.85; font-family: ui-monospace, monospace; font-size: 11px; }
+<div v-if="c.defence" class="defence" :class="c.defence.verdict">
+  <div class="d-head">{{ defenceHeadline(c.defence) }}</div>
+  <div v-if="c.defence.test_id" class="d-proof">{{ c.defence.test_id }}
+    (with change: {{ c.defence.with_change_exit }}, without: {{ c.defence.without_change_exit }})</div>
+  <div v-if="c.defence.reason">{{ c.defence.reason }}</div>
+</div>
 textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; }
 .layout-main { display: grid; grid-template-columns: 250px 1fr; gap: 16px; }
 @media (max-width: 1400px) { .layout-main { grid-template-columns: 1fr; } }
@@ -188,6 +200,12 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                     </div>
                     <div v-if="(commentTimelines[c.id] || []).length === 0" class="text-xs text-gray-600 py-0.5">No tracked events yet.</div>
                 </div>
+            </div>
+            <div v-if="c.defence" class="defence" :class="c.defence.verdict">
+              <div class="d-head">{{ defenceHeadline(c.defence) }}</div>
+              <div v-if="c.defence.test_id" class="d-proof">{{ c.defence.test_id }}
+                (with change: {{ c.defence.with_change_exit }}, without: {{ c.defence.without_change_exit }})</div>
+              <div v-if="c.defence.reason">{{ c.defence.reason }}</div>
             </div>
             <textarea v-model="replyDrafts[c.id]" rows="3" class="reply-box w-full p-2 rounded text-sm mb-1"></textarea>
             <button @click="postReply(c.id)" class="bg-green-700 hover:bg-green-600 text-white px-3 py-1 rounded text-xs">Post Reply</button>
@@ -517,6 +535,12 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                             <div class="text-sm text-gray-500 mt-1 italic">Reply: {{ c.suggested_reply || '' }}</div>
                         </template>
                         <template v-else-if="commentLabel(c) === 'needs reply'">
+                            <div v-if="c.defence" class="defence" :class="c.defence.verdict">
+                              <div class="d-head">{{ defenceHeadline(c.defence) }}</div>
+                              <div v-if="c.defence.test_id" class="d-proof">{{ c.defence.test_id }}
+                                (with change: {{ c.defence.with_change_exit }}, without: {{ c.defence.without_change_exit }})</div>
+                              <div v-if="c.defence.reason">{{ c.defence.reason }}</div>
+                            </div>
                             <textarea v-model="replyDrafts[c.id]" rows="2" class="reply-box w-full p-2 rounded text-sm mb-1 mt-2"></textarea>
                             <button @click="postReply(c.id)" class="bg-green-700 hover:bg-green-600 text-white px-3 py-1 rounded text-xs">Post Reply</button>
                         </template>
@@ -545,6 +569,12 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                     <div class="text-sm text-gray-500 mt-1 italic">Reply: {{ c.suggested_reply || '' }}</div>
                 </template>
                 <template v-else-if="commentLabel(c) === 'needs reply'">
+                    <div v-if="c.defence" class="defence" :class="c.defence.verdict">
+                      <div class="d-head">{{ defenceHeadline(c.defence) }}</div>
+                      <div v-if="c.defence.test_id" class="d-proof">{{ c.defence.test_id }}
+                        (with change: {{ c.defence.with_change_exit }}, without: {{ c.defence.without_change_exit }})</div>
+                      <div v-if="c.defence.reason">{{ c.defence.reason }}</div>
+                    </div>
                     <textarea v-model="replyDrafts[c.id]" rows="2" class="reply-box w-full p-2 rounded text-sm mb-1 mt-2"></textarea>
                     <button @click="postReply(c.id)" class="bg-green-700 hover:bg-green-600 text-white px-3 py-1 rounded text-xs">Post Reply</button>
                 </template>
@@ -573,6 +603,12 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                 <div class="text-sm text-gray-500 mt-1 italic">Reply: {{ c.suggested_reply || '' }}</div>
             </template>
             <template v-else-if="commentLabel(c) === 'needs reply'">
+                <div v-if="c.defence" class="defence" :class="c.defence.verdict">
+                  <div class="d-head">{{ defenceHeadline(c.defence) }}</div>
+                  <div v-if="c.defence.test_id" class="d-proof">{{ c.defence.test_id }}
+                    (with change: {{ c.defence.with_change_exit }}, without: {{ c.defence.without_change_exit }})</div>
+                  <div v-if="c.defence.reason">{{ c.defence.reason }}</div>
+                </div>
                 <textarea v-model="replyDrafts[c.id]" rows="2" class="reply-box w-full p-2 rounded text-sm mb-1 mt-2"></textarea>
                 <button @click="postReply(c.id)" class="bg-green-700 hover:bg-green-600 text-white px-3 py-1 rounded text-xs">Post Reply</button>
             </template>
@@ -1143,6 +1179,13 @@ frshtyApp({
             return 'needs reply';
         }
 
+        function defenceHeadline(d) {
+            if (!d) return '';
+            if (d.verdict === 'SUBSTANTIATED') return 'VERIFIED — a test in this branch backs this reply';
+            if (d.verdict === 'REFUTED') return 'REFUTED — the evidence contradicts this reply';
+            return 'UNVERIFIED — nothing backs this reply, check it yourself';
+        }
+
         function commentClass(c) {
             const s = c.status || 'needs_reply';
             if (s === 'addressed') return 'addressed';
@@ -1664,7 +1707,7 @@ frshtyApp({
             selectedRepo, repoTabs, filteredComments, needsReplyComments,
             renderMarkdown, escHtml,
             jobStatusClass, jobReason, jobHasOutput,
-            diffLineClass, diffLinePrefix, hunkLines, formatCommentDate, hunkCollapsed, commentLabel, commentClass, commentBodyTextClass, commentBadgeStyle, flatCount, scrollToFile,
+            diffLineClass, diffLinePrefix, hunkLines, formatCommentDate, hunkCollapsed, commentLabel, commentClass, defenceHeadline, commentBodyTextClass, commentBadgeStyle, flatCount, scrollToFile,
             load, loadJobs, switchTab, severityClass,
             saveRelease, clearRelease, reinspectRelease,
             setStatus, startDev, restartTicket, submitNote, onSetStateChange, toggleAutoPr,
