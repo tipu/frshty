@@ -8,6 +8,8 @@ reads/writes on the passed-in `st` dict.
 """
 import subprocess
 
+import core.git_util as git_util
+
 MAX_BASE_SYNC_ATTEMPTS = 2
 
 
@@ -55,14 +57,22 @@ def sync_branch_with_base(platform, repo_path, base_branch: str, branch: str,
                            cwd=str(worktree), capture_output=True, text=True, timeout=60)
     if fetch.returncode != 0:
         return {"result": "fetch_failed"}
-    behind = subprocess.run(["git", "rev-list", "--count", f"HEAD..origin/{base_branch}"],
-                            cwd=str(worktree), capture_output=True, text=True, timeout=10).stdout.strip()
+    try:
+        behind = git_util.run_git(worktree, ["rev-list", "--count", f"HEAD..origin/{base_branch}"],
+                                  timeout=10).stdout.strip()
+    except git_util.GitCommandError as e:
+        return {"result": "fetch_failed", "error": str(e)[:200]}
     if behind == "0":
         st["base_synced"] = True
         return {"result": "uptodate"}
 
-    dirty = subprocess.run(["git", "status", "--porcelain"], cwd=str(worktree),
-                           capture_output=True, text=True, timeout=30).stdout.strip()
+    # A failed `git status` returns empty stdout, which reads as a clean tree and
+    # walks straight past the dirty_worktree guard below into a merge and a push.
+    try:
+        dirty = git_util.run_git(worktree, ["status", "--porcelain"], timeout=30).stdout.strip()
+    except git_util.GitCommandError as e:
+        return {"result": "dirty_worktree", "error": f"could not read worktree state: {e}"[:200],
+                "attempts": st.get("base_sync_attempts", 0), "capped": False}
     if dirty:
         files = ", ".join(ln.strip().split(maxsplit=1)[-1] for ln in dirty.splitlines()[:5])
         error = f"worktree has uncommitted changes ({files}); merge would overwrite them"
