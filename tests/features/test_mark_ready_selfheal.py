@@ -11,6 +11,15 @@ from core.tasks.tickets import (
 from core.tasks.registry import TaskContext
 
 
+def _commit_result(cwd, message):
+    """Mirror commit_with_hooks: run the commit and return the CompletedProcess.
+
+    The caller reads .returncode so it can hand a hook rejection back for repair,
+    so a fake that returns None no longer models the real function."""
+    return subprocess.run(["git", "commit", "-qm", message], cwd=str(cwd),
+                          capture_output=True, text=True)
+
+
 def _git(cwd, *args):
     subprocess.run(["git", *args], cwd=cwd, capture_output=True, check=True)
 
@@ -117,7 +126,7 @@ class TestMarkReadySelfHeal:
         with patch("core.state.load_ticket", return_value={"slug": "PROJ-1-x"}), \
              patch("core.tasks.tickets._fire_ticket_dev_complete"), \
              patch("core.git_util.commit_with_hooks",
-                   side_effect=lambda repo_dir, message, **kw: _git(repo_dir, "commit", "-qm", message)):
+                   side_effect=lambda repo_dir, message, **kw: _commit_result(repo_dir, message)):
             result = mark_ready(ctx)
         assert result.status == "ok", result.reason
         assert _dirty_workspace_repos(ticket_dir) == []

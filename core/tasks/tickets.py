@@ -424,9 +424,49 @@ def _commit_workspace_changes(ticket_dir: Path, ticket_key: str,
             continue
         subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
         from core.git_util import commit_with_hooks
-        commit_with_hooks(repo_dir, message=commit_msg, check=True, timeout=900)
+        attempt = commit_with_hooks(repo_dir, message=commit_msg, timeout=900)
+        if attempt.returncode != 0:
+            if _repair_hook_failure(repo_dir, attempt, ticket_key):
+                subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
+                attempt = commit_with_hooks(repo_dir, message=commit_msg, timeout=900)
+            if attempt.returncode != 0:
+                raise subprocess.CalledProcessError(
+                    attempt.returncode, ["git", "commit", "-m", commit_msg],
+                    output=attempt.stdout, stderr=attempt.stderr)
         committed.append(repo_dir.name)
     return committed
+
+
+def _repair_hook_failure(repo_dir: Path, attempt, ticket_key: str) -> bool:
+    """Give the pre-commit output back to the agent and let it fix the code once.
+
+    commit_with_hooks deliberately does not pass --no-verify, so a real lint
+    failure surfaces instead of being bypassed. Nothing acted on it, though: the
+    output went into a CalledProcessError and the ticket was blocked. DEV-644 was
+    stopped by two uses of `l` as a loop variable in generated tests. The hook
+    already says exactly what is wrong and which line, so hand that back and
+    retry once. A second failure still blocks, which is what should happen when
+    the problem is not a trivial style slip.
+    """
+    output = ((attempt.stdout or "") + (attempt.stderr or "")).strip()
+    if not output:
+        return False
+    log.emit("commit_hook_failed",
+             f"{ticket_key}: pre-commit rejected {repo_dir.name}; attempting one repair",
+             meta={"ticket": ticket_key, "repo": repo_dir.name, "output": output[-600:]})
+    fixed = run_claude_code(
+        "The pre-commit hooks rejected this commit. Fix ONLY what the hook output below "
+        "reports, in this repository. Do not change behaviour, do not touch unrelated "
+        "files, and do not disable, skip or reconfigure the hook. Make the smallest edit "
+        "that satisfies it.\n\n"
+        f"HOOK OUTPUT:\n{output[-4000:]}",
+        cwd=repo_dir, timeout=FIX_TIMEOUT)
+    if fixed is None:
+        log.emit("commit_hook_repair_failed",
+                 f"{ticket_key}: repair step returned nothing for {repo_dir.name}",
+                 meta={"ticket": ticket_key, "repo": repo_dir.name})
+        return False
+    return True
 
 
 def _kill_stray_recorders() -> None:
