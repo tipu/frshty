@@ -28,6 +28,17 @@ REVIEW_TIMEOUT = 1800
 FIX_TIMEOUT = 1800
 TEST_PLAN_TIMEOUT = 1800
 TEST_WRITE_TIMEOUT = 3600
+# A pre-commit repair is a bounded edit: the hook names the file and the line.
+# It must not inherit FIX_TIMEOUT, which is sized for implementing review
+# findings.
+HOOK_REPAIR_TIMEOUT = 300
+HOOK_RUN_TIMEOUT = 900
+# What _commit_workspace_changes can spend in the worst case: hooks, one repair,
+# hooks again. Every task that commits has to carry this on top of its own work,
+# or the task times out mid-commit and leaves the repo staged but uncommitted.
+# write_tests and fix_review_findings were already over budget before the repair
+# step existed, because the hook run alone was unaccounted for.
+COMMIT_PHASE_TIMEOUT = HOOK_RUN_TIMEOUT * 2 + HOOK_REPAIR_TIMEOUT
 TEST_RUN_TIMEOUT = 5400
 PROOF_TIMEOUT = 3600
 MIN_TESTING_MD_BYTES = 200
@@ -424,11 +435,11 @@ def _commit_workspace_changes(ticket_dir: Path, ticket_key: str,
             continue
         subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
         from core.git_util import commit_with_hooks
-        attempt = commit_with_hooks(repo_dir, message=commit_msg, timeout=900)
+        attempt = commit_with_hooks(repo_dir, message=commit_msg, timeout=HOOK_RUN_TIMEOUT)
         if attempt.returncode != 0:
             if _repair_hook_failure(repo_dir, attempt, ticket_key):
                 subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
-                attempt = commit_with_hooks(repo_dir, message=commit_msg, timeout=900)
+                attempt = commit_with_hooks(repo_dir, message=commit_msg, timeout=HOOK_RUN_TIMEOUT)
             if attempt.returncode != 0:
                 raise subprocess.CalledProcessError(
                     attempt.returncode, ["git", "commit", "-m", commit_msg],
@@ -460,7 +471,7 @@ def _repair_hook_failure(repo_dir: Path, attempt, ticket_key: str) -> bool:
         "files, and do not disable, skip or reconfigure the hook. Make the smallest edit "
         "that satisfies it.\n\n"
         f"HOOK OUTPUT:\n{output[-4000:]}",
-        cwd=repo_dir, timeout=FIX_TIMEOUT)
+        cwd=repo_dir, timeout=HOOK_REPAIR_TIMEOUT)
     if fixed is None:
         log.emit("commit_hook_repair_failed",
                  f"{ticket_key}: repair step returned nothing for {repo_dir.name}",
@@ -670,7 +681,7 @@ def start_reviewing(ctx: TaskContext) -> TaskResult:
       preconditions=[status_is("reviewing"),
                      file_contains("docs/tri-review.md", r"VERDICT:\s*FAIL")],
       postconditions=[file_contains("docs/tri-review.md", r"VERDICT:\s*PASS")],
-      timeout=FIX_TIMEOUT + REVIEW_TIMEOUT + 300)
+      timeout=FIX_TIMEOUT + REVIEW_TIMEOUT + COMMIT_PHASE_TIMEOUT)
 def fix_review_findings(ctx: TaskContext) -> TaskResult:
     ticket_dir = _ticket_dir(ctx)
     if not ticket_dir.is_dir():
@@ -928,7 +939,7 @@ def _render_testing_md_section(path: Path) -> str:
       preconditions=[status_is("testing"),
                      file_exists("docs/test-plan.md")],
       postconditions=[file_exists("docs/test-files-written.txt")],
-      timeout=TEST_WRITE_TIMEOUT)
+      timeout=TEST_WRITE_TIMEOUT + COMMIT_PHASE_TIMEOUT)
 def write_tests(ctx: TaskContext) -> TaskResult:
     ticket_dir = _ticket_dir(ctx)
     if not ticket_dir.is_dir():
@@ -953,7 +964,7 @@ def write_tests(ctx: TaskContext) -> TaskResult:
       preconditions=[status_is("testing"),
                      file_exists("docs/test-plan.md")],
       postconditions=[file_contains("docs/test-runs.md", r"VERDICT:\s*(PASS|FAIL)")],
-      timeout=TEST_RUN_TIMEOUT)
+      timeout=TEST_RUN_TIMEOUT + COMMIT_PHASE_TIMEOUT)
 def run_tests_and_fix(ctx: TaskContext) -> TaskResult:
     """Run tests once per task invocation. If FAIL and cap not reached, ask
     claude to fix and let the dispatcher re-enqueue us next cycle. Each
@@ -1149,7 +1160,7 @@ def prove(ctx: TaskContext) -> TaskResult:
       preconditions=[status_is("proving"),
                      file_exists("docs/proof.md")],
       on_success_status="pr_ready",
-      timeout=900)
+      timeout=900 + COMMIT_PHASE_TIMEOUT)
 def mark_ready(ctx: TaskContext) -> TaskResult:
     """Final gate: proving → pr_ready after proof is on disk. Fires
     ticket_dev_complete. The skip-path version of the event (when there is

@@ -80,3 +80,34 @@ class TestHookFailureIsRepaired:
             out = T._commit_workspace_changes(td, "DEV-1", message="m")
         assert out == ["r"]
         agent.assert_not_called()
+
+
+class TestBudgets:
+    """A task that commits must be able to finish committing.
+
+    write_tests and fix_review_findings were already over budget before the
+    repair step existed: the hook run itself was never counted, so a slow
+    pre-commit could kill the task after the work was done but before it was
+    committed, leaving the repo staged and the ticket blocked.
+    """
+
+    def test_the_repair_is_not_given_the_full_fix_budget(self):
+        assert T.HOOK_REPAIR_TIMEOUT < T.FIX_TIMEOUT
+        assert T.HOOK_REPAIR_TIMEOUT <= 300
+
+    def test_the_commit_budget_covers_two_hook_runs_and_one_repair(self):
+        assert T.COMMIT_PHASE_TIMEOUT == T.HOOK_RUN_TIMEOUT * 2 + T.HOOK_REPAIR_TIMEOUT
+
+    def test_every_task_that_commits_budgets_for_it(self):
+        from core.tasks import registry
+        work = {
+            "write_tests": T.TEST_WRITE_TIMEOUT,
+            "fix_review_findings": T.FIX_TIMEOUT + T.REVIEW_TIMEOUT,
+            "run_tests_and_fix": T.TEST_RUN_TIMEOUT,
+            "mark_ready": 900,
+        }
+        for name, inner in work.items():
+            got = registry._REGISTRY[name]["timeout"]
+            assert got >= inner + T.COMMIT_PHASE_TIMEOUT, (
+                f"{name} allows {got}s but its work plus the commit phase needs "
+                f"{inner + T.COMMIT_PHASE_TIMEOUT}s")
