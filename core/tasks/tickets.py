@@ -386,10 +386,16 @@ def _dirty_workspace_repos(ticket_dir: Path) -> list[str]:
     for child in sorted(search_root.iterdir()):
         if not (child.is_dir() and (child / ".git").exists()):
             continue
-        status = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=child, capture_output=True, text=True,
-        )
+        # A failed status returns empty stdout, which reads as a clean repo and
+        # lets mark_ready's clean-worktree gate pass over real uncommitted work.
+        try:
+            status = git_util.run_git(child, ["status", "--porcelain"], timeout=30)
+        except git_util.GitCommandError as e:
+            log.emit("dirty_check_failed",
+                     f"could not read {child.name} worktree state: {e}",
+                     meta={"repo": child.name})
+            dirty.append(child.name)
+            continue
         lines = [l for l in status.stdout.splitlines() if l.strip()]
         meaningful = [
             l for l in lines
@@ -422,10 +428,10 @@ def _commit_workspace_changes(ticket_dir: Path, ticket_key: str,
 
     committed: list[str] = []
     for repo_dir in candidates:
-        status = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=repo_dir, capture_output=True, text=True,
-        )
+        # Same failure, worse consequence: an unreadable status looks like
+        # "nothing to commit", so the repo is skipped and the caller reports
+        # success while the work stays uncommitted.
+        status = git_util.run_git(repo_dir, ["status", "--porcelain"], timeout=30)
         lines = [l for l in status.stdout.splitlines() if l.strip()]
         meaningful = [
             l for l in lines

@@ -205,6 +205,45 @@ def commit_with_hooks(repo_dir: Path,
     )
 
 
+class GitCommandError(RuntimeError):
+    """A git command exited with a status the caller did not allow."""
+
+    def __init__(self, args, result):
+        self.args_run, self.result = args, result
+        super().__init__(
+            f"git {' '.join(args)} exited {result.returncode}: "
+            f"{((result.stderr or '') + (result.stdout or '')).strip()[:300]}")
+
+
+def run_git(cwd, args: list[str], *, allowed_codes=(0,), timeout: int = 60):
+    """Run a git command and refuse to hand back output from a failed one.
+
+    subprocess.run returns an object whose .stdout is empty both when the
+    command had nothing to report and when it failed. Every caller that read
+    only .stdout therefore turned a failure into a fact: a failed `git diff`
+    became "no changes" and marked a ticket merged, a failed `git status`
+    became "clean" and skipped committing real work, a failed `git rev-list`
+    became "no commits to lose" and hard-reset the branch.
+
+    Anything outside `allowed_codes` raises. Commands whose non-zero status is
+    information rather than failure — `diff --quiet`, `merge-base --is-ancestor`
+    — pass the codes they expect instead of being silently tolerated.
+    """
+    result = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True,
+                            text=True, timeout=timeout)
+    if result.returncode not in allowed_codes:
+        raise GitCommandError(args, result)
+    return result
+
+
+def is_dirty(worktree) -> bool:
+    """Whether the worktree has tracked or untracked changes. Raises if unknown.
+
+    Deliberately not returning False on failure: the callers use this to decide
+    whether destroying the working tree is safe."""
+    return bool(run_git(worktree, ["status", "--porcelain"], timeout=30).stdout.strip())
+
+
 def refresh_worktree_onto_base(worktree, base_branch: str) -> dict:
     """Bring a ticket worktree up to date with its base without destroying work.
 
@@ -214,7 +253,12 @@ def refresh_worktree_onto_base(worktree, base_branch: str) -> dict:
     commits survive only in the reflog. Merge instead in that case, which
     achieves the same fresh base and keeps the work.
 
-    Returns {"result": reset|merged|merge_failed|no_base, "ahead": int}.
+    A reset is only safe when there is nothing to lose, so this refuses to touch
+    a worktree with uncommitted or untracked changes, and refuses to act at all
+    on a state it could not read. Every git call here is checked: a failure that
+    silently produced empty output is what made the original reset destructive.
+
+    Returns {"result": reset|merged|merge_failed|no_base|dirty|unknown, "ahead": int}.
     """
     wt = str(worktree)
     fetch = subprocess.run(["git", "fetch", "origin", base_branch],
@@ -222,28 +266,36 @@ def refresh_worktree_onto_base(worktree, base_branch: str) -> dict:
     if fetch.returncode != 0:
         return {"result": "no_base", "ahead": 0, "error": (fetch.stderr or "").strip()[:200]}
 
-    counted = subprocess.run(["git", "rev-list", "--count", f"origin/{base_branch}..HEAD"],
-                             cwd=wt, capture_output=True, text=True, timeout=30)
-    raw = (counted.stdout or "").strip()
-    if counted.returncode != 0 or not raw.isdigit():
-        # Never reset on a count we could not read. A failed rev-list returns an
-        # empty stdout, which is indistinguishable from a genuine zero, and this
-        # function resets when the count is zero. Reading the failure as "nothing
-        # to lose" would destroy the commits it exists to protect.
-        return {"result": "unknown_ahead", "ahead": 0,
-                "error": (counted.stderr or "").strip()[:200] or "unreadable commit count"}
-    ahead = int(raw)
+    try:
+        raw = run_git(wt, ["rev-list", "--count", f"origin/{base_branch}..HEAD"],
+                      timeout=30).stdout.strip()
+        if not raw.isdigit():
+            return {"result": "unknown", "ahead": 0, "error": "unreadable commit count"}
+        ahead = int(raw)
+        dirty = is_dirty(wt)
+    except GitCommandError as e:
+        return {"result": "unknown", "ahead": 0, "error": str(e)[:200]}
 
     if ahead == 0:
-        subprocess.run(["git", "reset", "--hard", f"origin/{base_branch}"],
-                       cwd=wt, capture_output=True, timeout=60)
-        subprocess.run(["git", "clean", "-fd"], cwd=wt, capture_output=True, timeout=60)
+        if dirty:
+            # reset --hard plus clean -fd would delete tracked edits and untracked
+            # files alike. "No commits ahead" says nothing about the working tree.
+            return {"result": "dirty", "ahead": 0,
+                    "error": "worktree has uncommitted changes; refusing to reset"}
+        try:
+            run_git(wt, ["reset", "--hard", f"origin/{base_branch}"])
+            run_git(wt, ["clean", "-fd"])
+        except GitCommandError as e:
+            return {"result": "unknown", "ahead": 0, "error": str(e)[:200]}
         return {"result": "reset", "ahead": 0}
 
     merged = subprocess.run(["git", "merge", f"origin/{base_branch}", "--no-edit"],
                             cwd=wt, capture_output=True, text=True, timeout=120)
     if merged.returncode != 0:
-        subprocess.run(["git", "merge", "--abort"], cwd=wt, capture_output=True, timeout=60)
-        return {"result": "merge_failed", "ahead": ahead,
-                "error": (merged.stderr or merged.stdout or "").strip()[:200]}
+        aborted = subprocess.run(["git", "merge", "--abort"], cwd=wt,
+                                 capture_output=True, text=True, timeout=60)
+        detail = (merged.stderr or merged.stdout or "").strip()[:200]
+        if aborted.returncode != 0:
+            detail = f"{detail} (merge --abort also failed; worktree left mid-merge)"
+        return {"result": "merge_failed", "ahead": ahead, "error": detail}
     return {"result": "merged", "ahead": ahead}
