@@ -225,7 +225,14 @@ def refresh_worktree_onto_base(worktree, base_branch: str) -> dict:
     counted = subprocess.run(["git", "rev-list", "--count", f"origin/{base_branch}..HEAD"],
                              cwd=wt, capture_output=True, text=True, timeout=30)
     raw = (counted.stdout or "").strip()
-    ahead = int(raw) if raw.isdigit() else 0
+    if counted.returncode != 0 or not raw.isdigit():
+        # Never reset on a count we could not read. A failed rev-list returns an
+        # empty stdout, which is indistinguishable from a genuine zero, and this
+        # function resets when the count is zero. Reading the failure as "nothing
+        # to lose" would destroy the commits it exists to protect.
+        return {"result": "unknown_ahead", "ahead": 0,
+                "error": (counted.stderr or "").strip()[:200] or "unreadable commit count"}
+    ahead = int(raw)
 
     if ahead == 0:
         subprocess.run(["git", "reset", "--hard", f"origin/{base_branch}"],
