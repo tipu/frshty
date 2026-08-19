@@ -207,7 +207,8 @@ class TestReviewPr:
 
         with patch("features.reviewer._ensure_review_worktree", return_value=None), \
              patch("features.reviewer._load_conventions", return_value=""), \
-             patch("features.reviewer._run_all_personas", return_value=[("spec", None), ("breakage", None), ("maint", None)]):
+             patch("features.reviewer._run_personas_for_providers",
+                   return_value={"claude": [("spec", None), ("breakage", None), ("maint", None)]}):
             result = reviewer.review_pr(config, mock_platform, pr)
         assert result is None
 
