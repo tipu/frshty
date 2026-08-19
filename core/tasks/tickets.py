@@ -1,4 +1,5 @@
 """Ticket pipeline tasks. Headless claude -p invocations, postcondition-gated."""
+import hashlib
 import json
 import re
 import os
@@ -550,6 +551,17 @@ _REPAIRABLE_DIAGNOSTICS = (
     # basedpyright's wording for the same thing. Omitting it excluded the exact
     # diagnostic that motivated this work: the SimpleNamespace stub on DEV-635.
     re.compile(r"cannot be assigned to (parameter|type|declared type)", re.I),
+    # black in modifying mode names each file it rewrote, then counts them.
+    re.compile(r"^reformatted ", re.I | re.M),
+    re.compile(r"\d+ files? reformatted", re.I),
+    # mypy prints its error code in brackets. Only codes whose fix is an edit to
+    # existing code are listed; the name/attribute/import family is on the never
+    # list below, because "define the missing name" is the cheap exit.
+    re.compile(r"\[(arg-type|assignment|return-value|call-arg|call-overload"
+               r"|index|operator|list-item|dict-item|type-arg|type-var|override"
+               r"|var-annotated|no-untyped-def|no-any-return|redundant-cast"
+               r"|truthy-bool|comparison-overlap|unused-ignore"
+               r"|func-returns-value)\]"),
 )
 _NEVER_REPAIRABLE = (
     re.compile(r"unknown import symbol", re.I),
@@ -558,6 +570,16 @@ _NEVER_REPAIRABLE = (
     re.compile(r"modulenotfounderror|no module named", re.I),
     re.compile(r"could not be resolved", re.I),
     re.compile(r"cannot find implementation or library stub", re.I),
+    # A missing name is the cheat door, not a lint fix: the only edit that
+    # satisfies it is inventing the name, which is how `FileExplorerAction:
+    # TypeAlias = Any` turned a missing dependency green. F821/F822 are ruff's
+    # codes for it, so the blanket ruff-code allowance above must not admit them.
+    re.compile(r"\bF82[123]\b"),
+    re.compile(r"\[(name-defined|attr-defined|import|import-not-found"
+               r"|import-untyped|used-before-def|no-redef|has-type)\]"),
+    re.compile(r"undefined name", re.I),
+    re.compile(r"is not defined", re.I),
+    re.compile(r"\bTS2304\b|cannot find name", re.I),
 )
 
 
@@ -596,7 +618,64 @@ def _restore_repo(repo_dir: Path, snapshot: tuple[str, set[str]]) -> None:
             (repo_dir / rel).unlink(missing_ok=True)
 
 
-def _repair_touched_only_code(repo_dir: Path) -> tuple[bool, str]:
+def _porcelain_entries(raw: str) -> list[tuple[str, list[str]]]:
+    """Parse `git status --porcelain -z` into (code, paths) pairs.
+
+    A rename emits two NUL-separated fields, destination first. Reading only the
+    destination of `git mv .pre-commit-config.yaml pre-commit.disabled` inspects
+    the harmless half and lets the hook config leave the repo. `-z` is used so
+    the split is unambiguous: the line form quotes paths containing spaces.
+    """
+    fields = raw.split("\0")
+    entries: list[tuple[str, list[str]]] = []
+    i = 0
+    while i < len(fields):
+        rec = fields[i]
+        i += 1
+        if not rec:
+            continue
+        code, paths = rec[:2], [rec[3:]]
+        if "R" in code or "C" in code:
+            if i < len(fields) and fields[i]:
+                paths.append(fields[i])
+            i += 1
+        entries.append((code, [p for p in paths if p]))
+    return entries
+
+
+def _sha_of(path: Path) -> str:
+    """The file's content hash, or "" when it is not there."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def _hook_integrity(repo_dir: Path) -> dict[str, str]:
+    """Fingerprint everything that decides whether the hook still runs.
+
+    `git status` cannot answer this. A file the repair adds to `.git/info/exclude`
+    never appears as untracked, and nothing under `.git` is tracked at all, so a
+    swapped `.venv/bin/pre-commit` or a rewritten `.git/hooks/pre-commit` is
+    invisible to the worktree check above. Asking whether these are unchanged is
+    answerable; asking whether the diff looks honest is not.
+    """
+    runner = git_util._find_pre_commit(repo_dir)
+    watched = {
+        "config": repo_dir / ".pre-commit-config.yaml",
+        "exclude": repo_dir / ".git" / "info" / "exclude",
+        "git_hook": repo_dir / ".git" / "hooks" / "pre-commit",
+    }
+    state = {k: _sha_of(p) for k, p in watched.items()}
+    # The resolved binary's contents, not its path. A path that moves without the
+    # contents changing is benign, and pinning it would add a field no test can
+    # make fail on its own.
+    state["runner"] = _sha_of(runner) if runner else ""
+    return state
+
+
+def _repair_touched_only_code(repo_dir: Path,
+                              before: dict[str, str] | None = None) -> tuple[bool, str]:
     """Whether the repair agent stayed inside the code, or found a cheap exit.
 
     The agent runs with permissions bypassed, so telling it not to disable the
@@ -606,20 +685,25 @@ def _repair_touched_only_code(repo_dir: Path) -> tuple[bool, str]:
     suppression directive. Each of those makes the commit pass and the problem
     invisible, so they are rejected in code rather than in a prompt.
     """
+    if before is not None:
+        after = _hook_integrity(repo_dir)
+        for key, was in before.items():
+            if after.get(key) != was:
+                return False, f"repair changed the hook setup ({key}); it may only edit code"
     try:
-        changed = git_util.run_git(repo_dir, ["status", "--porcelain"], timeout=30)
+        changed = git_util.run_git(repo_dir, ["status", "--porcelain", "-z"], timeout=30)
     except git_util.GitCommandError:
         return False, "could not read the worktree after the repair"
-    for line in changed.stdout.splitlines():
-        rel = line[3:].split(" -> ")[-1].strip()
-        if not rel:
-            continue
-        if line.startswith("??") or line.startswith("A "):
-            # A lint or formatting fix never needs a new file. Creating one is
-            # how a shadow module or a fabricated type stub gets in.
-            return False, f"repair created a new file ({rel}); it may only edit existing code"
-        if Path(rel).name in _REPAIR_FORBIDDEN_NAMES:
-            return False, f"repair touched {Path(rel).name}, which is configuration, not code"
+    for code, paths in _porcelain_entries(changed.stdout):
+        for rel in paths:
+            if Path(rel).name in _REPAIR_FORBIDDEN_NAMES:
+                return False, f"repair touched {Path(rel).name}, which is configuration, not code"
+        rel = paths[0]
+        if "?" in code or "A" in code or "R" in code or "C" in code:
+            # A lint or formatting fix never needs a new file, and never moves
+            # one. Either is how a shadow module or a fabricated type stub gets
+            # in, and a rename is also how a config file leaves the repo.
+            return False, f"repair added or moved a file ({rel}); it may only edit existing code"
         target = repo_dir / rel
         try:
             body = target.read_text()
@@ -659,6 +743,7 @@ def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
              f"{ticket_key}: pre-commit rejected {repo_dir.name}; attempting one repair",
              meta={"ticket": ticket_key, "repo": repo_dir.name,
                    "output": (outcome.output or "")[-600:]})
+    hooks_before = _hook_integrity(repo_dir)
     try:
         snapshot = _snapshot_repo(repo_dir)
     except git_util.GitCommandError as e:
@@ -681,7 +766,7 @@ def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
                  meta={"ticket": ticket_key, "repo": repo_dir.name})
         return "block_unknown"
 
-    clean, why = _repair_touched_only_code(repo_dir)
+    clean, why = _repair_touched_only_code(repo_dir, hooks_before)
     if not clean:
         try:
             _restore_repo(repo_dir, snapshot)

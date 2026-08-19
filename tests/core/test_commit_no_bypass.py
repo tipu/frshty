@@ -47,6 +47,44 @@ class TestNoSilentBypass:
                              capture_output=True, text=True).stdout
         assert log.strip() == "", "nothing may be committed when the hooks cannot run"
 
+    def test_a_failing_hook_run_never_reaches_git_commit(self, tmp_path):
+        """The helper used to run the hooks itself, log the failure, and then run
+        `git commit` anyway. A repo that configures pre-commit but installs no
+        native git hook therefore committed and reported exit 0."""
+        r = _repo(tmp_path, config=True)
+        pc = r / ".venv" / "bin" / "pre-commit"
+        pc.parent.mkdir(parents=True)
+        pc.write_text("#!/bin/sh\necho 'hook says no'\nexit 1\n")
+        pc.chmod(0o755)
+        assert not (r / ".git" / "hooks" / "pre-commit").exists()
+        got = git_util.commit_with_hooks(r, message="m")
+        assert got.returncode != 0
+        assert "hook says no" in ((got.stdout or "") + (got.stderr or ""))
+        log = subprocess.run(["git", "-C", str(r), "log", "--oneline"],
+                             capture_output=True, text=True).stdout
+        assert log.strip() == "", "a failed hook run must not produce a commit"
+
+    def test_a_failing_hook_run_raises_when_check_is_set(self, tmp_path):
+        r = _repo(tmp_path, config=True)
+        pc = r / ".venv" / "bin" / "pre-commit"
+        pc.parent.mkdir(parents=True)
+        pc.write_text("#!/bin/sh\nexit 1\n")
+        pc.chmod(0o755)
+        with pytest.raises(subprocess.CalledProcessError):
+            git_util.commit_with_hooks(r, message="m", check=True)
+
+    def test_a_passing_hook_run_still_commits(self, tmp_path):
+        r = _repo(tmp_path, config=True)
+        pc = r / ".venv" / "bin" / "pre-commit"
+        pc.parent.mkdir(parents=True)
+        pc.write_text("#!/bin/sh\nexit 0\n")
+        pc.chmod(0o755)
+        got = git_util.commit_with_hooks(r, message="m")
+        assert got.returncode == 0
+        log = subprocess.run(["git", "-C", str(r), "log", "--oneline"],
+                             capture_output=True, text=True).stdout
+        assert log.strip() != ""
+
     def test_no_config_still_commits_without_suppressing_native_hooks(self, tmp_path):
         r = _repo(tmp_path, config=False)
         with patch.object(git_util, "_find_pre_commit", return_value=None):
