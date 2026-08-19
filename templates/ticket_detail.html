@@ -409,14 +409,16 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                 <div v-if="proofMdContent" class="mb-3 last:mb-0">
                     <div class="md-content text-sm" v-html="renderMarkdown(proofMdContent)"></div>
                 </div>
-                <div v-for="name in ((ticket && ticket.proof_videos) || [])" :key="name" class="mb-3 last:mb-0">
+                <div v-for="v in ((ticket && ticket.proof_videos) || [])" :key="v.name" class="mb-3 last:mb-0">
                     <div class="flex items-center gap-2 mb-1">
-                        <code class="text-xs text-gray-400 font-mono select-all break-all">{{ proofPath(name) }}</code>
-                        <button @click="copyText(proofPath(name))" class="text-xs text-gray-500 hover:text-gray-300 shrink-0"
-                                :title="'copy ' + proofPath(name)">{{ copiedPath === proofPath(name) ? '✓ copied' : '⧉ copy' }}</button>
+                        <code class="text-xs text-gray-400 font-mono select-all break-all">{{ proofPath(v.name) }}</code>
+                        <button @click="copyText(proofPath(v.name))" class="text-xs text-gray-500 hover:text-gray-300 shrink-0"
+                                :title="'copy ' + proofPath(v.name)">{{ copiedPath === proofPath(v.name) ? '✓ copied' : '⧉ copy' }}</button>
+                        <span v-if="v.created_at" class="text-xs text-gray-500 shrink-0 ml-auto"
+                              :title="v.created_at">created {{ formatProofDate(v.created_at) }}</span>
                     </div>
                     <video controls class="w-full rounded" style="max-height:600px">
-                        <source :src="`/api/tickets/${key}/docs/${encodeURIComponent(name)}`">
+                        <source :src="`/api/tickets/${key}/docs/${encodeURIComponent(v.name)}`">
                     </video>
                 </div>
                 <div class="mt-3 pt-3 border-t border-gray-800">
@@ -1185,6 +1187,15 @@ frshtyApp({
             return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
         }
 
+        function formatProofDate(s) {
+            if (!s) return '';
+            const d = new Date(s);
+            if (isNaN(d)) return '';
+            return d.toLocaleString(undefined, {
+                month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit',
+            });
+        }
+
         function commentLabel(c) {
             const s = c.status || 'needs_reply';
             if (s === 'addressed') return 'addressed';
@@ -1716,7 +1727,7 @@ frshtyApp({
             prFailReasonLabel, prFailReasonTip, blockingBanner,
             rawStateJson, rawStateCopied, copyRawState,
             mergedJobsTransitions, formatCoFieldDiff,
-            ticketUrl, prScheduledLabel, dropdownStates,
+            ticketUrl, prScheduledLabel, dropdownStates, formatProofDate,
             sortedDocs, proofMdContent, filteredHistory, parsedDiff, fileTreeRows, commentsByFile, unmatchedComments,
             selectedRepo, repoTabs, filteredComments, needsReplyComments,
             renderMarkdown, escHtml,

@@ -1,6 +1,7 @@
 import json
 import re
 import subprocess
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -108,20 +109,30 @@ def review_pr(config: dict, platform, pr: dict, ticket_context: str = "",
     conventions = _load_conventions(config, pr["repo"])
     file_context = _read_changed_files(diff_text, worktree) if worktree else ""
 
-    persona_results = _run_all_personas(pr, diff_text, conventions, file_context, worktree, ticket_context,
-                                        model=_reviewer_model(config))
-    successful = [(name, data) for name, data in persona_results if data is not None]
-    if not successful:
-        return None
+    prompts = {name: _build_persona_prompt(text, pr, diff_text, conventions, file_context,
+                                           worktree is not None, ticket_context)
+               for name, text in PERSONAS.items()}
+    by_provider = _run_personas_for_providers(
+        prompts, _review_providers(config), worktree=worktree,
+        model=_reviewer_model(config), run_key=f"{pr['repo']}-{pr['id']}")
 
-    merged = _merge_reviews(successful)
-    if merged.get("issues"):
-        merged["issues"] = _validate_issues(merged["issues"], worktree)
-        merged["issues"] = _simplify_all_issues(merged["issues"])
-        merged["issues"] = _style_match_all(config, merged["issues"])
-
-    _write_review_artifacts(config, pr, merged, diff_text)
-    return merged
+    first: dict | None = None
+    for provider, results in by_provider.items():
+        successful = [(name, data) for name, data in results if data is not None]
+        if not successful:
+            log.emit("review_provider_empty",
+                     f"{pr['repo']}#{pr['id']}: no valid {provider} persona output",
+                     meta={"repo": pr["repo"], "pr_id": pr["id"], "provider": provider})
+            continue
+        merged = _merge_reviews(successful)
+        if merged.get("issues"):
+            merged["issues"] = _validate_issues(merged["issues"], worktree)
+            merged["issues"] = _simplify_all_issues(merged["issues"])
+            merged["issues"] = _style_match_all(config, merged["issues"])
+        _write_review_artifacts(config, pr, merged, diff_text, provider=provider)
+        if provider == "claude" or first is None:
+            first = merged
+    return first
 
 
 def _write_review_artifacts(config, pr, merged: dict, diff_text: str,
@@ -211,7 +222,10 @@ CODEX_REVIEW_TIMEOUT = 1200
 
 def _run_codex_persona(args):
     name, prompt, cwd, ticket_key = args
-    run_dir = cwd / ".codex-runs" / ticket_key.replace("/", "-")
+    # Peer PRs are reviewed without a checkout, so cwd can be None. The run
+    # directory still has to land somewhere or codex never gets asked at all.
+    run_root = Path(cwd) if cwd else Path(tempfile.gettempdir()) / "frshty-codex-runs"
+    run_dir = run_root / ".codex-runs" / ticket_key.replace("/", "-")
     run_dir.mkdir(parents=True, exist_ok=True)
     last = run_dir / f"{name}-last.md"
     try:
@@ -244,15 +258,23 @@ def _run_codex_persona(args):
     return (name, data)
 
 
-def _run_all_personas(pr, diff_text, conventions, file_context, worktree, ticket_context="", model=None):
-    tasks = []
-    for persona_name, persona_text in PERSONAS.items():
-        prompt = _build_persona_prompt(persona_text, pr, diff_text, conventions, file_context, worktree is not None, ticket_context)
-        tasks.append((persona_name, prompt, worktree, model))
+def _run_personas_for_providers(prompts: dict, providers: list[str], *,
+                                worktree, model, run_key: str) -> dict[str, list]:
+    """Run one set of persona prompts through every configured provider.
 
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        results = list(pool.map(_run_single_persona, tasks))
-    return results
+    Shared by review_pr and review_ticket. The experiment previously lived only
+    in review_ticket, so reviewer.providers silently did nothing on the peer-PR
+    path, which is where most reviews happen. Returns {provider: [(name, data)]}.
+    """
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        futures = {}
+        if "claude" in providers:
+            futures["claude"] = [pool.submit(_run_single_persona, (name, prompt, worktree, model))
+                                 for name, prompt in prompts.items()]
+        if "codex" in providers:
+            futures["codex"] = [pool.submit(_run_codex_persona, (name, prompt, worktree, run_key))
+                                for name, prompt in prompts.items()]
+        return {provider: [f.result() for f in futs] for provider, futs in futures.items()}
 
 
 def _merge_reviews(results: list[tuple[str, dict]]) -> dict:
@@ -803,21 +825,12 @@ def review_ticket(config: dict, ticket_key: str, prs: list[dict]) -> dict[str, d
     providers = _review_providers(config)
     prompts = {name: _build_ticket_persona_prompt(text, ticket_key, goal, sections, has_tools)
                for name, text in PERSONAS.items()}
-    tasks = [(name, prompt, cwd if has_tools else None, _reviewer_model(config))
-             for name, prompt in prompts.items()]
-    codex_tasks = [(name, prompt, cwd, ticket_key) for name, prompt in prompts.items()]
-    with ThreadPoolExecutor(max_workers=6) as pool:
-        claude_futs = [pool.submit(_run_single_persona, t) for t in tasks]
-        codex_futs = ([pool.submit(_run_codex_persona, t) for t in codex_tasks]
-                      if "codex" in providers else [])
-        persona_results = [f.result() for f in claude_futs]
-        codex_results = [f.result() for f in codex_futs]
+    by_provider = _run_personas_for_providers(
+        prompts, providers, worktree=cwd if has_tools else None,
+        model=_reviewer_model(config), run_key=ticket_key)
 
     results: dict[str, dict | None] = dict(none_result)
-    provider_sets = [("claude", persona_results)]
-    if "codex" in providers:
-        provider_sets.append(("codex", codex_results))
-    for provider, presults in provider_sets:
+    for provider, presults in by_provider.items():
         successful = [(name, data) for name, data in presults if data is not None]
         if not successful:
             log.emit("review_provider_empty",
