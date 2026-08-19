@@ -1,8 +1,8 @@
 """Ticket pipeline tasks. Headless claude -p invocations, postcondition-gated."""
-import hashlib
 import json
 import re
 import os
+import shutil
 import subprocess
 import uuid
 from datetime import datetime, timezone
@@ -643,12 +643,37 @@ def _porcelain_entries(raw: str) -> list[tuple[str, list[str]]]:
     return entries
 
 
+_SYMLINK = b"\0symlink\0"
+
+
 def _bytes_of(path: Path) -> bytes | None:
-    """The file's contents, or None when it is not there."""
+    """The file's contents, or None when it is not there.
+
+    A symlink records its target instead of the bytes on the far end. Replacing
+    a watched file with a link elsewhere is a change even when both sides read
+    the same, and recording the link is what lets it be put back as a link.
+    """
     try:
+        if path.is_symlink():
+            return _SYMLINK + os.readlink(path).encode()
         return path.read_bytes()
     except OSError:
         return None
+
+
+def _clear_path(path: Path) -> None:
+    """Remove whatever is at `path` without following it.
+
+    Writing to a watched path that the repair turned into a symlink would follow
+    the link and overwrite a file outside the repository. Unlinking removes the
+    link itself, so the restore stays inside the checkout.
+    """
+    if path.is_symlink():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
 
 
 def _hook_paths(repo_dir: Path) -> dict[str, Path]:
@@ -704,24 +729,30 @@ def _hook_integrity(repo_dir: Path) -> dict[str, bytes | None]:
 
 
 def _restore_hook_setup(repo_dir: Path, before: dict[str, bytes | None]) -> list[str]:
-    """Put the hook files back. Returns the keys that could not be restored."""
+    """Put the hook files back. Returns the keys that could not be restored.
+
+    Every path is cleared before it is written, so a watched file the repair
+    turned into a symlink or a directory is replaced rather than written
+    through, which would follow the link out of the checkout.
+    """
     failed = []
     for key, path in _hook_paths(repo_dir).items():
         was = before.get(key)
         if _bytes_of(path) == was:
             continue
         try:
-            if was is None:
-                path.unlink(missing_ok=True)
-            else:
+            _clear_path(path)
+            if was is not None:
+                if path.parent.is_symlink():
+                    raise OSError(f"{path.parent} is a symlink")
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(was)
-                if key.startswith("runner:") or key == "git_hook":
-                    path.chmod(0o755)
+                if was.startswith(_SYMLINK):
+                    path.symlink_to(was[len(_SYMLINK):].decode())
+                else:
+                    path.write_bytes(was)
+                    if key.startswith("runner:") or key == "git_hook":
+                        path.chmod(0o755)
         except OSError:
-            failed.append(key)
-            continue
-        if _bytes_of(path) != was:
             failed.append(key)
     return failed
 

@@ -225,6 +225,68 @@ class TestRejectionLeavesNoWorkingHole:
         ok, _ = T._repair_touched_only_code(r, before)
         assert ok, "after restoration the fingerprint must match again"
 
+    def test_restoring_a_symlinked_path_does_not_write_through_it(self, tmp_path):
+        """Restoration must stay inside the checkout. Writing to a watched path
+        that has become a symlink follows the link and overwrites whatever is on
+        the other end."""
+        r = _repo(tmp_path)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        victim = outside / "victim"
+        victim.write_text("DO NOT OVERWRITE\n")
+        before = T._hook_integrity(r)
+        cfg = r / ".pre-commit-config.yaml"
+        cfg.unlink()
+        cfg.symlink_to(victim)
+        assert T._restore_hook_setup(r, before) == []
+        assert victim.read_text() == "DO NOT OVERWRITE\n"
+        assert not cfg.is_symlink()
+        assert cfg.read_text() == "repos: []\n"
+
+    def test_swapping_a_watched_file_for_a_symlink_is_rejected(self, tmp_path):
+        """Detection, not just repair. The link may point at content identical to
+        the original, so comparing the bytes on the far end sees nothing."""
+        r = _repo(tmp_path)
+        twin = tmp_path / "twin"
+        twin.write_text("repos: []\n")
+        before = T._hook_integrity(r)
+        cfg = r / ".pre-commit-config.yaml"
+        cfg.unlink()
+        cfg.symlink_to(twin)
+        assert cfg.read_text() == "repos: []\n", "the contents on the far end match"
+        ok, why = T._repair_touched_only_code(r, before)
+        assert not ok
+        assert "hook setup" in why
+
+    def test_restoring_a_path_replaced_by_a_directory(self, tmp_path):
+        r = _repo(tmp_path)
+        before = T._hook_integrity(r)
+        cfg = r / ".pre-commit-config.yaml"
+        cfg.unlink()
+        cfg.mkdir()
+        (cfg / "decoy").write_text("x\n")
+        assert T._restore_hook_setup(r, before) == []
+        assert cfg.is_file()
+        assert cfg.read_text() == "repos: []\n"
+
+    def test_a_restore_that_cannot_complete_is_reported(self, tmp_path):
+        """Silence here means the ticket is retried against a contaminated
+        worktree."""
+        r = _repo(tmp_path)
+        bindir = r / ".venv" / "bin"
+        bindir.mkdir(parents=True)
+        runner = bindir / "pre-commit"
+        runner.write_text("#!/bin/sh\nexec real-check\n")
+        runner.chmod(0o755)
+        before = T._hook_integrity(r)
+        runner.write_text("#!/bin/sh\nexit 0\n")
+        bindir.chmod(0o555)
+        try:
+            failed = T._restore_hook_setup(r, before)
+        finally:
+            bindir.chmod(0o755)
+        assert failed, "an unwritable path must be reported, not skipped"
+
     def test_the_router_removes_a_planted_runner_not_just_the_guard(self, tmp_path):
         """Through _route_hook_failure, not by calling the restore directly. A
         restore that works but is never reached leaves the same hole."""
