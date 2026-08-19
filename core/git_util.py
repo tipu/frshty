@@ -97,17 +97,26 @@ def add_or_reuse_worktree(repo_path: Path, worktree_path: Path, branch: str,
     return holder
 
 
-def _find_pre_commit(repo_dir: Path) -> Path | None:
-    """Return the path to a usable pre-commit binary, or None.
+def pre_commit_candidates(repo_dir: Path) -> list[Path]:
+    """Every path `_find_pre_commit` would consider, in preference order.
 
-    Preference order: per-repo `.venv/bin/pre-commit`, then `~/.local/bin`,
-    then `/usr/local/bin` / `/usr/bin`, then anything on PATH."""
-    candidates = [
+    Exposed so a caller can watch all of them. Watching only the one that
+    resolves today misses a repair that plants a higher-priority runner, because
+    that changes which path resolves rather than the contents of the old one."""
+    return [
         repo_dir / ".venv" / "bin" / "pre-commit",
         Path.home() / ".local" / "bin" / "pre-commit",
         Path("/usr/local/bin/pre-commit"),
         Path("/usr/bin/pre-commit"),
     ]
+
+
+def _find_pre_commit(repo_dir: Path) -> Path | None:
+    """Return the path to a usable pre-commit binary, or None.
+
+    Preference order: per-repo `.venv/bin/pre-commit`, then `~/.local/bin`,
+    then `/usr/local/bin` / `/usr/bin`, then anything on PATH."""
+    candidates = pre_commit_candidates(repo_dir)
     for c in candidates:
         try:
             if c.is_file() and os.access(c, os.X_OK):

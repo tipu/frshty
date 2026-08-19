@@ -643,47 +643,106 @@ def _porcelain_entries(raw: str) -> list[tuple[str, list[str]]]:
     return entries
 
 
-def _sha_of(path: Path) -> str:
-    """The file's content hash, or "" when it is not there."""
+def _bytes_of(path: Path) -> bytes | None:
+    """The file's contents, or None when it is not there."""
     try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+        return path.read_bytes()
     except OSError:
-        return ""
+        return None
 
 
-def _hook_integrity(repo_dir: Path) -> dict[str, str]:
-    """Fingerprint everything that decides whether the hook still runs.
+def _hook_paths(repo_dir: Path) -> dict[str, Path]:
+    """Every file that decides whether the hook runs, resolved for this checkout.
 
-    `git status` cannot answer this. A file the repair adds to `.git/info/exclude`
-    never appears as untracked, and nothing under `.git` is tracked at all, so a
-    swapped `.venv/bin/pre-commit` or a rewritten `.git/hooks/pre-commit` is
-    invisible to the worktree check above. Asking whether these are unchanged is
-    answerable; asking whether the diff looks honest is not.
+    A ticket repo is a linked worktree, so `<repo>/.git` is a file and
+    `<repo>/.git/info/exclude` cannot exist. Git honours `info/exclude` from the
+    common directory, not the per-worktree one, and looks for hooks in
+    `core.hooksPath` before the common `hooks/`. Watching the literal
+    `<repo>/.git/...` paths therefore watched nothing in production.
+
+    `<common>/config` is included because it is where `core.hooksPath` and
+    `core.excludesFile` are set, so one path covers redirecting either.
     """
-    runner = git_util._find_pre_commit(repo_dir)
+    try:
+        common = Path(git_util.run_git(
+            repo_dir, ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+            timeout=30).stdout.strip())
+    except (git_util.GitCommandError, OSError):
+        common = repo_dir / ".git"
+    try:
+        configured = git_util.run_git(repo_dir, ["config", "--get", "core.hooksPath"],
+                                      allowed_codes=(0, 1), timeout=30).stdout.strip()
+    except git_util.GitCommandError:
+        configured = ""
+    hooks = Path(configured) if configured else common / "hooks"
+    if not hooks.is_absolute():
+        hooks = repo_dir / hooks
     watched = {
         "config": repo_dir / ".pre-commit-config.yaml",
-        "exclude": repo_dir / ".git" / "info" / "exclude",
-        "git_hook": repo_dir / ".git" / "hooks" / "pre-commit",
+        "gitignore": repo_dir / ".gitignore",
+        "exclude": common / "info" / "exclude",
+        "git_config": common / "config",
+        "git_hook": hooks / "pre-commit",
     }
-    state = {k: _sha_of(p) for k, p in watched.items()}
-    # The resolved binary's contents, not its path. A path that moves without the
-    # contents changing is benign, and pinning it would add a field no test can
-    # make fail on its own.
-    state["runner"] = _sha_of(runner) if runner else ""
-    return state
+    for candidate in git_util.pre_commit_candidates(repo_dir):
+        watched[f"runner:{candidate}"] = candidate
+    return watched
+
+
+def _hook_integrity(repo_dir: Path) -> dict[str, bytes | None]:
+    """Snapshot those files, so a rejected repair can be undone exactly.
+
+    `git status` cannot answer this. A file the repair adds to `info/exclude`
+    never appears as untracked, and nothing under the git directory is tracked at
+    all, so a swapped `.venv/bin/pre-commit` is invisible to the worktree check
+    below. Asking whether these are unchanged is answerable; asking whether the
+    diff looks honest is not. Contents are kept rather than hashes because
+    `_restore_repo` skips ignored files, so a planted runner would otherwise
+    survive the rejection and make the next attempt pass.
+    """
+    return {k: _bytes_of(p) for k, p in _hook_paths(repo_dir).items()}
+
+
+def _restore_hook_setup(repo_dir: Path, before: dict[str, bytes | None]) -> list[str]:
+    """Put the hook files back. Returns the keys that could not be restored."""
+    failed = []
+    for key, path in _hook_paths(repo_dir).items():
+        was = before.get(key)
+        if _bytes_of(path) == was:
+            continue
+        try:
+            if was is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(was)
+                if key.startswith("runner:") or key == "git_hook":
+                    path.chmod(0o755)
+        except OSError:
+            failed.append(key)
+            continue
+        if _bytes_of(path) != was:
+            failed.append(key)
+    return failed
+
+
+# A repair edits existing files. Anything else — added, deleted, renamed, copied,
+# untracked, or a type change to a symlink — is a way to satisfy the hook without
+# fixing the code, so the status code is allowlisted rather than blacklisted.
+_MODIFY_ONLY = set("M ")
 
 
 def _repair_touched_only_code(repo_dir: Path,
-                              before: dict[str, str] | None = None) -> tuple[bool, str]:
+                              before: dict[str, bytes | None] | None = None) -> tuple[bool, str]:
     """Whether the repair agent stayed inside the code, or found a cheap exit.
 
     The agent runs with permissions bypassed, so telling it not to disable the
     hook is a request. When a hook cannot be satisfied from inside the repo — a
     symbol missing from a published sibling package, say — the cheap ways to
-    comply are loosening the linter, editing the manifest, or dropping a
-    suppression directive. Each of those makes the commit pass and the problem
-    invisible, so they are rejected in code rather than in a prompt.
+    comply are loosening the linter, editing the manifest, dropping a suppression
+    directive, or deleting the file the hook complained about. Each of those makes
+    the commit pass and the problem invisible, so they are rejected in code rather
+    than in a prompt.
     """
     if before is not None:
         after = _hook_integrity(repo_dir)
@@ -699,11 +758,9 @@ def _repair_touched_only_code(repo_dir: Path,
             if Path(rel).name in _REPAIR_FORBIDDEN_NAMES:
                 return False, f"repair touched {Path(rel).name}, which is configuration, not code"
         rel = paths[0]
-        if "?" in code or "A" in code or "R" in code or "C" in code:
-            # A lint or formatting fix never needs a new file, and never moves
-            # one. Either is how a shadow module or a fabricated type stub gets
-            # in, and a rename is also how a config file leaves the repo.
-            return False, f"repair added or moved a file ({rel}); it may only edit existing code"
+        if not set(code) <= _MODIFY_ONLY:
+            return False, (f"repair did more than edit {rel} (git status {code!r}); "
+                           f"it may only change the contents of existing files")
         target = repo_dir / rel
         try:
             body = target.read_text()
@@ -772,9 +829,21 @@ def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
             _restore_repo(repo_dir, snapshot)
         except git_util.GitCommandError:
             pass
+        # _restore_repo lists untracked files with --exclude-standard, so a
+        # planted `.venv/bin/pre-commit` survives it and the next attempt runs
+        # the fake instead of the real hook. The hook files are put back from
+        # their recorded contents rather than left to that enumeration.
+        failed = _restore_hook_setup(repo_dir, hooks_before)
+        if failed:
+            log.emit("commit_hook_setup_contaminated",
+                     f"{ticket_key}: {repo_dir.name} hook setup could not be put back "
+                     f"({', '.join(failed)}); do not retry this worktree until it is "
+                     f"rebuilt",
+                     meta={"ticket": ticket_key, "repo": repo_dir.name, "keys": failed})
         log.emit("commit_hook_repair_rejected",
                  f"{ticket_key}: discarded the repair of {repo_dir.name}: {why}",
-                 meta={"ticket": ticket_key, "repo": repo_dir.name, "reason": why})
+                 meta={"ticket": ticket_key, "repo": repo_dir.name, "reason": why,
+                       "unrestored": failed})
         return "block_unknown"
     return "repair"
 

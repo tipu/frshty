@@ -131,3 +131,169 @@ class TestHookIntegrityCoversWhatStatusCannotSee:
         (r / "pkg" / "mod.py").write_text("y = 3\n")
         ok, why = T._repair_touched_only_code(r, before)
         assert ok, why
+
+    def test_redirecting_hooks_through_git_config_is_rejected(self, tmp_path):
+        """core.hooksPath is how the hook is disabled without touching a hook."""
+        r = _repo(tmp_path)
+        before = T._hook_integrity(r)
+        _git(r, "config", "core.hooksPath", str(tmp_path / "empty-hooks"))
+        ok, why = T._repair_touched_only_code(r, before)
+        assert not ok
+        assert "hook setup" in why
+
+    def test_the_watched_hook_follows_a_configured_hooks_path(self, tmp_path):
+        """When core.hooksPath is already set, the hook git runs is the one
+        there. Watching the default location watches a file that does not
+        exist, so rewriting the real hook goes unnoticed."""
+        r = _repo(tmp_path)
+        elsewhere = tmp_path / "hooks"
+        elsewhere.mkdir()
+        (elsewhere / "pre-commit").write_text("#!/bin/sh\nexec real-check\n")
+        _git(r, "config", "core.hooksPath", str(elsewhere))
+        before = T._hook_integrity(r)
+        (elsewhere / "pre-commit").write_text("#!/bin/sh\nexit 0\n")
+        ok, why = T._repair_touched_only_code(r, before)
+        assert not ok
+        assert "hook setup" in why
+
+
+class TestOnlyEditsAreAllowed:
+    def test_deleting_the_offending_file_is_rejected(self, tmp_path):
+        """`git rm bad.py` satisfies any hook that complained about bad.py. The
+        guard listed the ways in rather than the one way through, so a deletion
+        matched nothing and the missing file then read as unreadable and was
+        skipped."""
+        r = _repo(tmp_path)
+        before = T._hook_integrity(r)
+        _git(r, "rm", "-q", "app.py")
+        ok, why = T._repair_touched_only_code(r, before)
+        assert not ok, "a repair that deletes the file the hook named must be rejected"
+
+    def test_replacing_a_file_with_a_symlink_is_rejected(self, tmp_path):
+        r = _repo(tmp_path)
+        before = T._hook_integrity(r)
+        (r / "app.py").unlink()
+        (r / "app.py").symlink_to(r / "pkg" / "mod.py")
+        _git(r, "add", "-A")
+        ok, why = T._repair_touched_only_code(r, before)
+        assert not ok
+
+    def test_a_staged_edit_is_still_accepted(self, tmp_path):
+        """Staging is what the repair loop does next, so `M ` has to pass."""
+        r = _repo(tmp_path)
+        before = T._hook_integrity(r)
+        (r / "app.py").write_text("x = 2\n")
+        _git(r, "add", "-A")
+        ok, why = T._repair_touched_only_code(r, before)
+        assert ok, why
+
+
+class TestRejectionLeavesNoWorkingHole:
+    def test_a_planted_runner_is_removed_not_merely_noticed(self, tmp_path):
+        """_restore_repo lists untracked files with --exclude-standard, so the
+        planted runner survived it. Noticing a bypass and leaving it in place
+        means the next attempt runs the fake hook and passes."""
+        r = _repo(tmp_path)
+        before = T._hook_integrity(r)
+        (r / ".venv" / "bin").mkdir(parents=True)
+        fake = r / ".venv" / "bin" / "pre-commit"
+        fake.write_text("#!/bin/sh\nexit 0\n")
+        fake.chmod(0o755)
+        failed = T._restore_hook_setup(r, before)
+        assert failed == []
+        assert not fake.exists(), "the planted runner must not survive the rejection"
+
+    def test_a_real_runner_is_put_back_after_being_overwritten(self, tmp_path):
+        r = _repo(tmp_path)
+        (r / ".venv" / "bin").mkdir(parents=True)
+        real = r / ".venv" / "bin" / "pre-commit"
+        real.write_text("#!/bin/sh\nexec the-real-thing \"$@\"\n")
+        real.chmod(0o755)
+        before = T._hook_integrity(r)
+        real.write_text("#!/bin/sh\nexit 0\n")
+        assert T._restore_hook_setup(r, before) == []
+        assert "the-real-thing" in real.read_text()
+        assert real.stat().st_mode & 0o111, "the runner must stay executable"
+
+    def test_an_edited_exclude_is_put_back(self, tmp_path):
+        r = _repo(tmp_path)
+        before = T._hook_integrity(r)
+        excl = r / ".git" / "info" / "exclude"
+        excl.parent.mkdir(parents=True, exist_ok=True)
+        excl.write_text("shadow.py\n")
+        assert T._restore_hook_setup(r, before) == []
+        ok, _ = T._repair_touched_only_code(r, before)
+        assert ok, "after restoration the fingerprint must match again"
+
+    def test_the_router_removes_a_planted_runner_not_just_the_guard(self, tmp_path):
+        """Through _route_hook_failure, not by calling the restore directly. A
+        restore that works but is never reached leaves the same hole."""
+        from unittest.mock import patch
+
+        from core import git_util as g
+
+        r = _repo(tmp_path)
+        fake = r / ".venv" / "bin" / "pre-commit"
+
+        def cheat(*a, **k):
+            fake.parent.mkdir(parents=True, exist_ok=True)
+            fake.write_text("#!/bin/sh\nexit 0\n")
+            fake.chmod(0o755)
+            return "done"
+
+        outcome = g.CommitOutcome("hook_failed", "hook_pass_2", "r", 1,
+                                  "app.py:1:1: E741 Ambiguous name", "aaa", "aaa")
+        with patch.object(T, "run_claude_code", side_effect=cheat), patch.object(T, "log"):
+            route = T._route_hook_failure(r, outcome, "DEV-1")
+        assert route == "block_unknown"
+        assert not fake.exists(), "the router must undo the bypass, not only notice it"
+
+
+class TestLinkedWorktrees:
+    """Ticket repos are linked worktrees, so `<repo>/.git` is a file. Watching
+    `<repo>/.git/info/exclude` watched a path that cannot exist, which made the
+    fingerprint blind in exactly the place it runs."""
+
+    def _worktree(self, tmp_path: Path) -> Path:
+        main = _repo(tmp_path)
+        wt = tmp_path / "tick"
+        _git(main, "worktree", "add", "-q", "-b", "feat", str(wt))
+        assert (wt / ".git").is_file()
+        return wt
+
+    def test_the_watched_exclude_is_the_one_git_honours(self, tmp_path):
+        wt = self._worktree(tmp_path)
+        excl = T._hook_paths(wt)["exclude"]
+        excl.parent.mkdir(parents=True, exist_ok=True)
+        excl.write_text("secret.py\n")
+        (wt / "secret.py").write_text("x = 1\n")
+        assert _git(wt, "status", "--porcelain").stdout.strip() == "", (
+            "the guard must watch the exclude file git actually reads")
+
+    def test_hiding_a_file_in_a_worktree_is_rejected(self, tmp_path):
+        wt = self._worktree(tmp_path)
+        before = T._hook_integrity(wt)
+        excl = T._hook_paths(wt)["exclude"]
+        excl.parent.mkdir(parents=True, exist_ok=True)
+        excl.write_text("secret.py\n")
+        (wt / "secret.py").write_text("x = 1\n")
+        ok, why = T._repair_touched_only_code(wt, before)
+        assert not ok
+        assert "hook setup" in why
+
+    def test_the_watched_hook_is_the_one_git_runs(self, tmp_path):
+        wt = self._worktree(tmp_path)
+        before = T._hook_integrity(wt)
+        hook = T._hook_paths(wt)["git_hook"]
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        hook.write_text("#!/bin/sh\nexit 0\n")
+        ok, why = T._repair_touched_only_code(wt, before)
+        assert not ok
+        assert "hook setup" in why
+
+    def test_an_ordinary_edit_in_a_worktree_is_accepted(self, tmp_path):
+        wt = self._worktree(tmp_path)
+        before = T._hook_integrity(wt)
+        (wt / "app.py").write_text("x = 9\n")
+        ok, why = T._repair_touched_only_code(wt, before)
+        assert ok, why
