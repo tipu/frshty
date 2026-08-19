@@ -28,6 +28,7 @@ native git hooks in repos with no pre-commit config at all.
 import os
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 import core.log as log
@@ -156,6 +157,112 @@ def _run_pre_commit(repo_dir: Path, pc: Path, env: dict[str, str]) -> None:
                       "stdout_tail": (run.stdout or "")[-2000:],
                       "stderr_tail": (run.stderr or "")[-1000:]},
             )
+
+
+@dataclass
+class CommitOutcome:
+    """What happened when we tried to commit, and the evidence for it.
+
+    Every non-zero result used to look identical to the caller, and the useful
+    text — the diagnostics from the explicit `pre-commit run` passes — was logged
+    and thrown away, so only the later `git commit` output survived. Anything
+    deciding what to do next was reading the wrong thing.
+    """
+    status: str          # committed | hook_failed | tooling_failed | git_failed
+    phase: str           # locate_runner | hook_pass_1 | hook_pass_2 | git_commit
+    repo: str
+    exit_code: int
+    output: str
+    before_head: str
+    after_head: str
+
+    @property
+    def ok(self) -> bool:
+        return self.status == "committed"
+
+
+_ENVIRONMENT_MARKERS = (
+    "pre-commit not found", "pre-commit: not found", "did you forget to activate",
+    "command not found", "no such file or directory: 'pre-commit'",
+    "executable not found", "permission denied",
+)
+_DEPENDENCY_MARKERS = (
+    "unknown import symbol", "modulenotfounderror", "no module named",
+    "could not be resolved", "cannot find implementation or library stub",
+    "is not a known attribute of module", "importerror",
+)
+
+
+def triage_commit_failure(status: str, output: str) -> str:
+    """Classify a failed commit deterministically, before asking any model.
+
+    Returns environment | dependency | git | ambiguous. Only "ambiguous" is worth
+    a model call, and only "ambiguous" may lead to editing code. The three real
+    failures behind this — a type error in a generated test, a symbol missing
+    from a published sibling package, and a missing pre-commit binary — all
+    arrived through one code path and all got the same answer: "edit something".
+    Two of those three are not fixable by editing this repository.
+    """
+    text = (output or "").lower()
+    if status == "git_failed":
+        return "git"
+    if status == "tooling_failed" or any(m in text for m in _ENVIRONMENT_MARKERS):
+        return "environment"
+    if any(m in text for m in _DEPENDENCY_MARKERS):
+        return "dependency"
+    return "ambiguous"
+
+
+def commit_outcome(repo_dir: Path, message: str | None = None,
+                   extra_commit_args: list[str] | None = None,
+                   timeout: int = 120) -> CommitOutcome:
+    """Stage and commit, reporting which phase failed and keeping its output."""
+    repo = repo_dir.name
+
+    def _head() -> str:
+        got = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo_dir),
+                             capture_output=True, text=True, timeout=30)
+        return (got.stdout or "").strip() if got.returncode == 0 else ""
+
+    before = _head()
+    config = repo_dir / ".pre-commit-config.yaml"
+    pc = _find_pre_commit(repo_dir) if config.is_file() else None
+    env = _hook_env(repo_dir, pc)
+
+    if config.is_file() and pc is None:
+        return CommitOutcome("tooling_failed", "locate_runner", repo, 127,
+                             "pre-commit is configured for this repository but no "
+                             "binary could be located in .venv/bin or on PATH",
+                             before, before)
+
+    if pc is not None:
+        for attempt in (1, 2):
+            run = subprocess.run([str(pc), "run"], cwd=str(repo_dir),
+                                 capture_output=True, text=True, env=env,
+                                 timeout=PRE_COMMIT_TIMEOUT)
+            subprocess.run(["git", "add", "-A"], cwd=str(repo_dir),
+                           capture_output=True, timeout=30)
+            if run.returncode == 0:
+                break
+            if attempt == 2:
+                # Running git commit now would only repeat the same checks and
+                # replace these diagnostics with a terser failure.
+                return CommitOutcome("hook_failed", f"hook_pass_{attempt}", repo,
+                                     run.returncode,
+                                     ((run.stdout or "") + (run.stderr or "")).strip(),
+                                     before, before)
+
+    args = ["git", "commit", *(extra_commit_args or [])]
+    if message is not None:
+        args.extend(["-m", message])
+    done = subprocess.run(args, cwd=str(repo_dir), capture_output=True,
+                          text=True, timeout=timeout, env=env)
+    if done.returncode != 0:
+        return CommitOutcome("git_failed", "git_commit", repo, done.returncode,
+                             ((done.stdout or "") + (done.stderr or "")).strip(),
+                             before, before)
+    return CommitOutcome("committed", "git_commit", repo, 0,
+                         (done.stdout or "").strip(), before, _head())
 
 
 def commit_with_hooks(repo_dir: Path,
