@@ -72,6 +72,10 @@ class TestOnlyKnownDiagnosticsAreRepaired:
             ("isort", "ERROR: /src/a.py Imports are incorrectly sorted and/or formatted."),
             ("black check", "would reformat app.py"),
             ("black modifying", "reformatted app.py\nAll done!\n1 file reformatted."),
+            # The per-file line and the summary line are separate patterns, so
+            # each needs a case that only it matches.
+            ("black per-file only", "reformatted app.py"),
+            ("black summary only", "All done!\n3 files reformatted."),
             ("mypy arg-type", 'error: Argument 1 to "f" has incompatible type '
                               '"int"; expected "str"  [arg-type]'),
         ):
