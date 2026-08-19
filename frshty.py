@@ -32,6 +32,7 @@ from web.wizard import router as _wizard_router
 from web.observability import router as _observability_router
 from web.reviews import router as _reviews_router
 from web.tickets import router as _tickets_router
+from web.work import router as _work_router
 
 
 if len(sys.argv) >= 2 and Path(sys.argv[1]).is_file():
@@ -66,6 +67,7 @@ app.include_router(_wizard_router)
 app.include_router(_observability_router)
 app.include_router(_reviews_router)
 app.include_router(_tickets_router)
+app.include_router(_work_router)
 
 
 def main():
