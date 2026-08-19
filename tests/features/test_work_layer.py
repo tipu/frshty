@@ -127,7 +127,6 @@ class TestIntake:
 
     def test_intake_creates_item_and_run(self, tmp_path, monkeypatch):
         from unittest.mock import patch, MagicMock
-        import web.work as work
         reg = MagicMock()
         reg.config = {"workspace": {"root": tmp_path}}
         instances = MagicMock()
@@ -273,3 +272,74 @@ class TestPersonalConfig:
             if host:
                 assert host not in seen_hosts, f"{p.name} and {seen_hosts[host]} share {host}"
                 seen_hosts[host] = p.name
+
+
+class TestHookInstaller:
+    def test_installer_idempotent_and_preserving(self, tmp_path):
+        import json
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "install_work_hooks", "scripts/install_work_hooks.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        settings = tmp_path / "settings.json"
+        settings.write_text(json.dumps({
+            "hooks": {"UserPromptSubmit": [{"matcher": "", "hooks": [
+                {"type": "command", "command": "echo existing"}]}]},
+            "permissions": {"allow": ["Read"]},
+        }))
+        added = mod.install_into(str(settings))
+        assert set(added) == set(mod.EVENTS)
+        again = mod.install_into(str(settings))
+        assert again == []
+        data = json.loads(settings.read_text())
+        prompt_hooks = data["hooks"]["UserPromptSubmit"]
+        commands = [h["command"] for e in prompt_hooks for h in e["hooks"]]
+        assert "echo existing" in commands
+        assert data["permissions"] == {"allow": ["Read"]}
+        for event in mod.EVENTS:
+            cmds = [h["command"] for e in data["hooks"][event] for h in e["hooks"]]
+            assert any("work_hook.py" in c for c in cmds)
+
+
+class TestHookScript:
+    def test_hook_records_stop_event(self, tmp_path):
+        import json
+        import subprocess
+        import core.db as _db
+        dbfile = str(_db._DB_PATH)
+        item_id = _mkitem("hooked item")
+        work_store.add_run(item_id, "sid-hook-1", "work-h1", "/tmp")
+        payload = json.dumps({"session_id": "sid-hook-1", "hook_event_name": "Stop"})
+        r = subprocess.run(
+            [".venv/bin/python", "scripts/work_hook.py"],
+            input=payload, capture_output=True, text=True, timeout=15,
+            env={**__import__("os").environ, "FRSHTY_DB": dbfile},
+        )
+        assert r.returncode == 0, r.stderr
+        item = db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "needs_you"
+
+    def test_hook_foreign_session_fast_noop(self, tmp_path):
+        import json
+        import subprocess
+        import core.db as _db
+        dbfile = str(_db._DB_PATH)
+        before = db.query_one("SELECT COUNT(*) AS n FROM work_events")["n"]
+        payload = json.dumps({"session_id": "sid-foreign-xyz", "hook_event_name": "Stop"})
+        r = subprocess.run(
+            [".venv/bin/python", "scripts/work_hook.py"],
+            input=payload, capture_output=True, text=True, timeout=15,
+            env={**__import__("os").environ, "FRSHTY_DB": dbfile},
+        )
+        assert r.returncode == 0
+        after = db.query_one("SELECT COUNT(*) AS n FROM work_events")["n"]
+        assert after == before
+
+    def test_hook_garbage_input_exits_zero(self):
+        import subprocess
+        r = subprocess.run(
+            [".venv/bin/python", "scripts/work_hook.py"],
+            input="not json at all", capture_output=True, text=True, timeout=15,
+        )
+        assert r.returncode == 0
