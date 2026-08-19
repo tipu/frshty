@@ -15,12 +15,15 @@ Strategy: locate the per-repo pre-commit binary (typically
 auto-fixing hooks (ruff --fix, ruff-format) actually run and re-stage their
 output, then `git commit` normally so the git-driven hook re-runs and
 no-ops. If a hook surfaces real lint errors that auto-fix can't resolve,
-the second `git commit` re-runs the same hooks and fails — surfacing the
-lint error to the caller rather than silently bypassing it with --no-verify.
+the second `git commit` re-runs the same hooks and fails, surfacing the
+lint error to the caller.
 
-Fallback: only when no pre-commit binary can be located does this helper
-fall back to `git commit --no-verify`. That keeps frshty progressing on
-repos that have a `.pre-commit-config.yaml` but no installed venv.
+There is no bypass. A repo that configures pre-commit but whose binary cannot
+be located returns exit 127 with an explanatory stderr. It used to commit with
+--no-verify instead, which let a ticket advance as though the hooks had passed;
+windows-rpa-client committed that way during DEV-635 and was reported clean.
+Because that flag was appended outside the config check, it also suppressed
+native git hooks in repos with no pre-commit config at all.
 """
 import os
 import shutil
@@ -114,13 +117,19 @@ def _find_pre_commit(repo_dir: Path) -> Path | None:
     return Path(located) if located else None
 
 
-def _hook_env(repo_dir: Path) -> dict[str, str]:
-    """Build an env where the repo's `.venv/bin` is on PATH so any git-driven
-    hooks that exec `pre-commit` from PATH find the per-repo binary."""
+def _hook_env(repo_dir: Path, pre_commit: Path | None = None) -> dict[str, str]:
+    """Build an env where the chosen pre-commit binary is on PATH.
+
+    The git-driven hook script re-resolves `pre-commit` from PATH. _find_pre_commit
+    falls back to ~/.local/bin and PATH, so putting only the repo's .venv/bin here
+    meant the hook could fail to find the very binary we had just selected and
+    report "pre-commit not found. Did you forget to activate your virtualenv?".
+    """
     env = {**os.environ}
-    venv_bin = repo_dir / ".venv" / "bin"
-    if venv_bin.is_dir():
-        env["PATH"] = f"{venv_bin}:{env.get('PATH', '')}"
+    for candidate in (pre_commit.parent if pre_commit else None,
+                      repo_dir / ".venv" / "bin"):
+        if candidate and candidate.is_dir():
+            env["PATH"] = f"{candidate}{os.pathsep}{env.get('PATH', '')}"
     return env
 
 
@@ -162,11 +171,10 @@ def commit_with_hooks(repo_dir: Path,
     `extra_commit_args`: e.g. `["--no-edit"]` for merge commits.
     `check`: forward to subprocess.run; True raises on non-zero exit.
 
-    Falls back to `git commit --no-verify` only when no pre-commit binary
-    can be located (e.g. repo has a hook script installed but no venv with
-    pre-commit). When pre-commit IS available, the helper commits without
-    --no-verify so real lint failures surface as CalledProcessError /
-    non-zero returncode rather than being silently bypassed."""
+    Never bypasses verification. A repo that configures pre-commit but whose
+    binary cannot be located returns exit 127 with an explanatory stderr, so the
+    caller sees a tooling failure instead of an unverified commit. A repo with no
+    pre-commit config commits normally, leaving any native git hooks in force."""
     args = ["git", "commit"]
     extras = list(extra_commit_args or [])
 
@@ -175,13 +183,22 @@ def commit_with_hooks(repo_dir: Path,
 
     if pc is None:
         if config.is_file():
+            # Committing unverified is worse than not committing: the ticket
+            # advances as though the hooks had passed. Report a tooling failure
+            # and let the caller decide, rather than rubber-stamping the commit.
             log.emit(
                 "git_pre_commit_unavailable",
-                f"{repo_dir.name}: pre-commit config present but binary not "
-                f"located in repo .venv or PATH; committing with --no-verify",
+                f"{repo_dir.name}: pre-commit config present but no binary found "
+                f"in the repo .venv or on PATH; refusing to commit unverified",
                 meta={"repo": repo_dir.name},
             )
-        args.append("--no-verify")
+            detail = ("pre-commit is configured for this repository but no binary "
+                      "could be located in .venv/bin or on PATH")
+            if check:
+                raise subprocess.CalledProcessError(127, args, output="", stderr=detail)
+            return subprocess.CompletedProcess(args, 127, "", detail)
+        # No pre-commit config at all: an ordinary commit, which still runs any
+        # native git hooks the repo installs.
         args.extend(extras)
         if message is not None:
             args.extend(["-m", message])
@@ -194,7 +211,7 @@ def commit_with_hooks(repo_dir: Path,
     # before the git-driven hook re-runs the same checks. The env carries
     # `<repo>/.venv/bin` on PATH so the git-driven hook script's
     # `command -v pre-commit` fallback resolves to the same binary.
-    env = _hook_env(repo_dir)
+    env = _hook_env(repo_dir, pc)
     _run_pre_commit(repo_dir, pc, env)
     args.extend(extras)
     if message is not None:
