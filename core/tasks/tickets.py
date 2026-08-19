@@ -357,6 +357,51 @@ _NOISE_ONLY = {"Pipfile", "Pipfile.lock", "pnpm-lock.yaml", "yarn.lock",
 _SCRATCH_DIRS = (".playwright-cli", "test-results")
 
 
+def _capture_repo_heads(ticket_dir: Path) -> dict[str, str]:
+    """Each workspace repo's HEAD, so a later diff can span exactly what changed.
+
+    A repo whose head cannot be read is left out rather than recorded blank: a
+    blank baseline would widen the range to the whole history.
+    """
+    workspace = ticket_dir / "workspace"
+    search_root = workspace if workspace.is_dir() else ticket_dir
+    heads: dict[str, str] = {}
+    if not search_root.is_dir():
+        return heads
+    for child in sorted(search_root.iterdir()):
+        if not (child.is_dir() and (child / ".git").exists()):
+            continue
+        try:
+            heads[child.name] = git_util.run_git(child, ["rev-parse", "HEAD"],
+                                                 timeout=30).stdout.strip()
+        except git_util.GitCommandError:
+            continue
+    return heads
+
+
+def _review_diff_ranges(ticket_dir: Path, baseline: dict[str, str]) -> dict[str, str]:
+    """`<before>..HEAD` per repo that gained commits, for the verifier to read.
+
+    The verify step used to inspect the working tree. Committing first leaves it
+    clean, and on a retry the previous attempt's commit is invisible too, which
+    is how DEV-644 wrote FAIL nineteen times for work that was already done.
+    HEAD^..HEAD is not enough: the agent may commit on its own and a retry adds
+    more, across several repos.
+    """
+    ranges: dict[str, str] = {}
+    for repo, before in baseline.items():
+        wt = (ticket_dir / "workspace" / repo)
+        if not (wt / ".git").exists():
+            continue
+        try:
+            after = git_util.run_git(wt, ["rev-parse", "HEAD"], timeout=30).stdout.strip()
+        except git_util.GitCommandError:
+            continue
+        if after and before and after != before:
+            ranges[repo] = f"{before}..{after}"
+    return ranges
+
+
 def _clean_workspace_scratch(ticket_dir: Path) -> list[str]:
     """Remove ephemeral tool scratch (playwright artifacts, test output) that
     agents leave in worktrees. These are never source — left in place they
@@ -440,50 +485,122 @@ def _commit_workspace_changes(ticket_dir: Path, ticket_key: str,
         if not meaningful:
             continue
         subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
-        from core.git_util import commit_with_hooks
-        attempt = commit_with_hooks(repo_dir, message=commit_msg, timeout=HOOK_RUN_TIMEOUT)
-        if attempt.returncode != 0:
-            if _repair_hook_failure(repo_dir, attempt, ticket_key):
+        outcome = git_util.commit_outcome(repo_dir, message=commit_msg,
+                                          timeout=HOOK_RUN_TIMEOUT)
+        if not outcome.ok:
+            route = _route_hook_failure(repo_dir, outcome, ticket_key)
+            if route == "repair":
                 subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
-                attempt = commit_with_hooks(repo_dir, message=commit_msg, timeout=HOOK_RUN_TIMEOUT)
-            if attempt.returncode != 0:
-                raise subprocess.CalledProcessError(
-                    attempt.returncode, ["git", "commit", "-m", commit_msg],
-                    output=attempt.stdout, stderr=attempt.stderr)
+                outcome = git_util.commit_outcome(repo_dir, message=commit_msg,
+                                                  timeout=HOOK_RUN_TIMEOUT)
+            if not outcome.ok:
+                raise CommitBlocked(repo_dir.name, route, outcome)
         committed.append(repo_dir.name)
     return committed
 
 
-def _repair_hook_failure(repo_dir: Path, attempt, ticket_key: str) -> bool:
-    """Give the pre-commit output back to the agent and let it fix the code once.
+_REPAIR_FORBIDDEN_NAMES = (
+    ".pre-commit-config.yaml", "pyproject.toml", "setup.cfg", "ruff.toml",
+    "Pipfile", "Pipfile.lock", "package.json", "package-lock.json",
+    "pnpm-lock.yaml", "poetry.lock", "uv.lock", "requirements.txt",
+    "tsconfig.json", "pyrightconfig.json", ".ruff.toml", "mypy.ini",
+)
+_SUPPRESSION_MARKERS = (
+    "# type: ignore", "# noqa", "# pyright: ignore", "# ruff: noqa",
+    "@ts-ignore", "@ts-nocheck", "eslint-disable",
+)
 
-    commit_with_hooks deliberately does not pass --no-verify, so a real lint
-    failure surfaces instead of being bypassed. Nothing acted on it, though: the
-    output went into a CalledProcessError and the ticket was blocked. DEV-644 was
-    stopped by two uses of `l` as a loop variable in generated tests. The hook
-    already says exactly what is wrong and which line, so hand that back and
-    retry once. A second failure still blocks, which is what should happen when
-    the problem is not a trivial style slip.
+
+class CommitBlocked(RuntimeError):
+    """A commit that cannot proceed, carrying why so the ticket can say so.
+
+    A raw CalledProcessError told the operator nothing: DEV-635 surfaced as
+    "worktree has uncommitted changes" two stages later, with the real cause —
+    a symbol missing from a published sibling package — buried in a job record.
     """
-    output = ((attempt.stdout or "") + (attempt.stderr or "")).strip()
-    if not output:
-        return False
+
+    def __init__(self, repo: str, route: str, outcome):
+        self.repo, self.route, self.outcome = repo, route, outcome
+        super().__init__(f"{repo}: commit blocked ({route}) during {outcome.phase}: "
+                         f"{(outcome.output or '').strip()[:300]}")
+
+
+def _repair_touched_only_code(repo_dir: Path) -> tuple[bool, str]:
+    """Whether the repair agent stayed inside the code, or found a cheap exit.
+
+    The agent runs with permissions bypassed, so telling it not to disable the
+    hook is a request. When a hook cannot be satisfied from inside the repo — a
+    symbol missing from a published sibling package, say — the cheap ways to
+    comply are loosening the linter, editing the manifest, or dropping a
+    suppression directive. Each of those makes the commit pass and the problem
+    invisible, so they are rejected in code rather than in a prompt.
+    """
+    try:
+        changed = git_util.run_git(repo_dir, ["status", "--porcelain"], timeout=30)
+    except git_util.GitCommandError:
+        return False, "could not read the worktree after the repair"
+    for line in changed.stdout.splitlines():
+        rel = line[3:].split(" -> ")[-1].strip()
+        if not rel:
+            continue
+        if Path(rel).name in _REPAIR_FORBIDDEN_NAMES:
+            return False, f"repair touched {Path(rel).name}, which is configuration, not code"
+        target = repo_dir / rel
+        try:
+            body = target.read_text()
+        except (OSError, UnicodeDecodeError):
+            continue
+        for marker in _SUPPRESSION_MARKERS:
+            if marker in body:
+                return False, f"repair added a suppression directive ({marker}) in {rel}"
+    return True, ""
+
+
+def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
+    """Decide what a failed commit deserves, and only then maybe edit code.
+
+    Returns repair | block_dependency | block_environment | block_git |
+    block_unknown. Anything that is not a plain code defect blocks with a reason
+    instead of being handed to an editing agent that cannot fix it.
+    """
+    kind = git_util.triage_commit_failure(outcome.status, outcome.output)
+    if kind != "ambiguous":
+        log.emit("commit_hook_blocked",
+                 f"{ticket_key}: {repo_dir.name} commit blocked ({kind}); not attempting a code repair",
+                 meta={"ticket": ticket_key, "repo": repo_dir.name, "kind": kind,
+                       "phase": outcome.phase, "output": (outcome.output or "")[-600:]})
+        return {"dependency": "block_dependency", "environment": "block_environment",
+                "git": "block_git"}[kind]
+
     log.emit("commit_hook_failed",
              f"{ticket_key}: pre-commit rejected {repo_dir.name}; attempting one repair",
-             meta={"ticket": ticket_key, "repo": repo_dir.name, "output": output[-600:]})
+             meta={"ticket": ticket_key, "repo": repo_dir.name,
+                   "output": (outcome.output or "")[-600:]})
     fixed = run_claude_code(
         "The pre-commit hooks rejected this commit. Fix ONLY what the hook output below "
         "reports, in this repository. Do not change behaviour, do not touch unrelated "
         "files, and do not disable, skip or reconfigure the hook. Make the smallest edit "
-        "that satisfies it.\n\n"
-        f"HOOK OUTPUT:\n{output[-4000:]}",
+        "that satisfies it. If it cannot be fixed by editing code in this repository, "
+        "change nothing and say so.\n\n"
+        f"HOOK OUTPUT:\n{(outcome.output or '')[-4000:]}",
         cwd=repo_dir, timeout=HOOK_REPAIR_TIMEOUT)
     if fixed is None:
         log.emit("commit_hook_repair_failed",
                  f"{ticket_key}: repair step returned nothing for {repo_dir.name}",
                  meta={"ticket": ticket_key, "repo": repo_dir.name})
-        return False
-    return True
+        return "block_unknown"
+
+    clean, why = _repair_touched_only_code(repo_dir)
+    if not clean:
+        try:
+            git_util.run_git(repo_dir, ["checkout", "--", "."], timeout=60)
+        except git_util.GitCommandError:
+            pass
+        log.emit("commit_hook_repair_rejected",
+                 f"{ticket_key}: discarded the repair of {repo_dir.name}: {why}",
+                 meta={"ticket": ticket_key, "repo": repo_dir.name, "reason": why})
+        return "block_unknown"
+    return "repair"
 
 
 def _kill_stray_recorders() -> None:
@@ -701,6 +818,7 @@ def fix_review_findings(ctx: TaskContext) -> TaskResult:
     )
     log.emit("ticket_review_fixing", f"Apply fix for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key})
+    baseline = _capture_repo_heads(ticket_dir)
     sid, resume = _claim_session(ctx, "fix_review_findings")
     fix_result = run_claude_code(fix_prompt, cwd=ticket_dir, timeout=FIX_TIMEOUT,
                                  session_id=sid, resume=resume)
@@ -709,10 +827,32 @@ def fix_review_findings(ctx: TaskContext) -> TaskResult:
             _drop_session(ctx, "fix_review_findings")
         return TaskResult("failed", "fix step: claude returned non-zero or empty")
 
+    # Commit first. Verifying first meant a failed commit left "VERDICT: PASS"
+    # standing over uncommitted work, which is how DEV-635 reached the next stage
+    # claiming a review it could not show.
+    committed = _commit_workspace_changes(ticket_dir, ctx.ticket_key or "")
+    if committed:
+        log.emit("ticket_review_committed",
+                 f"Committed fix changes for {ctx.ticket_key}: {', '.join(committed)}",
+                 meta={"ticket": ctx.ticket_key, "repos": committed})
+
+    ranges = _review_diff_ranges(ticket_dir, baseline)
+    if ranges:
+        range_text = "\n".join(
+            f"  {repo}: git diff {rng}" for repo, rng in sorted(ranges.items()))
+        diff_instruction = (
+            "The fix has already been committed. Inspect exactly these ranges, one per "
+            "repository under workspace/ — the working tree is clean, so `git diff` alone "
+            f"shows nothing:\n{range_text}\n")
+    else:
+        diff_instruction = (
+            "No repository gained a commit, so nothing was changed. Every blocking "
+            "finding is therefore still unaddressed.\n")
+
     verify_prompt = (
         "Independent verification step. Read docs/tri-review.md to see the original blocking "
-        "findings. Then run `git diff` (and `git diff --staged` if relevant) to see the changes "
-        "that were just made. For each blocking finding from the original review, decide whether "
+        "findings. " + diff_instruction +
+        "For each blocking finding from the original review, decide whether "
         "the diff actually addresses it — be skeptical, this is a fresh review, not a confirmation "
         "of a prior judgement.\n\n"
         "Update the Verdict section of docs/tri-review.md (replace whatever is there) with exactly "
@@ -728,11 +868,6 @@ def fix_review_findings(ctx: TaskContext) -> TaskResult:
     verify_result = run_claude_code(verify_prompt, cwd=ticket_dir, timeout=REVIEW_TIMEOUT)
     if verify_result is None:
         return TaskResult("failed", "verify step: claude returned non-zero or empty")
-    committed = _commit_workspace_changes(ticket_dir, ctx.ticket_key or "")
-    if committed:
-        log.emit("ticket_review_committed",
-                 f"Committed fix changes for {ctx.ticket_key}: {', '.join(committed)}",
-                 meta={"ticket": ctx.ticket_key, "repos": committed})
     return TaskResult("ok")
 
 
