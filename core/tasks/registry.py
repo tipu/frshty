@@ -21,6 +21,9 @@ class TaskContext:
 
 @dataclass
 class TaskResult:
+    # Set when the failure can never converge, so a retry-loop task must still
+    # block instead of being re-enqueued. See _release_gate_on_failure.
+    hard_block: bool = field(default=False, kw_only=True)
     status: str
     reason: str = ""
     artifacts: dict = field(default_factory=dict)
@@ -88,6 +91,17 @@ _RETRY_LOOP_TASKS = frozenset({
 })
 
 
+def _result_from_exception(e: Exception) -> TaskResult:
+    """Turn a raised exception into a result, preserving a hard block.
+
+    An exception marked `hard_block` must not be flattened into an ordinary
+    failure: the retry-loop exemption would then re-enqueue it forever.
+    """
+    return TaskResult("failed", f"{type(e).__name__}: {e}",
+                      artifacts={"traceback": traceback.format_exc()},
+                      hard_block=bool(getattr(e, "hard_block", False)))
+
+
 def _release_gate_on_failure(ctx: TaskContext, result: TaskResult) -> TaskResult:
     """When a pipeline task hard-fails it can leave a ticket stuck in an
     LLM-active status (planning/reviewing/testing/proving) that occupies the
@@ -101,7 +115,9 @@ def _release_gate_on_failure(ctx: TaskContext, result: TaskResult) -> TaskResult
     blocking them would break convergence of the review/test fix loops."""
     if result.status != "failed" or not ctx.ticket_key:
         return result
-    if ctx.task in _RETRY_LOOP_TASKS:
+    # A hard block is not "not yet converged". Retrying it re-runs the whole
+    # fixer, with permissions bypassed, against a cause no edit can fix.
+    if ctx.task in _RETRY_LOOP_TASKS and not getattr(result, "hard_block", False):
         return result
     import core.state as state
     from features.tickets import _GATE_OCCUPYING_STATUSES
@@ -142,8 +158,7 @@ def run_task(ctx: TaskContext) -> TaskResult:
         elif not isinstance(result, TaskResult):
             result = TaskResult("ok", artifacts={"return": result})
     except Exception as e:
-        return _release_gate_on_failure(ctx, TaskResult("failed", f"{type(e).__name__}: {e}",
-                          artifacts={"traceback": traceback.format_exc()}))
+        return _release_gate_on_failure(ctx, _result_from_exception(e))
     if result.status != "ok":
         return _release_gate_on_failure(ctx, result)
     for p in postconds:
