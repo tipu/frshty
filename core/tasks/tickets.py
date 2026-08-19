@@ -1,5 +1,6 @@
 """Ticket pipeline tasks. Headless claude -p invocations, postcondition-gated."""
 import json
+import re
 import os
 import subprocess
 import uuid
@@ -519,10 +520,74 @@ class CommitBlocked(RuntimeError):
     a symbol missing from a published sibling package — buried in a job record.
     """
 
+    # No retry can fix a missing dependency, a missing runner or a git-level
+    # fault, and each retry re-runs the privileged fixer first.
+    hard_block = True
+
     def __init__(self, repo: str, route: str, outcome):
         self.repo, self.route, self.outcome = repo, route, outcome
         super().__init__(f"{repo}: commit blocked ({route}) during {outcome.phase}: "
                          f"{(outcome.output or '').strip()[:300]}")
+
+
+# Diagnostics we know how to fix by editing this repository, and nothing else.
+# A blacklist asked "does this edit look like cheating", which pattern matching
+# cannot answer: `FileExplorerAction: TypeAlias = Any` is ordinary code that
+# turns a missing dependency green. This asks the answerable question instead,
+# and anything unrecognised blocks rather than reaching a privileged agent.
+_REPAIRABLE_DIAGNOSTICS = (
+    re.compile(r"\b[EWFCNBAS]\d{3}\b"),                 # ruff / flake8 codes
+    re.compile(r"would reformat", re.I),
+    re.compile(r"\bfiles? (were|would be) (re)?formatted", re.I),
+    re.compile(r"trailing whitespace", re.I),
+    re.compile(r"fix end of files", re.I),
+    re.compile(r"\bisort\b", re.I),
+    re.compile(r"incompatible types in assignment", re.I),
+    re.compile(r"is not assignable to (parameter|type)", re.I),
+)
+_NEVER_REPAIRABLE = (
+    re.compile(r"unknown import symbol", re.I),
+    re.compile(r"cannot find module", re.I),
+    re.compile(r"\bTS2307\b"),
+    re.compile(r"modulenotfounderror|no module named", re.I),
+    re.compile(r"could not be resolved", re.I),
+    re.compile(r"cannot find implementation or library stub", re.I),
+)
+
+
+def _is_repairable(output: str) -> bool:
+    """Whether this diagnostic is one we are willing to let an agent edit for."""
+    text = (output or "").strip()
+    if not text:
+        return False
+    if any(p.search(text) for p in _NEVER_REPAIRABLE):
+        return False
+    return any(p.search(text) for p in _REPAIRABLE_DIAGNOSTICS)
+
+
+def _snapshot_repo(repo_dir: Path) -> tuple[str, set[str]]:
+    """The staged tree plus the untracked files, so a repair can be undone exactly.
+
+    `git checkout -- .` restores the worktree from the index, so a staged cheat
+    survives in both. Recording the index as a tree object lets the index and the
+    worktree both go back, while leaving the fix work that was staged before the
+    repair untouched.
+    """
+    tree = git_util.run_git(repo_dir, ["write-tree"], timeout=60).stdout.strip()
+    listed = git_util.run_git(repo_dir, ["ls-files", "--others", "--exclude-standard"],
+                              timeout=60).stdout.splitlines()
+    return tree, {p.strip() for p in listed if p.strip()}
+
+
+def _restore_repo(repo_dir: Path, snapshot: tuple[str, set[str]]) -> None:
+    tree, untracked_before = snapshot
+    git_util.run_git(repo_dir, ["read-tree", tree], timeout=60)
+    git_util.run_git(repo_dir, ["checkout-index", "-a", "-f"], timeout=120)
+    now = git_util.run_git(repo_dir, ["ls-files", "--others", "--exclude-standard"],
+                           timeout=60).stdout.splitlines()
+    for rel in (p.strip() for p in now if p.strip()):
+        if rel not in untracked_before:
+            (repo_dir / rel).unlink(missing_ok=True)
 
 
 def _repair_touched_only_code(repo_dir: Path) -> tuple[bool, str]:
@@ -543,6 +608,10 @@ def _repair_touched_only_code(repo_dir: Path) -> tuple[bool, str]:
         rel = line[3:].split(" -> ")[-1].strip()
         if not rel:
             continue
+        if line.startswith("??") or line.startswith("A "):
+            # A lint or formatting fix never needs a new file. Creating one is
+            # how a shadow module or a fabricated type stub gets in.
+            return False, f"repair created a new file ({rel}); it may only edit existing code"
         if Path(rel).name in _REPAIR_FORBIDDEN_NAMES:
             return False, f"repair touched {Path(rel).name}, which is configuration, not code"
         target = repo_dir / rel
@@ -564,6 +633,14 @@ def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
     instead of being handed to an editing agent that cannot fix it.
     """
     kind = git_util.triage_commit_failure(outcome.status, outcome.output)
+    if kind == "ambiguous" and not _is_repairable(outcome.output):
+        # Recognised as a hook rejection, but not as one we know how to fix here.
+        log.emit("commit_hook_unrecognised",
+                 f"{ticket_key}: {repo_dir.name} hook failure is not on the repairable "
+                 f"list; blocking rather than editing",
+                 meta={"ticket": ticket_key, "repo": repo_dir.name,
+                       "output": (outcome.output or "")[-600:]})
+        return "block_unknown"
     if kind != "ambiguous":
         log.emit("commit_hook_blocked",
                  f"{ticket_key}: {repo_dir.name} commit blocked ({kind}); not attempting a code repair",
@@ -576,6 +653,14 @@ def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
              f"{ticket_key}: pre-commit rejected {repo_dir.name}; attempting one repair",
              meta={"ticket": ticket_key, "repo": repo_dir.name,
                    "output": (outcome.output or "")[-600:]})
+    try:
+        snapshot = _snapshot_repo(repo_dir)
+    except git_util.GitCommandError as e:
+        log.emit("commit_hook_snapshot_failed",
+                 f"{ticket_key}: could not snapshot {repo_dir.name} before repair: {e}",
+                 meta={"ticket": ticket_key, "repo": repo_dir.name})
+        return "block_unknown"
+
     fixed = run_claude_code(
         "The pre-commit hooks rejected this commit. Fix ONLY what the hook output below "
         "reports, in this repository. Do not change behaviour, do not touch unrelated "
@@ -593,7 +678,7 @@ def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
     clean, why = _repair_touched_only_code(repo_dir)
     if not clean:
         try:
-            git_util.run_git(repo_dir, ["checkout", "--", "."], timeout=60)
+            _restore_repo(repo_dir, snapshot)
         except git_util.GitCommandError:
             pass
         log.emit("commit_hook_repair_rejected",
