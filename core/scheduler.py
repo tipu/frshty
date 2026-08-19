@@ -116,6 +116,20 @@ def delete(instance_key: str, key: str) -> None:
     db.execute("DELETE FROM scheduler WHERE instance_key=? AND key=?", (instance_key, key))
 
 
+def delete_instance(instance_key: str) -> int:
+    """Drop every scheduled row for one instance and report how many went.
+
+    Rows outlive the config that created them, so an instance that stops being
+    loaded keeps firing forever and every job it produces dies as an unknown
+    instance_key."""
+    rows = db.query_all("SELECT COUNT(*) AS n FROM scheduler WHERE instance_key=?",
+                        (instance_key,))
+    n = rows[0]["n"] if rows else 0
+    if n:
+        db.execute("DELETE FROM scheduler WHERE instance_key=?", (instance_key,))
+    return n
+
+
 def check_due(config: dict) -> None:
     """Legacy oneshot firing path (scheduler_check task). Recurring rows are
     owned by the beat thread elsewhere and ignored here."""

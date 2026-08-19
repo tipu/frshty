@@ -106,6 +106,8 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
            title="guided slide walkthrough">▶ Present</a>
         <button @click="openDiscuss" class="ln-btn ln-btn-discuss"
                 title="Open a separate claude (cl) terminal in this ticket's worktree dir">💬 Discuss</button>
+        <a v-if="ticketUrl" :href="ticketUrl" target="_blank" class="ln-btn"
+           title="Open this ticket in the upstream tracker">Open Ticket &nearr;</a>
     </template>
 
 <div id="content">
@@ -182,7 +184,6 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
         <span class="text-sm text-gray-400">branch: <code>{{ branch }}</code></span>
         <a v-for="pr in (state.prs || [])" :key="pr.url" :href="pr.url" target="_blank"
            class="link text-sm">{{ pr.repo }} PR #{{ pr.id }} &nearr;</a>
-        <a v-if="ticketUrl" :href="ticketUrl" target="_blank" class="link text-sm ml-auto">Open Ticket &nearr;</a>
     </div>
     <div v-if="needsReplyComments.length" class="card p-4 mt-2 border-l-2 border-yellow-500">
         <div class="text-xs font-bold text-yellow-500 uppercase mb-2">Review comments needing reply ({{ needsReplyComments.length }})</div>

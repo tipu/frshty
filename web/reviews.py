@@ -457,14 +457,17 @@ def api_start_discuss(repo: str, pr_id: int, body: dict):
 
     terminal.kill_terminal(session_id)
     terminal.ensure_session(session_id, cwd)
-    terminal.send_keys(session_id, f"claude --dangerously-skip-permissions --append-system-prompt {shlex.quote(context)}")
+    terminal.send_keys(session_id, f"{terminal.claude_cmd(_config)} --append-system-prompt {shlex.quote(context)}")
 
     return {"session_id": session_id}
 
 
 @router.websocket("/ws/discuss/{session_id}")
 async def ws_discuss(websocket: WebSocket, session_id: str):
-    from web.state import multi_apply_host, multi_reset
+    from web.state import host_is_disabled, multi_apply_host, multi_reset
+    if host_is_disabled(websocket.headers.get("host")):
+        await websocket.close(code=1011, reason="instance disabled")
+        return
     tokens = multi_apply_host(websocket.headers.get("host"))
     try:
         await terminal.terminal_handler(websocket, session_id, _config)

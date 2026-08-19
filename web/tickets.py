@@ -11,6 +11,7 @@ from starlette.websockets import WebSocket
 
 import core.config as cfg
 import core.db as db
+import core.git_util as git_util
 import core.log as log
 import core.queue as q
 import core.scheduler as scheduler
@@ -35,17 +36,25 @@ _LOCKFILE_NOISE = frozenset({
 })
 
 
-def _changed_files(wt: Path, base_ref: str) -> list[str]:
-    result = subprocess.run(
-        ["git", "diff", "--name-only", f"{base_ref}...HEAD"],
-        cwd=str(wt), capture_output=True, text=True, timeout=30,
-    )
-    if result.returncode != 0:
-        return []
+def _changed_files(wt: Path, base_ref: str) -> list[str] | None:
+    """Files changed against the base, or None when the diff could not be run.
+
+    Returning [] on failure made a broken diff indistinguishable from a branch
+    with no changes, and every caller reads an empty list as "nothing here".
+    That is how the Submit PR modal came to state "branch has no commits against
+    its base" for a repo it had simply failed to inspect. None forces the caller
+    to say it does not know."""
+    try:
+        result = git_util.run_git(wt, ["diff", "--name-only", f"{base_ref}...HEAD"],
+                                  timeout=30)
+    except git_util.GitCommandError:
+        return None
     return [f for f in result.stdout.splitlines() if f.strip()]
 
 
-def _is_meaningful_change(files: list[str]) -> bool:
+def _is_meaningful_change(files: list[str] | None) -> bool:
+    """False for no change AND for an unknown change. Callers that act on the
+    difference must check for None before calling this."""
     if not files:
         return False
     return any(f.split("/")[-1] not in _LOCKFILE_NOISE for f in files)
@@ -196,10 +205,15 @@ def api_ticket_pr_info(ticket_key: str):
                                stale_reason="no worktree for this repo")
                 else:
                     files = _changed_files(wt, f"origin/{cfg.base_branch_for(_config, name)}")
-                    row["files_changed"] = len(files)
-                    if not _is_meaningful_change(files):
-                        row.update(has_changes=False,
-                                   stale_reason="branch has no commits against its base")
+                    if files is None:
+                        row.update(files_changed=0, has_changes=False,
+                                   stale_reason="could not inspect this repo, so its "
+                                                "state is unknown")
+                    else:
+                        row["files_changed"] = len(files)
+                        if not _is_meaningful_change(files):
+                            row.update(has_changes=False,
+                                       stale_reason="branch has no commits against its base")
                 repos_out.append(row)
             if any(not r["has_changes"] for r in repos_out):
                 log.emit("pr_info_stale_repo",
@@ -327,6 +341,10 @@ def _submit_pr_sync(ticket_key: str, data: dict):
         subprocess.run(["git", "fetch", "origin", base_branch], cwd=str(wt), capture_output=True, timeout=60)
 
         files = _changed_files(wt, f"origin/{base_branch}")
+        if files is None:
+            return JSONResponse(
+                {"error": f"could not inspect {repo_name}; refusing to open a PR "
+                          f"from a state that could not be read"}, status_code=400)
         if not _is_meaningful_change(files):
             return JSONResponse({"error": f"no meaningful changes in {repo_name}"}, status_code=400)
 
@@ -780,7 +798,10 @@ def api_ticket_docs_file(key: str, filename: str):
 
 @router.websocket("/ws/terminal/{key}")
 async def ws_terminal(websocket: WebSocket, key: str):
-    from web.state import multi_apply_host, multi_reset
+    from web.state import host_is_disabled, multi_apply_host, multi_reset
+    if host_is_disabled(websocket.headers.get("host")):
+        await websocket.close(code=1011, reason="instance disabled")
+        return
     tokens = multi_apply_host(websocket.headers.get("host"))
     try:
         await terminal.terminal_handler(websocket, key, _config)
@@ -807,7 +828,7 @@ def api_reset_terminal(key: str):
     time.sleep(1)
     terminal.ensure_session(key, str(ticket_dir))
     time.sleep(1)
-    terminal.send_keys(key, "claude --dangerously-skip-permissions")
+    terminal.send_keys(key, terminal.claude_cmd(_config))
     return {"status": "ok"}
 
 
@@ -869,7 +890,8 @@ def api_start_discuss(key: str, cont: bool = False):
         return {"status": "running", "discuss_key": discuss_key}
     terminal.ensure_session(discuss_key, str(ticket_dir))
     if not health.get("claude_running"):
-        terminal.send_keys(discuss_key, "cl --continue" if cont else "cl")
+        base = terminal.claude_cmd(_config)
+        terminal.send_keys(discuss_key, f"{base} --continue" if cont else base)
     _schedule_discuss_kill(discuss_key)
     return {"status": "ok", "discuss_key": discuss_key}
 

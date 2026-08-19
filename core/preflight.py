@@ -5,14 +5,17 @@ Also provides gh_active_account() and gh_switch_to() used by the per-call
 diagnostic + auto-switch in features/platforms.py.
 """
 import json
+import os
 import subprocess
 from pathlib import Path
 
 import core.log as log
 
 
-def _run(cmd: list[str], timeout: int = 15) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+def _run(cmd: list[str], timeout: int = 15,
+         env: dict | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, capture_output=True, text=True,
+                          timeout=timeout, env=env)
 
 
 def gh_active_account() -> str | None:
@@ -50,14 +53,32 @@ def gh_switch_to(login: str) -> tuple[bool, str]:
     return False, (r.stderr.strip() or r.stdout.strip())[:300]
 
 
-def gh_repo_push_ok(repo: str) -> tuple[bool, str]:
+def gh_token_for(login: str) -> str:
+    """Token of one logged-in gh account. Empty string when gh has no token
+    for it. Lets a check run as a named account without switching the active
+    one, which is global state shared by every instance."""
+    r = _run(["gh", "auth", "token", "--user", login])
+    if r.returncode != 0:
+        return ""
+    return r.stdout.strip()
+
+
+def gh_repo_push_ok(repo: str, account: str = "") -> tuple[bool, str]:
     """Non-destructive permission check via GitHub API. Returns (ok, reason).
-    'ok' means the active gh account has push permission on the repo."""
-    r = _run(["gh", "api", f"repos/{repo}", "--jq", ".permissions.push"])
+    'ok' means the gh account has push permission on the repo: the active
+    account, or `account` when the instance names one."""
+    env = None
+    if account:
+        token = gh_token_for(account)
+        if not token:
+            return False, f"gh has no token for account {account!r}"
+        env = {**os.environ, "GH_TOKEN": token}
+    r = _run(["gh", "api", f"repos/{repo}", "--jq", ".permissions.push"], env=env)
+    who = f"gh account {account!r}" if account else "active gh account"
     if r.returncode != 0:
         msg = (r.stderr.strip() or r.stdout.strip())[:300]
         if "Not Found" in msg or "404" in msg:
-            return False, "repo not visible to active gh account (404)"
+            return False, f"repo not visible to {who} (404)"
         return False, msg or "gh api failed"
     out = r.stdout.strip()
     if out == "true":
@@ -100,16 +121,33 @@ def preflight_instance(config: dict) -> tuple[bool, list[dict]]:
 
     platform = (config.get("job") or {}).get("platform") or ""
     if platform == "github":
-        repo = (config.get("github") or {}).get("repo") or ""
-        if not repo:
+        gh_cfg = config.get("github") or {}
+        raw = gh_cfg.get("repo") or ""
+        account = gh_cfg.get("account") or ""
+        repos = [raw] if isinstance(raw, str) else list(raw)
+        repos = [r for r in repos if r]
+        if not repos:
             checks.append({"name": "github.repo", "ok": False, "detail": "not configured"})
-        else:
-            ok, reason = gh_repo_push_ok(repo)
+        for repo in repos:
+            ok, reason = gh_repo_push_ok(repo, account)
             checks.append({"name": f"github.repo[{repo}]", "ok": ok, "detail": reason})
             if not ok:
-                active = gh_active_account() or "<none>"
-                checks.append({"name": "gh active account", "ok": False,
-                               "detail": f"{active} (cannot access {repo})"})
+                who = account or gh_active_account() or "<none>"
+                checks.append({"name": f"gh account[{repo}]", "ok": False,
+                               "detail": f"{who} (cannot access {repo})"})
+
+    git_cfg = config.get("git") or {}
+    name, email = git_cfg.get("name", ""), git_cfg.get("email", "")
+    if name and email:
+        from core.config import get_repos
+        from core.git_util import effective_identity
+        want = f"{name} <{email}>"
+        for repo in get_repos(config):
+            author, committer = effective_identity(repo["path"])
+            ok = author == want and committer == want
+            detail = want if ok else f"author {author or '<unknown>'}, committer {committer or '<unknown>'}"
+            checks.append({"name": f"git identity[{repo['name']}]",
+                           "ok": ok, "detail": detail})
 
     all_ok = all(c["ok"] for c in checks)
     return all_ok, checks
