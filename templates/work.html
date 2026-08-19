@@ -64,7 +64,8 @@ const { createApp } = Vue;
 createApp({
   data() {
     return {
-      groups: {}, personalLoaded: false, intakeText: "", intakeError: "",
+      groups: { needs_you: [], agent_working: [], waiting_external: [], failed_stale: [], done: [] },
+      personalLoaded: false, intakeText: "", intakeError: "",
       groupOrder: ["needs_you", "agent_working", "waiting_external", "failed_stale", "done"],
       labels: { needs_you: "Needs you", agent_working: "Agent working", waiting_external: "Waiting external", failed_stale: "Failed or stale", done: "Recently completed" },
       cls: { needs_you: "needs", agent_working: "working", waiting_external: "waiting", failed_stale: "stale", done: "done" },
