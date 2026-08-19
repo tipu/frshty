@@ -6,6 +6,11 @@ from pathlib import Path
 _cv_config: ContextVar[dict] = ContextVar("frshty_config", default={})
 _primary_config: dict = {}
 _configs_by_host: dict[str, dict] = {}
+# Hostnames belonging to an instance the event system refused to load. They are
+# answered with 503 rather than left unregistered: an unregistered host falls
+# through to the primary config, which would serve one instance's data — and
+# its commit endpoints — under another instance's name.
+_disabled_hosts: set[str] = set()
 
 
 class _ConfigView(dict):
@@ -57,6 +62,16 @@ def active_config() -> dict:
     _config inside a thread silently falls back to the primary instance."""
     v = _cv_config.get()
     return v if v else _primary_config
+
+
+def host_is_disabled(host: str | None) -> bool:
+    """True when this hostname belongs to an instance that was not loaded.
+
+    Callers that bypass the HTTP middleware — the WebSocket handlers — must ask
+    this themselves. multi_apply_host() answers None for a disabled host just
+    as it does for an unknown one, and None falls back to the primary config,
+    which would hand the caller a terminal in the wrong instance."""
+    return (host or "").split(":")[0].lower() in _disabled_hosts
 
 
 def multi_apply_host(host: str | None):

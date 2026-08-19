@@ -23,6 +23,25 @@ def _tmux_bin():
 _terminals: dict[str, dict] = {}
 
 
+def claude_cmd(config: dict | None = None) -> str:
+    """Interactive claude command line for one instance's tmux pane.
+
+    Mirrors core.llm.ClaudeProvider: same bin, same env overrides, same
+    CLAUDE_CONFIG_DIR. Without this a pane authenticates as the operator's
+    default account instead of the account the instance is configured with,
+    because _child_env() drops every variable it does not whitelist."""
+    claude_cfg = ((config or {}).get("llm") or {}).get("claude") or {}
+    env = {str(k): str(v) for k, v in (claude_cfg.get("env") or {}).items()}
+    config_dir = claude_cfg.get("config_dir")
+    if config_dir and "CLAUDE_CONFIG_DIR" not in env:
+        env["CLAUDE_CONFIG_DIR"] = str(config_dir)
+    prefix = "".join(
+        f"{k}={shlex.quote(os.path.expanduser(v))} " for k, v in sorted(env.items())
+    )
+    bin_name = claude_cfg.get("bin", "claude")
+    return f"{prefix}{bin_name} --dangerously-skip-permissions"
+
+
 def _tmux_session_name(ticket_key: str) -> str:
     return f"term-{ticket_key}"
 
@@ -113,7 +132,8 @@ def send_keys(ticket_key: str, keys: str):
     )
 
 
-def launch_claude(key: str, cwd: str, session_uuid: str, context: str, first_run: bool):
+def launch_claude(key: str, cwd: str, session_uuid: str, context: str, first_run: bool,
+                  config: dict | None = None):
     """Start (or resume) a Claude conversation in the `key` tmux session.
 
     First launch pins a deterministic --session-id and seeds context via
@@ -129,12 +149,11 @@ def launch_claude(key: str, cwd: str, session_uuid: str, context: str, first_run
         with open(ctx_path, "w") as f:
             f.write(context or "")
         cmd = (
-            f"claude --session-id {shlex.quote(session_uuid)} "
-            f"--dangerously-skip-permissions "
+            f"{claude_cmd(config)} --session-id {shlex.quote(session_uuid)} "
             f"--append-system-prompt \"$(cat {shlex.quote(ctx_path)})\""
         )
     else:
-        cmd = f"claude --resume {shlex.quote(session_uuid)} --dangerously-skip-permissions"
+        cmd = f"{claude_cmd(config)} --resume {shlex.quote(session_uuid)}"
     send_keys(key, cmd)
 
 

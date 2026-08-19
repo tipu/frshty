@@ -131,6 +131,123 @@ def _cron_ticker(interval: int = 240) -> None:
 _beat: BeatThread | None = None
 
 
+def _enforce_git_identity(instance_configs: list[dict]) -> set[str]:
+    """Write and verify each instance's commit identity, and report the
+    instances that could not prove theirs.
+
+    frshty is not the only committer in its worktrees — the headless agent and
+    the tmux panes run their own `git commit` — so the identity is written to
+    each repo's local config, which all of them read, rather than passed around
+    our own subprocesses. An instance that cannot prove the identity is not
+    loaded at all: a commit authored by the wrong person is not recoverable
+    once the branch is pushed. Instances without a [git] block keep whatever
+    the machine already gives them and are never gated.
+
+    Two passes on purpose. Everything is resolved and every collision is known
+    before the first repo is written, so a config that will be rejected never
+    leaves a half-applied identity behind.
+
+    Two gaps remain by choice. A repo that appears under projects_dir after
+    startup is not configured until the next restart, and a raw `git push` run
+    by a person or the agent skips the pre-push guard in features.platforms.
+    Neither is worth chasing: the identity lives in repo-local config, so every
+    later `git commit` in a configured repo reads it whoever runs it."""
+    from core.config import get_repos
+    from core.git_util import configure_repo_identity, git_common_dir
+
+    failed: set[str] = set()
+    planned: list[tuple[str, dict, str, str, str]] = []
+    claimed: dict[str, list[tuple[str, str, str]]] = {}
+
+    for config in instance_configs:
+        key = (config.get("job") or {}).get("key") or "<unknown>"
+        if "git" not in config:
+            continue
+        git_cfg = config.get("git") or {}
+        name, email = git_cfg.get("name", ""), git_cfg.get("email", "")
+        if not (name and email):
+            # A typo in either field must not read as "no identity wanted".
+            log.emit("git_identity_incomplete",
+                     f"[{key}] [git] needs both name and email; got "
+                     f"name={name!r} email={email!r}",
+                     meta={"instance_key": key})
+            failed.add(key)
+            continue
+        want = f"{name} <{email}>"
+        injected = sorted(
+            k for k in ((config.get("llm") or {}).get("claude") or {}).get("env", {})
+            if str(k).startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))
+        )
+        if injected:
+            # The agent commits inside the worktree, so anything we hand its
+            # process outranks the repo config we just wrote.
+            log.emit("git_identity_env_conflict",
+                     f"[{key}] [llm.claude.env] sets {', '.join(injected)}, which "
+                     f"overrides the identity this instance declares",
+                     meta={"instance_key": key, "keys": injected})
+            failed.add(key)
+            continue
+        try:
+            repos = get_repos(config)
+        except Exception as e:
+            log.emit("git_identity_error",
+                     f"[{key}] could not list repos: {type(e).__name__}: {e}",
+                     meta={"instance_key": key})
+            failed.add(key)
+            continue
+        for repo in repos:
+            try:
+                common = git_common_dir(repo["path"])
+            except Exception as e:
+                log.emit("git_identity_error",
+                         f"[{key}] {repo['name']}: {type(e).__name__}: {e}",
+                         meta={"instance_key": key, "repo": repo["name"]})
+                failed.add(key)
+                continue
+            if common:
+                claimed.setdefault(common, []).append((key, want, repo["name"]))
+            planned.append((key, repo, name, email, want))
+
+    for common, claimants in claimed.items():
+        wants = {want for _, want, _ in claimants}
+        if len(wants) < 2:
+            continue
+        # Every claimant fails, not just the newest: one config file cannot hold
+        # two identities, and there is no way to tell which claimant is right.
+        for key, want, repo_name in claimants:
+            log.emit("git_identity_collision",
+                     f"[{key}] {repo_name} shares the git directory {common} with "
+                     f"other instances claiming {sorted(wants - {want})}; this "
+                     f"instance claims {want!r}. One clone cannot hold two "
+                     f"identities.",
+                     meta={"instance_key": key, "repo": repo_name,
+                           "common_dir": common, "claims": sorted(wants)})
+            failed.add(key)
+
+    for key, repo, name, email, want in planned:
+        if key in failed:
+            continue
+        try:
+            ok, detail = configure_repo_identity(repo["path"], name, email)
+        except Exception as e:
+            log.emit("git_identity_error",
+                     f"[{key}] {repo['name']}: {type(e).__name__}: {e}",
+                     meta={"instance_key": key, "repo": repo["name"]})
+            failed.add(key)
+            continue
+        if ok:
+            log.emit("git_identity_set",
+                     f"[{key}] {repo['name']} commits as {detail}",
+                     meta={"instance_key": key, "repo": repo["name"],
+                           "category": "noise"})
+        else:
+            log.emit("git_identity_unverified",
+                     f"[{key}] {repo['name']}: {detail}",
+                     meta={"instance_key": key, "repo": repo["name"]})
+            failed.add(key)
+    return failed
+
+
 def start_events(
     instance_configs: list[dict],
     db_path: Path = DEFAULT_DB_PATH,
@@ -154,6 +271,30 @@ def start_events(
         except Exception as e:
             log.emit("claude_invocation_recovery_failed",
                      f"could not mark stuck claude invocations: {e}")
+        unverified = _enforce_git_identity(instance_configs)
+        for key in sorted(unverified):
+            try:
+                dropped = scheduler.delete_instance(key)
+                if dropped:
+                    log.emit("scheduler_rows_dropped",
+                             f"[{key}] removed {dropped} scheduled row(s); the "
+                             f"instance is not loaded, so beat would fire them "
+                             f"into nothing",
+                             meta={"instance_key": key, "rows": dropped})
+            except Exception as e:
+                log.emit("scheduler_cleanup_failed",
+                         f"[{key}] could not drop scheduled rows: "
+                         f"{type(e).__name__}: {e}",
+                         meta={"instance_key": key})
+            log.emit("instance_not_loaded",
+                     f"[{key}] not loaded: its commit identity could not be "
+                     f"verified. No job runs and no host routes to it until "
+                     f"the identity is fixed and frshty restarts.",
+                     meta={"instance_key": key})
+        instance_configs = [
+            c for c in instance_configs
+            if ((c.get("job") or {}).get("key") or "<unknown>") not in unverified
+        ]
         _instances = Instances()
         for c in instance_configs:
             _instances.add(c)

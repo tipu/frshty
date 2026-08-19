@@ -1,7 +1,9 @@
 import time
 from uuid import uuid4
 
-from web.state import multi_apply_host, multi_reset
+from starlette.responses import JSONResponse
+
+from web.state import _disabled_hosts, multi_apply_host, multi_reset
 
 
 _USAGE_SKIP_EXACT = frozenset({
@@ -43,6 +45,14 @@ def install(app):
         Unknown hosts fall through to whatever config is currently the contextvar
         default (typically the primary). Single-instance mode is a no-op.
         """
+        host = (request.headers.get("host") or "").split(":")[0].lower()
+        if host in _disabled_hosts:
+            return JSONResponse(
+                {"error": f"instance for {host} is disabled: its commit identity "
+                          f"could not be verified. See the frshty log for "
+                          f"git_identity_unverified."},
+                status_code=503,
+            )
         tokens = multi_apply_host(request.headers.get("host"))
         try:
             response = await call_next(request)

@@ -45,8 +45,9 @@ def test_launch_creates_session_and_resumes(client):
     (wt / "pr_comments.json").write_text('[{"id":1,"pr_repo":"analysis_dev","pr_id":551,"body":"Sanitize?","path":"a.py","line":5,"diff_hunk":"@@","status":"needs_reply","suggested_reply":"done"}]')
 
     calls = []
-    def fake_launch(key, cwd, sid, ctx, first_run):
-        calls.append({"key": key, "cwd": cwd, "sid": sid, "ctx": ctx, "first_run": first_run})
+    def fake_launch(key, cwd, sid, ctx, first_run, config=None):
+        calls.append({"key": key, "cwd": cwd, "sid": sid, "ctx": ctx,
+                      "first_run": first_run, "config": config})
     with patch("core.terminal.launch_claude", side_effect=fake_launch), \
          patch("core.terminal.session_healthy", return_value={"alive": False, "claude_running": False}):
         r1 = c.post("/api/today/launch", json={"loop_type": "pr_comments_needs_reply", "ticket_key": "FRG-186"})
@@ -56,6 +57,7 @@ def test_launch_creates_session_and_resumes(client):
         assert calls[0]["first_run"] is True
         assert "Sanitize?" in calls[0]["ctx"] and "done" in calls[0]["ctx"]
         assert calls[0]["cwd"] == str(wt)
+        assert calls[0]["config"] is not None  # pane inherits the instance's claude auth
         sid = r1.json()["session_id"]
 
         # second call by key -> should resume (first_run False, no context)

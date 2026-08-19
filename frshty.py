@@ -100,14 +100,39 @@ def main():
         raise
 
 
+    # An instance the event system refused to load must not be reachable over
+    # HTTP either: several endpoints commit and push directly.
+    try:
+        import core.runtime as _rt
+        loaded = set(_rt.instances().keys()) if _rt.instances() else None
+    except Exception:
+        loaded = None
+
+    if loaded is not None and not args.multi and primary["job"]["key"] not in loaded:
+        raise SystemExit(
+            f"refusing to start: instance '{primary['job']['key']}' could not "
+            f"prove its commit identity. Fix the [git] block or the repo "
+            f"configuration and start again."
+        )
+
     if args.multi:
+        from web.state import _disabled_hosts
         for c in configs:
+            key = c.get("job", {}).get("key", "")
             host = c.get("job", {}).get("host", "")
             if host.startswith("http://"):
                 host = host[len("http://"):]
             elif host.startswith("https://"):
                 host = host[len("https://"):]
             host = host.split(":")[0].split("/")[0].lower()
+            if loaded is not None and key not in loaded:
+                if host:
+                    _disabled_hosts.add(host)
+                log.emit("host_route_disabled",
+                         f"[{key}] {host or '<no host>'} answers 503: the "
+                         f"instance was not loaded",
+                         meta={"instance_key": key, "host": host})
+                continue
             if host:
                 if host in _configs_by_host:
                     raise ValueError(f"hostname {host} claimed by two configs")

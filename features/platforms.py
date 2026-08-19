@@ -9,7 +9,7 @@ import httpx
 
 import core.log as log
 from core import external_log
-from core.config import resolve_env, get_repos
+from core.config import resolve_env, get_repos, base_branch_for
 from core.claude_runner import run_claude_code
 
 
@@ -125,6 +125,51 @@ def _bb_thread_resolved(comment: dict, by_id: dict) -> bool:
         parent_id = cur.get("parent_id")
         cur = by_id.get(str(parent_id)) if parent_id is not None else None
     return False
+
+
+def _identity_block_reason(config: dict, repo_path, branch: str) -> str:
+    """Why this push must not happen, or "" when it may.
+
+    The startup gate proves the identity once. This is the only check that
+    looks at the commits themselves, so it is the one that catches an identity
+    changed after startup — by a human, by the agent, or by a `--author` flag.
+    Only commits this branch adds on top of its base are examined; history
+    inherited from the base belongs to whoever wrote it."""
+    git_cfg = config.get("git") or {}
+    name, email = git_cfg.get("name", ""), git_cfg.get("email", "")
+    if not (name and email):
+        return ""
+    want = f"{name} <{email}>"
+    repo_path = Path(repo_path)
+    # A PR worktree is named after the branch slug, not the repo, so the
+    # directory name is not a safe key for a per-repo base override. The shared
+    # git directory always sits inside the canonical checkout.
+    from core.git_util import git_common_dir
+    common = git_common_dir(repo_path)
+    repo_name = Path(common).parent.name if common else repo_path.name
+    base = base_branch_for(config, repo_name)
+    result = subprocess.run(
+        ["git", "log", f"origin/{base}..HEAD", "--format=%h%x00%an <%ae>%x00%cn <%ce>"],
+        cwd=str(repo_path), capture_output=True, text=True, timeout=60,
+    )
+    if result.returncode != 0:
+        # Fail closed. An unreadable range is not evidence of correct authorship,
+        # and a wrong author cannot be taken back once it is on the remote.
+        return (f"cannot read origin/{base}..HEAD in {repo_name}, so the "
+                f"authorship of this push is unknown: "
+                f"{(result.stderr or '').strip()[:200]}")
+    wrong = []
+    for line in result.stdout.splitlines():
+        parts = line.split("\x00")
+        if len(parts) != 3:
+            continue
+        sha, author, committer = parts
+        if author != want or committer != want:
+            wrong.append(f"{sha} by {author}")
+    if not wrong:
+        return ""
+    return (f"{len(wrong)} commit(s) on {branch} are not authored by {want}: "
+            f"{'; '.join(wrong[:5])}")
 
 
 class BitbucketPlatform:
@@ -354,6 +399,11 @@ class BitbucketPlatform:
     def push_branch(self, repo_path, branch: str, force: bool = False) -> dict:
         if not branch.strip():
             return {"ok": False, "error": "empty branch name"}
+        blocked = _identity_block_reason(self.config, repo_path, branch)
+        if blocked:
+            log.emit("git_identity_push_blocked", blocked,
+                     meta={"repo": Path(repo_path).name, "branch": branch})
+            return {"ok": False, "error": blocked}
         args = ["push", "-u", "origin", f"HEAD:refs/heads/{branch}"]
         if force:
             args.insert(1, "--force-with-lease")
@@ -434,10 +484,34 @@ class GitHubPlatform:
         self.repo = self.repos[0]
         self.base_branch = config["workspace"].get("base_branch", "main")
         self._me_login_cache: str | None = None
+        self._gh_env_cache: dict | None = None
+
+    def _gh_env(self) -> dict | None:
+        """Child env carrying this instance's gh credentials, or None to
+        inherit the active account.
+
+        The active gh account is global state shared by every instance, so two
+        instances owned by different accounts flip it back and forth and each
+        flip costs one failed call first. A token in the child env scopes the
+        credential to this instance and leaves the active account alone."""
+        account = (self.config.get("github") or {}).get("account") or ""
+        if not account:
+            return None
+        if self._gh_env_cache is None:
+            from core.preflight import gh_token_for
+            token = gh_token_for(account)
+            if not token:
+                log.emit("gh_account_token_missing",
+                         f"gh has no token for configured account '{account}'; "
+                         f"falling back to the active account",
+                         meta={"account": account})
+            self._gh_env_cache = {**os.environ, "GH_TOKEN": token} if token else {}
+        return self._gh_env_cache or None
 
     def _run_gh(self, args: list[str]) -> subprocess.CompletedProcess:
         return subprocess.run(
             ["gh"] + args, capture_output=True, text=True, timeout=60,
+            env=self._gh_env(),
         )
 
     def _graphql(self, query: str, **variables) -> dict | None:
@@ -774,6 +848,11 @@ class GitHubPlatform:
     def push_branch(self, repo_path, branch: str, force: bool = False) -> dict:
         if not branch.strip():
             return {"ok": False, "error": "empty branch name"}
+        blocked = _identity_block_reason(self.config, repo_path, branch)
+        if blocked:
+            log.emit("git_identity_push_blocked", blocked,
+                     meta={"repo": Path(repo_path).name, "branch": branch})
+            return {"ok": False, "error": blocked}
         args = ["push", "-u", "origin", f"HEAD:refs/heads/{branch}"]
         if force:
             args.insert(1, "--force-with-lease")
@@ -830,28 +909,40 @@ class GitHubPlatform:
 
     def _try_recover_gh_auth(self, full_repo: str, original_err: str) -> bool:
         """When gh can't see the repo, check whether one of the other logged-in
-        accounts can. If exactly one match exists and it's the repo owner,
-        switch to it and let the caller retry. Emits gh_auth_mismatch + (on
-        attempt) gh_auth_switched events for observability."""
+        accounts can. The target is github.account when the instance names one,
+        otherwise the repo owner; if it is logged in, switch to it and let the
+        caller retry. Emits gh_auth_mismatch + (on attempt) gh_auth_switched
+        events for observability."""
         from core.preflight import (
             gh_active_account, gh_logged_in_accounts, gh_switch_to,
             gh_repo_push_ok,
         )
         owner = full_repo.split("/", 1)[0] if "/" in full_repo else full_repo
+        configured = (self.config.get("github") or {}).get("account") or ""
+        if configured:
+            log.emit("gh_repo_not_visible",
+                     f"gh can't access {full_repo} as configured account "
+                     f"'{configured}'. The account's token is already used for "
+                     f"every call, so switching the active account would not "
+                     f"help; check the account's access to the repo.",
+                     meta={"repo": full_repo, "account": configured,
+                           "stderr": original_err[:300]})
+            return False
+        target = owner
         active = gh_active_account() or "<none>"
         accounts = gh_logged_in_accounts()
         log.emit("gh_auth_mismatch",
                  f"gh can't access {full_repo} as active account '{active}'. "
                  f"Logged-in accounts: {accounts}. "
-                 f"Fix: gh auth switch -u <owner-account>",
-                 meta={"repo": full_repo, "active": active,
+                 f"Fix: gh auth switch -u {target}",
+                 meta={"repo": full_repo, "active": active, "target": target,
                        "logged_in": accounts, "stderr": original_err[:300]})
-        if owner in accounts and owner != active:
-            ok, msg = gh_switch_to(owner)
+        if target in accounts and target != active:
+            ok, msg = gh_switch_to(target)
             if not ok:
                 log.emit("gh_auth_switch_failed",
-                         f"auto-switch to '{owner}' failed: {msg}",
-                         meta={"target": owner, "error": msg})
+                         f"auto-switch to '{target}' failed: {msg}",
+                         meta={"target": target, "error": msg})
                 return False
             new_active = gh_active_account() or "<none>"
             push_ok, push_reason = gh_repo_push_ok(full_repo)
