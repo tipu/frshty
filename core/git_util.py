@@ -181,15 +181,21 @@ class CommitOutcome:
         return self.status == "committed"
 
 
+# Scoped to the hook runner. A bare "permission denied" or "command not found"
+# appears in ordinary test output too, and classifying a genuine test failure as
+# an environment problem blocks work that an agent could have fixed.
 _ENVIRONMENT_MARKERS = (
     "pre-commit not found", "pre-commit: not found", "did you forget to activate",
-    "command not found", "no such file or directory: 'pre-commit'",
-    "executable not found", "permission denied",
+    "no such file or directory: 'pre-commit'", "pre-commit: command not found",
+    "hook script", "unable to find pre-commit",
 )
 _DEPENDENCY_MARKERS = (
     "unknown import symbol", "modulenotfounderror", "no module named",
     "could not be resolved", "cannot find implementation or library stub",
     "is not a known attribute of module", "importerror",
+    # TypeScript's form of the same question. Left out originally, so it reached
+    # the repair agent, which can satisfy it with a fabricated .d.ts.
+    "cannot find module", "ts2307", "cannot find name",
 )
 
 
