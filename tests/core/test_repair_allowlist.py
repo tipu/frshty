@@ -70,9 +70,29 @@ class TestOnlyKnownDiagnosticsAreRepaired:
             ("prettier", "[warn] Code style issues found in the above file."),
             ("eslint", "  4:1  error  'x' is unused  no-unused-vars\n\n1 problem (1 error, 0 warnings)"),
             ("isort", "ERROR: /src/a.py Imports are incorrectly sorted and/or formatted."),
-            ("black", "would reformat app.py"),
+            ("black check", "would reformat app.py"),
+            ("black modifying", "reformatted app.py\nAll done!\n1 file reformatted."),
+            ("mypy arg-type", 'error: Argument 1 to "f" has incompatible type '
+                              '"int"; expected "str"  [arg-type]'),
         ):
             assert T._is_repairable(text), f"{name} output should be repairable"
+
+    def test_a_missing_name_is_not_repairable(self):
+        """The only edit that satisfies "undefined name X" is inventing X, which
+        is the cheat this allowlist exists to stop. The blanket ruff-code pattern
+        admits F821 unless it is excluded by name."""
+        for name, text in (
+            ("ruff F821", "app.py:3:5: F821 Undefined name `FileExplorerAction`"),
+            ("ruff F822", "app.py:1:1: F822 Undefined name `X` in `__all__`"),
+            # F823 never says "undefined name", so only the code excludes it.
+            ("ruff F823", "app.py:9:9: F823 Local variable `x` defined in enclosing "
+                          "scope on line 4 referenced before assignment"),
+            ("mypy name-defined", 'error: Name "FileExplorerAction" is not defined  [name-defined]'),
+            ("mypy attr-defined", 'error: Module "pkg" has no attribute "X"  [attr-defined]'),
+            ("eslint no-undef", "  1:1  error  'Foo' is not defined  no-undef"),
+            ("tsc TS2304", "src/a.ts(1,1): error TS2304: Cannot find name 'Foo'."),
+        ):
+            assert not T._is_repairable(text), f"{name} output must not be repairable"
 
 
 class TestRoutingUsesTheAllowlist:
