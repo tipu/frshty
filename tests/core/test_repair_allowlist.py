@@ -57,6 +57,24 @@ class TestOnlyKnownDiagnosticsAreRepaired:
         assert not T._is_repairable("")
 
 
+    def test_the_diagnostic_that_started_this_is_repairable(self):
+        """basedpyright's wording. The first version of this allowlist excluded
+        it, which would have blocked the exact DEV-635 case it was built for."""
+        assert T._is_repairable(
+            'test_tool_http.py:62:32 - error: Argument of type "SimpleNamespace" '
+            'cannot be assigned to parameter "request" of type "Request"')
+
+    def test_common_formatters_and_linters_are_repairable(self):
+        """Inverting the default risks blocking work frshty used to fix."""
+        for name, text in (
+            ("prettier", "[warn] Code style issues found in the above file."),
+            ("eslint", "  4:1  error  'x' is unused  no-unused-vars\n\n1 problem (1 error, 0 warnings)"),
+            ("isort", "ERROR: /src/a.py Imports are incorrectly sorted and/or formatted."),
+            ("black", "would reformat app.py"),
+        ):
+            assert T._is_repairable(text), f"{name} output should be repairable"
+
+
 class TestRoutingUsesTheAllowlist:
     def test_ts2307_blocks_instead_of_reaching_the_agent(self, tmp_path):
         r = _repo(tmp_path)

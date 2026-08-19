@@ -541,9 +541,15 @@ _REPAIRABLE_DIAGNOSTICS = (
     re.compile(r"\bfiles? (were|would be) (re)?formatted", re.I),
     re.compile(r"trailing whitespace", re.I),
     re.compile(r"fix end of files", re.I),
+    re.compile(r"imports are incorrectly sorted", re.I),
     re.compile(r"\bisort\b", re.I),
+    re.compile(r"code style issues found", re.I),           # prettier
+    re.compile(r"✖ \d+ problem|\d+ problems? \(\d+ error", re.I),  # eslint summary
     re.compile(r"incompatible types in assignment", re.I),
     re.compile(r"is not assignable to (parameter|type)", re.I),
+    # basedpyright's wording for the same thing. Omitting it excluded the exact
+    # diagnostic that motivated this work: the SimpleNamespace stub on DEV-635.
+    re.compile(r"cannot be assigned to (parameter|type|declared type)", re.I),
 )
 _NEVER_REPAIRABLE = (
     re.compile(r"unknown import symbol", re.I),
