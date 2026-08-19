@@ -361,7 +361,8 @@ def test_empty_branch_falls_back_to_pr_id_slug(tmp_path):
 
     with patch("features.reviewer._ensure_review_worktree", return_value=None), \
          patch("features.reviewer._load_conventions", return_value=""), \
-         patch("features.reviewer._run_all_personas", return_value=[("spec", {"issues": [], "verdict": "approved"})]), \
+         patch("features.reviewer._run_personas_for_providers",
+               return_value={"claude": [("spec", {"issues": [], "verdict": "approved"})]}), \
          patch("features.reviewer._merge_reviews", return_value={"issues": [], "verdict": "approved"}):
         reviewer.review_pr(config, platform, pr)
 

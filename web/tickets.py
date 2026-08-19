@@ -3,6 +3,7 @@ import json
 import subprocess
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Request
@@ -584,16 +585,28 @@ def api_ticket_detail(key: str):
 PROOF_VIDEO_EXTS = {".webm", ".mp4", ".mov", ".mkv"}
 
 
-def _list_proof_videos(docs_dir: Path) -> list[str]:
-    """Return sorted filenames of video artifacts in the ticket's docs/ dir.
-    Used by the proving step to surface recordings on the ticket detail page."""
+def _list_proof_videos(docs_dir: Path) -> list[dict]:
+    """Return video artifacts in the ticket's docs/ dir, sorted by filename.
+    Each entry is {"name", "created_at"}. Used by the proving step to
+    surface recordings on the ticket detail page. created_at is the file mtime
+    as an ISO string — a re-run overwrites the recording in place, so the write
+    time is when that recording was made. It tells a stale proof from a fresh
+    one, which the filename alone cannot."""
     if not docs_dir.is_dir():
         return []
-    names: list[str] = []
+    out: list[dict] = []
     for f in docs_dir.iterdir():
-        if f.is_file() and f.suffix.lower() in PROOF_VIDEO_EXTS:
-            names.append(f.name)
-    return sorted(names)
+        if not (f.is_file() and f.suffix.lower() in PROOF_VIDEO_EXTS):
+            continue
+        try:
+            st = f.stat()
+        except OSError:
+            continue
+        out.append({
+            "name": f.name,
+            "created_at": datetime.fromtimestamp(st.st_mtime, timezone.utc).isoformat(),
+        })
+    return sorted(out, key=lambda v: v["name"])
 
 
 def _load_ticket_transitions(instance_key: str, key: str) -> list[dict]:
