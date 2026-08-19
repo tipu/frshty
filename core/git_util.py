@@ -205,6 +205,89 @@ def commit_with_hooks(repo_dir: Path,
     )
 
 
+def git_common_dir(repo_dir: Path) -> str:
+    """Absolute path of the repo's shared git directory. Two checkouts that
+    return the same value share one config file, so they cannot hold two
+    different identities."""
+    r = subprocess.run(["git", "rev-parse", "--path-format=absolute",
+                        "--git-common-dir"],
+                       cwd=str(repo_dir), capture_output=True, text=True, timeout=30)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def linked_worktrees(repo_dir: Path) -> list[Path]:
+    """Every checkout attached to this repo, the canonical one included.
+
+    Worktree-local config (`extensions.worktreeConfig`) outranks the shared
+    config, so a repo-level identity is not proof about a worktree until the
+    worktree itself is asked."""
+    r = subprocess.run(["git", "worktree", "list", "--porcelain"],
+                       cwd=str(repo_dir), capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        return [repo_dir]
+    paths = [Path(line[len("worktree "):]) for line in r.stdout.splitlines()
+             if line.startswith("worktree ")]
+    return paths or [repo_dir]
+
+
+def effective_identity(repo_dir: Path) -> tuple[str, str]:
+    """The author and committer git would actually stamp on a commit here.
+
+    Reads `git var`, not the config, because ambient GIT_AUTHOR_* /
+    GIT_COMMITTER_* variables and worktree-local config outrank anything we
+    write. Returns ("", "") when git cannot answer."""
+    out = []
+    for var in ("GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"):
+        r = subprocess.run(["git", "var", var], cwd=str(repo_dir),
+                           capture_output=True, text=True, timeout=30)
+        ident = r.stdout.strip() if r.returncode == 0 else ""
+        out.append(ident.rsplit(">", 1)[0] + ">" if ">" in ident else "")
+    return out[0], out[1]
+
+
+def configure_repo_identity(repo_dir: Path, name: str,
+                            email: str) -> tuple[bool, str]:
+    """Make `repo_dir` commit as `name <email>`, and prove that it will.
+
+    Written to the repo's local config rather than passed per command: frshty
+    is not the only thing that commits in these worktrees. The headless agent
+    and the interactive tmux panes run their own `git commit`, and neither
+    inherits flags or env we set around our own subprocesses. Repo-local
+    config is the one place all of them read. Linked worktrees share the
+    canonical checkout's config, so setting it once covers every ticket
+    worktree, existing and future.
+
+    Returns (ok, detail). `ok` means git itself now reports this identity for
+    both author and committer."""
+    want = f"{name} <{email}>"
+    for key, value in (("user.name", name), ("user.email", email)):
+        prior = subprocess.run(["git", "config", "--local", "--get-all", key],
+                               cwd=str(repo_dir), capture_output=True, text=True,
+                               timeout=30).stdout.strip()
+        r = subprocess.run(["git", "config", "--local", "--replace-all", key, value],
+                           cwd=str(repo_dir), capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            return False, f"could not set {key}: {(r.stderr or '').strip()[:200]}"
+        if prior and prior != value:
+            log.emit("git_identity_replaced",
+                     f"{repo_dir.name}: {key} was {prior!r}, now {value!r}",
+                     meta={"repo": repo_dir.name, "key": key,
+                           "was": prior, "now": value})
+
+    for checkout in linked_worktrees(repo_dir):
+        if not checkout.is_dir():
+            continue
+        author, committer = effective_identity(checkout)
+        if not author or not committer:
+            return False, f"git var could not report an identity in {checkout}"
+        if author != want or committer != want:
+            return False, (f"{checkout} still commits as author {author!r} "
+                           f"committer {committer!r}; something outranks the "
+                           f"repo config (worktree config or "
+                           f"GIT_AUTHOR_*/GIT_COMMITTER_* env)")
+    return True, want
+
+
 class GitCommandError(RuntimeError):
     """A git command exited with a status the caller did not allow."""
 

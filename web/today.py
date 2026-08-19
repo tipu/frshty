@@ -287,7 +287,7 @@ def api_today_launch(body: dict):
     first_run = not m.get("seeded")
     context = _build_context(loop_type, ticket_key, repo, pr_id) if first_run else ""
     try:
-        terminal.launch_claude(key, cwd, m["sid"], context, first_run)
+        terminal.launch_claude(key, cwd, m["sid"], context, first_run, config=_config)
     except Exception as e:
         log.emit("today_launch_failed",
                  f"[{instance_key}] launch {key} failed: {type(e).__name__}: {e}")

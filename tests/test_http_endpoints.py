@@ -4,6 +4,7 @@ Boots frshty's FastAPI app against a temp sqlite db, exercises the new
 /api/tickets/<key>/set-state, /auto-pr, /retry-job, /notes, /jobs routes.
 """
 import json
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -155,6 +156,44 @@ auto_pr = false
 workspace = "ws-{key}"
 """)
     return cfg_path
+
+
+def test_instance_with_an_unverifiable_git_identity_is_not_loaded(tmp_path):
+    """A wrong commit author is unrecoverable once pushed, so an instance that
+    cannot prove its identity must not get a worker at all."""
+    good = _write_config(tmp_path, "good", 17011)
+    bad = _write_config(tmp_path, "bad", 17012)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path / "repo")], check=True)
+    # 'bad' names a repo that does not exist, so its identity cannot be written.
+    bad.write_text(bad.read_text().replace('repos = ["repo"]', 'repos = ["absent"]')
+                   + '\n[git]\nname = "work"\nemail = "work@example.com"\n')
+    good.write_text(good.read_text()
+                    + '\n[git]\nname = "work"\nemail = "work@example.com"\n')
+
+    for mod in list(sys.modules):
+        if mod == "frshty" or mod.startswith("core.") or mod == "core" or mod.startswith("web.") or mod == "web":
+            sys.modules.pop(mod, None)
+
+    import core.db as db
+    import core.runtime as rt
+    import core.config as cfg_mod
+    from core import tasks  # noqa: F401
+
+    db_path = tmp_path / "identity.db"
+    migrations = ROOT / "migrations"
+    db.init(db_path, migrations)
+    configs = [cfg_mod.load_config(str(good)), cfg_mod.load_config(str(bad))]
+    rt._started = False
+    rt._instances = None
+    rt._pool = None
+    rt._dispatcher = None
+    instances = rt.start_events(configs, db_path=db_path, migrations_dir=migrations,
+                                worker_count=1, cron_interval=3600)
+
+    assert instances.keys() == ["good"], instances.keys()
+    ident = subprocess.run(["git", "-C", str(tmp_path / "repo"), "var", "GIT_AUTHOR_IDENT"],
+                           capture_output=True, text=True).stdout
+    assert "work@example.com" in ident
 
 
 def test_multi_registers_all_instances(tmp_path):
