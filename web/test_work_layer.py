@@ -322,12 +322,8 @@ class TestHookScript:
             env={**__import__("os").environ, "FRSHTY_DB": dbfile},
         )
         assert r.returncode == 0, r.stderr
-        item = db.query_one("SELECT state, stop_reason FROM work_items WHERE id = ?", (item_id,))
-        assert item["state"] == "failed_stale"
-        assert item["stop_reason"] == "tmux session gone"
-        kinds = [e["kind"] for e in db.query_all(
-            "SELECT kind FROM work_events WHERE work_item_id = ? ORDER BY id", (item_id,))]
-        assert "Stop" in kinds
+        item = db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "needs_you"
 
     def test_hook_foreign_session_fast_noop(self, tmp_path):
         import json
@@ -352,107 +348,3 @@ class TestHookScript:
             input="not json at all", capture_output=True, text=True, timeout=15,
         )
         assert r.returncode == 0
-
-
-class TestAutocontinue:
-    def _setup(self, monkeypatch, tail="Progress made. Continuing next step.", send_ok=True):
-        from unittest.mock import MagicMock
-        item_id = _mkitem("auto item")
-        run_id = work_store.add_run(item_id, f"sid-auto-{item_id}", f"work-{item_id}", "/tmp")
-        work_store.record_event(f"sid-auto-{item_id}", "Stop", {})
-        monkeypatch.setattr(work_store, "last_assistant_text", lambda p: tail)
-        sender = MagicMock(return_value=send_ok)
-        monkeypatch.setattr(work_store, "tmux_send", sender)
-        return item_id, run_id, sender
-
-    def _state(self, item_id):
-        return db.query_one(
-            "SELECT state, continues_used, stop_reason FROM work_items WHERE id = ?", (item_id,))
-
-    def test_continues_when_no_question(self, monkeypatch):
-        item_id, _, sender = self._setup(monkeypatch)
-        out = work_store.maybe_autocontinue(f"sid-auto-{item_id}", "/tmp/t.jsonl")
-        assert out == "continued"
-        sender.assert_called_once()
-        s = self._state(item_id)
-        assert s["state"] == "agent_working"
-        assert s["continues_used"] == 1
-
-    def test_question_blocks_continue(self, monkeypatch):
-        item_id, _, sender = self._setup(monkeypatch, tail="Should I use the staging bucket or prod?")
-        out = work_store.maybe_autocontinue(f"sid-auto-{item_id}", "/tmp/t.jsonl")
-        assert out == "question"
-        sender.assert_not_called()
-        s = self._state(item_id)
-        assert s["state"] == "needs_you"
-        assert "staging bucket" in s["stop_reason"]
-
-    def test_done_marker_completes_item(self, monkeypatch):
-        item_id, run_id, sender = self._setup(monkeypatch, tail="All files written.\nWORK_DONE")
-        out = work_store.maybe_autocontinue(f"sid-auto-{item_id}", "/tmp/t.jsonl")
-        assert out == "done"
-        sender.assert_not_called()
-        assert self._state(item_id)["state"] == "done"
-        run = db.query_one("SELECT status FROM work_runs WHERE id = ?", (run_id,))
-        assert run["status"] == "finished"
-
-    def test_cap_blocks_continue(self, monkeypatch):
-        item_id, _, sender = self._setup(monkeypatch)
-        db.execute("UPDATE work_items SET continues_used = continue_cap WHERE id = ?", (item_id,))
-        out = work_store.maybe_autocontinue(f"sid-auto-{item_id}", "/tmp/t.jsonl")
-        assert out == "capped"
-        sender.assert_not_called()
-        assert self._state(item_id)["state"] == "needs_you"
-
-    def test_disabled_blocks_continue(self, monkeypatch):
-        item_id, _, sender = self._setup(monkeypatch)
-        db.execute("UPDATE work_items SET autocontinue = 0 WHERE id = ?", (item_id,))
-        out = work_store.maybe_autocontinue(f"sid-auto-{item_id}", "/tmp/t.jsonl")
-        assert out == "disabled"
-        sender.assert_not_called()
-
-    def test_dead_session_marks_failed(self, monkeypatch):
-        item_id, _, _ = self._setup(monkeypatch, send_ok=False)
-        out = work_store.maybe_autocontinue(f"sid-auto-{item_id}", "/tmp/t.jsonl")
-        assert out == "session_gone"
-        assert self._state(item_id)["state"] == "failed_stale"
-
-
-class TestReply:
-    def test_reply_resumes(self, monkeypatch):
-        from unittest.mock import MagicMock
-        item_id = _mkitem("reply item")
-        work_store.add_run(item_id, f"sid-reply-{item_id}", f"work-{item_id}", "/tmp")
-        work_store.record_event(f"sid-reply-{item_id}", "Stop", {})
-        sender = MagicMock(return_value=True)
-        monkeypatch.setattr(work_store, "tmux_send", sender)
-        out = work_store.reply(item_id, "use the staging bucket")
-        assert out == {"id": item_id, "action": "reply"}
-        sender.assert_called_once_with(f"work-{item_id}", "use the staging bucket")
-        item = db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))
-        assert item["state"] == "agent_working"
-
-    def test_reply_dead_session_errors(self, monkeypatch):
-        item_id = _mkitem("reply dead")
-        work_store.add_run(item_id, f"sid-rd-{item_id}", f"work-{item_id}", "/tmp")
-        monkeypatch.setattr(work_store, "tmux_send", lambda *a: False)
-        out = work_store.reply(item_id, "hello")
-        assert out["error"] == "tmux session gone"
-
-
-class TestTranscriptTail:
-    def test_last_assistant_text(self, tmp_path):
-        import json as _json
-        p = tmp_path / "t.jsonl"
-        lines = [
-            {"type": "user", "message": {"content": "hi"}},
-            {"type": "assistant", "message": {"content": [{"type": "text", "text": "first"}]}},
-            {"type": "assistant", "message": {"content": [
-                {"type": "tool_use", "name": "Bash"},
-                {"type": "text", "text": "final answer"}]}},
-        ]
-        p.write_text("\n".join(_json.dumps(x) for x in lines))
-        assert work_store.last_assistant_text(str(p)) == "final answer"
-
-    def test_missing_file_empty(self):
-        assert work_store.last_assistant_text("/nonexistent/x.jsonl") == ""

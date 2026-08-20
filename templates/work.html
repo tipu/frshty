@@ -54,7 +54,13 @@
         <span class="wbtn" @click="act(it, 'done')">done</span>
         <span class="wbtn" @click="snooze(it)">snooze</span>
         <span class="wbtn" v-if="g === 'failed_stale' || g === 'waiting_external'" @click="act(it, 'reopen')">reopen</span>
+        <span class="wbtn" @click="act(it, it.autocontinue ? 'autocontinue_off' : 'autocontinue_on')">
+          auto {{ it.autocontinue ? 'on' : 'off' }} ({{ it.continues_used }}/{{ it.continue_cap }})
+        </span>
       </div>
+      <form class="mt-2 flex gap-2" v-if="g === 'needs_you'" @submit.prevent="reply(it)">
+        <input class="wintake flex-1" v-model="replyText[it.id]" placeholder="Answer and resume…" />
+      </form>
     </div>
   </div>
   <div class="text-gray-600 text-sm" v-if="total === 0">No work items yet.</div>
@@ -65,7 +71,7 @@ createApp({
   data() {
     return {
       groups: { needs_you: [], agent_working: [], waiting_external: [], failed_stale: [], done: [] },
-      personalLoaded: false, intakeText: "", intakeError: "",
+      personalLoaded: false, intakeText: "", intakeError: "", replyText: {},
       groupOrder: ["needs_you", "agent_working", "waiting_external", "failed_stale", "done"],
       labels: { needs_you: "Needs you", agent_working: "Agent working", waiting_external: "Waiting external", failed_stale: "Failed or stale", done: "Recently completed" },
       cls: { needs_you: "needs", agent_working: "working", waiting_external: "waiting", failed_stale: "stale", done: "done" },
@@ -97,6 +103,15 @@ createApp({
         body: JSON.stringify({ action, until }),
       });
       await this.refresh();
+    },
+    async reply(it) {
+      const text = (this.replyText[it.id] || "").trim();
+      if (!text) return;
+      const r = await fetch(`/api/work/items/${it.id}/reply`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text }),
+      });
+      if (r.ok) { this.replyText[it.id] = ""; await this.refresh(); }
     },
     snooze(it) {
       const until = new Date(Date.now() + 4 * 3600 * 1000).toISOString();
