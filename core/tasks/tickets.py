@@ -607,18 +607,26 @@ def _snapshot_repo(repo_dir: Path) -> tuple[str, set[str]]:
     repair untouched.
     """
     tree = git_util.run_git(repo_dir, ["write-tree"], timeout=60).stdout.strip()
-    listed = git_util.run_git(repo_dir, ["ls-files", "--others", "--exclude-standard"],
-                              timeout=60).stdout.splitlines()
-    return tree, {p.strip() for p in listed if p.strip()}
+    return tree, _untracked(repo_dir)
+
+
+def _untracked(repo_dir: Path) -> set[str]:
+    """Untracked paths, NUL-separated so they compare with themselves.
+
+    The line form quotes a name containing a space, a tab or a non-ASCII
+    character, so recording it one way and reading it back the other made an
+    untracked file that was already there look like one the repair created.
+    """
+    listed = git_util.run_git(repo_dir, ["ls-files", "--others", "--exclude-standard", "-z"],
+                              timeout=60).stdout
+    return {p for p in listed.split("\0") if p}
 
 
 def _restore_repo(repo_dir: Path, snapshot: tuple[str, set[str]]) -> None:
     tree, untracked_before = snapshot
     git_util.run_git(repo_dir, ["read-tree", tree], timeout=60)
     git_util.run_git(repo_dir, ["checkout-index", "-a", "-f"], timeout=120)
-    now = git_util.run_git(repo_dir, ["ls-files", "--others", "--exclude-standard"],
-                           timeout=60).stdout.splitlines()
-    for rel in (p.strip() for p in now if p.strip()):
+    for rel in _untracked(repo_dir):
         if rel not in untracked_before:
             (repo_dir / rel).unlink(missing_ok=True)
 
@@ -776,12 +784,16 @@ def _local_hook_entries(repo_dir: Path) -> list[Path]:
         return []
     found = []
     for raw in _ENTRY_LINE.findall(body):
-        # The first token only. It is the command pre-commit runs; the rest are
-        # its arguments, and `run` in `pipenv --quiet run basedpyright` would
-        # otherwise watch any repo that happens to contain a file called run.
-        token = raw.strip("'\"").split()[:1]
-        if token and (repo_dir / token[0]).is_file():
-            found.append(repo_dir / token[0])
+        tokens = raw.strip("'\"").split()
+        for i, token in enumerate(tokens):
+            # The command, plus any later argument that names a path. `entry:
+            # bash scripts/lint.sh` runs the script, not bash. A bare later word
+            # is not enough: `run` in `pipenv --quiet run basedpyright` would
+            # otherwise watch any repo containing a file called run.
+            if i and "/" not in token:
+                continue
+            if (repo_dir / token).is_file():
+                found.append(repo_dir / token)
     return found
 
 
@@ -912,9 +924,7 @@ def _repair_changes(repo_dir: Path, snapshot: tuple[str, set[str]]
             out.append(("other", paths, f"mode {src_mode} to {dst_mode}"))
         else:
             out.append(("other", paths, f"git status {status}"))
-    listed = git_util.run_git(repo_dir, ["ls-files", "--others", "--exclude-standard", "-z"],
-                              timeout=60).stdout
-    for rel in (p for p in listed.split("\0") if p):
+    for rel in _untracked(repo_dir):
         if rel not in untracked_before:
             out.append(("add", [rel], "new untracked file"))
     return out
@@ -972,8 +982,14 @@ def _added_suppressions(repo_dir: Path, snapshot: tuple[str, set[str]] | None,
     def _count(body: str) -> dict[str, int]:
         return {m: body.count(m) for m in _SUPPRESSION_MARKERS}
 
+    target = repo_dir / rel
+    if target.is_symlink() or not target.is_file():
+        # A gitlink for a dirty submodule is a directory here. Reading it failed
+        # and the failure was reported as an added marker, so ordinary submodule
+        # dirtiness that predates the repair rejected an unrelated fix.
+        return []
     try:
-        now = _count((repo_dir / rel).read_text())
+        now = _count(target.read_text())
     except (OSError, UnicodeDecodeError):
         return [] if snapshot is None else ["unreadable file"]
     if snapshot is None:
@@ -1087,7 +1103,13 @@ def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
                  meta={"ticket": ticket_key, "repo": repo_dir.name})
         return _undo("the repair step returned nothing")
 
-    clean, why = _repair_touched_only_code(repo_dir, hooks_before, snapshot)
+    try:
+        clean, why = _repair_touched_only_code(repo_dir, hooks_before, snapshot)
+    except Exception as e:
+        # Deciding whether the repair stayed inside the code runs several git
+        # commands, and one of them timing out is not a verdict. Leaving the
+        # edits in place unexamined is the state this exists to prevent.
+        return _undo(f"could not judge the repair: {e}")
     if not clean:
         return _undo(why)
     return "repair"
