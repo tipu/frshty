@@ -3,6 +3,7 @@ import json
 import re
 import os
 import shutil
+import stat
 import subprocess
 import uuid
 from datetime import datetime, timezone
@@ -506,6 +507,10 @@ _REPAIR_FORBIDDEN_NAMES = (
     "Pipfile", "Pipfile.lock", "package.json", "package-lock.json",
     "pnpm-lock.yaml", "poetry.lock", "uv.lock", "requirements.txt",
     "tsconfig.json", "pyrightconfig.json", ".ruff.toml", "mypy.ini",
+    # Any .gitignore, not only the one at the root. Adding a path to a nested
+    # one hides a created file from the status check that would reject it.
+    ".gitignore", ".eslintrc.json", ".eslintrc.js", "eslint.config.js",
+    ".prettierrc", ".isort.cfg", "tox.ini",
 )
 _SUPPRESSION_MARKERS = (
     "# type: ignore", "# noqa", "# pyright: ignore", "# ruff: noqa",
@@ -644,21 +649,42 @@ def _porcelain_entries(raw: str) -> list[tuple[str, list[str]]]:
 
 
 _SYMLINK = b"\0symlink\0"
+_IRREGULAR = b"\0irregular\0"
+_OVERSIZE = b"\0oversize\0"
+# Hook runners and hook scripts are small. Anything past this is not one, and
+# reading it whole to compare it would be the only cost of finding that out.
+_MAX_WATCHED_BYTES = 4 * 1024 * 1024
+# Every hook git can abort a commit with. Watching only pre-commit leaves
+# commit-msg free to be replaced with one that exits 0.
+_WATCHED_HOOKS = ("pre-commit", "prepare-commit-msg", "commit-msg")
+
+HookState = tuple[bytes | None, int | None]
 
 
-def _bytes_of(path: Path) -> bytes | None:
-    """The file's contents, or None when it is not there.
+def _state_of(path: Path) -> HookState:
+    """What the file is and how it is permitted, not only what it says.
 
-    A symlink records its target instead of the bytes on the far end. Replacing
-    a watched file with a link elsewhere is a change even when both sides read
-    the same, and recording the link is what lets it be put back as a link.
+    Git skips a hook that is not executable, so `chmod -x` disables it without
+    changing a byte, and a symlink to identical content reads the same as the
+    original. The mode and the link target are therefore part of the state.
     """
     try:
-        if path.is_symlink():
-            return _SYMLINK + os.readlink(path).encode()
-        return path.read_bytes()
+        st = path.lstat()
     except OSError:
-        return None
+        return None, None
+    if stat.S_ISLNK(st.st_mode):
+        try:
+            return _SYMLINK + os.readlink(path).encode(), st.st_mode
+        except OSError:
+            return _IRREGULAR, st.st_mode
+    if not stat.S_ISREG(st.st_mode):
+        return _IRREGULAR, st.st_mode
+    if st.st_size > _MAX_WATCHED_BYTES:
+        return _OVERSIZE + f"{st.st_size}:{st.st_mtime_ns}".encode(), st.st_mode
+    try:
+        return path.read_bytes(), st.st_mode
+    except OSError:
+        return _IRREGULAR, st.st_mode
 
 
 def _clear_path(path: Path) -> None:
@@ -676,7 +702,7 @@ def _clear_path(path: Path) -> None:
         path.unlink(missing_ok=True)
 
 
-def _hook_paths(repo_dir: Path) -> dict[str, Path]:
+def _hook_paths(repo_dir: Path) -> list[Path]:
     """Every file that decides whether the hook runs, resolved for this checkout.
 
     A ticket repo is a linked worktree, so `<repo>/.git` is a file and
@@ -687,34 +713,30 @@ def _hook_paths(repo_dir: Path) -> dict[str, Path]:
 
     `<common>/config` is included because it is where `core.hooksPath` and
     `core.excludesFile` are set, so one path covers redirecting either.
+
+    Raises rather than guessing when git cannot answer. A fallback here would
+    turn "we do not know where the hooks are" into a fingerprint of files that
+    do not exist, which compares equal to itself and passes.
     """
-    try:
-        common = Path(git_util.run_git(
-            repo_dir, ["rev-parse", "--path-format=absolute", "--git-common-dir"],
-            timeout=30).stdout.strip())
-    except (git_util.GitCommandError, OSError):
-        common = repo_dir / ".git"
-    try:
-        configured = git_util.run_git(repo_dir, ["config", "--get", "core.hooksPath"],
-                                      allowed_codes=(0, 1), timeout=30).stdout.strip()
-    except git_util.GitCommandError:
-        configured = ""
-    hooks = Path(configured) if configured else common / "hooks"
+    common = Path(git_util.run_git(
+        repo_dir, ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        timeout=30).stdout.strip())
+    configured = git_util.run_git(repo_dir, ["config", "--get", "core.hooksPath"],
+                                  allowed_codes=(0, 1), timeout=30).stdout.strip()
+    hooks = Path(os.path.expanduser(configured)) if configured else common / "hooks"
     if not hooks.is_absolute():
         hooks = repo_dir / hooks
-    watched = {
-        "config": repo_dir / ".pre-commit-config.yaml",
-        "gitignore": repo_dir / ".gitignore",
-        "exclude": common / "info" / "exclude",
-        "git_config": common / "config",
-        "git_hook": hooks / "pre-commit",
-    }
-    for candidate in git_util.pre_commit_candidates(repo_dir):
-        watched[f"runner:{candidate}"] = candidate
+    watched = [
+        repo_dir / ".pre-commit-config.yaml",
+        common / "info" / "exclude",
+        common / "config",
+    ]
+    watched.extend(hooks / name for name in _WATCHED_HOOKS)
+    watched.extend(git_util.pre_commit_candidates(repo_dir))
     return watched
 
 
-def _hook_integrity(repo_dir: Path) -> dict[str, bytes | None]:
+def _hook_integrity(repo_dir: Path) -> dict[Path, HookState]:
     """Snapshot those files, so a rejected repair can be undone exactly.
 
     `git status` cannot answer this. A file the repair adds to `info/exclude`
@@ -724,36 +746,43 @@ def _hook_integrity(repo_dir: Path) -> dict[str, bytes | None]:
     diff looks honest is not. Contents are kept rather than hashes because
     `_restore_repo` skips ignored files, so a planted runner would otherwise
     survive the rejection and make the next attempt pass.
+
+    Keyed by path so the comparison and the restore both use the paths resolved
+    before the repair ran. Re-resolving afterwards would follow a `core.hooksPath`
+    the repair had just changed, and write the old hook to the new location while
+    leaving the one git now runs untouched.
     """
-    return {k: _bytes_of(p) for k, p in _hook_paths(repo_dir).items()}
+    return {p: _state_of(p) for p in _hook_paths(repo_dir)}
 
 
-def _restore_hook_setup(repo_dir: Path, before: dict[str, bytes | None]) -> list[str]:
-    """Put the hook files back. Returns the keys that could not be restored.
+def _restore_hook_setup(before: dict[Path, HookState]) -> list[str]:
+    """Put the hook files back. Returns the paths that could not be restored.
 
     Every path is cleared before it is written, so a watched file the repair
     turned into a symlink or a directory is replaced rather than written
     through, which would follow the link out of the checkout.
     """
     failed = []
-    for key, path in _hook_paths(repo_dir).items():
-        was = before.get(key)
-        if _bytes_of(path) == was:
+    for path, was in before.items():
+        if _state_of(path) == was:
             continue
+        content, mode = was
         try:
+            if content is not None and content.startswith((_IRREGULAR, _OVERSIZE)):
+                raise OSError(f"{path} was not a file we can reproduce")
             _clear_path(path)
-            if was is not None:
+            if content is not None:
                 if path.parent.is_symlink():
                     raise OSError(f"{path.parent} is a symlink")
                 path.parent.mkdir(parents=True, exist_ok=True)
-                if was.startswith(_SYMLINK):
-                    path.symlink_to(was[len(_SYMLINK):].decode())
+                if content.startswith(_SYMLINK):
+                    path.symlink_to(content[len(_SYMLINK):].decode())
                 else:
-                    path.write_bytes(was)
-                    if key.startswith("runner:") or key == "git_hook":
-                        path.chmod(0o755)
+                    path.write_bytes(content)
+                    if mode is not None:
+                        os.chmod(path, stat.S_IMODE(mode))
         except OSError:
-            failed.append(key)
+            failed.append(str(path))
     return failed
 
 
@@ -764,7 +793,7 @@ _MODIFY_ONLY = set("M ")
 
 
 def _repair_touched_only_code(repo_dir: Path,
-                              before: dict[str, bytes | None] | None = None) -> tuple[bool, str]:
+                              before: dict[Path, HookState] | None = None) -> tuple[bool, str]:
     """Whether the repair agent stayed inside the code, or found a cheap exit.
 
     The agent runs with permissions bypassed, so telling it not to disable the
@@ -776,10 +805,9 @@ def _repair_touched_only_code(repo_dir: Path,
     than in a prompt.
     """
     if before is not None:
-        after = _hook_integrity(repo_dir)
-        for key, was in before.items():
-            if after.get(key) != was:
-                return False, f"repair changed the hook setup ({key}); it may only edit code"
+        for path, was in before.items():
+            if _state_of(path) != was:
+                return False, f"repair changed the hook setup ({path}); it may only edit code"
     try:
         changed = git_util.run_git(repo_dir, ["status", "--porcelain", "-z"], timeout=30)
     except git_util.GitCommandError:
@@ -831,10 +859,13 @@ def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
              f"{ticket_key}: pre-commit rejected {repo_dir.name}; attempting one repair",
              meta={"ticket": ticket_key, "repo": repo_dir.name,
                    "output": (outcome.output or "")[-600:]})
-    hooks_before = _hook_integrity(repo_dir)
     try:
+        # Both before the agent runs. Without a baseline there is nothing to
+        # compare the repair against and nothing to put back, so not being able
+        # to take one blocks rather than letting the agent edit unwatched.
+        hooks_before = _hook_integrity(repo_dir)
         snapshot = _snapshot_repo(repo_dir)
-    except git_util.GitCommandError as e:
+    except (git_util.GitCommandError, OSError) as e:
         log.emit("commit_hook_snapshot_failed",
                  f"{ticket_key}: could not snapshot {repo_dir.name} before repair: {e}",
                  meta={"ticket": ticket_key, "repo": repo_dir.name})
@@ -848,14 +879,7 @@ def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
         "change nothing and say so.\n\n"
         f"HOOK OUTPUT:\n{(outcome.output or '')[-4000:]}",
         cwd=repo_dir, timeout=HOOK_REPAIR_TIMEOUT)
-    if fixed is None:
-        log.emit("commit_hook_repair_failed",
-                 f"{ticket_key}: repair step returned nothing for {repo_dir.name}",
-                 meta={"ticket": ticket_key, "repo": repo_dir.name})
-        return "block_unknown"
-
-    clean, why = _repair_touched_only_code(repo_dir, hooks_before)
-    if not clean:
+    def _undo(why: str) -> str:
         try:
             _restore_repo(repo_dir, snapshot)
         except git_util.GitCommandError:
@@ -864,18 +888,30 @@ def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
         # planted `.venv/bin/pre-commit` survives it and the next attempt runs
         # the fake instead of the real hook. The hook files are put back from
         # their recorded contents rather than left to that enumeration.
-        failed = _restore_hook_setup(repo_dir, hooks_before)
+        failed = _restore_hook_setup(hooks_before)
         if failed:
             log.emit("commit_hook_setup_contaminated",
                      f"{ticket_key}: {repo_dir.name} hook setup could not be put back "
                      f"({', '.join(failed)}); do not retry this worktree until it is "
                      f"rebuilt",
-                     meta={"ticket": ticket_key, "repo": repo_dir.name, "keys": failed})
+                     meta={"ticket": ticket_key, "repo": repo_dir.name, "paths": failed})
         log.emit("commit_hook_repair_rejected",
                  f"{ticket_key}: discarded the repair of {repo_dir.name}: {why}",
                  meta={"ticket": ticket_key, "repo": repo_dir.name, "reason": why,
                        "unrestored": failed})
         return "block_unknown"
+
+    if fixed is None:
+        # A repair that died or timed out still edited files on its way there,
+        # and returning here left them in place unexamined.
+        log.emit("commit_hook_repair_failed",
+                 f"{ticket_key}: repair step returned nothing for {repo_dir.name}",
+                 meta={"ticket": ticket_key, "repo": repo_dir.name})
+        return _undo("the repair step returned nothing")
+
+    clean, why = _repair_touched_only_code(repo_dir, hooks_before)
+    if not clean:
+        return _undo(why)
     return "repair"
 
 
