@@ -456,3 +456,48 @@ class TestTranscriptTail:
 
     def test_missing_file_empty(self):
         assert work_store.last_assistant_text("/nonexistent/x.jsonl") == ""
+
+
+class TestArtifacts:
+    def test_record_and_find(self, tmp_path):
+        import json as _json
+        item_id = _mkitem("make a report")
+        work_store.add_run(item_id, f"sid-art-{item_id}", f"work-{item_id}", "/tmp")
+        t = tmp_path / "t.jsonl"
+        t.write_text(_json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "Done.\nARTIFACT: /tmp/report.html - quarterly report page"}]}}))
+        added = work_store.record_artifacts(f"sid-art-{item_id}", str(t))
+        assert added == 1
+        again = work_store.record_artifacts(f"sid-art-{item_id}", str(t))
+        assert again == 0
+        hits = work_store.find_artifacts("quarterly")
+        assert hits and hits[0]["path"] == "/tmp/report.html"
+        assert hits[0]["objective"] == "make a report"
+        assert work_store.find_artifacts("no-such-thing-xyz") == []
+
+    def test_ignores_relative_paths(self, tmp_path):
+        import json as _json
+        item_id = _mkitem("bad artifact")
+        work_store.add_run(item_id, f"sid-artb-{item_id}", f"work-{item_id}", "/tmp")
+        t = tmp_path / "t.jsonl"
+        t.write_text(_json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "ARTIFACT: relative/path.txt - nope"}]}}))
+        assert work_store.record_artifacts(f"sid-artb-{item_id}", str(t)) == 0
+
+
+class TestTodayProducer:
+    def test_launch_links_work_item(self):
+        from web.today import _ensure_work_item
+        m = {"sid": "sid-today-1", "ticket_key": "DEV-999", "title": "Fix DEV-999 CI"}
+        _ensure_work_item("aimyable", m, "loop-key-1", "/tmp")
+        run = db.query_one("SELECT work_item_id FROM work_runs WHERE session_id = 'sid-today-1'")
+        assert run is not None
+        item = db.query_one("SELECT objective, scope, scope_ref, instance_key FROM work_items WHERE id = ?",
+                            (run["work_item_id"],))
+        assert item["objective"] == "Fix DEV-999 CI"
+        assert item["scope"] == "ticket"
+        assert item["scope_ref"] == "DEV-999"
+        assert item["instance_key"] == "aimyable"
+        _ensure_work_item("aimyable", m, "loop-key-1", "/tmp")
+        n = db.query_one("SELECT COUNT(*) AS n FROM work_runs WHERE session_id = 'sid-today-1'")["n"]
+        assert n == 1

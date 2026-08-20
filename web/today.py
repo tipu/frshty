@@ -13,6 +13,7 @@ import manager.runner as runner
 import manager.staleness as staleness
 from core.config import get_repos
 from features.tickets import _load_pr_comments
+from services import work_store
 from web.state import _config
 
 
@@ -240,6 +241,20 @@ def _build_context(loop_type: str, ticket_key: str | None, repo: str | None, pr_
     return f"# {head}\n\nReview this item and tell me what you want to do."
 
 
+def _ensure_work_item(instance_key: str, m: dict, key: str, cwd: str):
+    try:
+        existing = db.query_one("SELECT id FROM work_runs WHERE session_id = ?", (m["sid"],))
+        if existing:
+            return
+        scope = "ticket" if m.get("ticket_key") else "pr"
+        scope_ref = m.get("ticket_key") or f"{m.get('repo')}/{m.get('pr_id')}"
+        item_id = work_store.create_item(m.get("title") or scope_ref, scope=scope,
+                                         scope_ref=scope_ref, instance_key=instance_key)
+        work_store.add_run(item_id, m["sid"], key, cwd)
+    except Exception as e:
+        log.emit("work_item_link_failed", f"[{instance_key}] {key}: {type(e).__name__}: {e}")
+
+
 @router.post("/api/today/launch")
 def api_today_launch(body: dict):
     instance_key = _config.get("job", {}).get("key", "")
@@ -282,6 +297,7 @@ def api_today_launch(body: dict):
     if health.get("alive") and health.get("claude_running"):
         store[key] = m
         state.save(_LAUNCH_STORE, store)
+        _ensure_work_item(instance_key, m, key, cwd)
         return {"key": key, "status": "running", "title": m["title"], "session_id": m["sid"]}
 
     first_run = not m.get("seeded")
@@ -297,4 +313,5 @@ def api_today_launch(body: dict):
     m["launched_at"] = _now_iso()
     store[key] = m
     state.save(_LAUNCH_STORE, store)
+    _ensure_work_item(instance_key, m, key, cwd)
     return {"key": key, "status": "launched", "title": m["title"], "session_id": m["sid"]}

@@ -113,6 +113,16 @@ async def trigger_cycle(instance: str | None = None) -> str:
     return json.dumps(results, indent=2)
 
 
+@server.tool(description="Find artifacts produced by work-layer runs: reports, pages, videos, files the operator asked for. Searches path, note, and the owning objective. Use when the operator asks where something they made is.")
+async def find_artifact(query: str = "") -> str:
+    instances, _ = _resolve(None)
+    if not instances:
+        return json.dumps({"error": "no instances running"})
+    result = await call_instance(instances[0]["base_url"], "GET",
+                                 f"/api/work/artifacts?q={query}")
+    return json.dumps(result, indent=2)
+
+
 @server.tool(description="Get raw ticket data from the actual ticket system (Jira/Linear), not frshty's internal state. Useful for comparing what the ticket system says vs what frshty thinks.")
 async def get_raw_tickets(instance: str | None = None) -> str:
     instances, found = _resolve(instance)

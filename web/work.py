@@ -66,6 +66,8 @@ def api_work_intake(body: dict):
         f"# Work item {item_id}\n\n## Objective\n\n{objective}\n\n"
         "Work toward the objective. When you stop, state a one-line checkpoint. "
         "If you need a decision only the operator can make, ask the question and stop. "
+        "When you produce a file the operator will open (report, page, video, image), "
+        "print a line: ARTIFACT: /absolute/path - one-line description. "
         f"When the objective is fully met, end your final message with the single line {work_store.DONE_MARKER}."
     )
     try:
@@ -99,6 +101,11 @@ def api_work_reply(item_id: int, body: dict):
 @router.get("/work/{item_id}/terminal", response_class=HTMLResponse)
 def work_terminal_page(item_id: int):
     return _template("work_terminal.html")
+
+
+@router.get("/api/work/artifacts")
+def api_work_artifacts(q: str = ""):
+    return {"artifacts": work_store.find_artifacts(q)}
 
 
 @router.get("/api/work/items/{item_id}/events")
