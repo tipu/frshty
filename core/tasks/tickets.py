@@ -17,6 +17,9 @@ from core.claude_runner import run_claude_code, run_haiku, extract_json
 from core.config import base_branch_for, get_repos, ticket_worktree_path
 from core.deps import relink_shared_venv
 from core.consensus_plan import run_consensus_plan
+from core.consensus_scope import (
+    SCOPE_FANOUT_TIMEOUT, run_scope_review, scope_fingerprint,
+)
 from core.tasks.registry import TaskContext, TaskResult, task
 import features.defence as defence
 from core.tasks.preconditions import (
@@ -2070,6 +2073,57 @@ def fix_reported_bug(ctx: TaskContext) -> TaskResult:
     if result is None:
         return TaskResult("failed", "claude returned non-zero or empty")
     return TaskResult("ok")
+
+
+SCOPE_REVIEW_TIMEOUT = SCOPE_FANOUT_TIMEOUT + 300
+
+
+@task("scope_review",
+      preconditions=[feature_enabled("scope_review"),
+                     status_is("pr_ready", "in_review")],
+      postconditions=[file_contains("docs/scope-review.md",
+                                    r"SCOPE VERDICT:\s*(PASS|FAIL)")],
+      timeout=SCOPE_REVIEW_TIMEOUT)
+def scope_review(ctx: TaskContext) -> TaskResult:
+    """Consensus scope review of the ticket branch (the automated /c gate).
+
+    Captures the branch-diff fingerprint BEFORE the review so a commit that
+    lands mid-review leaves the recorded fingerprint stale and the dispatcher
+    re-enqueues a fresh review. The verdict is recorded on the ticket state;
+    the dispatcher holds PR creation (pr_ready) and auto-merge (in_review)
+    until the verdict for the current fingerprint is pass."""
+    ticket_dir = _ticket_dir(ctx)
+    if not ticket_dir.is_dir():
+        return TaskResult("failed", f"ticket dir missing: {ticket_dir}")
+    ts = state.load_ticket(ctx.ticket_key or "") or {}
+    slug = ts.get("slug") or (ctx.ticket_key or "")
+    fingerprint = scope_fingerprint(ctx.config, ts)
+    if not fingerprint:
+        return TaskResult("skipped", "no branch diff to review")
+    log.emit("ticket_scope_review_started",
+             f"Consensus scope review for {ctx.ticket_key}",
+             meta={"ticket": ctx.ticket_key})
+    verdict, reason = run_scope_review(ctx.config, ticket_dir, slug,
+                                       ticket_key=ctx.ticket_key or "")
+    if verdict is None:
+        return TaskResult("failed", reason)
+
+    def _record(current: dict) -> dict:
+        new = dict(current or {})
+        new["scope_review"] = {
+            "fingerprint": fingerprint,
+            "verdict": verdict,
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
+        return new
+    state.update_ticket(ctx.ticket_key, _record)
+    event = ("ticket_scope_review_passed" if verdict == "pass"
+             else "ticket_scope_review_failed")
+    base_url = ctx.config.get("_base_url", "")
+    log.emit(event, f"{ctx.ticket_key}: scope review {verdict} ({reason})",
+             links={"detail": f"{base_url}/tickets/{ctx.ticket_key}"},
+             meta={"ticket": ctx.ticket_key, "verdict": verdict})
+    return TaskResult("ok", reason)
 
 
 @task("create_pr",

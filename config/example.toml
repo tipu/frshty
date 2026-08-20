@@ -57,6 +57,7 @@ slack = false
 timesheet = false
 billing = false
 releases = false                  # tag tickets to a release; whole-release LLM inspection when all members reach merged/validation/done. optional release.md at <workspace.root>/releases/<release_key>/release.md guides the inspection prompt.
+scope_review = false              # consensus scope review (claude/codex/agy) of the branch diff when a ticket is code complete; re-runs whenever branch code changes; a fail verdict holds PR creation and auto-merge until fixed.
 
 # [slack]
 # raw_path = "/path/to/slack_int/messages/raw.jsonl"
