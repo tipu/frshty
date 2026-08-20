@@ -1,5 +1,6 @@
 import os
 import threading
+import time
 import uuid
 
 from fastapi import APIRouter
@@ -83,8 +84,7 @@ def api_work_intake(body: dict):
         work_store.mark_launch_failed(run_id, f"{type(e).__name__}: {e}")
         log.emit("work_launch_failed", f"work item {item_id}: {type(e).__name__}: {e}")
         return JSONResponse({"error": f"launch failed: {e}", "item_id": item_id}, status_code=500)
-    threading.Timer(10.0, work_store.tmux_send,
-                    args=(tmux_key, "Begin the objective from your system prompt now.")).start()
+    threading.Thread(target=_kickoff, args=(tmux_key,), daemon=True).start()
     counts = {g: len(rows) for g, rows in work_store.grouped_items().items()}
     return {"item_id": item_id, "run_id": run_id, "session_id": session_id,
             "tmux_key": tmux_key, "state": "agent_working", "counts": counts}
@@ -104,6 +104,18 @@ def api_work_reply(item_id: int, body: dict):
 @router.get("/work/{item_id}/terminal", response_class=HTMLResponse)
 def work_terminal_page(item_id: int):
     return _template("work_terminal.html")
+
+
+def _kickoff(tmux_key: str):
+    for _ in range(30):
+        time.sleep(3)
+        try:
+            if terminal.session_healthy(tmux_key).get("claude_running"):
+                time.sleep(4)
+                work_store.tmux_send(tmux_key, "Begin the objective from your system prompt now.")
+                return
+        except Exception:
+            return
 
 
 @router.get("/api/work/artifacts")
