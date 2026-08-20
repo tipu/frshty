@@ -246,6 +246,26 @@ class TestHookIntegrityCoversWhatStatusCannotSee:
             "        name: types\n        entry: pipenv --quiet run basedpyright\n")
         assert T._local_hook_entries(r) == []
 
+    def test_an_interpreter_wrapped_entry_script_is_watched(self, tmp_path):
+        """`entry: bash scripts/lint.sh` runs the script, not bash. Watching only
+        the first token watches the interpreter and leaves the hook itself as an
+        ordinary tracked file."""
+        r = _repo(tmp_path)
+        script = r / "scripts" / "lint.sh"
+        script.parent.mkdir()
+        script.write_text("#!/bin/sh\nexec real-check\n")
+        (r / ".pre-commit-config.yaml").write_text(
+            "repos:\n  - repo: local\n    hooks:\n      - id: lint\n"
+            "        name: lint\n        entry: bash scripts/lint.sh\n")
+        _git(r, "add", "-A")
+        _git(r, "commit", "-qm", "wrapped hook", "--no-verify")
+        assert script in T._hook_paths(r)
+        before = T._hook_integrity(r)
+        script.write_text("#!/bin/sh\nexit 0\n")
+        ok, why = T._repair_touched_only_code(r, before)
+        assert not ok
+        assert "hook setup" in why
+
     def test_only_the_command_is_watched_not_its_arguments(self, tmp_path):
         """`run` is an argument of `pipenv --quiet run basedpyright`, and a repo
         that happens to contain a file called run must not have it watched: an
@@ -305,36 +325,59 @@ class TestHookIntegrityCoversWhatStatusCannotSee:
 
 class TestTheGuardAcceptsWhatFormattersProduce:
     """The cost of tightening this guard is blocked tickets, so the shapes a real
-    autofix leaves behind are pinned alongside the ones it must reject."""
+    autofix leaves behind are pinned alongside the ones it must reject.
+
+    Every case supplies a snapshot, because production always does. Omitting it
+    exercises the conservative fallback instead, so these would have passed while
+    the path that actually runs rejected the formatter output they name."""
+
+    def _judged(self, r: Path, repair):
+        snapshot = T._snapshot_repo(r)
+        before = T._hook_integrity(r)
+        repair(r)
+        return T._repair_touched_only_code(r, before, snapshot)
 
     def test_edits_across_several_files_are_accepted(self, tmp_path):
         r = _repo(tmp_path)
-        before = T._hook_integrity(r)
-        (r / "app.py").write_text("x = 11\n")
-        (r / "pkg" / "mod.py").write_text("y = 22\n")
+
+        def repair(r):
+            (r / "app.py").write_text("x = 11\n")
+            (r / "pkg" / "mod.py").write_text("y = 22\n")
+
+        ok, why = self._judged(r, repair)
         assert _git(r, "status", "--porcelain").stdout.strip(), "the test must edit something"
-        ok, why = T._repair_touched_only_code(r, before)
         assert ok, why
 
     def test_a_mix_of_staged_and_unstaged_edits_is_accepted(self, tmp_path):
         """A fix the agent staged and one it did not are `M ` and ` M`, and a
         file touched both ways is `MM`."""
         r = _repo(tmp_path)
-        before = T._hook_integrity(r)
-        (r / "app.py").write_text("x = 2\n")
-        _git(r, "add", "app.py")
-        (r / "app.py").write_text("x = 3\n")
-        (r / "pkg" / "mod.py").write_text("y = 3\n")
+
+        def repair(r):
+            (r / "app.py").write_text("x = 2\n")
+            _git(r, "add", "app.py")
+            (r / "app.py").write_text("x = 3\n")
+            (r / "pkg" / "mod.py").write_text("y = 3\n")
+
+        ok, why = self._judged(r, repair)
         codes = {c for c, _ in T._porcelain_entries(
             _git(r, "status", "--porcelain", "-z").stdout)}
         assert codes == {"MM", " M"}, codes
-        ok, why = T._repair_touched_only_code(r, before)
         assert ok, why
 
     def test_a_repair_that_changed_nothing_is_accepted(self, tmp_path):
         r = _repo(tmp_path)
-        before = T._hook_integrity(r)
-        ok, why = T._repair_touched_only_code(r, before)
+        ok, why = self._judged(r, lambda r: None)
+        assert ok, why
+
+    def test_an_untracked_name_with_a_space_is_not_read_as_new(self, tmp_path):
+        """The line form of ls-files quotes such a name and the -z form does not,
+        so recording it one way and reading it back the other made a file that
+        was already there look like one the repair created."""
+        r = _repo(tmp_path)
+        (r / "build log.txt").write_text("noise\n")
+        (r / "caf\u00e9.txt").write_text("noise\n")
+        ok, why = self._judged(r, lambda r: (r / "app.py").write_text("x = 9\n"))
         assert ok, why
 
     def test_real_ruff_output_is_accepted(self, tmp_path):
@@ -345,12 +388,14 @@ class TestTheGuardAcceptsWhatFormattersProduce:
         (r / "app.py").write_text("import os\nimport sys\nx   =    sys.argv\n")
         _git(r, "add", "-A")
         _git(r, "commit", "-qm", "messy", "--no-verify")
-        before = T._hook_integrity(r)
-        subprocess.run([ruff, "check", "--select", "F401", "--fix", "."],
-                       cwd=str(r), capture_output=True)
-        subprocess.run([ruff, "format", "."], cwd=str(r), capture_output=True)
+
+        def repair(r):
+            subprocess.run([ruff, "check", "--select", "F401", "--fix", "."],
+                           cwd=str(r), capture_output=True)
+            subprocess.run([ruff, "format", "."], cwd=str(r), capture_output=True)
+
+        ok, why = self._judged(r, repair)
         assert (r / "app.py").read_text() != "import os\nimport sys\nx   =    sys.argv\n"
-        ok, why = T._repair_touched_only_code(r, before)
         assert ok, why
 
 
@@ -394,6 +439,31 @@ class TestJudgedAgainstThePreRepairTree:
         r = self._staged(tmp_path)
         ok, why = self._judge(r, lambda r: (r / "new.py").write_text("y = 2\n"),
                               lambda r: (r / "app.py").write_text("x = 9\n"))
+        assert ok, why
+
+    def test_a_dirty_submodule_is_not_read_as_an_added_marker(self, tmp_path):
+        """A gitlink for a dirty submodule is a directory on disk. Reading it
+        failed and the failure was reported as an added suppression, so ordinary
+        submodule dirtiness that predates the repair rejected an unrelated fix."""
+        r = self._staged(tmp_path)
+        sub = tmp_path / "libsrc"
+        sub.mkdir()
+        _git_init = subprocess.run(["git", "init", "-q", str(sub)], check=True)
+        _git(sub, "config", "user.email", "t@t")
+        _git(sub, "config", "user.name", "t")
+        (sub / "lib.py").write_text("z = 1\n")
+        _git(sub, "add", "-A")
+        _git(sub, "commit", "-qm", "lib", "--no-verify")
+        subprocess.run(["git", "-C", str(r), "-c", "protocol.file.allow=always",
+                        "submodule", "add", "-q", str(sub), "lib"],
+                       capture_output=True, check=True)
+        _git(r, "commit", "-qm", "add submodule", "--no-verify")
+        (r / "lib" / "lib.py").write_text("z = 2\n")   # dirty before the repair
+        _git(r, "add", "-A")
+        snapshot = T._snapshot_repo(r)
+        before = T._hook_integrity(r)
+        (r / "app.py").write_text("x = 9\n")           # the repair
+        ok, why = T._repair_touched_only_code(r, before, snapshot)
         assert ok, why
 
     def test_an_untracked_file_that_was_already_there_is_not_the_repairs_doing(self, tmp_path):
@@ -521,6 +591,19 @@ class TestOnlyEditsAreAllowed:
 
 
 class TestRejectionLeavesNoWorkingHole:
+    def test_a_planted_file_whose_name_git_quotes_is_still_removed(self, tmp_path):
+        """`git ls-files` prints a non-ASCII name as "caf\\303\\251.txt" in its
+        line form and as the real bytes with -z. Recording one and deleting the
+        other leaves the planted file behind and marks a file that was always
+        there as newly created."""
+        r = _repo(tmp_path)
+        snapshot = T._snapshot_repo(r)
+        planted = r / "café.py"
+        planted.write_text("FileExplorerAction = object\n")
+        assert "café.py" in T._untracked(r)
+        T._restore_repo(r, snapshot)
+        assert not planted.exists(), "a quoted name must not survive the undo"
+
     def test_a_planted_runner_is_removed_not_merely_noticed(self, tmp_path):
         """_restore_repo lists untracked files with --exclude-standard, so the
         planted runner survived it. Noticing a bypass and leaving it in place
@@ -742,6 +825,30 @@ class TestRejectionLeavesNoWorkingHole:
         assert route == "block_unknown"
         assert not (r / "shadow.py").exists(), (
             "the hidden file must not survive; the exclude has to go back first")
+
+    def test_a_git_failure_while_judging_still_undoes_the_repair(self, tmp_path):
+        """Deciding whether the repair stayed inside the code runs several git
+        commands. One of them timing out is not a verdict, and letting it escape
+        left the edits in place unexamined."""
+        from unittest.mock import patch
+
+        from core import git_util as g
+
+        r = _repo(tmp_path)
+
+        def cheat(*a, **k):
+            (r / "app.py").write_text("half-done\n")
+            return "done"
+
+        outcome = g.CommitOutcome("hook_failed", "hook_pass_2", "r", 1,
+                                  "app.py:1:1: E741 Ambiguous name", "aaa", "aaa")
+        with patch.object(T, "run_claude_code", side_effect=cheat), \
+             patch.object(T, "_repair_touched_only_code",
+                          side_effect=subprocess.TimeoutExpired(["git", "diff"], 60)), \
+             patch.object(T, "log"):
+            route = T._route_hook_failure(r, outcome, "DEV-1")
+        assert route == "block_unknown"
+        assert (r / "app.py").read_text() == "x = 1\n", "the repair must be undone"
 
     def test_an_unusable_baseline_blocks_before_the_agent_runs(self, tmp_path):
         """A baseline that cannot be put back is not a baseline."""
