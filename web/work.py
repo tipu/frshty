@@ -14,9 +14,6 @@ from web.pages import _template
 
 router = APIRouter()
 
-_SID_NS = uuid.UUID("6f72736d-0000-0000-0000-776f726b6c79")
-
-
 def _personal_config() -> dict | None:
     instances = runtime.instances()
     if not instances:
@@ -61,7 +58,7 @@ def api_work_intake(body: dict):
     if not os.path.isdir(cwd):
         return JSONResponse({"error": f"cwd does not exist: {cwd}"}, status_code=400)
     item_id = work_store.create_item(objective, instance_key="personal")
-    session_id = str(uuid.uuid5(_SID_NS, f"work-item:{item_id}"))
+    session_id = str(uuid.uuid4())
     tmux_key = f"work-{item_id}"
     run_id = work_store.add_run(item_id, session_id, tmux_key, cwd)
     context = (
