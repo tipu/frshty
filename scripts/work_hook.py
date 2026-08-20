@@ -39,7 +39,11 @@ def main() -> int:
         }
         import core.db as db
         from services import work_store
-        db.init(Path(DB_PATH), Path(__file__).resolve().parent.parent / "migrations")
+        db._DB_PATH = Path(DB_PATH)
+        try:
+            db.query_one("SELECT 1 FROM work_runs LIMIT 1")
+        except Exception:
+            db.init(Path(DB_PATH), Path(__file__).resolve().parent.parent / "migrations")
         payload["last_assistant_message"] = work_store.last_assistant_text(transcript_path)[:300]
         work_store.record_event(session_id, kind, payload)
         if kind == "Stop":
