@@ -142,6 +142,7 @@ class TestIntake:
         args = mock_launch.call_args
         assert args.args[0] == f"work-{d['item_id']}"
         assert args.args[2] == d["session_id"]
+        assert d["session_id"] != ""
         assert "ship the widget" in args.args[3]
         assert args.args[4] is True
         item = db.query_one("SELECT state FROM work_items WHERE id = ?", (d["item_id"],))
