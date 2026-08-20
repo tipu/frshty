@@ -246,6 +246,23 @@ class TestHookIntegrityCoversWhatStatusCannotSee:
             "        name: types\n        entry: pipenv --quiet run basedpyright\n")
         assert T._local_hook_entries(r) == []
 
+    def test_only_the_command_is_watched_not_its_arguments(self, tmp_path):
+        """`run` is an argument of `pipenv --quiet run basedpyright`, and a repo
+        that happens to contain a file called run must not have it watched: an
+        ordinary edit to it would then be rejected as tampering."""
+        r = _repo(tmp_path)
+        (r / "run").write_text("#!/bin/sh\necho hello\n")
+        (r / ".pre-commit-config.yaml").write_text(
+            "repos:\n  - repo: local\n    hooks:\n      - id: types\n"
+            "        name: types\n        entry: pipenv --quiet run basedpyright\n")
+        _git(r, "add", "-A")
+        _git(r, "commit", "-qm", "has a file called run", "--no-verify")
+        assert T._local_hook_entries(r) == []
+        before = T._hook_integrity(r)
+        (r / "run").write_text("#!/bin/sh\necho hi\n")
+        ok, why = T._repair_touched_only_code(r, before)
+        assert ok, why
+
     def test_a_tilde_in_the_hooks_path_is_expanded(self, tmp_path):
         """Git expands ~ in pathname values. Leaving it literal makes the watched
         path a directory named "~" inside the repo, which never exists."""
@@ -420,7 +437,7 @@ class TestRejectionLeavesNoWorkingHole:
         fake = r / ".venv" / "bin" / "pre-commit"
         fake.write_text("#!/bin/sh\nexit 0\n")
         fake.chmod(0o755)
-        failed = T._restore_hook_setup(before)
+        failed = T._restore_hook_setup(before, T._restorable_roots(r))
         assert failed == []
         assert not fake.exists(), "the planted runner must not survive the rejection"
 
@@ -432,7 +449,7 @@ class TestRejectionLeavesNoWorkingHole:
         real.chmod(0o755)
         before = T._hook_integrity(r)
         real.write_text("#!/bin/sh\nexit 0\n")
-        assert T._restore_hook_setup(before) == []
+        assert T._restore_hook_setup(before, T._restorable_roots(r)) == []
         assert "the-real-thing" in real.read_text()
         assert real.stat().st_mode & 0o111, "the runner must stay executable"
 
@@ -442,7 +459,7 @@ class TestRejectionLeavesNoWorkingHole:
         excl = r / ".git" / "info" / "exclude"
         excl.parent.mkdir(parents=True, exist_ok=True)
         excl.write_text("shadow.py\n")
-        assert T._restore_hook_setup(before) == []
+        assert T._restore_hook_setup(before, T._restorable_roots(r)) == []
         ok, _ = T._repair_touched_only_code(r, before)
         assert ok, "after restoration the fingerprint must match again"
 
@@ -459,7 +476,7 @@ class TestRejectionLeavesNoWorkingHole:
         cfg = r / ".pre-commit-config.yaml"
         cfg.unlink()
         cfg.symlink_to(victim)
-        assert T._restore_hook_setup(before) == []
+        assert T._restore_hook_setup(before, T._restorable_roots(r)) == []
         assert victim.read_text() == "DO NOT OVERWRITE\n"
         assert not cfg.is_symlink()
         assert cfg.read_text() == "repos: []\n"
@@ -486,7 +503,7 @@ class TestRejectionLeavesNoWorkingHole:
         cfg.unlink()
         cfg.mkdir()
         (cfg / "decoy").write_text("x\n")
-        assert T._restore_hook_setup(before) == []
+        assert T._restore_hook_setup(before, T._restorable_roots(r)) == []
         assert cfg.is_file()
         assert cfg.read_text() == "repos: []\n"
 
@@ -503,7 +520,7 @@ class TestRejectionLeavesNoWorkingHole:
         runner.write_text("#!/bin/sh\nexit 0\n")
         bindir.chmod(0o555)
         try:
-            failed = T._restore_hook_setup(before)
+            failed = T._restore_hook_setup(before, T._restorable_roots(r))
         finally:
             bindir.chmod(0o755)
         assert failed, "an unwritable path must be reported, not skipped"
@@ -522,7 +539,7 @@ class TestRejectionLeavesNoWorkingHole:
         elsewhere.mkdir()
         _git(r, "config", "core.hooksPath", str(elsewhere))
         original.write_text("#!/bin/sh\nexit 0\n")
-        assert T._restore_hook_setup(before) == []
+        assert T._restore_hook_setup(before, T._restorable_roots(r)) == []
         assert "exec real-check" in original.read_text(), (
             "the hook recorded before the repair is the one that must be put back")
         assert not (elsewhere / "pre-commit").exists(), (
@@ -538,8 +555,25 @@ class TestRejectionLeavesNoWorkingHole:
         before = T._hook_integrity(r)
         runner.write_text("#!/bin/sh\nexit 0\n")
         runner.chmod(0o644)
-        assert T._restore_hook_setup(before) == []
+        assert T._restore_hook_setup(before, T._restorable_roots(r)) == []
         assert runner.stat().st_mode & 0o111, "the runner must be executable again"
+
+    def test_a_config_outside_the_checkout_is_reported_not_rewritten(self, tmp_path):
+        """`git config --show-origin` names ~/.gitconfig and /etc/gitconfig, so a
+        change to either has to block the ticket. Writing them back would have
+        frshty rewriting the operator's own configuration from a recording it
+        took minutes earlier."""
+        r = _repo(tmp_path)
+        outside = tmp_path / "their.gitconfig"
+        outside.write_text("[core]\n\tquotePath = false\n")
+        _git(r, "config", "include.path", str(outside))
+        before = T._hook_integrity(r)
+        assert outside in before
+        outside.write_text("[core]\n\tquotePath = true\n")
+        failed = T._restore_hook_setup(before, T._restorable_roots(r))
+        assert str(outside) in failed, "the change must be reported"
+        assert outside.read_text() == "[core]\n\tquotePath = true\n", (
+            "and the file must not be rewritten")
 
     def test_the_router_removes_a_planted_runner_not_just_the_guard(self, tmp_path):
         """Through _route_hook_failure, not by calling the restore directly. A
