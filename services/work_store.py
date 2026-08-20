@@ -213,23 +213,40 @@ def last_assistant_text(transcript_path: str) -> str:
     return text.strip()
 
 
-def record_artifacts(session_id: str, transcript_path: str) -> int:
-    text = ""
-    if transcript_path and os.path.isfile(transcript_path):
+def _assistant_texts(transcript_path: str) -> list[str]:
+    if not transcript_path or not os.path.isfile(transcript_path):
+        return []
+    try:
+        with open(transcript_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 262144))
+            raw = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+    texts = []
+    for line in raw.splitlines():
+        if '"type":"assistant"' not in line and '"type": "assistant"' not in line:
+            continue
         try:
-            with open(transcript_path, "rb") as f:
-                f.seek(0, os.SEEK_END)
-                size = f.tell()
-                f.seek(max(0, size - 262144))
-                text = f.read().decode("utf-8", errors="replace")
-        except OSError:
-            return 0
+            d = json.loads(line)
+        except ValueError:
+            continue
+        content = (d.get("message") or {}).get("content") or []
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "text" and b.get("text"):
+                texts.append(b["text"])
+    return texts
+
+
+def record_artifacts(session_id: str, transcript_path: str) -> int:
     found = []
-    for line in text.splitlines():
+    lines = [ln for t in _assistant_texts(transcript_path) for ln in t.splitlines()]
+    for line in lines:
         idx = line.find(ARTIFACT_MARKER)
         if idx < 0:
             continue
-        rest = line[idx + len(ARTIFACT_MARKER):].strip().strip('"').replace("\u2014", " - ")
+        rest = line[idx + len(ARTIFACT_MARKER):].strip().replace("\u2014", " - ").replace("—", " - ")
         for sep in (" — ", " - ", " -- "):
             if sep in rest:
                 path, note = rest.split(sep, 1)

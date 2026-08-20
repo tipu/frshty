@@ -472,6 +472,7 @@ class TestArtifacts:
         assert again == 0
         hits = work_store.find_artifacts("quarterly")
         assert hits and hits[0]["path"] == "/tmp/report.html"
+        assert hits[0]["note"] == "quarterly report page"
         assert hits[0]["objective"] == "make a report"
         assert work_store.find_artifacts("no-such-thing-xyz") == []
 
