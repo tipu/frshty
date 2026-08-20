@@ -49,6 +49,9 @@
         {{ it.scope }} · updated {{ ago(it.updated_at) }}
         <span v-if="it.instance_key"> · {{ it.instance_key }}</span>
       </div>
+      <div class="mt-2" v-if="g === 'done'">
+        <span class="wbtn" @click="act(it, 'reopen')">reopen</span>
+      </div>
       <div class="mt-2" v-if="g !== 'done'">
         <span class="wbtn" v-if="it.last_tmux_key" @click="openTerminal(it)">terminal</span>
         <span class="wbtn" @click="act(it, 'done')">done</span>
