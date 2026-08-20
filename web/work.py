@@ -26,9 +26,14 @@ def _personal_config() -> dict | None:
     return entry.config
 
 
+def _fresh(resp: HTMLResponse) -> HTMLResponse:
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
 @router.get("/work", response_class=HTMLResponse)
 def work_page():
-    return _template("work.html")
+    return _fresh(_template("work.html"))
 
 
 @router.get("/api/work/items")
@@ -84,7 +89,7 @@ def api_work_intake(body: dict):
         work_store.mark_launch_failed(run_id, f"{type(e).__name__}: {e}")
         log.emit("work_launch_failed", f"work item {item_id}: {type(e).__name__}: {e}")
         return JSONResponse({"error": f"launch failed: {e}", "item_id": item_id}, status_code=500)
-    threading.Thread(target=_kickoff, args=(tmux_key,), daemon=True).start()
+    threading.Thread(target=_kickoff, args=(tmux_key, run_id), daemon=True).start()
     counts = {g: len(rows) for g, rows in work_store.grouped_items().items()}
     return {"item_id": item_id, "run_id": run_id, "session_id": session_id,
             "tmux_key": tmux_key, "state": "agent_working", "counts": counts}
@@ -111,24 +116,26 @@ def api_work_detail(item_id: int):
 
 @router.get("/work/{item_id}", response_class=HTMLResponse)
 def work_detail_page(item_id: int):
-    return _template("work_detail.html")
+    return _fresh(_template("work_detail.html"))
 
 
 @router.get("/work/{item_id}/terminal", response_class=HTMLResponse)
 def work_terminal_page(item_id: int):
-    return _template("work_terminal.html")
+    return _fresh(_template("work_terminal.html"))
 
 
-def _kickoff(tmux_key: str):
-    for _ in range(30):
-        time.sleep(3)
-        try:
+def _kickoff(tmux_key: str, run_id: int):
+    try:
+        for _ in range(30):
+            time.sleep(3)
             if terminal.session_healthy(tmux_key).get("claude_running"):
                 time.sleep(4)
-                work_store.tmux_send(tmux_key, "Begin the objective from your system prompt now.")
-                return
-        except Exception:
-            return
+                if work_store.tmux_send(tmux_key, "Begin the objective from your system prompt now."):
+                    return
+                break
+        work_store.mark_launch_failed(run_id, "kickoff never delivered: Claude did not start in the pane")
+    except Exception as e:
+        work_store.mark_launch_failed(run_id, f"kickoff error: {type(e).__name__}: {e}")
 
 
 @router.get("/api/work/artifacts")

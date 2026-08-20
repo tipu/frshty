@@ -387,6 +387,21 @@ class TestAutocontinue:
         assert s["state"] == "needs_you"
         assert "staging bucket" in s["stop_reason"]
 
+    def test_done_marker_echo_does_not_complete(self, monkeypatch):
+        item_id, _, sender = self._setup(
+            monkeypatch, tail="I will end with WORK_DONE when finished. Proceeding with step 2.")
+        out = work_store.maybe_autocontinue(f"sid-auto-{item_id}", "/tmp/t.jsonl")
+        assert out == "continued"
+        assert self._state(item_id)["state"] == "agent_working"
+
+    def test_delayed_event_cannot_resurrect_done(self):
+        item_id = _mkitem("resurrect guard")
+        work_store.add_run(item_id, f"sid-res-{item_id}", f"work-{item_id}", "/tmp")
+        work_store.apply_action(item_id, "done")
+        work_store.record_event(f"sid-res-{item_id}", "UserPromptSubmit", {})
+        assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                            (item_id,))["state"] == "done"
+
     def test_done_marker_completes_item(self, monkeypatch):
         item_id, run_id, sender = self._setup(monkeypatch, tail="All files written.\nWORK_DONE")
         out = work_store.maybe_autocontinue(f"sid-auto-{item_id}", "/tmp/t.jsonl")
@@ -426,6 +441,7 @@ class TestReply:
         work_store.record_event(f"sid-reply-{item_id}", "Stop", {})
         sender = MagicMock(return_value=True)
         monkeypatch.setattr(work_store, "tmux_send", sender)
+        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
         out = work_store.reply(item_id, "use the staging bucket")
         assert out == {"id": item_id, "action": "reply"}
         sender.assert_called_once_with(f"work-{item_id}", "use the staging bucket")
@@ -435,9 +451,16 @@ class TestReply:
     def test_reply_dead_session_errors(self, monkeypatch):
         item_id = _mkitem("reply dead")
         work_store.add_run(item_id, f"sid-rd-{item_id}", f"work-{item_id}", "/tmp")
-        monkeypatch.setattr(work_store, "tmux_send", lambda *a: False)
+        monkeypatch.setattr(work_store, "claude_running", lambda k: False)
         out = work_store.reply(item_id, "hello")
-        assert out["error"] == "tmux session gone"
+        assert "no live Claude" in out["error"]
+
+    def test_reply_on_done_item_refused(self, monkeypatch):
+        item_id = _mkitem("reply done")
+        work_store.add_run(item_id, f"sid-rdn-{item_id}", f"work-{item_id}", "/tmp")
+        work_store.apply_action(item_id, "done")
+        out = work_store.reply(item_id, "hello")
+        assert "reopen" in out["error"]
 
 
 class TestTranscriptTail:

@@ -12,6 +12,8 @@ DONE_WINDOW_DAYS = 7
 GROUPS = ("needs_you", "agent_working", "waiting_external", "failed_stale", "done")
 
 launch_lock = threading.Lock()
+_send_locks: dict[str, threading.Lock] = {}
+_send_locks_guard = threading.Lock()
 
 TMUX_SOCKET = os.path.expanduser("~/.frshty-tmux")
 DONE_MARKER = "WORK_DONE"
@@ -119,7 +121,7 @@ def record_event(session_id: str, kind: str, payload: dict) -> bool:
             run_params.append(now)
         run_params.append(run["id"])
         c.execute(f"UPDATE work_runs SET {', '.join(run_sets)} WHERE id = ?", tuple(run_params))
-        if item_state == "needs_you" and item["state"] == "done":
+        if item["state"] == "done":
             return True
         if item_state:
             reason = ""
@@ -168,25 +170,47 @@ def apply_action(item_id: int, action: str, until: str | None = None) -> dict:
     return {"id": item_id, "action": action}
 
 
-def tmux_send(tmux_key: str, text: str) -> bool:
-    session = f"term-{tmux_key}"
-    tmux = "tmux"
+def _tmux_bin() -> str:
     for candidate in ("/usr/bin/tmux", "/opt/homebrew/bin/tmux", os.path.expanduser("~/.local/bin/tmux")):
         if os.path.exists(candidate):
-            tmux = candidate
-            break
-    alive = subprocess.run([tmux, "-S", TMUX_SOCKET, "has-session", "-t", session],
-                           capture_output=True)
-    if alive.returncode != 0:
+            return candidate
+    return "tmux"
+
+
+def _pane_lock(session: str) -> threading.Lock:
+    with _send_locks_guard:
+        return _send_locks.setdefault(session, threading.Lock())
+
+
+def claude_running(tmux_key: str) -> bool:
+    session = f"term-{tmux_key}"
+    tmux = _tmux_bin()
+    panes = subprocess.run([tmux, "-S", TMUX_SOCKET, "list-panes", "-t", session, "-F", "#{pane_pid}"],
+                           capture_output=True, text=True)
+    if panes.returncode != 0 or not panes.stdout.strip():
         return False
-    sent = subprocess.run([tmux, "-S", TMUX_SOCKET, "send-keys", "-t", session, text],
-                          capture_output=True)
-    if sent.returncode != 0:
-        return False
-    time.sleep(0.4)
-    enter = subprocess.run([tmux, "-S", TMUX_SOCKET, "send-keys", "-t", session, "Enter"],
-                          capture_output=True)
-    return enter.returncode == 0
+    pane_pid = panes.stdout.strip().splitlines()[0]
+    check = subprocess.run(["pgrep", "-P", pane_pid, "-f", "claude"],
+                           capture_output=True, text=True)
+    return bool(check.stdout.strip())
+
+
+def tmux_send(tmux_key: str, text: str) -> bool:
+    session = f"term-{tmux_key}"
+    tmux = _tmux_bin()
+    with _pane_lock(session):
+        alive = subprocess.run([tmux, "-S", TMUX_SOCKET, "has-session", "-t", session],
+                               capture_output=True)
+        if alive.returncode != 0:
+            return False
+        sent = subprocess.run([tmux, "-S", TMUX_SOCKET, "send-keys", "-t", session, "-l", "--", text],
+                              capture_output=True)
+        if sent.returncode != 0:
+            return False
+        time.sleep(0.4)
+        enter = subprocess.run([tmux, "-S", TMUX_SOCKET, "send-keys", "-t", session, "Enter"],
+                              capture_output=True)
+        return enter.returncode == 0
 
 
 def last_assistant_text(transcript_path: str) -> str:
@@ -392,7 +416,8 @@ def maybe_autocontinue(session_id: str, transcript_path: str) -> str:
         if not item or item["state"] != "needs_you":
             return "not_applicable"
         excerpt = tail[:300]
-        if DONE_MARKER in tail:
+        final_lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
+        if final_lines and final_lines[-1] == DONE_MARKER:
             c.execute(
                 "UPDATE work_items SET state = 'done', stop_reason = '', "
                 "current_checkpoint = ?, updated_at = ? WHERE id = ?",
@@ -416,9 +441,18 @@ def maybe_autocontinue(session_id: str, transcript_path: str) -> str:
                 (run["work_item_id"], run["id"], now),
             )
             return "question"
-        if not item["autocontinue"] or item["continues_used"] >= item["continue_cap"]:
-            return "capped" if item["autocontinue"] else "disabled"
-        if not tmux_send(run["tmux_key"], CONTINUE_PROMPT):
+        if not item["autocontinue"]:
+            return "disabled"
+        if item["continues_used"] >= item["continue_cap"]:
+            return "capped"
+    sent = tmux_send(run["tmux_key"], CONTINUE_PROMPT)
+    now = _now()
+    with db.tx() as c:
+        current = c.execute("SELECT state FROM work_items WHERE id = ?",
+                            (run["work_item_id"],)).fetchone()
+        if not current or current["state"] != "needs_you":
+            return "not_applicable"
+        if not sent:
             c.execute("UPDATE work_items SET stop_reason = 'tmux session gone', "
                       "state = 'failed_stale', updated_at = ? WHERE id = ?",
                       (now, run["work_item_id"]))
@@ -439,12 +473,19 @@ def maybe_autocontinue(session_id: str, transcript_path: str) -> str:
 def reply(item_id: int, text: str) -> dict:
     now = _now()
     with db.tx() as c:
+        item = c.execute("SELECT state FROM work_items WHERE id = ?", (item_id,)).fetchone()
+        if not item:
+            return {"error": "unknown work item"}
+        if item["state"] == "done":
+            return {"error": "item is done; reopen it before replying"}
         run = c.execute(
             "SELECT id, tmux_key FROM work_runs WHERE work_item_id = ? ORDER BY id DESC LIMIT 1",
             (item_id,),
         ).fetchone()
         if not run:
             return {"error": "no run for this item"}
+    if not claude_running(run["tmux_key"]):
+        return {"error": "no live Claude in the session; open the terminal"}
     if not tmux_send(run["tmux_key"], text):
         return {"error": "tmux session gone"}
     with db.tx() as c:
@@ -469,7 +510,8 @@ def grouped_items(now: datetime | None = None) -> dict[str, list[dict]]:
     rows = db.query_all(
         "SELECT i.*, "
         "(SELECT session_id FROM work_runs r WHERE r.work_item_id = i.id ORDER BY r.id DESC LIMIT 1) AS last_session_id, "
-        "(SELECT tmux_key FROM work_runs r WHERE r.work_item_id = i.id ORDER BY r.id DESC LIMIT 1) AS last_tmux_key "
+        "(SELECT tmux_key FROM work_runs r WHERE r.work_item_id = i.id ORDER BY r.id DESC LIMIT 1) AS last_tmux_key, "
+        "EXISTS(SELECT 1 FROM work_events e WHERE e.work_item_id = i.id AND e.kind = 'operator_done') AS operator_confirmed "
         "FROM work_items i ORDER BY i.priority DESC, i.updated_at DESC"
     )
     groups: dict[str, list[dict]] = {g: [] for g in GROUPS}

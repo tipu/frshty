@@ -5,7 +5,7 @@
 <meta charset="utf-8">
 <title>Work — frshty</title>
 <script src="/static/tailwind.js"></script>
-<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="/static/vendor/vue.global.prod.js"></script>
 <script src="/static/frshty-nav.js"></script>
 <script src="/static/frshty-shell.js"></script>
 <link rel="stylesheet" href="/static/frshty.css">
@@ -25,15 +25,24 @@
 </style>
 </head>
 <body class="bg-[#0b0b10] text-gray-200">
+<div id="boot-error" class="max-w-5xl mx-auto px-6 py-3 text-sm" style="background:#7f1d1d;color:#fca5a5;">
+  The board application failed to start. Hard-refresh this page (Ctrl/Cmd+Shift+R). If this banner stays, the frshty daemon or its static assets are broken.
+</div>
 <div id="app" class="max-w-5xl mx-auto px-6 py-6">
+  <div v-if="connError" class="text-sm px-4 py-2 mb-4 rounded" style="background:#7f1d1d;color:#fca5a5;">
+    {{ connError }}
+  </div>
   <div class="flex items-center justify-between mb-6">
     <h1 class="text-xl font-bold">Work</h1>
     <span class="text-xs text-gray-500" v-if="!personalLoaded">personal instance not loaded — read-only</span>
   </div>
   <form @submit.prevent="intake" class="mb-8">
-    <input class="wintake" v-model="intakeText" :disabled="!personalLoaded"
+    <input class="wintake" v-model="intakeText" :disabled="!personalLoaded || intakeBusy"
            placeholder="Describe an outcome. Enter launches a run." />
+    <input class="wintake mt-2" style="font-size:12px" v-model="intakeCwd" :disabled="!personalLoaded || intakeBusy"
+           placeholder="Working directory (optional, absolute path; default: personal workspace)" />
     <div class="text-xs text-red-400 mt-2" v-if="intakeError">{{ intakeError }}</div>
+    <div class="text-xs text-gray-500 mt-2" v-if="intakeBusy">launching…</div>
   </form>
   <div class="wgroup" v-for="g in groupOrder" :key="g" v-show="groups[g] && groups[g].length">
     <h2 class="text-sm font-bold uppercase tracking-wide text-gray-400 mb-2">
@@ -43,6 +52,10 @@
       <div class="flex items-center justify-between">
         <a class="font-medium underline decoration-gray-600 hover:decoration-gray-300" :href="'/work/' + it.id">{{ it.objective }}</a>
         <div class="text-xs text-gray-500">#{{ it.id }}</div>
+      </div>
+      <div class="text-xs mt-1" v-if="g === 'done'"
+           :style="it.operator_confirmed ? 'color:#86efac' : 'color:#fde047'">
+        {{ it.operator_confirmed ? 'done — you confirmed' : 'done — agent-reported, not verified by you' }}
       </div>
       <div class="wreason" v-if="it.stop_reason">{{ it.stop_reason }}</div>
       <div class="wmeta">
@@ -74,7 +87,8 @@ createApp({
   data() {
     return {
       groups: { needs_you: [], agent_working: [], waiting_external: [], failed_stale: [], done: [] },
-      personalLoaded: false, intakeText: "", intakeError: "", replyText: {},
+      personalLoaded: false, intakeText: "", intakeCwd: "", intakeError: "", intakeBusy: false,
+      connError: "", replyText: {},
       groupOrder: ["needs_you", "agent_working", "waiting_external", "failed_stale", "done"],
       labels: { needs_you: "Needs you", agent_working: "Agent working", waiting_external: "Waiting external", failed_stale: "Failed or stale", done: "Recently completed" },
       cls: { needs_you: "needs", agent_working: "working", waiting_external: "waiting", failed_stale: "stale", done: "done" },
@@ -85,36 +99,58 @@ createApp({
   },
   methods: {
     async refresh() {
-      const r = await fetch("/api/work/items");
-      const d = await r.json();
-      this.groups = d.groups; this.personalLoaded = d.personal_loaded;
+      try {
+        const r = await fetch("/api/work/items");
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const d = await r.json();
+        this.groups = d.groups; this.personalLoaded = d.personal_loaded;
+        this.connError = "";
+      } catch (e) {
+        this.connError = "Disconnected from frshty (" + e.message + "). Data below is stale; retrying every 15s.";
+      }
     },
     async intake() {
-      this.intakeError = "";
-      const r = await fetch("/api/work/intake", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: this.intakeText }),
-      });
-      const d = await r.json();
-      if (!r.ok) { this.intakeError = d.error || "intake failed"; return; }
-      this.intakeText = "";
-      await this.refresh();
+      this.intakeError = ""; this.intakeBusy = true;
+      try {
+        const r = await fetch("/api/work/intake", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: this.intakeText, cwd: this.intakeCwd }),
+        });
+        const d = await r.json();
+        if (!r.ok) { this.intakeError = d.error || "intake failed (HTTP " + r.status + ")"; return; }
+        this.intakeText = ""; this.intakeCwd = "";
+        await this.refresh();
+      } catch (e) {
+        this.intakeError = "request failed: " + e.message + " — is frshty up?";
+      } finally {
+        this.intakeBusy = false;
+      }
     },
     async act(it, action, until) {
-      await fetch(`/api/work/items/${it.id}/action`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, until }),
-      });
+      try {
+        const r = await fetch(`/api/work/items/${it.id}/action`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action, until }),
+        });
+        if (!r.ok) { const d = await r.json(); this.connError = d.error || ("action failed HTTP " + r.status); }
+      } catch (e) {
+        this.connError = "action failed: " + e.message;
+      }
       await this.refresh();
     },
     async reply(it) {
       const text = (this.replyText[it.id] || "").trim();
       if (!text) return;
-      const r = await fetch(`/api/work/items/${it.id}/reply`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text }),
-      });
-      if (r.ok) { this.replyText[it.id] = ""; await this.refresh(); }
+      try {
+        const r = await fetch(`/api/work/items/${it.id}/reply`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+        });
+        if (!r.ok) { const d = await r.json(); this.connError = d.error || ("reply failed HTTP " + r.status); return; }
+        this.replyText[it.id] = ""; await this.refresh();
+      } catch (e) {
+        this.connError = "reply failed: " + e.message;
+      }
     },
     snooze(it) {
       const until = new Date(Date.now() + 4 * 3600 * 1000).toISOString();
@@ -131,7 +167,11 @@ createApp({
       return Math.round(s / 86400) + "d ago";
     },
   },
-  mounted() { this.refresh(); setInterval(() => this.refresh(), 15000); },
+  mounted() {
+    const b = document.getElementById("boot-error");
+    if (b) b.remove();
+    this.refresh(); setInterval(() => this.refresh(), 15000);
+  },
 }).mount("#app");
 </script>
 </body>
