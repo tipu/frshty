@@ -40,7 +40,10 @@ def main() -> int:
         import core.db as db
         from services import work_store
         db.init(Path(DB_PATH), Path(__file__).resolve().parent.parent / "migrations")
+        payload["last_assistant_message"] = work_store.last_assistant_text(transcript_path)[:300]
         work_store.record_event(session_id, kind, payload)
+        if kind == "Stop":
+            work_store.maybe_autocontinue(session_id, transcript_path)
     except Exception:
         if os.environ.get("WORK_HOOK_DEBUG"):
             import traceback

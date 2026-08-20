@@ -1,4 +1,5 @@
 import os
+import threading
 import uuid
 
 from fastapi import APIRouter
@@ -63,7 +64,9 @@ def api_work_intake(body: dict):
     run_id = work_store.add_run(item_id, session_id, tmux_key, cwd)
     context = (
         f"# Work item {item_id}\n\n## Objective\n\n{objective}\n\n"
-        "Report a one-line checkpoint of where things stand before you stop."
+        "Work toward the objective. When you stop, state a one-line checkpoint. "
+        "If you need a decision only the operator can make, ask the question and stop. "
+        f"When the objective is fully met, end your final message with the single line {work_store.DONE_MARKER}."
     )
     try:
         with work_store.launch_lock:
@@ -75,9 +78,22 @@ def api_work_intake(body: dict):
         work_store.mark_launch_failed(run_id, f"{type(e).__name__}: {e}")
         log.emit("work_launch_failed", f"work item {item_id}: {type(e).__name__}: {e}")
         return JSONResponse({"error": f"launch failed: {e}", "item_id": item_id}, status_code=500)
+    threading.Timer(10.0, work_store.tmux_send,
+                    args=(tmux_key, "Begin the objective from your system prompt now.")).start()
     counts = {g: len(rows) for g, rows in work_store.grouped_items().items()}
     return {"item_id": item_id, "run_id": run_id, "session_id": session_id,
             "tmux_key": tmux_key, "state": "agent_working", "counts": counts}
+
+
+@router.post("/api/work/items/{item_id}/reply")
+def api_work_reply(item_id: int, body: dict):
+    text = (body.get("text") or "").strip()
+    if not text:
+        return JSONResponse({"error": "empty reply"}, status_code=400)
+    result = work_store.reply(item_id, text)
+    if "error" in result:
+        return JSONResponse(result, status_code=409)
+    return result
 
 
 @router.get("/work/{item_id}/terminal", response_class=HTMLResponse)

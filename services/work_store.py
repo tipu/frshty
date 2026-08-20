@@ -1,3 +1,6 @@
+import json
+import os
+import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
 
@@ -8,6 +11,14 @@ DONE_WINDOW_DAYS = 7
 GROUPS = ("needs_you", "agent_working", "waiting_external", "failed_stale", "done")
 
 launch_lock = threading.Lock()
+
+TMUX_SOCKET = os.path.expanduser("~/.frshty-tmux")
+DONE_MARKER = "WORK_DONE"
+CONTINUE_PROMPT = (
+    "Continue toward the objective. If you are blocked on a decision only the "
+    "operator can make, ask the question and stop. If the objective is fully "
+    f"met, end your message with the single line {DONE_MARKER}."
+)
 
 _EVENT_TRANSITIONS = {
     "SessionStart": ("running", "agent_working", None),
@@ -135,6 +146,9 @@ def apply_action(item_id: int, action: str, until: str | None = None) -> dict:
                 "UPDATE work_items SET state = 'waiting_external', snoozed_until = ?, updated_at = ? WHERE id = ?",
                 (until, now, item_id),
             )
+        elif action in ("autocontinue_on", "autocontinue_off"):
+            c.execute("UPDATE work_items SET autocontinue = ?, updated_at = ? WHERE id = ?",
+                      (1 if action == "autocontinue_on" else 0, now, item_id))
         elif action == "reopen":
             c.execute(
                 "UPDATE work_items SET state = 'needs_you', snoozed_until = NULL, updated_at = ? WHERE id = ?",
@@ -147,6 +161,139 @@ def apply_action(item_id: int, action: str, until: str | None = None) -> dict:
             (item_id, f"operator_{action}", db.dump_json({"until": until}), now),
         )
     return {"id": item_id, "action": action}
+
+
+def tmux_send(tmux_key: str, text: str) -> bool:
+    session = f"term-{tmux_key}"
+    tmux = "tmux"
+    for candidate in ("/usr/bin/tmux", "/opt/homebrew/bin/tmux", os.path.expanduser("~/.local/bin/tmux")):
+        if os.path.exists(candidate):
+            tmux = candidate
+            break
+    alive = subprocess.run([tmux, "-S", TMUX_SOCKET, "has-session", "-t", session],
+                           capture_output=True)
+    if alive.returncode != 0:
+        return False
+    sent = subprocess.run([tmux, "-S", TMUX_SOCKET, "send-keys", "-t", session, text, "Enter"],
+                          capture_output=True)
+    return sent.returncode == 0
+
+
+def last_assistant_text(transcript_path: str) -> str:
+    if not transcript_path or not os.path.isfile(transcript_path):
+        return ""
+    try:
+        with open(transcript_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 131072))
+            tail = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    text = ""
+    for line in tail.splitlines():
+        if '"type":"assistant"' not in line and '"type": "assistant"' not in line:
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        content = (d.get("message") or {}).get("content") or []
+        parts = [b.get("text", "") for b in content
+                 if isinstance(b, dict) and b.get("type") == "text"]
+        if parts:
+            text = "\n".join(parts)
+    return text.strip()
+
+
+def _looks_like_question(text: str) -> bool:
+    return "?" in text[-300:]
+
+
+def maybe_autocontinue(session_id: str, transcript_path: str) -> str:
+    tail = last_assistant_text(transcript_path)
+    now = _now()
+    with db.tx() as c:
+        run = c.execute(
+            "SELECT id, work_item_id, tmux_key FROM work_runs WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if not run:
+            return "unknown_session"
+        item = c.execute(
+            "SELECT state, autocontinue, continues_used, continue_cap "
+            "FROM work_items WHERE id = ?", (run["work_item_id"],),
+        ).fetchone()
+        if not item or item["state"] != "needs_you":
+            return "not_applicable"
+        excerpt = tail[:300]
+        if DONE_MARKER in tail:
+            c.execute(
+                "UPDATE work_items SET state = 'done', stop_reason = '', "
+                "current_checkpoint = ?, updated_at = ? WHERE id = ?",
+                (excerpt, now, run["work_item_id"]),
+            )
+            c.execute("UPDATE work_runs SET status = 'finished', finished_at = ? WHERE id = ?",
+                      (now, run["id"]))
+            c.execute(
+                "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+                "VALUES (?, ?, 'self_reported_done', ?, ?)",
+                (run["work_item_id"], run["id"], db.dump_json({"tail": excerpt}), now),
+            )
+            return "done"
+        if excerpt:
+            c.execute("UPDATE work_items SET stop_reason = ? WHERE id = ?",
+                      (excerpt, run["work_item_id"]))
+        if _looks_like_question(tail):
+            c.execute(
+                "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+                "VALUES (?, ?, 'question_detected', '{}', ?)",
+                (run["work_item_id"], run["id"], now),
+            )
+            return "question"
+        if not item["autocontinue"] or item["continues_used"] >= item["continue_cap"]:
+            return "capped" if item["autocontinue"] else "disabled"
+        if not tmux_send(run["tmux_key"], CONTINUE_PROMPT):
+            c.execute("UPDATE work_items SET stop_reason = 'tmux session gone', "
+                      "state = 'failed_stale', updated_at = ? WHERE id = ?",
+                      (now, run["work_item_id"]))
+            return "session_gone"
+        c.execute(
+            "UPDATE work_items SET state = 'agent_working', continues_used = continues_used + 1, "
+            "updated_at = ? WHERE id = ?", (now, run["work_item_id"]),
+        )
+        c.execute("UPDATE work_runs SET status = 'running' WHERE id = ?", (run["id"],))
+        c.execute(
+            "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+            "VALUES (?, ?, 'auto_continued', ?, ?)",
+            (run["work_item_id"], run["id"], db.dump_json({"n": item["continues_used"] + 1}), now),
+        )
+    return "continued"
+
+
+def reply(item_id: int, text: str) -> dict:
+    now = _now()
+    with db.tx() as c:
+        run = c.execute(
+            "SELECT id, tmux_key FROM work_runs WHERE work_item_id = ? ORDER BY id DESC LIMIT 1",
+            (item_id,),
+        ).fetchone()
+        if not run:
+            return {"error": "no run for this item"}
+    if not tmux_send(run["tmux_key"], text):
+        return {"error": "tmux session gone"}
+    with db.tx() as c:
+        c.execute(
+            "UPDATE work_items SET state = 'agent_working', stop_reason = '', updated_at = ? "
+            "WHERE id = ?", (now, item_id),
+        )
+        c.execute("UPDATE work_runs SET status = 'running' WHERE id = ?", (run["id"],))
+        c.execute(
+            "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+            "VALUES (?, ?, 'operator_reply', ?, ?)",
+            (item_id, run["id"], db.dump_json({"text": text[:500]}), now),
+        )
+    return {"id": item_id, "action": "reply"}
 
 
 def grouped_items(now: datetime | None = None) -> dict[str, list[dict]]:
