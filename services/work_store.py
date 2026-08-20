@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 import core.db as db
@@ -14,6 +15,7 @@ launch_lock = threading.Lock()
 
 TMUX_SOCKET = os.path.expanduser("~/.frshty-tmux")
 DONE_MARKER = "WORK_DONE"
+ARTIFACT_MARKER = "ARTIFACT:"
 CONTINUE_PROMPT = (
     "Continue toward the objective. If you are blocked on a decision only the "
     "operator can make, ask the question and stop. If the objective is fully "
@@ -174,9 +176,14 @@ def tmux_send(tmux_key: str, text: str) -> bool:
                            capture_output=True)
     if alive.returncode != 0:
         return False
-    sent = subprocess.run([tmux, "-S", TMUX_SOCKET, "send-keys", "-t", session, text, "Enter"],
+    sent = subprocess.run([tmux, "-S", TMUX_SOCKET, "send-keys", "-t", session, text],
                           capture_output=True)
-    return sent.returncode == 0
+    if sent.returncode != 0:
+        return False
+    time.sleep(0.4)
+    enter = subprocess.run([tmux, "-S", TMUX_SOCKET, "send-keys", "-t", session, "Enter"],
+                          capture_output=True)
+    return enter.returncode == 0
 
 
 def last_assistant_text(transcript_path: str) -> str:
@@ -204,6 +211,63 @@ def last_assistant_text(transcript_path: str) -> str:
         if parts:
             text = "\n".join(parts)
     return text.strip()
+
+
+def record_artifacts(session_id: str, transcript_path: str) -> int:
+    text = ""
+    if transcript_path and os.path.isfile(transcript_path):
+        try:
+            with open(transcript_path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                f.seek(max(0, size - 262144))
+                text = f.read().decode("utf-8", errors="replace")
+        except OSError:
+            return 0
+    found = []
+    for line in text.splitlines():
+        idx = line.find(ARTIFACT_MARKER)
+        if idx < 0:
+            continue
+        rest = line[idx + len(ARTIFACT_MARKER):].strip().strip('"').replace("\u2014", " - ")
+        for sep in (" — ", " - ", " -- "):
+            if sep in rest:
+                path, note = rest.split(sep, 1)
+                break
+        else:
+            path, note = rest, ""
+        path = path.strip()
+        if path.startswith("/") and len(path) < 500:
+            found.append((path, note.strip()[:200]))
+    if not found:
+        return 0
+    now = _now()
+    added = 0
+    with db.tx() as c:
+        run = c.execute(
+            "SELECT id, work_item_id FROM work_runs WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        if not run:
+            return 0
+        for path, note in found:
+            cur = c.execute(
+                "INSERT OR IGNORE INTO work_artifacts(work_item_id, work_run_id, path, note, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (run["work_item_id"], run["id"], path, note, now),
+            )
+            added += cur.rowcount
+    return added
+
+
+def find_artifacts(query: str = "", limit: int = 20) -> list[dict]:
+    like = f"%{query}%"
+    return db.query_all(
+        "SELECT a.id, a.path, a.note, a.created_at, a.work_item_id, i.objective "
+        "FROM work_artifacts a LEFT JOIN work_items i ON i.id = a.work_item_id "
+        "WHERE a.path LIKE ? OR a.note LIKE ? OR i.objective LIKE ? "
+        "ORDER BY a.id DESC LIMIT ?",
+        (like, like, like, limit),
+    )
 
 
 def _looks_like_question(text: str) -> bool:
