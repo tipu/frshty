@@ -207,7 +207,7 @@ class TestHookIntegrityCoversWhatStatusCannotSee:
         assert not ok
         assert "hook setup" in why
 
-    def test_a_global_config_is_watched_too(self, tmp_path):
+    def test_an_included_config_is_watched_too(self, tmp_path):
         """core.hooksPath and core.excludesFile can be set in any config file git
         reads, so the watched set comes from git rather than from a guess."""
         r = _repo(tmp_path)
@@ -354,7 +354,88 @@ class TestTheGuardAcceptsWhatFormattersProduce:
         assert ok, why
 
 
-class TestSuppressionIsJudgedOnAddedLinesOnly:
+class TestJudgedAgainstThePreRepairTree:
+    """`git status` compares against HEAD, so it reports the ticket's own earlier
+    work as well as the repair's. The guard blamed the repair for a manifest the
+    ticket had legitimately edited hours before, and no repair could ever pass in
+    that checkout again."""
+
+    def _staged(self, tmp_path: Path):
+        r = _repo(tmp_path)
+        (r / "package.json").write_text('{"name":"a"}\n')
+        (r / "run").write_text("#!/bin/sh\n")
+        _git(r, "add", "-A")
+        _git(r, "commit", "-qm", "seed", "--no-verify")
+        return r
+
+    def _judge(self, r: Path, prior, repair):
+        prior(r)
+        _git(r, "add", "-A")   # what _commit_workspace_changes does before committing
+        snapshot = T._snapshot_repo(r)
+        before = T._hook_integrity(r)
+        repair(r)
+        return T._repair_touched_only_code(r, before, snapshot)
+
+    def test_a_manifest_the_ticket_edited_earlier_is_not_the_repairs_doing(self, tmp_path):
+        r = self._staged(tmp_path)
+        ok, why = self._judge(r,
+                              lambda r: (r / "package.json").write_text('{"name":"a","dep":"1"}\n'),
+                              lambda r: (r / "app.py").write_text("x = 9\n"))
+        assert ok, why
+
+    def test_a_manifest_the_repair_edited_is_still_rejected(self, tmp_path):
+        r = self._staged(tmp_path)
+        ok, why = self._judge(r, lambda r: None,
+                              lambda r: (r / "package.json").write_text('{"name":"cheat"}\n'))
+        assert not ok
+        assert "package.json" in why
+
+    def test_a_file_the_ticket_added_earlier_is_not_the_repairs_doing(self, tmp_path):
+        r = self._staged(tmp_path)
+        ok, why = self._judge(r, lambda r: (r / "new.py").write_text("y = 2\n"),
+                              lambda r: (r / "app.py").write_text("x = 9\n"))
+        assert ok, why
+
+    def test_an_untracked_file_that_was_already_there_is_not_the_repairs_doing(self, tmp_path):
+        """A build artifact nobody gitignored is untracked before the repair and
+        still untracked after it. Rejecting on its presence blocks every repair
+        in that checkout."""
+        r = self._staged(tmp_path)
+        (r / "build.log").write_text("noise\n")
+        snapshot = T._snapshot_repo(r)
+        before = T._hook_integrity(r)
+        assert "build.log" in snapshot[1]
+        (r / "app.py").write_text("x = 9\n")
+        ok, why = T._repair_touched_only_code(r, before, snapshot)
+        assert ok, why
+
+    def test_a_file_the_repair_added_is_still_rejected(self, tmp_path):
+        r = self._staged(tmp_path)
+        ok, why = self._judge(r, lambda r: None,
+                              lambda r: (r / "stub.py").write_text("FileExplorerAction = object\n"))
+        assert not ok
+
+    def test_a_mode_change_the_repair_made_is_rejected(self, tmp_path):
+        """Visible only against the pre-repair tree. Against HEAD it is
+        indistinguishable from a mode change the ticket made earlier."""
+        r = self._staged(tmp_path)
+        ok, why = self._judge(r, lambda r: None, lambda r: (r / "app.py").chmod(0o755))
+        assert not ok
+        assert "mode" in why
+
+    def test_a_mode_change_the_ticket_made_earlier_is_not_the_repairs_doing(self, tmp_path):
+        r = self._staged(tmp_path)
+        ok, why = self._judge(r, lambda r: (r / "run").chmod(0o755),
+                              lambda r: (r / "app.py").write_text("x = 9\n"))
+        assert ok, why
+
+    def test_a_deletion_is_still_rejected(self, tmp_path):
+        r = self._staged(tmp_path)
+        ok, why = self._judge(r, lambda r: None, lambda r: (r / "app.py").unlink())
+        assert not ok
+
+
+class TestSuppressionIsCountedNotMatched:
     """Reading the whole file asked whether it contains a marker. That is a
     different question: a file that already carries a `# noqa` could never be
     formatted again, because the guard reported the pre-existing one as the
@@ -382,6 +463,19 @@ class TestSuppressionIsJudgedOnAddedLinesOnly:
         r = self._repo_with(tmp_path, "import os  # noqa\nx   =   1\n")
         route = self._route(r, lambda: (r / "app.py").write_text("import os  # noqa\nx = 1\n"))
         assert route == "repair", "an ordinary reformat of a file with a marker must pass"
+
+    def test_reformatting_the_marker_line_itself_does_not_block(self, tmp_path):
+        """The line carrying the marker is the one a formatter is most likely to
+        rewrite, and reading the added lines presents it as newly added."""
+        r = self._repo_with(tmp_path, "x=1  # noqa\n")
+        route = self._route(r, lambda: (r / "app.py").write_text("x = 1  # noqa\n"))
+        assert route == "repair"
+
+    def test_a_second_marker_on_a_reformatted_line_still_blocks(self, tmp_path):
+        """Counting has to notice one more, not merely that one is present."""
+        r = self._repo_with(tmp_path, "x=1  # noqa\ny=2\n")
+        route = self._route(r, lambda: (r / "app.py").write_text("x = 1  # noqa\ny = 2  # noqa\n"))
+        assert route == "block_unknown"
 
     def test_a_marker_the_repair_added_still_blocks(self, tmp_path):
         r = self._repo_with(tmp_path, "import os\nx   =   1\n")
@@ -662,6 +756,29 @@ class TestRejectionLeavesNoWorkingHole:
                                   "app.py:1:1: E741 Ambiguous name", "aaa", "aaa")
         with patch.object(T, "run_claude_code") as agent, patch.object(T, "log"):
             route = T._route_hook_failure(r, outcome, "DEV-1")
+        assert route == "block_unknown"
+        agent.assert_not_called()
+
+    def test_an_unreadable_runner_also_blocks(self, tmp_path):
+        """A directory is not the only shape that cannot be put back. A regular
+        file we cannot read is recorded the same way and must block the same."""
+        from unittest.mock import patch
+
+        from core import git_util as g
+
+        r = _repo(tmp_path)
+        (r / ".venv" / "bin").mkdir(parents=True)
+        runner = r / ".venv" / "bin" / "pre-commit"
+        runner.write_text("#!/bin/sh\nexec real-check\n")
+        runner.chmod(0o000)
+        try:
+            assert T._state_of(runner)[0] == T._IRREGULAR
+            outcome = g.CommitOutcome("hook_failed", "hook_pass_2", "r", 1,
+                                      "app.py:1:1: E741 Ambiguous name", "aaa", "aaa")
+            with patch.object(T, "run_claude_code") as agent, patch.object(T, "log"):
+                route = T._route_hook_failure(r, outcome, "DEV-1")
+        finally:
+            runner.chmod(0o755)
         assert route == "block_unknown"
         agent.assert_not_called()
 
