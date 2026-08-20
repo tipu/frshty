@@ -102,13 +102,19 @@ def pre_commit_candidates(repo_dir: Path) -> list[Path]:
 
     Exposed so a caller can watch all of them. Watching only the one that
     resolves today misses a repair that plants a higher-priority runner, because
-    that changes which path resolves rather than the contents of the old one."""
-    return [
+    that changes which path resolves rather than the contents of the old one.
+    The PATH fallback is included for the same reason: it is the runner that
+    actually executes when none of the fixed locations has one."""
+    fixed = [
         repo_dir / ".venv" / "bin" / "pre-commit",
         Path.home() / ".local" / "bin" / "pre-commit",
         Path("/usr/local/bin/pre-commit"),
         Path("/usr/bin/pre-commit"),
     ]
+    located = shutil.which("pre-commit")
+    if located and Path(located) not in fixed:
+        fixed.append(Path(located))
+    return fixed
 
 
 def _find_pre_commit(repo_dir: Path) -> Path | None:
@@ -116,15 +122,13 @@ def _find_pre_commit(repo_dir: Path) -> Path | None:
 
     Preference order: per-repo `.venv/bin/pre-commit`, then `~/.local/bin`,
     then `/usr/local/bin` / `/usr/bin`, then anything on PATH."""
-    candidates = pre_commit_candidates(repo_dir)
-    for c in candidates:
+    for c in pre_commit_candidates(repo_dir):
         try:
             if c.is_file() and os.access(c, os.X_OK):
                 return c
         except OSError:
             continue
-    located = shutil.which("pre-commit")
-    return Path(located) if located else None
+    return None
 
 
 def _hook_env(repo_dir: Path, pre_commit: Path | None = None) -> dict[str, str]:
