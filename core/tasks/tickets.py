@@ -862,9 +862,67 @@ def _restore_hook_setup(before: dict[Path, HookState],
 _MODIFY_ONLY = set("M ")
 
 
+def _raw_diff_entries(raw: str) -> list[tuple[str, str, str, list[str]]]:
+    """Parse `git diff --raw -z` into (src_mode, dst_mode, status, paths).
+
+    Each record is `:<srcmode> <dstmode> <srcsha> <dstsha> <status>` followed by
+    one NUL-separated path, or two for a rename or a copy.
+    """
+    fields = raw.split("\0")
+    entries, i = [], 0
+    while i < len(fields):
+        head = fields[i]
+        i += 1
+        if not head.startswith(":"):
+            continue
+        parts = head[1:].split()
+        if len(parts) < 5:
+            continue
+        src_mode, dst_mode, status = parts[0], parts[1], parts[4]
+        paths = []
+        wanted = 2 if status[0] in "RC" else 1
+        while wanted and i < len(fields):
+            if fields[i]:
+                paths.append(fields[i])
+                wanted -= 1
+            i += 1
+        entries.append((src_mode, dst_mode, status, paths))
+    return entries
+
+
+def _repair_changes(repo_dir: Path, snapshot: tuple[str, set[str]]
+                    ) -> list[tuple[str, list[str], str]]:
+    """What the repair changed, measured against the tree recorded before it.
+
+    `git status` compares against HEAD, so it also reports the ticket's own
+    earlier work. That made the guard blame the repair for a manifest the ticket
+    had legitimately edited hours before, and no repair could ever pass in such a
+    checkout. Returns (kind, paths, detail) where kind is edit | add | other.
+    """
+    tree, untracked_before = snapshot
+    raw = git_util.run_git(repo_dir, ["diff", "--raw", "-z", "--find-renames", tree],
+                           timeout=60).stdout
+    out = []
+    for src_mode, dst_mode, status, paths in _raw_diff_entries(raw):
+        if not paths:
+            continue
+        if status[0] == "M" and src_mode == dst_mode:
+            out.append(("edit", paths, status))
+        elif status[0] == "M":
+            out.append(("other", paths, f"mode {src_mode} to {dst_mode}"))
+        else:
+            out.append(("other", paths, f"git status {status}"))
+    listed = git_util.run_git(repo_dir, ["ls-files", "--others", "--exclude-standard", "-z"],
+                              timeout=60).stdout
+    for rel in (p for p in listed.split("\0") if p):
+        if rel not in untracked_before:
+            out.append(("add", [rel], "new untracked file"))
+    return out
+
+
 def _repair_touched_only_code(repo_dir: Path,
                               before: dict[Path, HookState] | None = None,
-                              base_tree: str | None = None) -> tuple[bool, str]:
+                              snapshot: tuple[str, set[str]] | None = None) -> tuple[bool, str]:
     """Whether the repair agent stayed inside the code, or found a cheap exit.
 
     The agent runs with permissions bypassed, so telling it not to disable the
@@ -880,47 +938,55 @@ def _repair_touched_only_code(repo_dir: Path,
             if _state_of(path) != was:
                 return False, f"repair changed the hook setup ({path}); it may only edit code"
     try:
-        changed = git_util.run_git(repo_dir, ["status", "--porcelain", "-z"], timeout=30)
+        changes = (_repair_changes(repo_dir, snapshot) if snapshot is not None
+                   else [("edit" if set(c) <= _MODIFY_ONLY else "other", p, f"git status {c!r}")
+                         for c, p in _porcelain_entries(git_util.run_git(
+                             repo_dir, ["status", "--porcelain", "-z"], timeout=30).stdout)])
     except git_util.GitCommandError:
         return False, "could not read the worktree after the repair"
-    for code, paths in _porcelain_entries(changed.stdout):
+    for kind, paths, detail in changes:
         for rel in paths:
             if Path(rel).name in _REPAIR_FORBIDDEN_NAMES:
                 return False, f"repair touched {Path(rel).name}, which is configuration, not code"
-        rel = paths[0]
-        if not set(code) <= _MODIFY_ONLY:
-            return False, (f"repair did more than edit {rel} (git status {code!r}); "
+        if kind != "edit":
+            return False, (f"repair did more than edit {paths[0]} ({detail}); "
                            f"it may only change the contents of existing files")
-        for marker in _added_suppressions(repo_dir, base_tree, rel):
-            return False, f"repair added a suppression directive ({marker}) in {rel}"
+        for marker in _added_suppressions(repo_dir, snapshot, paths[0]):
+            return False, f"repair added a suppression directive ({marker}) in {paths[0]}"
     return True, ""
 
 
-def _added_suppressions(repo_dir: Path, base_tree: str | None, rel: str) -> list[str]:
-    """Suppression markers on lines the repair added, and no others.
+def _added_suppressions(repo_dir: Path, snapshot: tuple[str, set[str]] | None,
+                        rel: str) -> list[str]:
+    """Markers the repair added, counted rather than matched.
 
     Reading the whole file asked whether the file contains a marker, which is a
     different question: any file that already carries a `# noqa` could never be
-    formatted again, because the guard would report the pre-existing one as the
-    repair's work.
+    formatted again. Reading the added lines was closer but still wrong, because
+    a formatter that rewrites the line the marker sits on presents it as added.
+    Counting answers it: the repair added one only if there are now more.
 
     Without a baseline the question cannot be answered, so it falls back to the
     whole file, which over-rejects rather than passing silently.
     """
-    if base_tree is None:
-        try:
-            body = (repo_dir / rel).read_text()
-        except (OSError, UnicodeDecodeError):
-            return []
-        return [m for m in _SUPPRESSION_MARKERS if m in body]
+    def _count(body: str) -> dict[str, int]:
+        return {m: body.count(m) for m in _SUPPRESSION_MARKERS}
+
     try:
-        diff = git_util.run_git(repo_dir, ["diff", base_tree, "--unified=0", "--", rel],
-                                timeout=60).stdout
+        now = _count((repo_dir / rel).read_text())
+    except (OSError, UnicodeDecodeError):
+        return [] if snapshot is None else ["unreadable file"]
+    if snapshot is None:
+        return [m for m, n in now.items() if n]
+    try:
+        was = _count(git_util.run_git(repo_dir, ["show", f"{snapshot[0]}:{rel}"],
+                                      timeout=60).stdout)
     except git_util.GitCommandError:
-        return ["unreadable diff"]
-    added = "\n".join(ln[1:] for ln in diff.splitlines()
-                      if ln.startswith("+") and not ln.startswith("+++"))
-    return [m for m in _SUPPRESSION_MARKERS if m in added]
+        # Not in the recorded tree, so every marker in it is new. A file the
+        # repair created is rejected before this, so this is the rare case of a
+        # path git cannot read back.
+        was = dict.fromkeys(_SUPPRESSION_MARKERS, 0)
+    return [m for m, n in now.items() if n > was.get(m, 0)]
 
 
 def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
@@ -1021,7 +1087,7 @@ def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
                  meta={"ticket": ticket_key, "repo": repo_dir.name})
         return _undo("the repair step returned nothing")
 
-    clean, why = _repair_touched_only_code(repo_dir, hooks_before, snapshot[0])
+    clean, why = _repair_touched_only_code(repo_dir, hooks_before, snapshot)
     if not clean:
         return _undo(why)
     return "repair"
