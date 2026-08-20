@@ -43,6 +43,7 @@ def main() -> int:
         payload["last_assistant_message"] = work_store.last_assistant_text(transcript_path)[:300]
         work_store.record_event(session_id, kind, payload)
         if kind == "Stop":
+            work_store.record_artifacts(session_id, transcript_path)
             work_store.maybe_autocontinue(session_id, transcript_path)
     except Exception:
         if os.environ.get("WORK_HOOK_DEBUG"):
