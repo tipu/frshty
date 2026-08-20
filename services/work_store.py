@@ -18,8 +18,11 @@ DONE_MARKER = "WORK_DONE"
 ARTIFACT_MARKER = "ARTIFACT:"
 CONTINUE_PROMPT = (
     "Continue toward the objective. If you are blocked on a decision only the "
-    "operator can make, ask the question and stop. If the objective is fully "
-    f"met, end your message with the single line {DONE_MARKER}."
+    "operator can make, ask the question and stop. Never send outward "
+    "communications (Slack messages, GitHub or Bitbucket comments, emails, "
+    "posts to external services) unless the operator explicitly asked for that "
+    "in this conversation; draft the content and ask instead. If the objective "
+    f"is fully met, end your message with the single line {DONE_MARKER}."
 )
 
 _EVENT_TRANSITIONS = {
