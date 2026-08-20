@@ -41,7 +41,7 @@
     </h2>
     <div :class="['wcard', cls[g]]" v-for="it in groups[g]" :key="it.id">
       <div class="flex items-center justify-between">
-        <div class="font-medium">{{ it.objective }}</div>
+        <a class="font-medium underline decoration-gray-600 hover:decoration-gray-300" :href="'/work/' + it.id">{{ it.objective }}</a>
         <div class="text-xs text-gray-500">#{{ it.id }}</div>
       </div>
       <div class="wreason" v-if="it.stop_reason">{{ it.stop_reason }}</div>

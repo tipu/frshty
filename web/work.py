@@ -101,6 +101,19 @@ def api_work_reply(item_id: int, body: dict):
     return result
 
 
+@router.get("/api/work/items/{item_id}/detail")
+def api_work_detail(item_id: int):
+    result = work_store.item_detail(item_id)
+    if "error" in result:
+        return JSONResponse(result, status_code=404)
+    return result
+
+
+@router.get("/work/{item_id}", response_class=HTMLResponse)
+def work_detail_page(item_id: int):
+    return _template("work_detail.html")
+
+
 @router.get("/work/{item_id}/terminal", response_class=HTMLResponse)
 def work_terminal_page(item_id: int):
     return _template("work_terminal.html")
