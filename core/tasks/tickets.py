@@ -590,7 +590,7 @@ _NEVER_REPAIRABLE = (
 
 def _is_repairable(output: str) -> bool:
     """Whether this diagnostic is one we are willing to let an agent edit for."""
-    text = (output or "").strip()
+    text = git_util.strip_ansi(output or "").strip()
     if not text:
         return False
     if any(p.search(text) for p in _NEVER_REPAIRABLE):
