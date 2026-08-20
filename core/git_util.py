@@ -26,6 +26,7 @@ Because that flag was appended outside the config check, it also suppressed
 native git hooks in repos with no pre-commit config at all.
 """
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -187,6 +188,20 @@ _DEPENDENCY_MARKERS = (
 )
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def strip_ansi(text: str) -> str:
+    """Hook output with the colour taken out.
+
+    Tools decide to colour from the environment, not from whether anyone is
+    reading. ruff writes `\\x1b[1m\\x1b[91mE501 `, and the escape sits directly
+    against the code, so `\\bE501\\b` finds no word boundary and the diagnostic
+    goes unrecognised. The classifier then blocks a ticket it knows how to fix.
+    """
+    return _ANSI.sub("", text or "")
+
+
 def triage_commit_failure(status: str, output: str) -> str:
     """Classify a failed commit deterministically, before asking any model.
 
@@ -197,7 +212,7 @@ def triage_commit_failure(status: str, output: str) -> str:
     arrived through one code path and all got the same answer: "edit something".
     Two of those three are not fixable by editing this repository.
     """
-    text = (output or "").lower()
+    text = strip_ansi(output or "").lower()
     if status == "git_failed":
         return "git"
     if status == "tooling_failed" or any(m in text for m in _ENVIRONMENT_MARKERS):

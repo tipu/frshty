@@ -81,6 +81,29 @@ class TestOnlyKnownDiagnosticsAreRepaired:
         ):
             assert T._is_repairable(text), f"{name} output should be repairable"
 
+    def test_coloured_output_is_classified_the_same_as_plain(self):
+        """Tools decide to colour from the environment, not from whether anyone
+        is reading. ruff writes `\x1b[1m\x1b[91mE501 `, and the escape sits
+        against the code, so `\\bE501\\b` finds no word boundary. Every case
+        above used clean text, so only an end-to-end run surfaced this: a real
+        ruff failure was classified unrecognised and blocked the ticket."""
+        coloured = ("\x1b[1m\x1b[91mE501 \x1b[0m\x1b[1mLine too long (33 > 20)\x1b[0m\n"
+                    " \x1b[1m\x1b[94m-->\x1b[0m app.py:2:21\n")
+        assert T._is_repairable(coloured)
+        assert not T._is_repairable(
+            "\x1b[1m\x1b[91mF821 \x1b[0m\x1b[1mUndefined name `X`\x1b[0m")
+
+    def test_coloured_output_is_triaged_the_same_as_plain(self):
+        """The triage markers are phrases, so an escape between their words
+        splits them. A hook that emphasises the tool name turns "pre-commit not
+        found" into environment output the classifier cannot see."""
+        assert g.triage_commit_failure(
+            "hook_failed", "\x1b[91mpre-commit\x1b[0m not found") == "environment"
+        assert g.triage_commit_failure(
+            "hook_failed",
+            "src/a.ts(4,33): \x1b[1mCannot find\x1b[0m module "
+            "'@acme/rpa-schema'") == "dependency"
+
     def test_a_missing_name_is_not_repairable(self):
         """The only edit that satisfies "undefined name X" is inventing X, which
         is the cheat this allowlist exists to stop. The blanket ruff-code pattern
