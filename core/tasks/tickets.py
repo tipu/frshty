@@ -674,8 +674,13 @@ def _state_of(path: Path) -> HookState:
         return None, None
     if stat.S_ISLNK(st.st_mode):
         try:
-            return _SYMLINK + os.readlink(path).encode(), st.st_mode
-        except OSError:
+            # The target's contents too. `~/.local/bin/pre-commit` is usually a
+            # link into a toolchain, and recording only where it points leaves
+            # rewriting what it points at invisible.
+            target = os.readlink(path).encode()
+            landed, _ = _state_of(path.resolve(strict=True))
+            return _SYMLINK + target + b"\0" + (landed or b""), st.st_mode
+        except (OSError, RuntimeError):
             return _IRREGULAR, st.st_mode
     if not stat.S_ISREG(st.st_mode):
         return _IRREGULAR, st.st_mode
@@ -711,8 +716,10 @@ def _hook_paths(repo_dir: Path) -> list[Path]:
     `core.hooksPath` before the common `hooks/`. Watching the literal
     `<repo>/.git/...` paths therefore watched nothing in production.
 
-    `<common>/config` is included because it is where `core.hooksPath` and
-    `core.excludesFile` are set, so one path covers redirecting either.
+    Every config file git actually read is watched, not the common one alone.
+    `core.hooksPath` and `core.excludesFile` can be set in the global or the
+    per-worktree file just as easily, and `git config --show-origin` names them
+    all, so asking git which files it read beats listing the ones we expect.
 
     Raises rather than guessing when git cannot answer. A fallback here would
     turn "we do not know where the hooks are" into a fingerprint of files that
@@ -733,7 +740,47 @@ def _hook_paths(repo_dir: Path) -> list[Path]:
     ]
     watched.extend(hooks / name for name in _WATCHED_HOOKS)
     watched.extend(git_util.pre_commit_candidates(repo_dir))
-    return watched
+    watched.extend(_config_origins(repo_dir))
+    watched.extend(_local_hook_entries(repo_dir))
+    seen, unique = set(), []
+    for p in watched:
+        if p not in seen:
+            seen.add(p)
+            unique.append(p)
+    return unique
+
+
+def _config_origins(repo_dir: Path) -> list[Path]:
+    """Every config file git read to answer, including global and worktree ones."""
+    listed = git_util.run_git(repo_dir, ["config", "--list", "--show-origin",
+                                         "--name-only", "-z"],
+                              allowed_codes=(0, 1), timeout=30).stdout
+    return [Path(f[len("file:"):]) for f in listed.split("\0")
+            if f.startswith("file:") and f[len("file:"):]]
+
+
+_ENTRY_LINE = re.compile(r"^\s*entry:\s*(.+?)\s*$", re.M)
+
+
+def _local_hook_entries(repo_dir: Path) -> list[Path]:
+    """Scripts inside the repo that a `repo: local` hook runs.
+
+    Such a script is the hook. Editing it to exit zero is an ordinary file
+    modification, which the worktree check accepts, so it has to be watched
+    like the runner is. Only entries that resolve to a file in this repository
+    are returned; an entry naming an installed command resolves to nothing.
+    """
+    try:
+        body = (repo_dir / ".pre-commit-config.yaml").read_text()
+    except (OSError, UnicodeDecodeError):
+        return []
+    found = []
+    for raw in _ENTRY_LINE.findall(body):
+        for token in raw.strip("'\"").split():
+            candidate = repo_dir / token
+            if candidate.is_file():
+                found.append(candidate)
+    return found
 
 
 def _hook_integrity(repo_dir: Path) -> dict[Path, HookState]:
@@ -793,7 +840,8 @@ _MODIFY_ONLY = set("M ")
 
 
 def _repair_touched_only_code(repo_dir: Path,
-                              before: dict[Path, HookState] | None = None) -> tuple[bool, str]:
+                              before: dict[Path, HookState] | None = None,
+                              base_tree: str | None = None) -> tuple[bool, str]:
     """Whether the repair agent stayed inside the code, or found a cheap exit.
 
     The agent runs with permissions bypassed, so telling it not to disable the
@@ -820,15 +868,36 @@ def _repair_touched_only_code(repo_dir: Path,
         if not set(code) <= _MODIFY_ONLY:
             return False, (f"repair did more than edit {rel} (git status {code!r}); "
                            f"it may only change the contents of existing files")
-        target = repo_dir / rel
-        try:
-            body = target.read_text()
-        except (OSError, UnicodeDecodeError):
-            continue
-        for marker in _SUPPRESSION_MARKERS:
-            if marker in body:
-                return False, f"repair added a suppression directive ({marker}) in {rel}"
+        for marker in _added_suppressions(repo_dir, base_tree, rel):
+            return False, f"repair added a suppression directive ({marker}) in {rel}"
     return True, ""
+
+
+def _added_suppressions(repo_dir: Path, base_tree: str | None, rel: str) -> list[str]:
+    """Suppression markers on lines the repair added, and no others.
+
+    Reading the whole file asked whether the file contains a marker, which is a
+    different question: any file that already carries a `# noqa` could never be
+    formatted again, because the guard would report the pre-existing one as the
+    repair's work.
+
+    Without a baseline the question cannot be answered, so it falls back to the
+    whole file, which over-rejects rather than passing silently.
+    """
+    if base_tree is None:
+        try:
+            body = (repo_dir / rel).read_text()
+        except (OSError, UnicodeDecodeError):
+            return []
+        return [m for m in _SUPPRESSION_MARKERS if m in body]
+    try:
+        diff = git_util.run_git(repo_dir, ["diff", base_tree, "--unified=0", "--", rel],
+                                timeout=60).stdout
+    except git_util.GitCommandError:
+        return ["unreadable diff"]
+    added = "\n".join(ln[1:] for ln in diff.splitlines()
+                      if ln.startswith("+") and not ln.startswith("+++"))
+    return [m for m in _SUPPRESSION_MARKERS if m in added]
 
 
 def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
@@ -871,6 +940,19 @@ def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
                  meta={"ticket": ticket_key, "repo": repo_dir.name})
         return "block_unknown"
 
+    unreproducible = [str(p) for p, (body, _) in hooks_before.items()
+                      if body is not None and body.startswith((_IRREGULAR, _OVERSIZE))]
+    if unreproducible:
+        # A baseline we cannot put back is not a baseline. Letting the agent run
+        # against one means a rejected repair leaves the hook setup as it found
+        # it, which is the state this exists to prevent.
+        log.emit("commit_hook_baseline_unusable",
+                 f"{ticket_key}: {repo_dir.name} hook setup cannot be recorded "
+                 f"({', '.join(unreproducible)}); not attempting a repair",
+                 meta={"ticket": ticket_key, "repo": repo_dir.name,
+                       "paths": unreproducible})
+        return "block_unknown"
+
     fixed = run_claude_code(
         "The pre-commit hooks rejected this commit. Fix ONLY what the hook output below "
         "reports, in this repository. Do not change behaviour, do not touch unrelated "
@@ -880,14 +962,12 @@ def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
         f"HOOK OUTPUT:\n{(outcome.output or '')[-4000:]}",
         cwd=repo_dir, timeout=HOOK_REPAIR_TIMEOUT)
     def _undo(why: str) -> str:
-        try:
-            _restore_repo(repo_dir, snapshot)
-        except git_util.GitCommandError:
-            pass
-        # _restore_repo lists untracked files with --exclude-standard, so a
-        # planted `.venv/bin/pre-commit` survives it and the next attempt runs
-        # the fake instead of the real hook. The hook files are put back from
-        # their recorded contents rather than left to that enumeration.
+        # The hook setup goes back first. _restore_repo enumerates untracked
+        # files, and that enumeration reads info/exclude, so cleaning up while
+        # the repair's exclude is still in place cannot see the file the repair
+        # hid behind it. _restore_repo also skips ignored files entirely, which
+        # is why a planted `.venv/bin/pre-commit` needs putting back from its
+        # recorded contents rather than by that enumeration.
         failed = _restore_hook_setup(hooks_before)
         if failed:
             log.emit("commit_hook_setup_contaminated",
@@ -895,6 +975,14 @@ def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
                      f"({', '.join(failed)}); do not retry this worktree until it is "
                      f"rebuilt",
                      meta={"ticket": ticket_key, "repo": repo_dir.name, "paths": failed})
+        try:
+            _restore_repo(repo_dir, snapshot)
+        except (git_util.GitCommandError, OSError, subprocess.TimeoutExpired) as e:
+            log.emit("commit_hook_worktree_contaminated",
+                     f"{ticket_key}: {repo_dir.name} worktree could not be put back "
+                     f"({e}); do not retry this worktree until it is rebuilt",
+                     meta={"ticket": ticket_key, "repo": repo_dir.name})
+            failed = failed + ["worktree"]
         log.emit("commit_hook_repair_rejected",
                  f"{ticket_key}: discarded the repair of {repo_dir.name}: {why}",
                  meta={"ticket": ticket_key, "repo": repo_dir.name, "reason": why,
@@ -909,7 +997,7 @@ def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
                  meta={"ticket": ticket_key, "repo": repo_dir.name})
         return _undo("the repair step returned nothing")
 
-    clean, why = _repair_touched_only_code(repo_dir, hooks_before)
+    clean, why = _repair_touched_only_code(repo_dir, hooks_before, snapshot[0])
     if not clean:
         return _undo(why)
     return "repair"
