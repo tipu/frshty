@@ -12,6 +12,7 @@ Nothing under `.git` is tracked, and every repo gitignores `.venv`, so a planted
 guard now fingerprints what decides whether the hook runs and compares it, which
 is answerable, instead of asking whether the diff looks honest, which is not.
 """
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -50,11 +51,13 @@ def _repo(tmp_path: Path) -> Path:
 
 class TestRenamesAreInspectedOnBothSides:
     def test_moving_the_hook_config_away_is_rejected(self, tmp_path):
+        """Without the fingerprint too, so this pins the rename inspection and
+        not the separate check that would also notice the file disappeared."""
         r = _repo(tmp_path)
-        before = T._hook_integrity(r)
         _git(r, "mv", ".pre-commit-config.yaml", "pre-commit.disabled")
-        ok, why = T._repair_touched_only_code(r, before)
+        ok, why = T._repair_touched_only_code(r, None)
         assert not ok, "a rename that removes the hook config must be rejected"
+        assert ".pre-commit-config.yaml" in why
 
     def test_moving_a_manifest_away_is_rejected(self, tmp_path):
         """pyproject.toml is not part of the hook fingerprint, so this case is
@@ -187,6 +190,62 @@ class TestHookIntegrityCoversWhatStatusCannotSee:
         with pytest.raises(git_util.GitCommandError):
             T._hook_paths(notarepo)
 
+    def test_editing_what_a_symlinked_runner_points_at_is_rejected(self, tmp_path):
+        """`~/.local/bin/pre-commit` is usually a link into a toolchain, so
+        recording only where it points leaves rewriting what it points at
+        invisible."""
+        r = _repo(tmp_path)
+        real = tmp_path / "toolchain" / "pre-commit"
+        real.parent.mkdir()
+        real.write_text("#!/bin/sh\nexec real-check\n")
+        real.chmod(0o755)
+        (r / ".venv" / "bin").mkdir(parents=True)
+        (r / ".venv" / "bin" / "pre-commit").symlink_to(real)
+        before = T._hook_integrity(r)
+        real.write_text("#!/bin/sh\nexit 0\n")
+        ok, why = T._repair_touched_only_code(r, before)
+        assert not ok
+        assert "hook setup" in why
+
+    def test_a_global_config_is_watched_too(self, tmp_path):
+        """core.hooksPath and core.excludesFile can be set in any config file git
+        reads, so the watched set comes from git rather than from a guess."""
+        r = _repo(tmp_path)
+        extra = tmp_path / "extra.gitconfig"
+        extra.write_text("[core]\n\tquotePath = false\n")
+        _git(r, "config", "include.path", str(extra))
+        watched = T._hook_paths(r)
+        assert extra in watched, watched
+
+    def test_a_local_hook_entry_script_is_watched(self, tmp_path):
+        """A repo-local hook's entry script is the hook. Editing it to exit zero
+        is an ordinary file modification, which the worktree check accepts."""
+        r = _repo(tmp_path)
+        script = r / "scripts" / "lint.sh"
+        script.parent.mkdir()
+        script.write_text("#!/bin/sh\nexec real-check\n")
+        script.chmod(0o755)
+        (r / ".pre-commit-config.yaml").write_text(
+            "repos:\n  - repo: local\n    hooks:\n      - id: lint\n"
+            "        name: lint\n        entry: scripts/lint.sh\n        language: script\n")
+        _git(r, "add", "-A")
+        _git(r, "commit", "-qm", "local hook", "--no-verify")
+        assert script in T._hook_paths(r)
+        before = T._hook_integrity(r)
+        script.write_text("#!/bin/sh\nexit 0\n")
+        ok, why = T._repair_touched_only_code(r, before)
+        assert not ok
+        assert "hook setup" in why
+
+    def test_an_entry_naming_an_installed_command_watches_nothing(self, tmp_path):
+        """The real configs run `pipenv --quiet run basedpyright`. Nothing in
+        that resolves to a file here, and inventing one would be a false watch."""
+        r = _repo(tmp_path)
+        (r / ".pre-commit-config.yaml").write_text(
+            "repos:\n  - repo: local\n    hooks:\n      - id: types\n"
+            "        name: types\n        entry: pipenv --quiet run basedpyright\n")
+        assert T._local_hook_entries(r) == []
+
     def test_a_tilde_in_the_hooks_path_is_expanded(self, tmp_path):
         """Git expands ~ in pathname values. Leaving it literal makes the watched
         path a directory named "~" inside the repo, which never exists."""
@@ -225,6 +284,98 @@ class TestHookIntegrityCoversWhatStatusCannotSee:
         ok, why = T._repair_touched_only_code(r, before)
         assert not ok
         assert "hook setup" in why
+
+
+class TestTheGuardAcceptsWhatFormattersProduce:
+    """The cost of tightening this guard is blocked tickets, so the shapes a real
+    autofix leaves behind are pinned alongside the ones it must reject."""
+
+    def test_edits_across_several_files_are_accepted(self, tmp_path):
+        r = _repo(tmp_path)
+        before = T._hook_integrity(r)
+        (r / "app.py").write_text("x = 11\n")
+        (r / "pkg" / "mod.py").write_text("y = 22\n")
+        assert _git(r, "status", "--porcelain").stdout.strip(), "the test must edit something"
+        ok, why = T._repair_touched_only_code(r, before)
+        assert ok, why
+
+    def test_a_mix_of_staged_and_unstaged_edits_is_accepted(self, tmp_path):
+        """A fix the agent staged and one it did not are `M ` and ` M`, and a
+        file touched both ways is `MM`."""
+        r = _repo(tmp_path)
+        before = T._hook_integrity(r)
+        (r / "app.py").write_text("x = 2\n")
+        _git(r, "add", "app.py")
+        (r / "app.py").write_text("x = 3\n")
+        (r / "pkg" / "mod.py").write_text("y = 3\n")
+        codes = {c for c, _ in T._porcelain_entries(
+            _git(r, "status", "--porcelain", "-z").stdout)}
+        assert codes == {"MM", " M"}, codes
+        ok, why = T._repair_touched_only_code(r, before)
+        assert ok, why
+
+    def test_a_repair_that_changed_nothing_is_accepted(self, tmp_path):
+        r = _repo(tmp_path)
+        before = T._hook_integrity(r)
+        ok, why = T._repair_touched_only_code(r, before)
+        assert ok, why
+
+    def test_real_ruff_output_is_accepted(self, tmp_path):
+        ruff = shutil.which("ruff")
+        if ruff is None:
+            pytest.skip("ruff is not installed")
+        r = _repo(tmp_path)
+        (r / "app.py").write_text("import os\nimport sys\nx   =    sys.argv\n")
+        _git(r, "add", "-A")
+        _git(r, "commit", "-qm", "messy", "--no-verify")
+        before = T._hook_integrity(r)
+        subprocess.run([ruff, "check", "--select", "F401", "--fix", "."],
+                       cwd=str(r), capture_output=True)
+        subprocess.run([ruff, "format", "."], cwd=str(r), capture_output=True)
+        assert (r / "app.py").read_text() != "import os\nimport sys\nx   =    sys.argv\n"
+        ok, why = T._repair_touched_only_code(r, before)
+        assert ok, why
+
+
+class TestSuppressionIsJudgedOnAddedLinesOnly:
+    """Reading the whole file asked whether it contains a marker. That is a
+    different question: a file that already carries a `# noqa` could never be
+    formatted again, because the guard reported the pre-existing one as the
+    repair's work. Plenty of real files carry one."""
+
+    def _repo_with(self, tmp_path: Path, body: str) -> Path:
+        r = _repo(tmp_path)
+        (r / "app.py").write_text(body)
+        _git(r, "add", "-A")
+        _git(r, "commit", "-qm", "seed", "--no-verify")
+        return r
+
+    def _route(self, r: Path, mutate) -> str:
+        from unittest.mock import patch
+
+        from core import git_util as g
+
+        outcome = g.CommitOutcome("hook_failed", "hook_pass_2", "r", 1,
+                                  "app.py:1:1: E741 Ambiguous name", "aaa", "aaa")
+        with patch.object(T, "run_claude_code", side_effect=lambda *a, **k: mutate() or "done"), \
+             patch.object(T, "log"):
+            return T._route_hook_failure(r, outcome, "DEV-1")
+
+    def test_a_pre_existing_marker_does_not_block_a_reformat(self, tmp_path):
+        r = self._repo_with(tmp_path, "import os  # noqa\nx   =   1\n")
+        route = self._route(r, lambda: (r / "app.py").write_text("import os  # noqa\nx = 1\n"))
+        assert route == "repair", "an ordinary reformat of a file with a marker must pass"
+
+    def test_a_marker_the_repair_added_still_blocks(self, tmp_path):
+        r = self._repo_with(tmp_path, "import os\nx   =   1\n")
+        route = self._route(r, lambda: (r / "app.py").write_text("import os  # noqa\nx = 1\n"))
+        assert route == "block_unknown"
+        assert "# noqa" not in (r / "app.py").read_text(), "and it must be undone"
+
+    def test_a_type_ignore_the_repair_added_still_blocks(self, tmp_path):
+        r = self._repo_with(tmp_path, "x   =   1\n")
+        route = self._route(r, lambda: (r / "app.py").write_text("x = 1  # type: ignore\n"))
+        assert route == "block_unknown"
 
 
 class TestOnlyEditsAreAllowed:
@@ -438,6 +589,47 @@ class TestRejectionLeavesNoWorkingHole:
         assert route == "block_unknown"
         assert not fake.exists()
         assert (r / "app.py").read_text() == "x = 1\n"
+
+    def test_the_exclude_is_put_back_before_the_worktree_cleanup_reads_it(self, tmp_path):
+        """_restore_repo enumerates untracked files, and that enumeration reads
+        info/exclude. Cleaning up while the repair's exclude is still in place
+        cannot see the file the repair hid behind it."""
+        from unittest.mock import patch
+
+        from core import git_util as g
+
+        r = _repo(tmp_path)
+        excl = _named(r, "info/exclude")
+
+        def cheat(*a, **k):
+            excl.parent.mkdir(parents=True, exist_ok=True)
+            excl.write_text("shadow.py\n")
+            (r / "shadow.py").write_text("FileExplorerAction = object\n")
+            return "done"
+
+        outcome = g.CommitOutcome("hook_failed", "hook_pass_2", "r", 1,
+                                  "app.py:1:1: E741 Ambiguous name", "aaa", "aaa")
+        with patch.object(T, "run_claude_code", side_effect=cheat), patch.object(T, "log"):
+            route = T._route_hook_failure(r, outcome, "DEV-1")
+        assert route == "block_unknown"
+        assert not (r / "shadow.py").exists(), (
+            "the hidden file must not survive; the exclude has to go back first")
+
+    def test_an_unusable_baseline_blocks_before_the_agent_runs(self, tmp_path):
+        """A baseline that cannot be put back is not a baseline."""
+        from unittest.mock import patch
+
+        from core import git_util as g
+
+        r = _repo(tmp_path)
+        (r / ".venv" / "bin").mkdir(parents=True)
+        (r / ".venv" / "bin" / "pre-commit").mkdir()
+        outcome = g.CommitOutcome("hook_failed", "hook_pass_2", "r", 1,
+                                  "app.py:1:1: E741 Ambiguous name", "aaa", "aaa")
+        with patch.object(T, "run_claude_code") as agent, patch.object(T, "log"):
+            route = T._route_hook_failure(r, outcome, "DEV-1")
+        assert route == "block_unknown"
+        agent.assert_not_called()
 
     def test_a_snapshot_that_cannot_be_taken_blocks_before_the_agent_runs(self, tmp_path):
         """No baseline means nothing to compare against and nothing to put back.
