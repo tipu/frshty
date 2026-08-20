@@ -502,3 +502,37 @@ class TestTodayProducer:
         _ensure_work_item("aimyable", m, "loop-key-1", "/tmp")
         n = db.query_one("SELECT COUNT(*) AS n FROM work_runs WHERE session_id = 'sid-today-1'")["n"]
         assert n == 1
+
+
+class TestDetail:
+    def test_timeline_and_done_source(self, tmp_path):
+        import json as _json
+        item_id = _mkitem("transparent item")
+        t = tmp_path / "t.jsonl"
+        lines = [
+            {"type": "user", "message": {"content": "Begin the objective."}, "timestamp": "T1"},
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Bash", "input": {"command": "git push origin branch"}}]},
+             "timestamp": "T2"},
+            {"type": "user", "message": {"content": [{"type": "tool_result", "content": "ok"}]},
+             "toolUseResult": {"ok": True}},
+            {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "Pushed the branch. WORK_DONE"}]}, "timestamp": "T3"},
+        ]
+        t.write_text("\n".join(_json.dumps(x) for x in lines))
+        work_store.add_run(item_id, f"sid-det-{item_id}", f"work-{item_id}", "/tmp")
+        db.execute("UPDATE work_runs SET transcript_path = ? WHERE session_id = ?",
+                   (str(t), f"sid-det-{item_id}"))
+        db.execute(
+            "INSERT INTO work_events(work_item_id, kind, payload, created_at) "
+            "VALUES (?, 'self_reported_done', '{}', 'now')", (item_id,))
+        db.execute("UPDATE work_items SET state = 'done' WHERE id = ?", (item_id,))
+        d = work_store.item_detail(item_id)
+        kinds = [e["kind"] for e in d["timeline"]]
+        assert kinds == ["prompt", "tool", "text"]
+        assert d["timeline"][1]["name"] == "Bash"
+        assert "git push" in d["timeline"][1]["arg"]
+        assert d["item"]["done_source"] == "agent"
+
+    def test_unknown_item_errors(self):
+        assert work_store.item_detail(999999) == {"error": "unknown work item"}

@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<meta charset="utf-8">
+<title>Work item — frshty</title>
+<script src="/static/tailwind.js"></script>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<link rel="stylesheet" href="/static/frshty.css">
+<style>
+.tl { border-left: 2px solid #2a2a35; margin-left: 8px; padding-left: 16px; }
+.tl-prompt { color: #93c5fd; margin: 14px 0 4px; white-space: pre-wrap; }
+.tl-text { color: #d0d0d0; margin: 8px 0; white-space: pre-wrap; line-height: 1.45; }
+.tl-tool { color: #6b7280; font-size: 12px; font-family: monospace; margin: 1px 0; }
+.badge { display: inline-block; padding: 1px 10px; border-radius: 4px; font-size: 12px; margin-left: 8px; }
+.b-done-agent { background: #713f12; color: #fde047; }
+.b-done-op { background: #14532d; color: #86efac; }
+.b-other { background: #1e3a5f; color: #93c5fd; }
+.sec { margin-top: 22px; }
+.art { font-family: monospace; font-size: 13px; color: #86efac; }
+</style>
+</head>
+<body class="bg-[#0b0b10] text-gray-200">
+<div id="app" class="max-w-4xl mx-auto px-6 py-6" v-if="item">
+  <div class="text-xs text-gray-500 mb-2"><a href="/work" class="underline">← work</a></div>
+  <h1 class="text-lg font-bold">{{ item.objective }}</h1>
+  <div class="mt-1">
+    <span :class="['badge', badgeCls]">{{ stateLabel }}</span>
+    <span class="text-xs text-gray-500 ml-2">#{{ item.id }} · {{ item.scope }} · {{ item.instance_key || 'no instance' }} · continues {{ item.continues_used }}/{{ item.continue_cap }}</span>
+    <a :href="'/work/' + item.id + '/terminal'" target="_blank" class="text-xs text-blue-400 underline ml-3">open terminal</a>
+  </div>
+  <div class="sec" v-if="artifacts.length">
+    <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Artifacts</h2>
+    <div v-for="a in artifacts" class="art">{{ a.path }} <span class="text-gray-500">— {{ a.note }}</span></div>
+  </div>
+  <div class="sec">
+    <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">What happened</h2>
+    <div class="text-xs text-gray-600 mb-2">Read from the session transcript. Prompts in blue, agent reports in white, every tool call in grey.</div>
+    <div class="tl">
+      <template v-for="e in timeline">
+        <div v-if="e.kind === 'prompt'" class="tl-prompt">❯ {{ e.text }}</div>
+        <div v-else-if="e.kind === 'text'" class="tl-text">{{ e.text }}</div>
+        <div v-else class="tl-tool">{{ e.name }} {{ e.arg }}</div>
+      </template>
+    </div>
+  </div>
+  <div class="sec">
+    <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Lifecycle</h2>
+    <div v-for="ev in events" class="text-xs text-gray-500 font-mono">{{ ev.created_at.slice(0,19) }} {{ ev.kind }}</div>
+  </div>
+</div>
+<script>
+const { createApp } = Vue;
+createApp({
+  data() { return { item: null, timeline: [], events: [], artifacts: [] }; },
+  computed: {
+    stateLabel() {
+      if (!this.item) return "";
+      if (this.item.state === "done")
+        return this.item.done_source === "operator" ? "done — you confirmed"
+             : this.item.done_source === "agent" ? "done — agent-reported, not verified by you"
+             : "done";
+      return this.item.state.replace("_", " ");
+    },
+    badgeCls() {
+      if (this.item.state !== "done") return "b-other";
+      return this.item.done_source === "operator" ? "b-done-op" : "b-done-agent";
+    },
+  },
+  async mounted() {
+    const id = location.pathname.split("/")[2];
+    const r = await fetch(`/api/work/items/${id}/detail`);
+    const d = await r.json();
+    this.item = d.item; this.timeline = d.timeline; this.events = d.events; this.artifacts = d.artifacts;
+  },
+}).mount("#app");
+</script>
+</body>
+</html>

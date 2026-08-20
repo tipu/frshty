@@ -279,6 +279,87 @@ def record_artifacts(session_id: str, transcript_path: str) -> int:
     return added
 
 
+def _salient_arg(name: str, inp: dict) -> str:
+    if not isinstance(inp, dict):
+        return ""
+    for key in ("command", "file_path", "path", "description", "prompt", "url", "query"):
+        v = inp.get(key)
+        if v:
+            return str(v).replace("\n", " ")[:120]
+    return ""
+
+
+def transcript_timeline(transcript_path: str, max_bytes: int = 4194304) -> list[dict]:
+    if not transcript_path or not os.path.isfile(transcript_path):
+        return []
+    try:
+        with open(transcript_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - max_bytes))
+            raw = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+    timeline: list[dict] = []
+    for line in raw.splitlines():
+        if '"type"' not in line:
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        t = d.get("type")
+        msg = d.get("message") or {}
+        if t == "user":
+            if d.get("toolUseResult") is not None or d.get("isSidechain"):
+                continue
+            content = msg.get("content")
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+                    continue
+                text = " ".join(b.get("text", "") for b in content
+                                if isinstance(b, dict) and b.get("type") == "text")
+            else:
+                continue
+            if text.strip():
+                timeline.append({"kind": "prompt", "text": text.strip()[:500],
+                                 "at": d.get("timestamp", "")})
+        elif t == "assistant" and not d.get("isSidechain"):
+            for b in msg.get("content") or []:
+                if not isinstance(b, dict):
+                    continue
+                if b.get("type") == "tool_use":
+                    timeline.append({"kind": "tool", "name": b.get("name", "?"),
+                                     "arg": _salient_arg(b.get("name", ""), b.get("input")),
+                                     "at": d.get("timestamp", "")})
+                elif b.get("type") == "text" and b.get("text", "").strip():
+                    timeline.append({"kind": "text", "text": b["text"].strip()[:2000],
+                                     "at": d.get("timestamp", "")})
+    return timeline
+
+
+def item_detail(item_id: int) -> dict:
+    item = db.query_one("SELECT * FROM work_items WHERE id = ?", (item_id,))
+    if not item:
+        return {"error": "unknown work item"}
+    runs = db.query_all("SELECT * FROM work_runs WHERE work_item_id = ? ORDER BY id", (item_id,))
+    events = db.query_all(
+        "SELECT id, work_run_id, kind, payload, created_at FROM work_events "
+        "WHERE work_item_id = ? ORDER BY id", (item_id,))
+    artifacts = db.query_all(
+        "SELECT path, note, created_at FROM work_artifacts WHERE work_item_id = ? ORDER BY id",
+        (item_id,))
+    kinds = {e["kind"] for e in events}
+    if item["state"] == "done":
+        item["done_source"] = "operator" if "operator_done" in kinds else (
+            "agent" if "self_reported_done" in kinds else "unknown")
+    timeline = transcript_timeline(runs[-1]["transcript_path"]) if runs else []
+    return {"item": item, "runs": runs, "events": events, "artifacts": artifacts,
+            "timeline": timeline}
+
+
 def find_artifacts(query: str = "", limit: int = 20) -> list[dict]:
     like = f"%{query}%"
     return db.query_all(
