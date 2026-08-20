@@ -13,6 +13,7 @@ import core.queue as q
 import core.state as state
 import core.comments as comments
 import core.branch_sync as branch_sync
+import core.consensus_scope as consensus_scope
 import core.git_util as git_util
 import features.defence as defence
 from core import external_log
@@ -76,6 +77,7 @@ _LLM_BACKED_TASKS = frozenset({
     "prove",
     "generate_pr_descriptions",
     "do_research",
+    "scope_review",
 })
 
 _REPO_GATED_TASKS = frozenset({
@@ -187,6 +189,24 @@ def _repo_gate_blocked(instance_key: str, ticket_key: str, config: dict | None =
         (instance_key, ticket_key, *statuses),
     )
     return rows[0]["ticket_key"] if rows else None
+
+
+def _scope_review_state(config: dict, ts: dict) -> str:
+    """Scope-review gate state for a code-complete ticket.
+
+    Returns 'disabled' (feature off, or no branch diff to review), 'pending'
+    (no verdict recorded for the current branch diff), 'pass', or 'fail'.
+    Keyed on consensus_scope.scope_fingerprint so any new code on the branch
+    invalidates the previous verdict and forces a fresh review."""
+    if not config.get("features", {}).get("scope_review"):
+        return "disabled"
+    fingerprint = consensus_scope.scope_fingerprint(config, ts)
+    if not fingerprint:
+        return "disabled"
+    rec = ts.get("scope_review") or {}
+    if rec.get("fingerprint") != fingerprint:
+        return "pending"
+    return "pass" if rec.get("verdict") == "pass" else "fail"
 
 
 def _parse_iso(ts: str | None) -> datetime | None:

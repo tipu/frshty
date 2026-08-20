@@ -96,6 +96,7 @@ class TicketState(TypedDict, total=False):
     - CI markers: ci_fix_attempts, ci_passed, checks_started_at,
       _ci_failed_pending, _ci_timeout_state
     - comment markers: last_comment_ids, comment_fix_attempts
+    - scope review markers: scope_review
     - misc: llm_sessions
     """
     status: str
@@ -133,6 +134,7 @@ class TicketState(TypedDict, total=False):
     _ci_timeout_state: dict
     last_comment_ids: dict
     comment_fix_attempts: dict
+    scope_review: dict
     llm_sessions: dict
 
 
@@ -374,6 +376,13 @@ def _handle_pr_ready_ticket(
     key = ticket["key"]
     if instance_key and not ts.get("pr_descriptions_generated_at") and _change_manifest_exists(config, ts, key):
         _t._enqueue_stage(instance_key, key, "generate_pr_descriptions")
+    if instance_key:
+        scope = _t._scope_review_state(config, ts)
+        if scope in ("pending", "fail"):
+            if scope == "pending":
+                _t._enqueue_stage(instance_key, key, "scope_review")
+            state.save_ticket(key, ts)
+            return ts, True
     if config.get("pr", {}).get("auto_pr") and not ts.get("pr_scheduled_at"):
         if instance_key and _t._repo_gate_blocked(instance_key, key, config):
             state.save_ticket(key, ts)
@@ -412,6 +421,10 @@ def _handle_in_review_ticket(
         state.save_ticket(key, ts)
         return ts, True
 
+    scope = _t._scope_review_state(config, ts) if instance_key else "disabled"
+    if ts["status"] == "in_review" and instance_key and scope == "pending":
+        _t._enqueue_stage(instance_key, key, "scope_review")
+
     if ts["status"] == "in_review":
         platform = _t.make_platform(config)
         result = platform.monitor_ci(ticket, ts, base_url)
@@ -429,7 +442,9 @@ def _handle_in_review_ticket(
         else:
             ts = result
 
-    if ts["status"] == "in_review" and ts.get("ci_passed") and config.get("pr", {}).get("auto_merge"):
+    if (ts["status"] == "in_review" and ts.get("ci_passed")
+            and config.get("pr", {}).get("auto_merge")
+            and scope in ("disabled", "pass")):
         ts = _t._merge(config, ticket, ts, base_url)
 
     if ts["status"] == "in_review":
