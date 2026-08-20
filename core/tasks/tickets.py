@@ -776,10 +776,12 @@ def _local_hook_entries(repo_dir: Path) -> list[Path]:
         return []
     found = []
     for raw in _ENTRY_LINE.findall(body):
-        for token in raw.strip("'\"").split():
-            candidate = repo_dir / token
-            if candidate.is_file():
-                found.append(candidate)
+        # The first token only. It is the command pre-commit runs; the rest are
+        # its arguments, and `run` in `pipenv --quiet run basedpyright` would
+        # otherwise watch any repo that happens to contain a file called run.
+        token = raw.strip("'\"").split()[:1]
+        if token and (repo_dir / token[0]).is_file():
+            found.append(repo_dir / token[0])
     return found
 
 
@@ -802,12 +804,28 @@ def _hook_integrity(repo_dir: Path) -> dict[Path, HookState]:
     return {p: _state_of(p) for p in _hook_paths(repo_dir)}
 
 
-def _restore_hook_setup(before: dict[Path, HookState]) -> list[str]:
+def _restorable_roots(repo_dir: Path) -> tuple[Path, ...]:
+    """Where this may write. The watched set is wider than the writable one.
+
+    `git config --show-origin` names `~/.gitconfig` and `/etc/gitconfig`, and a
+    change to either has to block the ticket. Writing them back would have
+    frshty rewriting the operator's own configuration from a recording it took
+    minutes earlier, which is worse than the contamination it is undoing.
+    """
+    common = Path(git_util.run_git(
+        repo_dir, ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        timeout=30).stdout.strip())
+    return (repo_dir.resolve(), common.resolve())
+
+
+def _restore_hook_setup(before: dict[Path, HookState],
+                        roots: tuple[Path, ...]) -> list[str]:
     """Put the hook files back. Returns the paths that could not be restored.
 
     Every path is cleared before it is written, so a watched file the repair
     turned into a symlink or a directory is replaced rather than written
-    through, which would follow the link out of the checkout.
+    through, which would follow the link out of the checkout. Paths outside
+    `roots` are reported rather than rewritten.
     """
     failed = []
     for path, was in before.items():
@@ -815,6 +833,11 @@ def _restore_hook_setup(before: dict[Path, HookState]) -> list[str]:
             continue
         content, mode = was
         try:
+            # Where the write lands, which is not where a symlink at `path`
+            # points: the link is cleared first, so the new file goes here.
+            lands = path.parent.resolve() / path.name
+            if not any(lands.is_relative_to(root) for root in roots):
+                raise OSError(f"{path} is outside this checkout")
             if content is not None and content.startswith((_IRREGULAR, _OVERSIZE)):
                 raise OSError(f"{path} was not a file we can reproduce")
             _clear_path(path)
@@ -933,6 +956,7 @@ def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
         # compare the repair against and nothing to put back, so not being able
         # to take one blocks rather than letting the agent edit unwatched.
         hooks_before = _hook_integrity(repo_dir)
+        hook_roots = _restorable_roots(repo_dir)
         snapshot = _snapshot_repo(repo_dir)
     except (git_util.GitCommandError, OSError) as e:
         log.emit("commit_hook_snapshot_failed",
@@ -968,7 +992,7 @@ def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
         # hid behind it. _restore_repo also skips ignored files entirely, which
         # is why a planted `.venv/bin/pre-commit` needs putting back from its
         # recorded contents rather than by that enumeration.
-        failed = _restore_hook_setup(hooks_before)
+        failed = _restore_hook_setup(hooks_before, hook_roots)
         if failed:
             log.emit("commit_hook_setup_contaminated",
                      f"{ticket_key}: {repo_dir.name} hook setup could not be put back "
