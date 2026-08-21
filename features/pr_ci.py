@@ -12,11 +12,12 @@ from core.claude_runner import run_balanced, run_claude_code, extract_json
 
 
 FIX_TIMEOUT = 1800
-# Must stay in sync with GitHubPlatform._evaluate_checks' failure set in
-# features/platforms.py — otherwise monitor_ci flags a PR as CI-failed and
-# enqueues fix_ci_failures, but triage sees no "failed" checks (no_failing),
-# never fixes or counts an attempt, and the ticket loops in_review forever
-# holding the repo gate. CANCELLED/TIMED_OUT are real failures GH reports.
+# Single source of truth for the CI failure set. _CIMonitorMixin._evaluate_checks
+# in features/platforms.py imports this — if the sets ever diverge again,
+# monitor_ci flags a PR as CI-failed and enqueues fix_ci_failures, but triage
+# sees no "failed" checks (no_failing), never fixes or counts an attempt, and
+# the ticket loops in_review forever holding the repo gate.
+# CANCELLED/TIMED_OUT are real failures GH reports; STOPPED is Bitbucket's.
 FAILED_STATES = ("FAILURE", "FAILED", "STOPPED", "CANCELLED", "TIMED_OUT")
 PENDING_STATES = ("PENDING", "QUEUED", "IN_PROGRESS", "INPROGRESS", "WAITING", "REQUESTED", "EXPECTED")
 

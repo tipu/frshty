@@ -11,6 +11,7 @@ import core.log as log
 from core import external_log
 from core.config import resolve_env, get_repos, base_branch_for
 from core.claude_runner import run_claude_code
+from features.pr_ci import FAILED_STATES
 
 
 _CONFLICT_RESOLVE_MODEL = os.environ.get(
@@ -172,7 +173,102 @@ def _identity_block_reason(config: dict, repo_path, branch: str) -> str:
             f"{'; '.join(wrong[:5])}")
 
 
-class BitbucketPlatform:
+class _CIMonitorMixin:
+    CI_TIMEOUT_SECS = 3600
+    NO_CI_GRACE_SECS = 300
+
+    def monitor_ci(self, ticket, ts, base_url) -> dict:
+        prs = ts.get("prs", [])
+        if not prs:
+            return ts
+
+        if not ts.get("checks_started_at"):
+            ts["checks_started_at"] = datetime.now(timezone.utc).isoformat()
+
+        all_passed = True
+        for pr in prs:
+            checks = self.get_pr_checks(pr["repo"], pr["id"])
+            if checks is None:
+                if not ts.get("_ci_fetch_failed_logged"):
+                    log.emit("ticket_ci_fetch_failed",
+                        f"Could not fetch CI checks for {ticket['key']} PR #{pr['id']}; holding (not treating as passed)",
+                        links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+                        meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"]})
+                    ts["_ci_fetch_failed_logged"] = True
+                all_passed = False
+                continue
+            ts.pop("_ci_fetch_failed_logged", None)
+            verdict = self._evaluate_checks(checks)
+
+            if verdict == "pending":
+                elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(ts["checks_started_at"])).total_seconds()
+                if not checks and elapsed > self.NO_CI_GRACE_SECS:
+                    if not ts.get("_ci_no_ci_logged"):
+                        log.emit("ticket_no_ci_configured",
+                            f"No CI checks for {ticket['key']} PR #{pr['id']} after {int(elapsed/60)}m, treating as passed",
+                            links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+                            meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"]})
+                        ts["_ci_no_ci_logged"] = True
+                    ts.pop("_ci_timeout_state", None)
+                    continue
+                if elapsed > self.CI_TIMEOUT_SECS:
+                    elapsed_mins = int(elapsed / 60)
+                    timeout_state = ts.get("_ci_timeout_state", {})
+
+                    is_same_pr = timeout_state.get("pr_id") == str(pr["id"])
+                    is_same_duration = abs(int(timeout_state.get("last_elapsed_mins", "0")) - elapsed_mins) < 10
+
+                    if is_same_pr and is_same_duration:
+                        timeout_state["strike_count"] = str(int(timeout_state.get("strike_count", "1")) + 1)
+                    else:
+                        timeout_state["strike_count"] = "1"
+
+                    timeout_state["pr_id"] = str(pr["id"])
+                    timeout_state["last_elapsed_mins"] = str(elapsed_mins)
+                    ts["_ci_timeout_state"] = timeout_state
+
+                    if int(timeout_state["strike_count"]) >= 5:
+                        log.emit("ticket_checks_stalled", f"CI checks stalled for {ticket['key']} PR #{pr['id']} after {elapsed_mins}m (5+ timeouts, stopping polling)",
+                            links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+                            meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"]})
+                        return {"_ci_stalled": True, "pr": pr}
+                    else:
+                        log.emit("ticket_checks_timeout", f"CI checks timed out for {ticket['key']} PR #{pr['id']} after {elapsed_mins}m ({timeout_state.get('strike_count', '1')}/5)",
+                            links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+                            meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"]})
+                    return ts
+                all_passed = False
+                continue
+
+            if verdict == "failed":
+                return {"_ci_failed": True, "pr": pr, "checks": checks}
+
+        if not all_passed:
+            return ts
+
+        if not ts.get("ci_passed"):
+            log.emit("ticket_checks_passed", f"All CI checks passed for {ticket['key']}",
+                links={"detail": f"{base_url}/tickets/{ticket['key']}"},
+                meta={"ticket": ticket["key"]})
+        ts["ci_passed"] = True
+        ts.pop("checks_started_at", None)
+        ts.pop("ci_fix_attempts", None)
+        ts.pop("_ci_timeout_state", None)
+        ts.pop("_ci_no_ci_logged", None)
+        return ts
+
+    def _evaluate_checks(self, checks: list[dict]) -> str:
+        if not checks:
+            return "pending"
+        states = {c["state"].upper() for c in checks}
+        if states & set(FAILED_STATES):
+            return "failed"
+        if states <= {"SUCCESS", "NEUTRAL", "SKIPPED"}:
+            return "passed"
+        return "pending"
+
+
+class BitbucketPlatform(_CIMonitorMixin):
     BASE_URL = "https://api.bitbucket.org/2.0"
 
     def __init__(self, config: dict):
@@ -296,7 +392,32 @@ class BitbucketPlatform:
             ]
 
     def get_failed_logs(self, repo: str, pr_id: int) -> str:
-        return ""
+        checks = self.get_pr_checks(repo, pr_id) or []
+        build_ids = []
+        for c in checks:
+            if c.get("state", "").upper() not in FAILED_STATES:
+                continue
+            m = re.search(r"/results/(\d+)", c.get("url", ""))
+            if m and m.group(1) not in build_ids:
+                build_ids.append(m.group(1))
+        if not build_ids:
+            return ""
+        logs = []
+        with external_log.client("bitbucket", auth=self._auth(), timeout=30, follow_redirects=True) as client:
+            for build in build_ids[:3]:
+                steps_url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pipelines/{build}/steps/"
+                resp = client.get(steps_url)
+                if resp.status_code != 200:
+                    continue
+                for step in resp.json().get("values", []):
+                    result_name = ((step.get("state") or {}).get("result") or {}).get("name", "")
+                    if result_name.upper() not in FAILED_STATES:
+                        continue
+                    log_resp = client.get(f"{steps_url}{step.get('uuid', '')}/log")
+                    if log_resp.status_code != 200:
+                        continue
+                    logs.append(f"=== pipeline #{build} step: {step.get('name', '')} ===\n{log_resp.text[-4000:]}")
+        return "\n\n".join(logs)
 
     def get_pr_state(self, repo: str, pr_id: int) -> str:
         info = self.get_pr_info(repo, pr_id)
@@ -443,10 +564,6 @@ class BitbucketPlatform:
                 return {"url": data["links"]["html"]["href"], "id": data["id"]}
             return {"error": resp.text}
 
-    def monitor_ci(self, ticket, ts, base_url) -> dict:
-        ts["ci_passed"] = True
-        return ts
-
     def merge_pr(self, repo: str, pr_id: int) -> dict:
         strategy = self.config.get("pr", {}).get("merge_strategy", "squash")
         url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}/merge"
@@ -475,7 +592,7 @@ class BitbucketPlatform:
         }
 
 
-class GitHubPlatform:
+class GitHubPlatform(_CIMonitorMixin):
 
     def __init__(self, config: dict):
         self.config = config
@@ -953,99 +1070,6 @@ class GitHubPlatform:
                            "repo": full_repo, "push_ok": push_ok})
             return push_ok
         return False
-
-    CI_TIMEOUT_SECS = 3600
-    NO_CI_GRACE_SECS = 300
-
-    def monitor_ci(self, ticket, ts, base_url) -> dict:
-        prs = ts.get("prs", [])
-        if not prs:
-            return ts
-
-        if not ts.get("checks_started_at"):
-            ts["checks_started_at"] = datetime.now(timezone.utc).isoformat()
-
-        all_passed = True
-        for pr in prs:
-            checks = self.get_pr_checks(pr["repo"], pr["id"])
-            if checks is None:
-                if not ts.get("_ci_fetch_failed_logged"):
-                    log.emit("ticket_ci_fetch_failed",
-                        f"Could not fetch CI checks for {ticket['key']} PR #{pr['id']}; holding (not treating as passed)",
-                        links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
-                        meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"]})
-                    ts["_ci_fetch_failed_logged"] = True
-                all_passed = False
-                continue
-            ts.pop("_ci_fetch_failed_logged", None)
-            verdict = self._evaluate_checks(checks)
-
-            if verdict == "pending":
-                elapsed = (datetime.now(timezone.utc) - datetime.fromisoformat(ts["checks_started_at"])).total_seconds()
-                if not checks and elapsed > self.NO_CI_GRACE_SECS:
-                    if not ts.get("_ci_no_ci_logged"):
-                        log.emit("ticket_no_ci_configured",
-                            f"No CI checks for {ticket['key']} PR #{pr['id']} after {int(elapsed/60)}m, treating as passed",
-                            links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
-                            meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"]})
-                        ts["_ci_no_ci_logged"] = True
-                    ts.pop("_ci_timeout_state", None)
-                    continue
-                if elapsed > self.CI_TIMEOUT_SECS:
-                    elapsed_mins = int(elapsed / 60)
-                    timeout_state = ts.get("_ci_timeout_state", {})
-
-                    is_same_pr = timeout_state.get("pr_id") == str(pr["id"])
-                    is_same_duration = abs(int(timeout_state.get("last_elapsed_mins", "0")) - elapsed_mins) < 10
-
-                    if is_same_pr and is_same_duration:
-                        timeout_state["strike_count"] = str(int(timeout_state.get("strike_count", "1")) + 1)
-                    else:
-                        timeout_state["strike_count"] = "1"
-
-                    timeout_state["pr_id"] = str(pr["id"])
-                    timeout_state["last_elapsed_mins"] = str(elapsed_mins)
-                    ts["_ci_timeout_state"] = timeout_state
-
-                    if int(timeout_state["strike_count"]) >= 5:
-                        log.emit("ticket_checks_stalled", f"CI checks stalled for {ticket['key']} PR #{pr['id']} after {elapsed_mins}m (5+ timeouts, stopping polling)",
-                            links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
-                            meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"]})
-                        return {"_ci_stalled": True, "pr": pr}
-                    else:
-                        log.emit("ticket_checks_timeout", f"CI checks timed out for {ticket['key']} PR #{pr['id']} after {elapsed_mins}m ({timeout_state.get('strike_count', '1')}/5)",
-                            links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
-                            meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"]})
-                    return ts
-                all_passed = False
-                continue
-
-            if verdict == "failed":
-                return {"_ci_failed": True, "pr": pr, "checks": checks}
-
-        if not all_passed:
-            return ts
-
-        if not ts.get("ci_passed"):
-            log.emit("ticket_checks_passed", f"All CI checks passed for {ticket['key']}",
-                links={"detail": f"{base_url}/tickets/{ticket['key']}"},
-                meta={"ticket": ticket["key"]})
-        ts["ci_passed"] = True
-        ts.pop("checks_started_at", None)
-        ts.pop("ci_fix_attempts", None)
-        ts.pop("_ci_timeout_state", None)
-        ts.pop("_ci_no_ci_logged", None)
-        return ts
-
-    def _evaluate_checks(self, checks: list[dict]) -> str:
-        if not checks:
-            return "pending"
-        states = {c["state"].upper() for c in checks}
-        if "FAILURE" in states or "FAILED" in states or "CANCELLED" in states or "TIMED_OUT" in states:
-            return "failed"
-        if states <= {"SUCCESS", "NEUTRAL", "SKIPPED"}:
-            return "passed"
-        return "pending"
 
     def merge_pr(self, repo: str, pr_id: int) -> dict:
         pr_config = self.config.get("pr", {})
