@@ -1,0 +1,1056 @@
+from datetime import datetime, timedelta, timezone
+
+import core.db as db
+from services import work_store
+
+
+def _mkitem(objective="do the thing", **kw):
+    return work_store.create_item(objective, **kw)
+
+
+class TestMigration:
+    def test_tables_exist(self):
+        names = {r["name"] for r in db.query_all(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert {"work_items", "work_runs", "work_events"} <= names
+
+    def test_migration_idempotent(self, tmp_path):
+        import pathlib
+        sql = pathlib.Path("migrations/014_work_layer.sql").read_text()
+        import sqlite3
+        conn = sqlite3.connect(tmp_path / "t.db")
+        conn.executescript(sql)
+        conn.executescript(sql)
+        rows = conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        assert len([r for r in rows if r[0].startswith("work_")]) == 3
+
+
+class TestTransitions:
+    def test_stop_flips_to_needs_you(self):
+        item_id = _mkitem()
+        work_store.add_run(item_id, "sid-stop-1", "work-1", "/tmp")
+        ok = work_store.record_event("sid-stop-1", "Stop", {"last_assistant_message": "did the thing"})
+        assert ok is True
+        item = db.query_one("SELECT state, stop_reason FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "needs_you"
+        assert "did the thing" in item["stop_reason"]
+        run = db.query_one("SELECT status FROM work_runs WHERE session_id = 'sid-stop-1'")
+        assert run["status"] == "stopped"
+
+    def test_unknown_session_writes_nothing(self):
+        before = db.query_one("SELECT COUNT(*) AS n FROM work_events")["n"]
+        ok = work_store.record_event("sid-nonexistent", "Stop", {})
+        assert ok is False
+        after = db.query_one("SELECT COUNT(*) AS n FROM work_events")["n"]
+        assert after == before
+
+    def test_prompt_resumes_working(self):
+        item_id = _mkitem()
+        work_store.add_run(item_id, "sid-resume-1", "work-2", "/tmp")
+        work_store.record_event("sid-resume-1", "Stop", {})
+        work_store.record_event("sid-resume-1", "UserPromptSubmit", {})
+        item = db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "agent_working"
+
+    def test_session_end_keeps_done(self):
+        item_id = _mkitem()
+        work_store.add_run(item_id, "sid-done-1", "work-3", "/tmp")
+        work_store.apply_action(item_id, "done")
+        work_store.record_event("sid-done-1", "SessionEnd", {"reason": "exit"})
+        item = db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "done"
+
+    def test_launch_failed_marks_item(self):
+        item_id = _mkitem()
+        run_id = work_store.add_run(item_id, "sid-fail-1", "work-4", "/tmp")
+        work_store.mark_launch_failed(run_id, "tmux exploded")
+        item = db.query_one("SELECT state, stop_reason FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "failed_stale"
+        assert "tmux exploded" in item["stop_reason"]
+
+
+class TestGrouping:
+    def test_five_groups(self):
+        now = datetime.now(timezone.utc)
+        fresh = _mkitem("working fresh")
+        stale = _mkitem("working stale")
+        needs = _mkitem("needs op")
+        snoozed = _mkitem("snoozed future")
+        expired = _mkitem("snooze expired")
+        done = _mkitem("finished")
+        db.execute("UPDATE work_items SET state='needs_you' WHERE id = ?", (needs,))
+        db.execute("UPDATE work_items SET state='done' WHERE id = ?", (done,))
+        db.execute(
+            "UPDATE work_items SET state='waiting_external', snoozed_until=? WHERE id = ?",
+            ((now + timedelta(hours=2)).isoformat(), snoozed),
+        )
+        db.execute(
+            "UPDATE work_items SET state='waiting_external', snoozed_until=? WHERE id = ?",
+            ((now - timedelta(hours=2)).isoformat(), expired),
+        )
+        db.execute(
+            "UPDATE work_items SET updated_at=? WHERE id = ?",
+            ((now - timedelta(minutes=31)).isoformat(), stale),
+        )
+        groups = work_store.grouped_items(now)
+        ids = {g: {r["id"] for r in rows} for g, rows in groups.items()}
+        assert fresh in ids["agent_working"]
+        assert stale in ids["failed_stale"]
+        assert needs in ids["needs_you"]
+        assert snoozed in ids["waiting_external"]
+        assert expired in ids["needs_you"]
+        assert done in ids["done"]
+
+    def test_stale_boundary(self):
+        now = datetime.now(timezone.utc)
+        fresh = _mkitem("29 min old")
+        db.execute("UPDATE work_items SET updated_at=? WHERE id = ?",
+                   ((now - timedelta(minutes=29)).isoformat(), fresh))
+        groups = work_store.grouped_items(now)
+        assert fresh in {r["id"] for r in groups["agent_working"]}
+
+    def test_empty_groups_are_lists(self):
+        groups = work_store.grouped_items()
+        assert set(groups.keys()) == set(work_store.GROUPS)
+        for rows in groups.values():
+            assert isinstance(rows, list)
+
+    def test_search_filters_by_objective(self):
+        hit = _mkitem("merge the billing PR")
+        miss = _mkitem("update the readme")
+        groups = work_store.grouped_items(q="BILLING")
+        ids = {r["id"] for rows in groups.values() for r in rows}
+        assert hit in ids
+        assert miss not in ids
+
+    def test_search_lifts_done_window(self):
+        now = datetime.now(timezone.utc)
+        old = _mkitem("ancient billing task")
+        db.execute("UPDATE work_items SET state='done', updated_at=? WHERE id = ?",
+                   ((now - timedelta(days=30)).isoformat(), old))
+        without_q = work_store.grouped_items(now)
+        assert old not in {r["id"] for r in without_q["done"]}
+        with_q = work_store.grouped_items(now, q="ancient billing")
+        assert old in {r["id"] for r in with_q["done"]}
+
+
+class TestIntake:
+    def _client(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from web.work import router
+        a = FastAPI()
+        a.include_router(router)
+        return TestClient(a)
+
+    def test_intake_creates_item_and_run(self, tmp_path, monkeypatch):
+        from unittest.mock import patch, MagicMock
+        reg = MagicMock()
+        reg.config = {"workspace": {"root": tmp_path}}
+        instances = MagicMock()
+        instances.get.return_value = reg
+        with patch("services.work_launch.runtime.instances", return_value=instances), \
+             patch("services.work_launch.terminal.launch_claude") as mock_launch, \
+             patch("services.work_launch.terminal.session_healthy", return_value={"alive": True, "claude_running": True}):
+            client = self._client()
+            r = client.post("/api/work/intake", json={"text": "ship the widget"})
+        assert r.status_code == 200, r.text
+        d = r.json()
+        mock_launch.assert_called_once()
+        args = mock_launch.call_args
+        assert args.args[0] == f"work-{d['item_id']}"
+        assert args.args[2] == d["session_id"]
+        assert d["session_id"] != ""
+        assert "ship the widget" in args.args[3]
+        assert args.args[4] is True
+        item = db.query_one("SELECT state FROM work_items WHERE id = ?", (d["item_id"],))
+        assert item["state"] == "agent_working"
+        run = db.query_one("SELECT status FROM work_runs WHERE id = ?", (d["run_id"],))
+        assert run["status"] == "launched"
+
+    def test_intake_launch_failure_marks_item(self, tmp_path):
+        from unittest.mock import patch, MagicMock
+        reg = MagicMock()
+        reg.config = {"workspace": {"root": tmp_path}}
+        instances = MagicMock()
+        instances.get.return_value = reg
+        with patch("services.work_launch.runtime.instances", return_value=instances), \
+             patch("services.work_launch.terminal.launch_claude", side_effect=RuntimeError("boom")), \
+             patch("services.work_launch.log.emit"):
+            client = self._client()
+            r = client.post("/api/work/intake", json={"text": "doomed"})
+        assert r.status_code == 500
+        item_id = r.json()["item_id"]
+        item = db.query_one("SELECT state, stop_reason FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "failed_stale"
+        assert "boom" in item["stop_reason"]
+
+    def test_intake_without_personal_is_503(self):
+        from unittest.mock import patch
+        with patch("services.work_launch.runtime.instances", return_value=None):
+            client = self._client()
+            r = client.post("/api/work/intake", json={"text": "anything"})
+        assert r.status_code == 503
+
+    def test_intake_rejects_empty(self):
+        client = self._client()
+        r = client.post("/api/work/intake", json={"text": "   "})
+        assert r.status_code == 400
+
+    def test_items_endpoint_renders_without_personal(self):
+        from unittest.mock import patch
+        with patch("services.work_launch.runtime.instances", return_value=None):
+            client = self._client()
+            r = client.get("/api/work/items")
+        assert r.status_code == 200
+        d = r.json()
+        assert set(d["groups"].keys()) == set(work_store.GROUPS)
+        assert d["personal_loaded"] is False
+
+    def test_work_page_renders(self):
+        client = self._client()
+        r = client.get("/work")
+        assert r.status_code == 200
+        assert "Needs you" in r.text
+
+    def test_items_endpoint_paginates_done(self):
+        from unittest.mock import patch
+        from web.work import DONE_PAGE_SIZE
+        ids = []
+        for n in range(DONE_PAGE_SIZE + 3):
+            item = _mkitem(f"paged task {n}")
+            work_store.apply_action(item, "done")
+            ids.append(item)
+        with patch("services.work_launch.runtime.instances", return_value=None):
+            client = self._client()
+            p1 = client.get("/api/work/items", params={"q": "paged task"}).json()
+            p2 = client.get("/api/work/items",
+                            params={"q": "paged task", "done_page": 2}).json()
+            clamped = client.get("/api/work/items",
+                                 params={"q": "paged task", "done_page": 99}).json()
+        assert p1["counts"]["done"] == DONE_PAGE_SIZE + 3
+        assert p1["done_pages"] == 2
+        assert len(p1["groups"]["done"]) == DONE_PAGE_SIZE
+        assert len(p2["groups"]["done"]) == 3
+        page_ids = {r["id"] for r in p1["groups"]["done"]} | {r["id"] for r in p2["groups"]["done"]}
+        assert page_ids == set(ids)
+        assert clamped["done_page"] == 2
+
+    def test_items_endpoint_search_filters(self):
+        from unittest.mock import patch
+        hit = _mkitem("unique needle objective")
+        _mkitem("unrelated haystack")
+        with patch("services.work_launch.runtime.instances", return_value=None):
+            client = self._client()
+            d = client.get("/api/work/items", params={"q": "needle"}).json()
+        all_ids = {r["id"] for rows in d["groups"].values() for r in rows}
+        assert all_ids == {hit}
+
+    def test_concurrent_intakes_serialize_launch(self, tmp_path):
+        import threading
+        import time
+        from unittest.mock import patch, MagicMock
+        reg = MagicMock()
+        reg.config = {"workspace": {"root": tmp_path}}
+        instances = MagicMock()
+        instances.get.return_value = reg
+        active = []
+        overlaps = []
+
+        def slow_launch(*a, **kw):
+            active.append(1)
+            if len(active) > 1:
+                overlaps.append(1)
+            time.sleep(0.05)
+            active.pop()
+
+        with patch("services.work_launch.runtime.instances", return_value=instances), \
+             patch("services.work_launch.terminal.launch_claude", side_effect=slow_launch), \
+             patch("services.work_launch.terminal.session_healthy", return_value={"alive": True, "claude_running": True}):
+            client = self._client()
+            threads = [
+                threading.Thread(target=lambda i=i: client.post(
+                    "/api/work/intake", json={"text": f"parallel {i}"}))
+                for i in range(4)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        assert overlaps == [], "launch_claude entered concurrently"
+        n = db.query_one("SELECT COUNT(*) AS n FROM work_items WHERE objective LIKE 'parallel %'")["n"]
+        assert n == 4
+
+
+class TestQueueReservation:
+    def test_work_run_single_flight_under_personal(self):
+        import core.queue as q
+        db.execute("DELETE FROM jobs")
+        first = q.enqueue_job("personal", "work_run", {"run_id": 1})
+        q.enqueue_job("personal", "work_run", {"run_id": 2})
+        client_job = q.enqueue_job("someclient", "scan_tickets", {})
+        claimed = q.claim_next()
+        assert claimed is not None and claimed["id"] == first
+        second = q.claim_next()
+        assert second is not None
+        assert second["id"] == client_job, "second work_run must not run while first is running"
+        third = q.claim_next()
+        assert third is None
+
+
+class TestPersonalConfig:
+    def test_loads_and_stays_quiet(self):
+        import os
+        import pytest
+        if not os.path.isfile("config/personal.toml"):
+            pytest.skip("config/personal.toml is machine-local and absent here; the work layer runs read-only")
+        import core.config as cfg
+        from core.registry import Instances
+        from core.tasks.routes import _cron_routes
+        config = cfg.load_config("config/personal.toml")
+        assert config["job"]["key"] == "personal"
+        assert "git" not in config
+        assert cfg.get_repos(config) == []
+        instances = Instances()
+        reg = instances.add(config)
+        jobs = _cron_routes({"instance_key": "personal"}, {"personal": reg})
+        tasks = {j["task"] for j in jobs}
+        assert tasks == {"scheduler_check", "dep_store_gc"}, tasks
+
+    def test_no_port_or_host_collision(self):
+        import pathlib
+        import tomllib
+        seen_hosts = {}
+        for p in sorted(pathlib.Path("config").glob("*.toml")):
+            if p.name in ("example.toml", "test.toml", "tipu-test.toml", "discovery.toml"):
+                continue
+            raw = tomllib.loads(p.read_text())
+            host = (raw.get("job") or {}).get("host", "")
+            if host:
+                assert host not in seen_hosts, f"{p.name} and {seen_hosts[host]} share {host}"
+                seen_hosts[host] = p.name
+
+
+class TestHookInstaller:
+    def test_installer_idempotent_and_preserving(self, tmp_path):
+        import json
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "install_work_hooks", "scripts/install_work_hooks.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        settings = tmp_path / "settings.json"
+        settings.write_text(json.dumps({
+            "hooks": {"UserPromptSubmit": [{"matcher": "", "hooks": [
+                {"type": "command", "command": "echo existing"}]}]},
+            "permissions": {"allow": ["Read"]},
+        }))
+        added = mod.install_into(str(settings))
+        expected = {e for e in mod.EVENTS if e != "PreToolUse"}
+        expected |= {"PreToolUse[AskUserQuestion]", "PreToolUse[Bash]"}
+        assert set(added) == expected
+        again = mod.install_into(str(settings))
+        assert again == []
+        data = json.loads(settings.read_text())
+        prompt_hooks = data["hooks"]["UserPromptSubmit"]
+        commands = [h["command"] for e in prompt_hooks for h in e["hooks"]]
+        assert "echo existing" in commands
+        assert data["permissions"] == {"allow": ["Read"]}
+        for event in mod.EVENTS:
+            cmds = [h["command"] for e in data["hooks"][event] for h in e["hooks"]]
+            assert any("work_hook.py" in c for c in cmds)
+
+
+class TestHookScript:
+    def test_hook_records_stop_event(self, tmp_path):
+        import json
+        import subprocess
+        import core.db as _db
+        dbfile = str(_db._DB_PATH)
+        item_id = _mkitem("hooked item")
+        work_store.add_run(item_id, "sid-hook-1", "work-h1", "/tmp")
+        payload = json.dumps({"session_id": "sid-hook-1", "hook_event_name": "Stop"})
+        r = subprocess.run(
+            [".venv/bin/python", "scripts/work_hook.py"],
+            input=payload, capture_output=True, text=True, timeout=15,
+            env={**__import__("os").environ, "FRSHTY_DB": dbfile},
+        )
+        assert r.returncode == 0, r.stderr
+        item = db.query_one("SELECT state, stop_reason FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "failed_stale"
+        assert item["stop_reason"] == "tmux session gone"
+        kinds = [e["kind"] for e in db.query_all(
+            "SELECT kind FROM work_events WHERE work_item_id = ? ORDER BY id", (item_id,))]
+        assert "Stop" in kinds
+
+    def test_hook_foreign_session_fast_noop(self, tmp_path):
+        import json
+        import subprocess
+        import core.db as _db
+        dbfile = str(_db._DB_PATH)
+        before = db.query_one("SELECT COUNT(*) AS n FROM work_events")["n"]
+        payload = json.dumps({"session_id": "sid-foreign-xyz", "hook_event_name": "Stop"})
+        r = subprocess.run(
+            [".venv/bin/python", "scripts/work_hook.py"],
+            input=payload, capture_output=True, text=True, timeout=15,
+            env={**__import__("os").environ, "FRSHTY_DB": dbfile},
+        )
+        assert r.returncode == 0
+        after = db.query_one("SELECT COUNT(*) AS n FROM work_events")["n"]
+        assert after == before
+
+    def test_hook_garbage_input_exits_zero(self):
+        import subprocess
+        r = subprocess.run(
+            [".venv/bin/python", "scripts/work_hook.py"],
+            input="not json at all", capture_output=True, text=True, timeout=15,
+        )
+        assert r.returncode == 0
+
+
+class TestAutocontinue:
+    def _setup(self, monkeypatch, tail="Progress made. Continuing next step.", send_ok=True):
+        from unittest.mock import MagicMock
+        item_id = _mkitem("auto item")
+        run_id = work_store.add_run(item_id, f"sid-auto-{item_id}", f"work-{item_id}", "/tmp")
+        work_store.record_event(f"sid-auto-{item_id}", "Stop", {})
+        monkeypatch.setattr(work_store, "last_assistant_text", lambda p: tail)
+        sender = MagicMock(return_value=send_ok)
+        monkeypatch.setattr(work_store, "tmux_send", sender)
+        return item_id, run_id, sender
+
+    def _state(self, item_id):
+        return db.query_one(
+            "SELECT state, continues_used, stop_reason FROM work_items WHERE id = ?", (item_id,))
+
+    def test_continues_when_no_question(self, monkeypatch):
+        item_id, _, sender = self._setup(monkeypatch)
+        out = work_store.maybe_autocontinue(f"sid-auto-{item_id}", "/tmp/t.jsonl")
+        assert out == "continued"
+        sender.assert_called_once()
+        s = self._state(item_id)
+        assert s["state"] == "agent_working"
+        assert s["continues_used"] == 1
+
+    def test_question_blocks_continue(self, monkeypatch):
+        item_id, _, sender = self._setup(monkeypatch, tail="Should I use the staging bucket or prod?")
+        out = work_store.maybe_autocontinue(f"sid-auto-{item_id}", "/tmp/t.jsonl")
+        assert out == "question"
+        sender.assert_not_called()
+        s = self._state(item_id)
+        assert s["state"] == "needs_you"
+        assert "staging bucket" in s["stop_reason"]
+
+    def test_done_marker_echo_does_not_complete(self, monkeypatch):
+        item_id, _, sender = self._setup(
+            monkeypatch, tail="I will end with WORK_DONE when finished. Proceeding with step 2.")
+        out = work_store.maybe_autocontinue(f"sid-auto-{item_id}", "/tmp/t.jsonl")
+        assert out == "continued"
+        assert self._state(item_id)["state"] == "agent_working"
+
+    def test_delayed_event_cannot_resurrect_done(self):
+        item_id = _mkitem("resurrect guard")
+        work_store.add_run(item_id, f"sid-res-{item_id}", f"work-{item_id}", "/tmp")
+        work_store.apply_action(item_id, "done")
+        work_store.record_event(f"sid-res-{item_id}", "UserPromptSubmit", {})
+        assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                            (item_id,))["state"] == "done"
+
+    def test_done_marker_completes_item(self, monkeypatch):
+        item_id, run_id, sender = self._setup(monkeypatch, tail="All files written.\nWORK_DONE")
+        out = work_store.maybe_autocontinue(f"sid-auto-{item_id}", "/tmp/t.jsonl")
+        assert out == "done"
+        sender.assert_not_called()
+        assert self._state(item_id)["state"] == "done"
+        run = db.query_one("SELECT status FROM work_runs WHERE id = ?", (run_id,))
+        assert run["status"] == "finished"
+
+    def test_cap_blocks_continue(self, monkeypatch):
+        item_id, _, sender = self._setup(monkeypatch)
+        db.execute("UPDATE work_items SET continues_used = continue_cap WHERE id = ?", (item_id,))
+        out = work_store.maybe_autocontinue(f"sid-auto-{item_id}", "/tmp/t.jsonl")
+        assert out == "capped"
+        sender.assert_not_called()
+        assert self._state(item_id)["state"] == "needs_you"
+
+    def test_disabled_blocks_continue(self, monkeypatch):
+        item_id, _, sender = self._setup(monkeypatch)
+        db.execute("UPDATE work_items SET autocontinue = 0 WHERE id = ?", (item_id,))
+        out = work_store.maybe_autocontinue(f"sid-auto-{item_id}", "/tmp/t.jsonl")
+        assert out == "disabled"
+        sender.assert_not_called()
+
+    def test_dead_session_marks_failed(self, monkeypatch):
+        item_id, _, _ = self._setup(monkeypatch, send_ok=False)
+        out = work_store.maybe_autocontinue(f"sid-auto-{item_id}", "/tmp/t.jsonl")
+        assert out == "session_gone"
+        assert self._state(item_id)["state"] == "failed_stale"
+
+
+class TestReply:
+    def test_reply_resumes(self, monkeypatch):
+        from unittest.mock import MagicMock
+        item_id = _mkitem("reply item")
+        work_store.add_run(item_id, f"sid-reply-{item_id}", f"work-{item_id}", "/tmp")
+        work_store.record_event(f"sid-reply-{item_id}", "Stop", {})
+        sender = MagicMock(return_value=True)
+        monkeypatch.setattr(work_store, "tmux_send", sender)
+        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        out = work_store.reply(item_id, "use the staging bucket")
+        assert out == {"id": item_id, "action": "reply"}
+        sender.assert_called_once_with(f"work-{item_id}", "use the staging bucket")
+        item = db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "agent_working"
+
+    def test_reply_dead_session_errors(self, monkeypatch):
+        item_id = _mkitem("reply dead")
+        work_store.add_run(item_id, f"sid-rd-{item_id}", f"work-{item_id}", "/tmp")
+        monkeypatch.setattr(work_store, "claude_running", lambda k: False)
+        out = work_store.reply(item_id, "hello")
+        assert "no live Claude" in out["error"]
+
+    def test_reply_on_done_item_refused(self, monkeypatch):
+        item_id = _mkitem("reply done")
+        work_store.add_run(item_id, f"sid-rdn-{item_id}", f"work-{item_id}", "/tmp")
+        work_store.apply_action(item_id, "done")
+        out = work_store.reply(item_id, "hello")
+        assert "reopen" in out["error"]
+
+
+class TestTranscriptTail:
+    def test_last_assistant_text(self, tmp_path):
+        import json as _json
+        p = tmp_path / "t.jsonl"
+        lines = [
+            {"type": "user", "message": {"content": "hi"}},
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": "first"}]}},
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Bash"},
+                {"type": "text", "text": "final answer"}]}},
+        ]
+        p.write_text("\n".join(_json.dumps(x) for x in lines))
+        assert work_store.last_assistant_text(str(p)) == "final answer"
+
+    def test_missing_file_empty(self):
+        assert work_store.last_assistant_text("/nonexistent/x.jsonl") == ""
+
+
+class TestArtifacts:
+    def test_record_and_find(self, tmp_path):
+        import json as _json
+        item_id = _mkitem("make a report")
+        work_store.add_run(item_id, f"sid-art-{item_id}", f"work-{item_id}", "/tmp")
+        t = tmp_path / "t.jsonl"
+        t.write_text(_json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "Done.\nARTIFACT: /tmp/report.html - quarterly report page"}]}}))
+        added = work_store.record_artifacts(f"sid-art-{item_id}", str(t))
+        assert added == 1
+        again = work_store.record_artifacts(f"sid-art-{item_id}", str(t))
+        assert again == 0
+        hits = work_store.find_artifacts("quarterly")
+        assert hits and hits[0]["path"] == "/tmp/report.html"
+        assert hits[0]["note"] == "quarterly report page"
+        assert hits[0]["objective"] == "make a report"
+        assert work_store.find_artifacts("no-such-thing-xyz") == []
+
+    def test_ignores_relative_paths(self, tmp_path):
+        import json as _json
+        item_id = _mkitem("bad artifact")
+        work_store.add_run(item_id, f"sid-artb-{item_id}", f"work-{item_id}", "/tmp")
+        t = tmp_path / "t.jsonl"
+        t.write_text(_json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "ARTIFACT: relative/path.txt - nope"}]}}))
+        assert work_store.record_artifacts(f"sid-artb-{item_id}", str(t)) == 0
+
+    def test_detail_exposes_artifact_id(self, tmp_path):
+        import json as _json
+        item_id = _mkitem("image artifact item")
+        work_store.add_run(item_id, f"sid-arti-{item_id}", f"work-{item_id}", "/tmp")
+        t = tmp_path / "t.jsonl"
+        t.write_text(_json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "ARTIFACT: /tmp/shot.png - screenshot"}]}}))
+        assert work_store.record_artifacts(f"sid-arti-{item_id}", str(t)) == 1
+        d = work_store.item_detail(item_id)
+        assert d["artifacts"][0]["path"] == "/tmp/shot.png"
+        assert isinstance(d["artifacts"][0]["id"], int)
+
+
+class TestTodayProducer:
+    def test_launch_links_work_item(self):
+        from web.today import _ensure_work_item
+        m = {"sid": "sid-today-1", "ticket_key": "DEV-999", "title": "Fix DEV-999 CI"}
+        _ensure_work_item("aimyable", m, "loop-key-1", "/tmp")
+        run = db.query_one("SELECT work_item_id FROM work_runs WHERE session_id = 'sid-today-1'")
+        assert run is not None
+        item = db.query_one("SELECT objective, scope, scope_ref, instance_key FROM work_items WHERE id = ?",
+                            (run["work_item_id"],))
+        assert item["objective"] == "Fix DEV-999 CI"
+        assert item["scope"] == "ticket"
+        assert item["scope_ref"] == "DEV-999"
+        assert item["instance_key"] == "aimyable"
+        _ensure_work_item("aimyable", m, "loop-key-1", "/tmp")
+        n = db.query_one("SELECT COUNT(*) AS n FROM work_runs WHERE session_id = 'sid-today-1'")["n"]
+        assert n == 1
+
+
+class TestDetail:
+    def test_timeline_and_done_source(self, tmp_path):
+        import json as _json
+        item_id = _mkitem("transparent item")
+        t = tmp_path / "t.jsonl"
+        lines = [
+            {"type": "user", "message": {"content": "Begin the objective."}, "timestamp": "T1"},
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Bash", "input": {"command": "git push origin branch"}}]},
+             "timestamp": "T2"},
+            {"type": "user", "message": {"content": [{"type": "tool_result", "content": "ok"}]},
+             "toolUseResult": {"ok": True}},
+            {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "Pushed the branch. WORK_DONE"}]}, "timestamp": "T3"},
+        ]
+        t.write_text("\n".join(_json.dumps(x) for x in lines))
+        work_store.add_run(item_id, f"sid-det-{item_id}", f"work-{item_id}", "/tmp")
+        db.execute("UPDATE work_runs SET transcript_path = ? WHERE session_id = ?",
+                   (str(t), f"sid-det-{item_id}"))
+        db.execute(
+            "INSERT INTO work_events(work_item_id, kind, payload, created_at) "
+            "VALUES (?, 'self_reported_done', '{}', 'now')", (item_id,))
+        db.execute("UPDATE work_items SET state = 'done' WHERE id = ?", (item_id,))
+        d = work_store.item_detail(item_id)
+        kinds = [e["kind"] for e in d["timeline"]]
+        assert kinds == ["prompt", "tool", "text"]
+        assert d["timeline"][1]["name"] == "Bash"
+        assert "git push" in d["timeline"][1]["arg"]
+        assert d["item"]["done_source"] == "agent"
+
+    def test_unknown_item_errors(self):
+        assert work_store.item_detail(999999) == {"error": "unknown work item"}
+
+    def test_read_system_prompt_from_launch_file(self, tmp_path, monkeypatch):
+        import core.terminal as terminal
+        from services import work_launch
+        monkeypatch.setattr(terminal, "LAUNCH_CONTEXT_DIR", str(tmp_path))
+        item_id = _mkitem("prompted item")
+        sid = f"sid-sp-{item_id}"
+        work_store.add_run(item_id, sid, f"work-{item_id}", "/tmp")
+        (tmp_path / f"{sid}.md").write_text("# Work item\n\n## Objective\n\nship the widget")
+        runs = work_store.item_detail(item_id)["runs"]
+        assert "ship the widget" in work_launch.read_system_prompt(runs)
+
+    def test_read_system_prompt_missing_file_empty(self, tmp_path, monkeypatch):
+        import core.terminal as terminal
+        from services import work_launch
+        monkeypatch.setattr(terminal, "LAUNCH_CONTEXT_DIR", str(tmp_path))
+        item_id = _mkitem("unprompted item")
+        work_store.add_run(item_id, f"sid-nosp-{item_id}", f"work-{item_id}", "/tmp")
+        runs = work_store.item_detail(item_id)["runs"]
+        assert work_launch.read_system_prompt(runs) == ""
+
+
+class TestQuestions:
+    QUESTIONS = {"questions": [{
+        "question": "Which bucket should the release use?",
+        "header": "Bucket",
+        "options": [{"label": "staging", "description": "safe"},
+                    {"label": "prod", "description": "live"}],
+        "multiSelect": False,
+    }]}
+
+    def _mkrun(self, name):
+        item_id = _mkitem(name)
+        sid = f"sid-q-{item_id}"
+        work_store.add_run(item_id, sid, f"work-{item_id}", "/tmp")
+        return item_id, sid
+
+    def test_record_question_sets_pending(self):
+        import json as _json
+        item_id, sid = self._mkrun("question item")
+        ok = work_store.record_question(sid, self.QUESTIONS)
+        assert ok is True
+        item = db.query_one(
+            "SELECT state, stop_reason, pending_question FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "needs_you"
+        assert "Which bucket" in item["stop_reason"]
+        parsed = _json.loads(item["pending_question"])
+        assert parsed["questions"][0]["options"][1]["label"] == "prod"
+        kinds = [e["kind"] for e in db.query_all(
+            "SELECT kind FROM work_events WHERE work_item_id = ?", (item_id,))]
+        assert "question_asked" in kinds
+
+    def test_record_question_unknown_session(self):
+        assert work_store.record_question("sid-q-nope", self.QUESTIONS) is False
+
+    def test_record_question_empty_input(self):
+        item_id, sid = self._mkrun("question empty")
+        assert work_store.record_question(sid, {}) is False
+        assert work_store.record_question(sid, {"questions": [{"question": " "}]}) is False
+        item = db.query_one("SELECT pending_question FROM work_items WHERE id = ?", (item_id,))
+        assert item["pending_question"] == ""
+
+    def test_record_question_done_item_refused(self):
+        item_id, sid = self._mkrun("question done")
+        work_store.apply_action(item_id, "done")
+        assert work_store.record_question(sid, self.QUESTIONS) is False
+
+    def test_pending_question_blocks_autocontinue(self, monkeypatch):
+        from unittest.mock import MagicMock
+        item_id, sid = self._mkrun("question blocks auto")
+        work_store.record_question(sid, self.QUESTIONS)
+        work_store.record_event(sid, "Stop", {})
+        monkeypatch.setattr(work_store, "last_assistant_text",
+                            lambda p: "I am blocked on the bucket decision. Waiting.")
+        sender = MagicMock(return_value=True)
+        monkeypatch.setattr(work_store, "tmux_send", sender)
+        out = work_store.maybe_autocontinue(sid, "/tmp/t.jsonl")
+        assert out == "question"
+        sender.assert_not_called()
+
+    def test_reply_clears_pending_question(self, monkeypatch):
+        from unittest.mock import MagicMock
+        item_id, sid = self._mkrun("question reply")
+        work_store.record_question(sid, self.QUESTIONS)
+        monkeypatch.setattr(work_store, "tmux_send", MagicMock(return_value=True))
+        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        work_store.reply(item_id, "Bucket: staging")
+        item = db.query_one(
+            "SELECT state, pending_question FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "agent_working"
+        assert item["pending_question"] == ""
+
+    def test_done_clears_pending_question(self):
+        item_id, sid = self._mkrun("question done clears")
+        work_store.record_question(sid, self.QUESTIONS)
+        work_store.apply_action(item_id, "done")
+        item = db.query_one("SELECT pending_question FROM work_items WHERE id = ?", (item_id,))
+        assert item["pending_question"] == ""
+
+    def test_hook_denies_ask_user_question(self):
+        import json as _json
+        import subprocess
+        import core.db as _db
+        dbfile = str(_db._DB_PATH)
+        item_id, sid = self._mkrun("question hook")
+        payload = _json.dumps({"session_id": sid, "hook_event_name": "PreToolUse",
+                               "tool_name": "AskUserQuestion",
+                               "tool_input": self.QUESTIONS})
+        r = subprocess.run(
+            [".venv/bin/python", "scripts/work_hook.py"],
+            input=payload, capture_output=True, text=True, timeout=15,
+            env={**__import__("os").environ, "FRSHTY_DB": dbfile},
+        )
+        assert r.returncode == 0, r.stderr
+        out = _json.loads(r.stdout)
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+        item = db.query_one(
+            "SELECT state, pending_question FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "needs_you"
+        assert "Which bucket" in item["pending_question"]
+
+    def test_hook_ignores_other_tools(self):
+        import json as _json
+        import subprocess
+        import core.db as _db
+        dbfile = str(_db._DB_PATH)
+        item_id, sid = self._mkrun("question other tool")
+        payload = _json.dumps({"session_id": sid, "hook_event_name": "PreToolUse",
+                               "tool_name": "Bash", "tool_input": {"command": "ls"}})
+        r = subprocess.run(
+            [".venv/bin/python", "scripts/work_hook.py"],
+            input=payload, capture_output=True, text=True, timeout=15,
+            env={**__import__("os").environ, "FRSHTY_DB": dbfile},
+        )
+        assert r.returncode == 0
+        assert r.stdout.strip() == ""
+        item = db.query_one("SELECT pending_question FROM work_items WHERE id = ?", (item_id,))
+        assert item["pending_question"] == ""
+
+    def test_hook_foreign_session_no_deny(self):
+        import json as _json
+        import subprocess
+        import core.db as _db
+        dbfile = str(_db._DB_PATH)
+        payload = _json.dumps({"session_id": "sid-not-work", "hook_event_name": "PreToolUse",
+                               "tool_name": "AskUserQuestion",
+                               "tool_input": self.QUESTIONS})
+        r = subprocess.run(
+            [".venv/bin/python", "scripts/work_hook.py"],
+            input=payload, capture_output=True, text=True, timeout=15,
+            env={**__import__("os").environ, "FRSHTY_DB": dbfile},
+        )
+        assert r.returncode == 0
+        assert r.stdout.strip() == ""
+
+    def test_stale_done_marker_does_not_override_question(self, monkeypatch):
+        from unittest.mock import MagicMock
+        item_id, sid = self._mkrun("question beats stale done")
+        work_store.record_question(sid, self.QUESTIONS)
+        work_store.record_event(sid, "Stop", {})
+        monkeypatch.setattr(work_store, "last_assistant_text",
+                            lambda p: "All PRs summarized.\nWORK_DONE")
+        sender = MagicMock(return_value=True)
+        monkeypatch.setattr(work_store, "tmux_send", sender)
+        out = work_store.maybe_autocontinue(sid, "/tmp/t.jsonl")
+        assert out == "question"
+        sender.assert_not_called()
+        item = db.query_one(
+            "SELECT state, pending_question FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "needs_you"
+        assert "Which bucket" in item["pending_question"]
+        kinds = [e["kind"] for e in db.query_all(
+            "SELECT kind FROM work_events WHERE work_item_id = ?", (item_id,))]
+        assert "self_reported_done" not in kinds
+
+    def test_prompt_submit_clears_pending_question(self):
+        item_id, sid = self._mkrun("prompt clears question")
+        work_store.record_question(sid, self.QUESTIONS)
+        work_store.record_event(sid, "UserPromptSubmit", {})
+        item = db.query_one(
+            "SELECT state, pending_question FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "agent_working"
+        assert item["pending_question"] == ""
+
+
+class TestFollowup:
+    def _client(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from web.work import router
+        a = FastAPI()
+        a.include_router(router)
+        return TestClient(a)
+
+    def _done_parent(self, objective="parent job"):
+        item_id = work_store.create_item(objective)
+        work_store.add_run(item_id, f"sid-fup-{item_id}", f"work-{item_id}", "/tmp")
+        now = work_store._now()
+        db.execute(
+            "UPDATE work_items SET state = 'done', summary = 'shipped the widget, PR #9' WHERE id = ?",
+            (item_id,))
+        db.execute(
+            "INSERT INTO work_artifacts(work_item_id, work_run_id, path, note, created_at) "
+            "VALUES (?, NULL, '/tmp/report.html', 'the report', ?)", (item_id, now))
+        return item_id
+
+    def _patched(self, tmp_path):
+        from unittest.mock import MagicMock, patch
+        reg = MagicMock()
+        reg.config = {"workspace": {"root": tmp_path}}
+        instances = MagicMock()
+        instances.get.return_value = reg
+        return (
+            patch("services.work_launch.runtime.instances", return_value=instances),
+            patch("services.work_launch.terminal.launch_claude"),
+            patch("services.work_launch.terminal.session_healthy",
+                  return_value={"alive": True, "claude_running": True}),
+        )
+
+    def test_followup_carries_parent_context(self, tmp_path):
+        from services import work_launch
+        parent = self._done_parent("upgrade normalize_ace")
+        p_inst, p_launch, p_health = self._patched(tmp_path)
+        with p_inst, p_launch as mock_launch, p_health:
+            out = work_launch.launch_followup(parent, "open the follow-up PR")
+        assert "error" not in out, out
+        ctx = mock_launch.call_args.args[3]
+        assert "Previous work item" in ctx
+        assert f"work item {parent}: upgrade normalize_ace" in ctx
+        assert "shipped the widget, PR #9" in ctx
+        assert "/tmp/report.html - the report" in ctx
+        child = db.query_one("SELECT source_item_id FROM work_items WHERE id = ?",
+                             (out["item_id"],))
+        assert child["source_item_id"] == parent
+
+    def test_followup_requires_done_parent(self, tmp_path):
+        from services import work_launch
+        parent = work_store.create_item("still running")
+        p_inst, p_launch, p_health = self._patched(tmp_path)
+        with p_inst, p_launch, p_health:
+            out = work_launch.launch_followup(parent, "too early")
+        assert "not done" in out["error"]
+        out = work_launch.launch_followup(999999, "no parent")
+        assert "unknown source" in out["error"]
+
+    def test_launch_rejects_unknown_source(self, tmp_path):
+        from services import work_launch
+        p_inst, p_launch, p_health = self._patched(tmp_path)
+        with p_inst, p_launch, p_health:
+            out = work_launch.launch("orphan", source_item_id=999999)
+        assert "unknown source" in out["error"]
+
+    def test_followup_endpoint(self, tmp_path):
+        parent = self._done_parent("endpoint parent")
+        p_inst, p_launch, p_health = self._patched(tmp_path)
+        with p_inst, p_launch, p_health:
+            client = self._client()
+            r = client.post(f"/api/work/items/{parent}/followup",
+                            json={"text": "next step"})
+            assert r.status_code == 200, r.text
+            child_id = r.json()["item_id"]
+            bad = client.post(f"/api/work/items/{child_id}/followup",
+                              json={"text": "child is not done"})
+        assert bad.status_code == 400
+        child = db.query_one("SELECT source_item_id, objective FROM work_items WHERE id = ?",
+                             (child_id,))
+        assert child["source_item_id"] == parent
+        assert child["objective"] == "next step"
+
+    def test_detail_exposes_lineage(self, tmp_path):
+        from services import work_launch
+        parent = self._done_parent("lineage parent")
+        p_inst, p_launch, p_health = self._patched(tmp_path)
+        with p_inst, p_launch, p_health:
+            out = work_launch.launch_followup(parent, "lineage child")
+        child_id = out["item_id"]
+        parent_detail = work_store.item_detail(parent)
+        assert parent_detail["source_item"] is None
+        assert [c["id"] for c in parent_detail["followup_children"]] == [child_id]
+        child_detail = work_store.item_detail(child_id)
+        assert child_detail["source_item"]["id"] == parent
+        assert child_detail["source_item"]["objective"] == "lineage parent"
+        assert child_detail["followup_children"] == []
+
+
+class TestBackgroundWait:
+    def _transcript(self, tmp_path, entries):
+        import json as _json
+        p = tmp_path / "bg.jsonl"
+        p.write_text("\n".join(_json.dumps(e) for e in entries) + "\n")
+        return str(p)
+
+    def _bash_start(self, task_id):
+        return {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1",
+             "content": f"Command running in background with ID: {task_id}. Output is being "
+                        "written to: /tmp/x.output. You will be notified when it completes."}]}}
+
+    def _monitor_start(self, task_id, persistent=True):
+        mode = "persistent — runs until TaskStop or session end" if persistent else "timeout 600000ms"
+        return {"type": "user", "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t2",
+             "content": f"Monitor started (task {task_id}, {mode}). You will be notified on each event."}]}}
+
+    def _notification(self, task_id, status, shape="queue"):
+        text = (f"<task-notification>\n<task-id>{task_id}</task-id>\n"
+                f"<status>{status}</status>\n<summary>done</summary>\n</task-notification>")
+        if shape == "queue":
+            return {"type": "queue-operation", "operation": "enqueue", "content": text}
+        if shape == "attachment":
+            return {"type": "attachment", "attachment": {"type": "queued_command", "prompt": text}}
+        return {"type": "user", "message": {"role": "user", "content": text}}
+
+    def _task_stop(self, task_id):
+        return {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "TaskStop", "input": {"task_id": task_id}}]}}
+
+    def _checkpoint(self, text):
+        return {"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}
+
+    def test_completed_notification_ends_task(self, tmp_path):
+        for shape in ("queue", "attachment", "user"):
+            path = self._transcript(tmp_path, [
+                self._bash_start("b111"), self._notification("b111", "completed", shape)])
+            assert work_store.pending_background_tasks(path) == set()
+
+    def test_unfinished_tasks_are_pending(self, tmp_path):
+        path = self._transcript(tmp_path, [
+            self._bash_start("b111"), self._monitor_start("b222"),
+            self._notification("b111", "completed")])
+        assert work_store.pending_background_tasks(path) == {"b222"}
+
+    def test_running_status_is_not_terminal(self, tmp_path):
+        path = self._transcript(tmp_path, [
+            self._monitor_start("b333"), self._notification("b333", "running")])
+        assert work_store.pending_background_tasks(path) == {"b333"}
+
+    def test_task_stop_ends_task(self, tmp_path):
+        path = self._transcript(tmp_path, [
+            self._monitor_start("b444"), self._task_stop("b444")])
+        assert work_store.pending_background_tasks(path) == set()
+
+    def test_sidechain_entries_ignored(self, tmp_path):
+        start = self._bash_start("b555")
+        start["isSidechain"] = True
+        path = self._transcript(tmp_path, [start])
+        assert work_store.pending_background_tasks(path) == set()
+
+    def test_stop_with_pending_bg_waits_external(self, tmp_path):
+        path = self._transcript(tmp_path, [
+            self._monitor_start("b666"),
+            self._checkpoint("Checkpoint: waiting on CI. The monitor fires when it finishes.")])
+        item_id = _mkitem("bg wait item")
+        work_store.add_run(item_id, f"sid-bg-{item_id}", f"work-{item_id}", "/tmp")
+        work_store.record_event(f"sid-bg-{item_id}", "Stop", {
+            "transcript_path": path,
+            "last_assistant_message": "Checkpoint: waiting on CI."})
+        item = db.query_one(
+            "SELECT state, stop_reason, snoozed_until FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "waiting_external"
+        assert item["stop_reason"].startswith("Waiting on a background task")
+        assert item["snoozed_until"]
+        out = work_store.maybe_autocontinue(f"sid-bg-{item_id}", path)
+        assert out == "not_applicable"
+
+    def test_stop_without_pending_bg_needs_you(self, tmp_path):
+        path = self._transcript(tmp_path, [
+            self._bash_start("b777"), self._notification("b777", "completed"),
+            self._checkpoint("All background work finished.")])
+        item_id = _mkitem("bg done item")
+        work_store.add_run(item_id, f"sid-bgd-{item_id}", f"work-{item_id}", "/tmp")
+        work_store.record_event(f"sid-bgd-{item_id}", "Stop", {"transcript_path": path})
+        assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                            (item_id,))["state"] == "needs_you"
+
+    def test_pending_question_outranks_bg_wait(self, tmp_path):
+        path = self._transcript(tmp_path, [
+            self._monitor_start("b888"), self._checkpoint("Blocked on the question above.")])
+        item_id = _mkitem("bg question item")
+        work_store.add_run(item_id, f"sid-bgq-{item_id}", f"work-{item_id}", "/tmp")
+        work_store.record_question(f"sid-bgq-{item_id}",
+                                   {"questions": [{"question": "Staging or prod?"}]})
+        work_store.record_event(f"sid-bgq-{item_id}", "Stop", {"transcript_path": path})
+        assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                            (item_id,))["state"] == "needs_you"
+
+    def test_question_tail_outranks_bg_wait(self, tmp_path):
+        path = self._transcript(tmp_path, [
+            self._monitor_start("b999"),
+            self._checkpoint("The monitor is running. Should I also restart the worker?")])
+        item_id = _mkitem("bg tail question item")
+        work_store.add_run(item_id, f"sid-bgt-{item_id}", f"work-{item_id}", "/tmp")
+        work_store.record_event(f"sid-bgt-{item_id}", "Stop", {"transcript_path": path})
+        assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                            (item_id,))["state"] == "needs_you"
+
+    def test_work_done_tail_outranks_bg_wait(self, tmp_path):
+        path = self._transcript(tmp_path, [
+            self._monitor_start("baaa"),
+            self._checkpoint("All finished.\nWORK_DONE")])
+        item_id = _mkitem("bg done marker item")
+        work_store.add_run(item_id, f"sid-bgw-{item_id}", f"work-{item_id}", "/tmp")
+        work_store.record_event(f"sid-bgw-{item_id}", "Stop", {"transcript_path": path})
+        assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                            (item_id,))["state"] == "needs_you"
+        out = work_store.maybe_autocontinue(f"sid-bgw-{item_id}", path)
+        assert out == "done"
+        assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                            (item_id,))["state"] == "done"
+
+    def test_idle_notification_with_pending_bg_waits_external(self, tmp_path):
+        path = self._transcript(tmp_path, [
+            self._monitor_start("bbbb"), self._checkpoint("Waiting on the monitor.")])
+        item_id = _mkitem("bg idle notif item")
+        work_store.add_run(item_id, f"sid-bgn-{item_id}", f"work-{item_id}", "/tmp")
+        work_store.record_event(f"sid-bgn-{item_id}", "Notification", {
+            "transcript_path": path, "message": "Claude is waiting for your input"})
+        assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                            (item_id,))["state"] == "waiting_external"
+
+    def test_permission_notification_stays_needs_you(self, tmp_path):
+        path = self._transcript(tmp_path, [
+            self._monitor_start("bccc"), self._checkpoint("Working through the steps.")])
+        item_id = _mkitem("bg perm notif item")
+        work_store.add_run(item_id, f"sid-bgp-{item_id}", f"work-{item_id}", "/tmp")
+        work_store.record_event(f"sid-bgp-{item_id}", "Notification", {
+            "transcript_path": path, "message": "Claude needs your permission to use Bash"})
+        assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                            (item_id,))["state"] == "needs_you"

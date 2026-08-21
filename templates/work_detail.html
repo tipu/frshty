@@ -126,6 +126,12 @@
            @error="$event.target.style.display='none'">
     </div>
   </div>
+  <div class="sec" v-if="systemPrompt">
+    <h2 class="text-sm font-bold uppercase text-gray-400 mb-1 cursor-pointer select-none" @click="showPrompt = !showPrompt">
+      System prompt <span class="text-gray-600 normal-case font-normal">{{ showPrompt ? "▾ hide" : "▸ show" }}</span>
+    </h2>
+    <pre v-if="showPrompt" class="text-xs" style="white-space:pre-wrap; color:#9ca3af; background:#101018; border:1px solid #2a2a35; border-radius:8px; padding:10px 14px; max-height:480px; overflow-y:auto">{{ systemPrompt }}</pre>
+  </div>
   <div class="sec">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">What happened</h2>
     <div class="text-xs text-gray-600 mb-2">Read from the session transcript. Prompts in blue, agent reports in white, every tool call in grey.</div>
@@ -147,6 +153,7 @@
 const { createApp } = Vue;
 createApp({
   data() { return { item: null, timeline: [], events: [], artifacts: [], replyText: "", replyError: "",
+                    systemPrompt: "", showPrompt: false,
                     followups: [], fuText: {}, fuCtx: {}, fuSlack: {}, fuError: {},
                     sourceItem: null, followupChildren: [],
                     fupText: "", fupCtx: [], fupSlack: false, fupError: "", fupBusy: false,
@@ -198,6 +205,7 @@ createApp({
       const d = await r.json();
       if (seq !== this._refreshSeq) return;
       this.item = d.item; this.timeline = d.timeline; this.events = d.events; this.artifacts = d.artifacts;
+      this.systemPrompt = d.system_prompt || "";
       const obj = (d.item.objective || "").trim();
       if (obj) {
         if (!this._baseTitle) this._baseTitle = document.title;

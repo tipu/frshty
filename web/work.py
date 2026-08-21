@@ -1,0 +1,202 @@
+import os
+
+from fastapi import APIRouter
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+
+import core.db as db
+from services import work_debrief, work_launch, work_store
+from web.pages import _template
+
+
+router = APIRouter()
+
+
+
+def _fresh(resp: HTMLResponse) -> HTMLResponse:
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@router.get("/work", response_class=HTMLResponse)
+def work_page():
+    return _fresh(_template("work.html"))
+
+
+DONE_PAGE_SIZE = 20
+
+
+@router.get("/api/work/items")
+def api_work_items(q: str = "", done_page: int = 1):
+    groups = work_store.grouped_items(q=q)
+    counts = {g: len(rows) for g, rows in groups.items()}
+    done_pages = max(1, -(-counts["done"] // DONE_PAGE_SIZE))
+    done_page = min(max(1, done_page), done_pages)
+    start = (done_page - 1) * DONE_PAGE_SIZE
+    groups["done"] = groups["done"][start:start + DONE_PAGE_SIZE]
+    return {"groups": groups, "counts": counts,
+            "done_page": done_page, "done_pages": done_pages,
+            "personal_loaded": work_launch.personal_config() is not None,
+            "projects": work_launch.project_entries(),
+            "slack_available": work_launch.slack_available()}
+
+
+@router.post("/api/work/items/{item_id}/action")
+def api_work_action(item_id: int, body: dict):
+    result = work_store.apply_action(item_id, (body.get("action") or "").strip(),
+                                     until=body.get("until"))
+    if "error" in result:
+        return JSONResponse(result, status_code=400)
+    return result
+
+
+@router.post("/api/work/intake")
+def api_work_intake(body: dict):
+    result = work_launch.launch(body.get("text") or "", cwd=body.get("cwd") or "",
+                                contexts=body.get("contexts") or [],
+                                slack=bool(body.get("slack")))
+    if "error" in result:
+        status = 503 if "personal instance" in result["error"] else (
+            500 if "launch failed" in result["error"] else 400)
+        return JSONResponse(result, status_code=status)
+    result["counts"] = {g: len(rows) for g, rows in work_store.grouped_items().items()}
+    return result
+
+
+@router.post("/api/work/items/{item_id}/reply")
+def api_work_reply(item_id: int, body: dict):
+    text = (body.get("text") or "").strip()
+    if not text:
+        return JSONResponse({"error": "empty reply"}, status_code=400)
+    result = work_store.reply(item_id, text)
+    if "error" in result:
+        return JSONResponse(result, status_code=409)
+    return result
+
+
+@router.post("/api/work/items/{item_id}/followup")
+def api_work_followup(item_id: int, body: dict):
+    result = work_launch.launch_followup(item_id, body.get("text") or "",
+                                         cwd=body.get("cwd") or "",
+                                         contexts=body.get("contexts") or [],
+                                         slack=bool(body.get("slack")))
+    if "error" in result:
+        status = 503 if "personal instance" in result["error"] else (
+            500 if "launch failed" in result["error"] else 400)
+        return JSONResponse(result, status_code=status)
+    return result
+
+
+@router.get("/api/work/items/{item_id}/detail")
+def api_work_detail(item_id: int):
+    result = work_store.item_detail(item_id)
+    if "error" in result:
+        return JSONResponse(result, status_code=404)
+    result["followups"] = work_debrief.followups_for(item_id)
+    result["projects"] = work_launch.project_entries()
+    result["slack_available"] = work_launch.slack_available()
+    result["system_prompt"] = work_launch.read_system_prompt(result["runs"])
+    return result
+
+
+@router.get("/work/{item_id}", response_class=HTMLResponse)
+def work_detail_page(item_id: int):
+    return _fresh(_template("work_detail.html"))
+
+
+@router.get("/work/{item_id}/terminal", response_class=HTMLResponse)
+def work_terminal_page(item_id: int):
+    return _fresh(_template("work_terminal.html"))
+
+
+
+@router.get("/api/work/linkmap")
+def api_work_linkmap():
+    return work_launch.link_map()
+
+
+@router.get("/api/work/artifacts")
+def api_work_artifacts(q: str = ""):
+    return {"artifacts": work_store.find_artifacts(q)}
+
+
+@router.get("/work/{item_id}/summary", response_class=HTMLResponse)
+def work_summary_page(item_id: int):
+    return _fresh(_template("work_summary.html"))
+
+
+@router.get("/api/work/items/{item_id}/summary")
+def api_work_summary(item_id: int):
+    item = db.query_one(
+        "SELECT id, objective, state, summary, updated_at FROM work_items WHERE id = ?",
+        (item_id,))
+    if not item:
+        return JSONResponse({"error": "unknown work item"}, status_code=404)
+    artifacts = db.query_all(
+        "SELECT id, path, note FROM work_artifacts WHERE work_item_id = ? ORDER BY id",
+        (item_id,))
+    return {"item": item, "artifacts": artifacts,
+            "followups": work_debrief.followups_for(item_id)}
+
+
+def _artifact_roots(artifact_id: int) -> list[str]:
+    roots = ["/tmp/"]
+    rows = db.query_all(
+        "SELECT r.cwd FROM work_artifacts a "
+        "JOIN work_runs r ON r.work_item_id = a.work_item_id "
+        "WHERE a.id = ? AND r.cwd != ''", (artifact_id,))
+    for r in rows:
+        roots.append(os.path.realpath(r["cwd"]) + os.sep)
+    return roots
+
+
+@router.get("/api/work/artifact_file/{artifact_id}")
+def api_work_artifact_file(artifact_id: int):
+    row = db.query_one("SELECT path FROM work_artifacts WHERE id = ?", (artifact_id,))
+    if not row:
+        return JSONResponse({"error": "unknown artifact"}, status_code=404)
+    real = os.path.realpath(row["path"])
+    if not os.path.isfile(real):
+        return JSONResponse({"error": f"file missing: {row['path']}"}, status_code=404)
+    if not any(real.startswith(root) for root in _artifact_roots(artifact_id)):
+        return JSONResponse(
+            {"error": f"artifact path outside the run's workspace: {row['path']}"},
+            status_code=403)
+    resp = FileResponse(real)
+    resp.headers["Content-Security-Policy"] = "sandbox"
+    return resp
+
+
+@router.post("/api/work/items/{item_id}/debrief")
+def api_work_debrief(item_id: int):
+    result = work_debrief.run_debrief(item_id)
+    if "error" in result:
+        return JSONResponse(result, status_code=409)
+    return result
+
+
+@router.post("/api/work/followups/{followup_id}/send")
+def api_followup_send(followup_id: int, body: dict):
+    result = work_debrief.send_followup(followup_id, text=(body.get("text") or ""),
+                                        contexts=body.get("contexts") or [],
+                                        slack=bool(body.get("slack")))
+    if "error" in result:
+        return JSONResponse(result, status_code=409)
+    return result
+
+
+@router.post("/api/work/followups/{followup_id}/dismiss")
+def api_followup_dismiss(followup_id: int):
+    result = work_debrief.dismiss_followup(followup_id)
+    if "error" in result:
+        return JSONResponse(result, status_code=409)
+    return result
+
+
+@router.get("/api/work/items/{item_id}/events")
+def api_work_events(item_id: int):
+    rows = db.query_all(
+        "SELECT id, work_run_id, kind, payload, created_at FROM work_events "
+        "WHERE work_item_id = ? ORDER BY id DESC LIMIT 100",
+        (item_id,),
+    )
+    return {"events": rows}
