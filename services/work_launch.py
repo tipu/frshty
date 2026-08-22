@@ -207,6 +207,64 @@ def launch(objective: str, cwd: str = "", contexts: list[str] | None = None,
             "tmux_key": tmux_key, "state": "agent_working"}
 
 
+WORK_SESSION_PREFIX = "term-work-"
+SUSPEND_IDLE_SECONDS = 30 * 60
+
+
+def suspend_idle_done_sessions(now: float | None = None) -> list[int]:
+    """Kill the tmux session of every done work item once its pane has sat
+    idle for SUSPEND_IDLE_SECONDS.
+
+    Without this every finished item keeps a resident Claude process forever.
+    Nothing is lost by the kill: the conversation lives in the Claude
+    transcript, and opening the item's terminal again relaunches Claude with
+    --resume on the same session id (resume_session). The idle window keeps a
+    session the operator is actively revisiting alive; a work session with no
+    matching work item row is treated as done."""
+    now = time.time() if now is None else now
+    killed: list[int] = []
+    for s in terminal.list_sessions():
+        if not s["name"].startswith(WORK_SESSION_PREFIX):
+            continue
+        suffix = s["name"][len(WORK_SESSION_PREFIX):]
+        if not suffix.isdigit() or now - s["activity"] < SUSPEND_IDLE_SECONDS:
+            continue
+        item = db.query_one("SELECT state FROM work_items WHERE id = ?", (int(suffix),))
+        if item is not None and item["state"] != "done":
+            continue
+        terminal.kill_terminal(f"work-{suffix}")
+        killed.append(int(suffix))
+    if killed:
+        log.emit("work_sessions_suspended",
+                 f"suspended {len(killed)} done work session(s): {sorted(killed)}")
+    return killed
+
+
+def resume_session(item_id: int) -> bool:
+    """Bring a suspended work session back to its old state: recreate the tmux
+    session in the run's cwd and relaunch Claude with --resume on the item's
+    original session id.
+
+    No-op while the tmux session still exists, checked under launch_lock so
+    two concurrent terminal connects cannot both type the resume command into
+    the pane."""
+    run = db.query_one(
+        "SELECT session_id, cwd FROM work_runs WHERE work_item_id = ? "
+        "ORDER BY id DESC LIMIT 1", (item_id,))
+    if not run:
+        return False
+    config = personal_config()
+    if config is None:
+        return False
+    cwd = run["cwd"] if run["cwd"] and os.path.isdir(run["cwd"]) else str(config["workspace"]["root"])
+    key = f"work-{item_id}"
+    with work_store.launch_lock:
+        if terminal.session_healthy(key)["alive"]:
+            return True
+        terminal.launch_claude(key, cwd, run["session_id"], "", False, config=config)
+    return True
+
+
 def launch_followup(source_item_id: int, objective: str, cwd: str = "",
                     contexts: list[str] | None = None, slack: bool = False) -> dict:
     source = db.query_one("SELECT id, state FROM work_items WHERE id = ?", (source_item_id,))

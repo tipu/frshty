@@ -83,6 +83,24 @@ def session_healthy(ticket_key: str) -> dict:
     return {"alive": True, "claude_running": claude_running}
 
 
+def list_sessions() -> list[dict]:
+    """Every session on the frshty tmux socket with its last-activity epoch."""
+    result = subprocess.run(
+        [_tmux_bin(), "-S", TMUX_SOCKET, "list-sessions", "-F",
+         "#{session_name} #{session_activity}"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        return []
+    sessions = []
+    for line in result.stdout.splitlines():
+        name, _, activity = line.rpartition(" ")
+        if not name or not activity.isdigit():
+            continue
+        sessions.append({"name": name, "activity": int(activity)})
+    return sessions
+
+
 def _resolve_cwd(config: dict, ticket_key: str) -> str | None:
     tickets = state.load("tickets")
     ts = tickets.get(ticket_key)
