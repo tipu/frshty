@@ -1054,3 +1054,111 @@ class TestBackgroundWait:
             "transcript_path": path, "message": "Claude needs your permission to use Bash"})
         assert db.query_one("SELECT state FROM work_items WHERE id = ?",
                             (item_id,))["state"] == "needs_you"
+
+
+class TestSuspendResume:
+    def _patch_sessions(self, monkeypatch, sessions, killed):
+        import core.terminal as terminal
+        monkeypatch.setattr(terminal, "list_sessions", lambda: sessions)
+        monkeypatch.setattr(terminal, "kill_terminal", lambda key: killed.append(key))
+
+    def test_suspend_kills_idle_done_session(self, monkeypatch):
+        from services import work_launch
+        item_id = _mkitem("suspend done item")
+        work_store.apply_action(item_id, "done")
+        killed = []
+        self._patch_sessions(monkeypatch,
+                             [{"name": f"term-work-{item_id}", "activity": 1000}], killed)
+        out = work_launch.suspend_idle_done_sessions(now=1000 + work_launch.SUSPEND_IDLE_SECONDS)
+        assert out == [item_id]
+        assert killed == [f"work-{item_id}"]
+
+    def test_suspend_skips_recent_activity(self, monkeypatch):
+        from services import work_launch
+        item_id = _mkitem("suspend recent item")
+        work_store.apply_action(item_id, "done")
+        killed = []
+        self._patch_sessions(monkeypatch,
+                             [{"name": f"term-work-{item_id}", "activity": 1000}], killed)
+        out = work_launch.suspend_idle_done_sessions(now=1000 + work_launch.SUSPEND_IDLE_SECONDS - 1)
+        assert out == []
+        assert killed == []
+
+    def test_suspend_skips_non_done_item(self, monkeypatch):
+        from services import work_launch
+        item_id = _mkitem("suspend live item")
+        killed = []
+        self._patch_sessions(monkeypatch,
+                             [{"name": f"term-work-{item_id}", "activity": 0}], killed)
+        assert work_launch.suspend_idle_done_sessions(now=10 ** 9) == []
+        assert killed == []
+
+    def test_suspend_kills_session_without_item_row(self, monkeypatch):
+        from services import work_launch
+        killed = []
+        self._patch_sessions(monkeypatch,
+                             [{"name": "term-work-99999999", "activity": 0}], killed)
+        assert work_launch.suspend_idle_done_sessions(now=10 ** 9) == [99999999]
+        assert killed == ["work-99999999"]
+
+    def test_suspend_ignores_ticket_sessions(self, monkeypatch):
+        from services import work_launch
+        killed = []
+        self._patch_sessions(monkeypatch,
+                             [{"name": "term-DEV-604", "activity": 0},
+                              {"name": "term-work-7-discuss", "activity": 0}], killed)
+        assert work_launch.suspend_idle_done_sessions(now=10 ** 9) == []
+        assert killed == []
+
+    def test_resume_relaunches_claude_with_resume(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+        import core.terminal as terminal
+        from services import work_launch
+        item_id = _mkitem("resume item")
+        sid = f"sid-resume-{item_id}"
+        work_store.add_run(item_id, sid, f"work-{item_id}", str(tmp_path))
+        config = {"workspace": {"root": tmp_path}}
+        monkeypatch.setattr(work_launch, "personal_config", lambda: config)
+        monkeypatch.setattr(terminal, "session_healthy",
+                            lambda k: {"alive": False, "claude_running": False})
+        launcher = MagicMock()
+        monkeypatch.setattr(terminal, "launch_claude", launcher)
+        assert work_launch.resume_session(item_id) is True
+        launcher.assert_called_once_with(f"work-{item_id}", str(tmp_path), sid, "", False,
+                                         config=config)
+
+    def test_resume_unknown_item_is_false(self, monkeypatch):
+        from services import work_launch
+        monkeypatch.setattr(work_launch, "personal_config", lambda: {"workspace": {"root": "/tmp"}})
+        assert work_launch.resume_session(99999999) is False
+
+    def test_resume_falls_back_to_workspace_root_cwd(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+        import core.terminal as terminal
+        from services import work_launch
+        item_id = _mkitem("resume gone cwd item")
+        sid = f"sid-resume2-{item_id}"
+        work_store.add_run(item_id, sid, f"work-{item_id}", str(tmp_path / "deleted"))
+        config = {"workspace": {"root": tmp_path}}
+        monkeypatch.setattr(work_launch, "personal_config", lambda: config)
+        monkeypatch.setattr(terminal, "session_healthy",
+                            lambda k: {"alive": False, "claude_running": False})
+        launcher = MagicMock()
+        monkeypatch.setattr(terminal, "launch_claude", launcher)
+        assert work_launch.resume_session(item_id) is True
+        assert launcher.call_args[0][1] == str(tmp_path)
+
+    def test_resume_noop_while_session_alive(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+        import core.terminal as terminal
+        from services import work_launch
+        item_id = _mkitem("resume alive item")
+        work_store.add_run(item_id, f"sid-resume3-{item_id}", f"work-{item_id}", str(tmp_path))
+        monkeypatch.setattr(work_launch, "personal_config",
+                            lambda: {"workspace": {"root": tmp_path}})
+        monkeypatch.setattr(terminal, "session_healthy",
+                            lambda k: {"alive": True, "claude_running": True})
+        launcher = MagicMock()
+        monkeypatch.setattr(terminal, "launch_claude", launcher)
+        assert work_launch.resume_session(item_id) is True
+        launcher.assert_not_called()
