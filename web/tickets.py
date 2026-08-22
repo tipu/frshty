@@ -25,6 +25,7 @@ from core.claude_runner import run_haiku
 from core.config import get_repos
 from core.ticket_status import TicketStatus
 from features.platforms import make_platform
+from services import work_launch
 from web.state import _config, events_enabled
 
 
@@ -817,6 +818,9 @@ async def ws_terminal(websocket: WebSocket, key: str):
         return
     tokens = multi_apply_host(websocket.headers.get("host"))
     try:
+        suffix = key[len("work-"):] if key.startswith("work-") else ""
+        if suffix.isdigit():
+            work_launch.resume_session(int(suffix))
         await terminal.terminal_handler(websocket, key, _config)
     finally:
         multi_reset(tokens)
