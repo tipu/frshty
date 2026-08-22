@@ -487,6 +487,164 @@ class TestAutocontinue:
         assert self._state(item_id)["state"] == "failed_stale"
 
 
+class TestStaleSweep:
+    def _mkstale(self, tmp_path, tail_text="Working on step 3.", minutes=40):
+        import json as _json
+        item_id = _mkitem("stale sweep item")
+        run_id = work_store.add_run(item_id, f"sid-sweep-{item_id}", f"work-{item_id}", "/tmp")
+        transcript = tmp_path / f"t-{item_id}.jsonl"
+        transcript.write_text(_json.dumps(
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": tail_text}]}}
+        ) + "\n")
+        db.execute("UPDATE work_runs SET transcript_path = ? WHERE id = ?",
+                   (str(transcript), run_id))
+        old = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+        db.execute("UPDATE work_items SET updated_at = ? WHERE id = ?", (old, item_id))
+        return item_id, run_id, transcript
+
+    def _age_transcript(self, transcript, minutes=40):
+        import os
+        past = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).timestamp()
+        os.utime(transcript, (past, past))
+
+    def test_live_transcript_refreshes_updated_at(self, tmp_path, monkeypatch):
+        item_id, _, _ = self._mkstale(tmp_path)
+        monkeypatch.setattr(work_store, "claude_running", lambda k: (_ for _ in ()).throw(AssertionError))
+        actions = work_store.sweep_stale_items()
+        assert {"id": item_id, "action": "refreshed"} in actions
+        item = db.query_one("SELECT state, updated_at FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "agent_working"
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(minutes=work_store.STALE_AFTER_MINUTES)).isoformat()
+        assert item["updated_at"] > cutoff
+
+    def test_dead_session_marked_failed(self, tmp_path, monkeypatch):
+        item_id, run_id, transcript = self._mkstale(tmp_path)
+        self._age_transcript(transcript)
+        monkeypatch.setattr(work_store, "claude_running", lambda k: False)
+        actions = work_store.sweep_stale_items()
+        assert {"id": item_id, "action": "failed"} in actions
+        item = db.query_one("SELECT state, stop_reason FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "failed_stale"
+        assert "without a Stop event" in item["stop_reason"]
+        run = db.query_one("SELECT status FROM work_runs WHERE id = ?", (run_id,))
+        assert run["status"] == "stopped"
+        kinds = {e["kind"] for e in db.query_all(
+            "SELECT kind FROM work_events WHERE work_item_id = ?", (item_id,))}
+        assert "stale_failed" in kinds
+
+    def test_live_idle_session_gets_synthesized_stop_and_continues(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+        item_id, _, transcript = self._mkstale(tmp_path)
+        self._age_transcript(transcript)
+        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        sender = MagicMock(return_value=True)
+        monkeypatch.setattr(work_store, "tmux_send", sender)
+        actions = work_store.sweep_stale_items()
+        assert {"id": item_id, "action": "stop_synthesized:continued"} in actions
+        sender.assert_called_once()
+        item = db.query_one("SELECT state, continues_used FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "agent_working"
+        assert item["continues_used"] == 1
+        kinds = {e["kind"] for e in db.query_all(
+            "SELECT kind FROM work_events WHERE work_item_id = ?", (item_id,))}
+        assert {"Stop", "auto_continued"} <= kinds
+
+    def test_live_idle_session_with_question_prompts_operator(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+        item_id, _, transcript = self._mkstale(
+            tmp_path, tail_text="Should I use the staging bucket or prod?")
+        self._age_transcript(transcript)
+        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        sender = MagicMock(return_value=True)
+        monkeypatch.setattr(work_store, "tmux_send", sender)
+        actions = work_store.sweep_stale_items()
+        assert {"id": item_id, "action": "stop_synthesized:question"} in actions
+        sender.assert_not_called()
+        item = db.query_one("SELECT state, stop_reason FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "needs_you"
+        assert "staging bucket" in item["stop_reason"]
+
+    def test_fresh_item_untouched(self):
+        item_id = _mkitem("fresh item")
+        work_store.add_run(item_id, f"sid-fresh-{item_id}", f"work-{item_id}", "/tmp")
+        assert work_store.sweep_stale_items() == []
+        assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                            (item_id,))["state"] == "agent_working"
+
+    def _mkpending(self, tmp_path, minutes):
+        import json as _json
+        item_id, run_id, transcript = self._mkstale(tmp_path, minutes=minutes)
+        transcript.write_text("\n".join(_json.dumps(x) for x in [
+            {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "Running the long build."},
+                {"type": "tool_use", "id": "toolu_1", "name": "Bash"}]}},
+        ]) + "\n")
+        self._age_transcript(transcript, minutes=minutes)
+        return item_id, run_id, transcript
+
+    def test_pending_tool_blocks_synthesized_stop(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+        item_id, _, _ = self._mkpending(tmp_path, minutes=40)
+        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        sender = MagicMock(return_value=True)
+        monkeypatch.setattr(work_store, "tmux_send", sender)
+        actions = work_store.sweep_stale_items()
+        assert {"id": item_id, "action": "busy_tool"} in actions
+        sender.assert_not_called()
+        item = db.query_one("SELECT state, updated_at FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "agent_working"
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(minutes=work_store.STALE_AFTER_MINUTES)).isoformat()
+        assert item["updated_at"] > cutoff
+
+    def test_pending_tool_past_stuck_window_prompts_operator(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+        item_id, _, _ = self._mkpending(
+            tmp_path, minutes=work_store.STUCK_AFTER_MINUTES + 10)
+        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        sender = MagicMock(return_value=True)
+        monkeypatch.setattr(work_store, "tmux_send", sender)
+        actions = work_store.sweep_stale_items()
+        assert {"id": item_id, "action": "stuck_tool"} in actions
+        sender.assert_not_called()
+        item = db.query_one("SELECT state, stop_reason FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "needs_you"
+        assert "has not returned" in item["stop_reason"]
+        kinds = {e["kind"] for e in db.query_all(
+            "SELECT kind FROM work_events WHERE work_item_id = ?", (item_id,))}
+        assert "stuck_tool" in kinds
+
+    def test_answered_tool_call_is_not_pending(self, tmp_path):
+        import json as _json
+        p = tmp_path / "answered.jsonl"
+        p.write_text("\n".join(_json.dumps(x) for x in [
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "Bash"}]}},
+            {"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]}},
+            {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "Build finished."}]}},
+        ]) + "\n")
+        assert work_store.pending_tool_calls(str(p)) is False
+
+    def test_unanswered_tool_call_is_pending(self, tmp_path):
+        import json as _json
+        p = tmp_path / "pending.jsonl"
+        p.write_text("\n".join(_json.dumps(x) for x in [
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "Bash"}]}},
+            {"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]}},
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "toolu_2", "name": "Bash"}]}},
+        ]) + "\n")
+        assert work_store.pending_tool_calls(str(p)) is True
+
+    def test_pending_tool_missing_transcript_is_false(self):
+        assert work_store.pending_tool_calls("/nonexistent/x.jsonl") is False
+
+
 class TestReply:
     def test_reply_resumes(self, monkeypatch):
         from unittest.mock import MagicMock
@@ -515,6 +673,55 @@ class TestReply:
         work_store.apply_action(item_id, "done")
         out = work_store.reply(item_id, "hello")
         assert "reopen" in out["error"]
+
+
+class TestSnoozedQuestion:
+    def _snoozed_with_question(self, until):
+        item_id = _mkitem("snoozed with question")
+        work_store.add_run(item_id, f"sid-sq-{item_id}", f"work-{item_id}", "/tmp")
+        db.execute("UPDATE work_items SET pending_question = ? WHERE id = ?",
+                   ('{"questions": [{"question": "Push it?"}]}', item_id))
+        work_store.apply_action(item_id, "snooze", until=until)
+        return item_id
+
+    def test_detail_remaps_expired_snooze_to_needs_you(self):
+        now = datetime.now(timezone.utc)
+        item_id = self._snoozed_with_question((now - timedelta(hours=1)).isoformat())
+        detail = work_store.item_detail(item_id)
+        assert detail["item"]["state"] == "needs_you"
+        assert detail["item"]["pending_question"]
+
+    def test_detail_keeps_future_snooze_waiting(self):
+        now = datetime.now(timezone.utc)
+        item_id = self._snoozed_with_question((now + timedelta(hours=1)).isoformat())
+        detail = work_store.item_detail(item_id)
+        assert detail["item"]["state"] == "waiting_external"
+        assert detail["item"]["pending_question"]
+
+    def test_reply_clears_snooze_and_question(self, monkeypatch):
+        now = datetime.now(timezone.utc)
+        item_id = self._snoozed_with_question((now + timedelta(hours=1)).isoformat())
+        monkeypatch.setattr(work_store, "tmux_send", lambda k, t: True)
+        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        out = work_store.reply(item_id, "push it")
+        assert out == {"id": item_id, "action": "reply"}
+        item = db.query_one(
+            "SELECT state, pending_question, snoozed_until FROM work_items WHERE id = ?",
+            (item_id,))
+        assert item["state"] == "agent_working"
+        assert item["pending_question"] == ""
+        assert item["snoozed_until"] is None
+
+    def test_prompt_submit_clears_snooze(self):
+        now = datetime.now(timezone.utc)
+        item_id = self._snoozed_with_question((now + timedelta(hours=1)).isoformat())
+        work_store.record_event(f"sid-sq-{item_id}", "UserPromptSubmit", {})
+        item = db.query_one(
+            "SELECT state, pending_question, snoozed_until FROM work_items WHERE id = ?",
+            (item_id,))
+        assert item["state"] == "agent_working"
+        assert item["pending_question"] == ""
+        assert item["snoozed_until"] is None
 
 
 class TestTranscriptTail:
