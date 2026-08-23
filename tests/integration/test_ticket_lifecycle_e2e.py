@@ -301,6 +301,7 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
         },
         "features": {"tickets": True},
         "pr": {"auto_pr": True, "auto_merge": False},
+        "pm_agent": {"enabled": False},
         "github": {"repo": "org/app", "user": "frshty-bot"},
         "bitbucket": {"user_account_id": "frshty-bot"},
         "jira": {},
@@ -309,7 +310,9 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
     }
 
     def fake_run_haiku(prompt: str, timeout: int = 0) -> str:
-        if "Classify each PR review comment" in prompt:
+        if "Classify this engineering ticket" in prompt:
+            return "code"
+        if "Triage each PR review comment" in prompt:
             return '{"results": [{"i": 0, "actionable": true}]}'
         if "Reply with JSON:" in prompt and "actionable" in prompt:
             return '{"actionable": true, "reason": "specific requested code change"}'
@@ -407,6 +410,7 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
          patch("features.tickets.make_platform", return_value=platform), \
          patch("core.tasks.tickets.make_platform", return_value=platform), \
          patch("features.tickets.run_haiku", side_effect=fake_run_haiku), \
+         patch("features.tickets.run_balanced", side_effect=fake_run_haiku), \
          patch("features.tickets.extract_json", side_effect=fake_extract_json), \
          patch("features.pr_ci.run_balanced", side_effect=fake_run_haiku), \
          patch("features.pr_ci.extract_json", side_effect=fake_extract_json), \

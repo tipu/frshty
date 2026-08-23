@@ -38,6 +38,7 @@ class TestReviewPrRunsEveryConfiguredProvider:
         cfg = _cfg(tmp_path, providers)
         with patch.object(reviewer, "_ensure_review_worktree", return_value=None), \
              patch.object(reviewer, "_load_conventions", return_value=""), \
+             patch.object(reviewer, "run_haiku", return_value=""), \
              patch.object(reviewer, "_validate_issues", side_effect=lambda i, w: i), \
              patch.object(reviewer, "_simplify_all_issues", side_effect=lambda i: i), \
              patch.object(reviewer, "_style_match_all", side_effect=lambda c, i: i), \

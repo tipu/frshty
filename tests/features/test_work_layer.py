@@ -1,3 +1,4 @@
+import sys
 from datetime import datetime, timedelta, timezone
 
 import core.db as db
@@ -371,7 +372,7 @@ class TestHookScript:
         work_store.add_run(item_id, "sid-hook-1", "work-h1", "/tmp")
         payload = json.dumps({"session_id": "sid-hook-1", "hook_event_name": "Stop"})
         r = subprocess.run(
-            [".venv/bin/python", "scripts/work_hook.py"],
+            [sys.executable, "scripts/work_hook.py"],
             input=payload, capture_output=True, text=True, timeout=15,
             env={**__import__("os").environ, "FRSHTY_DB": dbfile},
         )
@@ -391,7 +392,7 @@ class TestHookScript:
         before = db.query_one("SELECT COUNT(*) AS n FROM work_events")["n"]
         payload = json.dumps({"session_id": "sid-foreign-xyz", "hook_event_name": "Stop"})
         r = subprocess.run(
-            [".venv/bin/python", "scripts/work_hook.py"],
+            [sys.executable, "scripts/work_hook.py"],
             input=payload, capture_output=True, text=True, timeout=15,
             env={**__import__("os").environ, "FRSHTY_DB": dbfile},
         )
@@ -402,7 +403,7 @@ class TestHookScript:
     def test_hook_garbage_input_exits_zero(self):
         import subprocess
         r = subprocess.run(
-            [".venv/bin/python", "scripts/work_hook.py"],
+            [sys.executable, "scripts/work_hook.py"],
             input="not json at all", capture_output=True, text=True, timeout=15,
         )
         assert r.returncode == 0
@@ -734,7 +735,7 @@ class TestQuestions:
                                "tool_name": "AskUserQuestion",
                                "tool_input": self.QUESTIONS})
         r = subprocess.run(
-            [".venv/bin/python", "scripts/work_hook.py"],
+            [sys.executable, "scripts/work_hook.py"],
             input=payload, capture_output=True, text=True, timeout=15,
             env={**__import__("os").environ, "FRSHTY_DB": dbfile},
         )
@@ -755,7 +756,7 @@ class TestQuestions:
         payload = _json.dumps({"session_id": sid, "hook_event_name": "PreToolUse",
                                "tool_name": "Bash", "tool_input": {"command": "ls"}})
         r = subprocess.run(
-            [".venv/bin/python", "scripts/work_hook.py"],
+            [sys.executable, "scripts/work_hook.py"],
             input=payload, capture_output=True, text=True, timeout=15,
             env={**__import__("os").environ, "FRSHTY_DB": dbfile},
         )
@@ -773,7 +774,7 @@ class TestQuestions:
                                "tool_name": "AskUserQuestion",
                                "tool_input": self.QUESTIONS})
         r = subprocess.run(
-            [".venv/bin/python", "scripts/work_hook.py"],
+            [sys.executable, "scripts/work_hook.py"],
             input=payload, capture_output=True, text=True, timeout=15,
             env={**__import__("os").environ, "FRSHTY_DB": dbfile},
         )
