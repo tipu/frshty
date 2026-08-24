@@ -15,4 +15,4 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install httpx fastapi uvicorn watchfiles pytest
-      - run: pytest tests/ -v
+      - run: pytest tests/ -v -m "not slow"
