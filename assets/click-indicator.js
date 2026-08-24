@@ -52,5 +52,27 @@
 		}
 	}
 
-	document.addEventListener('pointerdown', e => mark(e.clientX, e.clientY), true)
+	let lastPointerdownAt = 0
+
+	const isInputField = el =>
+		el instanceof Element &&
+		(el.matches('input:not([type=hidden]), textarea, select') || el.isContentEditable)
+
+	const markElement = el => {
+		const rect = el.getBoundingClientRect()
+		const x = Math.min(Math.max(rect.left + rect.width / 2, 0), window.innerWidth)
+		const y = Math.min(Math.max(rect.top + rect.height / 2, 0), window.innerHeight)
+		mark(x, y)
+	}
+
+	document.addEventListener('pointerdown', e => {
+		lastPointerdownAt = performance.now()
+		mark(e.clientX, e.clientY)
+	}, true)
+
+	document.addEventListener('focusin', e => {
+		if (!isInputField(e.target)) return
+		if (performance.now() - lastPointerdownAt < 150) return
+		markElement(e.target)
+	}, true)
 })()

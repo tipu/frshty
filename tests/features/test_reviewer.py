@@ -1,8 +1,5 @@
 import json
-from pathlib import Path
 from unittest.mock import patch, MagicMock
-import time
-import pytest
 
 import core.state as state
 from features import reviewer
@@ -45,56 +42,67 @@ class TestReadFunctionContext:
         assert "a" in context
 
 
-class TestReadChangedFiles:
-    def test_reads_files(self, tmp_path):
-        (tmp_path / "a.py").write_text("content a")
-        diff = "diff --git a/a.py b/a.py\n"
-        result = reviewer._read_changed_files(diff, tmp_path)
-        assert "content a" in result
+class TestPromptTone:
+    def test_body_rules_demand_a_fix(self):
+        assert "The fix." in reviewer.BODY_RULES
+        assert "Write a finding, not a question." in reviewer.BODY_RULES
 
-    def test_skips_large_files(self, tmp_path):
-        (tmp_path / "big.py").write_text("x" * 70_000)
-        diff = "diff --git a/big.py b/big.py\n"
-        result = reviewer._read_changed_files(diff, tmp_path)
-        assert result == ""
+    def test_body_rules_do_not_mute_findings(self):
+        assert "Don't prescribe fixes" not in reviewer.BODY_RULES
+        assert "Let the question do the work" not in reviewer.BODY_RULES
 
-    def test_skips_missing_files(self, tmp_path):
-        diff = "diff --git a/gone.py b/gone.py\n"
-        result = reviewer._read_changed_files(diff, tmp_path)
-        assert result == ""
+    def test_every_persona_asks_for_multi_turn_work(self):
+        for name, text in reviewer.PERSONAS.items():
+            assert "HOW TO WORK:" in text, name
+            assert "Do not answer from the diff alone." in text, name
+            assert "Take as many tool calls as you need." in text, name
 
 
 class TestBuildPersonaPrompt:
     def test_includes_persona_text(self):
         pr = make_pr()
-        prompt = reviewer._build_persona_prompt("PERSONA TEXT", pr, "diff", "", "", False)
+        prompt = reviewer._build_persona_prompt("PERSONA TEXT", pr, "/r/diff.txt", [], "", None)
         assert "PERSONA TEXT" in prompt
 
-    def test_includes_diff(self):
+    def test_names_the_diff_file_instead_of_pasting_the_diff(self, tmp_path):
         pr = make_pr()
-        prompt = reviewer._build_persona_prompt("p", pr, "my diff content", "", "", False)
-        assert "my diff content" in prompt
+        diff_path = tmp_path / "diff.txt"
+        diff_path.write_text("my diff content")
+        prompt = reviewer._build_persona_prompt("p", pr, diff_path, ["a.py"], "", None)
+        assert str(diff_path) in prompt
+        assert "Read it with your tools" in prompt
+        assert "my diff content" not in prompt
+        assert "--- DIFF START ---" not in prompt
+        assert "a.py" in prompt
 
     def test_includes_conventions(self):
         pr = make_pr()
-        prompt = reviewer._build_persona_prompt("p", pr, "diff", "CONV TEXT", "", False)
+        prompt = reviewer._build_persona_prompt("p", pr, "/r/diff.txt", [], "CONV TEXT", None)
         assert "CONV TEXT" in prompt
 
-    def test_includes_tool_hint_when_tools(self):
+    def test_includes_tool_hint_when_tools(self, tmp_path):
         pr = make_pr()
-        prompt = reviewer._build_persona_prompt("p", pr, "diff", "", "", True)
-        assert "read-only access" in prompt
+        prompt = reviewer._build_persona_prompt("p", pr, "/r/diff.txt", [], "", tmp_path)
+        assert "read-only checkout" in prompt
+        assert "Do not answer in one" in prompt
+        assert str(tmp_path) in prompt
+
+    def test_asks_for_the_json_in_the_final_message_not_the_only_message(self, tmp_path):
+        pr = make_pr()
+        prompt = reviewer._build_persona_prompt("p", pr, "/r/diff.txt", [], "", tmp_path)
+        assert "FINAL message must be the JSON" in prompt
+        assert "entire response must be the JSON" not in prompt
 
     def test_includes_ticket_context_when_given(self):
         pr = make_pr()
-        prompt = reviewer._build_persona_prompt("p", pr, "diff", "", "", False,
+        prompt = reviewer._build_persona_prompt("p", pr, "/r/diff.txt", [], "", None,
                                                 ticket_context="TICKET GOAL + SIBLING DIFFS")
         assert "TICKET GOAL + SIBLING DIFFS" in prompt
         assert "--- TICKET CONTEXT ---" in prompt
 
     def test_no_ticket_context_block_when_empty(self):
         pr = make_pr()
-        prompt = reviewer._build_persona_prompt("p", pr, "diff", "", "", False)
+        prompt = reviewer._build_persona_prompt("p", pr, "/r/diff.txt", [], "", None)
         assert "TICKET CONTEXT" not in prompt
 
 
@@ -151,15 +159,33 @@ class TestValidateSingle:
         result = reviewer._validate_single((issue, None))
         assert result == issue
 
-    def test_false_positive_returns_none(self, tmp_path):
+    def _fp(self, tmp_path, verdict):
         f = tmp_path / "test.py"
         f.write_text("\n".join([f"line{i}" for i in range(200)]))
         issue = {"body": "problem", "severity": "blocking", "path": "test.py", "line": 50}
-        with patch("features.reviewer.run_balanced", return_value='{"decision": "false_positive", "reason": "guard clause"}'), \
-             patch("features.reviewer.extract_json", return_value={"decision": "false_positive", "reason": "guard clause"}), \
+        with patch("features.reviewer.run_balanced", return_value=json.dumps(verdict)), \
+             patch("features.reviewer.extract_json", return_value=verdict), \
              patch("features.reviewer.log"):
-            result = reviewer._validate_single((issue, tmp_path))
+            return issue, reviewer._validate_single((issue, tmp_path))
+
+    def test_false_positive_with_cited_line_returns_none(self, tmp_path):
+        _, result = self._fp(tmp_path, {"decision": "false_positive", "reason": "guard clause",
+                                        "defeating_line": 45})
         assert result is None
+
+    def test_false_positive_without_citation_keeps_issue(self, tmp_path):
+        issue, result = self._fp(tmp_path, {"decision": "false_positive", "reason": "guard clause"})
+        assert result == issue
+
+    def test_false_positive_citing_line_outside_context_keeps_issue(self, tmp_path):
+        issue, result = self._fp(tmp_path, {"decision": "false_positive", "reason": "guard clause",
+                                            "defeating_line": 190})
+        assert result == issue
+
+    def test_uncertain_keeps_issue(self, tmp_path):
+        issue, result = self._fp(tmp_path, {"decision": "uncertain", "reason": "cannot tell",
+                                            "defeating_line": 45})
+        assert result == issue
 
     def test_valid_returns_issue(self, tmp_path):
         f = tmp_path / "test.py"
@@ -532,10 +558,78 @@ class TestReviewerModel:
     def test_reads_config_knob(self):
         assert reviewer._reviewer_model({"reviewer": {"model": "claude-opus-4-8"}}) == "claude-opus-4-8"
 
-    def test_persona_run_passes_model(self):
-        with patch("features.reviewer.run_balanced", return_value=None) as mock_run:
-            reviewer._run_single_persona(("spec", "prompt", None, "claude-opus-4-8"))
+    def test_persona_run_passes_model(self, tmp_path):
+        with patch("features.reviewer.run_agentic", return_value=None) as mock_run:
+            reviewer._run_single_persona(("spec", "prompt", tmp_path, "claude-opus-4-8", None))
         assert mock_run.call_args.kwargs["model"] == "claude-opus-4-8"
+
+
+class TestPersonaRunsAsAgent:
+    def test_runs_in_the_checkout_with_read_only_tools(self, tmp_path):
+        with patch("features.reviewer.run_agentic", return_value=None) as mock_run:
+            reviewer._run_single_persona(("spec", "prompt", tmp_path, None, [tmp_path / "d"]))
+        kwargs = mock_run.call_args.kwargs
+        assert kwargs["cwd"] == tmp_path
+        assert kwargs["add_dirs"] == [tmp_path / "d"]
+        assert kwargs["tools"] == reviewer.REVIEW_TOOLS
+        assert kwargs["denied_tools"] == reviewer.REVIEW_DENIED_TOOLS
+        assert kwargs["timeout"] == reviewer.REVIEW_PERSONA_TIMEOUT
+
+    def test_review_tools_can_read_and_run_git_but_not_write(self):
+        assert "Read" in reviewer.REVIEW_TOOLS
+        assert "Grep" in reviewer.REVIEW_TOOLS
+        assert "Bash(git:*)" in reviewer.REVIEW_TOOLS
+        for denied in ("Write", "Edit", "NotebookEdit"):
+            assert denied in reviewer.REVIEW_DENIED_TOOLS
+            assert denied not in reviewer.REVIEW_TOOLS
+
+    def test_falls_back_to_one_shot_without_a_directory(self):
+        with patch("features.reviewer.run_agentic") as agentic, \
+             patch("features.reviewer.run_balanced", return_value=None) as balanced:
+            reviewer._run_single_persona(("spec", "prompt", None, None, None))
+        agentic.assert_not_called()
+        balanced.assert_called_once()
+
+    def test_review_pr_roots_the_agent_in_the_checkout(self, tmp_state, tmp_log):
+        pr = {"repo": "backend", "id": 1, "branch": "JIRA-9-x", "url": "u"}
+        worktree = tmp_state / "checkout"
+        worktree.mkdir()
+        config = {"_state_dir": tmp_state, "_base_url": "http://localhost"}
+        with patch("features.reviewer._ensure_review_worktree", return_value=worktree), \
+             patch("features.reviewer._load_conventions", return_value=""), \
+             patch("features.reviewer._run_single_persona",
+                   return_value=("spec", None)) as single:
+            reviewer.review_pr(config, MagicMock(), pr,
+                               prefetched_diff="diff --git a/a.py b/a.py\n+x\n")
+        review_dir = tmp_state / "reviews" / "backend" / "JIRA-9-x"
+        _, prompt, cwd, _, add_dirs = single.call_args.args[0]
+        assert cwd == worktree
+        assert add_dirs == [review_dir]
+        assert (review_dir / "diff.txt").read_text() == "diff --git a/a.py b/a.py\n+x\n"
+        assert str(review_dir / "diff.txt") in prompt
+        assert "+x" not in prompt
+
+    def test_review_pr_without_a_checkout_still_reads_the_staged_diff(self, tmp_state, tmp_log):
+        pr = {"repo": "backend", "id": 1, "branch": "JIRA-9-x", "url": "u"}
+        config = {"_state_dir": tmp_state, "_base_url": "http://localhost"}
+        with patch("features.reviewer._ensure_review_worktree", return_value=None), \
+             patch("features.reviewer._load_conventions", return_value=""), \
+             patch("features.reviewer._run_single_persona",
+                   return_value=("spec", None)) as single:
+            reviewer.review_pr(config, MagicMock(), pr,
+                               prefetched_diff="diff --git a/a.py b/a.py\n+x\n")
+        review_dir = tmp_state / "reviews" / "backend" / "JIRA-9-x"
+        _, _, cwd, _, add_dirs = single.call_args.args[0]
+        assert cwd == review_dir
+        assert add_dirs is None
+
+    def test_fan_out_passes_add_dirs_to_claude(self, tmp_path):
+        with patch("features.reviewer._run_single_persona",
+                   return_value=("spec", None)) as single:
+            reviewer._run_personas_for_providers(
+                {"spec": "p"}, ["claude"], worktree=tmp_path, model=None,
+                run_key="k", add_dirs=[tmp_path / "d"])
+        assert single.call_args.args[0] == ("spec", "p", tmp_path, None, [tmp_path / "d"])
 
 
 class TestReviewTicket:
@@ -585,11 +679,14 @@ class TestReviewedSiblingSections:
         platform.get_pr_info.return_value = {"state": "OPEN"}
         platform.get_pr_diff.return_value = "diff --git a/x b/x\n+z\n"
 
-        sections = reviewer._reviewed_sibling_sections({}, platform, "JIRA-9", {"frontend/2"})
+        sections = reviewer._reviewed_sibling_sections(
+            {"_state_dir": tmp_state}, platform, "JIRA-9", {"frontend/2"})
 
         assert len(sections) == 1
         assert "ALREADY-REVIEWED PR #7" in sections[0]
         assert "backend/7" in sections[0]
+        assert str(tmp_state / "reviews" / "backend" / "pr-7" / "diff.txt") in sections[0]
+        assert "+z" not in sections[0]
         platform.get_pr_diff.assert_called_once_with("backend", 7)
 
     def test_closed_sibling_is_skipped(self, tmp_state):
@@ -597,5 +694,6 @@ class TestReviewedSiblingSections:
         platform = MagicMock()
         platform.get_pr_info.return_value = {"state": "MERGED"}
 
-        assert reviewer._reviewed_sibling_sections({}, platform, "JIRA-9", set()) == []
+        assert reviewer._reviewed_sibling_sections(
+            {"_state_dir": tmp_state}, platform, "JIRA-9", set()) == []
         platform.get_pr_diff.assert_not_called()

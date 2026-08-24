@@ -50,7 +50,7 @@ class TestRunDebrief:
         with db.tx() as c:
             c.execute("UPDATE work_runs SET transcript_path = ? WHERE work_item_id = ?",
                       (str(t), item_id))
-        monkeypatch.setattr(work_debrief, "_run_claude", lambda p, c: CLAUDE_OUT)
+        monkeypatch.setattr(work_debrief, "_run_claude", lambda p: CLAUDE_OUT)
         out = work_debrief.run_debrief(item_id)
         assert out["followups"] == 1
         item = db.query_one("SELECT summary FROM work_items WHERE id = ?", (item_id,))
@@ -78,7 +78,7 @@ class TestRunDebrief:
         with db.tx() as c:
             c.execute("UPDATE work_runs SET transcript_path = ? WHERE work_item_id = ?",
                       (str(t), item_id))
-        def boom(p, c):
+        def boom(p):
             raise RuntimeError("claude exited 1")
         monkeypatch.setattr(work_debrief, "_run_claude", boom)
         out = work_debrief.run_debrief(item_id)
@@ -227,7 +227,7 @@ class TestSupersede:
         with db.tx() as c:
             c.execute("UPDATE work_runs SET transcript_path = ? WHERE work_item_id = ?",
                       (str(t), item_id))
-        monkeypatch.setattr(work_debrief, "_run_claude", lambda p, c: CLAUDE_OUT)
+        monkeypatch.setattr(work_debrief, "_run_claude", lambda p: CLAUDE_OUT)
         work_debrief.run_debrief(item_id)
         work_debrief.run_debrief(item_id)
         fus = work_debrief.followups_for(item_id)

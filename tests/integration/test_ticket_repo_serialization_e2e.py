@@ -10,6 +10,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 import core.db as db
 import core.log as log
 import core.queue as q
@@ -168,6 +170,7 @@ class FakePlatform:
             return {"status": "merged"}
 
 
+@pytest.mark.slow
 def test_ten_concurrent_prd_tickets_serialize_and_complete(tmp_path):
     """All 10 PRD tickets target the same hot-spot file. With the per-repo gate,
     they execute sequentially: at most one ticket occupies the pipeline

@@ -10,6 +10,7 @@
 <script src="/static/frshty-linkify.js"></script>
 <link rel="stylesheet" href="/static/frshty.css">
 <style>
+.tl-box { max-height: 70vh; overflow-y: auto; background: #0d0d13; border: 1px solid #2a2a35; border-radius: 8px; padding: 8px 14px; }
 .tl { border-left: 2px solid #2a2a35; margin-left: 8px; padding-left: 16px; }
 .tl-prompt { color: #93c5fd; margin: 14px 0 4px; white-space: pre-wrap; }
 .tl-text { color: #d0d0d0; margin: 8px 0; white-space: pre-wrap; line-height: 1.45; }
@@ -47,6 +48,24 @@
              :placeholder="item.pending_question ? 'Other — type your own answer…' : 'Answer and resume…'" />
     </form>
     <div class="text-xs text-red-400 mt-1" v-if="replyError">{{ replyError }}</div>
+  </div>
+  <div class="sec">
+    <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Side question</h2>
+    <div class="text-xs text-gray-600 mb-2">Typed into the live terminal as /btw. The run is not interrupted and the question never enters its conversation. The answer comes from a fork with no tools, so it can only reason about what the session already knows.</div>
+    <form @submit.prevent="askBtw">
+      <input class="wintake" style="width:100%; background:#101018; border:1px solid #2a2a35; border-radius:8px; padding:10px 14px; color:#e0e0e0"
+             v-model="btwText" :disabled="btwBusy"
+             :placeholder="btwBusy ? 'waiting for the answer…' : 'Ask the session a quick question…'" />
+    </form>
+    <div class="text-xs text-red-400 mt-1" v-if="btwError">{{ btwError }}</div>
+    <div class="tl-box mt-2" v-if="btwLog.length">
+      <div class="tl">
+        <template v-for="x in btwLog">
+          <div class="tl-prompt"><div class="tl-ts" :title="ts(x.at)">{{ rel(x.at) }}</div>❯ {{ x.question }}</div>
+          <div class="tl-text" v-html="lk(x.answer)"></div>
+        </template>
+      </div>
+    </div>
   </div>
   <div class="sec" v-if="item.summary || item.state === 'done'">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Summary</h2>
@@ -134,13 +153,18 @@
   </div>
   <div class="sec">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">What happened</h2>
-    <div class="text-xs text-gray-600 mb-2">Read from the session transcript. Prompts in blue, agent reports in white, every tool call in grey.</div>
-    <div class="tl">
-      <template v-for="e in timeline">
-        <div v-if="e.kind === 'prompt'" class="tl-prompt"><div class="tl-ts" v-if="e.at" :title="ts(e.at)">{{ rel(e.at) }}</div>❯ {{ e.text }}</div>
-        <div v-else-if="e.kind === 'text'" class="tl-text"><div class="tl-ts" v-if="e.at" :title="ts(e.at)">{{ rel(e.at) }}</div><span v-html="lk(e.text)"></span></div>
-        <div v-else class="tl-tool">{{ e.name }} {{ e.arg }}</div>
-      </template>
+    <div class="text-xs text-gray-600 mb-2">Read from the session transcript, newest first. Prompts in blue, agent reports in white, every tool call in grey.</div>
+    <div class="tl-box">
+      <div class="tl">
+        <template v-for="e in timelineView">
+          <div v-if="e.kind === 'prompt'" class="tl-prompt"><div class="tl-ts" v-if="e.at" :title="ts(e.at)">{{ rel(e.at) }}</div>❯ {{ e.text }}</div>
+          <div v-else-if="e.kind === 'text'" class="tl-text"><div class="tl-ts" v-if="e.at" :title="ts(e.at)">{{ rel(e.at) }}</div><span v-html="lk(e.text)"></span></div>
+          <div v-else class="tl-tool">{{ e.name }} {{ e.arg }}</div>
+        </template>
+      </div>
+    </div>
+    <div class="text-xs mt-2" v-if="timelineHidden">
+      <span class="text-blue-400 underline cursor-pointer" @click="timelineFull = true">show {{ timelineHidden }} older entries</span>
     </div>
   </div>
   <div class="sec">
@@ -153,13 +177,32 @@
 const { createApp } = Vue;
 createApp({
   data() { return { item: null, timeline: [], events: [], artifacts: [], replyText: "", replyError: "",
+                    timelineCap: 100, timelineFull: false,
                     systemPrompt: "", showPrompt: false,
+                    btwText: "", btwError: "", btwBusy: false,
                     followups: [], fuText: {}, fuCtx: {}, fuSlack: {}, fuError: {},
                     sourceItem: null, followupChildren: [],
                     fupText: "", fupCtx: [], fupSlack: false, fupError: "", fupBusy: false,
                     projects: [], slackAvailable: false,
                     debriefBusy: false, debriefError: "", linkmap: null }; },
   computed: {
+    timelineView() {
+      const rev = this.timeline.slice().reverse();
+      return this.timelineFull ? rev : rev.slice(0, this.timelineCap);
+    },
+    timelineHidden() {
+      return this.timelineFull ? 0 : Math.max(0, this.timeline.length - this.timelineCap);
+    },
+    btwLog() {
+      const out = [];
+      for (const ev of this.events) {
+        if (ev.kind !== "btw") continue;
+        let p = {};
+        try { p = JSON.parse(ev.payload || "{}"); } catch (e) { continue; }
+        out.push({ question: p.question || "", answer: p.answer || "", at: ev.created_at });
+      }
+      return out.reverse();
+    },
     stateLabel() {
       if (!this.item) return "";
       if (this.item.state === "done")
@@ -274,6 +317,25 @@ createApp({
         this.debriefBusy = false;
       }
       await this.refresh();
+    },
+    async askBtw() {
+      const text = this.btwText.trim();
+      if (!text || this.btwBusy) return;
+      this.btwBusy = true; this.btwError = "";
+      try {
+        const r = await fetch(`/api/work/items/${this.item.id}/btw`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+        });
+        const d = await r.json();
+        if (!r.ok) { this.btwError = d.error || ("ask failed HTTP " + r.status); return; }
+        this.btwText = "";
+        await this.refresh();
+      } catch (e) {
+        this.btwError = "ask failed: " + e.message;
+      } finally {
+        this.btwBusy = false;
+      }
     },
     async answer(text) {
       if (!text) return;

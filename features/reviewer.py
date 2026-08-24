@@ -2,14 +2,15 @@ import json
 import re
 import subprocess
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import core.log as log
 import core.state as state
 import core.git_util as git_util
-from core.claude_runner import run_balanced, run_haiku, extract_json
-from core.llm import run_external_model
+from core.claude_runner import run_agentic, run_balanced, run_haiku, extract_json
+from core.llm import READ_ONLY_TOOLS, WRITE_TOOLS, run_external_model
 from core.config import base_branch_for, get_repos
 import features.presentation as presentation
 from features.platforms import make_platform
@@ -22,7 +23,15 @@ PERSONA_SPEC = (
     "- Scope creep: changes that go beyond what was asked (flag, don't block)\n"
     "- If the PR references a Jira ticket, check the diff against any acceptance criteria mentioned\n\n"
     "Do NOT review for code style, naming, performance, or maintainability. Those are other reviewers' jobs.\n"
-    "If the diff fully satisfies the requirements, say so and approve.\n"
+    "If the diff fully satisfies the requirements, say so and approve.\n\n"
+    "HOW TO WORK:\n"
+    "- Do not answer from the diff alone. Open the checkout and confirm every claim before you write it.\n"
+    "- Read the ticket or PR description first and write out its acceptance criteria one by one.\n"
+    "- For each criterion, search the repository for the code that satisfies it. A requirement can be met "
+    "by code the diff does not touch, and a diff that looks complete can still miss a criterion.\n"
+    "- Open the tests for the new behaviour. A criterion with no test is not delivered.\n"
+    "- Take as many tool calls as you need. Many reads and greps, then the answer. A verified answer "
+    "in twenty turns beats a guess in one.\n"
 )
 
 PERSONA_BREAKAGE = (
@@ -37,7 +46,19 @@ PERSONA_BREAKAGE = (
     "- ORM misuse: N+1 queries, missing select_related/prefetch_related, tenant isolation bypass\n"
     "- Test coverage: are new code paths tested? Do tests assert meaningful behavior or just not-crash?\n\n"
     "Do NOT review for style, naming, or spec compliance. Those are other reviewers' jobs.\n"
-    "If nothing will break, say so and approve.\n"
+    "If nothing will break, say so and approve.\n\n"
+    "HOW TO WORK:\n"
+    "- Do not answer from the diff alone. Trace every finding in the checkout before you report it.\n"
+    "- For each suspicious line, open the file and read the whole function, not the hunk.\n"
+    "- Grep for the callers of every changed function and for the readers of every changed field or "
+    "response key. Most breakage lives in the caller, not in the diff.\n"
+    "- For permission, auth, and tenant code, open the base classes and the permission classes the "
+    "changed view drops or keeps. Compare against a view that is known correct.\n"
+    "- For migrations, read the models and the rows the migration touches, and follow every foreign "
+    "key that points at the deleted or changed data.\n"
+    "- Open the tests that cover the changed code paths. No test for a new path is a finding.\n"
+    "- Take as many tool calls as you need. Report a finding only after you traced its failure path "
+    "through real code. A verified answer in twenty turns beats a guess in one.\n"
 )
 
 PERSONA_MAINTAINABILITY = (
@@ -52,11 +73,23 @@ PERSONA_MAINTAINABILITY = (
     "- Convention violations: framework defaults overridden without reason\n"
     "- Pattern consistency: does this follow existing patterns in the codebase or introduce a new one?\n\n"
     "Do NOT review for production breakage or spec compliance. Those are other reviewers' jobs.\n"
-    "Prefix minor issues with `nit:`. State blocking issues directly.\n"
+    "Prefix minor issues with `nit:`. State blocking issues directly.\n\n"
+    "HOW TO WORK:\n"
+    "- Do not answer from the diff alone. Confirm every claim against the checkout.\n"
+    "- Before you call something a new pattern, grep for the established pattern and name the file "
+    "that establishes it.\n"
+    "- Before you call something duplicated, find the other copy and name its file and line.\n"
+    "- Before you call a name inconsistent, grep for the term across the repository and see which "
+    "spelling the codebase already uses.\n"
+    "- Take as many tool calls as you need. A verified answer in twenty turns beats a guess in one.\n"
 )
 
 PERSONAS = {"spec": PERSONA_SPEC, "breakage": PERSONA_BREAKAGE, "maintainability": PERSONA_MAINTAINABILITY}
 REVIEW_RETRY_COOLDOWN_SECONDS = 60 * 60
+
+REVIEW_TOOLS = READ_ONLY_TOOLS
+REVIEW_DENIED_TOOLS = WRITE_TOOLS
+REVIEW_PERSONA_TIMEOUT = 1200
 
 JSON_OUTPUT_SCHEMA = (
     'OUTPUT FORMAT: Return a single JSON object (no markdown fences, no explanation) with this schema:\n'
@@ -76,9 +109,40 @@ LINE_NUMBER_RULES = (
 
 BODY_RULES = (
     "BODY RULES: The 'body' field must NOT contain severity tags, bold markers, or line numbers. "
-    "Severity is already in the 'severity' field. "
-    "State the observed behavior factually in 1-2 sentences, then ask the author if it's intentional. "
-    "Don't prescribe fixes. Don't explain why it's wrong. Let the question do the work.\n"
+    "Severity is already in the 'severity' field and the location is already in the 'path' and "
+    "'line' fields.\n"
+    "Write a finding, not a question. Give three things, in this order:\n"
+    "1. The defect. Name the symbol, expression, or missing guard. Not 'this may be unsafe'.\n"
+    "2. The failure path. The concrete input, request, or sequence that triggers it, and what the "
+    "caller or the data ends up with. Give the real case (a request carrying another tenant's id, an "
+    "empty result set, a second concurrent write), never 'in some cases'.\n"
+    "3. The fix. What to change: the guard to add, the argument to pass, the call to move. A short "
+    "code snippet is welcome when it is shorter than the sentence describing it.\n"
+    "Length: 2 to 5 sentences. Use the longer end when the failure path needs it. Do not pad, do not "
+    "restate the code, do not add background.\n"
+    "Be specific and prescriptive. Do not hedge with 'might', 'could', or 'consider' about a defect "
+    "you verified in the code. State it.\n"
+    "Ask a question only when you tried to settle it with your tools and could not. Then say what you "
+    "checked and what is still unknown.\n"
+)
+
+TOOL_USE_RULES = (
+    "TOOL USE: You have a read-only checkout of this branch. Use it. The diff and the file excerpts "
+    "below are the starting point, not the evidence. Before you report any issue, open the file, read "
+    "the whole surrounding function, and grep for the callers of what changed. Do not answer in one "
+    "turn: a real review is many reads and greps, then the JSON. If you write the JSON without having "
+    "opened a single file, the review is wrong. When a claim resists verification, drop it or file it "
+    "as a question that states what you checked.\n"
+)
+
+TICKET_TOOL_USE_RULES = (
+    "TOOL USE: You have read-only checkouts of every repository in this ticket; each PR section below "
+    "names its worktree path. Use them with those absolute paths. The diffs and file excerpts are the "
+    "starting point, not the evidence. Before you report any issue, open the file, read the whole "
+    "surrounding function, and grep for the callers of what changed, including callers in the other "
+    "repositories of this ticket. Do not answer in one turn: a real review is many reads and greps, "
+    "then the JSON. When a claim resists verification, drop it or file it as a question that states "
+    "what you checked.\n"
 )
 
 
@@ -106,14 +170,17 @@ def review_pr(config: dict, platform, pr: dict, ticket_context: str = "",
         return None
 
     worktree = _ensure_review_worktree(config, pr)
+    review_dir = _review_dir(config, pr)
+    diff_path = _stage_diff(review_dir, diff_text)
     conventions = _load_conventions(config, pr["repo"])
-    file_context = _read_changed_files(diff_text, worktree) if worktree else ""
 
-    prompts = {name: _build_persona_prompt(text, pr, diff_text, conventions, file_context,
-                                           worktree is not None, ticket_context)
+    prompts = {name: _build_persona_prompt(text, pr, diff_path,
+                                           _extract_changed_paths(diff_text), conventions,
+                                           worktree, ticket_context)
                for name, text in PERSONAS.items()}
     by_provider = _run_personas_for_providers(
-        prompts, _review_providers(config), worktree=worktree,
+        prompts, _review_providers(config), worktree=worktree or review_dir,
+        add_dirs=[review_dir] if worktree else None,
         model=_reviewer_model(config), run_key=f"{pr['repo']}-{pr['id']}")
 
     first: dict | None = None
@@ -135,11 +202,26 @@ def review_pr(config: dict, platform, pr: dict, ticket_context: str = "",
     return first
 
 
-def _write_review_artifacts(config, pr, merged: dict, diff_text: str,
-                            provider: str = "claude") -> None:
+def _review_dir(config, pr) -> Path:
     branch_slug = pr["branch"].replace("/", "-") if pr.get("branch") else f"pr-{pr['id']}"
     review_dir = config["_state_dir"] / "reviews" / pr["repo"] / branch_slug
     review_dir.mkdir(parents=True, exist_ok=True)
+    return review_dir
+
+
+def _stage_diff(review_dir: Path, diff_text: str) -> Path:
+    """Put the diff on disk so the reviewer fetches it with a tool call.
+
+    A diff pasted into the prompt makes the model answer in one turn from the
+    prompt alone. A diff it has to open is the first of many reads."""
+    diff_path = review_dir / "diff.txt"
+    diff_path.write_text(diff_text)
+    return diff_path
+
+
+def _write_review_artifacts(config, pr, merged: dict, diff_text: str,
+                            provider: str = "claude") -> None:
+    review_dir = _review_dir(config, pr)
     merged["pr_id"] = pr["id"]
     merged["pr_url"] = pr.get("url", "")
     merged["repo"] = pr["repo"]
@@ -160,7 +242,8 @@ def _write_review_artifacts(config, pr, merged: dict, diff_text: str,
     (review_dir / f"queued_comments{suffix}.json").write_text(json.dumps(queued, indent=2))
 
 
-def _build_persona_prompt(persona_text, pr, diff_text, conventions, file_context, has_tools, ticket_context=""):
+def _build_persona_prompt(persona_text, pr, diff_path, changed_paths, conventions,
+                          worktree, ticket_context=""):
     parts = [
         f"You are reviewing pull request #{pr['id']} in repository '{pr['repo']}' (branch: {pr['branch']}).\n",
         persona_text + "\n",
@@ -178,14 +261,20 @@ def _build_persona_prompt(persona_text, pr, diff_text, conventions, file_context
             f"--- TICKET CONTEXT ---\n{ticket_context}\n--- END TICKET CONTEXT ---\n")
     if conventions:
         parts.append("Review against the project conventions provided. Only flag conventions that are explicitly stated in the conventions text. Do not infer or assume unwritten rules.\n")
-    if has_tools:
-        parts.append("You have read-only access to the repository. Use your tools to verify issues against the actual codebase when the diff alone is ambiguous.\n")
+    if worktree:
+        parts.append(TOOL_USE_RULES)
     if conventions:
         parts.append(f"--- PROJECT CONVENTIONS ---\n{conventions}\n--- END CONVENTIONS ---\n")
-    if file_context:
-        parts.append(f"--- CHANGED FILES ---\n{file_context}\n--- END CHANGED FILES ---\n")
-    parts.append(f"--- DIFF START ---\n{diff_text}\n--- DIFF END ---")
-    parts.append("\nIMPORTANT: Your entire response must be the JSON object and nothing else. No summary, no explanation, no markdown fences.")
+    if worktree:
+        parts.append(f"The branch is checked out read-only at {worktree}. That checkout is your "
+                     "working directory, so plain git commands and relative paths resolve inside it.\n")
+    parts.append(f"--- DIFF ---\nThe complete diff of this PR is the file {diff_path}. "
+                 "Read it with your tools and page through all of it; it is not pasted into "
+                 "this prompt.\n--- END DIFF ---")
+    if changed_paths:
+        parts.append("--- FILES CHANGED ---\n" + "\n".join(changed_paths) + "\n--- END FILES CHANGED ---")
+    parts.append("\nIMPORTANT: Explore first, then answer. Your FINAL message must be the JSON "
+                 "object and nothing else. No summary, no explanation, no markdown fences.")
     return "\n".join(parts)
 
 
@@ -198,14 +287,19 @@ def _review_providers(config) -> list[str]:
 
 
 def _run_single_persona(args):
-    name, prompt, worktree, model = args
-    tools = ["Read", "Glob", "Grep"] if worktree else None
+    name, prompt, cwd, model, add_dirs = args
     try:
-        output = run_balanced(prompt, worktree=worktree, tools=tools, model=model)
+        if cwd:
+            output = run_agentic(prompt, cwd=cwd, add_dirs=add_dirs, tools=REVIEW_TOOLS,
+                                 denied_tools=REVIEW_DENIED_TOOLS, model=model,
+                                 timeout=REVIEW_PERSONA_TIMEOUT,
+                                 function_name="review_persona")
+        else:
+            output = run_balanced(prompt, model=model)
     except subprocess.TimeoutExpired as e:
         log.emit("review_persona_timeout",
                  f"persona '{name}' timed out after {e.timeout}s",
-                 meta={"persona": name, "worktree": str(worktree) if worktree else ""})
+                 meta={"persona": name, "worktree": str(cwd) if cwd else ""})
         return (name, None)
     if not output:
         return (name, None)
@@ -213,7 +307,7 @@ def _run_single_persona(args):
     if data:
         for issue in data.get("issues", []):
             issue["persona"] = name
-            issue["tool_assisted"] = worktree is not None
+            issue["tool_assisted"] = cwd is not None
     return (name, data)
 
 
@@ -260,7 +354,8 @@ def _run_codex_persona(args):
 
 
 def _run_personas_for_providers(prompts: dict, providers: list[str], *,
-                                worktree, model, run_key: str) -> dict[str, list]:
+                                worktree, model, run_key: str,
+                                add_dirs: list | None = None) -> dict[str, list]:
     """Run one set of persona prompts through every configured provider.
 
     Shared by review_pr and review_ticket. The experiment previously lived only
@@ -270,7 +365,7 @@ def _run_personas_for_providers(prompts: dict, providers: list[str], *,
     with ThreadPoolExecutor(max_workers=6) as pool:
         futures = {}
         if "claude" in providers:
-            futures["claude"] = [pool.submit(_run_single_persona, (name, prompt, worktree, model))
+            futures["claude"] = [pool.submit(_run_single_persona, (name, prompt, worktree, model, add_dirs))
                                  for name, prompt in prompts.items()]
         if "codex" in providers:
             futures["codex"] = [pool.submit(_run_codex_persona, (name, prompt, worktree, run_key))
@@ -302,7 +397,13 @@ def _merge_reviews(results: list[tuple[str, dict]]) -> dict:
         "6. Preserve the 'persona' field from the source (for merged issues, use the persona whose body you kept)\n"
         "7. Verdict: use the most conservative (any 'changes_requested' wins)\n"
         "8. If any merged issue had tool_assisted=true, set it true on the merged issue\n"
-        "9. Drop any finding where confidence is clearly below 70% (vague, speculative, or hedged language)\n\n"
+        "9. Drop a finding only when it names no concrete defect at all: no file, no code path, nothing "
+        "the author could act on. Hedged wording is not a reason to drop. Rewrite the hedge into a "
+        "plain statement and keep the finding.\n"
+        "10. Never drop a finding because only one persona reported it. Each persona looks through a "
+        "different lens, so a single-persona finding is the normal case.\n"
+        "11. Keep every 'body' whole. Do not shorten it, do not remove the prescribed fix, and do not "
+        "turn a statement into a question.\n\n"
         "Return a single JSON object (no markdown fences) with the same schema as the inputs plus 'agreed_by' on each issue.\n\n"
         f"--- REVIEWS ---\n{merge_input}\n--- END REVIEWS ---"
     )
@@ -326,17 +427,24 @@ def _merge_reviews(results: list[tuple[str, dict]]) -> dict:
 
 
 VALIDATE_PROMPT = (
-    "You are auditing a code review comment for correctness. Your job is to DEBUNK the comment if possible.\n\n"
-    "Look for:\n"
-    "- Guard clauses, early returns, or type checks that make the flagged issue impossible\n"
-    "- Type narrowing (TypeScript/Python) that guarantees the variable is defined at the flagged line\n"
-    "- Surrounding logic that already handles the concern\n"
-    "- Initialization or assignment in a higher scope that the reviewer missed\n\n"
-    "If the surrounding code clearly defeats the claim, it is a false positive.\n"
-    "If you cannot determine from the provided context, say uncertain.\n"
-    "Do not speculate about code you cannot see.\n\n"
+    "You are auditing a code review comment for correctness. The comment is presumed correct. "
+    "Overturn it only when the code below proves it wrong.\n\n"
+    "A comment is a false positive only when one specific line in the context makes the reported "
+    "failure impossible:\n"
+    "- a guard clause, early return, or type check before the flagged line\n"
+    "- type narrowing that guarantees the value is defined at the flagged line\n"
+    "- surrounding logic that already handles the reported case\n"
+    "- an initialization or assignment in a higher scope that the reviewer missed\n\n"
+    "You must cite that line by its number from the context. No citation means no false positive.\n"
+    "The context is a fixed window around the flagged line. Code outside it is not evidence. "
+    "A concern you cannot check here is NOT a false positive: a missing caller, an untested path, a "
+    "missing permission class, a migration effect, a design objection. Return 'valid' for those and "
+    "let the author answer.\n"
+    "A comment that describes the code correctly is 'valid' even when you would not have raised it, "
+    "and even when it prescribes a fix you would write differently. You judge the claim, not the tone "
+    "and not the severity.\n\n"
     "Return ONLY a JSON object (no markdown fences):\n"
-    '{"decision":"valid"|"false_positive"|"uncertain","reason":"one sentence"}\n'
+    '{"decision":"valid"|"false_positive"|"uncertain","defeating_line":<line number from the context, or null>,"reason":"one sentence"}\n'
 )
 
 
@@ -352,6 +460,21 @@ def _read_function_context(worktree: Path, file_path: str, target_line: int) -> 
     end = min(len(lines), target_line + 60)
     numbered = [f"{i+1}: {lines[i]}" for i in range(start, end)]
     return "\n".join(numbered)
+
+
+def _cited_context_line(value, context: str) -> int | None:
+    """The auditor may only drop an issue when it cites a line that is really in
+    the context window it was shown. An uncited or invented line number means
+    the claim is unproven, so the issue survives."""
+    try:
+        num = int(value)
+    except (TypeError, ValueError):
+        return None
+    prefix = f"{num}: "
+    for line in context.splitlines():
+        if line.startswith(prefix):
+            return num
+    return None
 
 
 def _validate_single(args):
@@ -383,13 +506,21 @@ def _validate_single(args):
     if not data:
         return issue
 
-    decision = data.get("decision", "valid")
-    if decision == "false_positive":
-        reason = data.get("reason", "")
-        log.emit("review_validation_dropped", f"Dropped: {path}:{line} — {reason}",
-            meta={"path": path, "line": line, "body": issue["body"], "reason": reason})
-        return None
-    return issue
+    if data.get("decision") != "false_positive":
+        return issue
+
+    reason = data.get("reason", "")
+    cited = _cited_context_line(data.get("defeating_line"), context)
+    if cited is None:
+        log.emit("review_validation_kept",
+                 f"Kept {path}:{line}: false_positive claim cites no line in the context — {reason}",
+                 meta={"path": path, "line": line, "body": issue["body"], "reason": reason,
+                       "defeating_line": data.get("defeating_line")})
+        return issue
+    log.emit("review_validation_dropped", f"Dropped: {path}:{line} — {reason} (line {cited})",
+        meta={"path": path, "line": line, "body": issue["body"], "reason": reason,
+              "defeating_line": cited})
+    return None
 
 
 def _validate_issues(issues: list[dict], worktree: Path | None) -> list[dict]:
@@ -403,11 +534,15 @@ def _validate_issues(issues: list[dict], worktree: Path | None) -> list[dict]:
 
 def _simplify_body(body: str) -> str:
     output = run_haiku(
-        "Strip this review comment to its essence. Remove: hedging language (might, could, may), "
-        "examples, explanations of why, background context. "
-        "1-2 sentences max. Be imperative not narrative. "
+        "Tighten this review comment. Remove hedging (might, could, may, consider), filler, and any "
+        "sentence that only restates what the code says. "
+        "Keep all three of: the defect, the failure path that triggers it, and the prescribed fix. "
+        "Keep the specifics: symbol names, the triggering input, the concrete consequence. "
+        "Do not drop the fix. Do not turn a statement into a question. "
+        "Up to 5 sentences; go shorter only when nothing is lost. Be imperative, not narrative. "
         "Bad: 'This might overflow if the array is large.' "
-        "Good: 'This overflows on large arrays; use a buffer.' "
+        "Good: '`parse_batch` overflows once `items` exceeds 4096 because `buf` is fixed at 4 KB, so "
+        "the tail of the batch is written past the end. Size `buf` from `len(items)` or chunk the loop.' "
         "Backticks for code only. Return ONLY the rewritten text."
         f"\n\n{body}"
     )
@@ -488,7 +623,10 @@ def _style_match(body: str, examples: str) -> str:
     if not examples:
         return body
     output = run_haiku(
-        f"Rewrite this PR review comment to match this person's commenting style.\n\n"
+        f"Rewrite this PR review comment to match this person's commenting style.\n"
+        f"Match tone, wording, and formatting only. Keep the technical content complete: the defect, "
+        f"the failure path, and the prescribed fix must all survive, with their specifics. "
+        f"Do not shorten the comment into a question and do not soften a stated defect.\n\n"
         f"Style examples:\n{examples}\n\nComment to rewrite:\n{body}\n\n"
         f"Return ONLY the rewritten comment."
     )
@@ -546,31 +684,6 @@ def _extract_changed_paths(diff_text: str) -> list[str]:
     return re.findall(r"diff --git a/.+ b/(.+)", diff_text)
 
 
-def _read_changed_files(diff_text: str, worktree_path: Path) -> str:
-    paths = _extract_changed_paths(diff_text)
-    parts = []
-    total = 0
-    for p in paths:
-        fp = worktree_path / p
-        if not fp.is_file():
-            continue
-        try:
-            size = fp.stat().st_size
-            if size > 60_000:
-                continue
-            content = fp.read_text()
-        except (OSError, UnicodeDecodeError):
-            continue
-        parts.append(f"--- FILE: {p} ---\n{content}")
-        total += len(content)
-        if total > 120_000:
-            break
-    return "\n\n".join(parts)
-
-
-import time
-import re as regex_module
-
 
 def _extract_ticket_from_pr(pr: dict, ticket_state: dict) -> str | None:
     repo = pr.get("repo")
@@ -586,7 +699,7 @@ def _extract_ticket_from_pr(pr: dict, ticket_state: dict) -> str | None:
 
     branch = pr.get("branch", "")
     if branch:
-        match = regex_module.search(r"(?i)\b([a-z]+-\d+)", branch)
+        match = re.search(r"(?i)\b([a-z]+-\d+)", branch)
         if match:
             return match.group(1).upper()
 
@@ -698,22 +811,27 @@ def _ticket_context_for(config, pr: dict, ticket_key: str, prs: list[dict],
 def _build_ticket_persona_prompt(persona_text, ticket_key, goal, sections, has_tools):
     parts = [
         f"You are reviewing ALL the pull requests of ticket {ticket_key} together, as one change. "
-        "The PRs may span multiple repositories; every PR's diff is below. Review the change as a "
-        "whole: a requirement satisfied in any of the PRs is satisfied, and inconsistencies between "
-        "PRs (mismatched API contracts, producer/consumer drift) are issues.\n",
+        "The PRs may span multiple repositories; each section below names that PR's diff file and "
+        "its checkout. Review the change as a whole: a requirement satisfied in any of the PRs is "
+        "satisfied, and inconsistencies between PRs (mismatched API contracts, producer/consumer "
+        "drift) are issues.\n",
         persona_text + "\n",
         JSON_OUTPUT_SCHEMA, LINE_NUMBER_RULES, BODY_RULES,
         'Every issue MUST carry a "repo" field naming the repository it anchors to, and its "path" '
-        "must be a file present in that repository's diff below.\n",
+        "must be a file present in that repository's diff.\n",
     ]
     if goal:
         parts.append(f"--- TICKET GOAL ---\n{goal}\n--- END TICKET GOAL ---\n")
     if has_tools:
-        parts.append("You have read-only access to checkouts of the repositories; each PR section "
-                     "notes its worktree path. Use your tools with those absolute paths to verify "
-                     "issues when the diffs alone are ambiguous.\n")
+        parts.append(TICKET_TOOL_USE_RULES)
+        parts.append("Your working directory is the parent of every checkout, so address the "
+                     "checkouts and the diff files by the absolute paths given below and run git "
+                     "as `git -C <checkout> ...`.\n")
+    parts.append("No diff is pasted into this prompt. Read every diff file named below with your "
+                 "tools before you report anything, and page through all of each one.\n")
     parts.extend(sections)
-    parts.append("\nIMPORTANT: Your entire response must be the JSON object and nothing else. No summary, no explanation, no markdown fences.")
+    parts.append("\nIMPORTANT: Explore first, then answer. Your FINAL message must be the JSON "
+                 "object and nothing else. No summary, no explanation, no markdown fences.")
     return "\n".join(parts)
 
 
@@ -773,15 +891,16 @@ def _reviewed_sibling_sections(config: dict, platform, ticket_key: str,
         diff = platform.get_pr_diff(repo, pr_id) or ""
         if not diff:
             continue
-        if len(diff) > SIBLING_DIFF_CHAR_CAP:
-            diff = diff[:SIBLING_DIFF_CHAR_CAP] + "\n... [diff truncated]"
+        diff_path = _stage_diff(
+            _review_dir(config, {"repo": repo, "id": pr_id, "branch": entry.get("branch")}), diff)
         sections.append(
             f"=== ALREADY-REVIEWED PR #{pr_id} in repository '{repo}' (context only) ===\n"
             "This sibling PR of the same ticket was reviewed in an earlier batch. Do NOT "
             "raise issues against its files. Use it as context for the PRs under review: "
             "flag any inconsistency between them and this PR (mismatched API contracts, "
             "producer/consumer drift) as an issue on the PR under review.\n"
-            f"--- DIFF ({key}) ---\n{diff}\n--- DIFF END ---")
+            f"diff file ({key}): {diff_path}\n"
+            + "\n".join(_extract_changed_paths(diff)))
     return sections
 
 
@@ -803,17 +922,17 @@ def review_ticket(config: dict, ticket_key: str, prs: list[dict]) -> dict[str, d
         key = f"{pr['repo']}/{pr['id']}"
         wt = _ensure_review_worktree(config, pr)
         worktrees[key] = wt
-        d = diffs[key]
         conv = _load_conventions(config, pr["repo"])
-        fctx = _read_changed_files(diffs[key], wt) if wt else ""
+        diff_path = _stage_diff(_review_dir(config, pr), diffs[key])
         sec = [f"=== PR #{pr['id']} in repository '{pr['repo']}' (branch: {pr.get('branch', '')}) ==="]
         if wt:
             sec.append(f"worktree (read-only checkout): {wt}")
         if conv:
             sec.append(f"--- CONVENTIONS ({pr['repo']}) ---\n{conv}\n--- END CONVENTIONS ---")
-        if fctx:
-            sec.append(f"--- CHANGED FILES ({pr['repo']}) ---\n{fctx}\n--- END CHANGED FILES ---")
-        sec.append(f"--- DIFF ({key}) ---\n{d}\n--- DIFF END ---")
+        sec.append(f"diff file ({key}): {diff_path}")
+        sec.append(f"--- FILES CHANGED ({key}) ---\n"
+                   + "\n".join(_extract_changed_paths(diffs[key]))
+                   + f"\n--- END FILES CHANGED ({key}) ---")
         sections.append("\n".join(sec))
 
     has_tools = any(worktrees.values())
@@ -825,7 +944,7 @@ def review_ticket(config: dict, ticket_key: str, prs: list[dict]) -> dict[str, d
     prompts = {name: _build_ticket_persona_prompt(text, ticket_key, goal, sections, has_tools)
                for name, text in PERSONAS.items()}
     by_provider = _run_personas_for_providers(
-        prompts, providers, worktree=cwd if has_tools else None,
+        prompts, providers, worktree=cwd,
         model=_reviewer_model(config), run_key=ticket_key)
 
     results: dict[str, dict | None] = dict(none_result)

@@ -127,6 +127,7 @@ const PrCard = {
                     <template v-else>pending</template>
                 </span>
                 <span v-if="r.approved_by_me" class="badge badge-purple" title="you approved this PR on the platform">✓ you</span>
+                <span v-if="r.reviewers && r.reviewers.length" class="text-gray-400 text-xs" title="assigned reviewers">assigned: {{ r.reviewers.join(', ') }}</span>
                 <span v-if="r.created_on" class="text-gray-600 text-xs">created {{ $relTime(r.created_on) }}</span>
                 <span v-if="r.updated_on" class="text-gray-600 text-xs">updated {{ $relTime(r.updated_on) }}</span>
                 <span v-if="stale" class="badge badge-yellow text-xs">stale</span>

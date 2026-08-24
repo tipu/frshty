@@ -45,17 +45,34 @@ def main() -> int:
         if not row:
             return 0
         if kind == "PreToolUse":
-            if (data.get("tool_name") or "") != "AskUserQuestion":
+            tool = data.get("tool_name") or ""
+            if tool == "AskUserQuestion":
+                work_store = _bind_db()
+                if work_store.record_question(session_id, data.get("tool_input") or {}):
+                    print(json.dumps({
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": QUESTION_DENY_REASON,
+                        }
+                    }))
                 return 0
-            work_store = _bind_db()
-            if work_store.record_question(session_id, data.get("tool_input") or {}):
-                print(json.dumps({
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": QUESTION_DENY_REASON,
-                    }
-                }))
+            if tool == "Bash":
+                command = (data.get("tool_input") or {}).get("command") or ""
+                if "push" not in command:
+                    return 0
+                _bind_db()
+                from services import work_launch
+                gate = work_launch.gate_push(session_id, command, data.get("cwd") or "")
+                if gate["decision"] == "deny":
+                    print(json.dumps({
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": gate["reason"],
+                        }
+                    }))
+                return 0
             return 0
         transcript_path = data.get("transcript_path") or ""
         cursor = 0
@@ -70,7 +87,7 @@ def main() -> int:
         work_store = _bind_db()
         payload["last_assistant_message"] = work_store.last_assistant_text(transcript_path)[:300]
         work_store.record_event(session_id, kind, payload)
-        if kind == "Stop":
+        if work_store.is_idle_stop(kind, payload):
             work_store.record_artifacts(session_id, transcript_path)
             work_store.maybe_autocontinue(session_id, transcript_path)
     except Exception:

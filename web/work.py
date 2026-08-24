@@ -74,6 +74,14 @@ def api_work_reply(item_id: int, body: dict):
     return result
 
 
+@router.post("/api/work/items/{item_id}/btw")
+def api_work_btw(item_id: int, body: dict):
+    result = work_store.side_question(item_id, body.get("text") or "")
+    if "error" in result:
+        return JSONResponse(result, status_code=409)
+    return result
+
+
 @router.post("/api/work/items/{item_id}/followup")
 def api_work_followup(item_id: int, body: dict):
     result = work_launch.launch_followup(item_id, body.get("text") or "",

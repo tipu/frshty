@@ -38,8 +38,15 @@ class Dispatcher:
         t.start()
         self._thread = t
 
-    def stop(self) -> None:
+    def stop(self, join_timeout: float = 2.0) -> None:
+        """Signal the dispatcher thread to stop and wait up to join_timeout
+        seconds for it to finish the current drain, so no straggler write
+        lands in a database the caller tears down or swaps next (the test
+        suite swaps the module-global DB path between tests)."""
         self._stop.set()
+        t = self._thread
+        if t is not None and t is not threading.current_thread():
+            t.join(join_timeout)
 
     def _run(self) -> None:
         while not self._stop.is_set():

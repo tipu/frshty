@@ -4,11 +4,25 @@ import sys
 
 EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd", "Notification", "PreToolUse")
 DEFAULT_DIRS = ("~/.claude", "~/.quill-claude", "~/.aimyable-claude")
+PUSH_GATE_TIMEOUT = 2700
 
 
 def hook_command() -> str:
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "work_hook.py")
     return f"python3 {script}"
+
+
+def _wanted_entries(event: str, command: str) -> list[dict]:
+    if event == "PreToolUse":
+        return [
+            {"matcher": "AskUserQuestion",
+             "hooks": [{"type": "command", "command": command, "timeout": 10}]},
+            {"matcher": "Bash",
+             "hooks": [{"type": "command", "command": command,
+                        "timeout": PUSH_GATE_TIMEOUT}]},
+        ]
+    return [{"matcher": "",
+             "hooks": [{"type": "command", "command": command, "timeout": 5, "async": True}]}]
 
 
 def install_into(settings_path: str, events=EVENTS) -> list[str]:
@@ -22,25 +36,18 @@ def install_into(settings_path: str, events=EVENTS) -> list[str]:
     added = []
     for event in events:
         entries = hooks.setdefault(event, [])
-        commands = [
-            h.get("command")
-            for e in entries
-            for h in (e.get("hooks") or [])
-            if isinstance(h, dict)
-        ]
-        if command in commands:
-            continue
-        if event == "PreToolUse":
-            entries.append({
-                "matcher": "AskUserQuestion",
-                "hooks": [{"type": "command", "command": command, "timeout": 10}],
-            })
-        else:
-            entries.append({
-                "matcher": "",
-                "hooks": [{"type": "command", "command": command, "timeout": 5, "async": True}],
-            })
-        added.append(event)
+        for wanted in _wanted_entries(event, command):
+            present = any(
+                (e.get("matcher") or "") == wanted["matcher"]
+                and command in [h.get("command") for h in (e.get("hooks") or [])
+                                if isinstance(h, dict)]
+                for e in entries
+            )
+            if present:
+                continue
+            entries.append(wanted)
+            label = f"{event}[{wanted['matcher']}]" if wanted["matcher"] else event
+            added.append(label)
     if added:
         os.makedirs(os.path.dirname(settings_path), exist_ok=True)
         with open(settings_path, "w") as f:

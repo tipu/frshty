@@ -10,3 +10,8 @@ dependencies = [
     "mcp",
     "playwright",
 ]
+
+[tool.pytest.ini_options]
+markers = [
+    "slow: heavy end-to-end test that needs a multi-core machine; CI runs with -m 'not slow'",
+]

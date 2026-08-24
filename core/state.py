@@ -342,29 +342,30 @@ def save_ticket(key: str, data: dict) -> None:
     transition_reason = data.pop("_transition_reason", "")
     now = datetime.now(timezone.utc).isoformat()
     auto_pr = data.get("auto_pr")
-    prior_row = db.query_one(
-        "SELECT data, status FROM tickets WHERE instance_key=? AND ticket_key=?",
-        (instance, key),
-    )
-    prior_status = prior_row.get("status") if prior_row else None
-    prior_data = _row_to_ticket(dict(prior_row)) if prior_row else {}
-    db.execute(
-        "INSERT INTO tickets"
-        "(instance_key, ticket_key, status, slug, branch, url, external_status, auto_pr,"
-        " source, approval_status, obsolete_at, release_key, data, updated_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        " ON CONFLICT(instance_key, ticket_key) DO UPDATE SET"
-        "  status=excluded.status, slug=excluded.slug, branch=excluded.branch, url=excluded.url,"
-        "  external_status=excluded.external_status, auto_pr=excluded.auto_pr,"
-        "  source=excluded.source, approval_status=excluded.approval_status,"
-        "  obsolete_at=excluded.obsolete_at, release_key=excluded.release_key,"
-        "  data=excluded.data, updated_at=excluded.updated_at",
-        (instance, key, data.get("status", "new"), data.get("slug"), data.get("branch"),
-         data.get("url"), data.get("external_status"),
-         (1 if auto_pr else 0) if auto_pr is not None else None,
-         data.get("source", "jira"), data.get("approval_status"), data.get("obsolete_at"),
-         data.get("release_key"), json.dumps(data, default=str), now),
-    )
+    with db.tx() as c:
+        prior_row = c.execute(
+            "SELECT data, status FROM tickets WHERE instance_key=? AND ticket_key=?",
+            (instance, key),
+        ).fetchone()
+        prior_status = prior_row["status"] if prior_row else None
+        prior_data = _row_to_ticket(dict(prior_row)) if prior_row else {}
+        c.execute(
+            "INSERT INTO tickets"
+            "(instance_key, ticket_key, status, slug, branch, url, external_status, auto_pr,"
+            " source, approval_status, obsolete_at, release_key, data, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(instance_key, ticket_key) DO UPDATE SET"
+            "  status=excluded.status, slug=excluded.slug, branch=excluded.branch, url=excluded.url,"
+            "  external_status=excluded.external_status, auto_pr=excluded.auto_pr,"
+            "  source=excluded.source, approval_status=excluded.approval_status,"
+            "  obsolete_at=excluded.obsolete_at, release_key=excluded.release_key,"
+            "  data=excluded.data, updated_at=excluded.updated_at",
+            (instance, key, data.get("status", "new"), data.get("slug"), data.get("branch"),
+             data.get("url"), data.get("external_status"),
+             (1 if auto_pr else 0) if auto_pr is not None else None,
+             data.get("source", "jira"), data.get("approval_status"), data.get("obsolete_at"),
+             data.get("release_key"), json.dumps(data, default=str), now),
+        )
     _record_transition(
         instance, key, prior_status, data.get("status", "new"),
         prior_data, data, reason=transition_reason,
