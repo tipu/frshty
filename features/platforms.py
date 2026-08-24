@@ -676,6 +676,19 @@ class GitHubPlatform(_CIMonitorMixin):
             prs.extend(self._normalize_pr(pr, repo) for pr in json.loads(result.stdout))
         return prs
 
+    def list_open_prs(self) -> list[dict]:
+        prs = []
+        for repo in self.repos:
+            result = self._run_gh([
+                "pr", "list", "--repo", repo,
+                "--json", "number,title,author,headRefName,baseRefName,createdAt,updatedAt,url,state",
+                "--limit", "50",
+            ])
+            if result.returncode != 0:
+                continue
+            prs.extend(self._normalize_pr(pr, repo) for pr in json.loads(result.stdout))
+        return prs
+
     def find_merged_pr_by_key(self, key: str) -> dict | None:
         if not key:
             return None

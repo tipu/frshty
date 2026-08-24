@@ -264,7 +264,7 @@ That `docs/proof.md` is the postcondition gate for this step.
 
 _PROVE_BROWSER_BLOCK_HEADER = """
 
-BROWSER RECORDINGS: if any part of this proof drives a browser (Playwright, Puppeteer, or similar), install the click indicator below before navigating. It draws a brief red ring at each click so a viewer can see what is being clicked in the recording.
+BROWSER RECORDINGS: if any part of this proof drives a browser (Playwright, Puppeteer, or similar), install the click indicator below before navigating. It draws a brief red ring at each click, and the same ring on any input field that gains focus without a click (keyboard tabbing, programmatic focus such as fill()), so a viewer can see what is being interacted with in the recording.
 
 Playwright: `await context.addInitScript(SCRIPT)` on the BrowserContext before the first `goto`. It re-applies on every navigation, including SPA route changes. Register it on the context, not the page.
 Puppeteer: `await page.evaluateOnNewDocument(SCRIPT)`.
