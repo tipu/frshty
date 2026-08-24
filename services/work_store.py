@@ -36,6 +36,10 @@ CONTINUE_PROMPT = (
     f"is fully met, end your message with the single line {DONE_MARKER}."
 )
 
+_IDLE_STOP_KINDS_SQL = "'Stop', 'Notification', 'SessionEnd'"
+_DECIDED_KINDS_SQL = ("'auto_continued', 'question_detected', 'operator_reply', "
+                      "'self_reported_done', 'stuck_tool'")
+
 _EVENT_TRANSITIONS = {
     "SessionStart": ("running", "agent_working", None),
     "UserPromptSubmit": ("running", "agent_working", None),
@@ -122,7 +126,7 @@ def pending_background_tasks(transcript_path: str) -> set[str]:
     return started - ended
 
 
-def _is_idle_stop(kind: str, payload: dict) -> bool:
+def is_idle_stop(kind: str, payload: dict) -> bool:
     if kind == "Stop":
         return True
     return kind == "Notification" and "waiting for your input" in (payload.get("message") or "")
@@ -185,7 +189,7 @@ def record_event(session_id: str, kind: str, payload: dict) -> bool:
         return False
     run_status, item_state, default_reason = transition
     bg_pending = False
-    if item_state == "needs_you" and _is_idle_stop(kind, payload):
+    if item_state == "needs_you" and is_idle_stop(kind, payload):
         transcript_path = payload.get("transcript_path") or ""
         tail = last_assistant_text(transcript_path)
         final_lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
@@ -372,6 +376,134 @@ def tmux_send(tmux_key: str, text: str) -> bool:
         enter = subprocess.run([tmux, "-S", TMUX_SOCKET, "send-keys", "-t", session, "Enter"],
                               capture_output=True)
         return enter.returncode == 0
+
+
+BTW_ANSWER_TIMEOUT = 120
+_BTW_CLOSE_HINT = "Esc to close"
+_BTW_DONE_HINT = "c to copy"
+_BTW_SCROLL_LIMIT = 200
+_BTW_SCROLL_SETTLES = 3
+_BTW_SCROLL_SETTLE_SECONDS = 0.06
+
+
+def _tmux_run(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run([_tmux_bin(), "-S", TMUX_SOCKET, *args],
+                          capture_output=True, text=True)
+
+
+def _capture_pane(session: str) -> list[str]:
+    out = _tmux_run("capture-pane", "-t", session, "-p")
+    return out.stdout.splitlines() if out.returncode == 0 else []
+
+
+def btw_overlay(lines: list[str]) -> dict | None:
+    """The /btw panel drawn over the pane, or None when no panel is open.
+
+    The panel lists the questions asked so far, then the selected answer, then
+    a footer of key hints. The footer offers the copy hint only once the answer
+    is complete, so it doubles as the done signal."""
+    footer = None
+    for i in range(len(lines) - 1, -1, -1):
+        if _BTW_CLOSE_HINT in lines[i]:
+            footer = i
+            break
+    if footer is None:
+        return None
+    start, asked = footer, ""
+    for i in range(footer - 1, -1, -1):
+        stripped = lines[i].lstrip()
+        if stripped.startswith("/btw "):
+            start, asked = i + 1, stripped[len("/btw "):].strip()
+            break
+    body = [ln.rstrip() for ln in lines[start:footer]]
+    while body and not body[0]:
+        body.pop(0)
+    while body and not body[-1]:
+        body.pop()
+    return {"done": _BTW_DONE_HINT in lines[footer], "asked": asked, "body": body}
+
+
+def _merge_window(body: list[str], window: list[str]) -> bool:
+    """Append the part of a scrolled panel view that is not in body yet."""
+    if not window:
+        return False
+    for k in range(min(len(body), len(window)), 0, -1):
+        if body[-k:] == window[:k]:
+            rest = window[k:]
+            body.extend(rest)
+            return bool(rest)
+    body.extend(window)
+    return True
+
+
+def _btw_answer_text(body: list[str]) -> str:
+    rows = list(body)
+    while rows and not rows[0].strip():
+        rows.pop(0)
+    while rows and not rows[-1].strip():
+        rows.pop()
+    if not rows:
+        return ""
+    pad = min(len(r) - len(r.lstrip()) for r in rows if r.strip())
+    return "\n".join(r[pad:] if r.strip() else "" for r in rows)
+
+
+def ask_btw(tmux_key: str, question: str, timeout: float = BTW_ANSWER_TIMEOUT) -> dict:
+    """Ask a /btw side question in the pane and read the answer back.
+
+    /btw answers from a fork of the conversation, so the main turn keeps
+    running and the question never enters it. The exchange is not written to
+    the session transcript, so the answer is only readable from the pane
+    panel. The panel swallows keystrokes while it is open, so a stale panel is
+    closed first and ours is closed at the end. Answers taller than the pane
+    are stitched from successive views, one Down key at a time."""
+    session = f"term-{tmux_key}"
+    question = " ".join(question.split())
+    with _pane_lock(session):
+        if _tmux_run("has-session", "-t", session).returncode != 0:
+            return {"error": "tmux session gone"}
+        if btw_overlay(_capture_pane(session)):
+            _tmux_run("send-keys", "-t", session, "Escape")
+            time.sleep(0.4)
+            if btw_overlay(_capture_pane(session)):
+                return {"error": "a /btw panel is stuck open in the terminal"}
+        if _tmux_run("send-keys", "-t", session, "-l", "--",
+                     f"/btw {question}").returncode != 0:
+            return {"error": "tmux send failed"}
+        time.sleep(0.4)
+        if _tmux_run("send-keys", "-t", session, "Enter").returncode != 0:
+            return {"error": "tmux send failed"}
+        panel = None
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            time.sleep(0.5)
+            found = btw_overlay(_capture_pane(session))
+            if found and found["done"]:
+                panel = found
+                break
+        if panel is None:
+            return {"error": f"no /btw answer within {int(timeout)}s"}
+        head = panel["asked"].rstrip("\u2026").rstrip()
+        if not head or not question.startswith(head):
+            return {"error": "the terminal shows an answer to a different /btw question"}
+        body = panel["body"]
+        for _ in range(_BTW_SCROLL_LIMIT):
+            _tmux_run("send-keys", "-t", session, "Down")
+            grew = False
+            for _ in range(_BTW_SCROLL_SETTLES):
+                time.sleep(_BTW_SCROLL_SETTLE_SECONDS)
+                scrolled = btw_overlay(_capture_pane(session))
+                if not scrolled:
+                    break
+                if _merge_window(body, scrolled["body"]):
+                    grew = True
+                    break
+            if not grew:
+                break
+        if btw_overlay(_capture_pane(session)):
+            _tmux_run("send-keys", "-t", session, "Escape")
+    answer = _btw_answer_text(body)
+    return {"answer": answer} if answer else {"error": "empty /btw answer"}
 
 
 def last_assistant_text(transcript_path: str) -> str:
@@ -683,6 +815,35 @@ def reply(item_id: int, text: str) -> dict:
     return {"id": item_id, "action": "reply"}
 
 
+def side_question(item_id: int, text: str) -> dict:
+    """Ask the item's live Claude a side question without touching its run."""
+    question = " ".join((text or "").split())
+    if not question:
+        return {"error": "empty question"}
+    item = db.query_one("SELECT id FROM work_items WHERE id = ?", (item_id,))
+    if not item:
+        return {"error": "unknown work item"}
+    run = db.query_one(
+        "SELECT id, tmux_key FROM work_runs WHERE work_item_id = ? ORDER BY id DESC LIMIT 1",
+        (item_id,))
+    if not run:
+        return {"error": "no run for this item"}
+    if not claude_running(run["tmux_key"]):
+        return {"error": "no live Claude in the session; open the terminal"}
+    out = ask_btw(run["tmux_key"], question)
+    if "error" in out:
+        return out
+    now = _now()
+    with db.tx() as c:
+        c.execute(
+            "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+            "VALUES (?, ?, 'btw', ?, ?)",
+            (item_id, run["id"],
+             db.dump_json({"question": question, "answer": out["answer"][:8000]}), now),
+        )
+    return {"id": item_id, "question": question, "answer": out["answer"]}
+
+
 def pending_tool_calls(transcript_path: str) -> bool:
     """True when the transcript tail ends inside an unanswered tool call.
 
@@ -719,6 +880,38 @@ def pending_tool_calls(transcript_path: str) -> bool:
     return bool(pending)
 
 
+def retry_missed_autocontinues(cutoff: str) -> list[dict]:
+    """Run the autocontinue decision for a needs_you item that never got one.
+
+    The idle-stop hook is what decides whether to auto-continue. When that
+    hook is dropped, the item flips to needs_you with no decision recorded,
+    so it holds an unused continue budget and nothing moves it. This finds
+    those items and runs the decision late. An item whose decision already
+    ran carries an event newer than its last idle stop, so it is skipped.
+    """
+    rows = db.query_all(
+        "SELECT i.id AS item_id, r.session_id, r.tmux_key, r.transcript_path "
+        "FROM work_items i JOIN work_runs r ON r.id = "
+        "(SELECT r2.id FROM work_runs r2 WHERE r2.work_item_id = i.id ORDER BY r2.id DESC LIMIT 1) "
+        "WHERE i.state = 'needs_you' AND i.autocontinue = 1 "
+        "AND i.continues_used < i.continue_cap "
+        "AND COALESCE(i.pending_question, '') = '' "
+        "AND i.updated_at < ? "
+        "AND (SELECT COALESCE(MAX(e.id), 0) FROM work_events e WHERE e.work_item_id = i.id "
+        f"AND e.kind IN ({_IDLE_STOP_KINDS_SQL})) > "
+        "(SELECT COALESCE(MAX(e.id), 0) FROM work_events e WHERE e.work_item_id = i.id "
+        f"AND e.kind IN ({_DECIDED_KINDS_SQL}))",
+        (cutoff,),
+    )
+    actions: list[dict] = []
+    for row in rows:
+        if not claude_running(row["tmux_key"]):
+            continue
+        outcome = maybe_autocontinue(row["session_id"], row["transcript_path"])
+        actions.append({"id": row["item_id"], "action": f"autocontinue_retry:{outcome}"})
+    return actions
+
+
 def sweep_stale_items(now: datetime | None = None) -> list[dict]:
     """Reconcile agent_working items whose hook events have gone quiet.
 
@@ -729,7 +922,9 @@ def sweep_stale_items(now: datetime | None = None) -> list[dict]:
     session blocked in a tool call until STUCK_AFTER_MINUTES and then hands
     it to the operator, synthesizes the missed Stop for a live-but-idle
     session so the question/done/autocontinue path runs, and marks the item
-    failed_stale when the Claude process is gone.
+    failed_stale when the Claude process is gone. A second pass runs the
+    autocontinue decision for a needs_you item whose idle-stop hook was
+    dropped before it made one.
     """
     now_dt = now or datetime.now(timezone.utc)
     cutoff = (now_dt - timedelta(minutes=STALE_AFTER_MINUTES)).isoformat()
@@ -817,6 +1012,7 @@ def sweep_stale_items(now: datetime | None = None) -> list[dict]:
         record_artifacts(row["session_id"], row["transcript_path"])
         outcome = maybe_autocontinue(row["session_id"], row["transcript_path"])
         actions.append({"id": row["item_id"], "action": f"stop_synthesized:{outcome}"})
+    actions.extend(retry_missed_autocontinues(cutoff))
     return actions
 
 
