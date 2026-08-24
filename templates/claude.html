@@ -20,6 +20,7 @@
 .model-tag { background: #1f2937; color: #c4b5fd; }
 pre.body { white-space: pre-wrap; word-break: break-word; }
 </style>
+<script src="/static/frshty-usage.js"></script>
 </head>
 <body>
 
@@ -49,7 +50,9 @@ pre.body { white-space: pre-wrap; word-break: break-word; }
         <option value="">all functions</option>
         <option value="run_haiku">run_haiku</option>
         <option value="run_sonnet">run_sonnet</option>
+        <option value="run_balanced">run_balanced</option>
         <option value="run_claude_code">run_claude_code</option>
+        <option value="work_debrief">work_debrief</option>
     </select>
     <input type="text" v-model.lazy="filters.q" @change="load" placeholder="search prompt/output/job"
            class="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-300 flex-1 min-w-[200px]" />

@@ -250,24 +250,30 @@ def test_ten_concurrent_prd_tickets_serialize_and_complete(tmp_path):
     def fake_extract_json(raw: str):
         return json.loads(raw)
 
+    def fake_consensus_plan(config, ticket_dir: Path, slug: str, *,
+                            ticket_key: str = ""):
+        """start_planning delegates planning to core.consensus_plan, which fans
+        out to claude/codex/agy. Stub the subsystem at its boundary: this test
+        covers pipeline serialization, not consensus internals."""
+        ticket_dir = Path(ticket_dir)
+        docs = ticket_dir / "docs"
+        docs.mkdir(parents=True, exist_ok=True)
+        (docs / "technical-plan.md").write_text("# Plan\n\nTest Plan: ok\n")
+        (docs / "change-manifest.md").write_text("# Change Manifest\n")
+        repo = ticket_dir / REPO_NAME
+        counter["i"] += 1
+        existing = (repo / "app.txt").read_text()
+        (repo / "app.txt").write_text(
+            existing + f"line_added_by_ticket_{counter['i']}\n"
+        )
+        _git(repo, "add", "app.txt")
+        _git(repo, "commit", "--no-verify", "-m", f"feat: ticket {counter['i']}")
+        return True, "planned"
+
     def fake_run_claude_code(prompt: str, cwd: Path, timeout: int = 0,
                               session_id: str | None = None,
                               resume: bool = False):
         cwd = Path(cwd)
-        if "/ctp docs/" in prompt:
-            docs = cwd / "docs"
-            docs.mkdir(parents=True, exist_ok=True)
-            (docs / "technical-plan.md").write_text("# Plan\n\nTest Plan: ok\n")
-            (docs / "change-manifest.md").write_text("# Change Manifest\n")
-            repo = cwd / REPO_NAME
-            counter["i"] += 1
-            existing = (repo / "app.txt").read_text()
-            (repo / "app.txt").write_text(
-                existing + f"line_added_by_ticket_{counter['i']}\n"
-            )
-            _git(repo, "add", "app.txt")
-            _git(repo, "commit", "--no-verify", "-m", f"feat: ticket {counter['i']}")
-            return "planned"
         if "Run /tri-review" in prompt:
             (cwd / "docs" / "tri-review.md").write_text(
                 "# Tri Review\n\nAll good.\n\nVERDICT: PASS\n"
@@ -327,7 +333,8 @@ def test_ten_concurrent_prd_tickets_serialize_and_complete(tmp_path):
          patch("features.pr_ci.extract_json", side_effect=fake_extract_json), \
          patch("features.pr_ci.run_claude_code", side_effect=fake_run_claude_code), \
          patch("core.tasks.tickets.run_claude_code", side_effect=fake_run_claude_code), \
-         patch("features.tickets.run_claude_code", side_effect=fake_run_claude_code):
+         patch("features.tickets.run_claude_code", side_effect=fake_run_claude_code), \
+         patch("core.tasks.tickets.run_consensus_plan", side_effect=fake_consensus_plan):
         pool.start()
         try:
             # 10 tickets serialized through the per-repo gate at ~6s/ticket

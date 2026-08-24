@@ -1,3 +1,4 @@
+import functools
 import json
 import tempfile
 from pathlib import Path
@@ -5,8 +6,20 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from core.discovery import discover_instances, find_instance, call_instance, fan_out
+from services import usage
 
 server = FastMCP("frshty", instructions="Supervisor for multiple frshty instances. Query health, tickets, reviews, and events across all running instances. Fix stuck tickets, reconcile state drift, and trigger actions.")
+
+
+def tool(description: str):
+    def wrap(fn):
+        @functools.wraps(fn)
+        async def traced(*args, **kwargs):
+            usage.ensure_db()
+            usage.record("mcp", fn.__name__)
+            return await fn(*args, **kwargs)
+        return server.tool(description=description)(traced)
+    return wrap
 
 
 def _resolve(instance: str | None) -> tuple[list[dict], dict | None]:
@@ -17,7 +30,7 @@ def _resolve(instance: str | None) -> tuple[list[dict], dict | None]:
     return instances, None
 
 
-@server.tool(description="List all frshty instances with their health status, unread counts, and enabled features.")
+@tool(description="List all frshty instances with their health status, unread counts, and enabled features.")
 async def list_instances() -> str:
     instances = discover_instances()
     statuses = await fan_out(instances, "GET", "/api/status")
@@ -35,7 +48,7 @@ async def list_instances() -> str:
     return json.dumps(result, indent=2)
 
 
-@server.tool(description="Get active tickets. Pass instance name to query one, or omit for all instances.")
+@tool(description="Get active tickets. Pass instance name to query one, or omit for all instances.")
 async def get_tickets(instance: str | None = None) -> str:
     instances, found = _resolve(instance)
     if instance and not found:
@@ -45,7 +58,7 @@ async def get_tickets(instance: str | None = None) -> str:
     return json.dumps(results, indent=2)
 
 
-@server.tool(description="Get full ticket detail including docs, terminal health, and history.")
+@tool(description="Get full ticket detail including docs, terminal health, and history.")
 async def get_ticket_detail(instance: str, ticket_key: str) -> str:
     _, found = _resolve(instance)
     if not found:
@@ -54,7 +67,7 @@ async def get_ticket_detail(instance: str, ticket_key: str) -> str:
     return json.dumps(result, indent=2)
 
 
-@server.tool(description="Get recent events. Pass unread=true for only unread. Omit instance for all.")
+@tool(description="Get recent events. Pass unread=true for only unread. Omit instance for all.")
 async def get_events(instance: str | None = None, unread: bool = True) -> str:
     instances, found = _resolve(instance)
     if instance and not found:
@@ -65,7 +78,7 @@ async def get_events(instance: str | None = None, unread: bool = True) -> str:
     return json.dumps(results, indent=2)
 
 
-@server.tool(description="Get open PR reviews. Omit instance for all.")
+@tool(description="Get open PR reviews. Omit instance for all.")
 async def get_reviews(instance: str | None = None) -> str:
     instances, found = _resolve(instance)
     if instance and not found:
@@ -75,7 +88,7 @@ async def get_reviews(instance: str | None = None) -> str:
     return json.dumps(results, indent=2)
 
 
-@server.tool(description="Get scheduled PR creations and CI-pending tickets. Omit instance for all.")
+@tool(description="Get scheduled PR creations and CI-pending tickets. Omit instance for all.")
 async def get_scheduled(instance: str | None = None) -> str:
     instances, found = _resolve(instance)
     if instance and not found:
@@ -85,7 +98,7 @@ async def get_scheduled(instance: str | None = None) -> str:
     return json.dumps(results, indent=2)
 
 
-@server.tool(description="Restart a stuck ticket's Claude Code terminal session.")
+@tool(description="Restart a stuck ticket's Claude Code terminal session.")
 async def restart_ticket(instance: str, ticket_key: str) -> str:
     _, found = _resolve(instance)
     if not found:
@@ -94,7 +107,7 @@ async def restart_ticket(instance: str, ticket_key: str) -> str:
     return json.dumps(result, indent=2)
 
 
-@server.tool(description="Manually change a ticket's status (e.g. to pr_ready, done, etc).")
+@tool(description="Manually change a ticket's status (e.g. to pr_ready, done, etc).")
 async def change_ticket_status(instance: str, ticket_key: str, status: str) -> str:
     _, found = _resolve(instance)
     if not found:
@@ -103,7 +116,7 @@ async def change_ticket_status(instance: str, ticket_key: str, status: str) -> s
     return json.dumps(result, indent=2)
 
 
-@server.tool(description="Trigger an immediate poll cycle on an instance. Omit instance for all.")
+@tool(description="Trigger an immediate poll cycle on an instance. Omit instance for all.")
 async def trigger_cycle(instance: str | None = None) -> str:
     instances, found = _resolve(instance)
     if instance and not found:
@@ -113,7 +126,7 @@ async def trigger_cycle(instance: str | None = None) -> str:
     return json.dumps(results, indent=2)
 
 
-@server.tool(description="Find artifacts produced by work-layer runs: reports, pages, videos, files the operator asked for. Searches path, note, and the owning objective. Use when the operator asks where something they made is.")
+@tool(description="Find artifacts produced by work-layer runs: reports, pages, videos, files the operator asked for. Searches path, note, and the owning objective. Use when the operator asks where something they made is.")
 async def find_artifact(query: str = "") -> str:
     instances, _ = _resolve(None)
     if not instances:
@@ -123,7 +136,7 @@ async def find_artifact(query: str = "") -> str:
     return json.dumps(result, indent=2)
 
 
-@server.tool(description="Get raw ticket data from the actual ticket system (Jira/Linear), not frshty's internal state. Useful for comparing what the ticket system says vs what frshty thinks.")
+@tool(description="Get raw ticket data from the actual ticket system (Jira/Linear), not frshty's internal state. Useful for comparing what the ticket system says vs what frshty thinks.")
 async def get_raw_tickets(instance: str | None = None) -> str:
     instances, found = _resolve(instance)
     if instance and not found:
@@ -133,7 +146,7 @@ async def get_raw_tickets(instance: str | None = None) -> str:
     return json.dumps(results, indent=2)
 
 
-@server.tool(description="Get raw PR data from the actual platform (GitHub/Bitbucket), not frshty's internal state. Returns open PRs authored by the configured user.")
+@tool(description="Get raw PR data from the actual platform (GitHub/Bitbucket), not frshty's internal state. Returns open PRs authored by the configured user.")
 async def get_raw_prs(instance: str | None = None) -> str:
     instances, found = _resolve(instance)
     if instance and not found:
@@ -143,7 +156,7 @@ async def get_raw_prs(instance: str | None = None) -> str:
     return json.dumps(results, indent=2)
 
 
-@server.tool(description="Compare frshty ticket state vs actual ticket system and PR state. Detects drift like tickets that exist in Jira/Linear but not in frshty, or PRs that are merged but frshty still shows in_review.")
+@tool(description="Compare frshty ticket state vs actual ticket system and PR state. Detects drift like tickets that exist in Jira/Linear but not in frshty, or PRs that are merged but frshty still shows in_review.")
 async def reconcile(instance: str | None = None) -> str:
     instances, found = _resolve(instance)
     if instance and not found:
@@ -201,7 +214,7 @@ async def reconcile(instance: str | None = None) -> str:
     return json.dumps(discrepancies, indent=2)
 
 
-@server.tool(description="Take a screenshot of a frshty instance's web UI using Playwright. Returns the screenshot file path. Resolution is 1920x1080.")
+@tool(description="Take a screenshot of a frshty instance's web UI using Playwright. Returns the screenshot file path. Resolution is 1920x1080.")
 async def check_ui(instance: str, page: str = "/") -> str:
     _, found = _resolve(instance)
     if not found:

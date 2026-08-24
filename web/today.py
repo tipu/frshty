@@ -249,7 +249,8 @@ def _ensure_work_item(instance_key: str, m: dict, key: str, cwd: str):
         scope = "ticket" if m.get("ticket_key") else "pr"
         scope_ref = m.get("ticket_key") or f"{m.get('repo')}/{m.get('pr_id')}"
         item_id = work_store.create_item(m.get("title") or scope_ref, scope=scope,
-                                         scope_ref=scope_ref, instance_key=instance_key)
+                                         scope_ref=scope_ref, instance_key=instance_key,
+                                         tags=instance_key)
         work_store.add_run(item_id, m["sid"], key, cwd)
     except Exception as e:
         log.emit("work_item_link_failed", f"[{instance_key}] {key}: {type(e).__name__}: {e}")

@@ -2,6 +2,8 @@
 import json
 import re
 import os
+import shutil
+import stat
 import subprocess
 import uuid
 from datetime import datetime, timezone
@@ -15,6 +17,9 @@ from core.claude_runner import run_claude_code, run_haiku, extract_json
 from core.config import base_branch_for, get_repos, ticket_worktree_path
 from core.deps import relink_shared_venv
 from core.consensus_plan import run_consensus_plan
+from core.consensus_scope import (
+    SCOPE_FANOUT_TIMEOUT, run_scope_review, scope_fingerprint,
+)
 from core.tasks.registry import TaskContext, TaskResult, task
 import features.defence as defence
 from core.tasks.preconditions import (
@@ -505,6 +510,10 @@ _REPAIR_FORBIDDEN_NAMES = (
     "Pipfile", "Pipfile.lock", "package.json", "package-lock.json",
     "pnpm-lock.yaml", "poetry.lock", "uv.lock", "requirements.txt",
     "tsconfig.json", "pyrightconfig.json", ".ruff.toml", "mypy.ini",
+    # Any .gitignore, not only the one at the root. Adding a path to a nested
+    # one hides a created file from the status check that would reject it.
+    ".gitignore", ".eslintrc.json", ".eslintrc.js", "eslint.config.js",
+    ".prettierrc", ".isort.cfg", "tox.ini",
 )
 _SUPPRESSION_MARKERS = (
     "# type: ignore", "# noqa", "# pyright: ignore", "# ruff: noqa",
@@ -550,6 +559,17 @@ _REPAIRABLE_DIAGNOSTICS = (
     # basedpyright's wording for the same thing. Omitting it excluded the exact
     # diagnostic that motivated this work: the SimpleNamespace stub on DEV-635.
     re.compile(r"cannot be assigned to (parameter|type|declared type)", re.I),
+    # black in modifying mode names each file it rewrote, then counts them.
+    re.compile(r"^reformatted ", re.I | re.M),
+    re.compile(r"\d+ files? reformatted", re.I),
+    # mypy prints its error code in brackets. Only codes whose fix is an edit to
+    # existing code are listed; the name/attribute/import family is on the never
+    # list below, because "define the missing name" is the cheap exit.
+    re.compile(r"\[(arg-type|assignment|return-value|call-arg|call-overload"
+               r"|index|operator|list-item|dict-item|type-arg|type-var|override"
+               r"|var-annotated|no-untyped-def|no-any-return|redundant-cast"
+               r"|truthy-bool|comparison-overlap|unused-ignore"
+               r"|func-returns-value)\]"),
 )
 _NEVER_REPAIRABLE = (
     re.compile(r"unknown import symbol", re.I),
@@ -558,12 +578,22 @@ _NEVER_REPAIRABLE = (
     re.compile(r"modulenotfounderror|no module named", re.I),
     re.compile(r"could not be resolved", re.I),
     re.compile(r"cannot find implementation or library stub", re.I),
+    # A missing name is the cheat door, not a lint fix: the only edit that
+    # satisfies it is inventing the name, which is how `FileExplorerAction:
+    # TypeAlias = Any` turned a missing dependency green. F821/F822 are ruff's
+    # codes for it, so the blanket ruff-code allowance above must not admit them.
+    re.compile(r"\bF82[123]\b"),
+    re.compile(r"\[(name-defined|attr-defined|import|import-not-found"
+               r"|import-untyped|used-before-def|no-redef|has-type)\]"),
+    re.compile(r"undefined name", re.I),
+    re.compile(r"is not defined", re.I),
+    re.compile(r"\bTS2304\b|cannot find name", re.I),
 )
 
 
 def _is_repairable(output: str) -> bool:
     """Whether this diagnostic is one we are willing to let an agent edit for."""
-    text = (output or "").strip()
+    text = git_util.strip_ansi(output or "").strip()
     if not text:
         return False
     if any(p.search(text) for p in _NEVER_REPAIRABLE):
@@ -580,55 +610,402 @@ def _snapshot_repo(repo_dir: Path) -> tuple[str, set[str]]:
     repair untouched.
     """
     tree = git_util.run_git(repo_dir, ["write-tree"], timeout=60).stdout.strip()
-    listed = git_util.run_git(repo_dir, ["ls-files", "--others", "--exclude-standard"],
-                              timeout=60).stdout.splitlines()
-    return tree, {p.strip() for p in listed if p.strip()}
+    return tree, _untracked(repo_dir)
+
+
+def _untracked(repo_dir: Path) -> set[str]:
+    """Untracked paths, NUL-separated so they compare with themselves.
+
+    The line form quotes a name containing a space, a tab or a non-ASCII
+    character, so recording it one way and reading it back the other made an
+    untracked file that was already there look like one the repair created.
+    """
+    listed = git_util.run_git(repo_dir, ["ls-files", "--others", "--exclude-standard", "-z"],
+                              timeout=60).stdout
+    return {p for p in listed.split("\0") if p}
 
 
 def _restore_repo(repo_dir: Path, snapshot: tuple[str, set[str]]) -> None:
     tree, untracked_before = snapshot
     git_util.run_git(repo_dir, ["read-tree", tree], timeout=60)
     git_util.run_git(repo_dir, ["checkout-index", "-a", "-f"], timeout=120)
-    now = git_util.run_git(repo_dir, ["ls-files", "--others", "--exclude-standard"],
-                           timeout=60).stdout.splitlines()
-    for rel in (p.strip() for p in now if p.strip()):
+    for rel in _untracked(repo_dir):
         if rel not in untracked_before:
             (repo_dir / rel).unlink(missing_ok=True)
 
 
-def _repair_touched_only_code(repo_dir: Path) -> tuple[bool, str]:
+def _porcelain_entries(raw: str) -> list[tuple[str, list[str]]]:
+    """Parse `git status --porcelain -z` into (code, paths) pairs.
+
+    A rename emits two NUL-separated fields, destination first. Reading only the
+    destination of `git mv .pre-commit-config.yaml pre-commit.disabled` inspects
+    the harmless half and lets the hook config leave the repo. `-z` is used so
+    the split is unambiguous: the line form quotes paths containing spaces.
+    """
+    fields = raw.split("\0")
+    entries: list[tuple[str, list[str]]] = []
+    i = 0
+    while i < len(fields):
+        rec = fields[i]
+        i += 1
+        if not rec:
+            continue
+        code, paths = rec[:2], [rec[3:]]
+        if "R" in code or "C" in code:
+            if i < len(fields) and fields[i]:
+                paths.append(fields[i])
+            i += 1
+        entries.append((code, [p for p in paths if p]))
+    return entries
+
+
+_SYMLINK = b"\0symlink\0"
+_IRREGULAR = b"\0irregular\0"
+_OVERSIZE = b"\0oversize\0"
+# Hook runners and hook scripts are small. Anything past this is not one, and
+# reading it whole to compare it would be the only cost of finding that out.
+_MAX_WATCHED_BYTES = 4 * 1024 * 1024
+# Every hook git can abort a commit with. Watching only pre-commit leaves
+# commit-msg free to be replaced with one that exits 0.
+_WATCHED_HOOKS = ("pre-commit", "prepare-commit-msg", "commit-msg")
+
+HookState = tuple[bytes | None, int | None]
+
+
+def _state_of(path: Path) -> HookState:
+    """What the file is and how it is permitted, not only what it says.
+
+    Git skips a hook that is not executable, so `chmod -x` disables it without
+    changing a byte, and a symlink to identical content reads the same as the
+    original. The mode and the link target are therefore part of the state.
+    """
+    try:
+        st = path.lstat()
+    except OSError:
+        return None, None
+    if stat.S_ISLNK(st.st_mode):
+        try:
+            # The target's contents too. `~/.local/bin/pre-commit` is usually a
+            # link into a toolchain, and recording only where it points leaves
+            # rewriting what it points at invisible.
+            target = os.readlink(path).encode()
+            landed, _ = _state_of(path.resolve(strict=True))
+            return _SYMLINK + target + b"\0" + (landed or b""), st.st_mode
+        except (OSError, RuntimeError):
+            return _IRREGULAR, st.st_mode
+    if not stat.S_ISREG(st.st_mode):
+        return _IRREGULAR, st.st_mode
+    if st.st_size > _MAX_WATCHED_BYTES:
+        return _OVERSIZE + f"{st.st_size}:{st.st_mtime_ns}".encode(), st.st_mode
+    try:
+        return path.read_bytes(), st.st_mode
+    except OSError:
+        return _IRREGULAR, st.st_mode
+
+
+def _clear_path(path: Path) -> None:
+    """Remove whatever is at `path` without following it.
+
+    Writing to a watched path that the repair turned into a symlink would follow
+    the link and overwrite a file outside the repository. Unlinking removes the
+    link itself, so the restore stays inside the checkout.
+    """
+    if path.is_symlink():
+        path.unlink()
+    elif path.is_dir():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _hook_paths(repo_dir: Path) -> list[Path]:
+    """Every file that decides whether the hook runs, resolved for this checkout.
+
+    A ticket repo is a linked worktree, so `<repo>/.git` is a file and
+    `<repo>/.git/info/exclude` cannot exist. Git honours `info/exclude` from the
+    common directory, not the per-worktree one, and looks for hooks in
+    `core.hooksPath` before the common `hooks/`. Watching the literal
+    `<repo>/.git/...` paths therefore watched nothing in production.
+
+    Every config file git actually read is watched, not the common one alone.
+    `core.hooksPath` and `core.excludesFile` can be set in the global or the
+    per-worktree file just as easily, and `git config --show-origin` names them
+    all, so asking git which files it read beats listing the ones we expect.
+
+    Raises rather than guessing when git cannot answer. A fallback here would
+    turn "we do not know where the hooks are" into a fingerprint of files that
+    do not exist, which compares equal to itself and passes.
+    """
+    common = Path(git_util.run_git(
+        repo_dir, ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        timeout=30).stdout.strip())
+    configured = git_util.run_git(repo_dir, ["config", "--get", "core.hooksPath"],
+                                  allowed_codes=(0, 1), timeout=30).stdout.strip()
+    hooks = Path(os.path.expanduser(configured)) if configured else common / "hooks"
+    if not hooks.is_absolute():
+        hooks = repo_dir / hooks
+    watched = [
+        repo_dir / ".pre-commit-config.yaml",
+        common / "info" / "exclude",
+        common / "config",
+    ]
+    watched.extend(hooks / name for name in _WATCHED_HOOKS)
+    watched.extend(git_util.pre_commit_candidates(repo_dir))
+    watched.extend(_config_origins(repo_dir))
+    watched.extend(_local_hook_entries(repo_dir))
+    seen, unique = set(), []
+    for p in watched:
+        if p not in seen:
+            seen.add(p)
+            unique.append(p)
+    return unique
+
+
+def _config_origins(repo_dir: Path) -> list[Path]:
+    """Every config file git read to answer, including global and worktree ones."""
+    listed = git_util.run_git(repo_dir, ["config", "--list", "--show-origin",
+                                         "--name-only", "-z"],
+                              allowed_codes=(0, 1), timeout=30).stdout
+    return [Path(f[len("file:"):]) for f in listed.split("\0")
+            if f.startswith("file:") and f[len("file:"):]]
+
+
+_ENTRY_LINE = re.compile(r"^\s*entry:\s*(.+?)\s*$", re.M)
+
+
+def _local_hook_entries(repo_dir: Path) -> list[Path]:
+    """Scripts inside the repo that a `repo: local` hook runs.
+
+    Such a script is the hook. Editing it to exit zero is an ordinary file
+    modification, which the worktree check accepts, so it has to be watched
+    like the runner is. Only entries that resolve to a file in this repository
+    are returned; an entry naming an installed command resolves to nothing.
+    """
+    try:
+        body = (repo_dir / ".pre-commit-config.yaml").read_text()
+    except (OSError, UnicodeDecodeError):
+        return []
+    found = []
+    for raw in _ENTRY_LINE.findall(body):
+        tokens = raw.strip("'\"").split()
+        for i, token in enumerate(tokens):
+            # The command, plus any later argument that names a path. `entry:
+            # bash scripts/lint.sh` runs the script, not bash. A bare later word
+            # is not enough: `run` in `pipenv --quiet run basedpyright` would
+            # otherwise watch any repo containing a file called run.
+            if i and "/" not in token:
+                continue
+            if (repo_dir / token).is_file():
+                found.append(repo_dir / token)
+    return found
+
+
+def _hook_integrity(repo_dir: Path) -> dict[Path, HookState]:
+    """Snapshot those files, so a rejected repair can be undone exactly.
+
+    `git status` cannot answer this. A file the repair adds to `info/exclude`
+    never appears as untracked, and nothing under the git directory is tracked at
+    all, so a swapped `.venv/bin/pre-commit` is invisible to the worktree check
+    below. Asking whether these are unchanged is answerable; asking whether the
+    diff looks honest is not. Contents are kept rather than hashes because
+    `_restore_repo` skips ignored files, so a planted runner would otherwise
+    survive the rejection and make the next attempt pass.
+
+    Keyed by path so the comparison and the restore both use the paths resolved
+    before the repair ran. Re-resolving afterwards would follow a `core.hooksPath`
+    the repair had just changed, and write the old hook to the new location while
+    leaving the one git now runs untouched.
+    """
+    return {p: _state_of(p) for p in _hook_paths(repo_dir)}
+
+
+def _restorable_roots(repo_dir: Path) -> tuple[Path, ...]:
+    """Where this may write. The watched set is wider than the writable one.
+
+    `git config --show-origin` names `~/.gitconfig` and `/etc/gitconfig`, and a
+    change to either has to block the ticket. Writing them back would have
+    frshty rewriting the operator's own configuration from a recording it took
+    minutes earlier, which is worse than the contamination it is undoing.
+    """
+    common = Path(git_util.run_git(
+        repo_dir, ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        timeout=30).stdout.strip())
+    return (repo_dir.resolve(), common.resolve())
+
+
+def _restore_hook_setup(before: dict[Path, HookState],
+                        roots: tuple[Path, ...]) -> list[str]:
+    """Put the hook files back. Returns the paths that could not be restored.
+
+    Every path is cleared before it is written, so a watched file the repair
+    turned into a symlink or a directory is replaced rather than written
+    through, which would follow the link out of the checkout. Paths outside
+    `roots` are reported rather than rewritten.
+    """
+    failed = []
+    for path, was in before.items():
+        if _state_of(path) == was:
+            continue
+        content, mode = was
+        try:
+            # Where the write lands, which is not where a symlink at `path`
+            # points: the link is cleared first, so the new file goes here.
+            lands = path.parent.resolve() / path.name
+            if not any(lands.is_relative_to(root) for root in roots):
+                raise OSError(f"{path} is outside this checkout")
+            if content is not None and content.startswith((_IRREGULAR, _OVERSIZE)):
+                raise OSError(f"{path} was not a file we can reproduce")
+            _clear_path(path)
+            if content is not None:
+                if path.parent.is_symlink():
+                    raise OSError(f"{path.parent} is a symlink")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if content.startswith(_SYMLINK):
+                    path.symlink_to(content[len(_SYMLINK):].decode())
+                else:
+                    path.write_bytes(content)
+                    if mode is not None:
+                        os.chmod(path, stat.S_IMODE(mode))
+        except OSError:
+            failed.append(str(path))
+    return failed
+
+
+# A repair edits existing files. Anything else — added, deleted, renamed, copied,
+# untracked, or a type change to a symlink — is a way to satisfy the hook without
+# fixing the code, so the status code is allowlisted rather than blacklisted.
+_MODIFY_ONLY = set("M ")
+
+
+def _raw_diff_entries(raw: str) -> list[tuple[str, str, str, list[str]]]:
+    """Parse `git diff --raw -z` into (src_mode, dst_mode, status, paths).
+
+    Each record is `:<srcmode> <dstmode> <srcsha> <dstsha> <status>` followed by
+    one NUL-separated path, or two for a rename or a copy.
+    """
+    fields = raw.split("\0")
+    entries, i = [], 0
+    while i < len(fields):
+        head = fields[i]
+        i += 1
+        if not head.startswith(":"):
+            continue
+        parts = head[1:].split()
+        if len(parts) < 5:
+            continue
+        src_mode, dst_mode, status = parts[0], parts[1], parts[4]
+        paths = []
+        wanted = 2 if status[0] in "RC" else 1
+        while wanted and i < len(fields):
+            if fields[i]:
+                paths.append(fields[i])
+                wanted -= 1
+            i += 1
+        entries.append((src_mode, dst_mode, status, paths))
+    return entries
+
+
+def _repair_changes(repo_dir: Path, snapshot: tuple[str, set[str]]
+                    ) -> list[tuple[str, list[str], str]]:
+    """What the repair changed, measured against the tree recorded before it.
+
+    `git status` compares against HEAD, so it also reports the ticket's own
+    earlier work. That made the guard blame the repair for a manifest the ticket
+    had legitimately edited hours before, and no repair could ever pass in such a
+    checkout. Returns (kind, paths, detail) where kind is edit | add | other.
+    """
+    tree, untracked_before = snapshot
+    raw = git_util.run_git(repo_dir, ["diff", "--raw", "-z", "--find-renames", tree],
+                           timeout=60).stdout
+    out = []
+    for src_mode, dst_mode, status, paths in _raw_diff_entries(raw):
+        if not paths:
+            continue
+        if status[0] == "M" and src_mode == dst_mode:
+            out.append(("edit", paths, status))
+        elif status[0] == "M":
+            out.append(("other", paths, f"mode {src_mode} to {dst_mode}"))
+        else:
+            out.append(("other", paths, f"git status {status}"))
+    for rel in _untracked(repo_dir):
+        if rel not in untracked_before:
+            out.append(("add", [rel], "new untracked file"))
+    return out
+
+
+def _repair_touched_only_code(repo_dir: Path,
+                              before: dict[Path, HookState] | None = None,
+                              snapshot: tuple[str, set[str]] | None = None) -> tuple[bool, str]:
     """Whether the repair agent stayed inside the code, or found a cheap exit.
 
     The agent runs with permissions bypassed, so telling it not to disable the
     hook is a request. When a hook cannot be satisfied from inside the repo — a
     symbol missing from a published sibling package, say — the cheap ways to
-    comply are loosening the linter, editing the manifest, or dropping a
-    suppression directive. Each of those makes the commit pass and the problem
-    invisible, so they are rejected in code rather than in a prompt.
+    comply are loosening the linter, editing the manifest, dropping a suppression
+    directive, or deleting the file the hook complained about. Each of those makes
+    the commit pass and the problem invisible, so they are rejected in code rather
+    than in a prompt.
     """
+    if before is not None:
+        for path, was in before.items():
+            if _state_of(path) != was:
+                return False, f"repair changed the hook setup ({path}); it may only edit code"
     try:
-        changed = git_util.run_git(repo_dir, ["status", "--porcelain"], timeout=30)
+        changes = (_repair_changes(repo_dir, snapshot) if snapshot is not None
+                   else [("edit" if set(c) <= _MODIFY_ONLY else "other", p, f"git status {c!r}")
+                         for c, p in _porcelain_entries(git_util.run_git(
+                             repo_dir, ["status", "--porcelain", "-z"], timeout=30).stdout)])
     except git_util.GitCommandError:
         return False, "could not read the worktree after the repair"
-    for line in changed.stdout.splitlines():
-        rel = line[3:].split(" -> ")[-1].strip()
-        if not rel:
-            continue
-        if line.startswith("??") or line.startswith("A "):
-            # A lint or formatting fix never needs a new file. Creating one is
-            # how a shadow module or a fabricated type stub gets in.
-            return False, f"repair created a new file ({rel}); it may only edit existing code"
-        if Path(rel).name in _REPAIR_FORBIDDEN_NAMES:
-            return False, f"repair touched {Path(rel).name}, which is configuration, not code"
-        target = repo_dir / rel
-        try:
-            body = target.read_text()
-        except (OSError, UnicodeDecodeError):
-            continue
-        for marker in _SUPPRESSION_MARKERS:
-            if marker in body:
-                return False, f"repair added a suppression directive ({marker}) in {rel}"
+    for kind, paths, detail in changes:
+        for rel in paths:
+            if Path(rel).name in _REPAIR_FORBIDDEN_NAMES:
+                return False, f"repair touched {Path(rel).name}, which is configuration, not code"
+        if kind != "edit":
+            return False, (f"repair did more than edit {paths[0]} ({detail}); "
+                           f"it may only change the contents of existing files")
+        for marker in _added_suppressions(repo_dir, snapshot, paths[0]):
+            return False, f"repair added a suppression directive ({marker}) in {paths[0]}"
     return True, ""
+
+
+def _added_suppressions(repo_dir: Path, snapshot: tuple[str, set[str]] | None,
+                        rel: str) -> list[str]:
+    """Markers the repair added, counted rather than matched.
+
+    Reading the whole file asked whether the file contains a marker, which is a
+    different question: any file that already carries a `# noqa` could never be
+    formatted again. Reading the added lines was closer but still wrong, because
+    a formatter that rewrites the line the marker sits on presents it as added.
+    Counting answers it: the repair added one only if there are now more.
+
+    Without a baseline the question cannot be answered, so it falls back to the
+    whole file, which over-rejects rather than passing silently.
+    """
+    def _count(body: str) -> dict[str, int]:
+        return {m: body.count(m) for m in _SUPPRESSION_MARKERS}
+
+    target = repo_dir / rel
+    if target.is_symlink() or not target.is_file():
+        # A gitlink for a dirty submodule is a directory here. Reading it failed
+        # and the failure was reported as an added marker, so ordinary submodule
+        # dirtiness that predates the repair rejected an unrelated fix.
+        return []
+    try:
+        now = _count(target.read_text())
+    except (OSError, UnicodeDecodeError):
+        return [] if snapshot is None else ["unreadable file"]
+    if snapshot is None:
+        return [m for m, n in now.items() if n]
+    try:
+        was = _count(git_util.run_git(repo_dir, ["show", f"{snapshot[0]}:{rel}"],
+                                      timeout=60).stdout)
+    except git_util.GitCommandError:
+        # Not in the recorded tree, so every marker in it is new. A file the
+        # repair created is rejected before this, so this is the rare case of a
+        # path git cannot read back.
+        was = dict.fromkeys(_SUPPRESSION_MARKERS, 0)
+    return [m for m, n in now.items() if n > was.get(m, 0)]
 
 
 def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
@@ -660,11 +1037,29 @@ def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
              meta={"ticket": ticket_key, "repo": repo_dir.name,
                    "output": (outcome.output or "")[-600:]})
     try:
+        # Both before the agent runs. Without a baseline there is nothing to
+        # compare the repair against and nothing to put back, so not being able
+        # to take one blocks rather than letting the agent edit unwatched.
+        hooks_before = _hook_integrity(repo_dir)
+        hook_roots = _restorable_roots(repo_dir)
         snapshot = _snapshot_repo(repo_dir)
-    except git_util.GitCommandError as e:
+    except (git_util.GitCommandError, OSError) as e:
         log.emit("commit_hook_snapshot_failed",
                  f"{ticket_key}: could not snapshot {repo_dir.name} before repair: {e}",
                  meta={"ticket": ticket_key, "repo": repo_dir.name})
+        return "block_unknown"
+
+    unreproducible = [str(p) for p, (body, _) in hooks_before.items()
+                      if body is not None and body.startswith((_IRREGULAR, _OVERSIZE))]
+    if unreproducible:
+        # A baseline we cannot put back is not a baseline. Letting the agent run
+        # against one means a rejected repair leaves the hook setup as it found
+        # it, which is the state this exists to prevent.
+        log.emit("commit_hook_baseline_unusable",
+                 f"{ticket_key}: {repo_dir.name} hook setup cannot be recorded "
+                 f"({', '.join(unreproducible)}); not attempting a repair",
+                 meta={"ticket": ticket_key, "repo": repo_dir.name,
+                       "paths": unreproducible})
         return "block_unknown"
 
     fixed = run_claude_code(
@@ -675,22 +1070,51 @@ def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
         "change nothing and say so.\n\n"
         f"HOOK OUTPUT:\n{(outcome.output or '')[-4000:]}",
         cwd=repo_dir, timeout=HOOK_REPAIR_TIMEOUT)
+    def _undo(why: str) -> str:
+        # The hook setup goes back first. _restore_repo enumerates untracked
+        # files, and that enumeration reads info/exclude, so cleaning up while
+        # the repair's exclude is still in place cannot see the file the repair
+        # hid behind it. _restore_repo also skips ignored files entirely, which
+        # is why a planted `.venv/bin/pre-commit` needs putting back from its
+        # recorded contents rather than by that enumeration.
+        failed = _restore_hook_setup(hooks_before, hook_roots)
+        if failed:
+            log.emit("commit_hook_setup_contaminated",
+                     f"{ticket_key}: {repo_dir.name} hook setup could not be put back "
+                     f"({', '.join(failed)}); do not retry this worktree until it is "
+                     f"rebuilt",
+                     meta={"ticket": ticket_key, "repo": repo_dir.name, "paths": failed})
+        try:
+            _restore_repo(repo_dir, snapshot)
+        except (git_util.GitCommandError, OSError, subprocess.TimeoutExpired) as e:
+            log.emit("commit_hook_worktree_contaminated",
+                     f"{ticket_key}: {repo_dir.name} worktree could not be put back "
+                     f"({e}); do not retry this worktree until it is rebuilt",
+                     meta={"ticket": ticket_key, "repo": repo_dir.name})
+            failed = failed + ["worktree"]
+        log.emit("commit_hook_repair_rejected",
+                 f"{ticket_key}: discarded the repair of {repo_dir.name}: {why}",
+                 meta={"ticket": ticket_key, "repo": repo_dir.name, "reason": why,
+                       "unrestored": failed})
+        return "block_unknown"
+
     if fixed is None:
+        # A repair that died or timed out still edited files on its way there,
+        # and returning here left them in place unexamined.
         log.emit("commit_hook_repair_failed",
                  f"{ticket_key}: repair step returned nothing for {repo_dir.name}",
                  meta={"ticket": ticket_key, "repo": repo_dir.name})
-        return "block_unknown"
+        return _undo("the repair step returned nothing")
 
-    clean, why = _repair_touched_only_code(repo_dir)
+    try:
+        clean, why = _repair_touched_only_code(repo_dir, hooks_before, snapshot)
+    except Exception as e:
+        # Deciding whether the repair stayed inside the code runs several git
+        # commands, and one of them timing out is not a verdict. Leaving the
+        # edits in place unexamined is the state this exists to prevent.
+        return _undo(f"could not judge the repair: {e}")
     if not clean:
-        try:
-            _restore_repo(repo_dir, snapshot)
-        except git_util.GitCommandError:
-            pass
-        log.emit("commit_hook_repair_rejected",
-                 f"{ticket_key}: discarded the repair of {repo_dir.name}: {why}",
-                 meta={"ticket": ticket_key, "repo": repo_dir.name, "reason": why})
-        return "block_unknown"
+        return _undo(why)
     return "repair"
 
 
@@ -1005,8 +1429,13 @@ def fix_ci_failures(ctx: TaskContext) -> TaskResult:
                 def _memo(current, names=failed_names):
                     if not current:
                         return None
-                    seen = set(current.get("ci_unrelated_checks") or [])
-                    current["ci_unrelated_checks"] = sorted(seen | set(names))
+                    unrelated = current.get("ci_unrelated_checks")
+                    if not isinstance(unrelated, dict):
+                        unrelated = {}
+                    pr_key = f"{pr['repo']}/{pr['id']}"
+                    seen = set(unrelated.get(pr_key) or [])
+                    unrelated[pr_key] = sorted(seen | set(names))
+                    current["ci_unrelated_checks"] = unrelated
                     return current
                 updated = state.update_ticket(ctx.ticket_key or "", _memo)
                 if updated:
@@ -1023,10 +1452,20 @@ def fix_ci_failures(ctx: TaskContext) -> TaskResult:
                 # MAX_CI_FIX_ATTEMPTS in _handle_ci_failure, and wedges the
                 # repo gate indefinitely. 'unrelated' and 'no_failing' don't
                 # count (nothing of ours was attempted).
+                try:
+                    info_after = platform.get_pr_info(pr["repo"], pr["id"])
+                    head_after = info_after.get("head_sha", "") if isinstance(info_after, dict) else ""
+                except Exception:
+                    head_after = ""
+
                 def _bump(current):
                     if not current:
                         return None
                     current["ci_fix_attempts"] = current.get("ci_fix_attempts", 0) + 1
+                    if head_after:
+                        heads = current.get("ci_fix_heads") or {}
+                        heads[f"{pr['repo']}/{pr['id']}"] = head_after
+                        current["ci_fix_heads"] = heads
                     current.pop("ci_passed", None)
                     current.pop("checks_started_at", None)
                     current.pop("ci_unrelated_checks", None)
@@ -1649,6 +2088,57 @@ def fix_reported_bug(ctx: TaskContext) -> TaskResult:
     if result is None:
         return TaskResult("failed", "claude returned non-zero or empty")
     return TaskResult("ok")
+
+
+SCOPE_REVIEW_TIMEOUT = SCOPE_FANOUT_TIMEOUT + 300
+
+
+@task("scope_review",
+      preconditions=[feature_enabled("scope_review"),
+                     status_is("pr_ready", "in_review")],
+      postconditions=[file_contains("docs/scope-review.md",
+                                    r"SCOPE VERDICT:\s*(PASS|FAIL)")],
+      timeout=SCOPE_REVIEW_TIMEOUT)
+def scope_review(ctx: TaskContext) -> TaskResult:
+    """Consensus scope review of the ticket branch (the automated /c gate).
+
+    Captures the branch-diff fingerprint BEFORE the review so a commit that
+    lands mid-review leaves the recorded fingerprint stale and the dispatcher
+    re-enqueues a fresh review. The verdict is recorded on the ticket state;
+    the dispatcher holds PR creation (pr_ready) and auto-merge (in_review)
+    until the verdict for the current fingerprint is pass."""
+    ticket_dir = _ticket_dir(ctx)
+    if not ticket_dir.is_dir():
+        return TaskResult("failed", f"ticket dir missing: {ticket_dir}")
+    ts = state.load_ticket(ctx.ticket_key or "") or {}
+    slug = ts.get("slug") or (ctx.ticket_key or "")
+    fingerprint = scope_fingerprint(ctx.config, ts)
+    if not fingerprint:
+        return TaskResult("skipped", "no branch diff to review")
+    log.emit("ticket_scope_review_started",
+             f"Consensus scope review for {ctx.ticket_key}",
+             meta={"ticket": ctx.ticket_key})
+    verdict, reason = run_scope_review(ctx.config, ticket_dir, slug,
+                                       ticket_key=ctx.ticket_key or "")
+    if verdict is None:
+        return TaskResult("failed", reason)
+
+    def _record(current: dict) -> dict:
+        new = dict(current or {})
+        new["scope_review"] = {
+            "fingerprint": fingerprint,
+            "verdict": verdict,
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
+        return new
+    state.update_ticket(ctx.ticket_key, _record)
+    event = ("ticket_scope_review_passed" if verdict == "pass"
+             else "ticket_scope_review_failed")
+    base_url = ctx.config.get("_base_url", "")
+    log.emit(event, f"{ctx.ticket_key}: scope review {verdict} ({reason})",
+             links={"detail": f"{base_url}/tickets/{ctx.ticket_key}"},
+             meta={"ticket": ctx.ticket_key, "verdict": verdict})
+    return TaskResult("ok", reason)
 
 
 @task("create_pr",
