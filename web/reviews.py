@@ -289,7 +289,7 @@ def api_review_info(repo: str, pr_id: int, provider: str = "claude"):
     if not found:
         return {}
     branch_dir, comments, _ = found
-    review_json = branch_dir / "review.json"
+    review_json = branch_dir / f"review{review_store.provider_suffix(provider)}.json"
     review_data = json.loads(review_json.read_text()) if review_json.exists() else {}
     branch = review_data.get("source_branch", "")
     result = {
