@@ -3,23 +3,8 @@ from uuid import uuid4
 
 from starlette.responses import JSONResponse
 
+from services import usage
 from web.state import _disabled_hosts, multi_apply_host, multi_reset
-
-
-_USAGE_SKIP_EXACT = frozenset({
-    "/api/tickets/list",
-    "/api/events",
-    "/api/config",
-    "/api/status",
-    "/api/scheduled",
-})
-_USAGE_SKIP_PREFIXES = ("/static/", "/favicon")
-
-
-def _is_usage_worthy(path: str) -> bool:
-    if path in _USAGE_SKIP_EXACT:
-        return False
-    return not path.startswith(_USAGE_SKIP_PREFIXES)
 
 
 def install(app):
@@ -76,8 +61,11 @@ def install(app):
             raise
         elapsed = time.time() - t0
         print(f"[REQ {rid}] {time.strftime('%H:%M:%S')} {method} {path} done {elapsed:.2f}s status={response.status_code}", flush=True)
-        if _is_usage_worthy(path):
+        if usage.is_tracked(path):
             ms = int(elapsed * 1000)
             print(f"[USAGE] {host} {method} {path} status={response.status_code} ms={ms}", flush=True)
+            if response.status_code not in (404, 405):
+                route = request.scope.get("route")
+                usage.record("route", f"{method} {getattr(route, 'path', path)}", instance=host)
         response.headers["X-Response-Time"] = f"{elapsed:.3f}s"
         return response

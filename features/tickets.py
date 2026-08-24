@@ -23,7 +23,7 @@ from core.deps import run_dep_command, relink_shared_venv
 from core.claude_runner import run_haiku, run_balanced, run_claude_code, extract_json
 from core.ticket_status import TicketStatus, transition
 from features.platforms import make_platform
-from features.pr_ci import ci_summary
+from features.pr_ci import ci_summary, FAILED_STATES
 from features.ticket_systems import make_ticket_system
 
 
@@ -692,7 +692,7 @@ def _reingest_merged_ticket(config: dict, ticket: dict, ts: dict, base_url: str)
         cur_latest is not None and snap_latest is not None and cur_latest > snap_latest
     )
 
-    for field in ("prs", "ci_fix_attempts", "pr_attempts", "ci_passed",
+    for field in ("prs", "ci_fix_attempts", "ci_fix_heads", "pr_attempts", "ci_passed",
                   "checks_started_at", "_ci_failed_pending", "pr_scheduled_at",
                   "ci_unrelated_checks",
                   "conflict_resolution_attempts", "last_comment_ids",
@@ -942,6 +942,53 @@ def _process_ticket_comments(config: dict, key: str, ts: dict, ticket: dict, bas
 
 
 
+def _save_ticket_if_unmoved(key: str, ts: dict, loaded_status: str | None) -> bool:
+    """Persist a scan/advance ticket snapshot unless another actor moved the
+    ticket's status in the meantime.
+
+    check() and advance_ticket() hold a ticket dict across a long dispatch
+    window (handler chain, git subprocesses). A worker task can legally
+    transition the ticket during that window — start_planning's gate-locked
+    new->planning in particular. Writing the stale snapshot back would
+    silently revert that transition, which lets a sibling ticket pass the
+    per-repo serialization gate and produce conflicting PRs from the same
+    base commit. The snapshot is written when the stored status still matches
+    what this iteration loaded, when it already equals the status the
+    snapshot carries, or when stored -> snapshot is a legal move in the
+    ticket-status graph (which covers the handler chain's own mid-iteration
+    saves, e.g. a _create_pr save at in_review followed by _merge advancing
+    the snapshot to merged). A stored status the snapshot cannot legally
+    follow means a concurrent actor moved the ticket; the stale snapshot is
+    dropped and the next scan re-evaluates from fresh state. Returns True
+    when the snapshot was written."""
+    outcome = {"written": True}
+
+    def _mutate(cur: dict) -> dict:
+        if not cur:
+            return ts
+        cur_status = cur.get("status", "new")
+        new_status = ts.get("status", "new")
+        if cur_status in (loaded_status, new_status):
+            return ts
+        try:
+            transition(cur_status, new_status)
+        except ValueError as e:
+            if "Illegal transition" not in str(e):
+                return ts
+            outcome["written"] = False
+            outcome["current"] = cur_status
+            return cur
+        return ts
+
+    state.update_ticket(key, _mutate)
+    if not outcome["written"]:
+        log.emit("ticket_scan_write_dropped",
+                 f"{key}: status moved {loaded_status} -> {outcome['current']} "
+                 f"during scan; dropping stale snapshot write",
+                 meta={"ticket": key, "category": "noise"})
+    return outcome["written"]
+
+
 def advance_ticket(config: dict, instance_key: str = "", key: str = "") -> None:
     """Run the forward stage dispatch for a single ticket immediately.
 
@@ -957,6 +1004,7 @@ def advance_ticket(config: dict, instance_key: str = "", key: str = "") -> None:
     ts = state.load_ticket(key)
     if not ts:
         return
+    loaded_status = ts.get("status", "new")
     status = ts.get("status", "")
     if status in (TicketStatus.done.value, "done", "ignored", "epic",
                   TicketStatus.pending_approval.value, TicketStatus.blocked.value):
@@ -979,7 +1027,7 @@ def advance_ticket(config: dict, instance_key: str = "", key: str = "") -> None:
             continue
         ts, _stop = handler(config, ticket, ts, base_url, instance_key, True)
         break
-    state.save_ticket(key, ts)
+    _save_ticket_if_unmoved(key, ts, loaded_status)
 
 
 def check(config: dict, instance_key: str = ""):
@@ -1017,11 +1065,14 @@ def check(config: dict, instance_key: str = ""):
     - conflict_resolution_attempts: merge-conflict fix attempt count.
     - last_conflict_error: previous conflict error passed to the resolver.
     - ci_fix_attempts: CI fix attempt count.
+    - ci_fix_heads: per-PR head SHA last seen by the CI fix path; a head that
+      moves after the budget is spent resets ci_fix_attempts, and a parked
+      ci_failed ticket stays parked until a head moves or CI stops failing.
     - ci_passed: marker from monitor_ci that checks passed.
     - checks_started_at: CI monitoring window start timestamp.
-    - ci_unrelated_checks: check names triaged as not caused by our changes;
-      _handle_ci_failure skips re-triage while the failing set is covered,
-      cleared whenever a new commit is pushed.
+    - ci_unrelated_checks: per-PR ("repo/id" keyed) check names triaged as not
+      caused by our changes; _handle_ci_failure skips re-triage while the
+      failing PR's set is covered, cleared whenever a new commit is pushed.
     - _ci_failed_pending: queued/running CI-fix marker.
     - _ci_timeout_state: transient CI-stall state cleared before re-poll.
     - last_comment_ids: per-PR review-comment cursor.
@@ -1061,6 +1112,7 @@ def check(config: dict, instance_key: str = ""):
 
     platform = None
     for key, ts in list(ticket_state.items()):
+        loaded_status = ts.get("status", "new")
         if key in assigned_keys or ts.get("status") in (TicketStatus.done, "done", "ignored"):
             continue
         prs = ts.get("prs", [])
@@ -1076,13 +1128,13 @@ def check(config: dict, instance_key: str = ""):
         upstream = _upstream_status(config, key)
         if upstream is None or not _is_terminal_upstream(config, upstream):
             _note_unresolved_sweep(key, ts, upstream)
-            state.save_ticket(key, ts)
+            _save_ticket_if_unmoved(key, ts, loaded_status)
             continue
         ts["status"] = transition(ts.get("status", "new"), "done")
         ts["external_status"] = upstream
         ts["done_at"] = datetime.now(timezone.utc).isoformat()
         ts.pop("sweep_unresolved_status", None)
-        state.save_ticket(key, ts)
+        _save_ticket_if_unmoved(key, ts, loaded_status)
 
     for ticket in assigned:
         key = ticket.get("key", "?")
@@ -1091,8 +1143,10 @@ def check(config: dict, instance_key: str = ""):
                 running = [j for j in q.jobs_for_ticket(instance_key, key) if j["status"] == "running"]
                 if running:
                     continue
-            existing = key in ticket_state
-            ts = ticket_state.get(key, {"status": "new"})
+            fresh = state.load_ticket(key)
+            existing = fresh is not None
+            ts = fresh or {"status": "new"}
+            loaded_status = ts.get("status", "new")
             if ts.get("status") == "ignored":
                 continue
             ts["external_status"] = ticket.get("status", "")
@@ -1114,12 +1168,12 @@ def check(config: dict, instance_key: str = ""):
                 merged_ext = ts.get("merged_external_status")
                 if (merged_ext and ticket.get("status", "") == merged_ext
                         and not _done_ticket_has_new_comments(config, key, ts, ticket)):
-                    state.save_ticket(key, ts)
+                    _save_ticket_if_unmoved(key, ts, loaded_status)
                     continue
                 ts.pop("done_at", None)
                 if ts.get("merged_at"):
                     ts = _reingest_merged_ticket(config, ticket, ts, base_url)
-                    state.save_ticket(key, ts)
+                    _save_ticket_if_unmoved(key, ts, loaded_status)
                     if instance_key:
                         _enqueue_stage(instance_key, key, "start_planning")
                     continue
@@ -1138,7 +1192,7 @@ def check(config: dict, instance_key: str = ""):
                     ts["slug"] = _make_slug(key, ticket["summary"])
                     ts["branch"] = _make_branch(config, key, ticket)
                     ts["url"] = ticket.get("url", "")
-                state.save_ticket(key, ts)
+                _save_ticket_if_unmoved(key, ts, loaded_status)
                 continue
 
             _process_ticket_comments(config, key, ts, ticket, base_url, instance_key)
@@ -1150,7 +1204,7 @@ def check(config: dict, instance_key: str = ""):
                 ts["url"] = ticket.get("url", "")
                 ts["status"] = mapped
                 if mapped not in ("new", "planning", "reviewing"):
-                    state.save_ticket(key, ts)
+                    _save_ticket_if_unmoved(key, ts, loaded_status)
                     continue
 
             pre_stop = False
@@ -1185,7 +1239,7 @@ def check(config: dict, instance_key: str = ""):
                 if stop_ticket:
                     break
 
-            state.save_ticket(key, ts)
+            _save_ticket_if_unmoved(key, ts, loaded_status)
         except Exception as e:
             log.emit("ticket_check_error", f"[{key}] {type(e).__name__}: {e}",
                 links={"detail": f"{base_url}/tickets/{key}"},
@@ -1775,6 +1829,26 @@ def _draft_comment_reply(config, slug, ticket, comment, pr) -> str:
     return run_balanced(prompt) or ""
 
 
+def _reply_commits_to_change(reply: str) -> bool:
+    """A drafted reply that promises a code change ('this is a regression, I
+    will restore the count') proves the comment was actionable after all.
+    Posting the promise without the change leaves the reviewer waiting forever,
+    so such a comment must route to the fix path instead of reply-only."""
+    if not reply.strip():
+        return False
+    prompt = (
+        "Does this PR review reply COMMIT to making a code change, e.g. 'I will "
+        "restore X', 'I will rename Y before merging', 'This is a regression. I "
+        "will fix it.'? Answer false when the reply only explains the code, "
+        "answers a question, or declines the change.\n\n"
+        f"REPLY:\n{reply}\n\n"
+        'Reply with JSON: {"commits_to_change": true|false}'
+    )
+    raw = run_balanced(prompt)
+    parsed = extract_json(raw) if raw else None
+    return isinstance(parsed, dict) and bool(parsed.get("commits_to_change"))
+
+
 def _substantiate_reply(config, slug, ticket, comment, pr, suggested: str) -> dict:
     """Queue the evidence run for a drafted reply and return its pending marker.
 
@@ -1783,6 +1857,9 @@ def _substantiate_reply(config, slug, ticket, comment, pr, suggested: str) -> di
     processed one after another, so one slow repo would stall every later comment
     on every later ticket. The work goes on the queue instead and writes its
     verdict back into pr_comments.json when it finishes.
+
+    Callers must save the comment to pr_comments.json before calling this. The
+    queued task re-reads that file and skips any comment_id it cannot find.
     """
     if not config.get("features", {}).get("defence"):
         return {"verdict": defence.INCONCLUSIVE, "reason": "features.defence disabled"}
@@ -1814,6 +1891,7 @@ def _recheck_pr_failed(config, ticket, ts, base_url) -> dict:
     all_merged = True
     any_open = False
     any_open_conflicting = False
+    open_infos = []
     for pr in prs:
         try:
             info = platform.get_pr_info(pr["repo"], pr["id"]) or {}
@@ -1826,6 +1904,7 @@ def _recheck_pr_failed(config, ticket, ts, base_url) -> dict:
         all_merged = False
         if pr_state == "OPEN":
             any_open = True
+            open_infos.append((pr, info))
             if info.get("mergeable") == "CONFLICTING":
                 any_open_conflicting = True
 
@@ -1840,6 +1919,16 @@ def _recheck_pr_failed(config, ticket, ts, base_url) -> dict:
     if any_open:
         if ts.get("pr_failed_reason") == "conflict_failed" and any_open_conflicting:
             return ts
+
+        if ts.get("pr_failed_reason") == "ci_failed":
+            heads = ts.get("ci_fix_heads") or {}
+            head_moved = any(
+                info.get("head_sha") and heads.get(f"{pr['repo']}/{pr['id']}") != info["head_sha"]
+                for pr, info in open_infos
+            )
+            still_red = any(pr.get("ci") in ("failing", "unknown") for pr, _ in open_infos)
+            if still_red and not head_moved:
+                return ts
 
         log.emit("ticket_pr_failed_recovered_open",
             f"{_label(ticket['key'], ts)}: tracked PR now OPEN; recovering pr_failed → in_review",
@@ -1895,6 +1984,23 @@ def _cache_pr_health(platform, pr: dict, info: dict) -> None:
     pr["ci_checked_at"] = now
 
 
+def _ci_failure_comment_held(platform, pr, body: str) -> bool:
+    """A review comment that reports a pipeline/CI failure must not be resolved
+    on a no-change verdict while the PR's checks are still failing: 'already
+    addressed' is unverifiable until the pipeline it complains about is green.
+    A checks fetch failure counts as red — resolving on unknown CI state is the
+    same unverifiable claim."""
+    text = (body or "").lower()
+    subject = re.search(r"\b(pipeline|ci|build|checks?|eslint|ruff|lint\w*|tests?)\b|❌", text)
+    failure = re.search(r"\bfail(s|ed|ing|ure|ures)?\b|❌", text)
+    if not (subject and failure):
+        return False
+    checks = platform.get_pr_checks(pr["repo"], pr["id"])
+    if checks is None:
+        return True
+    return any(c.get("state", "").upper() in FAILED_STATES for c in checks)
+
+
 def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
     platform = make_platform(config)
     prs = ts.get("prs", [])
@@ -1941,6 +2047,7 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
     last_comment_ids = ts.get("last_comment_ids", {})
     comment_fix_attempts = ts.setdefault("comment_fix_attempts", {})
     pr_comments = _load_pr_comments(config, slug)
+    to_substantiate = []
 
     for pr in prs:
         pr_key = f"{pr['repo']}/{pr['id']}"
@@ -2034,12 +2141,45 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                 links={"detail": f"{base_url}/tickets/{ticket['key']}", "comment": comment.get("html_url", "")},
                 meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"]})
 
+            suggested = ""
+            if not actionable:
+                suggested = _draft_comment_reply(config, slug, ticket, comment, pr)
+                if _reply_commits_to_change(suggested):
+                    actionable = True
+                    log.emit("ticket_pr_comment_reclassified",
+                        f"{_label(ticket['key'], ts)} · {pr['repo']}: Draft reply commits to a code change, routing to fix — {comment['body'][:80]}",
+                        links={"detail": f"{base_url}/tickets/{ticket['key']}", "comment": comment.get("html_url", "")},
+                        meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"], "draft_reply": suggested[:200]})
+
             if actionable and wt is not None and wt.is_dir():
-                subprocess.run(["git", "pull", "--rebase", "origin", pr.get("branch") or ts["branch"]], cwd=str(wt), capture_output=True, timeout=60)
-                context = f"File: {comment.get('path', 'unknown')}\nLine: {comment.get('line', 'unknown')}\n\nReview comment: {comment['body']}\n\nFix this review comment."
+                branch_name = pr.get("branch") or ts["branch"]
+                subprocess.run(["git", "pull", "--rebase", "origin", branch_name], cwd=str(wt), capture_output=True, timeout=60)
+                try:
+                    head_before = git_util.run_git(wt, ["rev-parse", "HEAD"], timeout=30).stdout.strip()
+                except git_util.GitCommandError as e:
+                    head_before = ""
+                    log.emit("ticket_pr_comment_git_read_failed",
+                        f"{_label(ticket['key'], ts)} · {pr['repo']}: rev-parse HEAD failed before the fix run: {e}",
+                        meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"]})
+                context = (
+                    f"File: {comment.get('path', 'unknown')}\nLine: {comment.get('line', 'unknown')}\n\n"
+                    f"Review comment: {comment['body']}\n\n"
+                    + (f"Drafted reply that commits to this change: {suggested}\n\n" if suggested else "")
+                    + "Fix this review comment."
+                )
                 fix_result = run_claude_code(context, cwd=wt)
                 subprocess.run(["git", "add", "-A"], cwd=str(wt), capture_output=True, timeout=60)
                 staged = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=str(wt)).returncode != 0
+                try:
+                    head_after = git_util.run_git(wt, ["rev-parse", "HEAD"], timeout=30).stdout.strip()
+                except git_util.GitCommandError as e:
+                    head_after = ""
+                    log.emit("ticket_pr_comment_git_read_failed",
+                        f"{_label(ticket['key'], ts)} · {pr['repo']}: rev-parse HEAD failed after the fix run: {e}",
+                        meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"]})
+                agent_committed = bool(head_before) and bool(head_after) and head_after != head_before
+                if agent_committed:
+                    made_commit = True
                 commit_rc = None
                 fix_ok = False
                 if fix_result and staged:
@@ -2049,30 +2189,46 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                         timeout=900,
                     )
                     commit_rc = commit.returncode
-                    if commit_rc == 0:
-                        fix_ok = True
-                        made_commit = True
-                        to_resolve.append(comment["id"])
-                        entry["status"] = "addressed"
-                        sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(wt), capture_output=True, text=True, timeout=30).stdout.strip()
-                        stat = subprocess.run(["git", "show", "--stat", "--format=", "HEAD"], cwd=str(wt), capture_output=True, text=True, timeout=30).stdout.strip()
-                        changed_files = [ln.split("|")[0].strip() for ln in stat.splitlines() if "|" in ln]
-                        files_label = ", ".join(changed_files[:5]) + (f" +{len(changed_files) - 5} more" if len(changed_files) > 5 else "")
-                        commit_url = pr["url"].split("/pull/")[0] + f"/commit/{sha}" if sha and "/pull/" in pr.get("url", "") else ""
-                        entry["fix_commit"] = sha
-                        entry["fix_files"] = changed_files
-                        log.emit("ticket_pr_comment_fixed",
-                            f"{_label(ticket['key'], ts)} · {pr['repo']}: Fixed \"{comment['body'][:60]}\" — changed {files_label or 'files'} ({sha[:7]})",
-                            links={"detail": f"{base_url}/tickets/{ticket['key']}", "commit": commit_url, "comment": comment.get("html_url", "")},
-                            meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"], "commit": sha, "files": changed_files})
-                elif fix_result and not staged:
+                if fix_result and (commit_rc == 0 or (agent_committed and not staged)):
                     fix_ok = True
+                    made_commit = True
                     to_resolve.append(comment["id"])
                     entry["status"] = "addressed"
-                    log.emit("ticket_pr_comment_already_addressed",
-                        f"{_label(ticket['key'], ts)} · {pr['repo']}: Already addressed (no change needed) — {comment['body'][:60]}",
-                        links={"detail": f"{base_url}/tickets/{ticket['key']}", "comment": comment.get("html_url", "")},
-                        meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"]})
+                    sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(wt), capture_output=True, text=True, timeout=30).stdout.strip()
+                    stat = subprocess.run(["git", "show", "--stat", "--format=", "HEAD"], cwd=str(wt), capture_output=True, text=True, timeout=30).stdout.strip()
+                    changed_files = [ln.split("|")[0].strip() for ln in stat.splitlines() if "|" in ln]
+                    files_label = ", ".join(changed_files[:5]) + (f" +{len(changed_files) - 5} more" if len(changed_files) > 5 else "")
+                    commit_url = pr["url"].split("/pull/")[0] + f"/commit/{sha}" if sha and "/pull/" in pr.get("url", "") else ""
+                    entry["fix_commit"] = sha
+                    entry["fix_files"] = changed_files
+                    log.emit("ticket_pr_comment_fixed",
+                        f"{_label(ticket['key'], ts)} · {pr['repo']}: Fixed \"{comment['body'][:60]}\" — changed {files_label or 'files'} ({sha[:7]})",
+                        links={"detail": f"{base_url}/tickets/{ticket['key']}", "commit": commit_url, "comment": comment.get("html_url", "")},
+                        meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"], "commit": sha, "files": changed_files,
+                              "agent_committed": bool(agent_committed and commit_rc is None)})
+                elif fix_result and not staged:
+                    try:
+                        ahead = git_util.run_git(wt, ["rev-list", "--count", f"origin/{branch_name}..HEAD"], timeout=30).stdout.strip()
+                    except git_util.GitCommandError as e:
+                        ahead = ""
+                        log.emit("ticket_pr_comment_git_read_failed",
+                            f"{_label(ticket['key'], ts)} · {pr['repo']}: rev-list --count failed, unpushed commits unknown: {e}",
+                            meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"]})
+                    if ahead.isdigit() and int(ahead) > 0:
+                        made_commit = True
+                    if _ci_failure_comment_held(platform, pr, comment["body"]):
+                        log.emit("ticket_pr_comment_ci_red_hold",
+                            f"{_label(ticket['key'], ts)} · {pr['repo']}: Not resolving pipeline-failure comment without a commit while CI is red — {comment['body'][:60]}",
+                            links={"detail": f"{base_url}/tickets/{ticket['key']}", "comment": comment.get("html_url", "")},
+                            meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"]})
+                    else:
+                        fix_ok = True
+                        to_resolve.append(comment["id"])
+                        entry["status"] = "addressed"
+                        log.emit("ticket_pr_comment_already_addressed",
+                            f"{_label(ticket['key'], ts)} · {pr['repo']}: Already addressed (no change needed) — {comment['body'][:60]}",
+                            links={"detail": f"{base_url}/tickets/{ticket['key']}", "comment": comment.get("html_url", "")},
+                            meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"], "unpushed_commits": int(ahead) if ahead.isdigit() else None})
 
                 if not fix_ok:
                     entry["status"] = "fix_failed"
@@ -2096,10 +2252,9 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                                   "comment_id": comment["id"],
                                   "attempts": attempts})
             elif not actionable:
-                suggested = _draft_comment_reply(config, slug, ticket, comment, pr)
                 entry["status"] = "needs_reply"
                 entry["suggested_reply"] = suggested
-                entry["defence"] = _substantiate_reply(config, slug, ticket, comment, pr, suggested)
+                to_substantiate.append((entry, comment, pr))
                 log.emit("ticket_pr_comment_needs_reply", f"{_label(ticket['key'], ts)}: Reply needed {comment['body'][:80]}",
                     links={"detail": f"{base_url}/tickets/{ticket['key']}", "comment": comment.get("html_url", "")},
                     meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"]})
@@ -2131,6 +2286,10 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
 
     ts["last_comment_ids"] = last_comment_ids
     _save_pr_comments(config, slug, pr_comments)
+    for entry, comment, pr in to_substantiate:
+        entry["defence"] = _substantiate_reply(config, slug, ticket, comment, pr, entry["suggested_reply"])
+    if to_substantiate:
+        _save_pr_comments(config, slug, pr_comments)
     return ts
 
 
@@ -2172,6 +2331,7 @@ def _reconcile_prs(ts: dict, open_prs: list[dict], key: str = "") -> dict:
     if pr_changed or status_regressed:
         ts["conflict_resolution_attempts"] = 0
         ts["ci_fix_attempts"] = 0
+        ts.pop("ci_fix_heads", None)
         ts.pop("ci_passed", None)
         ts.pop("checks_started_at", None)
         ts.pop("ci_unrelated_checks", None)
@@ -2390,12 +2550,28 @@ def _merge(config, ticket, ts, base_url) -> dict:
     return ts
 
 
-def _handle_ci_failure(ticket, ts, pr, checks, base_url, instance_key="") -> dict:
-    failed_names = [c["name"] for c in checks if c["state"].upper() in ("FAILURE", "FAILED")]
-    fix_attempts = ts.get("ci_fix_attempts", 0)
+def _handle_ci_failure(ticket, ts, pr, checks, base_url, instance_key="", head_sha="") -> dict:
+    failed_names = [c["name"] for c in checks if c["state"].upper() in FAILED_STATES]
 
-    if failed_names and set(failed_names) <= set(ts.get("ci_unrelated_checks") or []):
+    heads = ts.get("ci_fix_heads") or {}
+    pr_key = f"{pr['repo']}/{pr['id']}"
+    if head_sha and heads.get(pr_key) != head_sha:
+        if ts.get("ci_fix_attempts"):
+            log.emit("ticket_ci_fix_budget_reset",
+                f"{_label(ticket['key'], ts)}: new commits on {pr_key} since last CI fix attempt; resetting fix budget",
+                links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+                meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"], "head_sha": head_sha})
+            ts["ci_fix_attempts"] = 0
+        heads[pr_key] = head_sha
+        ts["ci_fix_heads"] = heads
+        ts.pop("ci_unrelated_checks", None)
+
+    unrelated = ts.get("ci_unrelated_checks") or {}
+    unrelated_for_pr = unrelated.get(pr_key, []) if isinstance(unrelated, dict) else []
+    if failed_names and set(failed_names) <= set(unrelated_for_pr):
         return ts
+
+    fix_attempts = ts.get("ci_fix_attempts", 0)
 
     if fix_attempts >= MAX_CI_FIX_ATTEMPTS:
         log.emit("ticket_checks_failed", f"CI failed for {_label(ticket['key'], ts)} after {fix_attempts} fix attempts: {', '.join(failed_names)}",
@@ -2408,6 +2584,7 @@ def _handle_ci_failure(ticket, ts, pr, checks, base_url, instance_key="") -> dic
 
     ts["_ci_failed_pending"] = True
     if instance_key:
+        state.save_ticket(ticket["key"], ts)
         _enqueue_stage(instance_key, ticket["key"], "fix_ci_failures")
     return ts
 

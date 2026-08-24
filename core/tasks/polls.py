@@ -37,6 +37,20 @@ def poll_peer_reviews(ctx: TaskContext) -> TaskResult:
     return TaskResult("ok")
 
 
+@task("poll_pr_autofix", preconditions=[feature_enabled("pr_autofix")], timeout=180)
+def poll_pr_autofix(ctx: TaskContext) -> TaskResult:
+    from features import pr_autofix
+    pr_autofix.check(ctx.config)
+    return TaskResult("ok")
+
+
+@task("pr_autofix_run", preconditions=[feature_enabled("pr_autofix")], timeout=3300)
+def pr_autofix_run(ctx: TaskContext) -> TaskResult:
+    from features import pr_autofix
+    ok, reason = pr_autofix.run(ctx.config, ctx.payload)
+    return TaskResult("ok", reason or "") if ok else TaskResult("failed", reason)
+
+
 @task("timesheet_check", preconditions=[feature_enabled("timesheet")], timeout=120)
 def timesheet_check(ctx: TaskContext) -> TaskResult:
     from features import timesheet

@@ -304,6 +304,19 @@ def _flush_deferred_comments(config, instance_key, pr, pr_key, pr_ref, base_url,
              meta={"repo": pr["repo"], "pr_id": pr["id"], "comment_ids": comment_ids})
 
 
+def _comment_fix_tools(worktree: Path) -> list[str]:
+    scope = str(worktree.resolve())
+    return [
+        f"Read(/{scope}/**)",
+        "Grep",
+        "Glob",
+        f"Edit(/{scope}/**)",
+        f"Write(/{scope}/**)",
+        f"MultiEdit(/{scope}/**)",
+        f"NotebookEdit(/{scope}/**)",
+    ]
+
+
 def _commit_fix(worktree, message) -> tuple[bool, str]:
     subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True, timeout=60)
     staged = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=str(worktree), capture_output=True, timeout=60).returncode != 0
@@ -336,7 +349,8 @@ def fix_comment(config, payload) -> tuple[bool, str | None]:
                 return False, "Could not create worktree"
 
             context = f"File: {comment.get('path', 'unknown')}\nLine: {comment.get('line', 'unknown')}\n\nReview comment: {comment['body']}\n\nFix this review comment."
-            result = run_claude_code(context, cwd=worktree, timeout=600)
+            result = run_claude_code(context, cwd=worktree, timeout=600,
+                                     allowed_tools=_comment_fix_tools(worktree))
             if result is None:
                 log.emit("pr_comment_blocked", f"{pr_ref}: Claude failed to fix — {comment['body'][:80]}", links=links, meta={**meta, "reason": "Claude failed to fix"})
                 comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "Claude failed to fix")
@@ -419,7 +433,8 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
                 f"The following {len(pending)} review comments were left on this PR. "
                 f"Address ALL of them.\n\n{comment_list}\n\nFix every review comment above."
             )
-            result = run_claude_code(context, cwd=worktree, timeout=900)
+            result = run_claude_code(context, cwd=worktree, timeout=900,
+                                     allowed_tools=_comment_fix_tools(worktree))
             if result is None:
                 return _fail_all(pending_ids, "Claude failed to fix")
 

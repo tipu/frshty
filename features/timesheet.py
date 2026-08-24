@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import subprocess
 import hashlib
@@ -702,11 +703,19 @@ def _estimate_review_minutes(platform, repo: str, pr_id: int) -> int:
     return 30
 
 
-def _fetch_claude_sessions(config: dict, start: str, end: str) -> dict:
-    history_path = Path.home() / ".claude" / "history.jsonl"
-    if not history_path.exists():
-        return {}
+def _claude_history_paths(config: dict) -> list[Path]:
+    paths = [Path.home() / ".claude" / "history.jsonl"]
+    claude_cfg = (config.get("llm") or {}).get("claude") or {}
+    env_cfg = claude_cfg.get("env") or {}
+    config_dir = env_cfg.get("CLAUDE_CONFIG_DIR") or claude_cfg.get("config_dir")
+    if config_dir:
+        extra = Path(os.path.expanduser(str(config_dir))) / "history.jsonl"
+        if extra not in paths:
+            paths.append(extra)
+    return paths
 
+
+def _fetch_claude_sessions(config: dict, start: str, end: str) -> dict:
     ws_root = str(config.get("workspace", {}).get("root", ""))
     if not ws_root:
         return {}
@@ -715,38 +724,41 @@ def _fetch_claude_sessions(config: dict, start: str, end: str) -> dict:
     end_ts = int((datetime.strptime(end, "%Y-%m-%d") + timedelta(days=1)).timestamp() * 1000)
 
     sessions = {}
-    try:
-        with open(history_path) as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                ts = entry.get("timestamp", 0)
-                if not (start_ts <= ts < end_ts):
-                    continue
-                project = entry.get("project", "")
-                if not project.startswith(ws_root):
-                    continue
-                prompt = (entry.get("display") or "")[:80]
-                if not prompt:
-                    continue
-                dt = datetime.fromtimestamp(ts / 1000)
-                day_str = dt.strftime("%Y-%m-%d")
-                time_str = dt.strftime("%H:%M")
-                relative = project[len(ws_root):].strip("/")
-                short = relative.split("/")[0] if relative else config["job"]["key"]
-                sessions.setdefault(day_str, []).append({
-                    "project": short,
-                    "prompt": prompt,
-                    "time": time_str,
-                    "cwd": relative,
-                })
-    except OSError:
-        pass
+    for history_path in _claude_history_paths(config):
+        if not history_path.exists():
+            continue
+        try:
+            with open(history_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    ts = entry.get("timestamp", 0)
+                    if not (start_ts <= ts < end_ts):
+                        continue
+                    project = entry.get("project", "")
+                    if not project.startswith(ws_root):
+                        continue
+                    prompt = (entry.get("display") or "")[:80]
+                    if not prompt:
+                        continue
+                    dt = datetime.fromtimestamp(ts / 1000)
+                    day_str = dt.strftime("%Y-%m-%d")
+                    time_str = dt.strftime("%H:%M")
+                    relative = project[len(ws_root):].strip("/")
+                    short = relative.split("/")[0] if relative else config["job"]["key"]
+                    sessions.setdefault(day_str, []).append({
+                        "project": short,
+                        "prompt": prompt,
+                        "time": time_str,
+                        "cwd": relative,
+                    })
+        except OSError:
+            pass
     return sessions
 
 

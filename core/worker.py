@@ -62,8 +62,18 @@ class WorkerPool:
         sweep.start()
         self._threads.append(sweep)
 
-    def stop(self) -> None:
+    def stop(self, join_timeout: float = 2.0) -> None:
+        """Signal every thread to stop, then wait up to join_timeout seconds
+        per thread for it to finish its current job. Without the join, a
+        worker mid-job keeps running after stop() returns and writes its
+        completion (mark_done, ticket_advance event) into whatever database
+        the module globals point at by then — in the test suite that is the
+        NEXT test's freshly initialized DB."""
         self._stop.set()
+        for t in self._threads:
+            if t is threading.current_thread():
+                continue
+            t.join(join_timeout)
 
     def _reconcile_orphans(self) -> None:
         try:

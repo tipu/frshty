@@ -15,7 +15,7 @@ import core.terminal as terminal
 from core.tasks.tickets import (
     TEST_RUN_TIMEOUT, _NO_LOCAL_PY_VENV_SENTINEL, _detect_runner, _run_repo_tests,
 )
-from services import work_store
+from services import work_store, work_tags
 
 
 def personal_config() -> dict | None:
@@ -168,9 +168,12 @@ def launch(objective: str, cwd: str = "", contexts: list[str] | None = None,
     cwd = cwd or str(config["workspace"]["root"])
     if not os.path.isdir(cwd):
         return {"error": f"cwd does not exist: {cwd}"}
-    labels = ",".join(contexts + (["slack_int"] if slack else []))
+    label_list = contexts + (["slack_int"] if slack else [])
+    labels = ",".join(label_list)
+    tags = work_tags.derive_tags(objective, label_list,
+                                 [e["key"] for e in project_entries()])
     item_id = work_store.create_item(objective, instance_key="personal", contexts=labels,
-                                     source_item_id=source_item_id)
+                                     source_item_id=source_item_id, tags=",".join(tags))
     session_id = str(uuid.uuid4())
     tmux_key = f"work-{item_id}"
     run_id = work_store.add_run(item_id, session_id, tmux_key, cwd)
@@ -203,6 +206,8 @@ def launch(objective: str, cwd: str = "", contexts: list[str] | None = None,
         log.emit("work_launch_failed", f"work item {item_id}: {type(e).__name__}: {e}")
         return {"error": f"launch failed: {e}", "item_id": item_id}
     threading.Thread(target=_kickoff, args=(tmux_key, run_id), daemon=True).start()
+    if len(tags) < work_tags.MAX_TAGS:
+        work_tags.schedule_implicit_tags(item_id, objective, config)
     return {"item_id": item_id, "run_id": run_id, "session_id": session_id,
             "tmux_key": tmux_key, "state": "agent_working"}
 

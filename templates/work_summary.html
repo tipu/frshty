@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<meta charset="utf-8">
+<title>Work summary — frshty</title>
+<script src="/static/vendor/vue.global.prod.js"></script>
+<script src="/static/frshty-linkify.js"></script>
+<style>
+body { background: #0b0b10; color: #d5d5dc; font: 15px/1.5 system-ui, sans-serif; margin: 0; }
+.page { max-width: 1600px; margin: 0 auto; padding: 28px 20px; }
+h1 { font-size: 16px; margin: 0 0 4px; color: #fff; }
+.meta { font-size: 12px; color: #777; margin-bottom: 18px; }
+.summary { white-space: pre-wrap; background: #14141b; border: 1px solid #2a2a35; border-radius: 8px; padding: 14px 16px; }
+.empty { color: #777; font-style: italic; }
+.sec { margin-top: 20px; font-size: 12px; text-transform: uppercase; color: #888; font-weight: 700; }
+.art a { color: #86efac; font-family: monospace; font-size: 13px; text-decoration: underline; }
+.art span { color: #777; font-size: 12px; }
+.art img { display: block; max-width: 100%; max-height: 480px; border: 1px solid #2a2a35; border-radius: 8px; margin: 6px 0 12px; }
+.fu { background: #14141b; border: 1px solid #2a2a35; border-radius: 8px; padding: 10px 14px; margin-top: 8px; }
+.fu .to { font-size: 12px; color: #93c5fd; }
+.fu .draft { white-space: pre-wrap; margin-top: 4px; }
+.fu .st { font-size: 11px; color: #777; margin-top: 4px; }
+</style>
+<script src="/static/frshty-usage.js"></script>
+</head>
+<body>
+<div id="app" class="page">
+<div v-if="item">
+  <h1>{{ item.objective }}</h1>
+  <div class="meta">#{{ item.id }} · {{ item.state }} · <a :href="'/work/' + item.id" style="color:#93c5fd">detail</a></div>
+  <div class="summary" v-if="item.summary" v-html="lk(item.summary)"></div>
+  <div class="empty" v-else>No summary yet.</div>
+  <div v-if="artifacts.length">
+    <div class="sec">Artifacts</div>
+    <div class="art" v-for="a in artifacts">
+      <a :href="'/api/work/artifact_file/' + a.id" target="_blank">{{ a.path }}</a>
+      <span v-if="a.note"> — {{ a.note }}</span>
+      <img v-if="isImg(a.path)" :src="'/api/work/artifact_file/' + a.id" :alt="a.note || a.path"
+           @error="$event.target.style.display='none'">
+    </div>
+  </div>
+  <div v-if="followups.length">
+    <div class="sec">Follow-ups</div>
+    <div class="fu" v-for="f in followups">
+      <div class="to">{{ f.kind }} · {{ f.workspace }} · {{ f.recipient }}</div>
+      <div class="draft" v-html="lk(f.draft)"></div>
+      <div class="st">{{ f.status }}<span v-if="f.detail"> · {{ f.detail }}</span></div>
+    </div>
+  </div>
+</div>
+</div>
+<script>
+const { createApp } = Vue;
+createApp({
+  data() { return { item: null, artifacts: [], followups: [], linkmap: null }; },
+  methods: {
+    lk(text) { return window.frshtyLinkify(text, this.linkmap); },
+    isImg(p) { return /\.(png|jpe?g|gif|webp|svg|bmp|avif)$/i.test(p || ""); },
+  },
+  async mounted() {
+    try { this.linkmap = await (await fetch("/api/work/linkmap")).json(); } catch (e) {}
+    const id = location.pathname.split("/")[2];
+    const r = await fetch(`/api/work/items/${id}/summary`);
+    if (!r.ok) return;
+    const d = await r.json();
+    this.item = d.item; this.artifacts = d.artifacts; this.followups = d.followups;
+  },
+}).mount("#app");
+</script>
+</body>
+</html>

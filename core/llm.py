@@ -57,6 +57,9 @@ _LLM_LIMIT_PATTERNS = (
 )
 _MIN_PLAN_BYTES = int(os.environ.get("FRSHTY_MIN_PLAN_BYTES", "400"))
 
+READ_ONLY_TOOLS = ["Read", "Glob", "Grep", "Bash(git:*)"]
+WRITE_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch"]
+
 
 def _env():
     return {**os.environ, "CLAUDE_CODE_ENTRYPOINT": "cli"}
@@ -248,6 +251,13 @@ class LLMProvider(ABC):
         ...
 
     @abstractmethod
+    def agentic(self, prompt: str, *, cwd: Path, system_prompt: str | None = None,
+                add_dirs: list[Path] | None = None, tools: list[str] | None = None,
+                denied_tools: list[str] | None = None, timeout: int = 1200,
+                **kwargs) -> str | None:
+        ...
+
+    @abstractmethod
     def fast(self, prompt: str, *, timeout: int = 120, **kwargs) -> str | None:
         ...
 
@@ -278,12 +288,12 @@ class ClaudeProvider(LLMProvider):
     def thinking(self, prompt: str, *, cwd: Path | None = None,
                  timeout: int = 600, session_id: str | None = None,
                  resume: bool = False, model: str | None = None,
+                 allowed_tools: list[str] | None = None,
                  **kwargs) -> str | None:
         chosen_model = model or _THINKING_MODEL
         cmd = self._cmd(
             "-p", prompt,
             "--model", chosen_model,
-            "--dangerously-skip-permissions",
             "--output-format", "stream-json",
             "--include-partial-messages",
             "--verbose",
@@ -292,7 +302,11 @@ class ClaudeProvider(LLMProvider):
             cmd += ["--resume", session_id]
         elif session_id:
             cmd += ["--session-id", session_id]
-        inv_id = _record_start("run_claude_code", chosen_model, prompt, cwd, None, timeout)
+        if allowed_tools:
+            cmd += ["--allowedTools", ",".join(allowed_tools)]
+        else:
+            cmd += ["--dangerously-skip-permissions"]
+        inv_id = _record_start("run_claude_code", chosen_model, prompt, cwd, allowed_tools, timeout)
         t0 = time.monotonic()
         blocked, reason, remaining_s = _guard_status()
         if blocked:
@@ -407,84 +421,107 @@ class ClaudeProvider(LLMProvider):
         _record_end(inv_id, t0, "success", proc.returncode, output, usage=result_event)
         return output
 
+    def _run_print(self, cmd: list[str], *, prompt: str, function_name: str,
+                   model: str, cwd: Path | None, tools: list[str] | None,
+                   timeout: int, label: str) -> tuple[str | None, dict | None]:
+        """Shared body of every `claude -p` call: guard, queue, run, record.
+
+        `cwd` is the real process working directory, not just an --add-dir
+        grant, so the model explores the checkout it was pointed at.
+        Returns (text, result_envelope); text is None on block/timeout/error."""
+        inv_id = _record_start(function_name, model, prompt, cwd, tools, timeout)
+        t0 = time.monotonic()
+        blocked, reason, remaining_s = _guard_status()
+        if blocked:
+            _record_end(inv_id, t0, "blocked", None, _guard_block_output(reason, remaining_s))
+            log.emit("llm_guard_blocked",
+                     f"[{_active_instance_key()}] skipped {label} invocation "
+                     f"while cooldown active ({remaining_s}s left)",
+                     meta={"instance_key": _active_instance_key(),
+                           "reason": reason, "remaining_s": remaining_s})
+            _flag_guard_blocked()
+            return None, None
+        acquire_start = time.monotonic()
+        with _llm_sem:
+            _mark_running(inv_id, queued_s=time.monotonic() - acquire_start)
+            try:
+                result = subprocess.run(
+                    cmd, input=prompt.encode(), capture_output=True,
+                    cwd=str(cwd) if cwd else None, env=self._env(), timeout=timeout,
+                )
+            except subprocess.TimeoutExpired:
+                _record_end(inv_id, t0, "timeout", None, None)
+                return None, None
+            raw = result.stdout.decode() if result.stdout else ""
+            if result.returncode != 0 or not result.stdout:
+                err = result.stderr.decode() if result.stderr else ""
+                if err:
+                    raw = raw + "\n[stderr]\n" + err
+                _trip_llm_guard(raw)
+                _record_end(inv_id, t0, "error", result.returncode, raw)
+                return None, None
+            text, usage = _parse_claude_json_output(raw)
+            _record_end(inv_id, t0, "success", result.returncode, text, usage=usage)
+            return text, usage
+
     def balanced(self, prompt: str, *, worktree: Path | None = None,
                  tools: list[str] | None = None, timeout: int = 600,
-                 model: str | None = None, **kwargs) -> str | None:
+                 model: str | None = None, function_name: str = "run_balanced",
+                 **kwargs) -> str | None:
         chosen_model = model or "claude-sonnet-4-6"
         cmd = self._cmd("-p", "-", "--output-format", "json", "--model", chosen_model)
-        if worktree and worktree.is_dir():
-            cmd += ["--dangerously-skip-permissions", "--add-dir", str(worktree)]
+        cwd = worktree if worktree and worktree.is_dir() else None
+        if cwd:
+            cmd += ["--dangerously-skip-permissions", "--add-dir", str(cwd)]
             if tools:
-                cmd += ["--allowedTools"] + tools
-        inv_id = _record_start("run_balanced", chosen_model, prompt, worktree, tools, timeout)
-        t0 = time.monotonic()
-        blocked, reason, remaining_s = _guard_status()
-        if blocked:
-            _record_end(inv_id, t0, "blocked", None, _guard_block_output(reason, remaining_s))
-            log.emit("llm_guard_blocked",
-                     f"[{_active_instance_key()}] skipped Claude Sonnet invocation "
-                     f"while cooldown active ({remaining_s}s left)",
-                     meta={"instance_key": _active_instance_key(),
-                           "reason": reason, "remaining_s": remaining_s})
-            _flag_guard_blocked()
-            return None
-        acquire_start = time.monotonic()
-        with _llm_sem:
-            _mark_running(inv_id, queued_s=time.monotonic() - acquire_start)
-            try:
-                result = subprocess.run(
-                    cmd, input=prompt.encode(), capture_output=True, env=self._env(), timeout=timeout,
-                )
-            except subprocess.TimeoutExpired:
-                _record_end(inv_id, t0, "timeout", None, None)
-                return None
-            raw = result.stdout.decode() if result.stdout else ""
-            if result.returncode != 0 or not result.stdout:
-                err = result.stderr.decode() if result.stderr else ""
-                if err:
-                    raw = raw + "\n[stderr]\n" + err
-                _trip_llm_guard(raw)
-                _record_end(inv_id, t0, "error", result.returncode, raw)
-                return None
-            text, usage = _parse_claude_json_output(raw)
-            _record_end(inv_id, t0, "success", result.returncode, text, usage=usage)
-            return text
+                cmd += ["--allowedTools", ",".join(tools)]
+        text, _ = self._run_print(cmd, prompt=prompt, function_name=function_name,
+                                  model=chosen_model, cwd=cwd, tools=tools,
+                                  timeout=timeout, label="Claude Sonnet")
+        return text
+
+    def agentic(self, prompt: str, *, cwd: Path, system_prompt: str | None = None,
+                add_dirs: list[Path] | None = None, tools: list[str] | None = None,
+                denied_tools: list[str] | None = None, timeout: int = 1200,
+                model: str | None = None, function_name: str = "run_agentic",
+                **kwargs) -> str | None:
+        """Multi-turn Claude Code run rooted in `cwd`.
+
+        balanced() hands the model one prompt and takes the first answer, so a
+        prompt that already carries the whole payload comes back in a single
+        turn with no tool use. This mode instead starts the model inside the
+        checkout and lets it read, grep and run git until it is done, which is
+        what an interactive session does. Permission mode `dontAsk` denies
+        anything outside `tools` instead of prompting, so the run stays
+        read-only without a permission dialog."""
+        chosen_model = model or "claude-sonnet-4-6"
+        cmd = self._cmd("-p", "-", "--output-format", "json", "--model", chosen_model,
+                        "--permission-mode", "dontAsk")
+        if system_prompt:
+            cmd += ["--append-system-prompt", system_prompt]
+        if tools:
+            cmd += ["--allowedTools", ",".join(tools)]
+        if denied_tools:
+            cmd += ["--disallowedTools", ",".join(denied_tools)]
+        for extra in add_dirs or []:
+            cmd += ["--add-dir", str(extra)]
+        text, usage = self._run_print(cmd, prompt=prompt, function_name=function_name,
+                                      model=chosen_model, cwd=cwd, tools=tools,
+                                      timeout=timeout, label="Claude agent")
+        if text is not None and (usage or {}).get("num_turns") == 1:
+            log.emit("llm_agentic_single_turn",
+                     f"{function_name} answered in one turn without using a tool in {cwd}",
+                     meta={"function_name": function_name, "model": chosen_model,
+                           "cwd": str(cwd), "prompt_length": len(prompt)})
+        return text
 
     def fast(self, prompt: str, *, timeout: int = 120, **kwargs) -> str | None:
-        inv_id = _record_start("run_haiku", "claude-haiku-4-5-20251001", prompt, None, None, timeout)
-        t0 = time.monotonic()
-        blocked, reason, remaining_s = _guard_status()
-        if blocked:
-            _record_end(inv_id, t0, "blocked", None, _guard_block_output(reason, remaining_s))
-            log.emit("llm_guard_blocked",
-                     f"[{_active_instance_key()}] skipped Claude Haiku invocation "
-                     f"while cooldown active ({remaining_s}s left)",
-                     meta={"instance_key": _active_instance_key(),
-                           "reason": reason, "remaining_s": remaining_s})
-            _flag_guard_blocked()
-            return None
-        acquire_start = time.monotonic()
-        with _llm_sem:
-            _mark_running(inv_id, queued_s=time.monotonic() - acquire_start)
-            try:
-                result = subprocess.run(
-                    self._cmd("-p", "-", "--output-format", "json", "--model", "claude-haiku-4-5-20251001"),
-                    input=prompt.encode(), capture_output=True, env=self._env(), timeout=timeout,
-                )
-            except subprocess.TimeoutExpired:
-                _record_end(inv_id, t0, "timeout", None, None)
-                return None
-            raw = result.stdout.decode() if result.stdout else ""
-            if result.returncode != 0 or not result.stdout:
-                err = result.stderr.decode() if result.stderr else ""
-                if err:
-                    raw = raw + "\n[stderr]\n" + err
-                _trip_llm_guard(raw)
-                _record_end(inv_id, t0, "error", result.returncode, raw)
-                return None
-            text, usage = _parse_claude_json_output(raw)
-            _record_end(inv_id, t0, "success", result.returncode, text, usage=usage)
-            return text
+        model = "claude-haiku-4-5-20251001"
+        cmd = self._cmd("-p", "-", "--output-format", "json", "--model", model)
+        text, _ = self._run_print(cmd, prompt=prompt, function_name="run_haiku",
+                                  model=model, cwd=None, tools=None,
+                                  timeout=timeout, label="Claude Haiku")
+        return text
 
 
 class OpenCodeProvider(LLMProvider):
@@ -502,11 +539,21 @@ class OpenCodeProvider(LLMProvider):
 
     def balanced(self, prompt: str, *, worktree: Path | None = None,
                  tools: list[str] | None = None, timeout: int = 600,
-                 **kwargs) -> str | None:
+                 function_name: str = "run_balanced", **kwargs) -> str | None:
         cmd = ["opencode", "run", prompt, "--model", self.model_balanced,
                "--dangerously-skip-permissions"]
         cwd = worktree if worktree and worktree.is_dir() else None
-        return self._run(cmd, "run_balanced", self.model_balanced, prompt, cwd, timeout)
+        return self._run(cmd, function_name, self.model_balanced, prompt, cwd, timeout)
+
+    def agentic(self, prompt: str, *, cwd: Path, system_prompt: str | None = None,
+                add_dirs: list[Path] | None = None, tools: list[str] | None = None,
+                denied_tools: list[str] | None = None, timeout: int = 1200,
+                model: str | None = None, function_name: str = "run_agentic",
+                **kwargs) -> str | None:
+        full = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
+        cmd = ["opencode", "run", full, "--model", self.model_thinking,
+               "--dangerously-skip-permissions"]
+        return self._run(cmd, function_name, self.model_thinking, full, cwd, timeout)
 
     def fast(self, prompt: str, *, timeout: int = 120, **kwargs) -> str | None:
         cmd = ["opencode", "run", prompt, "--model", self.model_fast,
@@ -605,6 +652,10 @@ def run_balanced(prompt: str, *, worktree: Path | None = None,
                                     timeout=timeout, **kwargs)
 
 
+def run_agentic(prompt: str, *, cwd: Path, timeout: int = 1200, **kwargs) -> str | None:
+    return _get_provider().agentic(prompt, cwd=cwd, timeout=timeout, **kwargs)
+
+
 def run_fast(prompt: str, *, timeout: int = 120, **kwargs) -> str | None:
     return _get_provider().fast(prompt, timeout=timeout, **kwargs)
 
@@ -632,9 +683,14 @@ def run_external_model(cmd: list[str], *, fn_name: str, model: str, prompt: str,
                        cwd: Path | None = None, timeout: int = 600,
                        env_extra: dict[str, str] | None = None,
                        last_message_file: Path | None = None,
-                       transcript_file: Path | None = None) -> tuple[str | None, int | None]:
+                       transcript_file: Path | None = None,
+                       stdin_text: str | None = None) -> tuple[str | None, int | None]:
     """Run a non-Claude model CLI (codex, agy) under the same invocation
     logging as Claude. Returns (text, exit_code); text is None on timeout.
+
+    Pass the prompt via `stdin_text` (with a `-` placeholder in `cmd`) instead
+    of as an argv element when it can be large: Linux caps a single argv
+    element at 128 KB and the spawn fails with E2BIG past that.
 
     Prefers `last_message_file` (e.g. codex `-o`) when it holds content, else
     falls back to stdout. The full stdout+stderr is written to
@@ -649,6 +705,7 @@ def run_external_model(cmd: list[str], *, fn_name: str, model: str, prompt: str,
         result = subprocess.run(
             cmd, capture_output=True, cwd=str(cwd) if cwd else None,
             env=env, timeout=timeout,
+            input=stdin_text.encode() if stdin_text is not None else None,
         )
     except subprocess.TimeoutExpired:
         _record_end(inv_id, t0, "timeout", None, None)

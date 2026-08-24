@@ -38,7 +38,6 @@ class TestReviewPrRunsEveryConfiguredProvider:
         cfg = _cfg(tmp_path, providers)
         with patch.object(reviewer, "_ensure_review_worktree", return_value=None), \
              patch.object(reviewer, "_load_conventions", return_value=""), \
-             patch.object(reviewer, "_read_changed_files", return_value=""), \
              patch.object(reviewer, "_validate_issues", side_effect=lambda i, w: i), \
              patch.object(reviewer, "_simplify_all_issues", side_effect=lambda i: i), \
              patch.object(reviewer, "_style_match_all", side_effect=lambda c, i: i), \
@@ -86,8 +85,10 @@ class TestReviewPrRunsEveryConfiguredProvider:
         assert "review.json" not in names
 
     def test_no_provider_succeeding_writes_no_review_at_all(self, tmp_path):
+        """The staged diff is the reviewers' input, so it is there either way.
+        No review and no comment queue is what a failed review must leave."""
         names = self._run(tmp_path, ("claude", "codex"), claude=False, codex=False)
-        assert names == []
+        assert names == ["diff.txt"]
 
 
 class TestFanOutIsShared:

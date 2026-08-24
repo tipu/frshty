@@ -325,6 +325,43 @@ def commit_with_hooks(repo_dir: Path,
     return subprocess.CompletedProcess(args, code, "", outcome.output)
 
 
+def lint_files(repo_dir: Path, files: list[str],
+               timeout: int = PRE_COMMIT_TIMEOUT) -> dict:
+    """Run the repo's pre-commit hooks over `files` without committing.
+
+    The work-layer push gate's lint step: same runner discovery and env as
+    `commit_outcome`, scoped to the files a push introduces. A repo with no
+    pre-commit config passes trivially, matching `commit_with_hooks`. A repo
+    that configures pre-commit but whose binary cannot be located reports
+    tooling_failed rather than passing unverified. A non-zero exit reports
+    hook_failed even when the hooks auto-fixed the files, because a fix the
+    hook just wrote is not in the commits being pushed.
+
+    Returns {"status": pass|hook_failed|tooling_failed|no_config,
+    "exit_code": int, "output": str}."""
+    config = repo_dir / ".pre-commit-config.yaml"
+    if not config.is_file():
+        return {"status": "no_config", "exit_code": 0, "output": ""}
+    pc = _find_pre_commit(repo_dir)
+    if pc is None:
+        return {"status": "tooling_failed", "exit_code": 127,
+                "output": "pre-commit is configured for this repository but no "
+                          "binary could be located in .venv/bin or on PATH"}
+    present = [f for f in files if (repo_dir / f).is_file()]
+    if not present:
+        return {"status": "pass", "exit_code": 0, "output": "no files to lint"}
+    try:
+        run = subprocess.run([str(pc), "run", "--files", *present],
+                             cwd=str(repo_dir), capture_output=True, text=True,
+                             env=_hook_env(repo_dir, pc), timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {"status": "hook_failed", "exit_code": -1,
+                "output": f"pre-commit run timed out after {timeout}s"}
+    output = strip_ansi((run.stdout or "") + (run.stderr or "")).strip()
+    return {"status": "pass" if run.returncode == 0 else "hook_failed",
+            "exit_code": run.returncode, "output": output[-4000:]}
+
+
 def git_common_dir(repo_dir: Path) -> str:
     """Absolute path of the repo's shared git directory. Two checkouts that
     return the same value share one config file, so they cannot hold two

@@ -1,0 +1,1 @@
+ALTER TABLE work_items ADD COLUMN contexts TEXT NOT NULL DEFAULT '';

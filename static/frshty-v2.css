@@ -129,7 +129,7 @@ body { display: block; }
 
 /* Main */
 .ln-main { overflow-x: clip; min-width: 0; }
-.ln-page { max-width: 1280px; margin: 0 auto; padding: 0 36px 80px; display: flex; flex-direction: column; gap: 24px; }
+.ln-page { max-width: 1600px; margin: 0 auto; padding: 0 36px 80px; display: flex; flex-direction: column; gap: 24px; }
 
 .ln-topbar {
   position: sticky; top: 0; z-index: 2;
