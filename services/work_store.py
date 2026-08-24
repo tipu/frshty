@@ -1,0 +1,1053 @@
+import json
+import os
+import re
+import subprocess
+import threading
+import time
+from datetime import datetime, timedelta, timezone
+
+import core.db as db
+
+STALE_AFTER_MINUTES = 30
+STUCK_AFTER_MINUTES = 90
+DONE_WINDOW_DAYS = 7
+BG_WAIT_RECHECK_HOURS = 2
+GROUPS = ("needs_you", "agent_working", "waiting_external", "failed_stale", "done")
+
+launch_lock = threading.Lock()
+_send_locks: dict[str, threading.Lock] = {}
+_send_locks_guard = threading.Lock()
+
+TMUX_SOCKET = os.path.expanduser("~/.frshty-tmux")
+DONE_MARKER = "WORK_DONE"
+ARTIFACT_MARKER = "ARTIFACT:"
+CONTINUE_PROMPT = (
+    "Continue toward the objective. When you hit a decision point, decide "
+    "yourself by default: pick the most correct, cleanest, simplest option and "
+    "keep going. Ask the operator only when you truly cannot decide — the "
+    "choice is irreversible or destructive, or it depends on operator intent "
+    "you cannot infer. Ask with the AskUserQuestion tool, then end your turn "
+    "immediately; the work board shows the question to the operator, and when "
+    "their answer arrives as your next message, resume work from it. "
+    "Never send outward "
+    "communications (Slack messages, GitHub or Bitbucket comments, emails, "
+    "posts to external services) unless the operator explicitly asked for that "
+    "in this conversation; draft the content and ask instead. If the objective "
+    f"is fully met, end your message with the single line {DONE_MARKER}."
+)
+
+_IDLE_STOP_KINDS_SQL = "'Stop', 'Notification', 'SessionEnd'"
+_DECIDED_KINDS_SQL = ("'auto_continued', 'question_detected', 'operator_reply', "
+                      "'self_reported_done', 'stuck_tool'")
+
+_EVENT_TRANSITIONS = {
+    "SessionStart": ("running", "agent_working", None),
+    "UserPromptSubmit": ("running", "agent_working", None),
+    "Stop": ("stopped", "needs_you", "Claude finished its turn"),
+    "Notification": (None, "needs_you", "Notification"),
+    "SessionEnd": ("finished", "needs_you", "Session ended"),
+}
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+_BG_LINE_MARKERS = ("running in background with ID:", "Monitor started (task",
+                    "agentId:", "Task ID:", "<task-notification>", '"TaskStop"')
+_BG_START_RES = (
+    re.compile(r"running in background with ID: ([A-Za-z0-9_-]+)"),
+    re.compile(r"Monitor started \(task ([A-Za-z0-9_-]+)"),
+    re.compile(r"agentId: ([A-Za-z0-9_-]+)"),
+    re.compile(r"Workflow launched in background\. Task ID: ([A-Za-z0-9_-]+)"),
+)
+_BG_NOTIF_ID_RE = re.compile(r"<task-id>([A-Za-z0-9_-]+)</task-id>")
+_BG_NOTIF_TERMINAL_RE = re.compile(r"<status>(?:completed|failed|killed|stopped)</status>")
+
+
+def _bg_scan_result_text(text: str, started: set[str], ended: set[str]) -> None:
+    for pattern in _BG_START_RES:
+        for m in pattern.finditer(text):
+            started.add(m.group(1))
+    if "<task-notification>" in text and _BG_NOTIF_TERMINAL_RE.search(text):
+        m = _BG_NOTIF_ID_RE.search(text)
+        if m:
+            ended.add(m.group(1))
+
+
+def pending_background_tasks(transcript_path: str) -> set[str]:
+    if not transcript_path or not os.path.isfile(transcript_path):
+        return set()
+    started: set[str] = set()
+    ended: set[str] = set()
+    try:
+        with open(transcript_path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if not any(marker in line for marker in _BG_LINE_MARKERS):
+                    continue
+                try:
+                    d = json.loads(line)
+                except ValueError:
+                    continue
+                if d.get("isSidechain"):
+                    continue
+                if isinstance(d.get("content"), str):
+                    _bg_scan_result_text(d["content"], started, ended)
+                attachment_prompt = (d.get("attachment") or {}).get("prompt")
+                if isinstance(attachment_prompt, str):
+                    _bg_scan_result_text(attachment_prompt, started, ended)
+                content = (d.get("message") or {}).get("content")
+                if d.get("type") == "user":
+                    if isinstance(content, str):
+                        _bg_scan_result_text(content, started, ended)
+                    elif isinstance(content, list):
+                        for b in content:
+                            if not isinstance(b, dict):
+                                continue
+                            if b.get("type") == "text":
+                                _bg_scan_result_text(b.get("text") or "", started, ended)
+                            elif b.get("type") == "tool_result":
+                                inner = b.get("content")
+                                if isinstance(inner, str):
+                                    _bg_scan_result_text(inner, started, ended)
+                                elif isinstance(inner, list):
+                                    for x in inner:
+                                        if isinstance(x, dict) and x.get("type") == "text":
+                                            _bg_scan_result_text(x.get("text") or "", started, ended)
+                elif d.get("type") == "assistant" and isinstance(content, list):
+                    for b in content:
+                        if (isinstance(b, dict) and b.get("type") == "tool_use"
+                                and b.get("name") == "TaskStop"):
+                            task_id = (b.get("input") or {}).get("task_id")
+                            if task_id:
+                                ended.add(str(task_id))
+    except OSError:
+        return set()
+    return started - ended
+
+
+def is_idle_stop(kind: str, payload: dict) -> bool:
+    if kind == "Stop":
+        return True
+    return kind == "Notification" and "waiting for your input" in (payload.get("message") or "")
+
+
+def create_item(objective: str, scope: str = "ad-hoc", scope_ref: str = "",
+                instance_key: str | None = None, contexts: str = "",
+                source_item_id: int | None = None, tags: str = "") -> int:
+    now = _now()
+    with db.tx() as c:
+        cur = c.execute(
+            "INSERT INTO work_items(objective, scope, scope_ref, instance_key, contexts, "
+            "source_item_id, tags, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (objective, scope, scope_ref, instance_key, contexts, source_item_id, tags, now, now),
+        )
+        return cur.lastrowid
+
+
+def add_run(item_id: int, session_id: str, tmux_key: str, cwd: str,
+            provider: str = "claude") -> int:
+    now = _now()
+    with db.tx() as c:
+        cur = c.execute(
+            "INSERT INTO work_runs(work_item_id, provider, session_id, tmux_key, cwd, started_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (item_id, provider, session_id, tmux_key, cwd, now),
+        )
+        run_id = cur.lastrowid
+        c.execute(
+            "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+            "VALUES (?, ?, 'run_created', '{}', ?)",
+            (item_id, run_id, now),
+        )
+        return run_id
+
+
+def mark_launch_failed(run_id: int, error: str) -> None:
+    now = _now()
+    with db.tx() as c:
+        row = c.execute("SELECT work_item_id FROM work_runs WHERE id = ?", (run_id,)).fetchone()
+        if not row:
+            return
+        item_id = row["work_item_id"]
+        c.execute("UPDATE work_runs SET status = 'launch_failed', finished_at = ? WHERE id = ?",
+                  (now, run_id))
+        c.execute(
+            "UPDATE work_items SET state = 'failed_stale', stop_reason = ?, updated_at = ? WHERE id = ?",
+            (f"launch failed: {error}", now, item_id),
+        )
+        c.execute(
+            "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+            "VALUES (?, ?, 'launch_failed', ?, ?)",
+            (item_id, run_id, db.dump_json({"error": error}), now),
+        )
+
+
+def record_event(session_id: str, kind: str, payload: dict) -> bool:
+    transition = _EVENT_TRANSITIONS.get(kind)
+    if transition is None:
+        return False
+    run_status, item_state, default_reason = transition
+    bg_pending = False
+    if item_state == "needs_you" and is_idle_stop(kind, payload):
+        transcript_path = payload.get("transcript_path") or ""
+        tail = last_assistant_text(transcript_path)
+        final_lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
+        finished = bool(final_lines) and final_lines[-1] == DONE_MARKER
+        if not finished and not _looks_like_question(tail):
+            bg_pending = bool(pending_background_tasks(transcript_path))
+    now = _now()
+    with db.tx() as c:
+        run = c.execute(
+            "SELECT id, work_item_id FROM work_runs WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        if not run:
+            return False
+        item = c.execute(
+            "SELECT state, pending_question FROM work_items WHERE id = ?", (run["work_item_id"],)
+        ).fetchone()
+        c.execute(
+            "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (run["work_item_id"], run["id"], kind, db.dump_json(payload), now),
+        )
+        run_sets = ["transcript_path = COALESCE(NULLIF(?, ''), transcript_path)",
+                    "transcript_cursor = MAX(transcript_cursor, ?)"]
+        run_params: list = [payload.get("transcript_path") or "", int(payload.get("transcript_cursor") or 0)]
+        if run_status:
+            run_sets.append("status = ?")
+            run_params.append(run_status)
+        if kind == "SessionEnd":
+            run_sets.append("finished_at = ?")
+            run_params.append(now)
+        run_params.append(run["id"])
+        c.execute(f"UPDATE work_runs SET {', '.join(run_sets)} WHERE id = ?", tuple(run_params))
+        if item["state"] == "done":
+            return True
+        if item_state:
+            reason = ""
+            snooze = None
+            if item_state == "needs_you":
+                reason = payload.get("message") or payload.get("reason") or default_reason
+                excerpt = (payload.get("last_assistant_message") or "").strip()
+                if excerpt:
+                    reason = f"{reason}: {excerpt[:300]}"
+                if bg_pending and not item["pending_question"]:
+                    item_state = "waiting_external"
+                    snooze = (datetime.now(timezone.utc)
+                              + timedelta(hours=BG_WAIT_RECHECK_HOURS)).isoformat()
+                    reason = f"Waiting on a background task: {excerpt[:300]}" if excerpt \
+                        else "Waiting on a background task"
+            if kind == "UserPromptSubmit":
+                c.execute(
+                    "UPDATE work_items SET state = ?, stop_reason = ?, pending_question = '', "
+                    "snoozed_until = NULL, updated_at = ? WHERE id = ?",
+                    (item_state, reason, now, run["work_item_id"]),
+                )
+            else:
+                c.execute(
+                    "UPDATE work_items SET state = ?, stop_reason = ?, snoozed_until = ?, "
+                    "updated_at = ? WHERE id = ?",
+                    (item_state, reason, snooze, now, run["work_item_id"]),
+                )
+    return True
+
+
+def record_question(session_id: str, tool_input: dict) -> bool:
+    questions = (tool_input or {}).get("questions") or []
+    questions = [q for q in questions if isinstance(q, dict) and (q.get("question") or "").strip()]
+    if not questions:
+        return False
+    now = _now()
+    with db.tx() as c:
+        run = c.execute(
+            "SELECT id, work_item_id FROM work_runs WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        if not run:
+            return False
+        item = c.execute(
+            "SELECT state FROM work_items WHERE id = ?", (run["work_item_id"],)
+        ).fetchone()
+        if not item or item["state"] == "done":
+            return False
+        first = (questions[0].get("question") or "").strip()
+        c.execute(
+            "UPDATE work_items SET state = 'needs_you', stop_reason = ?, "
+            "pending_question = ?, updated_at = ? WHERE id = ?",
+            (first[:300], db.dump_json({"questions": questions}), now, run["work_item_id"]),
+        )
+        c.execute(
+            "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+            "VALUES (?, ?, 'question_asked', ?, ?)",
+            (run["work_item_id"], run["id"], db.dump_json({"questions": questions}), now),
+        )
+    return True
+
+
+def record_push_gate(session_id: str, verdict: str, payload: dict) -> bool:
+    now = _now()
+    with db.tx() as c:
+        run = c.execute(
+            "SELECT id, work_item_id FROM work_runs WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        if not run:
+            return False
+        c.execute(
+            "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+            "VALUES (?, ?, 'push_gate', ?, ?)",
+            (run["work_item_id"], run["id"],
+             db.dump_json({**payload, "verdict": verdict}), now),
+        )
+    return True
+
+
+def apply_action(item_id: int, action: str, until: str | None = None) -> dict:
+    now = _now()
+    with db.tx() as c:
+        item = c.execute("SELECT id, state FROM work_items WHERE id = ?", (item_id,)).fetchone()
+        if not item:
+            return {"error": "unknown work item"}
+        if action == "done":
+            c.execute("UPDATE work_items SET state = 'done', stop_reason = '', "
+                      "pending_question = '', updated_at = ? WHERE id = ?",
+                      (now, item_id))
+        elif action == "snooze":
+            if not until:
+                return {"error": "snooze requires until"}
+            c.execute(
+                "UPDATE work_items SET state = 'waiting_external', snoozed_until = ?, updated_at = ? WHERE id = ?",
+                (until, now, item_id),
+            )
+        elif action in ("autocontinue_on", "autocontinue_off"):
+            c.execute("UPDATE work_items SET autocontinue = ?, updated_at = ? WHERE id = ?",
+                      (1 if action == "autocontinue_on" else 0, now, item_id))
+        elif action == "reopen":
+            c.execute(
+                "UPDATE work_items SET state = 'needs_you', snoozed_until = NULL, updated_at = ? WHERE id = ?",
+                (now, item_id),
+            )
+        else:
+            return {"error": f"unknown action: {action}"}
+        c.execute(
+            "INSERT INTO work_events(work_item_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
+            (item_id, f"operator_{action}", db.dump_json({"until": until}), now),
+        )
+    return {"id": item_id, "action": action}
+
+
+def _tmux_bin() -> str:
+    for candidate in ("/usr/bin/tmux", "/opt/homebrew/bin/tmux", os.path.expanduser("~/.local/bin/tmux")):
+        if os.path.exists(candidate):
+            return candidate
+    return "tmux"
+
+
+def _pane_lock(session: str) -> threading.Lock:
+    with _send_locks_guard:
+        return _send_locks.setdefault(session, threading.Lock())
+
+
+def claude_running(tmux_key: str) -> bool:
+    session = f"term-{tmux_key}"
+    tmux = _tmux_bin()
+    panes = subprocess.run([tmux, "-S", TMUX_SOCKET, "list-panes", "-t", session, "-F", "#{pane_pid}"],
+                           capture_output=True, text=True)
+    if panes.returncode != 0 or not panes.stdout.strip():
+        return False
+    pane_pid = panes.stdout.strip().splitlines()[0]
+    check = subprocess.run(["pgrep", "-P", pane_pid, "-f", "claude"],
+                           capture_output=True, text=True)
+    return bool(check.stdout.strip())
+
+
+def tmux_send(tmux_key: str, text: str) -> bool:
+    session = f"term-{tmux_key}"
+    tmux = _tmux_bin()
+    with _pane_lock(session):
+        alive = subprocess.run([tmux, "-S", TMUX_SOCKET, "has-session", "-t", session],
+                               capture_output=True)
+        if alive.returncode != 0:
+            return False
+        sent = subprocess.run([tmux, "-S", TMUX_SOCKET, "send-keys", "-t", session, "-l", "--", text],
+                              capture_output=True)
+        if sent.returncode != 0:
+            return False
+        time.sleep(0.4)
+        enter = subprocess.run([tmux, "-S", TMUX_SOCKET, "send-keys", "-t", session, "Enter"],
+                              capture_output=True)
+        return enter.returncode == 0
+
+
+BTW_ANSWER_TIMEOUT = 120
+_BTW_CLOSE_HINT = "Esc to close"
+_BTW_DONE_HINT = "c to copy"
+_BTW_SCROLL_LIMIT = 200
+_BTW_SCROLL_SETTLES = 3
+_BTW_SCROLL_SETTLE_SECONDS = 0.06
+
+
+def _tmux_run(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run([_tmux_bin(), "-S", TMUX_SOCKET, *args],
+                          capture_output=True, text=True)
+
+
+def _capture_pane(session: str) -> list[str]:
+    out = _tmux_run("capture-pane", "-t", session, "-p")
+    return out.stdout.splitlines() if out.returncode == 0 else []
+
+
+def btw_overlay(lines: list[str]) -> dict | None:
+    """The /btw panel drawn over the pane, or None when no panel is open.
+
+    The panel lists the questions asked so far, then the selected answer, then
+    a footer of key hints. The footer offers the copy hint only once the answer
+    is complete, so it doubles as the done signal."""
+    footer = None
+    for i in range(len(lines) - 1, -1, -1):
+        if _BTW_CLOSE_HINT in lines[i]:
+            footer = i
+            break
+    if footer is None:
+        return None
+    start, asked = footer, ""
+    for i in range(footer - 1, -1, -1):
+        stripped = lines[i].lstrip()
+        if stripped.startswith("/btw "):
+            start, asked = i + 1, stripped[len("/btw "):].strip()
+            break
+    body = [ln.rstrip() for ln in lines[start:footer]]
+    while body and not body[0]:
+        body.pop(0)
+    while body and not body[-1]:
+        body.pop()
+    return {"done": _BTW_DONE_HINT in lines[footer], "asked": asked, "body": body}
+
+
+def _merge_window(body: list[str], window: list[str]) -> bool:
+    """Append the part of a scrolled panel view that is not in body yet."""
+    if not window:
+        return False
+    for k in range(min(len(body), len(window)), 0, -1):
+        if body[-k:] == window[:k]:
+            rest = window[k:]
+            body.extend(rest)
+            return bool(rest)
+    body.extend(window)
+    return True
+
+
+def _btw_answer_text(body: list[str]) -> str:
+    rows = list(body)
+    while rows and not rows[0].strip():
+        rows.pop(0)
+    while rows and not rows[-1].strip():
+        rows.pop()
+    if not rows:
+        return ""
+    pad = min(len(r) - len(r.lstrip()) for r in rows if r.strip())
+    return "\n".join(r[pad:] if r.strip() else "" for r in rows)
+
+
+def ask_btw(tmux_key: str, question: str, timeout: float = BTW_ANSWER_TIMEOUT) -> dict:
+    """Ask a /btw side question in the pane and read the answer back.
+
+    /btw answers from a fork of the conversation, so the main turn keeps
+    running and the question never enters it. The exchange is not written to
+    the session transcript, so the answer is only readable from the pane
+    panel. The panel swallows keystrokes while it is open, so a stale panel is
+    closed first and ours is closed at the end. Answers taller than the pane
+    are stitched from successive views, one Down key at a time."""
+    session = f"term-{tmux_key}"
+    question = " ".join(question.split())
+    with _pane_lock(session):
+        if _tmux_run("has-session", "-t", session).returncode != 0:
+            return {"error": "tmux session gone"}
+        if btw_overlay(_capture_pane(session)):
+            _tmux_run("send-keys", "-t", session, "Escape")
+            time.sleep(0.4)
+            if btw_overlay(_capture_pane(session)):
+                return {"error": "a /btw panel is stuck open in the terminal"}
+        if _tmux_run("send-keys", "-t", session, "-l", "--",
+                     f"/btw {question}").returncode != 0:
+            return {"error": "tmux send failed"}
+        time.sleep(0.4)
+        if _tmux_run("send-keys", "-t", session, "Enter").returncode != 0:
+            return {"error": "tmux send failed"}
+        panel = None
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            time.sleep(0.5)
+            found = btw_overlay(_capture_pane(session))
+            if found and found["done"]:
+                panel = found
+                break
+        if panel is None:
+            return {"error": f"no /btw answer within {int(timeout)}s"}
+        head = panel["asked"].rstrip("\u2026").rstrip()
+        if not head or not question.startswith(head):
+            return {"error": "the terminal shows an answer to a different /btw question"}
+        body = panel["body"]
+        for _ in range(_BTW_SCROLL_LIMIT):
+            _tmux_run("send-keys", "-t", session, "Down")
+            grew = False
+            for _ in range(_BTW_SCROLL_SETTLES):
+                time.sleep(_BTW_SCROLL_SETTLE_SECONDS)
+                scrolled = btw_overlay(_capture_pane(session))
+                if not scrolled:
+                    break
+                if _merge_window(body, scrolled["body"]):
+                    grew = True
+                    break
+            if not grew:
+                break
+        if btw_overlay(_capture_pane(session)):
+            _tmux_run("send-keys", "-t", session, "Escape")
+    answer = _btw_answer_text(body)
+    return {"answer": answer} if answer else {"error": "empty /btw answer"}
+
+
+def last_assistant_text(transcript_path: str) -> str:
+    if not transcript_path or not os.path.isfile(transcript_path):
+        return ""
+    try:
+        with open(transcript_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 131072))
+            tail = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    text = ""
+    for line in tail.splitlines():
+        if '"type":"assistant"' not in line and '"type": "assistant"' not in line:
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        content = (d.get("message") or {}).get("content") or []
+        parts = [b.get("text", "") for b in content
+                 if isinstance(b, dict) and b.get("type") == "text"]
+        if parts:
+            text = "\n".join(parts)
+    return text.strip()
+
+
+def _assistant_texts(transcript_path: str) -> list[str]:
+    if not transcript_path or not os.path.isfile(transcript_path):
+        return []
+    try:
+        with open(transcript_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 262144))
+            raw = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+    texts = []
+    for line in raw.splitlines():
+        if '"type":"assistant"' not in line and '"type": "assistant"' not in line:
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        content = (d.get("message") or {}).get("content") or []
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "text" and b.get("text"):
+                texts.append(b["text"])
+    return texts
+
+
+def record_artifacts(session_id: str, transcript_path: str) -> int:
+    found = []
+    lines = [ln for t in _assistant_texts(transcript_path) for ln in t.splitlines()]
+    for line in lines:
+        idx = line.find(ARTIFACT_MARKER)
+        if idx < 0:
+            continue
+        rest = line[idx + len(ARTIFACT_MARKER):].strip().replace("\u2014", " - ").replace("—", " - ")
+        for sep in (" — ", " - ", " -- "):
+            if sep in rest:
+                path, note = rest.split(sep, 1)
+                break
+        else:
+            path, note = rest, ""
+        path = path.strip()
+        if path.startswith("/") and len(path) < 500:
+            found.append((path, note.strip()[:200]))
+    if not found:
+        return 0
+    now = _now()
+    added = 0
+    with db.tx() as c:
+        run = c.execute(
+            "SELECT id, work_item_id FROM work_runs WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        if not run:
+            return 0
+        for path, note in found:
+            cur = c.execute(
+                "INSERT OR IGNORE INTO work_artifacts(work_item_id, work_run_id, path, note, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (run["work_item_id"], run["id"], path, note, now),
+            )
+            added += cur.rowcount
+    return added
+
+
+def _salient_arg(name: str, inp: dict) -> str:
+    if not isinstance(inp, dict):
+        return ""
+    for key in ("command", "file_path", "path", "description", "prompt", "url", "query"):
+        v = inp.get(key)
+        if v:
+            return str(v).replace("\n", " ")[:120]
+    return ""
+
+
+def transcript_timeline(transcript_path: str, max_bytes: int = 4194304) -> list[dict]:
+    if not transcript_path or not os.path.isfile(transcript_path):
+        return []
+    try:
+        with open(transcript_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - max_bytes))
+            raw = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+    timeline: list[dict] = []
+    for line in raw.splitlines():
+        if '"type"' not in line:
+            continue
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        t = d.get("type")
+        msg = d.get("message") or {}
+        if t == "user":
+            if d.get("toolUseResult") is not None or d.get("isSidechain"):
+                continue
+            content = msg.get("content")
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
+                    continue
+                text = " ".join(b.get("text", "") for b in content
+                                if isinstance(b, dict) and b.get("type") == "text")
+            else:
+                continue
+            if text.strip():
+                timeline.append({"kind": "prompt", "text": text.strip()[:500],
+                                 "at": d.get("timestamp", "")})
+        elif t == "assistant" and not d.get("isSidechain"):
+            for b in msg.get("content") or []:
+                if not isinstance(b, dict):
+                    continue
+                if b.get("type") == "tool_use":
+                    timeline.append({"kind": "tool", "name": b.get("name", "?"),
+                                     "arg": _salient_arg(b.get("name", ""), b.get("input")),
+                                     "at": d.get("timestamp", "")})
+                elif b.get("type") == "text" and b.get("text", "").strip():
+                    timeline.append({"kind": "text", "text": b["text"].strip()[:2000],
+                                     "at": d.get("timestamp", "")})
+    return timeline
+
+
+def item_detail(item_id: int) -> dict:
+    item = db.query_one("SELECT * FROM work_items WHERE id = ?", (item_id,))
+    if not item:
+        return {"error": "unknown work item"}
+    if item["state"] == "waiting_external" and item["snoozed_until"] \
+            and item["snoozed_until"] <= _now():
+        item["state"] = "needs_you"
+    runs = db.query_all("SELECT * FROM work_runs WHERE work_item_id = ? ORDER BY id", (item_id,))
+    events = db.query_all(
+        "SELECT id, work_run_id, kind, payload, created_at FROM work_events "
+        "WHERE work_item_id = ? ORDER BY id", (item_id,))
+    artifacts = db.query_all(
+        "SELECT id, path, note, created_at FROM work_artifacts WHERE work_item_id = ? ORDER BY id",
+        (item_id,))
+    kinds = {e["kind"] for e in events}
+    if item["state"] == "done":
+        item["done_source"] = "operator" if "operator_done" in kinds else (
+            "agent" if "self_reported_done" in kinds else "unknown")
+    timeline = transcript_timeline(runs[-1]["transcript_path"]) if runs else []
+    source_item = None
+    if item["source_item_id"]:
+        source_item = db.query_one(
+            "SELECT id, objective, state FROM work_items WHERE id = ?",
+            (item["source_item_id"],))
+    followup_children = db.query_all(
+        "SELECT id, objective, state FROM work_items WHERE source_item_id = ? ORDER BY id",
+        (item_id,))
+    return {"item": item, "runs": runs, "events": events, "artifacts": artifacts,
+            "timeline": timeline, "source_item": source_item,
+            "followup_children": followup_children}
+
+
+def find_artifacts(query: str = "", limit: int = 20) -> list[dict]:
+    like = f"%{query}%"
+    return db.query_all(
+        "SELECT a.id, a.path, a.note, a.created_at, a.work_item_id, i.objective "
+        "FROM work_artifacts a LEFT JOIN work_items i ON i.id = a.work_item_id "
+        "WHERE a.path LIKE ? OR a.note LIKE ? OR i.objective LIKE ? "
+        "ORDER BY a.id DESC LIMIT ?",
+        (like, like, like, limit),
+    )
+
+
+def _looks_like_question(text: str) -> bool:
+    return "?" in text[-300:]
+
+
+def maybe_autocontinue(session_id: str, transcript_path: str) -> str:
+    tail = last_assistant_text(transcript_path)
+    now = _now()
+    with db.tx() as c:
+        run = c.execute(
+            "SELECT id, work_item_id, tmux_key FROM work_runs WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        if not run:
+            return "unknown_session"
+        item = c.execute(
+            "SELECT state, autocontinue, continues_used, continue_cap, pending_question "
+            "FROM work_items WHERE id = ?", (run["work_item_id"],),
+        ).fetchone()
+        if not item or item["state"] != "needs_you":
+            return "not_applicable"
+        excerpt = tail[:300]
+        if item["pending_question"]:
+            c.execute(
+                "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+                "VALUES (?, ?, 'question_detected', '{}', ?)",
+                (run["work_item_id"], run["id"], now),
+            )
+            return "question"
+        final_lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
+        if final_lines and final_lines[-1] == DONE_MARKER:
+            c.execute(
+                "UPDATE work_items SET state = 'done', stop_reason = '', "
+                "pending_question = '', current_checkpoint = ?, updated_at = ? WHERE id = ?",
+                (excerpt, now, run["work_item_id"]),
+            )
+            c.execute("UPDATE work_runs SET status = 'finished', finished_at = ? WHERE id = ?",
+                      (now, run["id"]))
+            c.execute(
+                "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+                "VALUES (?, ?, 'self_reported_done', ?, ?)",
+                (run["work_item_id"], run["id"], db.dump_json({"tail": excerpt}), now),
+            )
+            return "done"
+        if excerpt:
+            c.execute("UPDATE work_items SET stop_reason = ? WHERE id = ?",
+                      (excerpt, run["work_item_id"]))
+        if _looks_like_question(tail):
+            c.execute(
+                "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+                "VALUES (?, ?, 'question_detected', '{}', ?)",
+                (run["work_item_id"], run["id"], now),
+            )
+            return "question"
+        if not item["autocontinue"]:
+            return "disabled"
+        if item["continues_used"] >= item["continue_cap"]:
+            return "capped"
+    sent = tmux_send(run["tmux_key"], CONTINUE_PROMPT)
+    now = _now()
+    with db.tx() as c:
+        current = c.execute("SELECT state FROM work_items WHERE id = ?",
+                            (run["work_item_id"],)).fetchone()
+        if not current or current["state"] != "needs_you":
+            return "not_applicable"
+        if not sent:
+            c.execute("UPDATE work_items SET stop_reason = 'tmux session gone', "
+                      "state = 'failed_stale', updated_at = ? WHERE id = ?",
+                      (now, run["work_item_id"]))
+            return "session_gone"
+        c.execute(
+            "UPDATE work_items SET state = 'agent_working', continues_used = continues_used + 1, "
+            "updated_at = ? WHERE id = ?", (now, run["work_item_id"]),
+        )
+        c.execute("UPDATE work_runs SET status = 'running' WHERE id = ?", (run["id"],))
+        c.execute(
+            "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+            "VALUES (?, ?, 'auto_continued', ?, ?)",
+            (run["work_item_id"], run["id"], db.dump_json({"n": item["continues_used"] + 1}), now),
+        )
+    return "continued"
+
+
+def reply(item_id: int, text: str) -> dict:
+    now = _now()
+    with db.tx() as c:
+        item = c.execute("SELECT state FROM work_items WHERE id = ?", (item_id,)).fetchone()
+        if not item:
+            return {"error": "unknown work item"}
+        if item["state"] == "done":
+            return {"error": "item is done; reopen it before replying"}
+        run = c.execute(
+            "SELECT id, tmux_key FROM work_runs WHERE work_item_id = ? ORDER BY id DESC LIMIT 1",
+            (item_id,),
+        ).fetchone()
+        if not run:
+            return {"error": "no run for this item"}
+    if not claude_running(run["tmux_key"]):
+        return {"error": "no live Claude in the session; open the terminal"}
+    if not tmux_send(run["tmux_key"], text):
+        return {"error": "tmux session gone"}
+    with db.tx() as c:
+        c.execute(
+            "UPDATE work_items SET state = 'agent_working', stop_reason = '', "
+            "pending_question = '', snoozed_until = NULL, updated_at = ? WHERE id = ?",
+            (now, item_id),
+        )
+        c.execute("UPDATE work_runs SET status = 'running' WHERE id = ?", (run["id"],))
+        c.execute(
+            "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+            "VALUES (?, ?, 'operator_reply', ?, ?)",
+            (item_id, run["id"], db.dump_json({"text": text[:500]}), now),
+        )
+    return {"id": item_id, "action": "reply"}
+
+
+def side_question(item_id: int, text: str) -> dict:
+    """Ask the item's live Claude a side question without touching its run."""
+    question = " ".join((text or "").split())
+    if not question:
+        return {"error": "empty question"}
+    item = db.query_one("SELECT id FROM work_items WHERE id = ?", (item_id,))
+    if not item:
+        return {"error": "unknown work item"}
+    run = db.query_one(
+        "SELECT id, tmux_key FROM work_runs WHERE work_item_id = ? ORDER BY id DESC LIMIT 1",
+        (item_id,))
+    if not run:
+        return {"error": "no run for this item"}
+    if not claude_running(run["tmux_key"]):
+        return {"error": "no live Claude in the session; open the terminal"}
+    out = ask_btw(run["tmux_key"], question)
+    if "error" in out:
+        return out
+    now = _now()
+    with db.tx() as c:
+        c.execute(
+            "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+            "VALUES (?, ?, 'btw', ?, ?)",
+            (item_id, run["id"],
+             db.dump_json({"question": question, "answer": out["answer"][:8000]}), now),
+        )
+    return {"id": item_id, "question": question, "answer": out["answer"]}
+
+
+def pending_tool_calls(transcript_path: str) -> bool:
+    """True when the transcript tail ends inside an unanswered tool call.
+
+    A tool_use id with no matching tool_result means Claude is blocked in
+    that call, not idle. The sweep must not synthesize a Stop for it.
+    """
+    if not transcript_path or not os.path.isfile(transcript_path):
+        return False
+    try:
+        with open(transcript_path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 262144))
+            tail = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return False
+    pending: set[str] = set()
+    for line in tail.splitlines():
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        content = (d.get("message") or {}).get("content")
+        if not isinstance(content, list):
+            continue
+        if d.get("type") == "assistant":
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("id"):
+                    pending.add(str(b["id"]))
+        elif d.get("type") == "user":
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "tool_result":
+                    pending.discard(str(b.get("tool_use_id") or ""))
+    return bool(pending)
+
+
+def retry_missed_autocontinues(cutoff: str) -> list[dict]:
+    """Run the autocontinue decision for a needs_you item that never got one.
+
+    The idle-stop hook is what decides whether to auto-continue. When that
+    hook is dropped, the item flips to needs_you with no decision recorded,
+    so it holds an unused continue budget and nothing moves it. This finds
+    those items and runs the decision late. An item whose decision already
+    ran carries an event newer than its last idle stop, so it is skipped.
+    """
+    rows = db.query_all(
+        "SELECT i.id AS item_id, r.session_id, r.tmux_key, r.transcript_path "
+        "FROM work_items i JOIN work_runs r ON r.id = "
+        "(SELECT r2.id FROM work_runs r2 WHERE r2.work_item_id = i.id ORDER BY r2.id DESC LIMIT 1) "
+        "WHERE i.state = 'needs_you' AND i.autocontinue = 1 "
+        "AND i.continues_used < i.continue_cap "
+        "AND COALESCE(i.pending_question, '') = '' "
+        "AND i.updated_at < ? "
+        "AND (SELECT COALESCE(MAX(e.id), 0) FROM work_events e WHERE e.work_item_id = i.id "
+        f"AND e.kind IN ({_IDLE_STOP_KINDS_SQL})) > "
+        "(SELECT COALESCE(MAX(e.id), 0) FROM work_events e WHERE e.work_item_id = i.id "
+        f"AND e.kind IN ({_DECIDED_KINDS_SQL}))",
+        (cutoff,),
+    )
+    actions: list[dict] = []
+    for row in rows:
+        if not claude_running(row["tmux_key"]):
+            continue
+        outcome = maybe_autocontinue(row["session_id"], row["transcript_path"])
+        actions.append({"id": row["item_id"], "action": f"autocontinue_retry:{outcome}"})
+    return actions
+
+
+def sweep_stale_items(now: datetime | None = None) -> list[dict]:
+    """Reconcile agent_working items whose hook events have gone quiet.
+
+    A single agent turn longer than STALE_AFTER_MINUTES fires no hooks, so
+    updated_at goes stale while the transcript still grows and the board
+    shows a live session as failed_stale. The sweep refreshes updated_at
+    from the transcript mtime for a session that is still writing, holds a
+    session blocked in a tool call until STUCK_AFTER_MINUTES and then hands
+    it to the operator, synthesizes the missed Stop for a live-but-idle
+    session so the question/done/autocontinue path runs, and marks the item
+    failed_stale when the Claude process is gone. A second pass runs the
+    autocontinue decision for a needs_you item whose idle-stop hook was
+    dropped before it made one.
+    """
+    now_dt = now or datetime.now(timezone.utc)
+    cutoff = (now_dt - timedelta(minutes=STALE_AFTER_MINUTES)).isoformat()
+    stuck_cutoff = (now_dt - timedelta(minutes=STUCK_AFTER_MINUTES)).isoformat()
+    rows = db.query_all(
+        "SELECT i.id AS item_id, r.id AS run_id, r.session_id, r.tmux_key, r.transcript_path "
+        "FROM work_items i JOIN work_runs r ON r.id = "
+        "(SELECT r2.id FROM work_runs r2 WHERE r2.work_item_id = i.id ORDER BY r2.id DESC LIMIT 1) "
+        "WHERE i.state = 'agent_working' AND i.updated_at < ?",
+        (cutoff,),
+    )
+    actions: list[dict] = []
+    for row in rows:
+        mtime_iso = ""
+        transcript_size = 0
+        try:
+            stat = os.stat(row["transcript_path"])
+            mtime_iso = datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()
+            transcript_size = stat.st_size
+        except OSError:
+            pass
+        if mtime_iso > cutoff:
+            with db.tx() as c:
+                c.execute(
+                    "UPDATE work_items SET updated_at = ? WHERE id = ? "
+                    "AND state = 'agent_working' AND updated_at < ?",
+                    (mtime_iso, row["item_id"], mtime_iso),
+                )
+            actions.append({"id": row["item_id"], "action": "refreshed"})
+            continue
+        if not claude_running(row["tmux_key"]):
+            flipped = 0
+            with db.tx() as c:
+                flipped = c.execute(
+                    "UPDATE work_items SET state = 'failed_stale', "
+                    "stop_reason = 'Claude process gone without a Stop event', "
+                    "updated_at = ? WHERE id = ? AND state = 'agent_working'",
+                    (_now(), row["item_id"]),
+                ).rowcount
+                if flipped:
+                    c.execute("UPDATE work_runs SET status = 'stopped' WHERE id = ?",
+                              (row["run_id"],))
+                    c.execute(
+                        "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+                        "VALUES (?, ?, 'stale_failed', '{}', ?)",
+                        (row["item_id"], row["run_id"], _now()),
+                    )
+            if flipped:
+                actions.append({"id": row["item_id"], "action": "failed"})
+            continue
+        if pending_tool_calls(row["transcript_path"]):
+            if mtime_iso and mtime_iso > stuck_cutoff:
+                with db.tx() as c:
+                    c.execute(
+                        "UPDATE work_items SET updated_at = ? WHERE id = ? "
+                        "AND state = 'agent_working'", (_now(), row["item_id"]),
+                    )
+                actions.append({"id": row["item_id"], "action": "busy_tool"})
+                continue
+            reason = (f"A tool call has not returned for {STUCK_AFTER_MINUTES} minutes. "
+                      "Open the terminal to see what it is waiting on.")
+            flipped = 0
+            with db.tx() as c:
+                flipped = c.execute(
+                    "UPDATE work_items SET state = 'needs_you', stop_reason = ?, "
+                    "updated_at = ? WHERE id = ? AND state = 'agent_working'",
+                    (reason, _now(), row["item_id"]),
+                ).rowcount
+                if flipped:
+                    c.execute(
+                        "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+                        "VALUES (?, ?, 'stuck_tool', '{}', ?)",
+                        (row["item_id"], row["run_id"], _now()),
+                    )
+            if flipped:
+                actions.append({"id": row["item_id"], "action": "stuck_tool"})
+            continue
+        payload = {
+            "transcript_path": row["transcript_path"],
+            "transcript_cursor": transcript_size,
+            "reason": f"No hook events for {STALE_AFTER_MINUTES} minutes; Stop synthesized by the stale sweep",
+            "last_assistant_message": last_assistant_text(row["transcript_path"])[:300],
+        }
+        record_event(row["session_id"], "Stop", payload)
+        record_artifacts(row["session_id"], row["transcript_path"])
+        outcome = maybe_autocontinue(row["session_id"], row["transcript_path"])
+        actions.append({"id": row["item_id"], "action": f"stop_synthesized:{outcome}"})
+    actions.extend(retry_missed_autocontinues(cutoff))
+    return actions
+
+
+def grouped_items(now: datetime | None = None, q: str = "",
+                  tags: str = "") -> dict[str, list[dict]]:
+    now = now or datetime.now(timezone.utc)
+    stale_cutoff = (now - timedelta(minutes=STALE_AFTER_MINUTES)).isoformat()
+    done_cutoff = (now - timedelta(days=DONE_WINDOW_DAYS)).isoformat()
+    now_iso = now.isoformat()
+    q = (q or "").strip().lower()
+    wanted_tags = {t.strip().lower() for t in (tags or "").split(",") if t.strip()}
+    rows = db.query_all(
+        "SELECT i.*, "
+        "(SELECT session_id FROM work_runs r WHERE r.work_item_id = i.id ORDER BY r.id DESC LIMIT 1) AS last_session_id, "
+        "(SELECT tmux_key FROM work_runs r WHERE r.work_item_id = i.id ORDER BY r.id DESC LIMIT 1) AS last_tmux_key, "
+        "EXISTS(SELECT 1 FROM work_events e WHERE e.work_item_id = i.id AND e.kind = 'operator_done') AS operator_confirmed "
+        "FROM work_items i ORDER BY i.priority DESC, i.created_at DESC"
+    )
+    groups: dict[str, list[dict]] = {g: [] for g in GROUPS}
+    for row in rows:
+        if q and q not in (row["objective"] or "").lower():
+            continue
+        if wanted_tags and wanted_tags.isdisjoint((row["tags"] or "").split(",")):
+            continue
+        state = row["state"]
+        if state == "done":
+            if q or wanted_tags or row["updated_at"] >= done_cutoff:
+                groups["done"].append(row)
+            continue
+        if state == "waiting_external" and row["snoozed_until"] and row["snoozed_until"] <= now_iso:
+            row["state"] = "needs_you"
+            groups["needs_you"].append(row)
+            continue
+        if state == "agent_working" and row["updated_at"] < stale_cutoff:
+            groups["failed_stale"].append(row)
+            continue
+        groups[state].append(row)
+    return groups

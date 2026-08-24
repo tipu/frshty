@@ -262,9 +262,10 @@ def _judge_blind(config: dict, claim: str, diff: str, result: DefenceResult,
         without_exit=result.without_change_exit, without_output=result.without_change_output,
     )
     text, _ = run_external_model(
-        ["codex", "exec", "--skip-git-repo-check", prompt],
+        ["codex", "exec", "--skip-git-repo-check", "-"],
         fn_name="defence_judge", model="codex", prompt=prompt,
         cwd=worktree, timeout=JUDGE_TIMEOUT,
+        stdin_text=prompt,
     )
     judge = "codex"
     if not text:

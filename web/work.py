@@ -4,7 +4,7 @@ from fastapi import APIRouter
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
 import core.db as db
-from services import work_debrief, work_launch, work_store
+from services import work_debrief, work_launch, work_store, work_tags
 from web.pages import _template
 
 
@@ -26,14 +26,15 @@ DONE_PAGE_SIZE = 20
 
 
 @router.get("/api/work/items")
-def api_work_items(q: str = "", done_page: int = 1):
-    groups = work_store.grouped_items(q=q)
+def api_work_items(q: str = "", tags: str = "", done_page: int = 1):
+    groups = work_store.grouped_items(q=q, tags=tags)
     counts = {g: len(rows) for g, rows in groups.items()}
     done_pages = max(1, -(-counts["done"] // DONE_PAGE_SIZE))
     done_page = min(max(1, done_page), done_pages)
     start = (done_page - 1) * DONE_PAGE_SIZE
     groups["done"] = groups["done"][start:start + DONE_PAGE_SIZE]
     return {"groups": groups, "counts": counts,
+            "all_tags": work_tags.known_tags(),
             "done_page": done_page, "done_pages": done_pages,
             "personal_loaded": work_launch.personal_config() is not None,
             "projects": work_launch.project_entries(),
@@ -68,6 +69,14 @@ def api_work_reply(item_id: int, body: dict):
     if not text:
         return JSONResponse({"error": "empty reply"}, status_code=400)
     result = work_store.reply(item_id, text)
+    if "error" in result:
+        return JSONResponse(result, status_code=409)
+    return result
+
+
+@router.post("/api/work/items/{item_id}/btw")
+def api_work_btw(item_id: int, body: dict):
+    result = work_store.side_question(item_id, body.get("text") or "")
     if "error" in result:
         return JSONResponse(result, status_code=409)
     return result

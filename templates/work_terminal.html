@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<meta charset="utf-8">
+<title>Work terminal — frshty</title>
+<script src="/static/vendor/xterm.js"></script>
+<link rel="stylesheet" href="/static/vendor/xterm.css">
+<script src="/static/vendor/xterm-addon-fit.js"></script>
+<style>
+html, body { margin: 0; height: 100%; background: #0a0a0f; }
+#term { height: 100%; }
+</style>
+<script src="/static/frshty-usage.js"></script>
+</head>
+<body>
+<div id="term"></div>
+<script>
+const key = location.pathname.split("/")[2];
+const term = new Terminal({
+  cursorBlink: true, fontSize: 14,
+  fontFamily: "'JetBrains Mono', Menlo, monospace",
+  theme: { background: "#0a0a0f", foreground: "#e2e8f0", cursor: "#e2e8f0" },
+});
+const fit = new FitAddon.FitAddon();
+term.loadAddon(fit);
+term.open(document.getElementById("term"));
+fit.fit();
+let ws = null;
+let delay = 0;
+function connect() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(`${proto}//${location.host}/ws/terminal/work-${key}`);
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => {
+    delay = 0;
+    fit.fit();
+    ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+  };
+  ws.onmessage = (e) => term.write(e.data instanceof ArrayBuffer ? new Uint8Array(e.data) : e.data);
+  ws.onclose = (e) => {
+    if (e.code === 1008) { term.write("\r\n\x1b[31m[terminal unavailable]\x1b[0m\r\n"); return; }
+    delay = Math.min(delay ? delay * 2 : 500, 8000);
+    setTimeout(() => { term.reset(); connect(); }, delay);
+  };
+}
+term.onData((d) => { if (ws && ws.readyState === 1) ws.send(d); });
+window.addEventListener("resize", () => {
+  fit.fit();
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+});
+connect();
+</script>
+</body>
+</html>

@@ -253,6 +253,7 @@ class _CIMonitorMixin:
         ts["ci_passed"] = True
         ts.pop("checks_started_at", None)
         ts.pop("ci_fix_attempts", None)
+        ts.pop("ci_fix_heads", None)
         ts.pop("_ci_timeout_state", None)
         ts.pop("_ci_no_ci_logged", None)
         return ts
@@ -437,6 +438,10 @@ class BitbucketPlatform(_CIMonitorMixin):
                 for p in (data.get("participants") or [])
                 if p.get("approved")
             ]
+            reviewers = [
+                r.get("display_name") or r.get("account_id", "")
+                for r in (data.get("reviewers") or [])
+            ]
             return {
                 "state": data.get("state", "OPEN"),
                 "updated_on": data.get("updated_on", ""),
@@ -446,6 +451,8 @@ class BitbucketPlatform(_CIMonitorMixin):
                 "author_id": data.get("author", {}).get("account_id", ""),
                 "mergeable": "CONFLICTING" if data.get("has_conflicts") else "MERGEABLE",
                 "approvers": approvers,
+                "reviewers": reviewers,
+                "head_sha": data.get("source", {}).get("commit", {}).get("hash", ""),
             }
 
     def post_pr_comment(self, repo: str, pr_id: int, body: str, path: str | None = None, line: int | None = None, parent_id: int | None = None) -> dict:
@@ -669,6 +676,19 @@ class GitHubPlatform(_CIMonitorMixin):
             prs.extend(self._normalize_pr(pr, repo) for pr in json.loads(result.stdout))
         return prs
 
+    def list_open_prs(self) -> list[dict]:
+        prs = []
+        for repo in self.repos:
+            result = self._run_gh([
+                "pr", "list", "--repo", repo,
+                "--json", "number,title,author,headRefName,baseRefName,createdAt,updatedAt,url,state",
+                "--limit", "50",
+            ])
+            if result.returncode != 0:
+                continue
+            prs.extend(self._normalize_pr(pr, repo) for pr in json.loads(result.stdout))
+        return prs
+
     def find_merged_pr_by_key(self, key: str) -> dict | None:
         if not key:
             return None
@@ -862,7 +882,7 @@ class GitHubPlatform(_CIMonitorMixin):
         full = self._resolve_repo(repo)
         result = self._run_gh([
             "pr", "view", str(pr_id), "--repo", full,
-            "--json", "state,updatedAt,mergeable,author,latestReviews",
+            "--json", "state,updatedAt,mergeable,author,latestReviews,headRefOid,assignees,reviewRequests",
         ])
         if result.returncode != 0:
             return {"state": "OPEN", "updated_on": "", "mergeable": "UNKNOWN"}
@@ -872,6 +892,10 @@ class GitHubPlatform(_CIMonitorMixin):
             for r in (data.get("latestReviews") or [])
             if r.get("state") == "APPROVED"
         ]
+        reviewers = [
+            a.get("login") or a.get("name", "")
+            for a in (data.get("assignees") or []) + (data.get("reviewRequests") or [])
+        ]
         return {
             "state": data.get("state", "OPEN"),
             "updated_on": data.get("updatedAt", ""),
@@ -879,6 +903,8 @@ class GitHubPlatform(_CIMonitorMixin):
             "author_id": data.get("author", {}).get("login", ""),
             "mergeable": data.get("mergeable", "UNKNOWN"),
             "approvers": approvers,
+            "reviewers": [x for x in reviewers if x],
+            "head_sha": data.get("headRefOid", ""),
         }
 
     def post_pr_comment(self, repo: str, pr_id: int, body: str, path: str | None = None, line: int | None = None, parent_id: int | None = None) -> dict:

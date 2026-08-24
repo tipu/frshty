@@ -264,7 +264,7 @@ That `docs/proof.md` is the postcondition gate for this step.
 
 _PROVE_BROWSER_BLOCK_HEADER = """
 
-BROWSER RECORDINGS: if any part of this proof drives a browser (Playwright, Puppeteer, or similar), install the click indicator below before navigating. It draws a brief red ring at each click so a viewer can see what is being clicked in the recording.
+BROWSER RECORDINGS: if any part of this proof drives a browser (Playwright, Puppeteer, or similar), install the click indicator below before navigating. It draws a brief red ring at each click, and the same ring on any input field that gains focus without a click (keyboard tabbing, programmatic focus such as fill()), so a viewer can see what is being interacted with in the recording.
 
 Playwright: `await context.addInitScript(SCRIPT)` on the BrowserContext before the first `goto`. It re-applies on every navigation, including SPA route changes. Register it on the context, not the page.
 Puppeteer: `await page.evaluateOnNewDocument(SCRIPT)`.
@@ -1429,8 +1429,13 @@ def fix_ci_failures(ctx: TaskContext) -> TaskResult:
                 def _memo(current, names=failed_names):
                     if not current:
                         return None
-                    seen = set(current.get("ci_unrelated_checks") or [])
-                    current["ci_unrelated_checks"] = sorted(seen | set(names))
+                    unrelated = current.get("ci_unrelated_checks")
+                    if not isinstance(unrelated, dict):
+                        unrelated = {}
+                    pr_key = f"{pr['repo']}/{pr['id']}"
+                    seen = set(unrelated.get(pr_key) or [])
+                    unrelated[pr_key] = sorted(seen | set(names))
+                    current["ci_unrelated_checks"] = unrelated
                     return current
                 updated = state.update_ticket(ctx.ticket_key or "", _memo)
                 if updated:
@@ -1447,10 +1452,20 @@ def fix_ci_failures(ctx: TaskContext) -> TaskResult:
                 # MAX_CI_FIX_ATTEMPTS in _handle_ci_failure, and wedges the
                 # repo gate indefinitely. 'unrelated' and 'no_failing' don't
                 # count (nothing of ours was attempted).
+                try:
+                    info_after = platform.get_pr_info(pr["repo"], pr["id"])
+                    head_after = info_after.get("head_sha", "") if isinstance(info_after, dict) else ""
+                except Exception:
+                    head_after = ""
+
                 def _bump(current):
                     if not current:
                         return None
                     current["ci_fix_attempts"] = current.get("ci_fix_attempts", 0) + 1
+                    if head_after:
+                        heads = current.get("ci_fix_heads") or {}
+                        heads[f"{pr['repo']}/{pr['id']}"] = head_after
+                        current["ci_fix_heads"] = heads
                     current.pop("ci_passed", None)
                     current.pop("checks_started_at", None)
                     current.pop("ci_unrelated_checks", None)

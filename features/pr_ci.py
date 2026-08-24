@@ -6,6 +6,7 @@ Haiku first, fix via headless claude only if the failure is caused by our
 changes, attempt cap enforced by the caller.
 """
 import json
+import re
 from pathlib import Path
 
 from core.claude_runner import run_balanced, run_claude_code, extract_json
@@ -58,18 +59,29 @@ def triage_and_fix_pr(platform, repo: str, pr_id: int, label: str,
     if worktree is None or not Path(worktree).is_dir():
         return {"result": "worktree_missing", "attempts": attempts, "failed_names": failed_names}
 
-    failure_logs = platform.get_failed_logs(repo, pr_id) or ""
-    pr_diff = platform.get_pr_diff(repo, pr_id) or ""
+    failure_logs = platform.get_failed_logs(repo, pr_id)
+    if not isinstance(failure_logs, str):
+        failure_logs = ""
+    pr_diff = platform.get_pr_diff(repo, pr_id)
+    if not isinstance(pr_diff, str):
+        pr_diff = ""
+    changed_files = re.findall(r"^diff --git a/.* b/(.*)$", pr_diff, flags=re.MULTILINE)
+    diff_note = f" (truncated: first 4000 of {len(pr_diff)} chars)" if len(pr_diff) > 4000 else ""
+    logs_note = f" (truncated: first 4000 of {len(failure_logs)} chars)" if len(failure_logs) > 4000 else ""
     causality_prompt = (
         "CI checks failed on a PR. Determine if this is caused by the changes in the PR "
         "or is pre-existing/unrelated.\n\n"
         f"PR: {label}\n"
         f"Failed checks: {', '.join(failed_names)}\n"
         f"Fix attempt: {attempts + 1}/{max_attempts}\n\n"
-        f"PR diff (what changed):\n{pr_diff[:4000]}\n\n"
-        f"Failure logs:\n{failure_logs[:4000]}\n\n"
+        f"All {len(changed_files)} changed files in the PR:\n"
+        + "\n".join(f"  {f}" for f in changed_files[:200]) + "\n\n"
+        f"PR diff{diff_note}:\n{pr_diff[:4000]}\n\n"
+        f"Failure logs{logs_note}:\n{failure_logs[:4000]}\n\n"
         "Analyze causality:\n"
-        "1. Could the diff have caused these failures? Consider both direct changes and indirect effects.\n"
+        "1. Could the diff have caused these failures? Consider both direct changes and indirect effects. "
+        "Judge from the full changed-file list, not only the diff excerpt — the excerpt may cover "
+        "only the first files.\n"
         "2. Or are these pre-existing failures, flaky tests, or infra issues unrelated to the changes?\n\n"
         "Reply with EXACTLY one JSON object:\n"
         '{"caused_by_us": true/false, "reason": "brief explanation", "fix_hint": "what to change if caused_by_us"}'
