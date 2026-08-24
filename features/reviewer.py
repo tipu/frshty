@@ -20,10 +20,12 @@ PERSONA_SPEC = (
     "Focus on:\n"
     "- Requirements coverage: every acceptance criterion in the description must be addressed\n"
     "- Missing functionality: what the description promises but the diff does not deliver\n"
-    "- Scope creep: changes that go beyond what was asked (flag, don't block)\n"
+    "- Scope creep: changes that go beyond what was asked. Flag the fact as a suggestion, then "
+    "grade the change itself on its own consequence under the severity rules.\n"
     "- If the PR references a Jira ticket, check the diff against any acceptance criteria mentioned\n\n"
-    "Do NOT review for code style, naming, performance, or maintainability. Those are other reviewers' jobs.\n"
-    "If the diff fully satisfies the requirements, say so and approve.\n\n"
+    "Do NOT go looking for code style, naming, performance, or maintainability. Those are other "
+    "reviewers' jobs. Report a defect you happened to see while verifying a criterion.\n"
+    "An empty issues list is a valid answer when every criterion is delivered and verified.\n\n"
     "HOW TO WORK:\n"
     "- Do not answer from the diff alone. Open the checkout and confirm every claim before you write it.\n"
     "- Read the ticket or PR description first and write out its acceptance criteria one by one.\n"
@@ -45,8 +47,8 @@ PERSONA_BREAKAGE = (
     "- Async/sync mismatch: blocking calls in async contexts, missing awaits\n"
     "- ORM misuse: N+1 queries, missing select_related/prefetch_related, tenant isolation bypass\n"
     "- Test coverage: are new code paths tested? Do tests assert meaningful behavior or just not-crash?\n\n"
-    "Do NOT review for style, naming, or spec compliance. Those are other reviewers' jobs.\n"
-    "If nothing will break, say so and approve.\n\n"
+    "Do NOT go looking for style, naming, or spec compliance. Those are other reviewers' jobs.\n"
+    "An empty issues list is a valid answer when you traced the changed paths and none of them break.\n\n"
     "HOW TO WORK:\n"
     "- Do not answer from the diff alone. Trace every finding in the checkout before you report it.\n"
     "- For each suspicious line, open the file and read the whole function, not the hunk.\n"
@@ -72,7 +74,10 @@ PERSONA_MAINTAINABILITY = (
     "- AI-generated noise: boilerplate comments that describe what the code literally does\n"
     "- Convention violations: framework defaults overridden without reason\n"
     "- Pattern consistency: does this follow existing patterns in the codebase or introduce a new one?\n\n"
-    "Do NOT review for production breakage or spec compliance. Those are other reviewers' jobs.\n"
+    "Do NOT go hunting for production breakage or spec compliance. Those are other reviewers' jobs. "
+    "But you open whole files to judge them, and the other reviewers cannot open all of them. When a "
+    "file you opened contains a defect that meets a blocking rule below, report it at that severity. "
+    "Staying in your lane is not a reason to file data loss as a nit.\n"
     "Prefix minor issues with `nit:`. State blocking issues directly.\n\n"
     "HOW TO WORK:\n"
     "- Do not answer from the diff alone. Confirm every claim against the checkout.\n"
@@ -97,6 +102,31 @@ JSON_OUTPUT_SCHEMA = (
     '"date":"YYYY-MM-DD","summary":"...","issues":[{"repo":"repository-name","severity":"blocking"|"suggestion"|"question",'
     '"path":"file/path","line":123,"start_line":120,"body":"markdown description"}],'
     '"blocking_summary":["..."],"suggestions_summary":["..."],"questions_summary":["..."]}\n'
+)
+
+SEVERITY_RULES = (
+    "SEVERITY RULES: Severity describes the consequence of the defect, not the lane you were asked "
+    "to review. Grade every finding on what it does to production data, to a user, or to a deploy, "
+    "even when the defect sits at the edge of your focus list.\n"
+    "Use \"blocking\" when any of these is true:\n"
+    "- Data is lost, corrupted, or made unreachable. Stored bytes left with no row that names them, "
+    "a row left with no bytes, a write silently discarded, a value overwritten by a concurrent request.\n"
+    "- A lifecycle or state field is read and then acted on without a lock or a recheck, so two "
+    "concurrent requests can both act on the stale value.\n"
+    "- An acceptance criterion has no code path that delivers it end to end, including the schedule, "
+    "job, or caller that must invoke it. A command nothing calls is not delivered.\n"
+    "- A migration already applied on the base branch is edited in place, so an applied database and "
+    "a fresh database end in different states.\n"
+    "- An authenticated endpoint reads or allocates without a bound, so one request can exhaust the process.\n"
+    "- Auth, tenant scoping, or a permission check is dropped, weakened, or bypassable.\n"
+    "- The change breaks an existing caller, consumer, or stored contract with no compatibility path.\n"
+    "A defect that raises no exception is not therefore a suggestion. Silent data loss is blocking. "
+    "Grade on the worst outcome you traced, not on how loud it is.\n"
+    "Use \"suggestion\" when the worst outcome you traced is cost, clutter, duplicated work, or "
+    "future maintenance burden.\n"
+    "Use \"question\" only when you used your tools, could not settle the fact, and that fact decides "
+    "whether the finding exists. Not knowing where a caller lives is a thing to grep for, not a "
+    "question. If you grep and find no caller, the missing caller is the finding.\n"
 )
 
 LINE_NUMBER_RULES = (
@@ -183,7 +213,8 @@ def review_pr(config: dict, platform, pr: dict, ticket_context: str = "",
         add_dirs=[review_dir] if worktree else None,
         model=_reviewer_model(config), run_key=f"{pr['repo']}-{pr['id']}")
 
-    first: dict | None = None
+    issues_by_provider: dict[str, list[dict]] = {}
+    shared_by_provider: dict[str, dict] = {}
     for provider, results in by_provider.items():
         successful = [(name, data) for name, data in results if data is not None]
         if not successful:
@@ -196,10 +227,27 @@ def review_pr(config: dict, platform, pr: dict, ticket_context: str = "",
             merged["issues"] = _validate_issues(merged["issues"], worktree)
             merged["issues"] = _simplify_all_issues(merged["issues"])
             merged["issues"] = _style_match_all(config, merged["issues"])
-        _write_review_artifacts(config, pr, merged, diff_text, provider=provider)
-        if provider == "claude" or first is None:
-            first = merged
-    return first
+        issues_by_provider[provider] = merged.get("issues", [])
+        shared_by_provider[provider] = merged
+        if provider != "claude":
+            _write_review_artifacts(config, pr, dict(merged), diff_text, provider=provider)
+
+    if not shared_by_provider:
+        return None
+    primary = dict(shared_by_provider.get("claude") or next(iter(shared_by_provider.values())))
+    issues = _union_issues(issues_by_provider)
+    blocking = [i for i in issues if i.get("severity") == "blocking"]
+    only_other = sorted({p for i in blocking for p in i["found_by"]} - {"claude"})
+    if blocking and only_other and not any("claude" in i["found_by"] for i in blocking):
+        log.emit("review_provider_only_blocker",
+                 f"{pr['repo']}#{pr['id']}: every blocking finding came from "
+                 f"{', '.join(only_other)}, not claude",
+                 meta={"repo": pr["repo"], "pr_id": pr["id"],
+                       "providers": only_other, "blocking": len(blocking)})
+    primary["issues"] = issues
+    primary["verdict"] = "changes_requested" if blocking else "approved"
+    _write_review_artifacts(config, pr, primary, diff_text, provider="claude")
+    return primary
 
 
 def _review_dir(config, pr) -> Path:
@@ -236,6 +284,7 @@ def _write_review_artifacts(config, pr, merged: dict, diff_text: str,
             "path": issue.get("path"), "line": issue.get("line"),
             "body": issue["body"], "severity": issue.get("severity", "suggestion"),
             "persona": issue.get("persona", ""), "status": "pending",
+            "found_by": issue.get("found_by") or [issue.get("provider") or provider],
         }
         for issue in merged.get("issues", [])
     ]
@@ -247,7 +296,7 @@ def _build_persona_prompt(persona_text, pr, diff_path, changed_paths, convention
     parts = [
         f"You are reviewing pull request #{pr['id']} in repository '{pr['repo']}' (branch: {pr['branch']}).\n",
         persona_text + "\n",
-        JSON_OUTPUT_SCHEMA, LINE_NUMBER_RULES, BODY_RULES,
+        JSON_OUTPUT_SCHEMA, SEVERITY_RULES, LINE_NUMBER_RULES, BODY_RULES,
     ]
     if ticket_context:
         parts.append(
@@ -426,6 +475,33 @@ def _merge_reviews(results: list[tuple[str, dict]]) -> dict:
     return base
 
 
+def _union_issues(per_provider: dict[str, list[dict]]) -> list[dict]:
+    """One issue list from every provider that reviewed this PR.
+
+    The A/B ran both providers and then posted only claude's list, so a defect
+    only codex found reached nobody and the verdict was computed as if it did
+    not exist. Near-duplicates collapse on path and line so two providers that
+    found the same defect do not produce two comments, and the more severe of
+    the two ratings wins. A finding never collapses against one from its own
+    provider: two distinct defects a few lines apart in one review are two
+    findings, and merging them would lose one."""
+    out: list[dict] = []
+    for provider, issues in per_provider.items():
+        for issue in issues:
+            twin = next((o for o in out
+                         if provider not in o["found_by"]
+                         and o.get("path") == issue.get("path")
+                         and abs((o.get("line") or 0) - (issue.get("line") or 0)) <= 5), None)
+            if twin is None:
+                out.append({**issue, "provider": provider, "found_by": [provider]})
+                continue
+            twin["found_by"] = sorted(set(twin["found_by"] + [provider]))
+            if issue.get("severity") == "blocking" and twin.get("severity") != "blocking":
+                twin["severity"] = "blocking"
+                twin["body"] = issue.get("body", twin.get("body", ""))
+    return out
+
+
 VALIDATE_PROMPT = (
     "You are auditing a code review comment for correctness. The comment is presumed correct. "
     "Overturn it only when the code below proves it wrong.\n\n"
@@ -490,6 +566,18 @@ def _validate_single(args):
 
     context = _read_function_context(worktree, path, line)
     if not context:
+        fp = worktree / path
+        if fp.is_file():
+            try:
+                total = len(fp.read_text().splitlines())
+            except (OSError, UnicodeDecodeError):
+                total = 0
+            if total and line > total:
+                log.emit("review_line_out_of_range",
+                         f"{path}:{line} is past the end of the file ({total} lines); "
+                         "the comment skipped validation and would anchor nowhere",
+                         meta={"path": path, "line": line, "file_lines": total,
+                               "severity": issue.get("severity", ""), "body": issue["body"]})
         return issue
 
     prompt = (
@@ -816,7 +904,7 @@ def _build_ticket_persona_prompt(persona_text, ticket_key, goal, sections, has_t
         "satisfied, and inconsistencies between PRs (mismatched API contracts, producer/consumer "
         "drift) are issues.\n",
         persona_text + "\n",
-        JSON_OUTPUT_SCHEMA, LINE_NUMBER_RULES, BODY_RULES,
+        JSON_OUTPUT_SCHEMA, SEVERITY_RULES, LINE_NUMBER_RULES, BODY_RULES,
         'Every issue MUST carry a "repo" field naming the repository it anchors to, and its "path" '
         "must be a file present in that repository's diff.\n",
     ]
@@ -948,6 +1036,8 @@ def review_ticket(config: dict, ticket_key: str, prs: list[dict]) -> dict[str, d
         model=_reviewer_model(config), run_key=ticket_key)
 
     results: dict[str, dict | None] = dict(none_result)
+    by_pr: dict[str, dict[str, list[dict]]] = {f"{p['repo']}/{p['id']}": {} for p in live}
+    shared_by_provider: dict[str, dict] = {}
     for provider, presults in by_provider.items():
         successful = [(name, data) for name, data in presults if data is not None]
         if not successful:
@@ -958,6 +1048,7 @@ def review_ticket(config: dict, ticket_key: str, prs: list[dict]) -> dict[str, d
         merged = _merge_reviews(successful)
         issues_by_key = _split_issues_by_pr(merged.get("issues", []), live, diffs)
         shared = {k: v for k, v in merged.items() if k != "issues"}
+        shared_by_provider[provider] = shared
         for pr in live:
             key = f"{pr['repo']}/{pr['id']}"
             issues = issues_by_key.get(key, [])
@@ -965,15 +1056,37 @@ def review_ticket(config: dict, ticket_key: str, prs: list[dict]) -> dict[str, d
                 issues = _validate_issues(issues, worktrees[key])
                 issues = _simplify_all_issues(issues)
                 issues = _style_match_all(config, issues)
-            per = {
-                **shared,
-                "issues": issues,
-                "verdict": "changes_requested" if any(i.get("severity") == "blocking" for i in issues) else "approved",
-                "source_branch": pr.get("branch") or shared.get("source_branch", ""),
-            }
-            _write_review_artifacts(config, pr, per, diffs[key], provider=provider)
-            if provider == "claude":
-                results[key] = per
+            by_pr[key][provider] = issues
+            if provider != "claude":
+                _write_review_artifacts(config, pr, {
+                    **shared,
+                    "issues": issues,
+                    "verdict": "changes_requested" if any(i.get("severity") == "blocking" for i in issues) else "approved",
+                    "source_branch": pr.get("branch") or shared.get("source_branch", ""),
+                }, diffs[key], provider=provider)
+
+    if not shared_by_provider:
+        return none_result
+    primary = shared_by_provider.get("claude") or next(iter(shared_by_provider.values()))
+    for pr in live:
+        key = f"{pr['repo']}/{pr['id']}"
+        if not by_pr[key]:
+            continue
+        issues = _union_issues(by_pr[key])
+        blocking = [i for i in issues if i.get("severity") == "blocking"]
+        only_other = sorted({p for i in blocking for p in i["found_by"]} - {"claude"})
+        if blocking and only_other and not any("claude" in i["found_by"] for i in blocking):
+            log.emit("review_provider_only_blocker",
+                     f"{key}: every blocking finding came from {', '.join(only_other)}, not claude",
+                     meta={"repo": pr["repo"], "pr_id": pr["id"], "ticket": ticket_key,
+                           "providers": only_other, "blocking": len(blocking)})
+        results[key] = {
+            **primary,
+            "issues": issues,
+            "verdict": "changes_requested" if blocking else "approved",
+            "source_branch": pr.get("branch") or primary.get("source_branch", ""),
+        }
+        _write_review_artifacts(config, pr, results[key], diffs[key], provider="claude")
     if all(v is None for v in results.values()):
         return none_result
     return results
