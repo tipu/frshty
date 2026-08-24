@@ -253,6 +253,7 @@ def api_reviews_list():
         r["is_mine"] = bool(my_id) and info.get("author_id", "") == my_id
         approvers = info.get("approvers") or []
         r["approved_by_me"] = bool(my_id) and my_id in approvers
+        r["reviewers"] = info.get("reviewers") or []
         r["title"] = info.get("title", "")
         return r
     with ThreadPoolExecutor(max_workers=10) as pool:

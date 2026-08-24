@@ -301,6 +301,7 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
         },
         "features": {"tickets": True},
         "pr": {"auto_pr": True, "auto_merge": False},
+        "pm_agent": {"enabled": False},
         "github": {"repo": "org/app", "user": "frshty-bot"},
         "bitbucket": {"user_account_id": "frshty-bot"},
         "jira": {},
@@ -309,6 +310,8 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
     }
 
     def fake_run_haiku(prompt: str, timeout: int = 0) -> str:
+        if "Classify this engineering ticket" in prompt:
+            return "code"
         if "Classify each PR review comment" in prompt:
             return '{"results": [{"i": 0, "actionable": true}]}'
         if "Reply with JSON:" in prompt and "actionable" in prompt:

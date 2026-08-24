@@ -1,3 +1,4 @@
+import sys
 from datetime import datetime, timedelta, timezone
 
 import core.db as db
@@ -371,7 +372,7 @@ class TestHookScript:
         work_store.add_run(item_id, "sid-hook-1", "work-h1", "/tmp")
         payload = json.dumps({"session_id": "sid-hook-1", "hook_event_name": "Stop"})
         r = subprocess.run(
-            [".venv/bin/python", "scripts/work_hook.py"],
+            [sys.executable, "scripts/work_hook.py"],
             input=payload, capture_output=True, text=True, timeout=15,
             env={**__import__("os").environ, "FRSHTY_DB": dbfile},
         )
@@ -391,7 +392,7 @@ class TestHookScript:
         before = db.query_one("SELECT COUNT(*) AS n FROM work_events")["n"]
         payload = json.dumps({"session_id": "sid-foreign-xyz", "hook_event_name": "Stop"})
         r = subprocess.run(
-            [".venv/bin/python", "scripts/work_hook.py"],
+            [sys.executable, "scripts/work_hook.py"],
             input=payload, capture_output=True, text=True, timeout=15,
             env={**__import__("os").environ, "FRSHTY_DB": dbfile},
         )
@@ -402,7 +403,7 @@ class TestHookScript:
     def test_hook_garbage_input_exits_zero(self):
         import subprocess
         r = subprocess.run(
-            [".venv/bin/python", "scripts/work_hook.py"],
+            [sys.executable, "scripts/work_hook.py"],
             input="not json at all", capture_output=True, text=True, timeout=15,
         )
         assert r.returncode == 0
@@ -487,6 +488,164 @@ class TestAutocontinue:
         assert self._state(item_id)["state"] == "failed_stale"
 
 
+class TestStaleSweep:
+    def _mkstale(self, tmp_path, tail_text="Working on step 3.", minutes=40):
+        import json as _json
+        item_id = _mkitem("stale sweep item")
+        run_id = work_store.add_run(item_id, f"sid-sweep-{item_id}", f"work-{item_id}", "/tmp")
+        transcript = tmp_path / f"t-{item_id}.jsonl"
+        transcript.write_text(_json.dumps(
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": tail_text}]}}
+        ) + "\n")
+        db.execute("UPDATE work_runs SET transcript_path = ? WHERE id = ?",
+                   (str(transcript), run_id))
+        old = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+        db.execute("UPDATE work_items SET updated_at = ? WHERE id = ?", (old, item_id))
+        return item_id, run_id, transcript
+
+    def _age_transcript(self, transcript, minutes=40):
+        import os
+        past = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).timestamp()
+        os.utime(transcript, (past, past))
+
+    def test_live_transcript_refreshes_updated_at(self, tmp_path, monkeypatch):
+        item_id, _, _ = self._mkstale(tmp_path)
+        monkeypatch.setattr(work_store, "claude_running", lambda k: (_ for _ in ()).throw(AssertionError))
+        actions = work_store.sweep_stale_items()
+        assert {"id": item_id, "action": "refreshed"} in actions
+        item = db.query_one("SELECT state, updated_at FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "agent_working"
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(minutes=work_store.STALE_AFTER_MINUTES)).isoformat()
+        assert item["updated_at"] > cutoff
+
+    def test_dead_session_marked_failed(self, tmp_path, monkeypatch):
+        item_id, run_id, transcript = self._mkstale(tmp_path)
+        self._age_transcript(transcript)
+        monkeypatch.setattr(work_store, "claude_running", lambda k: False)
+        actions = work_store.sweep_stale_items()
+        assert {"id": item_id, "action": "failed"} in actions
+        item = db.query_one("SELECT state, stop_reason FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "failed_stale"
+        assert "without a Stop event" in item["stop_reason"]
+        run = db.query_one("SELECT status FROM work_runs WHERE id = ?", (run_id,))
+        assert run["status"] == "stopped"
+        kinds = {e["kind"] for e in db.query_all(
+            "SELECT kind FROM work_events WHERE work_item_id = ?", (item_id,))}
+        assert "stale_failed" in kinds
+
+    def test_live_idle_session_gets_synthesized_stop_and_continues(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+        item_id, _, transcript = self._mkstale(tmp_path)
+        self._age_transcript(transcript)
+        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        sender = MagicMock(return_value=True)
+        monkeypatch.setattr(work_store, "tmux_send", sender)
+        actions = work_store.sweep_stale_items()
+        assert {"id": item_id, "action": "stop_synthesized:continued"} in actions
+        sender.assert_called_once()
+        item = db.query_one("SELECT state, continues_used FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "agent_working"
+        assert item["continues_used"] == 1
+        kinds = {e["kind"] for e in db.query_all(
+            "SELECT kind FROM work_events WHERE work_item_id = ?", (item_id,))}
+        assert {"Stop", "auto_continued"} <= kinds
+
+    def test_live_idle_session_with_question_prompts_operator(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+        item_id, _, transcript = self._mkstale(
+            tmp_path, tail_text="Should I use the staging bucket or prod?")
+        self._age_transcript(transcript)
+        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        sender = MagicMock(return_value=True)
+        monkeypatch.setattr(work_store, "tmux_send", sender)
+        actions = work_store.sweep_stale_items()
+        assert {"id": item_id, "action": "stop_synthesized:question"} in actions
+        sender.assert_not_called()
+        item = db.query_one("SELECT state, stop_reason FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "needs_you"
+        assert "staging bucket" in item["stop_reason"]
+
+    def test_fresh_item_untouched(self):
+        item_id = _mkitem("fresh item")
+        work_store.add_run(item_id, f"sid-fresh-{item_id}", f"work-{item_id}", "/tmp")
+        assert work_store.sweep_stale_items() == []
+        assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                            (item_id,))["state"] == "agent_working"
+
+    def _mkpending(self, tmp_path, minutes):
+        import json as _json
+        item_id, run_id, transcript = self._mkstale(tmp_path, minutes=minutes)
+        transcript.write_text("\n".join(_json.dumps(x) for x in [
+            {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "Running the long build."},
+                {"type": "tool_use", "id": "toolu_1", "name": "Bash"}]}},
+        ]) + "\n")
+        self._age_transcript(transcript, minutes=minutes)
+        return item_id, run_id, transcript
+
+    def test_pending_tool_blocks_synthesized_stop(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+        item_id, _, _ = self._mkpending(tmp_path, minutes=40)
+        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        sender = MagicMock(return_value=True)
+        monkeypatch.setattr(work_store, "tmux_send", sender)
+        actions = work_store.sweep_stale_items()
+        assert {"id": item_id, "action": "busy_tool"} in actions
+        sender.assert_not_called()
+        item = db.query_one("SELECT state, updated_at FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "agent_working"
+        cutoff = (datetime.now(timezone.utc)
+                  - timedelta(minutes=work_store.STALE_AFTER_MINUTES)).isoformat()
+        assert item["updated_at"] > cutoff
+
+    def test_pending_tool_past_stuck_window_prompts_operator(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+        item_id, _, _ = self._mkpending(
+            tmp_path, minutes=work_store.STUCK_AFTER_MINUTES + 10)
+        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        sender = MagicMock(return_value=True)
+        monkeypatch.setattr(work_store, "tmux_send", sender)
+        actions = work_store.sweep_stale_items()
+        assert {"id": item_id, "action": "stuck_tool"} in actions
+        sender.assert_not_called()
+        item = db.query_one("SELECT state, stop_reason FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "needs_you"
+        assert "has not returned" in item["stop_reason"]
+        kinds = {e["kind"] for e in db.query_all(
+            "SELECT kind FROM work_events WHERE work_item_id = ?", (item_id,))}
+        assert "stuck_tool" in kinds
+
+    def test_answered_tool_call_is_not_pending(self, tmp_path):
+        import json as _json
+        p = tmp_path / "answered.jsonl"
+        p.write_text("\n".join(_json.dumps(x) for x in [
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "Bash"}]}},
+            {"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]}},
+            {"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "Build finished."}]}},
+        ]) + "\n")
+        assert work_store.pending_tool_calls(str(p)) is False
+
+    def test_unanswered_tool_call_is_pending(self, tmp_path):
+        import json as _json
+        p = tmp_path / "pending.jsonl"
+        p.write_text("\n".join(_json.dumps(x) for x in [
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "Bash"}]}},
+            {"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"}]}},
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "toolu_2", "name": "Bash"}]}},
+        ]) + "\n")
+        assert work_store.pending_tool_calls(str(p)) is True
+
+    def test_pending_tool_missing_transcript_is_false(self):
+        assert work_store.pending_tool_calls("/nonexistent/x.jsonl") is False
+
+
 class TestReply:
     def test_reply_resumes(self, monkeypatch):
         from unittest.mock import MagicMock
@@ -515,6 +674,55 @@ class TestReply:
         work_store.apply_action(item_id, "done")
         out = work_store.reply(item_id, "hello")
         assert "reopen" in out["error"]
+
+
+class TestSnoozedQuestion:
+    def _snoozed_with_question(self, until):
+        item_id = _mkitem("snoozed with question")
+        work_store.add_run(item_id, f"sid-sq-{item_id}", f"work-{item_id}", "/tmp")
+        db.execute("UPDATE work_items SET pending_question = ? WHERE id = ?",
+                   ('{"questions": [{"question": "Push it?"}]}', item_id))
+        work_store.apply_action(item_id, "snooze", until=until)
+        return item_id
+
+    def test_detail_remaps_expired_snooze_to_needs_you(self):
+        now = datetime.now(timezone.utc)
+        item_id = self._snoozed_with_question((now - timedelta(hours=1)).isoformat())
+        detail = work_store.item_detail(item_id)
+        assert detail["item"]["state"] == "needs_you"
+        assert detail["item"]["pending_question"]
+
+    def test_detail_keeps_future_snooze_waiting(self):
+        now = datetime.now(timezone.utc)
+        item_id = self._snoozed_with_question((now + timedelta(hours=1)).isoformat())
+        detail = work_store.item_detail(item_id)
+        assert detail["item"]["state"] == "waiting_external"
+        assert detail["item"]["pending_question"]
+
+    def test_reply_clears_snooze_and_question(self, monkeypatch):
+        now = datetime.now(timezone.utc)
+        item_id = self._snoozed_with_question((now + timedelta(hours=1)).isoformat())
+        monkeypatch.setattr(work_store, "tmux_send", lambda k, t: True)
+        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        out = work_store.reply(item_id, "push it")
+        assert out == {"id": item_id, "action": "reply"}
+        item = db.query_one(
+            "SELECT state, pending_question, snoozed_until FROM work_items WHERE id = ?",
+            (item_id,))
+        assert item["state"] == "agent_working"
+        assert item["pending_question"] == ""
+        assert item["snoozed_until"] is None
+
+    def test_prompt_submit_clears_snooze(self):
+        now = datetime.now(timezone.utc)
+        item_id = self._snoozed_with_question((now + timedelta(hours=1)).isoformat())
+        work_store.record_event(f"sid-sq-{item_id}", "UserPromptSubmit", {})
+        item = db.query_one(
+            "SELECT state, pending_question, snoozed_until FROM work_items WHERE id = ?",
+            (item_id,))
+        assert item["state"] == "agent_working"
+        assert item["pending_question"] == ""
+        assert item["snoozed_until"] is None
 
 
 class TestTranscriptTail:
@@ -734,7 +942,7 @@ class TestQuestions:
                                "tool_name": "AskUserQuestion",
                                "tool_input": self.QUESTIONS})
         r = subprocess.run(
-            [".venv/bin/python", "scripts/work_hook.py"],
+            [sys.executable, "scripts/work_hook.py"],
             input=payload, capture_output=True, text=True, timeout=15,
             env={**__import__("os").environ, "FRSHTY_DB": dbfile},
         )
@@ -755,7 +963,7 @@ class TestQuestions:
         payload = _json.dumps({"session_id": sid, "hook_event_name": "PreToolUse",
                                "tool_name": "Bash", "tool_input": {"command": "ls"}})
         r = subprocess.run(
-            [".venv/bin/python", "scripts/work_hook.py"],
+            [sys.executable, "scripts/work_hook.py"],
             input=payload, capture_output=True, text=True, timeout=15,
             env={**__import__("os").environ, "FRSHTY_DB": dbfile},
         )
@@ -773,7 +981,7 @@ class TestQuestions:
                                "tool_name": "AskUserQuestion",
                                "tool_input": self.QUESTIONS})
         r = subprocess.run(
-            [".venv/bin/python", "scripts/work_hook.py"],
+            [sys.executable, "scripts/work_hook.py"],
             input=payload, capture_output=True, text=True, timeout=15,
             env={**__import__("os").environ, "FRSHTY_DB": dbfile},
         )
@@ -1162,3 +1370,306 @@ class TestSuspendResume:
         monkeypatch.setattr(terminal, "launch_claude", launcher)
         assert work_launch.resume_session(item_id) is True
         launcher.assert_not_called()
+
+
+def _panel(question, body_lines, done=True):
+    hints = "  ←/→ to switch · c to copy · f to fork · Esc to close" if done \
+        else "  ←/→ to switch · x to clear history · Esc to close"
+    return ["● earlier output", "", f"  /btw {question}", ""] + \
+        [f"    {ln}" for ln in body_lines] + ["", hints, "", "❯ "]
+
+
+class _FakePane:
+    def __init__(self, captures):
+        self.captures = list(captures)
+        self.keys: list[str] = []
+
+    def capture(self, session):
+        return self.captures.pop(0) if len(self.captures) > 1 else self.captures[0]
+
+    def run(self, *args):
+        import subprocess
+        if args[0] == "send-keys":
+            self.keys.append(args[-1])
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+
+def _install_pane(monkeypatch, pane):
+    monkeypatch.setattr(work_store, "_capture_pane", pane.capture)
+    monkeypatch.setattr(work_store, "_tmux_run", pane.run)
+    monkeypatch.setattr(work_store.time, "sleep", lambda s: None)
+
+
+class TestBtwOverlay:
+    def test_reads_question_and_body_when_done(self):
+        panel = work_store.btw_overlay(_panel("what is 17 times 3?", ["51"]))
+        assert panel["done"] is True
+        assert panel["asked"] == "what is 17 times 3?"
+        assert work_store._btw_answer_text(panel["body"]) == "51"
+
+    def test_answering_panel_is_not_done(self):
+        panel = work_store.btw_overlay(
+            _panel("what is 17 times 3?", ["· Answering…"], done=False))
+        assert panel["done"] is False
+
+    def test_no_panel_returns_none(self):
+        assert work_store.btw_overlay(["● just output", "❯ "]) is None
+
+    def test_answer_text_keeps_relative_indent(self):
+        panel = work_store.btw_overlay(_panel("q", ["def f():", "    return 1"]))
+        assert work_store._btw_answer_text(panel["body"]) == "def f():\n    return 1"
+
+    def test_merge_window_appends_only_new_lines(self):
+        body = ["a", "b", "c"]
+        assert work_store._merge_window(body, ["b", "c", "d"]) is True
+        assert body == ["a", "b", "c", "d"]
+        assert work_store._merge_window(body, ["b", "c", "d"]) is False
+        assert body == ["a", "b", "c", "d"]
+
+
+class TestAskBtw:
+    def test_reads_answer_and_closes_panel(self, monkeypatch):
+        idle = ["● just output", "❯ "]
+        answering = _panel("capital of France?", ["· Answering…"], done=False)
+        done = _panel("capital of France?", ["Paris"])
+        pane = _FakePane([idle, answering, done])
+        _install_pane(monkeypatch, pane)
+        out = work_store.ask_btw("work-1", "capital of France?")
+        assert out == {"answer": "Paris"}
+        assert "/btw capital of France?" in pane.keys
+        assert pane.keys.count("Escape") == 1
+
+    def test_stitches_scrolled_lines(self, monkeypatch):
+        idle = ["● just output", "❯ "]
+        first = _panel("primes?", ["2", "3", "5"])
+        second = _panel("primes?", ["3", "5", "7"])
+        pane = _FakePane([idle, first, second])
+        _install_pane(monkeypatch, pane)
+        out = work_store.ask_btw("work-1", "primes?")
+        assert out["answer"] == "2\n3\n5\n7"
+
+    def test_answer_to_another_question_is_refused(self, monkeypatch):
+        idle = ["● just output", "❯ "]
+        stale = _panel("something else entirely", ["nope"])
+        pane = _FakePane([idle, stale])
+        _install_pane(monkeypatch, pane)
+        out = work_store.ask_btw("work-1", "capital of France?")
+        assert "different /btw question" in out["error"]
+
+    def test_timeout_without_panel(self, monkeypatch):
+        pane = _FakePane([["● just output", "❯ "]])
+        _install_pane(monkeypatch, pane)
+        out = work_store.ask_btw("work-1", "capital of France?", timeout=0.2)
+        assert "no /btw answer" in out["error"]
+        assert "Escape" not in pane.keys
+
+
+class TestSideQuestion:
+    def test_records_exchange(self, monkeypatch):
+        item_id = _mkitem("side question item")
+        work_store.add_run(item_id, f"sid-btw-{item_id}", f"work-{item_id}", "/tmp")
+        db.execute("UPDATE work_items SET state = 'needs_you' WHERE id = ?", (item_id,))
+        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        monkeypatch.setattr(work_store, "ask_btw", lambda key, q: {"answer": "Paris"})
+        out = work_store.side_question(item_id, "  capital of\n France? ")
+        assert out["answer"] == "Paris"
+        assert out["question"] == "capital of France?"
+        row = db.query_one(
+            "SELECT payload FROM work_events WHERE work_item_id = ? AND kind = 'btw'", (item_id,))
+        assert '"answer": "Paris"' in row["payload"]
+        item = db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "needs_you"
+
+    def test_dead_session_errors(self, monkeypatch):
+        item_id = _mkitem("side question dead")
+        work_store.add_run(item_id, f"sid-btwd-{item_id}", f"work-{item_id}", "/tmp")
+        monkeypatch.setattr(work_store, "claude_running", lambda k: False)
+        out = work_store.side_question(item_id, "hello?")
+        assert "no live Claude" in out["error"]
+
+    def test_empty_question_errors(self):
+        item_id = _mkitem("side question empty")
+        out = work_store.side_question(item_id, "   ")
+        assert out["error"] == "empty question"
+
+    def test_failed_ask_records_nothing(self, monkeypatch):
+        item_id = _mkitem("side question failed")
+        work_store.add_run(item_id, f"sid-btwf-{item_id}", f"work-{item_id}", "/tmp")
+        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        monkeypatch.setattr(work_store, "ask_btw", lambda key, q: {"error": "tmux session gone"})
+        out = work_store.side_question(item_id, "hello?")
+        assert out["error"] == "tmux session gone"
+        assert db.query_one(
+            "SELECT payload FROM work_events WHERE work_item_id = ? AND kind = 'btw'",
+            (item_id,)) is None
+
+
+class TestIdleNotificationContinues:
+    """An API error ends the turn with a Notification, not a Stop.
+
+    Claude Code fires no Stop hook when the turn dies on an API error. It
+    fires the idle Notification instead, so the autocontinue decision has to
+    hang off both events or the item sits in needs_you forever.
+    """
+
+    def _transcript(self, tmp_path, item_id, text):
+        import json as _json
+        path = tmp_path / f"notif-{item_id}.jsonl"
+        path.write_text(_json.dumps(
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}}
+        ) + "\n")
+        return path
+
+    def test_idle_notification_is_an_idle_stop(self):
+        assert work_store.is_idle_stop("Stop", {}) is True
+        assert work_store.is_idle_stop(
+            "Notification", {"message": "Claude is waiting for your input"}) is True
+
+    def test_permission_notification_is_not_an_idle_stop(self):
+        assert work_store.is_idle_stop(
+            "Notification", {"message": "Claude needs your permission to use Bash"}) is False
+
+    def test_api_error_tail_is_not_read_as_a_question(self):
+        tail = ("API Error: 529 Overloaded. This is a server-side issue, usually "
+                "temporary — try again in a moment. If it persists, check "
+                "https://status.claude.com.")
+        assert work_store._looks_like_question(tail) is False
+
+    def test_hook_continues_on_idle_notification(self, tmp_path):
+        import json
+        import os
+        import subprocess
+        import core.db as _db
+        item_id = _mkitem("api error item")
+        work_store.add_run(item_id, "sid-notif-1", "work-notif-1", "/tmp")
+        transcript = self._transcript(tmp_path, item_id, "API Error: 529 Overloaded.")
+        payload = json.dumps({
+            "session_id": "sid-notif-1", "hook_event_name": "Notification",
+            "message": "Claude is waiting for your input",
+            "transcript_path": str(transcript),
+        })
+        r = subprocess.run(
+            [sys.executable, "scripts/work_hook.py"],
+            input=payload, capture_output=True, text=True, timeout=15,
+            env={**os.environ, "FRSHTY_DB": str(_db._DB_PATH)},
+        )
+        assert r.returncode == 0, r.stderr
+        item = db.query_one("SELECT state, stop_reason FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "failed_stale"
+        assert item["stop_reason"] == "tmux session gone"
+
+    def test_hook_leaves_permission_notification_to_the_operator(self, tmp_path):
+        import json
+        import os
+        import subprocess
+        import core.db as _db
+        item_id = _mkitem("permission prompt item")
+        work_store.add_run(item_id, "sid-notif-2", "work-notif-2", "/tmp")
+        transcript = self._transcript(tmp_path, item_id, "Running the migration.")
+        payload = json.dumps({
+            "session_id": "sid-notif-2", "hook_event_name": "Notification",
+            "message": "Claude needs your permission to use Bash",
+            "transcript_path": str(transcript),
+        })
+        r = subprocess.run(
+            [sys.executable, "scripts/work_hook.py"],
+            input=payload, capture_output=True, text=True, timeout=15,
+            env={**os.environ, "FRSHTY_DB": str(_db._DB_PATH)},
+        )
+        assert r.returncode == 0, r.stderr
+        item = db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "needs_you"
+        kinds = {e["kind"] for e in db.query_all(
+            "SELECT kind FROM work_events WHERE work_item_id = ?", (item_id,))}
+        assert "auto_continued" not in kinds
+
+
+class TestMissedAutocontinueSweep:
+    def _stuck(self, tmp_path, tail_text="API Error: 529 Overloaded.", minutes=40,
+               kind="Notification"):
+        import json as _json
+        item_id = _mkitem("missed autocontinue item")
+        run_id = work_store.add_run(item_id, f"sid-miss-{item_id}", f"work-{item_id}", "/tmp")
+        transcript = tmp_path / f"miss-{item_id}.jsonl"
+        transcript.write_text(_json.dumps(
+            {"type": "assistant", "message": {"content": [{"type": "text", "text": tail_text}]}}
+        ) + "\n")
+        db.execute("UPDATE work_runs SET transcript_path = ? WHERE id = ?",
+                   (str(transcript), run_id))
+        db.execute(
+            "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+            "VALUES (?, ?, ?, '{}', ?)",
+            (item_id, run_id, kind, work_store._now()))
+        old = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+        db.execute("UPDATE work_items SET state = 'needs_you', updated_at = ? WHERE id = ?",
+                   (old, item_id))
+        return item_id, run_id, transcript
+
+    def _cutoff(self):
+        return (datetime.now(timezone.utc)
+                - timedelta(minutes=work_store.STALE_AFTER_MINUTES)).isoformat()
+
+    def test_missed_decision_is_run_late(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+        item_id, _, _ = self._stuck(tmp_path)
+        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        sender = MagicMock(return_value=True)
+        monkeypatch.setattr(work_store, "tmux_send", sender)
+        actions = work_store.retry_missed_autocontinues(self._cutoff())
+        assert {"id": item_id, "action": "autocontinue_retry:continued"} in actions
+        sender.assert_called_once()
+        item = db.query_one("SELECT state, continues_used FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "agent_working"
+        assert item["continues_used"] == 1
+
+    def test_sweep_runs_the_retry_pass(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+        item_id, _, _ = self._stuck(tmp_path)
+        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        monkeypatch.setattr(work_store, "tmux_send", MagicMock(return_value=True))
+        actions = work_store.sweep_stale_items()
+        assert {"id": item_id, "action": "autocontinue_retry:continued"} in actions
+
+    def _assert_skipped(self, item_id, monkeypatch, live=True):
+        """The retry pass must not touch this item.
+
+        Other tests leave their own eligible items in the session database,
+        so the assertion is scoped to this item rather than to the whole
+        action list.
+        """
+        from unittest.mock import MagicMock
+        monkeypatch.setattr(work_store, "claude_running", lambda k: live)
+        monkeypatch.setattr(work_store, "tmux_send", MagicMock(return_value=True))
+        actions = work_store.retry_missed_autocontinues(self._cutoff())
+        assert [a for a in actions if a["id"] == item_id] == []
+        item = db.query_one(
+            "SELECT state, continues_used FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "needs_you"
+        return item
+
+    def test_decision_already_recorded_is_skipped(self, tmp_path, monkeypatch):
+        item_id, run_id, _ = self._stuck(tmp_path)
+        db.execute(
+            "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+            "VALUES (?, ?, 'question_detected', '{}', ?)",
+            (item_id, run_id, work_store._now()))
+        assert self._assert_skipped(item_id, monkeypatch)["continues_used"] == 0
+
+    def test_dead_session_is_left_alone(self, tmp_path, monkeypatch):
+        item_id, _, _ = self._stuck(tmp_path)
+        self._assert_skipped(item_id, monkeypatch, live=False)
+
+    def test_pending_question_is_left_for_the_operator(self, tmp_path, monkeypatch):
+        item_id, _, _ = self._stuck(tmp_path)
+        db.execute("UPDATE work_items SET pending_question = 'staging or prod?' WHERE id = ?",
+                   (item_id,))
+        self._assert_skipped(item_id, monkeypatch)
+
+    def test_recent_item_is_left_for_the_hook(self, tmp_path, monkeypatch):
+        item_id, _, _ = self._stuck(tmp_path, minutes=1)
+        self._assert_skipped(item_id, monkeypatch)
+
+    def test_capped_item_is_left_alone(self, tmp_path, monkeypatch):
+        item_id, _, _ = self._stuck(tmp_path)
+        db.execute("UPDATE work_items SET continues_used = continue_cap WHERE id = ?", (item_id,))
+        self._assert_skipped(item_id, monkeypatch)

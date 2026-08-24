@@ -92,10 +92,11 @@ def _fan_out(prompt: str, ticket_dir: Path, run_dir: Path,
     def _codex() -> tuple[str | None, int | None]:
         last = run_dir / "codex-plan.md"
         return run_external_model(
-            ["codex", "exec", "--skip-git-repo-check", "-o", str(last), prompt],
+            ["codex", "exec", "--skip-git-repo-check", "-o", str(last), "-"],
             fn_name="ctp_codex", model="codex", prompt=prompt,
             cwd=ticket_dir, timeout=timeout, last_message_file=last,
             transcript_file=run_dir / "codex-transcript.txt",
+            stdin_text=prompt,
         )
 
     def _agy() -> tuple[str | None, int | None]:

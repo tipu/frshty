@@ -17,6 +17,8 @@ def _cron_routes(event: dict, registries: dict) -> list[dict]:
             jobs.append({"instance_key": instance_key, "task": "poll_own_prs"})
             jobs.append({"instance_key": instance_key, "task": "poll_reviewer"})
             jobs.append({"instance_key": instance_key, "task": "poll_peer_reviews"})
+        if features.get("pr_autofix"):
+            jobs.append({"instance_key": instance_key, "task": "poll_pr_autofix"})
         if features.get("billing"):
             jobs.append({"instance_key": instance_key, "task": "poll_billing_invoices"})
         if features.get("slack"):

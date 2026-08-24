@@ -4,10 +4,12 @@ from core.tasks import tickets as T
 
 
 class TestClickIndicatorInjection:
-    def test_asset_loads_and_has_single_listener(self):
+    def test_asset_loads_and_has_click_and_focus_listeners(self):
         script = T._click_indicator_script()
         assert "frshty-click-indicator-style" in script
-        assert script.count("addEventListener") == 1
+        assert script.count("addEventListener") == 2
+        assert "'pointerdown'" in script
+        assert "'focusin'" in script
 
     def test_prompt_includes_script_and_suppresses_documentation(self):
         script = T._click_indicator_script()
