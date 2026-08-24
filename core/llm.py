@@ -278,12 +278,12 @@ class ClaudeProvider(LLMProvider):
     def thinking(self, prompt: str, *, cwd: Path | None = None,
                  timeout: int = 600, session_id: str | None = None,
                  resume: bool = False, model: str | None = None,
+                 allowed_tools: list[str] | None = None,
                  **kwargs) -> str | None:
         chosen_model = model or _THINKING_MODEL
         cmd = self._cmd(
             "-p", prompt,
             "--model", chosen_model,
-            "--dangerously-skip-permissions",
             "--output-format", "stream-json",
             "--include-partial-messages",
             "--verbose",
@@ -292,7 +292,11 @@ class ClaudeProvider(LLMProvider):
             cmd += ["--resume", session_id]
         elif session_id:
             cmd += ["--session-id", session_id]
-        inv_id = _record_start("run_claude_code", chosen_model, prompt, cwd, None, timeout)
+        if allowed_tools:
+            cmd += ["--allowedTools", ",".join(allowed_tools)]
+        else:
+            cmd += ["--dangerously-skip-permissions"]
+        inv_id = _record_start("run_claude_code", chosen_model, prompt, cwd, allowed_tools, timeout)
         t0 = time.monotonic()
         blocked, reason, remaining_s = _guard_status()
         if blocked:
@@ -409,14 +413,15 @@ class ClaudeProvider(LLMProvider):
 
     def balanced(self, prompt: str, *, worktree: Path | None = None,
                  tools: list[str] | None = None, timeout: int = 600,
-                 model: str | None = None, **kwargs) -> str | None:
+                 model: str | None = None, function_name: str = "run_balanced",
+                 **kwargs) -> str | None:
         chosen_model = model or "claude-sonnet-4-6"
         cmd = self._cmd("-p", "-", "--output-format", "json", "--model", chosen_model)
         if worktree and worktree.is_dir():
             cmd += ["--dangerously-skip-permissions", "--add-dir", str(worktree)]
             if tools:
                 cmd += ["--allowedTools"] + tools
-        inv_id = _record_start("run_balanced", chosen_model, prompt, worktree, tools, timeout)
+        inv_id = _record_start(function_name, chosen_model, prompt, worktree, tools, timeout)
         t0 = time.monotonic()
         blocked, reason, remaining_s = _guard_status()
         if blocked:
@@ -502,11 +507,11 @@ class OpenCodeProvider(LLMProvider):
 
     def balanced(self, prompt: str, *, worktree: Path | None = None,
                  tools: list[str] | None = None, timeout: int = 600,
-                 **kwargs) -> str | None:
+                 function_name: str = "run_balanced", **kwargs) -> str | None:
         cmd = ["opencode", "run", prompt, "--model", self.model_balanced,
                "--dangerously-skip-permissions"]
         cwd = worktree if worktree and worktree.is_dir() else None
-        return self._run(cmd, "run_balanced", self.model_balanced, prompt, cwd, timeout)
+        return self._run(cmd, function_name, self.model_balanced, prompt, cwd, timeout)
 
     def fast(self, prompt: str, *, timeout: int = 120, **kwargs) -> str | None:
         cmd = ["opencode", "run", prompt, "--model", self.model_fast,
@@ -632,9 +637,14 @@ def run_external_model(cmd: list[str], *, fn_name: str, model: str, prompt: str,
                        cwd: Path | None = None, timeout: int = 600,
                        env_extra: dict[str, str] | None = None,
                        last_message_file: Path | None = None,
-                       transcript_file: Path | None = None) -> tuple[str | None, int | None]:
+                       transcript_file: Path | None = None,
+                       stdin_text: str | None = None) -> tuple[str | None, int | None]:
     """Run a non-Claude model CLI (codex, agy) under the same invocation
     logging as Claude. Returns (text, exit_code); text is None on timeout.
+
+    Pass the prompt via `stdin_text` (with a `-` placeholder in `cmd`) instead
+    of as an argv element when it can be large: Linux caps a single argv
+    element at 128 KB and the spawn fails with E2BIG past that.
 
     Prefers `last_message_file` (e.g. codex `-o`) when it holds content, else
     falls back to stdout. The full stdout+stderr is written to
@@ -649,6 +659,7 @@ def run_external_model(cmd: list[str], *, fn_name: str, model: str, prompt: str,
         result = subprocess.run(
             cmd, capture_output=True, cwd=str(cwd) if cwd else None,
             env=env, timeout=timeout,
+            input=stdin_text.encode() if stdin_text is not None else None,
         )
     except subprocess.TimeoutExpired:
         _record_end(inv_id, t0, "timeout", None, None)

@@ -263,11 +263,20 @@ def _execute(action: str, key: str, meta: dict, config: dict):
 
 
 def _execute_create_pr(key: str, _meta: dict, config: dict):
-    from features.tickets import _create_pr
+    from features.tickets import _create_pr, _scope_review_state
     from features.ticket_systems import make_ticket_system
 
     ts = state.load_ticket(key)
     if not ts or ts.get("status") != "pr_ready":
+        return
+
+    if _scope_review_state(config, ts) not in ("disabled", "pass"):
+        ts.pop("pr_scheduled_at", None)
+        state.save_ticket(key, ts)
+        log.emit("ticket_pr_creation_held",
+                 f"{key}: scheduled PR held for consensus scope review; "
+                 f"the dispatcher creates the PR once the review passes",
+                 meta={"ticket": key})
         return
 
     ticket_system = make_ticket_system(config)

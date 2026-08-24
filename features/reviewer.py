@@ -232,11 +232,12 @@ def _run_codex_persona(args):
         text, exit_code = run_external_model(
             ["codex", "exec", "--skip-git-repo-check",
              "-c", 'model_reasoning_effort="medium"',
-             "-o", str(last), prompt],
+             "-o", str(last), "-"],
             fn_name="review_codex", model="codex", prompt=prompt,
             cwd=cwd, timeout=CODEX_REVIEW_TIMEOUT,
             last_message_file=last,
             transcript_file=run_dir / f"{name}-transcript.txt",
+            stdin_text=prompt,
         )
     except subprocess.TimeoutExpired:
         log.emit("review_persona_timeout",
@@ -803,8 +804,6 @@ def review_ticket(config: dict, ticket_key: str, prs: list[dict]) -> dict[str, d
         wt = _ensure_review_worktree(config, pr)
         worktrees[key] = wt
         d = diffs[key]
-        if len(d) > SIBLING_DIFF_CHAR_CAP:
-            d = d[:SIBLING_DIFF_CHAR_CAP] + "\n... [diff truncated]"
         conv = _load_conventions(config, pr["repo"])
         fctx = _read_changed_files(diffs[key], wt) if wt else ""
         sec = [f"=== PR #{pr['id']} in repository '{pr['repo']}' (branch: {pr.get('branch', '')}) ==="]

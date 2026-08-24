@@ -1,3 +1,5 @@
+import json
+import subprocess
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -723,7 +725,7 @@ class TestHandleCiFailureStub:
 
     def test_unrelated_verdict_skips_retriage(self):
         ts = make_ticket_state(status="in_review",
-                                ci_unrelated_checks=["lint", "coverage"])
+                                ci_unrelated_checks={"r/1": ["lint", "coverage"]})
         pr = {"repo": "r", "id": 1, "url": "u"}
         checks = [{"name": "lint", "state": "FAILED"}]
         with patch("features.tickets._enqueue_stage") as eq, \
@@ -733,8 +735,47 @@ class TestHandleCiFailureStub:
         assert result["status"] == "in_review"
         eq.assert_not_called()
 
-    def test_new_failing_check_beyond_unrelated_set_retriages(self):
+    def test_unrelated_verdict_is_scoped_to_its_pr(self):
+        """Check names collide across repos of a multi-repo ticket (both LSC-46
+        PRs expose a check named 'build'). A verdict for one PR must not
+        suppress fixing the same-named check on the other PR."""
+        ts = make_ticket_state(status="in_review",
+                                ci_unrelated_checks={"other/2": ["lint"]})
+        pr = {"repo": "r", "id": 1, "url": "u"}
+        checks = [{"name": "lint", "state": "FAILED"}]
+        with patch("features.tickets._enqueue_stage") as eq, \
+             patch("features.tickets.log"):
+            result = tickets._handle_ci_failure(make_ticket(), ts, pr, checks, "http://base", "inst")
+        assert result["_ci_failed_pending"] is True
+        eq.assert_called_once_with("inst", "PROJ-1", "fix_ci_failures")
+
+    def test_legacy_flat_unrelated_list_retriages(self):
         ts = make_ticket_state(status="in_review", ci_unrelated_checks=["lint"])
+        pr = {"repo": "r", "id": 1, "url": "u"}
+        checks = [{"name": "lint", "state": "FAILED"}]
+        with patch("features.tickets._enqueue_stage") as eq, \
+             patch("features.tickets.log"):
+            result = tickets._handle_ci_failure(make_ticket(), ts, pr, checks, "http://base", "inst")
+        assert result["_ci_failed_pending"] is True
+        eq.assert_called_once_with("inst", "PROJ-1", "fix_ci_failures")
+
+    def test_head_move_clears_unrelated_verdicts(self):
+        ts = make_ticket_state(status="in_review",
+                                ci_unrelated_checks={"r/1": ["lint"]},
+                                ci_fix_heads={"r/1": "sha1"})
+        pr = {"repo": "r", "id": 1, "url": "u"}
+        checks = [{"name": "lint", "state": "FAILED"}]
+        with patch("features.tickets._enqueue_stage") as eq, \
+             patch("features.tickets.log"):
+            result = tickets._handle_ci_failure(make_ticket(), ts, pr, checks,
+                                                "http://base", "inst", head_sha="sha2")
+        assert "ci_unrelated_checks" not in result
+        assert result["_ci_failed_pending"] is True
+        eq.assert_called_once_with("inst", "PROJ-1", "fix_ci_failures")
+
+    def test_new_failing_check_beyond_unrelated_set_retriages(self):
+        ts = make_ticket_state(status="in_review",
+                                ci_unrelated_checks={"r/1": ["lint"]})
         pr = {"repo": "r", "id": 1, "url": "u"}
         checks = [{"name": "lint", "state": "FAILED"},
                   {"name": "tests", "state": "FAILURE"}]
@@ -743,6 +784,80 @@ class TestHandleCiFailureStub:
             result = tickets._handle_ci_failure(make_ticket(), ts, pr, checks, "http://base", "inst")
         assert result["_ci_failed_pending"] is True
         eq.assert_called_once_with("inst", "PROJ-1", "fix_ci_failures")
+
+    def test_persists_pending_flag_before_enqueue(self):
+        """The fix_ci_failures precondition reads _ci_failed_pending from the
+        persisted ticket. A worker can pick the job up within a second, so the
+        flag must be saved before the enqueue, not at end-of-scan — observed
+        on atropos 2026-08-21: job 1484952 skipped on a stale flag read."""
+        calls = []
+        ts = make_ticket_state(status="in_review")
+        pr = {"repo": "r", "id": 1, "url": "u"}
+        checks = [{"name": "lint", "state": "FAILED"}]
+        with patch("features.tickets.state.save_ticket",
+                   side_effect=lambda *a, **k: calls.append("save")), \
+             patch("features.tickets._enqueue_stage",
+                   side_effect=lambda *a, **k: calls.append("enqueue")), \
+             patch("features.tickets.log"):
+            tickets._handle_ci_failure(make_ticket(), ts, pr, checks, "http://base", "inst")
+        assert calls == ["save", "enqueue"]
+
+    def test_head_moved_after_cap_resets_budget_and_retries(self):
+        """New commits on the PR branch (comment fixes, base syncs, human
+        pushes) create a new failure context: a budget spent on old code must
+        not block fixing failures on code that did not exist yet."""
+        ts = make_ticket_state(status="in_review", ci_fix_attempts=2,
+                                ci_fix_heads={"r/1": "sha1"})
+        pr = {"repo": "r", "id": 1, "url": "u"}
+        checks = [{"name": "lint", "state": "FAILED"}]
+        with patch("features.tickets._enqueue_stage") as eq, \
+             patch("features.tickets.log"):
+            result = tickets._handle_ci_failure(make_ticket(), ts, pr, checks,
+                                                "http://base", "inst", head_sha="sha2")
+        assert result["ci_fix_attempts"] == 0
+        assert result["ci_fix_heads"] == {"r/1": "sha2"}
+        assert result["_ci_failed_pending"] is True
+        assert result["status"] == "in_review"
+        eq.assert_called_once_with("inst", "PROJ-1", "fix_ci_failures")
+
+    def test_same_head_after_cap_parks_pr_failed(self):
+        ts = make_ticket_state(status="in_review", ci_fix_attempts=2,
+                                ci_fix_heads={"r/1": "sha2"})
+        pr = {"repo": "r", "id": 1, "url": "u"}
+        checks = [{"name": "lint", "state": "FAILED"}]
+        with patch("features.tickets._enqueue_stage") as eq, \
+             patch("features.tickets.log"):
+            result = tickets._handle_ci_failure(make_ticket(), ts, pr, checks,
+                                                "http://base", "inst", head_sha="sha2")
+        assert result["status"] == "pr_failed"
+        assert result["ci_fix_attempts"] == 2
+        eq.assert_not_called()
+
+    def test_spent_budget_with_no_recorded_head_resets(self):
+        """Tickets parked before head tracking existed have a spent budget but
+        no recorded head; the budget cannot be tied to the current code, so it
+        resets and the fixer gets a fresh chance."""
+        ts = make_ticket_state(status="in_review", ci_fix_attempts=2)
+        pr = {"repo": "r", "id": 1, "url": "u"}
+        checks = [{"name": "lint", "state": "FAILED"}]
+        with patch("features.tickets._enqueue_stage") as eq, \
+             patch("features.tickets.log"):
+            result = tickets._handle_ci_failure(make_ticket(), ts, pr, checks,
+                                                "http://base", "inst", head_sha="sha2")
+        assert result["ci_fix_attempts"] == 0
+        assert result["_ci_failed_pending"] is True
+        eq.assert_called_once_with("inst", "PROJ-1", "fix_ci_failures")
+
+    def test_no_head_sha_keeps_cap_behavior(self):
+        ts = make_ticket_state(status="in_review", ci_fix_attempts=2)
+        pr = {"repo": "r", "id": 1, "url": "u"}
+        checks = [{"name": "lint", "state": "FAILED"}]
+        with patch("features.tickets._enqueue_stage") as eq, \
+             patch("features.tickets.log"):
+            result = tickets._handle_ci_failure(make_ticket(), ts, pr, checks,
+                                                "http://base", "inst")
+        assert result["status"] == "pr_failed"
+        eq.assert_not_called()
 
 
 class TestCheckSkipsBusyTicket:
@@ -1530,6 +1645,7 @@ class TestFixCiFailuresTask:
         import core.state as state
         ts = state.load("tickets")["PROJ-1"]
         assert ts.get("ci_fix_attempts", 0) == 0
+        assert ts["ci_unrelated_checks"] == {"r/1": ["lint"]}
         assert "_ci_failed_pending" not in ts
 
     def test_caused_by_us_increments_and_clears_flag(self, fake_config, tmp_state, tmp_log):
@@ -1556,6 +1672,35 @@ class TestFixCiFailuresTask:
         ts = state.load("tickets")["PROJ-1"]
         assert ts["ci_fix_attempts"] == 1
         assert "_ci_failed_pending" not in ts
+
+    def test_attempt_records_pushed_head(self, fake_config, tmp_state, tmp_log):
+        """The head recorded after a fix push is the remote head; without this
+        record the next monitor cycle sees the fixer's own push as 'new
+        commits' and resets the budget forever."""
+        from core.tasks.tickets import fix_ci_failures
+        slug = "PROJ-1-do-the-thing"
+        self._seed(make_ticket_state(
+            status="in_review", _ci_failed_pending=True, slug=slug,
+            prs=[{"repo": "r", "id": 1, "url": "u"}],
+        ))
+        wt = fake_config["workspace"]["root"] / "tickets" / slug / "r"
+        wt.mkdir(parents=True)
+
+        mock_platform = MagicMock()
+        mock_platform.get_pr_checks.return_value = [{"name": "lint", "state": "FAILED"}]
+        mock_platform.get_failed_logs.return_value = "logs"
+        mock_platform.get_pr_diff.return_value = "diff"
+        mock_platform.get_pr_info.return_value = {"state": "OPEN", "head_sha": "sha9"}
+        with patch("core.tasks.tickets.make_platform", return_value=mock_platform), \
+             patch("features.pr_ci.run_balanced",
+                   return_value='{"caused_by_us": true, "reason": "bad", "fix_hint": "fix it"}'), \
+             patch("features.pr_ci.run_claude_code", return_value="ok"):
+            result = fix_ci_failures(self._ctx(fake_config))
+        assert result.status == "ok"
+        import core.state as state
+        ts = state.load("tickets")["PROJ-1"]
+        assert ts["ci_fix_attempts"] == 1
+        assert ts["ci_fix_heads"] == {"r/1": "sha9"}
 
     def test_exception_clears_pending_flag(self, fake_config, tmp_state, tmp_log):
         from core.tasks.tickets import fix_ci_failures
@@ -2126,6 +2271,348 @@ class TestCheckInReviewFixFailedRetry:
             )
 
 
+class TestReplyCommitsToChangeReroute:
+    """Observed live on aimyable/saas-dashboard#249 (DEV-644): the triage batch
+    classified the 'file count removed, seems odd' comment as not actionable,
+    the drafted reply admitted a regression and promised 'I will restore the
+    count', and the comment parked at needs_reply. The promise was never kept.
+    A draft reply that commits to a code change must reroute the comment to
+    the fix path."""
+
+    def _make_pr_comment(self, **overrides):
+        base = {"id": 100, "body": "This was a file count. Is the point to remove it?",
+                "author_id": "reviewer1", "author_name": "Bob",
+                "path": "src/LogTable.tsx", "line": 413, "parent_id": None,
+                "created_on": "2026-01-01T12:00:00Z",
+                "created_at": "2026-01-01T12:00:00Z",
+                "updated_at": "2026-01-01T12:00:00Z"}
+        base.update(overrides)
+        return base
+
+    def _setup_worktree(self, fake_config, slug):
+        ws_root = fake_config["workspace"]["root"]
+        wt = ws_root / "tickets" / slug / "repo"
+        wt.mkdir(parents=True, exist_ok=True)
+        (wt / ".git").mkdir(exist_ok=True)
+        return wt
+
+    def _run_scan(self, fake_config, commitment_json, draft_reply, run_claude):
+        slug = "PROJ-1-do-the-thing"
+        wt = self._setup_worktree(fake_config, slug)
+        ts = make_ticket_state(
+            status="in_review", slug=slug, branch=slug,
+            prs=[{"repo": "repo", "id": 99, "branch": slug, "url": "http://u"}],
+        )
+        ticket = {"key": "PROJ-1", "summary": "Do thing", "url": "http://j/PROJ-1"}
+        comment = self._make_pr_comment()
+
+        mock_platform = MagicMock()
+        mock_platform.get_pr_state.return_value = "OPEN"
+        mock_platform.get_pr_comments.return_value = [comment]
+        mock_platform.push_branch.return_value = {"ok": True}
+
+        def fake_llm(prompt, **kwargs):
+            if "Triage each PR review comment" in prompt:
+                return '{"results": [{"i": 0, "actionable": false}]}'
+            if "commits_to_change" in prompt:
+                return commitment_json
+            return draft_reply
+
+        def fake_git(cmd, **kwargs):
+            r = MagicMock()
+            r.returncode = 0
+            r.stdout = ""
+            if cmd[:2] == ["git", "rev-parse"]:
+                r.stdout = "abc1234\n"
+            elif cmd[:3] == ["git", "diff", "--cached"]:
+                r.returncode = 1
+            elif cmd[:2] == ["git", "show"]:
+                r.stdout = " src/LogTable.tsx | 2 +-\n"
+            elif cmd[:2] == ["git", "rev-list"]:
+                r.stdout = "1\n"
+            return r
+
+        bb_config = {
+            **fake_config,
+            "job": {**fake_config["job"], "platform": "bitbucket"},
+            "bitbucket": {"org": "x", "user_account_id": "bot-self"},
+        }
+
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "repo", "path": wt.parent}]), \
+             patch("features.tickets.ticket_worktree_path", return_value=wt), \
+             patch("features.tickets.run_balanced", side_effect=fake_llm), \
+             patch("features.tickets.run_claude_code", return_value=run_claude) as fixer, \
+             patch("features.tickets.commit_with_hooks",
+                   return_value=MagicMock(returncode=0)), \
+             patch("features.tickets.subprocess.run", side_effect=fake_git):
+            ts = tickets._check_in_review(bb_config, ticket, ts, "http://base")
+
+        saved = json.loads(
+            (fake_config["workspace"]["root"] / "tickets" / slug / "pr_comments.json").read_text()
+        )
+        return ts, mock_platform, fixer, saved
+
+    def test_reply_committing_to_change_routes_to_fix_path(
+        self, fresh_db, fake_config, tmp_state
+    ):
+        ts, platform, fixer, saved = self._run_scan(
+            fake_config,
+            commitment_json='{"commits_to_change": true}',
+            draft_reply="The count was removed. This is a regression. I will restore the count.",
+            run_claude="fixed",
+        )
+        assert fixer.call_count == 1, (
+            "a draft reply that commits to a change must send the comment to "
+            "the fix path, but run_claude_code was never called"
+        )
+        fix_prompt = fixer.call_args.args[0]
+        assert "I will restore the count" in fix_prompt, (
+            "the fix prompt must carry the drafted reply so the fixer knows "
+            f"the committed change; got: {fix_prompt!r}"
+        )
+        assert saved[0]["status"] == "addressed", (
+            f"expected the comment addressed, got {saved[0]['status']!r}"
+        )
+        platform.resolve_comment.assert_called_once_with("repo", 99, 100)
+
+    def test_reply_declining_change_stays_needs_reply(
+        self, fresh_db, fake_config, tmp_state
+    ):
+        declining = "The label is intentional. The count moved into the expanded panel. No change is needed."
+        ts, platform, fixer, saved = self._run_scan(
+            fake_config,
+            commitment_json='{"commits_to_change": false}',
+            draft_reply=declining,
+            run_claude="should not run",
+        )
+        assert fixer.call_count == 0, (
+            "a reply that declines the change must stay reply-only, but the "
+            "fix path ran"
+        )
+        assert saved[0]["status"] == "needs_reply"
+        assert saved[0]["suggested_reply"] == declining
+        platform.resolve_comment.assert_not_called()
+
+
+class TestSubstantiateReplyEnqueueOrdering:
+    """Observed live as jobs 326892/326893/327582/327583: the poll enqueued
+    substantiate_reply before it saved pr_comments.json, so the queued task
+    read the file, missed the comment, and skipped with 'comment no longer
+    tracked'. The defence verdict then stayed stuck at PENDING. The poll must
+    save the comment file before it enqueues the job."""
+
+    def test_the_comment_is_on_disk_before_the_job_is_enqueued(
+        self, fresh_db, fake_config, tmp_state
+    ):
+        slug = "PROJ-1-do-the-thing"
+        ts = make_ticket_state(
+            status="in_review", slug=slug, branch=slug,
+            prs=[{"repo": "repo", "id": 99, "branch": slug, "url": "http://u"}],
+        )
+        ticket = {"key": "PROJ-1", "summary": "Do thing", "url": "http://j/PROJ-1"}
+        comment = {"id": 77, "body": "Why did we pick this approach?",
+                   "author_id": "reviewer1", "author_name": "Bob",
+                   "path": "src/main.py", "line": 42, "parent_id": None,
+                   "created_on": "2026-01-01T12:00:00Z"}
+        cfg = {**fake_config, "features": {"defence": True}}
+
+        mock_platform = MagicMock()
+        mock_platform.get_pr_comments.return_value = [comment]
+
+        rows_at_enqueue = []
+
+        def capture_file(*args, **kwargs):
+            path = tickets._pr_comments_path(cfg, slug)
+            rows_at_enqueue.append(
+                json.loads(path.read_text()) if path.exists() else None
+            )
+
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.get_repos", return_value=[]), \
+             patch("features.tickets.run_balanced",
+                   return_value='{"results": [{"i": 0, "actionable": false}]}'), \
+             patch("features.tickets._draft_comment_reply", return_value="a claim"), \
+             patch.object(tickets, "q") as q:
+            q.enqueue_job.side_effect = capture_file
+            tickets._check_in_review(cfg, ticket, ts, "http://base")
+
+        q.enqueue_job.assert_called_once()
+        args, kwargs = q.enqueue_job.call_args
+        assert kwargs["payload"] == {"slug": slug, "repo": "repo", "comment_id": 77}
+
+        assert rows_at_enqueue[0] is not None, (
+            "substantiate_reply was enqueued before pr_comments.json existed; "
+            "the queued task would skip with 'comment no longer tracked'"
+        )
+        saved = {str(r["id"]): r for r in rows_at_enqueue[0]}
+        assert "77" in saved, (
+            "the comment must be in pr_comments.json when the job is enqueued; "
+            f"got ids {list(saved)}"
+        )
+        assert saved["77"]["suggested_reply"] == "a claim"
+
+        final = json.loads(tickets._pr_comments_path(cfg, slug).read_text())
+        assert final[0]["defence"]["verdict"] == tickets.defence.PENDING
+
+
+class TestCheckInReviewSelfCommittedFix:
+    """Observed live on aimyable django-drf-app PR #174 (DEV-644, 2026-08-20):
+    Trevin Avery's review comment 845507041 was resolved on Bitbucket at
+    23:46:00Z with no commit delivered to the remote. The inline fix path
+    judged "did the agent produce a fix" solely from `git add -A` +
+    `git diff --cached --quiet`. The agent committed the fix itself
+    (31d4e8f) inside run_claude_code, so nothing was left staged; the code
+    took the "already addressed (no change needed)" branch, made_commit
+    stayed False, the push never ran, and the thread was resolved anyway —
+    the fix commit stranded in the local worktree, invisible to the
+    reviewer. The path must compare HEAD before/after the agent run, and
+    must not resolve a comment while the local branch holds commits the
+    remote does not have."""
+
+    def _init_git_pair(self, tmp_path, branch):
+        origin = tmp_path / "origin.git"
+        wt = tmp_path / "wt"
+        subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+        subprocess.run(["git", "clone", str(origin), str(wt)], check=True, capture_output=True)
+        for k, v in (("user.email", "t@example.com"), ("user.name", "t"), ("commit.gpgsign", "false")):
+            subprocess.run(["git", "config", k, v], cwd=str(wt), check=True, capture_output=True)
+        (wt / "app.py").write_text("original\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(wt), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=str(wt), check=True, capture_output=True)
+        subprocess.run(["git", "checkout", "-b", branch], cwd=str(wt), check=True, capture_output=True)
+        subprocess.run(["git", "push", "-u", "origin", branch], cwd=str(wt), check=True, capture_output=True)
+        return wt
+
+    def _head(self, wt):
+        return subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(wt),
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+    def _commit_all(self, wt, message):
+        subprocess.run(["git", "add", "-A"], cwd=str(wt), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", message], cwd=str(wt), check=True, capture_output=True)
+
+    def _setup(self, fake_config, slug):
+        ts = make_ticket_state(
+            status="in_review", slug=slug, branch=slug,
+            prs=[{"repo": "repo", "id": 99, "branch": slug, "url": "http://u"}],
+        )
+        ticket = {"key": "PROJ-1", "summary": "Do thing", "url": "http://j/PROJ-1"}
+        comment = {"id": 100, "body": "You are overriding the original definition without removing the old one",
+                   "author_id": "reviewer1", "author_name": "Trevin",
+                   "path": "app.py", "line": 1, "parent_id": None,
+                   "created_on": "2026-08-20T23:00:00Z",
+                   "created_at": "2026-08-20T23:00:00Z",
+                   "updated_at": "2026-08-20T23:00:00Z"}
+        mock_platform = MagicMock()
+        mock_platform.get_pr_state.return_value = "OPEN"
+        mock_platform.get_pr_comments.return_value = [comment]
+        mock_platform.push_branch.return_value = {"ok": True}
+        bb_config = {
+            **fake_config,
+            "job": {**fake_config["job"], "platform": "bitbucket"},
+            "bitbucket": {"org": "x", "user_account_id": "bot-self"},
+        }
+        return ts, ticket, mock_platform, bb_config
+
+    def _run_check(self, bb_config, ticket, ts, wt, mock_platform, claude):
+        haiku_classify = '{"results": [{"i": 0, "actionable": true}]}'
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "repo", "path": wt.parent}]), \
+             patch("features.tickets.ticket_worktree_path", return_value=wt), \
+             patch("features.tickets.run_balanced", return_value=haiku_classify), \
+             patch("features.tickets.run_claude_code", side_effect=claude):
+            return tickets._check_in_review(bb_config, ticket, ts, "http://base")
+
+    def test_agent_self_commit_is_pushed_then_resolved(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        """The DEV-644 mechanism: the agent commits its fix inside its own
+        run, so nothing is left staged. The run must count as a fix — pushed
+        to the remote, recorded on the entry — and the thread resolved only
+        after the push."""
+        slug = "PROJ-1-do-the-thing"
+        wt = self._init_git_pair(tmp_path, slug)
+        ts, ticket, mock_platform, bb_config = self._setup(fake_config, slug)
+
+        def claude(prompt, cwd=None, **kwargs):
+            (wt / "app.py").write_text("fixed\n")
+            self._commit_all(wt, "remove duplicate field")
+            return "committed the fix"
+
+        ts = self._run_check(bb_config, ticket, ts, wt, mock_platform, claude)
+
+        assert mock_platform.push_branch.call_count == 1, (
+            "agent self-commit left the staging area empty; the run must "
+            "still be detected as a fix (HEAD moved) and pushed — resolving "
+            "the thread with the commit stranded locally is the DEV-644 bug"
+        )
+        mock_platform.resolve_comment.assert_called_once_with("repo", 99, 100)
+        names = [c[0] for c in mock_platform.mock_calls]
+        assert names.index("push_branch") < names.index("resolve_comment"), (
+            "the thread must only be resolved after the push delivered the commit"
+        )
+        saved = tickets._load_pr_comments(bb_config, slug)
+        entry = next(e for e in saved if e["id"] == 100)
+        assert entry["status"] == "addressed"
+        assert entry["fix_commit"] == self._head(wt), (
+            "the self-made commit sha must be recorded so the audit trail "
+            "links the resolved thread to a real commit"
+        )
+
+    def test_no_change_run_pushes_stranded_local_commit_before_resolving(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        """The crash-race variant: an earlier run committed but never pushed
+        (branch ahead of origin), then this run finds the code already fixed
+        and stages nothing. Resolving is honest only if the stranded commit
+        is pushed in the same pass."""
+        slug = "PROJ-1-do-the-thing"
+        wt = self._init_git_pair(tmp_path, slug)
+        (wt / "app.py").write_text("stranded fix\n")
+        self._commit_all(wt, "fix from an earlier run that never got pushed")
+        ts, ticket, mock_platform, bb_config = self._setup(fake_config, slug)
+
+        def claude(prompt, cwd=None, **kwargs):
+            return "the fix is already present in the code"
+
+        ts = self._run_check(bb_config, ticket, ts, wt, mock_platform, claude)
+
+        assert mock_platform.push_branch.call_count == 1, (
+            "local branch is ahead of origin; resolving 'already addressed' "
+            "without pushing strands the fix commit locally"
+        )
+        mock_platform.resolve_comment.assert_called_once_with("repo", 99, 100)
+        names = [c[0] for c in mock_platform.mock_calls]
+        assert names.index("push_branch") < names.index("resolve_comment")
+
+    def test_clean_no_change_run_resolves_without_push(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        """Control case: branch in sync with origin and the agent changes
+        nothing — the comment is genuinely already addressed. No push must
+        happen, and the thread still resolves. Proves the unpushed-commit
+        guard can report zero and does not fire a push on every pass."""
+        slug = "PROJ-1-do-the-thing"
+        wt = self._init_git_pair(tmp_path, slug)
+        ts, ticket, mock_platform, bb_config = self._setup(fake_config, slug)
+
+        def claude(prompt, cwd=None, **kwargs):
+            return "no change needed"
+
+        ts = self._run_check(bb_config, ticket, ts, wt, mock_platform, claude)
+
+        assert mock_platform.push_branch.call_count == 0, (
+            "nothing to deliver — a push here would mean the guard fires "
+            "unconditionally instead of measuring ahead-of-origin"
+        )
+        mock_platform.resolve_comment.assert_called_once_with("repo", 99, 100)
+
+
 class TestRecheckPrFailed:
     """A pr_failed ticket must not be terminal in scan_tickets — observed on
     nectar 2026-05-12: 13 pr_failed tickets in DB included NEC-3039 (PR #691
@@ -2191,6 +2678,56 @@ class TestRecheckPrFailed:
         assert ts["status"] == "pr_failed"
         assert mock_platform.get_pr_info.call_count == 0, (
             "with no tracked PRs there's nothing to re-check; must not hit the platform"
+        )
+
+    def test_ci_failed_same_head_still_red_stays_parked(self, fake_config):
+        """Observed on atropos 2026-08-21: LSC-46 flip-flopped pr_failed ↔
+        in_review every scan cycle for a full day. Recovery on an OPEN PR
+        whose CI is still failing on the exact head that spent the fix budget
+        re-enters the capped in_review path, which parks it again: churn and
+        log spam with no repair. It must stay parked until reality changes."""
+        ts = self._ts(pr_failed_reason="ci_failed",
+                      ci_fix_heads={"repo/99": "sha2"})
+        mock_platform = MagicMock()
+        mock_platform.get_pr_info.return_value = {
+            "state": "OPEN", "approvers": [], "head_sha": "sha2"}
+        mock_platform.get_pr_checks.return_value = [
+            {"name": "build", "state": "FAILURE"}]
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.log") as mock_log:
+            ts = tickets._recheck_pr_failed(fake_config, self._ticket(), ts, "http://b")
+        assert ts["status"] == "pr_failed"
+        assert mock_log.emit.call_count == 0
+
+    def test_ci_failed_head_moved_recovers(self, fake_config):
+        ts = self._ts(pr_failed_reason="ci_failed",
+                      ci_fix_heads={"repo/99": "sha2"})
+        mock_platform = MagicMock()
+        mock_platform.get_pr_info.return_value = {
+            "state": "OPEN", "approvers": [], "head_sha": "sha3"}
+        mock_platform.get_pr_checks.return_value = [
+            {"name": "build", "state": "FAILURE"}]
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.log"):
+            ts = tickets._recheck_pr_failed(fake_config, self._ticket(), ts, "http://b")
+        assert ts["status"] == "in_review", (
+            "new commits landed on the PR branch; the ticket must recover so "
+            f"the CI fix path gets a fresh budget. got: {ts['status']}"
+        )
+
+    def test_ci_failed_now_green_recovers(self, fake_config):
+        ts = self._ts(pr_failed_reason="ci_failed",
+                      ci_fix_heads={"repo/99": "sha2"})
+        mock_platform = MagicMock()
+        mock_platform.get_pr_info.return_value = {
+            "state": "OPEN", "approvers": [], "head_sha": "sha2"}
+        mock_platform.get_pr_checks.return_value = [
+            {"name": "build", "state": "SUCCESS"}]
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.log"):
+            ts = tickets._recheck_pr_failed(fake_config, self._ticket(), ts, "http://b")
+        assert ts["status"] == "in_review", (
+            f"CI recovered on the platform; ticket must recover. got: {ts['status']}"
         )
 
     def test_platform_error_stays_pr_failed(self, fake_config):
@@ -2494,3 +3031,133 @@ class TestResolveStatusInvalidEntry:
     def test_valid_mapped_still_works(self):
         config = {"job": {"ticket_system": "jira"}, "jira": {"status_map": {"In Progress": "planning"}}}
         assert tickets._resolve_status(config, "In Progress") == "planning"
+
+
+class TestCheckInReviewPipelineCommentHold:
+    """Observed on aimyable windows-rpa-client #56 and websocket-server #118
+    (DEV-635, 2026-08-21): pipeline-failure comments ("N of M checks failed")
+    were resolved via the "already addressed (no change needed)" branch while
+    the PR's pipeline was still red. A no-change verdict on a comment that
+    reports a CI failure is unverifiable until the checks are green, so the
+    resolve must be held while any check is failing."""
+
+    PIPELINE_COMMENT = "## ❌ 2 of 5 checks failed — `9e2f021`\n\n- Swagger Schema\n- Django Migrations"
+
+    def _init_git_pair(self, tmp_path, branch):
+        origin = tmp_path / "origin.git"
+        wt = tmp_path / "wt"
+        subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+        subprocess.run(["git", "clone", str(origin), str(wt)], check=True, capture_output=True)
+        for k, v in (("user.email", "t@example.com"), ("user.name", "t"), ("commit.gpgsign", "false")):
+            subprocess.run(["git", "config", k, v], cwd=str(wt), check=True, capture_output=True)
+        (wt / "app.py").write_text("original\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(wt), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=str(wt), check=True, capture_output=True)
+        subprocess.run(["git", "checkout", "-b", branch], cwd=str(wt), check=True, capture_output=True)
+        subprocess.run(["git", "push", "-u", "origin", branch], cwd=str(wt), check=True, capture_output=True)
+        return wt
+
+    def _setup(self, fake_config, slug, checks):
+        ts = make_ticket_state(
+            status="in_review", slug=slug, branch=slug,
+            prs=[{"repo": "repo", "id": 99, "branch": slug, "url": "http://u"}],
+        )
+        ticket = {"key": "PROJ-1", "summary": "Do thing", "url": "http://j/PROJ-1"}
+        comment = {"id": 100, "body": self.PIPELINE_COMMENT,
+                   "author_id": "reviewer1", "author_name": "Pipeline Bot",
+                   "path": None, "line": None, "parent_id": None,
+                   "created_on": "2026-08-21T00:00:00Z",
+                   "created_at": "2026-08-21T00:00:00Z",
+                   "updated_at": "2026-08-21T00:00:00Z"}
+        mock_platform = MagicMock()
+        mock_platform.get_pr_state.return_value = "OPEN"
+        mock_platform.get_pr_comments.return_value = [comment]
+        mock_platform.get_pr_checks.return_value = checks
+        mock_platform.push_branch.return_value = {"ok": True}
+        bb_config = {
+            **fake_config,
+            "job": {**fake_config["job"], "platform": "bitbucket"},
+            "bitbucket": {"org": "x", "user_account_id": "bot-self"},
+        }
+        return ts, ticket, mock_platform, bb_config
+
+    def _run_check(self, bb_config, ticket, ts, wt, mock_platform):
+        haiku_classify = '{"results": [{"i": 0, "actionable": true}]}'
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "repo", "path": wt.parent}]), \
+             patch("features.tickets.ticket_worktree_path", return_value=wt), \
+             patch("features.tickets.run_balanced", return_value=haiku_classify), \
+             patch("features.tickets.run_claude_code",
+                   side_effect=lambda prompt, cwd=None, **kw: "no change needed"):
+            return tickets._check_in_review(bb_config, ticket, ts, "http://base")
+
+    def test_no_change_hold_while_checks_red(self, fresh_db, fake_config, tmp_state, tmp_path):
+        slug = "PROJ-1-do-the-thing"
+        wt = self._init_git_pair(tmp_path, slug)
+        red = [{"name": "Pipeline", "state": "FAILED", "url": ""}]
+        ts, ticket, mock_platform, bb_config = self._setup(fake_config, slug, red)
+
+        ts = self._run_check(bb_config, ticket, ts, wt, mock_platform)
+
+        mock_platform.resolve_comment.assert_not_called()
+        saved = tickets._load_pr_comments(bb_config, slug)
+        entry = next(e for e in saved if e["id"] == 100)
+        assert entry["status"] == "fix_failed"
+        assert ts.get("last_comment_ids", {}).get("repo/99") is None, (
+            "the held comment must stay eligible for a retry once CI is green"
+        )
+
+    def test_hold_still_pushes_stranded_commit(self, fresh_db, fake_config, tmp_state, tmp_path):
+        slug = "PROJ-1-do-the-thing"
+        wt = self._init_git_pair(tmp_path, slug)
+        (wt / "app.py").write_text("stranded fix\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(wt), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "stranded"], cwd=str(wt), check=True, capture_output=True)
+        red = [{"name": "Pipeline", "state": "FAILED", "url": ""}]
+        ts, ticket, mock_platform, bb_config = self._setup(fake_config, slug, red)
+
+        ts = self._run_check(bb_config, ticket, ts, wt, mock_platform)
+
+        assert mock_platform.push_branch.call_count == 1, (
+            "holding the resolve must not also strand the local fix commit — "
+            "the push is what can turn the pipeline green"
+        )
+        mock_platform.resolve_comment.assert_not_called()
+
+    def test_resolves_once_checks_green(self, fresh_db, fake_config, tmp_state, tmp_path):
+        slug = "PROJ-1-do-the-thing"
+        wt = self._init_git_pair(tmp_path, slug)
+        red = [{"name": "Pipeline", "state": "FAILED", "url": ""}]
+        ts, ticket, mock_platform, bb_config = self._setup(fake_config, slug, red)
+
+        ts = self._run_check(bb_config, ticket, ts, wt, mock_platform)
+        mock_platform.resolve_comment.assert_not_called()
+
+        mock_platform.get_pr_checks.return_value = [{"name": "Pipeline", "state": "SUCCESS", "url": ""}]
+        ts = self._run_check(bb_config, ticket, ts, wt, mock_platform)
+
+        mock_platform.resolve_comment.assert_called_once_with("repo", 99, 100)
+        saved = tickets._load_pr_comments(bb_config, slug)
+        entry = [e for e in saved if e["id"] == 100][-1]
+        assert entry["status"] == "addressed"
+
+
+class TestCiFailureCommentHeld:
+    def _pf(self, checks):
+        pf = MagicMock()
+        pf.get_pr_checks.return_value = checks
+        return pf
+
+    def test_non_ci_comment_never_held(self):
+        pf = self._pf([{"name": "Pipeline", "state": "FAILED", "url": ""}])
+        assert tickets._ci_failure_comment_held(pf, {"repo": "r", "id": 1}, "rename this variable") is False
+        pf.get_pr_checks.assert_not_called()
+
+    def test_ci_comment_green_checks_not_held(self):
+        pf = self._pf([{"name": "Pipeline", "state": "SUCCESS", "url": ""}])
+        assert tickets._ci_failure_comment_held(pf, {"repo": "r", "id": 1}, "ESLint failed") is False
+
+    def test_ci_comment_fetch_failure_held(self):
+        pf = self._pf(None)
+        assert tickets._ci_failure_comment_held(pf, {"repo": "r", "id": 1}, "1 of 3 checks failed") is True

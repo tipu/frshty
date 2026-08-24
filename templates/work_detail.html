@@ -6,40 +6,139 @@
 <title>Work item — frshty</title>
 <script src="/static/tailwind.js"></script>
 <script src="/static/vendor/vue.global.prod.js"></script>
+<script src="/static/frshty-work-question.js"></script>
+<script src="/static/frshty-linkify.js"></script>
 <link rel="stylesheet" href="/static/frshty.css">
 <style>
 .tl { border-left: 2px solid #2a2a35; margin-left: 8px; padding-left: 16px; }
 .tl-prompt { color: #93c5fd; margin: 14px 0 4px; white-space: pre-wrap; }
 .tl-text { color: #d0d0d0; margin: 8px 0; white-space: pre-wrap; line-height: 1.45; }
 .tl-tool { color: #6b7280; font-size: 12px; font-family: monospace; margin: 1px 0; }
+.tl-ts { color: #4b5563; font-size: 11px; font-family: monospace; }
 .badge { display: inline-block; padding: 1px 10px; border-radius: 4px; font-size: 12px; margin-left: 8px; }
 .b-done-agent { background: #713f12; color: #fde047; }
 .b-done-op { background: #14532d; color: #86efac; }
 .b-other { background: #1e3a5f; color: #93c5fd; }
 .sec { margin-top: 22px; }
 .art { font-family: monospace; font-size: 13px; color: #86efac; }
+.art img { display: block; max-width: 100%; max-height: 480px; border: 1px solid #2a2a35; border-radius: 8px; margin: 6px 0 12px; }
 </style>
+<script src="/static/frshty-usage.js"></script>
 </head>
 <body class="bg-[#0b0b10] text-gray-200">
-<div id="app" class="max-w-4xl mx-auto px-6 py-6" v-if="item">
+<div id="app" class="max-w-[1600px] mx-auto px-6 py-6">
+<div v-if="item">
   <div class="text-xs text-gray-500 mb-2"><a href="/work" class="underline">← work</a></div>
   <h1 class="text-lg font-bold">{{ item.objective }}</h1>
   <div class="mt-1">
     <span :class="['badge', badgeCls]">{{ stateLabel }}</span>
-    <span class="text-xs text-gray-500 ml-2">#{{ item.id }} · {{ item.scope }} · {{ item.instance_key || 'no instance' }} · continues {{ item.continues_used }}/{{ item.continue_cap }}</span>
+    <span class="text-xs text-gray-500 ml-2">#{{ item.id }} · {{ item.scope }} · {{ item.instance_key || 'no instance' }} · continues {{ item.continues_used }}/{{ item.continue_cap }}<span v-if="item.contexts"> · {{ item.contexts }}</span></span>
+    <a v-if="sourceItem" :href="'/work/' + sourceItem.id" class="text-xs text-blue-400 underline ml-3" :title="sourceItem.objective">follows #{{ sourceItem.id }}</a>
     <a :href="'/work/' + item.id + '/terminal'" target="_blank" class="text-xs text-blue-400 underline ml-3">open terminal</a>
+  </div>
+  <div class="sec" v-if="item.state === 'needs_you' || item.pending_question">
+    <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Needs you</h2>
+    <div class="text-sm" style="color:#fbbf24; white-space:pre-wrap"
+         v-if="item.stop_reason && !item.pending_question" v-html="lk(item.stop_reason)"></div>
+    <work-question :item="item" @answer="answer($event)"></work-question>
+    <form class="mt-2" @submit.prevent="answer(replyText.trim())">
+      <input class="wintake" style="width:100%; background:#101018; border:1px solid #2a2a35; border-radius:8px; padding:10px 14px; color:#e0e0e0"
+             v-model="replyText"
+             :placeholder="item.pending_question ? 'Other — type your own answer…' : 'Answer and resume…'" />
+    </form>
+    <div class="text-xs text-red-400 mt-1" v-if="replyError">{{ replyError }}</div>
+  </div>
+  <div class="sec" v-if="item.summary || item.state === 'done'">
+    <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Summary</h2>
+    <div class="text-sm" style="white-space:pre-wrap" v-if="item.summary" v-html="lk(item.summary)"></div>
+    <div class="text-xs text-gray-600" v-else>No summary yet.</div>
+    <div class="mt-1">
+      <a :href="'/work/' + item.id + '/summary'" target="_blank" class="text-xs text-blue-400 underline">open summary page</a>
+      <span class="text-xs text-blue-400 underline ml-3 cursor-pointer" @click="debrief">{{ debriefBusy ? "debriefing…" : "regenerate" }}</span>
+      <span class="text-xs text-red-400 ml-3" v-if="debriefError">{{ debriefError }}</span>
+    </div>
+  </div>
+  <div class="sec" v-if="followups.length">
+    <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Follow-ups</h2>
+    <div v-for="f in followups" :key="f.id" class="mb-3" style="background:#101018;border:1px solid #2a2a35;border-radius:8px;padding:10px 14px">
+      <div class="text-xs" style="color:#93c5fd">
+        <template v-if="f.kind === 'work_item'">new work item · {{ f.status }}</template>
+        <template v-else>{{ f.kind }} · {{ f.workspace }} · {{ f.recipient }} · {{ f.status }}</template>
+      </div>
+      <textarea v-if="f.status === 'draft'" v-model="fuText[f.id]" rows="3"
+                style="width:100%;background:#0b0b10;border:1px solid #2a2a35;border-radius:6px;color:#e0e0e0;padding:6px 10px;margin-top:6px"></textarea>
+      <div v-else class="text-sm mt-1" style="white-space:pre-wrap" v-html="lk(f.draft)"></div>
+      <div class="mt-2 flex flex-wrap gap-3 text-xs text-gray-400"
+           v-if="f.status === 'draft' && f.kind === 'work_item' && (projects.length || slackAvailable)">
+        <label v-for="p in projects" :key="p.key" class="cursor-pointer" :title="p.root">
+          <input type="checkbox" v-model="fuCtx[f.id]" :value="p.key" />
+          {{ p.key }}
+        </label>
+        <label v-if="slackAvailable" class="cursor-pointer" title="tell the run to read the slack_int capture archive for the selected project's org">
+          <input type="checkbox" v-model="fuSlack[f.id]" />
+          slack_int
+        </label>
+      </div>
+      <div class="mt-2" v-if="f.status === 'draft' || f.status === 'failed'">
+        <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#14532d;color:#86efac"
+              v-if="f.status === 'draft'" @click="fuSend(f)">{{ f.kind === 'work_item' ? 'launch run' : 'send as you' }}</span>
+        <span class="text-xs px-3 py-1 rounded cursor-pointer ml-2" style="background:#3f1d1d;color:#fca5a5"
+              @click="fuDismiss(f)">dismiss</span>
+      </div>
+      <div class="text-xs text-gray-500 mt-1" v-if="f.detail">{{ f.detail }}</div>
+      <div class="text-xs text-red-400 mt-1" v-if="fuError[f.id]">{{ fuError[f.id] }}</div>
+    </div>
+  </div>
+  <div class="sec" v-if="item.state === 'done'">
+    <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Follow up</h2>
+    <div class="text-xs text-gray-600 mb-2">Launch a new run that gets this item's objective, summary and artifacts as context.</div>
+    <textarea v-model="fupText" rows="3" placeholder="Objective for the follow-up run…"
+              style="width:100%;background:#101018;border:1px solid #2a2a35;border-radius:8px;color:#e0e0e0;padding:10px 14px"></textarea>
+    <div class="mt-2 flex flex-wrap gap-3 text-xs text-gray-400" v-if="projects.length || slackAvailable">
+      <label v-for="p in projects" :key="p.key" class="cursor-pointer" :title="p.root">
+        <input type="checkbox" v-model="fupCtx" :value="p.key" />
+        {{ p.key }}
+      </label>
+      <label v-if="slackAvailable" class="cursor-pointer" title="tell the run to read the slack_int capture archive for the selected project's org">
+        <input type="checkbox" v-model="fupSlack" />
+        slack_int
+      </label>
+    </div>
+    <div class="mt-2">
+      <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#14532d;color:#86efac"
+            @click="fupLaunch">{{ fupBusy ? "launching…" : "launch follow-up run" }}</span>
+      <span class="text-xs text-red-400 ml-3" v-if="fupError">{{ fupError }}</span>
+    </div>
+  </div>
+  <div class="sec" v-if="followupChildren.length">
+    <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Followed up by</h2>
+    <div v-for="c in followupChildren" class="text-sm">
+      <a :href="'/work/' + c.id" class="text-blue-400 underline">#{{ c.id }}</a>
+      <span class="text-gray-400 ml-1">{{ c.objective }}</span>
+      <span class="text-xs text-gray-500 ml-2">{{ c.state.replace('_', ' ') }}</span>
+    </div>
   </div>
   <div class="sec" v-if="artifacts.length">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Artifacts</h2>
-    <div v-for="a in artifacts" class="art">{{ a.path }} <span class="text-gray-500">— {{ a.note }}</span></div>
+    <div v-for="a in artifacts" class="art">
+      <a :href="'/api/work/artifact_file/' + a.id" target="_blank" class="underline">{{ a.path }}</a> <span class="text-gray-500">— {{ a.note }}</span>
+      <img v-if="isImg(a.path)" :src="'/api/work/artifact_file/' + a.id" :alt="a.note || a.path"
+           @error="$event.target.style.display='none'">
+    </div>
+  </div>
+  <div class="sec" v-if="systemPrompt">
+    <h2 class="text-sm font-bold uppercase text-gray-400 mb-1 cursor-pointer select-none" @click="showPrompt = !showPrompt">
+      System prompt <span class="text-gray-600 normal-case font-normal">{{ showPrompt ? "▾ hide" : "▸ show" }}</span>
+    </h2>
+    <pre v-if="showPrompt" class="text-xs" style="white-space:pre-wrap; color:#9ca3af; background:#101018; border:1px solid #2a2a35; border-radius:8px; padding:10px 14px; max-height:480px; overflow-y:auto">{{ systemPrompt }}</pre>
   </div>
   <div class="sec">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">What happened</h2>
     <div class="text-xs text-gray-600 mb-2">Read from the session transcript. Prompts in blue, agent reports in white, every tool call in grey.</div>
     <div class="tl">
       <template v-for="e in timeline">
-        <div v-if="e.kind === 'prompt'" class="tl-prompt">❯ {{ e.text }}</div>
-        <div v-else-if="e.kind === 'text'" class="tl-text">{{ e.text }}</div>
+        <div v-if="e.kind === 'prompt'" class="tl-prompt"><div class="tl-ts" v-if="e.at" :title="ts(e.at)">{{ rel(e.at) }}</div>❯ {{ e.text }}</div>
+        <div v-else-if="e.kind === 'text'" class="tl-text"><div class="tl-ts" v-if="e.at" :title="ts(e.at)">{{ rel(e.at) }}</div><span v-html="lk(e.text)"></span></div>
         <div v-else class="tl-tool">{{ e.name }} {{ e.arg }}</div>
       </template>
     </div>
@@ -49,10 +148,17 @@
     <div v-for="ev in events" class="text-xs text-gray-500 font-mono">{{ ev.created_at.slice(0,19) }} {{ ev.kind }}</div>
   </div>
 </div>
+</div>
 <script>
 const { createApp } = Vue;
 createApp({
-  data() { return { item: null, timeline: [], events: [], artifacts: [] }; },
+  data() { return { item: null, timeline: [], events: [], artifacts: [], replyText: "", replyError: "",
+                    systemPrompt: "", showPrompt: false,
+                    followups: [], fuText: {}, fuCtx: {}, fuSlack: {}, fuError: {},
+                    sourceItem: null, followupChildren: [],
+                    fupText: "", fupCtx: [], fupSlack: false, fupError: "", fupBusy: false,
+                    projects: [], slackAvailable: false,
+                    debriefBusy: false, debriefError: "", linkmap: null }; },
   computed: {
     stateLabel() {
       if (!this.item) return "";
@@ -67,13 +173,131 @@ createApp({
       return this.item.done_source === "operator" ? "b-done-op" : "b-done-agent";
     },
   },
-  async mounted() {
-    const id = location.pathname.split("/")[2];
-    const r = await fetch(`/api/work/items/${id}/detail`);
-    const d = await r.json();
-    this.item = d.item; this.timeline = d.timeline; this.events = d.events; this.artifacts = d.artifacts;
+  methods: {
+    lk(text) { return window.frshtyLinkify(text, this.linkmap); },
+    ts(at) {
+      const d = new Date(at);
+      if (isNaN(d.getTime())) return "";
+      const p = n => String(n).padStart(2, "0");
+      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    },
+    rel(at) {
+      const d = new Date(at);
+      if (isNaN(d.getTime())) return "";
+      const s = Math.max(0, Math.floor((Date.now() - d.getTime()) / 1000));
+      if (s < 60) return "just now";
+      const m = Math.floor(s / 60);
+      if (m < 60) return `${m} min${m === 1 ? "" : "s"} ago`;
+      const h = Math.floor(m / 60);
+      if (h < 24) return `${h} hour${h === 1 ? "" : "s"} ago`;
+      const dy = Math.floor(h / 24);
+      return `${dy} day${dy === 1 ? "" : "s"} ago`;
+    },
+    isImg(p) { return /\.(png|jpe?g|gif|webp|svg|bmp|avif)$/i.test(p || ""); },
+    async loadLinkmap() {
+      try { this.linkmap = await (await fetch("/api/work/linkmap")).json(); } catch (e) {}
+    },
+    async refresh() {
+      const seq = ++this._refreshSeq;
+      const id = location.pathname.split("/")[2];
+      const r = await fetch(`/api/work/items/${id}/detail`);
+      if (!r.ok || seq !== this._refreshSeq) return;
+      const d = await r.json();
+      if (seq !== this._refreshSeq) return;
+      this.item = d.item; this.timeline = d.timeline; this.events = d.events; this.artifacts = d.artifacts;
+      this.systemPrompt = d.system_prompt || "";
+      const obj = (d.item.objective || "").trim();
+      if (obj) {
+        if (!this._baseTitle) this._baseTitle = document.title;
+        const snip = obj.length > 40 ? obj.slice(0, 40) + "…" : obj;
+        document.title = this._baseTitle.replace("Work item", snip);
+      }
+      this.followups = d.followups || [];
+      this.sourceItem = d.source_item || null; this.followupChildren = d.followup_children || [];
+      this.projects = d.projects || []; this.slackAvailable = !!d.slack_available;
+      const known = new Set(this.projects.map(p => p.key));
+      const parent = (this.item.contexts || "").split(",").filter(Boolean);
+      if (!this._fupSeeded) {
+        this._fupSeeded = true;
+        this.fupCtx = parent.filter(c => known.has(c));
+        this.fupSlack = parent.includes("slack_int");
+      }
+      for (const f of this.followups)
+        if (f.status === "draft" && !(f.id in this.fuText)) {
+          this.fuText[f.id] = f.draft;
+          this.fuCtx[f.id] = parent.filter(c => known.has(c));
+          this.fuSlack[f.id] = parent.includes("slack_int");
+        }
+    },
+    async fuSend(f) {
+      this.fuError[f.id] = "";
+      const r = await fetch(`/api/work/followups/${f.id}/send`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: this.fuText[f.id] || "",
+                               contexts: this.fuCtx[f.id] || [], slack: !!this.fuSlack[f.id] }),
+      });
+      if (!r.ok) { const d = await r.json(); this.fuError[f.id] = d.error || ("send failed HTTP " + r.status); }
+      await this.refresh();
+    },
+    async fupLaunch() {
+      const text = this.fupText.trim();
+      if (!text || this.fupBusy) return;
+      this.fupBusy = true; this.fupError = "";
+      try {
+        const r = await fetch(`/api/work/items/${this.item.id}/followup`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text, contexts: this.fupCtx, slack: this.fupSlack }),
+        });
+        const d = await r.json();
+        if (!r.ok) { this.fupError = d.error || ("launch failed HTTP " + r.status); return; }
+        location.href = "/work/" + d.item_id;
+      } catch (e) {
+        this.fupError = "launch failed: " + e.message;
+      } finally {
+        this.fupBusy = false;
+      }
+    },
+    async fuDismiss(f) {
+      const r = await fetch(`/api/work/followups/${f.id}/dismiss`, { method: "POST" });
+      if (!r.ok) { const d = await r.json(); this.fuError[f.id] = d.error || "dismiss failed"; }
+      await this.refresh();
+    },
+    async debrief() {
+      if (this.debriefBusy) return;
+      this.debriefBusy = true; this.debriefError = "";
+      try {
+        const r = await fetch(`/api/work/items/${this.item.id}/debrief`, { method: "POST" });
+        if (!r.ok) { const d = await r.json(); this.debriefError = d.error || ("debrief failed HTTP " + r.status); }
+      } catch (e) {
+        this.debriefError = "debrief failed: " + e.message;
+      } finally {
+        this.debriefBusy = false;
+      }
+      await this.refresh();
+    },
+    async answer(text) {
+      if (!text) return;
+      this.replyError = "";
+      try {
+        const r = await fetch(`/api/work/items/${this.item.id}/reply`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+        });
+        if (!r.ok) { const d = await r.json(); this.replyError = d.error || ("reply failed HTTP " + r.status); return; }
+        this.replyText = "";
+        await this.refresh();
+      } catch (e) {
+        this.replyError = "reply failed: " + e.message;
+      }
+    },
   },
-}).mount("#app");
+  async mounted() {
+    this._refreshSeq = 0;
+    this.loadLinkmap();
+    await this.refresh();
+    setInterval(() => this.refresh(), 15000);
+  },
+}).component("work-question", window.WorkQuestion).mount("#app");
 </script>
 </body>
 </html>

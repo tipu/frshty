@@ -28,18 +28,53 @@ def _connect() -> sqlite3.Connection:
     return conn
 
 
+def _has_sql(fragment: str) -> bool:
+    kept = "\n".join(ln for ln in fragment.splitlines() if not ln.strip().startswith("--"))
+    return bool(kept.strip(" \t\n;"))
+
+
+def _statements(script: str) -> list[str]:
+    statements = []
+    buf = ""
+    for chunk in script.split(";"):
+        buf += chunk + ";"
+        if sqlite3.complete_statement(buf):
+            if _has_sql(buf):
+                statements.append(buf.strip())
+            buf = ""
+    if _has_sql(buf):
+        statements.append(buf.strip(" \n;"))
+    return statements
+
+
 def _apply_migrations() -> None:
     if _MIGRATIONS_DIR is None or not _MIGRATIONS_DIR.exists():
         return
     conn = _connect()
     try:
         conn.execute("CREATE TABLE IF NOT EXISTS _migrations (name TEXT PRIMARY KEY, applied_at TEXT NOT NULL)")
-        applied = {row["name"] for row in conn.execute("SELECT name FROM _migrations")}
         for sql_file in sorted(_MIGRATIONS_DIR.glob("*.sql")):
+            applied = {row["name"] for row in conn.execute("SELECT name FROM _migrations")}
             if sql_file.name in applied:
                 continue
-            conn.executescript(sql_file.read_text())
-            conn.execute("INSERT INTO _migrations(name, applied_at) VALUES (?, datetime('now'))", (sql_file.name,))
+            statements = _statements(sql_file.read_text())
+            while statements and statements[0].upper().startswith("PRAGMA"):
+                conn.execute(statements.pop(0))
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                applied = {row["name"] for row in conn.execute("SELECT name FROM _migrations")}
+                if sql_file.name not in applied:
+                    for statement in statements:
+                        conn.execute(statement)
+                    conn.execute("INSERT INTO _migrations(name, applied_at) VALUES (?, datetime('now'))",
+                                 (sql_file.name,))
+                conn.execute("COMMIT")
+            except BaseException:
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.OperationalError:
+                    pass
+                raise
     finally:
         conn.close()
 

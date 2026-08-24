@@ -2,7 +2,7 @@ import json
 import os
 import sys
 
-EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd", "Notification")
+EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd", "Notification", "PreToolUse")
 DEFAULT_DIRS = ("~/.claude", "~/.quill-claude", "~/.aimyable-claude")
 
 
@@ -30,10 +30,16 @@ def install_into(settings_path: str, events=EVENTS) -> list[str]:
         ]
         if command in commands:
             continue
-        entries.append({
-            "matcher": "",
-            "hooks": [{"type": "command", "command": command, "timeout": 5, "async": True}],
-        })
+        if event == "PreToolUse":
+            entries.append({
+                "matcher": "AskUserQuestion",
+                "hooks": [{"type": "command", "command": command, "timeout": 10}],
+            })
+        else:
+            entries.append({
+                "matcher": "",
+                "hooks": [{"type": "command", "command": command, "timeout": 5, "async": True}],
+            })
         added.append(event)
     if added:
         os.makedirs(os.path.dirname(settings_path), exist_ok=True)

@@ -26,6 +26,7 @@ Because that flag was appended outside the config check, it also suppressed
 native git hooks in repos with no pre-commit config at all.
 """
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -97,25 +98,38 @@ def add_or_reuse_worktree(repo_path: Path, worktree_path: Path, branch: str,
     return holder
 
 
-def _find_pre_commit(repo_dir: Path) -> Path | None:
-    """Return the path to a usable pre-commit binary, or None.
+def pre_commit_candidates(repo_dir: Path) -> list[Path]:
+    """Every path `_find_pre_commit` would consider, in preference order.
 
-    Preference order: per-repo `.venv/bin/pre-commit`, then `~/.local/bin`,
-    then `/usr/local/bin` / `/usr/bin`, then anything on PATH."""
-    candidates = [
+    Exposed so a caller can watch all of them. Watching only the one that
+    resolves today misses a repair that plants a higher-priority runner, because
+    that changes which path resolves rather than the contents of the old one.
+    The PATH fallback is included for the same reason: it is the runner that
+    actually executes when none of the fixed locations has one."""
+    fixed = [
         repo_dir / ".venv" / "bin" / "pre-commit",
         Path.home() / ".local" / "bin" / "pre-commit",
         Path("/usr/local/bin/pre-commit"),
         Path("/usr/bin/pre-commit"),
     ]
-    for c in candidates:
+    located = shutil.which("pre-commit")
+    if located and Path(located) not in fixed:
+        fixed.append(Path(located))
+    return fixed
+
+
+def _find_pre_commit(repo_dir: Path) -> Path | None:
+    """Return the path to a usable pre-commit binary, or None.
+
+    Preference order: per-repo `.venv/bin/pre-commit`, then `~/.local/bin`,
+    then `/usr/local/bin` / `/usr/bin`, then anything on PATH."""
+    for c in pre_commit_candidates(repo_dir):
         try:
             if c.is_file() and os.access(c, os.X_OK):
                 return c
         except OSError:
             continue
-    located = shutil.which("pre-commit")
-    return Path(located) if located else None
+    return None
 
 
 def _hook_env(repo_dir: Path, pre_commit: Path | None = None) -> dict[str, str]:
@@ -132,31 +146,6 @@ def _hook_env(repo_dir: Path, pre_commit: Path | None = None) -> dict[str, str]:
         if candidate and candidate.is_dir():
             env["PATH"] = f"{candidate}{os.pathsep}{env.get('PATH', '')}"
     return env
-
-
-def _run_pre_commit(repo_dir: Path, pc: Path, env: dict[str, str]) -> None:
-    """Run `pre-commit run` and re-stage anything it auto-fixed. Idempotent
-    second pass catches the typical "files were modified, please re-run"
-    exit code from the first invocation."""
-    for attempt in range(2):
-        run = subprocess.run(
-            [str(pc), "run"],
-            cwd=str(repo_dir), capture_output=True, text=True,
-            env=env, timeout=PRE_COMMIT_TIMEOUT,
-        )
-        subprocess.run(["git", "add", "-A"], cwd=str(repo_dir),
-                       capture_output=True, timeout=30)
-        if run.returncode == 0:
-            return
-        if attempt == 1:
-            log.emit(
-                "git_pre_commit_unresolved",
-                f"{repo_dir.name}: pre-commit reported unresolved issues "
-                f"after retry; subsequent git commit will surface them",
-                meta={"repo": repo_dir.name,
-                      "stdout_tail": (run.stdout or "")[-2000:],
-                      "stderr_tail": (run.stderr or "")[-1000:]},
-            )
 
 
 @dataclass
@@ -199,6 +188,20 @@ _DEPENDENCY_MARKERS = (
 )
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def strip_ansi(text: str) -> str:
+    """Hook output with the colour taken out.
+
+    Tools decide to colour from the environment, not from whether anyone is
+    reading. ruff writes `\\x1b[1m\\x1b[91mE501 `, and the escape sits directly
+    against the code, so `\\bE501\\b` finds no word boundary and the diagnostic
+    goes unrecognised. The classifier then blocks a ticket it knows how to fix.
+    """
+    return _ANSI.sub("", text or "")
+
+
 def triage_commit_failure(status: str, output: str) -> str:
     """Classify a failed commit deterministically, before asking any model.
 
@@ -209,7 +212,7 @@ def triage_commit_failure(status: str, output: str) -> str:
     arrived through one code path and all got the same answer: "edit something".
     Two of those three are not fixable by editing this repository.
     """
-    text = (output or "").lower()
+    text = strip_ansi(output or "").lower()
     if status == "git_failed":
         return "git"
     if status == "tooling_failed" or any(m in text for m in _ENVIRONMENT_MARKERS):
@@ -287,52 +290,39 @@ def commit_with_hooks(repo_dir: Path,
     Never bypasses verification. A repo that configures pre-commit but whose
     binary cannot be located returns exit 127 with an explanatory stderr, so the
     caller sees a tooling failure instead of an unverified commit. A repo with no
-    pre-commit config commits normally, leaving any native git hooks in force."""
-    args = ["git", "commit"]
-    extras = list(extra_commit_args or [])
+    pre-commit config commits normally, leaving any native git hooks in force.
 
-    config = repo_dir / ".pre-commit-config.yaml"
-    pc = _find_pre_commit(repo_dir) if config.is_file() else None
-
-    if pc is None:
-        if config.is_file():
-            # Committing unverified is worse than not committing: the ticket
-            # advances as though the hooks had passed. Report a tooling failure
-            # and let the caller decide, rather than rubber-stamping the commit.
-            log.emit(
-                "git_pre_commit_unavailable",
-                f"{repo_dir.name}: pre-commit config present but no binary found "
-                f"in the repo .venv or on PATH; refusing to commit unverified",
-                meta={"repo": repo_dir.name},
-            )
-            detail = ("pre-commit is configured for this repository but no binary "
-                      "could be located in .venv/bin or on PATH")
-            if check:
-                raise subprocess.CalledProcessError(127, args, output="", stderr=detail)
-            return subprocess.CompletedProcess(args, 127, "", detail)
-        # No pre-commit config at all: an ordinary commit, which still runs any
-        # native git hooks the repo installs.
-        args.extend(extras)
-        if message is not None:
-            args.extend(["-m", message])
-        return subprocess.run(
-            args, cwd=str(repo_dir), capture_output=True, text=True,
-            check=check, timeout=timeout,
-        )
-
-    # Run the auto-fixers ourselves so their modifications get re-staged
-    # before the git-driven hook re-runs the same checks. The env carries
-    # `<repo>/.venv/bin` on PATH so the git-driven hook script's
-    # `command -v pre-commit` fallback resolves to the same binary.
-    env = _hook_env(repo_dir, pc)
-    _run_pre_commit(repo_dir, pc, env)
-    args.extend(extras)
+    This is `commit_outcome` flattened into a CompletedProcess for callers that
+    only read a return code. It used to run the hooks itself and then run
+    `git commit` regardless of what they said, so a repo whose hooks fail but
+    which installs no native git hook committed and reported success."""
+    outcome = commit_outcome(repo_dir, message=message,
+                             extra_commit_args=extra_commit_args, timeout=timeout)
+    args = ["git", "commit", *(extra_commit_args or [])]
     if message is not None:
         args.extend(["-m", message])
-    return subprocess.run(
-        args, cwd=str(repo_dir), capture_output=True, text=True,
-        check=check, timeout=timeout, env=env,
-    )
+
+    if outcome.ok:
+        return subprocess.CompletedProcess(args, 0, outcome.output, "")
+
+    if outcome.status == "tooling_failed":
+        log.emit(
+            "git_pre_commit_unavailable",
+            f"{repo_dir.name}: pre-commit config present but no binary found "
+            f"in the repo .venv or on PATH; refusing to commit unverified",
+            meta={"repo": repo_dir.name},
+        )
+    elif outcome.status == "hook_failed":
+        log.emit(
+            "git_pre_commit_unresolved",
+            f"{repo_dir.name}: pre-commit reported unresolved issues after "
+            f"retry; refusing to commit",
+            meta={"repo": repo_dir.name, "output_tail": (outcome.output or "")[-2000:]},
+        )
+    code = outcome.exit_code or 1
+    if check:
+        raise subprocess.CalledProcessError(code, args, output="", stderr=outcome.output)
+    return subprocess.CompletedProcess(args, code, "", outcome.output)
 
 
 def git_common_dir(repo_dir: Path) -> str:

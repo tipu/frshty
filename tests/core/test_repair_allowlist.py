@@ -70,9 +70,56 @@ class TestOnlyKnownDiagnosticsAreRepaired:
             ("prettier", "[warn] Code style issues found in the above file."),
             ("eslint", "  4:1  error  'x' is unused  no-unused-vars\n\n1 problem (1 error, 0 warnings)"),
             ("isort", "ERROR: /src/a.py Imports are incorrectly sorted and/or formatted."),
-            ("black", "would reformat app.py"),
+            ("black check", "would reformat app.py"),
+            ("black modifying", "reformatted app.py\nAll done!\n1 file reformatted."),
+            # The per-file line and the summary line are separate patterns, so
+            # each needs a case that only it matches.
+            ("black per-file only", "reformatted app.py"),
+            ("black summary only", "All done!\n3 files reformatted."),
+            ("mypy arg-type", 'error: Argument 1 to "f" has incompatible type '
+                              '"int"; expected "str"  [arg-type]'),
         ):
             assert T._is_repairable(text), f"{name} output should be repairable"
+
+    def test_coloured_output_is_classified_the_same_as_plain(self):
+        """Tools decide to colour from the environment, not from whether anyone
+        is reading. ruff writes `\x1b[1m\x1b[91mE501 `, and the escape sits
+        against the code, so `\\bE501\\b` finds no word boundary. Every case
+        above used clean text, so only an end-to-end run surfaced this: a real
+        ruff failure was classified unrecognised and blocked the ticket."""
+        coloured = ("\x1b[1m\x1b[91mE501 \x1b[0m\x1b[1mLine too long (33 > 20)\x1b[0m\n"
+                    " \x1b[1m\x1b[94m-->\x1b[0m app.py:2:21\n")
+        assert T._is_repairable(coloured)
+        assert not T._is_repairable(
+            "\x1b[1m\x1b[91mF821 \x1b[0m\x1b[1mUndefined name `X`\x1b[0m")
+
+    def test_coloured_output_is_triaged_the_same_as_plain(self):
+        """The triage markers are phrases, so an escape between their words
+        splits them. A hook that emphasises the tool name turns "pre-commit not
+        found" into environment output the classifier cannot see."""
+        assert g.triage_commit_failure(
+            "hook_failed", "\x1b[91mpre-commit\x1b[0m not found") == "environment"
+        assert g.triage_commit_failure(
+            "hook_failed",
+            "src/a.ts(4,33): \x1b[1mCannot find\x1b[0m module "
+            "'@acme/rpa-schema'") == "dependency"
+
+    def test_a_missing_name_is_not_repairable(self):
+        """The only edit that satisfies "undefined name X" is inventing X, which
+        is the cheat this allowlist exists to stop. The blanket ruff-code pattern
+        admits F821 unless it is excluded by name."""
+        for name, text in (
+            ("ruff F821", "app.py:3:5: F821 Undefined name `FileExplorerAction`"),
+            ("ruff F822", "app.py:1:1: F822 Undefined name `X` in `__all__`"),
+            # F823 never says "undefined name", so only the code excludes it.
+            ("ruff F823", "app.py:9:9: F823 Local variable `x` defined in enclosing "
+                          "scope on line 4 referenced before assignment"),
+            ("mypy name-defined", 'error: Name "FileExplorerAction" is not defined  [name-defined]'),
+            ("mypy attr-defined", 'error: Module "pkg" has no attribute "X"  [attr-defined]'),
+            ("eslint no-undef", "  1:1  error  'Foo' is not defined  no-undef"),
+            ("tsc TS2304", "src/a.ts(1,1): error TS2304: Cannot find name 'Foo'."),
+        ):
+            assert not T._is_repairable(text), f"{name} output must not be repairable"
 
 
 class TestRoutingUsesTheAllowlist:

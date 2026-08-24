@@ -23,9 +23,10 @@ body { font-family: 'SF Mono', 'Cascadia Code', ui-monospace, monospace; backgro
 .progress-fill { height: 100%; background: linear-gradient(90deg, #3b82f6, #8b5cf6); transition: width .45s cubic-bezier(.4,0,.2,1); }
 
 .viewport { flex: 1; position: relative; min-height: 0; }
-.slide { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 2vh 6vw 8vh; overflow-y: auto; }
-.slide.tall { align-items: flex-start; padding-top: 4vh; }
-.slide-inner { width: 100%; max-width: 1000px; }
+.slide { position: absolute; inset: 0; display: flex; justify-content: center; padding: 2vh 6vw 8vh; overflow-y: auto; }
+.slide.tall { padding-top: 4vh; }
+.slide.tall .slide-inner { margin-top: 0; }
+.slide-inner { width: 100%; max-width: 1000px; margin: auto 0; }
 
 .kicker { font-size: 12px; letter-spacing: .22em; text-transform: uppercase; color: var(--accent); margin-bottom: 18px; font-weight: 600; }
 .headline { font-size: clamp(26px, 4vw, 46px); font-weight: 700; line-height: 1.15; color: #f4f6fb; letter-spacing: -0.01em; }
@@ -85,6 +86,7 @@ body { font-family: 'SF Mono', 'Cascadia Code', ui-monospace, monospace; backgro
 .diff-del { background: rgba(248,81,73,.18); }
 .diff-add .diff-gutter, .diff-add .diff-sign, .diff-del .diff-gutter, .diff-del .diff-sign { color: #aeb8c4; }
 </style>
+<script src="/static/frshty-usage.js"></script>
 </head>
 <body>
 <div id="app" v-cloak>

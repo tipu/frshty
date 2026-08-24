@@ -8,6 +8,8 @@
 <script src="/static/vendor/vue.global.prod.js"></script>
 <script src="/static/frshty-nav.js"></script>
 <script src="/static/frshty-shell.js"></script>
+<script src="/static/frshty-work-question.js"></script>
+<script src="/static/frshty-linkify.js"></script>
 <link rel="stylesheet" href="/static/frshty.css">
 <link rel="stylesheet" href="/static/frshty-v2.css">
 <style>
@@ -22,31 +24,55 @@
 .wreason { font-size: 12px; color: #fbbf24; margin-top: 6px; }
 .wbtn { font-size: 11px; padding: 2px 10px; border-radius: 4px; background: #1e3a5f; color: #93c5fd; margin-right: 6px; cursor: pointer; }
 .wintake { width: 100%; background: #101018; border: 1px solid #2a2a35; border-radius: 8px; padding: 10px 14px; color: #e0e0e0; }
+.wsum { white-space: pre-wrap; font-size: 13px; color: #c9c9d1; background: #101018; border: 1px solid #2a2a35; border-radius: 6px; padding: 8px 12px; margin-top: 6px; }
+.wtag { font-size: 11px; padding: 1px 10px; border-radius: 9999px; cursor: pointer; background: #16161e; border: 1px solid #2a2a35; color: #9ca3af; user-select: none; }
+.wtag:hover { border-color: #4b5563; color: #d1d5db; }
+.wtag.on { background: #1e3a5f; border-color: #3b82f6; color: #93c5fd; }
 </style>
+<script src="/static/frshty-usage.js"></script>
 </head>
 <body class="bg-[#0b0b10] text-gray-200">
-<div id="boot-error" class="max-w-5xl mx-auto px-6 py-3 text-sm" style="background:#7f1d1d;color:#fca5a5;">
+<div id="boot-error" class="max-w-[1600px] mx-auto px-6 py-3 text-sm" style="background:#7f1d1d;color:#fca5a5;">
   The board application failed to start. Hard-refresh this page (Ctrl/Cmd+Shift+R). If this banner stays, the frshty daemon or its static assets are broken.
 </div>
-<div id="app" class="max-w-5xl mx-auto px-6 py-6">
+<div id="app" class="max-w-[1600px] mx-auto px-6 py-6">
   <div v-if="connError" class="text-sm px-4 py-2 mb-4 rounded" style="background:#7f1d1d;color:#fca5a5;">
     {{ connError }}
   </div>
-  <div class="flex items-center justify-between mb-6">
+  <div class="flex items-center justify-between mb-6 gap-4">
     <h1 class="text-xl font-bold">Work</h1>
+    <input class="wintake" style="max-width:340px" v-model="searchText" @input="onSearch"
+           placeholder="Search past work items…" />
     <span class="text-xs text-gray-500" v-if="!personalLoaded">personal instance not loaded — read-only</span>
+  </div>
+  <div class="mb-4 flex flex-wrap gap-2 text-xs text-gray-400 items-center" v-if="allTags.length">
+    <span class="text-gray-600">tags:</span>
+    <span v-for="t in allTags" :key="t" class="wtag" :class="{ on: tagFilter.includes(t) }"
+          @click="toggleTag(t)">{{ t }}</span>
+    <span v-if="tagFilter.length" class="cursor-pointer underline text-gray-500" @click="clearTags">clear</span>
   </div>
   <form @submit.prevent="intake" class="mb-8">
     <input class="wintake" v-model="intakeText" :disabled="!personalLoaded || intakeBusy"
-           placeholder="Describe an outcome. Enter launches a run." />
-    <input class="wintake mt-2" style="font-size:12px" v-model="intakeCwd" :disabled="!personalLoaded || intakeBusy"
-           placeholder="Working directory (optional, absolute path; default: personal workspace)" />
+           placeholder="Describe an outcome, not a report (say 'get PR #123 merged', not 'PR stats'). Enter launches a run." />
+    <div class="mt-2 flex flex-wrap gap-3 text-xs text-gray-400" v-if="projects.length || slackAvailable">
+      <label v-for="p in visibleProjects" :key="p.key" class="cursor-pointer" :title="p.root">
+        <input type="checkbox" v-model="intakeContexts" :value="p.key" :disabled="!personalLoaded || intakeBusy" />
+        {{ p.key }}
+      </label>
+      <label v-if="slackAvailable" class="cursor-pointer" title="tell the run to read the slack_int capture archive for the selected project's org">
+        <input type="checkbox" v-model="intakeSlack" :disabled="!personalLoaded || intakeBusy" />
+        slack_int
+      </label>
+      <span v-if="extraProjects.length && !moreOpen" class="cursor-pointer underline" @click="moreOpen = true">more ▸</span>
+      <span v-if="extraProjects.length && moreOpen" class="cursor-pointer underline" @click="moreOpen = false">less ▾</span>
+    </div>
+    <button type="submit" class="hidden" aria-hidden="true" tabindex="-1"></button>
     <div class="text-xs text-red-400 mt-2" v-if="intakeError">{{ intakeError }}</div>
     <div class="text-xs text-gray-500 mt-2" v-if="intakeBusy">launching…</div>
   </form>
   <div class="wgroup" v-for="g in groupOrder" :key="g" v-show="groups[g] && groups[g].length">
     <h2 class="text-sm font-bold uppercase tracking-wide text-gray-400 mb-2">
-      {{ labels[g] }} <span class="text-gray-600">({{ groups[g].length }})</span>
+      {{ label(g) }} <span class="text-gray-600">({{ count(g) }})</span>
     </h2>
     <div :class="['wcard', cls[g]]" v-for="it in groups[g]" :key="it.id">
       <div class="flex items-center justify-between">
@@ -57,10 +83,17 @@
            :style="it.operator_confirmed ? 'color:#86efac' : 'color:#fde047'">
         {{ it.operator_confirmed ? 'done — you confirmed' : 'done — agent-reported, not verified by you' }}
       </div>
-      <div class="wreason" v-if="it.stop_reason">{{ it.stop_reason }}</div>
+      <div class="wreason" v-if="it.stop_reason" v-html="lk(it.stop_reason)"></div>
+      <div class="mt-1" v-if="it.summary">
+        <span class="wbtn" @click="sumOpen[it.id] = !sumOpen[it.id]">{{ sumOpen[it.id] ? "summary ▾" : "summary ▸" }}</span>
+        <a class="wbtn" style="text-decoration:none" :href="'/work/' + it.id + '/summary'" target="_blank">open ↗</a>
+      </div>
+      <div class="wsum" v-if="it.summary && sumOpen[it.id]" v-html="lk(it.summary)"></div>
       <div class="wmeta">
         {{ it.scope }} · updated {{ ago(it.updated_at) }}
         <span v-if="it.instance_key"> · {{ it.instance_key }}</span>
+        <span v-for="t in (it.tags || '').split(',').filter(Boolean)" :key="t"
+              style="background:#1e293b;color:#93c5fd;border-radius:4px;padding:0 6px;margin-left:6px">{{ t }}</span>
       </div>
       <div class="mt-2" v-if="g === 'done'">
         <span class="wbtn" @click="act(it, 'reopen')">reopen</span>
@@ -74,12 +107,19 @@
           auto {{ it.autocontinue ? 'on' : 'off' }} ({{ it.continues_used }}/{{ it.continue_cap }})
         </span>
       </div>
+      <work-question v-if="g === 'needs_you'" :item="it" @answer="answer(it, $event)"></work-question>
       <form class="mt-2 flex gap-2" v-if="g === 'needs_you'" @submit.prevent="reply(it)">
-        <input class="wintake flex-1" v-model="replyText[it.id]" placeholder="Answer and resume…" />
+        <input class="wintake flex-1" v-model="replyText[it.id]"
+               :placeholder="it.pending_question ? 'Other — type your own answer…' : 'Answer and resume…'" />
       </form>
     </div>
+    <div class="mt-2 flex items-center gap-3 text-xs text-gray-400" v-if="g === 'done' && donePages > 1">
+      <span class="wbtn" v-if="donePage > 1" @click="setDonePage(donePage - 1)">‹ prev</span>
+      <span>page {{ donePage }} / {{ donePages }}</span>
+      <span class="wbtn" v-if="donePage < donePages" @click="setDonePage(donePage + 1)">next ›</span>
+    </div>
   </div>
-  <div class="text-gray-600 text-sm" v-if="total === 0">No work items yet.</div>
+  <div class="text-gray-600 text-sm" v-if="total === 0">{{ (searchText.trim() || tagFilter.length) ? "No matches." : "No work items yet." }}</div>
 </div>
 <script>
 const { createApp } = Vue;
@@ -87,24 +127,96 @@ createApp({
   data() {
     return {
       groups: { needs_you: [], agent_working: [], waiting_external: [], failed_stale: [], done: [] },
-      personalLoaded: false, intakeText: "", intakeCwd: "", intakeError: "", intakeBusy: false,
-      connError: "", replyText: {},
-      groupOrder: ["needs_you", "agent_working", "waiting_external", "failed_stale", "done"],
+      personalLoaded: false, intakeText: "", intakeError: "", intakeBusy: false,
+      projects: [], slackAvailable: false, intakeContexts: [], intakeSlack: false, moreOpen: false,
+      connError: "", replyText: {}, sumOpen: {}, linkmap: null,
+      searchText: "", tagFilter: JSON.parse(localStorage.getItem("workTagFilter") || "[]"), allTags: [], donePage: 1, donePages: 1, counts: {},
+      groupOrder: ["agent_working", "needs_you", "waiting_external", "failed_stale", "done"],
       labels: { needs_you: "Needs you", agent_working: "Agent working", waiting_external: "Waiting external", failed_stale: "Failed or stale", done: "Recently completed" },
       cls: { needs_you: "needs", agent_working: "working", waiting_external: "waiting", failed_stale: "stale", done: "done" },
     };
   },
   computed: {
-    total() { return Object.values(this.groups).reduce((n, g) => n + (g ? g.length : 0), 0); },
+    total() {
+      const c = Object.values(this.counts);
+      if (c.length) return c.reduce((n, x) => n + x, 0);
+      return Object.values(this.groups).reduce((n, g) => n + (g ? g.length : 0), 0);
+    },
+    primaryProjects() {
+      const order = ["aimyable", "quill", "clarivis"];
+      return order.map(k => this.projects.find(p => p.key === k)).filter(Boolean);
+    },
+    extraProjects() {
+      const primary = new Set(this.primaryProjects.map(p => p.key));
+      return this.projects.filter(p => !primary.has(p.key));
+    },
+    visibleProjects() {
+      if (this.moreOpen) return [...this.primaryProjects, ...this.extraProjects];
+      return [...this.primaryProjects,
+              ...this.extraProjects.filter(p => this.intakeContexts.includes(p.key))];
+    },
   },
   methods: {
+    lk(text) { return window.frshtyLinkify(text, this.linkmap); },
+    label(g) {
+      if (g === "done" && (this.searchText.trim() || this.tagFilter.length)) return "Completed (all time)";
+      return this.labels[g];
+    },
+    count(g) {
+      if (this.counts && this.counts[g] != null) return this.counts[g];
+      return (this.groups[g] || []).length;
+    },
+    onSearch() {
+      clearTimeout(this._searchT);
+      this._searchT = setTimeout(() => { this.donePage = 1; this.refresh(); }, 300);
+    },
+    onTagToggle() {
+      localStorage.setItem("workTagFilter", JSON.stringify(this.tagFilter));
+      this.donePage = 1;
+      this.refresh();
+    },
+    toggleTag(t) {
+      const i = this.tagFilter.indexOf(t);
+      if (i >= 0) this.tagFilter.splice(i, 1); else this.tagFilter.push(t);
+      this.onTagToggle();
+    },
+    clearTags() {
+      this.tagFilter = [];
+      this.onTagToggle();
+    },
+    setDonePage(p) {
+      this.donePage = p;
+      this.refresh();
+    },
+    async loadLinkmap() {
+      try { this.linkmap = await (await fetch("/api/work/linkmap")).json(); } catch (e) {}
+    },
     async refresh() {
+      const seq = ++this._refreshSeq;
       try {
-        const r = await fetch("/api/work/items");
+        const params = new URLSearchParams();
+        const q = this.searchText.trim();
+        if (q) params.set("q", q);
+        if (this.tagFilter.length) params.set("tags", this.tagFilter.join(","));
+        if (this.donePage > 1) params.set("done_page", this.donePage);
+        const qs = params.toString();
+        const r = await fetch("/api/work/items" + (qs ? "?" + qs : ""));
         if (!r.ok) throw new Error("HTTP " + r.status);
         const d = await r.json();
+        if (seq !== this._refreshSeq) return;
         this.groups = d.groups; this.personalLoaded = d.personal_loaded;
+        this.counts = d.counts || {};
+        this.allTags = d.all_tags || [];
+        this.donePage = d.done_page || 1; this.donePages = d.done_pages || 1;
+        this.projects = d.projects || []; this.slackAvailable = !!d.slack_available;
         this.connError = "";
+        const known = new Set(this.allTags);
+        const kept = this.tagFilter.filter(t => known.has(t));
+        if (kept.length !== this.tagFilter.length) {
+          this.tagFilter = kept;
+          localStorage.setItem("workTagFilter", JSON.stringify(kept));
+          this.refresh();
+        }
       } catch (e) {
         this.connError = "Disconnected from frshty (" + e.message + "). Data below is stale; retrying every 15s.";
       }
@@ -114,11 +226,12 @@ createApp({
       try {
         const r = await fetch("/api/work/intake", {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: this.intakeText, cwd: this.intakeCwd }),
+          body: JSON.stringify({ text: this.intakeText,
+                                 contexts: this.intakeContexts, slack: this.intakeSlack }),
         });
         const d = await r.json();
         if (!r.ok) { this.intakeError = d.error || "intake failed (HTTP " + r.status + ")"; return; }
-        this.intakeText = ""; this.intakeCwd = "";
+        this.intakeText = ""; this.intakeContexts = []; this.intakeSlack = false;
         await this.refresh();
       } catch (e) {
         this.intakeError = "request failed: " + e.message + " — is frshty up?";
@@ -139,7 +252,9 @@ createApp({
       await this.refresh();
     },
     async reply(it) {
-      const text = (this.replyText[it.id] || "").trim();
+      await this.answer(it, (this.replyText[it.id] || "").trim());
+    },
+    async answer(it, text) {
       if (!text) return;
       try {
         const r = await fetch(`/api/work/items/${it.id}/reply`, {
@@ -168,11 +283,12 @@ createApp({
     },
   },
   mounted() {
+    this._refreshSeq = 0;
     const b = document.getElementById("boot-error");
     if (b) b.remove();
-    this.refresh(); setInterval(() => this.refresh(), 15000);
+    this.loadLinkmap(); this.refresh(); setInterval(() => this.refresh(), 15000);
   },
-}).mount("#app");
+}).component("work-question", window.WorkQuestion).mount("#app");
 </script>
 </body>
 </html>

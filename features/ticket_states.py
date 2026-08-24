@@ -93,9 +93,10 @@ class TicketState(TypedDict, total=False):
       ticket_comment_snapshot
     - PR markers: prs, pr_scheduled_at, pr_attempts, pr_failed_reason
     - conflict markers: conflict_resolution_attempts, last_conflict_error
-    - CI markers: ci_fix_attempts, ci_passed, checks_started_at,
+    - CI markers: ci_fix_attempts, ci_fix_heads, ci_passed, checks_started_at,
       _ci_failed_pending, _ci_timeout_state
     - comment markers: last_comment_ids, comment_fix_attempts
+    - scope review markers: scope_review
     - misc: llm_sessions
     """
     status: str
@@ -127,12 +128,14 @@ class TicketState(TypedDict, total=False):
     conflict_resolution_attempts: int
     last_conflict_error: str
     ci_fix_attempts: int
+    ci_fix_heads: dict
     ci_passed: bool
     checks_started_at: str
     _ci_failed_pending: bool
     _ci_timeout_state: dict
     last_comment_ids: dict
     comment_fix_attempts: dict
+    scope_review: dict
     llm_sessions: dict
 
 
@@ -197,9 +200,16 @@ def _handle_new_ticket(
         # _enqueue_stage dedupes against queued/running jobs and the
         # consecutive-failure cap, so this is a no-op when planning is already
         # in flight or already gave up.
+        def _keep_task_fields(cur: dict) -> dict:
+            merged = dict(ts)
+            for field in ("status", "slug", "branch", "discovered_at"):
+                if cur.get(field) is not None:
+                    merged[field] = cur[field]
+            return merged
+
+        ts = state.update_ticket(key, _keep_task_fields) or ts
         if instance_key and ts.get("slug"):
             _t._enqueue_stage(instance_key, key, "start_planning")
-        state.save_ticket(key, ts)
         return ts, True
     if not existing:
         log.emit("ticket_found", f"New ticket: {key} — {ticket['summary']}",
@@ -374,6 +384,13 @@ def _handle_pr_ready_ticket(
     key = ticket["key"]
     if instance_key and not ts.get("pr_descriptions_generated_at") and _change_manifest_exists(config, ts, key):
         _t._enqueue_stage(instance_key, key, "generate_pr_descriptions")
+    if instance_key:
+        scope = _t._scope_review_state(config, ts)
+        if scope in ("pending", "fail"):
+            if scope == "pending":
+                _t._enqueue_stage(instance_key, key, "scope_review")
+            state.save_ticket(key, ts)
+            return ts, True
     if config.get("pr", {}).get("auto_pr") and not ts.get("pr_scheduled_at"):
         if instance_key and _t._repo_gate_blocked(instance_key, key, config):
             state.save_ticket(key, ts)
@@ -412,11 +429,18 @@ def _handle_in_review_ticket(
         state.save_ticket(key, ts)
         return ts, True
 
+    scope = _t._scope_review_state(config, ts) if instance_key else "disabled"
+    if ts["status"] == "in_review" and instance_key and scope == "pending":
+        _t._enqueue_stage(instance_key, key, "scope_review")
+
     if ts["status"] == "in_review":
         platform = _t.make_platform(config)
         result = platform.monitor_ci(ticket, ts, base_url)
         if result.get("_ci_failed"):
-            ts = _t._handle_ci_failure(ticket, ts, result["pr"], result["checks"], base_url, instance_key)
+            failed_pr = result["pr"]
+            failed_info = pr_info_map.get((failed_pr["repo"], failed_pr["id"])) or {}
+            ts = _t._handle_ci_failure(ticket, ts, failed_pr, result["checks"], base_url, instance_key,
+                                       head_sha=failed_info.get("head_sha", ""))
         elif result.get("_ci_stalled"):
             pr = result.get("pr") or {}
             log.emit("ticket_checks_stall_repolling",
@@ -429,7 +453,9 @@ def _handle_in_review_ticket(
         else:
             ts = result
 
-    if ts["status"] == "in_review" and ts.get("ci_passed") and config.get("pr", {}).get("auto_merge"):
+    if (ts["status"] == "in_review" and ts.get("ci_passed")
+            and config.get("pr", {}).get("auto_merge")
+            and scope in ("disabled", "pass")):
         ts = _t._merge(config, ticket, ts, base_url)
 
     if ts["status"] == "in_review":
