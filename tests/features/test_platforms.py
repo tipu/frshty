@@ -366,3 +366,96 @@ class TestBitbucketGetPrComments:
         assert by_id[11]["resolved"] is True
         assert by_id[20]["resolved"] is False
         assert by_id[21]["resolved"] is False
+
+
+class TestBitbucketMonitorCI:
+    """BitbucketPlatform.monitor_ci was a stub that unconditionally set
+    ci_passed=True, so red Bitbucket pipelines never triggered
+    fix_ci_failures (observed on the four red DEV-635 PRs, 2026-08-21).
+    Both platforms now share _CIMonitorMixin."""
+
+    def _ts(self):
+        return {"prs": [{"repo": "r", "id": 1, "url": "u"}], "status": "in_review"}
+
+    def test_failed_check_returns_ci_failed(self):
+        p = _bb_platform()
+        checks = [{"name": "Pipeline", "state": "FAILED", "url": ""}]
+        with patch.object(p, "get_pr_checks", return_value=checks), \
+             patch("features.platforms.log"):
+            result = p.monitor_ci({"key": "DEV-1"}, self._ts(), "http://base")
+        assert result.get("_ci_failed") is True
+        assert result.get("ci_passed") is not True
+
+    def test_stopped_check_returns_ci_failed(self):
+        p = _bb_platform()
+        checks = [{"name": "Pipeline", "state": "STOPPED", "url": ""}]
+        with patch.object(p, "get_pr_checks", return_value=checks), \
+             patch("features.platforms.log"):
+            result = p.monitor_ci({"key": "DEV-1"}, self._ts(), "http://base")
+        assert result.get("_ci_failed") is True
+
+    def test_all_success_sets_ci_passed(self):
+        p = _bb_platform()
+        checks = [{"name": "Pipeline", "state": "SUCCESS", "url": ""}]
+        with patch.object(p, "get_pr_checks", return_value=checks), \
+             patch("features.platforms.log"):
+            result = p.monitor_ci({"key": "DEV-1"}, self._ts(), "http://base")
+        assert result.get("ci_passed") is True
+
+    def test_inprogress_is_pending_not_passed(self):
+        p = _bb_platform()
+        checks = [{"name": "Pipeline", "state": "INPROGRESS", "url": ""}]
+        with patch.object(p, "get_pr_checks", return_value=checks), \
+             patch("features.platforms.log"):
+            result = p.monitor_ci({"key": "DEV-1"}, self._ts(), "http://base")
+        assert result.get("ci_passed") is not True
+        assert result.get("_ci_failed") is not True
+
+    def test_fetch_failure_holds(self):
+        p = _bb_platform()
+        with patch.object(p, "get_pr_checks", return_value=None), \
+             patch("features.platforms.log"):
+            result = p.monitor_ci({"key": "DEV-1"}, self._ts(), "http://base")
+        assert result.get("ci_passed") is not True
+        assert result.get("_ci_failed") is not True
+
+
+class TestBitbucketGetFailedLogs:
+    def test_fetches_failed_step_log(self):
+        p = _bb_platform()
+        checks = [{"name": "Pipeline", "state": "FAILED",
+                   "url": "https://bitbucket.org/o/repo/addon/pipelines/home#!/results/42"}]
+        steps_resp = MagicMock()
+        steps_resp.status_code = 200
+        steps_resp.json.return_value = {"values": [
+            {"uuid": "{s1}", "name": "Ruff",
+             "state": {"name": "COMPLETED", "result": {"name": "FAILED"}}},
+            {"uuid": "{s2}", "name": "Tests",
+             "state": {"name": "COMPLETED", "result": {"name": "SUCCESSFUL"}}},
+        ]}
+        log_resp = MagicMock()
+        log_resp.status_code = 200
+        log_resp.text = "E501 line too long"
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        mock_client.get.side_effect = [steps_resp, log_resp]
+        with patch.object(p, "get_pr_checks", return_value=checks), \
+             patch("features.platforms.external_log.client", return_value=mock_client):
+            logs = p.get_failed_logs("repo", 1)
+        assert "E501 line too long" in logs
+        assert "Ruff" in logs
+        urls = [c.args[0] for c in mock_client.get.call_args_list]
+        assert urls[0].endswith("/repositories/o/repo/pipelines/42/steps/")
+        assert urls[1].endswith("/repositories/o/repo/pipelines/42/steps/{s1}/log")
+
+    def test_no_pipeline_url_returns_empty(self):
+        p = _bb_platform()
+        checks = [{"name": "External CI", "state": "FAILED", "url": "https://elsewhere.example/run/9"}]
+        mock_client = MagicMock()
+        mock_client.__enter__ = MagicMock(return_value=mock_client)
+        mock_client.__exit__ = MagicMock(return_value=False)
+        with patch.object(p, "get_pr_checks", return_value=checks), \
+             patch("features.platforms.external_log.client", return_value=mock_client):
+            assert p.get_failed_logs("repo", 1) == ""
+        assert mock_client.get.call_count == 0

@@ -25,7 +25,7 @@ ALLOWED = {
     # The seam itself: raw git belongs here and nowhere else, so this ceiling
     # tracks the seam as it absorbs calls from the files below. Every other
     # number may only go down.
-    "core/git_util.py": 19,
+    "core/git_util.py": 18,
     "features/tickets.py": 33,
     "web/tickets.py": 9,
     "features/defence.py": 8,

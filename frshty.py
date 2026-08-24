@@ -32,6 +32,7 @@ from web.wizard import router as _wizard_router
 from web.observability import router as _observability_router
 from web.reviews import router as _reviews_router
 from web.tickets import router as _tickets_router
+from web.usage import router as _usage_router
 from web.work import router as _work_router
 
 
@@ -67,6 +68,7 @@ app.include_router(_wizard_router)
 app.include_router(_observability_router)
 app.include_router(_reviews_router)
 app.include_router(_tickets_router)
+app.include_router(_usage_router)
 app.include_router(_work_router)
 
 
@@ -139,6 +141,12 @@ def main():
                 if host in _configs_by_host:
                     raise ValueError(f"hostname {host} claimed by two configs")
                 _configs_by_host[host] = c
+
+    try:
+        from services import work_debrief
+        work_debrief.start_scanner()
+    except Exception as e:
+        log.emit("work_debrief_boot_failed", f"{type(e).__name__}: {e}")
 
     state.init(primary["_state_dir"])
     log.init(primary["_state_dir"], primary["job"]["key"])
