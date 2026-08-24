@@ -436,3 +436,37 @@ class TestRerunReview:
         finally:
             with wr._rerun_inflight_lock:
                 wr._rerun_inflight.discard(("myrepo", 6))
+
+
+class TestReviewInfoReadsTheProvidersOwnVerdict:
+    """The info route took a provider argument but always read the unsuffixed
+    review.json, so the codex tab showed claude's verdict. On
+    django-drf-app#175 that printed 'approved' above eleven codex blockers."""
+
+    def _seed(self, tmp_path):
+        branch_dir = tmp_path / "reviews" / "myrepo" / "JIRA-9-branch"
+        branch_dir.mkdir(parents=True)
+        for suffix in ("", ".codex"):
+            (branch_dir / f"queued_comments{suffix}.json").write_text(json.dumps(
+                [{"pr_id": 7, "repo": "myrepo", "pr_url": "http://pr/7", "status": "pending"}]))
+        (branch_dir / "review.json").write_text(json.dumps(
+            {"source_branch": "JIRA-9-branch", "verdict": "approved", "summary": "claude"}))
+        (branch_dir / "review.codex.json").write_text(json.dumps(
+            {"source_branch": "JIRA-9-branch", "verdict": "changes_requested", "summary": "codex"}))
+
+    def _info(self, client, provider):
+        with patch("web.reviews.make_platform", return_value=MagicMock()), \
+             patch("web.reviews.make_ticket_system", return_value=None):
+            return client.get(f"/api/reviews/myrepo/7/info?provider={provider}").json()
+
+    def test_the_codex_tab_shows_the_codex_verdict(self, client, tmp_path):
+        self._seed(tmp_path)
+        data = self._info(client, "codex")
+        assert data["verdict"] == "changes_requested"
+        assert data["summary"] == "codex"
+
+    def test_the_claude_tab_still_shows_the_claude_verdict(self, client, tmp_path):
+        self._seed(tmp_path)
+        data = self._info(client, "claude")
+        assert data["verdict"] == "approved"
+        assert data["summary"] == "claude"
