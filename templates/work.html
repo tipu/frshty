@@ -107,8 +107,8 @@
           auto {{ it.autocontinue ? 'on' : 'off' }} ({{ it.continues_used }}/{{ it.continue_cap }})
         </span>
       </div>
-      <work-question v-if="g === 'needs_you'" :item="it" @answer="answer(it, $event)"></work-question>
-      <form class="mt-2 flex gap-2" v-if="g === 'needs_you'" @submit.prevent="reply(it)">
+      <work-question v-if="g === 'needs_you' || it.pending_question" :item="it" @answer="answer(it, $event)"></work-question>
+      <form class="mt-2 flex gap-2" v-if="g === 'needs_you' || it.pending_question" @submit.prevent="reply(it)">
         <input class="wintake flex-1" v-model="replyText[it.id]"
                :placeholder="it.pending_question ? 'Other — type your own answer…' : 'Answer and resume…'" />
       </form>

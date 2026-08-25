@@ -55,6 +55,7 @@ def _now() -> str:
 
 _BG_LINE_MARKERS = ("running in background with ID:", "Monitor started (task",
                     "agentId:", "Task ID:", "<task-notification>", '"TaskStop"')
+_WAKEUP_PROMPT_MARKER = "<task-notification>"
 _BG_START_RES = (
     re.compile(r"running in background with ID: ([A-Za-z0-9_-]+)"),
     re.compile(r"Monitor started \(task ([A-Za-z0-9_-]+)"),
@@ -183,6 +184,16 @@ def mark_launch_failed(run_id: int, error: str) -> None:
         )
 
 
+def is_wakeup_prompt(prompt: str) -> bool:
+    """True when a submitted prompt is a background wake-up, not an answer.
+
+    A finished background task, a Monitor event and a workflow result all
+    reach the session as a user prompt, so each one fires UserPromptSubmit
+    exactly like a reply typed by the operator. None of them answers
+    anything, so a question waiting on the board must survive them."""
+    return _WAKEUP_PROMPT_MARKER in (prompt or "")
+
+
 def record_event(session_id: str, kind: str, payload: dict) -> bool:
     transition = _EVENT_TRANSITIONS.get(kind)
     if transition is None:
@@ -239,11 +250,15 @@ def record_event(session_id: str, kind: str, payload: dict) -> bool:
                     reason = f"Waiting on a background task: {excerpt[:300]}" if excerpt \
                         else "Waiting on a background task"
             if kind == "UserPromptSubmit":
-                c.execute(
-                    "UPDATE work_items SET state = ?, stop_reason = ?, pending_question = '', "
-                    "snoozed_until = NULL, updated_at = ? WHERE id = ?",
-                    (item_state, reason, now, run["work_item_id"]),
-                )
+                if item["pending_question"] and is_wakeup_prompt(payload.get("prompt") or ""):
+                    c.execute("UPDATE work_items SET updated_at = ? WHERE id = ?",
+                              (now, run["work_item_id"]))
+                else:
+                    c.execute(
+                        "UPDATE work_items SET state = ?, stop_reason = ?, pending_question = '', "
+                        "snoozed_until = NULL, updated_at = ? WHERE id = ?",
+                        (item_state, reason, now, run["work_item_id"]),
+                    )
             else:
                 c.execute(
                     "UPDATE work_items SET state = ?, stop_reason = ?, snoozed_until = ?, "
@@ -368,6 +383,8 @@ def tmux_send(tmux_key: str, text: str) -> bool:
                                capture_output=True)
         if alive.returncode != 0:
             return False
+        if not close_btw_panel(session):
+            return False
         sent = subprocess.run([tmux, "-S", TMUX_SOCKET, "send-keys", "-t", session, "-l", "--", text],
                               capture_output=True)
         if sent.returncode != 0:
@@ -423,6 +440,19 @@ def btw_overlay(lines: list[str]) -> dict | None:
     return {"done": _BTW_DONE_HINT in lines[footer], "asked": asked, "body": body}
 
 
+def close_btw_panel(session: str) -> bool:
+    """Close an open /btw panel and report whether the pane takes keys again.
+
+    The panel swallows every keystroke while it is open, so a reply or a
+    continue prompt sent into the pane would be lost with nothing to show for
+    it. A pane with no panel is already open for keys."""
+    if not btw_overlay(_capture_pane(session)):
+        return True
+    _tmux_run("send-keys", "-t", session, "Escape")
+    time.sleep(0.4)
+    return btw_overlay(_capture_pane(session)) is None
+
+
 def _merge_window(body: list[str], window: list[str]) -> bool:
     """Append the part of a scrolled panel view that is not in body yet."""
     if not window:
@@ -462,11 +492,8 @@ def ask_btw(tmux_key: str, question: str, timeout: float = BTW_ANSWER_TIMEOUT) -
     with _pane_lock(session):
         if _tmux_run("has-session", "-t", session).returncode != 0:
             return {"error": "tmux session gone"}
-        if btw_overlay(_capture_pane(session)):
-            _tmux_run("send-keys", "-t", session, "Escape")
-            time.sleep(0.4)
-            if btw_overlay(_capture_pane(session)):
-                return {"error": "a /btw panel is stuck open in the terminal"}
+        if not close_btw_panel(session):
+            return {"error": "a /btw panel is stuck open in the terminal"}
         if _tmux_run("send-keys", "-t", session, "-l", "--",
                      f"/btw {question}").returncode != 0:
             return {"error": "tmux send failed"}
@@ -482,9 +509,11 @@ def ask_btw(tmux_key: str, question: str, timeout: float = BTW_ANSWER_TIMEOUT) -
                 panel = found
                 break
         if panel is None:
+            close_btw_panel(session)
             return {"error": f"no /btw answer within {int(timeout)}s"}
         head = panel["asked"].rstrip("\u2026").rstrip()
         if not head or not question.startswith(head):
+            close_btw_panel(session)
             return {"error": "the terminal shows an answer to a different /btw question"}
         body = panel["body"]
         for _ in range(_BTW_SCROLL_LIMIT):
@@ -500,8 +529,7 @@ def ask_btw(tmux_key: str, question: str, timeout: float = BTW_ANSWER_TIMEOUT) -
                     break
             if not grew:
                 break
-        if btw_overlay(_capture_pane(session)):
-            _tmux_run("send-keys", "-t", session, "Escape")
+        close_btw_panel(session)
     answer = _btw_answer_text(body)
     return {"answer": answer} if answer else {"error": "empty /btw answer"}
 
