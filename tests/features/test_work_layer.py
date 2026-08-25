@@ -1017,6 +1017,68 @@ class TestQuestions:
         assert item["state"] == "agent_working"
         assert item["pending_question"] == ""
 
+    WAKEUP = ("<task-notification>\n<task-id>b2ms6zphy</task-id>\n"
+              "<summary>Monitor event: \"E2E on main\"</summary>\n</task-notification>")
+
+    def test_wakeup_prompt_keeps_pending_question(self):
+        item_id, sid = self._mkrun("wakeup keeps question")
+        work_store.record_question(sid, self.QUESTIONS)
+        work_store.record_event(sid, "UserPromptSubmit", {"prompt": self.WAKEUP})
+        item = db.query_one(
+            "SELECT state, stop_reason, pending_question FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "needs_you"
+        assert "Which bucket" in item["pending_question"]
+        assert "Which bucket" in item["stop_reason"]
+
+    def test_operator_prompt_still_clears_pending_question(self):
+        item_id, sid = self._mkrun("operator prompt clears question")
+        work_store.record_question(sid, self.QUESTIONS)
+        work_store.record_event(sid, "UserPromptSubmit", {"prompt": "Bucket: staging"})
+        item = db.query_one(
+            "SELECT state, pending_question FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "agent_working"
+        assert item["pending_question"] == ""
+
+    def test_wakeup_prompt_leaves_no_question_alone(self):
+        item_id, sid = self._mkrun("wakeup without question")
+        work_store.record_event(sid, "Stop", {})
+        work_store.record_event(sid, "UserPromptSubmit", {"prompt": self.WAKEUP})
+        item = db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "agent_working"
+
+    def test_wakeup_prompt_does_not_autocontinue_past_question(self, monkeypatch):
+        from unittest.mock import MagicMock
+        item_id, sid = self._mkrun("wakeup blocks autocontinue")
+        work_store.record_question(sid, self.QUESTIONS)
+        work_store.record_event(sid, "Stop", {})
+        work_store.record_event(sid, "UserPromptSubmit", {"prompt": self.WAKEUP})
+        work_store.record_event(sid, "Stop", {})
+        monkeypatch.setattr(work_store, "last_assistant_text", lambda p: "Read the task output.")
+        sender = MagicMock(return_value=True)
+        monkeypatch.setattr(work_store, "tmux_send", sender)
+        assert work_store.maybe_autocontinue(sid, "/tmp/t.jsonl") == "question"
+        sender.assert_not_called()
+
+    def test_hook_forwards_prompt_and_keeps_question(self):
+        import json as _json
+        import subprocess
+        import core.db as _db
+        dbfile = str(_db._DB_PATH)
+        item_id, sid = self._mkrun("hook forwards prompt")
+        work_store.record_question(sid, self.QUESTIONS)
+        payload = _json.dumps({"session_id": sid, "hook_event_name": "UserPromptSubmit",
+                               "prompt": self.WAKEUP})
+        r = subprocess.run(
+            [sys.executable, "scripts/work_hook.py"],
+            input=payload, capture_output=True, text=True, timeout=15,
+            env={**__import__("os").environ, "FRSHTY_DB": dbfile},
+        )
+        assert r.returncode == 0, r.stderr
+        item = db.query_one(
+            "SELECT state, pending_question FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "needs_you"
+        assert "Which bucket" in item["pending_question"]
+
 
 class TestFollowup:
     def _client(self):
@@ -1462,6 +1524,63 @@ class TestAskBtw:
         out = work_store.ask_btw("work-1", "capital of France?", timeout=0.2)
         assert "no /btw answer" in out["error"]
         assert "Escape" not in pane.keys
+
+    def test_timeout_with_open_panel_closes_it(self, monkeypatch):
+        idle = ["● just output", "❯ "]
+        answering = _panel("capital of France?", ["· Answering…"], done=False)
+        pane = _FakePane([idle, answering])
+        _install_pane(monkeypatch, pane)
+        out = work_store.ask_btw("work-1", "capital of France?", timeout=0.2)
+        assert "no /btw answer" in out["error"]
+        assert "Escape" in pane.keys
+
+    def test_answer_to_another_question_closes_panel(self, monkeypatch):
+        idle = ["● just output", "❯ "]
+        stale = _panel("something else entirely", ["nope"])
+        pane = _FakePane([idle, stale])
+        _install_pane(monkeypatch, pane)
+        work_store.ask_btw("work-1", "capital of France?")
+        assert "Escape" in pane.keys
+
+
+class TestPaneHandover:
+    def test_close_btw_panel_is_a_noop_without_a_panel(self, monkeypatch):
+        pane = _FakePane([["● just output", "❯ "]])
+        _install_pane(monkeypatch, pane)
+        assert work_store.close_btw_panel("term-work-1") is True
+        assert pane.keys == []
+
+    def test_close_btw_panel_closes_an_open_one(self, monkeypatch):
+        open_panel = _panel("capital of France?", ["Paris"])
+        idle = ["● just output", "❯ "]
+        pane = _FakePane([open_panel, idle])
+        _install_pane(monkeypatch, pane)
+        assert work_store.close_btw_panel("term-work-1") is True
+        assert pane.keys == ["Escape"]
+
+    def test_close_btw_panel_reports_a_stuck_panel(self, monkeypatch):
+        pane = _FakePane([_panel("capital of France?", ["Paris"])])
+        _install_pane(monkeypatch, pane)
+        assert work_store.close_btw_panel("term-work-1") is False
+
+    def test_send_refuses_while_a_panel_swallows_keys(self, monkeypatch):
+        import subprocess
+        from unittest.mock import MagicMock
+        runner = MagicMock(return_value=subprocess.CompletedProcess([], 0, "", ""))
+        monkeypatch.setattr(work_store.subprocess, "run", runner)
+        monkeypatch.setattr(work_store, "close_btw_panel", lambda session: False)
+        assert work_store.tmux_send("work-1", "use the staging bucket") is False
+        assert not any("send-keys" in str(c) for c in runner.call_args_list)
+
+    def test_send_proceeds_once_the_panel_is_closed(self, monkeypatch):
+        import subprocess
+        from unittest.mock import MagicMock
+        runner = MagicMock(return_value=subprocess.CompletedProcess([], 0, "", ""))
+        monkeypatch.setattr(work_store.subprocess, "run", runner)
+        monkeypatch.setattr(work_store.time, "sleep", lambda s: None)
+        monkeypatch.setattr(work_store, "close_btw_panel", lambda session: True)
+        assert work_store.tmux_send("work-1", "use the staging bucket") is True
+        assert any("use the staging bucket" in str(c) for c in runner.call_args_list)
 
 
 class TestSideQuestion:
