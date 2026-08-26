@@ -1,3 +1,4 @@
+import base64
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -152,7 +153,7 @@ class TestIntake:
         instances.get.return_value = reg
         with patch("services.work_launch.runtime.instances", return_value=instances), \
              patch("services.work_launch.terminal.launch_claude") as mock_launch, \
-             patch("services.work_launch.terminal.session_healthy", return_value={"alive": True, "claude_running": True}):
+             patch("services.work_launch.terminal.session_healthy", return_value={"alive": True, "agent_running": True}):
             client = self._client()
             r = client.post("/api/work/intake", json={"text": "ship the widget"})
         assert r.status_code == 200, r.text
@@ -214,6 +215,40 @@ class TestIntake:
         assert r.status_code == 200
         assert "Needs you" in r.text
 
+    def test_work_detail_collapses_consecutive_tool_calls_by_default(self):
+        r = self._client().get("/work/1")
+
+        assert r.status_code == 200
+        assert '<details v-else-if="e.kind === \'tools\'" class="tl-tools">' in r.text
+        assert "e.entries.length }} tool call" in r.text
+        assert "previous.kind === \"tools\"" in r.text
+        assert '<details v-else-if="e.kind === \'tools\'" class="tl-tools" open>' not in r.text
+
+    def test_transcript_image_endpoint_serves_lazy_image(self, tmp_path):
+        import json as _json
+        image_bytes = b"\x89PNG\r\n\x1a\nwork timeline"
+        transcript = tmp_path / "image.jsonl"
+        transcript.write_text(_json.dumps({
+            "type": "user", "timestamp": "2026-08-25T03:51:39.000Z",
+            "message": {"content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                                   "data": base64.b64encode(image_bytes).decode()}},
+                {"type": "text", "text": "[Image: original 20x10]"},
+            ]},
+        }))
+        item_id = _mkitem("view transcript image")
+        work_store.add_run(item_id, f"sid-img-{item_id}", f"work-{item_id}", "/tmp")
+        db.execute("UPDATE work_runs SET transcript_path = ? WHERE work_item_id = ?",
+                   (str(transcript), item_id))
+        image_ref = work_store.item_detail(item_id)["timeline"][0]["images"][0]
+
+        r = self._client().get(
+            f"/api/work/items/{item_id}/transcript-image/{image_ref['id']}")
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "image/png"
+        assert r.headers["content-security-policy"] == "sandbox"
+        assert r.content == image_bytes
+
     def test_items_endpoint_paginates_done(self):
         from unittest.mock import patch
         from web.work import DONE_PAGE_SIZE
@@ -267,7 +302,7 @@ class TestIntake:
 
         with patch("services.work_launch.runtime.instances", return_value=instances), \
              patch("services.work_launch.terminal.launch_claude", side_effect=slow_launch), \
-             patch("services.work_launch.terminal.session_healthy", return_value={"alive": True, "claude_running": True}):
+             patch("services.work_launch.terminal.session_healthy", return_value={"alive": True, "agent_running": True}):
             client = self._client()
             threads = [
                 threading.Thread(target=lambda i=i: client.post(
@@ -510,7 +545,7 @@ class TestStaleSweep:
 
     def test_live_transcript_refreshes_updated_at(self, tmp_path, monkeypatch):
         item_id, _, _ = self._mkstale(tmp_path)
-        monkeypatch.setattr(work_store, "claude_running", lambda k: (_ for _ in ()).throw(AssertionError))
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": (_ for _ in ()).throw(AssertionError))
         actions = work_store.sweep_stale_items()
         assert {"id": item_id, "action": "refreshed"} in actions
         item = db.query_one("SELECT state, updated_at FROM work_items WHERE id = ?", (item_id,))
@@ -522,7 +557,7 @@ class TestStaleSweep:
     def test_dead_session_marked_failed(self, tmp_path, monkeypatch):
         item_id, run_id, transcript = self._mkstale(tmp_path)
         self._age_transcript(transcript)
-        monkeypatch.setattr(work_store, "claude_running", lambda k: False)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": False)
         actions = work_store.sweep_stale_items()
         assert {"id": item_id, "action": "failed"} in actions
         item = db.query_one("SELECT state, stop_reason FROM work_items WHERE id = ?", (item_id,))
@@ -538,7 +573,7 @@ class TestStaleSweep:
         from unittest.mock import MagicMock
         item_id, _, transcript = self._mkstale(tmp_path)
         self._age_transcript(transcript)
-        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
         sender = MagicMock(return_value=True)
         monkeypatch.setattr(work_store, "tmux_send", sender)
         actions = work_store.sweep_stale_items()
@@ -556,7 +591,7 @@ class TestStaleSweep:
         item_id, _, transcript = self._mkstale(
             tmp_path, tail_text="Should I use the staging bucket or prod?")
         self._age_transcript(transcript)
-        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
         sender = MagicMock(return_value=True)
         monkeypatch.setattr(work_store, "tmux_send", sender)
         actions = work_store.sweep_stale_items()
@@ -587,7 +622,7 @@ class TestStaleSweep:
     def test_pending_tool_blocks_synthesized_stop(self, tmp_path, monkeypatch):
         from unittest.mock import MagicMock
         item_id, _, _ = self._mkpending(tmp_path, minutes=40)
-        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
         sender = MagicMock(return_value=True)
         monkeypatch.setattr(work_store, "tmux_send", sender)
         actions = work_store.sweep_stale_items()
@@ -603,7 +638,7 @@ class TestStaleSweep:
         from unittest.mock import MagicMock
         item_id, _, _ = self._mkpending(
             tmp_path, minutes=work_store.STUCK_AFTER_MINUTES + 10)
-        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
         sender = MagicMock(return_value=True)
         monkeypatch.setattr(work_store, "tmux_send", sender)
         actions = work_store.sweep_stale_items()
@@ -654,7 +689,7 @@ class TestReply:
         work_store.record_event(f"sid-reply-{item_id}", "Stop", {})
         sender = MagicMock(return_value=True)
         monkeypatch.setattr(work_store, "tmux_send", sender)
-        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
         out = work_store.reply(item_id, "use the staging bucket")
         assert out == {"id": item_id, "action": "reply"}
         sender.assert_called_once_with(f"work-{item_id}", "use the staging bucket")
@@ -664,7 +699,7 @@ class TestReply:
     def test_reply_dead_session_errors(self, monkeypatch):
         item_id = _mkitem("reply dead")
         work_store.add_run(item_id, f"sid-rd-{item_id}", f"work-{item_id}", "/tmp")
-        monkeypatch.setattr(work_store, "claude_running", lambda k: False)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": False)
         out = work_store.reply(item_id, "hello")
         assert "no live Claude" in out["error"]
 
@@ -703,7 +738,7 @@ class TestSnoozedQuestion:
         now = datetime.now(timezone.utc)
         item_id = self._snoozed_with_question((now + timedelta(hours=1)).isoformat())
         monkeypatch.setattr(work_store, "tmux_send", lambda k, t: True)
-        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
         out = work_store.reply(item_id, "push it")
         assert out == {"id": item_id, "action": "reply"}
         item = db.query_one(
@@ -741,6 +776,24 @@ class TestTranscriptTail:
 
     def test_missing_file_empty(self):
         assert work_store.last_assistant_text("/nonexistent/x.jsonl") == ""
+
+    def test_timeline_keeps_image_only_prompt(self, tmp_path):
+        import json as _json
+        image_bytes = b"jpeg bytes"
+        p = tmp_path / "image-only.jsonl"
+        p.write_text(_json.dumps({
+            "type": "user", "timestamp": "T1", "message": {"content": [{
+                "type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                               "data": base64.b64encode(image_bytes).decode()},
+            }]},
+        }))
+
+        timeline = work_store.transcript_timeline(str(p))
+        assert timeline[0]["kind"] == "prompt"
+        assert timeline[0]["text"] == ""
+        assert timeline[0]["images"][0]["media_type"] == "image/jpeg"
+        assert work_store.transcript_image(str(p), timeline[0]["images"][0]["id"]) == \
+            (image_bytes, "image/jpeg")
 
 
 class TestArtifacts:
@@ -918,7 +971,7 @@ class TestQuestions:
         item_id, sid = self._mkrun("question reply")
         work_store.record_question(sid, self.QUESTIONS)
         monkeypatch.setattr(work_store, "tmux_send", MagicMock(return_value=True))
-        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
         work_store.reply(item_id, "Bucket: staging")
         item = db.query_one(
             "SELECT state, pending_question FROM work_items WHERE id = ?", (item_id,))
@@ -1111,7 +1164,7 @@ class TestFollowup:
             patch("services.work_launch.runtime.instances", return_value=instances),
             patch("services.work_launch.terminal.launch_claude"),
             patch("services.work_launch.terminal.session_healthy",
-                  return_value={"alive": True, "claude_running": True}),
+                  return_value={"alive": True, "agent_running": True}),
         )
 
     def test_followup_carries_parent_context(self, tmp_path):
@@ -1390,12 +1443,12 @@ class TestSuspendResume:
         config = {"workspace": {"root": tmp_path}}
         monkeypatch.setattr(work_launch, "personal_config", lambda: config)
         monkeypatch.setattr(terminal, "session_healthy",
-                            lambda k: {"alive": False, "claude_running": False})
+                            lambda k, agent="claude": {"alive": False, "agent_running": False})
         launcher = MagicMock()
-        monkeypatch.setattr(terminal, "launch_claude", launcher)
+        monkeypatch.setattr(terminal, "launch_agent", launcher)
         assert work_launch.resume_session(item_id) is True
         launcher.assert_called_once_with(f"work-{item_id}", str(tmp_path), sid, "", False,
-                                         config=config)
+                                         config=config, agent="claude", agent_session_id="")
 
     def test_resume_unknown_item_is_false(self, monkeypatch):
         from services import work_launch
@@ -1412,9 +1465,9 @@ class TestSuspendResume:
         config = {"workspace": {"root": tmp_path}}
         monkeypatch.setattr(work_launch, "personal_config", lambda: config)
         monkeypatch.setattr(terminal, "session_healthy",
-                            lambda k: {"alive": False, "claude_running": False})
+                            lambda k, agent="claude": {"alive": False, "agent_running": False})
         launcher = MagicMock()
-        monkeypatch.setattr(terminal, "launch_claude", launcher)
+        monkeypatch.setattr(terminal, "launch_agent", launcher)
         assert work_launch.resume_session(item_id) is True
         assert launcher.call_args[0][1] == str(tmp_path)
 
@@ -1427,9 +1480,9 @@ class TestSuspendResume:
         monkeypatch.setattr(work_launch, "personal_config",
                             lambda: {"workspace": {"root": tmp_path}})
         monkeypatch.setattr(terminal, "session_healthy",
-                            lambda k: {"alive": True, "claude_running": True})
+                            lambda k, agent="claude": {"alive": True, "agent_running": True})
         launcher = MagicMock()
-        monkeypatch.setattr(terminal, "launch_claude", launcher)
+        monkeypatch.setattr(terminal, "launch_agent", launcher)
         assert work_launch.resume_session(item_id) is True
         launcher.assert_not_called()
 
@@ -1588,7 +1641,7 @@ class TestSideQuestion:
         item_id = _mkitem("side question item")
         work_store.add_run(item_id, f"sid-btw-{item_id}", f"work-{item_id}", "/tmp")
         db.execute("UPDATE work_items SET state = 'needs_you' WHERE id = ?", (item_id,))
-        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
         monkeypatch.setattr(work_store, "ask_btw", lambda key, q: {"answer": "Paris"})
         out = work_store.side_question(item_id, "  capital of\n France? ")
         assert out["answer"] == "Paris"
@@ -1602,7 +1655,7 @@ class TestSideQuestion:
     def test_dead_session_errors(self, monkeypatch):
         item_id = _mkitem("side question dead")
         work_store.add_run(item_id, f"sid-btwd-{item_id}", f"work-{item_id}", "/tmp")
-        monkeypatch.setattr(work_store, "claude_running", lambda k: False)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": False)
         out = work_store.side_question(item_id, "hello?")
         assert "no live Claude" in out["error"]
 
@@ -1614,7 +1667,7 @@ class TestSideQuestion:
     def test_failed_ask_records_nothing(self, monkeypatch):
         item_id = _mkitem("side question failed")
         work_store.add_run(item_id, f"sid-btwf-{item_id}", f"work-{item_id}", "/tmp")
-        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
         monkeypatch.setattr(work_store, "ask_btw", lambda key, q: {"error": "tmux session gone"})
         out = work_store.side_question(item_id, "hello?")
         assert out["error"] == "tmux session gone"
@@ -1731,7 +1784,7 @@ class TestMissedAutocontinueSweep:
     def test_missed_decision_is_run_late(self, tmp_path, monkeypatch):
         from unittest.mock import MagicMock
         item_id, _, _ = self._stuck(tmp_path)
-        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
         sender = MagicMock(return_value=True)
         monkeypatch.setattr(work_store, "tmux_send", sender)
         actions = work_store.retry_missed_autocontinues(self._cutoff())
@@ -1744,7 +1797,7 @@ class TestMissedAutocontinueSweep:
     def test_sweep_runs_the_retry_pass(self, tmp_path, monkeypatch):
         from unittest.mock import MagicMock
         item_id, _, _ = self._stuck(tmp_path)
-        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
         monkeypatch.setattr(work_store, "tmux_send", MagicMock(return_value=True))
         actions = work_store.sweep_stale_items()
         assert {"id": item_id, "action": "autocontinue_retry:continued"} in actions
@@ -1757,7 +1810,7 @@ class TestMissedAutocontinueSweep:
         action list.
         """
         from unittest.mock import MagicMock
-        monkeypatch.setattr(work_store, "claude_running", lambda k: live)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": live)
         monkeypatch.setattr(work_store, "tmux_send", MagicMock(return_value=True))
         actions = work_store.retry_missed_autocontinues(self._cutoff())
         assert [a for a in actions if a["id"] == item_id] == []

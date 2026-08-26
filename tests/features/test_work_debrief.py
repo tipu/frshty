@@ -133,7 +133,8 @@ class TestSend:
         assert "#42" in out["detail"]
         item_id = db.query_one("SELECT work_item_id FROM work_followups WHERE id = ?",
                                (fid,))["work_item_id"]
-        launched.assert_called_once_with(item_id, "hi", contexts=[], slack=False)
+        launched.assert_called_once_with(item_id, "hi", contexts=[], slack=False,
+                                        agent="claude")
 
     def test_work_item_kind_passes_contexts(self, monkeypatch):
         fid = self._draft(kind="work_item")
@@ -143,7 +144,8 @@ class TestSend:
         assert out["status"] == "sent"
         item_id = db.query_one("SELECT work_item_id FROM work_followups WHERE id = ?",
                                (fid,))["work_item_id"]
-        launched.assert_called_once_with(item_id, "hi", contexts=["aimyable"], slack=True)
+        launched.assert_called_once_with(item_id, "hi", contexts=["aimyable"], slack=True,
+                                        agent="claude")
 
     def test_dismiss(self):
         fid = self._draft()
@@ -276,7 +278,7 @@ class TestLaunchContexts:
         with patch.object(work_launch.runtime, "instances", lambda: instances), \
              patch.object(work_launch.terminal, "launch_claude", fake_launch_claude), \
              patch.object(work_launch.terminal, "session_healthy",
-                          return_value={"alive": True, "claude_running": True}), \
+                          return_value={"alive": True, "agent_running": True}), \
              patch.object(work_launch.threading, "Thread", MagicMock()):
             out = work_launch.launch("do a thing", contexts=["aimyable"], slack=True)
         assert "error" not in out

@@ -28,6 +28,7 @@
 .wtag { font-size: 11px; padding: 1px 10px; border-radius: 9999px; cursor: pointer; background: #16161e; border: 1px solid #2a2a35; color: #9ca3af; user-select: none; }
 .wtag:hover { border-color: #4b5563; color: #d1d5db; }
 .wtag.on { background: #1e3a5f; border-color: #3b82f6; color: #93c5fd; }
+.wsel { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: #16161e; border: 1px solid #2a2a35; color: #d1d5db; }
 </style>
 <script src="/static/frshty-usage.js"></script>
 </head>
@@ -54,7 +55,13 @@
   <form @submit.prevent="intake" class="mb-8">
     <input class="wintake" v-model="intakeText" :disabled="!personalLoaded || intakeBusy"
            placeholder="Describe an outcome, not a report (say 'get PR #123 merged', not 'PR stats'). Enter launches a run." />
-    <div class="mt-2 flex flex-wrap gap-3 text-xs text-gray-400" v-if="projects.length || slackAvailable">
+    <div class="mt-2 flex flex-wrap gap-3 text-xs text-gray-400 items-center">
+      <label class="cursor-pointer" title="which agent CLI runs this work item">
+        agent
+        <select class="wsel ml-1" v-model="intakeAgent" :disabled="!personalLoaded || intakeBusy">
+          <option v-for="a in agents" :key="a" :value="a">{{ a }}</option>
+        </select>
+      </label>
       <label v-for="p in visibleProjects" :key="p.key" class="cursor-pointer" :title="p.root">
         <input type="checkbox" v-model="intakeContexts" :value="p.key" :disabled="!personalLoaded || intakeBusy" />
         {{ p.key }}
@@ -91,6 +98,7 @@
       <div class="wsum" v-if="it.summary && sumOpen[it.id]" v-html="lk(it.summary)"></div>
       <div class="wmeta">
         {{ it.scope }} · updated {{ ago(it.updated_at) }}
+        <span v-if="it.last_provider"> · {{ it.last_provider }}</span>
         <span v-if="it.instance_key"> · {{ it.instance_key }}</span>
         <span v-for="t in (it.tags || '').split(',').filter(Boolean)" :key="t"
               style="background:#1e293b;color:#93c5fd;border-radius:4px;padding:0 6px;margin-left:6px">{{ t }}</span>
@@ -129,6 +137,7 @@ createApp({
       groups: { needs_you: [], agent_working: [], waiting_external: [], failed_stale: [], done: [] },
       personalLoaded: false, intakeText: "", intakeError: "", intakeBusy: false,
       projects: [], slackAvailable: false, intakeContexts: [], intakeSlack: false, moreOpen: false,
+      agents: ["claude"], intakeAgent: localStorage.getItem("workAgent") || "claude",
       connError: "", replyText: {}, sumOpen: {}, linkmap: null,
       searchText: "", tagFilter: JSON.parse(localStorage.getItem("workTagFilter") || "[]"), allTags: [], donePage: 1, donePages: 1, counts: {},
       groupOrder: ["agent_working", "needs_you", "waiting_external", "failed_stale", "done"],
@@ -143,7 +152,7 @@ createApp({
       return Object.values(this.groups).reduce((n, g) => n + (g ? g.length : 0), 0);
     },
     primaryProjects() {
-      const order = ["aimyable", "quill", "clarivis"];
+      const order = ["aimyable", "quill", "clarivis", "algotrader2"];
       return order.map(k => this.projects.find(p => p.key === k)).filter(Boolean);
     },
     extraProjects() {
@@ -209,6 +218,8 @@ createApp({
         this.allTags = d.all_tags || [];
         this.donePage = d.done_page || 1; this.donePages = d.done_pages || 1;
         this.projects = d.projects || []; this.slackAvailable = !!d.slack_available;
+        this.agents = d.agents && d.agents.length ? d.agents : ["claude"];
+        if (!this.agents.includes(this.intakeAgent)) this.intakeAgent = this.agents[0];
         this.connError = "";
         const known = new Set(this.allTags);
         const kept = this.tagFilter.filter(t => known.has(t));
@@ -226,11 +237,12 @@ createApp({
       try {
         const r = await fetch("/api/work/intake", {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: this.intakeText,
+          body: JSON.stringify({ text: this.intakeText, agent: this.intakeAgent,
                                  contexts: this.intakeContexts, slack: this.intakeSlack }),
         });
         const d = await r.json();
         if (!r.ok) { this.intakeError = d.error || "intake failed (HTTP " + r.status + ")"; return; }
+        localStorage.setItem("workAgent", this.intakeAgent);
         this.intakeText = ""; this.intakeContexts = []; this.intakeSlack = false;
         await this.refresh();
       } catch (e) {

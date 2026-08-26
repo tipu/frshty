@@ -74,7 +74,7 @@ class TestFeatureGate:
         state.save_ticket("T-1", _ticket("new"))
         from unittest.mock import patch
         with patch("web.tickets.terminal.session_healthy",
-                   return_value={"alive": False, "claude_running": False}):
+                   return_value={"alive": False, "agent_running": False}):
             resp = c.get("/api/tickets/T-1/detail")
         assert resp.status_code == 200
         assert resp.json().get("release") is None
@@ -154,7 +154,7 @@ class TestTicketDetailExtension:
         releases_mod.upsert_release(state.active_instance_key(), "v1.0")
         from unittest.mock import patch
         with patch("web.tickets.terminal.session_healthy",
-                   return_value={"alive": False, "claude_running": False}):
+                   return_value={"alive": False, "agent_running": False}):
             resp = c.get("/api/tickets/T-1/detail")
         assert resp.status_code == 200
         rel = resp.json()["release"]
