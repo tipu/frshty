@@ -490,19 +490,40 @@ def _commit_workspace_changes(ticket_dir: Path, ticket_key: str,
         ]
         if not meaningful:
             continue
-        subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
-        outcome = git_util.commit_outcome(repo_dir, message=commit_msg,
-                                          timeout=HOOK_RUN_TIMEOUT)
+        outcome, route = commit_repo_changes(repo_dir, ticket_key, commit_msg)
         if not outcome.ok:
-            route = _route_hook_failure(repo_dir, outcome, ticket_key)
-            if route == "repair":
-                subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
-                outcome = git_util.commit_outcome(repo_dir, message=commit_msg,
-                                                  timeout=HOOK_RUN_TIMEOUT)
-            if not outcome.ok:
-                raise CommitBlocked(repo_dir.name, route, outcome)
+            raise CommitBlocked(repo_dir.name, route, outcome)
         committed.append(repo_dir.name)
     return committed
+
+
+def commit_repo_changes(repo_dir: Path, ticket_key: str,
+                        message: str) -> tuple[git_util.CommitOutcome, str]:
+    """Commit one repo and give a repairable hook failure one bounded repair.
+
+    Ticket pipeline stages and in-review comment fixes must take the same path.
+    The latter used to call ``commit_with_hooks`` directly, reduce every failure
+    to return code 1, and then retry the original review prompt without the hook
+    diagnostics.  A valid fix that introduced a type error consequently stayed
+    staged, contaminated the next comment fix, and was capped without ever being
+    pushed.
+
+    Returns the final outcome and the route selected for the first failure.
+    ``route`` is ``committed`` when the first commit succeeds, ``repair`` when a
+    bounded diagnostic repair was attempted, or one of ``block_*`` when editing
+    this repository cannot safely address the failure.
+    """
+    subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
+    outcome = git_util.commit_outcome(repo_dir, message=message,
+                                      timeout=HOOK_RUN_TIMEOUT)
+    route = "committed"
+    if not outcome.ok:
+        route = _route_hook_failure(repo_dir, outcome, ticket_key)
+        if route == "repair":
+            subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
+            outcome = git_util.commit_outcome(repo_dir, message=message,
+                                              timeout=HOOK_RUN_TIMEOUT)
+    return outcome, route
 
 
 _REPAIR_FORBIDDEN_NAMES = (
@@ -559,6 +580,12 @@ _REPAIRABLE_DIAGNOSTICS = (
     # basedpyright's wording for the same thing. Omitting it excluded the exact
     # diagnostic that motivated this work: the SimpleNamespace stub on DEV-635.
     re.compile(r"cannot be assigned to (parameter|type|declared type)", re.I),
+    # The PR-comment fixer for DEV-635 moved screenshot decoding out of a lock
+    # but initially left the values assigned only inside the locked branch.
+    re.compile(r"is possibly unbound", re.I),
+    # Its next fix generated a model call with a keyword the installed schema
+    # does not accept. This is a local call-site correction, not a missing API.
+    re.compile(r"no parameter named", re.I),
     # black in modifying mode names each file it rewrote, then counts them.
     re.compile(r"^reformatted ", re.I | re.M),
     re.compile(r"\d+ files? reformatted", re.I),
