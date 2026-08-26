@@ -2344,8 +2344,10 @@ class TestReplyCommitsToChangeReroute:
              patch("features.tickets.ticket_worktree_path", return_value=wt), \
              patch("features.tickets.run_balanced", side_effect=fake_llm), \
              patch("features.tickets.run_claude_code", return_value=run_claude) as fixer, \
-             patch("features.tickets.commit_with_hooks",
-                   return_value=MagicMock(returncode=0)), \
+             patch("features.tickets._commit_pr_comment_changes",
+                   return_value=(tickets.git_util.CommitOutcome(
+                       "committed", "git_commit", "repo", 0,
+                       "committed", "abc1234", "def5678"), "committed")), \
              patch("features.tickets.subprocess.run", side_effect=fake_git):
             ts = tickets._check_in_review(bb_config, ticket, ts, "http://base")
 

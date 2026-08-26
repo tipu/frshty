@@ -18,7 +18,6 @@ import core.git_util as git_util
 import features.defence as defence
 from core import external_log
 from core.config import base_branch_for, get_repos, ticket_worktree_path, resolve_env
-from core.git_util import commit_with_hooks
 from core.deps import run_dep_command, relink_shared_venv
 from core.claude_runner import run_haiku, run_balanced, run_claude_code, extract_json
 from core.ticket_status import TicketStatus, transition
@@ -1883,6 +1882,20 @@ def _substantiate_reply(config, slug, ticket, comment, pr, suggested: str) -> di
 MAX_PR_COMMENT_FIX_ATTEMPTS = 2
 
 
+def _commit_pr_comment_changes(worktree: Path, ticket_key: str,
+                               message: str) -> tuple[git_util.CommitOutcome, str]:
+    """Use the ticket pipeline's diagnostic-preserving commit/repair path.
+
+    Kept as a small seam here so the comment workflow does not duplicate the
+    hook-repair policy and its tests can exercise comment state independently.
+    The import is local because ``core.tasks.tickets`` imports this feature
+    module from task bodies.
+    """
+    from core.tasks.tickets import commit_repo_changes
+
+    return commit_repo_changes(worktree, ticket_key, message)
+
+
 def _recheck_pr_failed(config, ticket, ts, base_url) -> dict:
     prs = ts.get("prs") or []
     if not prs:
@@ -2181,15 +2194,18 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                 if agent_committed:
                     made_commit = True
                 commit_rc = None
+                commit_outcome = None
+                commit_route = None
                 fix_ok = False
                 if fix_result and staged:
-                    commit = commit_with_hooks(
+                    commit_outcome, commit_route = _commit_pr_comment_changes(
                         wt,
+                        ticket["key"],
                         message=f"fix: address review comment on {comment.get('path', 'unknown')}",
-                        timeout=900,
                     )
-                    commit_rc = commit.returncode
-                if fix_result and (commit_rc == 0 or (agent_committed and not staged)):
+                    commit_rc = commit_outcome.exit_code
+                if fix_result and ((commit_outcome is not None and commit_outcome.ok)
+                                   or (agent_committed and not staged)):
                     fix_ok = True
                     made_commit = True
                     to_resolve.append(comment["id"])
@@ -2236,12 +2252,25 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                     attempts = comment_fix_attempts.get(attempt_key, 0) + 1
                     comment_fix_attempts[attempt_key] = attempts
                     entry["attempts"] = attempts
+                    if commit_outcome is not None:
+                        failure = (
+                            f"Commit blocked during {commit_outcome.phase} "
+                            f"({commit_route or commit_outcome.status})"
+                        )
+                    else:
+                        failure = "No code change produced"
                     log.emit("ticket_pr_comment_fix_failed",
-                        f"{_label(ticket['key'], ts)}: No code change produced for {comment['body'][:80]}",
+                        f"{_label(ticket['key'], ts)}: {failure} for {comment['body'][:80]}",
                         links={"detail": f"{base_url}/tickets/{ticket['key']}"},
                         meta={"ticket": ticket["key"],
+                              "repo": pr["repo"],
+                              "comment_id": comment["id"],
                               "claude_returned": bool(fix_result),
                               "commit_rc": commit_rc,
+                              "commit_status": commit_outcome.status if commit_outcome else None,
+                              "commit_phase": commit_outcome.phase if commit_outcome else None,
+                              "commit_route": commit_route,
+                              "commit_output": (commit_outcome.output or "")[-2000:] if commit_outcome else "",
                               "attempts": attempts,
                               "max_attempts": MAX_PR_COMMENT_FIX_ATTEMPTS})
                     if attempts >= MAX_PR_COMMENT_FIX_ATTEMPTS:
