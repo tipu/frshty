@@ -138,7 +138,7 @@ class TestTickets:
         docs_dir = tmp_path / "tickets" / slug / "docs"
         docs_dir.mkdir(parents=True)
         (docs_dir / "ticket.md").write_text("# T-1\n\nDescription")
-        with patch("web.tickets.terminal.session_healthy", return_value={"alive": False, "claude_running": False}):
+        with patch("web.tickets.terminal.session_healthy", return_value={"alive": False, "agent_running": False}):
             resp = client.get("/api/tickets/T-1/detail")
         assert resp.status_code == 200
         data = resp.json()
@@ -182,7 +182,7 @@ class TestTickets:
         slug = "T-1-slug"
         state.save("tickets", {"T-1": {"status": "new", "slug": slug}})
         state.transition_ticket("T-1", "planning")
-        with patch("web.tickets.terminal.session_healthy", return_value={"alive": False, "claude_running": False}):
+        with patch("web.tickets.terminal.session_healthy", return_value={"alive": False, "agent_running": False}):
             resp = client.get("/api/tickets/T-1/detail")
         assert resp.status_code == 200
         data = resp.json()
@@ -198,7 +198,7 @@ class TestTickets:
 
     def test_detail_empty_transitions_and_scheduled_rows(self, client):
         state.save("tickets", {"T-1": {"status": "new", "slug": "s"}})
-        with patch("web.tickets.terminal.session_healthy", return_value={"alive": False, "claude_running": False}):
+        with patch("web.tickets.terminal.session_healthy", return_value={"alive": False, "agent_running": False}):
             resp = client.get("/api/tickets/T-1/detail")
         assert resp.status_code == 200
         data = resp.json()
