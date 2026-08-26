@@ -23,6 +23,15 @@ def _tmux_bin():
 _terminals: dict[str, dict] = {}
 
 
+AGENTS = ("claude", "codex")
+
+
+def _env_prefix(env: dict) -> str:
+    return "".join(
+        f"{k}={shlex.quote(os.path.expanduser(v))} " for k, v in sorted(env.items())
+    )
+
+
 def claude_cmd(config: dict | None = None) -> str:
     """Interactive claude command line for one instance's tmux pane.
 
@@ -35,11 +44,37 @@ def claude_cmd(config: dict | None = None) -> str:
     config_dir = claude_cfg.get("config_dir")
     if config_dir and "CLAUDE_CONFIG_DIR" not in env:
         env["CLAUDE_CONFIG_DIR"] = str(config_dir)
-    prefix = "".join(
-        f"{k}={shlex.quote(os.path.expanduser(v))} " for k, v in sorted(env.items())
-    )
     bin_name = claude_cfg.get("bin", "claude")
-    return f"{prefix}{bin_name} --dangerously-skip-permissions"
+    return f"{_env_prefix(env)}{bin_name} --dangerously-skip-permissions"
+
+
+def codex_cmd(config: dict | None = None, subcommand: str = "") -> str:
+    """Interactive codex command line for one instance's tmux pane.
+
+    Same shape as claude_cmd: the instance's env overrides and CODEX_HOME are
+    prepended because _child_env() drops every variable it does not
+    whitelist, so without them the pane authenticates as the operator's
+    default codex account. The subcommand goes before the flags because codex
+    parses them per subcommand."""
+    codex_cfg = ((config or {}).get("llm") or {}).get("codex") or {}
+    env = {str(k): str(v) for k, v in (codex_cfg.get("env") or {}).items()}
+    config_dir = codex_cfg.get("config_dir")
+    if config_dir and "CODEX_HOME" not in env:
+        env["CODEX_HOME"] = str(config_dir)
+    bin_name = codex_cfg.get("bin", "codex")
+    head = f"{_env_prefix(env)}{bin_name}"
+    if subcommand:
+        head = f"{head} {subcommand}"
+    return f"{head} --dangerously-bypass-approvals-and-sandbox"
+
+
+CODEX_NOTIFY_SCRIPT = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts", "codex_notify.py")
+
+
+def _codex_notify_flag(session_uuid: str) -> str:
+    argv = json.dumps(["python3", CODEX_NOTIFY_SCRIPT, session_uuid])
+    return f"-c {shlex.quote('notify=' + argv)}"
 
 
 def _tmux_session_name(ticket_key: str) -> str:
@@ -62,25 +97,26 @@ def _process_alive(pid: int) -> bool:
         return False
 
 
-def session_healthy(ticket_key: str) -> dict:
+def session_healthy(ticket_key: str, agent: str = "claude") -> dict:
+    """Liveness of one pane: the tmux session exists, and the agent CLI
+    (claude or codex) runs as a child of the pane."""
     session_name = _tmux_session_name(ticket_key)
     if not _tmux_session_exists(session_name):
-        return {"alive": False, "claude_running": False}
+        return {"alive": False, "agent_running": False}
 
     result = subprocess.run(
         [_tmux_bin(), "-S", TMUX_SOCKET, "list-panes", "-t", session_name, "-F", "#{pane_pid}"],
         capture_output=True, text=True,
     )
     if result.returncode != 0 or not result.stdout.strip():
-        return {"alive": True, "claude_running": False}
+        return {"alive": True, "agent_running": False}
 
     pane_pid = result.stdout.strip().splitlines()[0]
-    claude_check = subprocess.run(
-        ["pgrep", "-P", pane_pid, "-f", "claude"],
+    agent_check = subprocess.run(
+        ["pgrep", "-P", pane_pid, "-f", agent if agent in AGENTS else "claude"],
         capture_output=True, text=True,
     )
-    claude_running = bool(claude_check.stdout.strip())
-    return {"alive": True, "claude_running": claude_running}
+    return {"alive": True, "agent_running": bool(agent_check.stdout.strip())}
 
 
 def list_sessions() -> list[dict]:
@@ -150,6 +186,43 @@ def send_keys(ticket_key: str, keys: str):
     )
 
 
+def pane_text(ticket_key: str) -> str:
+    """What the pane currently shows, or "" when the tmux session is gone."""
+    session_name = _tmux_session_name(ticket_key)
+    if not _tmux_session_exists(session_name):
+        return ""
+    out = subprocess.run(
+        [_tmux_bin(), "-S", TMUX_SOCKET, "capture-pane", "-t", session_name, "-p"],
+        capture_output=True, text=True,
+    )
+    return out.stdout if out.returncode == 0 else ""
+
+
+CODEX_TRUST_PROMPT = "Do you trust the contents of this directory?"
+
+
+def answer_codex_trust(ticket_key: str) -> bool:
+    """Accept the codex directory-trust question when the pane shows it.
+
+    Codex asks it the first time it opens a directory, before it reads the
+    prompt it was given, so a work run in a directory codex has not seen sits
+    on the question forever: the process is up, no turn ever starts, and no
+    notification reaches the board. The answer is yes because the launcher
+    already runs codex with approvals bypassed and the operator chose the
+    directory. `Yes, continue` is preselected, so Enter takes it. Codex writes
+    the answer to its own config, so the question comes once per directory.
+    A `-c projects...trust_level` override does not work: codex reads trust
+    only from the config file on disk."""
+    if CODEX_TRUST_PROMPT not in pane_text(ticket_key):
+        return False
+    subprocess.run(
+        [_tmux_bin(), "-S", TMUX_SOCKET, "send-keys", "-t",
+         _tmux_session_name(ticket_key), "Enter"],
+        capture_output=True,
+    )
+    return True
+
+
 def launch_claude(key: str, cwd: str, session_uuid: str, context: str, first_run: bool,
                   config: dict | None = None):
     """Start (or resume) a Claude conversation in the `key` tmux session.
@@ -159,7 +232,7 @@ def launch_claude(key: str, cwd: str, session_uuid: str, context: str, first_run
     browser (or the process dying) returns to the same conversation. No-op if
     Claude is already running in the pane — the websocket just reattaches."""
     ensure_session(key, cwd)
-    if session_healthy(key).get("claude_running"):
+    if session_healthy(key).get("agent_running"):
         return
     if first_run:
         os.makedirs(LAUNCH_CONTEXT_DIR, exist_ok=True)
@@ -173,6 +246,44 @@ def launch_claude(key: str, cwd: str, session_uuid: str, context: str, first_run
     else:
         cmd = f"{claude_cmd(config)} --resume {shlex.quote(session_uuid)}"
     send_keys(key, cmd)
+
+
+def launch_codex(key: str, cwd: str, session_uuid: str, context: str, first_run: bool,
+                 config: dict | None = None, agent_session_id: str = ""):
+    """Start (or resume) a Codex conversation in the `key` tmux session.
+
+    Codex has no system-prompt flag, so the seeded context is the first
+    prompt. Codex also mints its own thread id, so the work session id
+    travels as an argument to the notify program: every turn-complete
+    notification carries it back and the board attributes the turn to this
+    run. A resume needs the codex thread id recorded from the first
+    notification; without one the pane continues the newest codex session in
+    this directory."""
+    ensure_session(key, cwd)
+    if session_healthy(key, agent="codex").get("agent_running"):
+        return
+    notify = _codex_notify_flag(session_uuid)
+    if first_run:
+        os.makedirs(LAUNCH_CONTEXT_DIR, exist_ok=True)
+        ctx_path = os.path.join(LAUNCH_CONTEXT_DIR, f"{session_uuid}.md")
+        with open(ctx_path, "w") as f:
+            f.write(context or "")
+        cmd = f"{codex_cmd(config)} {notify} \"$(cat {shlex.quote(ctx_path)})\""
+    else:
+        target = shlex.quote(agent_session_id) if agent_session_id else "--last"
+        cmd = f"{codex_cmd(config, 'resume')} {notify} {target}"
+    send_keys(key, cmd)
+
+
+def launch_agent(key: str, cwd: str, session_uuid: str, context: str, first_run: bool,
+                 config: dict | None = None, agent: str = "claude",
+                 agent_session_id: str = ""):
+    """Start (or resume) the pane's agent CLI, claude or codex."""
+    if agent == "codex":
+        launch_codex(key, cwd, session_uuid, context, first_run, config=config,
+                     agent_session_id=agent_session_id)
+        return
+    launch_claude(key, cwd, session_uuid, context, first_run, config=config)
 
 
 def _get_or_spawn(ticket_key: str, cwd: str):
