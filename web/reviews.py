@@ -134,7 +134,7 @@ def api_rerun_ticket_review(ticket_key: str):
     if not prs:
         return JSONResponse({"error": f"No pending reviews found for {ticket_key}"}, status_code=404)
 
-    reviewer.review_ticket_prs(_config, ticket_key, prs)
+    reviewer.review_ticket_prs(_config, ticket_key, prs, auto=False)
     return {"status": "review_started", "ticket": ticket_key, "pr_count": len(prs)}
 
 
@@ -178,7 +178,7 @@ def api_rerun_review(repo: str, pr_id: int):
                     for name in ("walkthrough_cache.json", "presentation_cache.json",
                                  "presentation_meta.json", "file_summaries.json"):
                         (f[0] / name).unlink(missing_ok=True)
-            reviewer.review_ticket_prs(cfg, ticket_key, prs)
+            reviewer.review_ticket_prs(cfg, ticket_key, prs, auto=False)
         except Exception as e:
             log.emit("cycle_error", f"Manual re-review crashed for {repo} PR #{pr_id}: {type(e).__name__}: {e}",
                 meta={"repo": repo, "pr_id": pr_id})
