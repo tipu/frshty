@@ -411,10 +411,13 @@ def agent_running(tmux_key: str, agent: str = "claude") -> bool:
 def pane_activity(tmux_key: str) -> str:
     """Last-output time of the pane as an ISO timestamp, or "" when the tmux
     session is gone. A codex rollout is written only between tool calls, so
-    the pane is the freshness signal while one long command runs."""
+    the pane is the freshness signal while one long command runs. The format
+    is `window_activity`: tmux advances that one on pane output, while
+    `session_activity` stays frozen at the time the session was created and
+    reports every live pane as idle."""
     result = subprocess.run(
         [_tmux_bin(), "-S", TMUX_SOCKET, "display-message", "-p", "-t", f"term-{tmux_key}",
-         "#{session_activity}"], capture_output=True, text=True)
+         "#{window_activity}"], capture_output=True, text=True)
     stamp = result.stdout.strip()
     if result.returncode != 0 or not stamp.isdigit():
         return ""
@@ -1249,7 +1252,56 @@ def sweep_stale_items(now: datetime | None = None) -> list[dict]:
         record_artifacts(row["session_id"], transcript_path)
         outcome = maybe_autocontinue(row["session_id"], transcript_path)
         actions.append({"id": row["item_id"], "action": f"stop_synthesized:{outcome}"})
+    actions.extend(revive_resumed_runs())
     actions.extend(retry_missed_autocontinues(cutoff))
+    return actions
+
+
+def revive_resumed_runs() -> list[dict]:
+    """Return a failed_stale item to agent_working when its agent came back.
+
+    The sweep marks an item failed_stale when the agent process is gone. The
+    operator usually restarts the agent in the same pane — `codex resume`
+    picks the same rollout back up — and from then on the board shows a dead
+    item while the terminal works. A live agent in the pane plus a transcript
+    written after the failure is proof this run resumed, so the item goes
+    back to agent_working and the stale sweep owns it again."""
+    rows = db.query_all(
+        "SELECT i.id AS item_id, i.updated_at, r.id AS run_id, r.session_id, r.tmux_key, "
+        "r.transcript_path, r.provider, r.cwd, r.started_at, r.agent_session_id "
+        "FROM work_items i JOIN work_runs r ON r.id = "
+        "(SELECT r2.id FROM work_runs r2 WHERE r2.work_item_id = i.id ORDER BY r2.id DESC LIMIT 1) "
+        "WHERE i.state = 'failed_stale' AND r.status = 'stopped'"
+    )
+    actions: list[dict] = []
+    for row in rows:
+        row["id"] = row["run_id"]
+        try:
+            stat = os.stat(resolve_transcript_path(row))
+        except OSError:
+            continue
+        mtime_iso = datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()
+        if mtime_iso <= row["updated_at"]:
+            continue
+        if not agent_running(row["tmux_key"], row["provider"]):
+            continue
+        revived = 0
+        with db.tx() as c:
+            revived = c.execute(
+                "UPDATE work_items SET state = 'agent_working', stop_reason = '', "
+                "updated_at = ? WHERE id = ? AND state = 'failed_stale'",
+                (mtime_iso, row["item_id"]),
+            ).rowcount
+            if revived:
+                c.execute("UPDATE work_runs SET status = 'running' WHERE id = ?",
+                          (row["run_id"],))
+                c.execute(
+                    "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+                    "VALUES (?, ?, 'run_resumed', '{}', ?)",
+                    (row["item_id"], row["run_id"], _now()),
+                )
+        if revived:
+            actions.append({"id": row["item_id"], "action": "revived"})
     return actions
 
 
