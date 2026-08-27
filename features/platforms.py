@@ -134,8 +134,8 @@ def _identity_block_reason(config: dict, repo_path, branch: str) -> str:
     The startup gate proves the identity once. This is the only check that
     looks at the commits themselves, so it is the one that catches an identity
     changed after startup — by a human, by the agent, or by a `--author` flag.
-    Only commits this branch adds on top of its base are examined; history
-    inherited from the base belongs to whoever wrote it."""
+    Only the commits this push would publish are examined; history the remote
+    already holds belongs to whoever wrote it."""
     git_cfg = config.get("git") or {}
     name, email = git_cfg.get("name", ""), git_cfg.get("email", "")
     if not (name and email):
@@ -145,18 +145,31 @@ def _identity_block_reason(config: dict, repo_path, branch: str) -> str:
     # A PR worktree is named after the branch slug, not the repo, so the
     # directory name is not a safe key for a per-repo base override. The shared
     # git directory always sits inside the canonical checkout.
-    from core.git_util import git_common_dir
+    from core.git_util import git_common_dir, run_git
     common = git_common_dir(repo_path)
     repo_name = Path(common).parent.name if common else repo_path.name
     base = base_branch_for(config, repo_name)
+    # A push publishes origin/<branch>..HEAD. Commits already on the remote
+    # branch are published, so pushing again changes nothing about them, and a
+    # long-lived branch collects CI-bot commits and commits the same person
+    # made under another git identity. Judging the whole branch against the
+    # base turns those into a permanent block, so the agent can never answer a
+    # review comment on a branch that has ever merged. Fall back to the base
+    # when the branch is not on the remote yet: then the push does publish
+    # everything.
+    ref = f"origin/{branch}"
+    on_remote = run_git(repo_path, ["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+                        allowed_codes=(0, 1)).returncode == 0
+    if not on_remote:
+        ref = f"origin/{base}"
     result = subprocess.run(
-        ["git", "log", f"origin/{base}..HEAD", "--format=%h%x00%an <%ae>%x00%cn <%ce>"],
+        ["git", "log", f"{ref}..HEAD", "--format=%h%x00%an <%ae>%x00%cn <%ce>"],
         cwd=str(repo_path), capture_output=True, text=True, timeout=60,
     )
     if result.returncode != 0:
         # Fail closed. An unreadable range is not evidence of correct authorship,
         # and a wrong author cannot be taken back once it is on the remote.
-        return (f"cannot read origin/{base}..HEAD in {repo_name}, so the "
+        return (f"cannot read {ref}..HEAD in {repo_name}, so the "
                 f"authorship of this push is unknown: "
                 f"{(result.stderr or '').strip()[:200]}")
     wrong = []
