@@ -224,6 +224,15 @@ class TestIntake:
         assert "previous.kind === \"tools\"" in r.text
         assert '<details v-else-if="e.kind === \'tools\'" class="tl-tools" open>' not in r.text
 
+    def test_work_detail_reports_load_and_render_failures(self):
+        r = self._client().get("/work/1")
+
+        assert r.status_code == 200
+        assert "Loading work item…" in r.text
+        assert "Unable to load this work item:" in r.text
+        assert 'id="work-fatal"' in r.text
+        assert "setInterval(() => this.refresh(), 15000)" in r.text
+
     def test_transcript_image_endpoint_serves_lazy_image(self, tmp_path):
         import json as _json
         image_bytes = b"\x89PNG\r\n\x1a\nwork timeline"
