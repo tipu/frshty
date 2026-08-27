@@ -91,6 +91,7 @@ PERSONA_MAINTAINABILITY = (
 
 PERSONAS = {"spec": PERSONA_SPEC, "breakage": PERSONA_BREAKAGE, "maintainability": PERSONA_MAINTAINABILITY}
 REVIEW_RETRY_COOLDOWN_SECONDS = 60 * 60
+REVIEW_MAX_CHANGED_LINES = 8000
 
 REVIEW_TOOLS = READ_ONLY_TOOLS
 REVIEW_DENIED_TOOLS = WRITE_TOOLS
@@ -335,6 +336,13 @@ def _review_providers(config) -> list[str]:
     return (config.get("reviewer") or {}).get("providers") or ["claude"]
 
 
+def _max_changed_lines(config) -> int:
+    value = (config.get("reviewer") or {}).get("max_changed_lines")
+    if value is None:
+        return REVIEW_MAX_CHANGED_LINES
+    return int(value)
+
+
 def _run_single_persona(args):
     name, prompt, cwd, model, add_dirs = args
     try:
@@ -463,16 +471,59 @@ def _merge_reviews(results: list[tuple[str, dict]]) -> dict:
             if "issues" not in data and len(data) == 1:
                 data = next(iter(data.values()))
             if isinstance(data.get("issues"), list):
+                data["issues"] = _collapse_persona_duplicates(data["issues"])
                 return data
 
+    log.emit("review_merge_fallback",
+             "persona merge model returned nothing; merging the persona lists in code",
+             meta={"personas": [name for name, _ in results]})
     all_issues = []
     for name, data in results:
         for issue in data.get("issues", []):
             issue["agreed_by"] = [name]
             all_issues.append(issue)
     base = results[0][1]
-    base["issues"] = all_issues
+    base["issues"] = _collapse_persona_duplicates(all_issues)
     return base
+
+
+def _collapse_persona_duplicates(issues: list[dict]) -> list[dict]:
+    """One comment per line when several personas report the same defect.
+
+    Three personas read the same diff, so one defect arrives three times on one
+    line. The merge model normally folds them together. When that call fails the
+    persona lists were concatenated as they were, and the pull request got three
+    comments stacked on one line. Collapse on the exact path and line, keep the
+    most severe rating and the longest body, and name every persona in
+    'agreed_by'. A finding with no path or no line never collapses: those are
+    general comments and each one is its own remark."""
+    out: list[dict] = []
+    dropped: list[dict] = []
+    for issue in issues:
+        path = issue.get("path")
+        line = issue.get("line")
+        twin = next((o for o in out
+                     if path and line
+                     and o.get("path") == path and o.get("line") == line), None)
+        if twin is None:
+            out.append(issue)
+            continue
+        dropped.append({"path": path, "line": line, "persona": issue.get("persona", ""),
+                        "body": issue.get("body", "")})
+        twin["agreed_by"] = sorted(set(twin.get("agreed_by", []) + issue.get("agreed_by", [])))
+        if issue.get("severity") == "blocking":
+            twin["severity"] = "blocking"
+        if len(issue.get("body", "")) > len(twin.get("body", "")):
+            twin["body"] = issue["body"]
+            twin["persona"] = issue.get("persona", twin.get("persona", ""))
+        if issue.get("tool_assisted"):
+            twin["tool_assisted"] = True
+    if dropped:
+        log.emit("review_duplicate_findings_collapsed",
+                 f"{len(dropped)} finding(s) landed on a line another persona already flagged: "
+                 + ", ".join(f"{d['path']}:{d['line']}" for d in dropped),
+                 meta={"dropped": dropped, "kept": len(out)})
+    return out
 
 
 def _union_issues(per_provider: dict[str, list[dict]]) -> list[dict]:
@@ -772,6 +823,10 @@ def _extract_changed_paths(diff_text: str) -> list[str]:
     return re.findall(r"diff --git a/.+ b/(.+)", diff_text)
 
 
+def _changed_line_count(diff_text: str) -> int:
+    return sum(1 for line in diff_text.splitlines()
+               if line[:1] in ("+", "-") and not line.startswith(("+++", "---")))
+
 
 def _extract_ticket_from_pr(pr: dict, ticket_state: dict) -> str | None:
     repo = pr.get("repo")
@@ -797,6 +852,8 @@ def _extract_ticket_from_pr(pr: dict, ticket_state: dict) -> str | None:
 def _pr_needs_tracking(review_state: dict, pr: dict) -> bool:
     pr_key = f"{pr.get('repo')}/{pr.get('id')}"
     existing = review_state.get(pr_key, {})
+    if existing.get("skipped"):
+        return (pr.get("head_sha") or "") != (existing.get("skipped_head_sha") or "")
     if not existing.get("reviewed"):
         return True
 
@@ -873,6 +930,48 @@ def _fetch_ticket_diffs(platform, prs: list[dict]) -> dict[str, str]:
         except Exception:
             diffs[f"{pr['repo']}/{pr['id']}"] = ""
     return diffs
+
+
+def _oversized_prs(config: dict, ticket_key: str, prs: list[dict],
+                   diffs: dict[str, str]) -> list[dict]:
+    """The PRs an automatic review must not fire on. A ticket's PRs go into one
+    prompt, so they pass or fail the cap together. __no_ticket__ PRs are
+    unrelated, so each one is measured on its own."""
+    cap = _max_changed_lines(config)
+    if cap <= 0:
+        return []
+    if ticket_key == "__no_ticket__":
+        return [p for p in prs
+                if _changed_line_count(diffs.get(f"{p['repo']}/{p['id']}", "")) > cap]
+    total = sum(_changed_line_count(diffs.get(f"{p['repo']}/{p['id']}", "")) for p in prs)
+    return list(prs) if total > cap else []
+
+
+def _record_oversized_skip(config: dict, ticket_key: str, prs: list[dict],
+                           diffs: dict[str, str], review_state: dict) -> None:
+    cap = _max_changed_lines(config)
+    lines = sum(_changed_line_count(diffs.get(f"{p['repo']}/{p['id']}", "")) for p in prs)
+    files = sum(len(_extract_changed_paths(diffs.get(f"{p['repo']}/{p['id']}", ""))) for p in prs)
+    label = (ticket_key if ticket_key != "__no_ticket__"
+             else ", ".join(f"{p['repo']}#{p['id']}" for p in prs))
+    log.emit("review_skipped_too_large",
+             f"{label}: {lines} changed lines in {files} files is over the {cap} line "
+             "auto-review cap. The review did not run. Start it by hand to review it anyway.",
+             links={"detail": f"{config['_base_url']}/reviews"},
+             meta={"ticket": ticket_key, "changed_lines": lines, "files": files, "cap": cap,
+                   "prs": [f"{p['repo']}/{p['id']}" for p in prs]})
+    now = time.time()
+    for pr in prs:
+        pr_key = f"{pr['repo']}/{pr['id']}"
+        entry = dict(review_state.get(pr_key, {}))
+        entry.update({
+            "skipped": "too_large",
+            "skipped_head_sha": pr.get("head_sha", ""),
+            "skipped_at": now,
+            "branch": pr.get("branch", ""),
+            "ticket": ticket_key,
+        })
+        review_state[pr_key] = entry
 
 
 def _ticket_context_for(config, pr: dict, ticket_key: str, prs: list[dict],
@@ -992,12 +1091,14 @@ def _reviewed_sibling_sections(config: dict, platform, ticket_key: str,
     return sections
 
 
-def review_ticket(config: dict, ticket_key: str, prs: list[dict]) -> dict[str, dict | None]:
+def review_ticket(config: dict, ticket_key: str, prs: list[dict],
+                  diffs: dict[str, str] | None = None) -> dict[str, dict | None]:
     """Single persona pass over the combined diffs of all the ticket's PRs.
     Returns {repo/id: per-PR merged review or None} and writes each PR's
     review artifacts, so the per-PR pages and comment queues work unchanged."""
     platform = make_platform(config)
-    diffs = _fetch_ticket_diffs(platform, prs)
+    if diffs is None:
+        diffs = _fetch_ticket_diffs(platform, prs)
     none_result: dict[str, dict | None] = {f"{p['repo']}/{p['id']}": None for p in prs}
     live = [p for p in prs if diffs.get(f"{p['repo']}/{p['id']}")]
     if not live:
@@ -1092,11 +1193,23 @@ def review_ticket(config: dict, ticket_key: str, prs: list[dict]) -> dict[str, d
     return results
 
 
-def review_ticket_prs(config: dict, ticket_key: str, prs: list[dict]) -> list[dict]:
+def review_ticket_prs(config: dict, ticket_key: str, prs: list[dict],
+                      auto: bool = True) -> list[dict]:
     platform = make_platform(config)
     review_state = state.load("reviews")
     base_url = config["_base_url"]
     failed_prs: list[dict] = []
+
+    diffs = _fetch_ticket_diffs(platform, prs)
+    if auto:
+        oversized = _oversized_prs(config, ticket_key, prs, diffs)
+        if oversized:
+            _record_oversized_skip(config, ticket_key, oversized, diffs, review_state)
+            state.save("reviews", review_state)
+            oversized_keys = {(p["repo"], p["id"]) for p in oversized}
+            prs = [p for p in prs if (p["repo"], p["id"]) not in oversized_keys]
+            if not prs:
+                return []
 
     if ticket_key == "__no_ticket__":
         results = {}
@@ -1107,14 +1220,15 @@ def review_ticket_prs(config: dict, ticket_key: str, prs: list[dict]) -> list[di
             log.emit("review_started", f"{label} PR #{pr['id']} in {pr['repo']}",
                 links={"pr": pr["url"], "detail": f"{base_url}/reviews/{pr['repo']}/{pr['id']}"},
                 meta={"repo": pr["repo"], "pr_id": pr["id"], "ticket": ticket_key, "re_review": re_review})
-            ticket_context = _ticket_context_for(config, pr, ticket_key, prs, {})
-            results[pr_key] = review_pr(config, platform, pr, ticket_context=ticket_context)
+            ticket_context = _ticket_context_for(config, pr, ticket_key, prs, diffs)
+            results[pr_key] = review_pr(config, platform, pr, ticket_context=ticket_context,
+                                        prefetched_diff=diffs.get(pr_key, ""))
     else:
         log.emit("review_started",
             f"Reviewing ticket {ticket_key}: {len(prs)} PR(s) as one change",
             links={"detail": f"{base_url}/reviews/{prs[0]['repo']}/{prs[0]['id']}"},
             meta={"ticket": ticket_key, "prs": [f"{p['repo']}/{p['id']}" for p in prs]})
-        results = review_ticket(config, ticket_key, prs)
+        results = review_ticket(config, ticket_key, prs, diffs=diffs)
 
     for pr in prs:
         pr_key = f"{pr['repo']}/{pr['id']}"

@@ -152,6 +152,47 @@ class TestMergeReviews:
             result = reviewer._merge_reviews([("spec", data1), ("breakage", data2)])
         assert len(result["issues"]) == 2
 
+    def test_fallback_collapses_same_line_findings(self):
+        data1 = {"verdict": "approved",
+                 "issues": [{"body": "short", "severity": "suggestion",
+                             "path": "a.ts", "line": 26, "persona": "spec"}]}
+        data2 = {"verdict": "changes_requested",
+                 "issues": [{"body": "a much longer body", "severity": "blocking",
+                             "path": "a.ts", "line": 26, "persona": "breakage"}]}
+        with patch("features.reviewer.run_haiku", return_value=None):
+            result = reviewer._merge_reviews([("spec", data1), ("breakage", data2)])
+        assert len(result["issues"]) == 1
+        issue = result["issues"][0]
+        assert issue["severity"] == "blocking"
+        assert issue["body"] == "a much longer body"
+        assert issue["agreed_by"] == ["breakage", "spec"]
+
+    def test_fallback_keeps_findings_on_different_lines(self):
+        data1 = {"verdict": "approved",
+                 "issues": [{"body": "a", "severity": "blocking", "path": "a.ts", "line": 26}]}
+        data2 = {"verdict": "approved",
+                 "issues": [{"body": "b", "severity": "blocking", "path": "a.ts", "line": 28}]}
+        with patch("features.reviewer.run_haiku", return_value=None):
+            result = reviewer._merge_reviews([("spec", data1), ("breakage", data2)])
+        assert len(result["issues"]) == 2
+
+    def test_merged_output_collapses_same_line_findings(self):
+        merged = {"verdict": "changes_requested", "issues": [
+            {"body": "one", "severity": "blocking", "path": "a.ts", "line": 26,
+             "agreed_by": ["spec"]},
+            {"body": "two", "severity": "blocking", "path": "a.ts", "line": 26,
+             "agreed_by": ["breakage"]},
+        ]}
+        with patch("features.reviewer.run_haiku", return_value=json.dumps(merged)):
+            result = reviewer._merge_reviews([("spec", {"issues": []}), ("breakage", {"issues": []})])
+        assert len(result["issues"]) == 1
+        assert result["issues"][0]["agreed_by"] == ["breakage", "spec"]
+
+    def test_collapse_keeps_general_comments_apart(self):
+        issues = [{"body": "a", "severity": "suggestion", "path": "", "line": None},
+                  {"body": "b", "severity": "suggestion", "path": "", "line": None}]
+        assert len(reviewer._collapse_persona_duplicates(issues)) == 2
+
 
 class TestValidateSingle:
     def test_no_path_returns_issue(self):
@@ -697,3 +738,135 @@ class TestReviewedSiblingSections:
         assert reviewer._reviewed_sibling_sections(
             {"_state_dir": tmp_state}, platform, "JIRA-9", set()) == []
         platform.get_pr_diff.assert_not_called()
+
+
+def _diff(lines: int, path: str = "a.py") -> str:
+    body = "\n".join(f"+line {i}" for i in range(lines))
+    return f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n{body}\n"
+
+
+class TestChangedLineCount:
+    def test_counts_added_and_removed_lines(self):
+        diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n+one\n-two\n context\n"
+        assert reviewer._changed_line_count(diff) == 2
+
+    def test_ignores_file_headers(self):
+        assert reviewer._changed_line_count(_diff(3)) == 3
+
+    def test_empty_diff(self):
+        assert reviewer._changed_line_count("") == 0
+
+
+class TestMaxChangedLines:
+    def test_default(self):
+        assert reviewer._max_changed_lines({}) == reviewer.REVIEW_MAX_CHANGED_LINES
+
+    def test_config_override(self):
+        assert reviewer._max_changed_lines({"reviewer": {"max_changed_lines": 500}}) == 500
+
+    def test_zero_disables(self):
+        config = {"reviewer": {"max_changed_lines": 0}}
+        prs = [make_pr(repo="backend", id=7)]
+        diffs = {"backend/7": _diff(50000)}
+        assert reviewer._oversized_prs(config, "JIRA-9", prs, diffs) == []
+
+
+class TestOversizedPrs:
+    def test_ticket_prs_are_measured_together(self):
+        config = {"reviewer": {"max_changed_lines": 100}}
+        prs = [make_pr(repo="backend", id=7), make_pr(repo="frontend", id=2)]
+        diffs = {"backend/7": _diff(60), "frontend/2": _diff(60)}
+        assert reviewer._oversized_prs(config, "JIRA-9", prs, diffs) == prs
+
+    def test_ticket_under_cap_passes(self):
+        config = {"reviewer": {"max_changed_lines": 100}}
+        prs = [make_pr(repo="backend", id=7), make_pr(repo="frontend", id=2)]
+        diffs = {"backend/7": _diff(40), "frontend/2": _diff(40)}
+        assert reviewer._oversized_prs(config, "JIRA-9", prs, diffs) == []
+
+    def test_no_ticket_prs_are_measured_alone(self):
+        config = {"reviewer": {"max_changed_lines": 100}}
+        big = make_pr(repo="backend", id=7)
+        small = make_pr(repo="frontend", id=2)
+        diffs = {"backend/7": _diff(150), "frontend/2": _diff(10)}
+        assert reviewer._oversized_prs(config, "__no_ticket__", [big, small], diffs) == [big]
+
+
+class TestOversizedSkip:
+    def _config(self, tmp_state, cap=100):
+        return {"_state_dir": tmp_state, "_base_url": "http://localhost:8000",
+                "reviewer": {"max_changed_lines": cap}}
+
+    def test_auto_review_of_oversized_ticket_never_calls_the_model(self, tmp_state):
+        prs = [make_pr(repo="backend", id=7, head_sha="abc")]
+        platform = MagicMock()
+        platform.get_pr_diff.return_value = _diff(500)
+        with patch("features.reviewer.make_platform", return_value=platform), \
+             patch("features.reviewer.review_ticket") as review_ticket:
+            failed = reviewer.review_ticket_prs(self._config(tmp_state), "JIRA-9", prs)
+        review_ticket.assert_not_called()
+        assert failed == []
+        assert state.load("reviews")["backend/7"]["skipped"] == "too_large"
+
+    def test_skip_is_reported_to_the_event_feed(self, tmp_state):
+        prs = [make_pr(repo="backend", id=7, head_sha="abc")]
+        platform = MagicMock()
+        platform.get_pr_diff.return_value = _diff(500)
+        with patch("features.reviewer.make_platform", return_value=platform), \
+             patch("features.reviewer.review_ticket"), \
+             patch("features.reviewer.log.emit") as emit:
+            reviewer.review_ticket_prs(self._config(tmp_state), "JIRA-9", prs)
+        events = [c.args[0] for c in emit.call_args_list]
+        assert "review_skipped_too_large" in events
+        assert "review_started" not in events
+
+    def test_under_cap_ticket_still_reviews(self, tmp_state):
+        prs = [make_pr(repo="backend", id=7, head_sha="abc")]
+        platform = MagicMock()
+        platform.get_pr_diff.return_value = _diff(10)
+        with patch("features.reviewer.make_platform", return_value=platform), \
+             patch("features.reviewer.review_ticket", return_value={"backend/7": None}) as review_ticket:
+            reviewer.review_ticket_prs(self._config(tmp_state), "JIRA-9", prs)
+        review_ticket.assert_called_once()
+        assert "skipped" not in state.load("reviews").get("backend/7", {})
+
+    def test_manual_rerun_ignores_the_cap(self, tmp_state):
+        prs = [make_pr(repo="backend", id=7, head_sha="abc")]
+        platform = MagicMock()
+        platform.get_pr_diff.return_value = _diff(500)
+        with patch("features.reviewer.make_platform", return_value=platform), \
+             patch("features.reviewer.review_ticket", return_value={"backend/7": None}) as review_ticket:
+            reviewer.review_ticket_prs(self._config(tmp_state), "JIRA-9", prs, auto=False)
+        review_ticket.assert_called_once()
+
+    def test_oversized_no_ticket_pr_is_dropped_and_siblings_run(self, tmp_state):
+        big = make_pr(repo="backend", id=7, head_sha="abc")
+        small = make_pr(repo="frontend", id=2, head_sha="def")
+        platform = MagicMock()
+        platform.get_pr_diff.side_effect = lambda repo, pr_id: _diff(500) if repo == "backend" else _diff(10)
+        with patch("features.reviewer.make_platform", return_value=platform), \
+             patch("features.reviewer.review_pr", return_value=None) as review_pr:
+            reviewer.review_ticket_prs(self._config(tmp_state), "__no_ticket__", [big, small])
+        assert [c.args[2]["repo"] for c in review_pr.call_args_list] == ["frontend"]
+
+    def test_diff_is_fetched_once_per_pr(self, tmp_state):
+        prs = [make_pr(repo="backend", id=7, head_sha="abc")]
+        platform = MagicMock()
+        platform.get_pr_diff.return_value = _diff(10)
+        with patch("features.reviewer.make_platform", return_value=platform), \
+             patch("features.reviewer.review_pr", return_value=None):
+            reviewer.review_ticket_prs(self._config(tmp_state), "__no_ticket__", prs)
+        platform.get_pr_diff.assert_called_once_with("backend", 7)
+
+
+class TestSkippedPrTracking:
+    def test_skipped_pr_is_not_tracked_again(self):
+        review_state = {"backend/7": {"skipped": "too_large", "skipped_head_sha": "abc"}}
+        assert not reviewer._pr_needs_tracking(review_state, make_pr(repo="backend", id=7, head_sha="abc"))
+
+    def test_new_head_retracks_a_skipped_pr(self):
+        review_state = {"backend/7": {"skipped": "too_large", "skipped_head_sha": "abc"}}
+        assert reviewer._pr_needs_tracking(review_state, make_pr(repo="backend", id=7, head_sha="zzz"))
+
+    def test_unreviewed_pr_is_tracked(self):
+        assert reviewer._pr_needs_tracking({}, make_pr(repo="backend", id=7, head_sha="abc"))
