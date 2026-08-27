@@ -10,8 +10,9 @@ DB_PATH = os.environ.get("FRSHTY_DB") or os.path.expanduser("~/.frshty/frshty.db
 
 QUESTION_DENY_REASON = (
     "Question recorded on the work board. The operator will answer it in a "
-    "later message. Do not call AskUserQuestion again. State that you are "
-    "blocked on this question and end your turn."
+    "later message. Do not ask this question again. State that you are "
+    "blocked on it and end your turn. Keep using AskUserQuestion for every "
+    "later question or request: it is the only way one reaches the operator."
 )
 
 
