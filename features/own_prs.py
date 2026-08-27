@@ -205,7 +205,7 @@ def _process_detected_comments(config, instance_key, platform, pr, pr_ref, base_
             log.emit("pr_comment_classify_failed",
                      f"{pr_ref}: Could not classify (LLM empty/unparseable), will retry — {comment['body'][:80]}",
                      links=links, meta=meta)
-            comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "classification failed")
+            comments.mark_comment_retryable(instance_key, "pr", pr_key, comment_id, "classification failed")
             continue
 
         if actionable:
@@ -251,6 +251,14 @@ def _reclaim_stuck_comments(instance_key, pr, pr_key, pr_ref, base_url, by_id, u
                 continue
             note = "orphaned mid-fix"
         elif error_count > MAX_COMMENT_RETRIES:
+            announced = seen.setdefault("abandoned_comments", [])
+            if comment_id not in announced:
+                announced.append(comment_id)
+                log.emit("pr_comment_abandoned",
+                         f"{pr_ref}: Gave up after {error_count} failed attempt(s) — {comment['body'][:80]}",
+                         links={"pr": pr["url"], "detail": f"{base_url}/"},
+                         meta={"repo": pr["repo"], "pr_id": pr["id"], "comment_id": comment_id,
+                               "error_count": error_count, "last_error": row.get("last_error")})
             continue
         else:
             note = f"retry {error_count}/{MAX_COMMENT_RETRIES}"
@@ -352,9 +360,11 @@ def fix_comment(config, payload) -> tuple[bool, str | None]:
             result = run_claude_code(context, cwd=worktree, timeout=600,
                                      allowed_tools=_comment_fix_tools(worktree))
             if result is None:
-                log.emit("pr_comment_blocked", f"{pr_ref}: Claude failed to fix — {comment['body'][:80]}", links=links, meta={**meta, "reason": "Claude failed to fix"})
-                comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "Claude failed to fix")
-                return False, "Claude failed to fix"
+                reason = "Claude did not run to completion"
+                log.emit("pr_comment_provider_failed", f"{pr_ref}: {reason} — {comment['body'][:80]}", links=links, meta={**meta, "reason": reason})
+                comments.mark_comment_deferred(instance_key, "pr", pr_key, comment_id,
+                                               comment.get("updated_at") or comment.get("created_at"))
+                return False, reason
 
             committed, commit_reason = _commit_fix(worktree, f"fix: address review comment on {comment.get('path', 'unknown')}")
             if not committed:
@@ -405,6 +415,23 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
             comments.mark_comment_error(instance_key, "pr", pr_key, cid, reason)
         return False, reason
 
+    def _defer_all(pending_comments, reason):
+        """Park a batch the model never got to, without spending its budget.
+
+        run_claude_code returns None for a guard block, a timeout, and a
+        non-zero exit alike, so None says the run did not finish — it says
+        nothing about the comment. Charging that to error_count exhausts
+        MAX_COMMENT_RETRIES inside one outage and abandons the comment for
+        good. Deferring puts it back in the debounce pool for the next poll."""
+        ids = [str(c["id"]) for c in pending_comments]
+        log.emit("pr_comment_provider_failed",
+                 f"{pr_ref}: {reason} — batch of {len(ids)} comment(s) held for retry",
+                 links=links, meta={**meta, "reason": reason})
+        for c in pending_comments:
+            comments.mark_comment_deferred(instance_key, "pr", pr_key, str(c["id"]),
+                                           c.get("updated_at") or c.get("created_at"))
+        return False, reason
+
     try:
         with _worktree_lock(pr_key):
             by_id = {str(c["id"]): c for c in platform.get_pr_comments(pr["repo"], pr["id"])}
@@ -436,7 +463,7 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
             result = run_claude_code(context, cwd=worktree, timeout=900,
                                      allowed_tools=_comment_fix_tools(worktree))
             if result is None:
-                return _fail_all(pending_ids, "Claude failed to fix")
+                return _defer_all(pending, "Claude did not run to completion")
 
             committed, commit_reason = _commit_fix(worktree, f"fix: address {len(pending)} review comments")
             if not committed:
