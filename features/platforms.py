@@ -149,21 +149,22 @@ def _identity_block_reason(config: dict, repo_path, branch: str) -> str:
     common = git_common_dir(repo_path)
     repo_name = Path(common).parent.name if common else repo_path.name
     base = base_branch_for(config, repo_name)
-    # A push publishes origin/<branch>..HEAD. Commits already on the remote
-    # branch are published, so pushing again changes nothing about them, and a
-    # long-lived branch collects CI-bot commits and commits the same person
-    # made under another git identity. Judging the whole branch against the
-    # base turns those into a permanent block, so the agent can never answer a
-    # review comment on a branch that has ever merged. Fall back to the base
-    # when the branch is not on the remote yet: then the push does publish
-    # everything.
+    # Two exclusions, and this check needs both. A push publishes
+    # origin/<branch>..HEAD, so commits the remote branch already holds are not
+    # this push's to answer for: a long-lived branch collects CI-bot commits
+    # and commits the same person made under another git identity, and judging
+    # them again blocks every later push. Commits already on the base are not
+    # this push's either, even when the push does publish them — merging the
+    # base carries other people's work by design, and base sync would never
+    # complete. What is left is what this push adds and nobody has seen.
     ref = f"origin/{branch}"
     on_remote = run_git(repo_path, ["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
                         allowed_codes=(0, 1)).returncode == 0
     if not on_remote:
         ref = f"origin/{base}"
     result = subprocess.run(
-        ["git", "log", f"{ref}..HEAD", "--format=%h%x00%an <%ae>%x00%cn <%ce>"],
+        ["git", "log", f"{ref}..HEAD", "--not", f"origin/{base}",
+         "--format=%h%x00%an <%ae>%x00%cn <%ce>"],
         cwd=str(repo_path), capture_output=True, text=True, timeout=60,
     )
     if result.returncode != 0:
