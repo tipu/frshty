@@ -481,6 +481,27 @@ class TestRunningCodexTranscript:
         assert [e["kind"] for e in work_store.item_detail(item_id)["timeline"]] == \
             ["prompt", "text"]
 
+    def test_a_missing_recorded_thread_falls_back_to_the_matching_run(
+            self, tmp_path, monkeypatch):
+        _, started, opened = self._times()
+        item_id, sid = _mkrun("codex recorded a phantom thread")
+        path = _rollout(tmp_path, "thread-actual", [USER_ITEM, EXEC_ITEM, AGENT_ITEM],
+                        cwd="/tmp", at=opened)
+        with db.tx() as c:
+            c.execute("UPDATE work_runs SET started_at = ?, "
+                      "agent_session_id = 'thread-phantom' WHERE session_id = ?",
+                      (started, sid))
+        monkeypatch.setattr(codex_session, "HOME_DIR", str(tmp_path))
+
+        detail = work_store.item_detail(item_id)
+
+        assert [e["kind"] for e in detail["timeline"]] == ["prompt", "tool", "text"]
+        run = db.query_one(
+            "SELECT transcript_path, agent_session_id FROM work_runs WHERE session_id = ?",
+            (sid,))
+        assert run["transcript_path"] == path
+        assert run["agent_session_id"] == "thread-actual"
+
     def test_a_claude_run_is_never_searched(self, tmp_path, monkeypatch):
         item_id, sid = _mkrun("claude run without a transcript", provider="claude")
         _rollout(tmp_path, "thread-not-mine", [USER_ITEM], cwd="/tmp",
