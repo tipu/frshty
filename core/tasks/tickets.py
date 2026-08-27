@@ -570,6 +570,22 @@ _REPAIRABLE_DIAGNOSTICS = (
                r"|var-annotated|no-untyped-def|no-any-return|redundant-cast"
                r"|truthy-bool|comparison-overlap|unused-ignore"
                r"|func-returns-value)\]"),
+    # basedpyright names its rule in parentheses, and the message text differs
+    # per rule, so listing wordings covers one rule each: DEV-678 blocked on
+    # `"__getitem__" method not defined on type "object" (reportIndexIssue)`,
+    # a plain code defect in a test the agent had just written. These are the
+    # rules that mirror the mypy codes above; the name, attribute and import
+    # family is on the never list below for the same reason it is there.
+    re.compile(r"\((report(ArgumentType|AssignmentType|ReturnType|CallIssue"
+               r"|IndexIssue|OperatorIssue|InvalidTypeArguments|InvalidTypeVarUse"
+               r"|InvalidTypeForm|IncompatibleMethodOverride"
+               r"|IncompatibleVariableOverride|MissingParameterType"
+               r"|TypedDictNotRequiredAccess|SelfClsParameterName"
+               r"|UnnecessaryCast|UnnecessaryComparison|UnnecessaryContains"
+               r"|UnnecessaryIsInstance|UnnecessaryTypeIgnoreComment"
+               r"|UnusedImport|UnusedVariable|UnusedExpression|UnusedCoroutine"
+               r"|OptionalSubscript|OptionalMemberAccess|OptionalIterable"
+               r"|OptionalOperand|OptionalCall|OptionalContextManager))\)"),
 )
 _NEVER_REPAIRABLE = (
     re.compile(r"unknown import symbol", re.I),
@@ -588,6 +604,13 @@ _NEVER_REPAIRABLE = (
     re.compile(r"undefined name", re.I),
     re.compile(r"is not defined", re.I),
     re.compile(r"\bTS2304\b|cannot find name", re.I),
+    # The same family under basedpyright's rule names. DEV-635 blocked because
+    # no wording above matched `Attribute "method" is unknown`, so it fell
+    # through to unrecognised. Naming the rules states the decision instead of
+    # depending on the allowance above never growing to cover them.
+    re.compile(r"\((report(MissingImports|MissingModuleSource|MissingTypeStubs"
+               r"|AttributeAccessIssue|UndefinedVariable|UnboundVariable"
+               r"|PossiblyUnbound|Redeclaration|PrivateImportUsage))\)"),
 )
 
 
@@ -1639,7 +1662,14 @@ def write_tests(ctx: TaskContext) -> TaskResult:
 def run_tests_and_fix(ctx: TaskContext) -> TaskResult:
     """Run tests once per task invocation. If FAIL and cap not reached, ask
     claude to fix and let the dispatcher re-enqueue us next cycle. Each
-    invocation writes a fresh VERDICT into docs/test-runs.md."""
+    invocation writes a fresh VERDICT into docs/test-runs.md.
+
+    The attempt is given back when the fix step could not run. The cap bounds
+    fix iterations, and an invocation that dispatched no fix converged nothing;
+    counting it spends the budget on the outage instead. DEV-678 reached
+    `cap_reached` in three minutes on a spend limit, two of its three attempts
+    never having reached claude, and the FAIL that cap recorded was not a
+    verdict on the code."""
     from features.tickets import MAX_TEST_FIX_ATTEMPTS
     ts = state.load_ticket(ctx.ticket_key or "") or {}
     ticket_dir = _ticket_dir(ctx)
@@ -1716,6 +1746,8 @@ def run_tests_and_fix(ctx: TaskContext) -> TaskResult:
     if fix_result is None:
         if resume:
             _drop_session(ctx, "run_tests_and_fix")
+        state.update_ticket(ctx.ticket_key or "",
+                            lambda t: {**t, "test_fix_attempts": attempt - 1} if t else t)
         return TaskResult("failed", "fix step: claude returned non-zero")
 
     _commit_workspace_changes(
