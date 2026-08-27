@@ -35,6 +35,7 @@
 <script src="/static/frshty-usage.js"></script>
 </head>
 <body class="bg-[#0b0b10] text-gray-200">
+<div id="work-fatal" hidden class="max-w-[1600px] mx-auto px-6 pt-6 text-sm text-red-400"></div>
 <div id="app" class="max-w-[1600px] mx-auto px-6 py-6">
 <div v-if="item">
   <div class="text-xs text-gray-500 mb-2"><a href="/work" class="underline">← work</a></div>
@@ -209,11 +210,29 @@
     <div v-for="ev in events" class="text-xs text-gray-500 font-mono">{{ ev.created_at.slice(0,19) }} {{ ev.kind }}</div>
   </div>
 </div>
+<div v-else>
+  <div class="text-xs text-gray-500 mb-2"><a href="/work" class="underline">← work</a></div>
+  <div class="text-sm text-gray-400" v-if="!loadError">Loading work item…</div>
+  <div v-else>
+    <div class="text-sm text-red-400">{{ loadError }}</div>
+    <button type="button" class="text-xs text-blue-400 underline mt-2" @click="refresh">retry</button>
+  </div>
+</div>
 </div>
 <script>
 const { createApp } = Vue;
-createApp({
-  data() { return { item: null, timeline: [], events: [], artifacts: [], replyText: "", replyError: "",
+function showWorkFatal(error) {
+  const el = document.getElementById("work-fatal");
+  if (!el) return;
+  const message = error && error.message ? error.message : String(error || "unknown error");
+  el.textContent = "Work detail failed to render: " + message;
+  el.hidden = false;
+}
+window.addEventListener("error", event => showWorkFatal(event.error || event.message));
+window.addEventListener("unhandledrejection", event => showWorkFatal(event.reason));
+
+const app = createApp({
+  data() { return { item: null, loadError: "", timeline: [], events: [], artifacts: [], replyText: "", replyError: "",
                     timelineCap: 100, timelineFull: false,
                     timelineImagesOpen: {},
                     systemPrompt: "", showPrompt: false,
@@ -322,38 +341,49 @@ createApp({
     async refresh() {
       const seq = ++this._refreshSeq;
       const id = location.pathname.split("/")[2];
-      const r = await fetch(`/api/work/items/${id}/detail`);
-      if (!r.ok || seq !== this._refreshSeq) return;
-      const d = await r.json();
-      if (seq !== this._refreshSeq) return;
-      this.item = d.item; this.timeline = d.timeline; this.events = d.events; this.artifacts = d.artifacts;
-      this.systemPrompt = d.system_prompt || "";
-      const obj = (d.item.objective || "").trim();
-      if (obj) {
-        if (!this._baseTitle) this._baseTitle = document.title;
-        const snip = obj.length > 40 ? obj.slice(0, 40) + "…" : obj;
-        document.title = this._baseTitle.replace("Work item", snip);
-      }
-      this.followups = d.followups || [];
-      this.sourceItem = d.source_item || null; this.followupChildren = d.followup_children || [];
-      this.projects = d.projects || []; this.slackAvailable = !!d.slack_available;
-      this.runs = d.runs || [];
-      this.agents = d.agents && d.agents.length ? d.agents : ["claude"];
-      const known = new Set(this.projects.map(p => p.key));
-      const parent = (this.item.contexts || "").split(",").filter(Boolean);
-      if (!this._fupSeeded) {
-        this._fupSeeded = true;
-        this.fupCtx = parent.filter(c => known.has(c));
-        this.fupSlack = parent.includes("slack_int");
-        this.fupAgent = this.agents.includes(this.provider) ? this.provider : this.agents[0];
-      }
-      for (const f of this.followups)
-        if (f.status === "draft" && !(f.id in this.fuText)) {
-          this.fuText[f.id] = f.draft;
-          this.fuCtx[f.id] = parent.filter(c => known.has(c));
-          this.fuSlack[f.id] = parent.includes("slack_int");
-          this.fuAgent[f.id] = this.fupAgent;
+      try {
+        const r = await fetch(`/api/work/items/${id}/detail`);
+        if (!r.ok) {
+          let detail = "";
+          try { detail = (await r.json()).error || ""; } catch (e) {}
+          throw new Error(detail || ("HTTP " + r.status));
         }
+        const d = await r.json();
+        if (seq !== this._refreshSeq) return;
+        if (!d.item) throw new Error("response did not include the work item");
+        this.item = d.item; this.timeline = d.timeline || []; this.events = d.events || [];
+        this.artifacts = d.artifacts || []; this.systemPrompt = d.system_prompt || "";
+        const obj = (d.item.objective || "").trim();
+        if (obj) {
+          if (!this._baseTitle) this._baseTitle = document.title;
+          const snip = obj.length > 40 ? obj.slice(0, 40) + "…" : obj;
+          document.title = this._baseTitle.replace("Work item", snip);
+        }
+        this.followups = d.followups || [];
+        this.sourceItem = d.source_item || null; this.followupChildren = d.followup_children || [];
+        this.projects = d.projects || []; this.slackAvailable = !!d.slack_available;
+        this.runs = d.runs || [];
+        this.agents = d.agents && d.agents.length ? d.agents : ["claude"];
+        const known = new Set(this.projects.map(p => p.key));
+        const parent = (this.item.contexts || "").split(",").filter(Boolean);
+        if (!this._fupSeeded) {
+          this._fupSeeded = true;
+          this.fupCtx = parent.filter(c => known.has(c));
+          this.fupSlack = parent.includes("slack_int");
+          this.fupAgent = this.agents.includes(this.provider) ? this.provider : this.agents[0];
+        }
+        for (const f of this.followups)
+          if (f.status === "draft" && !(f.id in this.fuText)) {
+            this.fuText[f.id] = f.draft;
+            this.fuCtx[f.id] = parent.filter(c => known.has(c));
+            this.fuSlack[f.id] = parent.includes("slack_int");
+            this.fuAgent[f.id] = this.fupAgent;
+          }
+        this.loadError = "";
+      } catch (e) {
+        if (seq === this._refreshSeq)
+          this.loadError = "Unable to load this work item: " + (e.message || String(e));
+      }
     },
     async fuSend(f) {
       this.fuError[f.id] = "";
@@ -438,13 +468,18 @@ createApp({
       }
     },
   },
-  async mounted() {
+  mounted() {
     this._refreshSeq = 0;
     this.loadLinkmap();
-    await this.refresh();
+    this.refresh();
     setInterval(() => this.refresh(), 15000);
   },
-}).component("work-question", window.WorkQuestion).mount("#app");
+});
+app.config.errorHandler = (error, instance, info) => {
+  showWorkFatal(error);
+  console.error("Work detail render error", info, error);
+};
+app.component("work-question", window.WorkQuestion).mount("#app");
 </script>
 </body>
 </html>
