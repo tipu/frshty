@@ -832,19 +832,22 @@ def resolve_transcript_path(run: dict) -> str:
     A claude run gets its transcript path from its first hook event and a
     codex run gets it from its first notify call. A session still inside its
     first turn therefore has no path, so the item detail page shows an empty
-    timeline for a run that is plainly working. Codex records the working
-    directory and the start time in its rollout, so the file is found from
-    what the launch already stored, and the run keeps the path and the codex
-    thread id once they are known."""
+    timeline for a run that is plainly working. An auxiliary Codex
+    notification can also name a thread that has no rollout. Codex records
+    the working directory and the start time in its real rollout, so a
+    missing recorded thread falls back to those launch facts and the run
+    keeps the corrected path and thread id once they are known."""
     path = (run.get("transcript_path") or "").strip()
     if path or run.get("provider") != "codex":
         return path
     agent_session_id = (run.get("agent_session_id") or "").strip()
-    path = codex_session.rollout_path(agent_session_id) if agent_session_id else \
-        codex_session.find_rollout(run.get("cwd") or "", run.get("started_at") or "")
+    path = codex_session.rollout_path(agent_session_id) if agent_session_id else ""
+    if not path:
+        path = codex_session.find_rollout(run.get("cwd") or "",
+                                          run.get("started_at") or "")
     if not path:
         return ""
-    thread_id = agent_session_id or codex_session.rollout_thread_id(path)
+    thread_id = codex_session.rollout_thread_id(path) or agent_session_id
     with db.tx() as c:
         claimed = c.execute(
             "UPDATE work_runs SET transcript_path = ?, agent_session_id = ? "
