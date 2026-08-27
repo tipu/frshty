@@ -1,4 +1,5 @@
 import json
+import sys
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
@@ -62,10 +63,13 @@ def emit(event: str, summary: str, links: dict | None = None, meta: dict | None 
         "links": clean_links,
         "meta": meta or {},
     }
-    _db.execute(
-        "INSERT OR IGNORE INTO log_events(id, instance_key, job, event, summary, links, meta, ts) VALUES(?,?,?,?,?,?,?,?)",
-        (record_id, instance_key, job, event, summary, json.dumps(clean_links), json.dumps(meta or {}), ts)
-    )
+    try:
+        _db.execute(
+            "INSERT OR IGNORE INTO log_events(id, instance_key, job, event, summary, links, meta, ts) VALUES(?,?,?,?,?,?,?,?)",
+            (record_id, instance_key, job, event, summary, json.dumps(clean_links), json.dumps(meta or {}), ts)
+        )
+    except Exception as e:
+        print(f"[{job}] log_emit_failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
     print(f"[{job}] {event}: {summary}", flush=True)
     return record
 
