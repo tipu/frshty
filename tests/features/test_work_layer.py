@@ -1358,6 +1358,28 @@ class TestBackgroundWait:
         assert db.query_one("SELECT state FROM work_items WHERE id = ?",
                             (item_id,))["state"] == "done"
 
+    def test_operator_ask_tail_outranks_bg_wait(self, tmp_path):
+        path = self._transcript(tmp_path, [
+            self._monitor_start("bddd"),
+            self._checkpoint("Restarted. Send another code when ready — the prompt "
+                             "appears in about 100 seconds and waits 15 minutes.")])
+        item_id = _mkitem("bg 2fa item")
+        work_store.add_run(item_id, f"sid-bg2fa-{item_id}", f"work-{item_id}", "/tmp")
+        work_store.record_event(f"sid-bg2fa-{item_id}", "Stop", {"transcript_path": path})
+        assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                            (item_id,))["state"] == "needs_you"
+
+    def test_operator_ask_notification_outranks_bg_wait(self, tmp_path):
+        path = self._transcript(tmp_path, [
+            self._monitor_start("beee"),
+            self._checkpoint("Send me a fresh 6-digit code and I will write it in.")])
+        item_id = _mkitem("bg 2fa notif item")
+        work_store.add_run(item_id, f"sid-bg2fn-{item_id}", f"work-{item_id}", "/tmp")
+        work_store.record_event(f"sid-bg2fn-{item_id}", "Notification", {
+            "transcript_path": path, "message": "Claude is waiting for your input"})
+        assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                            (item_id,))["state"] == "needs_you"
+
     def test_idle_notification_with_pending_bg_waits_external(self, tmp_path):
         path = self._transcript(tmp_path, [
             self._monitor_start("bbbb"), self._checkpoint("Waiting on the monitor.")])
@@ -1700,6 +1722,22 @@ class TestIdleNotificationContinues:
     def test_permission_notification_is_not_an_idle_stop(self):
         assert work_store.is_idle_stop(
             "Notification", {"message": "Claude needs your permission to use Bash"}) is False
+
+    def test_operator_ask_without_a_question_mark_blocks(self):
+        for tail in ("Restarted. Send another code when ready — the prompt appears soon.",
+                     "Ready. Send me a fresh 6-digit code and I will write it in.",
+                     "I am blocked. Paste the admin password and I will continue.",
+                     "Waiting for your approval before the deploy.",
+                     "Let me know which tenant to use."):
+            assert work_store._blocked_on_operator(tail) is True, tail
+
+    def test_progress_tail_is_not_an_operator_ask(self):
+        for tail in ("Checkpoint: waiting on CI. The monitor fires when it finishes.",
+                     "All background work finished.",
+                     "Checkpoint: tests pass. Sent the branch to origin.",
+                     "Reply posted to the PR comment.",
+                     "Mac working tree already matches the target commit."):
+            assert work_store._blocked_on_operator(tail) is False, tail
 
     def test_api_error_tail_is_not_read_as_a_question(self):
         tail = ("API Error: 529 Overloaded. This is a server-side issue, usually "

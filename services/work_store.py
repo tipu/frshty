@@ -36,11 +36,24 @@ CONTINUE_PROMPT = (
     "you cannot infer. Ask with the AskUserQuestion tool, then end your turn "
     "immediately; the work board shows the question to the operator, and when "
     "their answer arrives as your next message, resume work from it. "
+    "Use that same tool for anything only the operator can supply — a "
+    "secret, a one-time code, an approval — not only for a decision. A "
+    "request written in prose does not reach the operator. "
     "Never send outward "
     "communications (Slack messages, GitHub or Bitbucket comments, emails, "
     "posts to external services) unless the operator explicitly asked for that "
     "in this conversation; draft the content and ask instead. If the objective "
     f"is fully met, end your message with the single line {DONE_MARKER}."
+)
+
+_OPERATOR_ASK_RE = re.compile(
+    r"(?:^|[.!?\n]\s+|\u2014\s*)(?:please\s+)?"
+    r"(?:send|paste|provide|reply with|confirm|approve)\b"
+    r"|\b(?:send|paste|give|provide|share|tell|hand)\s+(?:me|us|it over|them)\b"
+    r"|\bwaiting (?:on|for) (?:you|your)\b"
+    r"|\blet me know\b"
+    r"|\bfrom you\b",
+    re.IGNORECASE,
 )
 
 _IDLE_STOP_KINDS_SQL = "'Stop', 'Notification', 'SessionEnd'"
@@ -212,7 +225,7 @@ def record_event(session_id: str, kind: str, payload: dict) -> bool:
         tail = last_assistant_text(transcript_path)
         final_lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
         finished = bool(final_lines) and final_lines[-1] == DONE_MARKER
-        if not finished and not _looks_like_question(tail):
+        if not finished and not _blocked_on_operator(tail):
             bg_pending = bool(pending_background_tasks(transcript_path))
     now = _now()
     with db.tx() as c:
@@ -894,6 +907,21 @@ def _looks_like_question(text: str) -> bool:
     return "?" in text[-300:]
 
 
+def _asks_operator(text: str) -> bool:
+    """True when the agent's last message asks the operator to hand something over.
+
+    A request for a secret, a one-time code or an approval is written as an
+    order, not as a question: "Send another code when ready" carries no
+    question mark. Without this the item was read as an unattended background
+    wait, was snoozed for hours, and the agent sat at the prompt while the
+    operator saw nothing to answer."""
+    return bool(_OPERATOR_ASK_RE.search(text[-300:]))
+
+
+def _blocked_on_operator(text: str) -> bool:
+    return _looks_like_question(text) or _asks_operator(text)
+
+
 def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None = None) -> str:
     """Decide what a finished agent turn means for the item: done, a question
     for the operator, or another turn.
@@ -942,7 +970,7 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
         if excerpt:
             c.execute("UPDATE work_items SET stop_reason = ? WHERE id = ?",
                       (excerpt, run["work_item_id"]))
-        if _looks_like_question(tail):
+        if _blocked_on_operator(tail):
             c.execute(
                 "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
                 "VALUES (?, ?, 'question_detected', '{}', ?)",
