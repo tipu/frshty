@@ -225,6 +225,32 @@ class TestPrePushGuard:
         assert _identity_block_reason(self._cfg(name=WANT_NAME, email=WANT_EMAIL),
                                       r, "feature") == ""
 
+    def test_merging_the_base_does_not_block_the_push(self, tmp_path):
+        """Base sync merges main into the branch, then pushes.
+
+        The merge carries main's commits, written by other people, and they are
+        not on the remote branch yet, so the push does publish them. They are
+        already public on the base, so their authorship is not this push's to
+        answer for. Blocking here stops frshty keeping any branch current."""
+        from features.platforms import _identity_block_reason
+        r = self._remote_backed(tmp_path)
+        configure_repo_identity(r, WANT_NAME, WANT_EMAIL)
+        self._commit(r, "ours")
+        subprocess.run(["git", "-C", str(r), "push", "-q", "origin", "feature"], check=True)
+
+        # Someone else lands a commit on main.
+        subprocess.run(["git", "-C", str(r), "checkout", "-q", "main"], check=True)
+        configure_repo_identity(r, "personal", "me@home.example")
+        self._commit(r, "theirs-on-main")
+        subprocess.run(["git", "-C", str(r), "push", "-q", "origin", "main"], check=True)
+
+        # Base sync: merge main into the branch, then push.
+        configure_repo_identity(r, WANT_NAME, WANT_EMAIL)
+        subprocess.run(["git", "-C", str(r), "checkout", "-q", "feature"], check=True)
+        subprocess.run(["git", "-C", str(r), "merge", "-q", "main", "--no-edit"], check=True)
+        assert _identity_block_reason(self._cfg(name=WANT_NAME, email=WANT_EMAIL),
+                                      r, "feature") == ""
+
     def test_a_wrong_author_not_yet_on_the_remote_still_blocks(self, tmp_path):
         from features.platforms import _identity_block_reason
         r = self._remote_backed(tmp_path)
