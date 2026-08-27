@@ -211,6 +211,74 @@ class TestCodexSweep:
         actions = work_store.sweep_stale_items()
         assert {"id": item_id, "action": "failed"} in actions
 
+    def test_pane_activity_reads_the_format_tmux_advances_on_output(self):
+        """tmux freezes session_activity at the time the session was created,
+        so the pane freshness signal has to read window_activity."""
+        captured = {}
+
+        def fake_run(argv, **kwargs):
+            captured["argv"] = argv
+            return subprocess.CompletedProcess(argv, 0, stdout="1787792497\n", stderr="")
+
+        with patch("services.work_store.subprocess.run", fake_run):
+            stamp = work_store.pane_activity("work-42")
+        assert "#{window_activity}" in captured["argv"]
+        assert "#{session_activity}" not in captured["argv"]
+        assert stamp.startswith("2026-")
+
+    def test_a_resumed_agent_revives_a_failed_item(self, monkeypatch, tmp_path):
+        from datetime import datetime, timedelta, timezone
+        item_id, sid = _mkrun("codex resumed in the same pane")
+        transcript = tmp_path / "rollout.jsonl"
+        transcript.write_text("{}\n")
+        failed_at = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+        with db.tx() as c:
+            c.execute("UPDATE work_items SET state = 'failed_stale', "
+                      "stop_reason = 'Agent process gone without a Stop event', "
+                      "updated_at = ? WHERE id = ?", (failed_at, item_id))
+            c.execute("UPDATE work_runs SET status = 'stopped', transcript_path = ? "
+                      "WHERE work_item_id = ?", (str(transcript), item_id))
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
+        assert {"id": item_id, "action": "revived"} in work_store.sweep_stale_items()
+        item = db.query_one("SELECT state, stop_reason FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "agent_working"
+        assert item["stop_reason"] == ""
+        run = db.query_one("SELECT status FROM work_runs WHERE work_item_id = ?", (item_id,))
+        assert run["status"] == "running"
+
+    def test_a_dead_pane_leaves_a_failed_item_alone(self, monkeypatch, tmp_path):
+        from datetime import datetime, timedelta, timezone
+        item_id, sid = _mkrun("codex still dead")
+        transcript = tmp_path / "dead.jsonl"
+        transcript.write_text("{}\n")
+        failed_at = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+        with db.tx() as c:
+            c.execute("UPDATE work_items SET state = 'failed_stale', updated_at = ? WHERE id = ?",
+                      (failed_at, item_id))
+            c.execute("UPDATE work_runs SET status = 'stopped', transcript_path = ? "
+                      "WHERE work_item_id = ?", (str(transcript), item_id))
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": False)
+        assert {"id": item_id, "action": "revived"} not in work_store.revive_resumed_runs()
+        item = db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "failed_stale"
+
+    def test_a_transcript_older_than_the_failure_leaves_the_item_alone(self, monkeypatch, tmp_path):
+        from datetime import datetime, timezone
+        item_id, sid = _mkrun("codex idle pane")
+        transcript = tmp_path / "old.jsonl"
+        transcript.write_text("{}\n")
+        failed_at = datetime.now(timezone.utc).isoformat()
+        with db.tx() as c:
+            c.execute("UPDATE work_items SET state = 'failed_stale', updated_at = ? WHERE id = ?",
+                      (failed_at, item_id))
+            c.execute("UPDATE work_runs SET status = 'stopped', transcript_path = ? "
+                      "WHERE work_item_id = ?", (str(transcript), item_id))
+        os.utime(transcript, (0, 0))
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
+        assert {"id": item_id, "action": "revived"} not in work_store.revive_resumed_runs()
+        item = db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "failed_stale"
+
     def test_reply_needs_a_live_codex(self, monkeypatch):
         item_id, sid = _mkrun("codex reply")
         seen = {}
