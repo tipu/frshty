@@ -162,28 +162,33 @@ def _child_env():
     }
 
 
-def ensure_session(ticket_key: str, cwd: str):
+def launch_pane_command(ticket_key: str, cwd: str, command: str):
+    """Run an agent as the pane command, without starting an interactive shell.
+
+    A newly-created tmux pane normally starts the operator's interactive shell.
+    Sending the agent command immediately after ``new-session`` races that
+    shell's startup files. Supplying the command to tmux instead makes its
+    shell non-interactive, so files such as .zshrc are not read. An existing
+    pane with no agent is respawned the same way, which also recovers panes
+    whose shell startup is stuck.
+    """
     session_name = _tmux_session_name(ticket_key)
+    login_shell = os.environ.get("SHELL") or "/bin/sh"
+    pane_command = f"{command}; exec {shlex.quote(login_shell)} -l"
     if _tmux_session_exists(session_name):
-        return session_name
-    subprocess.run(
-        [
+        args = [
+            _tmux_bin(), "-S", TMUX_SOCKET, "respawn-pane", "-k", "-t", session_name,
+            "-c", cwd, pane_command,
+        ]
+    else:
+        args = [
             _tmux_bin(), "-S", TMUX_SOCKET, "new-session", "-d", "-s", session_name,
-            "-c", cwd, "-x", "80", "-y", "24",
-        ],
-        env=_child_env(), capture_output=True,
-    )
-    return session_name
-
-
-def send_keys(ticket_key: str, keys: str):
-    session_name = _tmux_session_name(ticket_key)
-    if not _tmux_session_exists(session_name):
-        return
-    subprocess.run(
-        [_tmux_bin(), "-S", TMUX_SOCKET, "send-keys", "-t", session_name, keys, "Enter"],
-        capture_output=True,
-    )
+            "-c", cwd, "-x", "80", "-y", "24", pane_command,
+        ]
+    result = subprocess.run(args, env=_child_env(), capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or f"tmux exited {result.returncode}"
+        raise RuntimeError(f"could not launch agent pane: {detail}")
 
 
 def pane_text(ticket_key: str) -> str:
@@ -231,7 +236,6 @@ def launch_claude(key: str, cwd: str, session_uuid: str, context: str, first_run
     --append-system-prompt; later launches resume the same id so closing the
     browser (or the process dying) returns to the same conversation. No-op if
     Claude is already running in the pane — the websocket just reattaches."""
-    ensure_session(key, cwd)
     if session_healthy(key).get("agent_running"):
         return
     if first_run:
@@ -245,7 +249,7 @@ def launch_claude(key: str, cwd: str, session_uuid: str, context: str, first_run
         )
     else:
         cmd = f"{claude_cmd(config)} --resume {shlex.quote(session_uuid)}"
-    send_keys(key, cmd)
+    launch_pane_command(key, cwd, cmd)
 
 
 def launch_codex(key: str, cwd: str, session_uuid: str, context: str, first_run: bool,
@@ -259,7 +263,6 @@ def launch_codex(key: str, cwd: str, session_uuid: str, context: str, first_run:
     run. A resume needs the codex thread id recorded from the first
     notification; without one the pane continues the newest codex session in
     this directory."""
-    ensure_session(key, cwd)
     if session_healthy(key, agent="codex").get("agent_running"):
         return
     notify = _codex_notify_flag(session_uuid)
@@ -272,7 +275,7 @@ def launch_codex(key: str, cwd: str, session_uuid: str, context: str, first_run:
     else:
         target = shlex.quote(agent_session_id) if agent_session_id else "--last"
         cmd = f"{codex_cmd(config, 'resume')} {notify} {target}"
-    send_keys(key, cmd)
+    launch_pane_command(key, cwd, cmd)
 
 
 def launch_agent(key: str, cwd: str, session_uuid: str, context: str, first_run: bool,
