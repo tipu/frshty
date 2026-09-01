@@ -19,6 +19,7 @@ import core.state as state
 import core.terminal as terminal
 import features.presentation as presentation
 import features.releases as releases
+import features.ticket_timeline as ticket_timeline
 import features.tickets as _tickets_mod
 from core.claude_runner import run_haiku
 from core.config import get_repos
@@ -651,6 +652,21 @@ def api_classify_ticket(key: str, body: dict):
     return {"status": "classified", "work_type": work_type}
 
 
+@router.get("/api/tickets/{key}/timeline")
+def api_ticket_timeline(key: str):
+    """The pipeline timeline: one ordered array of circles, the gap between
+    each pair, the artifacts every phase produced and the time-scaled
+    segments the ribbon draws."""
+    tickets = state.load("tickets")
+    ts = tickets.get(key)
+    if not ts:
+        return JSONResponse({"error": "not found"}, status_code=404)
+    ws = _config["workspace"]
+    docs_dir = ws["root"] / ws["tickets_dir"] / ts.get("slug", "") / "docs"
+    active_key = state.active_instance_key()
+    return ticket_timeline.build(active_key, key, docs_dir)
+
+
 @router.get("/api/tickets/{key}/transitions")
 def api_ticket_transitions(key: str):
     active_key = state.active_instance_key()
@@ -781,6 +797,11 @@ _DOC_MIME = {
     ".mov": "video/quicktime",
     ".mkv": "video/x-matroska",
     ".html": "text/html",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".svg": "image/svg+xml",
 }
 
 

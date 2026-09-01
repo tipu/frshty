@@ -151,6 +151,40 @@ def get_events_for_ticket(ticket_key: str, limit: int = 200) -> list[dict]:
     return events
 
 
+def get_all_events_for_ticket(ticket_key: str, limit: int = 5000) -> list[dict]:
+    """Every non-noise event for a ticket, oldest first.
+
+    get_events_for_ticket() answers "what happened lately" and caps at 200
+    newest-first, which is the wrong shape for a timeline: a ticket with 150
+    PR-comment events loses its own creation. This returns the whole record
+    in the order it happened."""
+    instance_key = _active_instance_key()
+    job = _active_job_key()
+    if not instance_key or not job:
+        return []
+    like = f"%{ticket_key}%"
+    rows = _db.query_all(
+        """
+        SELECT e.id, e.job, e.event, e.summary, e.ts,
+               COALESCE(json_extract(e.links, '$'), '{}') as links,
+               COALESCE(json_extract(e.meta, '$'), '{}') as meta
+        FROM log_events e
+        WHERE e.instance_key=? AND e.job=?
+          AND (e.summary LIKE ? OR e.meta LIKE ?)
+          AND COALESCE(json_extract(e.meta, '$.category'), '') != 'noise'
+        ORDER BY e.ts ASC LIMIT ?
+        """,
+        (instance_key, job, like, like, limit),
+    )
+    events = []
+    for row in rows:
+        ev = dict(row)
+        ev["links"] = json.loads(ev.get("links") or "{}")
+        ev["meta"] = json.loads(ev.get("meta") or "{}")
+        events.append(ev)
+    return events
+
+
 def get_events_for_comment(comment_id: str, limit: int = 100) -> list[dict]:
     """Events for a single comment ('sub-ticket'), assembled from log_events
     whose meta.comment_id matches. This is the per-comment lifecycle timeline
