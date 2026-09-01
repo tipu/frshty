@@ -138,7 +138,7 @@ class TestTickets:
         docs_dir = tmp_path / "tickets" / slug / "docs"
         docs_dir.mkdir(parents=True)
         (docs_dir / "ticket.md").write_text("# T-1\n\nDescription")
-        with patch("web.tickets.terminal.session_healthy", return_value={"alive": False, "claude_running": False}):
+        with patch("web.tickets.terminal.session_healthy", return_value={"alive": False, "agent_running": False}):
             resp = client.get("/api/tickets/T-1/detail")
         assert resp.status_code == 200
         data = resp.json()
@@ -156,17 +156,16 @@ class TestTickets:
         assert resp.status_code == 200
         mock_kill.assert_called_once_with("T-1")
 
-    def test_reset_terminal_kills_and_spawns_with_claude(self, client):
+    def test_reset_terminal_kills_and_spawns_with_claude(self, client, tmp_path):
         state.save("tickets", {"T-1": {"status": "in_review", "slug": "T-1-s"}})
         with patch("web.tickets.terminal.kill_terminal") as mock_kill, \
-             patch("web.tickets.terminal.ensure_session") as mock_ensure, \
-             patch("web.tickets.terminal.send_keys") as mock_send, \
-             patch("web.tickets.time.sleep"):
+             patch("web.tickets.terminal.launch_pane_command") as mock_launch:
             resp = client.post("/api/tickets/T-1/terminal/reset")
         assert resp.status_code == 200
         mock_kill.assert_called_once_with("T-1")
-        mock_ensure.assert_called_once()
-        mock_send.assert_called_once_with("T-1", "claude --dangerously-skip-permissions")
+        mock_launch.assert_called_once_with(
+            "T-1", str(tmp_path / "tickets" / "T-1-s"),
+            "claude --dangerously-skip-permissions")
 
     def test_reset_terminal_not_found(self, client):
         resp = client.post("/api/tickets/NOPE/terminal/reset")
@@ -182,7 +181,7 @@ class TestTickets:
         slug = "T-1-slug"
         state.save("tickets", {"T-1": {"status": "new", "slug": slug}})
         state.transition_ticket("T-1", "planning")
-        with patch("web.tickets.terminal.session_healthy", return_value={"alive": False, "claude_running": False}):
+        with patch("web.tickets.terminal.session_healthy", return_value={"alive": False, "agent_running": False}):
             resp = client.get("/api/tickets/T-1/detail")
         assert resp.status_code == 200
         data = resp.json()
@@ -198,7 +197,7 @@ class TestTickets:
 
     def test_detail_empty_transitions_and_scheduled_rows(self, client):
         state.save("tickets", {"T-1": {"status": "new", "slug": "s"}})
-        with patch("web.tickets.terminal.session_healthy", return_value={"alive": False, "claude_running": False}):
+        with patch("web.tickets.terminal.session_healthy", return_value={"alive": False, "agent_running": False}):
             resp = client.get("/api/tickets/T-1/detail")
         assert resp.status_code == 200
         data = resp.json()
@@ -436,3 +435,37 @@ class TestRerunReview:
         finally:
             with wr._rerun_inflight_lock:
                 wr._rerun_inflight.discard(("myrepo", 6))
+
+
+class TestReviewInfoReadsTheProvidersOwnVerdict:
+    """The info route took a provider argument but always read the unsuffixed
+    review.json, so the codex tab showed claude's verdict. On
+    django-drf-app#175 that printed 'approved' above eleven codex blockers."""
+
+    def _seed(self, tmp_path):
+        branch_dir = tmp_path / "reviews" / "myrepo" / "JIRA-9-branch"
+        branch_dir.mkdir(parents=True)
+        for suffix in ("", ".codex"):
+            (branch_dir / f"queued_comments{suffix}.json").write_text(json.dumps(
+                [{"pr_id": 7, "repo": "myrepo", "pr_url": "http://pr/7", "status": "pending"}]))
+        (branch_dir / "review.json").write_text(json.dumps(
+            {"source_branch": "JIRA-9-branch", "verdict": "approved", "summary": "claude"}))
+        (branch_dir / "review.codex.json").write_text(json.dumps(
+            {"source_branch": "JIRA-9-branch", "verdict": "changes_requested", "summary": "codex"}))
+
+    def _info(self, client, provider):
+        with patch("web.reviews.make_platform", return_value=MagicMock()), \
+             patch("web.reviews.make_ticket_system", return_value=None):
+            return client.get(f"/api/reviews/myrepo/7/info?provider={provider}").json()
+
+    def test_the_codex_tab_shows_the_codex_verdict(self, client, tmp_path):
+        self._seed(tmp_path)
+        data = self._info(client, "codex")
+        assert data["verdict"] == "changes_requested"
+        assert data["summary"] == "codex"
+
+    def test_the_claude_tab_still_shows_the_claude_verdict(self, client, tmp_path):
+        self._seed(tmp_path)
+        data = self._info(client, "claude")
+        assert data["verdict"] == "approved"
+        assert data["summary"] == "claude"

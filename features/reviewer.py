@@ -20,10 +20,12 @@ PERSONA_SPEC = (
     "Focus on:\n"
     "- Requirements coverage: every acceptance criterion in the description must be addressed\n"
     "- Missing functionality: what the description promises but the diff does not deliver\n"
-    "- Scope creep: changes that go beyond what was asked (flag, don't block)\n"
+    "- Scope creep: changes that go beyond what was asked. Flag the fact as a suggestion, then "
+    "grade the change itself on its own consequence under the severity rules.\n"
     "- If the PR references a Jira ticket, check the diff against any acceptance criteria mentioned\n\n"
-    "Do NOT review for code style, naming, performance, or maintainability. Those are other reviewers' jobs.\n"
-    "If the diff fully satisfies the requirements, say so and approve.\n\n"
+    "Do NOT go looking for code style, naming, performance, or maintainability. Those are other "
+    "reviewers' jobs. Report a defect you happened to see while verifying a criterion.\n"
+    "An empty issues list is a valid answer when every criterion is delivered and verified.\n\n"
     "HOW TO WORK:\n"
     "- Do not answer from the diff alone. Open the checkout and confirm every claim before you write it.\n"
     "- Read the ticket or PR description first and write out its acceptance criteria one by one.\n"
@@ -45,8 +47,8 @@ PERSONA_BREAKAGE = (
     "- Async/sync mismatch: blocking calls in async contexts, missing awaits\n"
     "- ORM misuse: N+1 queries, missing select_related/prefetch_related, tenant isolation bypass\n"
     "- Test coverage: are new code paths tested? Do tests assert meaningful behavior or just not-crash?\n\n"
-    "Do NOT review for style, naming, or spec compliance. Those are other reviewers' jobs.\n"
-    "If nothing will break, say so and approve.\n\n"
+    "Do NOT go looking for style, naming, or spec compliance. Those are other reviewers' jobs.\n"
+    "An empty issues list is a valid answer when you traced the changed paths and none of them break.\n\n"
     "HOW TO WORK:\n"
     "- Do not answer from the diff alone. Trace every finding in the checkout before you report it.\n"
     "- For each suspicious line, open the file and read the whole function, not the hunk.\n"
@@ -72,8 +74,11 @@ PERSONA_MAINTAINABILITY = (
     "- AI-generated noise: boilerplate comments that describe what the code literally does\n"
     "- Convention violations: framework defaults overridden without reason\n"
     "- Pattern consistency: does this follow existing patterns in the codebase or introduce a new one?\n\n"
-    "Do NOT review for production breakage or spec compliance. Those are other reviewers' jobs.\n"
-    "Prefix minor issues with `nit:`. State blocking issues directly.\n\n"
+    "Do NOT go hunting for production breakage or spec compliance. Those are other reviewers' jobs. "
+    "But you open whole files to judge them, and the other reviewers cannot open all of them. When a "
+    "file you opened contains a defect that meets a blocking rule below, report it at that severity. "
+    "Staying in your lane is not a reason to file data loss as a nit.\n"
+    "Prefix minor issues with `nit:`. A blocking finding still says plainly what breaks.\n\n"
     "HOW TO WORK:\n"
     "- Do not answer from the diff alone. Confirm every claim against the checkout.\n"
     "- Before you call something a new pattern, grep for the established pattern and name the file "
@@ -86,6 +91,7 @@ PERSONA_MAINTAINABILITY = (
 
 PERSONAS = {"spec": PERSONA_SPEC, "breakage": PERSONA_BREAKAGE, "maintainability": PERSONA_MAINTAINABILITY}
 REVIEW_RETRY_COOLDOWN_SECONDS = 60 * 60
+REVIEW_MAX_CHANGED_LINES = 8000
 
 REVIEW_TOOLS = READ_ONLY_TOOLS
 REVIEW_DENIED_TOOLS = WRITE_TOOLS
@@ -99,6 +105,31 @@ JSON_OUTPUT_SCHEMA = (
     '"blocking_summary":["..."],"suggestions_summary":["..."],"questions_summary":["..."]}\n'
 )
 
+SEVERITY_RULES = (
+    "SEVERITY RULES: Severity describes the consequence of the defect, not the lane you were asked "
+    "to review. Grade every finding on what it does to production data, to a user, or to a deploy, "
+    "even when the defect sits at the edge of your focus list.\n"
+    "Use \"blocking\" when any of these is true:\n"
+    "- Data is lost, corrupted, or made unreachable. Stored bytes left with no row that names them, "
+    "a row left with no bytes, a write silently discarded, a value overwritten by a concurrent request.\n"
+    "- A lifecycle or state field is read and then acted on without a lock or a recheck, so two "
+    "concurrent requests can both act on the stale value.\n"
+    "- An acceptance criterion has no code path that delivers it end to end, including the schedule, "
+    "job, or caller that must invoke it. A command nothing calls is not delivered.\n"
+    "- A migration already applied on the base branch is edited in place, so an applied database and "
+    "a fresh database end in different states.\n"
+    "- An authenticated endpoint reads or allocates without a bound, so one request can exhaust the process.\n"
+    "- Auth, tenant scoping, or a permission check is dropped, weakened, or bypassable.\n"
+    "- The change breaks an existing caller, consumer, or stored contract with no compatibility path.\n"
+    "A defect that raises no exception is not therefore a suggestion. Silent data loss is blocking. "
+    "Grade on the worst outcome you traced, not on how loud it is.\n"
+    "Use \"suggestion\" when the worst outcome you traced is cost, clutter, duplicated work, or "
+    "future maintenance burden.\n"
+    "Use \"question\" only when you used your tools, could not settle the fact, and that fact decides "
+    "whether the finding exists. Not knowing where a caller lives is a thing to grep for, not a "
+    "question. If you grep and find no caller, the missing caller is the finding.\n"
+)
+
 LINE_NUMBER_RULES = (
     "LINE NUMBER RULES: 'line' and 'start_line' must be the line number in the NEW version of the file. "
     "In the diff, hunk headers look like @@ -old,count +new,count @@. The +new number is where the new file lines start. "
@@ -107,23 +138,40 @@ LINE_NUMBER_RULES = (
     "'line' is the most relevant line for the issue. 'start_line' is the first line of the relevant code block.\n"
 )
 
+HOUSE_VOICE = (
+    "VOICE: Write the comment the way you would say it to the author at their desk.\n"
+    "Two sentences, in this order:\n"
+    "1. The ask, as a question: \"Can we <the change you want>?\" Say the change in plain words, "
+    "not as an implementation plan. One question, and it is the first sentence.\n"
+    "2. The reason: what the code does now and what that costs, joined by \"so\" or \"which\". "
+    "Name the real trigger and the real consequence the user, the caller, or the ticket goal ends "
+    "up with.\n"
+    "Use plain nouns for the moving parts (\"the timer\", \"the composer\", \"the spoken "
+    "offset\") instead of the symbol names, unless the author cannot find the code without the "
+    "symbol. Contractions are fine. No code blocks, no bullet lists, no headings.\n"
+    "Length: two sentences. A third only when the trigger needs its own sentence. Never more.\n"
+    "Do not prescribe the patch, do not list steps, do not ask for a test, do not restate the code, "
+    "do not add background.\n"
+    "The question is how the finding is delivered, not a hedge. You verified the defect, so say what "
+    "happens, not what might happen. \"Can\" for a path that only some inputs take is fine; "
+    "\"might\", \"could\", and \"possibly\" about the defect itself are not.\n"
+    "Example: \"Can we wait to reveal the text until the audio actually starts? Right now the timer "
+    "starts as soon as text streams in, so the transcript gets ahead of ElevenLabs and misses the "
+    "main goal of this ticket.\"\n"
+    "Example: \"Can we treat an error as the end of the turn here? With voice enabled a failed "
+    "response never becomes caught up, so the composer stays stuck in loading and the user can't "
+    "retry.\"\n"
+)
+
 BODY_RULES = (
     "BODY RULES: The 'body' field must NOT contain severity tags, bold markers, or line numbers. "
     "Severity is already in the 'severity' field and the location is already in the 'path' and "
     "'line' fields.\n"
-    "Write a finding, not a question. Give three things, in this order:\n"
-    "1. The defect. Name the symbol, expression, or missing guard. Not 'this may be unsafe'.\n"
-    "2. The failure path. The concrete input, request, or sequence that triggers it, and what the "
-    "caller or the data ends up with. Give the real case (a request carrying another tenant's id, an "
-    "empty result set, a second concurrent write), never 'in some cases'.\n"
-    "3. The fix. What to change: the guard to add, the argument to pass, the call to move. A short "
-    "code snippet is welcome when it is shorter than the sentence describing it.\n"
-    "Length: 2 to 5 sentences. Use the longer end when the failure path needs it. Do not pad, do not "
-    "restate the code, do not add background.\n"
-    "Be specific and prescriptive. Do not hedge with 'might', 'could', or 'consider' about a defect "
-    "you verified in the code. State it.\n"
-    "Ask a question only when you tried to settle it with your tools and could not. Then say what you "
-    "checked and what is still unknown.\n"
+    + HOUSE_VOICE +
+    "Every body opens with a question. That is the house voice, not the \"question\" severity. "
+    "Grade severity by the SEVERITY RULES alone.\n"
+    "Ask about a fact you could not settle only when you tried to settle it with your tools and "
+    "failed. Then say what you checked and what is still unknown, and rate it \"question\".\n"
 )
 
 TOOL_USE_RULES = (
@@ -183,7 +231,8 @@ def review_pr(config: dict, platform, pr: dict, ticket_context: str = "",
         add_dirs=[review_dir] if worktree else None,
         model=_reviewer_model(config), run_key=f"{pr['repo']}-{pr['id']}")
 
-    first: dict | None = None
+    issues_by_provider: dict[str, list[dict]] = {}
+    shared_by_provider: dict[str, dict] = {}
     for provider, results in by_provider.items():
         successful = [(name, data) for name, data in results if data is not None]
         if not successful:
@@ -195,11 +244,27 @@ def review_pr(config: dict, platform, pr: dict, ticket_context: str = "",
         if merged.get("issues"):
             merged["issues"] = _validate_issues(merged["issues"], worktree)
             merged["issues"] = _simplify_all_issues(merged["issues"])
-            merged["issues"] = _style_match_all(config, merged["issues"])
-        _write_review_artifacts(config, pr, merged, diff_text, provider=provider)
-        if provider == "claude" or first is None:
-            first = merged
-    return first
+        issues_by_provider[provider] = merged.get("issues", [])
+        shared_by_provider[provider] = merged
+        if provider != "claude":
+            _write_review_artifacts(config, pr, dict(merged), diff_text, provider=provider)
+
+    if not shared_by_provider:
+        return None
+    primary = dict(shared_by_provider.get("claude") or next(iter(shared_by_provider.values())))
+    issues = _union_issues(issues_by_provider)
+    blocking = [i for i in issues if i.get("severity") == "blocking"]
+    only_other = sorted({p for i in blocking for p in i["found_by"]} - {"claude"})
+    if blocking and only_other and not any("claude" in i["found_by"] for i in blocking):
+        log.emit("review_provider_only_blocker",
+                 f"{pr['repo']}#{pr['id']}: every blocking finding came from "
+                 f"{', '.join(only_other)}, not claude",
+                 meta={"repo": pr["repo"], "pr_id": pr["id"],
+                       "providers": only_other, "blocking": len(blocking)})
+    primary["issues"] = issues
+    primary["verdict"] = "changes_requested" if blocking else "approved"
+    _write_review_artifacts(config, pr, primary, diff_text, provider="claude")
+    return primary
 
 
 def _review_dir(config, pr) -> Path:
@@ -236,6 +301,7 @@ def _write_review_artifacts(config, pr, merged: dict, diff_text: str,
             "path": issue.get("path"), "line": issue.get("line"),
             "body": issue["body"], "severity": issue.get("severity", "suggestion"),
             "persona": issue.get("persona", ""), "status": "pending",
+            "found_by": issue.get("found_by") or [issue.get("provider") or provider],
         }
         for issue in merged.get("issues", [])
     ]
@@ -247,7 +313,7 @@ def _build_persona_prompt(persona_text, pr, diff_path, changed_paths, convention
     parts = [
         f"You are reviewing pull request #{pr['id']} in repository '{pr['repo']}' (branch: {pr['branch']}).\n",
         persona_text + "\n",
-        JSON_OUTPUT_SCHEMA, LINE_NUMBER_RULES, BODY_RULES,
+        JSON_OUTPUT_SCHEMA, SEVERITY_RULES, LINE_NUMBER_RULES, BODY_RULES,
     ]
     if ticket_context:
         parts.append(
@@ -284,6 +350,13 @@ def _reviewer_model(config) -> str | None:
 
 def _review_providers(config) -> list[str]:
     return (config.get("reviewer") or {}).get("providers") or ["claude"]
+
+
+def _max_changed_lines(config) -> int:
+    value = (config.get("reviewer") or {}).get("max_changed_lines")
+    if value is None:
+        return REVIEW_MAX_CHANGED_LINES
+    return int(value)
 
 
 def _run_single_persona(args):
@@ -389,7 +462,10 @@ def _merge_reviews(results: list[tuple[str, dict]]) -> dict:
         "- breakage: checked if the diff will break in production\n"
         "- maintainability: checked if the diff will be regretted in 3 months\n\n"
         "Your task:\n"
-        "1. Identify duplicate/overlapping findings across personas (same problem even if different wording or ±5 lines)\n"
+        "1. Identify duplicate/overlapping findings across personas. Two findings are the same "
+        "finding when they describe one defect, even when the wording differs, the line numbers sit "
+        "up to five lines apart, or one persona describes the cause and another describes the "
+        "symptom. Two symptoms of one root cause are one finding.\n"
         "2. Merge duplicates into single issues with an 'agreed_by' array listing which personas flagged it\n"
         "3. For merged issues, use the most detailed 'body' from the agreeing personas\n"
         "4. For merged issues, use the most severe severity rating\n"
@@ -402,28 +478,99 @@ def _merge_reviews(results: list[tuple[str, dict]]) -> dict:
         "plain statement and keep the finding.\n"
         "10. Never drop a finding because only one persona reported it. Each persona looks through a "
         "different lens, so a single-persona finding is the normal case.\n"
-        "11. Keep every 'body' whole. Do not shorten it, do not remove the prescribed fix, and do not "
-        "turn a statement into a question.\n\n"
+        "11. Keep every 'body' whole and in the voice it arrived in. Each body opens with a question "
+        "that asks for the change, then gives the reason. Keep both parts, do not shorten them, and "
+        "do not rewrite the question into a statement.\n\n"
         "Return a single JSON object (no markdown fences) with the same schema as the inputs plus 'agreed_by' on each issue.\n\n"
         f"--- REVIEWS ---\n{merge_input}\n--- END REVIEWS ---"
     )
-    output = run_haiku(merge_prompt)
+    output = run_balanced(merge_prompt, timeout=300)
     if output:
         data = extract_json(output)
         if data:
             if "issues" not in data and len(data) == 1:
                 data = next(iter(data.values()))
             if isinstance(data.get("issues"), list):
+                data["issues"] = _collapse_persona_duplicates(data["issues"])
                 return data
 
+    log.emit("review_merge_fallback",
+             "persona merge model returned nothing; merging the persona lists in code",
+             meta={"personas": [name for name, _ in results]})
     all_issues = []
     for name, data in results:
         for issue in data.get("issues", []):
             issue["agreed_by"] = [name]
             all_issues.append(issue)
     base = results[0][1]
-    base["issues"] = all_issues
+    base["issues"] = _collapse_persona_duplicates(all_issues)
     return base
+
+
+def _collapse_persona_duplicates(issues: list[dict]) -> list[dict]:
+    """One comment per line when several personas report the same defect.
+
+    Three personas read the same diff, so one defect arrives three times on one
+    line. The merge model normally folds them together. When that call fails the
+    persona lists were concatenated as they were, and the pull request got three
+    comments stacked on one line. Collapse on the exact path and line, keep the
+    most severe rating and the longest body, and name every persona in
+    'agreed_by'. A finding with no path or no line never collapses: those are
+    general comments and each one is its own remark."""
+    out: list[dict] = []
+    dropped: list[dict] = []
+    for issue in issues:
+        path = issue.get("path")
+        line = issue.get("line")
+        twin = next((o for o in out
+                     if path and line
+                     and o.get("path") == path and o.get("line") == line), None)
+        if twin is None:
+            out.append(issue)
+            continue
+        dropped.append({"path": path, "line": line, "persona": issue.get("persona", ""),
+                        "body": issue.get("body", "")})
+        twin["agreed_by"] = sorted(set(twin.get("agreed_by", []) + issue.get("agreed_by", [])))
+        if issue.get("severity") == "blocking":
+            twin["severity"] = "blocking"
+        if len(issue.get("body", "")) > len(twin.get("body", "")):
+            twin["body"] = issue["body"]
+            twin["persona"] = issue.get("persona", twin.get("persona", ""))
+        if issue.get("tool_assisted"):
+            twin["tool_assisted"] = True
+    if dropped:
+        log.emit("review_duplicate_findings_collapsed",
+                 f"{len(dropped)} finding(s) landed on a line another persona already flagged: "
+                 + ", ".join(f"{d['path']}:{d['line']}" for d in dropped),
+                 meta={"dropped": dropped, "kept": len(out)})
+    return out
+
+
+def _union_issues(per_provider: dict[str, list[dict]]) -> list[dict]:
+    """One issue list from every provider that reviewed this PR.
+
+    The A/B ran both providers and then posted only claude's list, so a defect
+    only codex found reached nobody and the verdict was computed as if it did
+    not exist. Near-duplicates collapse on path and line so two providers that
+    found the same defect do not produce two comments, and the more severe of
+    the two ratings wins. A finding never collapses against one from its own
+    provider: two distinct defects a few lines apart in one review are two
+    findings, and merging them would lose one."""
+    out: list[dict] = []
+    for provider, issues in per_provider.items():
+        for issue in issues:
+            twin = next((o for o in out
+                         if provider not in o["found_by"]
+                         and o.get("path") == issue.get("path")
+                         and abs((o.get("line") or 0) - (issue.get("line") or 0)) <= 5), None)
+            if twin is None:
+                out.append({**issue, "provider": provider, "found_by": [provider]})
+                continue
+            twin["found_by"] = sorted(set(twin["found_by"] + [provider]))
+            if issue.get("severity") == "blocking" and twin.get("severity") != "blocking":
+                twin["severity"] = "blocking"
+                twin["body"] = issue.get("body", twin.get("body", ""))
+    return out
 
 
 VALIDATE_PROMPT = (
@@ -442,7 +589,8 @@ VALIDATE_PROMPT = (
     "let the author answer.\n"
     "A comment that describes the code correctly is 'valid' even when you would not have raised it, "
     "and even when it prescribes a fix you would write differently. You judge the claim, not the tone "
-    "and not the severity.\n\n"
+    "and not the severity. Every comment opens with a question to the author. That is the house "
+    "style, not an admission of doubt; judge the claim the rest of the comment makes.\n\n"
     "Return ONLY a JSON object (no markdown fences):\n"
     '{"decision":"valid"|"false_positive"|"uncertain","defeating_line":<line number from the context, or null>,"reason":"one sentence"}\n'
 )
@@ -490,6 +638,18 @@ def _validate_single(args):
 
     context = _read_function_context(worktree, path, line)
     if not context:
+        fp = worktree / path
+        if fp.is_file():
+            try:
+                total = len(fp.read_text().splitlines())
+            except (OSError, UnicodeDecodeError):
+                total = 0
+            if total and line > total:
+                log.emit("review_line_out_of_range",
+                         f"{path}:{line} is past the end of the file ({total} lines); "
+                         "the comment skipped validation and would anchor nowhere",
+                         meta={"path": path, "line": line, "file_lines": total,
+                               "severity": issue.get("severity", ""), "body": issue["body"]})
         return issue
 
     prompt = (
@@ -532,20 +692,27 @@ def _validate_issues(issues: list[dict], worktree: Path | None) -> list[dict]:
     return [r for r in results if r is not None]
 
 
+REWRITE_INTRO = (
+    "Rewrite this code review comment in the house voice below. Keep the defect and the reason it "
+    "matters. Drop the implementation plan, the test request, and any sentence that only restates "
+    "the code. Keep the specifics that make the finding real: the triggering input and the concrete "
+    "consequence.\n\n"
+)
+
+REWRITE_EXAMPLE = (
+    "\nBad: \"`usePacedDisplayMessages` starts revealing text solely from chat-stream state and "
+    "never consumes the playback-start state emitted by `HeyGenAvatarStream`. Gate the reveal timer "
+    "on the playback-start signal and add a test that the transcript stays hidden during TTS "
+    "generation.\"\n"
+    "Good: \"Can we wait to reveal the text until the audio actually starts? Right now the timer "
+    "starts as soon as text streams in, so the transcript gets ahead of ElevenLabs and misses the "
+    "main goal of this ticket.\"\n"
+    "\nReturn ONLY the rewritten comment.\n"
+)
+
+
 def _simplify_body(body: str) -> str:
-    output = run_haiku(
-        "Tighten this review comment. Remove hedging (might, could, may, consider), filler, and any "
-        "sentence that only restates what the code says. "
-        "Keep all three of: the defect, the failure path that triggers it, and the prescribed fix. "
-        "Keep the specifics: symbol names, the triggering input, the concrete consequence. "
-        "Do not drop the fix. Do not turn a statement into a question. "
-        "Up to 5 sentences; go shorter only when nothing is lost. Be imperative, not narrative. "
-        "Bad: 'This might overflow if the array is large.' "
-        "Good: '`parse_batch` overflows once `items` exceeds 4096 because `buf` is fixed at 4 KB, so "
-        "the tail of the batch is written past the end. Size `buf` from `len(items)` or chunk the loop.' "
-        "Backticks for code only. Return ONLY the rewritten text."
-        f"\n\n{body}"
-    )
+    output = run_balanced(REWRITE_INTRO + HOUSE_VOICE + REWRITE_EXAMPLE + f"\n{body}", timeout=120)
     return output if output else body
 
 
@@ -554,18 +721,11 @@ def _simplify_body_with_context(body: str, code_context: str | None, file_path: 
     if code_context:
         context_section = f"\nCode context (line {line_num} in {file_path}):\n```\n{code_context}\n```\n"
 
-    prompt = (
-        "You are simplifying a code review comment. Strip it to its essence while preserving the technical intent.\n"
-        "Remove: hedging language (might, could, may), examples, explanations of why, background context.\n"
-        "Keep: the actual problem and the prescribed fix, which must still make sense in context of the code.\n"
-        "1-2 sentences max. Be imperative not narrative.\n"
-        "Bad: 'This might overflow if the array is large.'\n"
-        "Good: 'This overflows on large arrays; use a buffer.'\n"
-        "Backticks for code identifiers only. Return ONLY the rewritten text, nothing else."
-        f"{context_section}\nReview comment to simplify:\n{body}"
+    output = run_balanced(
+        REWRITE_INTRO + HOUSE_VOICE + REWRITE_EXAMPLE
+        + f"{context_section}\nReview comment to rewrite:\n{body}",
+        timeout=120,
     )
-
-    output = run_haiku(prompt)
     return output if output else body
 
 
@@ -619,33 +779,6 @@ def _simplify_all_issues(issues: list[dict]) -> list[dict]:
     return issues
 
 
-def _style_match(body: str, examples: str) -> str:
-    if not examples:
-        return body
-    output = run_haiku(
-        f"Rewrite this PR review comment to match this person's commenting style.\n"
-        f"Match tone, wording, and formatting only. Keep the technical content complete: the defect, "
-        f"the failure path, and the prescribed fix must all survive, with their specifics. "
-        f"Do not shorten the comment into a question and do not soften a stated defect.\n\n"
-        f"Style examples:\n{examples}\n\nComment to rewrite:\n{body}\n\n"
-        f"Return ONLY the rewritten comment."
-    )
-    return output if output else body
-
-
-def _style_match_all(config: dict, issues: list[dict]) -> list[dict]:
-    history_path = config["_state_dir"] / "comment_history.jsonl"
-    if not history_path.exists():
-        return issues
-    lines = history_path.read_text().strip().splitlines()[-20:]
-    examples = "\n".join(lines)
-    with ThreadPoolExecutor(max_workers=10) as pool:
-        bodies = list(pool.map(lambda i: _style_match(i["body"], examples), issues))
-    for issue, body in zip(issues, bodies):
-        issue["body"] = body
-    return issues
-
-
 def _ensure_review_worktree(config, pr) -> Path | None:
     repos = get_repos(config)
     matching = [r for r in repos if r["name"] == pr["repo"]]
@@ -684,6 +817,10 @@ def _extract_changed_paths(diff_text: str) -> list[str]:
     return re.findall(r"diff --git a/.+ b/(.+)", diff_text)
 
 
+def _changed_line_count(diff_text: str) -> int:
+    return sum(1 for line in diff_text.splitlines()
+               if line[:1] in ("+", "-") and not line.startswith(("+++", "---")))
+
 
 def _extract_ticket_from_pr(pr: dict, ticket_state: dict) -> str | None:
     repo = pr.get("repo")
@@ -709,6 +846,8 @@ def _extract_ticket_from_pr(pr: dict, ticket_state: dict) -> str | None:
 def _pr_needs_tracking(review_state: dict, pr: dict) -> bool:
     pr_key = f"{pr.get('repo')}/{pr.get('id')}"
     existing = review_state.get(pr_key, {})
+    if existing.get("skipped"):
+        return (pr.get("head_sha") or "") != (existing.get("skipped_head_sha") or "")
     if not existing.get("reviewed"):
         return True
 
@@ -787,6 +926,48 @@ def _fetch_ticket_diffs(platform, prs: list[dict]) -> dict[str, str]:
     return diffs
 
 
+def _oversized_prs(config: dict, ticket_key: str, prs: list[dict],
+                   diffs: dict[str, str]) -> list[dict]:
+    """The PRs an automatic review must not fire on. A ticket's PRs go into one
+    prompt, so they pass or fail the cap together. __no_ticket__ PRs are
+    unrelated, so each one is measured on its own."""
+    cap = _max_changed_lines(config)
+    if cap <= 0:
+        return []
+    if ticket_key == "__no_ticket__":
+        return [p for p in prs
+                if _changed_line_count(diffs.get(f"{p['repo']}/{p['id']}", "")) > cap]
+    total = sum(_changed_line_count(diffs.get(f"{p['repo']}/{p['id']}", "")) for p in prs)
+    return list(prs) if total > cap else []
+
+
+def _record_oversized_skip(config: dict, ticket_key: str, prs: list[dict],
+                           diffs: dict[str, str], review_state: dict) -> None:
+    cap = _max_changed_lines(config)
+    lines = sum(_changed_line_count(diffs.get(f"{p['repo']}/{p['id']}", "")) for p in prs)
+    files = sum(len(_extract_changed_paths(diffs.get(f"{p['repo']}/{p['id']}", ""))) for p in prs)
+    label = (ticket_key if ticket_key != "__no_ticket__"
+             else ", ".join(f"{p['repo']}#{p['id']}" for p in prs))
+    log.emit("review_skipped_too_large",
+             f"{label}: {lines} changed lines in {files} files is over the {cap} line "
+             "auto-review cap. The review did not run. Start it by hand to review it anyway.",
+             links={"detail": f"{config['_base_url']}/reviews"},
+             meta={"ticket": ticket_key, "changed_lines": lines, "files": files, "cap": cap,
+                   "prs": [f"{p['repo']}/{p['id']}" for p in prs]})
+    now = time.time()
+    for pr in prs:
+        pr_key = f"{pr['repo']}/{pr['id']}"
+        entry = dict(review_state.get(pr_key, {}))
+        entry.update({
+            "skipped": "too_large",
+            "skipped_head_sha": pr.get("head_sha", ""),
+            "skipped_at": now,
+            "branch": pr.get("branch", ""),
+            "ticket": ticket_key,
+        })
+        review_state[pr_key] = entry
+
+
 def _ticket_context_for(config, pr: dict, ticket_key: str, prs: list[dict],
                         diffs: dict[str, str]) -> str:
     goal = presentation.resolve_ticket_goal(config, pr.get("branch", ""), pr["repo"], pr["id"])
@@ -816,7 +997,7 @@ def _build_ticket_persona_prompt(persona_text, ticket_key, goal, sections, has_t
         "satisfied, and inconsistencies between PRs (mismatched API contracts, producer/consumer "
         "drift) are issues.\n",
         persona_text + "\n",
-        JSON_OUTPUT_SCHEMA, LINE_NUMBER_RULES, BODY_RULES,
+        JSON_OUTPUT_SCHEMA, SEVERITY_RULES, LINE_NUMBER_RULES, BODY_RULES,
         'Every issue MUST carry a "repo" field naming the repository it anchors to, and its "path" '
         "must be a file present in that repository's diff.\n",
     ]
@@ -904,12 +1085,14 @@ def _reviewed_sibling_sections(config: dict, platform, ticket_key: str,
     return sections
 
 
-def review_ticket(config: dict, ticket_key: str, prs: list[dict]) -> dict[str, dict | None]:
+def review_ticket(config: dict, ticket_key: str, prs: list[dict],
+                  diffs: dict[str, str] | None = None) -> dict[str, dict | None]:
     """Single persona pass over the combined diffs of all the ticket's PRs.
     Returns {repo/id: per-PR merged review or None} and writes each PR's
     review artifacts, so the per-PR pages and comment queues work unchanged."""
     platform = make_platform(config)
-    diffs = _fetch_ticket_diffs(platform, prs)
+    if diffs is None:
+        diffs = _fetch_ticket_diffs(platform, prs)
     none_result: dict[str, dict | None] = {f"{p['repo']}/{p['id']}": None for p in prs}
     live = [p for p in prs if diffs.get(f"{p['repo']}/{p['id']}")]
     if not live:
@@ -948,6 +1131,8 @@ def review_ticket(config: dict, ticket_key: str, prs: list[dict]) -> dict[str, d
         model=_reviewer_model(config), run_key=ticket_key)
 
     results: dict[str, dict | None] = dict(none_result)
+    by_pr: dict[str, dict[str, list[dict]]] = {f"{p['repo']}/{p['id']}": {} for p in live}
+    shared_by_provider: dict[str, dict] = {}
     for provider, presults in by_provider.items():
         successful = [(name, data) for name, data in presults if data is not None]
         if not successful:
@@ -958,32 +1143,66 @@ def review_ticket(config: dict, ticket_key: str, prs: list[dict]) -> dict[str, d
         merged = _merge_reviews(successful)
         issues_by_key = _split_issues_by_pr(merged.get("issues", []), live, diffs)
         shared = {k: v for k, v in merged.items() if k != "issues"}
+        shared_by_provider[provider] = shared
         for pr in live:
             key = f"{pr['repo']}/{pr['id']}"
             issues = issues_by_key.get(key, [])
             if issues:
                 issues = _validate_issues(issues, worktrees[key])
                 issues = _simplify_all_issues(issues)
-                issues = _style_match_all(config, issues)
-            per = {
-                **shared,
-                "issues": issues,
-                "verdict": "changes_requested" if any(i.get("severity") == "blocking" for i in issues) else "approved",
-                "source_branch": pr.get("branch") or shared.get("source_branch", ""),
-            }
-            _write_review_artifacts(config, pr, per, diffs[key], provider=provider)
-            if provider == "claude":
-                results[key] = per
+            by_pr[key][provider] = issues
+            if provider != "claude":
+                _write_review_artifacts(config, pr, {
+                    **shared,
+                    "issues": issues,
+                    "verdict": "changes_requested" if any(i.get("severity") == "blocking" for i in issues) else "approved",
+                    "source_branch": pr.get("branch") or shared.get("source_branch", ""),
+                }, diffs[key], provider=provider)
+
+    if not shared_by_provider:
+        return none_result
+    primary = shared_by_provider.get("claude") or next(iter(shared_by_provider.values()))
+    for pr in live:
+        key = f"{pr['repo']}/{pr['id']}"
+        if not by_pr[key]:
+            continue
+        issues = _union_issues(by_pr[key])
+        blocking = [i for i in issues if i.get("severity") == "blocking"]
+        only_other = sorted({p for i in blocking for p in i["found_by"]} - {"claude"})
+        if blocking and only_other and not any("claude" in i["found_by"] for i in blocking):
+            log.emit("review_provider_only_blocker",
+                     f"{key}: every blocking finding came from {', '.join(only_other)}, not claude",
+                     meta={"repo": pr["repo"], "pr_id": pr["id"], "ticket": ticket_key,
+                           "providers": only_other, "blocking": len(blocking)})
+        results[key] = {
+            **primary,
+            "issues": issues,
+            "verdict": "changes_requested" if blocking else "approved",
+            "source_branch": pr.get("branch") or primary.get("source_branch", ""),
+        }
+        _write_review_artifacts(config, pr, results[key], diffs[key], provider="claude")
     if all(v is None for v in results.values()):
         return none_result
     return results
 
 
-def review_ticket_prs(config: dict, ticket_key: str, prs: list[dict]) -> list[dict]:
+def review_ticket_prs(config: dict, ticket_key: str, prs: list[dict],
+                      auto: bool = True) -> list[dict]:
     platform = make_platform(config)
     review_state = state.load("reviews")
     base_url = config["_base_url"]
     failed_prs: list[dict] = []
+
+    diffs = _fetch_ticket_diffs(platform, prs)
+    if auto:
+        oversized = _oversized_prs(config, ticket_key, prs, diffs)
+        if oversized:
+            _record_oversized_skip(config, ticket_key, oversized, diffs, review_state)
+            state.save("reviews", review_state)
+            oversized_keys = {(p["repo"], p["id"]) for p in oversized}
+            prs = [p for p in prs if (p["repo"], p["id"]) not in oversized_keys]
+            if not prs:
+                return []
 
     if ticket_key == "__no_ticket__":
         results = {}
@@ -994,14 +1213,15 @@ def review_ticket_prs(config: dict, ticket_key: str, prs: list[dict]) -> list[di
             log.emit("review_started", f"{label} PR #{pr['id']} in {pr['repo']}",
                 links={"pr": pr["url"], "detail": f"{base_url}/reviews/{pr['repo']}/{pr['id']}"},
                 meta={"repo": pr["repo"], "pr_id": pr["id"], "ticket": ticket_key, "re_review": re_review})
-            ticket_context = _ticket_context_for(config, pr, ticket_key, prs, {})
-            results[pr_key] = review_pr(config, platform, pr, ticket_context=ticket_context)
+            ticket_context = _ticket_context_for(config, pr, ticket_key, prs, diffs)
+            results[pr_key] = review_pr(config, platform, pr, ticket_context=ticket_context,
+                                        prefetched_diff=diffs.get(pr_key, ""))
     else:
         log.emit("review_started",
             f"Reviewing ticket {ticket_key}: {len(prs)} PR(s) as one change",
             links={"detail": f"{base_url}/reviews/{prs[0]['repo']}/{prs[0]['id']}"},
             meta={"ticket": ticket_key, "prs": [f"{p['repo']}/{p['id']}" for p in prs]})
-        results = review_ticket(config, ticket_key, prs)
+        results = review_ticket(config, ticket_key, prs, diffs=diffs)
 
     for pr in prs:
         pr_key = f"{pr['repo']}/{pr['id']}"

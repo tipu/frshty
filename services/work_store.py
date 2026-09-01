@@ -1,3 +1,5 @@
+import base64
+import binascii
 import json
 import os
 import re
@@ -6,6 +8,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
+import core.codex_session as codex_session
 import core.db as db
 
 STALE_AFTER_MINUTES = 30
@@ -19,8 +22,12 @@ _send_locks: dict[str, threading.Lock] = {}
 _send_locks_guard = threading.Lock()
 
 TMUX_SOCKET = os.path.expanduser("~/.frshty-tmux")
+AGENTS = ("claude", "codex")
 DONE_MARKER = "WORK_DONE"
 ARTIFACT_MARKER = "ARTIFACT:"
+_IMAGE_ID_RE = re.compile(r"^(\d+)-(\d+)$")
+_IMAGE_MEDIA_RE = re.compile(r"^image/[a-z0-9.+-]+$")
+_MAX_IMAGE_BASE64 = 64 * 1024 * 1024
 CONTINUE_PROMPT = (
     "Continue toward the objective. When you hit a decision point, decide "
     "yourself by default: pick the most correct, cleanest, simplest option and "
@@ -29,11 +36,24 @@ CONTINUE_PROMPT = (
     "you cannot infer. Ask with the AskUserQuestion tool, then end your turn "
     "immediately; the work board shows the question to the operator, and when "
     "their answer arrives as your next message, resume work from it. "
+    "Use that same tool for anything only the operator can supply — a "
+    "secret, a one-time code, an approval — not only for a decision. A "
+    "request written in prose does not reach the operator. "
     "Never send outward "
     "communications (Slack messages, GitHub or Bitbucket comments, emails, "
     "posts to external services) unless the operator explicitly asked for that "
     "in this conversation; draft the content and ask instead. If the objective "
     f"is fully met, end your message with the single line {DONE_MARKER}."
+)
+
+_OPERATOR_ASK_RE = re.compile(
+    r"(?:^|[.!?\n]\s+|\u2014\s*)(?:please\s+)?"
+    r"(?:send|paste|provide|reply with|confirm|approve)\b"
+    r"|\b(?:send|paste|give|provide|share|tell|hand)\s+(?:me|us|it over|them)\b"
+    r"|\bwaiting (?:on|for) (?:you|your)\b"
+    r"|\blet me know\b"
+    r"|\bfrom you\b",
+    re.IGNORECASE,
 )
 
 _IDLE_STOP_KINDS_SQL = "'Stop', 'Notification', 'SessionEnd'"
@@ -43,7 +63,7 @@ _DECIDED_KINDS_SQL = ("'auto_continued', 'question_detected', 'operator_reply', 
 _EVENT_TRANSITIONS = {
     "SessionStart": ("running", "agent_working", None),
     "UserPromptSubmit": ("running", "agent_working", None),
-    "Stop": ("stopped", "needs_you", "Claude finished its turn"),
+    "Stop": ("stopped", "needs_you", "The agent finished its turn"),
     "Notification": (None, "needs_you", "Notification"),
     "SessionEnd": ("finished", "needs_you", "Session ended"),
 }
@@ -55,6 +75,7 @@ def _now() -> str:
 
 _BG_LINE_MARKERS = ("running in background with ID:", "Monitor started (task",
                     "agentId:", "Task ID:", "<task-notification>", '"TaskStop"')
+_WAKEUP_PROMPT_MARKER = "<task-notification>"
 _BG_START_RES = (
     re.compile(r"running in background with ID: ([A-Za-z0-9_-]+)"),
     re.compile(r"Monitor started \(task ([A-Za-z0-9_-]+)"),
@@ -183,6 +204,16 @@ def mark_launch_failed(run_id: int, error: str) -> None:
         )
 
 
+def is_wakeup_prompt(prompt: str) -> bool:
+    """True when a submitted prompt is a background wake-up, not an answer.
+
+    A finished background task, a Monitor event and a workflow result all
+    reach the session as a user prompt, so each one fires UserPromptSubmit
+    exactly like a reply typed by the operator. None of them answers
+    anything, so a question waiting on the board must survive them."""
+    return _WAKEUP_PROMPT_MARKER in (prompt or "")
+
+
 def record_event(session_id: str, kind: str, payload: dict) -> bool:
     transition = _EVENT_TRANSITIONS.get(kind)
     if transition is None:
@@ -194,7 +225,7 @@ def record_event(session_id: str, kind: str, payload: dict) -> bool:
         tail = last_assistant_text(transcript_path)
         final_lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
         finished = bool(final_lines) and final_lines[-1] == DONE_MARKER
-        if not finished and not _looks_like_question(tail):
+        if not finished and not _blocked_on_operator(tail):
             bg_pending = bool(pending_background_tasks(transcript_path))
     now = _now()
     with db.tx() as c:
@@ -239,11 +270,15 @@ def record_event(session_id: str, kind: str, payload: dict) -> bool:
                     reason = f"Waiting on a background task: {excerpt[:300]}" if excerpt \
                         else "Waiting on a background task"
             if kind == "UserPromptSubmit":
-                c.execute(
-                    "UPDATE work_items SET state = ?, stop_reason = ?, pending_question = '', "
-                    "snoozed_until = NULL, updated_at = ? WHERE id = ?",
-                    (item_state, reason, now, run["work_item_id"]),
-                )
+                if item["pending_question"] and is_wakeup_prompt(payload.get("prompt") or ""):
+                    c.execute("UPDATE work_items SET updated_at = ? WHERE id = ?",
+                              (now, run["work_item_id"]))
+                else:
+                    c.execute(
+                        "UPDATE work_items SET state = ?, stop_reason = ?, pending_question = '', "
+                        "snoozed_until = NULL, updated_at = ? WHERE id = ?",
+                        (item_state, reason, now, run["work_item_id"]),
+                    )
             else:
                 c.execute(
                     "UPDATE work_items SET state = ?, stop_reason = ?, snoozed_until = ?, "
@@ -251,6 +286,19 @@ def record_event(session_id: str, kind: str, payload: dict) -> bool:
                     (item_state, reason, snooze, now, run["work_item_id"]),
                 )
     return True
+
+
+def record_agent_session(session_id: str, agent_session_id: str) -> bool:
+    """Store the agent's own conversation id for a run. Codex mints its
+    thread id itself, and a resume needs that id, not the work session id."""
+    agent_session_id = (agent_session_id or "").strip()
+    if not agent_session_id:
+        return False
+    with db.tx() as c:
+        cur = c.execute(
+            "UPDATE work_runs SET agent_session_id = ? WHERE session_id = ? "
+            "AND agent_session_id != ?", (agent_session_id, session_id, agent_session_id))
+        return bool(cur.rowcount)
 
 
 def record_question(session_id: str, tool_input: dict) -> bool:
@@ -347,7 +395,7 @@ def _pane_lock(session: str) -> threading.Lock:
         return _send_locks.setdefault(session, threading.Lock())
 
 
-def claude_running(tmux_key: str) -> bool:
+def agent_running(tmux_key: str, agent: str = "claude") -> bool:
     session = f"term-{tmux_key}"
     tmux = _tmux_bin()
     panes = subprocess.run([tmux, "-S", TMUX_SOCKET, "list-panes", "-t", session, "-F", "#{pane_pid}"],
@@ -355,9 +403,25 @@ def claude_running(tmux_key: str) -> bool:
     if panes.returncode != 0 or not panes.stdout.strip():
         return False
     pane_pid = panes.stdout.strip().splitlines()[0]
-    check = subprocess.run(["pgrep", "-P", pane_pid, "-f", "claude"],
+    check = subprocess.run(["pgrep", "-P", pane_pid, "-f", agent if agent in AGENTS else "claude"],
                            capture_output=True, text=True)
     return bool(check.stdout.strip())
+
+
+def pane_activity(tmux_key: str) -> str:
+    """Last-output time of the pane as an ISO timestamp, or "" when the tmux
+    session is gone. A codex rollout is written only between tool calls, so
+    the pane is the freshness signal while one long command runs. The format
+    is `window_activity`: tmux advances that one on pane output, while
+    `session_activity` stays frozen at the time the session was created and
+    reports every live pane as idle."""
+    result = subprocess.run(
+        [_tmux_bin(), "-S", TMUX_SOCKET, "display-message", "-p", "-t", f"term-{tmux_key}",
+         "#{window_activity}"], capture_output=True, text=True)
+    stamp = result.stdout.strip()
+    if result.returncode != 0 or not stamp.isdigit():
+        return ""
+    return datetime.fromtimestamp(int(stamp), timezone.utc).isoformat()
 
 
 def tmux_send(tmux_key: str, text: str) -> bool:
@@ -367,6 +431,8 @@ def tmux_send(tmux_key: str, text: str) -> bool:
         alive = subprocess.run([tmux, "-S", TMUX_SOCKET, "has-session", "-t", session],
                                capture_output=True)
         if alive.returncode != 0:
+            return False
+        if not close_btw_panel(session):
             return False
         sent = subprocess.run([tmux, "-S", TMUX_SOCKET, "send-keys", "-t", session, "-l", "--", text],
                               capture_output=True)
@@ -423,6 +489,19 @@ def btw_overlay(lines: list[str]) -> dict | None:
     return {"done": _BTW_DONE_HINT in lines[footer], "asked": asked, "body": body}
 
 
+def close_btw_panel(session: str) -> bool:
+    """Close an open /btw panel and report whether the pane takes keys again.
+
+    The panel swallows every keystroke while it is open, so a reply or a
+    continue prompt sent into the pane would be lost with nothing to show for
+    it. A pane with no panel is already open for keys."""
+    if not btw_overlay(_capture_pane(session)):
+        return True
+    _tmux_run("send-keys", "-t", session, "Escape")
+    time.sleep(0.4)
+    return btw_overlay(_capture_pane(session)) is None
+
+
 def _merge_window(body: list[str], window: list[str]) -> bool:
     """Append the part of a scrolled panel view that is not in body yet."""
     if not window:
@@ -462,11 +541,8 @@ def ask_btw(tmux_key: str, question: str, timeout: float = BTW_ANSWER_TIMEOUT) -
     with _pane_lock(session):
         if _tmux_run("has-session", "-t", session).returncode != 0:
             return {"error": "tmux session gone"}
-        if btw_overlay(_capture_pane(session)):
-            _tmux_run("send-keys", "-t", session, "Escape")
-            time.sleep(0.4)
-            if btw_overlay(_capture_pane(session)):
-                return {"error": "a /btw panel is stuck open in the terminal"}
+        if not close_btw_panel(session):
+            return {"error": "a /btw panel is stuck open in the terminal"}
         if _tmux_run("send-keys", "-t", session, "-l", "--",
                      f"/btw {question}").returncode != 0:
             return {"error": "tmux send failed"}
@@ -482,9 +558,11 @@ def ask_btw(tmux_key: str, question: str, timeout: float = BTW_ANSWER_TIMEOUT) -
                 panel = found
                 break
         if panel is None:
+            close_btw_panel(session)
             return {"error": f"no /btw answer within {int(timeout)}s"}
         head = panel["asked"].rstrip("\u2026").rstrip()
         if not head or not question.startswith(head):
+            close_btw_panel(session)
             return {"error": "the terminal shows an answer to a different /btw question"}
         body = panel["body"]
         for _ in range(_BTW_SCROLL_LIMIT):
@@ -500,8 +578,7 @@ def ask_btw(tmux_key: str, question: str, timeout: float = BTW_ANSWER_TIMEOUT) -
                     break
             if not grew:
                 break
-        if btw_overlay(_capture_pane(session)):
-            _tmux_run("send-keys", "-t", session, "Escape")
+        close_btw_panel(session)
     answer = _btw_answer_text(body)
     return {"answer": answer} if answer else {"error": "empty /btw answer"}
 
@@ -509,6 +586,8 @@ def ask_btw(tmux_key: str, question: str, timeout: float = BTW_ANSWER_TIMEOUT) -
 def last_assistant_text(transcript_path: str) -> str:
     if not transcript_path or not os.path.isfile(transcript_path):
         return ""
+    if codex_session.is_rollout(transcript_path):
+        return codex_session.last_assistant_text(transcript_path)
     try:
         with open(transcript_path, "rb") as f:
             f.seek(0, os.SEEK_END)
@@ -536,6 +615,8 @@ def last_assistant_text(transcript_path: str) -> str:
 def _assistant_texts(transcript_path: str) -> list[str]:
     if not transcript_path or not os.path.isfile(transcript_path):
         return []
+    if codex_session.is_rollout(transcript_path):
+        return codex_session.assistant_texts(transcript_path)
     try:
         with open(transcript_path, "rb") as f:
             f.seek(0, os.SEEK_END)
@@ -559,9 +640,11 @@ def _assistant_texts(transcript_path: str) -> list[str]:
     return texts
 
 
-def record_artifacts(session_id: str, transcript_path: str) -> int:
+def record_artifacts(session_id: str, transcript_path: str,
+                     texts: list[str] | None = None) -> int:
     found = []
-    lines = [ln for t in _assistant_texts(transcript_path) for ln in t.splitlines()]
+    source = _assistant_texts(transcript_path) if texts is None else texts
+    lines = [ln for t in source for ln in t.splitlines()]
     for line in lines:
         idx = line.find(ARTIFACT_MARKER)
         if idx < 0:
@@ -606,25 +689,75 @@ def _salient_arg(name: str, inp: dict) -> str:
     return ""
 
 
+def _tail_json_records(path: str, max_bytes: int):
+    """Yield complete JSONL tail records and their byte offsets.
+
+    The first line is allowed to exceed ``max_bytes`` because an inline image
+    can make one otherwise-relevant user record several megabytes long.
+    """
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            start = max(0, size - max_bytes)
+            cursor = start
+            while cursor > 0:
+                chunk_start = max(0, cursor - 65536)
+                f.seek(chunk_start)
+                chunk = f.read(cursor - chunk_start)
+                newline = chunk.rfind(b"\n")
+                if newline >= 0:
+                    start = chunk_start + newline + 1
+                    break
+                cursor = chunk_start
+            else:
+                start = 0
+            f.seek(start)
+            while True:
+                offset = f.tell()
+                line = f.readline()
+                if not line:
+                    break
+                try:
+                    yield json.loads(line.decode("utf-8", errors="replace")), offset
+                except ValueError:
+                    continue
+    except OSError:
+        return
+
+
+def _claude_image_data(block: dict) -> tuple[str, str] | None:
+    if not isinstance(block, dict) or block.get("type") != "image":
+        return None
+    source = block.get("source") or {}
+    if isinstance(source, dict) and source.get("type") == "base64":
+        media_type = str(source.get("media_type") or "").lower()
+        data = source.get("data")
+    else:
+        file_data = block.get("file") or {}
+        media_type = str(file_data.get("media_type") or "").lower()
+        data = file_data.get("base64")
+    if not _IMAGE_MEDIA_RE.fullmatch(media_type) or not isinstance(data, str) or not data:
+        return None
+    return data, media_type
+
+
+def _claude_image_refs(content: list, offset: int) -> list[dict]:
+    refs = []
+    for block_index, block in enumerate(content):
+        image = _claude_image_data(block)
+        if image is not None:
+            refs.append({"id": f"{offset}-{block_index}", "media_type": image[1]})
+    return refs
+
+
 def transcript_timeline(transcript_path: str, max_bytes: int = 4194304) -> list[dict]:
     if not transcript_path or not os.path.isfile(transcript_path):
         return []
-    try:
-        with open(transcript_path, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            size = f.tell()
-            f.seek(max(0, size - max_bytes))
-            raw = f.read().decode("utf-8", errors="replace")
-    except OSError:
-        return []
+    if codex_session.is_rollout(transcript_path):
+        return codex_session.timeline(transcript_path, max_bytes)
     timeline: list[dict] = []
-    for line in raw.splitlines():
-        if '"type"' not in line:
-            continue
-        try:
-            d = json.loads(line)
-        except ValueError:
-            continue
+    for d, offset in _tail_json_records(transcript_path, max_bytes):
         t = d.get("type")
         msg = d.get("message") or {}
         if t == "user":
@@ -633,16 +766,21 @@ def transcript_timeline(transcript_path: str, max_bytes: int = 4194304) -> list[
             content = msg.get("content")
             if isinstance(content, str):
                 text = content
+                images = []
             elif isinstance(content, list):
                 if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
                     continue
                 text = " ".join(b.get("text", "") for b in content
                                 if isinstance(b, dict) and b.get("type") == "text")
+                images = _claude_image_refs(content, offset)
             else:
                 continue
-            if text.strip():
-                timeline.append({"kind": "prompt", "text": text.strip()[:500],
-                                 "at": d.get("timestamp", "")})
+            if text.strip() or images:
+                entry = {"kind": "prompt", "text": text.strip()[:500],
+                         "at": d.get("timestamp", "")}
+                if images:
+                    entry["images"] = images
+                timeline.append(entry)
         elif t == "assistant" and not d.get("isSidechain"):
             for b in msg.get("content") or []:
                 if not isinstance(b, dict):
@@ -655,6 +793,77 @@ def transcript_timeline(transcript_path: str, max_bytes: int = 4194304) -> list[
                     timeline.append({"kind": "text", "text": b["text"].strip()[:2000],
                                      "at": d.get("timestamp", "")})
     return timeline
+
+
+def transcript_image(transcript_path: str, image_id: str) -> tuple[bytes, str] | None:
+    """Read one image referenced by :func:`transcript_timeline`."""
+    if codex_session.is_rollout(transcript_path):
+        return codex_session.embedded_image(transcript_path, image_id)
+    match = _IMAGE_ID_RE.fullmatch(image_id or "")
+    if not match or not transcript_path or not os.path.isfile(transcript_path):
+        return None
+    offset, block_index = (int(part) for part in match.groups())
+    try:
+        with open(transcript_path, "rb") as f:
+            if offset < 0 or offset >= os.fstat(f.fileno()).st_size:
+                return None
+            f.seek(offset)
+            record = json.loads(f.readline().decode("utf-8", errors="replace"))
+    except (OSError, ValueError):
+        return None
+    if record.get("type") != "user" or record.get("toolUseResult") is not None \
+            or record.get("isSidechain"):
+        return None
+    content = (record.get("message") or {}).get("content") or []
+    if not isinstance(content, list) or block_index >= len(content):
+        return None
+    image = _claude_image_data(content[block_index])
+    if image is None or len(image[0]) > _MAX_IMAGE_BASE64:
+        return None
+    try:
+        return base64.b64decode(image[0], validate=True), image[1]
+    except (ValueError, binascii.Error):
+        return None
+
+
+def resolve_transcript_path(run: dict) -> str:
+    """The transcript file of a run, discovered when no hook has named it yet.
+
+    A claude run gets its transcript path from its first hook event and a
+    codex run gets it from its first notify call. A session still inside its
+    first turn therefore has no path, so the item detail page shows an empty
+    timeline for a run that is plainly working. An auxiliary Codex
+    notification can also name a thread that has no rollout. Codex records
+    the working directory and the start time in its real rollout, so a
+    missing recorded thread falls back to those launch facts and the run
+    keeps the corrected path and thread id once they are known."""
+    path = (run.get("transcript_path") or "").strip()
+    if path or run.get("provider") != "codex":
+        return path
+    agent_session_id = (run.get("agent_session_id") or "").strip()
+    path = codex_session.rollout_path(agent_session_id) if agent_session_id else ""
+    if not path:
+        path = codex_session.find_rollout(run.get("cwd") or "",
+                                          run.get("started_at") or "")
+    if not path:
+        return ""
+    thread_id = codex_session.rollout_thread_id(path) or agent_session_id
+    with db.tx() as c:
+        claimed = c.execute(
+            "UPDATE work_runs SET transcript_path = ?, agent_session_id = ? "
+            "WHERE id = ? AND COALESCE(transcript_path, '') = '' "
+            "AND NOT EXISTS (SELECT 1 FROM work_runs o WHERE o.transcript_path = ? "
+            "AND o.id != work_runs.id)",
+            (path, thread_id, run["id"], path),
+        ).rowcount
+    if not claimed:
+        current = db.query_one("SELECT transcript_path FROM work_runs WHERE id = ?",
+                               (run["id"],)) or {}
+        run["transcript_path"] = (current.get("transcript_path") or "").strip()
+        return run["transcript_path"]
+    run["transcript_path"] = path
+    run["agent_session_id"] = thread_id
+    return path
 
 
 def item_detail(item_id: int) -> dict:
@@ -675,7 +884,7 @@ def item_detail(item_id: int) -> dict:
     if item["state"] == "done":
         item["done_source"] = "operator" if "operator_done" in kinds else (
             "agent" if "self_reported_done" in kinds else "unknown")
-    timeline = transcript_timeline(runs[-1]["transcript_path"]) if runs else []
+    timeline = transcript_timeline(resolve_transcript_path(runs[-1])) if runs else []
     source_item = None
     if item["source_item_id"]:
         source_item = db.query_one(
@@ -704,8 +913,29 @@ def _looks_like_question(text: str) -> bool:
     return "?" in text[-300:]
 
 
-def maybe_autocontinue(session_id: str, transcript_path: str) -> str:
-    tail = last_assistant_text(transcript_path)
+def _asks_operator(text: str) -> bool:
+    """True when the agent's last message asks the operator to hand something over.
+
+    A request for a secret, a one-time code or an approval is written as an
+    order, not as a question: "Send another code when ready" carries no
+    question mark. Without this the item was read as an unattended background
+    wait, was snoozed for hours, and the agent sat at the prompt while the
+    operator saw nothing to answer."""
+    return bool(_OPERATOR_ASK_RE.search(text[-300:]))
+
+
+def _blocked_on_operator(text: str) -> bool:
+    return _looks_like_question(text) or _asks_operator(text)
+
+
+def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None = None) -> str:
+    """Decide what a finished agent turn means for the item: done, a question
+    for the operator, or another turn.
+
+    `tail` overrides the transcript read for an agent that hands its last
+    message over directly: the codex notify program is given the message, so
+    it does not have to wait for the rollout file to catch up."""
+    tail = last_assistant_text(transcript_path) if tail is None else tail.strip()
     now = _now()
     with db.tx() as c:
         run = c.execute(
@@ -746,7 +976,7 @@ def maybe_autocontinue(session_id: str, transcript_path: str) -> str:
         if excerpt:
             c.execute("UPDATE work_items SET stop_reason = ? WHERE id = ?",
                       (excerpt, run["work_item_id"]))
-        if _looks_like_question(tail):
+        if _blocked_on_operator(tail):
             c.execute(
                 "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
                 "VALUES (?, ?, 'question_detected', '{}', ?)",
@@ -791,13 +1021,13 @@ def reply(item_id: int, text: str) -> dict:
         if item["state"] == "done":
             return {"error": "item is done; reopen it before replying"}
         run = c.execute(
-            "SELECT id, tmux_key FROM work_runs WHERE work_item_id = ? ORDER BY id DESC LIMIT 1",
-            (item_id,),
+            "SELECT id, tmux_key, provider FROM work_runs WHERE work_item_id = ? "
+            "ORDER BY id DESC LIMIT 1", (item_id,),
         ).fetchone()
         if not run:
             return {"error": "no run for this item"}
-    if not claude_running(run["tmux_key"]):
-        return {"error": "no live Claude in the session; open the terminal"}
+    if not agent_running(run["tmux_key"], run["provider"]):
+        return {"error": f"no live {run['provider'].capitalize()} in the session; open the terminal"}
     if not tmux_send(run["tmux_key"], text):
         return {"error": "tmux session gone"}
     with db.tx() as c:
@@ -824,11 +1054,13 @@ def side_question(item_id: int, text: str) -> dict:
     if not item:
         return {"error": "unknown work item"}
     run = db.query_one(
-        "SELECT id, tmux_key FROM work_runs WHERE work_item_id = ? ORDER BY id DESC LIMIT 1",
-        (item_id,))
+        "SELECT id, tmux_key, provider FROM work_runs WHERE work_item_id = ? "
+        "ORDER BY id DESC LIMIT 1", (item_id,))
     if not run:
         return {"error": "no run for this item"}
-    if not claude_running(run["tmux_key"]):
+    if run["provider"] != "claude":
+        return {"error": f"side questions need a claude session; this run is {run['provider']}"}
+    if not agent_running(run["tmux_key"], run["provider"]):
         return {"error": "no live Claude in the session; open the terminal"}
     out = ask_btw(run["tmux_key"], question)
     if "error" in out:
@@ -848,9 +1080,13 @@ def pending_tool_calls(transcript_path: str) -> bool:
     """True when the transcript tail ends inside an unanswered tool call.
 
     A tool_use id with no matching tool_result means Claude is blocked in
-    that call, not idle. The sweep must not synthesize a Stop for it.
+    that call, not idle. The sweep must not synthesize a Stop for it. A
+    codex rollout records a command only once it completes, so it can never
+    show a call in flight and always answers False.
     """
     if not transcript_path or not os.path.isfile(transcript_path):
+        return False
+    if codex_session.is_rollout(transcript_path):
         return False
     try:
         with open(transcript_path, "rb") as f:
@@ -890,7 +1126,8 @@ def retry_missed_autocontinues(cutoff: str) -> list[dict]:
     ran carries an event newer than its last idle stop, so it is skipped.
     """
     rows = db.query_all(
-        "SELECT i.id AS item_id, r.session_id, r.tmux_key, r.transcript_path "
+        "SELECT i.id AS item_id, r.id, r.session_id, r.tmux_key, r.transcript_path, "
+        "r.provider, r.cwd, r.started_at, r.agent_session_id "
         "FROM work_items i JOIN work_runs r ON r.id = "
         "(SELECT r2.id FROM work_runs r2 WHERE r2.work_item_id = i.id ORDER BY r2.id DESC LIMIT 1) "
         "WHERE i.state = 'needs_you' AND i.autocontinue = 1 "
@@ -905,9 +1142,9 @@ def retry_missed_autocontinues(cutoff: str) -> list[dict]:
     )
     actions: list[dict] = []
     for row in rows:
-        if not claude_running(row["tmux_key"]):
+        if not agent_running(row["tmux_key"], row["provider"]):
             continue
-        outcome = maybe_autocontinue(row["session_id"], row["transcript_path"])
+        outcome = maybe_autocontinue(row["session_id"], resolve_transcript_path(row))
         actions.append({"id": row["item_id"], "action": f"autocontinue_retry:{outcome}"})
     return actions
 
@@ -922,15 +1159,17 @@ def sweep_stale_items(now: datetime | None = None) -> list[dict]:
     session blocked in a tool call until STUCK_AFTER_MINUTES and then hands
     it to the operator, synthesizes the missed Stop for a live-but-idle
     session so the question/done/autocontinue path runs, and marks the item
-    failed_stale when the Claude process is gone. A second pass runs the
-    autocontinue decision for a needs_you item whose idle-stop hook was
-    dropped before it made one.
+    failed_stale when the agent process is gone. A codex rollout is written
+    only between tool calls, so pane activity counts as freshness too. A
+    second pass runs the autocontinue decision for a needs_you item whose
+    idle-stop hook was dropped before it made one.
     """
     now_dt = now or datetime.now(timezone.utc)
     cutoff = (now_dt - timedelta(minutes=STALE_AFTER_MINUTES)).isoformat()
     stuck_cutoff = (now_dt - timedelta(minutes=STUCK_AFTER_MINUTES)).isoformat()
     rows = db.query_all(
-        "SELECT i.id AS item_id, r.id AS run_id, r.session_id, r.tmux_key, r.transcript_path "
+        "SELECT i.id AS item_id, r.id AS run_id, r.session_id, r.tmux_key, "
+        "r.transcript_path, r.provider, r.cwd, r.started_at, r.agent_session_id "
         "FROM work_items i JOIN work_runs r ON r.id = "
         "(SELECT r2.id FROM work_runs r2 WHERE r2.work_item_id = i.id ORDER BY r2.id DESC LIMIT 1) "
         "WHERE i.state = 'agent_working' AND i.updated_at < ?",
@@ -938,14 +1177,18 @@ def sweep_stale_items(now: datetime | None = None) -> list[dict]:
     )
     actions: list[dict] = []
     for row in rows:
+        row["id"] = row["run_id"]
+        transcript_path = resolve_transcript_path(row)
         mtime_iso = ""
         transcript_size = 0
         try:
-            stat = os.stat(row["transcript_path"])
+            stat = os.stat(transcript_path)
             mtime_iso = datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()
             transcript_size = stat.st_size
         except OSError:
             pass
+        if row["provider"] != "claude":
+            mtime_iso = max(mtime_iso, pane_activity(row["tmux_key"]))
         if mtime_iso > cutoff:
             with db.tx() as c:
                 c.execute(
@@ -955,12 +1198,12 @@ def sweep_stale_items(now: datetime | None = None) -> list[dict]:
                 )
             actions.append({"id": row["item_id"], "action": "refreshed"})
             continue
-        if not claude_running(row["tmux_key"]):
+        if not agent_running(row["tmux_key"], row["provider"]):
             flipped = 0
             with db.tx() as c:
                 flipped = c.execute(
                     "UPDATE work_items SET state = 'failed_stale', "
-                    "stop_reason = 'Claude process gone without a Stop event', "
+                    "stop_reason = 'Agent process gone without a Stop event', "
                     "updated_at = ? WHERE id = ? AND state = 'agent_working'",
                     (_now(), row["item_id"]),
                 ).rowcount
@@ -975,7 +1218,7 @@ def sweep_stale_items(now: datetime | None = None) -> list[dict]:
             if flipped:
                 actions.append({"id": row["item_id"], "action": "failed"})
             continue
-        if pending_tool_calls(row["transcript_path"]):
+        if pending_tool_calls(transcript_path):
             if mtime_iso and mtime_iso > stuck_cutoff:
                 with db.tx() as c:
                     c.execute(
@@ -1003,21 +1246,70 @@ def sweep_stale_items(now: datetime | None = None) -> list[dict]:
                 actions.append({"id": row["item_id"], "action": "stuck_tool"})
             continue
         payload = {
-            "transcript_path": row["transcript_path"],
+            "transcript_path": transcript_path,
             "transcript_cursor": transcript_size,
             "reason": f"No hook events for {STALE_AFTER_MINUTES} minutes; Stop synthesized by the stale sweep",
-            "last_assistant_message": last_assistant_text(row["transcript_path"])[:300],
+            "last_assistant_message": last_assistant_text(transcript_path)[:300],
         }
         record_event(row["session_id"], "Stop", payload)
-        record_artifacts(row["session_id"], row["transcript_path"])
-        outcome = maybe_autocontinue(row["session_id"], row["transcript_path"])
+        record_artifacts(row["session_id"], transcript_path)
+        outcome = maybe_autocontinue(row["session_id"], transcript_path)
         actions.append({"id": row["item_id"], "action": f"stop_synthesized:{outcome}"})
+    actions.extend(revive_resumed_runs())
     actions.extend(retry_missed_autocontinues(cutoff))
     return actions
 
 
+def revive_resumed_runs() -> list[dict]:
+    """Return a failed_stale item to agent_working when its agent came back.
+
+    The sweep marks an item failed_stale when the agent process is gone. The
+    operator usually restarts the agent in the same pane — `codex resume`
+    picks the same rollout back up — and from then on the board shows a dead
+    item while the terminal works. A live agent in the pane plus a transcript
+    written after the failure is proof this run resumed, so the item goes
+    back to agent_working and the stale sweep owns it again."""
+    rows = db.query_all(
+        "SELECT i.id AS item_id, i.updated_at, r.id AS run_id, r.session_id, r.tmux_key, "
+        "r.transcript_path, r.provider, r.cwd, r.started_at, r.agent_session_id "
+        "FROM work_items i JOIN work_runs r ON r.id = "
+        "(SELECT r2.id FROM work_runs r2 WHERE r2.work_item_id = i.id ORDER BY r2.id DESC LIMIT 1) "
+        "WHERE i.state = 'failed_stale' AND r.status = 'stopped'"
+    )
+    actions: list[dict] = []
+    for row in rows:
+        row["id"] = row["run_id"]
+        try:
+            stat = os.stat(resolve_transcript_path(row))
+        except OSError:
+            continue
+        mtime_iso = datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()
+        if mtime_iso <= row["updated_at"]:
+            continue
+        if not agent_running(row["tmux_key"], row["provider"]):
+            continue
+        revived = 0
+        with db.tx() as c:
+            revived = c.execute(
+                "UPDATE work_items SET state = 'agent_working', stop_reason = '', "
+                "updated_at = ? WHERE id = ? AND state = 'failed_stale'",
+                (mtime_iso, row["item_id"]),
+            ).rowcount
+            if revived:
+                c.execute("UPDATE work_runs SET status = 'running' WHERE id = ?",
+                          (row["run_id"],))
+                c.execute(
+                    "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+                    "VALUES (?, ?, 'run_resumed', '{}', ?)",
+                    (row["item_id"], row["run_id"], _now()),
+                )
+        if revived:
+            actions.append({"id": row["item_id"], "action": "revived"})
+    return actions
+
+
 def grouped_items(now: datetime | None = None, q: str = "",
-                  tags: str = "") -> dict[str, list[dict]]:
+                  tags: str = "", all_done: bool = False) -> dict[str, list[dict]]:
     now = now or datetime.now(timezone.utc)
     stale_cutoff = (now - timedelta(minutes=STALE_AFTER_MINUTES)).isoformat()
     done_cutoff = (now - timedelta(days=DONE_WINDOW_DAYS)).isoformat()
@@ -1028,6 +1320,10 @@ def grouped_items(now: datetime | None = None, q: str = "",
         "SELECT i.*, "
         "(SELECT session_id FROM work_runs r WHERE r.work_item_id = i.id ORDER BY r.id DESC LIMIT 1) AS last_session_id, "
         "(SELECT tmux_key FROM work_runs r WHERE r.work_item_id = i.id ORDER BY r.id DESC LIMIT 1) AS last_tmux_key, "
+        "(SELECT provider FROM work_runs r WHERE r.work_item_id = i.id ORDER BY r.id DESC LIMIT 1) AS last_provider, "
+        "(SELECT created_at FROM work_events e WHERE e.work_item_id = i.id "
+        "AND e.kind IN ('operator_done', 'self_reported_done') "
+        "ORDER BY e.id DESC LIMIT 1) AS completed_at, "
         "EXISTS(SELECT 1 FROM work_events e WHERE e.work_item_id = i.id AND e.kind = 'operator_done') AS operator_confirmed "
         "FROM work_items i ORDER BY i.priority DESC, i.created_at DESC"
     )
@@ -1039,7 +1335,7 @@ def grouped_items(now: datetime | None = None, q: str = "",
             continue
         state = row["state"]
         if state == "done":
-            if q or wanted_tags or row["updated_at"] >= done_cutoff:
+            if all_done or q or wanted_tags or row["updated_at"] >= done_cutoff:
                 groups["done"].append(row)
             continue
         if state == "waiting_external" and row["snoozed_until"] and row["snoozed_until"] <= now_iso:
@@ -1050,4 +1346,206 @@ def grouped_items(now: datetime | None = None, q: str = "",
             groups["failed_stale"].append(row)
             continue
         groups[state].append(row)
+    # Tags and debriefs can update a completed item later, so use the actual
+    # completion event rather than the board-wide priority/creation ordering.
+    # Legacy done rows without an event fall back to their last update.
+    groups["done"].sort(
+        key=lambda row: (row["completed_at"] or row["updated_at"], row["id"]),
+        reverse=True,
+    )
     return groups
+
+
+THREAD_TITLE_CHARS = 60
+NON_PROJECT_CONTEXTS = ("slack_int",)
+
+
+def _thread_components() -> list[list[dict]]:
+    """Group work items into threads by their follow-up chain.
+
+    A thread is a connected component of the source_item_id graph. No separate
+    table is needed: a follow-up already records which item it continues, and a
+    chain of continued work is exactly the effort a thread names."""
+    rows = db.query_all(
+        "SELECT id, objective, state, source_item_id, contexts, updated_at, created_at "
+        "FROM work_items ORDER BY id")
+    parent = {row["id"]: row["id"] for row in rows}
+
+    def find(item_id: int) -> int:
+        while parent[item_id] != item_id:
+            parent[item_id] = parent[parent[item_id]]
+            item_id = parent[item_id]
+        return item_id
+
+    for row in rows:
+        source = row["source_item_id"]
+        if source in parent:
+            a, b = find(row["id"]), find(source)
+            if a != b:
+                parent[max(a, b)] = min(a, b)
+
+    components: dict[int, list[dict]] = {}
+    for row in rows:
+        components.setdefault(find(row["id"]), []).append(row)
+    return [members for members in components.values() if len(members) > 1]
+
+
+def _thread_title(objective: str) -> str:
+    text = " ".join((objective or "").split())
+    if len(text) <= THREAD_TITLE_CHARS:
+        return text
+    cut = text[:THREAD_TITLE_CHARS].rsplit(" ", 1)[0] or text[:THREAD_TITLE_CHARS]
+    return cut + "…"
+
+
+def thread_projects(members: list[dict]) -> list[str]:
+    """Name the projects a thread touches.
+
+    A launch records the picked projects in the item contexts, so the contexts
+    of the member tasks are the project context the list has to show. slack_int
+    is a capability the launcher adds to the same field, not a project."""
+    projects: list[str] = []
+    for member in members:
+        for label in (member["contexts"] or "").split(","):
+            label = label.strip()
+            if label and label not in NON_PROJECT_CONTEXTS and label not in projects:
+                projects.append(label)
+    return projects
+
+
+def needs_you_count(now: datetime | None = None) -> int:
+    """Count the tasks the board puts in its needs_you group.
+
+    grouped_items promotes a waiting_external item back to needs_you once its
+    snooze expires, so the rail badge has to apply the same rule or it will
+    disagree with the board it links to."""
+    now = now or datetime.now(timezone.utc)
+    row = db.query_one(
+        "SELECT COUNT(*) AS n FROM work_items WHERE state = 'needs_you' "
+        "OR (state = 'waiting_external' AND snoozed_until IS NOT NULL AND snoozed_until <= ?)",
+        (now.isoformat(),))
+    return row["n"] if row else 0
+
+
+def thread_map() -> dict[int, dict]:
+    """Map every threaded item id to the thread it belongs to."""
+    mapping: dict[int, dict] = {}
+    for members in _thread_components():
+        root = members[0]
+        thread = {"root_id": root["id"], "title": _thread_title(root["objective"])}
+        for member in members:
+            mapping[member["id"]] = thread
+    return mapping
+
+
+def threads(now: datetime | None = None) -> list[dict]:
+    now = now or datetime.now(timezone.utc)
+    stale_cutoff = (now - timedelta(minutes=STALE_AFTER_MINUTES)).isoformat()
+    artifact_counts = {
+        row["work_item_id"]: row["n"] for row in db.query_all(
+            "SELECT work_item_id, COUNT(*) AS n FROM work_artifacts GROUP BY work_item_id")}
+    providers_by_item: dict[int, list[str]] = {}
+    for row in db.query_all(
+            "SELECT DISTINCT work_item_id, provider FROM work_runs ORDER BY provider"):
+        providers_by_item.setdefault(row["work_item_id"], []).append(row["provider"])
+
+    out = []
+    for members in _thread_components():
+        root = members[0]
+        tasks = []
+        providers: list[str] = []
+        for member in members:
+            state = member["state"]
+            if state == "agent_working" and member["updated_at"] < stale_cutoff:
+                state = "failed_stale"
+            tasks.append({"id": member["id"], "objective": member["objective"],
+                          "state": state, "updated_at": member["updated_at"]})
+            for provider in providers_by_item.get(member["id"], []):
+                if provider not in providers:
+                    providers.append(provider)
+        counts: dict[str, int] = {}
+        for task in tasks:
+            counts[task["state"]] = counts.get(task["state"], 0) + 1
+        out.append({
+            "root_id": root["id"],
+            "title": _thread_title(root["objective"]),
+            "objective": root["objective"],
+            "tasks": tasks,
+            "task_count": len(tasks),
+            "counts": counts,
+            "artifact_count": sum(artifact_counts.get(t["id"], 0) for t in tasks),
+            "projects": thread_projects(members),
+            "providers": providers,
+            "updated_at": max(t["updated_at"] for t in tasks),
+        })
+    out.sort(key=lambda thread: (thread["updated_at"], thread["root_id"]), reverse=True)
+    return out
+
+
+def thread_detail(root_id: int, now: datetime | None = None) -> dict:
+    """The roll-up one thread page needs: its member tasks oldest first, the
+    artifacts they produced, and the newest done task a new member can follow.
+
+    A thread has no row of its own, so its title, objective and summary all
+    come from its members. The summary is the newest member summary rather
+    than a stored field, because that is the latest synthesized state."""
+    now = now or datetime.now(timezone.utc)
+    stale_cutoff = (now - timedelta(minutes=STALE_AFTER_MINUTES)).isoformat()
+    now_iso = now.isoformat()
+    members = next((m for m in _thread_components() if m[0]["id"] == root_id), None)
+    if members is None:
+        return {"error": f"unknown thread: {root_id}"}
+    ids = [member["id"] for member in members]
+    marks = ",".join("?" * len(ids))
+    rows = db.query_all(
+        "SELECT i.*, "
+        "(SELECT tmux_key FROM work_runs r WHERE r.work_item_id = i.id ORDER BY r.id DESC LIMIT 1) AS last_tmux_key, "
+        "(SELECT provider FROM work_runs r WHERE r.work_item_id = i.id ORDER BY r.id DESC LIMIT 1) AS last_provider, "
+        "EXISTS(SELECT 1 FROM work_events e WHERE e.work_item_id = i.id AND e.kind = 'operator_done') AS operator_confirmed "
+        f"FROM work_items i WHERE i.id IN ({marks}) ORDER BY i.id", tuple(ids))
+    artifacts = db.query_all(
+        "SELECT id, work_item_id, path, note, created_at FROM work_artifacts "
+        f"WHERE work_item_id IN ({marks}) ORDER BY work_item_id, id", tuple(ids))
+    artifact_counts: dict[int, int] = {}
+    for artifact in artifacts:
+        artifact_counts[artifact["work_item_id"]] = artifact_counts.get(
+            artifact["work_item_id"], 0) + 1
+
+    tasks = []
+    providers: list[str] = []
+    for row in rows:
+        state = row["state"]
+        if state == "waiting_external" and row["snoozed_until"] and row["snoozed_until"] <= now_iso:
+            state = "needs_you"
+        elif state == "agent_working" and row["updated_at"] < stale_cutoff:
+            state = "failed_stale"
+        row["state"] = state
+        row["artifact_count"] = artifact_counts.get(row["id"], 0)
+        tasks.append(row)
+        if row["last_provider"] and row["last_provider"] not in providers:
+            providers.append(row["last_provider"])
+
+    counts: dict[str, int] = {}
+    for task in tasks:
+        counts[task["state"]] = counts.get(task["state"], 0) + 1
+    done_ids = [task["id"] for task in tasks if task["state"] == "done"]
+    summarised = [task for task in tasks if (task["summary"] or "").strip()]
+    return {
+        "root_id": root_id,
+        "title": _thread_title(members[0]["objective"]),
+        "objective": members[0]["objective"],
+        "status": "complete" if len(done_ids) == len(tasks) else "active",
+        "tasks": tasks,
+        "task_count": len(tasks),
+        "counts": counts,
+        "done_count": len(done_ids),
+        "needs_you": counts.get("needs_you", 0),
+        "artifacts": artifacts,
+        "artifact_count": len(artifacts),
+        "providers": providers,
+        "created_at": min(task["created_at"] for task in tasks),
+        "updated_at": max(task["updated_at"] for task in tasks),
+        "summary": (summarised[-1]["summary"] or "").strip() if summarised else "",
+        "summary_from": summarised[-1]["id"] if summarised else None,
+        "continue_from": done_ids[-1] if done_ids else None,
+    }

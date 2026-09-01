@@ -295,7 +295,7 @@ def api_today_launch(body: dict):
 
     m.setdefault("title", _title(loop_type, ticket_key, repo, pr_id))
     health = terminal.session_healthy(key)
-    if health.get("alive") and health.get("claude_running"):
+    if health.get("alive") and health.get("agent_running"):
         store[key] = m
         state.save(_LAUNCH_STORE, store)
         _ensure_work_item(instance_key, m, key, cwd)

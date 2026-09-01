@@ -323,3 +323,27 @@ class TestMigrationSchema:
         rows = db.query_all("PRAGMA index_list(log_events)")
         index_names = {r["name"] for r in rows}
         assert "idx_log_events_job_ts" in index_names
+
+
+class TestEmitSurvivesADeadDatabase:
+    """emit() is the last-resort error reporter of every daemon thread, so it
+    must never raise: a thread that reports a database fault through it would
+    otherwise die on the same fault and never come back."""
+
+    def test_emit_does_not_raise_when_the_write_fails(self, tmp_log, monkeypatch, capsys):
+        import sqlite3
+
+        def boom(*a, **k):
+            raise sqlite3.OperationalError("disk I/O error")
+
+        monkeypatch.setattr(db, "execute", boom)
+        record = log.emit("worker_claim_error", "w3: OperationalError: disk I/O error")
+        assert record["event"] == "worker_claim_error"
+        assert "log_emit_failed" in capsys.readouterr().err
+
+    def test_emit_still_raises_nothing_but_writes_when_the_db_is_healthy(self, tmp_log):
+        key = state._instance_key_cv.get()
+        log.emit("healthy_write", "still stored")
+        rows = db.query_all("SELECT * FROM log_events WHERE instance_key=? AND event=?",
+                            (key, "healthy_write"))
+        assert len(rows) == 1
