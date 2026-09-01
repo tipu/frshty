@@ -269,21 +269,45 @@ def _artifact_roots(artifact_id: int) -> list[str]:
     return roots
 
 
+def _serve_artifact(artifact_id: int, real: str, shown: str):
+    if not os.path.isfile(real):
+        return JSONResponse({"error": f"file missing: {shown}"}, status_code=404)
+    if not any(real.startswith(root) for root in _artifact_roots(artifact_id)):
+        return JSONResponse(
+            {"error": f"artifact path outside the run's workspace: {shown}"},
+            status_code=403)
+    resp = FileResponse(real)
+    resp.headers["Content-Security-Policy"] = "sandbox"
+    return resp
+
+
 @router.get("/api/work/artifact_file/{artifact_id}")
 def api_work_artifact_file(artifact_id: int):
     row = db.query_one("SELECT path FROM work_artifacts WHERE id = ?", (artifact_id,))
     if not row:
         return JSONResponse({"error": "unknown artifact"}, status_code=404)
     real = os.path.realpath(row["path"])
-    if not os.path.isfile(real):
-        return JSONResponse({"error": f"file missing: {row['path']}"}, status_code=404)
-    if not any(real.startswith(root) for root in _artifact_roots(artifact_id)):
+    if real.lower().endswith((".html", ".htm")):
+        return RedirectResponse(f"/api/work/artifact_file/{artifact_id}/",
+                                status_code=307)
+    return _serve_artifact(artifact_id, real, row["path"])
+
+
+@router.get("/api/work/artifact_file/{artifact_id}/{name:path}")
+def api_work_artifact_asset(artifact_id: int, name: str):
+    row = db.query_one("SELECT path FROM work_artifacts WHERE id = ?", (artifact_id,))
+    if not row:
+        return JSONResponse({"error": "unknown artifact"}, status_code=404)
+    real = os.path.realpath(row["path"])
+    if not name:
+        return _serve_artifact(artifact_id, real, row["path"])
+    folder = os.path.dirname(real) + os.sep
+    asset = os.path.realpath(os.path.join(folder, name))
+    if not asset.startswith(folder):
         return JSONResponse(
-            {"error": f"artifact path outside the run's workspace: {row['path']}"},
+            {"error": f"asset path outside the artifact folder: {name}"},
             status_code=403)
-    resp = FileResponse(real)
-    resp.headers["Content-Security-Policy"] = "sandbox"
-    return resp
+    return _serve_artifact(artifact_id, asset, name)
 
 
 @router.post("/api/work/items/{item_id}/debrief")
