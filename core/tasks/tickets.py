@@ -394,9 +394,11 @@ def _review_diff_ranges(ticket_dir: Path, baseline: dict[str, str]) -> dict[str,
     HEAD^..HEAD is not enough: the agent may commit on its own and a retry adds
     more, across several repos.
     """
+    workspace = ticket_dir / "workspace"
+    search_root = workspace if workspace.is_dir() else ticket_dir
     ranges: dict[str, str] = {}
     for repo, before in baseline.items():
-        wt = (ticket_dir / "workspace" / repo)
+        wt = search_root / repo
         if not (wt / ".git").exists():
             continue
         try:
