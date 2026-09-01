@@ -333,7 +333,8 @@ body { display: block; }
 /* Task board — the cards, the composer and the two-column board on /tasks */
 .ln-task-compose { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 12px; align-items: center; background: var(--ln-surface); border: 1px solid var(--ln-border-hi); border-radius: 8px; padding: 10px 12px; }
 .ln-task-compose .ln-input { min-width: 0; width: 100%; box-sizing: border-box; border-color: transparent; background: transparent; padding-left: 2px; }
-.ln-task-compose .ln-compose-text { display: block; resize: none; overflow-y: auto; max-height: 220px; white-space: pre-wrap; line-height: 1.5; padding-top: 4px; padding-bottom: 4px; }
+.ln-task-compose .ln-compose-text { display: block; resize: none; overflow-y: auto; scrollbar-width: none; max-height: 220px; white-space: pre-wrap; line-height: 1.5; padding-top: 4px; padding-bottom: 4px; }
+.ln-task-compose .ln-compose-text::-webkit-scrollbar { width: 0; height: 0; }
 .ln-task-compose-opts { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 6px; font-size: 11.5px; color: var(--ln-text-3); }
 .ln-chipsel { border: 1px solid var(--ln-border); border-radius: 5px; padding: 2px 7px; font-size: 11px; color: var(--ln-text-2); background: var(--ln-bg); cursor: pointer; }
 .ln-chipsel:hover { border-color: var(--ln-border-hi); color: var(--ln-text); }
