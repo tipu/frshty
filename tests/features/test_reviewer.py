@@ -43,13 +43,25 @@ class TestReadFunctionContext:
 
 
 class TestPromptTone:
-    def test_body_rules_demand_a_fix(self):
-        assert "The fix." in reviewer.BODY_RULES
-        assert "Write a finding, not a question." in reviewer.BODY_RULES
+    def test_body_rules_ask_for_the_house_voice(self):
+        assert reviewer.HOUSE_VOICE in reviewer.BODY_RULES
+        assert "The ask, as a question" in reviewer.HOUSE_VOICE
+        assert "Can we <the change you want>?" in reviewer.HOUSE_VOICE
+
+    def test_body_rules_keep_the_reason(self):
+        assert "The reason: what the code does now and what that costs" in reviewer.HOUSE_VOICE
+        assert "Length: two sentences." in reviewer.HOUSE_VOICE
+
+    def test_body_rules_ban_the_implementation_plan(self):
+        assert "Do not prescribe the patch" in reviewer.HOUSE_VOICE
+        assert "do not ask for a test" in reviewer.HOUSE_VOICE
+
+    def test_the_question_voice_is_not_the_question_severity(self):
+        assert "not the \"question\" severity" in reviewer.BODY_RULES
 
     def test_body_rules_do_not_mute_findings(self):
         assert "Don't prescribe fixes" not in reviewer.BODY_RULES
-        assert "Let the question do the work" not in reviewer.BODY_RULES
+        assert "Don't explain why it's wrong" not in reviewer.BODY_RULES
 
     def test_every_persona_asks_for_multi_turn_work(self):
         for name, text in reviewer.PERSONAS.items():
@@ -145,10 +157,10 @@ class TestMergeReviews:
         result = reviewer._merge_reviews([("spec", data)])
         assert result["issues"][0]["agreed_by"] == ["spec"]
 
-    def test_multiple_results_fallback_on_haiku_failure(self):
+    def test_multiple_results_fallback_on_merge_model_failure(self):
         data1 = {"verdict": "approved", "issues": [{"body": "a", "severity": "suggestion"}]}
         data2 = {"verdict": "changes_requested", "issues": [{"body": "b", "severity": "blocking"}]}
-        with patch("features.reviewer.run_haiku", return_value=None):
+        with patch("features.reviewer.run_balanced", return_value=None):
             result = reviewer._merge_reviews([("spec", data1), ("breakage", data2)])
         assert len(result["issues"]) == 2
 
@@ -159,7 +171,7 @@ class TestMergeReviews:
         data2 = {"verdict": "changes_requested",
                  "issues": [{"body": "a much longer body", "severity": "blocking",
                              "path": "a.ts", "line": 26, "persona": "breakage"}]}
-        with patch("features.reviewer.run_haiku", return_value=None):
+        with patch("features.reviewer.run_balanced", return_value=None):
             result = reviewer._merge_reviews([("spec", data1), ("breakage", data2)])
         assert len(result["issues"]) == 1
         issue = result["issues"][0]
@@ -172,7 +184,7 @@ class TestMergeReviews:
                  "issues": [{"body": "a", "severity": "blocking", "path": "a.ts", "line": 26}]}
         data2 = {"verdict": "approved",
                  "issues": [{"body": "b", "severity": "blocking", "path": "a.ts", "line": 28}]}
-        with patch("features.reviewer.run_haiku", return_value=None):
+        with patch("features.reviewer.run_balanced", return_value=None):
             result = reviewer._merge_reviews([("spec", data1), ("breakage", data2)])
         assert len(result["issues"]) == 2
 
@@ -183,7 +195,7 @@ class TestMergeReviews:
             {"body": "two", "severity": "blocking", "path": "a.ts", "line": 26,
              "agreed_by": ["breakage"]},
         ]}
-        with patch("features.reviewer.run_haiku", return_value=json.dumps(merged)):
+        with patch("features.reviewer.run_balanced", return_value=json.dumps(merged)):
             result = reviewer._merge_reviews([("spec", {"issues": []}), ("breakage", {"issues": []})])
         assert len(result["issues"]) == 1
         assert result["issues"][0]["agreed_by"] == ["breakage", "spec"]
@@ -192,6 +204,15 @@ class TestMergeReviews:
         issues = [{"body": "a", "severity": "suggestion", "path": "", "line": None},
                   {"body": "b", "severity": "suggestion", "path": "", "line": None}]
         assert len(reviewer._collapse_persona_duplicates(issues)) == 2
+
+
+    def test_the_merge_never_runs_on_the_fast_tier(self):
+        data1 = {"verdict": "approved", "issues": [{"body": "a", "severity": "suggestion"}]}
+        data2 = {"verdict": "approved", "issues": [{"body": "b", "severity": "suggestion"}]}
+        with patch("features.reviewer.run_haiku") as fast, \
+             patch("features.reviewer.run_balanced", return_value=None):
+            reviewer._merge_reviews([("spec", data1), ("breakage", data2)])
+        fast.assert_not_called()
 
 
 class TestValidateSingle:
@@ -240,21 +261,36 @@ class TestValidateSingle:
 
 class TestSimplifyBody:
     def test_returns_simplified(self):
-        with patch("features.reviewer.run_haiku", return_value="simplified text"):
+        with patch("features.reviewer.run_balanced", return_value="simplified text"):
             assert reviewer._simplify_body("verbose body") == "simplified text"
 
     def test_fallback_on_none(self):
-        with patch("features.reviewer.run_haiku", return_value=None):
+        with patch("features.reviewer.run_balanced", return_value=None):
             assert reviewer._simplify_body("original") == "original"
 
+    def test_prompt_carries_the_house_voice(self):
+        with patch("features.reviewer.run_balanced", return_value="x") as run:
+            reviewer._simplify_body("verbose body")
+        assert reviewer.HOUSE_VOICE in run.call_args[0][0]
 
-class TestStyleMatch:
-    def test_no_examples_returns_body(self):
-        assert reviewer._style_match("body", "") == "body"
+    def test_context_prompt_carries_the_house_voice(self):
+        with patch("features.reviewer.run_balanced", return_value="x") as run:
+            reviewer._simplify_body_with_context("body", "1: code", "a.ts", 1)
+        prompt = run.call_args[0][0]
+        assert reviewer.HOUSE_VOICE in prompt
+        assert "1: code" in prompt
 
-    def test_with_examples_calls_haiku(self):
-        with patch("features.reviewer.run_haiku", return_value="styled"):
-            assert reviewer._style_match("body", "example1\nexample2") == "styled"
+    def test_the_rewrite_never_runs_on_the_fast_tier(self):
+        with patch("features.reviewer.run_haiku") as fast, \
+             patch("features.reviewer.run_balanced", return_value="x"):
+            reviewer._simplify_body("verbose body")
+        fast.assert_not_called()
+
+
+class TestStyleMatchIsGone:
+    def test_no_style_match_pass_remains(self):
+        assert not hasattr(reviewer, "_style_match")
+        assert not hasattr(reviewer, "_style_match_all")
 
 
 class TestReviewPr:
@@ -694,8 +730,7 @@ class TestReviewTicket:
              patch("features.reviewer._run_single_persona",
                    side_effect=lambda args: (args[0], dict(persona_data))), \
              patch("features.reviewer._merge_reviews", return_value=dict(persona_data)), \
-             patch("features.reviewer._simplify_all_issues", side_effect=lambda i: i), \
-             patch("features.reviewer._style_match_all", side_effect=lambda c, i: i):
+             patch("features.reviewer._simplify_all_issues", side_effect=lambda i: i):
             results = reviewer.review_ticket(config, "JIRA-9", prs)
 
         assert results["backend/1"]["verdict"] == "changes_requested"
