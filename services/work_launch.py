@@ -42,6 +42,7 @@ def project_entries() -> list[dict]:
     extras = {
         "frshty": os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "clarivis": os.path.expanduser("~/Documents/dev/clarivis"),
+        "algotrader2": os.path.expanduser("~/Documents/dev/algotrader2/implementation"),
     }
     for key, root in extras.items():
         if not any(e["key"] == key for e in entries) and os.path.isdir(root):
@@ -147,11 +148,15 @@ def _source_block(source_item_id: int) -> str:
 
 
 def launch(objective: str, cwd: str = "", contexts: list[str] | None = None,
-           slack: bool = False, source_item_id: int | None = None) -> dict:
+           slack: bool = False, source_item_id: int | None = None,
+           agent: str = "claude") -> dict:
     objective = (objective or "").strip()
     contexts = [c for c in (contexts or []) if isinstance(c, str)]
+    agent = (agent or "claude").strip().lower()
     if not objective:
         return {"error": "empty objective"}
+    if agent not in terminal.AGENTS:
+        return {"error": f"unknown agent: {agent}"}
     config = personal_config()
     if config is None:
         return {"error": "personal instance not loaded; work layer is read-only"}
@@ -176,7 +181,7 @@ def launch(objective: str, cwd: str = "", contexts: list[str] | None = None,
                                      source_item_id=source_item_id, tags=",".join(tags))
     session_id = str(uuid.uuid4())
     tmux_key = f"work-{item_id}"
-    run_id = work_store.add_run(item_id, session_id, tmux_key, cwd)
+    run_id = work_store.add_run(item_id, session_id, tmux_key, cwd, provider=agent)
     context = (
         f"# Work item {item_id}\n\n## Objective\n\n{objective}\n"
         + source_block + _context_block(contexts, slack) + "\n"
@@ -188,6 +193,9 @@ def launch(objective: str, cwd: str = "", contexts: list[str] | None = None,
         "cannot infer. Ask with the AskUserQuestion tool, then end your turn "
         "immediately; the work board shows the question to the operator, and "
         "when their answer arrives as your next message, resume work from it. "
+        "Use that same tool for anything only the operator can supply — a "
+        "secret, a one-time code, an approval — not only for a decision. A "
+        "request written in prose does not reach the operator. "
         "Never send outward communications (Slack messages, GitHub or Bitbucket comments, "
         "emails, posts to external services) unless the operator explicitly asks for that "
         "in this conversation; draft the content and ask instead. "
@@ -197,19 +205,20 @@ def launch(objective: str, cwd: str = "", contexts: list[str] | None = None,
     )
     try:
         with work_store.launch_lock:
-            terminal.launch_claude(tmux_key, cwd, session_id, context, True, config=config)
-        health = terminal.session_healthy(tmux_key)
+            terminal.launch_agent(tmux_key, cwd, session_id, context, True, config=config,
+                                  agent=agent)
+        health = terminal.session_healthy(tmux_key, agent=agent)
         if not health.get("alive"):
             raise RuntimeError("tmux session did not start")
     except Exception as e:
         work_store.mark_launch_failed(run_id, f"{type(e).__name__}: {e}")
         log.emit("work_launch_failed", f"work item {item_id}: {type(e).__name__}: {e}")
         return {"error": f"launch failed: {e}", "item_id": item_id}
-    threading.Thread(target=_kickoff, args=(tmux_key, run_id), daemon=True).start()
+    threading.Thread(target=_kickoff, args=(tmux_key, run_id, agent), daemon=True).start()
     if len(tags) < work_tags.MAX_TAGS:
         work_tags.schedule_implicit_tags(item_id, objective, config)
     return {"item_id": item_id, "run_id": run_id, "session_id": session_id,
-            "tmux_key": tmux_key, "state": "agent_working"}
+            "tmux_key": tmux_key, "state": "agent_working", "agent": agent}
 
 
 WORK_SESSION_PREFIX = "term-work-"
@@ -250,12 +259,12 @@ def resume_session(item_id: int) -> bool:
     session in the run's cwd and relaunch Claude with --resume on the item's
     original session id.
 
-    No-op while the tmux session still exists, checked under launch_lock so
-    two concurrent terminal connects cannot both type the resume command into
-    the pane."""
+    No-op while the agent is still running, checked under launch_lock so two
+    concurrent terminal connects cannot both relaunch it. A surviving tmux
+    pane with no agent is respawned with the resume command."""
     run = db.query_one(
-        "SELECT session_id, cwd FROM work_runs WHERE work_item_id = ? "
-        "ORDER BY id DESC LIMIT 1", (item_id,))
+        "SELECT session_id, cwd, provider, agent_session_id FROM work_runs "
+        "WHERE work_item_id = ? ORDER BY id DESC LIMIT 1", (item_id,))
     if not run:
         return False
     config = personal_config()
@@ -264,21 +273,24 @@ def resume_session(item_id: int) -> bool:
     cwd = run["cwd"] if run["cwd"] and os.path.isdir(run["cwd"]) else str(config["workspace"]["root"])
     key = f"work-{item_id}"
     with work_store.launch_lock:
-        if terminal.session_healthy(key)["alive"]:
+        if terminal.session_healthy(key, agent=run["provider"])["agent_running"]:
             return True
-        terminal.launch_claude(key, cwd, run["session_id"], "", False, config=config)
+        terminal.launch_agent(key, cwd, run["session_id"], "", False, config=config,
+                              agent=run["provider"],
+                              agent_session_id=run["agent_session_id"])
     return True
 
 
 def launch_followup(source_item_id: int, objective: str, cwd: str = "",
-                    contexts: list[str] | None = None, slack: bool = False) -> dict:
+                    contexts: list[str] | None = None, slack: bool = False,
+                    agent: str = "claude") -> dict:
     source = db.query_one("SELECT id, state FROM work_items WHERE id = ?", (source_item_id,))
     if not source:
         return {"error": f"unknown source work item: {source_item_id}"}
     if source["state"] != "done":
         return {"error": f"source work item {source_item_id} is not done (state: {source['state']})"}
     return launch(objective, cwd=cwd, contexts=contexts, slack=slack,
-                  source_item_id=source_item_id)
+                  source_item_id=source_item_id, agent=agent)
 
 
 PUSH_GATE_TEST_TIMEOUT = TEST_RUN_TIMEOUT // 3
@@ -445,15 +457,42 @@ def gate_push(session_id: str, command: str, cwd: str) -> dict:
     return {"decision": "allow", "reason": "lint and tests passed"}
 
 
-def _kickoff(tmux_key: str, run_id: int):
+TRUST_PROMPT_TRIES = 8
+TRUST_PROMPT_INTERVAL = 2
+
+
+def _answer_trust_prompt(tmux_key: str) -> bool:
+    """Clear the codex directory-trust question before the readiness check.
+
+    Codex holds the pane on the question while its process is already up, so
+    the readiness check would call the run healthy and return with the
+    question still on screen."""
+    for _ in range(TRUST_PROMPT_TRIES):
+        time.sleep(TRUST_PROMPT_INTERVAL)
+        if terminal.answer_codex_trust(tmux_key):
+            return True
+    return False
+
+
+def _kickoff(tmux_key: str, run_id: int, agent: str = "claude"):
+    """Confirm the agent CLI came up, and give Claude its first prompt.
+
+    Claude is seeded through --append-system-prompt, so it sits idle until a
+    prompt arrives. Codex takes the same context as its first prompt on the
+    command line, so it is already working and needs no kickoff message."""
     try:
+        if agent == "codex":
+            _answer_trust_prompt(tmux_key)
         for _ in range(30):
             time.sleep(3)
-            if terminal.session_healthy(tmux_key).get("claude_running"):
+            if terminal.session_healthy(tmux_key, agent=agent).get("agent_running"):
                 time.sleep(4)
+                if agent != "claude":
+                    return
                 if work_store.tmux_send(tmux_key, "Begin the objective from your system prompt now."):
                     return
                 break
-        work_store.mark_launch_failed(run_id, "kickoff never delivered: Claude did not start in the pane")
+        work_store.mark_launch_failed(
+            run_id, f"kickoff never delivered: {agent} did not start in the pane")
     except Exception as e:
         work_store.mark_launch_failed(run_id, f"kickoff error: {type(e).__name__}: {e}")

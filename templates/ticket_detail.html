@@ -899,6 +899,11 @@ frshtyApp({
 
         const visitedStates = computed(() => {
             const v = new Set(['new']);
+            for (const t of (ticket.value && ticket.value.transitions) || []) {
+                if (t.rejected) continue;
+                if (t.prior_status) v.add(t.prior_status);
+                if (t.new_status) v.add(t.new_status);
+            }
             for (const j of jobs.value) {
                 try {
                     const pl = typeof j.payload === 'string' ? JSON.parse(j.payload || '{}') : (j.payload || {});

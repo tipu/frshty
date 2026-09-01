@@ -1,3 +1,4 @@
+import base64
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -134,6 +135,33 @@ class TestGrouping:
         with_q = work_store.grouped_items(now, q="ancient billing")
         assert old in {r["id"] for r in with_q["done"]}
 
+    def test_done_items_are_sorted_by_completion_time_descending(self):
+        now = datetime.now(timezone.utc)
+        completed_first = _mkitem("completed first")
+        completed_last = _mkitem("completed last")
+        db.execute(
+            "UPDATE work_items SET state='done', priority=10, updated_at=? WHERE id = ?",
+            (now.isoformat(), completed_first),
+        )
+        db.execute(
+            "UPDATE work_items SET state='done', priority=0, updated_at=? WHERE id = ?",
+            ((now - timedelta(hours=1)).isoformat(), completed_last),
+        )
+        db.execute(
+            "INSERT INTO work_events(work_item_id, kind, created_at) VALUES (?, 'operator_done', ?)",
+            (completed_first, (now - timedelta(hours=2)).isoformat()),
+        )
+        db.execute(
+            "INSERT INTO work_events(work_item_id, kind, created_at) VALUES (?, 'self_reported_done', ?)",
+            (completed_last, (now - timedelta(hours=1)).isoformat()),
+        )
+
+        done_ids = [
+            row["id"] for row in work_store.grouped_items(now, q="completed")["done"]
+        ]
+
+        assert done_ids == [completed_last, completed_first]
+
 
 class TestIntake:
     def _client(self):
@@ -152,7 +180,7 @@ class TestIntake:
         instances.get.return_value = reg
         with patch("services.work_launch.runtime.instances", return_value=instances), \
              patch("services.work_launch.terminal.launch_claude") as mock_launch, \
-             patch("services.work_launch.terminal.session_healthy", return_value={"alive": True, "claude_running": True}):
+             patch("services.work_launch.terminal.session_healthy", return_value={"alive": True, "agent_running": True}):
             client = self._client()
             r = client.post("/api/work/intake", json={"text": "ship the widget"})
         assert r.status_code == 200, r.text
@@ -214,6 +242,49 @@ class TestIntake:
         assert r.status_code == 200
         assert "Needs you" in r.text
 
+    def test_work_detail_collapses_consecutive_tool_calls_by_default(self):
+        r = self._client().get("/work/1")
+
+        assert r.status_code == 200
+        assert '<details v-else-if="e.kind === \'tools\'" class="tl-tools">' in r.text
+        assert "e.entries.length }} tool call" in r.text
+        assert "previous.kind === \"tools\"" in r.text
+        assert '<details v-else-if="e.kind === \'tools\'" class="tl-tools" open>' not in r.text
+
+    def test_work_detail_reports_load_and_render_failures(self):
+        r = self._client().get("/work/1")
+
+        assert r.status_code == 200
+        assert "Loading work item…" in r.text
+        assert "Unable to load this work item:" in r.text
+        assert 'id="work-fatal"' in r.text
+        assert "setInterval(() => this.refresh(), 15000)" in r.text
+
+    def test_transcript_image_endpoint_serves_lazy_image(self, tmp_path):
+        import json as _json
+        image_bytes = b"\x89PNG\r\n\x1a\nwork timeline"
+        transcript = tmp_path / "image.jsonl"
+        transcript.write_text(_json.dumps({
+            "type": "user", "timestamp": "2026-08-25T03:51:39.000Z",
+            "message": {"content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png",
+                                                   "data": base64.b64encode(image_bytes).decode()}},
+                {"type": "text", "text": "[Image: original 20x10]"},
+            ]},
+        }))
+        item_id = _mkitem("view transcript image")
+        work_store.add_run(item_id, f"sid-img-{item_id}", f"work-{item_id}", "/tmp")
+        db.execute("UPDATE work_runs SET transcript_path = ? WHERE work_item_id = ?",
+                   (str(transcript), item_id))
+        image_ref = work_store.item_detail(item_id)["timeline"][0]["images"][0]
+
+        r = self._client().get(
+            f"/api/work/items/{item_id}/transcript-image/{image_ref['id']}")
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "image/png"
+        assert r.headers["content-security-policy"] == "sandbox"
+        assert r.content == image_bytes
+
     def test_items_endpoint_paginates_done(self):
         from unittest.mock import patch
         from web.work import DONE_PAGE_SIZE
@@ -267,7 +338,7 @@ class TestIntake:
 
         with patch("services.work_launch.runtime.instances", return_value=instances), \
              patch("services.work_launch.terminal.launch_claude", side_effect=slow_launch), \
-             patch("services.work_launch.terminal.session_healthy", return_value={"alive": True, "claude_running": True}):
+             patch("services.work_launch.terminal.session_healthy", return_value={"alive": True, "agent_running": True}):
             client = self._client()
             threads = [
                 threading.Thread(target=lambda i=i: client.post(
@@ -510,7 +581,7 @@ class TestStaleSweep:
 
     def test_live_transcript_refreshes_updated_at(self, tmp_path, monkeypatch):
         item_id, _, _ = self._mkstale(tmp_path)
-        monkeypatch.setattr(work_store, "claude_running", lambda k: (_ for _ in ()).throw(AssertionError))
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": (_ for _ in ()).throw(AssertionError))
         actions = work_store.sweep_stale_items()
         assert {"id": item_id, "action": "refreshed"} in actions
         item = db.query_one("SELECT state, updated_at FROM work_items WHERE id = ?", (item_id,))
@@ -522,7 +593,7 @@ class TestStaleSweep:
     def test_dead_session_marked_failed(self, tmp_path, monkeypatch):
         item_id, run_id, transcript = self._mkstale(tmp_path)
         self._age_transcript(transcript)
-        monkeypatch.setattr(work_store, "claude_running", lambda k: False)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": False)
         actions = work_store.sweep_stale_items()
         assert {"id": item_id, "action": "failed"} in actions
         item = db.query_one("SELECT state, stop_reason FROM work_items WHERE id = ?", (item_id,))
@@ -538,7 +609,7 @@ class TestStaleSweep:
         from unittest.mock import MagicMock
         item_id, _, transcript = self._mkstale(tmp_path)
         self._age_transcript(transcript)
-        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
         sender = MagicMock(return_value=True)
         monkeypatch.setattr(work_store, "tmux_send", sender)
         actions = work_store.sweep_stale_items()
@@ -556,7 +627,7 @@ class TestStaleSweep:
         item_id, _, transcript = self._mkstale(
             tmp_path, tail_text="Should I use the staging bucket or prod?")
         self._age_transcript(transcript)
-        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
         sender = MagicMock(return_value=True)
         monkeypatch.setattr(work_store, "tmux_send", sender)
         actions = work_store.sweep_stale_items()
@@ -587,7 +658,7 @@ class TestStaleSweep:
     def test_pending_tool_blocks_synthesized_stop(self, tmp_path, monkeypatch):
         from unittest.mock import MagicMock
         item_id, _, _ = self._mkpending(tmp_path, minutes=40)
-        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
         sender = MagicMock(return_value=True)
         monkeypatch.setattr(work_store, "tmux_send", sender)
         actions = work_store.sweep_stale_items()
@@ -603,7 +674,7 @@ class TestStaleSweep:
         from unittest.mock import MagicMock
         item_id, _, _ = self._mkpending(
             tmp_path, minutes=work_store.STUCK_AFTER_MINUTES + 10)
-        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
         sender = MagicMock(return_value=True)
         monkeypatch.setattr(work_store, "tmux_send", sender)
         actions = work_store.sweep_stale_items()
@@ -654,7 +725,7 @@ class TestReply:
         work_store.record_event(f"sid-reply-{item_id}", "Stop", {})
         sender = MagicMock(return_value=True)
         monkeypatch.setattr(work_store, "tmux_send", sender)
-        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
         out = work_store.reply(item_id, "use the staging bucket")
         assert out == {"id": item_id, "action": "reply"}
         sender.assert_called_once_with(f"work-{item_id}", "use the staging bucket")
@@ -664,7 +735,7 @@ class TestReply:
     def test_reply_dead_session_errors(self, monkeypatch):
         item_id = _mkitem("reply dead")
         work_store.add_run(item_id, f"sid-rd-{item_id}", f"work-{item_id}", "/tmp")
-        monkeypatch.setattr(work_store, "claude_running", lambda k: False)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": False)
         out = work_store.reply(item_id, "hello")
         assert "no live Claude" in out["error"]
 
@@ -703,7 +774,7 @@ class TestSnoozedQuestion:
         now = datetime.now(timezone.utc)
         item_id = self._snoozed_with_question((now + timedelta(hours=1)).isoformat())
         monkeypatch.setattr(work_store, "tmux_send", lambda k, t: True)
-        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
         out = work_store.reply(item_id, "push it")
         assert out == {"id": item_id, "action": "reply"}
         item = db.query_one(
@@ -741,6 +812,24 @@ class TestTranscriptTail:
 
     def test_missing_file_empty(self):
         assert work_store.last_assistant_text("/nonexistent/x.jsonl") == ""
+
+    def test_timeline_keeps_image_only_prompt(self, tmp_path):
+        import json as _json
+        image_bytes = b"jpeg bytes"
+        p = tmp_path / "image-only.jsonl"
+        p.write_text(_json.dumps({
+            "type": "user", "timestamp": "T1", "message": {"content": [{
+                "type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                               "data": base64.b64encode(image_bytes).decode()},
+            }]},
+        }))
+
+        timeline = work_store.transcript_timeline(str(p))
+        assert timeline[0]["kind"] == "prompt"
+        assert timeline[0]["text"] == ""
+        assert timeline[0]["images"][0]["media_type"] == "image/jpeg"
+        assert work_store.transcript_image(str(p), timeline[0]["images"][0]["id"]) == \
+            (image_bytes, "image/jpeg")
 
 
 class TestArtifacts:
@@ -918,7 +1007,7 @@ class TestQuestions:
         item_id, sid = self._mkrun("question reply")
         work_store.record_question(sid, self.QUESTIONS)
         monkeypatch.setattr(work_store, "tmux_send", MagicMock(return_value=True))
-        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
         work_store.reply(item_id, "Bucket: staging")
         item = db.query_one(
             "SELECT state, pending_question FROM work_items WHERE id = ?", (item_id,))
@@ -1017,6 +1106,68 @@ class TestQuestions:
         assert item["state"] == "agent_working"
         assert item["pending_question"] == ""
 
+    WAKEUP = ("<task-notification>\n<task-id>b2ms6zphy</task-id>\n"
+              "<summary>Monitor event: \"E2E on main\"</summary>\n</task-notification>")
+
+    def test_wakeup_prompt_keeps_pending_question(self):
+        item_id, sid = self._mkrun("wakeup keeps question")
+        work_store.record_question(sid, self.QUESTIONS)
+        work_store.record_event(sid, "UserPromptSubmit", {"prompt": self.WAKEUP})
+        item = db.query_one(
+            "SELECT state, stop_reason, pending_question FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "needs_you"
+        assert "Which bucket" in item["pending_question"]
+        assert "Which bucket" in item["stop_reason"]
+
+    def test_operator_prompt_still_clears_pending_question(self):
+        item_id, sid = self._mkrun("operator prompt clears question")
+        work_store.record_question(sid, self.QUESTIONS)
+        work_store.record_event(sid, "UserPromptSubmit", {"prompt": "Bucket: staging"})
+        item = db.query_one(
+            "SELECT state, pending_question FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "agent_working"
+        assert item["pending_question"] == ""
+
+    def test_wakeup_prompt_leaves_no_question_alone(self):
+        item_id, sid = self._mkrun("wakeup without question")
+        work_store.record_event(sid, "Stop", {})
+        work_store.record_event(sid, "UserPromptSubmit", {"prompt": self.WAKEUP})
+        item = db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "agent_working"
+
+    def test_wakeup_prompt_does_not_autocontinue_past_question(self, monkeypatch):
+        from unittest.mock import MagicMock
+        item_id, sid = self._mkrun("wakeup blocks autocontinue")
+        work_store.record_question(sid, self.QUESTIONS)
+        work_store.record_event(sid, "Stop", {})
+        work_store.record_event(sid, "UserPromptSubmit", {"prompt": self.WAKEUP})
+        work_store.record_event(sid, "Stop", {})
+        monkeypatch.setattr(work_store, "last_assistant_text", lambda p: "Read the task output.")
+        sender = MagicMock(return_value=True)
+        monkeypatch.setattr(work_store, "tmux_send", sender)
+        assert work_store.maybe_autocontinue(sid, "/tmp/t.jsonl") == "question"
+        sender.assert_not_called()
+
+    def test_hook_forwards_prompt_and_keeps_question(self):
+        import json as _json
+        import subprocess
+        import core.db as _db
+        dbfile = str(_db._DB_PATH)
+        item_id, sid = self._mkrun("hook forwards prompt")
+        work_store.record_question(sid, self.QUESTIONS)
+        payload = _json.dumps({"session_id": sid, "hook_event_name": "UserPromptSubmit",
+                               "prompt": self.WAKEUP})
+        r = subprocess.run(
+            [sys.executable, "scripts/work_hook.py"],
+            input=payload, capture_output=True, text=True, timeout=15,
+            env={**__import__("os").environ, "FRSHTY_DB": dbfile},
+        )
+        assert r.returncode == 0, r.stderr
+        item = db.query_one(
+            "SELECT state, pending_question FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "needs_you"
+        assert "Which bucket" in item["pending_question"]
+
 
 class TestFollowup:
     def _client(self):
@@ -1049,7 +1200,7 @@ class TestFollowup:
             patch("services.work_launch.runtime.instances", return_value=instances),
             patch("services.work_launch.terminal.launch_claude"),
             patch("services.work_launch.terminal.session_healthy",
-                  return_value={"alive": True, "claude_running": True}),
+                  return_value={"alive": True, "agent_running": True}),
         )
 
     def test_followup_carries_parent_context(self, tmp_path):
@@ -1243,6 +1394,28 @@ class TestBackgroundWait:
         assert db.query_one("SELECT state FROM work_items WHERE id = ?",
                             (item_id,))["state"] == "done"
 
+    def test_operator_ask_tail_outranks_bg_wait(self, tmp_path):
+        path = self._transcript(tmp_path, [
+            self._monitor_start("bddd"),
+            self._checkpoint("Restarted. Send another code when ready — the prompt "
+                             "appears in about 100 seconds and waits 15 minutes.")])
+        item_id = _mkitem("bg 2fa item")
+        work_store.add_run(item_id, f"sid-bg2fa-{item_id}", f"work-{item_id}", "/tmp")
+        work_store.record_event(f"sid-bg2fa-{item_id}", "Stop", {"transcript_path": path})
+        assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                            (item_id,))["state"] == "needs_you"
+
+    def test_operator_ask_notification_outranks_bg_wait(self, tmp_path):
+        path = self._transcript(tmp_path, [
+            self._monitor_start("beee"),
+            self._checkpoint("Send me a fresh 6-digit code and I will write it in.")])
+        item_id = _mkitem("bg 2fa notif item")
+        work_store.add_run(item_id, f"sid-bg2fn-{item_id}", f"work-{item_id}", "/tmp")
+        work_store.record_event(f"sid-bg2fn-{item_id}", "Notification", {
+            "transcript_path": path, "message": "Claude is waiting for your input"})
+        assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                            (item_id,))["state"] == "needs_you"
+
     def test_idle_notification_with_pending_bg_waits_external(self, tmp_path):
         path = self._transcript(tmp_path, [
             self._monitor_start("bbbb"), self._checkpoint("Waiting on the monitor.")])
@@ -1328,12 +1501,12 @@ class TestSuspendResume:
         config = {"workspace": {"root": tmp_path}}
         monkeypatch.setattr(work_launch, "personal_config", lambda: config)
         monkeypatch.setattr(terminal, "session_healthy",
-                            lambda k: {"alive": False, "claude_running": False})
+                            lambda k, agent="claude": {"alive": False, "agent_running": False})
         launcher = MagicMock()
-        monkeypatch.setattr(terminal, "launch_claude", launcher)
+        monkeypatch.setattr(terminal, "launch_agent", launcher)
         assert work_launch.resume_session(item_id) is True
         launcher.assert_called_once_with(f"work-{item_id}", str(tmp_path), sid, "", False,
-                                         config=config)
+                                         config=config, agent="claude", agent_session_id="")
 
     def test_resume_unknown_item_is_false(self, monkeypatch):
         from services import work_launch
@@ -1350,13 +1523,30 @@ class TestSuspendResume:
         config = {"workspace": {"root": tmp_path}}
         monkeypatch.setattr(work_launch, "personal_config", lambda: config)
         monkeypatch.setattr(terminal, "session_healthy",
-                            lambda k: {"alive": False, "claude_running": False})
+                            lambda k, agent="claude": {"alive": False, "agent_running": False})
         launcher = MagicMock()
-        monkeypatch.setattr(terminal, "launch_claude", launcher)
+        monkeypatch.setattr(terminal, "launch_agent", launcher)
         assert work_launch.resume_session(item_id) is True
         assert launcher.call_args[0][1] == str(tmp_path)
 
-    def test_resume_noop_while_session_alive(self, tmp_path, monkeypatch):
+    def test_resume_relaunches_when_pane_exists_without_agent(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+        import core.terminal as terminal
+        from services import work_launch
+        item_id = _mkitem("resume empty pane item")
+        sid = f"sid-resume-empty-{item_id}"
+        work_store.add_run(item_id, sid, f"work-{item_id}", str(tmp_path))
+        config = {"workspace": {"root": tmp_path}}
+        monkeypatch.setattr(work_launch, "personal_config", lambda: config)
+        monkeypatch.setattr(terminal, "session_healthy",
+                            lambda k, agent="claude": {"alive": True, "agent_running": False})
+        launcher = MagicMock()
+        monkeypatch.setattr(terminal, "launch_agent", launcher)
+        assert work_launch.resume_session(item_id) is True
+        launcher.assert_called_once_with(f"work-{item_id}", str(tmp_path), sid, "", False,
+                                         config=config, agent="claude", agent_session_id="")
+
+    def test_resume_noop_while_agent_running(self, tmp_path, monkeypatch):
         from unittest.mock import MagicMock
         import core.terminal as terminal
         from services import work_launch
@@ -1365,9 +1555,9 @@ class TestSuspendResume:
         monkeypatch.setattr(work_launch, "personal_config",
                             lambda: {"workspace": {"root": tmp_path}})
         monkeypatch.setattr(terminal, "session_healthy",
-                            lambda k: {"alive": True, "claude_running": True})
+                            lambda k, agent="claude": {"alive": True, "agent_running": True})
         launcher = MagicMock()
-        monkeypatch.setattr(terminal, "launch_claude", launcher)
+        monkeypatch.setattr(terminal, "launch_agent", launcher)
         assert work_launch.resume_session(item_id) is True
         launcher.assert_not_called()
 
@@ -1463,13 +1653,70 @@ class TestAskBtw:
         assert "no /btw answer" in out["error"]
         assert "Escape" not in pane.keys
 
+    def test_timeout_with_open_panel_closes_it(self, monkeypatch):
+        idle = ["● just output", "❯ "]
+        answering = _panel("capital of France?", ["· Answering…"], done=False)
+        pane = _FakePane([idle, answering])
+        _install_pane(monkeypatch, pane)
+        out = work_store.ask_btw("work-1", "capital of France?", timeout=0.2)
+        assert "no /btw answer" in out["error"]
+        assert "Escape" in pane.keys
+
+    def test_answer_to_another_question_closes_panel(self, monkeypatch):
+        idle = ["● just output", "❯ "]
+        stale = _panel("something else entirely", ["nope"])
+        pane = _FakePane([idle, stale])
+        _install_pane(monkeypatch, pane)
+        work_store.ask_btw("work-1", "capital of France?")
+        assert "Escape" in pane.keys
+
+
+class TestPaneHandover:
+    def test_close_btw_panel_is_a_noop_without_a_panel(self, monkeypatch):
+        pane = _FakePane([["● just output", "❯ "]])
+        _install_pane(monkeypatch, pane)
+        assert work_store.close_btw_panel("term-work-1") is True
+        assert pane.keys == []
+
+    def test_close_btw_panel_closes_an_open_one(self, monkeypatch):
+        open_panel = _panel("capital of France?", ["Paris"])
+        idle = ["● just output", "❯ "]
+        pane = _FakePane([open_panel, idle])
+        _install_pane(monkeypatch, pane)
+        assert work_store.close_btw_panel("term-work-1") is True
+        assert pane.keys == ["Escape"]
+
+    def test_close_btw_panel_reports_a_stuck_panel(self, monkeypatch):
+        pane = _FakePane([_panel("capital of France?", ["Paris"])])
+        _install_pane(monkeypatch, pane)
+        assert work_store.close_btw_panel("term-work-1") is False
+
+    def test_send_refuses_while_a_panel_swallows_keys(self, monkeypatch):
+        import subprocess
+        from unittest.mock import MagicMock
+        runner = MagicMock(return_value=subprocess.CompletedProcess([], 0, "", ""))
+        monkeypatch.setattr(work_store.subprocess, "run", runner)
+        monkeypatch.setattr(work_store, "close_btw_panel", lambda session: False)
+        assert work_store.tmux_send("work-1", "use the staging bucket") is False
+        assert not any("send-keys" in str(c) for c in runner.call_args_list)
+
+    def test_send_proceeds_once_the_panel_is_closed(self, monkeypatch):
+        import subprocess
+        from unittest.mock import MagicMock
+        runner = MagicMock(return_value=subprocess.CompletedProcess([], 0, "", ""))
+        monkeypatch.setattr(work_store.subprocess, "run", runner)
+        monkeypatch.setattr(work_store.time, "sleep", lambda s: None)
+        monkeypatch.setattr(work_store, "close_btw_panel", lambda session: True)
+        assert work_store.tmux_send("work-1", "use the staging bucket") is True
+        assert any("use the staging bucket" in str(c) for c in runner.call_args_list)
+
 
 class TestSideQuestion:
     def test_records_exchange(self, monkeypatch):
         item_id = _mkitem("side question item")
         work_store.add_run(item_id, f"sid-btw-{item_id}", f"work-{item_id}", "/tmp")
         db.execute("UPDATE work_items SET state = 'needs_you' WHERE id = ?", (item_id,))
-        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
         monkeypatch.setattr(work_store, "ask_btw", lambda key, q: {"answer": "Paris"})
         out = work_store.side_question(item_id, "  capital of\n France? ")
         assert out["answer"] == "Paris"
@@ -1483,7 +1730,7 @@ class TestSideQuestion:
     def test_dead_session_errors(self, monkeypatch):
         item_id = _mkitem("side question dead")
         work_store.add_run(item_id, f"sid-btwd-{item_id}", f"work-{item_id}", "/tmp")
-        monkeypatch.setattr(work_store, "claude_running", lambda k: False)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": False)
         out = work_store.side_question(item_id, "hello?")
         assert "no live Claude" in out["error"]
 
@@ -1495,7 +1742,7 @@ class TestSideQuestion:
     def test_failed_ask_records_nothing(self, monkeypatch):
         item_id = _mkitem("side question failed")
         work_store.add_run(item_id, f"sid-btwf-{item_id}", f"work-{item_id}", "/tmp")
-        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
         monkeypatch.setattr(work_store, "ask_btw", lambda key, q: {"error": "tmux session gone"})
         out = work_store.side_question(item_id, "hello?")
         assert out["error"] == "tmux session gone"
@@ -1528,6 +1775,22 @@ class TestIdleNotificationContinues:
     def test_permission_notification_is_not_an_idle_stop(self):
         assert work_store.is_idle_stop(
             "Notification", {"message": "Claude needs your permission to use Bash"}) is False
+
+    def test_operator_ask_without_a_question_mark_blocks(self):
+        for tail in ("Restarted. Send another code when ready — the prompt appears soon.",
+                     "Ready. Send me a fresh 6-digit code and I will write it in.",
+                     "I am blocked. Paste the admin password and I will continue.",
+                     "Waiting for your approval before the deploy.",
+                     "Let me know which tenant to use."):
+            assert work_store._blocked_on_operator(tail) is True, tail
+
+    def test_progress_tail_is_not_an_operator_ask(self):
+        for tail in ("Checkpoint: waiting on CI. The monitor fires when it finishes.",
+                     "All background work finished.",
+                     "Checkpoint: tests pass. Sent the branch to origin.",
+                     "Reply posted to the PR comment.",
+                     "Mac working tree already matches the target commit."):
+            assert work_store._blocked_on_operator(tail) is False, tail
 
     def test_api_error_tail_is_not_read_as_a_question(self):
         tail = ("API Error: 529 Overloaded. This is a server-side issue, usually "
@@ -1612,7 +1875,7 @@ class TestMissedAutocontinueSweep:
     def test_missed_decision_is_run_late(self, tmp_path, monkeypatch):
         from unittest.mock import MagicMock
         item_id, _, _ = self._stuck(tmp_path)
-        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
         sender = MagicMock(return_value=True)
         monkeypatch.setattr(work_store, "tmux_send", sender)
         actions = work_store.retry_missed_autocontinues(self._cutoff())
@@ -1625,7 +1888,7 @@ class TestMissedAutocontinueSweep:
     def test_sweep_runs_the_retry_pass(self, tmp_path, monkeypatch):
         from unittest.mock import MagicMock
         item_id, _, _ = self._stuck(tmp_path)
-        monkeypatch.setattr(work_store, "claude_running", lambda k: True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
         monkeypatch.setattr(work_store, "tmux_send", MagicMock(return_value=True))
         actions = work_store.sweep_stale_items()
         assert {"id": item_id, "action": "autocontinue_retry:continued"} in actions
@@ -1638,7 +1901,7 @@ class TestMissedAutocontinueSweep:
         action list.
         """
         from unittest.mock import MagicMock
-        monkeypatch.setattr(work_store, "claude_running", lambda k: live)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": live)
         monkeypatch.setattr(work_store, "tmux_send", MagicMock(return_value=True))
         actions = work_store.retry_missed_autocontinues(self._cutoff())
         assert [a for a in actions if a["id"] == item_id] == []

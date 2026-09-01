@@ -49,7 +49,7 @@ def test_launch_creates_session_and_resumes(client):
         calls.append({"key": key, "cwd": cwd, "sid": sid, "ctx": ctx,
                       "first_run": first_run, "config": config})
     with patch("core.terminal.launch_claude", side_effect=fake_launch), \
-         patch("core.terminal.session_healthy", return_value={"alive": False, "claude_running": False}):
+         patch("core.terminal.session_healthy", return_value={"alive": False, "agent_running": False}):
         r1 = c.post("/api/today/launch", json={"loop_type": "pr_comments_needs_reply", "ticket_key": "FRG-186"})
         assert r1.status_code == 200, r1.text
         key = r1.json()["key"]
@@ -69,7 +69,7 @@ def test_launch_creates_session_and_resumes(client):
 
     # if claude already running -> attach only, no relaunch
     with patch("core.terminal.launch_claude", side_effect=fake_launch), \
-         patch("core.terminal.session_healthy", return_value={"alive": True, "claude_running": True}):
+         patch("core.terminal.session_healthy", return_value={"alive": True, "agent_running": True}):
         r3 = c.post("/api/today/launch", json={"key": key})
         assert r3.status_code == 200
         assert r3.json()["status"] == "running"

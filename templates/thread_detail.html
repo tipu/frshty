@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<meta charset="utf-8">
+<title>Thread — frshty</title>
+<script src="/static/vendor/vue.global.prod.js"></script>
+<script src="/static/frshty-nav.js"></script>
+<script src="/static/frshty-shell.js"></script>
+<link rel="stylesheet" href="/static/frshty.css">
+<link rel="stylesheet" href="/static/frshty-v2.css">
+<script src="/static/frshty-usage.js"></script>
+</head>
+<body>
+<div id="app" v-cloak>
+<frshty-shell :features="features" :instance="instanceName" :counts="railCounts" :crumbs="crumbs">
+  <template #actions>
+    <div class="ln-segment">
+      <a class="ln-seg-btn" href="/tasks">Board</a>
+      <a class="ln-seg-btn on" href="/threads">Threads</a>
+      <a class="ln-seg-btn" href="/tasks?view=archive">Archive</a>
+    </div>
+  </template>
+
+  <div v-if="loadError">
+    <div class="ln-small" style="color:var(--ln-red)">{{ loadError }}</div>
+    <div class="ln-small" style="margin-top:6px">
+      <a class="ln-link" href="/threads">← all threads</a>
+      · <a class="ln-link" :href="'/tasks/' + rootId">open task #{{ rootId }}</a>
+    </div>
+  </div>
+
+  <template v-if="thread">
+    <div class="ln-hero">
+      <div>
+        <div class="ln-small ln-muted">
+          Thread · rooted at task <a class="ln-link" :href="'/tasks/' + thread.root_id">#{{ thread.root_id }}</a>
+          · <a class="ln-link" href="/threads">all threads</a>
+        </div>
+        <h1 class="ln-title" style="margin-top:4px">
+          {{ thread.title }}
+          <span class="ln-pill" :class="thread.status === 'complete' ? 'ln-pill-green' : 'ln-pill-blue'"
+                style="vertical-align:middle;margin-left:8px">{{ thread.status === 'complete' ? '✓ Complete' : '● Active' }}</span>
+          <span class="ln-pill ln-pill-amber" style="vertical-align:middle" v-if="thread.needs_you">{{ thread.needs_you }} needs you</span>
+        </h1>
+        <p class="ln-subtitle">{{ thread.objective }}</p>
+      </div>
+      <div style="display:flex;gap:8px">
+        <a class="ln-btn ln-btn-ghost" :href="'/tasks/' + thread.root_id">Open first task</a>
+      </div>
+    </div>
+
+    <div class="ln-kpi-row-4" style="margin-top:18px">
+      <div class="ln-kpi"><div class="ln-kpi-value">{{ thread.task_count }}</div><div class="ln-kpi-label">Tasks</div></div>
+      <div class="ln-kpi">
+        <div class="ln-kpi-value" :style="thread.needs_you ? 'color:var(--ln-amber)' : ''">{{ thread.needs_you }}</div>
+        <div class="ln-kpi-label">Needs you</div>
+      </div>
+      <div class="ln-kpi"><div class="ln-kpi-value">{{ thread.done_count }} / {{ thread.task_count }}</div><div class="ln-kpi-label">Complete</div></div>
+      <div class="ln-kpi"><div class="ln-kpi-value">{{ thread.artifact_count }}</div><div class="ln-kpi-label">Artifacts</div></div>
+    </div>
+
+    <div class="ln-thread-grid" style="margin-top:22px">
+      <div>
+        <div class="ln-section-head">
+          <div>
+            <h2 class="ln-section-title">Tasks in this thread</h2>
+            <p class="ln-section-sub">Newest first. Each task keeps its own run history and terminal.</p>
+          </div>
+        </div>
+
+        <form @submit.prevent="launch" class="ln-task-compose" style="margin-bottom:14px">
+          <div>
+            <input class="ln-input" v-model="launchText" :disabled="!canLaunch || launchBusy"
+                   placeholder="What should happen next in this thread?" />
+            <div class="ln-task-compose-opts">
+              <span class="ln-chipsel">agent:
+                <select v-model="launchAgent" :disabled="!canLaunch || launchBusy">
+                  <option v-for="a in agents" :key="a" :value="a">{{ a }}</option>
+                </select>
+              </span>
+              <span class="ln-chipsel" v-for="p in visibleProjects" :key="p.key"
+                    :class="{ on: launchContexts.includes(p.key) }" :title="p.root"
+                    @click="toggleContext(p.key)">{{ p.key }}</span>
+              <span class="ln-chipsel" v-if="extraProjects.length" @click="moreOpen = !moreOpen">{{ moreOpen ? '− less' : '+ context' }}</span>
+              <span class="ln-chipsel" v-if="slackAvailable" :class="{ on: launchSlack }"
+                    @click="launchSlack = !launchSlack">slack_int</span>
+              <span class="ln-accent ln-small" v-if="canLaunch">✦ continues task #{{ thread.continue_from }} — its summary and artifacts are included</span>
+              <span class="ln-hint" v-else>finish a task in this thread before launching the next one</span>
+            </div>
+          </div>
+          <button type="submit" class="ln-btn ln-btn-primary" :disabled="!canLaunch || launchBusy">↗ Launch in thread</button>
+        </form>
+        <div class="ln-small" style="color:var(--ln-red)" v-if="launchError">{{ launchError }}</div>
+
+        <div class="ln-tl">
+          <div class="ln-tl-item" :class="t.state" v-for="t in orderedTasks" :key="t.id">
+            <div class="ln-tl-node"></div>
+            <article class="ln-task" :class="t.state">
+              <div class="ln-task-top">
+                <a class="ln-task-title" :href="'/tasks/' + t.id">{{ t.objective }}</a>
+                <div class="ln-task-id">#{{ t.id }}</div>
+              </div>
+              <div class="ln-task-note" v-if="note(t)">{{ note(t) }}</div>
+              <div class="ln-task-foot">
+                <span class="ln-pill" :class="statePill(t.state)">{{ stateLabel(t) }}</span>
+                <span v-if="t.last_provider">{{ t.last_provider }}</span>
+                <span v-if="t.artifact_count">· {{ t.artifact_count }} artifact{{ t.artifact_count === 1 ? '' : 's' }}</span>
+                <span class="ln-tag" v-for="tag in tags(t)" :key="tag">{{ tag }}</span>
+                <span class="ln-right">
+                  <a class="ln-btn ln-btn-sm ln-btn-ghost" v-if="t.summary" :href="'/tasks/' + t.id + '/summary'" target="_blank">Summary</a>
+                  <a class="ln-btn ln-btn-sm ln-btn-ghost" v-if="t.last_tmux_key && t.state !== 'done'" :href="'/tasks/' + t.id + '/terminal'" target="_blank">Terminal</a>
+                  <span>{{ $relTime(t.updated_at) }}</span>
+                </span>
+              </div>
+            </article>
+          </div>
+        </div>
+      </div>
+
+      <aside style="display:flex;flex-direction:column;gap:12px">
+        <div class="ln-card">
+          <div class="ln-card-head">Thread summary</div>
+          <div class="ln-card-body ln-summary">
+            <p v-if="thread.summary">{{ thread.summary }}</p>
+            <p class="ln-muted" v-else>No task in this thread has written a summary yet.</p>
+            <div class="ln-small ln-muted" style="margin-top:10px" v-if="thread.summary_from">
+              Latest synthesized state, from task
+              <a class="ln-link" :href="'/tasks/' + thread.summary_from">#{{ thread.summary_from }}</a>
+            </div>
+          </div>
+        </div>
+
+        <div class="ln-card">
+          <div class="ln-card-head">
+            Artifacts
+            <span class="ln-small ln-muted" style="margin-left:auto;font-weight:400">
+              {{ thread.artifact_count }} across {{ artifactTaskCount }} task{{ artifactTaskCount === 1 ? '' : 's' }}
+            </span>
+          </div>
+          <div class="ln-card-body">
+            <div class="ln-artifact" v-for="a in thread.artifacts" :key="a.id">
+              <div class="ln-artifact-icon">{{ ext(a.path) }}</div>
+              <div style="min-width:0">
+                <a class="ln-artifact-name" :href="'/api/work/artifact_file/' + a.id" target="_blank" :title="a.path">{{ base(a.path) }}</a>
+                <div class="ln-artifact-meta">#{{ a.work_item_id }}<span v-if="a.note"> · {{ a.note }}</span></div>
+              </div>
+            </div>
+            <div class="ln-small ln-muted" v-if="!thread.artifacts.length">No artifacts recorded in this thread.</div>
+          </div>
+        </div>
+
+        <div class="ln-note">
+          <strong>The thread does not run.</strong> It holds the shared outcome and the compressed
+          context. Every agent conversation still belongs to a task.
+        </div>
+      </aside>
+    </div>
+  </template>
+</frshty-shell>
+</div>
+<script>
+const STATE_LABELS = {
+  needs_you: "● Needs you", agent_working: "● Working", waiting_external: "○ Waiting",
+  failed_stale: "● Stale", done: "✓ Done",
+};
+const STATE_PILLS = {
+  needs_you: "ln-pill-amber", agent_working: "ln-pill-blue", waiting_external: "ln-pill-ghost",
+  failed_stale: "ln-pill-red", done: "ln-pill-green",
+};
+frshtyApp({
+  data() {
+    return {
+      features: {}, instanceName: "", thread: null, loadError: "", railNeedsYou: 0,
+      projects: [], agents: ["claude"], slackAvailable: false, personalLoaded: false,
+      launchText: "", launchAgent: localStorage.getItem("workAgent") || "claude",
+      launchContexts: [], launchSlack: false, launchBusy: false, launchError: "",
+      moreOpen: false,
+    };
+  },
+  computed: {
+    rootId() { return parseInt(location.pathname.split("/").pop(), 10); },
+    railCounts() { return { tasks: this.railNeedsYou }; },
+    crumbs() {
+      return ["Work", "Tasks", "Threads", this.thread ? this.thread.title : "#" + this.rootId];
+    },
+    canLaunch() {
+      return !!(this.thread && this.thread.continue_from && this.personalLoaded);
+    },
+    orderedTasks() {
+      return this.thread ? [...this.thread.tasks].reverse() : [];
+    },
+    artifactTaskCount() {
+      if (!this.thread) return 0;
+      return new Set(this.thread.artifacts.map(a => a.work_item_id)).size;
+    },
+    primaryProjects() {
+      const order = ["aimyable", "quill", "clarivis", "algotrader2"];
+      return order.map(k => this.projects.find(p => p.key === k)).filter(Boolean);
+    },
+    extraProjects() {
+      const primary = new Set(this.primaryProjects.map(p => p.key));
+      return this.projects.filter(p => !primary.has(p.key));
+    },
+    visibleProjects() {
+      if (this.moreOpen) return [...this.primaryProjects, ...this.extraProjects];
+      return [...this.primaryProjects,
+              ...this.extraProjects.filter(p => this.launchContexts.includes(p.key))];
+    },
+  },
+  methods: {
+    stateLabel(t) {
+      if (t.state === "done") return t.operator_confirmed ? "✓ Confirmed" : "✓ Done";
+      return STATE_LABELS[t.state] || t.state;
+    },
+    statePill(state) { return STATE_PILLS[state] || "ln-pill-ghost"; },
+    note(t) {
+      const text = t.state === "done"
+        ? (t.summary || t.current_checkpoint || "")
+        : (t.stop_reason || t.current_checkpoint || t.summary || "");
+      return text.length > 240 ? text.slice(0, 240).trimEnd() + "…" : text;
+    },
+    tags(t) { return (t.tags || "").split(",").filter(Boolean); },
+    base(path) { return (path || "").split("/").pop(); },
+    ext(path) {
+      const name = this.base(path);
+      const dot = name.lastIndexOf(".");
+      if (dot < 0) return "FILE";
+      return name.slice(dot + 1).toUpperCase().slice(0, 4);
+    },
+    toggleContext(key) {
+      const i = this.launchContexts.indexOf(key);
+      if (i >= 0) this.launchContexts.splice(i, 1); else this.launchContexts.push(key);
+    },
+    async loadConfig() {
+      try {
+        const cfg = await (await fetch("/api/config")).json();
+        this.features = cfg.features || {};
+        this.instanceName = (cfg.job && cfg.job.key) || "";
+      } catch (e) {}
+    },
+    async refresh() {
+      try {
+        const r = await fetch("/api/work/threads/" + this.rootId);
+        if (r.status === 404) { this.loadError = "No thread is rooted at task #" + this.rootId + "."; return; }
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const d = await r.json();
+        this.thread = d;
+        this.railNeedsYou = d.rail_needs_you || 0;
+        this.projects = d.projects || [];
+        this.agents = d.agents && d.agents.length ? d.agents : ["claude"];
+        if (!this.agents.includes(this.launchAgent)) this.launchAgent = this.agents[0];
+        this.slackAvailable = !!d.slack_available;
+        this.personalLoaded = !!d.personal_loaded;
+        this.loadError = "";
+      } catch (e) {
+        this.loadError = "Unable to load this thread: " + e.message;
+      }
+    },
+    async launch() {
+      if (!this.canLaunch) return;
+      this.launchError = ""; this.launchBusy = true;
+      try {
+        const r = await fetch("/api/work/threads/" + this.rootId + "/tasks", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: this.launchText, agent: this.launchAgent,
+                                 contexts: this.launchContexts, slack: this.launchSlack }),
+        });
+        const d = await r.json();
+        if (!r.ok) { this.launchError = d.error || "launch failed (HTTP " + r.status + ")"; return; }
+        localStorage.setItem("workAgent", this.launchAgent);
+        this.launchText = ""; this.launchContexts = []; this.launchSlack = false;
+        await this.refresh();
+      } catch (e) {
+        this.launchError = "request failed: " + e.message + " — is frshty up?";
+      } finally {
+        this.launchBusy = false;
+      }
+    },
+  },
+  mounted() {
+    this.loadConfig();
+    this.refresh();
+    setInterval(() => this.refresh(), 15000);
+  },
+}).mount("#app");
+</script>
+</body>
+</html>

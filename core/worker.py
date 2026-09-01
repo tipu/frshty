@@ -239,7 +239,11 @@ class WorkerPool:
                 if self._stop.wait(self.poll_interval):
                     return
                 continue
-            self._run_one(job)
+            try:
+                self._run_one(job)
+            except Exception as e:
+                log.emit("worker_run_error", f"w{worker_idx}: job_id={job['id']}: "
+                         f"{type(e).__name__}: {e}")
 
     def _run_one(self, job: dict) -> None:
         import core.state as state

@@ -134,8 +134,8 @@ def _identity_block_reason(config: dict, repo_path, branch: str) -> str:
     The startup gate proves the identity once. This is the only check that
     looks at the commits themselves, so it is the one that catches an identity
     changed after startup — by a human, by the agent, or by a `--author` flag.
-    Only commits this branch adds on top of its base are examined; history
-    inherited from the base belongs to whoever wrote it."""
+    Only the commits this push would publish are examined; history the remote
+    already holds belongs to whoever wrote it."""
     git_cfg = config.get("git") or {}
     name, email = git_cfg.get("name", ""), git_cfg.get("email", "")
     if not (name and email):
@@ -145,18 +145,32 @@ def _identity_block_reason(config: dict, repo_path, branch: str) -> str:
     # A PR worktree is named after the branch slug, not the repo, so the
     # directory name is not a safe key for a per-repo base override. The shared
     # git directory always sits inside the canonical checkout.
-    from core.git_util import git_common_dir
+    from core.git_util import git_common_dir, run_git
     common = git_common_dir(repo_path)
     repo_name = Path(common).parent.name if common else repo_path.name
     base = base_branch_for(config, repo_name)
+    # Two exclusions, and this check needs both. A push publishes
+    # origin/<branch>..HEAD, so commits the remote branch already holds are not
+    # this push's to answer for: a long-lived branch collects CI-bot commits
+    # and commits the same person made under another git identity, and judging
+    # them again blocks every later push. Commits already on the base are not
+    # this push's either, even when the push does publish them — merging the
+    # base carries other people's work by design, and base sync would never
+    # complete. What is left is what this push adds and nobody has seen.
+    ref = f"origin/{branch}"
+    on_remote = run_git(repo_path, ["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+                        allowed_codes=(0, 1)).returncode == 0
+    if not on_remote:
+        ref = f"origin/{base}"
     result = subprocess.run(
-        ["git", "log", f"origin/{base}..HEAD", "--format=%h%x00%an <%ae>%x00%cn <%ce>"],
+        ["git", "log", f"{ref}..HEAD", "--not", f"origin/{base}",
+         "--format=%h%x00%an <%ae>%x00%cn <%ce>"],
         cwd=str(repo_path), capture_output=True, text=True, timeout=60,
     )
     if result.returncode != 0:
         # Fail closed. An unreadable range is not evidence of correct authorship,
         # and a wrong author cannot be taken back once it is on the remote.
-        return (f"cannot read origin/{base}..HEAD in {repo_name}, so the "
+        return (f"cannot read {ref}..HEAD in {repo_name}, so the "
                 f"authorship of this push is unknown: "
                 f"{(result.stderr or '').strip()[:200]}")
     wrong = []
@@ -777,10 +791,13 @@ class GitHubPlatform(_CIMonitorMixin):
             out.append(pr)
         return out
 
-    _REVIEW_THREADS_QUERY = (
+    _REVIEW_COMMENTS_QUERY = (
         "query($owner:String!,$name:String!,$number:Int!){"
         " repository(owner:$owner,name:$name){"
         " pullRequest(number:$number){"
+        " reviews(first:100){nodes{"
+        " databaseId body url submittedAt updatedAt state author{login}"
+        "}}"
         " reviewThreads(first:100){nodes{"
         " id isResolved"
         " comments(first:100){nodes{"
@@ -789,18 +806,22 @@ class GitHubPlatform(_CIMonitorMixin):
         "}}}}}}}"
     )
 
-    def _review_threads(self, repo: str, pr_id: int) -> list[dict]:
+    def _review_data(self, repo: str, pr_id: int) -> dict:
         full = self._resolve_repo(repo)
         owner, _, name = full.partition("/")
-        data = self._graphql(self._REVIEW_THREADS_QUERY, owner=owner, name=name, number=pr_id)
+        data = self._graphql(self._REVIEW_COMMENTS_QUERY, owner=owner, name=name, number=pr_id)
         if not data:
-            return []
-        pr = (((data.get("data") or {}).get("repository") or {}).get("pullRequest") or {})
+            return {}
+        return (((data.get("data") or {}).get("repository") or {}).get("pullRequest") or {})
+
+    def _review_threads(self, repo: str, pr_id: int) -> list[dict]:
+        pr = self._review_data(repo, pr_id)
         return (pr.get("reviewThreads") or {}).get("nodes") or []
 
     def get_pr_comments(self, repo: str, pr_id: int) -> list[dict]:
         out: list[dict] = []
-        for t in self._review_threads(repo, pr_id):
+        pr = self._review_data(repo, pr_id)
+        for t in (pr.get("reviewThreads") or {}).get("nodes") or []:
             resolved = bool(t.get("isResolved"))
             thread_id = t.get("id", "")
             for c in (t.get("comments") or {}).get("nodes") or []:
@@ -819,8 +840,38 @@ class GitHubPlatform(_CIMonitorMixin):
                     "updated_at": c.get("updatedAt", created),
                     "parent_id": (c.get("replyTo") or {}).get("databaseId"),
                     "resolved": resolved,
+                    "resolvable": True,
                     "thread_id": thread_id,
                 })
+        # A review can carry both inline comments and a top-level body. GitHub
+        # exposes only the inline comments as reviewThreads; omitting reviews
+        # here silently drops general feedback submitted in the same review.
+        # General review bodies cannot be resolved through
+        # resolveReviewThread, so callers mark them processed after the code
+        # is pushed instead of attempting an impossible mutation.
+        for review in (pr.get("reviews") or {}).get("nodes") or []:
+            body = review.get("body", "")
+            if not body.strip():
+                continue
+            created = review.get("submittedAt", "")
+            out.append({
+                "id": review.get("databaseId"),
+                "body": body,
+                "author_id": (review.get("author") or {}).get("login", ""),
+                "author_name": (review.get("author") or {}).get("login", ""),
+                "path": None,
+                "line": None,
+                "diff_hunk": "",
+                "html_url": review.get("url", ""),
+                "created_on": created,
+                "created_at": created,
+                "updated_at": review.get("updatedAt", created),
+                "parent_id": None,
+                "resolved": review.get("state") == "DISMISSED",
+                "resolvable": False,
+                "thread_id": "",
+                "comment_kind": "review_body",
+            })
         return out
 
     def get_pr_diff(self, repo: str, pr_id: int) -> str | None:

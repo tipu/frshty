@@ -1,9 +1,11 @@
 import os
 
 from fastapi import APIRouter
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+                               RedirectResponse, Response)
 
 import core.db as db
+import core.terminal as terminal
 from services import work_debrief, work_launch, work_store, work_tags
 from web.pages import _template
 
@@ -17,17 +19,81 @@ def _fresh(resp: HTMLResponse) -> HTMLResponse:
     return resp
 
 
-@router.get("/work", response_class=HTMLResponse)
-def work_page():
+@router.get("/tasks", response_class=HTMLResponse)
+def tasks_page():
     return _fresh(_template("work.html"))
+
+
+@router.get("/threads", response_class=HTMLResponse)
+def threads_page():
+    return _fresh(_template("threads.html"))
+
+
+@router.get("/threads/{root_id}", response_class=HTMLResponse)
+def thread_detail_page(root_id: int):
+    return _fresh(_template("thread_detail.html"))
+
+
+@router.get("/work")
+def work_page():
+    return RedirectResponse("/tasks", status_code=308)
 
 
 DONE_PAGE_SIZE = 20
 
 
+@router.get("/api/work/threads")
+def api_work_threads():
+    return {"threads": work_store.threads(),
+            "needs_you": work_store.needs_you_count()}
+
+
+@router.get("/api/work/threads/{root_id}")
+def api_work_thread(root_id: int):
+    result = work_store.thread_detail(root_id)
+    if "error" in result:
+        return JSONResponse(result, status_code=404)
+    result["rail_needs_you"] = work_store.needs_you_count()
+    result["personal_loaded"] = work_launch.personal_config() is not None
+    result["projects"] = work_launch.project_entries()
+    result["agents"] = list(terminal.AGENTS)
+    result["slack_available"] = work_launch.slack_available()
+    return result
+
+
+@router.post("/api/work/threads/{root_id}/tasks")
+def api_work_thread_task(root_id: int, body: dict):
+    """Launch a task into a thread.
+
+    Thread membership is the follow-up chain, so a new member has to continue
+    an existing one. The newest completed task is the source: its summary and
+    artifacts are the compressed context the design asks a thread to pass on."""
+    thread = work_store.thread_detail(root_id)
+    if "error" in thread:
+        return JSONResponse(thread, status_code=404)
+    if thread["continue_from"] is None:
+        return JSONResponse(
+            {"error": "no completed task in this thread yet; a new task continues a completed one"},
+            status_code=409)
+    result = work_launch.launch_followup(thread["continue_from"], body.get("text") or "",
+                                         cwd=body.get("cwd") or "",
+                                         contexts=body.get("contexts") or [],
+                                         slack=bool(body.get("slack")),
+                                         agent=body.get("agent") or "claude")
+    if "error" in result:
+        status = 503 if "personal instance" in result["error"] else (
+            500 if "launch failed" in result["error"] else 400)
+        return JSONResponse(result, status_code=status)
+    return result
+
+
 @router.get("/api/work/items")
-def api_work_items(q: str = "", tags: str = "", done_page: int = 1):
-    groups = work_store.grouped_items(q=q, tags=tags)
+def api_work_items(q: str = "", tags: str = "", done_page: int = 1, archive: int = 0):
+    groups = work_store.grouped_items(q=q, tags=tags, all_done=bool(archive))
+    threads = work_store.thread_map()
+    for rows in groups.values():
+        for row in rows:
+            row["thread"] = threads.get(row["id"])
     counts = {g: len(rows) for g, rows in groups.items()}
     done_pages = max(1, -(-counts["done"] // DONE_PAGE_SIZE))
     done_page = min(max(1, done_page), done_pages)
@@ -38,6 +104,7 @@ def api_work_items(q: str = "", tags: str = "", done_page: int = 1):
             "done_page": done_page, "done_pages": done_pages,
             "personal_loaded": work_launch.personal_config() is not None,
             "projects": work_launch.project_entries(),
+            "agents": list(terminal.AGENTS),
             "slack_available": work_launch.slack_available()}
 
 
@@ -54,7 +121,8 @@ def api_work_action(item_id: int, body: dict):
 def api_work_intake(body: dict):
     result = work_launch.launch(body.get("text") or "", cwd=body.get("cwd") or "",
                                 contexts=body.get("contexts") or [],
-                                slack=bool(body.get("slack")))
+                                slack=bool(body.get("slack")),
+                                agent=body.get("agent") or "claude")
     if "error" in result:
         status = 503 if "personal instance" in result["error"] else (
             500 if "launch failed" in result["error"] else 400)
@@ -87,7 +155,8 @@ def api_work_followup(item_id: int, body: dict):
     result = work_launch.launch_followup(item_id, body.get("text") or "",
                                          cwd=body.get("cwd") or "",
                                          contexts=body.get("contexts") or [],
-                                         slack=bool(body.get("slack")))
+                                         slack=bool(body.get("slack")),
+                                         agent=body.get("agent") or "claude")
     if "error" in result:
         status = 503 if "personal instance" in result["error"] else (
             500 if "launch failed" in result["error"] else 400)
@@ -102,19 +171,49 @@ def api_work_detail(item_id: int):
         return JSONResponse(result, status_code=404)
     result["followups"] = work_debrief.followups_for(item_id)
     result["projects"] = work_launch.project_entries()
+    result["agents"] = list(terminal.AGENTS)
     result["slack_available"] = work_launch.slack_available()
     result["system_prompt"] = work_launch.read_system_prompt(result["runs"])
+    result["thread"] = work_store.thread_map().get(item_id)
+    result["needs_you"] = work_store.needs_you_count()
     return result
 
 
-@router.get("/work/{item_id}", response_class=HTMLResponse)
-def work_detail_page(item_id: int):
+@router.get("/api/work/items/{item_id}/transcript-image/{image_id}")
+def api_work_transcript_image(item_id: int, image_id: str):
+    run = db.query_one(
+        "SELECT id, transcript_path, provider, cwd, started_at, agent_session_id "
+        "FROM work_runs WHERE work_item_id = ? ORDER BY id DESC LIMIT 1", (item_id,))
+    image = work_store.transcript_image(
+        work_store.resolve_transcript_path(run), image_id) if run else None
+    if image is None:
+        return JSONResponse({"error": "transcript image not found"}, status_code=404)
+    data, media_type = image
+    return Response(content=data, media_type=media_type, headers={
+        "Cache-Control": "private, max-age=3600",
+        "Content-Security-Policy": "sandbox",
+        "X-Content-Type-Options": "nosniff",
+    })
+
+
+@router.get("/tasks/{item_id}", response_class=HTMLResponse)
+def task_detail_page(item_id: int):
     return _fresh(_template("work_detail.html"))
 
 
-@router.get("/work/{item_id}/terminal", response_class=HTMLResponse)
-def work_terminal_page(item_id: int):
+@router.get("/tasks/{item_id}/terminal", response_class=HTMLResponse)
+def task_terminal_page(item_id: int):
     return _fresh(_template("work_terminal.html"))
+
+
+@router.get("/work/{item_id}")
+def work_detail_page(item_id: int):
+    return RedirectResponse(f"/tasks/{item_id}", status_code=308)
+
+
+@router.get("/work/{item_id}/terminal")
+def work_terminal_page(item_id: int):
+    return RedirectResponse(f"/tasks/{item_id}/terminal", status_code=308)
 
 
 
@@ -128,9 +227,14 @@ def api_work_artifacts(q: str = ""):
     return {"artifacts": work_store.find_artifacts(q)}
 
 
-@router.get("/work/{item_id}/summary", response_class=HTMLResponse)
-def work_summary_page(item_id: int):
+@router.get("/tasks/{item_id}/summary", response_class=HTMLResponse)
+def task_summary_page(item_id: int):
     return _fresh(_template("work_summary.html"))
+
+
+@router.get("/work/{item_id}/summary")
+def work_summary_page(item_id: int):
+    return RedirectResponse(f"/tasks/{item_id}/summary", status_code=308)
 
 
 @router.get("/api/work/items/{item_id}/summary")
@@ -147,14 +251,21 @@ def api_work_summary(item_id: int):
             "followups": work_debrief.followups_for(item_id)}
 
 
+_SCRATCH_ROOT = "/tmp/"
+
+
 def _artifact_roots(artifact_id: int) -> list[str]:
-    roots = ["/tmp/"]
+    roots = [_SCRATCH_ROOT]
     rows = db.query_all(
         "SELECT r.cwd FROM work_artifacts a "
         "JOIN work_runs r ON r.work_item_id = a.work_item_id "
         "WHERE a.id = ? AND r.cwd != ''", (artifact_id,))
-    for r in rows:
-        roots.append(os.path.realpath(r["cwd"]) + os.sep)
+    candidates = [r["cwd"] for r in rows]
+    candidates += [e["root"] for e in work_launch.project_entries() if e["root"]]
+    for path in candidates:
+        root = os.path.realpath(path) + os.sep
+        if root not in roots:
+            roots.append(root)
     return roots
 
 
@@ -187,7 +298,8 @@ def api_work_debrief(item_id: int):
 def api_followup_send(followup_id: int, body: dict):
     result = work_debrief.send_followup(followup_id, text=(body.get("text") or ""),
                                         contexts=body.get("contexts") or [],
-                                        slack=bool(body.get("slack")))
+                                        slack=bool(body.get("slack")),
+                                        agent=body.get("agent") or "claude")
     if "error" in result:
         return JSONResponse(result, status_code=409)
     return result

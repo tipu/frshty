@@ -3,8 +3,7 @@
 <head>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <meta charset="utf-8">
-<title>Work — frshty</title>
-<script src="/static/tailwind.js"></script>
+<title>Tasks — frshty</title>
 <script src="/static/vendor/vue.global.prod.js"></script>
 <script src="/static/frshty-nav.js"></script>
 <script src="/static/frshty-shell.js"></script>
@@ -13,137 +12,210 @@
 <link rel="stylesheet" href="/static/frshty.css">
 <link rel="stylesheet" href="/static/frshty-v2.css">
 <style>
-.wgroup { margin-bottom: 24px; }
-.wcard { background: #16161e; border: 1px solid #2a2a35; border-radius: 8px; padding: 12px 16px; margin: 8px 0; }
-.wcard.needs { border-left: 3px solid #fca5a5; }
-.wcard.working { border-left: 3px solid #93c5fd; }
-.wcard.waiting { border-left: 3px solid #fde047; }
-.wcard.stale { border-left: 3px solid #f97316; }
-.wcard.done { border-left: 3px solid #86efac; opacity: 0.7; }
-.wmeta { font-size: 11px; color: #888; margin-top: 4px; }
-.wreason { font-size: 12px; color: #fbbf24; margin-top: 6px; }
-.wbtn { font-size: 11px; padding: 2px 10px; border-radius: 4px; background: #1e3a5f; color: #93c5fd; margin-right: 6px; cursor: pointer; }
-.wintake { width: 100%; background: #101018; border: 1px solid #2a2a35; border-radius: 8px; padding: 10px 14px; color: #e0e0e0; }
-.wsum { white-space: pre-wrap; font-size: 13px; color: #c9c9d1; background: #101018; border: 1px solid #2a2a35; border-radius: 6px; padding: 8px 12px; margin-top: 6px; }
-.wtag { font-size: 11px; padding: 1px 10px; border-radius: 9999px; cursor: pointer; background: #16161e; border: 1px solid #2a2a35; color: #9ca3af; user-select: none; }
-.wtag:hover { border-color: #4b5563; color: #d1d5db; }
-.wtag.on { background: #1e3a5f; border-color: #3b82f6; color: #93c5fd; }
+.wintake { width: 100%; background: var(--ln-bg); border: 1px solid var(--ln-border-hi); border-radius: 6px; padding: 7px 10px; color: var(--ln-text); font-size: 12.5px; }
+.wsum { white-space: pre-wrap; font-size: 12.5px; color: var(--ln-text-2); background: var(--ln-bg); border: 1px solid var(--ln-border); border-radius: 6px; padding: 8px 12px; margin-top: 8px; }
 </style>
 <script src="/static/frshty-usage.js"></script>
 </head>
-<body class="bg-[#0b0b10] text-gray-200">
-<div id="boot-error" class="max-w-[1600px] mx-auto px-6 py-3 text-sm" style="background:#7f1d1d;color:#fca5a5;">
+<body>
+<div id="boot-error" style="padding:12px 36px;font-size:13px;background:#7f1d1d;color:#fca5a5;">
   The board application failed to start. Hard-refresh this page (Ctrl/Cmd+Shift+R). If this banner stays, the frshty daemon or its static assets are broken.
 </div>
-<div id="app" class="max-w-[1600px] mx-auto px-6 py-6">
-  <div v-if="connError" class="text-sm px-4 py-2 mb-4 rounded" style="background:#7f1d1d;color:#fca5a5;">
-    {{ connError }}
+<div id="app" v-cloak>
+<frshty-shell :features="features" :instance="instanceName" :counts="railCounts" :crumbs="crumbs">
+  <template #actions>
+    <div class="ln-segment">
+      <a class="ln-seg-btn" :class="{ on: view === 'board' }" href="/tasks">Board</a>
+      <a class="ln-seg-btn" href="/threads">Threads</a>
+      <a class="ln-seg-btn" :class="{ on: view === 'archive' }" href="/tasks?view=archive">Archive</a>
+    </div>
+    <button class="ln-btn ln-btn-ghost" title="Filter view (not wired)">Filter</button>
+    <button class="ln-btn ln-btn-ghost" title="Display options (not wired)">Display</button>
+  </template>
+
+  <div class="ln-small" style="color:var(--ln-red)" v-if="connError">{{ connError }}</div>
+
+  <div class="ln-hero">
+    <div>
+      <h1 class="ln-title">{{ view === 'archive' ? 'Archive' : 'Tasks' }}</h1>
+      <p class="ln-subtitle" v-if="view === 'archive'">
+        Every completed task, with no time limit. The board only shows the recent ones.
+      </p>
+      <p class="ln-subtitle" v-else>
+        Launch a standalone task. Group it into a thread only when the work grows past one run.
+      </p>
+    </div>
+    <input class="ln-input" style="min-width:280px" v-model="searchText" @input="onSearch"
+           placeholder="Search past tasks…" />
   </div>
-  <div class="flex items-center justify-between mb-6 gap-4">
-    <h1 class="text-xl font-bold">Work</h1>
-    <input class="wintake" style="max-width:340px" v-model="searchText" @input="onSearch"
-           placeholder="Search past work items…" />
-    <span class="text-xs text-gray-500" v-if="!personalLoaded">personal instance not loaded — read-only</span>
-  </div>
-  <div class="mb-4 flex flex-wrap gap-2 text-xs text-gray-400 items-center" v-if="allTags.length">
-    <span class="text-gray-600">tags:</span>
-    <span v-for="t in allTags" :key="t" class="wtag" :class="{ on: tagFilter.includes(t) }"
+
+  <div class="ln-small ln-muted" v-if="!personalLoaded">personal instance not loaded — read-only</div>
+
+  <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center" v-if="allTags.length">
+    <span class="ln-hint">tags</span>
+    <span v-for="t in allTags" :key="t" class="ln-chipsel" :class="{ on: tagFilter.includes(t) }"
           @click="toggleTag(t)">{{ t }}</span>
-    <span v-if="tagFilter.length" class="cursor-pointer underline text-gray-500" @click="clearTags">clear</span>
+    <button class="ln-link ln-small" v-if="tagFilter.length" @click="clearTags">clear</button>
   </div>
-  <form @submit.prevent="intake" class="mb-8">
-    <input class="wintake" v-model="intakeText" :disabled="!personalLoaded || intakeBusy"
-           placeholder="Describe an outcome, not a report (say 'get PR #123 merged', not 'PR stats'). Enter launches a run." />
-    <div class="mt-2 flex flex-wrap gap-3 text-xs text-gray-400" v-if="projects.length || slackAvailable">
-      <label v-for="p in visibleProjects" :key="p.key" class="cursor-pointer" :title="p.root">
-        <input type="checkbox" v-model="intakeContexts" :value="p.key" :disabled="!personalLoaded || intakeBusy" />
-        {{ p.key }}
-      </label>
-      <label v-if="slackAvailable" class="cursor-pointer" title="tell the run to read the slack_int capture archive for the selected project's org">
-        <input type="checkbox" v-model="intakeSlack" :disabled="!personalLoaded || intakeBusy" />
-        slack_int
-      </label>
-      <span v-if="extraProjects.length && !moreOpen" class="cursor-pointer underline" @click="moreOpen = true">more ▸</span>
-      <span v-if="extraProjects.length && moreOpen" class="cursor-pointer underline" @click="moreOpen = false">less ▾</span>
-    </div>
-    <button type="submit" class="hidden" aria-hidden="true" tabindex="-1"></button>
-    <div class="text-xs text-red-400 mt-2" v-if="intakeError">{{ intakeError }}</div>
-    <div class="text-xs text-gray-500 mt-2" v-if="intakeBusy">launching…</div>
-  </form>
-  <div class="wgroup" v-for="g in groupOrder" :key="g" v-show="groups[g] && groups[g].length">
-    <h2 class="text-sm font-bold uppercase tracking-wide text-gray-400 mb-2">
-      {{ label(g) }} <span class="text-gray-600">({{ count(g) }})</span>
-    </h2>
-    <div :class="['wcard', cls[g]]" v-for="it in groups[g]" :key="it.id">
-      <div class="flex items-center justify-between">
-        <a class="font-medium underline decoration-gray-600 hover:decoration-gray-300" :href="'/work/' + it.id">{{ it.objective }}</a>
-        <div class="text-xs text-gray-500">#{{ it.id }}</div>
-      </div>
-      <div class="text-xs mt-1" v-if="g === 'done'"
-           :style="it.operator_confirmed ? 'color:#86efac' : 'color:#fde047'">
-        {{ it.operator_confirmed ? 'done — you confirmed' : 'done — agent-reported, not verified by you' }}
-      </div>
-      <div class="wreason" v-if="it.stop_reason" v-html="lk(it.stop_reason)"></div>
-      <div class="mt-1" v-if="it.summary">
-        <span class="wbtn" @click="sumOpen[it.id] = !sumOpen[it.id]">{{ sumOpen[it.id] ? "summary ▾" : "summary ▸" }}</span>
-        <a class="wbtn" style="text-decoration:none" :href="'/work/' + it.id + '/summary'" target="_blank">open ↗</a>
-      </div>
-      <div class="wsum" v-if="it.summary && sumOpen[it.id]" v-html="lk(it.summary)"></div>
-      <div class="wmeta">
-        {{ it.scope }} · updated {{ ago(it.updated_at) }}
-        <span v-if="it.instance_key"> · {{ it.instance_key }}</span>
-        <span v-for="t in (it.tags || '').split(',').filter(Boolean)" :key="t"
-              style="background:#1e293b;color:#93c5fd;border-radius:4px;padding:0 6px;margin-left:6px">{{ t }}</span>
-      </div>
-      <div class="mt-2" v-if="g === 'done'">
-        <span class="wbtn" @click="act(it, 'reopen')">reopen</span>
-      </div>
-      <div class="mt-2" v-if="g !== 'done'">
-        <span class="wbtn" v-if="it.last_tmux_key" @click="openTerminal(it)">terminal</span>
-        <span class="wbtn" @click="act(it, 'done')">done</span>
-        <span class="wbtn" @click="snooze(it)">snooze</span>
-        <span class="wbtn" v-if="g === 'failed_stale' || g === 'waiting_external'" @click="act(it, 'reopen')">reopen</span>
-        <span class="wbtn" @click="act(it, it.autocontinue ? 'autocontinue_off' : 'autocontinue_on')">
-          auto {{ it.autocontinue ? 'on' : 'off' }} ({{ it.continues_used }}/{{ it.continue_cap }})
+
+  <form @submit.prevent="intake" class="ln-task-compose" v-if="view === 'board'">
+    <div>
+      <input class="ln-input" v-model="intakeText" :disabled="!personalLoaded || intakeBusy"
+             placeholder="Describe an outcome, not a report (say 'get PR #123 merged', not 'PR stats'). Enter launches a run." />
+      <div class="ln-task-compose-opts">
+        <span class="ln-chipsel" title="which agent CLI runs this task">agent:
+          <select v-model="intakeAgent" :disabled="!personalLoaded || intakeBusy">
+            <option v-for="a in agents" :key="a" :value="a">{{ a }}</option>
+          </select>
         </span>
+        <span class="ln-chipsel" v-for="p in visibleProjects" :key="p.key" :title="p.root"
+              :class="{ on: intakeContexts.includes(p.key) }" @click="toggleContext(p.key)">{{ p.key }}</span>
+        <span class="ln-chipsel" v-if="extraProjects.length" @click="moreOpen = !moreOpen">{{ moreOpen ? '− less' : '+ context' }}</span>
+        <span class="ln-chipsel" v-if="slackAvailable" :class="{ on: intakeSlack }"
+              title="tell the run to read the slack_int capture archive for the selected project's org"
+              @click="intakeSlack = !intakeSlack">slack_int</span>
+        <span class="ln-hint" v-if="intakeBusy">launching…</span>
+        <span class="ln-hint" v-else>no thread — this task stands alone</span>
       </div>
-      <work-question v-if="g === 'needs_you'" :item="it" @answer="answer(it, $event)"></work-question>
-      <form class="mt-2 flex gap-2" v-if="g === 'needs_you'" @submit.prevent="reply(it)">
-        <input class="wintake flex-1" v-model="replyText[it.id]"
-               :placeholder="it.pending_question ? 'Other — type your own answer…' : 'Answer and resume…'" />
-      </form>
     </div>
-    <div class="mt-2 flex items-center gap-3 text-xs text-gray-400" v-if="g === 'done' && donePages > 1">
-      <span class="wbtn" v-if="donePage > 1" @click="setDonePage(donePage - 1)">‹ prev</span>
-      <span>page {{ donePage }} / {{ donePages }}</span>
-      <span class="wbtn" v-if="donePage < donePages" @click="setDonePage(donePage + 1)">next ›</span>
+    <button type="submit" class="ln-btn ln-btn-primary" :disabled="!personalLoaded || intakeBusy">↗ Launch task</button>
+  </form>
+  <div class="ln-small" style="color:var(--ln-red)" v-if="intakeError">{{ intakeError }}</div>
+
+  <div class="ln-board">
+    <div>
+      <div class="ln-group" v-for="g in visibleGroups" :key="g" v-show="groups[g] && groups[g].length">
+        <div class="ln-group-head">{{ label(g) }} <span class="ln-count-chip">{{ count(g) }}</span></div>
+        <article class="ln-task" :class="g" v-for="it in groups[g]" :key="it.id">
+          <div class="ln-task-top">
+            <div style="min-width:0">
+              <a class="ln-task-title" :href="'/tasks/' + it.id">{{ it.objective }}</a>
+              <div class="ln-task-note ln-task-note-warn" v-if="it.stop_reason" v-html="lk(note(it.stop_reason))"></div>
+              <div class="ln-task-note" v-else-if="note(it.current_checkpoint)">{{ note(it.current_checkpoint) }}</div>
+            </div>
+            <div class="ln-task-id">#{{ it.id }}</div>
+          </div>
+          <div class="ln-task-foot">
+            <span class="ln-pill" :class="statePill(g, it)">{{ stateText(g, it) }}</span>
+            <a class="ln-pill ln-pill-violet ln-thread-pill" v-if="it.thread" style="text-decoration:none"
+               :href="'/threads/' + it.thread.root_id" :title="'thread rooted at task #' + it.thread.root_id">⑂ {{ it.thread.title }}</a>
+            <span>{{ ago(it.updated_at) }}</span>
+            <span v-if="it.last_provider">· {{ it.last_provider }}</span>
+            <span class="ln-tag" v-for="t in tagsOf(it)" :key="t">{{ t }}</span>
+            <span class="ln-right">
+              <button class="ln-btn ln-btn-sm ln-btn-ghost" v-if="it.summary"
+                      @click="sumOpen[it.id] = !sumOpen[it.id]">{{ sumOpen[it.id] ? 'Summary ▾' : 'Summary ▸' }}</button>
+              <a class="ln-btn ln-btn-sm ln-btn-ghost" v-if="it.summary" :href="'/tasks/' + it.id + '/summary'" target="_blank">↗</a>
+              <template v-if="g === 'done'">
+                <button class="ln-btn ln-btn-sm ln-btn-ghost" @click="act(it, 'reopen')">Reopen</button>
+              </template>
+              <template v-else>
+                <button class="ln-btn ln-btn-sm ln-btn-ghost" v-if="it.last_tmux_key" @click="openTerminal(it)">Terminal</button>
+                <button class="ln-btn ln-btn-sm ln-btn-ghost" @click="act(it, 'done')">Done</button>
+                <button class="ln-btn ln-btn-sm ln-btn-ghost" @click="snooze(it)">Snooze</button>
+                <button class="ln-btn ln-btn-sm ln-btn-ghost" v-if="g === 'failed_stale' || g === 'waiting_external'"
+                        @click="act(it, 'reopen')">Reopen</button>
+                <button class="ln-btn ln-btn-sm ln-btn-ghost"
+                        @click="act(it, it.autocontinue ? 'autocontinue_off' : 'autocontinue_on')">
+                  auto {{ it.autocontinue ? 'on' : 'off' }} ({{ it.continues_used }}/{{ it.continue_cap }})
+                </button>
+              </template>
+              <a class="ln-btn ln-btn-sm" :href="'/tasks/' + it.id">Open task</a>
+            </span>
+          </div>
+          <div class="wsum" v-if="it.summary && sumOpen[it.id]" v-html="lk(it.summary)"></div>
+          <work-question v-if="g === 'needs_you' || it.pending_question" :item="it" @answer="answer(it, $event)"></work-question>
+          <form style="margin-top:8px" v-if="g === 'needs_you' || it.pending_question" @submit.prevent="reply(it)">
+            <input class="wintake" v-model="replyText[it.id]"
+                   :placeholder="it.pending_question ? 'Other — type your own answer…' : 'Answer and resume…'" />
+          </form>
+        </article>
+        <div style="display:flex;align-items:center;gap:8px;margin-top:10px" class="ln-small ln-muted"
+             v-if="g === 'done' && donePages > 1">
+          <button class="ln-btn ln-btn-sm ln-btn-ghost" v-if="donePage > 1" @click="setDonePage(donePage - 1)">‹ prev</button>
+          <span>page {{ donePage }} / {{ donePages }}</span>
+          <button class="ln-btn ln-btn-sm ln-btn-ghost" v-if="donePage < donePages" @click="setDonePage(donePage + 1)">next ›</button>
+        </div>
+      </div>
+      <div class="ln-small ln-muted" v-if="view === 'archive' && !(groups.done || []).length">{{ (searchText.trim() || tagFilter.length) ? "No matches." : "No completed tasks yet." }}</div>
+      <div class="ln-small ln-muted" v-else-if="view === 'board' && total === 0">{{ (searchText.trim() || tagFilter.length) ? "No matches." : "No tasks yet." }}</div>
     </div>
+
+    <aside style="display:flex;flex-direction:column;gap:12px">
+      <div class="ln-card">
+        <div class="ln-card-head">
+          Active threads
+          <a class="ln-link ln-small" style="margin-left:auto" href="/threads">View all</a>
+        </div>
+        <div class="ln-thread-row" v-for="t in activeThreads" :key="t.root_id" @click="openThread(t.root_id)">
+          <div class="ln-thread-row-title">{{ t.title }}</div>
+          <div class="ln-thread-row-meta">
+            <span style="color:var(--ln-amber)" v-if="t.counts.needs_you">{{ t.counts.needs_you }} needs you</span>
+            <span style="color:var(--ln-blue)" v-else-if="t.counts.agent_working">{{ t.counts.agent_working }} working</span>
+            <span v-else>{{ t.counts.done === t.task_count ? 'complete' : 'idle' }}</span>
+            <span>{{ t.task_count }} task{{ t.task_count === 1 ? '' : 's' }}</span>
+          </div>
+          <div class="ln-progress" :title="(t.counts.done || 0) + ' of ' + t.task_count + ' complete'">
+            <span :style="{ width: Math.round(100 * (t.counts.done || 0) / t.task_count) + '%' }"></span>
+          </div>
+        </div>
+        <div class="ln-card-body ln-small ln-muted" v-if="!activeThreads.length">
+          No threads yet. A thread appears when a task launches a follow-up task.
+        </div>
+      </div>
+      <div class="ln-note">
+        <strong>One rail item, two views.</strong> Threads are a lens on the same tasks, so they
+        live behind the Board / Threads control in the topbar. The rail stays flat and Tasks
+        stays lit on every thread page.
+      </div>
+    </aside>
   </div>
-  <div class="text-gray-600 text-sm" v-if="total === 0">{{ (searchText.trim() || tagFilter.length) ? "No matches." : "No work items yet." }}</div>
+</frshty-shell>
 </div>
 <script>
-const { createApp } = Vue;
-createApp({
+const STATE_PILLS = {
+  needs_you: "ln-pill-amber", agent_working: "ln-pill-blue", waiting_external: "ln-pill-ghost",
+  failed_stale: "ln-pill-red", done: "ln-pill-green",
+};
+const STATE_TEXT = {
+  needs_you: "● Needs you", agent_working: "● Working", waiting_external: "○ Waiting external",
+  failed_stale: "● Failed or stale",
+};
+frshtyApp({
   data() {
     return {
+      features: {}, instanceName: "",
+      view: new URLSearchParams(location.search).get("view") === "archive" ? "archive" : "board",
       groups: { needs_you: [], agent_working: [], waiting_external: [], failed_stale: [], done: [] },
       personalLoaded: false, intakeText: "", intakeError: "", intakeBusy: false,
       projects: [], slackAvailable: false, intakeContexts: [], intakeSlack: false, moreOpen: false,
-      connError: "", replyText: {}, sumOpen: {}, linkmap: null,
+      agents: ["claude"], intakeAgent: localStorage.getItem("workAgent") || "claude",
+      connError: "", replyText: {}, sumOpen: {}, linkmap: null, threads: [],
       searchText: "", tagFilter: JSON.parse(localStorage.getItem("workTagFilter") || "[]"), allTags: [], donePage: 1, donePages: 1, counts: {},
       groupOrder: ["agent_working", "needs_you", "waiting_external", "failed_stale", "done"],
       labels: { needs_you: "Needs you", agent_working: "Agent working", waiting_external: "Waiting external", failed_stale: "Failed or stale", done: "Recently completed" },
-      cls: { needs_you: "needs", agent_working: "working", waiting_external: "waiting", failed_stale: "stale", done: "done" },
     };
   },
   computed: {
+    visibleGroups() {
+      return this.view === "archive" ? ["done"] : this.groupOrder;
+    },
+    railCounts() {
+      return { tasks: this.count("needs_you") };
+    },
+    crumbs() {
+      return this.view === "archive" ? ["Work", "Tasks", "Archive"] : ["Work", "Tasks"];
+    },
+    activeThreads() {
+      return this.threads.slice(0, 6);
+    },
     total() {
       const c = Object.values(this.counts);
       if (c.length) return c.reduce((n, x) => n + x, 0);
       return Object.values(this.groups).reduce((n, g) => n + (g ? g.length : 0), 0);
     },
     primaryProjects() {
-      const order = ["aimyable", "quill", "clarivis"];
+      const order = ["aimyable", "quill", "clarivis", "algotrader2"];
       return order.map(k => this.projects.find(p => p.key === k)).filter(Boolean);
     },
     extraProjects() {
@@ -159,12 +231,29 @@ createApp({
   methods: {
     lk(text) { return window.frshtyLinkify(text, this.linkmap); },
     label(g) {
-      if (g === "done" && (this.searchText.trim() || this.tagFilter.length)) return "Completed (all time)";
+      if (g === "done" && (this.view === "archive" || this.searchText.trim() || this.tagFilter.length)) return "Completed (all time)";
       return this.labels[g];
     },
     count(g) {
       if (this.counts && this.counts[g] != null) return this.counts[g];
       return (this.groups[g] || []).length;
+    },
+    statePill(g, it) {
+      if (g === "done") return it.operator_confirmed ? "ln-pill-green" : "ln-pill-amber";
+      return STATE_PILLS[g] || "ln-pill-ghost";
+    },
+    stateText(g, it) {
+      if (g === "done") return it.operator_confirmed ? "✓ You confirmed" : "✓ Agent-reported";
+      return STATE_TEXT[g] || g;
+    },
+    note(text) {
+      const line = (text || "").trim();
+      return line.length > 200 ? line.slice(0, 200).trimEnd() + "…" : line;
+    },
+    tagsOf(it) {
+      const tags = (it.tags || "").split(",").filter(Boolean);
+      if (it.instance_key) tags.unshift(it.instance_key);
+      return tags;
     },
     onSearch() {
       clearTimeout(this._searchT);
@@ -180,6 +269,10 @@ createApp({
       if (i >= 0) this.tagFilter.splice(i, 1); else this.tagFilter.push(t);
       this.onTagToggle();
     },
+    toggleContext(key) {
+      const i = this.intakeContexts.indexOf(key);
+      if (i >= 0) this.intakeContexts.splice(i, 1); else this.intakeContexts.push(key);
+    },
     clearTags() {
       this.tagFilter = [];
       this.onTagToggle();
@@ -188,8 +281,23 @@ createApp({
       this.donePage = p;
       this.refresh();
     },
+    openThread(rootId) { window.location.href = "/threads/" + rootId; },
+    async loadConfig() {
+      try {
+        const cfg = await (await fetch("/api/config")).json();
+        this.features = cfg.features || {};
+        this.instanceName = (cfg.job && cfg.job.key) || "";
+      } catch (e) {}
+    },
     async loadLinkmap() {
       try { this.linkmap = await (await fetch("/api/work/linkmap")).json(); } catch (e) {}
+    },
+    async loadThreads() {
+      try {
+        const r = await fetch("/api/work/threads");
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        this.threads = (await r.json()).threads || [];
+      } catch (e) {}
     },
     async refresh() {
       const seq = ++this._refreshSeq;
@@ -199,6 +307,7 @@ createApp({
         if (q) params.set("q", q);
         if (this.tagFilter.length) params.set("tags", this.tagFilter.join(","));
         if (this.donePage > 1) params.set("done_page", this.donePage);
+        if (this.view === "archive") params.set("archive", "1");
         const qs = params.toString();
         const r = await fetch("/api/work/items" + (qs ? "?" + qs : ""));
         if (!r.ok) throw new Error("HTTP " + r.status);
@@ -209,6 +318,8 @@ createApp({
         this.allTags = d.all_tags || [];
         this.donePage = d.done_page || 1; this.donePages = d.done_pages || 1;
         this.projects = d.projects || []; this.slackAvailable = !!d.slack_available;
+        this.agents = d.agents && d.agents.length ? d.agents : ["claude"];
+        if (!this.agents.includes(this.intakeAgent)) this.intakeAgent = this.agents[0];
         this.connError = "";
         const known = new Set(this.allTags);
         const kept = this.tagFilter.filter(t => known.has(t));
@@ -226,11 +337,12 @@ createApp({
       try {
         const r = await fetch("/api/work/intake", {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: this.intakeText,
+          body: JSON.stringify({ text: this.intakeText, agent: this.intakeAgent,
                                  contexts: this.intakeContexts, slack: this.intakeSlack }),
         });
         const d = await r.json();
         if (!r.ok) { this.intakeError = d.error || "intake failed (HTTP " + r.status + ")"; return; }
+        localStorage.setItem("workAgent", this.intakeAgent);
         this.intakeText = ""; this.intakeContexts = []; this.intakeSlack = false;
         await this.refresh();
       } catch (e) {
@@ -250,6 +362,7 @@ createApp({
         this.connError = "action failed: " + e.message;
       }
       await this.refresh();
+      await this.loadThreads();
     },
     async reply(it) {
       await this.answer(it, (this.replyText[it.id] || "").trim());
@@ -272,7 +385,7 @@ createApp({
       this.act(it, "snooze", until);
     },
     openTerminal(it) {
-      window.open(`/work/${it.id}/terminal`, "_blank");
+      window.open(`/tasks/${it.id}/terminal`, "_blank");
     },
     ago(iso) {
       const s = (Date.now() - new Date(iso).getTime()) / 1000;
@@ -286,7 +399,8 @@ createApp({
     this._refreshSeq = 0;
     const b = document.getElementById("boot-error");
     if (b) b.remove();
-    this.loadLinkmap(); this.refresh(); setInterval(() => this.refresh(), 15000);
+    this.loadConfig(); this.loadLinkmap(); this.loadThreads(); this.refresh();
+    setInterval(() => { this.refresh(); this.loadThreads(); }, 15000);
   },
 }).component("work-question", window.WorkQuestion).mount("#app");
 </script>

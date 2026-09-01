@@ -207,6 +207,65 @@ class TestPrePushGuard:
                                       r, "feature") == ""
 
 
+    def test_history_already_on_the_remote_branch_is_ignored(self, tmp_path):
+        """A push publishes origin/<branch>..HEAD, not the whole branch.
+
+        A long-lived PR branch carries CI-bot commits and commits the same
+        person made under another git identity. Those are already on the
+        remote, so pushing changes nothing about them, but judging the whole
+        branch against the base blocks every later push — the agent can never
+        answer a review comment on a branch that has ever merged."""
+        from features.platforms import _identity_block_reason
+        r = self._remote_backed(tmp_path)
+        self._commit(r, "bot-commit")  # the personal identity, i.e. not ours
+        subprocess.run(["git", "-C", str(r), "push", "-q", "origin", "feature"], check=True)
+
+        configure_repo_identity(r, WANT_NAME, WANT_EMAIL)
+        self._commit(r, "our-fix")
+        assert _identity_block_reason(self._cfg(name=WANT_NAME, email=WANT_EMAIL),
+                                      r, "feature") == ""
+
+    def test_merging_the_base_does_not_block_the_push(self, tmp_path):
+        """Base sync merges main into the branch, then pushes.
+
+        The merge carries main's commits, written by other people, and they are
+        not on the remote branch yet, so the push does publish them. They are
+        already public on the base, so their authorship is not this push's to
+        answer for. Blocking here stops frshty keeping any branch current."""
+        from features.platforms import _identity_block_reason
+        r = self._remote_backed(tmp_path)
+        configure_repo_identity(r, WANT_NAME, WANT_EMAIL)
+        self._commit(r, "ours")
+        subprocess.run(["git", "-C", str(r), "push", "-q", "origin", "feature"], check=True)
+
+        # Someone else lands a commit on main.
+        subprocess.run(["git", "-C", str(r), "checkout", "-q", "main"], check=True)
+        configure_repo_identity(r, "personal", "me@home.example")
+        self._commit(r, "theirs-on-main")
+        subprocess.run(["git", "-C", str(r), "push", "-q", "origin", "main"], check=True)
+
+        # Base sync: merge main into the branch, then push.
+        configure_repo_identity(r, WANT_NAME, WANT_EMAIL)
+        subprocess.run(["git", "-C", str(r), "checkout", "-q", "feature"], check=True)
+        subprocess.run(["git", "-C", str(r), "merge", "-q", "main", "--no-edit"], check=True)
+        assert _identity_block_reason(self._cfg(name=WANT_NAME, email=WANT_EMAIL),
+                                      r, "feature") == ""
+
+    def test_a_wrong_author_not_yet_on_the_remote_still_blocks(self, tmp_path):
+        from features.platforms import _identity_block_reason
+        r = self._remote_backed(tmp_path)
+        configure_repo_identity(r, WANT_NAME, WANT_EMAIL)
+        self._commit(r, "ours")
+        subprocess.run(["git", "-C", str(r), "push", "-q", "origin", "feature"], check=True)
+
+        configure_repo_identity(r, "personal", "me@home.example")
+        self._commit(r, "theirs")
+        reason = _identity_block_reason(self._cfg(name=WANT_NAME, email=WANT_EMAIL),
+                                        r, "feature")
+        assert "not authored by" in reason
+        assert "me@home.example" in reason
+
+
 class TestCollisionGrouping:
     def test_three_claimants_two_identities_all_fail(self, tmp_path):
         _repo(tmp_path / "shared")

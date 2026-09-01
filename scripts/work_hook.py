@@ -10,8 +10,9 @@ DB_PATH = os.environ.get("FRSHTY_DB") or os.path.expanduser("~/.frshty/frshty.db
 
 QUESTION_DENY_REASON = (
     "Question recorded on the work board. The operator will answer it in a "
-    "later message. Do not call AskUserQuestion again. State that you are "
-    "blocked on this question and end your turn."
+    "later message. Do not ask this question again. State that you are "
+    "blocked on it and end your turn. Keep using AskUserQuestion for every "
+    "later question or request: it is the only way one reaches the operator."
 )
 
 
@@ -83,6 +84,7 @@ def main() -> int:
             "transcript_cursor": cursor,
             "message": (data.get("message") or "")[:500],
             "reason": (data.get("reason") or "")[:200],
+            "prompt": (data.get("prompt") or "")[:2000],
         }
         work_store = _bind_db()
         payload["last_assistant_message"] = work_store.last_assistant_text(transcript_path)[:300]

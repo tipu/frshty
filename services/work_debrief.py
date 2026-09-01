@@ -122,13 +122,19 @@ def _run_debrief_locked(item_id: int) -> dict:
         "FROM work_items WHERE id = ?", (item_id,))
     if not item:
         return {"error": "unknown work item"}
-    run = db.query_one(
-        "SELECT transcript_path FROM work_runs WHERE work_item_id = ? "
-        "AND transcript_path != '' ORDER BY id DESC LIMIT 1", (item_id,))
-    if not run or not os.path.isfile(run["transcript_path"]):
+    runs = db.query_all(
+        "SELECT id, transcript_path, provider, cwd, started_at, agent_session_id "
+        "FROM work_runs WHERE work_item_id = ? ORDER BY id DESC", (item_id,))
+    transcript_path = ""
+    for run in runs:
+        candidate = work_store.resolve_transcript_path(run)
+        if candidate and os.path.isfile(candidate):
+            transcript_path = candidate
+            break
+    if not transcript_path:
         _record_debrief_event(item_id, "debrief_failed", {"error": "no transcript"})
         return {"error": "no transcript"}
-    dialogue = _render_dialogue(run["transcript_path"])
+    dialogue = _render_dialogue(transcript_path)
     if not dialogue.strip():
         _record_debrief_event(item_id, "debrief_failed", {"error": "empty dialogue"})
         return {"error": "empty dialogue"}
@@ -270,16 +276,17 @@ def _deliver_slack(row) -> str:
             f"ts={result.get('ts', '')}")
 
 
-def _deliver_work_item(row, contexts: list[str], slack: bool) -> str:
+def _deliver_work_item(row, contexts: list[str], slack: bool, agent: str) -> str:
     result = work_launch.launch_followup(row["work_item_id"], row["draft"],
-                                         contexts=contexts, slack=slack)
+                                         contexts=contexts, slack=slack, agent=agent)
     if "error" in result:
         raise RuntimeError(result["error"])
     return f"launched work item #{result['item_id']}"
 
 
 def send_followup(followup_id: int, text: str | None = None,
-                  contexts: list[str] | None = None, slack: bool = False) -> dict:
+                  contexts: list[str] | None = None, slack: bool = False,
+                  agent: str = "claude") -> dict:
     now = work_store._now()
     with db.tx() as c:
         row = c.execute("SELECT * FROM work_followups WHERE id = ?", (followup_id,)).fetchone()
@@ -297,7 +304,7 @@ def send_followup(followup_id: int, text: str | None = None,
     try:
         if row["kind"] == "work_item":
             detail = _deliver_work_item(
-                row, [c for c in (contexts or []) if isinstance(c, str)], bool(slack))
+                row, [c for c in (contexts or []) if isinstance(c, str)], bool(slack), agent)
         else:
             detail = _deliver_slack(row)
         status = "sent"

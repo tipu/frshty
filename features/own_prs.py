@@ -113,6 +113,21 @@ def _check_comments(config, instance_key, platform, pr, base_url, seen=None, tic
                       if c.get("author_id") != user_id and not c.get("resolved")]
     if first_sight:
         all_to_process = _baseline_existing_comments(instance_key, pr_key, all_to_process)
+    # General GitHub review bodies were added to the adapter after inline
+    # comment tracking had already been live. Baseline just the old bodies on
+    # the first poll with the expanded source so rollout does not replay an
+    # entire PR's review history. Recent bodies remain actionable, including
+    # ones submitted before this version was deployed.
+    if any(c.get("comment_kind") == "review_body" for c in platform_comments) \
+            and not seen.get("review_bodies_baselined"):
+        review_bodies = [c for c in all_to_process if c.get("comment_kind") == "review_body"]
+        recent_review_bodies = _baseline_existing_comments(instance_key, pr_key, review_bodies)
+        keep_ids = {str(c["id"]) for c in recent_review_bodies}
+        all_to_process = [
+            c for c in all_to_process
+            if c.get("comment_kind") != "review_body" or str(c["id"]) in keep_ids
+        ]
+        seen["review_bodies_baselined"] = True
 
     handled = set()
     if all_to_process:
@@ -205,7 +220,7 @@ def _process_detected_comments(config, instance_key, platform, pr, pr_ref, base_
             log.emit("pr_comment_classify_failed",
                      f"{pr_ref}: Could not classify (LLM empty/unparseable), will retry — {comment['body'][:80]}",
                      links=links, meta=meta)
-            comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "classification failed")
+            comments.mark_comment_retryable(instance_key, "pr", pr_key, comment_id, "classification failed")
             continue
 
         if actionable:
@@ -251,6 +266,14 @@ def _reclaim_stuck_comments(instance_key, pr, pr_key, pr_ref, base_url, by_id, u
                 continue
             note = "orphaned mid-fix"
         elif error_count > MAX_COMMENT_RETRIES:
+            announced = seen.setdefault("abandoned_comments", [])
+            if comment_id not in announced:
+                announced.append(comment_id)
+                log.emit("pr_comment_abandoned",
+                         f"{pr_ref}: Gave up after {error_count} failed attempt(s) — {comment['body'][:80]}",
+                         links={"pr": pr["url"], "detail": f"{base_url}/"},
+                         meta={"repo": pr["repo"], "pr_id": pr["id"], "comment_id": comment_id,
+                               "error_count": error_count, "last_error": row.get("last_error")})
             continue
         else:
             note = f"retry {error_count}/{MAX_COMMENT_RETRIES}"
@@ -352,9 +375,11 @@ def fix_comment(config, payload) -> tuple[bool, str | None]:
             result = run_claude_code(context, cwd=worktree, timeout=600,
                                      allowed_tools=_comment_fix_tools(worktree))
             if result is None:
-                log.emit("pr_comment_blocked", f"{pr_ref}: Claude failed to fix — {comment['body'][:80]}", links=links, meta={**meta, "reason": "Claude failed to fix"})
-                comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "Claude failed to fix")
-                return False, "Claude failed to fix"
+                reason = "Claude did not run to completion"
+                log.emit("pr_comment_provider_failed", f"{pr_ref}: {reason} — {comment['body'][:80]}", links=links, meta={**meta, "reason": reason})
+                comments.mark_comment_deferred(instance_key, "pr", pr_key, comment_id,
+                                               comment.get("updated_at") or comment.get("created_at"))
+                return False, reason
 
             committed, commit_reason = _commit_fix(worktree, f"fix: address review comment on {comment.get('path', 'unknown')}")
             if not committed:
@@ -369,12 +394,13 @@ def fix_comment(config, payload) -> tuple[bool, str | None]:
                 comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "push failed")
                 return False, "push failed"
 
-        resolution = platform.resolve_comment(pr["repo"], pr["id"], int(comment_id))
-        if isinstance(resolution, dict) and resolution.get("status") != "resolved":
-            detail = str(resolution.get("detail", ""))[:200]
-            log.emit("pr_comment_blocked", f"{pr_ref}: Resolve failed — {comment['body'][:80]}", links=links, meta={**meta, "reason": "resolve failed", "detail": detail})
-            comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "resolve failed")
-            return False, "resolve failed"
+        if comment.get("resolvable", True):
+            resolution = platform.resolve_comment(pr["repo"], pr["id"], int(comment_id))
+            if isinstance(resolution, dict) and resolution.get("status") != "resolved":
+                detail = str(resolution.get("detail", ""))[:200]
+                log.emit("pr_comment_blocked", f"{pr_ref}: Resolve failed — {comment['body'][:80]}", links=links, meta={**meta, "reason": "resolve failed", "detail": detail})
+                comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "resolve failed")
+                return False, "resolve failed"
 
         log.emit("pr_comment_addressed", f"{pr_ref}: Fixed & pushed — {comment['body'][:80]}", links=links, meta=meta)
         comments.mark_comment_processed(instance_key, "pr", pr_key, comment_id)
@@ -403,6 +429,23 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
         log.emit(event, f"{pr_ref}: {reason} — batch of {len(ids)} comment(s)", links=links, meta={**meta, "reason": reason})
         for cid in ids:
             comments.mark_comment_error(instance_key, "pr", pr_key, cid, reason)
+        return False, reason
+
+    def _defer_all(pending_comments, reason):
+        """Park a batch the model never got to, without spending its budget.
+
+        run_claude_code returns None for a guard block, a timeout, and a
+        non-zero exit alike, so None says the run did not finish — it says
+        nothing about the comment. Charging that to error_count exhausts
+        MAX_COMMENT_RETRIES inside one outage and abandons the comment for
+        good. Deferring puts it back in the debounce pool for the next poll."""
+        ids = [str(c["id"]) for c in pending_comments]
+        log.emit("pr_comment_provider_failed",
+                 f"{pr_ref}: {reason} — batch of {len(ids)} comment(s) held for retry",
+                 links=links, meta={**meta, "reason": reason})
+        for c in pending_comments:
+            comments.mark_comment_deferred(instance_key, "pr", pr_key, str(c["id"]),
+                                           c.get("updated_at") or c.get("created_at"))
         return False, reason
 
     try:
@@ -436,7 +479,7 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
             result = run_claude_code(context, cwd=worktree, timeout=900,
                                      allowed_tools=_comment_fix_tools(worktree))
             if result is None:
-                return _fail_all(pending_ids, "Claude failed to fix")
+                return _defer_all(pending, "Claude did not run to completion")
 
             committed, commit_reason = _commit_fix(worktree, f"fix: address {len(pending)} review comments")
             if not committed:
@@ -448,7 +491,12 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
                 return _fail_all(pending_ids, "push failed")
 
         unresolved = []
+        pending_by_id = {str(c["id"]): c for c in pending}
         for cid in pending_ids:
+            comment = pending_by_id[cid]
+            if not comment.get("resolvable", True):
+                comments.mark_comment_processed(instance_key, "pr", pr_key, cid)
+                continue
             resolution = platform.resolve_comment(pr["repo"], pr["id"], int(cid))
             if isinstance(resolution, dict) and resolution.get("status") != "resolved":
                 comments.mark_comment_error(instance_key, "pr", pr_key, cid, "resolve failed")

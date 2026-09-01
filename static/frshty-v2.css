@@ -202,6 +202,7 @@ body { display: block; }
 /* Pills */
 .ln-pill { display: inline-flex; align-items: center; gap: 4px; font-size: 10.5px; font-weight: 500; padding: 2px 7px; border-radius: 99px; background: var(--ln-surface-3); color: var(--ln-text-2); text-transform: capitalize; letter-spacing: 0.01em; white-space: nowrap; }
 .ln-pill-ghost { background: transparent; border: 1px solid var(--ln-border-hi); }
+.ln-thread-pill { text-transform: none; cursor: pointer; }
 .ln-pill-urgent { background: rgb(239 91 91 / 0.15); color: var(--ln-red); }
 .ln-pill-ticket { background: rgb(79 140 255 / 0.12); color: var(--ln-blue); }
 .ln-pill-review { background: rgb(245 181 68 / 0.12); color: var(--ln-amber); }
@@ -321,6 +322,69 @@ body { display: block; }
 .ln-card { background: var(--ln-surface); border: 1px solid var(--ln-border); border-radius: 8px; overflow: hidden; }
 .ln-card-head { display: flex; gap: 10px; align-items: center; padding: 10px 14px; font-size: 12.5px; font-weight: 600; border-bottom: 1px solid var(--ln-border); }
 .ln-card-body { padding: 12px 14px; font-size: 13px; }
+
+/* Threads — the follow-up chain of a task, listed on /threads */
+.ln-thread-row { padding: 11px 14px; border-bottom: 1px solid var(--ln-border); cursor: pointer; }
+.ln-thread-row:last-child { border-bottom: none; }
+.ln-thread-row:hover { background: var(--ln-surface-2); }
+.ln-thread-row-title { font-size: 12.5px; font-weight: 500; color: var(--ln-text); }
+.ln-thread-row-meta { display: flex; justify-content: space-between; gap: 10px; margin-top: 5px; font-size: 11px; color: var(--ln-text-4); }
+
+/* Task board — the cards, the composer and the two-column board on /tasks */
+.ln-task-compose { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 12px; align-items: center; background: var(--ln-surface); border: 1px solid var(--ln-border-hi); border-radius: 8px; padding: 10px 12px; }
+.ln-task-compose .ln-input { min-width: 0; width: 100%; box-sizing: border-box; border-color: transparent; background: transparent; padding-left: 2px; }
+.ln-task-compose-opts { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 6px; font-size: 11.5px; color: var(--ln-text-3); }
+.ln-chipsel { border: 1px solid var(--ln-border); border-radius: 5px; padding: 2px 7px; font-size: 11px; color: var(--ln-text-2); background: var(--ln-bg); cursor: pointer; }
+.ln-chipsel:hover { border-color: var(--ln-border-hi); color: var(--ln-text); }
+.ln-chipsel.on { border-color: var(--ln-accent); color: var(--ln-accent-2); }
+.ln-chipsel select { all: unset; cursor: pointer; color: inherit; }
+.ln-hint { font-size: 11.5px; color: var(--ln-text-4); }
+.ln-board { display: grid; grid-template-columns: minmax(0,1fr) 300px; gap: 20px; align-items: start; }
+.ln-group + .ln-group { margin-top: 20px; }
+.ln-group-head { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ln-text-3); }
+.ln-task { position: relative; background: var(--ln-surface); border: 1px solid var(--ln-border); border-radius: 8px; padding: 11px 14px 10px 16px; overflow: hidden; }
+.ln-task + .ln-task { margin-top: 7px; }
+.ln-task::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 2px; background: var(--ln-state, var(--ln-blue)); }
+.ln-task:hover { border-color: var(--ln-border-hi); }
+.ln-task.needs_you { --ln-state: var(--ln-amber); }
+.ln-task.agent_working { --ln-state: var(--ln-blue); }
+.ln-task.waiting_external { --ln-state: var(--ln-text-4); }
+.ln-task.failed_stale { --ln-state: var(--ln-red); }
+.ln-task.done { --ln-state: var(--ln-green); }
+.ln-task-top { display: flex; gap: 14px; justify-content: space-between; align-items: flex-start; }
+.ln-task-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 13.5px; font-weight: 500; color: var(--ln-text); text-decoration: none; }
+a.ln-task-title:hover { text-decoration: underline; }
+.ln-task-id { font-family: var(--ln-mono); font-size: 11px; color: var(--ln-text-4); white-space: nowrap; }
+.ln-task-note { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin-top: 4px; font-size: 12.5px; color: var(--ln-text-3); }
+.ln-task-note-warn { color: var(--ln-amber); }
+.ln-task-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 9px; font-size: 11.5px; color: var(--ln-text-4); }
+.ln-task-foot .ln-right { margin-left: auto; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.ln-tag { font-size: 10.5px; padding: 1px 6px; border-radius: 4px; background: rgb(79 140 255 / 0.1); color: var(--ln-blue); }
+.ln-progress { height: 3px; margin-top: 8px; border-radius: 3px; background: var(--ln-surface-3); overflow: hidden; }
+.ln-progress span { display: block; height: 100%; border-radius: inherit; background: var(--ln-accent); }
+.ln-thread-list .ln-progress { max-width: 260px; }
+.ln-note { padding: 10px 12px; border: 1px dashed var(--ln-border-hi); border-radius: 8px; font-size: 11.5px; line-height: 1.5; color: var(--ln-text-3); }
+.ln-note strong { color: var(--ln-text-2); }
+
+/* Thread detail — the roll-up at /threads/<root id> */
+.ln-thread-grid { display: grid; grid-template-columns: minmax(0,1fr) 340px; gap: 20px; align-items: start; }
+.ln-kpi-row-4 { display: grid; grid-template-columns: repeat(4, minmax(90px,1fr)); gap: 10px; }
+.ln-tl { position: relative; }
+.ln-tl::before { content: ""; position: absolute; left: 4px; top: 14px; bottom: 16px; width: 1px; background: var(--ln-border-hi); }
+.ln-tl-item { position: relative; display: grid; grid-template-columns: 18px minmax(0,1fr); gap: 10px; padding-bottom: 8px; }
+.ln-tl-node { position: relative; z-index: 1; width: 9px; height: 9px; margin-top: 14px; border-radius: 50%; border: 2px solid var(--ln-bg); background: var(--ln-node, var(--ln-blue)); box-shadow: 0 0 0 2px var(--ln-surface-3); }
+.ln-tl-item.needs_you { --ln-node: var(--ln-amber); }
+.ln-tl-item.done { --ln-node: var(--ln-green); }
+.ln-tl-item.waiting_external { --ln-node: var(--ln-text-4); }
+.ln-tl-item.failed_stale { --ln-node: var(--ln-red); }
+.ln-artifact { display: grid; grid-template-columns: 28px minmax(0,1fr); gap: 9px; padding: 8px 0; border-bottom: 1px solid var(--ln-border); }
+.ln-artifact:first-child { padding-top: 0; }
+.ln-artifact:last-child { padding-bottom: 0; border-bottom: none; }
+.ln-artifact-icon { width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid var(--ln-border); border-radius: 6px; background: var(--ln-surface-2); color: var(--ln-green); font-family: var(--ln-mono); font-size: 9.5px; }
+.ln-artifact-name { font-family: var(--ln-mono); font-size: 11px; color: var(--ln-text-2); text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: block; }
+.ln-artifact-name:hover { color: var(--ln-text); text-decoration: underline; }
+.ln-artifact-meta { margin-top: 2px; font-size: 10.5px; color: var(--ln-text-4); }
+.ln-summary p { margin: 0; font-size: 12.5px; color: var(--ln-text-2); line-height: 1.55; white-space: pre-wrap; }
 .ln-diff-body { font-family: var(--ln-mono); font-size: 12px; line-height: 1.55; padding: 8px 0; background: var(--ln-bg); }
 .ln-diff-line { display: grid; grid-template-columns: 44px 20px 1fr; padding: 0 12px; }
 .ln-diff-ln { color: var(--ln-text-4); text-align: right; padding-right: 8px; }
@@ -680,26 +744,6 @@ body { display: block; }
   background: var(--ln-bg);
 }
 .ln-tkt-compose .ln-avatar-sm { width: 26px; height: 26px; font-size: 10px; margin-top: 4px; }
-
-/* Tasks */
-.ln-tasks { display: flex; flex-direction: column; }
-.ln-task {
-  display: grid;
-  grid-template-columns: 14px 160px 90px 1fr 110px 70px;
-  gap: 12px;
-  padding: 10px 16px;
-  border-top: 1px solid var(--ln-border);
-  align-items: center;
-  font-size: 12.5px;
-}
-.ln-task:first-child { border-top: none; }
-.ln-task-running { background: rgb(245 181 68 / 0.04); }
-.ln-task-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ln-text-4); }
-.ln-task-dot-running { background: var(--ln-amber); box-shadow: 0 0 0 3px rgb(245 181 68 / 0.3); }
-.ln-task-dot-success { background: var(--ln-green); }
-.ln-task-dot-failed { background: var(--ln-red); }
-.ln-task-note { color: var(--ln-text-2); }
-.ln-task-elapsed { text-align: right; }
 
 /* Activity */
 .ln-tkt-activity { padding: 8px 16px; }

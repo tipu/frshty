@@ -2,7 +2,6 @@ import asyncio
 import json
 import subprocess
 import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -552,7 +551,7 @@ def api_ticket_detail(key: str):
     terminal_alive = False
     if ts.get("status") in ("planning", "reviewing", "in_review"):
         health = terminal.session_healthy(key)
-        terminal_alive = health["alive"] and health["claude_running"]
+        terminal_alive = health["alive"] and health["agent_running"]
 
     summary = None
     if docs_dir.is_dir():
@@ -842,10 +841,7 @@ def api_reset_terminal(key: str):
     ws = _config["workspace"]
     ticket_dir = ws["root"] / ws["tickets_dir"] / slug
     terminal.kill_terminal(key)
-    time.sleep(1)
-    terminal.ensure_session(key, str(ticket_dir))
-    time.sleep(1)
-    terminal.send_keys(key, terminal.claude_cmd(_config))
+    terminal.launch_pane_command(key, str(ticket_dir), terminal.claude_cmd(_config))
     return {"status": "ok"}
 
 
@@ -902,13 +898,13 @@ def api_start_discuss(key: str, cont: bool = False):
         return JSONResponse({"error": f"ticket dir missing: {ticket_dir}"}, status_code=400)
     discuss_key = f"{key}{DISCUSS_KEY_SUFFIX}"
     health = terminal.session_healthy(discuss_key)
-    if health.get("alive") and health.get("claude_running"):
+    if health.get("alive") and health.get("agent_running"):
         _schedule_discuss_kill(discuss_key)
         return {"status": "running", "discuss_key": discuss_key}
-    terminal.ensure_session(discuss_key, str(ticket_dir))
-    if not health.get("claude_running"):
+    if not health.get("agent_running"):
         base = terminal.claude_cmd(_config)
-        terminal.send_keys(discuss_key, f"{base} --continue" if cont else base)
+        terminal.launch_pane_command(
+            discuss_key, str(ticket_dir), f"{base} --continue" if cont else base)
     _schedule_discuss_kill(discuss_key)
     return {"status": "ok", "discuss_key": discuss_key}
 
