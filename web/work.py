@@ -90,7 +90,7 @@ def api_work_thread_task(root_id: int, body: dict):
 
 @router.get("/api/work/items")
 def api_work_items(q: str = "", tags: str = "", done_page: int = 1, archive: int = 0):
-    groups = work_store.grouped_items(q=q, tags=tags, all_done=bool(archive))
+    groups = work_store.grouped_items(q=q, tags=tags, archived=bool(archive))
     threads = work_store.thread_map()
     for rows in groups.values():
         for row in rows:
@@ -107,6 +107,11 @@ def api_work_items(q: str = "", tags: str = "", done_page: int = 1, archive: int
             "projects": work_launch.project_entries(),
             "agents": list(terminal.AGENTS),
             "slack_available": work_launch.slack_available()}
+
+
+@router.post("/api/work/items/archive-completed")
+def api_work_archive_completed():
+    return {"archived": work_store.archive_completed()}
 
 
 @router.post("/api/work/items/{item_id}/action")

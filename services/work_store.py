@@ -13,7 +13,6 @@ import core.db as db
 
 STALE_AFTER_MINUTES = 30
 STUCK_AFTER_MINUTES = 90
-DONE_WINDOW_DAYS = 7
 BG_WAIT_RECHECK_HOURS = 2
 GROUPS = ("needs_you", "agent_working", "waiting_external", "failed_stale", "done")
 
@@ -371,9 +370,16 @@ def apply_action(item_id: int, action: str, until: str | None = None) -> dict:
                       (1 if action == "autocontinue_on" else 0, now, item_id))
         elif action == "reopen":
             c.execute(
-                "UPDATE work_items SET state = 'needs_you', snoozed_until = NULL, updated_at = ? WHERE id = ?",
+                "UPDATE work_items SET state = 'needs_you', snoozed_until = NULL, "
+                "archived_at = NULL, updated_at = ? WHERE id = ?",
                 (now, item_id),
             )
+        elif action == "archive":
+            if item["state"] != "done":
+                return {"error": "only a completed task can be archived"}
+            c.execute("UPDATE work_items SET archived_at = ? WHERE id = ?", (now, item_id))
+        elif action == "unarchive":
+            c.execute("UPDATE work_items SET archived_at = NULL WHERE id = ?", (item_id,))
         else:
             return {"error": f"unknown action: {action}"}
         c.execute(
@@ -1309,10 +1315,14 @@ def revive_resumed_runs() -> list[dict]:
 
 
 def grouped_items(now: datetime | None = None, q: str = "",
-                  tags: str = "", all_done: bool = False) -> dict[str, list[dict]]:
+                  tags: str = "", archived: bool = False) -> dict[str, list[dict]]:
+    """Group the work items for one board view.
+
+    A completed task stays in the done group until the operator archives it.
+    Archiving is the only way it leaves, so the board and the archive split
+    the completed tasks between them and none of them becomes unreachable."""
     now = now or datetime.now(timezone.utc)
     stale_cutoff = (now - timedelta(minutes=STALE_AFTER_MINUTES)).isoformat()
-    done_cutoff = (now - timedelta(days=DONE_WINDOW_DAYS)).isoformat()
     now_iso = now.isoformat()
     q = (q or "").strip().lower()
     wanted_tags = {t.strip().lower() for t in (tags or "").split(",") if t.strip()}
@@ -1335,7 +1345,7 @@ def grouped_items(now: datetime | None = None, q: str = "",
             continue
         state = row["state"]
         if state == "done":
-            if all_done or q or wanted_tags or row["updated_at"] >= done_cutoff:
+            if bool(row["archived_at"]) == archived:
                 groups["done"].append(row)
             continue
         if state == "waiting_external" and row["snoozed_until"] and row["snoozed_until"] <= now_iso:
@@ -1411,6 +1421,19 @@ def thread_projects(members: list[dict]) -> list[str]:
             if label and label not in NON_PROJECT_CONTEXTS and label not in projects:
                 projects.append(label)
     return projects
+
+
+def archive_completed() -> int:
+    """Archive every completed task the board still shows, and count them.
+
+    The board keeps a completed task until it is archived, so the first use of
+    the archive faces a long list. One call clears that list, and Unarchive
+    still brings any single task back."""
+    now = _now()
+    with db.tx() as c:
+        return c.execute(
+            "UPDATE work_items SET archived_at = ? WHERE state = 'done' AND archived_at IS NULL",
+            (now,)).rowcount
 
 
 def needs_you_count(now: datetime | None = None) -> int:
