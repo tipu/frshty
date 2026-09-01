@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -9,6 +10,7 @@ import pytest
 import core.db as db
 import core.state as state
 import core.log as log
+from services import work_artifacts
 
 
 _SESSION_DB_PATH = None
@@ -40,6 +42,21 @@ def _reinject_core_modules() -> None:
             current = getattr(mod, attr, None)
             if isinstance(current, types.ModuleType) and current.__name__ == expected:
                 setattr(mod, attr, replacement)
+
+@pytest.fixture(scope="session", autouse=True)
+def _isolated_artifact_root(tmp_path_factory):
+    """Keep a test launch from creating folders in the operator's real
+    ~/.frshty/artifacts store. The environment carries the override because
+    some tests re-import services.*, which would drop a patched attribute."""
+    root = tmp_path_factory.mktemp("frshty-artifacts")
+    previous = os.environ.get(work_artifacts.ROOT_ENV)
+    os.environ[work_artifacts.ROOT_ENV] = str(root)
+    yield root
+    if previous is None:
+        del os.environ[work_artifacts.ROOT_ENV]
+    else:
+        os.environ[work_artifacts.ROOT_ENV] = previous
+
 
 @pytest.fixture(scope="session", autouse=True)
 def _isolated_db(tmp_path_factory):
