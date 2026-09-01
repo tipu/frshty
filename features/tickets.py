@@ -1336,8 +1336,17 @@ def _sweep_merge_applies(ts: dict, pr_states: list[str]) -> bool:
 
 
 def _sweep_mark_merged(config: dict, key: str, ts: dict, base_url: str) -> dict:
+    """Move a ticket the sweep found fully merged, recording the upstream status
+    it holds right now. The cached external_status is whatever the ticket showed
+    when it last appeared in the query, which is stale by definition here, and
+    _handle_merged_ticket reads merged_external_status to decide whether a later
+    upstream move is a reopen. Storing the stale value makes a genuine reopen
+    back to that same status invisible."""
+    upstream = _upstream_status(config, key)
+    if upstream:
+        ts["external_status"] = upstream
     ticket = {"key": key, "summary": ts.get("summary", ""), "url": ts.get("url", ""),
-              "status": ts.get("external_status", "")}
+              "status": upstream or ts.get("external_status", "")}
     log.emit("ticket_merged",
              f"All PRs merged for {_label(key, ts)} (ticket had left the ticket query)",
              links={"ticket": ts.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
