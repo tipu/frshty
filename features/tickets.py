@@ -1773,16 +1773,29 @@ def _pr_comments_path(config, slug):
 
 
 def _load_pr_comments(config, slug) -> list[dict]:
+    """The registered PR comments, or an empty list when the file cannot be
+    read. A truncated or half-written file is reported to the event feed
+    instead of raising into every caller."""
     path = _pr_comments_path(config, slug)
-    if path.exists():
+    if not path.exists():
+        return []
+    try:
         return json.loads(path.read_text())
-    return []
+    except (OSError, ValueError) as e:
+        log.emit("pr_comments_unreadable", f"{path} could not be read: {e}",
+                 meta={"slug": slug, "path": str(path), "error": str(e)})
+        return []
 
 
 def _save_pr_comments(config, slug, comments: list[dict]):
+    """Write the file in one rename so a concurrent reader never sees it
+    truncated. path.write_text() empties the file first, and a read landing
+    in that window used to fail the whole ticket detail page."""
     path = _pr_comments_path(config, slug)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(comments, indent=2, default=str))
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(comments, indent=2, default=str))
+    tmp.replace(path)
 
 
 def _draft_comment_reply(config, slug, ticket, comment, pr) -> str:

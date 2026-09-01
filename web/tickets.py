@@ -995,12 +995,7 @@ def api_ticket_pr_comments(key: str):
     ts = tickets.get(key)
     if not ts:
         return []
-    slug = ts.get("slug", "")
-    ws = _config["workspace"]
-    path = ws["root"] / ws["tickets_dir"] / slug / "pr_comments.json"
-    if not path.exists():
-        return []
-    return json.loads(path.read_text())
+    return _tickets_mod._load_pr_comments(_config, ts.get("slug", ""))
 
 
 @router.get("/api/tickets/{key}/pr-comments/{comment_id}/timeline")
@@ -1024,7 +1019,7 @@ def api_ticket_reply(key: str, comment_id: int, body: dict):
     if not path.exists():
         return JSONResponse({"error": "no comments"}, status_code=404)
 
-    comments = json.loads(path.read_text())
+    comments = _tickets_mod._load_pr_comments(_config, slug)
     entry = next((c for c in comments if c["id"] == comment_id), None)
     if not entry:
         return JSONResponse({"error": "comment not found"}, status_code=404)
