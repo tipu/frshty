@@ -95,15 +95,22 @@ def _detect_runner(repo_dir: Path) -> tuple[list[str], dict[str, str]] | None:
     if (repo_dir / "pyproject.toml").exists() or \
        (repo_dir / "pytest.ini").exists() or \
        (repo_dir / "tests").is_dir():
+        pytest_args = ["-q"]
+        # Repositories commonly keep live-service BDD suites beside their
+        # self-contained unit suite.  A bare `pytest` collects both and turns
+        # missing integration infrastructure into a product-code failure.  CI
+        # for these repositories likewise runs tests/unit separately.
+        if (repo_dir / "tests" / "unit").is_dir():
+            pytest_args.append("tests/unit")
         venv_pytest = repo_dir / ".venv" / "bin" / "pytest"
         if venv_pytest.exists():
-            return ([str(venv_pytest), "-q"], {})
+            return ([str(venv_pytest), *pytest_args], {})
         if (repo_dir / "Pipfile").exists():
-            return (["pipenv", "run", "pytest", "-q"], {})
+            return (["pipenv", "run", "pytest", *pytest_args], {})
         if (repo_dir / "uv.lock").exists():
-            return (["uv", "run", "pytest", "-q"], {})
+            return (["uv", "run", "pytest", *pytest_args], {})
         if (repo_dir / "poetry.lock").exists():
-            return (["poetry", "run", "pytest", "-q"], {})
+            return (["poetry", "run", "pytest", *pytest_args], {})
         return ([_NO_LOCAL_PY_VENV_SENTINEL], {})
     if (repo_dir / "go.mod").exists():
         return (["go", "test", "./..."], {})
@@ -290,6 +297,16 @@ _PROVE_BROWSER_BLOCK_FOOTER = """
 """
 
 
+_PROVE_CHANGE_SCOPE_BLOCK = """
+
+AUTHORITATIVE TICKET CHANGE SCOPE:
+The configured base branch for each repository was used to calculate this list. Only the repositories and files below changed for this ticket:
+{scope}
+
+Do not infer ticket changes by comparing every repository with `main`. Treat every repository omitted from this list as unchanged and out of scope. Base the proof only on the change scope below and the ticket artifacts in `docs/`; do not demonstrate pre-existing behavior from an omitted repository.
+"""
+
+
 def _click_indicator_script() -> str:
     """The click-visualisation script injected into browser-driven proofs.
     Kept as an asset rather than inline so it stays editable and testable on
@@ -299,6 +316,48 @@ def _click_indicator_script() -> str:
         return path.read_text().strip()
     except OSError:
         return ""
+
+
+def _proof_change_scope(ticket_dir: Path, config: dict) -> str:
+    """Describe committed ticket changes relative to each repo's real base.
+
+    Ticket worktrees can start from non-main branches (for example a UI's
+    development branch). Giving prove an explicit scope prevents inherited
+    branch commits from being mistaken for this ticket's work.
+    """
+    workspace = ticket_dir / "workspace"
+    search_root = workspace if workspace.is_dir() else ticket_dir
+    changed: list[str] = []
+    indeterminate: list[str] = []
+    for repo_dir in sorted(p for p in search_root.iterdir() if p.is_dir()):
+        if not (repo_dir / ".git").exists():
+            continue
+        base_branch = base_branch_for(config, repo_dir.name)
+        try:
+            result = git_util.run_git(
+                repo_dir,
+                ["diff", "--name-only", f"origin/{base_branch}...HEAD"],
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired, git_util.GitCommandError):
+            indeterminate.append(
+                f"- {repo_dir.name} (base: {base_branch}; diff unavailable)"
+            )
+            continue
+        files = [line for line in result.stdout.splitlines() if line.strip()]
+        if files:
+            file_list = "\n".join(f"  - {path}" for path in files)
+            changed.append(
+                f"- {repo_dir.name} (base: {base_branch})\n{file_list}"
+            )
+    if not changed:
+        changed.append("- No committed repository changes were detected.")
+    if indeterminate:
+        changed.append(
+            "Repositories whose diff could not be determined (inspect before "
+            "using):\n" + "\n".join(indeterminate)
+        )
+    return "\n".join(changed)
 
 
 _PROVE_FEEDBACK_BLOCK = """
@@ -399,9 +458,11 @@ def _review_diff_ranges(ticket_dir: Path, baseline: dict[str, str]) -> dict[str,
     HEAD^..HEAD is not enough: the agent may commit on its own and a retry adds
     more, across several repos.
     """
+    workspace = ticket_dir / "workspace"
+    search_root = workspace if workspace.is_dir() else ticket_dir
     ranges: dict[str, str] = {}
     for repo, before in baseline.items():
-        wt = (ticket_dir / "workspace" / repo)
+        wt = search_root / repo
         if not (wt / ".git").exists():
             continue
         try:
@@ -1683,10 +1744,24 @@ def run_tests_and_fix(ctx: TaskContext) -> TaskResult:
         workspace = ticket_dir
 
     attempt = int(ts.get("test_fix_attempts", 0)) + 1
+    test_exclude = set(ctx.config.get("workspace", {}).get("test_exclude", []))
 
     per_repo: list[dict] = []
     for repo_dir in sorted(p for p in workspace.iterdir() if p.is_dir()):
         if not (repo_dir / ".git").exists():
+            continue
+        if repo_dir.name in test_exclude:
+            per_repo.append({
+                "repo": repo_dir.name,
+                "result": "skipped",
+                "tail": "local test run excluded by workspace.test_exclude; "
+                        "external CI owns this repository's integration environment",
+            })
+            log.emit(
+                "test_runner_excluded",
+                f"{ctx.ticket_key}/{repo_dir.name}: local tests excluded by config",
+                meta={"ticket": ctx.ticket_key, "repo": repo_dir.name},
+            )
             continue
         base_branch = base_branch_for(ctx.config, repo_dir.name)
         if not _repo_has_changes_vs_base(repo_dir, base_branch):
@@ -1835,6 +1910,9 @@ def prove(ctx: TaskContext) -> TaskResult:
         )
         return TaskResult("ok", artifacts={"skipped": True})
     prompt = _PROVE_PROMPT_TEMPLATE.format(proof_md=proof_md)
+    prompt += _PROVE_CHANGE_SCOPE_BLOCK.format(
+        scope=_proof_change_scope(ticket_dir, ctx.config)
+    )
     indicator = _click_indicator_script()
     if indicator:
         prompt += _PROVE_BROWSER_BLOCK_HEADER + indicator + _PROVE_BROWSER_BLOCK_FOOTER

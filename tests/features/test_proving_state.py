@@ -1,8 +1,11 @@
 """Tests for `_handle_proving_ticket` dispatcher routing and the prove task."""
+import subprocess
+
 import pytest
 from unittest.mock import patch
 
 import features.ticket_states as ts_mod
+from core.tasks import tickets as T
 from core.tasks.tickets import prove
 from core.tasks.registry import TaskContext
 
@@ -113,3 +116,57 @@ class TestProveTask:
              patch("core.tasks.tickets.run_claude_code", return_value=None):
             result = prove(ctx)
         assert result.status == "failed"
+
+
+class TestProofChangeScope:
+    def test_uses_configured_base_branch_and_lists_only_changed_repo(self, tmp_path):
+        repo = tmp_path / "ticket" / "rapid-analytics-ui"
+        (repo / ".git").mkdir(parents=True)
+        config = {
+            "workspace": {
+                "base_branch": "main",
+                "base_branches": {"rapid-analytics-ui": "development"},
+            }
+        }
+        completed = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="src/analytics.ts\n", stderr=""
+        )
+        with patch.object(T.git_util, "run_git", return_value=completed) as run:
+            scope = T._proof_change_scope(tmp_path / "ticket", config)
+
+        assert "rapid-analytics-ui (base: development)" in scope
+        assert "src/analytics.ts" in scope
+        assert run.call_args.args[1][-1] == "origin/development...HEAD"
+
+    def test_repo_whose_diff_fails_is_reported_as_indeterminate(self, tmp_path):
+        repo = tmp_path / "ticket" / "rapid-analytics-ui"
+        (repo / ".git").mkdir(parents=True)
+        config = {"workspace": {"base_branch": "main"}}
+        failure = T.git_util.GitCommandError(
+            ["diff"],
+            subprocess.CompletedProcess(args=[], returncode=128, stdout="",
+                                        stderr="unknown revision"),
+        )
+        with patch.object(T.git_util, "run_git", side_effect=failure):
+            scope = T._proof_change_scope(tmp_path / "ticket", config)
+
+        assert "diff unavailable" in scope
+        assert "No committed repository changes were detected." in scope
+
+    def test_prompt_marks_omitted_repositories_out_of_scope(self, tmp_path):
+        ctx = TestProveTask()._ctx(tmp_path)
+        (tmp_path / "PROOF.md").write_text("# proof guide\n")
+        with patch("core.state.load_ticket",
+                   return_value={"slug": "PROJ-1-do-the-thing"}), \
+             patch("core.tasks.tickets._claim_session",
+                   return_value=(None, False)), \
+             patch("core.tasks.tickets._proof_change_scope",
+                   return_value="- backend (base: development)\n  - src/api.py"), \
+             patch("core.tasks.tickets.run_claude_code",
+                   return_value="proof-done") as rc:
+            result = prove(ctx)
+
+        assert result.status == "ok"
+        prompt = rc.call_args.args[0]
+        assert "backend (base: development)" in prompt
+        assert "Treat every repository omitted from this list as unchanged" in prompt
