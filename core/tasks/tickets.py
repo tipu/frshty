@@ -1692,10 +1692,24 @@ def run_tests_and_fix(ctx: TaskContext) -> TaskResult:
         workspace = ticket_dir
 
     attempt = int(ts.get("test_fix_attempts", 0)) + 1
+    test_exclude = set(ctx.config.get("workspace", {}).get("test_exclude", []))
 
     per_repo: list[dict] = []
     for repo_dir in sorted(p for p in workspace.iterdir() if p.is_dir()):
         if not (repo_dir / ".git").exists():
+            continue
+        if repo_dir.name in test_exclude:
+            per_repo.append({
+                "repo": repo_dir.name,
+                "result": "skipped",
+                "tail": "local test run excluded by workspace.test_exclude; "
+                        "external CI owns this repository's integration environment",
+            })
+            log.emit(
+                "test_runner_excluded",
+                f"{ctx.ticket_key}/{repo_dir.name}: local tests excluded by config",
+                meta={"ticket": ctx.ticket_key, "repo": repo_dir.name},
+            )
             continue
         base_branch = base_branch_for(ctx.config, repo_dir.name)
         if not _repo_has_changes_vs_base(repo_dir, base_branch):
