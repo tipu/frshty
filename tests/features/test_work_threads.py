@@ -91,29 +91,79 @@ class TestThreadDerivation:
 
 
 class TestArchive:
-    def test_archive_returns_done_items_older_than_the_board_window(self):
-        item_id = work_store.create_item("finished long ago")
-        old = (datetime.now(timezone.utc) - timedelta(
-            days=work_store.DONE_WINDOW_DAYS + 3)).isoformat()
+    def _done_item(self, objective):
+        item_id = work_store.create_item(objective)
         with db.tx() as c:
-            c.execute("UPDATE work_items SET state = 'done', updated_at = ? WHERE id = ?",
-                      (old, item_id))
+            c.execute("UPDATE work_items SET state = 'done' WHERE id = ?", (item_id,))
+        return item_id
+
+    def test_the_board_keeps_a_completed_task_until_it_is_archived(self):
+        item_id = self._done_item("finished but still on the board")
+        assert item_id in [row["id"] for row in work_store.grouped_items()["done"]]
+        assert item_id not in [row["id"] for row in work_store.grouped_items(archived=True)["done"]]
+
+        assert work_store.apply_action(item_id, "archive") == {"id": item_id, "action": "archive"}
+
+        assert item_id not in [row["id"] for row in work_store.grouped_items()["done"]]
+        assert item_id in [row["id"] for row in work_store.grouped_items(archived=True)["done"]]
+
+    def test_unarchive_puts_the_task_back_on_the_board(self):
+        item_id = self._done_item("archived then wanted back")
+        work_store.apply_action(item_id, "archive")
+        work_store.apply_action(item_id, "unarchive")
+        assert item_id in [row["id"] for row in work_store.grouped_items()["done"]]
+        assert item_id not in [row["id"] for row in work_store.grouped_items(archived=True)["done"]]
+
+    def test_reopen_clears_the_archive_flag(self):
+        item_id = self._done_item("archived then reopened")
+        work_store.apply_action(item_id, "archive")
+        work_store.apply_action(item_id, "reopen")
+        row = db.query_one("SELECT state, archived_at FROM work_items WHERE id = ?", (item_id,))
+        assert row["state"] == "needs_you"
+        assert row["archived_at"] is None
+
+    def test_only_a_completed_task_can_be_archived(self):
+        item_id = work_store.create_item("still running")
+        assert "error" in work_store.apply_action(item_id, "archive")
+        assert db.query_one("SELECT archived_at FROM work_items WHERE id = ?",
+                            (item_id,))["archived_at"] is None
+
+    def test_archive_completed_clears_the_board_in_one_call(self):
+        first = self._done_item("first completed task")
+        second = self._done_item("second completed task")
+        running = work_store.create_item("still running")
+
+        assert work_store.archive_completed() >= 2
+
         board = work_store.grouped_items()
-        archive = work_store.grouped_items(all_done=True)
-        assert item_id not in [row["id"] for row in board["done"]]
-        assert item_id in [row["id"] for row in archive["done"]]
+        assert board["done"] == []
+        archived = [row["id"] for row in work_store.grouped_items(archived=True)["done"]]
+        assert first in archived
+        assert second in archived
+        assert db.query_one("SELECT archived_at FROM work_items WHERE id = ?",
+                            (running,))["archived_at"] is None
+
+    def test_archive_completed_endpoint_reports_the_count(self):
+        client = _client()
+        self._done_item("completed and cleared by the endpoint")
+        pending = client.get("/api/work/items").json()["counts"]["done"]
+
+        body = client.post("/api/work/items/archive-completed").json()
+
+        assert body["archived"] == pending
+        assert client.get("/api/work/items").json()["counts"]["done"] == 0
 
     def test_items_endpoint_honours_the_archive_flag(self):
         # The done group is paginated, so count the group rather than read page one.
         client = _client()
         board_before = client.get("/api/work/items").json()["counts"]["done"]
         archive_before = client.get("/api/work/items?archive=1").json()["counts"]["done"]
-        item_id = work_store.create_item("archived by the endpoint")
-        old = (datetime.now(timezone.utc) - timedelta(
-            days=work_store.DONE_WINDOW_DAYS + 3)).isoformat()
-        with db.tx() as c:
-            c.execute("UPDATE work_items SET state = 'done', updated_at = ? WHERE id = ?",
-                      (old, item_id))
+        item_id = self._done_item("archived by the endpoint")
+        assert client.get("/api/work/items").json()["counts"]["done"] == board_before + 1
+        assert client.get("/api/work/items?archive=1").json()["counts"]["done"] == archive_before
+
+        client.post(f"/api/work/items/{item_id}/action", json={"action": "archive"})
+
         assert client.get("/api/work/items").json()["counts"]["done"] == board_before
         assert client.get("/api/work/items?archive=1").json()["counts"]["done"] == archive_before + 1
 

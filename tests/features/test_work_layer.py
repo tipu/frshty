@@ -125,15 +125,15 @@ class TestGrouping:
         assert hit in ids
         assert miss not in ids
 
-    def test_search_lifts_done_window(self):
+    def test_an_old_completed_task_stays_on_the_board_until_it_is_archived(self):
         now = datetime.now(timezone.utc)
         old = _mkitem("ancient billing task")
         db.execute("UPDATE work_items SET state='done', updated_at=? WHERE id = ?",
                    ((now - timedelta(days=30)).isoformat(), old))
-        without_q = work_store.grouped_items(now)
-        assert old not in {r["id"] for r in without_q["done"]}
-        with_q = work_store.grouped_items(now, q="ancient billing")
-        assert old in {r["id"] for r in with_q["done"]}
+        assert old in {r["id"] for r in work_store.grouped_items(now)["done"]}
+        work_store.apply_action(old, "archive")
+        assert old not in {r["id"] for r in work_store.grouped_items(now)["done"]}
+        assert old in {r["id"] for r in work_store.grouped_items(now, archived=True)["done"]}
 
     def test_done_items_are_sorted_by_completion_time_descending(self):
         now = datetime.now(timezone.utc)
