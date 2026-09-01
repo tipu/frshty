@@ -49,6 +49,14 @@ _ALLOWED: dict[TicketStatus, set[TicketStatus]] = {
 }
 
 
+def can_transition(current: str, target: str) -> bool:
+    try:
+        transition(current, target)
+    except ValueError:
+        return False
+    return True
+
+
 def transition(current: str, target: str) -> str:
     cur = TicketStatus(current)
     tgt = TicketStatus(target)

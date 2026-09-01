@@ -21,7 +21,7 @@ from core.config import base_branch_for, get_repos, ticket_worktree_path, resolv
 from core.git_util import commit_with_hooks
 from core.deps import run_dep_command, relink_shared_venv
 from core.claude_runner import run_haiku, run_balanced, run_claude_code, extract_json
-from core.ticket_status import TicketStatus, transition
+from core.ticket_status import TicketStatus, can_transition, transition
 from features.platforms import make_platform
 from features.pr_ci import ci_summary, FAILED_STATES
 from features.ticket_systems import make_ticket_system
@@ -1120,10 +1120,15 @@ def check(config: dict, instance_key: str = ""):
             if platform is None:
                 platform = make_platform(config)
             try:
-                if any(platform.get_pr_state(p["repo"], p["id"]) == "OPEN" for p in prs):
-                    continue
+                pr_states = [platform.get_pr_state(p["repo"], p["id"]) for p in prs]
             except Exception as e:
                 log.emit("check_pr_state_failed", f"Failed to check PR state: {e}", meta={"ticket": key})
+                continue
+            if any(s == "OPEN" for s in pr_states):
+                continue
+            if _sweep_merge_applies(ts, pr_states):
+                ts = _sweep_mark_merged(config, key, ts, base_url)
+                _save_ticket_if_unmoved(key, ts, loaded_status)
                 continue
         upstream = _upstream_status(config, key)
         if upstream is None or not _is_terminal_upstream(config, upstream):
@@ -1310,6 +1315,35 @@ def _upstream_status(config: dict, key: str) -> str | None:
         return None
     status = str(fetched.get("status") or "").strip()
     return status or None
+
+
+def _sweep_merge_applies(ts: dict, pr_states: list[str]) -> bool:
+    """Whether the sweep must move a ticket that left the query to merged.
+
+    A ticket leaves the ticket query whenever its upstream status moves outside
+    the configured window, and that happens on the way forward as well as back:
+    DEV-604's PRs merged three days after Jira moved it to "Ready for Testing".
+    From then on the sweep asked only whether the upstream status was terminal,
+    said no, and parked the ticket at in_review forever. All tracked PRs merged
+    is the same proof _check_in_review acts on for a ticket still in the query;
+    the sweep applies the identical rule so the merge is not lost with the
+    upstream status window.
+    """
+    if not pr_states or not all(s == "MERGED" for s in pr_states):
+        return False
+    status = ts.get("status", "new")
+    return status not in _TERMINAL_STATUSES and can_transition(status, "merged")
+
+
+def _sweep_mark_merged(config: dict, key: str, ts: dict, base_url: str) -> dict:
+    ticket = {"key": key, "summary": ts.get("summary", ""), "url": ts.get("url", ""),
+              "status": ts.get("external_status", "")}
+    log.emit("ticket_merged",
+             f"All PRs merged for {_label(key, ts)} (ticket had left the ticket query)",
+             links={"ticket": ts.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
+             meta={"ticket": key, "via": "sweep"})
+    ts.pop("sweep_unresolved_status", None)
+    return _mark_ticket_merged(config, ticket, ts)
 
 
 def _note_unresolved_sweep(key: str, ts: dict, upstream: str | None) -> None:
