@@ -150,6 +150,11 @@ pr_autofix = false                # github only: every newly created PR gets a c
 # regression_days = 7                  # validation_run regression in last N days
 # pending_approval_hours = 12          # pending_approval ticket sitting >Nh
 
+# [today_agent]
+# enabled = true                       # off unless set; seeds the today_agent_tick schedule
+# cadence = "daily_8_local"            # daily_<hour>_local; supports any hour 0-23
+# use_llm = true                       # false ranks the staleness buckets deterministically
+
 # --- Wizard (one-card PR-unblock surface) ---
 # Maps github logins to Slack targets so /wizard can draft and send pings.
 # slack_int's HTTP bridge (127.0.0.1:8900) does the actual sending.
