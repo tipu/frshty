@@ -78,7 +78,7 @@ PERSONA_MAINTAINABILITY = (
     "But you open whole files to judge them, and the other reviewers cannot open all of them. When a "
     "file you opened contains a defect that meets a blocking rule below, report it at that severity. "
     "Staying in your lane is not a reason to file data loss as a nit.\n"
-    "Prefix minor issues with `nit:`. State blocking issues directly.\n\n"
+    "Prefix minor issues with `nit:`. A blocking finding still says plainly what breaks.\n\n"
     "HOW TO WORK:\n"
     "- Do not answer from the diff alone. Confirm every claim against the checkout.\n"
     "- Before you call something a new pattern, grep for the established pattern and name the file "
@@ -138,23 +138,40 @@ LINE_NUMBER_RULES = (
     "'line' is the most relevant line for the issue. 'start_line' is the first line of the relevant code block.\n"
 )
 
+HOUSE_VOICE = (
+    "VOICE: Write the comment the way you would say it to the author at their desk.\n"
+    "Two sentences, in this order:\n"
+    "1. The ask, as a question: \"Can we <the change you want>?\" Say the change in plain words, "
+    "not as an implementation plan. One question, and it is the first sentence.\n"
+    "2. The reason: what the code does now and what that costs, joined by \"so\" or \"which\". "
+    "Name the real trigger and the real consequence the user, the caller, or the ticket goal ends "
+    "up with.\n"
+    "Use plain nouns for the moving parts (\"the timer\", \"the composer\", \"the spoken "
+    "offset\") instead of the symbol names, unless the author cannot find the code without the "
+    "symbol. Contractions are fine. No code blocks, no bullet lists, no headings.\n"
+    "Length: two sentences. A third only when the trigger needs its own sentence. Never more.\n"
+    "Do not prescribe the patch, do not list steps, do not ask for a test, do not restate the code, "
+    "do not add background.\n"
+    "The question is how the finding is delivered, not a hedge. You verified the defect, so say what "
+    "happens, not what might happen. \"Can\" for a path that only some inputs take is fine; "
+    "\"might\", \"could\", and \"possibly\" about the defect itself are not.\n"
+    "Example: \"Can we wait to reveal the text until the audio actually starts? Right now the timer "
+    "starts as soon as text streams in, so the transcript gets ahead of ElevenLabs and misses the "
+    "main goal of this ticket.\"\n"
+    "Example: \"Can we treat an error as the end of the turn here? With voice enabled a failed "
+    "response never becomes caught up, so the composer stays stuck in loading and the user can't "
+    "retry.\"\n"
+)
+
 BODY_RULES = (
     "BODY RULES: The 'body' field must NOT contain severity tags, bold markers, or line numbers. "
     "Severity is already in the 'severity' field and the location is already in the 'path' and "
     "'line' fields.\n"
-    "Write a finding, not a question. Give three things, in this order:\n"
-    "1. The defect. Name the symbol, expression, or missing guard. Not 'this may be unsafe'.\n"
-    "2. The failure path. The concrete input, request, or sequence that triggers it, and what the "
-    "caller or the data ends up with. Give the real case (a request carrying another tenant's id, an "
-    "empty result set, a second concurrent write), never 'in some cases'.\n"
-    "3. The fix. What to change: the guard to add, the argument to pass, the call to move. A short "
-    "code snippet is welcome when it is shorter than the sentence describing it.\n"
-    "Length: 2 to 5 sentences. Use the longer end when the failure path needs it. Do not pad, do not "
-    "restate the code, do not add background.\n"
-    "Be specific and prescriptive. Do not hedge with 'might', 'could', or 'consider' about a defect "
-    "you verified in the code. State it.\n"
-    "Ask a question only when you tried to settle it with your tools and could not. Then say what you "
-    "checked and what is still unknown.\n"
+    + HOUSE_VOICE +
+    "Every body opens with a question. That is the house voice, not the \"question\" severity. "
+    "Grade severity by the SEVERITY RULES alone.\n"
+    "Ask about a fact you could not settle only when you tried to settle it with your tools and "
+    "failed. Then say what you checked and what is still unknown, and rate it \"question\".\n"
 )
 
 TOOL_USE_RULES = (
@@ -227,7 +244,6 @@ def review_pr(config: dict, platform, pr: dict, ticket_context: str = "",
         if merged.get("issues"):
             merged["issues"] = _validate_issues(merged["issues"], worktree)
             merged["issues"] = _simplify_all_issues(merged["issues"])
-            merged["issues"] = _style_match_all(config, merged["issues"])
         issues_by_provider[provider] = merged.get("issues", [])
         shared_by_provider[provider] = merged
         if provider != "claude":
@@ -446,7 +462,10 @@ def _merge_reviews(results: list[tuple[str, dict]]) -> dict:
         "- breakage: checked if the diff will break in production\n"
         "- maintainability: checked if the diff will be regretted in 3 months\n\n"
         "Your task:\n"
-        "1. Identify duplicate/overlapping findings across personas (same problem even if different wording or ±5 lines)\n"
+        "1. Identify duplicate/overlapping findings across personas. Two findings are the same "
+        "finding when they describe one defect, even when the wording differs, the line numbers sit "
+        "up to five lines apart, or one persona describes the cause and another describes the "
+        "symptom. Two symptoms of one root cause are one finding.\n"
         "2. Merge duplicates into single issues with an 'agreed_by' array listing which personas flagged it\n"
         "3. For merged issues, use the most detailed 'body' from the agreeing personas\n"
         "4. For merged issues, use the most severe severity rating\n"
@@ -459,12 +478,13 @@ def _merge_reviews(results: list[tuple[str, dict]]) -> dict:
         "plain statement and keep the finding.\n"
         "10. Never drop a finding because only one persona reported it. Each persona looks through a "
         "different lens, so a single-persona finding is the normal case.\n"
-        "11. Keep every 'body' whole. Do not shorten it, do not remove the prescribed fix, and do not "
-        "turn a statement into a question.\n\n"
+        "11. Keep every 'body' whole and in the voice it arrived in. Each body opens with a question "
+        "that asks for the change, then gives the reason. Keep both parts, do not shorten them, and "
+        "do not rewrite the question into a statement.\n\n"
         "Return a single JSON object (no markdown fences) with the same schema as the inputs plus 'agreed_by' on each issue.\n\n"
         f"--- REVIEWS ---\n{merge_input}\n--- END REVIEWS ---"
     )
-    output = run_haiku(merge_prompt)
+    output = run_balanced(merge_prompt, timeout=300)
     if output:
         data = extract_json(output)
         if data:
@@ -569,7 +589,8 @@ VALIDATE_PROMPT = (
     "let the author answer.\n"
     "A comment that describes the code correctly is 'valid' even when you would not have raised it, "
     "and even when it prescribes a fix you would write differently. You judge the claim, not the tone "
-    "and not the severity.\n\n"
+    "and not the severity. Every comment opens with a question to the author. That is the house "
+    "style, not an admission of doubt; judge the claim the rest of the comment makes.\n\n"
     "Return ONLY a JSON object (no markdown fences):\n"
     '{"decision":"valid"|"false_positive"|"uncertain","defeating_line":<line number from the context, or null>,"reason":"one sentence"}\n'
 )
@@ -671,20 +692,27 @@ def _validate_issues(issues: list[dict], worktree: Path | None) -> list[dict]:
     return [r for r in results if r is not None]
 
 
+REWRITE_INTRO = (
+    "Rewrite this code review comment in the house voice below. Keep the defect and the reason it "
+    "matters. Drop the implementation plan, the test request, and any sentence that only restates "
+    "the code. Keep the specifics that make the finding real: the triggering input and the concrete "
+    "consequence.\n\n"
+)
+
+REWRITE_EXAMPLE = (
+    "\nBad: \"`usePacedDisplayMessages` starts revealing text solely from chat-stream state and "
+    "never consumes the playback-start state emitted by `HeyGenAvatarStream`. Gate the reveal timer "
+    "on the playback-start signal and add a test that the transcript stays hidden during TTS "
+    "generation.\"\n"
+    "Good: \"Can we wait to reveal the text until the audio actually starts? Right now the timer "
+    "starts as soon as text streams in, so the transcript gets ahead of ElevenLabs and misses the "
+    "main goal of this ticket.\"\n"
+    "\nReturn ONLY the rewritten comment.\n"
+)
+
+
 def _simplify_body(body: str) -> str:
-    output = run_haiku(
-        "Tighten this review comment. Remove hedging (might, could, may, consider), filler, and any "
-        "sentence that only restates what the code says. "
-        "Keep all three of: the defect, the failure path that triggers it, and the prescribed fix. "
-        "Keep the specifics: symbol names, the triggering input, the concrete consequence. "
-        "Do not drop the fix. Do not turn a statement into a question. "
-        "Up to 5 sentences; go shorter only when nothing is lost. Be imperative, not narrative. "
-        "Bad: 'This might overflow if the array is large.' "
-        "Good: '`parse_batch` overflows once `items` exceeds 4096 because `buf` is fixed at 4 KB, so "
-        "the tail of the batch is written past the end. Size `buf` from `len(items)` or chunk the loop.' "
-        "Backticks for code only. Return ONLY the rewritten text."
-        f"\n\n{body}"
-    )
+    output = run_balanced(REWRITE_INTRO + HOUSE_VOICE + REWRITE_EXAMPLE + f"\n{body}", timeout=120)
     return output if output else body
 
 
@@ -693,18 +721,11 @@ def _simplify_body_with_context(body: str, code_context: str | None, file_path: 
     if code_context:
         context_section = f"\nCode context (line {line_num} in {file_path}):\n```\n{code_context}\n```\n"
 
-    prompt = (
-        "You are simplifying a code review comment. Strip it to its essence while preserving the technical intent.\n"
-        "Remove: hedging language (might, could, may), examples, explanations of why, background context.\n"
-        "Keep: the actual problem and the prescribed fix, which must still make sense in context of the code.\n"
-        "1-2 sentences max. Be imperative not narrative.\n"
-        "Bad: 'This might overflow if the array is large.'\n"
-        "Good: 'This overflows on large arrays; use a buffer.'\n"
-        "Backticks for code identifiers only. Return ONLY the rewritten text, nothing else."
-        f"{context_section}\nReview comment to simplify:\n{body}"
+    output = run_balanced(
+        REWRITE_INTRO + HOUSE_VOICE + REWRITE_EXAMPLE
+        + f"{context_section}\nReview comment to rewrite:\n{body}",
+        timeout=120,
     )
-
-    output = run_haiku(prompt)
     return output if output else body
 
 
@@ -753,33 +774,6 @@ def build_walkthrough_context(comment: dict, worktree: Path | None) -> dict:
 def _simplify_all_issues(issues: list[dict]) -> list[dict]:
     with ThreadPoolExecutor(max_workers=10) as pool:
         bodies = list(pool.map(lambda i: _simplify_body(i["body"]), issues))
-    for issue, body in zip(issues, bodies):
-        issue["body"] = body
-    return issues
-
-
-def _style_match(body: str, examples: str) -> str:
-    if not examples:
-        return body
-    output = run_haiku(
-        f"Rewrite this PR review comment to match this person's commenting style.\n"
-        f"Match tone, wording, and formatting only. Keep the technical content complete: the defect, "
-        f"the failure path, and the prescribed fix must all survive, with their specifics. "
-        f"Do not shorten the comment into a question and do not soften a stated defect.\n\n"
-        f"Style examples:\n{examples}\n\nComment to rewrite:\n{body}\n\n"
-        f"Return ONLY the rewritten comment."
-    )
-    return output if output else body
-
-
-def _style_match_all(config: dict, issues: list[dict]) -> list[dict]:
-    history_path = config["_state_dir"] / "comment_history.jsonl"
-    if not history_path.exists():
-        return issues
-    lines = history_path.read_text().strip().splitlines()[-20:]
-    examples = "\n".join(lines)
-    with ThreadPoolExecutor(max_workers=10) as pool:
-        bodies = list(pool.map(lambda i: _style_match(i["body"], examples), issues))
     for issue, body in zip(issues, bodies):
         issue["body"] = body
     return issues
@@ -1156,7 +1150,6 @@ def review_ticket(config: dict, ticket_key: str, prs: list[dict],
             if issues:
                 issues = _validate_issues(issues, worktrees[key])
                 issues = _simplify_all_issues(issues)
-                issues = _style_match_all(config, issues)
             by_pr[key][provider] = issues
             if provider != "claude":
                 _write_review_artifacts(config, pr, {
