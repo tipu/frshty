@@ -19,8 +19,8 @@ from pathlib import Path
 import core.tasks.tickets as T
 
 
-def _repo(tmp_path: Path, name: str) -> Path:
-    r = tmp_path / "workspace" / name
+def _repo(tmp_path: Path, name: str, *, flat: bool = False) -> Path:
+    r = tmp_path / name if flat else tmp_path / "workspace" / name
     r.mkdir(parents=True)
     subprocess.run(["git", "init", "-q", str(r)], check=True)
     subprocess.run(["git", "-C", str(r), "config", "user.email", "t@t"], check=True)
@@ -89,3 +89,23 @@ class TestRangesGivenToTheVerifier:
         n = subprocess.run(["git", "-C", str(r), "rev-list", "--count", rng],
                            capture_output=True, text=True).stdout.strip()
         assert n == "3"
+
+    def test_flat_ticket_layout_is_supported(self, tmp_path):
+        """Production uses repos directly below the ticket directory."""
+        r = _repo(tmp_path, "one", flat=True)
+        before = T._capture_repo_heads(tmp_path)
+        (r / "a.py").write_text("x = 2\n")
+        subprocess.run(["git", "-C", str(r), "add", "-A"], check=True)
+        subprocess.run(
+            ["git", "-C", str(r), "commit", "-qm", "fix", "--no-verify"],
+            check=True,
+        )
+
+        ranges = T._review_diff_ranges(tmp_path, before)
+        after = subprocess.run(
+            ["git", "-C", str(r), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert ranges["one"] == f"{before['one']}..{after}"
