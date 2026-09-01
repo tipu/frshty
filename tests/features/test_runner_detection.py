@@ -22,7 +22,7 @@ class TestPackageJson:
                json.dumps({"scripts": {"test": "jest"}}))
         cmd, env = _detect_runner(tmp_path)
         assert cmd == ["npm", "run", "test"]
-        assert env == {}
+        assert env == {"CI": "true"}
 
     def test_pnpm_preferred_when_lockfile_present(self, tmp_path):
         _write(tmp_path / "package.json",

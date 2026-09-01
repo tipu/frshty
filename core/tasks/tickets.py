@@ -82,11 +82,16 @@ def _detect_runner(repo_dir: Path) -> tuple[list[str], dict[str, str]] | None:
         scripts = pkg.get("scripts", {}) if isinstance(pkg, dict) else {}
         for candidate in ("test", "test:unit", "test:ci"):
             if candidate in scripts:
+                # CI=true makes watch-mode-by-default runners (vitest,
+                # react-scripts test) run once and exit instead of hanging
+                # until TEST_RUN_TIMEOUT; jest and already-run-mode scripts
+                # are unaffected by the var.
+                env = {"CI": "true"}
                 if (repo_dir / "pnpm-lock.yaml").exists():
-                    return (["pnpm", "run", candidate], {})
+                    return (["pnpm", "run", candidate], env)
                 if (repo_dir / "yarn.lock").exists():
-                    return (["yarn", "run", candidate], {})
-                return (["npm", "run", candidate], {})
+                    return (["yarn", "run", candidate], env)
+                return (["npm", "run", candidate], env)
     if (repo_dir / "pyproject.toml").exists() or \
        (repo_dir / "pytest.ini").exists() or \
        (repo_dir / "tests").is_dir():
