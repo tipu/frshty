@@ -90,15 +90,22 @@ def _detect_runner(repo_dir: Path) -> tuple[list[str], dict[str, str]] | None:
     if (repo_dir / "pyproject.toml").exists() or \
        (repo_dir / "pytest.ini").exists() or \
        (repo_dir / "tests").is_dir():
+        pytest_args = ["-q"]
+        # Repositories commonly keep live-service BDD suites beside their
+        # self-contained unit suite.  A bare `pytest` collects both and turns
+        # missing integration infrastructure into a product-code failure.  CI
+        # for these repositories likewise runs tests/unit separately.
+        if (repo_dir / "tests" / "unit").is_dir():
+            pytest_args.append("tests/unit")
         venv_pytest = repo_dir / ".venv" / "bin" / "pytest"
         if venv_pytest.exists():
-            return ([str(venv_pytest), "-q"], {})
+            return ([str(venv_pytest), *pytest_args], {})
         if (repo_dir / "Pipfile").exists():
-            return (["pipenv", "run", "pytest", "-q"], {})
+            return (["pipenv", "run", "pytest", *pytest_args], {})
         if (repo_dir / "uv.lock").exists():
-            return (["uv", "run", "pytest", "-q"], {})
+            return (["uv", "run", "pytest", *pytest_args], {})
         if (repo_dir / "poetry.lock").exists():
-            return (["poetry", "run", "pytest", "-q"], {})
+            return (["poetry", "run", "pytest", *pytest_args], {})
         return ([_NO_LOCAL_PY_VENV_SENTINEL], {})
     if (repo_dir / "go.mod").exists():
         return (["go", "test", "./..."], {})
