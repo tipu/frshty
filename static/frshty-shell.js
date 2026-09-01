@@ -16,6 +16,7 @@
 			{ href: '/global', label: 'Global', icon: '◎' },
 		]},
 		{ title: 'Work', links: [
+			{ href: '/tasks', label: 'Tasks', icon: '◈', match: ['/tasks', '/threads'] },
 			{ href: '/reviews', label: 'Reviews', icon: '◐' },
 			{ href: '/today', label: 'Today', icon: '☉' },
 			{ href: '/wizard', label: 'Wizard', icon: '✦' },
@@ -37,6 +38,13 @@
 		return path === href || path.indexOf(href + '/') === 0;
 	}
 
+	// A link can claim more than one path. Threads is a view of Tasks rather
+	// than its own rail item, so /threads has to keep the Tasks item lit.
+	function linkActive(path, link) {
+		const hrefs = link.match || [link.href];
+		return hrefs.some(h => pathMatches(path, h));
+	}
+
 	// Map URL paths back to the breadcrumb crumbs the topbar renders. Looking up
 	// by current path keeps the topbar consistent across pages without each
 	// page having to know its own breadcrumb. Each entry is [section, page] —
@@ -44,6 +52,8 @@
 	const CRUMBS = {
 		'/': ['Workspace', 'Inbox'],
 		'/global': ['Workspace', 'Global'],
+		'/tasks': ['Work', 'Tasks'],
+		'/threads': ['Work', 'Tasks', 'Threads'],
 		'/reviews': ['Work', 'Reviews'],
 		'/today': ['Work', 'Today'],
 		'/wizard': ['Work', 'Wizard'],
@@ -60,7 +70,7 @@
 	function crumbsForPath(path) {
 		if (CRUMBS[path]) return CRUMBS[path];
 		// Detail routes — /tickets/DEV-475 → ["Work", "Tickets", "DEV-475"]
-		const m = path.match(/^(\/tickets|\/reviews|\/prd)\/(.+?)\/?$/);
+		const m = path.match(/^(\/tickets|\/reviews|\/prd|\/tasks|\/threads)\/(.+?)\/?$/);
 		if (m && CRUMBS[m[1]]) return [...CRUMBS[m[1]], m[2]];
 		return ['Workspace', 'Home'];
 	}
@@ -88,7 +98,7 @@
 					links: section.links
 						.filter(l => !l.feature || f[l.feature] !== false)
 						.map(l => Object.assign({}, l, {
-							active: pathMatches(path, l.href),
+							active: linkActive(path, l),
 							count: this.counts[l.label.toLowerCase()] || 0,
 						})),
 				}));

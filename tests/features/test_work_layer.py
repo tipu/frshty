@@ -135,6 +135,33 @@ class TestGrouping:
         with_q = work_store.grouped_items(now, q="ancient billing")
         assert old in {r["id"] for r in with_q["done"]}
 
+    def test_done_items_are_sorted_by_completion_time_descending(self):
+        now = datetime.now(timezone.utc)
+        completed_first = _mkitem("completed first")
+        completed_last = _mkitem("completed last")
+        db.execute(
+            "UPDATE work_items SET state='done', priority=10, updated_at=? WHERE id = ?",
+            (now.isoformat(), completed_first),
+        )
+        db.execute(
+            "UPDATE work_items SET state='done', priority=0, updated_at=? WHERE id = ?",
+            ((now - timedelta(hours=1)).isoformat(), completed_last),
+        )
+        db.execute(
+            "INSERT INTO work_events(work_item_id, kind, created_at) VALUES (?, 'operator_done', ?)",
+            (completed_first, (now - timedelta(hours=2)).isoformat()),
+        )
+        db.execute(
+            "INSERT INTO work_events(work_item_id, kind, created_at) VALUES (?, 'self_reported_done', ?)",
+            (completed_last, (now - timedelta(hours=1)).isoformat()),
+        )
+
+        done_ids = [
+            row["id"] for row in work_store.grouped_items(now, q="completed")["done"]
+        ]
+
+        assert done_ids == [completed_last, completed_first]
+
 
 class TestIntake:
     def _client(self):

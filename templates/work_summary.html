@@ -28,7 +28,7 @@ h1 { font-size: 16px; margin: 0 0 4px; color: #fff; }
 <div id="app" class="page">
 <div v-if="item">
   <h1>{{ item.objective }}</h1>
-  <div class="meta">#{{ item.id }} · {{ item.state }} · <a :href="'/work/' + item.id" style="color:#93c5fd">detail</a></div>
+  <div class="meta">#{{ item.id }} · {{ item.state }} · <a :href="'/tasks/' + item.id" style="color:#93c5fd">detail</a></div>
   <div class="summary" v-if="item.summary" v-html="lk(item.summary)"></div>
   <div class="empty" v-else>No summary yet.</div>
   <div v-if="artifacts.length">
