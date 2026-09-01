@@ -49,6 +49,30 @@ def _run(tmp_path, attempts_before, fix_result):
 
 
 class TestAttemptBudget:
+	def test_configured_external_ci_repo_is_skipped(self, tmp_path):
+		(tmp_path / "workspace" / "repo" / ".git").mkdir(parents=True, exist_ok=True)
+		ctx = _ctx(tmp_path)
+		ctx.config = {"workspace": {"test_exclude": ["repo"]}}
+		with patch.object(T, "_ticket_dir", return_value=tmp_path), \
+		     patch.object(T.state, "load_ticket", return_value={"status": "testing"}), \
+		     patch.object(T, "_repo_has_changes_vs_base") as changed, \
+		     patch.object(T, "_detect_runner") as detect, \
+		     patch.object(T, "_write_test_runs") as write_runs, \
+		     patch.object(T, "log"):
+			result = T.run_tests_and_fix(ctx)
+
+		assert result.status == "ok"
+		assert result.artifacts["verdict"] == "PASS"
+		changed.assert_not_called()
+		detect.assert_not_called()
+		per_repo = write_runs.call_args.args[2]
+		assert per_repo == [{
+			"repo": "repo",
+			"result": "skipped",
+			"tail": "local test run excluded by workspace.test_exclude; "
+			        "external CI owns this repository's integration environment",
+		}]
+
 	def test_an_attempt_that_never_reached_claude_is_given_back(self, tmp_path):
 		result, attempts = _run(tmp_path, attempts_before=0, fix_result=None)
 		assert result.status == "failed"
