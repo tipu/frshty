@@ -71,8 +71,10 @@
 
         <form @submit.prevent="launch" class="ln-task-compose" style="margin-bottom:14px">
           <div>
-            <input class="ln-input" v-model="launchText" :disabled="!canLaunch || launchBusy"
-                   placeholder="What should happen next in this thread?" />
+            <textarea class="ln-input ln-compose-text" rows="1" ref="launchBox" v-model="launchText"
+                      :disabled="!canLaunch || launchBusy" @keydown.enter="onComposeEnter($event, launch)"
+                      @input="grow($event.target)"
+                      placeholder="What should happen next in this thread? Enter launches a run, Shift+Enter adds a line."></textarea>
             <div class="ln-task-compose-opts">
               <span class="ln-chipsel">agent:
                 <select v-model="launchAgent" :disabled="!canLaunch || launchBusy">
@@ -257,6 +259,16 @@ frshtyApp({
         this.loadError = "Unable to load this thread: " + e.message;
       }
     },
+    onComposeEnter(e, submit) {
+      if (e.isComposing || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+      e.preventDefault();
+      submit();
+    },
+    grow(el) {
+      if (!el) return;
+      el.style.height = "auto";
+      el.style.height = el.scrollHeight + "px";
+    },
     async launch() {
       if (!this.canLaunch) return;
       this.launchError = ""; this.launchBusy = true;
@@ -270,6 +282,7 @@ frshtyApp({
         if (!r.ok) { this.launchError = d.error || "launch failed (HTTP " + r.status + ")"; return; }
         localStorage.setItem("workAgent", this.launchAgent);
         this.launchText = ""; this.launchContexts = []; this.launchSlack = false;
+        this.$nextTick(() => this.grow(this.$refs.launchBox));
         await this.refresh();
       } catch (e) {
         this.launchError = "request failed: " + e.message + " — is frshty up?";
