@@ -297,6 +297,16 @@ _PROVE_BROWSER_BLOCK_FOOTER = """
 """
 
 
+_PROVE_CHANGE_SCOPE_BLOCK = """
+
+AUTHORITATIVE TICKET CHANGE SCOPE:
+The configured base branch for each repository was used to calculate this list. Only the repositories and files below changed for this ticket:
+{scope}
+
+Do not infer ticket changes by comparing every repository with `main`. Treat every repository omitted from this list as unchanged and out of scope. Base the proof only on the change scope below and the ticket artifacts in `docs/`; do not demonstrate pre-existing behavior from an omitted repository.
+"""
+
+
 def _click_indicator_script() -> str:
     """The click-visualisation script injected into browser-driven proofs.
     Kept as an asset rather than inline so it stays editable and testable on
@@ -306,6 +316,52 @@ def _click_indicator_script() -> str:
         return path.read_text().strip()
     except OSError:
         return ""
+
+
+def _proof_change_scope(ticket_dir: Path, config: dict) -> str:
+    """Describe committed ticket changes relative to each repo's real base.
+
+    Ticket worktrees can start from non-main branches (for example a UI's
+    development branch). Giving prove an explicit scope prevents inherited
+    branch commits from being mistaken for this ticket's work.
+    """
+    workspace = ticket_dir / "workspace"
+    search_root = workspace if workspace.is_dir() else ticket_dir
+    changed: list[str] = []
+    indeterminate: list[str] = []
+    for repo_dir in sorted(p for p in search_root.iterdir() if p.is_dir()):
+        if not (repo_dir / ".git").exists():
+            continue
+        base_branch = base_branch_for(config, repo_dir.name)
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--name-only", f"origin/{base_branch}...HEAD"],
+                cwd=repo_dir, capture_output=True, text=True, timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            indeterminate.append(
+                f"- {repo_dir.name} (base: {base_branch}; diff unavailable)"
+            )
+            continue
+        if result.returncode != 0:
+            indeterminate.append(
+                f"- {repo_dir.name} (base: {base_branch}; diff unavailable)"
+            )
+            continue
+        files = [line for line in result.stdout.splitlines() if line.strip()]
+        if files:
+            file_list = "\n".join(f"  - {path}" for path in files)
+            changed.append(
+                f"- {repo_dir.name} (base: {base_branch})\n{file_list}"
+            )
+    if not changed:
+        changed.append("- No committed repository changes were detected.")
+    if indeterminate:
+        changed.append(
+            "Repositories whose diff could not be determined (inspect before "
+            "using):\n" + "\n".join(indeterminate)
+        )
+    return "\n".join(changed)
 
 
 _PROVE_FEEDBACK_BLOCK = """
@@ -1858,6 +1914,9 @@ def prove(ctx: TaskContext) -> TaskResult:
         )
         return TaskResult("ok", artifacts={"skipped": True})
     prompt = _PROVE_PROMPT_TEMPLATE.format(proof_md=proof_md)
+    prompt += _PROVE_CHANGE_SCOPE_BLOCK.format(
+        scope=_proof_change_scope(ticket_dir, ctx.config)
+    )
     indicator = _click_indicator_script()
     if indicator:
         prompt += _PROVE_BROWSER_BLOCK_HEADER + indicator + _PROVE_BROWSER_BLOCK_FOOTER
