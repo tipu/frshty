@@ -118,6 +118,20 @@ class TestPython:
         cmd, _ = _detect_runner(tmp_path)
         assert cmd == [str(venv_pytest), "-q"]
 
+    def test_unit_subtree_excludes_integration_suite(self, tmp_path):
+        """Live-service integration tests have a separate CI environment."""
+        _write(tmp_path / "pyproject.toml", "[project]\nname='x'\n")
+        (tmp_path / "tests" / "unit").mkdir(parents=True)
+        (tmp_path / "tests" / "integration").mkdir()
+        venv_bin = tmp_path / ".venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        venv_pytest = venv_bin / "pytest"
+        venv_pytest.write_text("#!/usr/bin/env python\n")
+        venv_pytest.chmod(0o755)
+
+        cmd, _ = _detect_runner(tmp_path)
+        assert cmd == [str(venv_pytest), "-q", "tests/unit"]
+
 
 class TestGo:
     def test_go_mod(self, tmp_path):
