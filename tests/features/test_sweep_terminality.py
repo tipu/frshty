@@ -206,6 +206,14 @@ class TestSweepSeesTheMerge:
         out = self._sweep_with_pr_states("in_review", "Ready for Deploy", ["MERGED"])
         assert "sweep_unresolved_status" not in out
 
+    def test_the_merge_records_the_upstream_status_it_reads_now(self):
+        """merged_external_status decides whether a later upstream move is a
+        reopen. The cached external_status is stale by the time the sweep
+        sees the ticket."""
+        out = self._sweep_with_pr_states("in_review", "Ready for Deploy", ["MERGED"])
+        assert out["merged_external_status"] == "Ready for Deploy"
+        assert out["external_status"] == "Ready for Deploy"
+
     def test_an_open_pr_still_leaves_the_ticket_alone(self):
         out = self._sweep_with_pr_states("in_review", "Ready for Testing", ["OPEN", "MERGED"])
         assert out["status"] == "in_review"
