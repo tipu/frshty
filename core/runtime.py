@@ -389,6 +389,23 @@ def _seed_recurring_schedules(instance_configs: list[dict]) -> None:
                                         cadence=cadence, next_run_at=candidate)
         else:
             scheduler.delete(key, "manager_daily_digest")
+        today_cfg = c.get("today_agent") or {}
+        if today_cfg.get("enabled"):
+            cadence = today_cfg.get("cadence", "daily_8_local")
+            hour = 8
+            if cadence.startswith("daily_") and cadence.endswith("_local"):
+                try:
+                    hour = int(cadence[len("daily_"):-len("_local")])
+                except ValueError:
+                    hour = 8
+            candidate = now_pst.replace(hour=hour, minute=0, second=0, microsecond=0)
+            if candidate <= now_pst:
+                from datetime import timedelta as _td
+                candidate = candidate + _td(days=1)
+            scheduler.upsert_recurring(key, "today_agent_tick", "today_agent_tick",
+                                        cadence=cadence, next_run_at=candidate)
+        else:
+            scheduler.delete(key, "today_agent_tick")
 
 
 def stop_events() -> None:

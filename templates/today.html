@@ -52,6 +52,20 @@
 .empty-state { padding: 24px; text-align: center; color: #6b7280; }
 details > summary { cursor: pointer; color: #9ca3af; font-size: 13px; padding: 6px 0; }
 details[open] > summary { color: #d1d5db; margin-bottom: 8px; }
+.state-pill { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 10px; background: #1e293b; color: #cbd5e1; font-family: ui-monospace, monospace; }
+.state-pill.target { background: #14532d; color: #86efac; }
+.state-pill.done { background: #1e3a5f; color: #93c5fd; }
+.goal-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; border-bottom: 1px solid #1f2937; }
+.goal-row:last-child { border-bottom: none; }
+.goal-row.completed { opacity: 0.5; }
+.goal-key { font-family: ui-monospace, monospace; font-size: 12px; color: #93c5fd; }
+.plan-card { background: #161b22; border: 1px solid #2a2a2a; border-radius: 6px; }
+.plan-head { padding: 8px 14px; border-bottom: 1px solid #1f2937; display: flex; align-items: center; gap: 10px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #6b7280; }
+.q-card { background: #1f1408; border: 1px solid #7c3a08; padding: 12px; border-radius: 6px; margin-bottom: 10px; }
+.q-card .kind { font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: #fbbf24; }
+.kbd-input { background: #0f172a; border: 1px solid #334155; color: #e2e8f0; padding: 4px 8px; border-radius: 4px; font-family: ui-monospace, monospace; }
+.steer-btn { background: #1e293b; color: #cbd5e1; padding: 2px 8px; border-radius: 3px; font-size: 11px; border: 1px solid #334155; }
+.steer-btn:hover { background: #334155; }
 </style>
 <script src="/static/frshty-usage.js"></script>
 </head>
@@ -62,6 +76,71 @@ details[open] > summary { color: #d1d5db; margin-bottom: 8px; }
 
 
 
+
+<div v-if="questions.length" class="mb-4">
+    <div class="section-h" style="color:#fbbf24">Questions waiting on you ({{ questions.length }})</div>
+    <div v-for="qn in questions" :key="qn.job_id" class="q-card">
+        <div class="flex items-baseline gap-3 mb-2">
+            <span class="kind">{{ qn.kind }}</span>
+            <span class="state-pill" v-if="qn.ticket_key">{{ qn.ticket_key }}</span>
+            <span class="tk-meta ml-auto">{{ fmtRelative(qn.asked_at) }}</span>
+        </div>
+        <div class="tk-sum mb-3">{{ qn.question || '(no question text)' }}</div>
+        <div v-if="planError[qn.job_id]" class="err-inline">{{ planError[qn.job_id] }}</div>
+        <form @submit.prevent="answerQuestion(qn)" class="flex gap-2 items-center">
+            <template v-if="qn.expected_input === 'yes_no'">
+                <button type="button" class="steer-btn" @click="answerQuestion(qn, 'yes')">yes</button>
+                <button type="button" class="steer-btn" @click="answerQuestion(qn, 'no')">no</button>
+            </template>
+            <template v-else>
+                <input v-model="answers[qn.job_id]" class="kbd-input flex-1" autocomplete="off"
+                       :placeholder="qn.expected_input === 'typed_confirmation' ? 'type to confirm' : 'enter answer'" />
+                <button type="submit" class="btn-sec">Submit</button>
+            </template>
+        </form>
+    </div>
+</div>
+
+<div class="plan-card mb-4">
+    <div class="plan-head">
+        <span>Today's plan<span v-if="!planEmpty"> ({{ goals.length }} goals)</span></span>
+        <span v-if="paused" class="state-pill" style="background:#713f12;color:#fde047">paused</span>
+        <span class="ml-auto flex items-center gap-2">
+            <button v-if="!paused" class="steer-btn" @click="steer('pause')">pause</button>
+            <button v-else class="steer-btn" @click="steer('resume')">resume</button>
+            <button class="steer-btn" :disabled="planBusy" @click="replan()">{{ planBusy ? 'planning…' : 'replan' }}</button>
+        </span>
+    </div>
+    <div v-if="planError.plan" class="px-4 py-2"><span class="err-inline">{{ planError.plan }}</span></div>
+    <div v-if="planEmpty" class="px-4 py-4 tk-meta">
+        No plan yet. The planner runs daily when <code>[today_agent].enabled</code> is true; replan builds one now.
+    </div>
+    <template v-else>
+        <div v-for="g in goals" :key="g.ticket_key" class="goal-row" :class="{ completed: g.completed }">
+            <a :href="'/tickets/' + g.ticket_key" class="goal-key hover:underline">{{ g.ticket_key }}</a>
+            <span class="state-pill">{{ g.current_state || '?' }}</span>
+            <span class="tk-meta">→</span>
+            <span class="state-pill" :class="{ target: g.completed }">{{ g.target_state }}</span>
+            <span class="tk-sum flex-1 truncate" :title="g.rationale || g.summary">{{ g.rationale || g.summary }}</span>
+            <span class="tk-meta">{{ g.source_bucket }}</span>
+            <button class="steer-btn" title="skip today" @click="skipGoal(g)">skip</button>
+        </div>
+        <div v-if="!goals.length" class="px-4 py-4 tk-meta">
+            No active goals left. Every goal the planner picked has reached its target state.
+        </div>
+    </template>
+</div>
+
+<details v-if="planCompleted.length" class="mb-4">
+    <summary>Completed today ({{ planCompleted.length }})</summary>
+    <div class="plan-card">
+        <div v-for="g in planCompleted" :key="g.ticket_key" class="goal-row completed">
+            <span class="goal-key">{{ g.ticket_key }}</span>
+            <span class="state-pill done">{{ g.current_state || g.target_state }}</span>
+            <span class="tk-sum flex-1 truncate">{{ g.rationale || g.summary }}</span>
+        </div>
+    </div>
+</details>
 
 <div class="flex items-center gap-2 mb-3 flex-wrap">
     <template v-for="(count, key) in visibleCounts" :key="key">
@@ -370,6 +449,14 @@ frshtyApp({
     setup() {
         const loops = ref({});
         const counts = ref({});
+        const goals = ref([]);
+        const planCompleted = ref([]);
+        const questions = ref([]);
+        const answers = reactive({});
+        const planEmpty = ref(true);
+        const paused = ref(false);
+        const planBusy = ref(false);
+        const planError = reactive({});
         const snoozed = ref([]);
         const generatedAt = ref(null);
         const bodyMd = ref('');
@@ -664,9 +751,83 @@ frshtyApp({
             }
         }
 
+        async function loadPlan() {
+            try {
+                const [planResp, qResp] = await Promise.all([
+                    fetch('/api/today/plan'),
+                    fetch('/api/today/questions'),
+                ]);
+                if (!planResp.ok) throw new Error('HTTP ' + planResp.status);
+                const plan = await planResp.json();
+                planEmpty.value = !!plan.empty;
+                goals.value = plan.goals || [];
+                planCompleted.value = plan.completed || [];
+                paused.value = !!plan.paused;
+                if (!qResp.ok) throw new Error('HTTP ' + qResp.status);
+                const q = await qResp.json();
+                questions.value = q.questions || [];
+                delete planError.plan;
+            } catch (e) {
+                planError.plan = 'Failed to load the plan: ' + e.message;
+            }
+        }
+
+        async function steer(action, extra) {
+            try {
+                const r = await fetch('/api/today/steer', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({action, ...(extra || {})}),
+                });
+                if (!r.ok) {
+                    const err = await r.json().catch(() => ({}));
+                    throw new Error(err.error || ('HTTP ' + r.status));
+                }
+                delete planError.plan;
+            } catch (e) {
+                planError.plan = 'Action ' + action + ' failed: ' + e.message;
+                return;
+            }
+            await loadPlan();
+        }
+
+        async function replan() {
+            planBusy.value = true;
+            try { await steer('replan'); } finally { planBusy.value = false; }
+        }
+
+        async function skipGoal(g) {
+            const reason = window.prompt('Why skip ' + g.ticket_key + ' today?', '') || '';
+            await steer('skip', {ticket_key: g.ticket_key, reason});
+        }
+
+        async function answerQuestion(qn, override) {
+            const ans = override !== undefined ? override : (answers[qn.job_id] || '');
+            if (!ans && qn.expected_input !== 'yes_no') return;
+            try {
+                const r = await fetch('/api/today/answer', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({job_id: qn.job_id, answer: ans}),
+                });
+                if (!r.ok) {
+                    const err = await r.json().catch(() => ({}));
+                    throw new Error(err.error || ('HTTP ' + r.status));
+                }
+                delete planError[qn.job_id];
+            } catch (e) {
+                planError[qn.job_id] = 'Answer failed: ' + e.message;
+                return;
+            }
+            delete answers[qn.job_id];
+            await loadPlan();
+        }
+
         onMounted(() => {
             load();
+            loadPlan();
             setInterval(load, 30000);
+            setInterval(loadPlan, 30000);
         });
 
         return {
@@ -679,6 +840,9 @@ frshtyApp({
             prFailReasonLabel, prFailReasonClass, prFailReasonTip,
             doAction, snooze, unsnooze, sendReply, openSubmitPr, confirmSubmitPr, runNow,
             refreshLive, launchClaude, classifyTicket,
+            goals, planCompleted, questions, answers, planEmpty, paused,
+            planBusy, planError,
+            loadPlan, steer, replan, skipGoal, answerQuestion,
         };
     }
 }).mount('#app');
