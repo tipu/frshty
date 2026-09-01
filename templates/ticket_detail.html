@@ -231,10 +231,161 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
     </div>
 </div>
 
-<div v-if="hasCode" class="flex gap-2 mb-4">
+<div class="flex gap-2 mb-4">
+    <button class="tab-btn" :class="{ active: activeTab === 'timeline' }" @click="switchTab('timeline')">Timeline</button>
     <button class="tab-btn" :class="{ active: activeTab === 'docs' }" @click="activeTab = 'docs'">Docs</button>
-    <button class="tab-btn" :class="{ active: activeTab === 'diff' }" @click="switchTab('diff')">Diff &amp; Comments</button>
-    <button v-if="ticket && ticket.has_explainer" class="tab-btn" :class="{ active: activeTab === 'explainer' }" @click="activeTab = 'explainer'">Explainer</button>
+    <button v-if="hasCode" class="tab-btn" :class="{ active: activeTab === 'diff' }" @click="switchTab('diff')">Diff &amp; Comments</button>
+    <button v-if="hasCode && ticket && ticket.has_explainer" class="tab-btn" :class="{ active: activeTab === 'explainer' }" @click="activeTab = 'explainer'">Explainer</button>
+</div>
+
+<div v-show="activeTab === 'timeline'">
+    <div v-if="timelineError && !tlNodes.length" class="card p-4 text-red-400 text-sm">{{ timelineError }}</div>
+    <div v-else-if="timelineLoading" class="card p-4 text-gray-500 text-sm">Building the timeline…</div>
+    <div v-else-if="!tlNodes.length" class="card p-4 text-gray-500 text-sm">No pipeline record for this ticket yet.</div>
+    <template v-else>
+        <div v-if="timelineError" class="card p-3 mb-4 text-xs text-red-400">refresh failed: {{ timelineError }}</div>
+        <div v-if="tlSegments.length" class="card p-3 mb-4">
+            <div class="flex items-center justify-between mb-2 gap-3 flex-wrap">
+                <span class="text-xs font-bold text-gray-500 uppercase">Where the time went</span>
+                <span class="text-xs text-gray-500">
+                    {{ tlKpis.work_label }} of agent work spread over {{ tlKpis.wall_label }}
+                    ({{ tlKpis.work_pct }}%)
+                </span>
+            </div>
+            <div class="tlC-ribbon">
+                <button v-for="(s, i) in tlSegments" :key="'seg' + i"
+                        class="tlC-seg" :class="[segToneClass(s), s.kind === 'work' ? 'tlC-seg-work' : 'tlC-seg-idle', { on: selectedId === s.node }]"
+                        :style="{ flex: '0 0 ' + segPct(s) + '%' }"
+                        :title="s.label + ' — ' + fmtSpan(s.seconds)"
+                        @click="selectNode(s.node, true)">
+                    <span v-if="segPct(s) > 7" class="tlC-seg-lbl">{{ s.label }} · {{ fmtSpan(s.seconds) }}</span>
+                </button>
+            </div>
+            <div class="tlC-axis">
+                <span v-for="t in tlTicks" :key="t.at" class="tlC-tick" :style="{ left: t.pct + '%' }">{{ t.label }}</span>
+            </div>
+            <div class="tlC-legend">
+                <span><span class="tlC-swatch" style="background:var(--ln-green)"></span>agent working — {{ tlKpis.work_label }}</span>
+                <span><span class="tlC-swatch" style="background:repeating-linear-gradient(135deg,#171921 0 4px,#1e2028 4px 8px)"></span>waiting — {{ tlKpis.wait_label }}</span>
+                <span><span class="tlC-swatch" style="background:var(--ln-red)"></span>blocked on a human</span>
+                <span><span class="tlC-swatch" style="background:var(--ln-violet)"></span>PR review</span>
+            </div>
+        </div>
+
+        <div class="grid gap-2 mb-4" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">
+            <div class="ln-kpi"><div class="ln-kpi-label">Wall clock</div><div class="ln-kpi-value">{{ tlKpis.wall_label || '—' }}</div></div>
+            <div class="ln-kpi"><div class="ln-kpi-label">Agent working</div><div class="ln-kpi-value" style="color:var(--ln-green)">{{ tlKpis.work_label || '—' }}</div></div>
+            <div class="ln-kpi"><div class="ln-kpi-label">Waiting</div><div class="ln-kpi-value" style="color:var(--ln-red)">{{ tlKpis.wait_label || '—' }}</div></div>
+            <div class="ln-kpi">
+                <div class="ln-kpi-label">Longest gap</div>
+                <div class="ln-kpi-value" style="color:var(--ln-amber)">{{ tlKpis.longest_gap_label || '—' }}</div>
+                <div class="ln-kpi-trend">{{ tlKpis.longest_gap_why || '' }}</div>
+            </div>
+        </div>
+
+        <div class="tlA">
+            <div class="tlA-spine">
+                <template v-for="row in spineRows" :key="row.key">
+                    <div v-if="row.kind === 'pass'" class="tlA-pass">{{ row.label }}</div>
+                    <div v-else-if="row.kind === 'edge'" class="tlA-row tlA-edge" :class="{ 'is-lane1': row.lane }">
+                        <div class="tlA-time"></div>
+                        <div class="tlA-gut"><span class="tl-gap" :class="row.cls">{{ row.label }}</span></div>
+                        <div class="tlA-lbl"><span v-if="row.why" class="tl-gap-why">{{ row.why }}</span></div>
+                    </div>
+                    <div v-else class="tlA-row tlA-node"
+                         :class="['tl-c-' + row.node.tone, { 'is-lane1': row.node.lane, 'is-first': row.first, 'is-last': row.last }]"
+                         :ref="el => registerNodeEl(row.node.id, el)">
+                        <div class="tlA-time">{{ tlDay(row.node.ts) }}<br>{{ tlClock(row.node.ts) }}</div>
+                        <div class="tlA-gut">
+                            <span class="tl-dot" :class="[{ 'tl-dot-sm': row.node.lane, 'tl-dot-fill': row.node.stop, 'tl-dot-live': row.node.live }]">{{ row.node.glyph }}</span>
+                        </div>
+                        <button class="tlA-card" :class="{ on: selectedId === row.node.id }" @click="selectNode(row.node.id)">
+                            <div class="tlA-card-top">
+                                <span class="tlA-name">{{ row.node.name }}</span>
+                                <span v-if="row.node.repo" class="ln-pill ln-pill-violet">{{ row.node.repo }}</span>
+                                <span v-if="row.node.stop" class="ln-pill">{{ row.node.stop }}</span>
+                            </div>
+                            <div class="tlA-sub">{{ row.node.sub }}</div>
+                            <div v-if="(row.node.chips || []).length" class="tlA-chips">
+                                <span v-for="(c, ci) in row.node.chips" :key="ci" class="tlA-chip" :class="c[0] ? 'tlA-chip-' + c[0] : ''">{{ c[1] }}</span>
+                            </div>
+                        </button>
+                    </div>
+                </template>
+            </div>
+
+            <aside class="card tl-panel">
+                <div class="tl-panel-head">
+                    <div v-if="selectedNode" class="tl-dot tl-dot-fill" :class="'tl-c-' + selectedNode.tone">{{ selectedNode.glyph }}</div>
+                    <div style="min-width:0">
+                        <div class="tl-panel-title">{{ selectedNode ? selectedNode.name : 'Pick a circle' }}</div>
+                        <div class="tl-panel-meta">
+                            {{ selectedNode ? (selectedNode.ts.replace('T', ' ').slice(0, 19) + ' · ' + selectedNode.detail.meta) : 'the phase output loads here' }}
+                        </div>
+                    </div>
+                </div>
+                <div class="tl-panel-body">
+                    <template v-if="selectedNode">
+                        <div v-for="(b, bi) in selectedNode.detail.blocks" :key="bi">
+                            <div v-if="b.title" class="tl-block-title">{{ b.title }}</div>
+                            <dl v-if="b.k === 'kv' || b.k === 'steps'" class="tl-kv">
+                                <template v-for="(r, ri) in b.rows" :key="ri">
+                                    <dt :class="b.k === 'steps' ? 'ln-mono' : ''">{{ r[0] }}</dt>
+                                    <dd :style="b.k === 'steps' ? 'font-family:var(--ln-sans);color:var(--ln-text-2)' : ''">{{ r[1] }}</dd>
+                                </template>
+                            </dl>
+                            <template v-else-if="b.k === 'arts'">
+                                <div v-for="(a, ai) in b.items" :key="ai" class="tl-art-wrap">
+                                    <button class="tl-art" @click="toggleArtifact(a)">
+                                        <span class="tl-art-ic">{{ a.ic }}</span>
+                                        <span>
+                                            <span class="tl-art-name">{{ a.name }}</span>
+                                            <span v-if="a.sub" class="tl-art-sub">{{ a.sub }}</span>
+                                        </span>
+                                        <span class="tl-art-size">{{ a.size }}</span>
+                                    </button>
+                                    <div v-if="artifactOpen[a.name]" class="tl-art-open">
+                                        <video v-if="a.kind === 'video'" controls class="tl-media" :src="docUrl(a.name)"></video>
+                                        <img v-else-if="a.kind === 'image'" class="tl-media" :src="docUrl(a.name)">
+                                        <a v-else-if="a.kind === 'page'" class="link text-xs" :href="docUrl(a.name)" target="_blank">open {{ a.name }} &nearr;</a>
+                                        <div v-else-if="artifactText(a.name)" class="md-content text-sm" v-html="renderMarkdown(artifactText(a.name))"></div>
+                                        <div v-else class="text-xs text-gray-500">not inlined — open it from the Docs tab</div>
+                                    </div>
+                                </div>
+                            </template>
+                            <template v-else-if="b.k === 'commits'">
+                                <div v-for="(c, ci) in b.items" :key="ci" class="tl-art" style="grid-template-columns:22px minmax(0,1fr)">
+                                    <span class="tl-art-ic" style="color:var(--ln-green)">&#9095;</span>
+                                    <span>
+                                        <span class="tl-art-name" style="color:var(--ln-green)">{{ c.sha }}</span>
+                                        <span class="tl-art-sub">{{ c.msg }}</span>
+                                        <div style="margin-top:5px">
+                                            <div v-for="(f, fi) in c.files" :key="fi" class="tl-file">
+                                                <span class="tl-file-add">+</span><span>{{ f }}</span>
+                                            </div>
+                                        </div>
+                                    </span>
+                                </div>
+                            </template>
+                            <blockquote v-else-if="b.k === 'quote'" class="tl-quote">{{ b.text }}</blockquote>
+                            <pre v-else-if="b.k === 'pre'" class="tl-pre">{{ b.text }}</pre>
+                            <template v-else-if="b.k === 'files'">
+                                <div v-for="(f, fi) in b.items" :key="fi" class="tl-file"><span class="ln-muted">&#9642;</span><span>{{ f[0] }}</span></div>
+                            </template>
+                            <div v-else-if="b.k === 'votes'" class="tl-votes">
+                                <span v-for="(v, vi) in b.items" :key="vi" class="ln-pill" :class="v[1] === 'PASS' ? 'ln-pill-green' : 'ln-pill-red'">{{ v[0] }} {{ v[1] }}</span>
+                            </div>
+                            <video v-else-if="b.k === 'video'" controls class="tl-media" :src="docUrl(b.name)"></video>
+                            <div v-else-if="b.k === 'note'" class="tl-note">{{ b.text }}</div>
+                            <div v-else-if="b.k === 'warn'" class="tl-note tl-note-warn">{{ b.text }}</div>
+                        </div>
+                        <a v-if="selectedNode.links && selectedNode.links.comment" class="link text-xs" :href="selectedNode.links.comment" target="_blank">open the comment &nearr;</a>
+                    </template>
+                    <div v-else class="text-xs text-gray-500">Click any circle on the spine to load what it produced.</div>
+                </div>
+            </aside>
+        </div>
+    </template>
 </div>
 
 <div v-show="activeTab === 'docs'" class="layout-main">
@@ -705,7 +856,13 @@ frshtyApp({
         const releaseInput = ref('');
         const releaseError = ref('');
         const existingReleases = ref([]);
-        const activeTab = ref('docs');
+        const activeTab = ref('timeline');
+        const timeline = ref({ nodes: [], segments: [], kpis: {}, passes: [] });
+        const timelineLoading = ref(true);
+        const timelineError = ref('');
+        const selectedId = ref('');
+        const artifactOpen = reactive({});
+        const nodeEls = {};
         const maximized = ref(false);
         const resetting = ref(false);
         const redoProofOpen = ref(false);
@@ -1340,6 +1497,7 @@ frshtyApp({
         function switchTab(tab) {
             activeTab.value = tab;
             if (tab === 'diff') loadDiff();
+            if (tab === 'timeline') loadTimeline();
         }
 
         async function saveRelease() {
@@ -1699,15 +1857,127 @@ frshtyApp({
             } catch (e) {}
         }
 
+        function fmtSpan(seconds) {
+            const total = Math.round(seconds || 0);
+            if (total < 60) return total + 's';
+            const m = Math.floor(total / 60), sec = total % 60;
+            if (m < 60) return sec ? m + 'm ' + sec + 's' : m + 'm';
+            const h = Math.floor(m / 60), min = m % 60;
+            if (h < 24) return min ? h + 'h ' + String(min).padStart(2, '0') + 'm' : h + 'h';
+            const d = Math.floor(h / 24), hr = h % 24;
+            return hr ? d + 'd ' + hr + 'h' : d + 'd';
+        }
+        function gapClass(ms) {
+            const s = (ms || 0) / 1000;
+            if (s < 60) return 'tl-gap-s';
+            if (s < 3600) return 'tl-gap-m';
+            if (s < 6 * 3600) return 'tl-gap-l';
+            return 'tl-gap-xl';
+        }
+        const tlNodes = computed(() => timeline.value.nodes || []);
+        const tlSegments = computed(() => timeline.value.segments || []);
+        const tlKpis = computed(() => timeline.value.kpis || {});
+        const tlSpan = computed(() => {
+            const segs = tlSegments.value;
+            if (!segs.length) return 0;
+            return new Date(segs[segs.length - 1].t1) - new Date(segs[0].t0);
+        });
+        function segPct(seg) {
+            if (!tlSpan.value) return 0;
+            return ((new Date(seg.t1) - new Date(seg.t0)) / tlSpan.value) * 100;
+        }
+        function segToneClass(seg) {
+            return 'tl-c-' + ({ work: 'ok', block: 'fail', review: 'comment' }[seg.kind] || 'idle');
+        }
+        const tlTicks = computed(() => {
+            const segs = tlSegments.value;
+            if (!segs.length || !tlSpan.value) return [];
+            const t0 = new Date(segs[0].t0).getTime();
+            const days = tlSpan.value / 86400000;
+            const step = days > 12 ? 3 : days > 4 ? 1 : 0.5;
+            const out = [];
+            for (let d = 0; d * 86400000 < tlSpan.value; d += step) {
+                const at = t0 + d * 86400000;
+                const pct = ((at - t0) / tlSpan.value) * 100;
+                if (pct > 96) continue;
+                out.push({ at, pct, label: new Date(at).toISOString().slice(5, 10) });
+            }
+            return out;
+        });
+        const tlDay = (ts) => ts.slice(5, 10).replace('-', '/');
+        const tlClock = (ts) => ts.slice(11, 19);
+        const spineRows = computed(() => {
+            const rows = [];
+            const passes = timeline.value.passes || [];
+            let lastPass = null;
+            const nodes = tlNodes.value;
+            nodes.forEach((n, i) => {
+                if (n.pass !== lastPass) {
+                    const meta = passes.find(p => p.pass === n.pass);
+                    rows.push({ kind: 'pass', key: 'p' + n.pass, label: (meta && meta.label) || ('Pass ' + n.pass) });
+                    lastPass = n.pass;
+                } else if (n.gap_ms !== null && n.gap_ms !== undefined) {
+                    rows.push({ kind: 'edge', key: 'e' + n.id, lane: n.lane,
+                                label: n.gap_label, cls: gapClass(n.gap_ms), why: n.why });
+                }
+                rows.push({ kind: 'node', key: n.id, node: n,
+                            first: i === 0 || nodes[i - 1].pass !== n.pass,
+                            last: i === nodes.length - 1 || nodes[i + 1].pass !== n.pass });
+            });
+            return rows;
+        });
+        const selectedNode = computed(() => tlNodes.value.find(n => n.id === selectedId.value) || null);
+        function registerNodeEl(id, el) {
+            if (el) nodeEls[id] = el; else delete nodeEls[id];
+        }
+        function selectNode(id, scroll) {
+            if (!id) return;
+            selectedId.value = id;
+            for (const k of Object.keys(artifactOpen)) delete artifactOpen[k];
+            if (scroll && nodeEls[id]) nodeEls[id].scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+        function docUrl(name) {
+            return `/api/tickets/${key}/docs/${encodeURIComponent(name)}`;
+        }
+        function artifactText(name) {
+            return ((ticket.value && ticket.value.docs) || {})[name] || '';
+        }
+        function toggleArtifact(a) {
+            artifactOpen[a.name] = !artifactOpen[a.name];
+        }
+        let timelinePollTimer = null;
+        async function loadTimeline() {
+            timelineLoading.value = !timeline.value.nodes.length;
+            timelineError.value = '';
+            try {
+                const r = await fetch(`/api/tickets/${key}/timeline`);
+                if (!r.ok) throw new Error(`timeline request failed: ${r.status}`);
+                const d = await r.json();
+                if (d.error) throw new Error(d.error);
+                timeline.value = d;
+                if (!selectedId.value && (d.nodes || []).length) {
+                    selectedId.value = d.nodes[d.nodes.length - 1].id;
+                }
+            } catch (e) {
+                timelineError.value = String(e.message || e);
+            } finally {
+                timelineLoading.value = false;
+            }
+        }
+
         onMounted(() => {
             load();
             loadJobs();
+            loadTimeline();
             loadPmFindings();
             loadPrComments();
             startTerminal();
             pollPresentationStatus();
             presentationPollTimer = setInterval(pollPresentationStatus, 10000);
             jobsPollTimer = setInterval(loadJobs, 15000);
+            timelinePollTimer = setInterval(() => {
+                if (activeTab.value === 'timeline' && !document.hidden) loadTimeline();
+            }, 30000);
             escListener = (e) => { if (e.key === 'Escape' && maximized.value) toggleMaximize(); };
             document.addEventListener('keydown', escListener);
         });
@@ -1719,12 +1989,16 @@ frshtyApp({
             if (jobOutputPollTimer) clearTimeout(jobOutputPollTimer);
             if (presentationPollTimer) clearInterval(presentationPollTimer);
             if (jobsPollTimer) clearInterval(jobsPollTimer);
+            if (timelinePollTimer) clearInterval(timelinePollTimer);
         });
 
         return {
             key, ticket, features, runCommands, jobs, diffData, comments, presentationBuilding,
             noteText, pmFindings, releaseInput, releaseError, existingReleases,
             activeTab, maximized, resetting, eventFilter, setStateDdValue,
+            timeline, timelineLoading, timelineError, selectedId, selectedNode, spineRows,
+            tlNodes, tlSegments, tlKpis, tlTicks, tlDay, tlClock, fmtSpan, segPct, segToneClass,
+            selectNode, registerNodeEl, docUrl, artifactText, artifactOpen, toggleArtifact, loadTimeline,
             redoProofOpen, redoProofFeedback, redoProofSubmitting, submitRedoProof, prettyJson,
             loadError, sections, docExpanded, replyDrafts, jobOutput,
             prModalOpen, prRepos, prSubmitting,
