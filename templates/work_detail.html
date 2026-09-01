@@ -3,12 +3,15 @@
 <head>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <meta charset="utf-8">
-<title>Work item — frshty</title>
+<title>Task — frshty</title>
 <script src="/static/tailwind.js"></script>
 <script src="/static/vendor/vue.global.prod.js"></script>
+<script src="/static/frshty-nav.js"></script>
+<script src="/static/frshty-shell.js"></script>
 <script src="/static/frshty-work-question.js"></script>
 <script src="/static/frshty-linkify.js"></script>
 <link rel="stylesheet" href="/static/frshty.css">
+<link rel="stylesheet" href="/static/frshty-v2.css">
 <style>
 .tl-box { max-height: 70vh; overflow-y: auto; background: #0d0d13; border: 1px solid #2a2a35; border-radius: 8px; padding: 8px 14px; }
 .tl { border-left: 2px solid #2a2a35; margin-left: 8px; padding-left: 16px; }
@@ -34,17 +37,30 @@
 </style>
 <script src="/static/frshty-usage.js"></script>
 </head>
-<body class="bg-[#0b0b10] text-gray-200">
+<body>
 <div id="work-fatal" hidden class="max-w-[1600px] mx-auto px-6 pt-6 text-sm text-red-400"></div>
-<div id="app" class="max-w-[1600px] mx-auto px-6 py-6">
+<div id="app" v-cloak>
+<frshty-shell :features="features" :instance="instanceName" :crumbs="crumbs" :counts="railCounts">
+  <template #actions>
+    <div class="ln-segment">
+      <a class="ln-seg-btn on" href="/tasks">Board</a>
+      <a class="ln-seg-btn" href="/threads">Threads</a>
+      <a class="ln-seg-btn" href="/tasks?view=archive">Archive</a>
+    </div>
+  </template>
+  <div>
 <div v-if="item">
-  <div class="text-xs text-gray-500 mb-2"><a href="/work" class="underline">← work</a></div>
+  <div class="text-xs text-gray-500 mb-2"><a href="/tasks" class="underline">← tasks</a></div>
   <h1 class="text-lg font-bold">{{ item.objective }}</h1>
+  <div class="mt-1" v-if="thread">
+    <a class="ln-pill ln-pill-violet ln-thread-pill" style="text-decoration:none"
+       :href="'/threads/' + thread.root_id" :title="'thread rooted at task #' + thread.root_id">⑂ {{ thread.title }}</a>
+  </div>
   <div class="mt-1">
     <span :class="['badge', badgeCls]">{{ stateLabel }}</span>
     <span class="text-xs text-gray-500 ml-2">#{{ item.id }} · {{ item.scope }} · {{ item.instance_key || 'no instance' }} · continues {{ item.continues_used }}/{{ item.continue_cap }}<span v-if="provider"> · {{ provider }}</span><span v-if="item.contexts"> · {{ item.contexts }}</span></span>
-    <a v-if="sourceItem" :href="'/work/' + sourceItem.id" class="text-xs text-blue-400 underline ml-3" :title="sourceItem.objective">follows #{{ sourceItem.id }}</a>
-    <a :href="'/work/' + item.id + '/terminal'" target="_blank" class="text-xs text-blue-400 underline ml-3">open terminal</a>
+    <a v-if="sourceItem" :href="'/tasks/' + sourceItem.id" class="text-xs text-blue-400 underline ml-3" :title="sourceItem.objective">follows #{{ sourceItem.id }}</a>
+    <a :href="'/tasks/' + item.id + '/terminal'" target="_blank" class="text-xs text-blue-400 underline ml-3">open terminal</a>
   </div>
   <div class="sec" v-if="item.state === 'needs_you' || item.pending_question">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Needs you</h2>
@@ -81,7 +97,7 @@
     <div class="text-sm" style="white-space:pre-wrap" v-if="item.summary" v-html="lk(item.summary)"></div>
     <div class="text-xs text-gray-600" v-else>No summary yet.</div>
     <div class="mt-1">
-      <a :href="'/work/' + item.id + '/summary'" target="_blank" class="text-xs text-blue-400 underline">open summary page</a>
+      <a :href="'/tasks/' + item.id + '/summary'" target="_blank" class="text-xs text-blue-400 underline">open summary page</a>
       <span class="text-xs text-blue-400 underline ml-3 cursor-pointer" @click="debrief">{{ debriefBusy ? "debriefing…" : "regenerate" }}</span>
       <span class="text-xs text-red-400 ml-3" v-if="debriefError">{{ debriefError }}</span>
     </div>
@@ -153,7 +169,7 @@
   <div class="sec" v-if="followupChildren.length">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Followed up by</h2>
     <div v-for="c in followupChildren" class="text-sm">
-      <a :href="'/work/' + c.id" class="text-blue-400 underline">#{{ c.id }}</a>
+      <a :href="'/tasks/' + c.id" class="text-blue-400 underline">#{{ c.id }}</a>
       <span class="text-gray-400 ml-1">{{ c.objective }}</span>
       <span class="text-xs text-gray-500 ml-2">{{ c.state.replace('_', ' ') }}</span>
     </div>
@@ -211,16 +227,17 @@
   </div>
 </div>
 <div v-else>
-  <div class="text-xs text-gray-500 mb-2"><a href="/work" class="underline">← work</a></div>
+  <div class="text-xs text-gray-500 mb-2"><a href="/tasks" class="underline">← tasks</a></div>
   <div class="text-sm text-gray-400" v-if="!loadError">Loading work item…</div>
   <div v-else>
     <div class="text-sm text-red-400">{{ loadError }}</div>
     <button type="button" class="text-xs text-blue-400 underline mt-2" @click="refresh">retry</button>
   </div>
 </div>
+  </div>
+</frshty-shell>
 </div>
 <script>
-const { createApp } = Vue;
 function showWorkFatal(error) {
   const el = document.getElementById("work-fatal");
   if (!el) return;
@@ -231,8 +248,9 @@ function showWorkFatal(error) {
 window.addEventListener("error", event => showWorkFatal(event.error || event.message));
 window.addEventListener("unhandledrejection", event => showWorkFatal(event.reason));
 
-const app = createApp({
-  data() { return { item: null, loadError: "", timeline: [], events: [], artifacts: [], replyText: "", replyError: "",
+const app = frshtyApp({
+  data() { return { features: {}, instanceName: "", thread: null, needsYou: 0,
+                    item: null, loadError: "", timeline: [], events: [], artifacts: [], replyText: "", replyError: "",
                     timelineCap: 100, timelineFull: false,
                     timelineImagesOpen: {},
                     systemPrompt: "", showPrompt: false,
@@ -244,6 +262,13 @@ const app = createApp({
                     projects: [], slackAvailable: false,
                     debriefBusy: false, debriefError: "", linkmap: null }; },
   computed: {
+    railCounts() {
+      return { tasks: this.needsYou };
+    },
+    crumbs() {
+      const id = location.pathname.split("/")[2];
+      return ["Work", "Tasks", "#" + id];
+    },
     provider() {
       return this.runs.length ? this.runs[this.runs.length - 1].provider : "";
     },
@@ -335,6 +360,13 @@ const app = createApp({
     timelineImageUrl(img) {
       return `/api/work/items/${this.item.id}/transcript-image/${encodeURIComponent(img.id)}`;
     },
+    async loadConfig() {
+      try {
+        const cfg = await (await fetch("/api/config")).json();
+        this.features = cfg.features || {};
+        this.instanceName = (cfg.job && cfg.job.key) || "";
+      } catch (e) {}
+    },
     async loadLinkmap() {
       try { this.linkmap = await (await fetch("/api/work/linkmap")).json(); } catch (e) {}
     },
@@ -353,6 +385,8 @@ const app = createApp({
         if (!d.item) throw new Error("response did not include the work item");
         this.item = d.item; this.timeline = d.timeline || []; this.events = d.events || [];
         this.artifacts = d.artifacts || []; this.systemPrompt = d.system_prompt || "";
+        this.thread = d.thread || null;
+        this.needsYou = d.needs_you || 0;
         const obj = (d.item.objective || "").trim();
         if (obj) {
           if (!this._baseTitle) this._baseTitle = document.title;
@@ -408,7 +442,7 @@ const app = createApp({
         });
         const d = await r.json();
         if (!r.ok) { this.fupError = d.error || ("launch failed HTTP " + r.status); return; }
-        location.href = "/work/" + d.item_id;
+        location.href = "/tasks/" + d.item_id;
       } catch (e) {
         this.fupError = "launch failed: " + e.message;
       } finally {
@@ -470,6 +504,7 @@ const app = createApp({
   },
   mounted() {
     this._refreshSeq = 0;
+    this.loadConfig();
     this.loadLinkmap();
     this.refresh();
     setInterval(() => this.refresh(), 15000);

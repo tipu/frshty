@@ -1309,7 +1309,7 @@ def revive_resumed_runs() -> list[dict]:
 
 
 def grouped_items(now: datetime | None = None, q: str = "",
-                  tags: str = "") -> dict[str, list[dict]]:
+                  tags: str = "", all_done: bool = False) -> dict[str, list[dict]]:
     now = now or datetime.now(timezone.utc)
     stale_cutoff = (now - timedelta(minutes=STALE_AFTER_MINUTES)).isoformat()
     done_cutoff = (now - timedelta(days=DONE_WINDOW_DAYS)).isoformat()
@@ -1321,6 +1321,9 @@ def grouped_items(now: datetime | None = None, q: str = "",
         "(SELECT session_id FROM work_runs r WHERE r.work_item_id = i.id ORDER BY r.id DESC LIMIT 1) AS last_session_id, "
         "(SELECT tmux_key FROM work_runs r WHERE r.work_item_id = i.id ORDER BY r.id DESC LIMIT 1) AS last_tmux_key, "
         "(SELECT provider FROM work_runs r WHERE r.work_item_id = i.id ORDER BY r.id DESC LIMIT 1) AS last_provider, "
+        "(SELECT created_at FROM work_events e WHERE e.work_item_id = i.id "
+        "AND e.kind IN ('operator_done', 'self_reported_done') "
+        "ORDER BY e.id DESC LIMIT 1) AS completed_at, "
         "EXISTS(SELECT 1 FROM work_events e WHERE e.work_item_id = i.id AND e.kind = 'operator_done') AS operator_confirmed "
         "FROM work_items i ORDER BY i.priority DESC, i.created_at DESC"
     )
@@ -1332,7 +1335,7 @@ def grouped_items(now: datetime | None = None, q: str = "",
             continue
         state = row["state"]
         if state == "done":
-            if q or wanted_tags or row["updated_at"] >= done_cutoff:
+            if all_done or q or wanted_tags or row["updated_at"] >= done_cutoff:
                 groups["done"].append(row)
             continue
         if state == "waiting_external" and row["snoozed_until"] and row["snoozed_until"] <= now_iso:
@@ -1343,4 +1346,206 @@ def grouped_items(now: datetime | None = None, q: str = "",
             groups["failed_stale"].append(row)
             continue
         groups[state].append(row)
+    # Tags and debriefs can update a completed item later, so use the actual
+    # completion event rather than the board-wide priority/creation ordering.
+    # Legacy done rows without an event fall back to their last update.
+    groups["done"].sort(
+        key=lambda row: (row["completed_at"] or row["updated_at"], row["id"]),
+        reverse=True,
+    )
     return groups
+
+
+THREAD_TITLE_CHARS = 60
+NON_PROJECT_CONTEXTS = ("slack_int",)
+
+
+def _thread_components() -> list[list[dict]]:
+    """Group work items into threads by their follow-up chain.
+
+    A thread is a connected component of the source_item_id graph. No separate
+    table is needed: a follow-up already records which item it continues, and a
+    chain of continued work is exactly the effort a thread names."""
+    rows = db.query_all(
+        "SELECT id, objective, state, source_item_id, contexts, updated_at, created_at "
+        "FROM work_items ORDER BY id")
+    parent = {row["id"]: row["id"] for row in rows}
+
+    def find(item_id: int) -> int:
+        while parent[item_id] != item_id:
+            parent[item_id] = parent[parent[item_id]]
+            item_id = parent[item_id]
+        return item_id
+
+    for row in rows:
+        source = row["source_item_id"]
+        if source in parent:
+            a, b = find(row["id"]), find(source)
+            if a != b:
+                parent[max(a, b)] = min(a, b)
+
+    components: dict[int, list[dict]] = {}
+    for row in rows:
+        components.setdefault(find(row["id"]), []).append(row)
+    return [members for members in components.values() if len(members) > 1]
+
+
+def _thread_title(objective: str) -> str:
+    text = " ".join((objective or "").split())
+    if len(text) <= THREAD_TITLE_CHARS:
+        return text
+    cut = text[:THREAD_TITLE_CHARS].rsplit(" ", 1)[0] or text[:THREAD_TITLE_CHARS]
+    return cut + "…"
+
+
+def thread_projects(members: list[dict]) -> list[str]:
+    """Name the projects a thread touches.
+
+    A launch records the picked projects in the item contexts, so the contexts
+    of the member tasks are the project context the list has to show. slack_int
+    is a capability the launcher adds to the same field, not a project."""
+    projects: list[str] = []
+    for member in members:
+        for label in (member["contexts"] or "").split(","):
+            label = label.strip()
+            if label and label not in NON_PROJECT_CONTEXTS and label not in projects:
+                projects.append(label)
+    return projects
+
+
+def needs_you_count(now: datetime | None = None) -> int:
+    """Count the tasks the board puts in its needs_you group.
+
+    grouped_items promotes a waiting_external item back to needs_you once its
+    snooze expires, so the rail badge has to apply the same rule or it will
+    disagree with the board it links to."""
+    now = now or datetime.now(timezone.utc)
+    row = db.query_one(
+        "SELECT COUNT(*) AS n FROM work_items WHERE state = 'needs_you' "
+        "OR (state = 'waiting_external' AND snoozed_until IS NOT NULL AND snoozed_until <= ?)",
+        (now.isoformat(),))
+    return row["n"] if row else 0
+
+
+def thread_map() -> dict[int, dict]:
+    """Map every threaded item id to the thread it belongs to."""
+    mapping: dict[int, dict] = {}
+    for members in _thread_components():
+        root = members[0]
+        thread = {"root_id": root["id"], "title": _thread_title(root["objective"])}
+        for member in members:
+            mapping[member["id"]] = thread
+    return mapping
+
+
+def threads(now: datetime | None = None) -> list[dict]:
+    now = now or datetime.now(timezone.utc)
+    stale_cutoff = (now - timedelta(minutes=STALE_AFTER_MINUTES)).isoformat()
+    artifact_counts = {
+        row["work_item_id"]: row["n"] for row in db.query_all(
+            "SELECT work_item_id, COUNT(*) AS n FROM work_artifacts GROUP BY work_item_id")}
+    providers_by_item: dict[int, list[str]] = {}
+    for row in db.query_all(
+            "SELECT DISTINCT work_item_id, provider FROM work_runs ORDER BY provider"):
+        providers_by_item.setdefault(row["work_item_id"], []).append(row["provider"])
+
+    out = []
+    for members in _thread_components():
+        root = members[0]
+        tasks = []
+        providers: list[str] = []
+        for member in members:
+            state = member["state"]
+            if state == "agent_working" and member["updated_at"] < stale_cutoff:
+                state = "failed_stale"
+            tasks.append({"id": member["id"], "objective": member["objective"],
+                          "state": state, "updated_at": member["updated_at"]})
+            for provider in providers_by_item.get(member["id"], []):
+                if provider not in providers:
+                    providers.append(provider)
+        counts: dict[str, int] = {}
+        for task in tasks:
+            counts[task["state"]] = counts.get(task["state"], 0) + 1
+        out.append({
+            "root_id": root["id"],
+            "title": _thread_title(root["objective"]),
+            "objective": root["objective"],
+            "tasks": tasks,
+            "task_count": len(tasks),
+            "counts": counts,
+            "artifact_count": sum(artifact_counts.get(t["id"], 0) for t in tasks),
+            "projects": thread_projects(members),
+            "providers": providers,
+            "updated_at": max(t["updated_at"] for t in tasks),
+        })
+    out.sort(key=lambda thread: (thread["updated_at"], thread["root_id"]), reverse=True)
+    return out
+
+
+def thread_detail(root_id: int, now: datetime | None = None) -> dict:
+    """The roll-up one thread page needs: its member tasks oldest first, the
+    artifacts they produced, and the newest done task a new member can follow.
+
+    A thread has no row of its own, so its title, objective and summary all
+    come from its members. The summary is the newest member summary rather
+    than a stored field, because that is the latest synthesized state."""
+    now = now or datetime.now(timezone.utc)
+    stale_cutoff = (now - timedelta(minutes=STALE_AFTER_MINUTES)).isoformat()
+    now_iso = now.isoformat()
+    members = next((m for m in _thread_components() if m[0]["id"] == root_id), None)
+    if members is None:
+        return {"error": f"unknown thread: {root_id}"}
+    ids = [member["id"] for member in members]
+    marks = ",".join("?" * len(ids))
+    rows = db.query_all(
+        "SELECT i.*, "
+        "(SELECT tmux_key FROM work_runs r WHERE r.work_item_id = i.id ORDER BY r.id DESC LIMIT 1) AS last_tmux_key, "
+        "(SELECT provider FROM work_runs r WHERE r.work_item_id = i.id ORDER BY r.id DESC LIMIT 1) AS last_provider, "
+        "EXISTS(SELECT 1 FROM work_events e WHERE e.work_item_id = i.id AND e.kind = 'operator_done') AS operator_confirmed "
+        f"FROM work_items i WHERE i.id IN ({marks}) ORDER BY i.id", tuple(ids))
+    artifacts = db.query_all(
+        "SELECT id, work_item_id, path, note, created_at FROM work_artifacts "
+        f"WHERE work_item_id IN ({marks}) ORDER BY work_item_id, id", tuple(ids))
+    artifact_counts: dict[int, int] = {}
+    for artifact in artifacts:
+        artifact_counts[artifact["work_item_id"]] = artifact_counts.get(
+            artifact["work_item_id"], 0) + 1
+
+    tasks = []
+    providers: list[str] = []
+    for row in rows:
+        state = row["state"]
+        if state == "waiting_external" and row["snoozed_until"] and row["snoozed_until"] <= now_iso:
+            state = "needs_you"
+        elif state == "agent_working" and row["updated_at"] < stale_cutoff:
+            state = "failed_stale"
+        row["state"] = state
+        row["artifact_count"] = artifact_counts.get(row["id"], 0)
+        tasks.append(row)
+        if row["last_provider"] and row["last_provider"] not in providers:
+            providers.append(row["last_provider"])
+
+    counts: dict[str, int] = {}
+    for task in tasks:
+        counts[task["state"]] = counts.get(task["state"], 0) + 1
+    done_ids = [task["id"] for task in tasks if task["state"] == "done"]
+    summarised = [task for task in tasks if (task["summary"] or "").strip()]
+    return {
+        "root_id": root_id,
+        "title": _thread_title(members[0]["objective"]),
+        "objective": members[0]["objective"],
+        "status": "complete" if len(done_ids) == len(tasks) else "active",
+        "tasks": tasks,
+        "task_count": len(tasks),
+        "counts": counts,
+        "done_count": len(done_ids),
+        "needs_you": counts.get("needs_you", 0),
+        "artifacts": artifacts,
+        "artifact_count": len(artifacts),
+        "providers": providers,
+        "created_at": min(task["created_at"] for task in tasks),
+        "updated_at": max(task["updated_at"] for task in tasks),
+        "summary": (summarised[-1]["summary"] or "").strip() if summarised else "",
+        "summary_from": summarised[-1]["id"] if summarised else None,
+        "continue_from": done_ids[-1] if done_ids else None,
+    }

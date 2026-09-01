@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<meta charset="utf-8">
+<title>Threads — frshty</title>
+<script src="/static/vendor/vue.global.prod.js"></script>
+<script src="/static/frshty-nav.js"></script>
+<script src="/static/frshty-shell.js"></script>
+<link rel="stylesheet" href="/static/frshty.css">
+<link rel="stylesheet" href="/static/frshty-v2.css">
+<script src="/static/frshty-usage.js"></script>
+</head>
+<body>
+<div id="app" v-cloak>
+<frshty-shell :features="features" :instance="instanceName" :counts="railCounts">
+  <template #actions>
+    <div class="ln-segment">
+      <a class="ln-seg-btn" href="/tasks">Board</a>
+      <a class="ln-seg-btn on" href="/threads">Threads</a>
+      <a class="ln-seg-btn" href="/tasks?view=archive">Archive</a>
+    </div>
+  </template>
+
+  <div class="ln-hero">
+    <div>
+      <h1 class="ln-title">Threads</h1>
+      <p class="ln-subtitle">
+        The same tasks, grouped by the effort they belong to. A thread is the chain
+        of follow-up tasks that continue one task. A task that stands alone does not
+        appear here.
+      </p>
+    </div>
+  </div>
+
+  <div class="ln-small" style="color:var(--ln-red)" v-if="loadError">{{ loadError }}</div>
+
+  <div class="ln-card ln-thread-list" v-if="threads.length">
+    <div class="ln-thread-row" v-for="t in threads" :key="t.root_id"
+         @click="open(t.root_id)">
+      <div style="display:flex;gap:8px;align-items:center">
+        <div class="ln-thread-row-title">{{ t.title }}</div>
+        <span class="ln-tag" v-for="p in t.projects" :key="p">{{ p }}</span>
+        <span class="ln-pill ln-pill-amber" v-if="t.counts.needs_you">{{ t.counts.needs_you }} needs you</span>
+        <span class="ln-pill ln-pill-blue" v-else-if="t.counts.agent_working">{{ t.counts.agent_working }} working</span>
+        <span class="ln-task-id" style="margin-left:auto">#{{ t.root_id }}</span>
+      </div>
+      <div class="ln-thread-row-meta">
+        <span>{{ t.task_count }} task{{ t.task_count === 1 ? '' : 's' }} · {{ t.artifact_count }} artifact{{ t.artifact_count === 1 ? '' : 's' }}<span v-if="t.providers.length"> · {{ t.providers.join(', ') }}</span></span>
+        <span>updated {{ $relTime(t.updated_at) }}</span>
+      </div>
+      <div class="ln-progress" :title="doneCount(t) + ' of ' + t.task_count + ' complete'">
+        <span :style="{ width: Math.round(100 * doneCount(t) / t.task_count) + '%' }"></span>
+      </div>
+    </div>
+  </div>
+
+  <div class="ln-small ln-muted" v-else-if="!loadError && loaded">
+    No threads yet. A thread appears when a task launches a follow-up task.
+  </div>
+</frshty-shell>
+</div>
+<script>
+frshtyApp({
+  data() {
+    return { features: {}, instanceName: "", threads: [], loadError: "", loaded: false,
+             needsYou: 0 };
+  },
+  computed: {
+    railCounts() { return { tasks: this.needsYou }; },
+  },
+  methods: {
+    doneCount(t) { return t.counts.done || 0; },
+    open(rootId) { window.location.href = "/threads/" + rootId; },
+    async loadConfig() {
+      try {
+        const cfg = await (await fetch("/api/config")).json();
+        this.features = cfg.features || {};
+        this.instanceName = (cfg.job && cfg.job.key) || "";
+      } catch (e) {}
+    },
+    async refresh() {
+      try {
+        const r = await fetch("/api/work/threads");
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const d = await r.json();
+        this.threads = d.threads || [];
+        this.needsYou = d.needs_you || 0;
+        this.loadError = "";
+      } catch (e) {
+        this.loadError = "Unable to load threads: " + e.message;
+      } finally {
+        this.loaded = true;
+      }
+    },
+  },
+  mounted() {
+    this.loadConfig();
+    this.refresh();
+    setInterval(() => this.refresh(), 15000);
+  },
+}).mount("#app");
+</script>
+</body>
+</html>
