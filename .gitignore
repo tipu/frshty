@@ -25,6 +25,7 @@ config/*.toml
 .tmp
 
 # Local artifacts
+/explorations/
 .playwright-cli/
 /review-snap.yaml
 /*.png
