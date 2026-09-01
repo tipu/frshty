@@ -60,8 +60,10 @@
 
   <form @submit.prevent="intake" class="ln-task-compose" v-if="view === 'board'">
     <div>
-      <input class="ln-input" v-model="intakeText" :disabled="!personalLoaded || intakeBusy"
-             placeholder="Describe an outcome, not a report (say 'get PR #123 merged', not 'PR stats'). Enter launches a run." />
+      <textarea class="ln-input ln-compose-text" rows="1" ref="intakeBox" v-model="intakeText"
+                :disabled="!personalLoaded || intakeBusy" @keydown.enter="onComposeEnter($event, intake)"
+                @input="grow($event.target)"
+                placeholder="Describe an outcome, not a report (say 'get PR #123 merged', not 'PR stats'). Enter launches a run, Shift+Enter adds a line."></textarea>
       <div class="ln-task-compose-opts">
         <span class="ln-chipsel" title="which agent CLI runs this task">agent:
           <select v-model="intakeAgent" :disabled="!personalLoaded || intakeBusy">
@@ -332,6 +334,16 @@ frshtyApp({
         this.connError = "Disconnected from frshty (" + e.message + "). Data below is stale; retrying every 15s.";
       }
     },
+    onComposeEnter(e, submit) {
+      if (e.isComposing || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
+      e.preventDefault();
+      submit();
+    },
+    grow(el) {
+      if (!el) return;
+      el.style.height = "auto";
+      el.style.height = el.scrollHeight + "px";
+    },
     async intake() {
       this.intakeError = ""; this.intakeBusy = true;
       try {
@@ -344,6 +356,7 @@ frshtyApp({
         if (!r.ok) { this.intakeError = d.error || "intake failed (HTTP " + r.status + ")"; return; }
         localStorage.setItem("workAgent", this.intakeAgent);
         this.intakeText = ""; this.intakeContexts = []; this.intakeSlack = false;
+        this.$nextTick(() => this.grow(this.$refs.intakeBox));
         await this.refresh();
       } catch (e) {
         this.intakeError = "request failed: " + e.message + " — is frshty up?";
