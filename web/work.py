@@ -6,7 +6,8 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
 
 import core.db as db
 import core.terminal as terminal
-from services import work_debrief, work_launch, work_store, work_tags
+from services import (work_artifacts, work_debrief, work_launch, work_store,
+                      work_tags)
 from web.pages import _template
 
 
@@ -255,7 +256,7 @@ _SCRATCH_ROOT = "/tmp/"
 
 
 def _artifact_roots(artifact_id: int) -> list[str]:
-    roots = [_SCRATCH_ROOT]
+    roots = [str(work_artifacts.root()) + os.sep, _SCRATCH_ROOT]
     rows = db.query_all(
         "SELECT r.cwd FROM work_artifacts a "
         "JOIN work_runs r ON r.work_item_id = a.work_item_id "

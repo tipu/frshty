@@ -7,7 +7,7 @@ import time
 import core.db as db
 import core.llm as llm
 import core.log as log
-from services import work_launch, work_store
+from services import work_artifacts, work_launch, work_store
 
 SCAN_INTERVAL = 60
 DEBRIEF_TIMEOUT = 300
@@ -205,6 +205,10 @@ def _scan_loop():
             work_launch.suspend_idle_done_sessions()
         except Exception as e:
             log.emit("work_suspend_error", f"{type(e).__name__}: {e}")
+        try:
+            work_artifacts.gc_artifacts()
+        except Exception as e:
+            log.emit("work_artifact_gc_error", f"{type(e).__name__}: {e}")
         try:
             for act in work_store.sweep_stale_items():
                 if act["action"] != "refreshed":

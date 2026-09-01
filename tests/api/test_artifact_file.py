@@ -67,6 +67,24 @@ def _seed_report(tmp_path, monkeypatch):
     return _artifact(item_id, str(report))
 
 
+class TestArtifactStoreRoute:
+    def test_serves_a_file_in_the_artifact_store(self, tmp_path, monkeypatch):
+        store = tmp_path / "artifact-store"
+        os.makedirs(store / "work-1", exist_ok=True)
+        page = store / "work-1" / "report.html"
+        page.write_text("<p>hi</p>")
+        item_id = work_store.create_item("artifact store route test")
+        work_store.add_run(item_id, f"sid-store-{item_id}", "work-artifact",
+                           str(tmp_path / "run-workspace"))
+        monkeypatch.setattr(work_routes.work_launch, "project_entries", lambda: [])
+        monkeypatch.setattr(work_routes, "_SCRATCH_ROOT", str(tmp_path / "scratch") + os.sep)
+        monkeypatch.setattr(work_routes.work_artifacts, "root", lambda: store)
+        artifact_id = _artifact(item_id, str(page))
+        resp = work_routes.api_work_artifact_asset(artifact_id, "")
+        assert isinstance(resp, FileResponse)
+        assert resp.path.endswith("report.html")
+
+
 class TestArtifactAssetRoute:
     def test_html_artifact_redirects_to_a_folder_url(self, tmp_path, monkeypatch):
         artifact_id = _seed_report(tmp_path, monkeypatch)

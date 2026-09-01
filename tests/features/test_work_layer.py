@@ -197,6 +197,29 @@ class TestIntake:
         run = db.query_one("SELECT status FROM work_runs WHERE id = ?", (d["run_id"],))
         assert run["status"] == "launched"
 
+    def test_intake_points_the_session_at_the_artifact_store(self, tmp_path, monkeypatch):
+        from unittest.mock import patch, MagicMock
+        from services import work_artifacts
+        store = tmp_path / "artifact-store"
+        monkeypatch.setattr(work_artifacts, "root", lambda: store)
+        reg = MagicMock()
+        reg.config = {"workspace": {"root": tmp_path}}
+        instances = MagicMock()
+        instances.get.return_value = reg
+        with patch("services.work_launch.runtime.instances", return_value=instances), \
+             patch("services.work_launch.terminal.launch_claude") as mock_launch, \
+             patch("services.work_launch.terminal.session_healthy", return_value={"alive": True, "agent_running": True}):
+            client = self._client()
+            r = client.post("/api/work/intake", json={"text": "make a page"})
+        assert r.status_code == 200, r.text
+        item_id = r.json()["item_id"]
+        context = mock_launch.call_args.args[3]
+        folder = store / f"work-{item_id}"
+        assert folder.is_dir()
+        assert f"write it under {folder}/" in context
+        assert "Never write such a file to /tmp" in context
+        assert "Never publish an HTML page to the hosted Claude artifact service" in context
+
     def test_intake_launch_failure_marks_item(self, tmp_path):
         from unittest.mock import patch, MagicMock
         reg = MagicMock()

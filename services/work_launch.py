@@ -15,7 +15,7 @@ import core.terminal as terminal
 from core.tasks.tickets import (
     TEST_RUN_TIMEOUT, _NO_LOCAL_PY_VENV_SENTINEL, _detect_runner, _run_repo_tests,
 )
-from services import work_store, work_tags
+from services import work_artifacts, work_store, work_tags
 
 
 def personal_config() -> dict | None:
@@ -180,6 +180,7 @@ def launch(objective: str, cwd: str = "", contexts: list[str] | None = None,
     item_id = work_store.create_item(objective, instance_key="personal", contexts=labels,
                                      source_item_id=source_item_id, tags=",".join(tags))
     session_id = str(uuid.uuid4())
+    artifact_dir = work_artifacts.item_dir(item_id)
     tmux_key = f"work-{item_id}"
     run_id = work_store.add_run(item_id, session_id, tmux_key, cwd, provider=agent)
     context = (
@@ -200,7 +201,12 @@ def launch(objective: str, cwd: str = "", contexts: list[str] | None = None,
         "emails, posts to external services) unless the operator explicitly asks for that "
         "in this conversation; draft the content and ask instead. "
         "When you produce a file the operator will open (report, page, video, image), "
-        "print a line: ARTIFACT: /absolute/path - one-line description. "
+        f"write it under {artifact_dir}/ unless it belongs in a repository, and print "
+        "a line: ARTIFACT: /absolute/path - one-line description. Never write such a "
+        "file to /tmp or to a scratchpad directory: the board serves the file from "
+        "disk long after this session ends. Never publish an HTML page to the hosted "
+        "Claude artifact service; write the .html file into that folder, with every "
+        "image it needs beside it. "
         "Write git commit messages and pull request descriptions about the change only. "
         "Never name the model, the vendor, the agent or the tool that produced the work. "
         "Never add a session link, a Co-Authored-By trailer, or a line saying the work "
