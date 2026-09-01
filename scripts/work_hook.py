@@ -60,11 +60,16 @@ def main() -> int:
                 return 0
             if tool == "Bash":
                 command = (data.get("tool_input") or {}).get("command") or ""
-                if "push" not in command:
+                if "commit" not in command and "push" not in command:
                     return 0
                 _bind_db()
                 from services import work_launch
-                gate = work_launch.gate_push(session_id, command, data.get("cwd") or "")
+                cwd = data.get("cwd") or ""
+                gate = {"decision": "allow", "reason": "not gated"}
+                if "commit" in command:
+                    gate = work_launch.gate_commit(session_id, command, cwd)
+                if gate["decision"] == "allow" and "push" in command:
+                    gate = work_launch.gate_push(session_id, command, cwd)
                 if gate["decision"] == "deny":
                     print(json.dumps({
                         "hookSpecificOutput": {

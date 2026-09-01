@@ -332,7 +332,7 @@ def record_question(session_id: str, tool_input: dict) -> bool:
     return True
 
 
-def record_push_gate(session_id: str, verdict: str, payload: dict) -> bool:
+def record_gate(session_id: str, kind: str, verdict: str, payload: dict) -> bool:
     now = _now()
     with db.tx() as c:
         run = c.execute(
@@ -342,8 +342,8 @@ def record_push_gate(session_id: str, verdict: str, payload: dict) -> bool:
             return False
         c.execute(
             "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
-            "VALUES (?, ?, 'push_gate', ?, ?)",
-            (run["work_item_id"], run["id"],
+            "VALUES (?, ?, ?, ?, ?)",
+            (run["work_item_id"], run["id"], kind,
              db.dump_json({**payload, "verdict": verdict}), now),
         )
     return True
