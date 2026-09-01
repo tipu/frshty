@@ -33,6 +33,9 @@ assignee_email = "you@company.com"
 [workspace]
 root = "/path/to/project"
 repos = ["repo-name"]             # explicit repo list, OR use projects_dir to scan
+# Repos whose tests require CI-only services/secrets and cannot run locally.
+# They remain subject to the platform's required PR checks.
+# test_exclude = ["integration-only-repo"]
 # projects_dir = "projects"       # scan this subdir for git repos (mutually exclusive with repos)
 # exclude = ["some-repo"]         # skip these when scanning projects_dir
 tickets_dir = "tickets"
