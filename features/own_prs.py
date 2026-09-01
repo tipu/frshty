@@ -113,6 +113,21 @@ def _check_comments(config, instance_key, platform, pr, base_url, seen=None, tic
                       if c.get("author_id") != user_id and not c.get("resolved")]
     if first_sight:
         all_to_process = _baseline_existing_comments(instance_key, pr_key, all_to_process)
+    # General GitHub review bodies were added to the adapter after inline
+    # comment tracking had already been live. Baseline just the old bodies on
+    # the first poll with the expanded source so rollout does not replay an
+    # entire PR's review history. Recent bodies remain actionable, including
+    # ones submitted before this version was deployed.
+    if any(c.get("comment_kind") == "review_body" for c in platform_comments) \
+            and not seen.get("review_bodies_baselined"):
+        review_bodies = [c for c in all_to_process if c.get("comment_kind") == "review_body"]
+        recent_review_bodies = _baseline_existing_comments(instance_key, pr_key, review_bodies)
+        keep_ids = {str(c["id"]) for c in recent_review_bodies}
+        all_to_process = [
+            c for c in all_to_process
+            if c.get("comment_kind") != "review_body" or str(c["id"]) in keep_ids
+        ]
+        seen["review_bodies_baselined"] = True
 
     handled = set()
     if all_to_process:
@@ -379,12 +394,13 @@ def fix_comment(config, payload) -> tuple[bool, str | None]:
                 comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "push failed")
                 return False, "push failed"
 
-        resolution = platform.resolve_comment(pr["repo"], pr["id"], int(comment_id))
-        if isinstance(resolution, dict) and resolution.get("status") != "resolved":
-            detail = str(resolution.get("detail", ""))[:200]
-            log.emit("pr_comment_blocked", f"{pr_ref}: Resolve failed — {comment['body'][:80]}", links=links, meta={**meta, "reason": "resolve failed", "detail": detail})
-            comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "resolve failed")
-            return False, "resolve failed"
+        if comment.get("resolvable", True):
+            resolution = platform.resolve_comment(pr["repo"], pr["id"], int(comment_id))
+            if isinstance(resolution, dict) and resolution.get("status") != "resolved":
+                detail = str(resolution.get("detail", ""))[:200]
+                log.emit("pr_comment_blocked", f"{pr_ref}: Resolve failed — {comment['body'][:80]}", links=links, meta={**meta, "reason": "resolve failed", "detail": detail})
+                comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "resolve failed")
+                return False, "resolve failed"
 
         log.emit("pr_comment_addressed", f"{pr_ref}: Fixed & pushed — {comment['body'][:80]}", links=links, meta=meta)
         comments.mark_comment_processed(instance_key, "pr", pr_key, comment_id)
@@ -475,7 +491,12 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
                 return _fail_all(pending_ids, "push failed")
 
         unresolved = []
+        pending_by_id = {str(c["id"]): c for c in pending}
         for cid in pending_ids:
+            comment = pending_by_id[cid]
+            if not comment.get("resolvable", True):
+                comments.mark_comment_processed(instance_key, "pr", pr_key, cid)
+                continue
             resolution = platform.resolve_comment(pr["repo"], pr["id"], int(cid))
             if isinstance(resolution, dict) and resolution.get("status") != "resolved":
                 comments.mark_comment_error(instance_key, "pr", pr_key, cid, "resolve failed")

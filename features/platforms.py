@@ -791,10 +791,13 @@ class GitHubPlatform(_CIMonitorMixin):
             out.append(pr)
         return out
 
-    _REVIEW_THREADS_QUERY = (
+    _REVIEW_COMMENTS_QUERY = (
         "query($owner:String!,$name:String!,$number:Int!){"
         " repository(owner:$owner,name:$name){"
         " pullRequest(number:$number){"
+        " reviews(first:100){nodes{"
+        " databaseId body url submittedAt updatedAt state author{login}"
+        "}}"
         " reviewThreads(first:100){nodes{"
         " id isResolved"
         " comments(first:100){nodes{"
@@ -803,18 +806,22 @@ class GitHubPlatform(_CIMonitorMixin):
         "}}}}}}}"
     )
 
-    def _review_threads(self, repo: str, pr_id: int) -> list[dict]:
+    def _review_data(self, repo: str, pr_id: int) -> dict:
         full = self._resolve_repo(repo)
         owner, _, name = full.partition("/")
-        data = self._graphql(self._REVIEW_THREADS_QUERY, owner=owner, name=name, number=pr_id)
+        data = self._graphql(self._REVIEW_COMMENTS_QUERY, owner=owner, name=name, number=pr_id)
         if not data:
-            return []
-        pr = (((data.get("data") or {}).get("repository") or {}).get("pullRequest") or {})
+            return {}
+        return (((data.get("data") or {}).get("repository") or {}).get("pullRequest") or {})
+
+    def _review_threads(self, repo: str, pr_id: int) -> list[dict]:
+        pr = self._review_data(repo, pr_id)
         return (pr.get("reviewThreads") or {}).get("nodes") or []
 
     def get_pr_comments(self, repo: str, pr_id: int) -> list[dict]:
         out: list[dict] = []
-        for t in self._review_threads(repo, pr_id):
+        pr = self._review_data(repo, pr_id)
+        for t in (pr.get("reviewThreads") or {}).get("nodes") or []:
             resolved = bool(t.get("isResolved"))
             thread_id = t.get("id", "")
             for c in (t.get("comments") or {}).get("nodes") or []:
@@ -833,8 +840,38 @@ class GitHubPlatform(_CIMonitorMixin):
                     "updated_at": c.get("updatedAt", created),
                     "parent_id": (c.get("replyTo") or {}).get("databaseId"),
                     "resolved": resolved,
+                    "resolvable": True,
                     "thread_id": thread_id,
                 })
+        # A review can carry both inline comments and a top-level body. GitHub
+        # exposes only the inline comments as reviewThreads; omitting reviews
+        # here silently drops general feedback submitted in the same review.
+        # General review bodies cannot be resolved through
+        # resolveReviewThread, so callers mark them processed after the code
+        # is pushed instead of attempting an impossible mutation.
+        for review in (pr.get("reviews") or {}).get("nodes") or []:
+            body = review.get("body", "")
+            if not body.strip():
+                continue
+            created = review.get("submittedAt", "")
+            out.append({
+                "id": review.get("databaseId"),
+                "body": body,
+                "author_id": (review.get("author") or {}).get("login", ""),
+                "author_name": (review.get("author") or {}).get("login", ""),
+                "path": None,
+                "line": None,
+                "diff_hunk": "",
+                "html_url": review.get("url", ""),
+                "created_on": created,
+                "created_at": created,
+                "updated_at": review.get("updatedAt", created),
+                "parent_id": None,
+                "resolved": review.get("state") == "DISMISSED",
+                "resolvable": False,
+                "thread_id": "",
+                "comment_kind": "review_body",
+            })
         return out
 
     def get_pr_diff(self, repo: str, pr_id: int) -> str | None:

@@ -150,6 +150,44 @@ class TestCheckComments:
         assert datetime.fromisoformat(seen["fix_deadline"]) > datetime.now(timezone.utc)
         platform.push_branch.assert_not_called()
 
+    def test_new_review_body_source_baselines_old_but_processes_recent(self, tmp_path):
+        platform = MagicMock()
+        old = make_comment(
+            id=10,
+            author_id="reviewer1",
+            body="Old general feedback",
+            created_at=(datetime.now(timezone.utc) - timedelta(days=3)).isoformat(),
+            comment_kind="review_body",
+            resolvable=False,
+        )
+        recent = make_comment(
+            id=11,
+            author_id="reviewer1",
+            body="Add the missing fingerprint",
+            created_at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+            comment_kind="review_body",
+            resolvable=False,
+        )
+        platform.get_pr_comments.return_value = [old, recent]
+        pr = make_pr()
+        config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
+        seen = {}
+
+        with patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.run_balanced", return_value='{"results": [{"id": 0, "actionable": true, "reason": "clear"}]}'), \
+             patch("features.own_prs.q.enqueue_job"), \
+             patch("features.own_prs.log"):
+            mock_comments.has_comment_state.return_value = True
+            mock_comments.fetch_and_detect_comments.return_value = {"new": [old, recent], "edited": []}
+            mock_comments.get_unprocessed_comments.return_value = []
+            mock_comments.get_deferred_comments.return_value = []
+            own_prs._check_comments(config, "test", platform, pr, "http://base", seen=seen)
+
+        mock_comments.mark_comment_seen.assert_called_once()
+        assert mock_comments.mark_comment_seen.call_args.args[3] == "10"
+        assert mock_comments.mark_comment_deferred.call_args.args[3] == "11"
+        assert seen["review_bodies_baselined"] is True
+
     def test_new_comment_pushes_existing_window(self, tmp_path):
         platform = MagicMock()
         comment = make_comment(id=11, author_id="reviewer1", body="Also fix this")
@@ -496,6 +534,24 @@ class TestFixComment:
         mock_err.assert_called_once()
         mock_proc.assert_not_called()
 
+    def test_general_review_body_is_processed_without_thread_resolution(self, tmp_path):
+        platform = MagicMock()
+        platform.push_branch.return_value = {"ok": True}
+        config = {"_state_dir": tmp_path, "_base_url": "http://base", "job": {"key": "test"}}
+        payload = self._payload(resolvable=False, comment_kind="review_body")
+
+        with patch("features.own_prs.make_platform", return_value=platform), \
+             patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs.run_claude_code", return_value="done"), \
+             patch("features.own_prs._commit_fix", return_value=(True, "")), \
+             patch("features.own_prs.comments.mark_comment_processed") as mock_proc, \
+             patch("features.own_prs.log.emit"):
+            ok, reason = own_prs.fix_comment(config, payload)
+
+        assert ok is True and reason is None
+        platform.resolve_comment.assert_not_called()
+        mock_proc.assert_called_once()
+
     def test_no_push_when_claude_fails(self, tmp_path):
         platform = MagicMock()
         config = {"_state_dir": tmp_path, "_base_url": "http://base", "job": {"key": "test"}}
@@ -632,6 +688,28 @@ class TestFixCommentsBatch:
         platform.push_branch.assert_called_once()
         assert platform.resolve_comment.call_count == 2
         assert mock_comments.mark_comment_processed.call_count == 2
+
+    def test_general_review_body_skips_thread_resolution(self, tmp_path):
+        platform = MagicMock()
+        platform.get_pr_comments.return_value = [
+            make_comment(id=10, author_id="r1", body="Add a fingerprint",
+                         resolvable=False, comment_kind="review_body"),
+        ]
+        platform.push_branch.return_value = {"ok": True}
+
+        with patch("features.own_prs.make_platform", return_value=platform), \
+             patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs.run_claude_code", return_value="done"), \
+             patch("features.own_prs._commit_fix", return_value=(True, "")), \
+             patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.log.emit"):
+            ok, reason = own_prs.fix_comments_batch(
+                self._config(tmp_path), self._payload(ids=("10",)),
+            )
+
+        assert ok is True and reason is None
+        platform.resolve_comment.assert_not_called()
+        mock_comments.mark_comment_processed.assert_called_once()
 
     def test_provider_failure_does_not_spend_the_fix_budget(self, tmp_path):
         """A provider outage is not a verdict on the comment.
