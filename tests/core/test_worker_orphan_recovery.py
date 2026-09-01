@@ -164,3 +164,34 @@ def test_pid_file_paths_round_trip():
     assert p.name == "42.pid"
     assert p.parent.name == "jobs"
     assert p.parent.parent.name == "inst"
+
+
+class TestWorkerLoopSurvivesACrashedJob:
+    """A worker thread that dies stops claiming jobs for the life of the
+    process, so an unexpected error inside one job must not leave the loop."""
+
+    def test_the_loop_keeps_claiming_after_run_one_raises(self):
+        pool = WorkerPool({}, size=1, poll_interval=0.0)
+        claimed = []
+        seen = []
+
+        def claim_next():
+            if len(claimed) >= 3:
+                pool._stop.set()
+                return None
+            claimed.append(len(claimed))
+            return {"id": claimed[-1]}
+
+        def run_one(job):
+            seen.append(job["id"])
+            raise RuntimeError("disk I/O error")
+
+        import core.queue as queue_mod
+        original = queue_mod.claim_next
+        queue_mod.claim_next = claim_next
+        pool._run_one = run_one
+        try:
+            pool._run(0)
+        finally:
+            queue_mod.claim_next = original
+        assert seen == [0, 1, 2]

@@ -134,7 +134,7 @@ def api_rerun_ticket_review(ticket_key: str):
     if not prs:
         return JSONResponse({"error": f"No pending reviews found for {ticket_key}"}, status_code=404)
 
-    reviewer.review_ticket_prs(_config, ticket_key, prs)
+    reviewer.review_ticket_prs(_config, ticket_key, prs, auto=False)
     return {"status": "review_started", "ticket": ticket_key, "pr_count": len(prs)}
 
 
@@ -178,7 +178,7 @@ def api_rerun_review(repo: str, pr_id: int):
                     for name in ("walkthrough_cache.json", "presentation_cache.json",
                                  "presentation_meta.json", "file_summaries.json"):
                         (f[0] / name).unlink(missing_ok=True)
-            reviewer.review_ticket_prs(cfg, ticket_key, prs)
+            reviewer.review_ticket_prs(cfg, ticket_key, prs, auto=False)
         except Exception as e:
             log.emit("cycle_error", f"Manual re-review crashed for {repo} PR #{pr_id}: {type(e).__name__}: {e}",
                 meta={"repo": repo, "pr_id": pr_id})
@@ -289,7 +289,7 @@ def api_review_info(repo: str, pr_id: int, provider: str = "claude"):
     if not found:
         return {}
     branch_dir, comments, _ = found
-    review_json = branch_dir / "review.json"
+    review_json = branch_dir / f"review{review_store.provider_suffix(provider)}.json"
     review_data = json.loads(review_json.read_text()) if review_json.exists() else {}
     branch = review_data.get("source_branch", "")
     result = {
@@ -457,8 +457,9 @@ def api_start_discuss(repo: str, pr_id: int, body: dict):
         cwd = str(review_dir)
 
     terminal.kill_terminal(session_id)
-    terminal.ensure_session(session_id, cwd)
-    terminal.send_keys(session_id, f"{terminal.claude_cmd(_config)} --append-system-prompt {shlex.quote(context)}")
+    terminal.launch_pane_command(
+        session_id, cwd,
+        f"{terminal.claude_cmd(_config)} --append-system-prompt {shlex.quote(context)}")
 
     return {"session_id": session_id}
 

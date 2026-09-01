@@ -270,7 +270,7 @@ def _bb_get(json_value):
 
 
 _THREADS_RESPONSE = {
-    "data": {"repository": {"pullRequest": {"reviewThreads": {"nodes": [
+    "data": {"repository": {"pullRequest": {"reviews": {"nodes": []}, "reviewThreads": {"nodes": [
         {"id": "T_unresolved", "isResolved": False, "comments": {"nodes": [
             {"databaseId": 11, "body": "fix this", "path": "a.py", "line": 5,
              "originalLine": 5, "diffHunk": "@@", "url": "http://c/11",
@@ -300,6 +300,27 @@ class TestGitHubGetPrComments:
         assert second["resolved"] is True and second["thread_id"] == "T_resolved"
         assert second["line"] == 9
         assert second["parent_id"] == 11
+
+    def test_includes_nonempty_general_review_bodies(self):
+        p = _gh_platform()
+        import copy
+        import json as _json
+        response = copy.deepcopy(_THREADS_RESPONSE)
+        response["data"]["repository"]["pullRequest"]["reviews"]["nodes"] = [
+            {"databaseId": 33, "body": "Please add a fingerprint", "url": "http://r/33",
+             "submittedAt": "2026-01-03T00:00:00Z", "updatedAt": "2026-01-03T00:00:00Z",
+             "state": "COMMENTED", "author": {"login": "carol"}},
+            {"databaseId": 44, "body": "", "url": "http://r/44",
+             "submittedAt": "2026-01-04T00:00:00Z", "updatedAt": "2026-01-04T00:00:00Z",
+             "state": "COMMENTED", "author": {"login": "dave"}},
+        ]
+        with patch.object(p, "_run_gh", return_value=_gh_result(stdout=_json.dumps(response))):
+            comments = p.get_pr_comments("r", 1)
+        review = next(c for c in comments if c["id"] == 33)
+        assert review["comment_kind"] == "review_body"
+        assert review["resolvable"] is False
+        assert review["path"] is None and review["author_id"] == "carol"
+        assert not any(c["id"] == 44 for c in comments)
 
     def test_fetch_failure_is_empty(self):
         p = _gh_platform()

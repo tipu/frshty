@@ -28,6 +28,7 @@ config/*.toml
 .playwright-cli/
 /review-snap.yaml
 /*.png
+/*.mp4
 .python-version
 .codex
 

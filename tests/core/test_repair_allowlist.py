@@ -121,6 +121,58 @@ class TestOnlyKnownDiagnosticsAreRepaired:
         ):
             assert not T._is_repairable(text), f"{name} output must not be repairable"
 
+    def test_a_basedpyright_rule_name_is_repairable(self):
+        """DEV-678 is the case that proves it. The allowlist carried two
+        basedpyright wordings, and the message text differs per rule, so an
+        ordinary type error in a test the agent had just written was classified
+        unrecognised. That blocked with hard_block, so nothing retried it."""
+        assert T._is_repairable(
+            "  src/users/test_user_profile_view.py:19:19 - error: "
+            '"__getitem__" method not defined on type "object" (reportIndexIssue)\n'
+            "1 error, 0 warnings, 0 notes")
+
+    def test_the_repairable_pyright_rules_mirror_the_mypy_codes(self):
+        for name, rule in (
+            ("arg-type", "reportArgumentType"),
+            ("assignment", "reportAssignmentType"),
+            ("return-value", "reportReturnType"),
+            ("call-arg", "reportCallIssue"),
+            ("index", "reportIndexIssue"),
+            ("operator", "reportOperatorIssue"),
+            ("override", "reportIncompatibleMethodOverride"),
+            ("redundant-cast", "reportUnnecessaryCast"),
+            ("unused-ignore", "reportUnnecessaryTypeIgnoreComment"),
+            ("possibly-none", "reportOptionalMemberAccess"),
+        ):
+            text = f"a.py:1:1 - error: something is wrong ({rule})"
+            assert T._is_repairable(text), f"{name} ({rule}) should be repairable"
+
+    def test_a_basedpyright_name_or_import_rule_is_not_repairable(self):
+        """The rule name carries the decision, not the wording. DEV-635 blocked
+        only because no never pattern matched `Attribute "method" is unknown`
+        and nothing else matched either, so it fell through to unrecognised."""
+        for name, text in (
+            ("attribute", '  src/main.py:369:14 - error: Cannot access attribute '
+                          '"method" for class "Request"\n    Attribute "method" '
+                          'is unknown (reportAttributeAccessIssue)'),
+            ("import", 'a.py:1:8 - error: Import "acme" could not be '
+                       "resolved (reportMissingImports)"),
+            ("stub", 'a.py:1:8 - error: Stub file not found (reportMissingTypeStubs)'),
+            ("unbound", "a.py:4:5 - error: X is possibly unbound (reportPossiblyUnbound)"),
+            ("redeclaration", 'a.py:9:5 - error: Declaration "f" is obscured '
+                              "(reportRedeclaration)"),
+        ):
+            assert not T._is_repairable(text), f"{name} output must not be repairable"
+
+    def test_a_never_rule_wins_over_a_repairable_one_in_the_same_run(self):
+        """basedpyright prints every diagnostic it found. A run that reports a
+        missing import and an index error must block: repairing the half it can
+        fix still leaves the agent facing the dependency it cannot."""
+        assert not T._is_repairable(
+            'a.py:1:8 - error: Import "acme" could not be resolved (reportMissingImports)\n'
+            'b.py:2:2 - error: "__getitem__" method not defined (reportIndexIssue)\n'
+            "2 errors, 0 warnings, 0 notes")
+
 
 class TestRoutingUsesTheAllowlist:
     def test_ts2307_blocks_instead_of_reaching_the_agent(self, tmp_path):

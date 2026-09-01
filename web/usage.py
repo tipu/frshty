@@ -9,11 +9,27 @@ router = APIRouter()
 _MAX_EVENTS_PER_POST = 200
 
 
+def _walk_api_routes(routes):
+    """Every APIRoute reachable from an app, however deeply it is included.
+
+    FastAPI used to flatten include_router into app.routes. From 0.141 it
+    appends one _IncludedRouter that holds the APIRouter instead, so a flat
+    scan of app.routes finds only the routes declared on the app itself and
+    the usage report loses every route the frshty routers declare."""
+    for r in routes:
+        if isinstance(r, APIRoute):
+            yield r
+            continue
+        nested = getattr(r, "routes", None)
+        if nested is None:
+            nested = getattr(getattr(r, "original_router", None), "routes", None)
+        if nested:
+            yield from _walk_api_routes(nested)
+
+
 def _api_routes(request: Request) -> list[tuple[str, str]]:
     out = []
-    for r in request.app.routes:
-        if not isinstance(r, APIRoute):
-            continue
+    for r in _walk_api_routes(request.app.routes):
         for method in sorted(r.methods or ()):
             if method != "HEAD":
                 out.append((method, r.path))
@@ -24,8 +40,8 @@ def _page_template(request: Request, page: str) -> str:
     if not page.startswith("/"):
         return ""
     scope = {"type": "http", "path": page, "method": "GET"}
-    for r in request.app.routes:
-        if isinstance(r, APIRoute) and "GET" in (r.methods or ()):
+    for r in _walk_api_routes(request.app.routes):
+        if "GET" in (r.methods or ()):
             match, _ = r.matches(scope)
             if match == Match.FULL:
                 return r.path

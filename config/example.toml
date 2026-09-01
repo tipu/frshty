@@ -126,6 +126,16 @@ pr_autofix = false                # github only: every newly created PR gets a c
 # model_balanced = "deepseek/deepseek-v4-flash"   # used by balanced tier
 # model_fast = "deepseek/deepseek-v4-flash"       # used by fast tier
 
+# --- Peer PR reviewer ---
+# [reviewer]
+# model = "claude-opus-4-8"            # model for the review personas
+# providers = ["claude", "codex"]      # every persona runs once per provider
+# max_changed_lines = 8000             # a ticket whose PR diffs add up to more changed
+#                                      # lines than this is not reviewed automatically.
+#                                      # The event feed says it was skipped. Rerun by hand
+#                                      # from the reviews page to review it anyway.
+#                                      # Set 0 to remove the cap.
+
 # --- Manager (proactive daily digest) ---
 # [manager]
 # enabled = true

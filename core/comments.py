@@ -199,6 +199,30 @@ def mark_comment_error(
     )
 
 
+def mark_comment_retryable(
+    instance_key: str,
+    resource_type: str,
+    resource_id: str,
+    comment_id: str,
+    error: str,
+) -> None:
+    """Send a comment back for another pass without spending its retry budget.
+
+    error_count decides when frshty stops trying a comment. Only a failure the
+    comment itself caused belongs there. An LLM that never answered — a guard
+    block, a timeout, a provider error — says nothing about the comment, and
+    charging it exhausts the budget during one outage and abandons the comment
+    for good."""
+    db.execute(
+        """
+        UPDATE comment_state
+        SET state = 'new', last_error = ?
+        WHERE instance_key = ? AND resource_type = ? AND resource_id = ? AND comment_id = ?
+        """,
+        (error, instance_key, resource_type, resource_id, comment_id),
+    )
+
+
 def mark_comment_deleted(
     instance_key: str,
     resource_type: str,
