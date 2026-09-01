@@ -156,17 +156,16 @@ class TestTickets:
         assert resp.status_code == 200
         mock_kill.assert_called_once_with("T-1")
 
-    def test_reset_terminal_kills_and_spawns_with_claude(self, client):
+    def test_reset_terminal_kills_and_spawns_with_claude(self, client, tmp_path):
         state.save("tickets", {"T-1": {"status": "in_review", "slug": "T-1-s"}})
         with patch("web.tickets.terminal.kill_terminal") as mock_kill, \
-             patch("web.tickets.terminal.ensure_session") as mock_ensure, \
-             patch("web.tickets.terminal.send_keys") as mock_send, \
-             patch("web.tickets.time.sleep"):
+             patch("web.tickets.terminal.launch_pane_command") as mock_launch:
             resp = client.post("/api/tickets/T-1/terminal/reset")
         assert resp.status_code == 200
         mock_kill.assert_called_once_with("T-1")
-        mock_ensure.assert_called_once()
-        mock_send.assert_called_once_with("T-1", "claude --dangerously-skip-permissions")
+        mock_launch.assert_called_once_with(
+            "T-1", str(tmp_path / "tickets" / "T-1-s"),
+            "claude --dangerously-skip-permissions")
 
     def test_reset_terminal_not_found(self, client):
         resp = client.post("/api/tickets/NOPE/terminal/reset")

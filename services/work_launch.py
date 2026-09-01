@@ -259,9 +259,9 @@ def resume_session(item_id: int) -> bool:
     session in the run's cwd and relaunch Claude with --resume on the item's
     original session id.
 
-    No-op while the tmux session still exists, checked under launch_lock so
-    two concurrent terminal connects cannot both type the resume command into
-    the pane."""
+    No-op while the agent is still running, checked under launch_lock so two
+    concurrent terminal connects cannot both relaunch it. A surviving tmux
+    pane with no agent is respawned with the resume command."""
     run = db.query_one(
         "SELECT session_id, cwd, provider, agent_session_id FROM work_runs "
         "WHERE work_item_id = ? ORDER BY id DESC LIMIT 1", (item_id,))
@@ -273,7 +273,7 @@ def resume_session(item_id: int) -> bool:
     cwd = run["cwd"] if run["cwd"] and os.path.isdir(run["cwd"]) else str(config["workspace"]["root"])
     key = f"work-{item_id}"
     with work_store.launch_lock:
-        if terminal.session_healthy(key, agent=run["provider"])["alive"]:
+        if terminal.session_healthy(key, agent=run["provider"])["agent_running"]:
             return True
         terminal.launch_agent(key, cwd, run["session_id"], "", False, config=config,
                               agent=run["provider"],

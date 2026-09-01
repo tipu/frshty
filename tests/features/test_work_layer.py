@@ -1502,7 +1502,24 @@ class TestSuspendResume:
         assert work_launch.resume_session(item_id) is True
         assert launcher.call_args[0][1] == str(tmp_path)
 
-    def test_resume_noop_while_session_alive(self, tmp_path, monkeypatch):
+    def test_resume_relaunches_when_pane_exists_without_agent(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+        import core.terminal as terminal
+        from services import work_launch
+        item_id = _mkitem("resume empty pane item")
+        sid = f"sid-resume-empty-{item_id}"
+        work_store.add_run(item_id, sid, f"work-{item_id}", str(tmp_path))
+        config = {"workspace": {"root": tmp_path}}
+        monkeypatch.setattr(work_launch, "personal_config", lambda: config)
+        monkeypatch.setattr(terminal, "session_healthy",
+                            lambda k, agent="claude": {"alive": True, "agent_running": False})
+        launcher = MagicMock()
+        monkeypatch.setattr(terminal, "launch_agent", launcher)
+        assert work_launch.resume_session(item_id) is True
+        launcher.assert_called_once_with(f"work-{item_id}", str(tmp_path), sid, "", False,
+                                         config=config, agent="claude", agent_session_id="")
+
+    def test_resume_noop_while_agent_running(self, tmp_path, monkeypatch):
         from unittest.mock import MagicMock
         import core.terminal as terminal
         from services import work_launch

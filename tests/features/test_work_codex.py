@@ -43,10 +43,10 @@ def _mkrun(objective, provider="codex"):
 class TestCodexCommand:
     def test_first_run_seeds_context_and_notify(self, tmp_path, monkeypatch):
         sent = []
-        monkeypatch.setattr(terminal, "ensure_session", lambda k, c: k)
         monkeypatch.setattr(terminal, "session_healthy",
                             lambda k, agent="claude": {"alive": True, "agent_running": False})
-        monkeypatch.setattr(terminal, "send_keys", lambda k, cmd: sent.append(cmd))
+        monkeypatch.setattr(terminal, "launch_pane_command",
+                            lambda k, cwd, cmd: sent.append(cmd))
         monkeypatch.setattr(terminal, "LAUNCH_CONTEXT_DIR", str(tmp_path))
         terminal.launch_codex("work-1", "/tmp", "sess-uuid-1", "the context", True)
         cmd = sent[0]
@@ -58,10 +58,10 @@ class TestCodexCommand:
 
     def test_resume_uses_recorded_codex_thread(self, monkeypatch):
         sent = []
-        monkeypatch.setattr(terminal, "ensure_session", lambda k, c: k)
         monkeypatch.setattr(terminal, "session_healthy",
                             lambda k, agent="claude": {"alive": True, "agent_running": False})
-        monkeypatch.setattr(terminal, "send_keys", lambda k, cmd: sent.append(cmd))
+        monkeypatch.setattr(terminal, "launch_pane_command",
+                            lambda k, cwd, cmd: sent.append(cmd))
         terminal.launch_codex("work-1", "/tmp", "sess-uuid-2", "", False,
                               agent_session_id="thread-abc")
         assert "codex resume --dangerously-bypass-approvals-and-sandbox" in sent[0]
@@ -69,19 +69,19 @@ class TestCodexCommand:
 
     def test_resume_without_thread_falls_back_to_last(self, monkeypatch):
         sent = []
-        monkeypatch.setattr(terminal, "ensure_session", lambda k, c: k)
         monkeypatch.setattr(terminal, "session_healthy",
                             lambda k, agent="claude": {"alive": True, "agent_running": False})
-        monkeypatch.setattr(terminal, "send_keys", lambda k, cmd: sent.append(cmd))
+        monkeypatch.setattr(terminal, "launch_pane_command",
+                            lambda k, cwd, cmd: sent.append(cmd))
         terminal.launch_codex("work-1", "/tmp", "sess-uuid-3", "", False)
         assert sent[0].endswith("--last")
 
     def test_running_codex_is_not_relaunched(self, monkeypatch):
         sent = []
-        monkeypatch.setattr(terminal, "ensure_session", lambda k, c: k)
         monkeypatch.setattr(terminal, "session_healthy",
                             lambda k, agent="claude": {"alive": True, "agent_running": True})
-        monkeypatch.setattr(terminal, "send_keys", lambda k, cmd: sent.append(cmd))
+        monkeypatch.setattr(terminal, "launch_pane_command",
+                            lambda k, cwd, cmd: sent.append(cmd))
         terminal.launch_codex("work-1", "/tmp", "sess-uuid-4", "", True)
         assert sent == []
 
