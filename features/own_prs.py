@@ -126,7 +126,7 @@ def _thread_key(comment: dict, by_id: dict) -> str:
         cur = parent
 
 
-def _reopen_answered_threads(platform_comments: list, settled_ids: set) -> list[str]:
+def _reopen_answered_threads(platform_comments: list, settled_ids: set, self_id: str = "") -> list[str]:
     """Clear the resolved flag on threads a reviewer answered after they closed.
 
     Both adapters stamp the thread's resolution onto every comment in it, so a
@@ -134,10 +134,12 @@ def _reopen_answered_threads(platform_comments: list, settled_ids: set) -> list[
     every caller drops it — at intake, at reclaim, and at flush — without ever
     writing it to comment_state. The reviewer's follow-up is then lost for good.
 
-    A resolved thread that mixes comments frshty has settled with comments it
-    still owes an answer is one the reviewer reopened. A resolved thread with
-    nothing settled in it was closed by a human who wants it left alone, so
-    that one keeps its flag.
+    A resolved thread that mixes comments frshty owes an answer with comments
+    it does not is one the reviewer reopened. A resolved thread that owes an
+    answer on every comment was closed by a human who wants it left alone, so
+    that one keeps its flag. Only a reviewer's comment can be owed an answer:
+    our own reply never enters comment_state, so counting it would reopen its
+    thread on every poll forever.
 
     Mutates the comments in place and returns the reopened thread keys."""
     by_id = {str(c["id"]): c for c in platform_comments}
@@ -149,7 +151,11 @@ def _reopen_answered_threads(platform_comments: list, settled_ids: set) -> list[
     reopened = []
     for thread_key, thread in threads.items():
         ids = {str(c["id"]) for c in thread}
-        if not (ids & settled_ids) or not (ids - settled_ids):
+        owed = {
+            str(c["id"]) for c in thread
+            if str(c["id"]) not in settled_ids and c.get("author_id") != self_id
+        }
+        if not owed or not (ids - owed):
             continue
         for c in thread:
             c["resolved"] = False
@@ -167,7 +173,7 @@ def _check_comments(config, instance_key, platform, pr, base_url, seen=None, tic
     platform_comments = platform.get_pr_comments(pr["repo"], pr["id"])
     first_sight = not comments.has_comment_state(instance_key, "pr", pr_key)
     for thread_key in _reopen_answered_threads(
-            platform_comments, comments.settled_comment_ids(instance_key, "pr", pr_key)):
+            platform_comments, comments.settled_comment_ids(instance_key, "pr", pr_key), user_id):
         log.emit("pr_thread_reopened",
                  f"{pr_ref}: reviewer replied after the thread was resolved",
                  links={"pr": pr["url"], "detail": f"{base_url}/"},
@@ -516,7 +522,8 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
     try:
         with _worktree_lock(pr_key):
             fetched = platform.get_pr_comments(pr["repo"], pr["id"])
-            _reopen_answered_threads(fetched, comments.settled_comment_ids(instance_key, "pr", pr_key))
+            _reopen_answered_threads(fetched, comments.settled_comment_ids(instance_key, "pr", pr_key),
+                                     _self_id(config))
             by_id = {str(c["id"]): c for c in fetched}
             pending = []
             for cid in comment_ids:
