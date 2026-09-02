@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import core.comments as comments
 import core.git_util as git_util
 
 import core.log as log
@@ -2186,23 +2187,149 @@ def generate_pr_descriptions(ctx: TaskContext) -> TaskResult:
     return TaskResult("ok", artifacts={"generated": generated, "failed": failed})
 
 
+GENERIC_BUG_REPORT_PROMPT = (
+    "A user reported that this ticket's fix is not working or has regressed. "
+    "Re-investigate the issue in the current worktree state, identify why it's failing, "
+    "and fix it. Then run relevant tests to verify the fix works. Commit your changes."
+)
+
+
+def _bug_report_prompt(ticket_key: str, summary: str, reports: list[dict]) -> str:
+    """The prompt the bug fixer runs.
+
+    The reports are the whole point. Without them the fixer was told only that
+    "a user reported" something and had to guess which behaviour to look at, so
+    a QA note listing four named failures produced no change at all."""
+    if not reports:
+        return GENERIC_BUG_REPORT_PROMPT
+    parts = [
+        f"A reviewer reported that {ticket_key} does not work. Fix every point they raised.",
+        f"Ticket: {ticket_key} — {summary}" if summary else f"Ticket: {ticket_key}",
+        "",
+    ]
+    for report in reports:
+        header = f"--- report from {report.get('author') or 'a reviewer'}"
+        if report.get("created_at"):
+            header += f" ({report['created_at']})"
+        parts.append(header)
+        if report.get("reason"):
+            parts.append(f"Why this counts as an issue: {report['reason']}")
+        parts.append(report.get("body") or "")
+        parts.append("")
+    parts.append(
+        "Work in the per-repo checkouts under workspace/. Reproduce each reported failure, "
+        "fix it, run the tests that cover it, and commit your changes in every repository "
+        "you changed. If a reported point needs no code change, say so in your final "
+        "message and name the file and line that already handles it."
+    )
+    return "\n".join(parts)
+
+
+def _settle_bug_reports(ctx: TaskContext, reports: list[dict], error: str | None) -> None:
+    """Record the fix outcome against the comments that asked for it.
+
+    Marking every comment processed at enqueue time, as the poll used to, meant
+    a fix pass that changed nothing still closed the report."""
+    for report in reports:
+        comment_id = str(report.get("comment_id") or "")
+        if not comment_id:
+            continue
+        if error is None:
+            comments.mark_comment_processed(ctx.instance_key, "ticket",
+                                            ctx.ticket_key or "", comment_id)
+        else:
+            comments.mark_comment_error(ctx.instance_key, "ticket",
+                                        ctx.ticket_key or "", comment_id, error)
+
+
 @task("fix_reported_bug",
       timeout=FIX_TIMEOUT)
 def fix_reported_bug(ctx: TaskContext) -> TaskResult:
     ticket_dir = _ticket_dir(ctx)
+    payload = ctx.payload or {}
+    reports = [r for r in (payload.get("reports") or []) if isinstance(r, dict)]
     if not ticket_dir.is_dir():
+        _settle_bug_reports(ctx, reports, "ticket dir missing")
         return TaskResult("failed", f"ticket dir missing: {ticket_dir}")
-    prompt = (
-        "A user reported that this ticket's fix is not working or has regressed. "
-        "Re-investigate the issue in the current worktree state, identify why it's failing, "
-        "and fix it. Then run relevant tests to verify the fix works. Commit your changes."
-    )
+    prompt = _bug_report_prompt(ctx.ticket_key or "",
+                                payload.get("ticket_summary") or "", reports)
     log.emit("ticket_bug_fix_started", f"Investigating reported bug for {ctx.ticket_key}",
-             meta={"ticket": ctx.ticket_key})
+             meta={"ticket": ctx.ticket_key,
+                   "comment_ids": [str(r.get("comment_id")) for r in reports],
+                   "reports": len(reports)})
+    before = _capture_repo_heads(ticket_dir)
     result = run_claude_code(prompt, cwd=ticket_dir, timeout=FIX_TIMEOUT)
     if result is None:
+        _settle_bug_reports(ctx, reports, "claude returned non-zero or empty")
         return TaskResult("failed", "claude returned non-zero or empty")
-    return TaskResult("ok")
+
+    try:
+        _commit_workspace_changes(ticket_dir, ctx.ticket_key or "",
+                                  message=f"fix: {ctx.ticket_key} address reported issue")
+    except CommitBlocked as e:
+        _settle_bug_reports(ctx, reports, str(e)[:200])
+        return TaskResult("failed", str(e), hard_block=True)
+    after = _capture_repo_heads(ticket_dir)
+    changed = sorted(name for name, sha in after.items() if before.get(name) != sha)
+    if not changed:
+        log.emit("ticket_bug_fix_no_change",
+                 f"{ctx.ticket_key}: bug fix pass produced no commit",
+                 links={"detail": f"{ctx.config.get('_base_url', '')}/tickets/{ctx.ticket_key}"},
+                 meta={"ticket": ctx.ticket_key,
+                       "comment_ids": [str(r.get("comment_id")) for r in reports]})
+        _settle_bug_reports(ctx, reports, "no code change produced")
+        return TaskResult("failed", "no code change produced")
+
+    pushed, push_failed = _push_bug_fix(ctx, changed)
+    log.emit("ticket_bug_fix_committed",
+             f"{ctx.ticket_key}: committed reported-issue fix in {', '.join(changed)}",
+             links={"detail": f"{ctx.config.get('_base_url', '')}/tickets/{ctx.ticket_key}"},
+             meta={"ticket": ctx.ticket_key, "repos": changed,
+                   "pushed": pushed, "push_failed": push_failed,
+                   "comment_ids": [str(r.get("comment_id")) for r in reports]})
+    _settle_bug_reports(ctx, reports, None)
+    return TaskResult("ok", artifacts={"repos": changed, "pushed": pushed,
+                                       "push_failed": push_failed})
+
+
+def _push_bug_fix(ctx: TaskContext, changed: list[str]) -> tuple[list[str], list[str]]:
+    """Push the fix to the branch of every open PR it touched.
+
+    A commit that stays in the worktree is invisible to the reviewer who asked
+    for it, so the ticket reads as ignored even though the work is done."""
+    ts = state.load_ticket(ctx.ticket_key or "") or {}
+    prs = ts.get("prs") or []
+    slug = ts.get("slug") or ""
+    if not prs or not slug:
+        return [], []
+    platform = make_platform(ctx.config)
+    branches = {p["repo"]: (p.get("branch") or ts.get("branch") or "")
+                for p in prs if p.get("repo")}
+    pushed, failed = [], []
+    for name in changed:
+        branch = branches.get(name)
+        if not branch:
+            continue
+        wt = ticket_worktree_path(ctx.config, slug, name)
+        if not wt.is_dir():
+            continue
+        try:
+            result = platform.push_branch(wt, branch)
+        except Exception as e:
+            log.emit("ticket_bug_fix_push_failed",
+                     f"{ctx.ticket_key}: push of {name} failed: {type(e).__name__}: {e}",
+                     meta={"ticket": ctx.ticket_key, "repo": name})
+            failed.append(name)
+            continue
+        if isinstance(result, dict) and not result.get("ok", True):
+            log.emit("ticket_bug_fix_push_failed",
+                     f"{ctx.ticket_key}: push of {name} failed: "
+                     f"{str(result.get('error', ''))[:200]}",
+                     meta={"ticket": ctx.ticket_key, "repo": name})
+            failed.append(name)
+            continue
+        pushed.append(name)
+    return pushed, failed
 
 
 SCOPE_REVIEW_TIMEOUT = SCOPE_FANOUT_TIMEOUT + 300
