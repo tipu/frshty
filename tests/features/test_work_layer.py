@@ -260,6 +260,13 @@ class TestGrouping:
         assert archived in ids
         assert on_board not in ids
 
+    def test_the_archive_view_leaves_out_a_running_task(self):
+        now = datetime.now(timezone.utc)
+        running = _mkitem("running billing task")
+        db.execute("UPDATE work_items SET state='agent_working' WHERE id = ?", (running,))
+        groups = work_store.grouped_items(now, archived=True)
+        assert running not in {r["id"] for rows in groups.values() for r in rows}
+
     def test_done_items_are_sorted_by_completion_time_descending(self):
         now = datetime.now(timezone.utc)
         completed_first = _mkitem("completed first")
