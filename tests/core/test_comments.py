@@ -352,6 +352,35 @@ class TestGetUnprocessed:
         assert [c["comment_id"] for c in unprocessed] == ["c2", "c1", "c0"]
 
 
+class TestSettledCommentIds:
+    """Test the set frshty is finished with."""
+
+    def test_only_processed_and_deleted_are_settled(self, instance_key, resource_type, resource_id):
+        for i, state in enumerate(["new", "processing", "deferred", "processed", "deleted"]):
+            comments.mark_comment_processing(instance_key, resource_type, resource_id, f"c{i}", "2026-04-28T10:00:00Z")
+            if state == "new":
+                comments.mark_comment_error(instance_key, resource_type, resource_id, f"c{i}", "Error")
+            elif state == "deferred":
+                comments.mark_comment_deferred(instance_key, resource_type, resource_id, f"c{i}", "2026-04-28T10:00:00Z")
+            elif state == "processed":
+                comments.mark_comment_processed(instance_key, resource_type, resource_id, f"c{i}")
+            elif state == "deleted":
+                comments.mark_comment_deleted(instance_key, resource_type, resource_id, f"c{i}")
+
+        assert comments.settled_comment_ids(instance_key, resource_type, resource_id) == {"c3", "c4"}
+
+    def test_an_unknown_resource_has_nothing_settled(self, instance_key, resource_type):
+        assert comments.settled_comment_ids(instance_key, resource_type, "repo/never-seen") == set()
+
+    def test_settled_ids_are_isolated_by_resource(self, instance_key, resource_type):
+        comments.mark_comment_processing(instance_key, resource_type, "repo/1", "c1", "2026-04-28T10:00:00Z")
+        comments.mark_comment_processed(instance_key, resource_type, "repo/1", "c1")
+        comments.mark_comment_processing(instance_key, resource_type, "repo/2", "c2", "2026-04-28T10:00:00Z")
+        comments.mark_comment_processed(instance_key, resource_type, "repo/2", "c2")
+
+        assert comments.settled_comment_ids(instance_key, resource_type, "repo/1") == {"c1"}
+        assert comments.settled_comment_ids(instance_key, resource_type, "repo/2") == {"c2"}
+
 class TestMultipleResources:
     """Test isolation between different resources."""
 

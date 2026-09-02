@@ -98,16 +98,81 @@ def _cache_pr_metadata(platform, pr: dict, seen: dict) -> None:
     seen["review_state"] = "approved" if approvers else "pending"
 
 
+def _self_id(config: dict) -> str:
+    """The account frshty posts as, in the id space the adapter reports.
+
+    GitHub comments carry a login, Bitbucket comments carry an account id.
+    Reading only the Bitbucket key leaves this empty on a GitHub instance, and
+    the self-authored guard then matches nothing."""
+    if (config.get("job") or {}).get("platform") == "github":
+        return (config.get("github") or {}).get("user", "")
+    return (config.get("bitbucket") or {}).get("user_account_id", "")
+
+
+def _thread_key(comment: dict, by_id: dict) -> str:
+    if comment.get("thread_id"):
+        return str(comment["thread_id"])
+    cur = comment
+    walked: set[str] = set()
+    while True:
+        cid = str(cur["id"])
+        if cid in walked:
+            return cid
+        walked.add(cid)
+        parent_id = cur.get("parent_id")
+        parent = by_id.get(str(parent_id)) if parent_id is not None else None
+        if parent is None:
+            return cid
+        cur = parent
+
+
+def _reopen_answered_threads(platform_comments: list, settled_ids: set) -> list[str]:
+    """Clear the resolved flag on threads a reviewer answered after they closed.
+
+    Both adapters stamp the thread's resolution onto every comment in it, so a
+    reply written after the thread was resolved arrives with resolved=True and
+    every caller drops it — at intake, at reclaim, and at flush — without ever
+    writing it to comment_state. The reviewer's follow-up is then lost for good.
+
+    A resolved thread that mixes comments frshty has settled with comments it
+    still owes an answer is one the reviewer reopened. A resolved thread with
+    nothing settled in it was closed by a human who wants it left alone, so
+    that one keeps its flag.
+
+    Mutates the comments in place and returns the reopened thread keys."""
+    by_id = {str(c["id"]): c for c in platform_comments}
+    threads: dict[str, list[dict]] = {}
+    for c in platform_comments:
+        if c.get("resolved"):
+            threads.setdefault(_thread_key(c, by_id), []).append(c)
+
+    reopened = []
+    for thread_key, thread in threads.items():
+        ids = {str(c["id"]) for c in thread}
+        if not (ids & settled_ids) or not (ids - settled_ids):
+            continue
+        for c in thread:
+            c["resolved"] = False
+        reopened.append(thread_key)
+    return reopened
+
+
 def _check_comments(config, instance_key, platform, pr, base_url, seen=None, ticket_key=None):
-    user_id = config.get("bitbucket", {}).get("user_account_id", "")
+    user_id = _self_id(config)
     pr_key = f"{pr['repo']}/{pr['id']}"
     pr_ref = f"{pr['repo']}#{pr['id']}"
     if seen is None:
         seen = {}
 
     platform_comments = platform.get_pr_comments(pr["repo"], pr["id"])
-    by_id = {str(c["id"]): c for c in platform_comments}
     first_sight = not comments.has_comment_state(instance_key, "pr", pr_key)
+    for thread_key in _reopen_answered_threads(
+            platform_comments, comments.settled_comment_ids(instance_key, "pr", pr_key)):
+        log.emit("pr_thread_reopened",
+                 f"{pr_ref}: reviewer replied after the thread was resolved",
+                 links={"pr": pr["url"], "detail": f"{base_url}/"},
+                 meta={"repo": pr["repo"], "pr_id": pr["id"], "thread_id": thread_key})
+    by_id = {str(c["id"]): c for c in platform_comments}
     detection = comments.fetch_and_detect_comments(instance_key, platform, "pr", pr_key, platform_comments=platform_comments)
     all_to_process = [c for c in detection["new"] + detection["edited"]
                       if c.get("author_id") != user_id and not c.get("resolved")]
@@ -450,7 +515,9 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
 
     try:
         with _worktree_lock(pr_key):
-            by_id = {str(c["id"]): c for c in platform.get_pr_comments(pr["repo"], pr["id"])}
+            fetched = platform.get_pr_comments(pr["repo"], pr["id"])
+            _reopen_answered_threads(fetched, comments.settled_comment_ids(instance_key, "pr", pr_key))
+            by_id = {str(c["id"]): c for c in fetched}
             pending = []
             for cid in comment_ids:
                 comment = by_id.get(cid)
