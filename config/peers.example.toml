@@ -1,0 +1,11 @@
+# Remote frshty hosts whose task board this host federates.
+# Copy to config/peers.toml. That file is host-local: git ignores it, so a
+# checkout on another machine never peers with itself.
+#
+# key      short name shown on every task that runs on the peer
+# base_url the peer's frshty root, reachable from this host
+# label    optional display name; defaults to key
+
+# [[peers]]
+# key = "atropos"
+# base_url = "http://192.168.1.117:7100"

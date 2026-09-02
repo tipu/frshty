@@ -16,6 +16,7 @@ wheels/
 config/*.toml
 !config/example.toml
 !config/discovery.toml
+!config/peers.example.toml
 
 # Scratch scripts (may contain hardcoded credentials)
 /_fetch_*.py

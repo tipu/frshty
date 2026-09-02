@@ -50,7 +50,20 @@
            placeholder="Search past tasks…" />
   </div>
 
-  <div class="ln-small ln-muted" v-if="!personalLoaded">personal instance not loaded — read-only</div>
+  <div class="ln-small ln-muted" v-if="!targetMeta.personalLoaded">
+    {{ target ? ("the " + target + " host reports no personal instance — it cannot launch a task") : "personal instance not loaded — read-only" }}
+  </div>
+
+  <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center" v-if="peers.length">
+    <span class="ln-hint">source</span>
+    <span class="ln-chipsel" :class="{ on: sourceFilter === '' }"
+          title="every host on this board" @click="setSource('')">all</span>
+    <span class="ln-chipsel" :class="{ on: sourceFilter === 'local' }"
+          title="tasks that run on this host" @click="setSource('local')">{{ instanceName || 'local' }}</span>
+    <span class="ln-chipsel" v-for="p in peers" :key="p.key" :title="p.base_url"
+          :class="{ on: sourceFilter === p.key }" @click="setSource(p.key)">{{ p.label }}</span>
+  </div>
+  <div class="ln-small" style="color:var(--ln-red)" v-for="(msg, key) in peerErrors" :key="key">{{ key }}: {{ msg }}</div>
 
   <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center" v-if="allTags.length">
     <span class="ln-hint">tags</span>
@@ -62,26 +75,33 @@
   <form @submit.prevent="intake" class="ln-task-compose" v-if="view === 'board'">
     <div>
       <textarea class="ln-input ln-compose-text" rows="1" ref="intakeBox" v-model="intakeText"
-                :disabled="!personalLoaded || intakeBusy" @keydown.enter="onComposeEnter($event, intake)"
+                :disabled="!targetMeta.personalLoaded || intakeBusy" @keydown.enter="onComposeEnter($event, intake)"
                 @input="grow($event.target)"
                 placeholder="Describe an outcome, not a report (say 'get PR #123 merged', not 'PR stats'). Enter launches a run, Shift+Enter adds a line."></textarea>
       <div class="ln-task-compose-opts">
+        <span class="ln-chipsel" v-if="peers.length"
+              title="which host runs this task; it resets to this host on every page load">host:
+          <select v-model="target" :disabled="intakeBusy" @change="onTargetChange">
+            <option value="">{{ instanceName || 'local' }}</option>
+            <option v-for="p in peers" :key="p.key" :value="p.key">{{ p.label }}</option>
+          </select>
+        </span>
         <span class="ln-chipsel" title="which agent CLI runs this task">agent:
-          <select v-model="intakeAgent" :disabled="!personalLoaded || intakeBusy">
-            <option v-for="a in agents" :key="a" :value="a">{{ a }}</option>
+          <select v-model="intakeAgent" :disabled="!targetMeta.personalLoaded || intakeBusy">
+            <option v-for="a in targetMeta.agents" :key="a" :value="a">{{ a }}</option>
           </select>
         </span>
         <span class="ln-chipsel" v-for="p in visibleProjects" :key="p.key" :title="p.root"
               :class="{ on: intakeContexts.includes(p.key) }" @click="toggleContext(p.key)">{{ p.key }}</span>
         <span class="ln-chipsel" v-if="extraProjects.length" @click="moreOpen = !moreOpen">{{ moreOpen ? '− less' : '+ context' }}</span>
-        <span class="ln-chipsel" v-if="slackAvailable" :class="{ on: intakeSlack }"
+        <span class="ln-chipsel" v-if="targetMeta.slackAvailable" :class="{ on: intakeSlack }"
               title="tell the run to read the slack_int capture archive for the selected project's org"
               @click="intakeSlack = !intakeSlack">slack_int</span>
         <span class="ln-hint" v-if="intakeBusy">launching…</span>
         <span class="ln-hint" v-else>no thread — this task stands alone</span>
       </div>
     </div>
-    <button type="submit" class="ln-btn ln-btn-primary" :disabled="!personalLoaded || intakeBusy">↗ Launch task</button>
+    <button type="submit" class="ln-btn ln-btn-primary" :disabled="!targetMeta.personalLoaded || intakeBusy">↗ Launch task</button>
   </form>
   <div class="ln-small" style="color:var(--ln-red)" v-if="intakeError">{{ intakeError }}</div>
 
@@ -93,28 +113,29 @@
                   v-if="g === 'done' && view === 'board' && !searchText.trim() && !tagFilter.length"
                   title="move every completed task to the archive" @click="archiveCompleted">Archive all</button>
         </div>
-        <article class="ln-task" :class="g" v-for="it in groups[g]" :key="it.id">
+        <article class="ln-task" :class="g" v-for="it in groups[g]" :key="rowKey(it)">
           <div class="ln-task-top">
             <div style="min-width:0">
-              <a class="ln-task-title" :href="'/tasks/' + it.id">{{ it.objective }}</a>
-              <div class="ln-task-note ln-task-note-warn" v-if="it.stop_reason" v-html="lk(note(it.stop_reason))"></div>
+              <a class="ln-task-title" :href="taskHref(it)">{{ it.objective }}</a>
+              <div class="ln-task-note ln-task-note-warn" v-if="it.stop_reason" v-html="lkFor(it, note(it.stop_reason))"></div>
               <div class="ln-task-note" v-else-if="note(it.current_checkpoint)">{{ note(it.current_checkpoint) }}</div>
             </div>
             <div class="ln-task-id">#{{ it.id }}</div>
           </div>
           <div class="ln-task-foot">
             <span class="ln-pill" :class="statePill(g, it)">{{ stateText(g, it) }}</span>
+            <span class="ln-pill ln-pill-ghost" v-if="it.peer" :title="'this task runs on the ' + it.peer + ' host'">⇄ {{ it.peer }}</span>
             <span class="ln-pill ln-pill-ghost" v-if="view === 'board' && it.archived_at"
                   title="this task is in the archive, not on the board">Archived</span>
-            <a class="ln-pill ln-pill-violet ln-thread-pill" v-if="it.thread" style="text-decoration:none"
+            <a class="ln-pill ln-pill-violet ln-thread-pill" v-if="it.thread && !it.peer" style="text-decoration:none"
                :href="'/threads/' + it.thread.root_id" :title="'thread rooted at task #' + it.thread.root_id">⑂ {{ it.thread.title }}</a>
             <span>{{ ago(it.updated_at) }}</span>
             <span v-if="it.last_provider">· {{ it.last_provider }}</span>
             <span class="ln-tag" v-for="t in tagsOf(it)" :key="t">{{ t }}</span>
             <span class="ln-right">
               <button class="ln-btn ln-btn-sm ln-btn-ghost" v-if="it.summary"
-                      @click="sumOpen[it.id] = !sumOpen[it.id]">{{ sumOpen[it.id] ? 'Summary ▾' : 'Summary ▸' }}</button>
-              <a class="ln-btn ln-btn-sm ln-btn-ghost" v-if="it.summary" :href="'/tasks/' + it.id + '/summary'" target="_blank">↗</a>
+                      @click="sumOpen[rowKey(it)] = !sumOpen[rowKey(it)]">{{ sumOpen[rowKey(it)] ? 'Summary ▾' : 'Summary ▸' }}</button>
+              <a class="ln-btn ln-btn-sm ln-btn-ghost" v-if="it.summary" :href="taskHref(it, '/summary')" target="_blank">↗</a>
               <template v-if="g === 'needs_ack'">
                 <button class="ln-btn ln-btn-sm ln-btn-primary"
                         title="accept the agent's report and complete this task" @click="act(it, 'ack')">Acknowledge</button>
@@ -141,13 +162,13 @@
                   auto {{ it.autocontinue ? 'on' : 'off' }} ({{ it.continues_used }}/{{ it.continue_cap }})
                 </button>
               </template>
-              <a class="ln-btn ln-btn-sm" :href="'/tasks/' + it.id">Open task</a>
+              <a class="ln-btn ln-btn-sm" :href="taskHref(it)">Open task</a>
             </span>
           </div>
-          <div class="wsum" v-if="it.summary && sumOpen[it.id]" v-html="lk(it.summary)"></div>
+          <div class="wsum" v-if="it.summary && sumOpen[rowKey(it)]" v-html="lkFor(it, it.summary)"></div>
           <work-question v-if="g === 'needs_you' || it.pending_question" :item="it" @answer="answer(it, $event)"></work-question>
           <form style="margin-top:8px" v-if="g === 'needs_you' || it.pending_question" @submit.prevent="reply(it)">
-            <input class="wintake" v-model="replyText[it.id]"
+            <input class="wintake" v-model="replyText[rowKey(it)]"
                    :placeholder="it.pending_question ? 'Other — type your own answer…' : 'Answer and resume…'" />
           </form>
         </article>
@@ -213,6 +234,8 @@ frshtyApp({
       projects: [], slackAvailable: false, intakeContexts: [], intakeSlack: false, moreOpen: false,
       agents: ["claude"], intakeAgent: localStorage.getItem("workAgent") || "claude",
       connError: "", replyText: {}, sumOpen: {}, linkmap: null, threads: [],
+      peers: [], peerMeta: {}, peerErrors: {}, peerLinkmaps: {}, target: "",
+      sourceFilter: localStorage.getItem("workSourceFilter") || "",
       searchText: "", tagFilter: JSON.parse(localStorage.getItem("workTagFilter") || "[]"), allTags: [], donePage: 1, donePages: 1, counts: {},
       groupOrder: ["needs_ack", "agent_working", "needs_you", "waiting_external", "failed_stale", "done"],
       labels: { needs_ack: "Needs acknowledgement", needs_you: "Needs you", agent_working: "Agent working", waiting_external: "Waiting external", failed_stale: "Failed or stale", done: "Completed" },
@@ -231,18 +254,27 @@ frshtyApp({
     activeThreads() {
       return this.threads.slice(0, 6);
     },
+    targetMeta() {
+      if (!this.target) {
+        return { projects: this.projects, agents: this.agents,
+                 slackAvailable: this.slackAvailable, personalLoaded: this.personalLoaded };
+      }
+      return this.peerMeta[this.target] ||
+             { projects: [], agents: ["claude"], slackAvailable: false, personalLoaded: false };
+    },
     total() {
       const c = Object.values(this.counts);
       if (c.length) return c.reduce((n, x) => n + x, 0);
       return Object.values(this.groups).reduce((n, g) => n + (g ? g.length : 0), 0);
     },
     primaryProjects() {
+      if (this.target) return this.targetMeta.projects;
       const order = ["aimyable", "quill", "clarivis", "algotrader2"];
       return order.map(k => this.projects.find(p => p.key === k)).filter(Boolean);
     },
     extraProjects() {
       const primary = new Set(this.primaryProjects.map(p => p.key));
-      return this.projects.filter(p => !primary.has(p.key));
+      return this.targetMeta.projects.filter(p => !primary.has(p.key));
     },
     visibleProjects() {
       if (this.moreOpen) return [...this.primaryProjects, ...this.extraProjects];
@@ -252,6 +284,42 @@ frshtyApp({
   },
   methods: {
     lk(text) { return window.frshtyLinkify(text, this.linkmap); },
+    lkFor(it, text) {
+      if (!it.peer) return this.lk(text);
+      return window.frshtyLinkify(text, this.peerLinkmaps[it.peer], this.peerBase(it.peer));
+    },
+    rowKey(it) { return (it.peer || "local") + "#" + it.id; },
+    activeSources() {
+      const keys = [];
+      if (!this.sourceFilter || this.sourceFilter === "local") keys.push("");
+      for (const p of this.peers) {
+        if (!this.sourceFilter || this.sourceFilter === p.key) keys.push(p.key);
+      }
+      return keys;
+    },
+    peerBase(key) {
+      const peer = this.peers.find(p => p.key === key);
+      return peer ? peer.base_url : "";
+    },
+    apiUrl(peer, path) {
+      return peer ? "/api/work/peers/" + encodeURIComponent(peer) + path : path;
+    },
+    taskHref(it, suffix) {
+      return "/tasks/" + it.id + (suffix || "") +
+             (it.peer ? "?peer=" + encodeURIComponent(it.peer) : "");
+    },
+    setSource(key) {
+      this.sourceFilter = key;
+      localStorage.setItem("workSourceFilter", key);
+      this.donePage = 1;
+      this.refresh();
+    },
+    onTargetChange() {
+      this.intakeContexts = [];
+      this.intakeSlack = false;
+      const agents = this.targetMeta.agents || ["claude"];
+      if (!agents.includes(this.intakeAgent)) this.intakeAgent = agents[0];
+    },
     label(g) {
       if (g === "done" && this.view === "archive") return "Archived";
       return this.labels[g];
@@ -313,6 +381,26 @@ frshtyApp({
     },
     async loadLinkmap() {
       try { this.linkmap = await (await fetch("/api/work/linkmap")).json(); } catch (e) {}
+      for (const p of this.peers) {
+        try {
+          this.peerLinkmaps[p.key] =
+            await (await fetch(this.apiUrl(p.key, "/api/work/linkmap"))).json();
+        } catch (e) {}
+      }
+    },
+    async loadPeers() {
+      try {
+        const r = await fetch("/api/work/peers");
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        this.peers = (await r.json()).peers || [];
+        const known = new Set(this.peers.map(p => p.key));
+        if (this.sourceFilter && this.sourceFilter !== "local" && !known.has(this.sourceFilter)) {
+          this.sourceFilter = "";
+          localStorage.setItem("workSourceFilter", "");
+        }
+      } catch (e) {
+        this.peers = [];
+      }
     },
     async loadThreads() {
       try {
@@ -321,38 +409,90 @@ frshtyApp({
         this.threads = (await r.json()).threads || [];
       } catch (e) {}
     },
+    boardQuery() {
+      const params = new URLSearchParams();
+      const q = this.searchText.trim();
+      if (q) params.set("q", q);
+      if (this.tagFilter.length) params.set("tags", this.tagFilter.join(","));
+      if (this.donePage > 1) params.set("done_page", this.donePage);
+      if (this.view === "archive") params.set("archive", "1");
+      const qs = params.toString();
+      return qs ? "?" + qs : "";
+    },
+    async fetchSource(peer, qs) {
+      try {
+        const r = await fetch(this.apiUrl(peer, "/api/work/items" + qs));
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
+        return { peer, data: d, error: "" };
+      } catch (e) {
+        return { peer, data: null, error: e.message || String(e) };
+      }
+    },
     async refresh() {
       const seq = ++this._refreshSeq;
-      try {
-        const params = new URLSearchParams();
-        const q = this.searchText.trim();
-        if (q) params.set("q", q);
-        if (this.tagFilter.length) params.set("tags", this.tagFilter.join(","));
-        if (this.donePage > 1) params.set("done_page", this.donePage);
-        if (this.view === "archive") params.set("archive", "1");
-        const qs = params.toString();
-        const r = await fetch("/api/work/items" + (qs ? "?" + qs : ""));
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        const d = await r.json();
-        if (seq !== this._refreshSeq) return;
-        this.groups = d.groups; this.personalLoaded = d.personal_loaded;
-        this.counts = d.counts || {};
-        this.allTags = d.all_tags || [];
-        this.donePage = d.done_page || 1; this.donePages = d.done_pages || 1;
-        this.projects = d.projects || []; this.slackAvailable = !!d.slack_available;
-        this.agents = d.agents && d.agents.length ? d.agents : ["claude"];
-        if (!this.agents.includes(this.intakeAgent)) this.intakeAgent = this.agents[0];
-        this.connError = "";
-        const known = new Set(this.allTags);
-        const kept = this.tagFilter.filter(t => known.has(t));
-        if (kept.length !== this.tagFilter.length) {
-          this.tagFilter = kept;
-          localStorage.setItem("workTagFilter", JSON.stringify(kept));
-          this.refresh();
+      const qs = this.boardQuery();
+      const wantPage = Math.max(1, this.donePage);
+      const results = await Promise.all(this.activeSources().map(k => this.fetchSource(k, qs)));
+      if (seq !== this._refreshSeq) return;
+      const groups = {};
+      for (const g of this.groupOrder) groups[g] = [];
+      const counts = {};
+      const tags = new Set();
+      const peerErrors = {};
+      let donePages = 1, ok = 0;
+      for (const r of results) {
+        if (r.error) {
+          if (r.peer) peerErrors[r.peer] = r.error;
+          else this.connError = "Disconnected from frshty (" + r.error + "). This host's tasks are missing below; retrying every 15s.";
+          continue;
         }
-      } catch (e) {
-        this.connError = "Disconnected from frshty (" + e.message + "). Data below is stale; retrying every 15s.";
+        ok += 1;
+        const d = r.data;
+        for (const g of this.groupOrder) {
+          if (g === "done" && (d.done_page || 1) !== wantPage) continue;
+          for (const it of (d.groups || {})[g] || []) {
+            it.peer = r.peer;
+            groups[g].push(it);
+          }
+        }
+        for (const g of Object.keys(d.counts || {})) counts[g] = (counts[g] || 0) + d.counts[g];
+        for (const t of d.all_tags || []) tags.add(t);
+        donePages = Math.max(donePages, d.done_pages || 1);
+        const meta = { projects: d.projects || [], agents: (d.agents || []).length ? d.agents : ["claude"],
+                       slackAvailable: !!d.slack_available, personalLoaded: !!d.personal_loaded };
+        if (r.peer) {
+          this.peerMeta[r.peer] = meta;
+        } else {
+          this.personalLoaded = meta.personalLoaded; this.projects = meta.projects;
+          this.slackAvailable = meta.slackAvailable; this.agents = meta.agents;
+          this.connError = "";
+        }
       }
+      this.peerErrors = peerErrors;
+      if (!ok) return;
+      if (results.length > 1) {
+        for (const g of this.groupOrder) {
+          groups[g].sort((a, b) => this.rowStamp(b).localeCompare(this.rowStamp(a)));
+        }
+      }
+      this.groups = groups;
+      this.counts = counts;
+      this.allTags = [...tags].sort();
+      this.donePages = donePages;
+      this.donePage = Math.min(wantPage, donePages);
+      const agents = this.targetMeta.agents || ["claude"];
+      if (!agents.includes(this.intakeAgent)) this.intakeAgent = agents[0];
+      const known = new Set(this.allTags);
+      const kept = this.tagFilter.filter(t => known.has(t));
+      if (kept.length !== this.tagFilter.length) {
+        this.tagFilter = kept;
+        localStorage.setItem("workTagFilter", JSON.stringify(kept));
+        this.refresh();
+      }
+    },
+    rowStamp(it) {
+      return String(it.completed_at || it.updated_at || "");
     },
     onComposeEnter(e, submit) {
       if (e.isComposing || e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return;
@@ -367,7 +507,7 @@ frshtyApp({
     async intake() {
       this.intakeError = ""; this.intakeBusy = true;
       try {
-        const r = await fetch("/api/work/intake", {
+        const r = await fetch(this.apiUrl(this.target, "/api/work/intake"), {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text: this.intakeText, agent: this.intakeAgent,
                                  contexts: this.intakeContexts, slack: this.intakeSlack }),
@@ -386,7 +526,7 @@ frshtyApp({
     },
     async act(it, action, until) {
       try {
-        const r = await fetch(`/api/work/items/${it.id}/action`, {
+        const r = await fetch(this.apiUrl(it.peer, `/api/work/items/${it.id}/action`), {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ action, until }),
         });
@@ -400,27 +540,29 @@ frshtyApp({
     async archiveCompleted() {
       const n = this.count("done");
       if (!n || !confirm("Archive " + n + " completed task" + (n === 1 ? "" : "s") + "? They move to the Archive.")) return;
-      try {
-        const r = await fetch("/api/work/items/archive-completed", { method: "POST" });
-        if (!r.ok) { this.connError = "archive failed HTTP " + r.status; }
-      } catch (e) {
-        this.connError = "archive failed: " + e.message;
+      for (const peer of this.activeSources()) {
+        try {
+          const r = await fetch(this.apiUrl(peer, "/api/work/items/archive-completed"), { method: "POST" });
+          if (!r.ok) { this.connError = "archive failed on " + (peer || "local") + ": HTTP " + r.status; }
+        } catch (e) {
+          this.connError = "archive failed on " + (peer || "local") + ": " + e.message;
+        }
       }
       this.donePage = 1;
       await this.refresh();
     },
     async reply(it) {
-      await this.answer(it, (this.replyText[it.id] || "").trim());
+      await this.answer(it, (this.replyText[this.rowKey(it)] || "").trim());
     },
     async answer(it, text) {
       if (!text) return;
       try {
-        const r = await fetch(`/api/work/items/${it.id}/reply`, {
+        const r = await fetch(this.apiUrl(it.peer, `/api/work/items/${it.id}/reply`), {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text }),
         });
         if (!r.ok) { const d = await r.json(); this.connError = d.error || ("reply failed HTTP " + r.status); return; }
-        this.replyText[it.id] = ""; await this.refresh();
+        this.replyText[this.rowKey(it)] = ""; await this.refresh();
       } catch (e) {
         this.connError = "reply failed: " + e.message;
       }
@@ -430,7 +572,8 @@ frshtyApp({
       this.act(it, "snooze", until);
     },
     openTerminal(it) {
-      window.open(`/tasks/${it.id}/terminal`, "_blank");
+      const base = it.peer ? this.peerBase(it.peer) : "";
+      window.open(`${base}/tasks/${it.id}/terminal`, "_blank");
     },
     ago(iso) {
       const s = (Date.now() - new Date(iso).getTime()) / 1000;
@@ -444,7 +587,8 @@ frshtyApp({
     this._refreshSeq = 0;
     const b = document.getElementById("boot-error");
     if (b) b.remove();
-    this.loadConfig(); this.loadLinkmap(); this.loadThreads(); this.refresh();
+    this.loadConfig(); this.loadThreads();
+    this.loadPeers().then(() => { this.loadLinkmap(); this.refresh(); });
     setInterval(() => { this.refresh(); this.loadThreads(); }, 15000);
   },
 }).component("work-question", window.WorkQuestion).mount("#app");

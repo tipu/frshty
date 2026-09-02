@@ -28,15 +28,15 @@ h1 { font-size: 16px; margin: 0 0 4px; color: #fff; }
 <div id="app" class="page">
 <div v-if="item">
   <h1>{{ item.objective }}</h1>
-  <div class="meta">#{{ item.id }} · {{ item.state }} · <a :href="'/tasks/' + item.id" style="color:#93c5fd">detail</a></div>
+  <div class="meta">#{{ item.id }} · {{ item.state }}<span v-if="peer"> · ⇄ {{ peer }}</span> · <a :href="'/tasks/' + item.id + (peer ? '?peer=' + encodeURIComponent(peer) : '')" style="color:#93c5fd">detail</a></div>
   <div class="summary" v-if="item.summary" v-html="lk(item.summary)"></div>
   <div class="empty" v-else>No summary yet.</div>
   <div v-if="artifacts.length">
     <div class="sec">Artifacts</div>
     <div class="art" v-for="a in artifacts">
-      <a :href="'/api/work/artifact_file/' + a.id" target="_blank">{{ a.path }}</a>
+      <a :href="artifactUrl(a)" target="_blank">{{ a.path }}</a>
       <span v-if="a.note"> — {{ a.note }}</span>
-      <img v-if="isImg(a.path)" :src="'/api/work/artifact_file/' + a.id" :alt="a.note || a.path"
+      <img v-if="isImg(a.path)" :src="artifactUrl(a)" :alt="a.note || a.path"
            @error="$event.target.style.display='none'">
     </div>
   </div>
@@ -53,15 +53,28 @@ h1 { font-size: 16px; margin: 0 0 4px; color: #fff; }
 <script>
 const { createApp } = Vue;
 createApp({
-  data() { return { item: null, artifacts: [], followups: [], linkmap: null }; },
+  data() { return { item: null, artifacts: [], followups: [], linkmap: null,
+                    peer: new URLSearchParams(location.search).get("peer") || "",
+                    peerBase: "" }; },
   methods: {
-    lk(text) { return window.frshtyLinkify(text, this.linkmap); },
+    lk(text) { return window.frshtyLinkify(text, this.linkmap, this.peerBase); },
     isImg(p) { return /\.(png|jpe?g|gif|webp|svg|bmp|avif)$/i.test(p || ""); },
+    api(path) {
+      return this.peer ? "/api/work/peers/" + encodeURIComponent(this.peer) + path : path;
+    },
+    artifactUrl(a) { return (this.peerBase || "") + "/api/work/artifact_file/" + a.id; },
   },
   async mounted() {
-    try { this.linkmap = await (await fetch("/api/work/linkmap")).json(); } catch (e) {}
+    if (this.peer) {
+      try {
+        const peers = (await (await fetch("/api/work/peers")).json()).peers || [];
+        const match = peers.find(p => p.key === this.peer);
+        this.peerBase = match ? match.base_url : "";
+      } catch (e) {}
+    }
+    try { this.linkmap = await (await fetch(this.api("/api/work/linkmap"))).json(); } catch (e) {}
     const id = location.pathname.split("/")[2];
-    const r = await fetch(`/api/work/items/${id}/summary`);
+    const r = await fetch(this.api(`/api/work/items/${id}/summary`));
     if (!r.ok) return;
     const d = await r.json();
     this.item = d.item; this.artifacts = d.artifacts; this.followups = d.followups;
