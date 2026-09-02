@@ -39,6 +39,20 @@ def _worktree_lock(pr_key: str) -> threading.Lock:
         return _worktree_locks.setdefault(pr_key, threading.Lock())
 
 
+def _ticket_owns(pr: dict) -> str:
+    """Ticket key that already drives this PR, or "".
+
+    Read fresh per PR instead of once per poll: the ticket pipeline adopts a
+    manually opened PR as soon as it sees it, and a poll that started before
+    the adoption would otherwise keep driving the same branch from a second
+    worktree, duplicating CI fixes and comment fixes."""
+    for ticket_key, ts in state.load("tickets").items():
+        for p in ts.get("prs", []):
+            if p.get("repo") == pr["repo"] and p.get("id") == pr["id"]:
+                return ticket_key
+    return ""
+
+
 def check(config: dict):
     instance_key = config["job"]["key"]
     platform = make_platform(config)
@@ -46,19 +60,12 @@ def check(config: dict):
     if not my_prs:
         return
 
-    ticket_state = state.load("tickets")
-    ticket_prs = {}
-    for ticket_key, ts in ticket_state.items():
-        for p in ts.get("prs", []):
-            if p.get("repo") and p.get("id"):
-                ticket_prs[(p["repo"], p["id"])] = ticket_key
-
     pr_state = state.load("own_prs")
     base_url = config["_base_url"]
 
     active_keys: set[str] = set()
     for pr in my_prs:
-        if (pr["repo"], pr["id"]) in ticket_prs:
+        if _ticket_owns(pr):
             continue
         pr_key = f"{pr['repo']}/{pr['id']}"
         active_keys.add(pr_key)
@@ -66,8 +73,9 @@ def check(config: dict):
 
         _cache_pr_metadata(platform, pr, seen)
         _check_comments(config, instance_key, platform, pr, base_url, seen=seen)
-        _check_base_fresh(config, platform, pr, seen, base_url)
-        _check_ci(config, platform, pr, seen, base_url)
+        if not _ticket_owns(pr):
+            _check_base_fresh(config, platform, pr, seen, base_url)
+            _check_ci(config, platform, pr, seen, base_url)
         _check_stale(pr, seen, base_url)
 
         pr_state[pr_key] = seen
@@ -98,14 +106,18 @@ def _cache_pr_metadata(platform, pr: dict, seen: dict) -> None:
     seen["review_state"] = "approved" if approvers else "pending"
 
 
-def _self_id(config: dict) -> str:
+def _self_id(config: dict, platform=None) -> str:
     """The account frshty posts as, in the id space the adapter reports.
 
     GitHub comments carry a login, Bitbucket comments carry an account id.
     Reading only the Bitbucket key leaves this empty on a GitHub instance, and
-    the self-authored guard then matches nothing."""
+    the self-authored guard then matches nothing. github.user is unset on
+    almost every instance, so the adapter resolves the login instead."""
     if (config.get("job") or {}).get("platform") == "github":
-        return (config.get("github") or {}).get("user", "")
+        from_config = (config.get("github") or {}).get("user", "")
+        if from_config:
+            return from_config
+        return platform.self_id() if platform is not None else ""
     return (config.get("bitbucket") or {}).get("user_account_id", "")
 
 
@@ -164,7 +176,7 @@ def _reopen_answered_threads(platform_comments: list, settled_ids: set, self_id:
 
 
 def _check_comments(config, instance_key, platform, pr, base_url, seen=None, ticket_key=None):
-    user_id = _self_id(config)
+    user_id = _self_id(config, platform)
     pr_key = f"{pr['repo']}/{pr['id']}"
     pr_ref = f"{pr['repo']}#{pr['id']}"
     if seen is None:
@@ -189,16 +201,18 @@ def _check_comments(config, instance_key, platform, pr, base_url, seen=None, tic
     # the first poll with the expanded source so rollout does not replay an
     # entire PR's review history. Recent bodies remain actionable, including
     # ones submitted before this version was deployed.
-    if any(c.get("comment_kind") == "review_body" for c in platform_comments) \
-            and not seen.get("review_bodies_baselined"):
-        review_bodies = [c for c in all_to_process if c.get("comment_kind") == "review_body"]
-        recent_review_bodies = _baseline_existing_comments(instance_key, pr_key, review_bodies)
-        keep_ids = {str(c["id"]) for c in recent_review_bodies}
+    for kind, flag in (("review_body", "review_bodies_baselined"),
+                       ("issue_comment", "issue_comments_baselined")):
+        if seen.get(flag) or not any(c.get("comment_kind") == kind for c in platform_comments):
+            continue
+        of_kind = [c for c in all_to_process if c.get("comment_kind") == kind]
+        recent_of_kind = _baseline_existing_comments(instance_key, pr_key, of_kind)
+        keep_ids = {str(c["id"]) for c in recent_of_kind}
         all_to_process = [
             c for c in all_to_process
-            if c.get("comment_kind") != "review_body" or str(c["id"]) in keep_ids
+            if c.get("comment_kind") != kind or str(c["id"]) in keep_ids
         ]
-        seen["review_bodies_baselined"] = True
+        seen[flag] = True
 
     handled = set()
     if all_to_process:
@@ -523,7 +537,7 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
         with _worktree_lock(pr_key):
             fetched = platform.get_pr_comments(pr["repo"], pr["id"])
             _reopen_answered_threads(fetched, comments.settled_comment_ids(instance_key, "pr", pr_key),
-                                     _self_id(config))
+                                     _self_id(config, platform))
             by_id = {str(c["id"]): c for c in fetched}
             pending = []
             for cid in comment_ids:

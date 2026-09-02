@@ -124,6 +124,9 @@ class FakePlatform:
         self._next_pr_id = 1
         self.prs: dict[int, dict] = {}
 
+    def self_id(self) -> str:
+        return self.bot_user
+
     def list_my_open_prs(self) -> list[dict]:
         return [
             {
