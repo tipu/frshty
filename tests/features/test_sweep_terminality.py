@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import features.tickets as tickets
+from tests.conftest import make_ticket
 
 
 def _config():
@@ -231,3 +232,152 @@ class TestSweepSeesTheMerge:
     def test_upstream_done_still_wins_when_no_prs_are_tracked(self):
         out = _sweep("pr_ready", "Done")
         assert out["status"] == "done"
+
+
+class TestDev604Timeline:
+    """The DEV-604 sequence, replayed cycle by cycle against the real state store.
+
+    Cycle 1: the ticket is in the ticket query at "In Review" and both PRs are
+    open. _check_in_review holds it at in_review.
+    Cycle 2: Jira moves the ticket to "Ready for Testing". That status is
+    outside the ticket query, so the query stops returning the ticket and no
+    status handler runs for it again. The PRs are still open.
+    Cycle 3: the PRs merge. The ticket is still outside the query.
+
+    Before the fix, cycle 3 asked only whether "Ready for Testing" was terminal,
+    read no, and left the ticket at in_review. The tickets board renders one
+    column per stored status, so DEV-604 sat under "In review" with both PRs
+    merged, and no later cycle could move it. The cycles below run the real
+    check() against the real state store, so they also cover the durable write
+    and the second-cycle behaviour, which a hand-built state dict does not.
+    """
+
+    KEY = "DEV-604"
+    SLUG = "DEV-604-move-the-thing"
+    URL = "https://jira.example.com/browse/DEV-604"
+
+    def _prs(self):
+        return [{"repo": "repo", "id": 11, "branch": self.SLUG, "url": "http://pr/11"},
+                {"repo": "repo", "id": 12, "branch": self.SLUG, "url": "http://pr/12"}]
+
+    def _seed(self, tmp_state):
+        import core.state as state
+        state.save("tickets", {
+            self.KEY: {"status": "in_review", "slug": self.SLUG, "branch": self.SLUG,
+                       "url": self.URL, "summary": "Move the thing",
+                       "external_status": "In Review", "prs": self._prs()},
+            # A second ticket keeps the query result non-empty; check() returns
+            # early on an empty query. ignored is skipped by both loops.
+            "DEV-OTHER": {"status": "ignored", "slug": "DEV-OTHER-x"},
+        })
+
+    def _cycle(self, config, tmp_state, *, in_query: bool, upstream: str, pr_state: str):
+        """One check() pass over a world described by the ticket query result,
+        the upstream ticket status, and the state of every tracked PR."""
+        import core.state as state
+
+        platform = MagicMock()
+        platform.get_pr_state.return_value = pr_state
+        platform.get_pr_info.return_value = {"state": pr_state, "approvers": [],
+                                             "mergeable": "MERGEABLE"}
+        platform.get_pr_comments.return_value = []
+        platform.monitor_ci.side_effect = lambda _ticket, ts, _base_url: ts
+
+        system = MagicMock()
+        system.fetch_ticket.return_value = {"key": self.KEY, "status": upstream}
+
+        assigned = [make_ticket(key="DEV-OTHER", summary="other")]
+        if in_query:
+            assigned.append(make_ticket(key=self.KEY, summary="Move the thing",
+                                        status=upstream, url=self.URL))
+
+        with patch.object(tickets, "_fetch_tickets", return_value=assigned), \
+             patch.object(tickets, "_fetch_open_prs", return_value=[]), \
+             patch.object(tickets, "_fetch_ticket_comments", return_value=[]), \
+             patch.object(tickets, "_process_ticket_comments"), \
+             patch.object(tickets, "enqueue_prd_backfill"), \
+             patch.object(tickets, "run_haiku", return_value="code"), \
+             patch.object(tickets, "get_repos",
+                          return_value=[{"name": "repo", "path": tmp_state / "repo"}]), \
+             patch.object(tickets, "make_platform", return_value=platform), \
+             patch.object(tickets, "make_ticket_system", return_value=system), \
+             patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("core.queue.enqueue_job"):
+            tickets.check({**config, "_base_url": "http://base"}, instance_key="test")
+        return state.load_ticket(self.KEY)
+
+    def _merged_events(self):
+        import core.db as db
+        import core.state as state
+        return db.query_all(
+            "SELECT event FROM log_events WHERE instance_key=? "
+            "AND json_extract(meta, '$.ticket')=? AND event='ticket_merged'",
+            (state.active_instance_key(), self.KEY),
+        )
+
+    def test_the_ticket_reaches_merged_and_stays_there(self, fake_config, tmp_state, tmp_log):
+        self._seed(tmp_state)
+
+        in_query = self._cycle(fake_config, tmp_state,
+                               in_query=True, upstream="In Review", pr_state="OPEN")
+        assert in_query["status"] == "in_review"
+
+        left_query = self._cycle(fake_config, tmp_state,
+                                 in_query=False, upstream="Ready for Testing", pr_state="OPEN")
+        assert left_query["status"] == "in_review", "an open PR is not a finished ticket"
+        assert "merged_at" not in left_query
+
+        merged = self._cycle(fake_config, tmp_state,
+                             in_query=False, upstream="Ready for Testing", pr_state="MERGED")
+        assert merged["status"] == "merged", (
+            "DEV-604: both PRs merged after the ticket left the query; the board "
+            "column comes straight from this status"
+        )
+        assert merged["merged_at"]
+
+        steady = self._cycle(fake_config, tmp_state,
+                             in_query=False, upstream="Ready for Testing", pr_state="MERGED")
+        assert steady["status"] == "merged"
+        assert steady["merged_at"] == merged["merged_at"]
+        assert len(self._merged_events()) == 1, "the merge must be announced once"
+
+    def test_the_merge_records_the_status_upstream_holds_now(self, fake_config, tmp_state, tmp_log):
+        """external_status is whatever the ticket showed when it last appeared
+        in the query, so on this path it is stale by definition. Cycle 1 caches
+        "In Review"; the merge happens while upstream reads "Ready for Testing".
+        _handle_merged_ticket reads merged_external_status to decide whether a
+        later upstream move is a reopen, so the stale value would hide a real
+        reopen back to "Ready for Testing"."""
+        self._seed(tmp_state)
+        self._cycle(fake_config, tmp_state,
+                    in_query=True, upstream="In Review", pr_state="OPEN")
+        merged = self._cycle(fake_config, tmp_state,
+                             in_query=False, upstream="Ready for Testing", pr_state="MERGED")
+        assert merged["merged_external_status"] == "Ready for Testing"
+        assert merged["external_status"] == "Ready for Testing"
+
+    def test_an_upstream_lookup_that_fails_does_not_block_the_merge(self, fake_config, tmp_state, tmp_log):
+        """Merged PRs are the proof. A Jira outage at the moment of the sweep
+        must not park the ticket at in_review again."""
+        self._seed(tmp_state)
+        import core.state as state
+
+        platform = MagicMock()
+        platform.get_pr_state.return_value = "MERGED"
+        system = MagicMock()
+        system.fetch_ticket.side_effect = RuntimeError("jira down")
+
+        with patch.object(tickets, "_fetch_tickets",
+                          return_value=[make_ticket(key="DEV-OTHER", summary="other")]), \
+             patch.object(tickets, "_fetch_open_prs", return_value=[]), \
+             patch.object(tickets, "_fetch_ticket_comments", return_value=[]), \
+             patch.object(tickets, "enqueue_prd_backfill"), \
+             patch.object(tickets, "get_repos",
+                          return_value=[{"name": "repo", "path": tmp_state / "repo"}]), \
+             patch.object(tickets, "make_platform", return_value=platform), \
+             patch.object(tickets, "make_ticket_system", return_value=system):
+            tickets.check({**fake_config, "_base_url": "http://base"}, instance_key="test")
+
+        ts = state.load_ticket(self.KEY)
+        assert ts["status"] == "merged"
+        assert ts["merged_external_status"] == "In Review"
