@@ -82,6 +82,7 @@ _LLM_BACKED_TASKS = frozenset({
     "generate_pr_descriptions",
     "do_research",
     "scope_review",
+    "generate_flow_doc",
 })
 
 _REPO_GATED_TASKS = frozenset({

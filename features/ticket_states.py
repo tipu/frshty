@@ -276,7 +276,8 @@ def _handle_reviewing_ticket(
     key = ticket["key"]
     ws = config["workspace"]
     slug = ts.get("slug", "")
-    review_file = ws["root"] / ws["tickets_dir"] / slug / "docs" / "tri-review.md"
+    docs = ws["root"] / ws["tickets_dir"] / slug / "docs"
+    review_file = docs / "tri-review.md"
     if review_file.exists():
         verdict = _t._VERDICT_RE.search(review_file.read_text())
         if verdict and verdict.group(1).upper() == "PASS":
@@ -285,8 +286,14 @@ def _handle_reviewing_ticket(
             _t._enqueue_stage(instance_key, key, "fix_review_findings")
         else:
             _t._enqueue_stage(instance_key, key, "start_reviewing")
-    else:
-        _t._enqueue_stage(instance_key, key, "start_reviewing")
+        return ts, False
+    flow_doc = docs / "FLOW.html"
+    if not flow_doc.exists() and not ts.get("flow_doc_requested"):
+        ts["flow_doc_requested"] = True
+        state.save_ticket(key, ts)
+        _t._enqueue_stage(instance_key, key, "generate_flow_doc")
+        return ts, False
+    _t._enqueue_stage(instance_key, key, "start_reviewing")
     return ts, False
 
 
