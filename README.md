@@ -215,7 +215,9 @@ Set `FRSHTY_TIMEZONE` in your environment (any IANA zone). Default is `UTC`.
 FRSHTY_TIMEZONE=America/Los_Angeles
 ```
 
-Single source of truth for calendar-day semantics: "today", the timesheet fill window, billing fire times (Fri 7pm local, last-day-of-month 7pm local), recurring meeting weekday matching. Stored timestamps in SQLite, logs, and events are always UTC; rendering converts to this zone.
+Single source of truth for calendar-day semantics: "today", the timesheet fill window, billing fire times (Fri 7pm local, last-day-of-month 7pm local), recurring meeting weekday matching. Stored timestamps in SQLite, logs, and events are always UTC.
+
+The web pages do not use this zone. An API response carries a timestamp as a tz-aware ISO instant and never as a formatted clock, and `static/frshty-time.js` renders it in the zone the browser is in, so two people in different zones each read their own wall clock on the same page. `FRSHTY_TIMEZONE` covers only what the server decides on its own: calendar days and the wall clock inside a log line. `tests/test_client_timezone.py` rejects a page that cuts the clock out of an ISO string or names a fixed zone.
 
 ### Slack
 
