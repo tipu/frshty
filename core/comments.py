@@ -281,6 +281,27 @@ def mark_comment_seen(
         )
 
 
+def settled_comment_ids(
+    instance_key: str,
+    resource_type: str,
+    resource_id: str,
+) -> set[str]:
+    """Ids frshty is finished with: processed, or gone from the platform.
+
+    Everything else — never recorded, new, deferred, processing — is still
+    owed an answer."""
+    rows = db.query_all(
+        """
+        SELECT comment_id
+        FROM comment_state
+        WHERE instance_key = ? AND resource_type = ? AND resource_id = ?
+        AND state IN ('processed', 'deleted')
+        """,
+        (instance_key, resource_type, resource_id),
+    )
+    return {str(row["comment_id"]) for row in rows}
+
+
 def get_unprocessed_comments(
     instance_key: str,
     resource_type: str,
