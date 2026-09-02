@@ -63,6 +63,19 @@
     <a v-if="sourceItem" :href="'/tasks/' + sourceItem.id" class="text-xs text-blue-400 underline ml-3" :title="sourceItem.objective">follows #{{ sourceItem.id }}</a>
     <a :href="'/tasks/' + item.id + '/terminal'" target="_blank" class="text-xs text-blue-400 underline ml-3">open terminal</a>
   </div>
+  <div class="sec" v-if="item.state === 'needs_ack'">
+    <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Acknowledge</h2>
+    <div class="text-xs text-gray-600 mb-2">The agent reported this task done. Read the summary below, then acknowledge it to complete it, archive it to acknowledge and file it in one step, or reopen it if the work is not finished.</div>
+    <div class="flex flex-wrap gap-2 items-center">
+      <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#14532d;color:#86efac"
+            @click="act('ack')">acknowledge</span>
+      <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#1e293b;color:#cbd5e1"
+            @click="act('archive')">acknowledge and archive</span>
+      <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#3f1d1d;color:#fca5a5"
+            @click="act('reopen')">reopen</span>
+      <span class="text-xs text-red-400" v-if="actError">{{ actError }}</span>
+    </div>
+  </div>
   <div class="sec" v-if="item.state === 'needs_you' || item.pending_question">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Needs you</h2>
     <div class="text-sm" style="color:#fbbf24; white-space:pre-wrap"
@@ -93,7 +106,7 @@
       </div>
     </div>
   </div>
-  <div class="sec" v-if="item.summary || item.state === 'done'">
+  <div class="sec" v-if="item.summary || finished">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Summary</h2>
     <div class="text-sm" style="white-space:pre-wrap" v-if="item.summary" v-html="lk(item.summary)"></div>
     <div class="text-xs text-gray-600" v-else>No summary yet.</div>
@@ -140,7 +153,7 @@
       <div class="text-xs text-red-400 mt-1" v-if="fuError[f.id]">{{ fuError[f.id] }}</div>
     </div>
   </div>
-  <div class="sec" v-if="item.state === 'done'">
+  <div class="sec" v-if="finished">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Follow up</h2>
     <div class="text-xs text-gray-600 mb-2">Launch a new run that gets this item's objective, summary and artifacts as context.</div>
     <textarea v-model="fupText" rows="3" placeholder="Objective for the follow-up run…"
@@ -261,7 +274,7 @@ const app = frshtyApp({
                     fupText: "", fupCtx: [], fupSlack: false, fupError: "", fupBusy: false,
                     fupAgent: "claude", agents: ["claude"], runs: [],
                     projects: [], slackAvailable: false,
-                    debriefBusy: false, debriefError: "", linkmap: null }; },
+                    debriefBusy: false, debriefError: "", actError: "", linkmap: null }; },
   computed: {
     railCounts() {
       return { tasks: this.needsYou };
@@ -301,8 +314,12 @@ const app = frshtyApp({
       }
       return out.reverse();
     },
+    finished() {
+      return !!this.item && (this.item.state === "done" || this.item.state === "needs_ack");
+    },
     stateLabel() {
       if (!this.item) return "";
+      if (this.item.state === "needs_ack") return "agent reported done — acknowledge it";
       if (this.item.state === "done")
         return this.item.done_source === "operator" ? "done — you confirmed"
              : this.item.done_source === "agent" ? "done — agent-reported, not verified by you"
@@ -310,6 +327,7 @@ const app = frshtyApp({
       return this.item.state.replace("_", " ");
     },
     badgeCls() {
+      if (this.item.state === "needs_ack") return "b-done-agent";
       if (this.item.state !== "done") return "b-other";
       return this.item.done_source === "operator" ? "b-done-op" : "b-done-agent";
     },
@@ -384,7 +402,7 @@ const app = frshtyApp({
         this.item = d.item; this.timeline = d.timeline || []; this.events = d.events || [];
         this.artifacts = d.artifacts || []; this.systemPrompt = d.system_prompt || "";
         this.thread = d.thread || null;
-        this.needsYou = d.needs_you || 0;
+        this.needsYou = d.attention || 0;
         const obj = (d.item.objective || "").trim();
         if (obj) {
           if (!this._baseTitle) this._baseTitle = document.title;
@@ -450,6 +468,19 @@ const app = frshtyApp({
     async fuDismiss(f) {
       const r = await fetch(`/api/work/followups/${f.id}/dismiss`, { method: "POST" });
       if (!r.ok) { const d = await r.json(); this.fuError[f.id] = d.error || "dismiss failed"; }
+      await this.refresh();
+    },
+    async act(action) {
+      this.actError = "";
+      try {
+        const r = await fetch(`/api/work/items/${this.item.id}/action`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action }),
+        });
+        if (!r.ok) { const d = await r.json(); this.actError = d.error || ("action failed HTTP " + r.status); }
+      } catch (e) {
+        this.actError = "action failed: " + e.message;
+      }
       await this.refresh();
     },
     async debrief() {
