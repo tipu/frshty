@@ -48,6 +48,7 @@ HOOK_RUN_TIMEOUT = 900
 COMMIT_PHASE_TIMEOUT = HOOK_RUN_TIMEOUT * 2 + HOOK_REPAIR_TIMEOUT
 TEST_RUN_TIMEOUT = 5400
 PROOF_TIMEOUT = 3600
+FLOW_TIMEOUT = 1800
 MIN_TESTING_MD_BYTES = 200
 
 
@@ -1400,6 +1401,51 @@ def start_reviewing(ctx: TaskContext) -> TaskResult:
     log.emit("ticket_review_started", f"Headless /tri-review for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key})
     result = run_claude_code(prompt, cwd=ticket_dir, timeout=REVIEW_TIMEOUT)
+    if result is None:
+        return TaskResult("failed", "claude returned non-zero or empty")
+    return TaskResult("ok")
+
+
+_FLOW_PROMPT_TEMPLATE = """Build a single self-contained interactive HTML page that explains this ticket's code changes, and save it as docs/FLOW.html.
+
+Data source: the actual code changes in this ticket. This ticket usually spans MULTIPLE repositories/projects, each checked out as a git worktree under this directory (look under ./workspace/<repo>/, falling back to ./<repo>/). Enumerate every such repo. For each one, gather the real diff with:
+    git -C <repo> diff origin/{base_branch}...HEAD
+and read the full post-change source of each file that appears in that diff. Use ONLY these real diffs and sources as the data — do not invent or assume changes that are not in the diff. docs/change-manifest.md summarizes the changes and may help you describe intent.
+
+Multi-project is the common case and must be first-class:
+- Assign each project/repo a distinct color and show a legend. Use that color consistently everywhere — call-tree nodes, function-detail headers, file cards, and diagram nodes — so the project a thing belongs to is always visible at a glance.
+- The architecture/pipeline diagram must show how the change fits together ACROSS projects: render each project as its own color-coded lane/cluster and draw the cross-project edges (e.g. an API call, event, queue message, shared schema, or contract) that connect a function in one project to one in another. Make these cross-project hops visually prominent.
+- Tag every function and file with its project as well as file:line.
+
+Requirements for docs/FLOW.html:
+- One file, no external dependencies (no CDN, no network, no imports). It MUST work when opened directly from file://. Inline all CSS and JS. Dark theme.
+- Embed every diff and every source file inline in the page (e.g. inside JSON in <script type="application/json"> blocks) so nothing is fetched at runtime.
+- Three drill-in levels:
+  1. Call-flow overview first: the key functions shown as nodes in indented call trees (group by role, e.g. send / receive / startup), each node tagged with project + file:line and color-coded by project.
+  2. Click a function -> detail view: its signature, a short plain description of what it does, clickable "calls ->" and "<- called by" pills (which may cross projects) that navigate to those functions, and buttons to view its code or its diff.
+  3. Click into code -> full source, line-numbered, syntax-highlighted, auto-scrolled to the function.
+- Also include: the cross-project architecture diagram described above, and filterable file cards (one per changed file, filterable by project); clicking a card opens that file's color-coded diff in a modal. Modals close on Esc and on click-outside.
+- Derive the call graph (calls / called-by, including cross-project edges) by reading the actual source; keep it accurate to the diff.
+
+Output only the file docs/FLOW.html. Do NOT modify any source code or other docs."""
+
+
+@task("generate_flow_doc",
+      preconditions=[status_is("reviewing"), file_exists("docs/change-manifest.md")],
+      postconditions=[file_exists("docs/FLOW.html")],
+      timeout=FLOW_TIMEOUT)
+def generate_flow_doc(ctx: TaskContext) -> TaskResult:
+    """Render docs/FLOW.html: a self-contained interactive walkthrough of the
+    ticket's diff against the base branch. Runs once after the change manifest;
+    best-effort, so the reviewing handler does not block on it."""
+    ticket_dir = _ticket_dir(ctx)
+    if not ticket_dir.is_dir():
+        return TaskResult("failed", f"ticket dir missing: {ticket_dir}")
+    base_branch = ctx.config["workspace"].get("base_branch", "main")
+    prompt = _FLOW_PROMPT_TEMPLATE.format(base_branch=base_branch)
+    log.emit("ticket_flow_doc_started", f"Building FLOW.html for {ctx.ticket_key}",
+             meta={"ticket": ctx.ticket_key})
+    result = run_claude_code(prompt, cwd=ticket_dir, timeout=FLOW_TIMEOUT)
     if result is None:
         return TaskResult("failed", "claude returned non-zero or empty")
     return TaskResult("ok")
