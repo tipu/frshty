@@ -381,3 +381,89 @@ class TestDev604Timeline:
         ts = state.load_ticket(self.KEY)
         assert ts["status"] == "merged"
         assert ts["merged_external_status"] == "In Review"
+
+
+class TestSweptTicketOnlyMovesOnAdvance:
+    """A swept ticket gets no handler dispatch from the poll.
+
+    DEV-678 sat at proving for five days. Jira had moved it to "Ready for
+    Deploy", a status the instance query does not select, so every poll cycle
+    sent it down the sweep branch and no cycle ever ran
+    _handle_proving_ticket. The redo-proof endpoint had transitioned it into
+    proving and enqueued nothing, so nothing else could move it either.
+
+    These pin both halves of the rule. The poll will not dispatch a swept
+    ticket, which is why a manual transition must enqueue advance_ticket. And
+    advance_ticket does dispatch it, which is why that enqueue is enough.
+    """
+
+    def _cfg(self, tmp_path):
+        return {"job": {"key": "aimyable"},
+                "workspace": {"root": tmp_path, "tickets_dir": "tickets",
+                              "ticket_layout": "flat", "base_branch": "main"},
+                "pr": {}, "features": {},
+                "_base_url": "http://base", "_state_dir": tmp_path}
+
+    def test_poll_dispatches_the_queried_ticket_and_not_the_swept_one(
+            self, tmp_state, tmp_path):
+        """Both tickets sit at proving with no proof.md. Only the one the query
+        returned reaches the handler."""
+        import core.state as state
+        state.save("tickets", {
+            "DEV-SWEPT": {"status": "proving", "slug": "DEV-SWEPT-x"},
+            "DEV-QUERIED": {"status": "proving", "slug": "DEV-QUERIED-x"},
+        })
+        system = MagicMock()
+        system.fetch_ticket.return_value = {"key": "DEV-SWEPT",
+                                            "status": "Ready for Deploy"}
+        queried = make_ticket(key="DEV-QUERIED", status="In Review")
+
+        with patch.object(tickets, "_fetch_tickets", return_value=[queried]), \
+             patch.object(tickets, "make_ticket_system", return_value=system), \
+             patch.object(tickets, "get_repos", return_value=[{"name": "r", "path": tmp_path}]), \
+             patch.object(tickets, "_fetch_open_prs", return_value=[]), \
+             patch.object(tickets, "_process_ticket_comments"), \
+             patch.object(tickets, "enqueue_prd_backfill"), \
+             patch.object(tickets, "run_haiku", return_value="code"), \
+             patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("features.ticket_states._PRE_DISPATCH_HANDLERS", ()), \
+             patch.object(tickets, "_enqueue_stage") as eq:
+            tickets.check(self._cfg(tmp_path), "aimyable")
+
+        staged = [c.args[:3] for c in eq.call_args_list]
+        assert ("aimyable", "DEV-QUERIED", "prove") in staged
+        assert not [c for c in staged if c[1] == "DEV-SWEPT"], (
+            "the poll must not be relied on to move a swept ticket")
+
+    def test_advance_ticket_dispatches_a_swept_ticket(self, tmp_state, tmp_path):
+        """advance_ticket reads stored state only, so query membership is
+        irrelevant to it. This is the escape hatch a manual transition uses."""
+        import core.state as state
+        state.save("tickets", {"DEV-SWEPT": {"status": "proving",
+                                             "slug": "DEV-SWEPT-x"}})
+
+        with patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch.object(tickets, "_enqueue_stage") as eq:
+            tickets.advance_ticket(self._cfg(tmp_path), "aimyable", "DEV-SWEPT")
+
+        assert [c.args[:3] for c in eq.call_args_list] == [
+            ("aimyable", "DEV-SWEPT", "prove")]
+
+    def test_advance_ticket_marks_ready_once_the_proof_exists(
+            self, tmp_state, tmp_path):
+        """The negative control for the test above: the same call takes the
+        other branch when proof.md is present, so a passing 'prove' assertion
+        means the handler really ran."""
+        import core.state as state
+        docs = tmp_path / "tickets" / "DEV-SWEPT-x" / "docs"
+        docs.mkdir(parents=True)
+        (docs / "proof.md").write_text("PROOF: DEMOED\n")
+        state.save("tickets", {"DEV-SWEPT": {"status": "proving",
+                                             "slug": "DEV-SWEPT-x"}})
+
+        with patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch.object(tickets, "_enqueue_stage") as eq:
+            tickets.advance_ticket(self._cfg(tmp_path), "aimyable", "DEV-SWEPT")
+
+        assert [c.args[:3] for c in eq.call_args_list] == [
+            ("aimyable", "DEV-SWEPT", "mark_ready")]

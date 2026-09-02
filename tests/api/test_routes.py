@@ -287,6 +287,74 @@ class TestTickets:
         assert resp.status_code == 404
 
 
+class TestManualTransitionEnqueuesAdvance:
+    """A manual transition must enqueue advance_ticket.
+
+    Work chains forward in two ways only: a finished job emits ticket_advance
+    (core/worker.py), or the poll dispatches the ticket (features.tickets.check).
+    The poll iterates the tickets the upstream query returned, so a ticket whose
+    upstream status has left that query is never dispatched. A manual transition
+    that enqueues nothing therefore parks such a ticket for good. DEV-678 sat at
+    proving for five days after a redo-proof for exactly this reason.
+
+    Each test uses its own ticket key because the jobs table is shared for the
+    whole test session.
+    """
+
+    def _advance_jobs(self, key):
+        import core.queue as q
+        return [j for j in q.jobs_for_ticket("test", key)
+                if j["task"] == "advance_ticket"]
+
+    def test_redo_proof_enqueues_advance(self, client, tmp_path):
+        key, slug = "ADV-1", "ADV-1-s"
+        docs = tmp_path / "tickets" / slug / "docs"
+        docs.mkdir(parents=True)
+        (docs / "proof.md").write_text("PROOF: DEMOED\n")
+        state.save("tickets", {key: {"status": "pr_ready", "slug": slug}})
+
+        resp = client.post(f"/api/tickets/{key}/redo-proof", json={"feedback": "again"})
+
+        assert resp.status_code == 200, resp.text
+        assert state.load("tickets")[key]["status"] == "proving"
+        assert not (docs / "proof.md").exists()
+        assert (docs / "proof.prev.md").exists()
+        jobs = self._advance_jobs(key)
+        assert len(jobs) == 1, "redo-proof must enqueue advance_ticket"
+        assert jobs[0]["status"] == "queued"
+
+    def test_status_override_enqueues_advance(self, client):
+        key = "ADV-2"
+        state.save("tickets", {key: {"status": "in_review", "slug": f"{key}-s"}})
+
+        resp = client.post(f"/api/tickets/{key}/status", json={"status": "pr_failed"})
+
+        assert resp.status_code == 200, resp.text
+        jobs = self._advance_jobs(key)
+        assert len(jobs) == 1, "status override must enqueue advance_ticket"
+        assert jobs[0]["status"] == "queued"
+
+    def test_rejected_redo_proof_enqueues_nothing(self, client, tmp_path):
+        key, slug = "ADV-3", "ADV-3-s"
+        (tmp_path / "tickets" / slug / "docs").mkdir(parents=True)
+        state.save("tickets", {key: {"status": "new", "slug": slug}})
+
+        resp = client.post(f"/api/tickets/{key}/redo-proof", json={"feedback": ""})
+
+        assert resp.status_code == 400, resp.text
+        assert state.load("tickets")[key]["status"] == "new"
+        assert self._advance_jobs(key) == []
+
+    def test_rejected_status_override_enqueues_nothing(self, client):
+        key = "ADV-4"
+        state.save("tickets", {key: {"status": "new", "slug": f"{key}-s"}})
+
+        resp = client.post(f"/api/tickets/{key}/status", json={"status": "in_review"})
+
+        assert resp.status_code == 400, resp.text
+        assert self._advance_jobs(key) == []
+
+
 class TestDiscardTicket:
     def test_discard_removes_dir_and_state(self, client, tmp_path):
         slug = "T-1-thing"

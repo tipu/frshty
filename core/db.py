@@ -18,6 +18,10 @@ def init(db_path: Path, migrations_dir: Path) -> None:
     _apply_migrations()
 
 
+def path() -> Path | None:
+    return _DB_PATH
+
+
 def _connect() -> sqlite3.Connection:
     if _DB_PATH is None:
         raise RuntimeError("db not initialized; call core.db.init(path, migrations_dir) first")
