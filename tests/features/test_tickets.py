@@ -202,7 +202,7 @@ class TestRepoGate:
         with patch("core.queue.jobs_for_ticket", return_value=[]), \
              patch("core.queue.enqueue_job") as eq:
             tickets._enqueue_stage("inst", "T-1", "start_planning")
-            eq.assert_called_once_with("inst", "start_planning", ticket_key="T-1")
+            eq.assert_called_once_with("inst", "start_planning", ticket_key="T-1", payload=None)
 
     def test_advance_ticket_not_blocked_by_own_running_job(self, fresh_db):
         """advance_ticket runs as a job that is itself 'running'; that must not
@@ -238,7 +238,7 @@ class TestEnqueueStage:
              patch("core.queue.enqueue_job") as eq:
             tickets._enqueue_stage("inst", "T-1", "start_planning")
             qj.assert_called_once_with("inst", "T-1", limit=200)
-            eq.assert_called_once_with("inst", "start_planning", ticket_key="T-1")
+            eq.assert_called_once_with("inst", "start_planning", ticket_key="T-1", payload=None)
 
     def test_skips_when_already_queued(self):
         with patch("core.queue.jobs_for_ticket",
@@ -721,7 +721,7 @@ class TestHandleCiFailureStub:
              patch.object(q, "enqueue_job") as eq, \
              patch("features.tickets.log"):
             tickets._handle_ci_failure(make_ticket(), ts, pr, checks, "http://base", "inst")
-        eq.assert_called_once_with("inst", "fix_ci_failures", ticket_key="PROJ-1")
+        eq.assert_called_once_with("inst", "fix_ci_failures", ticket_key="PROJ-1", payload=None)
 
     def test_unrelated_verdict_skips_retriage(self):
         ts = make_ticket_state(status="in_review",
@@ -2271,6 +2271,77 @@ class TestCheckInReviewFixFailedRetry:
             )
 
 
+class TestCheckInReviewReviewerReply:
+    """Observed live on quillmeetings/quill#4561: Adam Walz answered the
+    notifier.ts:71 thread twice after it was resolved, and neither reply was
+    ever registered. A reply is how a reviewer says the fix did not land, so it
+    has to reach the classifier like any other comment."""
+
+    def _make_pr_comment(self, **overrides):
+        base = {"id": 100, "body": "Please rename this variable",
+                "author_id": "reviewer1", "author_name": "Bob",
+                "path": "src/main.py", "line": 42, "parent_id": None,
+                "created_on": "2026-01-01T12:00:00Z",
+                "created_at": "2026-01-01T12:00:00Z",
+                "updated_at": "2026-01-01T12:00:00Z"}
+        base.update(overrides)
+        return base
+
+    def _run(self, fake_config, tmp_path, comments, last_seen):
+        slug = "PROJ-1-do-the-thing"
+        wt = fake_config["workspace"]["root"] / "tickets" / slug / "repo"
+        wt.mkdir(parents=True, exist_ok=True)
+        (wt / ".git").mkdir(exist_ok=True)
+        ts = make_ticket_state(
+            status="in_review", slug=slug, branch=slug,
+            prs=[{"repo": "repo", "id": 99, "branch": slug, "url": "http://u"}],
+        )
+        ts["last_comment_ids"] = {"repo/99": last_seen}
+        ticket = {"key": "PROJ-1", "summary": "Do thing", "url": "http://j/PROJ-1"}
+
+        mock_platform = MagicMock()
+        mock_platform.get_pr_state.return_value = "OPEN"
+        mock_platform.get_pr_comments.return_value = comments
+        bb_config = {
+            **fake_config,
+            "job": {**fake_config["job"], "platform": "bitbucket"},
+            "bitbucket": {"org": "x", "user_account_id": "bot-self"},
+        }
+
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "repo", "path": wt.parent}]), \
+             patch("features.tickets.ticket_worktree_path", return_value=wt), \
+             patch("features.tickets.run_balanced",
+                   return_value='{"results": [{"i": 0, "actionable": true}]}') as haiku, \
+             patch("features.tickets.run_claude_code", return_value=None), \
+             patch("features.tickets.subprocess.run",
+                   return_value=MagicMock(returncode=0)):
+            tickets._check_in_review(bb_config, ticket, ts, "http://base")
+        return haiku
+
+    def test_a_reviewer_reply_reaches_the_classifier(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        root = self._make_pr_comment(id=100, body="add the sentry fingerprint")
+        reply = self._make_pr_comment(
+            id=101, parent_id=100,
+            body="reopening, this landed as resolved but the line is unchanged",
+        )
+        haiku = self._run(fake_config, tmp_path, [root, reply], last_seen=100)
+        haiku.assert_called_once()
+        assert "reopening" in haiku.call_args.args[0]
+
+    def test_the_agents_own_reply_is_ignored(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        root = self._make_pr_comment(id=100, body="add the sentry fingerprint")
+        own = self._make_pr_comment(id=101, parent_id=100, author_id="bot-self",
+                                    body="fixed in abc123")
+        haiku = self._run(fake_config, tmp_path, [root, own], last_seen=100)
+        haiku.assert_not_called()
+
+
 class TestReplyCommitsToChangeReroute:
     """Observed live on aimyable/saas-dashboard#249 (DEV-644): the triage batch
     classified the 'file count removed, seems odd' comment as not actionable,
@@ -3161,3 +3232,101 @@ class TestCiFailureCommentHeld:
     def test_ci_comment_fetch_failure_held(self):
         pf = self._pf(None)
         assert tickets._ci_failure_comment_held(pf, {"repo": "r", "id": 1}, "1 of 3 checks failed") is True
+
+
+class TestClipText:
+    def test_short_text_is_returned_whole(self):
+        assert tickets.clip_text("  a bug  ", 100) == ("a bug", 5)
+
+    def test_long_text_is_cut_and_reports_the_full_length(self):
+        clipped, full = tickets.clip_text("x" * 50, 10)
+        assert clipped == "x" * 10 + " …"
+        assert full == 50
+
+
+class TestIsIssueComment:
+    def test_yes_carries_the_reason_the_model_gave(self):
+        with patch("features.tickets.run_haiku",
+                   return_value="yes\nThe export button times out after the merge."):
+            verdict = tickets._is_issue_comment("still broken", "Export CSV", [])
+        assert verdict == {"issue": True,
+                           "reason": "The export button times out after the merge."}
+
+    def test_no_carries_no_reason(self):
+        with patch("features.tickets.run_haiku", return_value="no"):
+            assert tickets._is_issue_comment("looks good", "Export CSV", []) == {
+                "issue": False, "reason": ""}
+
+    def test_a_yes_without_a_reason_still_counts(self):
+        with patch("features.tickets.run_haiku", return_value="yes"):
+            assert tickets._is_issue_comment("broken", "Export CSV", []) == {
+                "issue": True, "reason": ""}
+
+    def test_an_empty_body_is_not_an_issue(self):
+        assert tickets._is_issue_comment("", "Export CSV", []) == {
+            "issue": False, "reason": ""}
+
+
+class TestIssueDetectedEvent:
+    """The event a bug report writes has to carry enough for the ticket
+    timeline to say which comment triggered the fix pass and what it said."""
+
+    COMMENT = {
+        "id": "17285",
+        "author_name": "Sam Reviewer",
+        "body": "The export button times out on staging after the merge.",
+        "created_at": "2026-09-01T18:20:00+00:00",
+        "updated_at": "2026-09-01T18:20:00+00:00",
+    }
+
+    def _run(self, fake_config, comment, reason="The export times out on staging."):
+        ts = {"slug": "DEV-1-export", "status": "in_review"}
+        ticket = make_ticket(key="DEV-1", summary="Export report to CSV")
+        detection = {"new": [comment], "edited": [], "deleted": [], "unchanged_count": 0}
+        emitted = []
+        with patch("features.tickets.get_repos", return_value=[{"name": "repo"}]), \
+             patch("features.tickets._fetch_ticket_comments", return_value=[comment]), \
+             patch("features.tickets.comments.fetch_and_detect_comments", return_value=detection), \
+             patch("features.tickets.comments.mark_comment_processing"), \
+             patch("features.tickets.comments.mark_comment_processed"), \
+             patch("features.tickets._is_issue_comment",
+                   return_value={"issue": True, "reason": reason}), \
+             patch("features.tickets._ensure_worktree", return_value={"ok": True}), \
+             patch("features.tickets._enqueue_stage"), \
+             patch("features.tickets.log.emit",
+                   side_effect=lambda *a, **k: emitted.append((a, k))):
+            tickets._process_ticket_comments(fake_config, "DEV-1", ts, ticket,
+                                             "http://localhost:8000", "test")
+        return [e for e in emitted if e[0][0] == "ticket_issue_detected"]
+
+    def test_meta_names_the_comment_its_author_and_the_stage_it_starts(self, fake_config):
+        events = self._run(fake_config, dict(self.COMMENT))
+        assert len(events) == 1
+        args, kwargs = events[0]
+        meta = kwargs["meta"]
+        assert meta["comment_id"] == "17285"
+        assert meta["comment_author"] == "Sam Reviewer"
+        assert meta["comment_created_at"] == "2026-09-01T18:20:00+00:00"
+        assert meta["comment_change"] == "new"
+        assert meta["comment_excerpt"] == self.COMMENT["body"]
+        assert meta["comment_chars"] == len(self.COMMENT["body"])
+        assert meta["issue_reason"] == "The export times out on staging."
+        assert meta["ticket_summary"] == "Export report to CSV"
+        assert meta["triggers"] == "fix_reported_bug"
+        assert args[1].endswith("The export times out on staging.")
+
+    def test_a_long_comment_is_cut_and_the_full_length_is_kept(self, fake_config):
+        comment = dict(self.COMMENT, body="y" * 5000)
+        meta = self._run(fake_config, comment)[0][1]["meta"]
+        assert meta["comment_chars"] == 5000
+        assert meta["comment_excerpt"] == "y" * tickets.ISSUE_COMMENT_EXCERPT_CHARS + " …"
+        assert meta["comment_excerpt_chars"] == tickets.ISSUE_COMMENT_EXCERPT_CHARS + 2
+
+    def test_an_edited_comment_is_marked_as_edited(self, fake_config):
+        comment = dict(self.COMMENT, previously_at="2026-09-01T17:00:00+00:00")
+        meta = self._run(fake_config, comment)[0][1]["meta"]
+        assert meta["comment_change"] == "edited"
+
+    def test_without_a_reason_the_summary_falls_back_to_the_comment(self, fake_config):
+        events = self._run(fake_config, dict(self.COMMENT), reason="")
+        assert events[0][0][1].endswith(self.COMMENT["body"])
