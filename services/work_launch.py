@@ -149,7 +149,7 @@ def _source_block(source_item_id: int) -> str:
 
 def launch(objective: str, cwd: str = "", contexts: list[str] | None = None,
            slack: bool = False, source_item_id: int | None = None,
-           agent: str = "claude") -> dict:
+           agent: str = "claude", brief: str = "") -> dict:
     objective = (objective or "").strip()
     contexts = [c for c in (contexts or []) if isinstance(c, str)]
     agent = (agent or "claude").strip().lower()
@@ -185,7 +185,7 @@ def launch(objective: str, cwd: str = "", contexts: list[str] | None = None,
     run_id = work_store.add_run(item_id, session_id, tmux_key, cwd, provider=agent)
     context = (
         f"# Work item {item_id}\n\n## Objective\n\n{objective}\n"
-        + source_block + _context_block(contexts, slack) + "\n"
+        + source_block + _context_block(contexts, slack) + (brief or "") + "\n"
         "Work toward the objective. When you stop, state a one-line checkpoint. "
         "When you hit a decision point, decide yourself by default: pick the "
         "most correct, cleanest, simplest option and keep going. Ask the "
