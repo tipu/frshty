@@ -6,6 +6,7 @@
 <title>Billing — frshty</title>
 <script src="/static/tailwind.js"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="/static/frshty-time.js"></script>
 <script src="/static/frshty-nav.js"></script>
 <script src="/static/frshty-shell.js"></script>
 <link rel="stylesheet" href="/static/frshty.css">
@@ -198,8 +199,7 @@ frshtyApp({
             const cadence = s.freq === 'monthly' ? 'Monthly' : 'Weekly';
             const fmtDateTime = iso => new Date(iso).toLocaleString('en-US', {
                 weekday: 'short', month: 'short', day: 'numeric',
-                hour: 'numeric', minute: '2-digit',
-                timeZone: 'America/Los_Angeles', timeZoneName: 'short',
+                hour: 'numeric', minute: '2-digit', timeZoneName: 'short',
             });
             const fmtDayDate = ymd => new Date(ymd + 'T12:00:00').toLocaleDateString('en-US',
                 { weekday: 'short', month: 'short', day: 'numeric' });
@@ -224,7 +224,8 @@ frshtyApp({
         const weeks = computed(() => {
             if (!client.value) return [];
             const isMonthly = client.value.billing_freq === 'monthly';
-            const now = new Date();
+            const today = new Date();
+            const now = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()));
             const threeMonthsAgo = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 3, 1));
             const endOfThisWeek = getMonday(now);
             endOfThisWeek.setUTCDate(endOfThisWeek.getUTCDate() + 7);

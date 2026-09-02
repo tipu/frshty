@@ -40,17 +40,7 @@
         `,
     };
 
-    function relTime(ts) {
-        if (!ts) return '';
-        const d = new Date(ts);
-        const secs = Math.floor((Date.now() - d.getTime()) / 1000);
-        if (secs < 60) return 'just now';
-        const mins = Math.floor(secs / 60);
-        if (mins < 60) return `${mins}m ago`;
-        const hrs = Math.floor(mins / 60);
-        if (hrs < 24) return `${hrs}h ago`;
-        return `${Math.floor(hrs / 24)}d ago`;
-    }
+    const relTime = ts => window.frshtyTime.relTime(ts);
 
     const PrSubmitModal = {
         props: {
@@ -189,6 +179,7 @@
         app.component('pr-submit-modal', PrSubmitModal);
         app.directive('autofocus', AutofocusDirective);
         app.config.globalProperties.$relTime = relTime;
+        app.config.globalProperties.$time = window.frshtyTime;
         return app;
     };
 })();

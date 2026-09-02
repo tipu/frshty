@@ -145,6 +145,27 @@ class TestTickets:
         assert data["key"] == "T-1"
         assert "ticket.md" in data["docs"]
 
+    def test_docs_file_serves_a_markdown_document_as_text(self, client, tmp_path):
+        slug = "T-1-slug"
+        state.save("tickets", {"T-1": {"status": "done", "slug": slug}})
+        docs_dir = tmp_path / "tickets" / slug / "docs"
+        docs_dir.mkdir(parents=True)
+        (docs_dir / "research.md").write_text("# findings\n")
+        resp = client.get("/api/tickets/T-1/docs/research.md")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/plain")
+        assert resp.text == "# findings\n"
+
+    def test_docs_file_rejects_a_file_type_outside_the_whitelist(self, client, tmp_path):
+        slug = "T-1-slug"
+        state.save("tickets", {"T-1": {"status": "done", "slug": slug}})
+        docs_dir = tmp_path / "tickets" / slug / "docs"
+        docs_dir.mkdir(parents=True)
+        (docs_dir / "proof.js" ).write_text("run()")
+        resp = client.get("/api/tickets/T-1/docs/proof.js")
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "unsupported file type"
+
     def test_demo_not_found(self, client):
         state.save("tickets", {"T-1": {"status": "merged", "slug": "T-1-s"}})
         resp = client.get("/api/tickets/T-1/demo")

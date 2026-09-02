@@ -5,6 +5,7 @@
 <meta charset="utf-8">
 <title>Tasks — frshty</title>
 <script src="/static/vendor/vue.global.prod.js"></script>
+<script src="/static/frshty-time.js"></script>
 <script src="/static/frshty-nav.js"></script>
 <script src="/static/frshty-shell.js"></script>
 <script src="/static/frshty-work-question.js"></script>
@@ -103,6 +104,8 @@
           </div>
           <div class="ln-task-foot">
             <span class="ln-pill" :class="statePill(g, it)">{{ stateText(g, it) }}</span>
+            <span class="ln-pill ln-pill-ghost" v-if="view === 'board' && it.archived_at"
+                  title="this task is in the archive, not on the board">Archived</span>
             <a class="ln-pill ln-pill-violet ln-thread-pill" v-if="it.thread" style="text-decoration:none"
                :href="'/threads/' + it.thread.root_id" :title="'thread rooted at task #' + it.thread.root_id">⑂ {{ it.thread.title }}</a>
             <span>{{ ago(it.updated_at) }}</span>
@@ -113,7 +116,7 @@
                       @click="sumOpen[it.id] = !sumOpen[it.id]">{{ sumOpen[it.id] ? 'Summary ▾' : 'Summary ▸' }}</button>
               <a class="ln-btn ln-btn-sm ln-btn-ghost" v-if="it.summary" :href="'/tasks/' + it.id + '/summary'" target="_blank">↗</a>
               <template v-if="g === 'done'">
-                <button class="ln-btn ln-btn-sm ln-btn-ghost" v-if="view === 'archive'"
+                <button class="ln-btn ln-btn-sm ln-btn-ghost" v-if="view === 'archive' || it.archived_at"
                         @click="act(it, 'unarchive')">Unarchive</button>
                 <button class="ln-btn ln-btn-sm ln-btn-ghost" v-else
                         title="take this completed task off the board" @click="act(it, 'archive')">Archive</button>
