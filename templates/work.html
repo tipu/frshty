@@ -127,8 +127,8 @@
             <span class="ln-pill ln-pill-ghost" v-if="it.peer" :title="'this task runs on the ' + it.peer + ' host'">⇄ {{ it.peer }}</span>
             <span class="ln-pill ln-pill-ghost" v-if="view === 'board' && it.archived_at"
                   title="this task is in the archive, not on the board">Archived</span>
-            <a class="ln-pill ln-pill-violet ln-thread-pill" v-if="it.thread && !it.peer" style="text-decoration:none"
-               :href="'/threads/' + it.thread.root_id" :title="'thread rooted at task #' + it.thread.root_id">⑂ {{ it.thread.title }}</a>
+            <a class="ln-pill ln-pill-violet ln-thread-pill" v-if="it.thread" style="text-decoration:none"
+               :href="threadHref(it.thread.root_id, it.peer)" :title="'thread rooted at task #' + it.thread.root_id">⑂ {{ it.thread.title }}</a>
             <span>{{ ago(it.updated_at) }}</span>
             <span v-if="it.last_provider">· {{ it.last_provider }}</span>
             <span class="ln-tag" v-for="t in tagsOf(it)" :key="t">{{ t }}</span>
@@ -189,13 +189,14 @@
           Active threads
           <a class="ln-link ln-small" style="margin-left:auto" href="/threads">View all</a>
         </div>
-        <div class="ln-thread-row" v-for="t in activeThreads" :key="t.root_id" @click="openThread(t.root_id)">
+        <div class="ln-thread-row" v-for="t in activeThreads" :key="(t.peer || 'local') + '#' + t.root_id" @click="openThread(t.root_id, t.peer)">
           <div class="ln-thread-row-title">{{ t.title }}</div>
           <div class="ln-thread-row-meta">
             <span style="color:var(--ln-green)" v-if="t.counts.needs_ack">{{ t.counts.needs_ack }} to acknowledge</span>
             <span style="color:var(--ln-amber)" v-else-if="t.counts.needs_you">{{ t.counts.needs_you }} needs you</span>
             <span style="color:var(--ln-blue)" v-else-if="t.counts.agent_working">{{ t.counts.agent_working }} working</span>
             <span v-else>{{ t.counts.done === t.task_count ? 'complete' : 'idle' }}</span>
+            <span v-if="t.peer" :title="'this thread runs on the ' + t.peer + ' host'">⇄ {{ t.peer }}</span>
             <span>{{ t.task_count }} task{{ t.task_count === 1 ? '' : 's' }}</span>
           </div>
           <div class="ln-progress" :title="(t.counts.done || 0) + ' of ' + t.task_count + ' complete'">
@@ -371,7 +372,10 @@ frshtyApp({
       this.donePage = p;
       this.refresh();
     },
-    openThread(rootId) { window.location.href = "/threads/" + rootId; },
+    openThread(rootId, peer) { window.location.href = this.threadHref(rootId, peer); },
+    threadHref(rootId, peer) {
+      return "/threads/" + rootId + (peer ? "?peer=" + encodeURIComponent(peer) : "");
+    },
     async loadConfig() {
       try {
         const cfg = await (await fetch("/api/config")).json();
@@ -403,11 +407,18 @@ frshtyApp({
       }
     },
     async loadThreads() {
-      try {
-        const r = await fetch("/api/work/threads");
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        this.threads = (await r.json()).threads || [];
-      } catch (e) {}
+      const perSource = await Promise.all(this.activeSources().map(async key => {
+        try {
+          const r = await fetch(this.apiUrl(key, "/api/work/threads"));
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          const d = await r.json();
+          return (d.threads || []).map(t => Object.assign({}, t, { peer: key }));
+        } catch (e) {
+          return [];
+        }
+      }));
+      this.threads = perSource.flat().sort(
+        (a, b) => (a.updated_at < b.updated_at) - (a.updated_at > b.updated_at));
     },
     boardQuery() {
       const params = new URLSearchParams();
@@ -587,8 +598,8 @@ frshtyApp({
     this._refreshSeq = 0;
     const b = document.getElementById("boot-error");
     if (b) b.remove();
-    this.loadConfig(); this.loadThreads();
-    this.loadPeers().then(() => { this.loadLinkmap(); this.refresh(); });
+    this.loadConfig();
+    this.loadPeers().then(() => { this.loadLinkmap(); this.refresh(); this.loadThreads(); });
     setInterval(() => { this.refresh(); this.loadThreads(); }, 15000);
   },
 }).component("work-question", window.WorkQuestion).mount("#app");

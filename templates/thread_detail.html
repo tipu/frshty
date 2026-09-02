@@ -27,7 +27,7 @@
     <div class="ln-small" style="color:var(--ln-red)">{{ loadError }}</div>
     <div class="ln-small" style="margin-top:6px">
       <a class="ln-link" href="/threads">← all threads</a>
-      · <a class="ln-link" :href="'/tasks/' + rootId">open task #{{ rootId }}</a>
+      · <a class="ln-link" :href="taskHref(rootId)">open task #{{ rootId }}</a>
     </div>
   </div>
 
@@ -35,8 +35,9 @@
     <div class="ln-hero">
       <div>
         <div class="ln-small ln-muted">
-          Thread · rooted at task <a class="ln-link" :href="'/tasks/' + thread.root_id">#{{ thread.root_id }}</a>
+          Thread · rooted at task <a class="ln-link" :href="taskHref(thread.root_id)">#{{ thread.root_id }}</a>
           · <a class="ln-link" href="/threads">all threads</a>
+          <span v-if="peer" :title="'this thread runs on the ' + peer + ' host'"> · ⇄ {{ peer }}</span>
         </div>
         <h1 class="ln-title" style="margin-top:4px">
           {{ thread.title }}
@@ -48,7 +49,7 @@
         <p class="ln-subtitle">{{ thread.objective }}</p>
       </div>
       <div style="display:flex;gap:8px">
-        <a class="ln-btn ln-btn-ghost" :href="'/tasks/' + thread.root_id">Open first task</a>
+        <a class="ln-btn ln-btn-ghost" :href="taskHref(thread.root_id)">Open first task</a>
       </div>
     </div>
 
@@ -102,7 +103,7 @@
             <div class="ln-tl-node"></div>
             <article class="ln-task" :class="t.state">
               <div class="ln-task-top">
-                <a class="ln-task-title" :href="'/tasks/' + t.id">{{ t.objective }}</a>
+                <a class="ln-task-title" :href="taskHref(t.id)">{{ t.objective }}</a>
                 <div class="ln-task-id">#{{ t.id }}</div>
               </div>
               <div class="ln-task-note" v-if="note(t)">{{ note(t) }}</div>
@@ -112,8 +113,8 @@
                 <span v-if="t.artifact_count">· {{ t.artifact_count }} artifact{{ t.artifact_count === 1 ? '' : 's' }}</span>
                 <span class="ln-tag" v-for="tag in tags(t)" :key="tag">{{ tag }}</span>
                 <span class="ln-right">
-                  <a class="ln-btn ln-btn-sm ln-btn-ghost" v-if="t.summary" :href="'/tasks/' + t.id + '/summary'" target="_blank">Summary</a>
-                  <a class="ln-btn ln-btn-sm ln-btn-ghost" v-if="t.last_tmux_key && t.state !== 'done' && t.state !== 'needs_ack'" :href="'/tasks/' + t.id + '/terminal'" target="_blank">Terminal</a>
+                  <a class="ln-btn ln-btn-sm ln-btn-ghost" v-if="t.summary" :href="taskHref(t.id, '/summary')" target="_blank">Summary</a>
+                  <a class="ln-btn ln-btn-sm ln-btn-ghost" v-if="t.last_tmux_key && t.state !== 'done' && t.state !== 'needs_ack'" :href="terminalHref(t.id)" target="_blank">Terminal</a>
                   <span>{{ $relTime(t.updated_at) }}</span>
                 </span>
               </div>
@@ -130,7 +131,7 @@
             <p class="ln-muted" v-else>No task in this thread has written a summary yet.</p>
             <div class="ln-small ln-muted" style="margin-top:10px" v-if="thread.summary_from">
               Latest synthesized state, from task
-              <a class="ln-link" :href="'/tasks/' + thread.summary_from">#{{ thread.summary_from }}</a>
+              <a class="ln-link" :href="taskHref(thread.summary_from)">#{{ thread.summary_from }}</a>
             </div>
           </div>
         </div>
@@ -146,7 +147,7 @@
             <div class="ln-artifact" v-for="a in thread.artifacts" :key="a.id">
               <div class="ln-artifact-icon">{{ ext(a.path) }}</div>
               <div style="min-width:0">
-                <a class="ln-artifact-name" :href="'/api/work/artifact_file/' + a.id" target="_blank" :title="a.path">{{ base(a.path) }}</a>
+                <a class="ln-artifact-name" :href="artifactUrl(a)" target="_blank" :title="a.path">{{ base(a.path) }}</a>
                 <div class="ln-artifact-meta">#{{ a.work_item_id }}<span v-if="a.note"> · {{ a.note }}</span></div>
               </div>
             </div>
@@ -176,6 +177,7 @@ frshtyApp({
   data() {
     return {
       features: {}, instanceName: "", thread: null, loadError: "", railNeedsYou: 0,
+      peer: new URLSearchParams(location.search).get("peer") || "", peerBase: "",
       projects: [], agents: ["claude"], slackAvailable: false, personalLoaded: false,
       launchText: "", launchAgent: localStorage.getItem("workAgent") || "claude",
       launchContexts: [], launchSlack: false, launchBusy: false, launchError: "",
@@ -186,7 +188,9 @@ frshtyApp({
     rootId() { return parseInt(location.pathname.split("/").pop(), 10); },
     railCounts() { return { tasks: this.railNeedsYou }; },
     crumbs() {
-      return ["Work", "Tasks", "Threads", this.thread ? this.thread.title : "#" + this.rootId];
+      return ["Work", "Tasks", "Threads",
+              (this.peer ? this.peer + " · " : "") +
+              (this.thread ? this.thread.title : "#" + this.rootId)];
     },
     canLaunch() {
       return !!(this.thread && this.thread.continue_from && this.personalLoaded);
@@ -218,6 +222,30 @@ frshtyApp({
       return STATE_LABELS[t.state] || t.state;
     },
     statePill(state) { return STATE_PILLS[state] || "ln-pill-ghost"; },
+    api(path) {
+      return this.peer ? "/api/work/peers/" + encodeURIComponent(this.peer) + path : path;
+    },
+    taskHref(id, suffix) {
+      return "/tasks/" + id + (suffix || "") +
+             (this.peer ? "?peer=" + encodeURIComponent(this.peer) : "");
+    },
+    terminalHref(id) {
+      return (this.peerBase || "") + "/tasks/" + id + "/terminal";
+    },
+    artifactUrl(a) {
+      return (this.peerBase || "") + "/api/work/artifact_file/" + a.id;
+    },
+    async loadPeers() {
+      if (!this.peer) return;
+      try {
+        const peers = (await (await fetch("/api/work/peers")).json()).peers || [];
+        const match = peers.find(p => p.key === this.peer);
+        this.peerBase = match ? match.base_url : "";
+        if (!match) this.loadError = `unknown peer '${this.peer}' — check config/peers.toml`;
+      } catch (e) {
+        this.loadError = "could not read the peer list: " + (e.message || String(e));
+      }
+    },
     note(t) {
       const text = (t.state === "done" || t.state === "needs_ack")
         ? (t.summary || t.current_checkpoint || "")
@@ -245,7 +273,7 @@ frshtyApp({
     },
     async refresh() {
       try {
-        const r = await fetch("/api/work/threads/" + this.rootId);
+        const r = await fetch(this.api("/api/work/threads/" + this.rootId));
         if (r.status === 404) { this.loadError = "No thread is rooted at task #" + this.rootId + "."; return; }
         if (!r.ok) throw new Error("HTTP " + r.status);
         const d = await r.json();
@@ -275,7 +303,7 @@ frshtyApp({
       if (!this.canLaunch) return;
       this.launchError = ""; this.launchBusy = true;
       try {
-        const r = await fetch("/api/work/threads/" + this.rootId + "/tasks", {
+        const r = await fetch(this.api("/api/work/threads/" + this.rootId + "/tasks"), {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text: this.launchText, agent: this.launchAgent,
                                  contexts: this.launchContexts, slack: this.launchSlack }),
@@ -295,7 +323,7 @@ frshtyApp({
   },
   mounted() {
     this.loadConfig();
-    this.refresh();
+    this.loadPeers().then(() => this.refresh());
     setInterval(() => this.refresh(), 15000);
   },
 }).mount("#app");
