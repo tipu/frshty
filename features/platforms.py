@@ -295,6 +295,9 @@ class BitbucketPlatform(_CIMonitorMixin):
         self.user_account_id = bb.get("user_account_id", "")
         self.repos = [r["name"] for r in get_repos(config)]
 
+    def self_id(self) -> str:
+        return self.user_account_id
+
     def _auth(self):
         return (self.user, self.token)
 
@@ -750,6 +753,15 @@ class GitHubPlatform(_CIMonitorMixin):
         self._me_login_cache = result.stdout.strip() if result.returncode == 0 else ""
         return self._me_login_cache
 
+    def self_id(self) -> str:
+        """The login frshty posts as, for the self-authored comment guard.
+
+        Almost no instance sets github.user, and an empty id makes that guard
+        match nothing, so frshty reads its own replies back as new reviewer
+        comments. The authenticated gh account is the same account frshty
+        posts with, so it is the correct fallback."""
+        return (self.config.get("github") or {}).get("user", "") or self._me_login()
+
     def list_review_prs(self) -> list[dict]:
         result = self._run_gh([
             "search", "prs", "--review-requested=@me", "--state=open",
@@ -797,6 +809,9 @@ class GitHubPlatform(_CIMonitorMixin):
         " pullRequest(number:$number){"
         " reviews(first:100){nodes{"
         " databaseId body url submittedAt updatedAt state author{login}"
+        "}}"
+        " comments(first:100){nodes{"
+        " databaseId body url createdAt updatedAt author{login}"
         "}}"
         " reviewThreads(first:100){nodes{"
         " id isResolved"
@@ -871,6 +886,34 @@ class GitHubPlatform(_CIMonitorMixin):
                 "resolvable": False,
                 "thread_id": "",
                 "comment_kind": "review_body",
+            })
+        # Bot reviewers (the Claude Code Review workflow) publish their whole
+        # verdict as a plain PR comment, not as a review. Those live outside
+        # both reviews and reviewThreads, so reading only those two sources
+        # hides every finding such a reviewer reports. Issue comments cannot
+        # be resolved through resolveReviewThread either.
+        for c in (pr.get("comments") or {}).get("nodes") or []:
+            body = c.get("body", "")
+            if not body.strip():
+                continue
+            created = c.get("createdAt", "")
+            out.append({
+                "id": c.get("databaseId"),
+                "body": body,
+                "author_id": (c.get("author") or {}).get("login", ""),
+                "author_name": (c.get("author") or {}).get("login", ""),
+                "path": None,
+                "line": None,
+                "diff_hunk": "",
+                "html_url": c.get("url", ""),
+                "created_on": created,
+                "created_at": created,
+                "updated_at": c.get("updatedAt", created),
+                "parent_id": None,
+                "resolved": False,
+                "resolvable": False,
+                "thread_id": "",
+                "comment_kind": "issue_comment",
             })
         return out
 

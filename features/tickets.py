@@ -2180,6 +2180,26 @@ def _ci_failure_comment_held(platform, pr, body: str) -> bool:
     return any(c.get("state", "").upper() in FAILED_STATES for c in checks)
 
 
+ISSUE_COMMENT_BASELINE_HOURS = 24
+
+
+def _issue_comment_floor(issue_comments: list[dict]) -> int:
+    """Highest issue-comment id that predates the rollout window.
+
+    Issue comments became a comment source long after ticket PRs started being
+    polled, and they carry ids from a sequence of their own. Without a floor of
+    their own the first poll with the expanded source replays every historical
+    comment on every open PR. Anything newer than the window stays actionable,
+    including comments written before this version was deployed."""
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=ISSUE_COMMENT_BASELINE_HOURS)
+    old_ids = []
+    for c in issue_comments:
+        written = _parse_iso(c.get("updated_at") or c.get("created_at"))
+        if written is not None and written < cutoff:
+            old_ids.append(c["id"])
+    return max(old_ids) if old_ids else 0
+
+
 def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
     platform = make_platform(config)
     prs = ts.get("prs", [])
@@ -2215,15 +2235,10 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
         return ts
 
     ts["status"] = transition(ts["status"], "in_review")
-    platform_name = config["job"].get("platform", "")
-    if platform_name == "bitbucket":
-        user_id = config.get("bitbucket", {}).get("user_account_id", "")
-    elif platform_name == "github":
-        user_id = config.get("github", {}).get("user", "")
-    else:
-        user_id = ""
+    user_id = platform.self_id()
     slug = ts["slug"]
     last_comment_ids = ts.get("last_comment_ids", {})
+    last_issue_comment_ids = ts.get("last_issue_comment_ids", {})
     comment_fix_attempts = ts.setdefault("comment_fix_attempts", {})
     pr_comments = _load_pr_comments(config, slug)
     to_substantiate = []
@@ -2242,9 +2257,14 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
             for c in comments
             if not c.get("resolved") and c["author_id"] != user_id and not c.get("parent_id")
         ]
+        issue_comments = [c for c in comments if c.get("comment_kind") == "issue_comment"]
+        if issue_comments and pr_key not in last_issue_comment_ids:
+            last_issue_comment_ids[pr_key] = _issue_comment_floor(issue_comments)
+        issue_floor = last_issue_comment_ids.get(pr_key, 0)
         new_comments = [
             c for c in comments
-            if c["id"] > last_seen and c["author_id"] != user_id
+            if c["author_id"] != user_id
+            and c["id"] > (issue_floor if c.get("comment_kind") == "issue_comment" else last_seen)
         ]
 
         if not new_comments:
@@ -2297,6 +2317,7 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
         repo_match = next((r for r in repos if r["name"] == pr["repo"]), None)
         wt = ticket_worktree_path(config, slug, pr["repo"]) if repo_match else None
         to_resolve = []
+        resolvable_ids = {c["id"]: c.get("resolvable", True) for c in new_comments}
         made_commit = False
 
         for idx, comment in enumerate(new_comments):
@@ -2468,6 +2489,8 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
             ts.pop("checks_started_at", None)
             ts.pop("ci_unrelated_checks", None)
         for cid in to_resolve:
+            if not resolvable_ids.get(cid, True):
+                continue
             platform.resolve_comment(pr["repo"], pr["id"], cid)
 
         batch_entries = pr_comments[-len(new_comments):]
@@ -2477,9 +2500,15 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
         ]
         all_classified = all(i in classifications for i in range(len(new_comments)))
         if not retryable_failures and all_classified:
-            last_comment_ids[pr_key] = max(c["id"] for c in new_comments)
+            new_issue = [c["id"] for c in new_comments if c.get("comment_kind") == "issue_comment"]
+            new_review = [c["id"] for c in new_comments if c.get("comment_kind") != "issue_comment"]
+            if new_review:
+                last_comment_ids[pr_key] = max(new_review)
+            if new_issue:
+                last_issue_comment_ids[pr_key] = max(new_issue)
 
     ts["last_comment_ids"] = last_comment_ids
+    ts["last_issue_comment_ids"] = last_issue_comment_ids
     _save_pr_comments(config, slug, pr_comments)
     for entry, comment, pr in to_substantiate:
         entry["defence"] = _substantiate_reply(config, slug, ticket, comment, pr, entry["suggested_reply"])

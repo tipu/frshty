@@ -322,6 +322,33 @@ class TestGitHubGetPrComments:
         assert review["path"] is None and review["author_id"] == "carol"
         assert not any(c["id"] == 44 for c in comments)
 
+    def test_includes_nonempty_issue_comments(self):
+        p = _gh_platform()
+        import copy
+        import json as _json
+        response = copy.deepcopy(_THREADS_RESPONSE)
+        response["data"]["repository"]["pullRequest"]["comments"] = {"nodes": [
+            {"databaseId": 55, "body": "### Claude Code Review\n[High] the lint job will fail",
+             "url": "http://c/55", "createdAt": "2026-01-05T00:00:00Z",
+             "updatedAt": "2026-01-05T00:00:00Z", "author": {"login": "github-actions"}},
+            {"databaseId": 66, "body": "   ", "url": "http://c/66",
+             "createdAt": "2026-01-06T00:00:00Z", "updatedAt": "2026-01-06T00:00:00Z",
+             "author": {"login": "github-actions"}},
+        ]}
+        with patch.object(p, "_run_gh", return_value=_gh_result(stdout=_json.dumps(response))):
+            comments = p.get_pr_comments("r", 1)
+        issue = next(c for c in comments if c["id"] == 55)
+        assert issue["comment_kind"] == "issue_comment"
+        assert issue["resolvable"] is False
+        assert issue["resolved"] is False
+        assert issue["parent_id"] is None
+        assert issue["author_id"] == "github-actions"
+        assert "the lint job will fail" in issue["body"]
+        assert not any(c["id"] == 66 for c in comments)
+
+    def test_the_query_asks_for_issue_comments(self):
+        assert " comments(first:100){nodes{" in GitHubPlatform._REVIEW_COMMENTS_QUERY
+
     def test_fetch_failure_is_empty(self):
         p = _gh_platform()
         with patch.object(p, "_run_gh", return_value=_gh_result(stderr="boom", returncode=1)):
@@ -480,3 +507,33 @@ class TestBitbucketGetFailedLogs:
              patch("features.platforms.external_log.client", return_value=mock_client):
             assert p.get_failed_logs("repo", 1) == ""
         assert mock_client.get.call_count == 0
+
+
+class TestSelfId:
+    def _github(self, github):
+        return GitHubPlatform({"job": {"platform": "github"}, "github": github,
+                               "workspace": {"base_branch": "main"}})
+
+    def test_github_prefers_the_configured_login(self):
+        p = self._github({"repo": "org/repo", "user": "configured"})
+        with patch.object(GitHubPlatform, "_run_gh") as run:
+            assert p.self_id() == "configured"
+        run.assert_not_called()
+
+    def test_github_falls_back_to_the_authenticated_login(self):
+        p = self._github({"repo": "org/repo"})
+        with patch.object(GitHubPlatform, "_run_gh",
+                          return_value=MagicMock(returncode=0, stdout="danialjatropos\n")):
+            assert p.self_id() == "danialjatropos"
+
+    def test_github_is_empty_when_gh_cannot_answer(self):
+        p = self._github({"repo": "org/repo"})
+        with patch.object(GitHubPlatform, "_run_gh",
+                          return_value=MagicMock(returncode=1, stdout="")):
+            assert p.self_id() == ""
+
+    def test_bitbucket_reads_the_account_id(self):
+        p = BitbucketPlatform({"job": {"platform": "bitbucket"},
+                               "bitbucket": {"org": "x", "user_account_id": "acct-1"},
+                               "workspace": {"root": "/tmp", "repos": []}})
+        assert p.self_id() == "acct-1"

@@ -1,5 +1,6 @@
 import json
 import subprocess
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -2302,6 +2303,7 @@ class TestCheckInReviewReviewerReply:
         mock_platform = MagicMock()
         mock_platform.get_pr_state.return_value = "OPEN"
         mock_platform.get_pr_comments.return_value = comments
+        mock_platform.self_id.return_value = "bot-self"
         bb_config = {
             **fake_config,
             "job": {**fake_config["job"], "platform": "bitbucket"},
@@ -3332,3 +3334,160 @@ class TestIssueDetectedEvent:
     def test_without_a_reason_the_summary_falls_back_to_the_comment(self, fake_config):
         events = self._run(fake_config, dict(self.COMMENT), reason="")
         assert events[0][0][1].endswith(self.COMMENT["body"])
+
+
+class TestCheckInReviewIssueComments:
+    """A bot reviewer publishes its whole verdict as a plain PR comment. Those
+    comments carry ids from a sequence of their own, so they need a floor of
+    their own and a rollout baseline."""
+
+    def _issue_comment(self, **overrides):
+        base = {"id": 500, "body": "[High] the lint job will fail",
+                "author_id": "github-actions", "author_name": "github-actions",
+                "path": None, "line": None, "parent_id": None,
+                "resolved": False, "resolvable": False,
+                "comment_kind": "issue_comment",
+                "created_on": "2026-01-01T12:00:00Z",
+                "created_at": "2026-01-01T12:00:00Z",
+                "updated_at": "2026-01-01T12:00:00Z"}
+        base.update(overrides)
+        return base
+
+    def _run(self, fake_config, tmp_path, comments, ts_extra=None):
+        slug = "PROJ-1-do-the-thing"
+        wt = fake_config["workspace"]["root"] / "tickets" / slug / "repo"
+        wt.mkdir(parents=True, exist_ok=True)
+        (wt / ".git").mkdir(exist_ok=True)
+        ts = make_ticket_state(
+            status="in_review", slug=slug, branch=slug,
+            prs=[{"repo": "repo", "id": 99, "branch": slug, "url": "http://u"}],
+        )
+        ts.update(ts_extra or {})
+        ticket = {"key": "PROJ-1", "summary": "Do thing", "url": "http://j/PROJ-1"}
+
+        mock_platform = MagicMock()
+        mock_platform.get_pr_state.return_value = "OPEN"
+        mock_platform.get_pr_comments.return_value = comments
+        mock_platform.self_id.return_value = "bot-self"
+        config = {**fake_config,
+                  "job": {**fake_config["job"], "platform": "github"},
+                  "github": {"repo": ["org/repo"]}}
+
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "repo", "path": wt.parent}]), \
+             patch("features.tickets.ticket_worktree_path", return_value=wt), \
+             patch("features.tickets.run_balanced",
+                   return_value='{"results": [{"i": 0, "actionable": false}]}') as haiku, \
+             patch("features.tickets.run_claude_code", return_value=None), \
+             patch("features.tickets._substantiate_reply", return_value=""), \
+             patch("features.tickets.subprocess.run",
+                   return_value=MagicMock(returncode=0, stdout="")):
+            out = tickets._check_in_review(config, ticket, ts, "http://base")
+        return haiku, out, mock_platform
+
+    def _triaged(self, haiku):
+        bodies = []
+        for call in haiku.call_args_list:
+            prompt = call.args[0]
+            if prompt.startswith("Triage each PR review comment"):
+                bodies += [ln[len("COMMENT: "):] for ln in prompt.splitlines()
+                           if ln.startswith("COMMENT: ")]
+        return bodies
+
+    def _recent(self):
+        return (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+
+    def _old(self):
+        return (datetime.now(timezone.utc) - timedelta(days=4)).isoformat()
+
+    def test_a_recent_bot_comment_reaches_the_classifier(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        c = self._issue_comment(created_at=self._recent(), updated_at=self._recent())
+        haiku, _, _ = self._run(fake_config, tmp_path, [c])
+        assert self._triaged(haiku) == ["[High] the lint job will fail"]
+
+    def test_an_old_bot_comment_is_baselined_on_the_first_poll(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        c = self._issue_comment(created_at=self._old(), updated_at=self._old())
+        haiku, out, _ = self._run(fake_config, tmp_path, [c])
+        assert self._triaged(haiku) == []
+        assert out["last_issue_comment_ids"]["repo/99"] == 500
+
+    def test_the_baseline_is_set_once_and_newer_comments_still_arrive(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        recent = self._issue_comment(id=501, created_at=self._recent(), updated_at=self._recent())
+        haiku, _, _ = self._run(fake_config, tmp_path, [recent],
+                                ts_extra={"last_issue_comment_ids": {"repo/99": 500}})
+        assert self._triaged(haiku) == ["[High] the lint job will fail"]
+
+    def test_a_bot_comment_below_the_floor_is_ignored(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        old = self._issue_comment(id=499, created_at=self._recent(), updated_at=self._recent())
+        haiku, _, _ = self._run(fake_config, tmp_path, [old],
+                                ts_extra={"last_issue_comment_ids": {"repo/99": 500}})
+        assert self._triaged(haiku) == []
+
+    def test_a_bot_comment_id_does_not_move_the_review_comment_floor(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        c = self._issue_comment(id=900000, created_at=self._recent(), updated_at=self._recent())
+        _, out, _ = self._run(fake_config, tmp_path, [c],
+                              ts_extra={"last_comment_ids": {"repo/99": 100}})
+        assert out["last_comment_ids"]["repo/99"] == 100
+        assert out["last_issue_comment_ids"]["repo/99"] == 900000
+
+    def _run_addressed(self, fake_config, tmp_path, comment):
+        slug = "PROJ-1-do-the-thing"
+        wt = fake_config["workspace"]["root"] / "tickets" / slug / "repo"
+        wt.mkdir(parents=True, exist_ok=True)
+        (wt / ".git").mkdir(exist_ok=True)
+        ts = make_ticket_state(
+            status="in_review", slug=slug, branch=slug,
+            prs=[{"repo": "repo", "id": 99, "branch": slug, "url": "http://u"}],
+        )
+        ticket = {"key": "PROJ-1", "summary": "Do thing", "url": "http://j/PROJ-1"}
+
+        mock_platform = MagicMock()
+        mock_platform.get_pr_state.return_value = "OPEN"
+        mock_platform.get_pr_comments.return_value = [comment]
+        mock_platform.get_pr_checks.return_value = []
+        mock_platform.self_id.return_value = "bot-self"
+        config = {**fake_config,
+                  "job": {**fake_config["job"], "platform": "github"},
+                  "github": {"repo": ["org/repo"]}}
+
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "repo", "path": wt.parent}]), \
+             patch("features.tickets.ticket_worktree_path", return_value=wt), \
+             patch("features.tickets.run_balanced",
+                   return_value='{"results": [{"i": 0, "actionable": true}]}'), \
+             patch("features.tickets.run_claude_code", return_value="done"), \
+             patch("features.tickets.git_util.run_git",
+                   return_value=MagicMock(returncode=0, stdout="0")), \
+             patch("features.tickets.subprocess.run",
+                   return_value=MagicMock(returncode=0, stdout="")):
+            out = tickets._check_in_review(config, ticket, ts, "http://base")
+        return out, mock_platform
+
+    def test_an_unresolvable_comment_is_never_sent_to_resolve(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        c = self._issue_comment(created_at=self._recent(), updated_at=self._recent())
+        out, platform = self._run_addressed(fake_config, tmp_path, c)
+        assert out["last_issue_comment_ids"]["repo/99"] == 500
+        platform.resolve_comment.assert_not_called()
+
+    def test_a_resolvable_review_comment_is_still_resolved(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        c = self._issue_comment(id=501, resolvable=True, path="src/main.py", line=42,
+                                created_at=self._recent(), updated_at=self._recent())
+        del c["comment_kind"]
+        _, platform = self._run_addressed(fake_config, tmp_path, c)
+        platform.resolve_comment.assert_called_once_with("repo", 99, 501)

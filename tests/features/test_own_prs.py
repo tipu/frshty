@@ -188,6 +188,70 @@ class TestCheckComments:
         assert mock_comments.mark_comment_deferred.call_args.args[3] == "11"
         assert seen["review_bodies_baselined"] is True
 
+    def test_new_issue_comment_source_baselines_old_but_processes_recent(self, tmp_path):
+        platform = MagicMock()
+        old = make_comment(
+            id=20,
+            author_id="github-actions",
+            body="Old bot verdict",
+            created_at=(datetime.now(timezone.utc) - timedelta(days=3)).isoformat(),
+            comment_kind="issue_comment",
+            resolvable=False,
+        )
+        recent = make_comment(
+            id=21,
+            author_id="github-actions",
+            body="[High] the lint job will fail",
+            created_at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+            comment_kind="issue_comment",
+            resolvable=False,
+        )
+        platform.get_pr_comments.return_value = [old, recent]
+        pr = make_pr()
+        config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
+        seen = {}
+
+        with patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.run_balanced", return_value='{"results": [{"id": 0, "actionable": true, "reason": "clear"}]}'), \
+             patch("features.own_prs.q.enqueue_job"), \
+             patch("features.own_prs.log"):
+            mock_comments.has_comment_state.return_value = True
+            mock_comments.fetch_and_detect_comments.return_value = {"new": [old, recent], "edited": []}
+            mock_comments.get_unprocessed_comments.return_value = []
+            mock_comments.get_deferred_comments.return_value = []
+            own_prs._check_comments(config, "test", platform, pr, "http://base", seen=seen)
+
+        mock_comments.mark_comment_seen.assert_called_once()
+        assert mock_comments.mark_comment_seen.call_args.args[3] == "20"
+        assert mock_comments.mark_comment_deferred.call_args.args[3] == "21"
+        assert seen["issue_comments_baselined"] is True
+
+    def test_each_comment_kind_keeps_its_own_baseline_flag(self, tmp_path):
+        platform = MagicMock()
+        body = make_comment(id=30, author_id="reviewer1", comment_kind="review_body",
+                            created_at=(datetime.now(timezone.utc) - timedelta(days=3)).isoformat(),
+                            resolvable=False)
+        issue = make_comment(id=31, author_id="github-actions", comment_kind="issue_comment",
+                             created_at=(datetime.now(timezone.utc) - timedelta(days=3)).isoformat(),
+                             resolvable=False)
+        platform.get_pr_comments.return_value = [body, issue]
+        config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
+        seen = {"review_bodies_baselined": True}
+
+        with patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.run_balanced", return_value='{"results": [{"id": 0, "actionable": true, "reason": "clear"}]}'), \
+             patch("features.own_prs.q.enqueue_job"), \
+             patch("features.own_prs.log"):
+            mock_comments.has_comment_state.return_value = True
+            mock_comments.fetch_and_detect_comments.return_value = {"new": [body, issue], "edited": []}
+            mock_comments.get_unprocessed_comments.return_value = []
+            mock_comments.get_deferred_comments.return_value = []
+            own_prs._check_comments(config, "test", platform, make_pr(), "http://base", seen=seen)
+
+        seen_ids = [c.args[3] for c in mock_comments.mark_comment_seen.call_args_list]
+        assert seen_ids == ["31"]
+        assert seen["issue_comments_baselined"] is True
+
     def test_new_comment_pushes_existing_window(self, tmp_path):
         platform = MagicMock()
         comment = make_comment(id=11, author_id="reviewer1", body="Also fix this")
@@ -569,6 +633,16 @@ class TestSelfId:
 
     def test_missing_platform_falls_back_to_the_account_id(self):
         assert own_prs._self_id({"bitbucket": {"user_account_id": "me-bb"}}) == "me-bb"
+
+    def test_github_instance_without_a_configured_login_asks_the_adapter(self):
+        platform = MagicMock()
+        platform.self_id.return_value = "danialjatropos"
+        config = {"job": {"platform": "github"}, "github": {"repo": ["org/svc"]}}
+        assert own_prs._self_id(config, platform) == "danialjatropos"
+
+    def test_github_instance_without_a_login_or_an_adapter_is_empty(self):
+        config = {"job": {"platform": "github"}, "github": {"repo": ["org/svc"]}}
+        assert own_prs._self_id(config) == ""
 
 
 class TestReopenedThreadEndToEnd:
@@ -1051,3 +1125,58 @@ class TestEnsureWorktree:
         pr = make_pr(repo="nonexistent")
         with patch("features.own_prs.get_repos", return_value=[{"name": "other", "path": "/x"}]):
             assert own_prs._ensure_worktree(config, pr) is None
+
+
+class TestTicketOwnership:
+    def _config(self, tmp_path):
+        return {"_state_dir": tmp_path, "_base_url": "http://base",
+                "job": {"key": "test", "platform": "github"},
+                "github": {"user": "me-gh"}, "workspace": {"repos": []}}
+
+    def _run_check(self, tmp_path, tickets, on_comments=None):
+        platform = MagicMock()
+        platform.list_my_open_prs.return_value = [make_pr(repo="svc", id=171)]
+
+        def load(module):
+            return tickets if module == "tickets" else {}
+
+        with patch("features.own_prs.make_platform", return_value=platform), \
+             patch("features.own_prs.state.load", side_effect=load), \
+             patch("features.own_prs.state.save") as mock_save, \
+             patch("features.own_prs._cache_pr_metadata"), \
+             patch("features.own_prs._check_comments", side_effect=on_comments) as mock_comments, \
+             patch("features.own_prs._check_base_fresh") as mock_base, \
+             patch("features.own_prs._check_ci") as mock_ci, \
+             patch("features.own_prs._check_stale"):
+            own_prs.check(self._config(tmp_path))
+        return {"comments": mock_comments, "base": mock_base, "ci": mock_ci, "save": mock_save}
+
+    def test_ticket_owned_pr_is_named(self):
+        tickets = {"LSC-51": {"prs": [{"repo": "svc", "id": 171}]}}
+        with patch("features.own_prs.state.load", return_value=tickets):
+            assert own_prs._ticket_owns({"repo": "svc", "id": 171}) == "LSC-51"
+            assert own_prs._ticket_owns({"repo": "svc", "id": 172}) == ""
+            assert own_prs._ticket_owns({"repo": "other", "id": 171}) == ""
+
+    def test_pr_already_on_a_ticket_is_left_to_the_ticket_lane(self, tmp_path):
+        calls = self._run_check(tmp_path, {"LSC-51": {"prs": [{"repo": "svc", "id": 171}]}})
+        calls["comments"].assert_not_called()
+        calls["base"].assert_not_called()
+        calls["ci"].assert_not_called()
+
+    def test_untracked_pr_runs_every_step(self, tmp_path):
+        calls = self._run_check(tmp_path, {})
+        calls["comments"].assert_called_once()
+        calls["base"].assert_called_once()
+        calls["ci"].assert_called_once()
+
+    def test_adoption_during_the_poll_stops_the_base_and_ci_steps(self, tmp_path):
+        tickets: dict = {}
+
+        def adopt(*args, **kwargs):
+            tickets["LSC-51"] = {"prs": [{"repo": "svc", "id": 171}]}
+
+        calls = self._run_check(tmp_path, tickets, on_comments=adopt)
+        calls["comments"].assert_called_once()
+        calls["base"].assert_not_called()
+        calls["ci"].assert_not_called()
