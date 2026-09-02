@@ -22,7 +22,7 @@
       .join("");
   }
 
-  window.frshtyLinkify = function (text, linkmap) {
+  window.frshtyLinkify = function (text, linkmap, base) {
     let t = esc(text || "");
     t = t.replace(/https?:\/\/[^\s<>()"']+[^\s<>()"'.,;:]/g, m => anchor(m, m));
     const repos = (linkmap && linkmap.repos) || {};
@@ -40,7 +40,7 @@
         anchor(repos[mentioned[0]].commit.replace("{sha}", m), m)));
     }
     t = outsideAnchors(t, seg => seg.replace(/\b([A-Z]{2,6})-(\d+)\b/g, (m, p, n) =>
-      TICKET_BLOCKLIST.has(p) ? m : anchor("/tickets/" + p + "-" + n, m)));
+      TICKET_BLOCKLIST.has(p) ? m : anchor((base || "") + "/tickets/" + p + "-" + n, m)));
     return t;
   };
 })();

@@ -53,15 +53,16 @@
 <div v-if="item">
   <div class="text-xs text-gray-500 mb-2"><a href="/tasks" class="underline">← tasks</a></div>
   <h1 class="text-lg font-bold">{{ item.objective }}</h1>
-  <div class="mt-1" v-if="thread">
+  <div class="mt-1" v-if="thread && !peer">
     <a class="ln-pill ln-pill-violet ln-thread-pill" style="text-decoration:none"
        :href="'/threads/' + thread.root_id" :title="'thread rooted at task #' + thread.root_id">⑂ {{ thread.title }}</a>
   </div>
   <div class="mt-1">
     <span :class="['badge', badgeCls]">{{ stateLabel }}</span>
     <span class="text-xs text-gray-500 ml-2">#{{ item.id }} · {{ item.scope }} · {{ item.instance_key || 'no instance' }} · continues {{ item.continues_used }}/{{ item.continue_cap }}<span v-if="provider"> · {{ provider }}</span><span v-if="item.contexts"> · {{ item.contexts }}</span></span>
-    <a v-if="sourceItem" :href="'/tasks/' + sourceItem.id" class="text-xs text-blue-400 underline ml-3" :title="sourceItem.objective">follows #{{ sourceItem.id }}</a>
-    <a :href="'/tasks/' + item.id + '/terminal'" target="_blank" class="text-xs text-blue-400 underline ml-3">open terminal</a>
+    <span v-if="peer" class="badge b-other" :title="'this task runs on the ' + peer + ' host'">⇄ {{ peer }}</span>
+    <a v-if="sourceItem" :href="taskHref(sourceItem.id)" class="text-xs text-blue-400 underline ml-3" :title="sourceItem.objective">follows #{{ sourceItem.id }}</a>
+    <a :href="terminalHref" target="_blank" class="text-xs text-blue-400 underline ml-3">open terminal</a>
   </div>
   <div class="sec" v-if="item.state === 'needs_ack'">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Acknowledge</h2>
@@ -111,7 +112,7 @@
     <div class="text-sm" style="white-space:pre-wrap" v-if="item.summary" v-html="lk(item.summary)"></div>
     <div class="text-xs text-gray-600" v-else>No summary yet.</div>
     <div class="mt-1">
-      <a :href="'/tasks/' + item.id + '/summary'" target="_blank" class="text-xs text-blue-400 underline">open summary page</a>
+      <a :href="taskHref(item.id, '/summary')" target="_blank" class="text-xs text-blue-400 underline">open summary page</a>
       <span class="text-xs text-blue-400 underline ml-3 cursor-pointer" @click="debrief">{{ debriefBusy ? "debriefing…" : "regenerate" }}</span>
       <span class="text-xs text-red-400 ml-3" v-if="debriefError">{{ debriefError }}</span>
     </div>
@@ -183,7 +184,7 @@
   <div class="sec" v-if="followupChildren.length">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Followed up by</h2>
     <div v-for="c in followupChildren" class="text-sm">
-      <a :href="'/tasks/' + c.id" class="text-blue-400 underline">#{{ c.id }}</a>
+      <a :href="taskHref(c.id)" class="text-blue-400 underline">#{{ c.id }}</a>
       <span class="text-gray-400 ml-1">{{ c.objective }}</span>
       <span class="text-xs text-gray-500 ml-2">{{ c.state.replace('_', ' ') }}</span>
     </div>
@@ -191,8 +192,8 @@
   <div class="sec" v-if="artifacts.length">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Artifacts</h2>
     <div v-for="a in artifacts" class="art">
-      <a :href="'/api/work/artifact_file/' + a.id" target="_blank" class="underline">{{ a.path }}</a> <span class="text-gray-500">— {{ a.note }}</span>
-      <img v-if="isImg(a.path)" :src="'/api/work/artifact_file/' + a.id" :alt="a.note || a.path"
+      <a :href="artifactUrl(a)" target="_blank" class="underline">{{ a.path }}</a> <span class="text-gray-500">— {{ a.note }}</span>
+      <img v-if="isImg(a.path)" :src="artifactUrl(a)" :alt="a.note || a.path"
            @error="$event.target.style.display='none'">
     </div>
   </div>
@@ -264,6 +265,8 @@ window.addEventListener("unhandledrejection", event => showWorkFatal(event.reaso
 
 const app = frshtyApp({
   data() { return { features: {}, instanceName: "", thread: null, needsYou: 0,
+                    peer: new URLSearchParams(location.search).get("peer") || "",
+                    peerBase: "",
                     item: null, loadError: "", timeline: [], events: [], artifacts: [], replyText: "", replyError: "",
                     timelineCap: 100, timelineFull: false,
                     timelineImagesOpen: {},
@@ -281,7 +284,11 @@ const app = frshtyApp({
     },
     crumbs() {
       const id = location.pathname.split("/")[2];
-      return ["Work", "Tasks", "#" + id];
+      return ["Work", "Tasks", (this.peer ? this.peer + " #" : "#") + id];
+    },
+    terminalHref() {
+      if (!this.item) return "";
+      return (this.peerBase || "") + "/tasks/" + this.item.id + "/terminal";
     },
     provider() {
       return this.runs.length ? this.runs[this.runs.length - 1].provider : "";
@@ -333,7 +340,17 @@ const app = frshtyApp({
     },
   },
   methods: {
-    lk(text) { return window.frshtyLinkify(text, this.linkmap); },
+    lk(text) { return window.frshtyLinkify(text, this.linkmap, this.peerBase); },
+    api(path) {
+      return this.peer ? "/api/work/peers/" + encodeURIComponent(this.peer) + path : path;
+    },
+    taskHref(id, suffix) {
+      return "/tasks/" + id + (suffix || "") +
+             (this.peer ? "?peer=" + encodeURIComponent(this.peer) : "");
+    },
+    artifactUrl(a) {
+      return (this.peerBase || "") + "/api/work/artifact_file/" + a.id;
+    },
     ts(at) {
       return window.frshtyTime.stamp(at);
     },
@@ -374,7 +391,8 @@ const app = frshtyApp({
       return `▸ show ${count} image${count === 1 ? "" : "s"}`;
     },
     timelineImageUrl(img) {
-      return `/api/work/items/${this.item.id}/transcript-image/${encodeURIComponent(img.id)}`;
+      return (this.peerBase || "") +
+             `/api/work/items/${this.item.id}/transcript-image/${encodeURIComponent(img.id)}`;
     },
     async loadConfig() {
       try {
@@ -384,13 +402,24 @@ const app = frshtyApp({
       } catch (e) {}
     },
     async loadLinkmap() {
-      try { this.linkmap = await (await fetch("/api/work/linkmap")).json(); } catch (e) {}
+      try { this.linkmap = await (await fetch(this.api("/api/work/linkmap"))).json(); } catch (e) {}
+    },
+    async loadPeerBase() {
+      if (!this.peer) return;
+      try {
+        const peers = (await (await fetch("/api/work/peers")).json()).peers || [];
+        const match = peers.find(p => p.key === this.peer);
+        this.peerBase = match ? match.base_url : "";
+        if (!match) this.loadError = `unknown peer '${this.peer}' — check config/peers.toml`;
+      } catch (e) {
+        this.loadError = "could not read the peer list: " + (e.message || String(e));
+      }
     },
     async refresh() {
       const seq = ++this._refreshSeq;
       const id = location.pathname.split("/")[2];
       try {
-        const r = await fetch(`/api/work/items/${id}/detail`);
+        const r = await fetch(this.api(`/api/work/items/${id}/detail`));
         if (!r.ok) {
           let detail = "";
           try { detail = (await r.json()).error || ""; } catch (e) {}
@@ -437,7 +466,7 @@ const app = frshtyApp({
     },
     async fuSend(f) {
       this.fuError[f.id] = "";
-      const r = await fetch(`/api/work/followups/${f.id}/send`, {
+      const r = await fetch(this.api(`/api/work/followups/${f.id}/send`), {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: this.fuText[f.id] || "",
                                contexts: this.fuCtx[f.id] || [], slack: !!this.fuSlack[f.id],
@@ -451,14 +480,14 @@ const app = frshtyApp({
       if (!text || this.fupBusy) return;
       this.fupBusy = true; this.fupError = "";
       try {
-        const r = await fetch(`/api/work/items/${this.item.id}/followup`, {
+        const r = await fetch(this.api(`/api/work/items/${this.item.id}/followup`), {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text, contexts: this.fupCtx, slack: this.fupSlack,
                                  agent: this.fupAgent }),
         });
         const d = await r.json();
         if (!r.ok) { this.fupError = d.error || ("launch failed HTTP " + r.status); return; }
-        location.href = "/tasks/" + d.item_id;
+        location.href = this.taskHref(d.item_id);
       } catch (e) {
         this.fupError = "launch failed: " + e.message;
       } finally {
@@ -466,14 +495,14 @@ const app = frshtyApp({
       }
     },
     async fuDismiss(f) {
-      const r = await fetch(`/api/work/followups/${f.id}/dismiss`, { method: "POST" });
+      const r = await fetch(this.api(`/api/work/followups/${f.id}/dismiss`), { method: "POST" });
       if (!r.ok) { const d = await r.json(); this.fuError[f.id] = d.error || "dismiss failed"; }
       await this.refresh();
     },
     async act(action) {
       this.actError = "";
       try {
-        const r = await fetch(`/api/work/items/${this.item.id}/action`, {
+        const r = await fetch(this.api(`/api/work/items/${this.item.id}/action`), {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ action }),
         });
@@ -487,7 +516,7 @@ const app = frshtyApp({
       if (this.debriefBusy) return;
       this.debriefBusy = true; this.debriefError = "";
       try {
-        const r = await fetch(`/api/work/items/${this.item.id}/debrief`, { method: "POST" });
+        const r = await fetch(this.api(`/api/work/items/${this.item.id}/debrief`), { method: "POST" });
         if (!r.ok) { const d = await r.json(); this.debriefError = d.error || ("debrief failed HTTP " + r.status); }
       } catch (e) {
         this.debriefError = "debrief failed: " + e.message;
@@ -501,7 +530,7 @@ const app = frshtyApp({
       if (!text || this.btwBusy) return;
       this.btwBusy = true; this.btwError = "";
       try {
-        const r = await fetch(`/api/work/items/${this.item.id}/btw`, {
+        const r = await fetch(this.api(`/api/work/items/${this.item.id}/btw`), {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text }),
         });
@@ -519,7 +548,7 @@ const app = frshtyApp({
       if (!text) return;
       this.replyError = "";
       try {
-        const r = await fetch(`/api/work/items/${this.item.id}/reply`, {
+        const r = await fetch(this.api(`/api/work/items/${this.item.id}/reply`), {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text }),
         });
@@ -534,6 +563,7 @@ const app = frshtyApp({
   mounted() {
     this._refreshSeq = 0;
     this.loadConfig();
+    this.loadPeerBase();
     this.loadLinkmap();
     this.refresh();
     setInterval(() => this.refresh(), 15000);

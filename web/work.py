@@ -1,13 +1,13 @@
 import os
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Body, Request
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                RedirectResponse, Response)
 
 import core.db as db
 import core.terminal as terminal
-from services import (work_artifacts, work_debrief, work_launch, work_store,
-                      work_tags)
+from services import (work_artifacts, work_debrief, work_launch, work_peers,
+                      work_store, work_tags)
 from web.pages import _template
 
 
@@ -41,6 +41,32 @@ def work_page():
 
 
 DONE_PAGE_SIZE = 20
+
+
+@router.get("/api/work/peers")
+def api_work_peers():
+    """The remote task boards this host can read and write.
+
+    The board asks every source for its own items and merges them in the
+    browser, so a peer that is asleep costs one failed request instead of
+    stalling the local board."""
+    return {"peers": work_peers.peers()}
+
+
+@router.get("/api/work/peers/{key}/{path:path}")
+def api_work_peer_get(key: str, path: str, request: Request):
+    status, payload = work_peers.request(key, "GET", path,
+                                         params=dict(request.query_params))
+    return JSONResponse(payload, status_code=status)
+
+
+@router.post("/api/work/peers/{key}/{path:path}")
+def api_work_peer_post(key: str, path: str, request: Request,
+                       body: dict | None = Body(default=None)):
+    status, payload = work_peers.request(key, "POST", path,
+                                         params=dict(request.query_params),
+                                         body=body or {})
+    return JSONResponse(payload, status_code=status)
 
 
 @router.get("/api/work/threads")
