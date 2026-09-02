@@ -1320,7 +1320,10 @@ def grouped_items(now: datetime | None = None, q: str = "",
 
     A completed task stays in the done group until the operator archives it.
     Archiving is the only way it leaves, so the board and the archive split
-    the completed tasks between them and none of them becomes unreachable."""
+    the completed tasks between them and none of them becomes unreachable.
+    A search reads the whole task history, so a search on the board also
+    returns the archived tasks. Without them a completed task becomes
+    unfindable the moment it is archived."""
     now = now or datetime.now(timezone.utc)
     stale_cutoff = (now - timedelta(minutes=STALE_AFTER_MINUTES)).isoformat()
     now_iso = now.isoformat()
@@ -1337,6 +1340,12 @@ def grouped_items(now: datetime | None = None, q: str = "",
         "EXISTS(SELECT 1 FROM work_events e WHERE e.work_item_id = i.id AND e.kind = 'operator_done') AS operator_confirmed "
         "FROM work_items i ORDER BY i.priority DESC, i.created_at DESC"
     )
+
+    def keep_done(row: dict) -> bool:
+        if archived:
+            return bool(row["archived_at"])
+        return bool(q) or not row["archived_at"]
+
     groups: dict[str, list[dict]] = {g: [] for g in GROUPS}
     for row in rows:
         if q and q not in (row["objective"] or "").lower():
@@ -1345,7 +1354,7 @@ def grouped_items(now: datetime | None = None, q: str = "",
             continue
         state = row["state"]
         if state == "done":
-            if bool(row["archived_at"]) == archived:
+            if keep_done(row):
                 groups["done"].append(row)
             continue
         if state == "waiting_external" and row["snoozed_until"] and row["snoozed_until"] <= now_iso:
