@@ -351,6 +351,10 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
             (repo / "app.txt").write_text("base\ngenerated_feature\n")
             return "planned"
 
+        if "save it as docs/FLOW.html" in prompt:
+            (cwd / "docs" / "FLOW.html").write_text("<html><body>flow</body></html>")
+            return "flow-doc-written"
+
         if "Run /tri-review" in prompt and "Fix all blocking findings" not in prompt:
             (cwd / "docs" / "tri-review.md").write_text(
                 "# Tri Review\n\nBlocking issue: generated_feature needs review_fix.\n\nVERDICT: FAIL\n"
@@ -428,6 +432,10 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
             ticket_dir = workspace_root / "tickets" / f"{TICKET_KEY}-build-lifecycle-flow"
             assert (ticket_dir / "docs" / "change-manifest.md").exists()
             assert (ticket_dir / REPO_NAME / "app.txt").read_text() == "base\ngenerated_feature\n"
+
+            _enqueue_and_wait(instance_key, "scan_tickets")
+            _wait_for_job("generate_flow_doc", TICKET_KEY)
+            assert (ticket_dir / "docs" / "FLOW.html").exists()
 
             _enqueue_and_wait(instance_key, "scan_tickets")
             _wait_for_job("start_reviewing", TICKET_KEY)

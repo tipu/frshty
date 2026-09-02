@@ -277,6 +277,10 @@ def test_ten_concurrent_prd_tickets_serialize_and_complete(tmp_path):
                               session_id: str | None = None,
                               resume: bool = False):
         cwd = Path(cwd)
+        if "save it as docs/FLOW.html" in prompt:
+            (cwd / "docs" / "FLOW.html").write_text("<html><body>flow</body></html>")
+            return "flow-doc-written"
+
         if "Run /tri-review" in prompt:
             (cwd / "docs" / "tri-review.md").write_text(
                 "# Tri Review\n\nAll good.\n\nVERDICT: PASS\n"
