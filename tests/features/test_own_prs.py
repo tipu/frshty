@@ -442,6 +442,7 @@ class TestCheckComments:
              patch("features.own_prs.run_balanced") as mock_sonnet, \
              patch("features.own_prs.q.enqueue_job") as mock_enqueue, \
              patch("features.own_prs.log"):
+            mock_comments.settled_comment_ids.return_value = set()
             mock_comments.fetch_and_detect_comments.return_value = {"new": [comment], "edited": []}
             mock_comments.get_unprocessed_comments.return_value = []
             mock_comments.get_deferred_comments.return_value = []
@@ -461,6 +462,7 @@ class TestCheckComments:
         with patch("features.own_prs.comments") as mock_comments, \
              patch("features.own_prs.q.enqueue_job") as mock_enqueue, \
              patch("features.own_prs.log"):
+            mock_comments.settled_comment_ids.return_value = set()
             mock_comments.fetch_and_detect_comments.return_value = {"new": [], "edited": []}
             mock_comments.get_unprocessed_comments.return_value = [
                 {"comment_id": "10", "state": "processing", "error_count": 0, "last_checked_at": stale},
@@ -487,6 +489,168 @@ class TestCheckComments:
             own_prs._check_comments(config, "test", platform, pr, "http://base")
         mock_comments.mark_comment_deleted.assert_called_once()
         mock_enqueue.assert_not_called()
+
+class TestReopenAnsweredThreads:
+    def test_reply_after_resolve_clears_the_flag_on_the_whole_thread(self):
+        root = make_comment(id=10, author_id="r1", resolved=True, thread_id="T1")
+        reply = make_comment(id=11, author_id="r1", resolved=True, thread_id="T1")
+        reopened = own_prs._reopen_answered_threads([root, reply], {"10"})
+        assert reopened == ["T1"]
+        assert root["resolved"] is False
+        assert reply["resolved"] is False
+
+    def test_thread_with_nothing_settled_in_it_keeps_the_flag(self):
+        root = make_comment(id=10, author_id="r1", resolved=True, thread_id="T1")
+        reply = make_comment(id=11, author_id="r1", resolved=True, thread_id="T1")
+        reopened = own_prs._reopen_answered_threads([root, reply], set())
+        assert reopened == []
+        assert root["resolved"] is True
+        assert reply["resolved"] is True
+
+    def test_fully_settled_thread_keeps_the_flag(self):
+        root = make_comment(id=10, author_id="r1", resolved=True, thread_id="T1")
+        reply = make_comment(id=11, author_id="r1", resolved=True, thread_id="T1")
+        assert own_prs._reopen_answered_threads([root, reply], {"10", "11"}) == []
+        assert root["resolved"] is True
+
+    def test_unresolved_thread_is_untouched(self):
+        root = make_comment(id=10, author_id="r1", resolved=False, thread_id="T1")
+        reply = make_comment(id=11, author_id="r1", resolved=False, thread_id="T1")
+        assert own_prs._reopen_answered_threads([root, reply], {"10"}) == []
+
+    def test_one_reopened_thread_does_not_reopen_its_neighbour(self):
+        a_root = make_comment(id=10, author_id="r1", resolved=True, thread_id="T1")
+        a_reply = make_comment(id=11, author_id="r1", resolved=True, thread_id="T1")
+        b_root = make_comment(id=20, author_id="r1", resolved=True, thread_id="T2")
+        own_prs._reopen_answered_threads([a_root, a_reply, b_root], {"10"})
+        assert a_reply["resolved"] is False
+        assert b_root["resolved"] is True
+
+    def test_threads_are_grouped_by_parent_when_the_adapter_has_no_thread_id(self):
+        root = make_comment(id=10, author_id="r1", resolved=True)
+        reply = make_comment(id=11, author_id="r1", resolved=True, parent_id=10)
+        other = make_comment(id=20, author_id="r1", resolved=True)
+        reopened = own_prs._reopen_answered_threads([root, reply, other], {"10"})
+        assert reopened == ["10"]
+        assert root["resolved"] is False
+        assert reply["resolved"] is False
+        assert other["resolved"] is True
+
+    def test_a_parent_cycle_does_not_hang(self):
+        a = make_comment(id=10, author_id="r1", resolved=True, parent_id=11)
+        b = make_comment(id=11, author_id="r1", resolved=True, parent_id=10)
+        own_prs._reopen_answered_threads([a, b], {"10"})
+
+
+class TestSelfId:
+    def test_github_instance_reads_the_login(self):
+        config = {"job": {"platform": "github"}, "github": {"user": "me-gh"},
+                  "bitbucket": {"user_account_id": "me-bb"}}
+        assert own_prs._self_id(config) == "me-gh"
+
+    def test_bitbucket_instance_reads_the_account_id(self):
+        config = {"job": {"platform": "bitbucket"}, "bitbucket": {"user_account_id": "me-bb"}}
+        assert own_prs._self_id(config) == "me-bb"
+
+    def test_missing_platform_falls_back_to_the_account_id(self):
+        assert own_prs._self_id({"bitbucket": {"user_account_id": "me-bb"}}) == "me-bb"
+
+
+class TestReopenedThreadEndToEnd:
+    def _config(self, tmp_path):
+        return {"_state_dir": tmp_path, "job": {"platform": "github", "key": "test"},
+                "github": {"user": "me-gh"}, "workspace": {"repos": []}}
+
+    def test_reply_after_resolve_is_deferred_for_a_fix(self, tmp_path):
+        platform = MagicMock()
+        root = make_comment(id=10, author_id="adamwalz", body="Add a fingerprint",
+                            resolved=True, thread_id="T1")
+        reply = make_comment(id=11, author_id="adamwalz", resolved=True, thread_id="T1",
+                             body="Reopening - this landed as resolved but the line is unchanged")
+        platform.get_pr_comments.return_value = [root, reply]
+        pr = make_pr()
+        seen = {}
+
+        with patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.run_balanced",
+                   return_value='{"results": [{"id": 0, "actionable": true, "reason": "clear"}]}'), \
+             patch("features.own_prs.q.enqueue_job"), \
+             patch("features.own_prs.log"):
+            mock_comments.settled_comment_ids.return_value = {"10"}
+            mock_comments.fetch_and_detect_comments.return_value = {"new": [reply], "edited": []}
+            mock_comments.get_unprocessed_comments.return_value = []
+            mock_comments.get_deferred_comments.return_value = []
+            own_prs._check_comments(self._config(tmp_path), "test", platform, pr,
+                                    "http://base", seen=seen)
+
+        mock_comments.mark_comment_deferred.assert_called_once()
+        assert mock_comments.mark_comment_deferred.call_args[0][3] == "11"
+
+    def test_reopened_thread_emits_an_event(self, tmp_path):
+        platform = MagicMock()
+        root = make_comment(id=10, author_id="adamwalz", resolved=True, thread_id="T1")
+        reply = make_comment(id=11, author_id="adamwalz", resolved=True, thread_id="T1")
+        platform.get_pr_comments.return_value = [root, reply]
+
+        with patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.run_balanced",
+                   return_value='{"results": [{"id": 0, "actionable": true, "reason": "clear"}]}'), \
+             patch("features.own_prs.q.enqueue_job"), \
+             patch("features.own_prs.log.emit") as mock_emit:
+            mock_comments.settled_comment_ids.return_value = {"10"}
+            mock_comments.fetch_and_detect_comments.return_value = {"new": [reply], "edited": []}
+            mock_comments.get_unprocessed_comments.return_value = []
+            mock_comments.get_deferred_comments.return_value = []
+            own_prs._check_comments(self._config(tmp_path), "test", platform, make_pr(),
+                                    "http://base", seen={})
+
+        events = [c[0][0] for c in mock_emit.call_args_list]
+        assert "pr_thread_reopened" in events
+
+    def test_a_reply_frshty_wrote_itself_is_not_a_reopen(self, tmp_path):
+        platform = MagicMock()
+        root = make_comment(id=10, author_id="adamwalz", resolved=True, thread_id="T1")
+        reply = make_comment(id=11, author_id="me-gh", body="fixed in abc123",
+                             resolved=True, thread_id="T1")
+        platform.get_pr_comments.return_value = [root, reply]
+
+        with patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.run_balanced") as mock_classify, \
+             patch("features.own_prs.q.enqueue_job") as mock_enqueue, \
+             patch("features.own_prs.log"):
+            mock_comments.settled_comment_ids.return_value = {"10"}
+            mock_comments.fetch_and_detect_comments.return_value = {"new": [reply], "edited": []}
+            mock_comments.get_unprocessed_comments.return_value = []
+            mock_comments.get_deferred_comments.return_value = []
+            own_prs._check_comments(self._config(tmp_path), "test", platform, make_pr(),
+                                    "http://base", seen={})
+
+        mock_classify.assert_not_called()
+        mock_enqueue.assert_not_called()
+        mock_comments.mark_comment_deferred.assert_not_called()
+
+    def test_reclaim_does_not_close_a_reopened_thread(self, tmp_path):
+        platform = MagicMock()
+        root = make_comment(id=10, author_id="adamwalz", resolved=True, thread_id="T1")
+        reply = make_comment(id=11, author_id="adamwalz", resolved=True, thread_id="T1")
+        platform.get_pr_comments.return_value = [root, reply]
+
+        with patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.q.enqueue_job"), \
+             patch("features.own_prs.log"):
+            mock_comments.settled_comment_ids.return_value = {"10"}
+            mock_comments.fetch_and_detect_comments.return_value = {"new": [], "edited": []}
+            mock_comments.get_unprocessed_comments.return_value = [
+                {"comment_id": "11", "state": "new", "error_count": 1, "last_checked_at": None},
+            ]
+            mock_comments.get_deferred_comments.return_value = []
+            own_prs._check_comments(self._config(tmp_path), "test", platform, make_pr(),
+                                    "http://base", seen={})
+
+        mock_comments.mark_comment_processed.assert_not_called()
+        mock_comments.mark_comment_deferred.assert_called_once()
+        assert mock_comments.mark_comment_deferred.call_args[0][3] == "11"
+
 
 class TestFixComment:
     def _payload(self, **comment_kw):
@@ -768,6 +932,7 @@ class TestFixCommentsBatch:
              patch("features.own_prs.run_claude_code") as mock_claude, \
              patch("features.own_prs.comments") as mock_comments, \
              patch("features.own_prs.log.emit"):
+            mock_comments.settled_comment_ids.return_value = set()
             ok, reason = own_prs.fix_comments_batch(self._config(tmp_path), self._payload(ids=("10", "99")))
 
         assert ok is True
