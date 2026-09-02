@@ -81,6 +81,9 @@ class FakePlatform:
         # serialisation itself.
         self._merge_lock = threading.Lock()
 
+    def self_id(self) -> str:
+        return self.bot_user
+
     def list_my_open_prs(self) -> list[dict]:
         return [
             {"id": pr["id"], "repo": pr["repo"], "title": pr["title"],
