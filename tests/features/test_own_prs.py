@@ -541,6 +541,21 @@ class TestReopenAnsweredThreads:
         b = make_comment(id=11, author_id="r1", resolved=True, parent_id=10)
         own_prs._reopen_answered_threads([a, b], {"10"})
 
+    def test_our_own_reply_does_not_reopen_the_thread(self):
+        """Our reply never enters comment_state, so counting it as owed would
+        reopen its thread on every poll for the life of the PR."""
+        root = make_comment(id=10, author_id="r1", resolved=True, thread_id="T1")
+        ours = make_comment(id=11, author_id="me", resolved=True, thread_id="T1")
+        assert own_prs._reopen_answered_threads([root, ours], {"10"}, "me") == []
+        assert root["resolved"] is True
+
+    def test_a_reviewer_reply_still_reopens_a_thread_we_replied_on(self):
+        root = make_comment(id=10, author_id="r1", resolved=True, thread_id="T1")
+        ours = make_comment(id=11, author_id="me", resolved=True, thread_id="T1")
+        theirs = make_comment(id=12, author_id="r1", resolved=True, thread_id="T1")
+        assert own_prs._reopen_answered_threads([root, ours, theirs], {"10"}, "me") == ["T1"]
+        assert theirs["resolved"] is False
+
 
 class TestSelfId:
     def test_github_instance_reads_the_login(self):
