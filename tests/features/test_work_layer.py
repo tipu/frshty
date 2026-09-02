@@ -71,6 +71,107 @@ class TestTransitions:
         assert "tmux exploded" in item["stop_reason"]
 
 
+class TestAcknowledgement:
+    """A task the agent reports done waits for the operator to acknowledge it.
+
+    The operator marking a task done is a confirmation already, so it goes
+    straight to done. Only the agent's own report parks a task in needs_ack."""
+
+    def _reported_done(self, monkeypatch, objective="agent reported done"):
+        from unittest.mock import MagicMock
+        item_id = _mkitem(objective)
+        work_store.add_run(item_id, f"sid-ack-{item_id}", f"work-{item_id}", "/tmp")
+        work_store.record_event(f"sid-ack-{item_id}", "Stop", {})
+        monkeypatch.setattr(work_store, "last_assistant_text", lambda p: "All done.\nWORK_DONE")
+        monkeypatch.setattr(work_store, "tmux_send", MagicMock(return_value=True))
+        work_store.maybe_autocontinue(f"sid-ack-{item_id}", "/tmp/t.jsonl")
+        return item_id
+
+    def _state(self, item_id):
+        return db.query_one(
+            "SELECT state, archived_at FROM work_items WHERE id = ?", (item_id,))
+
+    def test_the_agent_report_parks_the_task_in_needs_ack(self, monkeypatch):
+        item_id = self._reported_done(monkeypatch)
+        assert self._state(item_id)["state"] == "needs_ack"
+
+    def test_the_operator_marking_it_done_skips_the_acknowledgement(self):
+        item_id = _mkitem("operator marked done")
+        work_store.apply_action(item_id, "done")
+        assert self._state(item_id)["state"] == "done"
+
+    def test_acknowledging_completes_the_task(self, monkeypatch):
+        item_id = self._reported_done(monkeypatch)
+        assert "error" not in work_store.apply_action(item_id, "ack")
+        assert self._state(item_id)["state"] == "done"
+        kinds = {e["kind"] for e in work_store.item_detail(item_id)["events"]}
+        assert "operator_ack" in kinds
+
+    def test_acknowledging_marks_the_task_as_confirmed_by_the_operator(self, monkeypatch):
+        item_id = self._reported_done(monkeypatch, "confirmed by the operator")
+        work_store.apply_action(item_id, "ack")
+        row = next(r for r in work_store.grouped_items(q="confirmed by the operator")["done"]
+                   if r["id"] == item_id)
+        assert row["operator_confirmed"]
+        assert work_store.item_detail(item_id)["item"]["done_source"] == "operator"
+
+    def test_archiving_acknowledges_and_files_the_task_in_one_step(self, monkeypatch):
+        item_id = self._reported_done(monkeypatch)
+        assert "error" not in work_store.apply_action(item_id, "archive")
+        row = self._state(item_id)
+        assert row["state"] == "done"
+        assert row["archived_at"]
+
+    def test_an_unfinished_task_cannot_be_acknowledged(self):
+        item_id = _mkitem("still working")
+        assert "error" in work_store.apply_action(item_id, "ack")
+        assert self._state(item_id)["state"] == "agent_working"
+
+    def test_a_completed_task_cannot_be_acknowledged_twice(self, monkeypatch):
+        item_id = self._reported_done(monkeypatch)
+        work_store.apply_action(item_id, "ack")
+        assert "error" in work_store.apply_action(item_id, "ack")
+
+    def test_reopening_sends_the_task_back(self, monkeypatch):
+        item_id = self._reported_done(monkeypatch)
+        work_store.apply_action(item_id, "reopen")
+        assert self._state(item_id)["state"] == "needs_you"
+
+    def test_the_board_shows_it_before_the_working_group(self, monkeypatch):
+        item_id = self._reported_done(monkeypatch)
+        groups = work_store.grouped_items()
+        assert item_id in {r["id"] for r in groups["needs_ack"]}
+        assert item_id not in {r["id"] for r in groups["done"]}
+        order = list(groups)
+        assert order.index("needs_ack") < order.index("agent_working")
+
+    def test_the_archive_view_leaves_out_an_unacknowledged_task(self, monkeypatch):
+        item_id = self._reported_done(monkeypatch, "archive view billing task")
+        archived = work_store.grouped_items(q="archive view billing task", archived=True)
+        assert item_id not in {r["id"] for rows in archived.values() for r in rows}
+
+    def test_archive_all_leaves_an_unacknowledged_task_on_the_board(self, monkeypatch):
+        item_id = self._reported_done(monkeypatch)
+        work_store.archive_completed()
+        assert self._state(item_id)["archived_at"] is None
+
+    def test_a_late_hook_event_cannot_resurrect_it(self, monkeypatch):
+        item_id = self._reported_done(monkeypatch)
+        work_store.record_event(f"sid-ack-{item_id}", "UserPromptSubmit", {})
+        assert self._state(item_id)["state"] == "needs_ack"
+
+    def test_a_reply_is_refused_until_it_is_reopened(self, monkeypatch):
+        item_id = self._reported_done(monkeypatch)
+        assert "reopen" in work_store.reply(item_id, "hello")["error"]
+
+    def test_a_follow_up_can_launch_before_it_is_acknowledged(self, monkeypatch):
+        from services import work_launch
+        item_id = self._reported_done(monkeypatch)
+        monkeypatch.setattr(work_launch, "personal_config", lambda: None)
+        out = work_launch.launch_followup(item_id, "next step")
+        assert "not done" not in out.get("error", "")
+
+
 class TestGrouping:
     def test_five_groups(self):
         now = datetime.now(timezone.utc)
@@ -575,12 +676,12 @@ class TestAutocontinue:
         assert db.query_one("SELECT state FROM work_items WHERE id = ?",
                             (item_id,))["state"] == "done"
 
-    def test_done_marker_completes_item(self, monkeypatch):
+    def test_done_marker_parks_item_for_acknowledgement(self, monkeypatch):
         item_id, run_id, sender = self._setup(monkeypatch, tail="All files written.\nWORK_DONE")
         out = work_store.maybe_autocontinue(f"sid-auto-{item_id}", "/tmp/t.jsonl")
-        assert out == "done"
+        assert out == "needs_ack"
         sender.assert_not_called()
-        assert self._state(item_id)["state"] == "done"
+        assert self._state(item_id)["state"] == "needs_ack"
         run = db.query_one("SELECT status FROM work_runs WHERE id = ?", (run_id,))
         assert run["status"] == "finished"
 
@@ -1437,9 +1538,9 @@ class TestBackgroundWait:
         assert db.query_one("SELECT state FROM work_items WHERE id = ?",
                             (item_id,))["state"] == "needs_you"
         out = work_store.maybe_autocontinue(f"sid-bgw-{item_id}", path)
-        assert out == "done"
+        assert out == "needs_ack"
         assert db.query_one("SELECT state FROM work_items WHERE id = ?",
-                            (item_id,))["state"] == "done"
+                            (item_id,))["state"] == "needs_ack"
 
     def test_operator_ask_tail_outranks_bg_wait(self, tmp_path):
         path = self._transcript(tmp_path, [

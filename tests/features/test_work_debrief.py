@@ -61,6 +61,14 @@ class TestRunDebrief:
             "SELECT kind FROM work_events WHERE work_item_id = ?", (item_id,))]
         assert "debrief_done" in kinds
 
+    def test_a_task_waiting_for_acknowledgement_is_debriefed(self):
+        """The summary is what the operator reads before acknowledging, so it
+        has to be written while the task still waits in needs_ack."""
+        item_id = work_store.create_item("waiting for acknowledgement")
+        work_store.add_run(item_id, f"sid-db-{item_id}", f"work-{item_id}", "/tmp")
+        db.execute("UPDATE work_items SET state = 'needs_ack' WHERE id = ?", (item_id,))
+        assert item_id in work_debrief._pending_done_items()
+
     def test_no_transcript_fails_once(self):
         item_id = _done_item("no transcript")
         out = work_debrief.run_debrief(item_id)

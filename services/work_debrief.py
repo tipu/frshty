@@ -175,7 +175,9 @@ def _run_debrief_locked(item_id: int) -> dict:
 
 
 def _pending_done_items() -> list:
-    done = db.query_all("SELECT id FROM work_items WHERE state = 'done' ORDER BY id")
+    done = db.query_all(
+        f"SELECT id FROM work_items WHERE state IN {work_store.FINISHED_STATES_SQL} "
+        "ORDER BY id")
     events = db.query_all(
         "SELECT work_item_id, kind FROM work_events "
         "WHERE kind IN ('debrief_done', 'debrief_failed', 'debrief_skipped')")

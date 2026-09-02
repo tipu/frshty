@@ -237,8 +237,9 @@ SUSPEND_IDLE_SECONDS = 30 * 60
 
 
 def suspend_idle_done_sessions(now: float | None = None) -> list[int]:
-    """Kill the tmux session of every done work item once its pane has sat
-    idle for SUSPEND_IDLE_SECONDS.
+    """Kill the tmux session of every finished work item once its pane has sat
+    idle for SUSPEND_IDLE_SECONDS. A task waiting to be acknowledged is
+    finished, so its session is suspended too.
 
     Without this every finished item keeps a resident Claude process forever.
     Nothing is lost by the kill: the conversation lives in the Claude
@@ -255,7 +256,7 @@ def suspend_idle_done_sessions(now: float | None = None) -> list[int]:
         if not suffix.isdigit() or now - s["activity"] < SUSPEND_IDLE_SECONDS:
             continue
         item = db.query_one("SELECT state FROM work_items WHERE id = ?", (int(suffix),))
-        if item is not None and item["state"] != "done":
+        if item is not None and item["state"] not in work_store.FINISHED_STATES:
             continue
         terminal.kill_terminal(f"work-{suffix}")
         killed.append(int(suffix))
@@ -298,7 +299,7 @@ def launch_followup(source_item_id: int, objective: str, cwd: str = "",
     source = db.query_one("SELECT id, state FROM work_items WHERE id = ?", (source_item_id,))
     if not source:
         return {"error": f"unknown source work item: {source_item_id}"}
-    if source["state"] != "done":
+    if source["state"] not in work_store.FINISHED_STATES:
         return {"error": f"source work item {source_item_id} is not done (state: {source['state']})"}
     return launch(objective, cwd=cwd, contexts=contexts, slack=slack,
                   source_item_id=source_item_id, agent=agent)

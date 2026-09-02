@@ -14,7 +14,10 @@ import core.db as db
 STALE_AFTER_MINUTES = 30
 STUCK_AFTER_MINUTES = 90
 BG_WAIT_RECHECK_HOURS = 2
-GROUPS = ("needs_you", "agent_working", "waiting_external", "failed_stale", "done")
+GROUPS = ("needs_ack", "needs_you", "agent_working", "waiting_external", "failed_stale", "done")
+FINISHED_STATES = ("needs_ack", "done")
+FINISHED_STATES_SQL = "('needs_ack', 'done')"
+_ACK_EVENT_KINDS_SQL = "('operator_done', 'operator_ack')"
 
 launch_lock = threading.Lock()
 _send_locks: dict[str, threading.Lock] = {}
@@ -252,7 +255,7 @@ def record_event(session_id: str, kind: str, payload: dict) -> bool:
             run_params.append(now)
         run_params.append(run["id"])
         c.execute(f"UPDATE work_runs SET {', '.join(run_sets)} WHERE id = ?", tuple(run_params))
-        if item["state"] == "done":
+        if item["state"] in FINISHED_STATES:
             return True
         if item_state:
             reason = ""
@@ -315,7 +318,7 @@ def record_question(session_id: str, tool_input: dict) -> bool:
         item = c.execute(
             "SELECT state FROM work_items WHERE id = ?", (run["work_item_id"],)
         ).fetchone()
-        if not item or item["state"] == "done":
+        if not item or item["state"] in FINISHED_STATES:
             return False
         first = (questions[0].get("question") or "").strip()
         c.execute(
@@ -374,9 +377,22 @@ def apply_action(item_id: int, action: str, until: str | None = None) -> dict:
                 "archived_at = NULL, updated_at = ? WHERE id = ?",
                 (now, item_id),
             )
+        elif action == "ack":
+            if item["state"] != "needs_ack":
+                return {"error": "only an agent-reported task can be acknowledged"}
+            c.execute("UPDATE work_items SET state = 'done', stop_reason = '', "
+                      "pending_question = '', updated_at = ? WHERE id = ?",
+                      (now, item_id))
         elif action == "archive":
-            if item["state"] != "done":
+            if item["state"] not in FINISHED_STATES:
                 return {"error": "only a completed task can be archived"}
+            if item["state"] == "needs_ack":
+                c.execute("UPDATE work_items SET state = 'done', stop_reason = '', "
+                          "pending_question = '', updated_at = ? WHERE id = ?",
+                          (now, item_id))
+                c.execute(
+                    "INSERT INTO work_events(work_item_id, kind, payload, created_at) "
+                    "VALUES (?, 'operator_ack', '{}', ?)", (item_id, now))
             c.execute("UPDATE work_items SET archived_at = ? WHERE id = ?", (now, item_id))
         elif action == "unarchive":
             c.execute("UPDATE work_items SET archived_at = NULL WHERE id = ?", (item_id,))
@@ -887,8 +903,8 @@ def item_detail(item_id: int) -> dict:
         "SELECT id, path, note, created_at FROM work_artifacts WHERE work_item_id = ? ORDER BY id",
         (item_id,))
     kinds = {e["kind"] for e in events}
-    if item["state"] == "done":
-        item["done_source"] = "operator" if "operator_done" in kinds else (
+    if item["state"] in FINISHED_STATES:
+        item["done_source"] = "operator" if kinds & {"operator_done", "operator_ack"} else (
             "agent" if "self_reported_done" in kinds else "unknown")
     timeline = transcript_timeline(resolve_transcript_path(runs[-1])) if runs else []
     source_item = None
@@ -967,7 +983,7 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
         final_lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
         if final_lines and final_lines[-1] == DONE_MARKER:
             c.execute(
-                "UPDATE work_items SET state = 'done', stop_reason = '', "
+                "UPDATE work_items SET state = 'needs_ack', stop_reason = '', "
                 "pending_question = '', current_checkpoint = ?, updated_at = ? WHERE id = ?",
                 (excerpt, now, run["work_item_id"]),
             )
@@ -978,7 +994,7 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
                 "VALUES (?, ?, 'self_reported_done', ?, ?)",
                 (run["work_item_id"], run["id"], db.dump_json({"tail": excerpt}), now),
             )
-            return "done"
+            return "needs_ack"
         if excerpt:
             c.execute("UPDATE work_items SET stop_reason = ? WHERE id = ?",
                       (excerpt, run["work_item_id"]))
@@ -1024,8 +1040,8 @@ def reply(item_id: int, text: str) -> dict:
         item = c.execute("SELECT state FROM work_items WHERE id = ?", (item_id,)).fetchone()
         if not item:
             return {"error": "unknown work item"}
-        if item["state"] == "done":
-            return {"error": "item is done; reopen it before replying"}
+        if item["state"] in FINISHED_STATES:
+            return {"error": "item is finished; reopen it before replying"}
         run = c.execute(
             "SELECT id, tmux_key, provider FROM work_runs WHERE work_item_id = ? "
             "ORDER BY id DESC LIMIT 1", (item_id,),
@@ -1318,6 +1334,11 @@ def grouped_items(now: datetime | None = None, q: str = "",
                   tags: str = "", archived: bool = False) -> dict[str, list[dict]]:
     """Group the work items for one board view.
 
+    A task the agent reported done lands in needs_ack, not in done. The
+    operator acknowledges it to complete it, or archives it, which
+    acknowledges and files it in one step. An unacknowledged task is never
+    archived, so it never reaches the archive view.
+
     A completed task stays in the done group until the operator archives it.
     Archiving is the only way it leaves, so the board and the archive split
     the completed tasks between them and none of them becomes unreachable.
@@ -1335,9 +1356,10 @@ def grouped_items(now: datetime | None = None, q: str = "",
         "(SELECT tmux_key FROM work_runs r WHERE r.work_item_id = i.id ORDER BY r.id DESC LIMIT 1) AS last_tmux_key, "
         "(SELECT provider FROM work_runs r WHERE r.work_item_id = i.id ORDER BY r.id DESC LIMIT 1) AS last_provider, "
         "(SELECT created_at FROM work_events e WHERE e.work_item_id = i.id "
-        "AND e.kind IN ('operator_done', 'self_reported_done') "
+        "AND e.kind IN ('operator_done', 'operator_ack', 'self_reported_done') "
         "ORDER BY e.id DESC LIMIT 1) AS completed_at, "
-        "EXISTS(SELECT 1 FROM work_events e WHERE e.work_item_id = i.id AND e.kind = 'operator_done') AS operator_confirmed "
+        f"EXISTS(SELECT 1 FROM work_events e WHERE e.work_item_id = i.id "
+        f"AND e.kind IN {_ACK_EVENT_KINDS_SQL}) AS operator_confirmed "
         "FROM work_items i ORDER BY i.priority DESC, i.created_at DESC"
     )
 
@@ -1353,6 +1375,10 @@ def grouped_items(now: datetime | None = None, q: str = "",
         if wanted_tags and wanted_tags.isdisjoint((row["tags"] or "").split(",")):
             continue
         state = row["state"]
+        if state == "needs_ack":
+            if not archived:
+                groups["needs_ack"].append(row)
+            continue
         if state == "done":
             if keep_done(row):
                 groups["done"].append(row)
@@ -1437,7 +1463,8 @@ def archive_completed() -> int:
 
     The board keeps a completed task until it is archived, so the first use of
     the archive faces a long list. One call clears that list, and Unarchive
-    still brings any single task back."""
+    still brings any single task back. A task waiting to be acknowledged is
+    not completed yet, so this call leaves it on the board."""
     now = _now()
     with db.tx() as c:
         return c.execute(
@@ -1445,15 +1472,16 @@ def archive_completed() -> int:
             (now,)).rowcount
 
 
-def needs_you_count(now: datetime | None = None) -> int:
-    """Count the tasks the board puts in its needs_you group.
+def attention_count(now: datetime | None = None) -> int:
+    """Count the tasks that wait on the operator: needs_ack plus needs_you.
 
     grouped_items promotes a waiting_external item back to needs_you once its
     snooze expires, so the rail badge has to apply the same rule or it will
-    disagree with the board it links to."""
+    disagree with the board it links to. A task the agent reported done also
+    waits on the operator, so the badge counts it too."""
     now = now or datetime.now(timezone.utc)
     row = db.query_one(
-        "SELECT COUNT(*) AS n FROM work_items WHERE state = 'needs_you' "
+        "SELECT COUNT(*) AS n FROM work_items WHERE state IN ('needs_ack', 'needs_you') "
         "OR (state = 'waiting_external' AND snoozed_until IS NOT NULL AND snoozed_until <= ?)",
         (now.isoformat(),))
     return row["n"] if row else 0
@@ -1516,7 +1544,9 @@ def threads(now: datetime | None = None) -> list[dict]:
 
 def thread_detail(root_id: int, now: datetime | None = None) -> dict:
     """The roll-up one thread page needs: its member tasks oldest first, the
-    artifacts they produced, and the newest done task a new member can follow.
+    artifacts they produced, and the newest finished task a new member can
+    follow. A task waiting to be acknowledged is finished work, so a new
+    member can follow it before the operator acknowledges it.
 
     A thread has no row of its own, so its title, objective and summary all
     come from its members. The summary is the newest member summary rather
@@ -1533,7 +1563,8 @@ def thread_detail(root_id: int, now: datetime | None = None) -> dict:
         "SELECT i.*, "
         "(SELECT tmux_key FROM work_runs r WHERE r.work_item_id = i.id ORDER BY r.id DESC LIMIT 1) AS last_tmux_key, "
         "(SELECT provider FROM work_runs r WHERE r.work_item_id = i.id ORDER BY r.id DESC LIMIT 1) AS last_provider, "
-        "EXISTS(SELECT 1 FROM work_events e WHERE e.work_item_id = i.id AND e.kind = 'operator_done') AS operator_confirmed "
+        f"EXISTS(SELECT 1 FROM work_events e WHERE e.work_item_id = i.id "
+        f"AND e.kind IN {_ACK_EVENT_KINDS_SQL}) AS operator_confirmed "
         f"FROM work_items i WHERE i.id IN ({marks}) ORDER BY i.id", tuple(ids))
     artifacts = db.query_all(
         "SELECT id, work_item_id, path, note, created_at FROM work_artifacts "
@@ -1561,6 +1592,7 @@ def thread_detail(root_id: int, now: datetime | None = None) -> dict:
     for task in tasks:
         counts[task["state"]] = counts.get(task["state"], 0) + 1
     done_ids = [task["id"] for task in tasks if task["state"] == "done"]
+    finished_ids = [task["id"] for task in tasks if task["state"] in FINISHED_STATES]
     summarised = [task for task in tasks if (task["summary"] or "").strip()]
     return {
         "root_id": root_id,
@@ -1579,5 +1611,5 @@ def thread_detail(root_id: int, now: datetime | None = None) -> dict:
         "updated_at": max(task["updated_at"] for task in tasks),
         "summary": (summarised[-1]["summary"] or "").strip() if summarised else "",
         "summary_from": summarised[-1]["id"] if summarised else None,
-        "continue_from": done_ids[-1] if done_ids else None,
+        "continue_from": finished_ids[-1] if finished_ids else None,
     }
