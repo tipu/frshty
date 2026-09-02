@@ -115,7 +115,15 @@
               <button class="ln-btn ln-btn-sm ln-btn-ghost" v-if="it.summary"
                       @click="sumOpen[it.id] = !sumOpen[it.id]">{{ sumOpen[it.id] ? 'Summary ▾' : 'Summary ▸' }}</button>
               <a class="ln-btn ln-btn-sm ln-btn-ghost" v-if="it.summary" :href="'/tasks/' + it.id + '/summary'" target="_blank">↗</a>
-              <template v-if="g === 'done'">
+              <template v-if="g === 'needs_ack'">
+                <button class="ln-btn ln-btn-sm ln-btn-primary"
+                        title="accept the agent's report and complete this task" @click="act(it, 'ack')">Acknowledge</button>
+                <button class="ln-btn ln-btn-sm ln-btn-ghost"
+                        title="acknowledge and file it in the archive in one step" @click="act(it, 'archive')">Archive</button>
+                <button class="ln-btn ln-btn-sm ln-btn-ghost"
+                        title="the work is not finished; send it back" @click="act(it, 'reopen')">Reopen</button>
+              </template>
+              <template v-else-if="g === 'done'">
                 <button class="ln-btn ln-btn-sm ln-btn-ghost" v-if="view === 'archive' || it.archived_at"
                         @click="act(it, 'unarchive')">Unarchive</button>
                 <button class="ln-btn ln-btn-sm ln-btn-ghost" v-else
@@ -163,7 +171,8 @@
         <div class="ln-thread-row" v-for="t in activeThreads" :key="t.root_id" @click="openThread(t.root_id)">
           <div class="ln-thread-row-title">{{ t.title }}</div>
           <div class="ln-thread-row-meta">
-            <span style="color:var(--ln-amber)" v-if="t.counts.needs_you">{{ t.counts.needs_you }} needs you</span>
+            <span style="color:var(--ln-green)" v-if="t.counts.needs_ack">{{ t.counts.needs_ack }} to acknowledge</span>
+            <span style="color:var(--ln-amber)" v-else-if="t.counts.needs_you">{{ t.counts.needs_you }} needs you</span>
             <span style="color:var(--ln-blue)" v-else-if="t.counts.agent_working">{{ t.counts.agent_working }} working</span>
             <span v-else>{{ t.counts.done === t.task_count ? 'complete' : 'idle' }}</span>
             <span>{{ t.task_count }} task{{ t.task_count === 1 ? '' : 's' }}</span>
@@ -187,26 +196,26 @@
 </div>
 <script>
 const STATE_PILLS = {
-  needs_you: "ln-pill-amber", agent_working: "ln-pill-blue", waiting_external: "ln-pill-ghost",
-  failed_stale: "ln-pill-red", done: "ln-pill-green",
+  needs_ack: "ln-pill-green", needs_you: "ln-pill-amber", agent_working: "ln-pill-blue",
+  waiting_external: "ln-pill-ghost", failed_stale: "ln-pill-red", done: "ln-pill-green",
 };
 const STATE_TEXT = {
-  needs_you: "● Needs you", agent_working: "● Working", waiting_external: "○ Waiting external",
-  failed_stale: "● Failed or stale",
+  needs_ack: "✓ Agent reported done", needs_you: "● Needs you", agent_working: "● Working",
+  waiting_external: "○ Waiting external", failed_stale: "● Failed or stale",
 };
 frshtyApp({
   data() {
     return {
       features: {}, instanceName: "",
       view: new URLSearchParams(location.search).get("view") === "archive" ? "archive" : "board",
-      groups: { needs_you: [], agent_working: [], waiting_external: [], failed_stale: [], done: [] },
+      groups: { needs_ack: [], needs_you: [], agent_working: [], waiting_external: [], failed_stale: [], done: [] },
       personalLoaded: false, intakeText: "", intakeError: "", intakeBusy: false,
       projects: [], slackAvailable: false, intakeContexts: [], intakeSlack: false, moreOpen: false,
       agents: ["claude"], intakeAgent: localStorage.getItem("workAgent") || "claude",
       connError: "", replyText: {}, sumOpen: {}, linkmap: null, threads: [],
       searchText: "", tagFilter: JSON.parse(localStorage.getItem("workTagFilter") || "[]"), allTags: [], donePage: 1, donePages: 1, counts: {},
-      groupOrder: ["agent_working", "needs_you", "waiting_external", "failed_stale", "done"],
-      labels: { needs_you: "Needs you", agent_working: "Agent working", waiting_external: "Waiting external", failed_stale: "Failed or stale", done: "Completed" },
+      groupOrder: ["needs_ack", "agent_working", "needs_you", "waiting_external", "failed_stale", "done"],
+      labels: { needs_ack: "Needs acknowledgement", needs_you: "Needs you", agent_working: "Agent working", waiting_external: "Waiting external", failed_stale: "Failed or stale", done: "Completed" },
     };
   },
   computed: {
@@ -214,7 +223,7 @@ frshtyApp({
       return this.view === "archive" ? ["done"] : this.groupOrder;
     },
     railCounts() {
-      return { tasks: this.count("needs_you") };
+      return { tasks: this.count("needs_ack") + this.count("needs_you") };
     },
     crumbs() {
       return this.view === "archive" ? ["Work", "Tasks", "Archive"] : ["Work", "Tasks"];

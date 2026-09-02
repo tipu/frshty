@@ -42,7 +42,8 @@
       <div style="display:flex;gap:8px;align-items:center">
         <div class="ln-thread-row-title">{{ t.title }}</div>
         <span class="ln-tag" v-for="p in t.projects" :key="p">{{ p }}</span>
-        <span class="ln-pill ln-pill-amber" v-if="t.counts.needs_you">{{ t.counts.needs_you }} needs you</span>
+        <span class="ln-pill ln-pill-green" v-if="t.counts.needs_ack">{{ t.counts.needs_ack }} to acknowledge</span>
+        <span class="ln-pill ln-pill-amber" v-else-if="t.counts.needs_you">{{ t.counts.needs_you }} needs you</span>
         <span class="ln-pill ln-pill-blue" v-else-if="t.counts.agent_working">{{ t.counts.agent_working }} working</span>
         <span class="ln-task-id" style="margin-left:auto">#{{ t.root_id }}</span>
       </div>
@@ -86,7 +87,7 @@ frshtyApp({
         if (!r.ok) throw new Error("HTTP " + r.status);
         const d = await r.json();
         this.threads = d.threads || [];
-        this.needsYou = d.needs_you || 0;
+        this.needsYou = d.attention || 0;
         this.loadError = "";
       } catch (e) {
         this.loadError = "Unable to load threads: " + e.message;

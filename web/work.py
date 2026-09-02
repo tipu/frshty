@@ -46,7 +46,7 @@ DONE_PAGE_SIZE = 20
 @router.get("/api/work/threads")
 def api_work_threads():
     return {"threads": work_store.threads(),
-            "needs_you": work_store.needs_you_count()}
+            "attention": work_store.attention_count()}
 
 
 @router.get("/api/work/threads/{root_id}")
@@ -54,7 +54,7 @@ def api_work_thread(root_id: int):
     result = work_store.thread_detail(root_id)
     if "error" in result:
         return JSONResponse(result, status_code=404)
-    result["rail_needs_you"] = work_store.needs_you_count()
+    result["rail_attention"] = work_store.attention_count()
     result["personal_loaded"] = work_launch.personal_config() is not None
     result["projects"] = work_launch.project_entries()
     result["agents"] = list(terminal.AGENTS)
@@ -181,7 +181,7 @@ def api_work_detail(item_id: int):
     result["slack_available"] = work_launch.slack_available()
     result["system_prompt"] = work_launch.read_system_prompt(result["runs"])
     result["thread"] = work_store.thread_map().get(item_id)
-    result["needs_you"] = work_store.needs_you_count()
+    result["attention"] = work_store.attention_count()
     return result
 
 

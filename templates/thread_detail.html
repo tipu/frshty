@@ -42,6 +42,7 @@
           {{ thread.title }}
           <span class="ln-pill" :class="thread.status === 'complete' ? 'ln-pill-green' : 'ln-pill-blue'"
                 style="vertical-align:middle;margin-left:8px">{{ thread.status === 'complete' ? '✓ Complete' : '● Active' }}</span>
+          <span class="ln-pill ln-pill-green" style="vertical-align:middle" v-if="thread.counts.needs_ack">{{ thread.counts.needs_ack }} to acknowledge</span>
           <span class="ln-pill ln-pill-amber" style="vertical-align:middle" v-if="thread.needs_you">{{ thread.needs_you }} needs you</span>
         </h1>
         <p class="ln-subtitle">{{ thread.objective }}</p>
@@ -112,7 +113,7 @@
                 <span class="ln-tag" v-for="tag in tags(t)" :key="tag">{{ tag }}</span>
                 <span class="ln-right">
                   <a class="ln-btn ln-btn-sm ln-btn-ghost" v-if="t.summary" :href="'/tasks/' + t.id + '/summary'" target="_blank">Summary</a>
-                  <a class="ln-btn ln-btn-sm ln-btn-ghost" v-if="t.last_tmux_key && t.state !== 'done'" :href="'/tasks/' + t.id + '/terminal'" target="_blank">Terminal</a>
+                  <a class="ln-btn ln-btn-sm ln-btn-ghost" v-if="t.last_tmux_key && t.state !== 'done' && t.state !== 'needs_ack'" :href="'/tasks/' + t.id + '/terminal'" target="_blank">Terminal</a>
                   <span>{{ $relTime(t.updated_at) }}</span>
                 </span>
               </div>
@@ -164,12 +165,12 @@
 </div>
 <script>
 const STATE_LABELS = {
-  needs_you: "● Needs you", agent_working: "● Working", waiting_external: "○ Waiting",
-  failed_stale: "● Stale", done: "✓ Done",
+  needs_ack: "✓ Agent reported done", needs_you: "● Needs you", agent_working: "● Working",
+  waiting_external: "○ Waiting", failed_stale: "● Stale", done: "✓ Done",
 };
 const STATE_PILLS = {
-  needs_you: "ln-pill-amber", agent_working: "ln-pill-blue", waiting_external: "ln-pill-ghost",
-  failed_stale: "ln-pill-red", done: "ln-pill-green",
+  needs_ack: "ln-pill-green", needs_you: "ln-pill-amber", agent_working: "ln-pill-blue",
+  waiting_external: "ln-pill-ghost", failed_stale: "ln-pill-red", done: "ln-pill-green",
 };
 frshtyApp({
   data() {
@@ -218,7 +219,7 @@ frshtyApp({
     },
     statePill(state) { return STATE_PILLS[state] || "ln-pill-ghost"; },
     note(t) {
-      const text = t.state === "done"
+      const text = (t.state === "done" || t.state === "needs_ack")
         ? (t.summary || t.current_checkpoint || "")
         : (t.stop_reason || t.current_checkpoint || t.summary || "");
       return text.length > 240 ? text.slice(0, 240).trimEnd() + "…" : text;
@@ -249,7 +250,7 @@ frshtyApp({
         if (!r.ok) throw new Error("HTTP " + r.status);
         const d = await r.json();
         this.thread = d;
-        this.railNeedsYou = d.rail_needs_you || 0;
+        this.railNeedsYou = d.rail_attention || 0;
         this.projects = d.projects || [];
         this.agents = d.agents && d.agents.length ? d.agents : ["claude"];
         if (!this.agents.includes(this.launchAgent)) this.launchAgent = this.agents[0];

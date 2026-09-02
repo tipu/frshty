@@ -352,6 +352,7 @@ body { display: block; }
 .ln-task + .ln-task { margin-top: 7px; }
 .ln-task::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 2px; background: var(--ln-state, var(--ln-blue)); }
 .ln-task:hover { border-color: var(--ln-border-hi); }
+.ln-task.needs_ack { --ln-state: var(--ln-green); }
 .ln-task.needs_you { --ln-state: var(--ln-amber); }
 .ln-task.agent_working { --ln-state: var(--ln-blue); }
 .ln-task.waiting_external { --ln-state: var(--ln-text-4); }
@@ -379,6 +380,7 @@ a.ln-task-title:hover { text-decoration: underline; }
 .ln-tl::before { content: ""; position: absolute; left: 4px; top: 14px; bottom: 16px; width: 1px; background: var(--ln-border-hi); }
 .ln-tl-item { position: relative; display: grid; grid-template-columns: 18px minmax(0,1fr); gap: 10px; padding-bottom: 8px; }
 .ln-tl-node { position: relative; z-index: 1; width: 9px; height: 9px; margin-top: 14px; border-radius: 50%; border: 2px solid var(--ln-bg); background: var(--ln-node, var(--ln-blue)); box-shadow: 0 0 0 2px var(--ln-surface-3); }
+.ln-tl-item.needs_ack { --ln-node: var(--ln-green); }
 .ln-tl-item.needs_you { --ln-node: var(--ln-amber); }
 .ln-tl-item.done { --ln-node: var(--ln-green); }
 .ln-tl-item.waiting_external { --ln-node: var(--ln-text-4); }

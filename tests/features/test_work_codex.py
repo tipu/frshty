@@ -157,7 +157,7 @@ class TestCodexNotify:
                                "last-assistant-message": "Shipped it.\nWORK_DONE"})
         assert r.returncode == 0, r.stderr
         item = db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))
-        assert item["state"] == "done"
+        assert item["state"] == "needs_ack"
 
     def test_artifact_line_is_recorded(self):
         item_id, sid = _mkrun("codex notify artifact")
@@ -569,7 +569,7 @@ class TestRunningCodexTranscript:
         monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
         work_store.sweep_stale_items()
         item = db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))
-        assert item["state"] == "done"
+        assert item["state"] == "needs_ack"
 
 
 class TestCodexFollowupAgent:

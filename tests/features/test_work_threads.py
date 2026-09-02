@@ -168,13 +168,25 @@ class TestArchive:
         assert client.get("/api/work/items?archive=1").json()["counts"]["done"] == archive_before + 1
 
 
-class TestNeedsYouCount:
-    def test_count_matches_the_board_group(self):
+class TestAttentionCount:
+    def _board_attention(self):
+        groups = work_store.grouped_items()
+        return len(groups["needs_ack"]) + len(groups["needs_you"])
+
+    def test_count_matches_the_board_groups(self):
         work_store.create_item("waiting on the operator")
         with db.tx() as c:
             c.execute("UPDATE work_items SET state = 'needs_you' WHERE objective = ?",
                       ("waiting on the operator",))
-        assert work_store.needs_you_count() == len(work_store.grouped_items()["needs_you"])
+        assert work_store.attention_count() == self._board_attention()
+
+    def test_an_agent_reported_task_is_counted(self):
+        item_id = work_store.create_item("agent said it was done")
+        before = work_store.attention_count()
+        with db.tx() as c:
+            c.execute("UPDATE work_items SET state = 'needs_ack' WHERE id = ?", (item_id,))
+        assert work_store.attention_count() == before + 1
+        assert work_store.attention_count() == self._board_attention()
 
     def test_an_expired_snooze_counts_the_same_way_the_board_counts_it(self):
         item_id = work_store.create_item("snoozed and now due")
@@ -183,16 +195,16 @@ class TestNeedsYouCount:
             c.execute("UPDATE work_items SET state = 'waiting_external', snoozed_until = ? "
                       "WHERE id = ?", (past, item_id))
         assert item_id in [row["id"] for row in work_store.grouped_items()["needs_you"]]
-        assert work_store.needs_you_count() == len(work_store.grouped_items()["needs_you"])
+        assert work_store.attention_count() == self._board_attention()
 
     def test_a_live_snooze_is_not_counted(self):
         item_id = work_store.create_item("snoozed until later")
         future = (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat()
-        before = work_store.needs_you_count()
+        before = work_store.attention_count()
         with db.tx() as c:
             c.execute("UPDATE work_items SET state = 'waiting_external', snoozed_until = ? "
                       "WHERE id = ?", (future, item_id))
-        assert work_store.needs_you_count() == before
+        assert work_store.attention_count() == before
 
 
 class TestRoutes:
@@ -231,7 +243,7 @@ class TestRoutes:
         d = _client().get("/api/work/threads").json()
         thread = next(t for t in d["threads"] if t["root_id"] == ids[0])
         assert thread["counts"]["needs_you"] == 1
-        assert d["needs_you"] >= 1
+        assert d["attention"] >= 1
 
     def test_threads_endpoint_carries_the_project_context(self):
         root = work_store.create_item("root for project endpoint", contexts="aimyable")
@@ -254,12 +266,12 @@ class TestRoutes:
         ids = _chain(["root for detail", "follow up for detail"])
         d = _client().get(f"/api/work/items/{ids[1]}/detail").json()
         assert d["thread"]["root_id"] == ids[0]
-        assert d["needs_you"] == work_store.needs_you_count()
+        assert d["attention"] == work_store.attention_count()
 
     def test_task_detail_page_shows_the_rail_badge(self):
         r = _client().get("/tasks/1")
         assert ':counts="railCounts"' in r.text
-        assert "this.needsYou = d.needs_you || 0;" in r.text
+        assert "this.needsYou = d.attention || 0;" in r.text
 
 
 class TestShellRail:
@@ -401,7 +413,7 @@ class TestThreadDetailRoutes:
         assert d["root_id"] == ids[0]
         assert [t["id"] for t in d["tasks"]] == ids
         assert d["artifact_count"] == 1
-        assert d["rail_needs_you"] == work_store.needs_you_count()
+        assert d["rail_attention"] == work_store.attention_count()
         assert d["agents"]
 
     def test_unknown_thread_endpoint_is_404(self):
