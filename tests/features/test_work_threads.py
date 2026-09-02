@@ -469,10 +469,53 @@ class TestBoardUi:
     def test_thread_pills_link_to_the_thread_page(self):
         for name in ("templates/work.html", "templates/work_detail.html"):
             text = pathlib.Path(name).read_text()
-            assert "'/threads/' + " in text, name
+            assert "threadHref(" in text, name
+            assert '"/threads/" + rootId' in text, name
 
     def test_the_task_card_css_carries_a_state_stripe(self):
         css = pathlib.Path("static/frshty-v2.css").read_text()
         assert ".ln-task::before" in css
         assert ".ln-task.needs_you { --ln-state: var(--ln-amber); }" in css
         assert ".ln-tl-node" in css
+class TestPeerAwareThreads:
+    def _read(self, name):
+        return pathlib.Path(name).read_text()
+
+    def test_the_thread_pill_shows_on_a_peer_task(self):
+        board = self._read("templates/work.html")
+        detail = self._read("templates/work_detail.html")
+        assert 'v-if="it.thread && !it.peer"' not in board
+        assert 'v-if="it.thread"' in board
+        assert 'v-if="thread && !peer"' not in detail
+        assert 'v-if="thread"' in detail
+
+    def test_the_thread_pill_carries_the_peer_key(self):
+        for name in ("templates/work.html", "templates/work_detail.html"):
+            text = self._read(name)
+            assert '"?peer=" + encodeURIComponent(' in text, name
+
+    def test_the_threads_list_reads_every_peer(self):
+        text = self._read("templates/threads.html")
+        assert 'fetch("/api/work/peers")' in text
+        assert 'this.apiUrl(key, "/api/work/threads")' in text
+        assert 'this.loadPeers().then(() => this.refresh())' in text
+
+    def test_the_threads_list_tags_a_peer_row(self):
+        text = self._read("templates/threads.html")
+        assert 'v-if="t.peer"' in text
+        assert '(t.peer || \'local\') + \'#\' + t.root_id' in text
+
+    def test_the_thread_page_routes_through_the_peer_proxy(self):
+        text = self._read("templates/thread_detail.html")
+        assert '"/api/work/peers/" + encodeURIComponent(this.peer) + path' in text
+        assert 'this.api("/api/work/threads/" + this.rootId)' in text
+        assert 'this.api("/api/work/threads/" + this.rootId + "/tasks")' in text
+
+    def test_the_thread_page_sends_terminal_and_artifact_to_the_peer_host(self):
+        text = self._read("templates/thread_detail.html")
+        assert '(this.peerBase || "") + "/tasks/" + id + "/terminal"' in text
+        assert '(this.peerBase || "") + "/api/work/artifact_file/" + a.id' in text
+
+    def test_the_thread_page_reports_an_unknown_peer(self):
+        text = self._read("templates/thread_detail.html")
+        assert "unknown peer" in text

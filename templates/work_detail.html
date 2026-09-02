@@ -53,9 +53,9 @@
 <div v-if="item">
   <div class="text-xs text-gray-500 mb-2"><a href="/tasks" class="underline">← tasks</a></div>
   <h1 class="text-lg font-bold">{{ item.objective }}</h1>
-  <div class="mt-1" v-if="thread && !peer">
+  <div class="mt-1" v-if="thread">
     <a class="ln-pill ln-pill-violet ln-thread-pill" style="text-decoration:none"
-       :href="'/threads/' + thread.root_id" :title="'thread rooted at task #' + thread.root_id">⑂ {{ thread.title }}</a>
+       :href="threadHref(thread.root_id)" :title="'thread rooted at task #' + thread.root_id">⑂ {{ thread.title }}</a>
   </div>
   <div class="mt-1">
     <span :class="['badge', badgeCls]">{{ stateLabel }}</span>
@@ -346,6 +346,10 @@ const app = frshtyApp({
     },
     taskHref(id, suffix) {
       return "/tasks/" + id + (suffix || "") +
+             (this.peer ? "?peer=" + encodeURIComponent(this.peer) : "");
+    },
+    threadHref(rootId) {
+      return "/threads/" + rootId +
              (this.peer ? "?peer=" + encodeURIComponent(this.peer) : "");
     },
     artifactUrl(a) {
