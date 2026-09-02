@@ -499,7 +499,7 @@ class TestValidationRetry:
         with patch.object(tix, "MAX_STAGE_RETRIES", 5), \
              patch("core.queue.enqueue_job") as eq:
             tix._enqueue_stage("inst", "VAL-1", "validate_merged_ticket")
-            eq.assert_called_once_with("inst", "validate_merged_ticket", ticket_key="VAL-1")
+            eq.assert_called_once_with("inst", "validate_merged_ticket", ticket_key="VAL-1", payload=None)
 
     def test_validation_skips_when_already_queued(self, fresh_db, tmp_path):
         """Don't enqueue if a queued validate_merged_ticket already exists."""

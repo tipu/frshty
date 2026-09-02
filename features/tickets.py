@@ -69,6 +69,10 @@ def emit_once(
 MAX_STAGE_RETRIES = 5
 STAGE_RETRY_WINDOW_HOURS = 2
 
+ISSUE_COMMENT_EXCERPT_CHARS = 1200
+TICKET_COMMENT_RECLAIM_SECONDS = 3600
+MAX_TICKET_COMMENT_RETRIES = 3
+
 _LLM_BACKED_TASKS = frozenset({
     "start_planning", "start_reviewing", "fix_review_findings",
     "fix_ci_failures", "setup_prd_ticket", "fix_reported_bug",
@@ -252,7 +256,8 @@ def _dependency_blocked(instance_key: str, ticket_key: str) -> str | None:
     return None
 
 
-def _enqueue_stage(instance_key: str, ticket_key: str, task_name: str) -> None:
+def _enqueue_stage(instance_key: str, ticket_key: str, task_name: str,
+                   payload: dict | None = None) -> int | None:
     if task_name in _LLM_BACKED_TASKS:
         from core.llm import _guard_status
         try:
@@ -260,16 +265,16 @@ def _enqueue_stage(instance_key: str, ticket_key: str, task_name: str) -> None:
         except Exception:
             blocked = False
         if blocked:
-            return
+            return None
     if task_name == "start_planning":
         if _dependency_blocked(instance_key, ticket_key):
-            return
+            return None
     if task_name in _REPO_GATED_TASKS:
         if _repo_gate_blocked(instance_key, ticket_key):
-            return
+            return None
     existing = q.jobs_for_ticket(instance_key, ticket_key, limit=max(200, MAX_STAGE_RETRIES + 1))
     if any(j["task"] == task_name and j["status"] in ("queued", "running") for j in existing):
-        return
+        return None
     cutoff = datetime.now(timezone.utc) - timedelta(hours=STAGE_RETRY_WINDOW_HOURS)
     consecutive = 0
     for j in existing:
@@ -283,8 +288,9 @@ def _enqueue_stage(instance_key: str, ticket_key: str, task_name: str) -> None:
                 break
             consecutive += 1
     if consecutive >= MAX_STAGE_RETRIES:
-        return
-    q.enqueue_job(instance_key, task_name, ticket_key=ticket_key)
+        return None
+    return q.enqueue_job(instance_key, task_name, ticket_key=ticket_key,
+                         payload=payload)
 
 
 _RANKER_PROMPT = """You are ranking software tickets for execution order. Each ticket below shows its key, title, and brief description.
@@ -771,9 +777,24 @@ def _done_ticket_has_new_comments(config: dict, key: str, ts: dict, ticket: dict
     )
 
 
-def _is_issue_comment(body: str, ticket_summary: str, last_comments: list[dict]) -> bool:
+def clip_text(text: str, limit: int) -> tuple[str, int]:
+    """The text as an event stores it, and how long the text really is.
+
+    A comment body travels in event meta. A long one bloats every row that
+    reads the feed, so the body is cut and its full length travels with it."""
+    body = (text or "").strip()
+    if len(body) <= limit:
+        return body, len(body)
+    return body[:limit] + " \u2026", len(body)
+
+
+def _is_issue_comment(body: str, ticket_summary: str, last_comments: list[dict]) -> dict:
+    """Whether the comment reports a defect, and the reason the model gave.
+
+    The reason is what the ticket timeline shows beside the report, so a reader
+    sees why a fix pass started without opening the tracker."""
     if not body:
-        return False
+        return {"issue": False, "reason": ""}
     context = f"Ticket: {ticket_summary}\n\nRecent comments:\n"
     for c in last_comments[-3:]:
         context += f"- {c.get('body', '')}\n"
@@ -781,14 +802,18 @@ def _is_issue_comment(body: str, ticket_summary: str, last_comments: list[dict])
 
     prompt = context + (
         "Does this comment report a bug, regression, or issue that needs fixing? "
-        "Answer 'yes' or 'no' only. Examples of yes: 'still broken on staging', "
-        "'getting timeout now', 'regression after merge'. Examples of no: 'looks good', "
-        "'thanks for fixing', 'deployed successfully'."
+        "Answer 'yes' or 'no' on the first line. When the answer is yes, write one "
+        "sentence on a second line naming what is broken. Examples of yes: "
+        "'still broken on staging', 'getting timeout now', 'regression after merge'. "
+        "Examples of no: 'looks good', 'thanks for fixing', 'deployed successfully'."
     )
     result = run_haiku(prompt)
     if not result:
-        return False
-    return result.strip().lower().startswith("yes")
+        return {"issue": False, "reason": ""}
+    lines = [line.strip() for line in result.strip().splitlines() if line.strip()]
+    if not lines or not lines[0].lower().startswith("yes"):
+        return {"issue": False, "reason": ""}
+    return {"issue": True, "reason": " ".join(lines[1:]).strip()}
 
 
 def _ensure_worktree(config: dict, ticket_key: str, slug: str) -> dict | None:
@@ -869,6 +894,53 @@ class _TicketCommentAdapter:
         return self.comments_list
 
 
+def _unsettled_ticket_comments(instance_key: str, key: str) -> list[dict]:
+    """Ticket comments that still owe an answer and are worth another pass.
+
+    A row left in processing by a job that died keeps its upstream timestamp,
+    so the detector calls the comment unchanged for ever. Reclaiming the row
+    after the window is the only way that comment comes back. A row past its
+    retry budget is dropped here; _abandoned_ticket_comments announces it."""
+    now = datetime.now(timezone.utc)
+    rows = []
+    for row in comments.get_unprocessed_comments(instance_key, "ticket", key):
+        if (row.get("error_count") or 0) > MAX_TICKET_COMMENT_RETRIES:
+            continue
+        if row.get("state") == "processing":
+            started = _parse_iso(row.get("last_checked_at"))
+            if started is not None:
+                if started.tzinfo is None:
+                    started = started.replace(tzinfo=timezone.utc)
+                if (now - started).total_seconds() <= TICKET_COMMENT_RECLAIM_SECONDS:
+                    continue
+        rows.append(row)
+    return rows
+
+
+def _abandoned_ticket_comments(instance_key: str, key: str, ts: dict,
+                               ticket: dict, base_url: str) -> None:
+    """Announce, once, every reported bug frshty has stopped retrying.
+
+    A comment that spent its retry budget stays unprocessed for ever and says
+    nothing about itself. The operator has to learn the report was dropped."""
+    announced = list(ts.get("ticket_comments_abandoned") or [])
+    for row in comments.get_unprocessed_comments(instance_key, "ticket", key):
+        comment_id = str(row["comment_id"])
+        error_count = row.get("error_count") or 0
+        if error_count <= MAX_TICKET_COMMENT_RETRIES:
+            continue
+        if comment_id in announced:
+            continue
+        announced.append(comment_id)
+        ts["ticket_comments_abandoned"] = announced
+        log.emit("ticket_comment_fix_abandoned",
+                 f"{key}: giving up on comment {comment_id} after {error_count} attempts",
+                 links={"ticket": ticket.get("url", ""),
+                        "detail": f"{base_url}/tickets/{key}"},
+                 meta={"ticket": key, "comment_id": comment_id,
+                       "error_count": error_count})
+
+
 def _process_ticket_comments(config: dict, key: str, ts: dict, ticket: dict, base_url: str, instance_key: str = "") -> None:
     if not instance_key:
         return
@@ -881,8 +953,12 @@ def _process_ticket_comments(config: dict, key: str, ts: dict, ticket: dict, bas
 
     last_checked = ts.get("comments_checked_issue_updated_at", "")
     current_updated = ticket.get("updated_at", "")
+    unsettled: list[dict] = []
     if last_checked and current_updated and current_updated == last_checked:
-        return
+        _abandoned_ticket_comments(instance_key, key, ts, ticket, base_url)
+        unsettled = _unsettled_ticket_comments(instance_key, key)
+        if not unsettled:
+            return
 
     comments_data = _fetch_ticket_comments(config, key)
     if current_updated:
@@ -891,28 +967,29 @@ def _process_ticket_comments(config: dict, key: str, ts: dict, ticket: dict, bas
         ts["ticket_comment_snapshot"] = _comment_snapshot([])
         return
 
-    # Use stateful comment tracking for idempotency and edit detection
     detection = comments.fetch_and_detect_comments(instance_key, _TicketCommentAdapter(comments_data), "ticket", key)
-    all_to_process = detection["new"] + detection["edited"]
-
-    # Keep legacy snapshot for backward compatibility
-    old_snapshot = ts.get("ticket_comment_snapshot", {})
-    old_ids = set(old_snapshot.get("comment_ids", []))
     new_snapshot = _comment_snapshot(comments_data)
-    new_ids = set(new_snapshot.get("comment_ids", []))
-    new_comment_ids = new_ids - old_ids
 
-    if not all_to_process:
-        ts["ticket_comment_snapshot"] = new_snapshot
-        return
+    to_process = list(detection["new"]) + list(detection["edited"])
+    known = {str(c["id"]) for c in to_process}
+    by_id = {str(c["id"]): c for c in comments_data}
+    for row in unsettled:
+        comment_id = str(row["comment_id"])
+        if comment_id in known:
+            continue
+        comment = by_id.get(comment_id)
+        if comment is None:
+            continue
+        known.add(comment_id)
+        to_process.append(comment)
 
-    to_process = [c for c in all_to_process if c.get("id") in new_comment_ids]
     if not to_process:
         ts["ticket_comment_snapshot"] = new_snapshot
         return
 
     last_comments = sorted(comments_data, key=lambda c: c.get("created_at", ""))[-5:]
 
+    reports = []
     for comment in to_process:
         comment_id = str(comment["id"])
         edited_at = comment.get("updated_at") or comment.get("created_at")
@@ -920,26 +997,58 @@ def _process_ticket_comments(config: dict, key: str, ts: dict, ticket: dict, bas
 
         comments.mark_comment_processing(instance_key, "ticket", key, comment_id, edited_at)
 
-        if not _is_issue_comment(body, ticket.get("summary", ""), last_comments):
+        verdict = _is_issue_comment(body, ticket.get("summary", ""), last_comments)
+        if not verdict["issue"]:
             comments.mark_comment_processed(instance_key, "ticket", key, comment_id)
             continue
 
-        log.emit("ticket_issue_detected", f"Issue detected in comment for {key}",
+        excerpt, chars = clip_text(body, ISSUE_COMMENT_EXCERPT_CHARS)
+        reason = verdict["reason"]
+        log.emit("ticket_issue_detected",
+            f"{key}: a reviewer reported an issue \u2014 {reason or excerpt}",
             links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
-            meta={"ticket": key, "comment_id": comment_id})
-
-        wt_result = _ensure_worktree(config, key, slug)
-        if not wt_result:
-            log.emit("worktree_ensure_failed", f"Failed to ensure worktree for {key}",
-                meta={"ticket": key})
-            comments.mark_comment_error(instance_key, "ticket", key, comment_id, "Failed to ensure worktree")
-            continue
-
-        _enqueue_stage(instance_key, key, "fix_reported_bug")
-        comments.mark_comment_processed(instance_key, "ticket", key, comment_id)
+            meta={"ticket": key, "comment_id": comment_id,
+                  "comment_author": comment.get("author_name", ""),
+                  "comment_created_at": comment.get("created_at", ""),
+                  "comment_updated_at": comment.get("updated_at", ""),
+                  "comment_change": "edited" if comment.get("previously_at") else "new",
+                  "comment_excerpt": excerpt,
+                  "comment_chars": chars,
+                  "comment_excerpt_chars": len(excerpt),
+                  "issue_reason": reason,
+                  "ticket_summary": ticket.get("summary", ""),
+                  "triggers": "fix_reported_bug"})
+        reports.append({"comment_id": comment_id,
+                        "author": comment.get("author_name", ""),
+                        "created_at": comment.get("created_at", ""),
+                        "body": body,
+                        "reason": reason})
 
     ts["ticket_comment_snapshot"] = new_snapshot
+    if not reports:
+        return
 
+    if not _ensure_worktree(config, key, slug):
+        log.emit("worktree_ensure_failed", f"Failed to ensure worktree for {key}",
+            meta={"ticket": key})
+        _retry_ticket_reports(instance_key, key, reports, "Failed to ensure worktree")
+        return
+
+    payload = {"reports": reports, "ticket_summary": ticket.get("summary", "")}
+    if not _enqueue_stage(instance_key, key, "fix_reported_bug", payload=payload):
+        _retry_ticket_reports(instance_key, key, reports,
+                              "fix_reported_bug was not queued")
+
+
+def _retry_ticket_reports(instance_key: str, key: str, reports: list[dict],
+                          error: str) -> None:
+    """Hand every report in a refused pass back to the next poll.
+
+    The job never ran, so nothing about the comment failed. Charging the retry
+    budget here would abandon a good report over a queue that was busy."""
+    for report in reports:
+        comments.mark_comment_retryable(instance_key, "ticket", key,
+                                        report["comment_id"], error)
 
 
 def _save_ticket_if_unmoved(key: str, ts: dict, loaded_status: str | None) -> bool:
@@ -2121,7 +2230,7 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
         ]
         new_comments = [
             c for c in comments
-            if c["id"] > last_seen and c["author_id"] != user_id and not c.get("parent_id")
+            if c["id"] > last_seen and c["author_id"] != user_id
         ]
 
         if not new_comments:
