@@ -1342,6 +1342,9 @@ def grouped_items(now: datetime | None = None, q: str = "",
     A completed task stays in the done group until the operator archives it.
     Archiving is the only way it leaves, so the board and the archive split
     the completed tasks between them and none of them becomes unreachable.
+    The archive view holds archived tasks only, so a running task never
+    appears in it.
+
     A search reads the whole task history, so a search on the board also
     returns the archived tasks. Without them a completed task becomes
     unfindable the moment it is archived."""
@@ -1365,7 +1368,7 @@ def grouped_items(now: datetime | None = None, q: str = "",
 
     def keep_done(row: dict) -> bool:
         if archived:
-            return bool(row["archived_at"])
+            return True
         return bool(q) or not row["archived_at"]
 
     groups: dict[str, list[dict]] = {g: [] for g in GROUPS}
@@ -1374,10 +1377,11 @@ def grouped_items(now: datetime | None = None, q: str = "",
             continue
         if wanted_tags and wanted_tags.isdisjoint((row["tags"] or "").split(",")):
             continue
+        if archived and not row["archived_at"]:
+            continue
         state = row["state"]
         if state == "needs_ack":
-            if not archived:
-                groups["needs_ack"].append(row)
+            groups["needs_ack"].append(row)
             continue
         if state == "done":
             if keep_done(row):
