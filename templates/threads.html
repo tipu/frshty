@@ -37,10 +37,11 @@
   <div class="ln-small" style="color:var(--ln-red)" v-if="loadError">{{ loadError }}</div>
 
   <div class="ln-card ln-thread-list" v-if="threads.length">
-    <div class="ln-thread-row" v-for="t in threads" :key="t.root_id"
-         @click="open(t.root_id)">
+    <div class="ln-thread-row" v-for="t in threads" :key="(t.peer || 'local') + '#' + t.root_id"
+         @click="open(t.root_id, t.peer)">
       <div style="display:flex;gap:8px;align-items:center">
         <div class="ln-thread-row-title">{{ t.title }}</div>
+        <span class="ln-pill ln-pill-ghost" v-if="t.peer" :title="'this thread runs on the ' + t.peer + ' host'">⇄ {{ t.peer }}</span>
         <span class="ln-tag" v-for="p in t.projects" :key="p">{{ p }}</span>
         <span class="ln-pill ln-pill-green" v-if="t.counts.needs_ack">{{ t.counts.needs_ack }} to acknowledge</span>
         <span class="ln-pill ln-pill-amber" v-else-if="t.counts.needs_you">{{ t.counts.needs_you }} needs you</span>
@@ -66,14 +67,29 @@
 frshtyApp({
   data() {
     return { features: {}, instanceName: "", threads: [], loadError: "", loaded: false,
-             needsYou: 0 };
+             needsYou: 0, peers: [] };
   },
   computed: {
     railCounts() { return { tasks: this.needsYou }; },
   },
   methods: {
     doneCount(t) { return t.counts.done || 0; },
-    open(rootId) { window.location.href = "/threads/" + rootId; },
+    open(rootId, peer) { window.location.href = this.threadHref(rootId, peer); },
+    threadHref(rootId, peer) {
+      return "/threads/" + rootId + (peer ? "?peer=" + encodeURIComponent(peer) : "");
+    },
+    apiUrl(peer, path) {
+      return peer ? "/api/work/peers/" + encodeURIComponent(peer) + path : path;
+    },
+    async loadPeers() {
+      try {
+        const r = await fetch("/api/work/peers");
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        this.peers = (await r.json()).peers || [];
+      } catch (e) {
+        this.peers = [];
+      }
+    },
     async loadConfig() {
       try {
         const cfg = await (await fetch("/api/config")).json();
@@ -82,23 +98,31 @@ frshtyApp({
       } catch (e) {}
     },
     async refresh() {
-      try {
-        const r = await fetch("/api/work/threads");
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        const d = await r.json();
-        this.threads = d.threads || [];
-        this.needsYou = d.attention || 0;
-        this.loadError = "";
-      } catch (e) {
-        this.loadError = "Unable to load threads: " + e.message;
-      } finally {
-        this.loaded = true;
-      }
+      const sources = ["", ...this.peers.map(p => p.key)];
+      const results = await Promise.all(sources.map(async key => {
+        try {
+          const r = await fetch(this.apiUrl(key, "/api/work/threads"));
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          const d = await r.json();
+          return { key, threads: (d.threads || []).map(
+                     t => Object.assign({}, t, { peer: key })),
+                   attention: d.attention || 0, error: "" };
+        } catch (e) {
+          return { key, threads: [], attention: 0, error: e.message || String(e) };
+        }
+      }));
+      const errors = results.filter(r => r.error).map(
+        r => (r.key || "this host") + ": " + r.error);
+      this.threads = results.flatMap(r => r.threads).sort(
+        (a, b) => (a.updated_at < b.updated_at) - (a.updated_at > b.updated_at));
+      this.needsYou = results.reduce((n, r) => n + r.attention, 0);
+      this.loadError = errors.length ? "Unable to load threads from " + errors.join("; ") : "";
+      this.loaded = true;
     },
   },
   mounted() {
     this.loadConfig();
-    this.refresh();
+    this.loadPeers().then(() => this.refresh());
     setInterval(() => this.refresh(), 15000);
   },
 }).mount("#app");
