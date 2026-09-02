@@ -39,7 +39,7 @@
     <div>
       <h1 class="ln-title">{{ view === 'archive' ? 'Archive' : 'Tasks' }}</h1>
       <p class="ln-subtitle" v-if="view === 'archive'">
-        Every completed task, with no time limit. The board only shows the recent ones.
+        Only the completed tasks you archived. Archive a task to take it off the board.
       </p>
       <p class="ln-subtitle" v-else>
         Launch a standalone task. Group it into a thread only when the work grows past one run.
@@ -87,7 +87,11 @@
   <div class="ln-board">
     <div>
       <div class="ln-group" v-for="g in visibleGroups" :key="g" v-show="groups[g] && groups[g].length">
-        <div class="ln-group-head">{{ label(g) }} <span class="ln-count-chip">{{ count(g) }}</span></div>
+        <div class="ln-group-head">{{ label(g) }} <span class="ln-count-chip">{{ count(g) }}</span>
+          <button class="ln-btn ln-btn-sm ln-btn-ghost" style="margin-left:auto"
+                  v-if="g === 'done' && view === 'board' && !searchText.trim() && !tagFilter.length"
+                  title="move every completed task to the archive" @click="archiveCompleted">Archive all</button>
+        </div>
         <article class="ln-task" :class="g" v-for="it in groups[g]" :key="it.id">
           <div class="ln-task-top">
             <div style="min-width:0">
@@ -109,6 +113,10 @@
                       @click="sumOpen[it.id] = !sumOpen[it.id]">{{ sumOpen[it.id] ? 'Summary ▾' : 'Summary ▸' }}</button>
               <a class="ln-btn ln-btn-sm ln-btn-ghost" v-if="it.summary" :href="'/tasks/' + it.id + '/summary'" target="_blank">↗</a>
               <template v-if="g === 'done'">
+                <button class="ln-btn ln-btn-sm ln-btn-ghost" v-if="view === 'archive'"
+                        @click="act(it, 'unarchive')">Unarchive</button>
+                <button class="ln-btn ln-btn-sm ln-btn-ghost" v-else
+                        title="take this completed task off the board" @click="act(it, 'archive')">Archive</button>
                 <button class="ln-btn ln-btn-sm ln-btn-ghost" @click="act(it, 'reopen')">Reopen</button>
               </template>
               <template v-else>
@@ -139,7 +147,7 @@
           <button class="ln-btn ln-btn-sm ln-btn-ghost" v-if="donePage < donePages" @click="setDonePage(donePage + 1)">next ›</button>
         </div>
       </div>
-      <div class="ln-small ln-muted" v-if="view === 'archive' && !(groups.done || []).length">{{ (searchText.trim() || tagFilter.length) ? "No matches." : "No completed tasks yet." }}</div>
+      <div class="ln-small ln-muted" v-if="view === 'archive' && !(groups.done || []).length">{{ (searchText.trim() || tagFilter.length) ? "No matches." : "No archived tasks yet." }}</div>
       <div class="ln-small ln-muted" v-else-if="view === 'board' && total === 0">{{ (searchText.trim() || tagFilter.length) ? "No matches." : "No tasks yet." }}</div>
     </div>
 
@@ -195,7 +203,7 @@ frshtyApp({
       connError: "", replyText: {}, sumOpen: {}, linkmap: null, threads: [],
       searchText: "", tagFilter: JSON.parse(localStorage.getItem("workTagFilter") || "[]"), allTags: [], donePage: 1, donePages: 1, counts: {},
       groupOrder: ["agent_working", "needs_you", "waiting_external", "failed_stale", "done"],
-      labels: { needs_you: "Needs you", agent_working: "Agent working", waiting_external: "Waiting external", failed_stale: "Failed or stale", done: "Recently completed" },
+      labels: { needs_you: "Needs you", agent_working: "Agent working", waiting_external: "Waiting external", failed_stale: "Failed or stale", done: "Completed" },
     };
   },
   computed: {
@@ -233,7 +241,7 @@ frshtyApp({
   methods: {
     lk(text) { return window.frshtyLinkify(text, this.linkmap); },
     label(g) {
-      if (g === "done" && (this.view === "archive" || this.searchText.trim() || this.tagFilter.length)) return "Completed (all time)";
+      if (g === "done" && this.view === "archive") return "Archived";
       return this.labels[g];
     },
     count(g) {
@@ -376,6 +384,18 @@ frshtyApp({
       }
       await this.refresh();
       await this.loadThreads();
+    },
+    async archiveCompleted() {
+      const n = this.count("done");
+      if (!n || !confirm("Archive " + n + " completed task" + (n === 1 ? "" : "s") + "? They move to the Archive.")) return;
+      try {
+        const r = await fetch("/api/work/items/archive-completed", { method: "POST" });
+        if (!r.ok) { this.connError = "archive failed HTTP " + r.status; }
+      } catch (e) {
+        this.connError = "archive failed: " + e.message;
+      }
+      this.donePage = 1;
+      await this.refresh();
     },
     async reply(it) {
       await this.answer(it, (this.replyText[it.id] || "").trim());

@@ -126,17 +126,16 @@ class TestGroupedItemsTagFilter:
         assert {a, b} <= ids
         assert c not in ids
 
-    def test_tag_filter_lifts_done_window(self):
-        from datetime import datetime, timedelta, timezone
-        item_id = _mkitem("ancient turo job", tags="turo")
-        old = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    def test_tag_filter_applies_to_the_archive(self):
+        kept = _mkitem("ancient turo job", tags="turo")
+        other = _mkitem("ancient quill job", tags="quill")
         with db.tx() as c:
-            c.execute("UPDATE work_items SET state = 'done', updated_at = ? WHERE id = ?",
-                      (old, item_id))
-        without = work_store.grouped_items()
-        assert item_id not in {r["id"] for r in without["done"]}
-        with_tag = work_store.grouped_items(tags="turo")
-        assert item_id in {r["id"] for r in with_tag["done"]}
+            c.execute("UPDATE work_items SET state = 'done' WHERE id IN (?, ?)", (kept, other))
+        work_store.apply_action(kept, "archive")
+        work_store.apply_action(other, "archive")
+        archive = work_store.grouped_items(tags="turo", archived=True)
+        assert kept in {r["id"] for r in archive["done"]}
+        assert other not in {r["id"] for r in archive["done"]}
 
     def test_known_tags_lists_distinct(self):
         _mkitem("one", tags="turo,billing")
