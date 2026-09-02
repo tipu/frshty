@@ -135,6 +135,30 @@ class TestGrouping:
         assert old not in {r["id"] for r in work_store.grouped_items(now)["done"]}
         assert old in {r["id"] for r in work_store.grouped_items(now, archived=True)["done"]}
 
+    def test_a_board_search_finds_an_archived_task(self):
+        now = datetime.now(timezone.utc)
+        archived = _mkitem("archived billing task")
+        db.execute("UPDATE work_items SET state='done' WHERE id = ?", (archived,))
+        work_store.apply_action(archived, "archive")
+        assert archived not in {r["id"] for r in work_store.grouped_items(now)["done"]}
+        assert archived in {r["id"] for r in work_store.grouped_items(now, q="billing")["done"]}
+
+    def test_a_board_search_still_finds_a_task_on_the_board(self):
+        now = datetime.now(timezone.utc)
+        on_board = _mkitem("board billing task")
+        db.execute("UPDATE work_items SET state='done' WHERE id = ?", (on_board,))
+        assert on_board in {r["id"] for r in work_store.grouped_items(now, q="billing")["done"]}
+
+    def test_an_archive_search_leaves_out_the_tasks_on_the_board(self):
+        now = datetime.now(timezone.utc)
+        on_board = _mkitem("board billing task")
+        archived = _mkitem("archived billing task")
+        db.execute("UPDATE work_items SET state='done' WHERE id IN (?, ?)", (on_board, archived))
+        work_store.apply_action(archived, "archive")
+        ids = {r["id"] for r in work_store.grouped_items(now, q="billing", archived=True)["done"]}
+        assert archived in ids
+        assert on_board not in ids
+
     def test_done_items_are_sorted_by_completion_time_descending(self):
         now = datetime.now(timezone.utc)
         completed_first = _mkitem("completed first")
