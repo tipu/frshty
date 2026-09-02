@@ -1,8 +1,91 @@
 # frshty (فرشتہ)
 
-**/fəˈrɪʃ.tə/** — a personal dev dashboard that automates the lifecycle of a software engineer's daily work: PR reviews, ticket-to-PR development, Slack triage, timesheet, and billing. Built around AI-assisted workflows using Claude, Codex, and Gemini CLIs running inside a dev container.
+**/fəˈrɪʃ.tə/** — a dashboard that runs your engineering day.
 
-Not a product. A single-operator tool shared publicly so others can fork and adapt it.
+You assign yourself a ticket. frshty plans it, builds it, reviews its own work, opens the pull request, fixes the failing CI, answers the reviewer, logs the hours, and sends the invoice. You watch one page and step in when it asks for you.
+
+Not a product for sale. A single-operator tool published so you can fork it and point it at your own work.
+
+## Why it exists
+
+A senior engineer spends most of the day on the same loop. Read the ticket. Plan it. Write it. Review it. Open a PR. Wait. Fix CI. Answer a comment. Log the time. Send the invoice. Every step is mechanical, but every step still needs a human to start it and to remember it.
+
+frshty runs that loop. It keeps the state, starts each step, and asks for you only where judgment is required.
+
+## A day with frshty
+
+**8am.** The `/today` page lists the day in priority order. Tickets waiting to be classified. PR comments the agent could not fix on its own. Your own PRs that no one has reviewed in a day. PRs ready to merge. Hours you have not logged. Each row has one action.
+
+**9am.** You approve a ticket. frshty creates a worktree, produces a plan and a change manifest, implements it, runs the tests, reviews its own diff with three reviewer personas, loops on the findings until they pass, and opens the PR.
+
+**11am.** A teammate's PR lands in your review queue. frshty has already read the diff with three reviewer personas and drafted the comments. You edit them and submit, or you open the embedded terminal and argue with the model first.
+
+**2pm.** CI goes red on your PR. frshty reads the failure, finds the cause, fixes it, and pushes. A reviewer leaves four comments. frshty sorts them into "fix this" and "reply to this", fixes the first group in one commit, and drafts replies for the second.
+
+**7pm.** frshty proposes your timesheet from the tickets you actually touched. You edit and submit it to Jira.
+
+**Friday 7pm.** It builds the invoice from approved hours, applies your rate and your flat fees, and pushes it to bill.com.
+
+## What it does
+
+**Ships tickets.** Discovery pulls your assigned tickets out of Jira or Linear. Each one moves through plan, build, test, prove, review, PR, merge, and post-merge validation. Every stage produces a document you can read: the technical plan, the change manifest, the review verdict, the proof that the fix works. A stage that produces no document fails and retries instead of silently claiming success.
+
+**Reviews other people's PRs.** Three personas read the diff in parallel. Spec asks whether it delivers what the ticket asked for. Breakage asks what it will do to production. Maintainability asks whether you will regret it in three months. The findings are deduped and queued as comments you can edit, discuss one at a time in a terminal, or submit in bulk.
+
+**Keeps your own PRs moving.** It watches CI, fixes red builds, syncs the branch with the base, classifies reviewer comments, fixes the actionable ones in a batch commit, drafts replies to the rest, and resolves the thread on the platform only after a commit actually landed.
+
+**Checks the scope of a branch.** When a ticket is code complete, three independent models answer one question from one identical prompt: does every change on this branch belong to this ticket? A failing verdict holds the PR and the auto-merge until it is fixed. The vote is counted in code, not synthesized by a model.
+
+**Proves a claim before you make it.** Before a drafted reply says "this is already handled", it names a test, runs that test with the branch's source and again with the source reversed, and keeps the claim only if the test passes one way and fails the other.
+
+**Tells you what to work on.** A daily digest ranks everything that needs attention against a `PRIORITIES.md` you write yourself. The plan declares focus. The pipeline does the moving.
+
+**Tracks work that is not a ticket.** The work board is a single global page over every project, including the ones frshty does not manage. Each item is an outcome with a definition of done, not a terminal tab. Sessions become replaceable runs underneath it. The board groups by needs you, agent working, waiting on someone else, failed or stale, and recently done.
+
+**Explains a change.** Reviews and tickets get a generated slide walkthrough of the branch, rebuilt when the code moves.
+
+**Triages Slack.** Mentions and direct messages arrive summarized on one page instead of in your notification tray.
+
+**Logs time and bills for it.** Daily timesheet proposals from real ticket activity, recurring entries for standups, and weekly or monthly invoices pushed to bill.com.
+
+**Runs every client at once.** One process serves several instances. Each client gets its own port, its own worktrees, its own credentials, and its own feature set. State is partitioned per instance, so nothing leaks between them.
+
+## The screens
+
+| Page | What it is for |
+|---|---|
+| `/today` | The day in priority order, one action per row |
+| `/work` | Global outcome board across every project |
+| `/` | Live event feed, attention items, status cards |
+| `/reviews` | PR review queue, verdicts, queued comments |
+| `/reviews/{repo}/{pr}` | Diff, inline comments, per-comment discussion, slide walkthrough |
+| `/tickets` | Board of every ticket stage |
+| `/tickets/{key}` | Plan and review documents, job timeline, diff, embedded terminal |
+| `/wizard` | One card per PR that needs an action: merge, reply, approve, or nudge a reviewer on Slack |
+| `/scheduled` | Pending PR creations, CI waits, recurring schedule |
+| `/prd` | Product requirements intake and generated tickets |
+| `/slack` | Mentions and summaries |
+| `/timesheet`, `/billing` | Calendars of hours and invoices |
+| `/config` | In-browser editor for the instance config |
+
+## Turn on only what you need
+
+Every capability is a flag in the instance config. A flag that is off costs nothing. Timesheet and billing also drop out of the nav when they are off.
+
+| Flag | Gives you |
+|---|---|
+| `tickets` | The ticket-to-PR pipeline |
+| `review_prs` | Review queue for PRs where you are a reviewer |
+| `scope_review` | Consensus scope gate before the PR opens |
+| `pr_autofix` | Automatic review and fix cycle on every new PR (GitHub only) |
+| `defence` | Test-backed proof before a reply claims something works |
+| `presentations` | Slide walkthroughs of a branch |
+| `releases` | Group tickets into a release and inspect the whole release |
+| `slack` | Mention triage |
+| `timesheet` | Daily hour proposals |
+| `billing` | Invoices via bill.com |
+
+Separate config blocks turn on the daily manager digest (`[manager]`), the today agent (`[today_agent]`), the advisory PM reviews (`[pm_agent]`), PRD intake (`[prd]`), post-merge browser validation (`[validation]`), and the human approval gate before any ticket starts (`[ticket_approval]`).
 
 ## Quick start
 
@@ -11,12 +94,13 @@ Requires Python 3.12+ and [uv](https://github.com/astral-sh/uv).
 ```
 uv sync
 cp config/example.toml config/local.toml    # edit with your values
-python frshty.py config/local.toml          # single instance
-# OR
-python frshty.py --multi config/a.toml config/b.toml --port 7000   # multi-instance supervisor
+python frshty.py config/local.toml          # one instance
+python frshty.py --multi config/a.toml config/b.toml --port 7000   # several
 ```
 
-Credentials via env vars referenced in your config (`BB_TOKEN`, `JIRA_TOKEN`, `LINEAR_TOKEN`, etc). See `config/example.toml` for the full list. Claude/Codex/Gemini CLIs each manage their own auth (run `claude /login`, `codex login`, `gemini auth login` once on the host, then mount the auth dirs into the container).
+Open `http://localhost:<port>`.
+
+Credentials come from environment variables named in your config (`BB_TOKEN`, `JIRA_TOKEN`, `LINEAR_TOKEN`, and so on). See `config/example.toml` for the full list. The model CLIs (Claude Code, Codex, and the third consensus voice `agy`) each manage their own auth. Log in once on the host, then mount those auth directories into the container.
 
 Docker:
 
@@ -25,134 +109,13 @@ cp docker-compose.example.yml docker-compose.yml    # edit volume paths
 docker compose up
 ```
 
-## Product
+The image ships Claude Code, Codex, Gemini CLI, Playwright with Chromium, `gh`, `git`, and Python 3.12. The repo is bind-mounted, so a code change does not need a rebuild.
 
-### What it does for you
+## Setup details
 
-You assign a ticket in Jira or Linear. frshty picks it up, creates a git worktree, runs `/ctp` to produce a plan and a change manifest, then `/tri-review` to review its own work, loops on the review until it passes, and opens a PR. When CI fails on one of your PRs, it tries to fix it. When reviewers leave comments, it classifies them as actionable or needing a reply and either fixes the code or drafts a response. When someone mentions you in Slack, it summarizes and queues the thread for you. It logs hours against the tickets you worked on that day. At the end of the week or month, it generates an invoice via bill.com.
+**Timezone.** Set `FRSHTY_TIMEZONE` to any IANA zone. It controls what the server calls "today", when the timesheet fills, and when billing fires. Default is `UTC`. Web pages ignore it and render every timestamp in the viewer's own zone, so two people in two zones each read their own clock on the same page.
 
-Everything shows in a single web UI at `http://localhost:<port>`. The event feed is the center of gravity; the other pages are focused views.
-
-### Core workflows
-
-**Ticket pipeline.** Discovered tickets flow through stages: `new → planning → reviewing → pr_ready → pr_created → in_review → merged`. Each stage is a synchronous headless `claude -p` invocation run by a worker:
-
-| Stage | What runs | Artifact produced |
-|---|---|---|
-| `start_planning` | `/ctp docs/` | `docs/change-manifest.md`, `docs/technical-plan.md` |
-| `start_reviewing` | `/tri-review` | `docs/tri-review.md` with `VERDICT: PASS` or `VERDICT: FAIL` |
-| `fix_review_findings` | Read tri-review, fix blockers, re-run /tri-review | updated `docs/tri-review.md` |
-| `mark_ready` | Precondition check only | transitions to `pr_ready` |
-| `create_pr` | Pushes branch, opens PR | `prs` attached to ticket state |
-| `fix_ci_failures` | CI causality analysis + targeted fix | amended commit |
-| `backfill_artifacts` | For PRs opened outside frshty: reverse-generate planning/review docs from the diff | all three docs |
-
-Each stage asserts its artifact via a postcondition before reporting success. A silent claude failure fails the job cleanly; the next scan re-queues.
-
-**PR reviews.** For PRs where you're a reviewer, frshty runs three personas in parallel against the diff:
-
-- **spec**: does it deliver what the ticket asked for?
-- **breakage**: will it break something in production? (race conditions, N+1, missing auth, error handling)
-- **maintainability**: will you regret this in 3 months? (complexity, DRY, naming, patterns)
-
-The personas' findings are deduped, simplified, and merged into `review.json` + `queued_comments.json`. The `/reviews` page surfaces them; you can submit selected comments back to GitHub/Bitbucket, discuss comments one-by-one in an embedded terminal, or push the whole review.
-
-**Slack triage.** `slack_monitor` reads a slack-proxy-tools JSONL feed, filters mentions and direct messages, and adds them to the Slack page with a Claude-generated summary.
-
-**Timesheet.** Daily at 7pm local, `timesheet_check` walks your day's ticket activity and proposes worklog entries you can edit and submit to Jira. Recurring entries (standups, planned meetings) are defined per-config.
-
-**Billing.** Weekly (Fri 7pm local) or monthly (last day 7pm local), `billing_check` builds an invoice from approved timesheet hours, applies your rate and flat-fee extras, and pushes it to bill.com.
-
-**Multi-instance.** `python frshty.py --multi a.toml b.toml c.toml --port 7000` runs several dashboards from one Python process. State is partitioned by each config's `job.key` in a shared SQLite DB at `~/.frshty/frshty.db`. Each instance gets its own port from its config, its own worktree tree, and its own feature flags.
-
-**Supervisor & MCP.** `supervisor.py` polls all running instances, detects unresponsive processes and error events, and can restart a downed instance or escalate to you. `mcp_server.py` exposes the same inspection and control surface as MCP tools so Claude Desktop can query tickets, reviews, events, and trigger cycles across all instances.
-
-### The UI
-
-- `/` feed — event stream, attention items, status cards; noise/useful filter
-- `/reviews` — open review queue; verdict badges (LLM vs platform) and approval state
-- `/reviews/{repo}/{pr_id}` — diff with inline comments, per-comment discussion
-- `/tickets` — board view of all ticket stages
-- `/tickets/{key}` — ticket detail: docs tabs, jobs timeline, PR diff, embedded terminal
-- `/scheduled` — pending PR creations, CI-pending tickets, recurring schedule rows
-- `/slack` — mentions and summaries
-- `/timesheet`, `/billing` — calendars of hours and invoices
-- `/config` — in-browser editor for the instance's TOML
-
-### Nav gating by feature flag
-
-Nav items for Timesheet and Billing hide automatically on instances where the corresponding feature flag is off. The shared `/static/nav-gate.js` fetches `/api/config` and removes disabled routes from the nav.
-
-## Technical
-
-### Process model
-
-One FastAPI app per Python process. `--multi` registers each config as an "instance" in an in-memory registry keyed by `job.key`, and all instances share:
-
-- **SQLite DB** at `~/.frshty/frshty.db` (tables: `kv`, `events`, `jobs`, `scheduler`; all rows carry `instance_key`)
-- **Worker pool** (default 4 threads) claiming jobs from `jobs` table, serving every instance's work
-- **Beat thread** firing cron ticks (4-min cadence) and recurring scheduler rows
-- **Event bus dispatcher** reading undispatched rows from `events` and routing them to tasks
-
-Per-request state access uses a `ContextVar` (`_instance_key_cv`) so handlers, tasks, and workers see the right instance's data without explicit plumbing. The `TaskContext` passed to a task body carries `ctx.instance_key`; everything else is derived via the contextvar overlay.
-
-### State store (`core/state.py`, `core/db.py`)
-
-Tickets live in a per-row `tickets` table keyed by `(instance_key, ticket_key)`, accessed via `state.load_ticket(key) / save_ticket(key, data) / update_ticket(key, mutate)` — `update_ticket` wraps read-modify-write in a single `BEGIN IMMEDIATE` so concurrent workers can mutate different tickets without clobbering each other. Non-ticket modules (`scheduler`, `actions`, feature-specific blobs) still use the legacy `state.load(module) / state.save(module, dict)` API which reads/writes the `kv` table. `state.use(instance_key)` and `state.reset(token)` provide scoped overrides for per-job context.
-
-### Worker queue (`core/queue.py`, `core/worker.py`)
-
-`claim_next()` is the core primitive. It:
-
-1. Picks the oldest `queued` job
-2. **Refuses to claim** if that job's `ticket_key` has another `running` job (per-ticket mutex — prevents two stage jobs for the same ticket from colliding)
-3. Atomically flips `queued → running` with `started_at`
-
-`sweep_stale(max_age_seconds=3600)` is called by the worker pool every 60s and on startup to reset jobs that have been `running` longer than the threshold. On startup it's called with `max_age_seconds=0` because no worker can actually be running work yet — any `running` row is from a crashed prior process and should be reset immediately.
-
-The per-ticket mutex means you can run 10 ticket pipelines concurrently without any of them interfering with each other, but a single ticket's stages stay serialized.
-
-### Task registry (`core/tasks/registry.py`)
-
-`@task("name", preconditions=[...], postconditions=[...], timeout=N)` registers a task function. The runner:
-
-1. Runs preconditions. Any fail → task returns `skipped`
-2. Runs the body
-3. If body returned `ok`, runs postconditions. Any fail → task becomes `failed` (artifacts preserved)
-
-Preconditions are reusable gates like `status_is("reviewing")`, `file_exists("docs/change-manifest.md")`, `feature_enabled("timesheet")`, `has_flag("_ci_failed_pending")`. Postconditions reuse the same callable shape. This lets a stage task assert its expected artifact on the filesystem before reporting success, rather than silently returning ok while nothing happened.
-
-### Event bus (`core/event_bus.py`, `core/tasks/routes.py`)
-
-Events are rows in the `events` table. A dispatcher thread reads undispatched rows and fans them out via registered routes:
-
-- `cron_tick` → one `scan_tickets`/`poll_own_prs`/`poll_reviewer`/`slack_scan` per instance with the right feature flag
-- `ui_retry` → re-enqueue a specific task
-- `ui_set_state` → set ticket status
-- `ui_notes` → archive artifacts + reset ticket to `new`
-
-Dispatch is idempotent; the `dispatched_at` timestamp acts as the lock.
-
-### Scheduler (`core/scheduler.py`, `core/beat.py`)
-
-Two kinds of rows:
-
-- **Recurring** (`cadence = "weekly"|"monthly"|"daily_19pst"`): beat thread re-fires at each `next_run_at` and advances the timestamp by cadence. Examples: `billing_check` weekly, `timesheet_check` at 7pm PT daily
-- **Oneshot** (`run_at` timestamp, optional `action`): fires once. Used for scheduled PR creation after the `ticket_dev_complete` event, with optional jitter and business-hours clamping
-
-`_seed_recurring_schedules()` on startup upserts recurring rows when their feature flag is on and **deletes them when the flag is off**, so toggling `[features] timesheet = false` in the toml cleanly removes the daily entry on next restart.
-
-### Claude invocations (`core/claude_runner.py`)
-
-Three headless primitives:
-
-- `run_sonnet(prompt, worktree, tools, timeout)` — `claude -p - --model claude-sonnet-4-6 --add-dir <worktree>` (for PR review)
-- `run_haiku(prompt, timeout)` — `claude -p - --model claude-haiku-4-5-20251001` (for triage, classification, 1-word verdicts)
-- `run_claude_code(prompt, cwd, timeout)` — `claude -p <prompt> --dangerously-skip-permissions`, cwd-scoped (for ticket pipeline stages)
-
-No tmux, no capture_pane polling. Tasks call these synchronously, wait for the subprocess to return, and postconditions assert the artifact. Claude's keychain/credentials come from whichever process started frshty (launchd on macOS, docker container env on Linux), which is why SSH-spawned ad-hoc invocations won't work for auth — enqueue a task instead.
-
-If an org uses a separate Claude Code account, configure that per instance under `[llm.claude]` instead of relying on a shell alias. Example:
+**Per-instance Claude account.** If a client uses a separate Claude Code account, point that instance at its own config directory. frshty calls the CLI directly, so a shell alias will not reach it.
 
 ```toml
 [llm]
@@ -163,69 +126,33 @@ config_dir = "~/.aimyable-claude"
 args = ["--dangerously-skip-permissions"]
 ```
 
-This is the config-file equivalent of an alias like `cla="CLAUDE_CONFIG_DIR=~/.aimyable-claude claude --dangerously-skip-permissions"`. frshty invokes Claude via `subprocess` directly, so aliases from `.zshrc` are not loaded.
+**Slack.** Requires [slack-proxy-tools](https://github.com/tipu/slack-proxy-tools) checked out and running.
 
-### Platform abstraction (`features/platforms.py`)
+**Security.** Binds to `127.0.0.1`. Endpoints are unauthenticated. Do not expose it without putting your own auth in front.
 
-`BitbucketPlatform` and `GitHubPlatform` implement a common interface: `list_review_prs`, `get_pr_info`, `get_pr_diff`, `get_pr_comments`, `post_pr_comment`, `get_pr_checks`, `get_failed_logs`, `create_pr`, `push_branch`, `merge_base`, `merge_pr`, `resolve_comment`. Platform choice comes from `job.platform`. Bitbucket uses the REST API with basic auth; GitHub uses the `gh` CLI.
+## How it works
 
-When a PR state comes back non-OPEN (merged, declined, closed, superseded, deleted), the reviews endpoint rmtrees its review dir so the feed self-cleans.
+One FastAPI process serves every instance. Work is rows in a SQLite database at `~/.frshty/frshty.db`, claimed by a small worker pool.
 
-### Ticket system abstraction (`features/ticket_systems.py`)
+- **Jobs queue.** A worker claims the oldest queued job, but refuses to claim one whose ticket already has a job running. Different tickets advance in parallel; one ticket's own stages stay in order.
+- **Tasks.** Every unit of work declares preconditions and postconditions. Preconditions decide whether it should run. Postconditions assert the artifact on disk before it reports success, so a silent model failure fails the job instead of skipping a stage.
+- **Events.** A dispatcher reads the event table and fans rows out to tasks. Dispatch is idempotent.
+- **Scheduler.** A beat thread fires cron ticks and recurring rows. Turning a feature off deletes its recurring rows on the next start.
+- **Models.** Claude, Codex, and `agy` are invoked headless as subprocesses. No tmux in the pipeline. Tmux is used only for the terminal you drive yourself.
+- **Platforms.** GitHub and Bitbucket sit behind one interface, as do Jira and Linear. Choice is per instance.
 
-`JiraTicketSystem` and `LinearTicketSystem` implement `fetch_tickets()` returning a normalized list of tickets with key, summary, description, status, url, attachments, related, subtasks, parent. Choice comes from `job.ticket_system`.
-
-### Docker (`Dockerfile`, `docker-compose.example.yml`)
-
-The container has Claude Code, Codex, Gemini CLI, `gh`, `git`, and Python 3.12 pre-installed. The repo is bind-mounted to `/app` so code changes don't require a rebuild. Host auth dirs (`~/.claude`, `~/.codex`, `~/.gemini`, `~/.config/gh`) are mounted read-only or read-write depending on tool. The container runs on `--network host` so the server listens on `127.0.0.1:<port>` of the host.
-
-### Directory layout
-
-```
-core/                 # orchestration primitives (no business logic)
-├── state.py, db.py   # SQLite-backed kv + jobs
-├── queue.py, worker.py  # job claim + worker pool
-├── event_bus.py      # event → task routing
-├── scheduler.py, beat.py  # cron + recurring
-├── claude_runner.py  # headless subprocess wrappers
-├── tasks/            # @task-registered units of work
-└── terminal.py       # tmux wrapper (interactive operator terminal websocket only — backend pipeline is headless)
-
-features/             # per-domain logic
-├── tickets.py        # discovery, worktree setup, PR creation, CI fix, in-review handling
-├── reviewer.py       # PR review with three personas
-├── platforms.py      # github / bitbucket clients
-├── ticket_systems.py # jira / linear clients
-├── slack_monitor.py  # mentions + summaries
-├── timesheet.py, billing.py, billcom.py  # time tracking + invoicing
-
-templates/            # Jinja-free static HTML (read fresh per request)
-static/               # CSS, JS (nav-gate.js), favicon, vendored libs
-config/               # per-instance TOML files
-migrations/           # SQL schema migrations
+```text
+core/       orchestration primitives: queue, worker, tasks, events, scheduler, model runners
+features/   domain logic: tickets, reviewer, own PRs, scope, defence, slack, timesheet, billing
+manager/    daily digest and priority ranking
+services/   work items, runs, tags, debriefs
+prd/        requirements intake and ticket generation
+web/        pages and API
+templates/  static HTML, read fresh per request
+config/     one TOML per instance
 ```
 
-## Setup details
-
-### Timezone
-
-Set `FRSHTY_TIMEZONE` in your environment (any IANA zone). Default is `UTC`.
-
-```
-FRSHTY_TIMEZONE=America/Los_Angeles
-```
-
-Single source of truth for calendar-day semantics: "today", the timesheet fill window, billing fire times (Fri 7pm local, last-day-of-month 7pm local), recurring meeting weekday matching. Stored timestamps in SQLite, logs, and events are always UTC.
-
-The web pages do not use this zone. An API response carries a timestamp as a tz-aware ISO instant and never as a formatted clock, and `static/frshty-time.js` renders it in the zone the browser is in, so two people in different zones each read their own wall clock on the same page. `FRSHTY_TIMEZONE` covers only what the server decides on its own: calendar days and the wall clock inside a log line. `tests/test_client_timezone.py` rejects a page that cuts the clock out of an ISO string or names a fixed zone.
-
-### Slack
-
-Slack functionality requires [slack-proxy-tools](https://github.com/tipu/slack-proxy-tools) to be checked out and running. Follow the setup in that repo first.
-
-### Security
-
-Binds to `127.0.0.1` by default. Endpoints are unauthenticated. Do not expose without adding your own auth layer.
+`supervisor.py` watches every running instance and restarts a dead one. `mcp_server.py` exposes the same inspection and control surface as MCP tools, so Claude Desktop can query tickets, reviews, and events across all instances.
 
 ## License
 
