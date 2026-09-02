@@ -107,6 +107,27 @@
 				return this.crumbs || crumbsForPath(window.location.pathname);
 			},
 		},
+		// The topbar is sticky. Every other sticky panel on the page has to
+		// start below it, so publish the measured height as --ln-topbar-h and
+		// keep it correct when the actions row wraps on a narrow window.
+		mounted() {
+			this.$nextTick(() => {
+				const bar = this.$el.querySelector('.ln-topbar');
+				if (!bar) return;
+				const publish = () => {
+					const h = Math.round(bar.getBoundingClientRect().height);
+					if (h > 0) document.documentElement.style.setProperty('--ln-topbar-h', h + 'px');
+				};
+				publish();
+				if (window.ResizeObserver) {
+					this._topbarObserver = new ResizeObserver(publish);
+					this._topbarObserver.observe(bar);
+				}
+			});
+		},
+		beforeUnmount() {
+			if (this._topbarObserver) this._topbarObserver.disconnect();
+		},
 		template: `
 			<div class="ln-root">
 				<aside class="ln-rail">
@@ -167,8 +188,8 @@
 	// Time-relative helper kept on window so existing pages can use it without
 	// re-importing — frshty-nav.js had the same helper at $relTime.
 	function relTime(ts) {
-		if (!ts) return '';
-		const d = new Date(ts);
+		const d = window.frshtyTime.toDate(ts);
+		if (!d) return '';
 		const secs = Math.floor((Date.now() - d.getTime()) / 1000);
 		if (secs < 60) return 'just now';
 		const mins = Math.floor(secs / 60);

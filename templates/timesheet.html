@@ -6,6 +6,7 @@
 <title>Timesheet — frshty</title>
 <script src="/static/tailwind.js"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="/static/frshty-time.js"></script>
 <script src="/static/frshty-nav.js"></script>
 <script src="/static/frshty-shell.js"></script>
 <link rel="stylesheet" href="/static/frshty.css">
@@ -48,7 +49,7 @@ button { cursor: pointer; }
 </div>
 
 <div class="flex gap-4">
-    <div class="w-52 flex-shrink-0 sticky top-4 self-start">
+    <div class="w-52 flex-shrink-0 self-start" style="position:sticky;top:calc(var(--ln-topbar-h) + 16px)">
         <div class="card p-3 mb-3">
             <span class="text-gray-400 text-sm">Total to log:</span>
             <span class="text-xl font-bold text-green-400 ml-1">{{ Math.round(totalSuggest * 10) / 10 }}h</span>

@@ -24,6 +24,7 @@ from typing import Callable
 import core.db as db
 import core.log as log
 import core.state as state
+import core.tz as core_tz
 
 
 def _now_iso() -> str:
@@ -44,7 +45,9 @@ def schedule(key: str, action: str, run_at: datetime, meta: dict | None = None) 
         "ON CONFLICT(instance_key, key) DO UPDATE SET run_at=excluded.run_at, data=excluded.data",
         (instance_key, key, _to_utc_iso(run_at), db.dump_json(data)),
     )
-    log.emit("scheduled", f"Scheduled {action} for {key} at {run_at.strftime('%a %b %d %I:%M%p')}",
+    local_at = run_at.astimezone(core_tz.local_tz()) if run_at.tzinfo else run_at.replace(
+        tzinfo=timezone.utc).astimezone(core_tz.local_tz())
+    log.emit("scheduled", f"Scheduled {action} for {key} at {local_at.strftime('%a %b %d %I:%M%p %Z')}",
              meta={"ticket": key, "action": action, "run_at": _to_utc_iso(run_at)})
 
 
@@ -213,8 +216,7 @@ def _advance_recurring(cadence: str, prev_run_at: datetime, now: datetime) -> da
         from features.billing import _next_fire as billing_next_fire, FIRE_TZ
     except Exception:
         billing_next_fire = None
-        import core.tz as _ctz
-        FIRE_TZ = _ctz.local_tz()
+        FIRE_TZ = core_tz.local_tz()
 
     if cadence in ("weekly", "monthly") and billing_next_fire is not None:
         tz_prev = prev_run_at.astimezone(FIRE_TZ) if prev_run_at.tzinfo else prev_run_at.replace(tzinfo=timezone.utc).astimezone(FIRE_TZ)
@@ -231,9 +233,8 @@ def _advance_recurring(cadence: str, prev_run_at: datetime, now: datetime) -> da
         return candidate
 
     if cadence == "daily_19pst":
-        import core.tz as _ctz
-        tz = _ctz.local_tz()
-        local = prev_run_at.astimezone(tz) if prev_run_at.tzinfo else prev_run_at.replace(tzinfo=timezone.utc).astimezone(tz)
+        zone = core_tz.local_tz()
+        local = prev_run_at.astimezone(zone) if prev_run_at.tzinfo else prev_run_at.replace(tzinfo=timezone.utc).astimezone(zone)
         candidate = local.replace(hour=19, minute=0, second=0, microsecond=0) + timedelta(days=1)
         while candidate.astimezone(timezone.utc) <= now:
             candidate = candidate + timedelta(days=1)
@@ -246,9 +247,8 @@ def _advance_recurring(cadence: str, prev_run_at: datetime, now: datetime) -> da
             return prev_run_at + timedelta(hours=1)
         if not 0 <= hour <= 23:
             return prev_run_at + timedelta(hours=1)
-        import core.tz as _ctz
-        tz = _ctz.local_tz()
-        local = prev_run_at.astimezone(tz) if prev_run_at.tzinfo else prev_run_at.replace(tzinfo=timezone.utc).astimezone(tz)
+        zone = core_tz.local_tz()
+        local = prev_run_at.astimezone(zone) if prev_run_at.tzinfo else prev_run_at.replace(tzinfo=timezone.utc).astimezone(zone)
         candidate = local.replace(hour=hour, minute=0, second=0, microsecond=0) + timedelta(days=1)
         while candidate.astimezone(timezone.utc) <= now:
             candidate = candidate + timedelta(days=1)
@@ -334,8 +334,8 @@ def compute_delay_time(start: datetime, delay_hours: list[int], quiet_hours: lis
     delay = random.uniform(delay_hours[0], delay_hours[1])
     target = start + timedelta(hours=delay)
 
-    tz = ZoneInfo(tz_name)
-    local = target.astimezone(tz)
+    zone = ZoneInfo(tz_name)
+    local = target.astimezone(zone)
 
     quiet_start, quiet_end = quiet_hours
     if local.hour >= quiet_start or local.hour < quiet_end:

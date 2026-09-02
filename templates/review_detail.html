@@ -6,6 +6,7 @@
 <title>Review Detail — frshty</title>
 <script src="/static/tailwind.js"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="/static/frshty-time.js"></script>
 <script src="/static/frshty-nav.js"></script>
 <script src="/static/frshty-shell.js"></script>
 <link rel="stylesheet" href="/static/frshty-v2.css">
@@ -23,7 +24,7 @@ body { font-family: 'SF Mono', 'Cascadia Code', monospace; background: #0a0a0a; 
 nav a { color: #888; padding: 4px 12px; border-radius: 4px; }
 nav a:hover, nav a.active { color: #fff; background: #222; }
 .diff-file { border: 1px solid #2a2a2a; border-radius: 6px; overflow: visible; margin-bottom: 16px; }
-.diff-header { position: sticky; top: 72px; z-index: 5; background: #1a1a2a; padding: 8px 12px; font-size: 13px; color: #93c5fd; border-bottom: 1px solid #2a2a2a; }
+.diff-header { position: sticky; top: calc(var(--ln-topbar-h) + 16px); z-index: 5; background: #1a1a2a; padding: 8px 12px; font-size: 13px; color: #93c5fd; border-bottom: 1px solid #2a2a2a; }
 .diff-file-desc { font-size: 11px; font-weight: normal; color: #8b95a6; margin-top: 3px; }
 .diff-header:hover { background: #222244; }
 .diff-hunk { background: #1a1a2a; color: #7c8da6; padding: 2px 12px; font-size: 12px; }
@@ -56,7 +57,7 @@ body.moving .diff-line-num[data-line]:hover { background: #1e3a5f; color: #fff; 
 .persona-active { background: #1e3a5f; color: #93c5fd; }
 .persona-dim { background: #1a1a1a; color: #444; }
 textarea { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; }
-#sidebar { width: 240px; position: sticky; top: 72px; max-height: calc(100vh - 72px); overflow-y: auto; }
+#sidebar { width: 240px; position: sticky; top: calc(var(--ln-topbar-h) + 16px); max-height: calc(100vh - var(--ln-topbar-h) - 32px); overflow-y: auto; }
 #sidebar::-webkit-scrollbar { width: 4px; }
 #sidebar::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
 .sidebar-item { cursor: pointer; padding: 4px 8px; border-radius: 4px; font-size: 11px; }

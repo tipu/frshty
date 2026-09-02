@@ -6,6 +6,7 @@
 <title>Ticket — frshty</title>
 <script src="/static/tailwind.js"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="/static/frshty-time.js"></script>
 <script src="/static/frshty-nav.js"></script>
 <script src="/static/frshty-shell.js"></script>
 <link rel="stylesheet" href="/static/frshty-v2.css">
@@ -90,7 +91,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
 .collapsible-content { max-height: 600px; overflow: hidden; transition: max-height 0.2s ease-in-out; }
 .collapsible-content.collapsed { max-height: 0; opacity: 0; }
 .collapsible-content.expanded { max-height: none; overflow: visible; }
-.diff-file-sidebar { width: 240px; max-height: calc(100vh - 24px); overflow-y: auto; padding-right: 4px; }
+.diff-file-sidebar { width: 240px; position: sticky; top: calc(var(--ln-topbar-h) + 8px); max-height: calc(100vh - var(--ln-topbar-h) - 20px); overflow-y: auto; padding-right: 4px; }
 .diff-file-sidebar button { line-height: 1.4; }
 [v-cloak] { display: none; }
 </style>
@@ -209,7 +210,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                 <button @click="toggleTimeline(c.id)" class="text-xs text-blue-400 hover:underline">{{ timelineOpen[c.id] ? '▾' : '▸' }} Track</button>
                 <div v-if="timelineOpen[c.id]" class="mt-1 border-l-2 border-gray-700 pl-2">
                     <div v-for="ev in (commentTimelines[c.id] || [])" :key="ev.id" class="text-xs text-gray-400 py-0.5">
-                        <span class="text-gray-600">{{ (ev.ts || '').slice(5,16).replace('T',' ') }}</span>
+                        <span class="text-gray-600">{{ $time.dayMinute(ev.ts) }}</span>
                         <span class="text-gray-300 ml-1">{{ ev.event }}</span>
                     </div>
                     <div v-if="(commentTimelines[c.id] || []).length === 0" class="text-xs text-gray-600 py-0.5">No tracked events yet.</div>
@@ -307,7 +308,10 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                             </div>
                             <div class="tlA-sub">{{ row.node.sub }}</div>
                             <div v-if="(row.node.chips || []).length" class="tlA-chips">
-                                <span v-for="(c, ci) in row.node.chips" :key="ci" class="tlA-chip" :class="c[0] ? 'tlA-chip-' + c[0] : ''">{{ c[1] }}</span>
+                                <span v-for="(c, ci) in row.node.chips" :key="ci" class="tlA-chip"
+                                      :class="[c[0] ? 'tlA-chip-' + c[0] : '', chipOpens(c) ? 'tlA-chip-open' : '']"
+                                      :title="chipOpens(c) ? 'open ' + c[1] : null"
+                                      @click="openChip(c, $event)">{{ c[1] }}</span>
                             </div>
                         </button>
                     </div>
@@ -320,7 +324,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                     <div style="min-width:0">
                         <div class="tl-panel-title">{{ selectedNode ? selectedNode.name : 'Pick a circle' }}</div>
                         <div class="tl-panel-meta">
-                            {{ selectedNode ? (selectedNode.ts.replace('T', ' ').slice(0, 19) + ' · ' + selectedNode.detail.meta) : 'the phase output loads here' }}
+                            {{ selectedNode ? (tlStamp(selectedNode.ts) + ' · ' + selectedNode.detail.meta) : 'the phase output loads here' }}
                         </div>
                     </div>
                 </div>
@@ -330,8 +334,8 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                             <div v-if="b.title" class="tl-block-title">{{ b.title }}</div>
                             <dl v-if="b.k === 'kv' || b.k === 'steps'" class="tl-kv">
                                 <template v-for="(r, ri) in b.rows" :key="ri">
-                                    <dt :class="b.k === 'steps' ? 'ln-mono' : ''">{{ r[0] }}</dt>
-                                    <dd :style="b.k === 'steps' ? 'font-family:var(--ln-sans);color:var(--ln-text-2)' : ''">{{ r[1] }}</dd>
+                                    <dt :class="b.k === 'steps' ? 'ln-mono' : ''">{{ b.k === 'steps' ? tlRow(r[0]) : r[0] }}</dt>
+                                    <dd :style="b.k === 'steps' ? 'font-family:var(--ln-sans);color:var(--ln-text-2)' : ''">{{ tlValue(r[1]) }}</dd>
                                 </template>
                             </dl>
                             <template v-else-if="b.k === 'arts'">
@@ -344,13 +348,14 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                                         </span>
                                         <span class="tl-art-size">{{ a.size }}</span>
                                     </button>
-                                    <div v-if="artifactOpen[a.name]" class="tl-art-open">
+                                    <div v-if="artifactOpen[a.name] && hasPreview(a)" class="tl-art-open">
                                         <video v-if="a.kind === 'video'" controls class="tl-media" :src="docUrl(a.name)"></video>
                                         <img v-else-if="a.kind === 'image'" class="tl-media" :src="docUrl(a.name)">
-                                        <a v-else-if="a.kind === 'page'" class="link text-xs" :href="docUrl(a.name)" target="_blank">open {{ a.name }} &nearr;</a>
+                                        <div v-else-if="a.kind === 'file'" class="text-xs text-gray-500">no preview for this file type</div>
                                         <div v-else-if="artifactText(a.name)" class="md-content text-sm" v-html="renderMarkdown(artifactText(a.name))"></div>
-                                        <div v-else class="text-xs text-gray-500">not inlined — open it from the Docs tab</div>
                                     </div>
+                                    <a v-if="artifactOpen[a.name] && a.kind !== 'file'" class="link text-xs tl-art-link"
+                                       :href="docUrl(a.name)" target="_blank">open {{ a.name }} &nearr;</a>
                                 </div>
                             </template>
                             <template v-else-if="b.k === 'commits'">
@@ -432,7 +437,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                     <span :class="ticket.release.latest_review.verdict === 'pass' ? 'text-green-300' : 'text-red-300'">
                         verdict: {{ ticket.release.latest_review.verdict }}
                     </span>
-                    <span class="text-gray-500 ml-1">({{ (ticket.release.latest_review.findings || []).length }} findings · {{ ticket.release.latest_review.created_at }})</span>
+                    <span class="text-gray-500 ml-1">({{ (ticket.release.latest_review.findings || []).length }} findings · {{ $time.stamp(ticket.release.latest_review.created_at) }})</span>
                     <ul v-if="(ticket.release.latest_review.findings || []).length" class="mt-1 space-y-1">
                         <li v-for="(f, i) in ticket.release.latest_review.findings" :key="i" :class="severityClass(f.severity)">
                             [{{ f.category }}] {{ f.message }}
@@ -499,7 +504,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
             <div v-if="ticket && (ticket.scheduled_rows || []).length" class="mb-3 pb-3 border-b border-gray-800">
                 <div class="text-xs uppercase text-gray-500 mb-1">Currently scheduled</div>
                 <div v-for="(s, i) in (ticket.scheduled_rows || [])" :key="'sched-' + i" class="text-xs font-mono text-yellow-300">
-                    {{ s.run_at }} — {{ s.key }} <span v-if="s.action" class="text-gray-500">({{ s.action }})</span>
+                    {{ $time.stamp(s.run_at) }} — {{ s.key }} <span v-if="s.action" class="text-gray-500">({{ s.action }})</span>
                 </div>
             </div>
             <div class="text-xs space-y-1 max-h-96 overflow-y-auto">
@@ -507,7 +512,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                     <div v-if="row.kind === 'job'"
                          class="cursor-pointer hover:bg-gray-800 p-2 rounded flex items-center gap-2"
                          @click="viewJobOutput(row.id, row.task)">
-                        <span class="text-gray-500 flex-shrink-0">{{ row.finished_at || row.started_at || row.enqueued_at }} <span class="text-gray-600">({{ $relTime(row.finished_at || row.started_at || row.enqueued_at) }})</span></span>
+                        <span class="text-gray-500 flex-shrink-0">{{ $time.stamp(row.finished_at || row.started_at || row.enqueued_at) }} <span class="text-gray-600">({{ $relTime(row.finished_at || row.started_at || row.enqueued_at) }})</span></span>
                         <span class="flex-shrink-0" :class="jobStatusClass(row.status)">{{ row.status }}</span>
                         <span v-if="row.status === 'running'" class="text-xs px-1.5 py-0.5 rounded ml-1"
                               :class="row.pid_alive ? 'bg-green-900 text-green-300' : 'bg-red-900 text-red-300'"
@@ -523,7 +528,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                     </div>
                     <div v-else-if="row.kind === 'transition'" class="p-2 rounded flex items-center gap-2 border-l-2"
                          :class="row.rejected ? 'border-red-700 bg-red-950/30' : 'border-blue-700 bg-blue-950/20'">
-                        <span class="text-gray-500 flex-shrink-0">{{ row.ts }} <span class="text-gray-600">({{ $relTime(row.ts) }})</span></span>
+                        <span class="text-gray-500 flex-shrink-0">{{ $time.stamp(row.ts) }} <span class="text-gray-600">({{ $relTime(row.ts) }})</span></span>
                         <span class="text-xs px-1.5 py-0.5 rounded flex-shrink-0"
                               :class="row.rejected ? 'bg-red-900 text-red-200' : 'bg-blue-900 text-blue-200'">
                             {{ row.rejected ? 'rejected' : 'status' }}
@@ -539,7 +544,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                         </span>
                     </div>
                     <div v-else class="p-2 rounded flex items-center gap-2 border-l-2 border-gray-700 bg-gray-900/30">
-                        <span class="text-gray-500 flex-shrink-0">{{ row.ts }} <span class="text-gray-600">({{ $relTime(row.ts) }})</span></span>
+                        <span class="text-gray-500 flex-shrink-0">{{ $time.stamp(row.ts) }} <span class="text-gray-600">({{ $relTime(row.ts) }})</span></span>
                         <span class="text-xs px-1.5 py-0.5 rounded flex-shrink-0 bg-gray-800 text-gray-300">event</span>
                         <span class="font-mono text-gray-400 flex-shrink-0">{{ row.event }}</span>
                         <span class="text-gray-300 flex-1 truncate" :title="row.summary || ''">{{ (row.summary || '').split('\n')[0] }}</span>
@@ -567,7 +572,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                         <button @click="copyText(proofPath(v.name))" class="text-xs text-gray-500 hover:text-gray-300 shrink-0"
                                 :title="'copy ' + proofPath(v.name)">{{ copiedPath === proofPath(v.name) ? '✓ copied' : '⧉ copy' }}</button>
                         <span v-if="v.created_at" class="text-xs text-gray-500 shrink-0 ml-auto"
-                              :title="v.created_at">created {{ formatProofDate(v.created_at) }}</span>
+                              :title="$time.stamp(v.created_at)">created {{ formatProofDate(v.created_at) }}</span>
                     </div>
                     <video controls class="w-full rounded" style="max-height:600px">
                         <source :src="`/api/tickets/${key}/docs/${encodeURIComponent(v.name)}`">
@@ -639,7 +644,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
 <div v-show="activeTab === 'diff'">
     <div v-if="!parsedDiff.length && !filteredComments.length" class="text-gray-500 text-sm p-4">No diff or comments yet.</div>
     <div class="flex gap-4 items-start">
-        <div v-if="parsedDiff.length" class="diff-file-sidebar text-xs flex-shrink-0 sticky top-2 self-start">
+        <div v-if="parsedDiff.length" class="diff-file-sidebar text-xs flex-shrink-0 self-start">
             <div class="text-gray-500 uppercase tracking-wide mb-2 px-1">Files ({{ parsedDiff.length }})</div>
             <template v-for="(row, ri) in fileTreeRows" :key="ri">
                 <div v-if="row.type === 'repo'"
@@ -692,7 +697,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                             <button @click="toggleTimeline(c.id)" class="text-xs text-blue-400 hover:underline">{{ timelineOpen[c.id] ? '▾' : '▸' }} Track</button>
                             <div v-if="timelineOpen[c.id]" class="mt-1 border-l-2 border-gray-700 pl-2">
                                 <div v-for="ev in (commentTimelines[c.id] || [])" :key="ev.id" class="text-xs text-gray-400 py-0.5">
-                                    <span class="text-gray-600">{{ (ev.ts || '').slice(5,16).replace('T',' ') }}</span>
+                                    <span class="text-gray-600">{{ $time.dayMinute(ev.ts) }}</span>
                                     <span class="text-gray-300 ml-1">{{ ev.event }}</span>
                                 </div>
                                 <div v-if="(commentTimelines[c.id] || []).length === 0" class="text-xs text-gray-600 py-0.5">No tracked events yet.</div>
@@ -726,7 +731,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                     <button @click="toggleTimeline(c.id)" class="text-xs text-blue-400 hover:underline">{{ timelineOpen[c.id] ? '▾' : '▸' }} Track</button>
                     <div v-if="timelineOpen[c.id]" class="mt-1 border-l-2 border-gray-700 pl-2">
                         <div v-for="ev in (commentTimelines[c.id] || [])" :key="ev.id" class="text-xs text-gray-400 py-0.5">
-                            <span class="text-gray-600">{{ (ev.ts || '').slice(5,16).replace('T',' ') }}</span>
+                            <span class="text-gray-600">{{ $time.dayMinute(ev.ts) }}</span>
                             <span class="text-gray-300 ml-1">{{ ev.event }}</span>
                         </div>
                         <div v-if="(commentTimelines[c.id] || []).length === 0" class="text-xs text-gray-600 py-0.5">No tracked events yet.</div>
@@ -760,7 +765,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
                 <button @click="toggleTimeline(c.id)" class="text-xs text-blue-400 hover:underline">{{ timelineOpen[c.id] ? '▾' : '▸' }} Track</button>
                 <div v-if="timelineOpen[c.id]" class="mt-1 border-l-2 border-gray-700 pl-2">
                     <div v-for="ev in (commentTimelines[c.id] || [])" :key="ev.id" class="text-xs text-gray-400 py-0.5">
-                        <span class="text-gray-600">{{ (ev.ts || '').slice(5,16).replace('T',' ') }}</span>
+                        <span class="text-gray-600">{{ $time.dayMinute(ev.ts) }}</span>
                         <span class="text-gray-300 ml-1">{{ ev.event }}</span>
                     </div>
                     <div v-if="(commentTimelines[c.id] || []).length === 0" class="text-xs text-gray-600 py-0.5">No tracked events yet.</div>
@@ -954,7 +959,7 @@ frshtyApp({
                     icon: '🔒',
                     title: `Waiting on ${blockedBy.length} ticket${blockedBy.length > 1 ? 's' : ''}: ${blockedBy.join(', ')}`,
                     detail: 'LLM ranker marked these as foundations. Planning will start once they reach merged or done.',
-                    hint: s.blocked_by_ranked_at ? `Ranked at ${s.blocked_by_ranked_at.slice(0, 19).replace('T', ' ')} — auto-clears after 24h.` : '',
+                    hint: s.blocked_by_ranked_at ? `Ranked at ${window.frshtyTime.stamp(s.blocked_by_ranked_at)} — auto-clears after 24h.` : '',
                 };
             }
             if (s.setup_failed_at) {
@@ -962,7 +967,7 @@ frshtyApp({
                     severity: 'red',
                     icon: '⚠',
                     title: 'Worktree setup failed',
-                    detail: `Failed at ${s.setup_failed_at.slice(0, 19).replace('T', ' ')}. Frshty will retry next scan.`,
+                    detail: `Failed at ${window.frshtyTime.stamp(s.setup_failed_at)}. Frshty will retry next scan.`,
                     hint: '',
                 };
             }
@@ -989,7 +994,7 @@ frshtyApp({
                     severity: 'blue',
                     icon: '⏱',
                     title: 'PR creation scheduled',
-                    detail: `Will fire at ${s.pr_scheduled_at.slice(0, 19).replace('T', ' ')}.`,
+                    detail: `Will fire at ${window.frshtyTime.stamp(s.pr_scheduled_at)}.`,
                     hint: '',
                 };
             }
@@ -1900,12 +1905,15 @@ frshtyApp({
                 const at = t0 + d * 86400000;
                 const pct = ((at - t0) / tlSpan.value) * 100;
                 if (pct > 96) continue;
-                out.push({ at, pct, label: new Date(at).toISOString().slice(5, 10) });
+                out.push({ at, pct, label: window.frshtyTime.day(at) });
             }
             return out;
         });
-        const tlDay = (ts) => ts.slice(5, 10).replace('-', '/');
-        const tlClock = (ts) => ts.slice(11, 19);
+        const tlDay = (ts) => window.frshtyTime.day(ts);
+        const tlClock = (ts) => window.frshtyTime.clock(ts);
+        const tlStamp = (ts) => window.frshtyTime.stamp(ts);
+        const tlRow = (v) => window.frshtyTime.localize(v, window.frshtyTime.dayClock);
+        const tlValue = (v) => window.frshtyTime.localize(v);
         const spineRows = computed(() => {
             const rows = [];
             const passes = timeline.value.passes || [];
@@ -1914,7 +1922,9 @@ frshtyApp({
             nodes.forEach((n, i) => {
                 if (n.pass !== lastPass) {
                     const meta = passes.find(p => p.pass === n.pass);
-                    rows.push({ kind: 'pass', key: 'p' + n.pass, label: (meta && meta.label) || ('Pass ' + n.pass) });
+                    let label = (meta && meta.label) || ('Pass ' + n.pass);
+                    if (meta && meta.reopened_at) label += ' — reopened ' + window.frshtyTime.dateOnly(meta.reopened_at);
+                    rows.push({ kind: 'pass', key: 'p' + n.pass, label });
                     lastPass = n.pass;
                 } else if (n.gap_ms !== null && n.gap_ms !== undefined) {
                     rows.push({ kind: 'edge', key: 'e' + n.id, lane: n.lane,
@@ -1938,6 +1948,18 @@ frshtyApp({
         }
         function docUrl(name) {
             return `/api/tickets/${key}/docs/${encodeURIComponent(name)}`;
+        }
+        function hasPreview(a) {
+            if (a.kind === 'video' || a.kind === 'image' || a.kind === 'file') return true;
+            return a.kind === 'text' && !!artifactText(a.name);
+        }
+        function chipOpens(c) {
+            return (c[0] === 'doc' || c[0] === 'media') && !!c[1];
+        }
+        function openChip(c, ev) {
+            if (!chipOpens(c)) return;
+            ev.stopPropagation();
+            window.open(docUrl(c[1]), '_blank');
         }
         function artifactText(name) {
             return ((ticket.value && ticket.value.docs) || {})[name] || '';
@@ -1997,8 +2019,9 @@ frshtyApp({
             noteText, pmFindings, releaseInput, releaseError, existingReleases,
             activeTab, maximized, resetting, eventFilter, setStateDdValue,
             timeline, timelineLoading, timelineError, selectedId, selectedNode, spineRows,
-            tlNodes, tlSegments, tlKpis, tlTicks, tlDay, tlClock, fmtSpan, segPct, segToneClass,
-            selectNode, registerNodeEl, docUrl, artifactText, artifactOpen, toggleArtifact, loadTimeline,
+            tlNodes, tlSegments, tlKpis, tlTicks, tlDay, tlClock, tlStamp, tlRow, tlValue,
+            fmtSpan, segPct, segToneClass,
+            selectNode, registerNodeEl, docUrl, chipOpens, openChip, hasPreview, artifactText, artifactOpen, toggleArtifact, loadTimeline,
             redoProofOpen, redoProofFeedback, redoProofSubmitting, submitRedoProof, prettyJson,
             loadError, sections, docExpanded, replyDrafts, jobOutput,
             prModalOpen, prRepos, prSubmitting,

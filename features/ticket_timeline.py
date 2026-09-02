@@ -79,6 +79,9 @@ _DOC_ICONS = {
     ".webm": "▶", ".mp4": "▶", ".mov": "▶", ".mkv": "▶",
 }
 
+_CHIP_KINDS = {"video": "media", "image": "media", "page": "doc",
+               "text": "doc", "file": "file"}
+
 _MEDIA_EXTS = frozenset({".webm", ".mp4", ".mov", ".mkv"})
 _IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".svg"})
 _TEXT_EXTS = frozenset({".md", ".txt", ".json"})
@@ -345,7 +348,7 @@ def _job_nodes(groups: list[dict]) -> list[dict]:
             if job["finished"]:
                 span = " — " + fmt_span((job["finished"] - job["started"]).total_seconds())
             steps.append([
-                job["started"].strftime("%H:%M:%S"),
+                _iso(job["started"]),
                 f"{job['task']}{span} → {job['status']}",
             ])
         chips = [["", f"{len(jobs)} job" + ("" if len(jobs) == 1 else "s")]]
@@ -428,15 +431,15 @@ def _maintenance_nodes(groups: list[dict], transitions: list[dict]) -> list[dict
             chips.append(["", fmt_span(worked)])
         if failed:
             chips.append(["warn", "%d failed" % len(failed)])
-        steps = [[j["started"].strftime("%m/%d %H:%M:%S"),
+        steps = [[_iso(j["started"]),
                   "%s → %s" % (j["task"], j["status"])] for j in jobs[-40:]]
         blocks = [_block("steps", "Runs (most recent 40)", rows=steps)]
         blocks.append(_block("kv", "Totals", rows=[
             ["runs", str(count)],
             ["agent time", fmt_span(worked)],
             ["failed", str(len(failed))],
-            ["first", first["start"].isoformat(timespec="seconds")],
-            ["last", last["end"].isoformat(timespec="seconds")],
+            ["first", _iso(first["start"])],
+            ["last", _iso(last["end"])],
         ]))
         nodes.append({
             "id": "mt-%s-%s" % key,
@@ -560,12 +563,7 @@ def _event_nodes(events: list[dict]) -> list[dict]:
             ]))
 
     for ev in by_event.get("ticket_issue_detected", []):
-        nodes.append(_node(
-            ev, "human", "⚠", "Bug reported on the ticket",
-            _first_line(ev["summary"]), chips=[["warn", "issue detected"]],
-            blocks=[_block("kv", "Trigger", rows=[
-                ["source comment", str(ev["meta"].get("comment_id", ""))],
-            ])]))
+        nodes.append(_issue_node(ev))
 
     for name in ("ticket_scope_review_passed",):
         for ev in by_event.get(name, []):
@@ -612,6 +610,57 @@ def _event_nodes(events: list[dict]) -> list[dict]:
                 _block("pre", "Last report", text=checks[-1]["summary"][:1200]),
             ]))
     return nodes
+
+
+def _issue_node(ev: dict) -> dict:
+    """A human reported a bug on the ticket. The circle carries the comment
+    that triggered the fix pass, the reason the classifier called it an issue
+    and the stage the report started. Long comments are cut in the emitter,
+    so what arrives here is already short."""
+    meta = ev["meta"]
+    excerpt = (meta.get("comment_excerpt") or "").strip()
+    reason = (meta.get("issue_reason") or "").strip()
+    author = (meta.get("comment_author") or "").strip()
+
+    chips = [["warn", "issue detected"]]
+    if author:
+        chips.append(["", author])
+    chips.append(["", "comment %s" % meta.get("comment_id", "?")])
+
+    rows = [["source comment", str(meta.get("comment_id", ""))]]
+    if author:
+        rows.append(["reported by", author])
+    if meta.get("comment_created_at"):
+        rows.append(["posted", str(meta["comment_created_at"])])
+    if meta.get("comment_change"):
+        rows.append(["comment was", str(meta["comment_change"])])
+    if meta.get("ticket_summary"):
+        rows.append(["ticket", str(meta["ticket_summary"])])
+    rows.append(["started", str(meta.get("triggers") or "fix_reported_bug")])
+
+    blocks = []
+    if reason:
+        blocks.append(_block("note", "What the report says", text=reason))
+    if excerpt:
+        blocks.append(_block("quote", "The comment", text=excerpt))
+        full = int(meta.get("comment_chars") or 0)
+        shown = int(meta.get("comment_excerpt_chars") or len(excerpt))
+        if full > shown:
+            blocks.append(_block("note", text=(
+                "The comment is %d characters. The first %d are shown. "
+                "Open the ticket for the rest." % (full, shown))))
+    else:
+        blocks.append(_block("note", text=(
+            "This event was recorded before the comment text was stored. "
+            "Open comment %s on the ticket to read it."
+            % (meta.get("comment_id") or "?"))))
+    blocks.append(_block("kv", "Trigger", rows=rows))
+
+    name = "Bug reported on the ticket"
+    if author:
+        name = "Bug reported by %s" % author
+    return _node(ev, "human", "⚠", name, _first_line(ev["summary"]),
+                 chips=chips, blocks=blocks)
 
 
 def _last_votes(fanouts: list[dict], before: datetime) -> list[list[str]]:
@@ -695,7 +744,7 @@ def _comment_nodes(events: list[dict]) -> list[dict]:
             if token in seen:
                 continue
             seen.add(token)
-            steps.append([ev["at"].strftime("%m/%d %H:%M:%S"), line])
+            steps.append([_iso(ev["at"]), line])
         blocks.append(_block("steps", "What the agent did", rows=steps))
         commits = []
         for ev in group:
@@ -818,7 +867,7 @@ def _transition_nodes(transitions: list[dict], instance_key: str,
         if human:
             name = "Manual override — " + name
         blocks = [_block("steps", "Transitions", rows=[
-            [t["at"].strftime("%H:%M:%S"),
+            [_iso(t["at"]),
              "%s → %s%s" % (t["prior_status"], t["new_status"],
                                  (" — " + t["reason"]) if t["reason"] else "")]
             for t in run])]
@@ -882,8 +931,7 @@ def _attach_docs(nodes: list[dict], docs: list[dict]) -> None:
             node["detail"]["blocks"].insert(
                 0, _block("arts", "Artifacts produced", items=produced))
             for art in produced:
-                kind = "media" if art["kind"] in ("video", "image") else "doc"
-                node["chips"].append([kind, art["name"]])
+                node["chips"].append([_CHIP_KINDS[art["kind"]], art["name"]])
         if superseded:
             node["detail"]["blocks"].append(
                 _block("arts", "This phase writes these, another pass owns the copy on disk",
@@ -934,7 +982,7 @@ def _attach_phase_events(nodes: list[dict], events: list[dict]) -> None:
                 hooks[node["id"]][ev["event"]] = hooks[node["id"]].get(ev["event"], 0) + 1
             elif ev["event"] in _PHASE_OWNED_EVENTS:
                 folded.setdefault(node["id"], []).append(
-                    [ev["at"].strftime("%H:%M:%S"), _first_line(ev["summary"])[:160]])
+                    [_iso(ev["at"]), _first_line(ev["summary"])[:160]])
     for node in phases:
         rows = folded.get(node["id"])
         if rows:
@@ -961,8 +1009,8 @@ def _assign_passes(nodes: list[dict], events: list[dict]) -> list[dict]:
                 number += 1
         node["pass"] = number
     for boundary_index, at in enumerate(boundaries):
-        passes[boundary_index + 1]["label"] = "Pass %d — reopened %s" % (
-            boundary_index + 2, at.strftime("%Y-%m-%d"))
+        passes[boundary_index + 1]["label"] = "Pass %d" % (boundary_index + 2)
+        passes[boundary_index + 1]["reopened_at"] = _iso(at)
     return passes
 
 

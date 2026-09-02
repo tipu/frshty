@@ -792,6 +792,9 @@ def api_release_inspect(release_key: str, body: dict | None = None):
 
 
 _DOC_MIME = {
+    ".md": "text/plain; charset=utf-8",
+    ".txt": "text/plain; charset=utf-8",
+    ".json": "application/json",
     ".webm": "video/webm",
     ".mp4": "video/mp4",
     ".mov": "video/quicktime",
@@ -807,9 +810,10 @@ _DOC_MIME = {
 
 @router.get("/api/tickets/{key}/docs/{filename}")
 def api_ticket_docs_file(key: str, filename: str):
-    """Serve an artifact (video or html page) from a ticket's docs/
-    directory. Whitelisted by extension; filename cannot contain path
-    separators."""
+    """Serve an artifact (text file, image, video or html page) from a
+    ticket's docs/ directory. Whitelisted by extension; filename cannot
+    contain path separators. Text is served as text/plain so the browser
+    shows the file instead of downloading it."""
     if "/" in filename or "\\" in filename or ".." in filename:
         return JSONResponse({"error": "invalid filename"}, status_code=400)
     suffix = Path(filename).suffix.lower()
@@ -1033,7 +1037,7 @@ def api_ticket_reply(key: str, comment_id: int, body: dict):
     if result.get("status") == "posted":
         entry["status"] = "replied"
         entry["suggested_reply"] = body
-        path.write_text(json.dumps(comments, indent=2, default=str))
+        _tickets_mod._save_pr_comments(_config, slug, comments)
         log.emit("ticket_pr_reply_sent", f"Replied to comment on {key}",
             links={"detail": f"{_config['_base_url']}/tickets/{key}"},
             meta={"ticket": key, "comment_id": comment_id})

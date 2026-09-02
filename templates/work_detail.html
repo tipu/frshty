@@ -6,6 +6,7 @@
 <title>Task — frshty</title>
 <script src="/static/tailwind.js"></script>
 <script src="/static/vendor/vue.global.prod.js"></script>
+<script src="/static/frshty-time.js"></script>
 <script src="/static/frshty-nav.js"></script>
 <script src="/static/frshty-shell.js"></script>
 <script src="/static/frshty-work-question.js"></script>
@@ -223,7 +224,7 @@
   </div>
   <div class="sec">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Lifecycle</h2>
-    <div v-for="ev in events" class="text-xs text-gray-500 font-mono">{{ ev.created_at.slice(0,19) }} {{ ev.kind }}</div>
+    <div v-for="ev in events" class="text-xs text-gray-500 font-mono">{{ $time.stamp(ev.created_at) }} {{ ev.kind }}</div>
   </div>
 </div>
 <div v-else>
@@ -316,10 +317,7 @@ const app = frshtyApp({
   methods: {
     lk(text) { return window.frshtyLinkify(text, this.linkmap); },
     ts(at) {
-      const d = new Date(at);
-      if (isNaN(d.getTime())) return "";
-      const p = n => String(n).padStart(2, "0");
-      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+      return window.frshtyTime.stamp(at);
     },
     rel(at) {
       const d = new Date(at);

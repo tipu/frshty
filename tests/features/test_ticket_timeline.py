@@ -1,4 +1,6 @@
 import json
+import os
+import re
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -54,7 +56,6 @@ def record(fresh_db, tmp_path):
     docs.mkdir()
     plan = docs / "technical-plan.md"
     plan.write_text("# plan\n")
-    import os
     written = (T0 + timedelta(minutes=20)).timestamp()
     os.utime(plan, (written, written))
 
@@ -155,3 +156,140 @@ class TestBuild:
         assert out["nodes"] == []
         assert out["segments"] == []
         assert out["kpis"] == {}
+
+
+class TestArtifactChips:
+    """A chip on a phase circle opens the file it names. The chip only offers
+    to open what the docs endpoint serves, so a file type the board cannot
+    serve carries the inert kind."""
+
+    def _write(self, docs, name, minutes):
+        path = docs / name
+        path.write_text("x")
+        written = (T0 + timedelta(minutes=minutes)).timestamp()
+        os.utime(path, (written, written))
+
+    def test_a_text_document_gets_an_openable_chip(self, record):
+        plan = next(n for n in _build(record)["nodes"] if n["name"] == "Planning")
+        assert ["doc", "technical-plan.md"] in plan["chips"]
+
+    def test_a_video_gets_a_media_chip(self, record):
+        self._write(record, "walkthrough.webm", 21)
+        plan = next(n for n in _build(record)["nodes"] if n["name"] == "Planning")
+        assert ["media", "walkthrough.webm"] in plan["chips"]
+
+    def test_a_file_type_the_board_cannot_serve_gets_an_inert_chip(self, record):
+        self._write(record, "proof.js", 22)
+        plan = next(n for n in _build(record)["nodes"] if n["name"] == "Planning")
+        assert ["file", "proof.js"] in plan["chips"]
+        assert ["doc", "proof.js"] not in plan["chips"]
+
+
+class TestIssueReportedCircle:
+    """The circle a human's bug report puts on the spine. The panel has to
+    name the comment, quote it, and say what the report started."""
+
+    def _issue_event(self, meta):
+        _event("ticket_issue_detected",
+               "Issue detected in comment for %s: the export button times out" % TICKET,
+               _at(hours=17), meta={"ticket": TICKET, **meta})
+
+    def test_panel_quotes_the_comment_and_names_the_trigger(self, record):
+        self._issue_event({
+            "comment_id": "17285",
+            "comment_author": "Sam Reviewer",
+            "comment_created_at": "2026-09-01T18:20:00+00:00",
+            "comment_change": "new",
+            "comment_excerpt": "the export button times out after the merge",
+            "comment_chars": 43,
+            "comment_excerpt_chars": 43,
+            "issue_reason": "the export times out after the merge",
+            "ticket_summary": "Export report to CSV",
+            "triggers": "fix_reported_bug",
+        })
+        node = next(n for n in _build(record)["nodes"] if n["glyph"] == "⚠")
+        blocks = node["detail"]["blocks"]
+        quote = next(b for b in blocks if b["k"] == "quote")
+        assert quote["text"] == "the export button times out after the merge"
+        notes = [b["text"] for b in blocks if b["k"] == "note"]
+        assert "the export times out after the merge" in notes
+        rows = dict(next(b for b in blocks if b["k"] == "kv")["rows"])
+        assert rows["source comment"] == "17285"
+        assert rows["reported by"] == "Sam Reviewer"
+        assert rows["ticket"] == "Export report to CSV"
+        assert rows["started"] == "fix_reported_bug"
+        assert node["name"] == "Bug reported by Sam Reviewer"
+        assert ["warn", "issue detected"] in node["chips"]
+
+    def test_a_long_comment_says_how_much_was_cut(self, record):
+        self._issue_event({
+            "comment_id": "17285",
+            "comment_excerpt": "x" * 1200 + " …",
+            "comment_chars": 4300,
+            "comment_excerpt_chars": 1202,
+        })
+        node = next(n for n in _build(record)["nodes"] if n["glyph"] == "⚠")
+        notes = " ".join(b["text"] for b in node["detail"]["blocks"] if b["k"] == "note")
+        assert "4300 characters" in notes
+        assert "first 1202" in notes
+
+    def test_an_event_recorded_before_the_comment_was_stored_still_renders(self, record):
+        self._issue_event({"comment_id": "17285"})
+        node = next(n for n in _build(record)["nodes"] if n["glyph"] == "⚠")
+        assert node["name"] == "Bug reported on the ticket"
+        notes = " ".join(b["text"] for b in node["detail"]["blocks"] if b["k"] == "note")
+        assert "17285" in notes
+        rows = dict(next(b for b in node["detail"]["blocks"] if b["k"] == "kv")["rows"])
+        assert rows["started"] == "fix_reported_bug"
+
+
+class TestEveryTimestampLeavesAsAnInstant:
+    """The browser renders wall-clock time in the reader's zone, so the API
+    must never hand it a pre-formatted clock. Every timestamp in the payload
+    leaves as a tz-aware ISO instant."""
+
+    CLOCK = re.compile(r"^\d{2}[:/]\d{2}")
+
+    def _instant(self, value):
+        parsed = datetime.fromisoformat(value)
+        assert parsed.tzinfo is not None, f"{value} carries no offset"
+        return parsed
+
+    def test_step_rows_start_with_an_instant_not_a_clock(self, record):
+        checked = 0
+        for node in _build(record)["nodes"]:
+            for block in node["detail"]["blocks"]:
+                if block["k"] != "steps":
+                    continue
+                for row in block["rows"]:
+                    assert not self.CLOCK.match(row[0]), (
+                        f"{node['id']} step row is a formatted clock: {row[0]}")
+                    self._instant(row[0])
+                    checked += 1
+        assert checked, "no step rows were checked"
+
+    def test_totals_rows_carry_instants(self, record):
+        sync = next(n for n in _build(record)["nodes"]
+                    if n["name"].startswith("Base sync"))
+        rows = dict(next(b for b in sync["detail"]["blocks"]
+                         if b.get("title") == "Totals")["rows"])
+        self._instant(rows["first"])
+        self._instant(rows["last"])
+
+    def test_node_and_segment_timestamps_carry_an_offset(self, record):
+        built = _build(record)
+        for node in built["nodes"]:
+            self._instant(node["ts"])
+        for segment in built["segments"]:
+            self._instant(segment["t0"])
+            self._instant(segment["t1"])
+        for doc in built["docs"]:
+            self._instant(doc["mtime"])
+
+    def test_a_reopened_pass_reports_the_instant_not_a_date(self, record):
+        _event("ticket_requeued", "reopened", _at(hours=20))
+        passes = _build(record)["passes"]
+        second = next(p for p in passes if p["pass"] == 2)
+        assert second["label"] == "Pass 2"
+        assert "reopened" not in second["label"]
+        self._instant(second["reopened_at"])
