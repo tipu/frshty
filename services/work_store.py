@@ -14,7 +14,9 @@ import core.db as db
 STALE_AFTER_MINUTES = 30
 STUCK_AFTER_MINUTES = 90
 BG_WAIT_RECHECK_HOURS = 2
-GROUPS = ("needs_ack", "needs_you", "agent_working", "waiting_external", "failed_stale", "done")
+PROPOSED_STATE = "proposed"
+GROUPS = ("proposed", "needs_ack", "needs_you", "agent_working", "waiting_external",
+          "failed_stale", "done")
 FINISHED_STATES = ("needs_ack", "done")
 FINISHED_STATES_SQL = "('needs_ack', 'done')"
 _ACK_EVENT_KINDS_SQL = "('operator_done', 'operator_ack')"
@@ -166,6 +168,67 @@ def create_item(objective: str, scope: str = "ad-hoc", scope_ref: str = "",
             (objective, scope, scope_ref, instance_key, contexts, source_item_id, tags, now, now),
         )
         return cur.lastrowid
+
+
+def create_proposal(objective: str, note: str = "", instance_key: str | None = None,
+                    contexts: str = "", tags: str = "", cwd: str = "",
+                    brief: str = "") -> int:
+    """Put a task on the board that no agent has started.
+
+    frshty writes this when it decides by itself that something needs doing.
+    The operator approves it before an agent reads it, so the row carries the
+    launch arguments an approval will need: the working directory and the
+    brief that gives the agent the evidence frshty acted on."""
+    now = _now()
+    with db.tx() as c:
+        cur = c.execute(
+            "INSERT INTO work_items(objective, scope, instance_key, contexts, tags, "
+            "state, current_checkpoint, launch_cwd, launch_brief, created_at, updated_at) "
+            "VALUES (?, 'proposal', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (objective, instance_key, contexts, tags, PROPOSED_STATE, note, cwd,
+             brief, now, now),
+        )
+        item_id = cur.lastrowid
+        c.execute(
+            "INSERT INTO work_events(work_item_id, kind, payload, created_at) "
+            "VALUES (?, 'proposal_created', ?, ?)",
+            (item_id, db.dump_json({"note": note}), now),
+        )
+        return item_id
+
+
+def claim_proposal(item_id: int) -> bool:
+    """Take a proposal off the board so exactly one approval can launch it.
+
+    Two clicks on Approve race, and the loser must not start a second agent
+    on the same objective. The state flip is the claim: it succeeds once."""
+    now = _now()
+    with db.tx() as c:
+        claimed = c.execute(
+            "UPDATE work_items SET state = 'agent_working', updated_at = ? "
+            "WHERE id = ? AND state = ?", (now, item_id, PROPOSED_STATE))
+        if claimed.rowcount != 1:
+            return False
+        c.execute(
+            "INSERT INTO work_events(work_item_id, kind, payload, created_at) "
+            "VALUES (?, 'proposal_approved', '{}', ?)", (item_id, now))
+        return True
+
+
+def has_run(item_id: int) -> bool:
+    """Whether any agent session was ever created for this work item."""
+    row = db.query_one("SELECT 1 AS present FROM work_runs WHERE work_item_id = ? LIMIT 1",
+                       (item_id,))
+    return bool(row)
+
+
+def release_proposal(item_id: int) -> None:
+    """Put a claimed proposal back when its launch never started an agent."""
+    now = _now()
+    with db.tx() as c:
+        c.execute(
+            "UPDATE work_items SET state = ?, updated_at = ? "
+            "WHERE id = ? AND state = 'agent_working'", (PROPOSED_STATE, now, item_id))
 
 
 def add_run(item_id: int, session_id: str, tmux_key: str, cwd: str,
@@ -357,6 +420,12 @@ def apply_action(item_id: int, action: str, until: str | None = None) -> dict:
         item = c.execute("SELECT id, state FROM work_items WHERE id = ?", (item_id,)).fetchone()
         if not item:
             return {"error": "unknown work item"}
+        if item["state"] == PROPOSED_STATE and action != "decline":
+            # A proposal has no run. Every other action would leave it in a
+            # state that assumes one: snooze parks it in waiting_external and
+            # the board then shows it as needs_you with nothing to reply to,
+            # and none of them can be undone back to proposed.
+            return {"error": "a proposal can only be approved or declined"}
         if action == "done":
             c.execute("UPDATE work_items SET state = 'done', stop_reason = '', "
                       "pending_question = '', updated_at = ? WHERE id = ?",
@@ -383,6 +452,14 @@ def apply_action(item_id: int, action: str, until: str | None = None) -> dict:
             c.execute("UPDATE work_items SET state = 'done', stop_reason = '', "
                       "pending_question = '', updated_at = ? WHERE id = ?",
                       (now, item_id))
+        elif action == "decline":
+            if item["state"] != PROPOSED_STATE:
+                return {"error": "only a proposed task can be declined"}
+            c.execute(
+                "UPDATE work_items SET state = 'done', archived_at = ?, "
+                "stop_reason = 'Proposal declined', updated_at = ? WHERE id = ?",
+                (now, now, item_id),
+            )
         elif action == "archive":
             if item["state"] not in FINISHED_STATES:
                 return {"error": "only a completed task can be archived"}
@@ -1334,6 +1411,10 @@ def grouped_items(now: datetime | None = None, q: str = "",
                   tags: str = "", archived: bool = False) -> dict[str, list[dict]]:
     """Group the work items for one board view.
 
+    A task frshty opened by itself lands in proposed. No agent has read it
+    yet: the operator approves it to start one, or declines it, which files
+    it in the archive without ever running.
+
     A task the agent reported done lands in needs_ack, not in done. The
     operator acknowledges it to complete it, or archives it, which
     acknowledges and files it in one step. An unacknowledged task is never
@@ -1498,15 +1579,18 @@ def archive_thread(root_id: int) -> dict:
 
 
 def attention_count(now: datetime | None = None) -> int:
-    """Count the tasks that wait on the operator: needs_ack plus needs_you.
+    """Count the tasks that wait on the operator: proposed, needs_ack, needs_you.
 
     grouped_items promotes a waiting_external item back to needs_you once its
     snooze expires, so the rail badge has to apply the same rule or it will
     disagree with the board it links to. A task the agent reported done also
-    waits on the operator, so the badge counts it too."""
+    waits on the operator, so the badge counts it too, and so does a proposal
+    frshty opened by itself: nothing happens on it until the operator approves
+    it."""
     now = now or datetime.now(timezone.utc)
     row = db.query_one(
-        "SELECT COUNT(*) AS n FROM work_items WHERE state IN ('needs_ack', 'needs_you') "
+        "SELECT COUNT(*) AS n FROM work_items WHERE "
+        "state IN ('proposed', 'needs_ack', 'needs_you') "
         "OR (state = 'waiting_external' AND snoozed_until IS NOT NULL AND snoozed_until <= ?)",
         (now.isoformat(),))
     return row["n"] if row else 0

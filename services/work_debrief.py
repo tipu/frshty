@@ -175,8 +175,15 @@ def _run_debrief_locked(item_id: int) -> dict:
 
 
 def _pending_done_items() -> list:
+    """The finished items that still owe a debrief.
+
+    An item with no run has no dialogue to debrief. A proposal the operator
+    declined is exactly that: it reaches a finished state without an agent
+    ever reading it. Excluding it here keeps the scanner from spending three
+    attempts and three debrief_failed events on every declined proposal."""
     done = db.query_all(
         f"SELECT id FROM work_items WHERE state IN {work_store.FINISHED_STATES_SQL} "
+        "AND EXISTS(SELECT 1 FROM work_runs r WHERE r.work_item_id = work_items.id) "
         "ORDER BY id")
     events = db.query_all(
         "SELECT work_item_id, kind FROM work_events "

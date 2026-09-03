@@ -4,6 +4,29 @@ import tomllib
 from pathlib import Path
 
 
+SLACK_CAPTURE_FILE = "messages.jsonl"
+
+
+def _resolve_slack_paths(slack: dict) -> None:
+    """Make messages_dir and raw_path name the same capture, whichever is set.
+
+    messages_dir is the directory slack_int writes one instance's capture
+    into: the live messages.jsonl plus its rotated siblings. raw_path names
+    the live file alone and predates it. A config that sets either one gets
+    the other, so an existing config keeps working and a new one only has to
+    name the directory."""
+    messages_dir = str(slack.get("messages_dir") or "").strip()
+    raw_path = str(slack.get("raw_path") or "").strip()
+    if messages_dir and not raw_path:
+        raw_path = str(Path(messages_dir).expanduser() / SLACK_CAPTURE_FILE)
+    elif raw_path and not messages_dir:
+        messages_dir = str(Path(raw_path).expanduser().parent)
+    if messages_dir:
+        slack["messages_dir"] = str(Path(messages_dir).expanduser())
+    if raw_path:
+        slack["raw_path"] = str(Path(raw_path).expanduser())
+
+
 def load_config(path: str) -> dict:
     with open(path, "rb") as f:
         raw = tomllib.load(f)
@@ -30,6 +53,8 @@ def load_config(path: str) -> dict:
     raw["pr"].setdefault("auto_merge", False)
     raw["pr"].setdefault("merge_strategy", "squash")
     raw["pr"].setdefault("merge_flags", [])
+
+    _resolve_slack_paths(raw["slack"])
 
     raw["_config_path"] = Path(path)
     raw["_state_dir"] = Path.home() / ".frshty" / raw["job"]["key"]
