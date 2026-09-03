@@ -25,7 +25,7 @@ from core.claude_runner import run_haiku
 from core.config import get_repos
 from core.ticket_status import TicketStatus
 from features.platforms import make_platform
-from services import work_launch
+from services import ticket_doctor, work_launch
 from web.state import _config, events_enabled
 
 
@@ -1097,6 +1097,29 @@ def api_restart_ticket(key: str):
     return {"status": "restarted"}
 
 
+def _enqueue_manual_advance(key: str) -> int | None:
+    """Chain a manual ticket transition into its status handler.
+
+    A ticket only moves when a finished job emits ticket_advance
+    (core/worker.py) or when the poll dispatches it (features.tickets.check).
+    The poll dispatches assigned tickets only, so a ticket whose upstream
+    status has left the instance query is never dispatched. A manual
+    transition that enqueues nothing therefore parks such a ticket forever:
+    DEV-678 sat at proving for five days after a redo-proof because Jira had
+    moved it to "Ready for Deploy" and the poll's sweep branch only records
+    the ticket instead of running its handler.
+
+    advance_ticket reads stored state only, so it does not care whether the
+    ticket is still in the query. It guards its own terminal statuses and its
+    own already-running case, which is why this enqueues unconditionally
+    rather than repeating those rules here.
+    """
+    instance_key = _config.get("job", {}).get("key", "")
+    if not instance_key:
+        return None
+    return q.enqueue_job(instance_key, "advance_ticket", ticket_key=key)
+
+
 @router.post("/api/tickets/{key}/redo-proof")
 def api_redo_proof(key: str, body: dict):
     feedback = (body.get("feedback") or "").strip()
@@ -1126,6 +1149,7 @@ def api_redo_proof(key: str, body: dict):
         state.transition_ticket(key, "proving", reason="manual redo proof")
     except state.TicketStateError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
+    _enqueue_manual_advance(key)
     return {"status": "redoing", "feedback": bool(feedback)}
 
 
@@ -1155,6 +1179,7 @@ def api_set_ticket_status(key: str, body: dict):
     log.emit("ticket_status_override", f"Manual override {old_status} → {target} for {key}",
         links={"detail": f"{_config['_base_url']}/tickets/{key}"},
         meta={"ticket": key, "old_status": old_status, "new_status": target})
+    _enqueue_manual_advance(key)
     return {"status": target, "old_status": old_status}
 
 
@@ -1429,3 +1454,30 @@ def api_start_dev(key: str):
     ts = _tickets_mod._setup_ticket(_config, ticket, _config["_base_url"])
     state.save_ticket(key, ts)
     return {"status": "started", "new_status": ts.get("status")}
+
+
+@router.get("/api/tickets/{key}/doctor")
+def api_ticket_doctor_history(key: str):
+    """Every doctor request made for this ticket, newest first."""
+    return {"runs": ticket_doctor.history(_config, key)}
+
+
+@router.post("/api/tickets/{key}/doctor")
+def api_ticket_doctor(key: str, body: dict):
+    """Launch a work-board task that diagnoses why this ticket is stuck."""
+    result = ticket_doctor.launch(_config, key, body.get("description") or "")
+    if "error" in result:
+        message = result["error"]
+        if message.startswith("unknown ticket"):
+            return JSONResponse(result, status_code=404)
+        if "personal instance" in message:
+            return JSONResponse(result, status_code=503)
+        if "launch failed" in message:
+            return JSONResponse(result, status_code=500)
+        return JSONResponse(result, status_code=400)
+    outcome = "launched" if result.get("action") != "reply" else "given the new report"
+    log.emit("ticket_doctor_launched",
+             f"{key}: doctor task {result['item_id']} {outcome}",
+             links={"detail": f"{_config['_base_url']}/tasks/{result['item_id']}"},
+             meta={"ticket": key})
+    return {**result, "runs": ticket_doctor.history(_config, key)}
