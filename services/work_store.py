@@ -1476,6 +1476,27 @@ def archive_completed() -> int:
             (now,)).rowcount
 
 
+def archive_thread(root_id: int) -> dict:
+    """Archive every completed task in one thread, and count them.
+
+    A finished thread leaves one completed task per member on the board, and
+    the board keeps each one until it is archived. One call clears the whole
+    thread, and Unarchive still brings any single task back. A task waiting to
+    be acknowledged is not completed yet, so this call leaves it on the board.
+    archive_completed follows the same rule."""
+    members = next((m for m in _thread_components() if m[0]["id"] == root_id), None)
+    if members is None:
+        return {"error": f"unknown thread: {root_id}"}
+    ids = [member["id"] for member in members]
+    marks = ",".join("?" * len(ids))
+    now = _now()
+    with db.tx() as c:
+        archived = c.execute(
+            f"UPDATE work_items SET archived_at = ? WHERE id IN ({marks}) "
+            "AND state = 'done' AND archived_at IS NULL", (now, *ids)).rowcount
+    return {"root_id": root_id, "archived": archived}
+
+
 def attention_count(now: datetime | None = None) -> int:
     """Count the tasks that wait on the operator: needs_ack plus needs_you.
 
