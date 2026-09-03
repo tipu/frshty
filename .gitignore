@@ -41,3 +41,8 @@ config/*.toml
 /docs/
 
 .claude/
+
+# Coverage output
+.coverage
+coverage.json
+htmlcov/
