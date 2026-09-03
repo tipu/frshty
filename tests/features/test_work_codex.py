@@ -133,6 +133,17 @@ class TestCodexLaunch:
             _, cmd = work_launch._reviewer_cmd(agent, {})
             assert cmd.split()[-1] in ("-", "-p")
 
+    def test_the_reviewer_is_asked_for_high_and_critical_defects_only(self, tmp_path,
+                                                                      monkeypatch):
+        for agent, other in (("claude", "codex"), ("codex", "claude")):
+            prompt = _launch_prompt(tmp_path, monkeypatch, agent)
+            assert f"Ask {other} to report only high severity and critical defects" in prompt
+            assert "behavior that differs from the stated objective" in prompt
+            assert f"Tell {other} to skip every nit that does not change behavior" in prompt
+            assert "style, naming, formatting, comment wording, and test coverage" in prompt
+            assert f"Tell {other} to give the severity and the concrete failure case" in prompt
+            assert "find what is wrong" not in prompt
+
     def test_the_prompt_puts_the_question_file_on_stdin(self, tmp_path, monkeypatch):
         prompt = _launch_prompt(tmp_path, monkeypatch, "claude")
         assert "Write your question to a file" in prompt
