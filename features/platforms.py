@@ -194,6 +194,7 @@ class _CIMonitorMixin:
     def monitor_ci(self, ticket, ts, base_url) -> dict:
         prs = ts.get("prs", [])
         if not prs:
+            ts.pop("ci_passed", None)
             return ts
 
         if not ts.get("checks_started_at"):
