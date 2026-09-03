@@ -1278,6 +1278,9 @@ def check(config: dict, instance_key: str = ""):
             if parent and parent.get("key"):
                 ts["parent_key"] = parent["key"]
                 ts["parent_summary"] = parent.get("summary", "")
+            if ts.get("status") == "done" and ts.get("work_type") == "research":
+                _save_ticket_if_unmoved(key, ts, loaded_status)
+                continue
             if ts.get("status") == "done":
                 merged_ext = ts.get("merged_external_status")
                 if (merged_ext and ticket.get("status", "") == merged_ext
