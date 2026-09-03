@@ -611,7 +611,7 @@ def api_submit_comment(repo: str, pr_id: int, idx: int, provider: str = "claude"
         return JSONResponse({"error": "not found"}, status_code=404)
     branch_dir, comments, _ = found
     queued = branch_dir / f"queued_comments{review_store.provider_suffix(provider)}.json"
-    if idx >= len(comments):
+    if idx < 0 or idx >= len(comments):
         return JSONResponse({"error": "invalid index"}, status_code=400)
     comment = comments[idx]
     remote_id = comment.get("remote_id")
@@ -670,7 +670,7 @@ def api_delete_comment(repo: str, pr_id: int, idx: int, provider: str = "claude"
     if not found:
         return JSONResponse({"error": "not found"}, status_code=404)
     branch_dir, comments, _ = found
-    if idx >= len(comments):
+    if idx < 0 or idx >= len(comments):
         return JSONResponse({"error": "invalid index"}, status_code=400)
     comments.pop(idx)
     (branch_dir / f"queued_comments{review_store.provider_suffix(provider)}.json").write_text(json.dumps(comments, indent=2))
@@ -685,7 +685,7 @@ def api_update_comment(repo: str, pr_id: int, idx: int, body: dict, provider: st
     if not found:
         return JSONResponse({"error": "not found"}, status_code=404)
     branch_dir, comments, _ = found
-    if idx >= len(comments):
+    if idx < 0 or idx >= len(comments):
         return JSONResponse({"error": "invalid index"}, status_code=400)
     if "body" in body:
         comments[idx]["body"] = body["body"]
