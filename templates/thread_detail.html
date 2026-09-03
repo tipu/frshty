@@ -48,10 +48,14 @@
         </h1>
         <p class="ln-subtitle">{{ thread.objective }}</p>
       </div>
-      <div style="display:flex;gap:8px">
+      <div style="display:flex;gap:8px;align-items:flex-start">
         <a class="ln-btn ln-btn-ghost" :href="taskHref(thread.root_id)">Open first task</a>
+        <button class="ln-btn ln-btn-ghost" v-if="archivableCount" :disabled="archiveBusy"
+                title="move every completed task in this thread to the archive"
+                @click="archiveAll">Archive all ({{ archivableCount }})</button>
       </div>
     </div>
+    <div class="ln-small" style="color:var(--ln-red)" v-if="archiveError">{{ archiveError }}</div>
 
     <div class="ln-kpi-row-4" style="margin-top:18px">
       <div class="ln-kpi"><div class="ln-kpi-value">{{ thread.task_count }}</div><div class="ln-kpi-label">Tasks</div></div>
@@ -109,6 +113,8 @@
               <div class="ln-task-note" v-if="note(t)">{{ note(t) }}</div>
               <div class="ln-task-foot">
                 <span class="ln-pill" :class="statePill(t.state)">{{ stateLabel(t) }}</span>
+                <span class="ln-pill ln-pill-ghost" v-if="t.archived_at"
+                      title="this task is in the archive, not on the board">Archived</span>
                 <span v-if="t.last_provider">{{ t.last_provider }}</span>
                 <span v-if="t.artifact_count">· {{ t.artifact_count }} artifact{{ t.artifact_count === 1 ? '' : 's' }}</span>
                 <span class="ln-tag" v-for="tag in tags(t)" :key="tag">{{ tag }}</span>
@@ -181,7 +187,7 @@ frshtyApp({
       projects: [], agents: ["claude"], slackAvailable: false, personalLoaded: false,
       launchText: "", launchAgent: localStorage.getItem("workAgent") || "claude",
       launchContexts: [], launchSlack: false, launchBusy: false, launchError: "",
-      moreOpen: false,
+      moreOpen: false, archiveBusy: false, archiveError: "",
     };
   },
   computed: {
@@ -197,6 +203,10 @@ frshtyApp({
     },
     orderedTasks() {
       return this.thread ? [...this.thread.tasks].reverse() : [];
+    },
+    archivableCount() {
+      if (!this.thread) return 0;
+      return this.thread.tasks.filter(t => t.state === "done" && !t.archived_at).length;
     },
     artifactTaskCount() {
       if (!this.thread) return 0;
@@ -298,6 +308,24 @@ frshtyApp({
       if (!el) return;
       el.style.height = "auto";
       el.style.height = el.scrollHeight + "px";
+    },
+    async archiveAll() {
+      const n = this.archivableCount;
+      if (!n) return;
+      if (!confirm("Archive " + n + " completed task" + (n === 1 ? "" : "s") +
+                   " in this thread? They move to the Archive.")) return;
+      this.archiveError = ""; this.archiveBusy = true;
+      try {
+        const r = await fetch(this.api("/api/work/threads/" + this.rootId + "/archive"),
+                              { method: "POST" });
+        const d = await r.json();
+        if (!r.ok) { this.archiveError = d.error || ("archive failed (HTTP " + r.status + ")"); return; }
+        await this.refresh();
+      } catch (e) {
+        this.archiveError = "archive failed: " + e.message;
+      } finally {
+        this.archiveBusy = false;
+      }
     },
     async launch() {
       if (!this.canLaunch) return;

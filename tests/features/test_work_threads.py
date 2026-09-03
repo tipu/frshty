@@ -153,6 +153,80 @@ class TestArchive:
         assert body["archived"] == pending
         assert client.get("/api/work/items").json()["counts"]["done"] == 0
 
+    def test_archive_all_clears_one_thread_only(self):
+        ids = _chain(["thread root to archive", "thread follow up to archive"])
+        spared = _chain(["other thread root", "other thread follow up"])
+        lone = self._done_item("completed task outside every thread")
+        with db.tx() as c:
+            c.execute("UPDATE work_items SET state = 'done' WHERE id IN (?, ?, ?, ?)",
+                      tuple(ids) + tuple(spared))
+
+        assert work_store.archive_thread(ids[0]) == {"root_id": ids[0], "archived": 2}
+
+        board = [row["id"] for row in work_store.grouped_items()["done"]]
+        archived = [row["id"] for row in work_store.grouped_items(archived=True)["done"]]
+        assert ids[0] in archived and ids[1] in archived
+        assert ids[0] not in board and ids[1] not in board
+        assert spared[0] in board and spared[1] in board
+        assert lone in board
+
+    def test_archive_all_leaves_an_unfinished_task_in_the_thread(self):
+        ids = _chain(["thread root that finished", "thread follow up still running"])
+        with db.tx() as c:
+            c.execute("UPDATE work_items SET state = 'done' WHERE id = ?", (ids[0],))
+            c.execute("UPDATE work_items SET state = 'needs_ack' WHERE id = ?", (ids[1],))
+
+        assert work_store.archive_thread(ids[0])["archived"] == 1
+
+        rows = {row["id"]: row["archived_at"] for row in db.query_all(
+            "SELECT id, archived_at FROM work_items WHERE id IN (?, ?)", tuple(ids))}
+        assert rows[ids[0]] is not None
+        assert rows[ids[1]] is None
+
+    def test_archive_all_is_repeatable_and_counts_only_what_it_archives(self):
+        ids = _chain(["thread root archived twice", "thread follow up archived twice"])
+        with db.tx() as c:
+            c.execute("UPDATE work_items SET state = 'done' WHERE id IN (?, ?)", tuple(ids))
+        work_store.archive_thread(ids[0])
+
+        assert work_store.archive_thread(ids[0])["archived"] == 0
+
+    def test_archive_all_endpoint_reports_the_count(self):
+        client = _client()
+        ids = _chain(["thread root for the endpoint", "thread follow up for the endpoint"])
+        with db.tx() as c:
+            c.execute("UPDATE work_items SET state = 'done' WHERE id IN (?, ?)", tuple(ids))
+
+        r = client.post(f"/api/work/threads/{ids[0]}/archive")
+
+        assert r.status_code == 200
+        assert r.json() == {"root_id": ids[0], "archived": 2}
+        board = [row["id"] for row in work_store.grouped_items()["done"]]
+        assert ids[0] not in board and ids[1] not in board
+
+    def test_archive_all_endpoint_rejects_an_unknown_thread(self):
+        lone = work_store.create_item("not part of any thread")
+        r = _client().post(f"/api/work/threads/{lone}/archive")
+        assert r.status_code == 404
+        assert "error" in r.json()
+
+    def test_thread_page_offers_archive_all(self):
+        r = _client().get("/threads/1")
+        assert 'href="/tasks?view=archive"' in r.text
+        assert "Archive all ({{ archivableCount }})" in r.text
+        assert '"/api/work/threads/" + this.rootId + "/archive"' in r.text
+        assert 'this.thread.tasks.filter(t => t.state === "done" && !t.archived_at).length' in r.text
+        assert 'v-if="t.archived_at"' in r.text
+
+    def test_thread_detail_carries_the_archive_flag(self):
+        ids = _chain(["thread root with a flag", "thread follow up with a flag"])
+        with db.tx() as c:
+            c.execute("UPDATE work_items SET state = 'done' WHERE id = ?", (ids[0],))
+        work_store.archive_thread(ids[0])
+        tasks = {t["id"]: t for t in work_store.thread_detail(ids[0])["tasks"]}
+        assert tasks[ids[0]]["archived_at"] is not None
+        assert tasks[ids[1]]["archived_at"] is None
+
     def test_items_endpoint_honours_the_archive_flag(self):
         # The done group is paginated, so count the group rather than read page one.
         client = _client()
@@ -510,6 +584,7 @@ class TestPeerAwareThreads:
         assert '"/api/work/peers/" + encodeURIComponent(this.peer) + path' in text
         assert 'this.api("/api/work/threads/" + this.rootId)' in text
         assert 'this.api("/api/work/threads/" + this.rootId + "/tasks")' in text
+        assert 'this.api("/api/work/threads/" + this.rootId + "/archive")' in text
 
     def test_the_thread_page_sends_terminal_and_artifact_to_the_peer_host(self):
         text = self._read("templates/thread_detail.html")

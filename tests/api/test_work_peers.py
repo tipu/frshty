@@ -202,6 +202,14 @@ class TestPeerRoutes:
         assert calls[0] == ("POST", "http://x:1/api/work/items/archive-completed",
                             {}, {})
 
+    def test_thread_archive_is_forwarded_to_the_peer(self, peers_file, client, monkeypatch):
+        peers_file.write_text('[[peers]]\nkey = "a"\nbase_url = "http://x:1"\n')
+        calls = _stub_httpx(monkeypatch, _StubResponse(payload={"root_id": 4, "archived": 2}))
+        resp = client.post("/api/work/peers/a/api/work/threads/4/archive")
+        assert resp.status_code == 200
+        assert resp.json() == {"root_id": 4, "archived": 2}
+        assert calls[0] == ("POST", "http://x:1/api/work/threads/4/archive", {}, {})
+
     def test_proxy_route_refuses_a_non_work_path(self, peers_file, client):
         peers_file.write_text('[[peers]]\nkey = "a"\nbase_url = "http://x:1"\n')
         resp = client.get("/api/work/peers/a/api/config")
