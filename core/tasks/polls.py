@@ -65,6 +65,13 @@ def poll_billing_invoices(ctx: TaskContext) -> TaskResult:
     return TaskResult("ok")
 
 
+@task("watchdog_scan", timeout=300)
+def watchdog_scan(ctx: TaskContext) -> TaskResult:
+    from manager import watchdog
+    opened = watchdog.run(ctx.config, instance_key=ctx.instance_key)
+    return TaskResult("ok", artifacts={"opened": opened})
+
+
 @task("scheduler_check", timeout=60)
 def scheduler_check(ctx: TaskContext) -> TaskResult:
     from core import scheduler

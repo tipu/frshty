@@ -201,7 +201,15 @@ class _CIMonitorMixin:
 
         all_passed = True
         for pr in prs:
-            checks = self.get_pr_checks(pr["repo"], pr["id"])
+            try:
+                checks = self.get_pr_checks(pr["repo"], pr["id"])
+            except Exception as e:
+                log.emit("ticket_ci_fetch_error",
+                    f"Fetching CI checks for {ticket['key']} PR #{pr['id']} raised "
+                    f"{type(e).__name__}: {e}; holding (not treating as passed)",
+                    links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+                    meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"]})
+                checks = None
             if checks is None:
                 if not ts.get("_ci_fetch_failed_logged"):
                     log.emit("ticket_ci_fetch_failed",
@@ -250,6 +258,7 @@ class _CIMonitorMixin:
                         log.emit("ticket_checks_timeout", f"CI checks timed out for {ticket['key']} PR #{pr['id']} after {elapsed_mins}m ({timeout_state.get('strike_count', '1')}/5)",
                             links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
                             meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"]})
+                    ts.pop("ci_passed", None)
                     return ts
                 all_passed = False
                 continue
@@ -258,6 +267,7 @@ class _CIMonitorMixin:
                 return {"_ci_failed": True, "pr": pr, "checks": checks}
 
         if not all_passed:
+            ts.pop("ci_passed", None)
             return ts
 
         if not ts.get("ci_passed"):

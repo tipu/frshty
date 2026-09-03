@@ -457,6 +457,7 @@ def _handle_in_review_ticket(
                 meta={"ticket": ticket["key"], "repo": pr.get("repo"), "pr_id": pr.get("id")})
             ts.pop("_ci_timeout_state", None)
             ts.pop("checks_started_at", None)
+            ts.pop("ci_passed", None)
         else:
             ts = result
 

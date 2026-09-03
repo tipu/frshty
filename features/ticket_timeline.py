@@ -31,7 +31,7 @@ _RIBBON_BRIDGE = timedelta(minutes=5)
 _NOISE_TASKS = frozenset({
     "advance_ticket", "scan_tickets", "scheduler_check", "set_state",
     "validate_merged_ticket", "poll_own_prs", "poll_reviewer",
-    "poll_peer_reviews", "poll_pr_autofix", "apply_note_reset",
+    "poll_peer_reviews", "poll_pr_autofix", "apply_note_reset", "watchdog_scan",
 })
 
 _JOB_PHASES = {

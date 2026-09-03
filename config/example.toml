@@ -149,6 +149,11 @@ pr_autofix = false                # github only: every newly created PR gets a c
 # stale_ticket_hours = 72              # ticket discovered >Nh ago, status=new/planning/reviewing
 # regression_days = 7                  # validation_run regression in last N days
 # pending_approval_hours = 12          # pending_approval ticket sitting >Nh
+# [manager.watchdog]
+# enabled = true                       # staleness buckets open their own doctor task
+# scan_interval_minutes = 30           # how often the scan runs; the cron tick is faster
+# max_opens_per_scan = 2               # tasks one scan may open
+# max_opens_per_day = 6                # tasks 24 hours may open for this instance
 
 # [today_agent]
 # enabled = true                       # off unless set; seeds the today_agent_tick schedule

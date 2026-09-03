@@ -2778,6 +2778,7 @@ def _merge(config, ticket, ts, base_url) -> dict:
 
 
 def _handle_ci_failure(ticket, ts, pr, checks, base_url, instance_key="", head_sha="") -> dict:
+    ts.pop("ci_passed", None)
     failed_names = [c["name"] for c in checks if c["state"].upper() in FAILED_STATES]
 
     heads = ts.get("ci_fix_heads") or {}
