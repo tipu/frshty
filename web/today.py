@@ -290,7 +290,7 @@ def _list_active_snoozes(instance_key: str) -> list[dict]:
         "SELECT loop_type, entity_id, snooze_until, created_at, reason"
         " FROM today_snoozes"
         " WHERE instance_key=?"
-        " AND (snooze_until IS NULL OR snooze_until > datetime('now'))",
+        " AND (snooze_until IS NULL OR datetime(snooze_until) > datetime('now'))",
         (instance_key,),
     )
     return [dict(r) for r in rows]
