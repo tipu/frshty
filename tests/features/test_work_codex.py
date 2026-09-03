@@ -86,6 +86,19 @@ class TestCodexCommand:
         assert sent == []
 
 
+def _launch_prompt(tmp_path, monkeypatch, agent):
+    """The launch context one work item hands its agent."""
+    monkeypatch.setattr(work_launch, "personal_config",
+                        lambda: {"workspace": {"root": tmp_path}})
+    launcher = MagicMock()
+    with patch("services.work_launch.terminal.launch_agent", launcher), \
+         patch("services.work_launch.terminal.session_healthy",
+               return_value={"alive": True, "agent_running": True}), \
+         patch("services.work_launch.threading.Thread"):
+        work_launch.launch("check the work", agent=agent)
+    return launcher.call_args.args[3]
+
+
 class TestCodexLaunch:
     def test_launch_records_codex_provider(self, tmp_path, monkeypatch):
         monkeypatch.setattr(work_launch, "personal_config",
@@ -101,6 +114,72 @@ class TestCodexLaunch:
         run = db.query_one("SELECT provider FROM work_runs WHERE session_id = ?",
                            (out["session_id"],))
         assert run["provider"] == "codex"
+
+    def test_a_claude_run_is_cross_checked_by_codex(self, tmp_path, monkeypatch):
+        prompt = _launch_prompt(tmp_path, monkeypatch, "claude")
+        assert "Double check your analysis and your code with codex" in prompt
+        assert "codex exec" in prompt
+        assert "--skip-git-repo-check" in prompt
+        assert "with claude" not in prompt
+
+    def test_a_codex_run_is_cross_checked_by_claude(self, tmp_path, monkeypatch):
+        prompt = _launch_prompt(tmp_path, monkeypatch, "codex")
+        assert "Double check your analysis and your code with claude" in prompt
+        assert "claude --dangerously-skip-permissions -p" in prompt
+        assert "with codex" not in prompt
+
+    def test_the_reviewer_question_goes_on_stdin(self):
+        for agent in ("claude", "codex"):
+            _, cmd = work_launch._reviewer_cmd(agent, {})
+            assert cmd.split()[-1] in ("-", "-p")
+
+    def test_the_prompt_puts_the_question_file_on_stdin(self, tmp_path, monkeypatch):
+        prompt = _launch_prompt(tmp_path, monkeypatch, "claude")
+        assert "Write your question to a file" in prompt
+        assert "with that file on stdin" in prompt
+        assert "<<" not in prompt
+
+    def test_a_config_dir_env_override_wins_over_config_dir(self):
+        config = {"llm": {"claude": {"config_dir": "~/.ignored",
+                                     "env": {"CLAUDE_CONFIG_DIR": "~/.chosen"}},
+                          "codex": {"config_dir": "~/.ignored",
+                                    "env": {"CODEX_HOME": "~/.chosen"}}}}
+        _, claude_cmd = work_launch._reviewer_cmd("codex", config)
+        _, codex_cmd = work_launch._reviewer_cmd("claude", config)
+        assert claude_cmd.startswith(f"CLAUDE_CONFIG_DIR={os.path.expanduser('~/.chosen')} ")
+        assert codex_cmd.startswith(f"CODEX_HOME={os.path.expanduser('~/.chosen')} ")
+        assert ".ignored" not in claude_cmd and ".ignored" not in codex_cmd
+
+    def test_a_binary_path_with_a_space_is_quoted(self):
+        config = {"llm": {"claude": {"bin": "/opt/Claude CLI/claude"},
+                          "codex": {"bin": "/opt/Codex CLI/codex"}}}
+        _, claude_cmd = work_launch._reviewer_cmd("codex", config)
+        _, codex_cmd = work_launch._reviewer_cmd("claude", config)
+        assert claude_cmd.startswith("'/opt/Claude CLI/claude' ")
+        assert codex_cmd.startswith("'/opt/Codex CLI/codex' ")
+
+    def test_the_reviewer_command_carries_only_the_config_dir(self):
+        config = {"llm": {"claude": {"config_dir": "~/.quill-claude",
+                                     "env": {"ANTHROPIC_API_KEY": "sk-secret"}},
+                          "codex": {"config_dir": "~/.alt-codex",
+                                    "env": {"OPENAI_API_KEY": "sk-secret"}}}}
+        _, claude_cmd = work_launch._reviewer_cmd("codex", config)
+        _, codex_cmd = work_launch._reviewer_cmd("claude", config)
+        assert "sk-secret" not in claude_cmd and "sk-secret" not in codex_cmd
+        assert claude_cmd.startswith(f"CLAUDE_CONFIG_DIR={os.path.expanduser('~/.quill-claude')} ")
+        assert codex_cmd.startswith(f"CODEX_HOME={os.path.expanduser('~/.alt-codex')} ")
+
+    def test_a_secret_env_override_stays_out_of_the_launch_prompt(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(work_launch, "personal_config",
+                            lambda: {"workspace": {"root": tmp_path},
+                                     "llm": {"codex": {"env": {"OPENAI_API_KEY": "sk-secret"}}}})
+        launcher = MagicMock()
+        with patch("services.work_launch.terminal.launch_agent", launcher), \
+             patch("services.work_launch.terminal.session_healthy",
+                   return_value={"alive": True, "agent_running": True}), \
+             patch("services.work_launch.threading.Thread"):
+            work_launch.launch("check the work", agent="claude")
+        assert "sk-secret" not in launcher.call_args.args[3]
 
     def test_unknown_agent_is_rejected(self, tmp_path, monkeypatch):
         monkeypatch.setattr(work_launch, "personal_config",
