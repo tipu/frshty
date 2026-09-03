@@ -114,6 +114,19 @@ def api_work_thread_task(root_id: int, body: dict):
     return result
 
 
+@router.post("/api/work/threads/{root_id}/archive")
+def api_work_thread_archive(root_id: int):
+    """Archive every completed task in one thread.
+
+    A thread page lists the whole chain, so the operator who reads it there is
+    the one who wants it off the board. The call archives the completed tasks
+    only, so an unacknowledged task stays where the operator can read it."""
+    result = work_store.archive_thread(root_id)
+    if "error" in result:
+        return JSONResponse(result, status_code=404)
+    return result
+
+
 @router.get("/api/work/items")
 def api_work_items(q: str = "", tags: str = "", done_page: int = 1, archive: int = 0):
     groups = work_store.grouped_items(q=q, tags=tags, archived=bool(archive))
