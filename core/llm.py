@@ -333,11 +333,20 @@ class ClaudeProvider(LLMProvider):
                 log_fh = None
 
         try:
-            proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                cwd=str(cwd) if cwd else None, env=self._env(), text=True, bufsize=1, errors="replace",
-                start_new_session=True,
-            )
+            try:
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    cwd=str(cwd) if cwd else None, env=self._env(), text=True, bufsize=1, errors="replace",
+                    start_new_session=True,
+                )
+            except OSError as e:
+                if log_fh is not None:
+                    try:
+                        log_fh.close()
+                    except OSError as close_error:
+                        log.emit("job_log_close_failed",
+                                 f"Failed to close job log: {close_error}")
+                return _spawn_failed(inv_id, t0, "run_claude_code", chosen_model, e)
             pid_path = active_live_pid_path()
             if pid_path is not None:
                 try:
@@ -452,6 +461,8 @@ class ClaudeProvider(LLMProvider):
             except subprocess.TimeoutExpired:
                 _record_end(inv_id, t0, "timeout", None, None)
                 return None, None
+            except OSError as e:
+                return _spawn_failed(inv_id, t0, function_name, model, e), None
             raw = result.stdout.decode() if result.stdout else ""
             if result.returncode != 0 or not result.stdout:
                 err = result.stderr.decode() if result.stderr else ""
@@ -585,6 +596,8 @@ class OpenCodeProvider(LLMProvider):
             except subprocess.TimeoutExpired:
                 _record_end(inv_id, t0, "timeout", None, None)
                 return None
+            except OSError as e:
+                return _spawn_failed(inv_id, t0, fn_name, model, e)
             output = result.stdout.decode().strip() if result.stdout else ""
             if result.returncode != 0 or not result.stdout:
                 err = result.stderr.decode() if result.stderr else ""
@@ -595,6 +608,23 @@ class OpenCodeProvider(LLMProvider):
                 return None
             _record_end(inv_id, t0, "success", result.returncode, output)
             return output
+
+
+def _spawn_failed(inv_id: str | None, started_ms: float, fn_name: str,
+                  model: str, error: OSError) -> None:
+    """Close out an invocation whose CLI never started, and return None.
+
+    A missing, unreadable or non-executable model binary raises out of the
+    spawn itself, before any exit code exists. Every runner here is documented
+    to answer None on failure, so an escaping OSError crashed the caller
+    instead of degrading, and left the invocation row stuck at 'running'."""
+    detail = f"{type(error).__name__}: {error}"
+    _record_end(inv_id, started_ms, "error", None, detail)
+    log.emit("llm_spawn_failed",
+             f"[{_active_instance_key()}] could not start {model} for {fn_name}: {detail}",
+             meta={"instance_key": _active_instance_key(), "model": model,
+                   "function": fn_name, "error": detail})
+    return None
 
 
 def _mark_running(inv_id: str | None, queued_s: float | None = None) -> None:
@@ -686,7 +716,8 @@ def run_external_model(cmd: list[str], *, fn_name: str, model: str, prompt: str,
                        transcript_file: Path | None = None,
                        stdin_text: str | None = None) -> tuple[str | None, int | None]:
     """Run a non-Claude model CLI (codex, agy) under the same invocation
-    logging as Claude. Returns (text, exit_code); text is None on timeout.
+    logging as Claude. Returns (text, exit_code); both are None when the CLI
+    times out or cannot be started at all.
 
     Pass the prompt via `stdin_text` (with a `-` placeholder in `cmd`) instead
     of as an argv element when it can be large: Linux caps a single argv
@@ -710,6 +741,8 @@ def run_external_model(cmd: list[str], *, fn_name: str, model: str, prompt: str,
     except subprocess.TimeoutExpired:
         _record_end(inv_id, t0, "timeout", None, None)
         return None, None
+    except OSError as e:
+        return _spawn_failed(inv_id, t0, fn_name, model, e), None
     stdout = result.stdout.decode(errors="replace") if result.stdout else ""
     stderr = result.stderr.decode(errors="replace") if result.stderr else ""
     if transcript_file is not None:
