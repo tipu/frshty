@@ -354,6 +354,115 @@ class TestManualTransitionEnqueuesAdvance:
         assert resp.status_code == 400, resp.text
         assert self._advance_jobs(key) == []
 
+    def test_submit_pr_enqueues_advance(self, client, tmp_path):
+        from web import tickets as web_tickets
+        key, slug = "ADV-5", "ADV-5-s"
+        (tmp_path / "tickets" / slug / "repo1").mkdir(parents=True)
+        state.save("tickets", {key: {"status": "pr_ready", "slug": slug,
+                                     "branch": "b", "summary": "s"}})
+        platform = MagicMock()
+        platform.push_branch.return_value = {"ok": True}
+        platform.create_pr.return_value = {"url": "http://pr/1", "id": 1}
+
+        with patch("web.tickets.make_platform", return_value=platform), \
+             patch("web.tickets.subprocess.run",
+                   return_value=MagicMock(returncode=0, stdout="b\n", stderr="")), \
+             patch("web.tickets._changed_files", return_value=["a.py"]), \
+             patch("web.tickets._is_meaningful_change", return_value=True):
+            resp = web_tickets._submit_pr_sync(
+                key, {"repos": [{"name": "repo1", "title": "t", "description": "d"}]})
+
+        assert getattr(resp, "status_code", 200) == 200, getattr(resp, "body", resp)
+        assert state.load("tickets")[key]["status"] == "in_review"
+        jobs = self._advance_jobs(key)
+        assert len(jobs) == 1, "submit-pr must enqueue advance_ticket"
+        assert jobs[0]["status"] == "queued"
+
+    def test_restart_from_pr_failed_enqueues_advance(self, client):
+        key = "ADV-6"
+        state.save("tickets", {key: {"status": "pr_failed", "slug": f"{key}-s",
+                                     "prs": [{"repo": "r", "id": 1}]}})
+
+        resp = client.post(f"/api/tickets/{key}/restart")
+
+        assert resp.status_code == 200, resp.text
+        assert state.load("tickets")[key]["status"] == "in_review"
+        jobs = self._advance_jobs(key)
+        assert len(jobs) == 1, "restart out of pr_failed must enqueue advance_ticket"
+
+    def test_restart_from_pr_failed_without_prs_enqueues_advance(self, client):
+        key = "ADV-7"
+        state.save("tickets", {key: {"status": "pr_failed", "slug": f"{key}-s"}})
+
+        resp = client.post(f"/api/tickets/{key}/restart")
+
+        assert resp.status_code == 200, resp.text
+        assert state.load("tickets")[key]["status"] == "pr_ready"
+        assert len(self._advance_jobs(key)) == 1
+
+    def test_restart_into_planning_enqueues_its_own_stage_only(self, client):
+        import core.queue as q
+        key = "ADV-8"
+        state.save("tickets", {key: {"status": "planning", "slug": f"{key}-s"}})
+
+        resp = client.post(f"/api/tickets/{key}/restart")
+
+        assert resp.status_code == 200, resp.text
+        tasks = [j["task"] for j in q.jobs_for_ticket("test", key)]
+        assert tasks == ["start_planning"], tasks
+
+    def test_unignore_enqueues_advance(self, client):
+        key = "ADV-9"
+        state.save("tickets", {key: {"status": "ignored", "slug": f"{key}-s",
+                                     "discovered_at": "2026-01-01T00:00:00+00:00"}})
+
+        resp = client.post(f"/api/tickets/{key}/unignore")
+
+        assert resp.status_code == 200, resp.text
+        assert state.load("tickets")[key]["status"] == "new"
+        jobs = self._advance_jobs(key)
+        assert len(jobs) == 1, "unignore must enqueue advance_ticket"
+
+    def test_approve_enqueues_advance(self, client):
+        key = "ADV-10"
+        state.save("tickets", {key: {"status": "pending_approval", "slug": f"{key}-s",
+                                     "discovered_at": "2026-01-01T00:00:00+00:00"}})
+
+        resp = client.post(f"/api/tickets/{key}/approve")
+
+        assert resp.status_code == 200, resp.text
+        assert state.load("tickets")[key]["status"] == "new"
+        jobs = self._advance_jobs(key)
+        assert len(jobs) == 1, "approve must enqueue advance_ticket"
+
+    def test_approve_prd_enqueues_setup_not_advance(self, client):
+        import core.queue as q
+        key = "ADV-11"
+        state.save("tickets", {key: {"status": "pending_approval", "slug": f"{key}-s",
+                                     "source": "prd"}})
+
+        resp = client.post(f"/api/tickets/{key}/approve")
+
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["setup_enqueued"] is True
+        tasks = [j["task"] for j in q.jobs_for_ticket("test", key)]
+        assert tasks == ["setup_prd_ticket"], tasks
+
+    def test_start_dev_enqueues_advance(self, client):
+        key = "ADV-12"
+        state.save("tickets", {key: {"status": "new", "slug": f"{key}-s"}})
+        setup = {"status": "new", "slug": f"{key}-s", "branch": "b",
+                 "discovered_at": "2026-01-01T00:00:00+00:00"}
+
+        with patch("web.tickets._tickets_mod._fetch_tickets",
+                   return_value=[{"key": key, "summary": "s"}]), \
+             patch("web.tickets._tickets_mod._setup_ticket", return_value=setup):
+            resp = client.post(f"/api/tickets/{key}/start-dev")
+
+        assert resp.status_code == 200, resp.text
+        jobs = self._advance_jobs(key)
+        assert len(jobs) == 1, "start-dev must enqueue advance_ticket"
+
 
 class TestDiscardTicket:
     def test_discard_removes_dir_and_state(self, client, tmp_path):
