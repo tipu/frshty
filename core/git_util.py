@@ -357,6 +357,9 @@ def lint_files(repo_dir: Path, files: list[str],
     except subprocess.TimeoutExpired:
         return {"status": "hook_failed", "exit_code": -1,
                 "output": f"pre-commit run timed out after {timeout}s"}
+    except OSError as e:
+        return {"status": "tooling_failed", "exit_code": 127,
+                "output": f"pre-commit could not be started: {type(e).__name__}: {e}"}
     output = strip_ansi((run.stdout or "") + (run.stderr or "")).strip()
     return {"status": "pass" if run.returncode == 0 else "hook_failed",
             "exit_code": run.returncode, "output": output[-4000:]}

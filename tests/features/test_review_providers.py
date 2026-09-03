@@ -39,6 +39,7 @@ class TestReviewPrRunsEveryConfiguredProvider:
         with patch.object(reviewer, "_ensure_review_worktree", return_value=None), \
              patch.object(reviewer, "_load_conventions", return_value=""), \
              patch.object(reviewer, "run_haiku", return_value=""), \
+             patch.object(reviewer, "_merge_reviews", side_effect=lambda r: r[0][1]), \
              patch.object(reviewer, "_validate_issues", side_effect=lambda i, w: i), \
              patch.object(reviewer, "_simplify_all_issues", side_effect=lambda i: i), \
              patch.object(reviewer, "_run_single_persona",
@@ -86,6 +87,18 @@ class TestReviewPrRunsEveryConfiguredProvider:
         assert "review.json" in names
         d = Path(tmp_path) / "reviews" / "quill" / "claude-team-checkout-redirect"
         assert json.loads((d / "queued_comments.json").read_text())[0]["body"] == "from codex"
+
+    def test_the_fan_out_asks_no_model_of_its_own(self, tmp_path):
+        """Every model call on this path is stubbed, so nothing may reach a CLI.
+
+        The merge was not stubbed, so these cases ran the real merge model.
+        They passed only on a host that had the claude binary, spawned it on
+        every run, and failed on CI where the binary is absent."""
+        with patch.object(reviewer, "run_balanced", return_value=None) as balanced, \
+             patch.object(reviewer, "run_agentic", return_value=None) as agentic:
+            self._run(tmp_path, ("claude", "codex"))
+        balanced.assert_not_called()
+        agentic.assert_not_called()
 
     def test_no_provider_succeeding_writes_no_review_at_all(self, tmp_path):
         """The staged diff is the reviewers' input, so it is there either way.

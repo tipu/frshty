@@ -374,6 +374,11 @@ def _run_single_persona(args):
                  f"persona '{name}' timed out after {e.timeout}s",
                  meta={"persona": name, "worktree": str(cwd) if cwd else ""})
         return (name, None)
+    except OSError as e:
+        log.emit("review_persona_error",
+                 f"persona '{name}' could not run: {type(e).__name__}: {e}",
+                 meta={"persona": name, "worktree": str(cwd) if cwd else ""})
+        return (name, None)
     if not output:
         return (name, None)
     data = extract_json(output)
