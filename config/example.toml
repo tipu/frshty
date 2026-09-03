@@ -64,9 +64,23 @@ scope_review = false              # consensus scope review (claude/codex/agy) of
 pr_autofix = false                # github only: every newly created PR gets a claude+codex review; critical/high findings are consolidated and resolved directly on the PR branch (commit + push). Open PRs that predate enablement are baselined and left alone.
 
 # [slack]
-# raw_path = "/path/to/slack_int/messages/raw.jsonl"
+# messages_dir = "/path/to/slack_int/messages/myworkspace"
+#                                     # the directory holding this instance's slack capture
+#                                     # (messages.jsonl plus its rotated siblings). raw_path
+#                                     # names the live file alone; set either one and frshty
+#                                     # derives the other.
+# raw_path = "/path/to/slack_int/messages/myworkspace/messages.jsonl"
 # workspace = "myworkspace"
 # user_id = "UXXXXXXX"
+# propose_tasks = false               # when true, frshty reads the conversations this user is
+#                                     # part of and opens a task on /tasks for the ones that ask
+#                                     # for concrete work. Every such task lands in the
+#                                     # `proposed` group and never runs until you approve it.
+# propose_settle_minutes = 10         # a conversation is judged only once its last message is
+#                                     # this old, so a thread still being typed is left alone
+# propose_max_age_hours = 48          # never propose from a conversation older than this
+# propose_max_per_day = 3             # ceiling on proposals opened for this instance per day
+# propose_max_judgements_per_scan = 3 # ceiling on model calls per scan
 
 # [timesheet]
 # recurring = [

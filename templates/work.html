@@ -136,7 +136,13 @@
               <button class="ln-btn ln-btn-sm ln-btn-ghost" v-if="it.summary"
                       @click="sumOpen[rowKey(it)] = !sumOpen[rowKey(it)]">{{ sumOpen[rowKey(it)] ? 'Summary ▾' : 'Summary ▸' }}</button>
               <a class="ln-btn ln-btn-sm ln-btn-ghost" v-if="it.summary" :href="taskHref(it, '/summary')" target="_blank">↗</a>
-              <template v-if="g === 'needs_ack'">
+              <template v-if="g === 'proposed'">
+                <button class="ln-btn ln-btn-sm ln-btn-primary" :disabled="approveBusy[rowKey(it)]"
+                        title="start an agent on this proposal" @click="approve(it)">Approve &amp; launch</button>
+                <button class="ln-btn ln-btn-sm ln-btn-ghost"
+                        title="frshty was wrong; file it without running it" @click="act(it, 'decline')">Decline</button>
+              </template>
+              <template v-else-if="g === 'needs_ack'">
                 <button class="ln-btn ln-btn-sm ln-btn-primary"
                         title="accept the agent's report and complete this task" @click="act(it, 'ack')">Acknowledge</button>
                 <button class="ln-btn ln-btn-sm ln-btn-ghost"
@@ -218,10 +224,12 @@
 </div>
 <script>
 const STATE_PILLS = {
+  proposed: "ln-pill-violet",
   needs_ack: "ln-pill-green", needs_you: "ln-pill-amber", agent_working: "ln-pill-blue",
   waiting_external: "ln-pill-ghost", failed_stale: "ln-pill-red", done: "ln-pill-green",
 };
 const STATE_TEXT = {
+  proposed: "◇ frshty proposed this",
   needs_ack: "✓ Agent reported done", needs_you: "● Needs you", agent_working: "● Working",
   waiting_external: "○ Waiting external", failed_stale: "● Failed or stale",
 };
@@ -230,16 +238,16 @@ frshtyApp({
     return {
       features: {}, instanceName: "",
       view: new URLSearchParams(location.search).get("view") === "archive" ? "archive" : "board",
-      groups: { needs_ack: [], needs_you: [], agent_working: [], waiting_external: [], failed_stale: [], done: [] },
+      groups: { proposed: [], needs_ack: [], needs_you: [], agent_working: [], waiting_external: [], failed_stale: [], done: [] },
       personalLoaded: false, intakeText: "", intakeError: "", intakeBusy: false,
       projects: [], slackAvailable: false, intakeContexts: [], intakeSlack: false, moreOpen: false,
       agents: ["claude"], intakeAgent: localStorage.getItem("workAgent") || "claude",
-      connError: "", replyText: {}, sumOpen: {}, linkmap: null, threads: [],
+      connError: "", replyText: {}, sumOpen: {}, approveBusy: {}, linkmap: null, threads: [],
       peers: [], peerMeta: {}, peerErrors: {}, peerLinkmaps: {}, target: "",
       sourceFilter: localStorage.getItem("workSourceFilter") || "",
       searchText: "", tagFilter: JSON.parse(localStorage.getItem("workTagFilter") || "[]"), allTags: [], donePage: 1, donePages: 1, counts: {},
-      groupOrder: ["needs_ack", "agent_working", "needs_you", "waiting_external", "failed_stale", "done"],
-      labels: { needs_ack: "Needs acknowledgement", needs_you: "Needs you", agent_working: "Agent working", waiting_external: "Waiting external", failed_stale: "Failed or stale", done: "Completed" },
+      groupOrder: ["proposed", "needs_ack", "agent_working", "needs_you", "waiting_external", "failed_stale", "done"],
+      labels: { proposed: "Proposed — needs your approval", needs_ack: "Needs acknowledgement", needs_you: "Needs you", agent_working: "Agent working", waiting_external: "Waiting external", failed_stale: "Failed or stale", done: "Completed" },
     };
   },
   computed: {
@@ -247,7 +255,7 @@ frshtyApp({
       return this.view === "archive" ? ["done"] : this.groupOrder;
     },
     railCounts() {
-      return { tasks: this.count("needs_ack") + this.count("needs_you") };
+      return { tasks: this.count("proposed") + this.count("needs_ack") + this.count("needs_you") };
     },
     crumbs() {
       return this.view === "archive" ? ["Work", "Tasks", "Archive"] : ["Work", "Tasks"];
@@ -343,7 +351,7 @@ frshtyApp({
     },
     tagsOf(it) {
       const tags = (it.tags || "").split(",").filter(Boolean);
-      if (it.instance_key) tags.unshift(it.instance_key);
+      if (it.instance_key && !tags.includes(it.instance_key)) tags.unshift(it.instance_key);
       return tags;
     },
     onSearch() {
@@ -534,6 +542,25 @@ frshtyApp({
       } finally {
         this.intakeBusy = false;
       }
+    },
+    async approve(it) {
+      const key = this.rowKey(it);
+      if (this.approveBusy[key]) return;
+      this.approveBusy[key] = true;
+      try {
+        const r = await fetch(this.apiUrl(it.peer, `/api/work/items/${it.id}/approve`), {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ agent: this.intakeAgent }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) this.connError = d.error || ("approve failed HTTP " + r.status);
+      } catch (e) {
+        this.connError = "approve failed: " + e.message;
+      } finally {
+        delete this.approveBusy[key];
+      }
+      await this.refresh();
+      await this.loadThreads();
     },
     async act(it, action, until) {
       try {
