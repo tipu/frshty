@@ -380,6 +380,7 @@ def _submit_pr_sync(ticket_key: str, data: dict):
         return JSONResponse({"error": f"PRs created but state transition failed: {e}", "prs": prs}, status_code=500)
     log.emit("ticket_pr_created", f"PR submitted for {ticket_key}: {len(prs)} repo(s)",
              meta={"ticket": ticket_key, "repos": [p["repo"] for p in prs]})
+    _enqueue_manual_advance(ticket_key)
     return {"status": "ok", "prs": prs}
 
 
@@ -1094,6 +1095,8 @@ def api_restart_ticket(key: str):
         q.enqueue_job(instance_key, "start_planning", ticket_key=key)
     elif instance_key and status == "reviewing":
         q.enqueue_job(instance_key, "start_reviewing", ticket_key=key)
+    else:
+        _enqueue_manual_advance(key)
     return {"status": "restarted"}
 
 
@@ -1257,6 +1260,7 @@ def api_unignore_ticket(key: str):
     log.emit("ticket_unignored", f"Un-ignored {key}",
         links={"detail": f"{_config['_base_url']}/tickets/{key}"},
         meta={"ticket": key})
+    _enqueue_manual_advance(key)
     return {"status": "new"}
 
 
@@ -1286,6 +1290,8 @@ def api_approve_ticket(key: str):
                 log.emit("prd_setup_enqueue_failed",
                          f"failed to enqueue setup_prd_ticket for {key}: {type(e).__name__}: {e}",
                          meta={"ticket": key})
+    if not setup_enqueued:
+        _enqueue_manual_advance(key)
     return {"status": "new", "approval_status": "approved", "setup_enqueued": setup_enqueued}
 
 
@@ -1453,6 +1459,7 @@ def api_start_dev(key: str):
         return JSONResponse({"error": "ticket not found in ticket system"}, status_code=404)
     ts = _tickets_mod._setup_ticket(_config, ticket, _config["_base_url"])
     state.save_ticket(key, ts)
+    _enqueue_manual_advance(key)
     return {"status": "started", "new_status": ts.get("status")}
 
 
