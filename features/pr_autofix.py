@@ -18,6 +18,7 @@ import core.log as log
 import core.queue as q
 import core.state as state
 from core.claude_runner import run_agentic, run_balanced, run_claude_code, extract_json
+from core.commit_message import COMMIT_SUBJECT_RULE, commit_subject
 from core.config import base_branch_for, get_repos
 from core.llm import READ_ONLY_TOOLS, WRITE_TOOLS, run_external_model
 from features.platforms import make_platform
@@ -338,7 +339,8 @@ def run(config: dict, payload: dict) -> tuple[bool, str | None]:
             fix_prompt = (
                 f"A consolidated code review of this PR produced {len(findings)} critical/high "
                 f"finding(s). Resolve ALL of them with the smallest correct change. "
-                f"Do not refactor beyond what a finding requires.\n\n{findings_list}"
+                f"Do not refactor beyond what a finding requires.\n\n{findings_list}\n\n"
+                + COMMIT_SUBJECT_RULE
             )
             result = run_claude_code(fix_prompt, cwd=worktree, timeout=FIX_TIMEOUT,
                                      allowed_tools=_fix_tools(worktree))
@@ -352,7 +354,11 @@ def run(config: dict, payload: dict) -> tuple[bool, str | None]:
                 return _fail("fix run produced no changes")
             commit = git_util.commit_with_hooks(
                 worktree,
-                message=f"Resolve {len(findings)} critical/high finding(s) from the claude and codex auto-review.",
+                message=commit_subject(
+                    worktree,
+                    f"fix: resolve {len(findings)} critical/high review finding(s)",
+                    findings_list,
+                ),
                 timeout=900,
             )
             if commit.returncode != 0:

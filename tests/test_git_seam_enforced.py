@@ -30,7 +30,7 @@ ALLOWED = {
     "web/tickets.py": 9,
     "features/defence.py": 8,
     "core/tasks/tickets.py": 7,
-    "features/own_prs.py": 6,
+    "features/own_prs.py": 4,
     "features/presentation.py": 6,
     "core/consensus_plan.py": 3,
     "web/reviews.py": 3,

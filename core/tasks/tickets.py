@@ -16,6 +16,7 @@ import core.git_util as git_util
 import core.log as log
 import core.state as state
 from core.claude_runner import run_claude_code, run_haiku, extract_json
+from core.commit_message import COMMIT_SUBJECT_RULE, commit_subject
 from core.config import base_branch_for, get_repos, ticket_worktree_path
 from core.deps import relink_shared_venv
 from core.consensus_plan import run_consensus_plan
@@ -527,7 +528,8 @@ def _dirty_workspace_repos(ticket_dir: Path) -> list[str]:
 
 
 def _commit_workspace_changes(ticket_dir: Path, ticket_key: str,
-                              message: str | None = None) -> list[str]:
+                              message: str | None = None,
+                              describe: bool = False) -> list[str]:
     """Commit meaningful worktree changes left uncommitted by a Claude run.
 
     Skips any repo whose only dirty files are Pipfile / Pipfile.lock — those
@@ -536,7 +538,13 @@ def _commit_workspace_changes(ticket_dir: Path, ticket_key: str,
 
     `message` defaults to the historical tri-review wording for backward-
     compat with existing callers; new callers should pass an explicit message
-    that names the step (e.g. 'test: scaffold tests' / 'fix: failing tests')."""
+    that names the step (e.g. 'test: scaffold tests' / 'fix: failing tests').
+
+    `describe` replaces the wording of the step with one sentence about what
+    the repo's own change does, so a branch that answers a review does not
+    carry the same subject on every commit. The step wording stays the
+    fallback. It stages first, so a change that is only new files is a diff
+    the sentence can be written from and not just a list of names."""
     candidates: list[Path] = []
     workspace = ticket_dir / "workspace"
     search_root = workspace if workspace.is_dir() else ticket_dir
@@ -559,7 +567,11 @@ def _commit_workspace_changes(ticket_dir: Path, ticket_key: str,
         ]
         if not meaningful:
             continue
-        outcome, route = commit_repo_changes(repo_dir, ticket_key, commit_msg)
+        repo_msg = commit_msg
+        if describe:
+            git_util.run_git(repo_dir, ["add", "-A"], timeout=60)
+            repo_msg = commit_subject(repo_dir, commit_msg, ticket_key=ticket_key)
+        outcome, route = commit_repo_changes(repo_dir, ticket_key, repo_msg)
         if not outcome.ok:
             raise CommitBlocked(repo_dir.name, route, outcome)
         committed.append(repo_dir.name)
@@ -1493,7 +1505,8 @@ def fix_review_findings(ctx: TaskContext) -> TaskResult:
         "Read docs/tri-review.md and identify the blocking findings (those flagged as "
         "blocking, not suggestions). Fix each one in the workspace. Run any tests directly "
         "relevant to the changed files. Do NOT modify docs/tri-review.md — leave the verdict "
-        "section untouched; a separate verifier will assess your work."
+        "section untouched; a separate verifier will assess your work.\n\n"
+        + COMMIT_SUBJECT_RULE
     )
     log.emit("ticket_review_fixing", f"Apply fix for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key})
@@ -1509,7 +1522,7 @@ def fix_review_findings(ctx: TaskContext) -> TaskResult:
     # Commit first. Verifying first meant a failed commit left "VERDICT: PASS"
     # standing over uncommitted work, which is how DEV-635 reached the next stage
     # claiming a review it could not show.
-    committed = _commit_workspace_changes(ticket_dir, ctx.ticket_key or "")
+    committed = _commit_workspace_changes(ticket_dir, ctx.ticket_key or "", describe=True)
     if committed:
         log.emit("ticket_review_committed",
                  f"Committed fix changes for {ctx.ticket_key}: {', '.join(committed)}",
@@ -2264,7 +2277,8 @@ def generate_pr_descriptions(ctx: TaskContext) -> TaskResult:
 GENERIC_BUG_REPORT_PROMPT = (
     "A user reported that this ticket's fix is not working or has regressed. "
     "Re-investigate the issue in the current worktree state, identify why it's failing, "
-    "and fix it. Then run relevant tests to verify the fix works. Commit your changes."
+    "and fix it. Then run relevant tests to verify the fix works. Commit your changes.\n\n"
+    + COMMIT_SUBJECT_RULE
 )
 
 
@@ -2296,6 +2310,8 @@ def _bug_report_prompt(ticket_key: str, summary: str, reports: list[dict]) -> st
         "you changed. If a reported point needs no code change, say so in your final "
         "message and name the file and line that already handles it."
     )
+    parts.append("")
+    parts.append(COMMIT_SUBJECT_RULE)
     return "\n".join(parts)
 
 
@@ -2339,7 +2355,8 @@ def fix_reported_bug(ctx: TaskContext) -> TaskResult:
 
     try:
         _commit_workspace_changes(ticket_dir, ctx.ticket_key or "",
-                                  message=f"fix: {ctx.ticket_key} address reported issue")
+                                  message=f"fix: {ctx.ticket_key} address reported issue",
+                                  describe=True)
     except CommitBlocked as e:
         _settle_bug_reports(ctx, reports, str(e)[:200])
         return TaskResult("failed", str(e), hard_block=True)

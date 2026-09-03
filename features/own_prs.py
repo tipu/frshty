@@ -11,6 +11,7 @@ import core.comments as comments
 import core.git_util as git_util
 import core.branch_sync as branch_sync
 from core.claude_runner import run_claude_code, run_haiku, run_balanced, extract_json
+from core.commit_message import COMMIT_SUBJECT_RULE, commit_subject
 from core.config import base_branch_for, get_repos
 from features.platforms import make_platform
 
@@ -425,11 +426,17 @@ def _comment_fix_tools(worktree: Path) -> list[str]:
     ]
 
 
-def _commit_fix(worktree, message) -> tuple[bool, str]:
-    subprocess.run(["git", "add", "-A"], cwd=str(worktree), capture_output=True, timeout=60)
-    staged = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=str(worktree), capture_output=True, timeout=60).returncode != 0
+def _commit_fix(worktree, message, context: str = "") -> tuple[bool, str]:
+    try:
+        git_util.run_git(worktree, ["add", "-A"], timeout=60)
+        staged = git_util.run_git(worktree, ["diff", "--cached", "--quiet"],
+                                  allowed_codes=(0, 1), timeout=60).returncode != 0
+    except git_util.GitCommandError as e:
+        return False, f"could not stage the fix: {e}"[:200]
     if not staged:
         return False, "no changes produced"
+    if context:
+        message = commit_subject(worktree, message, context)
     commit = git_util.commit_with_hooks(worktree, message=message, timeout=900)
     if commit.returncode != 0:
         detail = (commit.stderr or commit.stdout or "").strip()[:200]
@@ -456,7 +463,11 @@ def fix_comment(config, payload) -> tuple[bool, str | None]:
                 comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "Could not create worktree")
                 return False, "Could not create worktree"
 
-            context = f"File: {comment.get('path', 'unknown')}\nLine: {comment.get('line', 'unknown')}\n\nReview comment: {comment['body']}\n\nFix this review comment."
+            context = (
+                f"File: {comment.get('path', 'unknown')}\nLine: {comment.get('line', 'unknown')}\n\n"
+                f"Review comment: {comment['body']}\n\nFix this review comment.\n\n"
+                + COMMIT_SUBJECT_RULE
+            )
             result = run_claude_code(context, cwd=worktree, timeout=600,
                                      allowed_tools=_comment_fix_tools(worktree))
             if result is None:
@@ -466,7 +477,9 @@ def fix_comment(config, payload) -> tuple[bool, str | None]:
                                                comment.get("updated_at") or comment.get("created_at"))
                 return False, reason
 
-            committed, commit_reason = _commit_fix(worktree, f"fix: address review comment on {comment.get('path', 'unknown')}")
+            committed, commit_reason = _commit_fix(
+                worktree, f"fix: address review comment on {comment.get('path', 'unknown')}",
+                context=comment["body"])
             if not committed:
                 log.emit("pr_comment_blocked", f"{pr_ref}: {commit_reason} — {comment['body'][:80]}", links=links, meta={**meta, "reason": commit_reason})
                 comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, commit_reason)
@@ -562,14 +575,17 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
             )
             context = (
                 f"The following {len(pending)} review comments were left on this PR. "
-                f"Address ALL of them.\n\n{comment_list}\n\nFix every review comment above."
+                f"Address ALL of them.\n\n{comment_list}\n\nFix every review comment above.\n\n"
+                + COMMIT_SUBJECT_RULE
             )
             result = run_claude_code(context, cwd=worktree, timeout=900,
                                      allowed_tools=_comment_fix_tools(worktree))
             if result is None:
                 return _defer_all(pending, "Claude did not run to completion")
 
-            committed, commit_reason = _commit_fix(worktree, f"fix: address {len(pending)} review comments")
+            committed, commit_reason = _commit_fix(
+                worktree, f"fix: address {len(pending)} review comments",
+                context=comment_list)
             if not committed:
                 return _fail_all(pending_ids, commit_reason)
 

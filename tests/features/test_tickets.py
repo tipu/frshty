@@ -2423,19 +2423,21 @@ class TestReplyCommitsToChangeReroute:
              patch("features.tickets._commit_pr_comment_changes",
                    return_value=(tickets.git_util.CommitOutcome(
                        "committed", "git_commit", "repo", 0,
-                       "committed", "abc1234", "def5678"), "committed")), \
+                       "committed", "abc1234", "def5678"), "committed")) as committer, \
+             patch("features.tickets.commit_subject",
+                   return_value="fix: restore the row count on the log table") as subject, \
              patch("features.tickets.subprocess.run", side_effect=fake_git):
             ts = tickets._check_in_review(bb_config, ticket, ts, "http://base")
 
         saved = json.loads(
             (fake_config["workspace"]["root"] / "tickets" / slug / "pr_comments.json").read_text()
         )
-        return ts, mock_platform, fixer, saved
+        return ts, mock_platform, fixer, saved, subject, committer
 
     def test_reply_committing_to_change_routes_to_fix_path(
         self, fresh_db, fake_config, tmp_state
     ):
-        ts, platform, fixer, saved = self._run_scan(
+        ts, platform, fixer, saved, subject, committer = self._run_scan(
             fake_config,
             commitment_json='{"commits_to_change": true}',
             draft_reply="The count was removed. This is a regression. I will restore the count.",
@@ -2446,6 +2448,11 @@ class TestReplyCommitsToChangeReroute:
             "the fix path, but run_claude_code was never called"
         )
         fix_prompt = fixer.call_args.args[0]
+        assert tickets.COMMIT_SUBJECT_RULE in fix_prompt, (
+            "the fix prompt must carry the commit subject rule, because this "
+            "fixer runs with full tools and can commit on its own; got: "
+            f"{fix_prompt!r}"
+        )
         assert "I will restore the count" in fix_prompt, (
             "the fix prompt must carry the drafted reply so the fixer knows "
             f"the committed change; got: {fix_prompt!r}"
@@ -2454,12 +2461,20 @@ class TestReplyCommitsToChangeReroute:
             f"expected the comment addressed, got {saved[0]['status']!r}"
         )
         platform.resolve_comment.assert_called_once_with("repo", 99, 100)
+        assert subject.call_args.args[2] == "This was a file count. Is the point to remove it?", (
+            "the review comment must reach the commit subject so the commit "
+            f"says what changed; got: {subject.call_args.args!r}"
+        )
+        assert committer.call_args.kwargs["message"] == "fix: restore the row count on the log table", (
+            "the derived subject must be the commit message, not the generic "
+            f"wording; got: {committer.call_args.kwargs!r}"
+        )
 
     def test_reply_declining_change_stays_needs_reply(
         self, fresh_db, fake_config, tmp_state
     ):
         declining = "The label is intentional. The count moved into the expanded panel. No change is needed."
-        ts, platform, fixer, saved = self._run_scan(
+        ts, platform, fixer, saved, subject, committer = self._run_scan(
             fake_config,
             commitment_json='{"commits_to_change": false}',
             draft_reply=declining,

@@ -423,6 +423,8 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
          patch("features.pr_ci.extract_json", side_effect=fake_extract_json), \
          patch("features.pr_ci.run_claude_code", side_effect=fake_run_claude_code), \
          patch("core.tasks.tickets.run_claude_code", side_effect=fake_run_claude_code), \
+         patch("core.commit_message.run_haiku",
+               return_value="describe the pending change"), \
          patch("features.tickets.run_claude_code", side_effect=fake_run_claude_code), \
          patch("core.tasks.tickets.run_consensus_plan", side_effect=fake_consensus_plan), \
          patch("features.acceptance.run_haiku", side_effect=fake_run_haiku), \
