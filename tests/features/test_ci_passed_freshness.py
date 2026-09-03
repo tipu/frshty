@@ -64,6 +64,15 @@ class TestMonitorCI:
             result = p.monitor_ci({"key": "DEV-1"}, _green_ts(), "http://base")
         assert "ci_passed" not in result
 
+    def test_a_ticket_that_lost_its_prs_clears_it(self):
+        """With no PR left there is no build to prove green. A stale flag
+        also hid the ticket from the in_review_no_ci bucket, which selects on
+        ci_passed being unset (manager/staleness.py:199)."""
+        p = _bb_platform()
+        with patch("features.platforms.log"):
+            result = p.monitor_ci({"key": "DEV-1"}, _green_ts(prs=[]), "http://base")
+        assert "ci_passed" not in result
+
     def test_the_ci_failure_handler_clears_it(self):
         ts = _green_ts()
         checks = [{"name": "Pipeline", "state": "FAILED", "url": ""}]
