@@ -119,10 +119,20 @@ def stale_own_prs(instance_key: str, threshold_hours: int = 24) -> list[dict]:
 
 def merge_ready_ticket_prs(instance_key: str, config: dict | None = None,
                             live: bool = False) -> list[dict]:
-    """Tickets in_review with passing CI AND at least one approver. Reads
-    approver state cached in ts['prs'][i]['approvers'] by features.tickets._check_in_review.
-    Pass live=True to bypass cache and re-fetch from the platform (used by the
-    manual Refresh button on /today).
+    """Tickets in_review with passing CI where EVERY open sibling PR is approved.
+
+    The ticket-level ci_passed flag is a whole-ticket fact: it is set only once
+    every tracked PR is green, and cleared again on every path that does not
+    prove that (features/platforms.py). Approval was not a whole-ticket fact:
+    the bucket used to qualify a ticket as soon as one PR had an approver, so a
+    three-PR ticket with one approval was reported merge ready and the operator
+    had to notice the other two himself. A PR already merged is not waiting for
+    anything, so it is excluded from the list and from the all-approved test; a
+    ticket whose PRs are all merged has nothing to merge and does not qualify.
+
+    Reads approver state cached in ts['prs'][i]['approvers'] by
+    features.tickets._check_in_review. Pass live=True to bypass cache and
+    re-fetch from the platform (used by the manual Refresh button on /today).
     Serves: 'get my approved PRs merged'."""
     rows = db.query_all(
         "SELECT ticket_key, slug, data FROM tickets"
@@ -146,17 +156,21 @@ def merge_ready_ticket_prs(instance_key: str, config: dict | None = None,
         d = _load_ticket_data(r)
         prs = d.get("prs") or []
         enriched: list[dict] = []
-        any_approved = False
+        all_approved = True
         for p in prs:
             approvers = list(p.get("approvers") or [])
+            pr_state = (p.get("pr_state") or "OPEN").upper()
             if platform:
                 try:
                     info = platform.get_pr_info(p.get("repo", ""), p.get("id")) or {}
                     approvers = info.get("approvers") or []
+                    pr_state = (info.get("state") or "OPEN").upper()
                 except Exception:
                     pass
-            if approvers:
-                any_approved = True
+            if pr_state != "OPEN":
+                continue
+            if not approvers:
+                all_approved = False
             enriched.append({
                 "repo": p.get("repo"),
                 "id": p.get("id"),
@@ -164,7 +178,7 @@ def merge_ready_ticket_prs(instance_key: str, config: dict | None = None,
                 "author": p.get("author"),
                 "approvers": approvers,
             })
-        if not prs or not any_approved:
+        if not enriched or not all_approved:
             continue
         out.append({
             "ticket_key": r["ticket_key"],

@@ -189,8 +189,9 @@ PIPELINE_MAP = """
 
 Read the snapshot first, then confirm every claim against the live system:
 query the database, read the job log, read the handler source. State no cause
-you cannot show evidence for. There is no psql on this host and the database is
-SQLite, so use `sqlite3` against the database path above.
+you cannot show evidence for. There is no psql and no `sqlite3` binary on this
+host. The database is SQLite, so query it with Python, for example
+`python3 -c "import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute('select ...').fetchall())" <db path>`.
 
 Find the exact reason the ticket is not moving. Name the file and line that
 makes the decision. Say whether the cause is ticket state, a failing job, a
