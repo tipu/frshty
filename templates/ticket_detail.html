@@ -108,6 +108,8 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
            title="guided slide walkthrough">▶ Present</a>
         <button @click="openDiscuss" class="ln-btn ln-btn-discuss"
                 title="Open a separate claude (cl) terminal in this ticket's worktree dir">💬 Discuss</button>
+        <button @click="openDoctor" class="ln-btn ln-btn-amber"
+                title="Diagnose why this ticket is stuck: launches a task that reads the frshty code and this ticket's state">🩺 Doctor</button>
         <a v-if="ticketUrl" :href="ticketUrl" target="_blank" class="ln-btn"
            title="Open this ticket in the upstream tracker">Open Ticket &nearr;</a>
     </template>
@@ -126,6 +128,32 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
             </div>
             <div class="text-xs text-gray-300 mt-0.5">{{ blockingBanner.detail }}</div>
             <div v-if="blockingBanner.hint" class="text-xs text-gray-500 mt-1">{{ blockingBanner.hint }}</div>
+        </div>
+    </div>
+    <div v-if="doctorRuns.length" class="card p-3 mb-2 border-l-4"
+         :class="doctorRunning.length ? 'border-amber-500 bg-amber-950/30' : 'border-gray-700'">
+        <div class="flex items-center gap-2">
+            <span class="text-sm font-semibold text-amber-300">🩺 Doctor</span>
+            <span v-if="doctorRunning.length" class="flex items-center gap-1 text-xs text-amber-300">
+                <span class="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+                {{ doctorRunning.length }} running
+            </span>
+            <span v-else class="text-xs text-gray-500">no run in progress</span>
+            <button @click="doctorHistoryOpen = !doctorHistoryOpen"
+                    class="ml-auto text-xs text-gray-400 hover:text-white">
+                {{ doctorHistoryOpen ? '▾' : '▸' }} history ({{ doctorRuns.length }})
+            </button>
+        </div>
+        <div v-for="r in (doctorHistoryOpen ? doctorRuns : doctorRunning)" :key="r.id"
+             class="mt-2 pt-2 border-t border-gray-800 text-xs">
+            <div class="flex items-center gap-2">
+                <span :class="doctorStateClass(r)">{{ doctorStateLabel(r) }}</span>
+                <a :href="r.url" target="_blank" class="link">task {{ r.item_id }} &nearr;</a>
+                <span class="text-gray-600">{{ $time.dayMinute(r.created_at) }}</span>
+            </div>
+            <div class="text-gray-300 mt-0.5">{{ r.description }}</div>
+            <div v-if="r.question" class="text-yellow-300 mt-0.5">asks: {{ r.question }}</div>
+            <div v-else-if="r.outcome" class="text-gray-400 mt-0.5">{{ r.outcome }}</div>
         </div>
     </div>
     <div class="card p-4 flex items-center gap-4 flex-wrap">
@@ -813,6 +841,37 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
     <div ref="terminalContainer" id="terminal-container" style="height: 500px; padding: 4px;"></div>
 </div>
 
+<teleport to="body">
+    <div v-if="doctorOpen" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50"
+         @click.self="closeDoctor">
+        <div class="card p-6 w-[46rem] max-w-[92vw] flex flex-col">
+            <div class="flex items-center justify-between mb-3 pb-3 border-b border-gray-700">
+                <h2 class="text-lg font-bold">🩺 Doctor {{ key }}</h2>
+                <button @click="closeDoctor" class="text-gray-600 hover:text-white text-xl">×</button>
+            </div>
+            <p class="text-xs text-gray-400 mb-3">
+                Describe what is wrong. A task starts on the board with this ticket's state, its jobs,
+                its events and the frshty source, and reports why the ticket is stuck.
+                You stay on this page; the run and its result show at the top of it.
+            </p>
+            <textarea v-model="doctorDescription" rows="6" v-autofocus
+                      :disabled="doctorSubmitting"
+                      placeholder="e.g. stuck in reviewing for two days, no new jobs, terminal shows nothing"
+                      class="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-sm text-gray-200 focus:border-blue-500 focus:outline-none resize-y"></textarea>
+            <div v-if="doctorError" class="text-xs text-red-400 mt-2">{{ doctorError }}</div>
+            <div class="flex gap-2 mt-4 pt-4 border-t border-gray-700">
+                <button @click="submitDoctor" :disabled="doctorSubmitting || !doctorDescription.trim()"
+                        class="flex-1 bg-amber-700 hover:bg-amber-600 text-white text-sm px-4 py-2 rounded"
+                        :class="{ 'opacity-50 cursor-not-allowed': doctorSubmitting || !doctorDescription.trim() }">
+                    {{ doctorSubmitting ? 'Starting…' : 'Run doctor' }}
+                </button>
+                <button @click="closeDoctor" :disabled="doctorSubmitting"
+                        class="flex-1 bg-gray-700 hover:bg-gray-600 text-white text-sm px-4 py-2 rounded">Cancel</button>
+            </div>
+        </div>
+    </div>
+</teleport>
+
 <pr-submit-modal :open="prModalOpen" :repos="prRepos" :submitting="prSubmitting" :ticket-key="key"
                  @close="closePrModal" @submit="onPrSubmit" />
 
@@ -873,6 +932,12 @@ frshtyApp({
         const redoProofOpen = ref(false);
         const redoProofFeedback = ref('');
         const redoProofSubmitting = ref(false);
+        const doctorOpen = ref(false);
+        const doctorRuns = ref([]);
+        const doctorHistoryOpen = ref(false);
+        const doctorDescription = ref('');
+        const doctorSubmitting = ref(false);
+        const doctorError = ref('');
         const eventFilter = ref('useful');
         const setStateDdValue = ref('');
         const loadError = ref(false);
@@ -1293,6 +1358,79 @@ frshtyApp({
                 alert('Redo failed: ' + e);
             } finally {
                 redoProofSubmitting.value = false;
+            }
+        }
+
+        function openDoctor() {
+            doctorError.value = '';
+            doctorOpen.value = true;
+        }
+
+        function closeDoctor() {
+            if (doctorSubmitting.value) return;
+            doctorOpen.value = false;
+        }
+
+        async function submitDoctor() {
+            const description = doctorDescription.value.trim();
+            if (!description) return;
+            doctorSubmitting.value = true;
+            doctorError.value = '';
+            try {
+                const resp = await fetch(`/api/tickets/${key}/doctor`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ description }),
+                }).then(r => r.json());
+                if (resp.error) {
+                    doctorError.value = resp.error;
+                } else {
+                    doctorOpen.value = false;
+                    doctorDescription.value = '';
+                    doctorRuns.value = resp.runs || [];
+                }
+            } catch (e) {
+                doctorError.value = String(e);
+            } finally {
+                doctorSubmitting.value = false;
+            }
+        }
+
+        const doctorRunning = computed(() => doctorRuns.value.filter(r => r.running));
+
+        const DOCTOR_STATE_LABELS = {
+            agent_working: 'running',
+            needs_you: 'needs you',
+            waiting_external: 'waiting',
+            failed_stale: 'stalled',
+            needs_ack: 'ready to review',
+            done: 'done',
+        };
+        const DOCTOR_STATE_CLASSES = {
+            agent_working: 'text-amber-300',
+            needs_you: 'text-yellow-300',
+            waiting_external: 'text-blue-300',
+            failed_stale: 'text-red-400',
+            needs_ack: 'text-green-400',
+            done: 'text-gray-400',
+        };
+
+        function doctorStateLabel(r) {
+            return DOCTOR_STATE_LABELS[r.state] || (r.state || 'gone');
+        }
+
+        function doctorStateClass(r) {
+            return DOCTOR_STATE_CLASSES[r.state] || 'text-gray-500';
+        }
+
+        async function loadDoctorRuns() {
+            try {
+                const r = await fetch(`/api/tickets/${key}/doctor`);
+                if (!r.ok) return;
+                const d = await r.json();
+                doctorRuns.value = d.runs || [];
+            } catch (e) {
+                console.warn('doctor history fetch failed', e);
             }
         }
 
@@ -1987,16 +2125,22 @@ frshtyApp({
             }
         }
 
+        let doctorPollTimer = null;
+
         onMounted(() => {
             load();
             loadJobs();
             loadTimeline();
             loadPmFindings();
             loadPrComments();
+            loadDoctorRuns();
             startTerminal();
             pollPresentationStatus();
             presentationPollTimer = setInterval(pollPresentationStatus, 10000);
             jobsPollTimer = setInterval(loadJobs, 15000);
+            doctorPollTimer = setInterval(() => {
+                if (doctorRunning.value.length && !document.hidden) loadDoctorRuns();
+            }, 15000);
             timelinePollTimer = setInterval(() => {
                 if (activeTab.value === 'timeline' && !document.hidden) loadTimeline();
             }, 30000);
@@ -2011,6 +2155,7 @@ frshtyApp({
             if (jobOutputPollTimer) clearTimeout(jobOutputPollTimer);
             if (presentationPollTimer) clearInterval(presentationPollTimer);
             if (jobsPollTimer) clearInterval(jobsPollTimer);
+            if (doctorPollTimer) clearInterval(doctorPollTimer);
             if (timelinePollTimer) clearInterval(timelinePollTimer);
         });
 
@@ -2043,6 +2188,10 @@ frshtyApp({
             proofPath, copyText, copiedPath,
             retryJob, postReply, toggleTimeline, commentTimelines, timelineOpen, viewJobOutput, closeJobOutput,
             runServices, resetTerminal, openDiscuss, toggleMaximize,
+            doctorOpen, doctorDescription, doctorSubmitting, doctorError,
+            openDoctor, closeDoctor, submitDoctor,
+            doctorRuns, doctorRunning, doctorHistoryOpen, loadDoctorRuns,
+            doctorStateLabel, doctorStateClass,
         };
     },
 }).mount('#app');
