@@ -263,8 +263,20 @@ class LLMProvider(ABC):
 
 
 _SKIP_PERMISSIONS = "--dangerously-skip-permissions"
-NO_TOOLS = ("Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task,NotebookEdit,"
-            "AskUserQuestion")
+# A deny list has to name every tool that exists now and every one a release
+# adds later, and it cannot name an MCP tool that a settings file introduces.
+# `--tools ""` says the opposite: nothing at all, whatever the settings hold.
+NO_TOOLS_FLAGS = ("--tools", "", "--strict-mcp-config")
+# Kept for the one caller that builds its own command line rather than going
+# through a provider (services/work_tags.py).
+NO_TOOLS = ("Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task,Agent,"
+            "NotebookEdit,MultiEdit,AskUserQuestion")
+# opencode reads its configuration from OPENCODE_CONFIG_CONTENT before any
+# file, so this denies every tool for one invocation without touching the
+# operator's opencode.json, which allows every tool to every agent.
+NO_TOOLS_OPENCODE_ENV = {
+    "OPENCODE_CONFIG_CONTENT": json.dumps({"permission": {"*": {"*": "deny"}}}),
+}
 
 
 class ClaudeProvider(LLMProvider):
@@ -539,12 +551,13 @@ class ClaudeProvider(LLMProvider):
         people: Slack messages, PR review comments, ticket descriptions. An
         instance configured with --dangerously-skip-permissions would
         otherwise let that text drive Bash. The permission flag is dropped and
-        every tool is denied by name, the same guard services/work_tags.py
-        already applies to its own one-shot call."""
+        the tool set is emptied outright, which also overrides the user,
+        project and local settings files, so a settings file that allows an
+        MCP tool cannot put one back."""
         model = "claude-haiku-4-5-20251001"
         cmd = [self.bin, *(a for a in self.extra_args if a != _SKIP_PERMISSIONS),
                "-p", "-", "--output-format", "json", "--model", model,
-               "--disallowedTools", NO_TOOLS]
+               *NO_TOOLS_FLAGS]
         text, _ = self._run_print(cmd, prompt=prompt, function_name="run_haiku",
                                   model=model, cwd=None, tools=None,
                                   timeout=timeout, label="Claude Haiku")
@@ -583,13 +596,21 @@ class OpenCodeProvider(LLMProvider):
         return self._run(cmd, function_name, self.model_thinking, full, cwd, timeout)
 
     def fast(self, prompt: str, *, timeout: int = 120, **kwargs) -> str | None:
-        """One-shot classification with no permission bypass. See
-        ClaudeProvider.fast: this tier reads text written by other people."""
+        """One-shot classification with no tools. See ClaudeProvider.fast:
+        this tier reads text written by other people.
+
+        `opencode run` has no flag that empties the tool set, and opencode.json
+        in this repository allows every tool to every agent, so dropping
+        --dangerously-skip-permissions alone leaves the classifier able to act.
+        The deny-everything configuration is handed to it in the environment
+        instead."""
         cmd = ["opencode", "run", prompt, "--model", self.model_fast]
-        return self._run(cmd, "run_fast", self.model_fast, prompt, None, timeout)
+        return self._run(cmd, "run_fast", self.model_fast, prompt, None, timeout,
+                         env_overrides=NO_TOOLS_OPENCODE_ENV)
 
     def _run(self, cmd: list[str], fn_name: str, model: str, prompt: str,
-             cwd: Path | None, timeout: int) -> str | None:
+             cwd: Path | None, timeout: int,
+             env_overrides: dict[str, str] | None = None) -> str | None:
         inv_id = _record_start(fn_name, model, prompt, cwd, None, timeout)
         t0 = time.monotonic()
         blocked, reason, remaining_s = _guard_status()
@@ -608,7 +629,7 @@ class OpenCodeProvider(LLMProvider):
             try:
                 result = subprocess.run(
                     cmd, capture_output=True, cwd=str(cwd) if cwd else None,
-                    timeout=timeout, env=os.environ,
+                    timeout=timeout, env={**os.environ, **(env_overrides or {})},
                 )
             except subprocess.TimeoutExpired:
                 _record_end(inv_id, t0, "timeout", None, None)

@@ -327,7 +327,29 @@ def test_the_fast_tier_never_gets_tools():
     with patch.object(provider, "_run_print", side_effect=capture):
         provider.fast("classify this: <untrusted slack text>")
 
+    cmd = seen["cmd"]
+    assert "--dangerously-skip-permissions" not in cmd
+    # --tools "" empties the built-in set and overrides the settings files, so
+    # no deny list has to stay in step with the tools a release adds. Proven
+    # against the real CLI: with this flag the model answers in one turn
+    # without running Bash; without it, it runs Bash and returns its output.
+    assert cmd[cmd.index("--tools") + 1] == ""
+    assert "--strict-mcp-config" in cmd
+
+
+def test_the_opencode_fast_tier_denies_every_tool():
+    """opencode.json in this repository allows every tool to every agent, and
+    `opencode run` has no flag that empties the set."""
+    provider = llm.OpenCodeProvider({"llm": {"opencode": {}}})
+    seen = {}
+
+    def capture(cmd, fn_name, model, prompt, cwd, timeout, env_overrides=None):
+        seen["cmd"], seen["env"] = cmd, env_overrides or {}
+        return "ok"
+
+    with patch.object(provider, "_run", side_effect=capture):
+        provider.fast("classify this: <untrusted slack text>")
+
     assert "--dangerously-skip-permissions" not in seen["cmd"]
-    assert "--disallowedTools" in seen["cmd"]
-    denied = seen["cmd"][seen["cmd"].index("--disallowedTools") + 1].split(",")
-    assert "Bash" in denied and "Write" in denied and "Task" in denied
+    assert json.loads(seen["env"]["OPENCODE_CONFIG_CONTENT"]) == {
+        "permission": {"*": {"*": "deny"}}}
