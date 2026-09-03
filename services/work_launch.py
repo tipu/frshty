@@ -267,18 +267,21 @@ def launch_proposed(item_id: int, agent: str = "claude") -> dict:
         return plan
     if not work_store.claim_proposal(item_id):
         return {"error": f"work item {item_id} is no longer awaiting approval"}
+    # A claimed proposal that produced no run never reached an agent, so it
+    # goes back on the board for the operator to approve again. The test is
+    # the run, not how _start ended: it can raise before add_run, on an
+    # artifact or prompt failure, and it can also raise after the agent is
+    # already running, when the kickoff thread or the tagging call fails.
+    # Releasing on the second would show a live agent as waiting for approval.
+    # A launch that did create a run is already recorded as failed_stale by
+    # mark_launch_failed, which is what every other launch leaves behind.
     try:
         result = _start(item_id, plan, slack, item["launch_brief"] or "",
                         work_tags.split_tags(item["tags"]))
     except Exception:
-        work_store.release_proposal(item_id)
+        if not work_store.has_run(item_id):
+            work_store.release_proposal(item_id)
         raise
-    # A claimed proposal that produced no run never reached an agent, so it
-    # goes back on the board for the operator to approve again. _start raises
-    # before add_run for an artifact or prompt failure, and returns an error
-    # without a run only for the same class of fault. A launch that did create
-    # a run is already recorded as failed_stale by mark_launch_failed, which is
-    # what every other launch leaves behind, so it is left alone.
     if not work_store.has_run(item_id):
         work_store.release_proposal(item_id)
     return result
