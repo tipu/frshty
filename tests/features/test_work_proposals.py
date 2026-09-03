@@ -174,3 +174,44 @@ def test_a_launch_that_raises_puts_the_proposal_back(tmp_path):
     assert db.query_one("SELECT state FROM work_items WHERE id = ?",
                         (item_id,))["state"] == "proposed"
     assert work_store.grouped_items()["proposed"][0]["id"] == item_id
+
+
+def test_a_launch_that_raises_after_the_agent_started_keeps_the_task(tmp_path):
+    """_start can raise after the session is live, when the kickoff thread or
+    the tagging call fails. Releasing then would show a running agent as still
+    waiting for approval, and the operator could decline it or approve it
+    twice."""
+    item_id = _proposal()
+    config = _personal_config(tmp_path)
+    with patch.object(work_launch, "personal_config", return_value=config), \
+         patch.object(work_launch, "project_entries", return_value=[]), \
+         patch.object(work_launch.terminal, "launch_agent"), \
+         patch.object(work_launch.terminal, "session_healthy", return_value={"alive": True}), \
+         patch.object(work_launch.threading, "Thread",
+                      side_effect=RuntimeError("cannot start thread")):
+        with pytest.raises(RuntimeError):
+            work_launch.launch_proposed(item_id)
+
+    assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                        (item_id,))["state"] == "agent_working"
+    assert len(db.query_all("SELECT id FROM work_runs WHERE work_item_id = ?",
+                            (item_id,))) == 1
+
+
+def test_the_sweep_fails_a_task_whose_launch_never_made_a_run():
+    """The launch writes the item, then the run. A process killed between the
+    two leaves a row every other sweep pass joins away."""
+    stranded = work_store.create_item("killed between the item and the run")
+    ran = work_store.create_item("a normal running task")
+    work_store.add_run(ran, "sess-sweep", "work-sweep", "/tmp")
+    old = "2020-01-01T00:00:00+00:00"
+    db.execute("UPDATE work_items SET updated_at = ? WHERE id IN (?, ?)",
+               (old, stranded, ran))
+
+    actions = work_store.fail_runless_items("2026-01-01T00:00:00+00:00")
+
+    assert actions == [{"id": stranded, "action": "failed_without_run"}]
+    assert db.query_one("SELECT state, stop_reason FROM work_items WHERE id = ?",
+                        (stranded,))["stop_reason"] == "The launch never started a session"
+    assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                        (ran,))["state"] == "agent_working"

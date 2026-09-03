@@ -53,6 +53,7 @@ MAX_TRANSCRIPT_MESSAGES = 60
 MAX_MESSAGE_CHARS = 6000
 MAX_OBJECTIVE_CHARS = 400
 MAX_NOTE_CHARS = 200
+MAX_TRACKED_FILES = 16
 
 # A message that carries one of these subtypes is a channel event, not
 # something a person said. message_changed and message_deleted are not here:
@@ -180,9 +181,16 @@ def _endpoint_channel(record: dict) -> str:
     """The channel a REST pull asked about, when the captured URL names it.
 
     conversations.history and conversations.replies return messages with no
-    channel field of their own, because the channel travelled in the request.
-    Some captures keep it in the query string. Reading it there is what lets a
-    direct message seen only through a REST pull be recognised as one."""
+    channel field of their own, because the channel travelled in the POST body
+    that the capture does not keep. Some capture setups put it in the query
+    string instead, and reading it there is what lets a direct message seen
+    only through a REST pull be recognised as one.
+
+    slack_int is not one of them. Of 58 REST message batches in the atropos
+    capture, none named the channel in the URL and one carried it on the
+    message. A thread still gets its channel from the websocket record that
+    delivered it live, which is every thread the operator has not only
+    back-scrolled to."""
     endpoint = record.get("endpoint")
     if not isinstance(endpoint, str) or "channel=" not in endpoint:
         return ""
@@ -218,7 +226,15 @@ def _message_records(record: dict) -> list[dict]:
             removed = str(payload.get("deleted_ts") or "")
             if not removed:
                 return []
-            thread_ts = str(payload.get("thread_ts") or "") or removed
+            # A deleted reply carries its parent only on previous_message; the
+            # wrapper has no thread_ts of its own. Without that the reply is
+            # looked up as the root of a thread that does not exist and stays
+            # in the index. 43 of 161 deletion events in the atropos capture
+            # have exactly this shape.
+            previous = payload.get("previous_message")
+            parent = (str(previous.get("thread_ts") or "")
+                      if isinstance(previous, dict) else "")
+            thread_ts = str(payload.get("thread_ts") or "") or parent or removed
             return [{"ts": removed, "thread_ts": thread_ts, "user": "", "text": "",
                      "channel": payload.get("channel") or channel, "deleted": True}]
         message = _normalize(payload, payload.get("channel") or channel)
@@ -229,7 +245,7 @@ def _message_records(record: dict) -> list[dict]:
         for item in batch:
             if not isinstance(item, dict) or item.get("type") != "message":
                 continue
-            message = _normalize(item, channel)
+            message = _normalize(item, item.get("channel") or channel)
             if message:
                 out.append(message)
         return out
@@ -253,7 +269,7 @@ def _mentions_operator(text: str, operator_id: str) -> bool:
     return bool(operator_id) and f"<@{operator_id}>" in (text or "")
 
 
-def _read_one(path: str, offset: int | None, bootstrap: bool) -> tuple[list[dict], int]:
+def _read_one(f, offset: int | None, bootstrap: bool) -> tuple[list[dict], int]:
     """Read one capture file from `offset` and return its records and the new
     offset.
 
@@ -275,42 +291,46 @@ def _read_one(path: str, offset: int | None, bootstrap: bool) -> tuple[list[dict
     it was not.
 
     readline is used rather than iteration because tell() is disabled inside a
-    for loop over a text file, and the offset is the whole point."""
-    size = os.path.getsize(path)
+    for loop over a text file, and the offset is the whole point.
+
+    The caller passes an open handle rather than a path so the identity, the
+    size and the bytes all come from one file. Stat'ing the path and opening
+    it separately would checkpoint bytes from the file that replaced it under
+    the identity of the file that was renamed away."""
+    size = os.fstat(f.fileno()).st_size
     if offset is None:
         offset = max(0, size - BOOTSTRAP_BYTES) if bootstrap else size
     elif offset > size:
         offset = 0
     records: list[dict] = []
-    with open(path, errors="replace") as f:
-        if offset:
-            f.seek(offset - 1)
-            f.readline()
+    if offset:
+        f.seek(offset - 1)
+        f.readline()
+    complete = f.tell()
+    while True:
+        line = f.readline()
+        if not line:
+            break
+        if not line.endswith("\n"):
+            break
         complete = f.tell()
-        while True:
-            line = f.readline()
-            if not line:
-                break
-            if not line.endswith("\n"):
-                break
-            complete = f.tell()
-            try:
-                record = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(record, dict):
-                records.append(record)
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict):
+            records.append(record)
     return records, complete
 
 
-def _file_key(path: str) -> str:
+def _file_key(f) -> str:
     """The identity of one capture file, so a rotation is seen as a rotation.
 
     A rotation renames the live file and creates a new one at the same path,
     so the path alone cannot say which file an offset belongs to. The inode
     can, and it follows the file through the rename, which is what lets the
     scan finish the rotated tail."""
-    st = os.stat(path)
+    st = os.fstat(f.fileno())
     return f"{st.st_dev}:{st.st_ino}"
 
 
@@ -326,8 +346,14 @@ def _read_capture(config: dict, blob: dict) -> list[dict]:
     unreadable = False
     for index, path in enumerate(paths):
         try:
-            key = _file_key(path)
-            records, new_offset = _read_one(path, offsets.get(key), bootstrap=index == 0)
+            with open(path, errors="replace") as f:
+                key = _file_key(f)
+                # The live file and the newest rotation both bootstrap: a
+                # rotation that happened inside the proposal window still
+                # holds the first half of a conversation whose replies are in
+                # the live file. Older siblings start at their end.
+                records, new_offset = _read_one(f, offsets.get(key),
+                                                bootstrap=index <= 1)
         except OSError:
             unreadable = True
             continue
@@ -337,8 +363,13 @@ def _read_capture(config: dict, blob: dict) -> list[dict]:
         # A file that could not be read this scan says nothing about where the
         # scan had reached in it. Dropping its offset would re-read the whole
         # bootstrap window when it comes back, so the old positions are kept.
+        # The map is capped so a permanently unreadable sibling cannot make it
+        # grow one entry per rotation forever; a capture holds a handful of
+        # files, and the entries kept are the most recently written.
         for key, value in offsets.items():
             seen.setdefault(key, value)
+        if len(seen) > MAX_TRACKED_FILES:
+            seen = dict(list(seen.items())[-MAX_TRACKED_FILES:])
     blob["offsets"] = seen
     # The live file is first in `paths` but holds the newest content, so the
     # rotated tails are folded in before it.
@@ -404,19 +435,21 @@ def _write_message(c, conversation_id: int, message: dict, user_name: str,
     return updated.rowcount == 1
 
 
-def _delete_message(c, instance_key: str, workspace: str, message: dict) -> bool:
+def _delete_message(c, instance_key: str, workspace: str,
+                    message: dict) -> int | None:
     """Drop a message its author deleted, so a withdrawn request stops being
-    evidence for a proposal."""
+    evidence for a proposal. Returns the conversation it came out of, so the
+    caller reconciles that conversation's counts."""
     row = c.execute(
         "SELECT id FROM slack_conversations"
         " WHERE instance_key=? AND workspace=? AND thread_ts=?",
         (instance_key, workspace, message["thread_ts"])).fetchone()
     if not row:
-        return False
+        return None
     deleted = c.execute(
         "DELETE FROM slack_conversation_messages WHERE conversation_id = ? AND ts = ?",
         (int(row["id"]), message["ts"]))
-    return deleted.rowcount == 1
+    return int(row["id"]) if deleted.rowcount == 1 else None
 
 
 def ingest(config: dict, instance_key: str = "", now: datetime | None = None) -> dict:
@@ -446,8 +479,10 @@ def ingest(config: dict, instance_key: str = "", now: datetime | None = None) ->
         for record in records:
             for message in _message_records(record):
                 if message["deleted"]:
-                    if _delete_message(c, instance_key, workspace, message):
+                    removed = _delete_message(c, instance_key, workspace, message)
+                    if removed is not None:
                         written += 1
+                        changed.add(removed)
                     continue
                 channel = message["channel"]
                 channel_name = names.get(channel, "") if channel else ""
@@ -461,11 +496,25 @@ def ingest(config: dict, instance_key: str = "", now: datetime | None = None) ->
                     written += 1
                     changed.add(conversation_id)
         for conversation_id in changed:
+            # judged_ts is cleared so an edit is judged again. An edit keeps
+            # the original ts, so last_ts does not move, and the candidate
+            # test would otherwise skip a message edited from chatter into a
+            # request forever. A conversation that already produced a proposal
+            # keeps its judgement: the operator is looking at that proposal.
+            # first_ts and last_ts are recomputed rather than extended,
+            # because a deletion can remove the message that set either one.
             c.execute(
-                "UPDATE slack_conversations SET message_count ="
-                " (SELECT COUNT(*) FROM slack_conversation_messages"
-                "  WHERE conversation_id = ?), updated_at = ? WHERE id = ?",
-                (conversation_id, stamp, conversation_id))
+                "UPDATE slack_conversations SET"
+                "  message_count = (SELECT COUNT(*) FROM slack_conversation_messages"
+                "                   WHERE conversation_id = ?),"
+                "  first_ts = COALESCE((SELECT MIN(ts) FROM slack_conversation_messages"
+                "                       WHERE conversation_id = ?), first_ts),"
+                "  last_ts = COALESCE((SELECT MAX(ts) FROM slack_conversation_messages"
+                "                      WHERE conversation_id = ?), last_ts),"
+                "  judged_ts = CASE WHEN proposed_at IS NULL THEN '' ELSE judged_ts END,"
+                "  updated_at = ? WHERE id = ?",
+                (conversation_id, conversation_id, conversation_id, stamp,
+                 conversation_id))
         # A direct message is addressed to the operator whoever wrote it, and
         # a REST batch carries no channel of its own, so involvement is settled
         # once the channel is known rather than per message.

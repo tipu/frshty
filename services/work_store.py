@@ -1261,7 +1261,10 @@ def sweep_stale_items(now: datetime | None = None) -> list[dict]:
     failed_stale when the agent process is gone. A codex rollout is written
     only between tool calls, so pane activity counts as freshness too. A
     second pass runs the autocontinue decision for a needs_you item whose
-    idle-stop hook was dropped before it made one.
+    idle-stop hook was dropped before it made one. A third pass fails an
+    agent_working item that has no run at all: the launch path writes the item
+    before the run, so a process that dies in that window leaves a row the
+    join below can never reach.
     """
     now_dt = now or datetime.now(timezone.utc)
     cutoff = (now_dt - timedelta(minutes=STALE_AFTER_MINUTES)).isoformat()
@@ -1354,8 +1357,40 @@ def sweep_stale_items(now: datetime | None = None) -> list[dict]:
         record_artifacts(row["session_id"], transcript_path)
         outcome = maybe_autocontinue(row["session_id"], transcript_path)
         actions.append({"id": row["item_id"], "action": f"stop_synthesized:{outcome}"})
+    actions.extend(fail_runless_items(cutoff))
     actions.extend(revive_resumed_runs())
     actions.extend(retry_missed_autocontinues(cutoff))
+    return actions
+
+
+def fail_runless_items(cutoff: str) -> list[dict]:
+    """Fail an agent_working item that never got a run.
+
+    launch() and launch_proposed() both write the work item, then the run. A
+    kill between the two, or an artifact failure that raises there, leaves an
+    item claiming an agent is working with nothing behind it. Every other
+    sweep pass joins work_runs, so none of them can see it, and the operator
+    is left with a task that never moves. Only rows older than the staleness
+    cutoff are touched, so a launch still in progress is not caught."""
+    rows = db.query_all(
+        "SELECT id FROM work_items WHERE state = 'agent_working' AND updated_at < ?"
+        " AND NOT EXISTS(SELECT 1 FROM work_runs r WHERE r.work_item_id = work_items.id)",
+        (cutoff,))
+    actions = []
+    for row in rows:
+        now = _now()
+        with db.tx() as c:
+            flipped = c.execute(
+                "UPDATE work_items SET state = 'failed_stale', "
+                "stop_reason = 'The launch never started a session', "
+                "updated_at = ? WHERE id = ? AND state = 'agent_working'",
+                (now, row["id"])).rowcount
+            if flipped:
+                c.execute(
+                    "INSERT INTO work_events(work_item_id, kind, payload, created_at) "
+                    "VALUES (?, 'stale_failed', '{}', ?)", (row["id"], now))
+        if flipped:
+            actions.append({"id": row["id"], "action": "failed_without_run"})
     return actions
 
 

@@ -379,9 +379,13 @@ def test_a_deleted_message_leaves_the_index(tmp_path):
     assert _messages(_conversations()[0]["id"]) == []
 
 
-def test_a_dm_seen_only_through_a_rest_pull_still_counts(tmp_path):
-    """A REST batch carries no channel on the message. The endpoint names it,
-    and a direct message is addressed to the operator whoever wrote it."""
+def test_a_dm_counts_when_the_capture_records_its_channel(tmp_path):
+    """A direct message is addressed to the operator whoever wrote it, so the
+    conversation counts as involving him once its channel is known.
+
+    A REST batch carries no channel on the message. This capture shape names
+    it in the endpoint; slack_int does not, and there a thread gets its
+    channel from the websocket record that delivered it live instead."""
     _capture(tmp_path, [{
         "dt": "x", "source": "rest",
         "endpoint": "https://atropos-workspace.slack.com/api/conversations.history"
@@ -408,3 +412,80 @@ def test_a_long_thread_keeps_its_root(tmp_path):
     transcript, _ = sc._transcript(_conversations()[0]["id"], {})
     assert "raised WB-412 for the cohort export" in transcript
     assert transcript.count("\n") + 1 == sc.MAX_TRANSCRIPT_MESSAGES
+
+
+def test_a_rest_batch_uses_a_channel_carried_on_the_message(tmp_path):
+    _capture(tmp_path, [{
+        "dt": "x", "source": "rest",
+        "endpoint": "https://atropos-workspace.slack.com/api/conversations.history?_x_id=1",
+        "payload": {"ok": True, "messages": [
+            {"type": "message", "ts": ROOT_TS, "user": ERIK, "channel": CHANNEL,
+             "text": "can you move WB-412 to the PLT board?"}]}}])
+    sc.ingest(_config(tmp_path), instance_key="atropos", now=NOW)
+
+    assert _conversations()[0]["channel_id"] == CHANNEL
+
+
+def test_an_edit_that_turns_chatter_into_a_request_is_judged_again(tmp_path):
+    """An edit keeps the original ts, so last_ts does not move. Without
+    clearing judged_ts the conversation would never be looked at again."""
+    _capture(tmp_path, [_ws(ROOT_TS, OPERATOR, "haha nice")])
+    config = _config(tmp_path)
+    sc.ingest(config, instance_key="atropos", now=NOW)
+    sc._record_judgement(_conversations()[0]["id"], ROOT_TS, NOW, None)
+    assert sc._candidates("atropos", config, NOW) == []
+
+    _capture(tmp_path, [{
+        "dt": "x", "source": "ws", "endpoint": "e",
+        "payload": {"type": "message", "subtype": "message_changed",
+                    "channel": CHANNEL,
+                    "message": {"type": "message", "ts": ROOT_TS, "user": OPERATOR,
+                                "text": "actually please deploy WB-412"}}}])
+    sc.ingest(config, instance_key="atropos", now=NOW)
+
+    assert len(sc._candidates("atropos", config, NOW)) == 1
+
+
+def test_a_deleted_reply_is_removed_from_its_parent_thread(tmp_path):
+    """Slack names the parent only on previous_message when a reply is
+    deleted; the wrapper carries no thread_ts of its own."""
+    reply_ts = "1788458500.000200"
+    _capture(tmp_path, [
+        _ws(ROOT_TS, OPERATOR, "raised WB-412"),
+        _ws(reply_ts, ERIK, "please deploy it to production", thread_ts=ROOT_TS),
+    ])
+    config = _config(tmp_path)
+    sc.ingest(config, instance_key="atropos", now=NOW)
+    assert len(_messages(_conversations()[0]["id"])) == 2
+
+    _capture(tmp_path, [{
+        "dt": "x", "source": "ws", "endpoint": "e",
+        "payload": {"type": "message", "subtype": "message_deleted",
+                    "channel": CHANNEL, "deleted_ts": reply_ts,
+                    "previous_message": {"type": "message", "ts": reply_ts,
+                                         "thread_ts": ROOT_TS, "user": ERIK,
+                                         "text": "please deploy it to production"}}}])
+    sc.ingest(config, instance_key="atropos", now=NOW)
+
+    row = _conversations()[0]
+    assert [m["ts"] for m in _messages(row["id"])] == [ROOT_TS]
+    assert row["message_count"] == 1, "the count follows the deletion"
+    assert row["last_ts"] == ROOT_TS, "last_ts is recomputed, not extended"
+
+
+def test_the_newest_rotated_file_is_read_on_a_cold_start(tmp_path):
+    """A rotation inside the proposal window holds the first half of a
+    conversation whose replies are in the live file."""
+    folder = tmp_path / "capture"
+    folder.mkdir()
+    (folder / "messages.jsonl.1").write_text(
+        json.dumps(_ws(ROOT_TS, OPERATOR, "raised WB-412")) + "\n")
+    (folder / "messages.jsonl").write_text(
+        json.dumps(_ws("1788458500.000200", ERIK, "move it to PLT",
+                       thread_ts=ROOT_TS)) + "\n")
+
+    sc.ingest(_config(tmp_path), instance_key="atropos", now=NOW)
+
+    assert len(_conversations()) == 1
+    assert [m["text"] for m in _messages(_conversations()[0]["id"])] == [
+        "raised WB-412", "move it to PLT"]
