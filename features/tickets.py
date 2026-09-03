@@ -20,6 +20,7 @@ from core import external_log
 from core.config import base_branch_for, get_repos, ticket_worktree_path, resolve_env
 from core.deps import run_dep_command, relink_shared_venv
 from core.claude_runner import run_haiku, run_balanced, run_claude_code, extract_json
+from core.commit_message import COMMIT_SUBJECT_RULE, commit_subject
 from core.ticket_status import TicketStatus, can_transition, transition
 from features.platforms import make_platform
 from features.pr_ci import ci_summary, FAILED_STATES
@@ -2368,7 +2369,8 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                     f"File: {comment.get('path', 'unknown')}\nLine: {comment.get('line', 'unknown')}\n\n"
                     f"Review comment: {comment['body']}\n\n"
                     + (f"Drafted reply that commits to this change: {suggested}\n\n" if suggested else "")
-                    + "Fix this review comment."
+                    + "Fix this review comment.\n\n"
+                    + COMMIT_SUBJECT_RULE
                 )
                 fix_result = run_claude_code(context, cwd=wt)
                 subprocess.run(["git", "add", "-A"], cwd=str(wt), capture_output=True, timeout=60)
@@ -2391,7 +2393,11 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                     commit_outcome, commit_route = _commit_pr_comment_changes(
                         wt,
                         ticket["key"],
-                        message=f"fix: address review comment on {comment.get('path', 'unknown')}",
+                        message=commit_subject(
+                            wt,
+                            f"fix: address review comment on {comment.get('path', 'unknown')}",
+                            comment["body"],
+                        ),
                     )
                     commit_rc = commit_outcome.exit_code
                 if fix_result and ((commit_outcome is not None and commit_outcome.ok)

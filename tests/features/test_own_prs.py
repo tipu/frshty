@@ -767,6 +767,25 @@ class TestFixComment:
         events = [c[0][0] for c in mock_emit.call_args_list]
         assert events.index("pr_comment_code_written") < events.index("pr_comment_addressed")
 
+    def test_review_comment_reaches_the_commit_subject(self, tmp_path):
+        platform = MagicMock()
+        platform.push_branch.return_value = {"ok": True}
+        config = {"_state_dir": tmp_path, "_base_url": "http://base", "job": {"key": "test"}}
+
+        with patch("features.own_prs.make_platform", return_value=platform), \
+             patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs.run_claude_code", return_value="done") as fixer, \
+             patch("features.own_prs._commit_fix", return_value=(True, "")) as mock_commit, \
+             patch("features.own_prs.comments.mark_comment_processed"), \
+             patch("features.own_prs.log.emit"):
+            own_prs.fix_comment(config, self._payload())
+
+        assert mock_commit.call_args.kwargs["context"] == "Fix this function"
+        assert own_prs.COMMIT_SUBJECT_RULE in fixer.call_args[0][0], (
+            "--allowedTools is a grant, not an exclusive list, so this fixer "
+            "can be given Bash by a settings file and commit on its own; the "
+            "prompt must carry the commit subject rule")
+
     def test_resolve_failure_marks_error_not_processed(self, tmp_path):
         platform = MagicMock()
         platform.push_branch.return_value = {"ok": True}
@@ -938,6 +957,8 @@ class TestFixCommentsBatch:
         assert "Fix that" in mock_claude.call_args[0][0]
         mock_commit.assert_called_once()
         assert "2 review comments" in mock_commit.call_args[0][1]
+        assert "Fix this" in mock_commit.call_args.kwargs["context"]
+        assert "Fix that" in mock_commit.call_args.kwargs["context"]
         platform.push_branch.assert_called_once()
         assert platform.resolve_comment.call_count == 2
         assert mock_comments.mark_comment_processed.call_count == 2
@@ -1090,6 +1111,35 @@ class TestCommitFix:
 
         assert ok is False
         assert reason == "no changes produced"
+
+    def test_context_replaces_the_generic_subject(self, tmp_path):
+        import subprocess
+        repo = self._init_repo(tmp_path / "repo")
+        (repo / "a.txt").write_text("two\n")
+
+        with patch("core.commit_message.run_haiku", return_value="Raise the retry ceiling to three"):
+            ok, reason = own_prs._commit_fix(
+                repo, "fix: address review comment on a.txt", context="raise the retry ceiling")
+
+        assert ok is True
+        assert reason == ""
+        msg = subprocess.run(["git", "log", "-1", "--format=%s"], cwd=str(repo),
+                             capture_output=True, text=True).stdout.strip()
+        assert msg == "fix: raise the retry ceiling to three"
+
+    def test_no_context_keeps_the_given_message(self, tmp_path):
+        import subprocess
+        repo = self._init_repo(tmp_path / "repo")
+        (repo / "a.txt").write_text("two\n")
+
+        with patch("core.commit_message.run_haiku") as haiku:
+            ok, _ = own_prs._commit_fix(repo, "fix: address review comment on a.txt")
+
+        assert ok is True
+        haiku.assert_not_called()
+        msg = subprocess.run(["git", "log", "-1", "--format=%s"], cwd=str(repo),
+                             capture_output=True, text=True).stdout.strip()
+        assert msg == "fix: address review comment on a.txt"
 
 
 class TestEnsureWorktree:

@@ -163,3 +163,62 @@ class TestReviewPrompt:
         assert "truncated" not in small
         big = pr_autofix._review_prompt(pr, "x" * (pr_autofix.DIFF_CHAR_CAP + 1), has_tools=False)
         assert "truncated" in big
+
+
+class TestFixCommitSubject:
+    """The auto-review fix commit must say what it changed.
+
+    It used to commit one fixed sentence that also named the review tools, so
+    a branch with three autofix passes carried the same subject three times."""
+
+    def _run(self, tmp_path, subject):
+        findings = [{"severity": "critical", "path": "a.py", "line": 3,
+                     "title": "empty page raises", "body": "guard the empty list"}]
+        platform = MagicMock()
+        platform.get_pr_diff.return_value = "diff --git a/a.py b/a.py\n"
+        platform.push_branch.return_value = {"ok": True}
+        commit = MagicMock()
+        commit.returncode = 0
+        config = {**_config(), "_state_dir": tmp_path, "_base_url": "http://base"}
+
+        with patch("features.pr_autofix.make_platform", return_value=platform), \
+             patch("features.pr_autofix._ensure_worktree", return_value=tmp_path), \
+             patch("features.pr_autofix._claude_review", return_value={"findings": []}), \
+             patch("features.pr_autofix._codex_review", return_value={"findings": []}), \
+             patch("features.pr_autofix._normalize_findings", return_value=findings), \
+             patch("features.pr_autofix._consolidate", return_value=findings), \
+             patch("features.pr_autofix._write_artifacts"), \
+             patch("features.pr_autofix.run_claude_code", return_value="fixed") as fixer, \
+             patch("features.pr_autofix.git_util.run_git") as run_git, \
+             patch("features.pr_autofix.commit_subject", return_value=subject) as subject_mock, \
+             patch("features.pr_autofix.git_util.commit_with_hooks", return_value=commit) as committer, \
+             patch("features.pr_autofix.state.load", return_value={}), \
+             patch("features.pr_autofix.state.save"), \
+             patch("features.pr_autofix.log.emit"):
+            run_git.return_value = MagicMock(returncode=1, stdout="abc1234\n")
+            ok, reason = pr_autofix.run(config, {"pr": make_pr()})
+
+        return ok, reason, subject_mock, committer, fixer
+
+    def test_the_derived_subject_is_the_commit_message(self, tmp_path):
+        ok, reason, subject_mock, committer, fixer = self._run(
+            tmp_path, "fix: return none when the page is empty")
+
+        assert ok is True, reason
+        assert committer.call_args.kwargs["message"] == "fix: return none when the page is empty"
+        assert pr_autofix.COMMIT_SUBJECT_RULE in fixer.call_args[0][0], (
+            "--allowedTools is a grant, not an exclusive list, so this fixer "
+            "can be given Bash by a settings file and commit on its own; the "
+            "prompt must carry the commit subject rule")
+
+    def test_the_findings_reach_the_subject_and_the_fallback_names_no_tool(self, tmp_path):
+        _, _, subject_mock, _, fixer = self._run(
+            tmp_path, "fix: return none when the page is empty")
+
+        fallback = subject_mock.call_args[0][1]
+        context = subject_mock.call_args[0][2]
+        assert "guard the empty list" in context
+        assert fallback == "fix: resolve 1 critical/high review finding(s)"
+        for name in ("claude", "codex"):
+            assert name not in fallback.lower(), (
+                f"the fallback commit subject must name no tool; got {fallback!r}")
