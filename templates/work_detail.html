@@ -511,6 +511,7 @@ const app = frshtyApp({
           body: JSON.stringify({ action }),
         });
         if (!r.ok) { const d = await r.json(); this.actError = d.error || ("action failed HTTP " + r.status); }
+        else if (action === "ack" || action === "archive") { location.href = "/tasks"; return; }
       } catch (e) {
         this.actError = "action failed: " + e.message;
       }
