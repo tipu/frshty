@@ -5,6 +5,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+import core.state as state
 from features import tickets
 from tests.conftest import make_ticket, make_ticket_state
 
@@ -862,29 +863,31 @@ class TestHandleCiFailureStub:
 
 
 class TestCheckSkipsBusyTicket:
-    def test_skips_ticket_with_running_job(self, fake_config, tmp_state):
-        import core.state as state
-        from tests.conftest import make_ticket
-        state.save("tickets", {"PROJ-1": make_ticket_state(status="planning", slug="PROJ-1-do-the-thing")})
+    """The busy guard is observable in the saved ticket. A ticket the guard
+    skips keeps the record it had; a ticket the guard lets through has its
+    record refreshed from the external ticket."""
 
+    def _check(self, fake_config, running):
+        state.save("tickets", {"PROJ-1": make_ticket_state(status="planning",
+                                                           slug="PROJ-1-do-the-thing")})
         with patch("features.tickets._fetch_tickets", return_value=[make_ticket()]), \
              patch("features.tickets.get_repos", return_value=[]), \
-             patch("core.queue.jobs_for_ticket",
-                   return_value=[{"task": "start_planning", "status": "running"}]), \
+             patch("core.queue.jobs_for_ticket", return_value=running), \
              patch("features.tickets._enqueue_stage") as eq:
             tickets.check(fake_config, instance_key="inst")
+        return eq, state.load_ticket("PROJ-1")
+
+    def test_skips_ticket_with_running_job(self, fake_config, tmp_state):
+        eq, saved = self._check(
+            fake_config, [{"task": "start_planning", "status": "running"}])
         eq.assert_not_called()
+        assert "external_status" not in saved
+        assert "summary" not in saved
 
     def test_processes_ticket_with_no_running_job(self, fake_config, tmp_state):
-        import core.state as state
-        from tests.conftest import make_ticket
-        state.save("tickets", {"PROJ-1": make_ticket_state(status="planning", slug="PROJ-1-do-the-thing")})
-
-        with patch("features.tickets._fetch_tickets", return_value=[make_ticket()]), \
-             patch("features.tickets.get_repos", return_value=[]), \
-             patch("core.queue.jobs_for_ticket", return_value=[]), \
-             patch("features.tickets._enqueue_stage"):
-            tickets.check(fake_config, instance_key="inst")
+        _, saved = self._check(fake_config, [])
+        assert saved["external_status"] == "In Progress"
+        assert saved["summary"] == "Do the thing"
 
 
 class TestCheckDoneTicketResurrection:
