@@ -162,6 +162,24 @@ def api_work_action(item_id: int, body: dict):
     return result
 
 
+@router.post("/api/work/items/{item_id}/approve")
+def api_work_approve(item_id: int, body: dict | None = Body(default=None)):
+    """Approve a proposal frshty opened by itself and start the agent on it.
+
+    A proposal is the only task on the board that has never run. Approval is
+    what turns it into a normal task, so it goes through the same launch every
+    other task uses."""
+    result = work_launch.launch_proposed(item_id,
+                                         agent=(body or {}).get("agent") or "claude")
+    if "error" in result:
+        error = result["error"]
+        status = 503 if "personal instance" in error else (
+            500 if "launch failed" in error else (
+                409 if "awaiting approval" in error else 400))
+        return JSONResponse(result, status_code=status)
+    return result
+
+
 @router.post("/api/work/intake")
 def api_work_intake(body: dict):
     result = work_launch.launch(body.get("text") or "", cwd=body.get("cwd") or "",

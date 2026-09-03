@@ -46,6 +46,8 @@ frshty runs that loop. It keeps the state, starts each step, and asks for you on
 
 **Triages Slack.** Mentions and direct messages arrive summarized on one page instead of in your notification tray.
 
+**Opens the task a Slack thread asks for.** frshty indexes each instance's Slack capture by conversation, not by message, and reads the threads you are part of. A thread that asks for concrete work becomes a task on the board carrying the whole thread as evidence. It sits in a `proposed` group and starts nothing until you approve it.
+
 **Logs time and bills for it.** Daily timesheet proposals from real ticket activity, recurring entries for standups, and weekly or monthly invoices pushed to bill.com.
 
 **Runs every client at once.** One process serves several instances. Each client gets its own port, its own worktrees, its own credentials, and its own feature set. State is partitioned per instance, so nothing leaks between them.
@@ -81,7 +83,7 @@ Every capability is a flag in the instance config. A flag that is off costs noth
 | `defence` | Test-backed proof before a reply claims something works |
 | `presentations` | Slide walkthroughs of a branch |
 | `releases` | Group tickets into a release and inspect the whole release |
-| `slack` | Mention triage |
+| `slack` | Mention triage, conversation index, and proposed tasks from Slack threads |
 | `timesheet` | Daily hour proposals |
 | `billing` | Invoices via bill.com |
 
@@ -126,7 +128,7 @@ config_dir = "~/.aimyable-claude"
 args = ["--dangerously-skip-permissions"]
 ```
 
-**Slack.** Requires [slack-proxy-tools](https://github.com/tipu/slack-proxy-tools) checked out and running.
+**Slack.** Requires [slack-proxy-tools](https://github.com/tipu/slack-proxy-tools) checked out and running. Point `[slack] messages_dir` at the directory it writes that instance's capture into and set `user_id` to your Slack id. Add `propose_tasks = true` to let frshty open tasks from what people ask you for in a thread.
 
 **Security.** Binds to `127.0.0.1`. Endpoints are unauthenticated. Do not expose it without putting your own auth in front.
 
@@ -145,7 +147,7 @@ One FastAPI process serves every instance. Work is rows in a SQLite database at 
 core/       orchestration primitives: queue, worker, tasks, events, scheduler, model runners
 features/   domain logic: tickets, reviewer, own PRs, scope, defence, slack, timesheet, billing
 manager/    daily digest and priority ranking
-services/   work items, runs, tags, debriefs
+services/   work items, runs, tags, debriefs, proposals
 prd/        requirements intake and ticket generation
 web/        pages and API
 templates/  static HTML, read fresh per request

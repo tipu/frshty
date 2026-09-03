@@ -190,9 +190,16 @@ def _cross_check_block(agent: str, config: dict) -> str:
     )
 
 
-def launch(objective: str, cwd: str = "", contexts: list[str] | None = None,
-           slack: bool = False, source_item_id: int | None = None,
-           agent: str = "claude", brief: str = "") -> dict:
+SLACK_LABEL = "slack_int"
+
+
+def _resolve_launch(objective: str, cwd: str, contexts: list[str], agent: str,
+                    source_item_id: int | None) -> dict:
+    """Validate one launch and resolve everything it needs to start.
+
+    An approval launches a work item that already exists, so every check that
+    can refuse a launch has to run before the item is claimed. This returns
+    the resolved arguments, or {"error": ...} and nothing has changed."""
     objective = (objective or "").strip()
     contexts = [c for c in (contexts or []) if isinstance(c, str)]
     agent = (agent or "claude").strip().lower()
@@ -216,12 +223,71 @@ def launch(objective: str, cwd: str = "", contexts: list[str] | None = None,
     cwd = cwd or str(config["workspace"]["root"])
     if not os.path.isdir(cwd):
         return {"error": f"cwd does not exist: {cwd}"}
-    label_list = contexts + (["slack_int"] if slack else [])
+    return {"objective": objective, "contexts": contexts, "agent": agent,
+            "config": config, "source_block": source_block, "cwd": cwd}
+
+
+def launch(objective: str, cwd: str = "", contexts: list[str] | None = None,
+           slack: bool = False, source_item_id: int | None = None,
+           agent: str = "claude", brief: str = "") -> dict:
+    plan = _resolve_launch(objective, cwd, contexts or [], agent, source_item_id)
+    if "error" in plan:
+        return plan
+    objective, contexts = plan["objective"], plan["contexts"]
+    label_list = contexts + ([SLACK_LABEL] if slack else [])
     labels = ",".join(label_list)
     tags = work_tags.derive_tags(objective, label_list,
                                  [e["key"] for e in project_entries()])
     item_id = work_store.create_item(objective, instance_key="personal", contexts=labels,
                                      source_item_id=source_item_id, tags=",".join(tags))
+    return _start(item_id, plan, slack, brief, tags)
+
+
+def launch_proposed(item_id: int, agent: str = "claude") -> dict:
+    """Start the agent on a proposal the operator approved.
+
+    The item is already on the board with its objective, project labels,
+    working directory and brief, so approval only has to resolve the launch,
+    claim the row and start the session. A resolve that fails leaves the
+    proposal where it was; a claim that loses a race reports it."""
+    item = db.query_one(
+        "SELECT id, state, objective, contexts, tags, source_item_id, launch_cwd, "
+        "launch_brief FROM work_items WHERE id = ?", (item_id,))
+    if not item:
+        return {"error": "unknown work item"}
+    if item["state"] != work_store.PROPOSED_STATE:
+        return {"error": f"work item {item_id} is not awaiting approval "
+                         f"(state: {item['state']})"}
+    labels = [c for c in (item["contexts"] or "").split(",") if c]
+    slack = SLACK_LABEL in labels
+    plan = _resolve_launch(item["objective"], item["launch_cwd"],
+                           [c for c in labels if c != SLACK_LABEL], agent,
+                           item["source_item_id"])
+    if "error" in plan:
+        return plan
+    if not work_store.claim_proposal(item_id):
+        return {"error": f"work item {item_id} is no longer awaiting approval"}
+    try:
+        result = _start(item_id, plan, slack, item["launch_brief"] or "",
+                        work_tags.split_tags(item["tags"]))
+    except Exception:
+        work_store.release_proposal(item_id)
+        raise
+    # A claimed proposal that produced no run never reached an agent, so it
+    # goes back on the board for the operator to approve again. _start raises
+    # before add_run for an artifact or prompt failure, and returns an error
+    # without a run only for the same class of fault. A launch that did create
+    # a run is already recorded as failed_stale by mark_launch_failed, which is
+    # what every other launch leaves behind, so it is left alone.
+    if not work_store.has_run(item_id):
+        work_store.release_proposal(item_id)
+    return result
+
+
+def _start(item_id: int, plan: dict, slack: bool, brief: str,
+           tags: list[str]) -> dict:
+    objective, contexts, agent = plan["objective"], plan["contexts"], plan["agent"]
+    config, source_block, cwd = plan["config"], plan["source_block"], plan["cwd"]
     session_id = str(uuid.uuid4())
     artifact_dir = work_artifacts.item_dir(item_id)
     tmux_key = f"work-{item_id}"

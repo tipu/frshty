@@ -10,6 +10,7 @@ import os
 import stat
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
@@ -309,3 +310,24 @@ def test_llm_guard_scoped_per_instance(tmp_path):
     finally:
         _state._default_instance_key = prev_default
         db.execute("DELETE FROM kv WHERE key='llm_guard'")
+
+
+def test_the_fast_tier_never_gets_tools():
+    """run_haiku classifies text written by other people: Slack messages, PR
+    review comments, ticket descriptions. An instance configured with
+    --dangerously-skip-permissions would otherwise let that text drive Bash."""
+    provider = llm.ClaudeProvider({"llm": {"claude": {
+        "bin": "claude", "args": ["--dangerously-skip-permissions"]}}})
+    seen = {}
+
+    def capture(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return ("ok", {})
+
+    with patch.object(provider, "_run_print", side_effect=capture):
+        provider.fast("classify this: <untrusted slack text>")
+
+    assert "--dangerously-skip-permissions" not in seen["cmd"]
+    assert "--disallowedTools" in seen["cmd"]
+    denied = seen["cmd"][seen["cmd"].index("--disallowedTools") + 1].split(",")
+    assert "Bash" in denied and "Write" in denied and "Task" in denied

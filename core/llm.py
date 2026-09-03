@@ -262,6 +262,11 @@ class LLMProvider(ABC):
         ...
 
 
+_SKIP_PERMISSIONS = "--dangerously-skip-permissions"
+NO_TOOLS = ("Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task,NotebookEdit,"
+            "AskUserQuestion")
+
+
 class ClaudeProvider(LLMProvider):
     def __init__(self, config: dict | None = None):
         llm_cfg = (config or {}).get("llm", {})
@@ -527,8 +532,19 @@ class ClaudeProvider(LLMProvider):
         return text
 
     def fast(self, prompt: str, *, timeout: int = 120, **kwargs) -> str | None:
+        """Classify or summarize one prompt in a single turn, with no tools.
+
+        Every caller of this tier hands the model the whole payload and takes
+        the text back, and several of those payloads are written by other
+        people: Slack messages, PR review comments, ticket descriptions. An
+        instance configured with --dangerously-skip-permissions would
+        otherwise let that text drive Bash. The permission flag is dropped and
+        every tool is denied by name, the same guard services/work_tags.py
+        already applies to its own one-shot call."""
         model = "claude-haiku-4-5-20251001"
-        cmd = self._cmd("-p", "-", "--output-format", "json", "--model", model)
+        cmd = [self.bin, *(a for a in self.extra_args if a != _SKIP_PERMISSIONS),
+               "-p", "-", "--output-format", "json", "--model", model,
+               "--disallowedTools", NO_TOOLS]
         text, _ = self._run_print(cmd, prompt=prompt, function_name="run_haiku",
                                   model=model, cwd=None, tools=None,
                                   timeout=timeout, label="Claude Haiku")
@@ -567,8 +583,9 @@ class OpenCodeProvider(LLMProvider):
         return self._run(cmd, function_name, self.model_thinking, full, cwd, timeout)
 
     def fast(self, prompt: str, *, timeout: int = 120, **kwargs) -> str | None:
-        cmd = ["opencode", "run", prompt, "--model", self.model_fast,
-               "--dangerously-skip-permissions"]
+        """One-shot classification with no permission bypass. See
+        ClaudeProvider.fast: this tier reads text written by other people."""
+        cmd = ["opencode", "run", prompt, "--model", self.model_fast]
         return self._run(cmd, "run_fast", self.model_fast, prompt, None, timeout)
 
     def _run(self, cmd: list[str], fn_name: str, model: str, prompt: str,

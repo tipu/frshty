@@ -5,12 +5,12 @@ import threading
 
 import core.db as db
 import core.log as log
+from core.llm import NO_TOOLS
 from core.terminal import claude_cmd
 from services import work_store
 
 MAX_TAGS = 2
 LLM_TIMEOUT = 120
-NO_TOOLS = "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task,NotebookEdit,AskUserQuestion"
 _TAG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,23}$")
 _WORD_RE = re.compile(r"[a-z0-9_-]+")
 

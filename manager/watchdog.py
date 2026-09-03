@@ -47,7 +47,7 @@ import core.queue as q
 import core.state as state
 from features.platforms import make_platform
 from manager import staleness
-from services import ticket_doctor, work_launch
+from services import ticket_doctor, work_launch, work_store
 
 FRSHTY_TAG = "frshty"
 DEFAULT_SCAN_INTERVAL_MINUTES = 30
@@ -320,6 +320,13 @@ def covered_by_open_task(entry: Entry, instance_key: str) -> int | None:
     is the run, not the item state: failed_stale also means an agent that
     started and died, and that work exists and is resumable.
 
+    A proposal covers, even though it has no run at all. It is a task frshty
+    already opened about this entity that is waiting for the operator to
+    approve or decline it. Opening a second task beside it would put the same
+    entity in front of him twice, and approving both would run two agents on
+    it. Unlike a launch_failed item it is visible on the board and asks for a
+    decision, so it does not silence the watchdog indefinitely.
+
     A task tagged for another project does not count: one project's work must
     not silence another's. The frshty label is not a project for this purpose —
     it marks a task about the tool, which is what a doctor task is — so an item
@@ -333,7 +340,7 @@ def covered_by_open_task(entry: Entry, instance_key: str) -> int | None:
     unscoped_covers = bool(entry.ticket_key) and _ticket_key_is_unique(entry.ticket_key)
     placeholders = ", ".join("?" for _ in _FINISHED_ITEM_STATES)
     rows = db.query_all(
-        "SELECT w.id, w.objective, w.contexts,"
+        "SELECT w.id, w.objective, w.contexts, w.state,"
         " (SELECT status FROM work_runs WHERE work_item_id = w.id"
         "  ORDER BY id DESC LIMIT 1) AS last_run_status"
         " FROM work_items w"
@@ -342,7 +349,8 @@ def covered_by_open_task(entry: Entry, instance_key: str) -> int | None:
     )
     needles = _needles(entry)
     for r in rows:
-        if r["last_run_status"] in (None, _FAILED_RUN_STATUS):
+        if (r["state"] != work_store.PROPOSED_STATE
+                and r["last_run_status"] in (None, _FAILED_RUN_STATUS)):
             continue
         projects = [c for c in (r["contexts"] or "").split(",")
                     if c and c != FRSHTY_TAG]

@@ -14,6 +14,7 @@ from core.registry import Instances
 from core.tasks.registry import get_task
 from core.tasks.routes import _cron_routes
 from manager import watchdog
+from services import work_store
 
 NOW = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
 
@@ -852,3 +853,24 @@ class TestCronRouting:
 
     def test_the_task_is_registered(self):
         assert get_task("watchdog_scan") is not None
+
+
+def test_a_pending_proposal_covers_its_ticket():
+    """A proposal is a task frshty already opened about this ticket that waits
+    on the operator. A watchdog task beside it would ask him about the same
+    ticket twice, and approving both would run two agents on it."""
+    _park_ticket("DEV-700")
+    item_id = work_store.create_proposal(
+        "Move DEV-700 to the PLT board.", instance_key="test", contexts="test")
+    entry = watchdog.Entry("DEV-700", "DEV-700", "DEV-700", "detail")
+
+    assert watchdog.covered_by_open_task(entry, "test") == item_id
+
+
+def test_a_proposal_for_another_ticket_covers_nothing():
+    _park_ticket("DEV-700")
+    work_store.create_proposal("Move DEV-701 to the PLT board.",
+                               instance_key="test", contexts="test")
+    entry = watchdog.Entry("DEV-700", "DEV-700", "DEV-700", "detail")
+
+    assert watchdog.covered_by_open_task(entry, "test") is None
