@@ -1,4 +1,5 @@
 """Ticket pipeline tasks. Headless claude -p invocations, postcondition-gated."""
+import hashlib
 import json
 import re
 import os
@@ -2568,12 +2569,19 @@ def apply_note_reset(ctx: TaskContext) -> TaskResult:
             archive.mkdir(parents=True, exist_ok=True)
             shutil.move(str(src), str(archive / fname))
             moved.append(fname)
-    if moved:
+    copied = []
+    research = docs / "research.md"
+    if research.exists():
+        archive.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(research), str(archive / "research.md"))
+        copied.append("research.md")
+    if moved or copied:
         archived_to = str(archive)
 
     state.reset_ticket(ctx.ticket_key or "", target="new",
                        reason="note added; re-plan from scratch")
-    return TaskResult("ok", artifacts={"archived_to": archived_to, "moved": moved})
+    return TaskResult("ok", artifacts={"archived_to": archived_to, "moved": moved,
+                                       "copied": copied})
 
 
 @task("set_state",
@@ -2608,6 +2616,43 @@ VALIDATION_TIMEOUT = 1800
 RESEARCH_TIMEOUT = 1800
 
 
+def _research_revision_context(ticket_dir: Path) -> str:
+    """The later specifications a re-run has to honour, and the doc they apply to.
+
+    A research ticket is re-run through the add-note path, which writes the
+    note under docs/notes/ and resets the ticket to new. Without this block the
+    re-run sees only the original ticket text and writes the same answer again.
+    """
+    docs = ticket_dir / "docs"
+    prior = docs / "research.md"
+    notes_dir = docs / "notes"
+    notes = sorted(notes_dir.glob("*.md")) if notes_dir.is_dir() else []
+    if not prior.exists() and not notes:
+        return ""
+    blocks = []
+    if prior.exists():
+        blocks.append(
+            "docs/research.md already exists. Read it first. Revise that file in "
+            "place: keep every finding that still holds, correct what the new "
+            "specifications change, and add what they ask for. Do not start a "
+            "blank document, and do not drop sections the specifications leave "
+            "untouched.")
+    if notes:
+        listed = ", ".join(f"docs/notes/{n.name}" for n in notes)
+        blocks.append(
+            f"Read every note file: {listed}. Those notes are later "
+            "specifications from the operator. They outrank the original ticket "
+            "text wherever the two disagree. The revised docs/research.md must "
+            "answer each one explicitly.")
+    return "\n\n" + "\n\n".join(blocks) + "\n"
+
+
+def _research_digest(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 @task("do_research",
       preconditions=[status_is("new", "researching")],
       postconditions=[file_exists("docs/research.md")],
@@ -2632,7 +2677,11 @@ def do_research(ctx: TaskContext) -> TaskResult:
                 continue
             base_branch = base_branch_for(ctx.config, repo["name"])
             git_util.refresh_worktree_onto_base(wt, base_branch)
-    log.emit("ticket_research_started", f"Research spike for {ctx.ticket_key}",
+    research_md = ticket_dir / "docs" / "research.md"
+    before = _research_digest(research_md)
+    revision = _research_revision_context(ticket_dir)
+    log.emit("ticket_research_started",
+             ("Research revision for " if before else "Research spike for ") + str(ctx.ticket_key),
              meta={"ticket": ctx.ticket_key})
     prompt = (
         "This is a RESEARCH spike, not a coding task. Investigate the question below "
@@ -2644,19 +2693,22 @@ def do_research(ctx: TaskContext) -> TaskResult:
         "- Your ONLY output is the file docs/research.md.\n\n"
         "docs/research.md must contain: the question restated, what you found (with "
         "concrete file:line references), the options and their tradeoffs, and a clear "
-        "recommendation.\n\n"
-        f"Research question:\n{ts.get('summary', '')}\n\n{ts.get('description', '')}"
+        "recommendation."
+        + revision +
+        f"\nResearch question:\n{ts.get('summary', '')}\n\n{ts.get('description', '')}"
     )
     result = run_claude_code(prompt, cwd=ticket_dir, timeout=RESEARCH_TIMEOUT)
     if result is None:
         return TaskResult("failed", "research: claude returned non-zero or empty")
-    if not (ticket_dir / "docs" / "research.md").exists():
+    if not research_md.exists():
         return TaskResult("failed", "research: docs/research.md not produced")
+    if before is not None and _research_digest(research_md) == before:
+        return TaskResult("failed", "research: docs/research.md unchanged by this run")
     log.emit("ticket_research_complete",
              f"Research written for {ctx.ticket_key}: docs/research.md",
              links={"detail": f"{ctx.config.get('_base_url', '')}/tickets/{ctx.ticket_key}"},
              meta={"ticket": ctx.ticket_key})
-    return TaskResult("ok")
+    return TaskResult("ok", artifacts={"revised": before is not None})
 
 
 @task("validate_merged_ticket",
