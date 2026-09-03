@@ -59,6 +59,9 @@ def test_own_prs_worktree_uses_correct_repo(tmp_path):
          patch("features.own_prs.subprocess.run", side_effect=fake_run):
         own_prs._ensure_worktree(config, pr)
 
+    assert calls, "_ensure_worktree ran no git command; the loop below proves nothing"
+    cwds = {str(cwd) for _, cwd in calls}
+    assert any(str(repo_b) in c for c in cwds), f"repo-b was never used: {cwds}"
     for cmd, cwd in calls:
         assert str(repo_a) not in str(cwd), f"Used repo-a path: {cmd} cwd={cwd}"
 

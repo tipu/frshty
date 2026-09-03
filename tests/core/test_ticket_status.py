@@ -236,13 +236,59 @@ class TestProvingState:
             transition("reviewing", "proving")
 
 
+# The graph the product is meant to have, written out here so the test does not
+# read its answer from the code under test. Every status may also stay where it
+# is and may always reach done; those two universal rules are applied below.
+EXPECTED_EDGES = {
+    "pending_approval": {"new", "done"},
+    "new": {"planning", "researching", "merged", "epic"},
+    "researching": {"done", "new"},
+    "planning": {"reviewing", "blocked"},
+    "reviewing": {"testing", "pr_ready", "planning", "blocked"},
+    "testing": {"proving", "pr_ready", "tests_failed", "reviewing", "blocked"},
+    "tests_failed": {"testing", "reviewing", "pr_ready", "done"},
+    "proving": {"pr_ready", "testing", "reviewing", "blocked"},
+    "pr_ready": {"testing", "proving", "reviewing", "in_review", "pr_failed", "merged"},
+    "in_review": {"merged", "in_review", "pr_failed", "proving"},
+    "merged": {"validation", "new"},
+    "validation": {"done", "new"},
+    "pr_failed": {"pr_ready", "in_review", "merged"},
+    "done": {"new", "pr_ready", "testing", "proving", "in_review"},
+    "epic": set(),
+    "ignored": {"new"},
+    "blocked": {"new"},
+}
+
+
+class TestGraphDefinition:
+    """The literal table above must stay in step with the shipped graph.
+
+    Without this, an edge added to core/ticket_status.py and copied into the
+    table would look reviewed when nobody reviewed it; without the literal
+    table, TestFullMatrix would read its expectation out of the code it tests
+    and pass for any graph at all.
+    """
+
+    def test_every_status_is_in_the_table(self):
+        assert set(EXPECTED_EDGES) == {s.value for s in TicketStatus}
+
+    def test_the_table_matches_the_shipped_graph(self):
+        shipped = {src.value: {d.value for d in dsts} for src, dsts in _ALLOWED.items()}
+        assert shipped == EXPECTED_EDGES
+
+    def test_every_named_target_is_a_real_status(self):
+        names = {s.value for s in TicketStatus}
+        for src, dsts in EXPECTED_EDGES.items():
+            assert dsts <= names, f"{src} names a status that does not exist: {dsts - names}"
+
+
 class TestFullMatrix:
-    """Parametrized over every (src, dst) pair. A transition is legal iff:
-      - dst == src (self-transition), or
-      - dst == done (always), or
-      - dst is in _ALLOWED[src].
-    This test locks the graph: adding/removing edges in core/ticket_status.py
-    will require updating expectations here, making graph changes intentional.
+    """Parametrized over every (src, dst) pair, checked against EXPECTED_EDGES.
+
+    A transition is legal iff dst == src, or dst == done, or dst is listed for
+    src in the literal table. Adding or removing an edge in
+    core/ticket_status.py fails TestGraphDefinition until the table is updated,
+    which is what makes a graph change intentional.
     """
 
     @pytest.mark.parametrize(
@@ -250,12 +296,10 @@ class TestFullMatrix:
         [(s.value, d.value) for s in TicketStatus for d in TicketStatus],
     )
     def test_pair(self, src, dst):
-        src_enum = TicketStatus(src)
-        dst_enum = TicketStatus(dst)
         expected_legal = (
-            dst_enum == src_enum
-            or dst_enum == TicketStatus.done
-            or dst_enum in _ALLOWED.get(src_enum, set())
+            dst == src
+            or dst == "done"
+            or dst in EXPECTED_EDGES[src]
         )
         if expected_legal:
             assert transition(src, dst) == dst
