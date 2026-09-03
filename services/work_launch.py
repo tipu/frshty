@@ -179,12 +179,19 @@ def _cross_check_block(agent: str, config: dict) -> str:
     """Tell the working agent to have the other model check its work.
 
     A claude session is checked by codex. A codex session is checked by
-    claude."""
+    claude. The reviewer is asked for high and critical defects only. A
+    style note must never hold up the report."""
     other, cmd = _reviewer_cmd(agent, config)
     return (
         f"Double check your analysis and your code with {other} before you report the "
         f"work done. Write your question to a file. Give {other} the claim you make and "
-        f"the files you changed. Ask {other} to find what is wrong. Run `{cmd}` from the "
+        f"the files you changed. Ask {other} to report only high severity and critical "
+        "defects: a wrong result, a crash, data loss, a security hole, a broken contract "
+        "between caller and callee, or any behavior that differs from the stated "
+        f"objective. Tell {other} to skip every nit that does not change behavior, "
+        "including style, naming, formatting, comment wording, and test coverage "
+        f"suggestions. Tell {other} to give the severity and the concrete failure case "
+        f"for each finding. Run `{cmd}` from the "
         "working directory with that file on stdin. Fix every finding you agree with. "
         "State every finding you rejected and the reason. "
     )
