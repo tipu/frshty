@@ -35,6 +35,11 @@ Nothing runs on a proposal: the operator approves it before an agent ever sees
 it. That gate is deliberate. The evidence is a Slack message written by
 somebody else, and an agent that acted on it directly would be taking
 instructions from outside.
+
+A declined proposal answers the request it was opened for, not the thread it
+came from. So the thread comes back as soon as somebody else asks again in it,
+and frshty reads the whole exchange once more. See
+_asked_again_since_the_decline.
 """
 import hashlib
 import json
@@ -840,15 +845,83 @@ def _retry_lands_in_time(judged_at: str | None, retry: int, last: float,
     return last >= (retry_at - timedelta(hours=max_age)).timestamp()
 
 
-def _is_candidate(row: dict, config: dict, now: datetime) -> bool:
+_DECLINED_PROPOSAL = (
+    "SELECT 1 AS found FROM work_items WHERE id = ?"
+    f" AND state IN {work_store.FINISHED_STATES_SQL} AND stop_reason = ?"
+)
+
+_CLAIM_CONVERSATION = (
+    "UPDATE slack_conversations SET judged_ts = ?, judged_at = ?,"
+    " proposed_at = ?, updated_at = ? WHERE id = ? AND revision = ?"
+    " AND (proposed_at IS NULL"
+    "      OR (work_item_id = ? AND EXISTS (" + _DECLINED_PROPOSAL + ")))"
+)
+
+_ASKED_SINCE = (
+    "SELECT 1 AS found FROM slack_conversation_messages"
+    " WHERE conversation_id = ? AND deleted = 0 AND ts > ?"
+    " AND (? = '' OR user_id <> ?) LIMIT 1"
+)
+
+
+def _asked_again_since_the_decline(row: dict, operator_id: str) -> bool:
+    """Whether a thread whose proposal the operator declined has been asked
+    again since that proposal was judged.
+
+    A declined proposal answers the request it was opened for. It says nothing
+    about the next request made in the same thread, and until this test existed
+    it silenced every one of them: proposed_at is what hides a conversation
+    from the proposer, it is written when the proposal is opened rather than
+    when the operator decides, and nothing ever took it off again.
+
+    Asked again means a message the declined proposal was not built from: one
+    that is not deleted, that is newer than the timestamp that proposal was
+    judged against, and that somebody other than the operator wrote. That is
+    the only shape a new request can take. A deletion takes evidence away
+    rather than adding it, an edit keeps the timestamp of the message it
+    edits, and a line the operator wrote is the operator asking somebody else,
+    which this module never proposes from. An instance with no operator id
+    cannot attribute any message, so there every message counts, exactly as
+    _somebody_else_spoke decides it.
+
+    This is a test on the conversation as it stands, not a mark written when
+    the request arrives. A mark would survive the request: a reply that reopens
+    the thread and is then deleted before the scan judges it would leave the
+    thread open, with nothing left in it but the request the operator already
+    declined, and frshty would propose that again.
+
+    Only a decline counts. A proposal still waiting on the operator does not,
+    because a second task for it would be the same question asked twice, and
+    an approved one does not because an agent is already on the work. A
+    declined proposal the operator reopened by hand does not either: that task
+    is live on the board, and opening another beside it would put two agents
+    on one request. The decline is read off the work item the conversation
+    opened, which is the only place the operator's decision is recorded."""
+    if not row["work_item_id"]:
+        return False
+    if not db.query_one(_DECLINED_PROPOSAL,
+                        (row["work_item_id"], work_store.DECLINED_REASON)):
+        return False
+    return db.query_one(_ASKED_SINCE,
+                        (row["id"], row["judged_ts"] or "", operator_id,
+                         operator_id)) is not None
+
+
+def _is_candidate(row: dict, config: dict, now: datetime,
+                  operator_id: str) -> bool:
     """Whether one conversation is worth spending a model call on right now.
 
     The scan folds the capture in again for each candidate, so a conversation
     that qualified when the list was built may have gained a message since.
     That is why this is a test on a row rather than a filter inside the query:
     the refreshed row is put through exactly the same test before it is
-    judged, and a conversation that is moving again is left to settle."""
-    if row["involves_operator"] != 1 or row["proposed_at"]:
+    judged, and a conversation that is moving again is left to settle.
+
+    The proposal mark is tested last of the tests that reject, after the
+    judgement watermark. It is the only one that costs a query, and that
+    watermark already rejects every conversation whose proposal still covers
+    everything said in it."""
+    if row["involves_operator"] != 1:
         return False
     if not row["message_count"]:
         # Every message in it was deleted, or a deletion is all the scan has
@@ -864,6 +937,8 @@ def _is_candidate(row: dict, config: dict, now: datetime) -> bool:
     if last < (now - timedelta(hours=max_age)).timestamp():
         return False
     if row["judged_ts"] and _ts_value(row["judged_ts"]) >= last:
+        return False
+    if row["proposed_at"] and not _asked_again_since_the_decline(row, operator_id):
         return False
     if (not row["judged_ts"] and _within(row["judged_at"], now, retry)
             and _retry_lands_in_time(row["judged_at"], retry, last, max_age)):
@@ -906,21 +981,23 @@ def _candidates(instance_key: str, config: dict, now: datetime) -> list[dict]:
     A conversation is judged once it has settled: the last message is older
     than settle_minutes, so the judge reads a finished exchange rather than
     one still being typed. It is judged again only when it gains messages
-    after that. A conversation that already produced a proposal is never
-    judged again — the operator decides on that proposal, and a second one
-    for the same thread would be the same question asked twice.
+    after that. A conversation that already produced a proposal is not judged
+    again while that proposal stands — the operator decides on it, and a
+    second one for the same thread would be the same question asked twice.
+    Once the operator declines it, somebody else asking again in that thread
+    brings the conversation back; see _asked_again_since_the_decline.
 
     A conversation nobody but the operator wrote in is dropped here rather
     than judged and rejected. It costs no model call, and it spends none of
     the scan's judgement allowance on a thread that cannot hold a request
     aimed at the operator. It is dropped without a judgement mark, so the
     reply that turns it into a real request makes it a candidate at once."""
+    operator_id = _operator_id(config)
     rows = db.query_all(
         "SELECT * FROM slack_conversations"
-        " WHERE instance_key = ? AND involves_operator = 1 AND proposed_at IS NULL"
+        " WHERE instance_key = ? AND involves_operator = 1"
         " ORDER BY last_ts DESC", (instance_key,))
-    out = [row for row in rows if _is_candidate(row, config, now)]
-    operator_id = _operator_id(config)
+    out = [row for row in rows if _is_candidate(row, config, now, operator_id)]
     out = [row for row in out if _somebody_else_spoke(row["id"], operator_id)]
     # A conversation the model never answered is put behind every conversation
     # that has not been read at all, and behind the ones whose failed attempt
@@ -932,10 +1009,22 @@ def _candidates(instance_key: str, config: dict, now: datetime) -> list[dict]:
 
 
 def _proposals_today(instance_key: str, now: datetime) -> int:
+    """How many tasks this instance proposed in the last 24 hours.
+
+    The tasks are counted, not the conversations that opened them. One
+    conversation opens more than one task over its life: the operator declines
+    a proposal, somebody asks again in the same thread, and the next scan
+    proposes again. The conversation carries the stamp of its latest proposal
+    alone, so counting conversations would let one thread open a task a day
+    and never spend more than one slot of the cap.
+
+    work_store.create_proposal is what writes these rows, this module is its
+    only caller, and the scan stamps them with its own clock, so the count is
+    the same rolling 24 hours the rest of the scan measures."""
     row = db.query_one(
-        "SELECT COUNT(*) AS n FROM slack_conversations"
-        " WHERE instance_key = ? AND proposed_at IS NOT NULL"
-        " AND datetime(proposed_at) > datetime(?)",
+        "SELECT COUNT(*) AS n FROM work_items"
+        " WHERE instance_key = ? AND scope = 'proposal'"
+        " AND datetime(created_at) > datetime(?)",
         (instance_key, _iso(now - timedelta(hours=24))))
     return int(row["n"]) if row else 0
 
@@ -1010,10 +1099,20 @@ def _record_attempt(conversation_id: int, now: datetime) -> None:
 
 
 def _record_judgement(conversation_id: int, last_ts: str, now: datetime) -> None:
+    """Mark how far this conversation has been read.
+
+    The watermark only ever moves forward. Two scans can judge one
+    conversation at once, and the transcript each read is the state of the
+    thread when it read it. A verdict that arrives late carries the older
+    watermark, and writing it would put the conversation back behind a
+    proposal another scan has already opened from the newer messages. That
+    thread would then look like it had asked again the moment the operator
+    declined that proposal, and the same request would be proposed twice."""
     stamp = _iso(now)
     db.execute(
-        "UPDATE slack_conversations SET judged_ts = ?, judged_at = ?, updated_at = ?"
-        " WHERE id = ?", (last_ts, stamp, stamp, conversation_id))
+        "UPDATE slack_conversations SET judged_ts = MAX(judged_ts, ?),"
+        " judged_at = ?, updated_at = ? WHERE id = ?",
+        (last_ts, stamp, stamp, conversation_id))
 
 
 def propose(config: dict, instance_key: str = "", now: datetime | None = None) -> list[dict]:
@@ -1031,13 +1130,13 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
                                       DEFAULT_MAX_JUDGEMENTS_PER_SCAN))
     budget = max(0, max_per_day - _proposals_today(instance_key, now))
     if budget <= 0 or max_judgements <= 0:
-        return [], {"messages": 0, "conversations": 0}
+        return [], {"messages": 0, "conversations": 0, "reopened": 0}
 
     names = _names()
     operator_id = _operator_id(config)
     operator = names.get(operator_id, "") or operator_id
     opened: list[dict] = []
-    counts = {"messages": 0, "conversations": 0}
+    counts = {"messages": 0, "conversations": 0, "reopened": 0}
     judged = 0
     for row in _candidates(instance_key, config, now):
         if judged >= max_judgements or len(opened) >= budget:
@@ -1059,7 +1158,7 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
             break
         fresh = db.query_one("SELECT * FROM slack_conversations WHERE id = ?",
                              (row["id"],))
-        if (not fresh or not _is_candidate(fresh, config, now)
+        if (not fresh or not _is_candidate(fresh, config, now, operator_id)
                 or not _somebody_else_spoke(row["id"], operator_id)):
             # The ingest above may have added a message to this very
             # conversation, which puts it back inside the settle window. It is
@@ -1117,36 +1216,52 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
         if not scan["complete"]:
             break
         # The mark is also the claim. It is written first, and only against a
-        # conversation that has no proposal and whose revision still matches
-        # the transcript above. ingest raises the revision for every
+        # conversation whose revision still matches the transcript above and
+        # which still carries the proposal the transcript was read against:
+        # no proposal at all, or the same declined one this conversation has
+        # asked past, still declined now. The operator can reopen a declined
+        # task while the model reads, and that changes no message, so the
+        # revision would not catch it and a second task would land beside the
+        # one he just put back. ingest raises the revision for every
         # conversation it touches, which covers a message added, a message
         # edited in place, and a message deleted, none of which last_ts alone
-        # would catch. So two scans that judged the same
+        # would catch. The work item id is what settles the race on a
+        # conversation that is asking again, because both scans see the same
+        # declined proposal and the winner replaces it inside this
+        # transaction. So two scans that judged the same
         # conversation at once cannot both open a task for it, and a
         # conversation that moved cannot get a proposal built from evidence
         # that is already out of date and then be blocked from ever being
         # judged again. The loser writes nothing and the next scan reads the
         # whole conversation.
         stamp = _iso(now)
+        declined = row["work_item_id"] if row["proposed_at"] else None
         with db.tx() as c:
             claimed = c.execute(
-                "UPDATE slack_conversations SET judged_ts = ?, judged_at = ?,"
-                " proposed_at = ?, updated_at = ? WHERE id = ?"
-                " AND proposed_at IS NULL AND revision = ?",
-                (row["last_ts"], stamp, stamp, stamp, row["id"], row["revision"]))
+                _CLAIM_CONVERSATION,
+                (row["last_ts"], stamp, stamp, stamp, row["id"], row["revision"],
+                 row["work_item_id"], row["work_item_id"],
+                 work_store.DECLINED_REASON))
             if claimed.rowcount != 1:
                 continue
             item_id = work_store.create_proposal(
                 objective, note=note, instance_key=instance_key,
                 contexts=",".join(contexts), tags=",".join(tags),
-                cwd=cwd, brief=brief, conn=c)
+                cwd=cwd, brief=brief, conn=c, now=stamp)
             c.execute("UPDATE slack_conversations SET work_item_id = ? WHERE id = ?",
                       (item_id, row["id"]))
-        log.emit("slack_proposal_opened",
-                 f"[{instance_key}] {channel} asks for work; proposed task {item_id}",
+        if declined:
+            counts["reopened"] += 1
+            summary = (f"[{instance_key}] {channel} asks again after task"
+                       f" {declined} was declined; proposed task {item_id}")
+        else:
+            summary = (f"[{instance_key}] {channel} asks for work;"
+                       f" proposed task {item_id}")
+        log.emit("slack_proposal_opened", summary,
                  links={"detail": f"/tasks/{item_id}"},
                  meta={"work_item_id": item_id, "channel": channel,
-                       "thread_ts": row["thread_ts"], "reason": reason})
+                       "thread_ts": row["thread_ts"], "reason": reason,
+                       "reopened_from": declined})
         opened.append({"work_item_id": item_id, "channel": channel,
                        "thread_ts": row["thread_ts"], "objective": objective})
     return opened, counts
@@ -1165,10 +1280,13 @@ def check(config: dict, instance_key: str = "", now: datetime | None = None) -> 
         # An instance with no capture configured has no evidence source. The
         # index it built before the capture was removed is not a reason to go
         # on proposing from it.
-        return {**counts, "proposed": 0, "skipped": "no capture configured"}
+        return {**counts, "proposed": 0, "reopened": 0,
+                "skipped": "no capture configured"}
     if not enabled(config):
-        return {**counts, "proposed": 0, "skipped": "propose_tasks is off"}
+        return {**counts, "proposed": 0, "reopened": 0,
+                "skipped": "propose_tasks is off"}
     opened, extra = propose(config, instance_key=instance_key, now=now)
     return {"messages": counts["messages"] + extra["messages"],
             "conversations": counts["conversations"] + extra["conversations"],
+            "reopened": extra["reopened"],
             "proposed": len(opened)}

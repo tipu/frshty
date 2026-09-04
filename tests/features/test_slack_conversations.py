@@ -360,6 +360,285 @@ def test_a_proposal_is_never_opened_twice_for_one_conversation(tmp_path):
     assert len(db.query_all("SELECT id FROM work_items")) == 1
 
 
+REPLY_TS = "1788462000.000400"
+
+
+def _item_ids():
+    return [row["id"] for row in db.query_all("SELECT id FROM work_items ORDER BY id")]
+
+
+def _declined_proposal(tmp_path):
+    """One thread, one proposal, and the operator declines it."""
+    _capture(tmp_path, _erik_thread())
+    _run(tmp_path, _verdict())
+    item_id = _item_ids()[0]
+    assert work_store.apply_action(item_id, "decline") == {
+        "id": item_id, "action": "decline"}
+    return item_id
+
+
+def test_a_new_message_reopens_a_declined_thread(tmp_path):
+    """A declined proposal used to silence its thread for good. The mark that
+    hides the thread from the proposer is written when the proposal is opened
+    and nothing ever took it off, so the next real request in the same thread
+    was never read."""
+    declined = _declined_proposal(tmp_path)
+    _capture(tmp_path, [_ws(REPLY_TS, ERIK, "and please also move WB-500 to PLT",
+                            thread_ts=ROOT_TS)])
+    opened, haiku = _run(tmp_path, _verdict())
+
+    assert haiku.call_count == 1, "the thread is judged again"
+    assert opened["reopened"] == 1
+    assert opened["proposed"] == 1
+    assert len(_item_ids()) == 2, "the new request opens its own task"
+    row = _conversations()[0]
+    assert row["work_item_id"] == _item_ids()[1]
+    assert row["work_item_id"] != declined
+    assert row["proposed_at"], "the new proposal marks the thread again"
+
+
+def test_a_declined_thread_with_no_new_message_stays_closed(tmp_path):
+    """The oracle for the test above. The same declined proposal, no new
+    message, and the thread is never read again."""
+    _declined_proposal(tmp_path)
+    opened, haiku = _run(tmp_path, _verdict())
+
+    assert haiku.call_count == 0
+    assert opened["reopened"] == 0
+    assert opened["proposed"] == 0
+    assert len(_item_ids()) == 1
+
+
+def test_a_new_message_never_reopens_a_proposal_the_operator_has_not_read(tmp_path):
+    """A proposal still waiting on the operator keeps its mark. Reopening it
+    would put a second task for the same thread beside the one on the board."""
+    _capture(tmp_path, _erik_thread())
+    _run(tmp_path, _verdict())
+    _capture(tmp_path, [_ws(REPLY_TS, ERIK, "and please also move WB-500 to PLT",
+                            thread_ts=ROOT_TS)])
+    opened, haiku = _run(tmp_path, _verdict())
+
+    assert haiku.call_count == 0
+    assert opened["reopened"] == 0
+    assert len(_item_ids()) == 1
+    assert _conversations()[0]["proposed_at"]
+
+
+def test_a_new_message_never_reopens_an_approved_proposal(tmp_path):
+    """An agent is already on the work. A second task for the same thread
+    would put two agents on one request."""
+    _capture(tmp_path, _erik_thread())
+    _run(tmp_path, _verdict())
+    assert work_store.claim_proposal(_item_ids()[0]) is True
+    _capture(tmp_path, [_ws(REPLY_TS, ERIK, "and please also move WB-500 to PLT",
+                            thread_ts=ROOT_TS)])
+    opened, haiku = _run(tmp_path, _verdict())
+
+    assert haiku.call_count == 0
+    assert opened["reopened"] == 0
+    assert len(_item_ids()) == 1
+
+
+def test_a_declined_thread_the_operator_reopened_by_hand_is_left_alone(tmp_path):
+    """Reopening the task puts it back on the board. The thread must not open
+    a second one beside it."""
+    declined = _declined_proposal(tmp_path)
+    assert work_store.apply_action(declined, "reopen") == {
+        "id": declined, "action": "reopen"}
+    _capture(tmp_path, [_ws(REPLY_TS, ERIK, "and please also move WB-500 to PLT",
+                            thread_ts=ROOT_TS)])
+    opened, haiku = _run(tmp_path, _verdict())
+
+    assert haiku.call_count == 0
+    assert opened["reopened"] == 0
+    assert len(_item_ids()) == 1
+
+
+def test_the_operators_own_reply_does_not_reopen_a_declined_thread(tmp_path):
+    """A line the operator wrote is the operator asking somebody else. It is
+    not a request made of the operator, so it is not a reason to ask the
+    operator the question they already answered."""
+    _declined_proposal(tmp_path)
+    _capture(tmp_path, [_ws(REPLY_TS, OPERATOR, "will do this next week",
+                            thread_ts=ROOT_TS)])
+    opened, haiku = _run(tmp_path, _verdict())
+
+    assert haiku.call_count == 0
+    assert opened["reopened"] == 0
+    assert len(_item_ids()) == 1
+    assert _conversations()[0]["proposed_at"], "the thread stays declined"
+
+
+def test_a_new_message_taken_back_does_not_reopen_a_declined_thread(tmp_path):
+    """A deletion takes evidence away rather than adding it. The tombstone
+    keeps the timestamp of the message it withdrew, which is newer than the
+    judgement, and it must not count as the new request that reopens the
+    thread."""
+    _declined_proposal(tmp_path)
+    _capture(tmp_path, [
+        _ws(REPLY_TS, ERIK, "and please also move WB-500 to PLT",
+            thread_ts=ROOT_TS),
+        {"dt": "2026-09-03T19:30:00+00:00", "source": "ws",
+         "endpoint": "https://wss-primary.slack.com/?x=1",
+         "payload": {"type": "message", "subtype": "message_deleted",
+                     "channel": CHANNEL, "deleted_ts": REPLY_TS,
+                     "previous_message": {"type": "message", "ts": REPLY_TS,
+                                          "thread_ts": ROOT_TS, "user": ERIK,
+                                          "text": "and please also move WB-500 to PLT"}}},
+    ])
+    opened, haiku = _run(tmp_path, _verdict())
+
+    row = _rows(_conversations()[0]["id"])[-1]
+    assert row["ts"] == REPLY_TS and row["deleted"] == 1, "the tombstone is newer"
+    assert haiku.call_count == 0
+    assert opened["reopened"] == 0
+    assert len(_item_ids()) == 1
+    assert _conversations()[0]["proposed_at"], "the thread stays declined"
+
+
+def test_a_withdrawn_request_the_operator_answered_leaves_the_thread_declined(tmp_path):
+    """The request is deleted and the operator writes after it. The thread has
+    moved past the declined judgement, so the watermark alone lets it through,
+    and the only message that could have reopened it is gone."""
+    _declined_proposal(tmp_path)
+    _capture(tmp_path, [
+        _ws(REPLY_TS, ERIK, "and please also move WB-500 to PLT",
+            thread_ts=ROOT_TS),
+        {"dt": "2026-09-03T19:20:00+00:00", "source": "ws", "endpoint": "e",
+         "payload": {"type": "message", "subtype": "message_deleted",
+                     "channel": CHANNEL, "deleted_ts": REPLY_TS,
+                     "previous_message": {"type": "message", "ts": REPLY_TS,
+                                          "thread_ts": ROOT_TS, "user": ERIK,
+                                          "text": "and please also move WB-500 to PLT"}}},
+        _ws("1788462100.000500", OPERATOR, "no problem, dropping it",
+            thread_ts=ROOT_TS),
+    ])
+    opened, haiku = _run(tmp_path, _verdict())
+
+    row = _conversations()[0]
+    assert row["last_ts"] == "1788462100.000500", "the thread moved past the judgement"
+    assert haiku.call_count == 0
+    assert opened["reopened"] == 0
+    assert len(_item_ids()) == 1
+    assert row["proposed_at"], "the thread stays declined"
+
+
+def test_a_request_taken_back_before_it_is_read_leaves_the_thread_declined(tmp_path):
+    """The thread asks again, the scan indexes the new request while it is
+    still settling, and the person deletes it before any scan judges it.
+
+    Nothing is left in the thread but the request the operator already
+    declined, so nothing may be proposed. A mark written when the new request
+    arrived would have outlived the request itself and proposed the declined
+    one a second time."""
+    _declined_proposal(tmp_path)
+    unsettled = str(NOW.timestamp() - 60) + "00"
+    _capture(tmp_path, [_ws(unsettled, ERIK, "and please also move WB-500 to PLT",
+                            thread_ts=ROOT_TS)])
+    first, first_haiku = _run(tmp_path, _verdict())
+    assert first_haiku.call_count == 0, "the new request has not settled yet"
+
+    _capture(tmp_path, [{
+        "dt": "2026-09-03T19:59:30+00:00", "source": "ws", "endpoint": "e",
+        "payload": {"type": "message", "subtype": "message_deleted",
+                    "channel": CHANNEL, "deleted_ts": unsettled,
+                    "previous_message": {"type": "message", "ts": unsettled,
+                                         "thread_ts": ROOT_TS, "user": ERIK,
+                                         "text": "and please also move WB-500 to PLT"}}}])
+    opened, haiku = _run(tmp_path, _verdict())
+
+    assert _messages(_conversations()[0]["id"])[-1]["ts"] == "1788458500.000200"
+    assert haiku.call_count == 0
+    assert opened["reopened"] == 0
+    assert len(_item_ids()) == 1
+    assert _conversations()[0]["proposed_at"], "the thread stays declined"
+
+
+def test_a_stale_verdict_never_moves_the_judgement_back(tmp_path):
+    """Two scans judge one conversation at once. The second reads the newer
+    message and opens a task from it. The first answers late, with nothing to
+    propose, and must not put the watermark back behind that task: the thread
+    would then look like it had asked again the moment the operator declined
+    it, and the same request would be proposed twice."""
+    _declined_proposal(tmp_path)
+    _capture(tmp_path, [_ws(REPLY_TS, ERIK, "and please also move WB-500 to PLT",
+                            thread_ts=ROOT_TS)])
+    config = _config(tmp_path, propose_tasks=True)
+    later_ts = "1788462100.000500"
+
+    def a_second_scan_wins_while_the_model_reads(prompt, **kwargs):
+        _capture(tmp_path, [_ws(later_ts, ERIK, "and WB-600 as well",
+                                thread_ts=ROOT_TS)])
+        with patch.object(sc, "run_haiku", return_value=_verdict()), \
+             patch.object(sc.work_launch, "project_entries", return_value=[]):
+            sc.check(config, instance_key="atropos", now=NOW)
+        return _verdict(actionable=False)
+
+    with patch.object(sc, "run_haiku",
+                      side_effect=a_second_scan_wins_while_the_model_reads), \
+         patch.object(sc.work_launch, "project_entries", return_value=[]):
+        sc.check(config, instance_key="atropos", now=NOW)
+
+    row = _conversations()[0]
+    assert row["judged_ts"] == later_ts, "the late verdict left the watermark alone"
+    assert len(_item_ids()) == 2, "the second scan opened one task"
+
+    assert work_store.apply_action(_item_ids()[1], "decline") == {
+        "id": _item_ids()[1], "action": "decline"}
+    opened, haiku = _run(tmp_path, _verdict())
+
+    assert haiku.call_count == 0, "nothing was said after that task was opened"
+    assert opened["proposed"] == 0
+    assert len(_item_ids()) == 2
+
+
+def test_a_declined_task_reopened_while_the_model_reads_blocks_the_proposal(tmp_path):
+    """The operator can put a declined task back on the board at any moment,
+    and that changes no Slack message, so the revision does not catch it. The
+    claim reads the decision again, so the thread does not open a second task
+    beside the one he just reopened."""
+    declined = _declined_proposal(tmp_path)
+    _capture(tmp_path, [_ws(REPLY_TS, ERIK, "and please also move WB-500 to PLT",
+                            thread_ts=ROOT_TS)])
+
+    def the_operator_reopens_while_the_model_reads(prompt, **kwargs):
+        work_store.apply_action(declined, "reopen")
+        return _verdict()
+
+    config = _config(tmp_path, propose_tasks=True)
+    with patch.object(sc, "run_haiku",
+                      side_effect=the_operator_reopens_while_the_model_reads), \
+         patch.object(sc.work_launch, "project_entries", return_value=[]):
+        opened = sc.check(config, instance_key="atropos", now=NOW)
+
+    assert opened["proposed"] == 0
+    assert len(_item_ids()) == 1
+    assert _conversations()[0]["work_item_id"] == declined
+
+
+def test_the_daily_budget_counts_every_task_one_thread_opened(tmp_path):
+    """A thread that is declined and asked again opens a second task. The cap
+    counts tasks, so that second one spends a slot. Counting the conversations
+    that opened them would let one thread open a task a day forever."""
+    _declined_proposal(tmp_path)
+    _capture(tmp_path, [_ws(REPLY_TS, ERIK, "and please also move WB-500 to PLT",
+                            thread_ts=ROOT_TS)])
+    opened, _ = _run(tmp_path, _verdict(), propose_max_per_day=2)
+    assert opened["proposed"] == 1, "the second task fits inside the cap"
+    assert sc._proposals_today("atropos", NOW) == 2
+
+    second = _item_ids()[1]
+    assert work_store.apply_action(second, "decline") == {
+        "id": second, "action": "decline"}
+    _capture(tmp_path, [_ws("1788462100.000500", ERIK, "and WB-600 as well",
+                            thread_ts=ROOT_TS)])
+    opened, haiku = _run(tmp_path, _verdict(), propose_max_per_day=2)
+
+    assert haiku.call_count == 0, "the cap is spent before any model call"
+    assert opened["proposed"] == 0
+    assert len(_item_ids()) == 2
+
+
 def test_the_daily_budget_caps_proposals(tmp_path):
     _capture(tmp_path, [
         _ws("1788458400.000100", ERIK, "first thing", channel=DM),
