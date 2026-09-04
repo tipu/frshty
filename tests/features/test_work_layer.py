@@ -1374,6 +1374,79 @@ class TestFollowup:
                              (out["item_id"],))
         assert child["source_item_id"] == parent
 
+    def _done_parent_with(self, contexts: str, provider: str = "claude",
+                          run_cwd: str = "/tmp"):
+        item_id = work_store.create_item("parent job", contexts=contexts)
+        work_store.add_run(item_id, f"sid-fup-{item_id}", f"work-{item_id}", run_cwd,
+                           provider=provider)
+        db.execute("UPDATE work_items SET state = 'needs_ack' WHERE id = ?", (item_id,))
+        return item_id
+
+    def test_followup_inherits_the_source_run_directory(self, tmp_path):
+        from unittest.mock import patch
+        from services import work_launch
+        repo = tmp_path / "repo-a"
+        repo.mkdir()
+        parent = self._done_parent_with("", run_cwd=str(repo))
+        p_inst, p_launch, p_health = self._patched(tmp_path)
+        with p_inst, p_launch, p_health, \
+             patch("services.work_launch.terminal.launch_agent") as mock_agent:
+            out = work_launch.launch_followup(parent, "finish the change")
+        assert "error" not in out, out
+        assert mock_agent.call_args.args[1] == str(repo)
+        child_run = db.query_one("SELECT cwd FROM work_runs WHERE id = ?", (out["run_id"],))
+        assert child_run["cwd"] == str(repo)
+
+    def test_followup_drops_a_source_directory_that_is_gone(self, tmp_path):
+        from unittest.mock import patch
+        from services import work_launch
+        parent = self._done_parent_with("", run_cwd=str(tmp_path / "purged-worktree"))
+        p_inst, p_launch, p_health = self._patched(tmp_path)
+        with p_inst, p_launch, p_health, \
+             patch("services.work_launch.terminal.launch_agent") as mock_agent:
+            out = work_launch.launch_followup(parent, "finish the change")
+        assert "error" not in out, out
+        assert mock_agent.call_args.args[1] == str(tmp_path)
+
+    def test_followup_inherits_projects_and_agent(self, tmp_path):
+        from unittest.mock import patch
+        from services import work_launch
+        parent = self._done_parent_with("aimyable,slack_int", provider="codex")
+        p_inst, p_launch, p_health = self._patched(tmp_path)
+        with p_inst, p_launch, p_health, \
+             patch("services.work_launch.terminal.launch_agent") as mock_agent:
+            out = work_launch.launch_followup(parent, "next step")
+        assert "error" not in out, out
+        assert mock_agent.call_args.kwargs["agent"] == "codex"
+        child = db.query_one("SELECT contexts FROM work_items WHERE id = ?", (out["item_id"],))
+        assert child["contexts"] == "aimyable,slack_int"
+
+    def test_followup_keeps_an_explicit_empty_context(self, tmp_path):
+        from unittest.mock import patch
+        from services import work_launch
+        parent = self._done_parent_with("aimyable,slack_int", provider="codex")
+        p_inst, p_launch, p_health = self._patched(tmp_path)
+        with p_inst, p_launch, p_health, \
+             patch("services.work_launch.terminal.launch_agent") as mock_agent:
+            out = work_launch.launch_followup(parent, "next step", contexts=[],
+                                              agent="claude")
+        assert "error" not in out, out
+        assert mock_agent.call_args.kwargs["agent"] == "claude"
+        child = db.query_one("SELECT contexts FROM work_items WHERE id = ?", (out["item_id"],))
+        assert child["contexts"] == ""
+
+    def test_followup_endpoint_inherits_projects(self, tmp_path):
+        parent = self._done_parent_with("aimyable")
+        p_inst, p_launch, p_health = self._patched(tmp_path)
+        with p_inst, p_launch, p_health:
+            client = self._client()
+            r = client.post(f"/api/work/items/{parent}/followup",
+                            json={"text": "next step"})
+        assert r.status_code == 200, r.text
+        child = db.query_one("SELECT contexts FROM work_items WHERE id = ?",
+                             (r.json()["item_id"],))
+        assert child["contexts"] == "aimyable"
+
     def test_followup_requires_done_parent(self, tmp_path):
         from services import work_launch
         parent = work_store.create_item("still running")

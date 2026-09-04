@@ -146,6 +146,9 @@
                 <button class="ln-btn ln-btn-sm ln-btn-primary"
                         title="accept the agent's report and complete this task" @click="act(it, 'ack')">Acknowledge</button>
                 <button class="ln-btn ln-btn-sm ln-btn-ghost"
+                        title="launch the next run from this one; it keeps this task's projects and agent"
+                        @click="toggleFollowup(it)">{{ fupOpen[rowKey(it)] ? 'Follow up ▾' : 'Follow up ▸' }}</button>
+                <button class="ln-btn ln-btn-sm ln-btn-ghost"
                         title="acknowledge and file it in the archive in one step" @click="act(it, 'archive')">Archive</button>
                 <button class="ln-btn ln-btn-sm ln-btn-ghost"
                         title="the work is not finished; send it back" @click="act(it, 'reopen')">Reopen</button>
@@ -172,6 +175,15 @@
             </span>
           </div>
           <div class="wsum" v-if="it.summary && sumOpen[rowKey(it)]" v-html="lkFor(it, it.summary)"></div>
+          <form style="margin-top:8px" v-if="g === 'needs_ack' && fupOpen[rowKey(it)]" @submit.prevent="launchFollowup(it)">
+            <textarea class="wintake" rows="1" :ref="el => setFupBox(rowKey(it), el)"
+                      v-model="fupText[rowKey(it)]" :disabled="fupBusy[rowKey(it)]"
+                      @keydown.enter="onComposeEnter($event, () => launchFollowup(it))"
+                      @input="grow($event.target)"
+                      placeholder="Follow-up objective… Enter launches a run, Shift+Enter adds a line."></textarea>
+            <div class="ln-small ln-muted" v-if="fupBusy[rowKey(it)]">launching…</div>
+            <div class="ln-small" style="color:var(--ln-red)" v-else-if="fupError[rowKey(it)]">{{ fupError[rowKey(it)] }}</div>
+          </form>
           <work-question v-if="g === 'needs_you' || it.pending_question" :item="it" @answer="answer(it, $event)"></work-question>
           <form style="margin-top:8px" v-if="g === 'needs_you' || it.pending_question" @submit.prevent="reply(it)">
             <input class="wintake" v-model="replyText[rowKey(it)]"
@@ -243,6 +255,7 @@ frshtyApp({
       projects: [], slackAvailable: false, intakeContexts: [], intakeSlack: false, moreOpen: false,
       agents: ["claude"], intakeAgent: localStorage.getItem("workAgent") || "claude",
       connError: "", replyText: {}, sumOpen: {}, approveBusy: {}, linkmap: null, threads: [],
+      fupOpen: {}, fupText: {}, fupBusy: {}, fupError: {},
       peers: [], peerMeta: {}, peerErrors: {}, peerLinkmaps: {}, target: "",
       sourceFilter: localStorage.getItem("workSourceFilter") || "",
       searchText: "", tagFilter: JSON.parse(localStorage.getItem("workTagFilter") || "[]"), allTags: [], donePage: 1, donePages: 1, counts: {},
@@ -605,6 +618,44 @@ frshtyApp({
         this.connError = "reply failed: " + e.message;
       }
     },
+    setFupBox(key, el) {
+      if (el) this._fupBoxes[key] = el;
+      else delete this._fupBoxes[key];
+    },
+    toggleFollowup(it) {
+      const key = this.rowKey(it);
+      if (this.fupOpen[key]) { delete this.fupOpen[key]; return; }
+      this.fupOpen[key] = true;
+      this.fupError[key] = "";
+      this.$nextTick(() => {
+        const el = this._fupBoxes[key];
+        if (el) { this.grow(el); el.focus(); }
+      });
+    },
+    async launchFollowup(it) {
+      const key = this.rowKey(it);
+      const text = (this.fupText[key] || "").trim();
+      if (!text || this.fupBusy[key]) return;
+      this.fupBusy[key] = true;
+      this.fupError[key] = "";
+      try {
+        const r = await fetch(this.apiUrl(it.peer, `/api/work/items/${it.id}/followup`), {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+        });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) { this.fupError[key] = d.error || ("follow-up failed HTTP " + r.status); return; }
+        this.fupText[key] = "";
+        delete this.fupOpen[key];
+      } catch (e) {
+        this.fupError[key] = "follow-up failed: " + e.message;
+        return;
+      } finally {
+        delete this.fupBusy[key];
+      }
+      await this.refresh();
+      await this.loadThreads();
+    },
     snooze(it) {
       const until = new Date(Date.now() + 4 * 3600 * 1000).toISOString();
       this.act(it, "snooze", until);
@@ -623,6 +674,7 @@ frshtyApp({
   },
   mounted() {
     this._refreshSeq = 0;
+    this._fupBoxes = {};
     const b = document.getElementById("boot-error");
     if (b) b.remove();
     this.loadConfig();
