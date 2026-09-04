@@ -15,6 +15,7 @@ STALE_AFTER_MINUTES = 30
 STUCK_AFTER_MINUTES = 90
 BG_WAIT_RECHECK_HOURS = 2
 PROPOSED_STATE = "proposed"
+DECLINED_REASON = "Proposal declined"
 GROUPS = ("proposed", "needs_ack", "needs_you", "agent_working", "waiting_external",
           "failed_stale", "done")
 FINISHED_STATES = ("needs_ack", "done")
@@ -172,7 +173,7 @@ def create_item(objective: str, scope: str = "ad-hoc", scope_ref: str = "",
 
 def create_proposal(objective: str, note: str = "", instance_key: str | None = None,
                     contexts: str = "", tags: str = "", cwd: str = "",
-                    brief: str = "", conn=None) -> int:
+                    brief: str = "", conn=None, now: str | None = None) -> int:
     """Put a task on the board that no agent has started.
 
     frshty writes this when it decides by itself that something needs doing.
@@ -183,18 +184,23 @@ def create_proposal(objective: str, note: str = "", instance_key: str | None = N
     `conn` lets a caller that has to record the proposal somewhere else write
     both rows in one transaction. db.tx opens its own connection and takes an
     immediate lock, so a caller cannot nest it; passing the open connection is
-    what makes the two writes commit or roll back together."""
+    what makes the two writes commit or roll back together.
+
+    `now` lets a caller stamp the row with the moment its own scan reads, so a
+    count over created_at answers the same question that caller's other counts
+    answer. It defaults to the wall clock."""
     if conn is not None:
         return _insert_proposal(conn, objective, note, instance_key, contexts,
-                                tags, cwd, brief)
+                                tags, cwd, brief, now)
     with db.tx() as c:
         return _insert_proposal(c, objective, note, instance_key, contexts,
-                                tags, cwd, brief)
+                                tags, cwd, brief, now)
 
 
 def _insert_proposal(c, objective: str, note: str, instance_key: str | None,
-                     contexts: str, tags: str, cwd: str, brief: str) -> int:
-    now = _now()
+                     contexts: str, tags: str, cwd: str, brief: str,
+                     now: str | None = None) -> int:
+    now = now or _now()
     cur = c.execute(
         "INSERT INTO work_items(objective, scope, instance_key, contexts, tags, "
         "state, current_checkpoint, launch_cwd, launch_brief, created_at, updated_at) "
@@ -471,8 +477,8 @@ def apply_action(item_id: int, action: str, until: str | None = None) -> dict:
                 return {"error": "only a proposed task can be declined"}
             c.execute(
                 "UPDATE work_items SET state = 'done', archived_at = ?, "
-                "stop_reason = 'Proposal declined', updated_at = ? WHERE id = ?",
-                (now, now, item_id),
+                "stop_reason = ?, updated_at = ? WHERE id = ?",
+                (now, DECLINED_REASON, now, item_id),
             )
         elif action == "archive":
             if item["state"] not in FINISHED_STATES:
