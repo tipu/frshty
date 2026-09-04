@@ -59,3 +59,33 @@ class TestLaunchClaude:
             "work-10", str(tmp_path),
             "claude --dangerously-skip-permissions --resume session-10",
         )
+
+    def test_resume_reapplies_the_launch_context(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            terminal, "session_healthy", lambda key: {"alive": False, "agent_running": False})
+        monkeypatch.setattr(terminal, "LAUNCH_CONTEXT_DIR", str(tmp_path / "ctx"))
+        launch = MagicMock()
+        monkeypatch.setattr(terminal, "launch_pane_command", launch)
+
+        terminal.launch_claude("work-11", str(tmp_path), "session-11", "report rules", True)
+        launch.reset_mock()
+        terminal.launch_claude("work-11", str(tmp_path), "session-11", "", False)
+
+        ctx = tmp_path / "ctx" / "session-11.md"
+        assert ctx.read_text() == "report rules"
+        assert launch.call_args.args[2] == (
+            "claude --dangerously-skip-permissions --resume session-11 "
+            f"--append-system-prompt \"$(cat {ctx})\""
+        )
+
+    def test_resume_without_a_launch_context_stays_bare(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            terminal, "session_healthy", lambda key: {"alive": False, "agent_running": False})
+        monkeypatch.setattr(terminal, "LAUNCH_CONTEXT_DIR", str(tmp_path / "ctx"))
+        launch = MagicMock()
+        monkeypatch.setattr(terminal, "launch_pane_command", launch)
+
+        terminal.launch_claude("work-12", str(tmp_path), "session-12", "", False)
+
+        assert launch.call_args.args[2] == (
+            "claude --dangerously-skip-permissions --resume session-12")

@@ -201,7 +201,8 @@ Then propose the smallest remedy. Do not change ticket state, do not enqueue or
 retry jobs, and do not edit or push frshty code until the operator approves the
 remedy with AskUserQuestion. Reading anything is unrestricted.
 
-Write the diagnosis as a markdown report artifact and print its ARTIFACT line.
+Write the diagnosis as a self-contained HTML report artifact and print its
+ARTIFACT line.
 """
 
 
