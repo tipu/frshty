@@ -351,6 +351,8 @@ class TestIntake:
         assert f"write it under {folder}/" in context
         assert "Never write such a file to /tmp" in context
         assert "Never publish an HTML page to the hosted Claude artifact service" in context
+        assert ("other prose document for the operator as a self-contained .html file, "
+                "never as Markdown or plain text") in context
 
     def test_intake_launch_failure_marks_item(self, tmp_path):
         from unittest.mock import patch, MagicMock
@@ -659,6 +661,13 @@ class TestAutocontinue:
         s = self._state(item_id)
         assert s["state"] == "agent_working"
         assert s["continues_used"] == 1
+
+    def test_continue_prompt_repeats_the_html_report_rule(self, monkeypatch):
+        item_id, _, sender = self._setup(monkeypatch)
+        assert work_store.maybe_autocontinue(f"sid-auto-{item_id}", "/tmp/t.jsonl") == "continued"
+        prompt = sender.call_args.args[1]
+        assert ("Write any report, summary or other prose document for the operator as "
+                "a self-contained .html file, never as Markdown or plain text.") in prompt
 
     def test_question_blocks_continue(self, monkeypatch):
         item_id, _, sender = self._setup(monkeypatch, tail="Should I use the staging bucket or prod?")
