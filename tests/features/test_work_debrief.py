@@ -252,7 +252,7 @@ class TestLaunchContexts:
         root = tmp_path / "aim-root"
         root.mkdir()
         entry = MagicMock()
-        entry.config = {"workspace": {"root": root, "repos": [{"name": "apipe"}, {"name": "portal"}]}}
+        entry.config = {"workspace": {"root": root, "repos": ["apipe", "portal"]}}
         return {"aimyable": entry}, str(root)
 
     def test_context_block_lists_project_and_slack(self, monkeypatch, tmp_path):

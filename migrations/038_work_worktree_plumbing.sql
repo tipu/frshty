@@ -1,0 +1,2 @@
+ALTER TABLE work_runs  ADD COLUMN board_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE work_items ADD COLUMN worktree_opt_out INTEGER NOT NULL DEFAULT 0;

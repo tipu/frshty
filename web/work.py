@@ -7,7 +7,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
 import core.db as db
 import core.terminal as terminal
 from services import (work_artifacts, work_debrief, work_launch, work_peers,
-                      work_store, work_tags)
+                      work_store, work_tags, work_worktree)
 from web.pages import _template
 
 
@@ -180,12 +180,42 @@ def api_work_approve(item_id: int, body: dict | None = Body(default=None)):
     return result
 
 
+@router.post("/api/work/items/{item_id}/worktree")
+def api_work_worktree(item_id: int, body: dict):
+    """Hand one task a worktree of the repository it tried to write into.
+
+    The work hook runs as its own process and resolves no instance config, so
+    it cannot work out a project's base branch or dependency commands and
+    cannot create a worktree itself. It asks here instead. The repository
+    comes from the file the session tried to change, which names the
+    repository even for a project that holds several."""
+    repo_path = (body.get("repo_path") or "").strip()
+    if not repo_path:
+        return JSONResponse({"error": "repo_path is required"}, status_code=400)
+    # Deliberately outside work_store.launch_lock. Creating a worktree fetches
+    # from the remote and installs dependencies, and holding the global launch
+    # lock across either would stall every launch, resume and other write gate
+    # behind it, until their own HTTP calls time out. The task asking here has
+    # a live session, and gc keeps any worktree whose holder has one.
+    row = work_worktree.ensure_for_repo(
+        item_id, repo_path, entries=work_launch.project_entries())
+    if not row:
+        return JSONResponse(
+            {"error": f"no worktree could be created for {repo_path}"},
+            status_code=409)
+    work_worktree.adopt_run(item_id, row["path"])
+    return {"path": row["path"], "branch": row["branch"],
+            "base_branch": row["base_branch"], "repo_path": row["repo_path"]}
+
+
 @router.post("/api/work/intake")
 def api_work_intake(body: dict):
     result = work_launch.launch(body.get("text") or "", cwd=body.get("cwd") or "",
                                 contexts=body.get("contexts") or [],
                                 slack=bool(body.get("slack")),
-                                agent=body.get("agent") or "claude")
+                                agent=body.get("agent") or "claude",
+                                repo=body.get("repo") or "",
+                                no_worktree=bool(body.get("no_worktree")))
     if "error" in result:
         status = 503 if "personal instance" in result["error"] else (
             500 if "launch failed" in result["error"] else 400)
@@ -245,6 +275,7 @@ def api_work_detail(item_id: int):
     result["system_prompt"] = work_launch.read_system_prompt(result["runs"])
     result["thread"] = work_store.thread_map().get(item_id)
     result["attention"] = work_store.attention_count()
+    result["worktree"] = work_worktree.for_item(item_id)
     return result
 
 

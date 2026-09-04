@@ -64,6 +64,10 @@
     <a v-if="sourceItem" :href="taskHref(sourceItem.id)" class="text-xs text-blue-400 underline ml-3" :title="sourceItem.objective">follows #{{ sourceItem.id }}</a>
     <a :href="terminalHref" target="_blank" class="text-xs text-blue-400 underline ml-3">open terminal</a>
   </div>
+  <div class="mt-1 text-xs text-gray-500" v-if="worktree"
+       :title="'shared checkout: ' + worktree.repo_path">
+    worktree {{ worktree.path }} on {{ worktree.branch }} (from {{ worktree.base_branch }})
+  </div>
   <div class="sec" v-if="item.state === 'proposed'">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Approve</h2>
     <div class="text-xs text-gray-600 mb-2">frshty opened this task by itself. No agent has read it. Approve it to start one on the objective above, or decline it to file it without running it.</div>
@@ -289,7 +293,7 @@ const app = frshtyApp({
                     systemPrompt: "", showPrompt: false,
                     btwText: "", btwError: "", btwBusy: false,
                     followups: [], fuText: {}, fuCtx: {}, fuSlack: {}, fuAgent: {}, fuError: {},
-                    sourceItem: null, followupChildren: [],
+                    sourceItem: null, followupChildren: [], worktree: null,
                     fupText: "", fupCtx: [], fupSlack: false, fupError: "", fupBusy: false,
                     fupAgent: "claude", agents: ["claude"], runs: [],
                     projects: [], slackAvailable: false,
@@ -461,6 +465,7 @@ const app = frshtyApp({
         }
         this.followups = d.followups || [];
         this.sourceItem = d.source_item || null; this.followupChildren = d.followup_children || [];
+        this.worktree = d.worktree || null;
         this.projects = d.projects || []; this.slackAvailable = !!d.slack_available;
         this.runs = d.runs || [];
         this.agents = d.agents && d.agents.length ? d.agents : ["claude"];

@@ -7,6 +7,7 @@ import time
 import uuid
 from pathlib import Path
 
+import core.config as core_config
 import core.db as db
 import core.git_util as git_util
 import core.log as log
@@ -15,7 +16,7 @@ import core.terminal as terminal
 from core.tasks.tickets import (
     TEST_RUN_TIMEOUT, _NO_LOCAL_PY_VENV_SENTINEL, _detect_runner, _run_repo_tests,
 )
-from services import work_artifacts, work_store, work_tags
+from services import work_artifacts, work_store, work_tags, work_worktree
 
 
 def personal_config() -> dict | None:
@@ -81,12 +82,17 @@ def agent_config(contexts: list[str], default_config: dict,
 
 
 def project_entries() -> list[dict]:
+    """Every project a task can select, with the repositories it holds.
+
+    The repository list comes from core.config.get_repos, not from
+    workspace.repos, because a project configured with projects_dir names no
+    repositories there and would report none."""
     instances = runtime.instances()
     entries = []
     for key in sorted(instances.keys() if instances else []):
         cfg = instances.get(key).config
         ws = cfg.get("workspace") or {}
-        repos = [r.get("name", "") for r in ws.get("repos") or [] if isinstance(r, dict)]
+        repos = [r["name"] for r in work_worktree._repos_of(cfg)]
         entries.append({"key": key, "root": str(ws.get("root", "")), "repos": repos})
     extras = {
         "frshty": os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -312,12 +318,18 @@ SLACK_LABEL = "slack_int"
 
 
 def _resolve_launch(objective: str, cwd: str, contexts: list[str], agent: str,
-                    source_item_id: int | None) -> dict:
+                    source_item_id: int | None, repo_pick: str = "",
+                    no_worktree: bool = False, item_id: int | None = None) -> dict:
     """Validate one launch and resolve everything it needs to start.
 
     An approval launches a work item that already exists, so every check that
     can refuse a launch has to run before the item is claimed. This returns
-    the resolved arguments, or {"error": ...} and nothing has changed."""
+    the resolved arguments, or {"error": ...} and nothing has changed.
+
+    The worktree is planned here and materialized in `_start`. Planning writes
+    nothing, so a launch that cannot resolve still leaves the board as it
+    was, and materializing needs a work item id that does not exist yet on
+    this path."""
     objective = (objective or "").strip()
     contexts = [c for c in (contexts or []) if isinstance(c, str)]
     agent = (agent or "claude").strip().lower()
@@ -333,9 +345,11 @@ def _resolve_launch(objective: str, cwd: str, contexts: list[str], agent: str,
         source_block = _source_block(source_item_id)
         if not source_block:
             return {"error": f"unknown source work item: {source_item_id}"}
-    cwd = (cwd or "").strip()
+    caller_cwd = (cwd or "").strip()
+    cwd = caller_cwd
+    entries = project_entries()
     if not cwd and len(contexts) == 1:
-        entry = next((e for e in project_entries() if e["key"] == contexts[0]), None)
+        entry = next((e for e in entries if e["key"] == contexts[0]), None)
         if entry and os.path.isdir(entry["root"]):
             cwd = entry["root"]
     cwd = cwd or str(config["workspace"]["root"])
@@ -344,15 +358,21 @@ def _resolve_launch(objective: str, cwd: str, contexts: list[str], agent: str,
     env = agent_config(contexts, config, agent)
     if "error" in env:
         return env
+    worktree = work_worktree.plan(objective, caller_cwd, cwd, contexts, entries,
+                                  repo_pick=repo_pick, no_worktree=no_worktree,
+                                  item_id=item_id)
     return {"objective": objective, "contexts": contexts, "agent": agent,
             "config": config, "env_key": env["key"], "env_config": env["config"],
-            "source_block": source_block, "cwd": cwd}
+            "source_block": source_block, "cwd": worktree["cwd"],
+            "worktree": worktree}
 
 
 def launch(objective: str, cwd: str = "", contexts: list[str] | None = None,
            slack: bool = False, source_item_id: int | None = None,
-           agent: str = "claude", brief: str = "") -> dict:
-    plan = _resolve_launch(objective, cwd, contexts or [], agent, source_item_id)
+           agent: str = "claude", brief: str = "", repo: str = "",
+           no_worktree: bool = False) -> dict:
+    plan = _resolve_launch(objective, cwd, contexts or [], agent, source_item_id,
+                           repo_pick=repo, no_worktree=no_worktree)
     if "error" in plan:
         return plan
     objective, contexts = plan["objective"], plan["contexts"]
@@ -361,7 +381,8 @@ def launch(objective: str, cwd: str = "", contexts: list[str] | None = None,
     tags = work_tags.derive_tags(objective, label_list,
                                  [e["key"] for e in project_entries()])
     item_id = work_store.create_item(objective, instance_key="personal", contexts=labels,
-                                     source_item_id=source_item_id, tags=",".join(tags))
+                                     source_item_id=source_item_id, tags=",".join(tags),
+                                     worktree_opt_out=no_worktree)
     return _start(item_id, plan, slack, brief, tags)
 
 
@@ -374,7 +395,7 @@ def launch_proposed(item_id: int, agent: str = "claude") -> dict:
     proposal where it was; a claim that loses a race reports it."""
     item = db.query_one(
         "SELECT id, state, objective, contexts, tags, source_item_id, launch_cwd, "
-        "launch_brief FROM work_items WHERE id = ?", (item_id,))
+        "launch_brief, worktree_opt_out FROM work_items WHERE id = ?", (item_id,))
     if not item:
         return {"error": "unknown work item"}
     if item["state"] != work_store.PROPOSED_STATE:
@@ -384,7 +405,9 @@ def launch_proposed(item_id: int, agent: str = "claude") -> dict:
     slack = SLACK_LABEL in labels
     plan = _resolve_launch(item["objective"], item["launch_cwd"],
                            [c for c in labels if c != SLACK_LABEL], agent,
-                           item["source_item_id"])
+                           item["source_item_id"],
+                           no_worktree=bool(item["worktree_opt_out"]),
+                           item_id=item_id)
     if "error" in plan:
         return plan
     if not work_store.claim_proposal(item_id):
@@ -409,66 +432,115 @@ def launch_proposed(item_id: int, agent: str = "claude") -> dict:
     return result
 
 
+def _materialize(item_id: int, plan: dict) -> tuple[str, dict]:
+    """The directory a run starts in, and the worktree row behind it.
+
+    Runs outside work_store.launch_lock, because it fetches and installs
+    dependencies. A create that fails is recorded and the run starts in the
+    directory the plan already had, so a launch never fails because a worktree
+    could not be made; the write gate and the commit gate then keep that run
+    from writing into a shared checkout."""
+    worktree = plan.get("worktree") or {}
+    cwd = worktree.get("cwd") or plan["cwd"]
+    if worktree.get("row"):
+        return cwd, worktree["row"]
+    if not worktree.get("create"):
+        # A follow-up runs in its source's worktree under R2 and creates
+        # nothing. Recording it makes this task a holder of the directory too,
+        # so the sweep holds the directory to this task's state as well.
+        return cwd, work_worktree.adopt_path(item_id, cwd)
+    row = work_worktree.ensure(item_id, worktree, plan["objective"])
+    return (row["path"], row) if row else (cwd, {})
+
+
 def _start(item_id: int, plan: dict, slack: bool, brief: str,
            tags: list[str]) -> dict:
     objective, contexts, agent = plan["objective"], plan["contexts"], plan["agent"]
-    config, source_block, cwd = plan["config"], plan["source_block"], plan["cwd"]
+    config, source_block = plan["config"], plan["source_block"]
     env_config = plan.get("env_config") or config
     session_id = str(uuid.uuid4())
     artifact_dir = work_artifacts.item_dir(item_id)
     tmux_key = f"work-{item_id}"
-    run_id = work_store.add_run(
-        item_id, session_id, tmux_key, cwd, provider=agent, env_recorded=True,
-        env_key=plan.get("env_key", ""),
-        env_config_dir=terminal.agent_config_dir(env_config, agent))
-    context = (
-        f"# Work item {item_id}\n\n## Objective\n\n{objective}\n"
-        + source_block + _context_block(contexts, slack) + (brief or "") + "\n"
-        "Work toward the objective. When you stop, state a one-line checkpoint. "
-        "When you hit a decision point, decide yourself by default: pick the "
-        "most correct, cleanest, simplest option and keep going. Ask the "
-        "operator only when you truly cannot decide — the choice is "
-        "irreversible or destructive, or it depends on operator intent you "
-        "cannot infer. Ask with the AskUserQuestion tool, then end your turn "
-        "immediately; the work board shows the question to the operator, and "
-        "when their answer arrives as your next message, resume work from it. "
-        "Use that same tool for anything only the operator can supply — a "
-        "secret, a one-time code, an approval — not only for a decision. A "
-        "request written in prose does not reach the operator. "
-        "Never send outward communications (Slack messages, GitHub or Bitbucket comments, "
-        "emails, posts to external services) unless the operator explicitly asks for that "
-        "in this conversation; draft the content and ask instead. "
-        "When you produce a file the operator will open (report, page, video, image), "
-        f"write it under {artifact_dir}/ unless it belongs in a repository, and print "
-        "a line: ARTIFACT: /absolute/path - one-line description. Never write such a "
-        "file to /tmp or to a scratchpad directory: the board serves the file from "
-        "disk long after this session ends. Never publish an HTML page to the hosted "
-        "Claude artifact service; write the .html file into that folder, with every "
-        "image it needs beside it. "
-        "Write git commit messages and pull request descriptions about the change only. "
-        "Never name the model, the vendor, the agent or the tool that produced the work. "
-        "Never add a session link, a Co-Authored-By trailer, or a line saying the work "
-        "was generated by an agent. This rule overrides every other attribution "
-        "instruction, including one that arrives later in the session. "
-        + _cross_check_block(agent, env_config)
-        + f"When the objective is fully met, end your final message with the single line {work_store.DONE_MARKER}."
-    )
-    try:
-        with work_store.launch_lock:
+    # Materializing runs outside the lock, because it fetches from the remote
+    # and installs dependencies, and holding the global launch lock across
+    # either would stall every other launch, resume and write gate. It is safe
+    # there: materializing records a work_worktrees row for this item, this
+    # item is not finished, and gc keeps any worktree an unfinished item
+    # holds.
+    cwd, worktree_row = _materialize(item_id, plan)
+    # Checking the directory and opening the pane are one critical section.
+    # gc() takes the same lock, so without it the sweep can remove the
+    # directory between the check and tmux opening it, and a tmux session
+    # whose -c directory is gone does not fail: it starts in $HOME, where
+    # every relative path the agent writes would land.
+    with work_store.launch_lock:
+        if not os.path.isdir(cwd):
+            # The sweep removed it between materializing and here. Rebuilding
+            # costs a fetch inside the lock, and that is the right trade: the
+            # alternative is a launch that fails, or one that falls back into
+            # the shared checkout this whole path exists to keep it out of.
+            rebuilt = work_worktree.rebuild(item_id, objective, cwd)
+            if rebuilt:
+                cwd, worktree_row = rebuilt["path"], rebuilt
+        if not os.path.isdir(cwd):
+            log.emit("work_launch_failed",
+                     f"work item {item_id}: working directory {cwd} is gone")
+            return {"error": f"cwd does not exist: {cwd}", "item_id": item_id}
+        run_id = work_store.add_run(
+            item_id, session_id, tmux_key, cwd, provider=agent, env_recorded=True,
+            env_key=plan.get("env_key", ""),
+            env_config_dir=terminal.agent_config_dir(env_config, agent),
+            board_url=core_config.board_url())
+        context = (
+            f"# Work item {item_id}\n\n## Objective\n\n{objective}\n"
+            + source_block + _context_block(contexts, slack)
+            + (work_worktree.context_block(worktree_row) if worktree_row else "")
+            + (brief or "") + "\n"
+            "Work toward the objective. When you stop, state a one-line checkpoint. "
+            "When you hit a decision point, decide yourself by default: pick the "
+            "most correct, cleanest, simplest option and keep going. Ask the "
+            "operator only when you truly cannot decide — the choice is "
+            "irreversible or destructive, or it depends on operator intent you "
+            "cannot infer. Ask with the AskUserQuestion tool, then end your turn "
+            "immediately; the work board shows the question to the operator, and "
+            "when their answer arrives as your next message, resume work from it. "
+            "Use that same tool for anything only the operator can supply — a "
+            "secret, a one-time code, an approval — not only for a decision. A "
+            "request written in prose does not reach the operator. "
+            "Never send outward communications (Slack messages, GitHub or Bitbucket comments, "
+            "emails, posts to external services) unless the operator explicitly asks for that "
+            "in this conversation; draft the content and ask instead. "
+            "When you produce a file the operator will open (report, page, video, image), "
+            f"write it under {artifact_dir}/ unless it belongs in a repository, and print "
+            "a line: ARTIFACT: /absolute/path - one-line description. Never write such a "
+            "file to /tmp or to a scratchpad directory: the board serves the file from "
+            "disk long after this session ends. Never publish an HTML page to the hosted "
+            "Claude artifact service; write the .html file into that folder, with every "
+            "image it needs beside it. "
+            "Write git commit messages and pull request descriptions about the change only. "
+            "Never name the model, the vendor, the agent or the tool that produced the work. "
+            "Never add a session link, a Co-Authored-By trailer, or a line saying the work "
+            "was generated by an agent. This rule overrides every other attribution "
+            "instruction, including one that arrives later in the session. "
+            + _cross_check_block(agent, env_config)
+            + f"When the objective is fully met, end your final message with the single line {work_store.DONE_MARKER}."
+        )
+        try:
             terminal.launch_agent(tmux_key, cwd, session_id, context, True,
                                   config=env_config, agent=agent)
-        health = terminal.session_healthy(tmux_key, agent=agent)
-        if not health.get("alive"):
-            raise RuntimeError("tmux session did not start")
-    except Exception as e:
-        work_store.mark_launch_failed(run_id, f"{type(e).__name__}: {e}")
-        log.emit("work_launch_failed", f"work item {item_id}: {type(e).__name__}: {e}")
-        return {"error": f"launch failed: {e}", "item_id": item_id}
+            health = terminal.session_healthy(tmux_key, agent=agent)
+            if not health.get("alive"):
+                raise RuntimeError("tmux session did not start")
+        except Exception as e:
+            work_store.mark_launch_failed(run_id, f"{type(e).__name__}: {e}")
+            log.emit("work_launch_failed", f"work item {item_id}: {type(e).__name__}: {e}")
+            return {"error": f"launch failed: {e}", "item_id": item_id}
     threading.Thread(target=_kickoff, args=(tmux_key, run_id, agent), daemon=True).start()
     if len(tags) < work_tags.MAX_TAGS:
         work_tags.schedule_implicit_tags(item_id, objective, config)
     return {"item_id": item_id, "run_id": run_id, "session_id": session_id,
-            "tmux_key": tmux_key, "state": "agent_working", "agent": agent}
+            "tmux_key": tmux_key, "state": "agent_working", "agent": agent,
+            "cwd": cwd, "worktree": worktree_row.get("path", "")}
 
 
 WORK_SESSION_PREFIX = "term-work-"
@@ -519,6 +591,11 @@ def resume_session(item_id: int) -> bool:
     environment at all started before the columns existed, and it keeps the
     live config the way it always did.
 
+    The directory is resolved again, because a resume does not go through
+    `_start` and would otherwise put an agent straight back into the shared
+    checkout a pre-feature run recorded. A worktree the sweep removed is
+    rebuilt on the same branch instead of being lost.
+
     No-op while the agent is still running, checked under launch_lock so two
     concurrent terminal connects cannot both relaunch it. A surviving tmux
     pane with no agent is respawned with the resume command."""
@@ -544,11 +621,59 @@ def resume_session(item_id: int) -> bool:
                 return False
         env_config = terminal.with_config_dir(base, run["provider"],
                                               run["env_config_dir"])
-    cwd = run["cwd"] if run["cwd"] and os.path.isdir(run["cwd"]) else str(config["workspace"]["root"])
+    item = db.query_one(
+        "SELECT objective, contexts, worktree_opt_out FROM work_items WHERE id = ?",
+        (item_id,))
+    recorded = run["cwd"] if run["cwd"] and os.path.isdir(run["cwd"]) else ""
+    contexts = [c for c in ((item["contexts"] if item else "") or "").split(",")
+                if c and c != SLACK_LABEL]
     key = f"work-{item_id}"
+    if terminal.session_healthy(key, agent=run["provider"])["agent_running"]:
+        return True
+    # Resolved and materialized outside the lock, for the reason _start does
+    # the same: a fetch and a dependency install must not stall every other
+    # launch. The row materializing records belongs to this item, and gc keeps
+    # a worktree whose holder still has a live session or is not finished.
+    cwd = recorded
+    if item is not None:
+        worktree = work_worktree.plan(
+            item["objective"], recorded, recorded, contexts, project_entries(),
+            no_worktree=bool(item["worktree_opt_out"]), item_id=item_id)
+        cwd = worktree["cwd"]
+        if worktree.get("create"):
+            row = work_worktree.ensure(item_id, worktree, item["objective"])
+            if row:
+                cwd = row["path"]
+    # Re-check and launch are one critical section: the sweep must not remove
+    # the directory between the check and tmux opening it, because a tmux
+    # session whose -c directory is gone starts in $HOME instead of failing.
     with work_store.launch_lock:
         if terminal.session_healthy(key, agent=run["provider"])["agent_running"]:
             return True
+        if not cwd or not os.path.isdir(cwd):
+            rebuilt = work_worktree.rebuild(
+                item_id, item["objective"] if item else "", cwd)
+            if rebuilt:
+                cwd = rebuilt["path"]
+        if not os.path.isdir(cwd):
+            # A task that ever had a worktree is never resumed in the workspace
+            # root. The root of a project is the shared checkout, or holds it,
+            # and putting a resumed agent there is the failure this whole
+            # feature exists to prevent. The operator repairs it instead.
+            if work_worktree.last_row(item_id) is not None:
+                log.emit("work_resume_failed",
+                         f"work item {item_id}: its worktree is gone and could not "
+                         "be rebuilt; the session is not resumed rather than "
+                         "resumed in a shared checkout")
+                return False
+            cwd = str(config["workspace"]["root"])
+        if not os.path.isdir(cwd):
+            log.emit("work_resume_failed",
+                     f"work item {item_id}: neither the recorded directory nor "
+                     f"the workspace root {cwd} exists; the session is not resumed")
+            return False
+        if cwd != run["cwd"]:
+            work_store.record_run_cwd(run["session_id"], cwd)
         terminal.launch_agent(key, cwd, run["session_id"], "", False, config=env_config,
                               agent=run["provider"],
                               agent_session_id=run["agent_session_id"])
@@ -579,13 +704,26 @@ def launch_followup(source_item_id: int, objective: str, cwd: str = "",
         return {"error": f"unknown source work item: {source_item_id}"}
     if source["state"] not in work_store.FINISHED_STATES:
         return {"error": f"source work item {source_item_id} is not done (state: {source['state']})"}
+    labels = [c for c in (source["contexts"] or "").split(",") if c]
+    source_contexts = [c for c in labels if c != SLACK_LABEL]
     if contexts is None:
-        labels = [c for c in (source["contexts"] or "").split(",") if c]
-        contexts = [c for c in labels if c != SLACK_LABEL]
+        contexts = source_contexts
         if slack is None:
             slack = SLACK_LABEL in labels
-        inherited_cwd = source["last_cwd"] or source["launch_cwd"] or ""
-        if not cwd and os.path.isdir(inherited_cwd):
+    # The directory is inherited on its own, not only when the projects were
+    # omitted too. The follow-up box on the task page always sends the
+    # projects, seeded from the source task, so a rule that keyed on them cut
+    # every follow-up launched from the board off from its source's worktree.
+    # A follow-up that changes the projects is a different piece of work, and
+    # the source's worktree would be the wrong repository for it.
+    if not cwd and set(contexts) == set(source_contexts):
+        # The source's worktree row is read ahead of the recorded directory,
+        # so the chain holds even when the run row was never moved to the
+        # worktree a gate handed out mid-session.
+        source_worktree = work_worktree.for_item(source_item_id) or {}
+        inherited_cwd = (source_worktree.get("path") or source["last_cwd"]
+                         or source["launch_cwd"] or "")
+        if os.path.isdir(inherited_cwd):
             cwd = inherited_cwd
     return launch(objective, cwd=cwd, contexts=contexts, slack=bool(slack),
                   source_item_id=source_item_id,
@@ -657,34 +795,57 @@ def _tokenize(command: str) -> list[str] | None:
         return None
 
 
-def _parse_git(command: str, verb: str) -> dict | None:
-    """Detect a `git <verb>` invocation in a shell command line.
+def _compose_chdir(chdir: str, found: str) -> str:
+    """The directory a segment runs in, from the `cd` that preceded it and the
+    `git -C` it carries.
 
-    Returns {"chdir": dir-or-""} for the segment that runs the verb, or None
-    when the command does not run it. Walks shell tokens segment by segment so
-    a quoted string, a grep pattern, or `git commit -m push` does not match;
-    tracks a preceding `cd <dir>` and a `git -C <dir>` so a gate checks the
-    repository the command actually targets. A command shlex cannot tokenize
-    falls back to a word-boundary match inside one segment."""
+    `-C` used to discard the `cd`, so `cd /shared/repo && git -C src commit`
+    reported `src` alone. That resolves against the session's own directory
+    and makes a gate inspect the wrong repository."""
+    if not found:
+        return chdir
+    if os.path.isabs(found) or not chdir:
+        return found
+    return os.path.normpath(os.path.join(chdir, found))
+
+
+def _parse_git_all(command: str, verb: str) -> list[dict]:
+    """Every `git <verb>` invocation in a shell command line.
+
+    Returns one {"chdir": dir-or-""} per segment that runs the verb, in order.
+    Walks shell tokens segment by segment so a quoted string, a grep pattern,
+    or `git commit -m push` does not match; tracks a preceding `cd <dir>` and a
+    `git -C <dir>` so a gate checks the repository the command actually
+    targets. Returning every match matters: stopping at the first one let a
+    second `git commit` later in the same command line through unchecked. A
+    command shlex cannot tokenize falls back to a word-boundary match inside
+    one segment."""
     command = _strip_heredocs(command)
     tokens = _tokenize(command)
     if tokens is None:
         if re.search(rf"(?:^|[|;&])[^|;&]*\bgit\b[^|;&]*\b{verb}\b", command):
-            return {"chdir": ""}
-        return None
+            return [{"chdir": ""}]
+        return []
     chdir = ""
+    found_all: list[dict] = []
     segment: list[str] = []
     for tok in tokens + ["\n"]:
         if tok in _SHELL_SEPARATORS:
             found = _segment_git(segment, verb)
             if found is not None:
-                return {"chdir": found or chdir}
-            if len(segment) >= 2 and segment[0] == "cd":
-                chdir = segment[1]
+                found_all.append({"chdir": _compose_chdir(chdir, found)})
+            elif len(segment) >= 2 and segment[0] == "cd":
+                chdir = _compose_chdir(chdir, segment[1])
             segment = []
         else:
             segment.append(tok)
-    return None
+    return found_all
+
+
+def _parse_git(command: str, verb: str) -> dict | None:
+    """The first `git <verb>` invocation in a shell command line, or None."""
+    found = _parse_git_all(command, verb)
+    return found[0] if found else None
 
 
 def parse_push(command: str) -> dict | None:
@@ -815,14 +976,44 @@ def attribution_match(text: str) -> tuple[str, str] | None:
     return None
 
 
+_SHARED_COMMIT_DENY = (
+    "Commit blocked by the work-layer commit gate: {repo} is a shared "
+    "checkout. Other agents hold uncommitted work in it, and `git add -A` "
+    "would take their changes into your commit.\n\n"
+    "{where}\n\n"
+    "Commit there instead. Leave the shared checkout untouched. Do not run "
+    "git checkout, git stash, git reset or git clean in it."
+)
+
+
+def _commit_repos(command: str, cwd: str) -> list[str]:
+    """The canonical checkout each `git commit` in `command` writes into.
+
+    Empty when every commit targets a worktree or no git repository at all."""
+    shared = []
+    for found in _parse_git_all(command, "commit"):
+        start = os.path.normpath(os.path.join(cwd or ".", found["chdir"] or "."))
+        root = work_worktree.shared_checkout(start)
+        if root and root not in shared:
+            shared.append(root)
+    return shared
+
+
 def gate_commit(session_id: str, command: str, cwd: str = "") -> dict:
-    """Deny a work-session `git commit` whose message credits the agent.
+    """Deny a work-session `git commit` that credits the agent or that writes
+    into a shared checkout.
 
     The message reaches git as a -m argument, a heredoc inside one, or a file
     named by -F, so the gate reads the command line and any such file. The
     operator wants no agent attribution in the history; the launch context
     says so, and a system reminder issued later in a session can still tell
     the agent to append a session link, so the rule is enforced here as well.
+
+    The shared-checkout test is not keyed on the task already owning a
+    worktree. A task that resolved none owns nothing, and a rule keyed on
+    ownership would let exactly that task commit into the shared tree. A deny
+    carries `need_worktree`, the repository the caller has to obtain a
+    worktree of, so the message can name a real directory.
     Returns {"decision": "allow"|"deny", "reason": str}."""
     if parse_commit(command) is None:
         return {"decision": "allow", "reason": "not a commit"}
@@ -836,28 +1027,55 @@ def gate_commit(session_id: str, command: str, cwd: str = "") -> dict:
         except OSError:
             continue
     found = attribution_match(text)
-    if not found:
+    if found:
+        label, match = found
+        work_store.record_gate(session_id, "commit_gate", "fail",
+                               {"command": command[:300], "label": label, "match": match})
+        return {"decision": "deny",
+                "reason": _COMMIT_DENY_REASON.format(label=label, match=match)}
+    item = work_worktree.session_item(session_id)
+    if item is None or item["worktree_opt_out"]:
         return {"decision": "allow", "reason": "no agent attribution"}
-    label, match = found
+    shared = _commit_repos(command, cwd)
+    if not shared:
+        return {"decision": "allow", "reason": "no agent attribution"}
     work_store.record_gate(session_id, "commit_gate", "fail",
-                           {"command": command[:300], "label": label, "match": match})
-    return {"decision": "deny",
-            "reason": _COMMIT_DENY_REASON.format(label=label, match=match)}
+                           {"command": command[:300], "shared": shared})
+    # Keyed on the repository that was denied. A task can hold a worktree of
+    # more than one repository, and naming the newest would send the agent to
+    # commit one repository's changes into another repository's tree.
+    row = work_worktree.for_item_repo(
+        item["id"], work_worktree.repo_common_dir(shared[0]))
+    where = (f"A worktree for this task is ready at {row['path']} on branch "
+             f"{row['branch']}." if row and os.path.isdir(row["path"])
+             else "Ask the work board for a worktree of this repository.")
+    return {"decision": "deny", "need_worktree": shared[0], "item_id": item["id"],
+            "reason": _SHARED_COMMIT_DENY.format(repo=shared[0], where=where)}
 
 
 def gate_push(session_id: str, command: str, cwd: str) -> dict:
-    """Lint and test the repository a work-session push targets.
+    """Lint and test every repository a work-session push targets.
 
     Returns {"decision": "allow"|"deny", "reason": str} and records the
     outcome as a push_gate event on the work item. Lint runs first and a lint
     failure denies before the test suite runs, so the fix loop stays short.
     A command whose repository cannot be resolved is allowed but recorded,
     because denying on a parse failure would wedge pushes the gate cannot
-    even check."""
-    push = parse_push(command)
-    if push is None:
+    even check. A command line that runs more than one push is gated once per
+    push; the first denial wins."""
+    pushes = _parse_git_all(command, "push")
+    if not pushes:
         return {"decision": "allow", "reason": "not a push"}
-    start_dir = os.path.normpath(os.path.join(cwd or ".", push["chdir"] or "."))
+    result = {"decision": "allow", "reason": "lint and tests passed"}
+    for push in pushes:
+        start_dir = os.path.normpath(os.path.join(cwd or ".", push["chdir"] or "."))
+        result = _gate_one_push(session_id, command, start_dir)
+        if result["decision"] == "deny":
+            return result
+    return result
+
+
+def _gate_one_push(session_id: str, command: str, start_dir: str) -> dict:
     repo = _repo_root(start_dir)
     payload = {"command": command[:300], "repo": repo.name if repo else ""}
     if repo is None:
