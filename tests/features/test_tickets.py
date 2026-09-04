@@ -2465,6 +2465,16 @@ class TestReplyCommitsToChangeReroute:
             "the review comment must reach the commit subject so the commit "
             f"says what changed; got: {subject.call_args.args!r}"
         )
+        assert subject.call_args.kwargs.get("ticket_key") == "PROJ-1", (
+            "the ticket key must reach the commit subject, because the ticket "
+            "system links a commit to its ticket by finding the key in the "
+            f"message; got: {subject.call_args.kwargs!r}"
+        )
+        assert "PROJ-1" in subject.call_args.args[1], (
+            "the fallback must carry the ticket key too, because the fallback "
+            "is what is committed when the model gives nothing usable; got: "
+            f"{subject.call_args.args[1]!r}"
+        )
         assert committer.call_args.kwargs["message"] == "fix: restore the row count on the log table", (
             "the derived subject must be the commit message, not the generic "
             f"wording; got: {committer.call_args.kwargs!r}"
