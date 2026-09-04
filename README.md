@@ -78,6 +78,7 @@ Every capability is a flag in the instance config. A flag that is off costs noth
 |---|---|
 | `tickets` | The ticket-to-PR pipeline |
 | `review_prs` | Review queue for PRs where you are a reviewer |
+| `auto_review` | On by default. Set it to false and a review only runs when you start one on `/reviews` |
 | `scope_review` | Consensus scope gate before the PR opens |
 | `pr_autofix` | Automatic review and fix cycle on every new PR (GitHub only) |
 | `defence` | Test-backed proof before a reply claims something works |
