@@ -252,7 +252,7 @@ class TestLaunchContexts:
         root = tmp_path / "apex-root"
         root.mkdir()
         entry = MagicMock()
-        entry.config = {"workspace": {"root": root, "repos": [{"name": "datapipe"}, {"name": "portal"}]}}
+        entry.config = {"workspace": {"root": root, "repos": ["datapipe", "portal"]}}
         return {"apexco": entry}, str(root)
 
     def test_context_block_lists_project_and_slack(self, monkeypatch, tmp_path):
