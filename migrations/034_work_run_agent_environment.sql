@@ -1,0 +1,2 @@
+ALTER TABLE work_runs ADD COLUMN env_key TEXT NOT NULL DEFAULT '';
+ALTER TABLE work_runs ADD COLUMN env_config_dir TEXT NOT NULL DEFAULT '';

@@ -32,6 +32,44 @@ def _env_prefix(env: dict) -> str:
     )
 
 
+CONFIG_DIR_VARS = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}
+
+
+def agent_config_dir(config: dict | None, agent: str = "claude") -> str:
+    """The configuration directory one agent runs with, "" when it runs with
+    the operator's default account.
+
+    An env override of the variable wins over config_dir, the precedence
+    claude_cmd and codex_cmd already use."""
+    agent_cfg = ((config or {}).get("llm") or {}).get(agent) or {}
+    env = {str(k): str(v) for k, v in (agent_cfg.get("env") or {}).items()}
+    var = CONFIG_DIR_VARS.get(agent, "CLAUDE_CONFIG_DIR")
+    return str(env.get(var) or agent_cfg.get("config_dir") or "")
+
+
+def with_config_dir(config: dict | None, agent: str, config_dir: str) -> dict:
+    """`config` with the agent's configuration directory replaced by
+    `config_dir`, and "" meaning the agent runs with no directory of its own.
+
+    A resume has to reproduce the directory the launch used, because the
+    conversation of a session lives under it. The recorded directory is the
+    authority, so an env override of the variable is dropped and a later
+    directory the config gained is removed."""
+    base = dict(config or {})
+    llm = dict(base.get("llm") or {})
+    agent_cfg = dict(llm.get(agent) or {})
+    env = {str(k): str(v) for k, v in (agent_cfg.get("env") or {}).items()}
+    if env.pop(CONFIG_DIR_VARS.get(agent, "CLAUDE_CONFIG_DIR"), None) is not None:
+        agent_cfg["env"] = env
+    if config_dir:
+        agent_cfg["config_dir"] = config_dir
+    else:
+        agent_cfg.pop("config_dir", None)
+    llm[agent] = agent_cfg
+    base["llm"] = llm
+    return base
+
+
 def claude_cmd(config: dict | None = None) -> str:
     """Interactive claude command line for one instance's tmux pane.
 
