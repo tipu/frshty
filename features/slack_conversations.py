@@ -21,6 +21,13 @@ The cost is that two messages in different channels sharing one ts would merge.
 Measured over the atropos capture — 24,192 records, 375 distinct message
 timestamps — no timestamp appeared in more than one channel.
 
+A direct message has no threads. People answer the previous message rather than
+reply in it, so one request is written as several top-level messages minutes
+apart and each of them is a conversation of one. Judged alone, none of them
+names what the others were about. So a conversation in a direct message is
+given what that direct message said before it, marked as context and judged
+from the messages below it. See _dm_context.
+
 A conversation the operator is part of, that has stopped moving, that somebody
 other than the operator wrote in, and that no proposal covers yet, is read once
 by the model. When it asks the operator for concrete work frshty opens a task
@@ -76,6 +83,7 @@ DEFAULT_MAX_JUDGEMENTS_PER_SCAN = 3
 DEFAULT_JUDGE_RETRY_MINUTES = 60
 MAX_TRANSCRIPT_MESSAGES = 60
 TRANSCRIPT_HEAD_MESSAGES = 5
+DM_CONTEXT_MESSAGES = 20
 MAX_MESSAGE_CHARS = 6000
 MAX_OBJECTIVE_CHARS = 400
 MAX_NOTE_CHARS = 200
@@ -84,6 +92,11 @@ ANSWERED_MARK = ("--- the operator already read everything above and declined"
                  " the task it opened; only what follows is new ---")
 ELIDED_MARK = ("--- {count} messages of this thread are left out here; it is"
                " longer than what you can see ---")
+CONTEXT_OPEN_MARK = ("--- what this direct message said before the conversation"
+                     " below; it is here so the conversation below can be read,"
+                     " and it is not what you are judging ---")
+CONTEXT_CLOSE_MARK = ("--- the conversation you are judging starts here ---")
+OPENED_MARK = "(frshty already opened a task for this message)"
 
 # A message that carries one of these subtypes is a channel event, not
 # something a person said. message_changed and message_deleted are not here:
@@ -162,13 +175,51 @@ acknowledges, or asks again for what was already asked above the line is not
 actionable. objective describes the new request, never the declined one.
 """
 
+CONTEXT_RULE = """
+The transcript opens with what this direct message said earlier. That part runs
+from
+
+{opened}
+
+to
+
+{closed}
+
+Those messages are there for one reason: to say what "this", "it" and "the
+ticket" in the conversation below point at. Judge the conversation below the
+second line alone. Every message above it is judged as its own conversation, so
+a request that appears only above it is not this one's to open. Read what is
+above the second line, use the identifiers it names in objective, and decide
+from what is below it.
+
+A message above the line marked "{opened_mark}" already opened a task for what
+it asks. A message below the line that repeats, chases, adds a detail to, or
+asks again for that work is not actionable: the task for it is open and the
+operator is deciding it. objective describes the new request, never the one
+that is already open.
+
+Nothing else above the line covers anything. A request above the line without
+that mark opened no task, whoever wrote it and however old it is, so when the
+conversation below the line asks the operator for that work it is the one that
+carries it, and it is actionable.
+"""
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
 def _iso(dt: datetime) -> str:
-    return dt.isoformat()
+    """Every stamp this module writes, in UTC.
+
+    These stamps are compared as strings: SQL orders text_dt against
+    proposed_at, and the candidate tests order judged_at against each other. An
+    isoformat that kept the offset it was given would break that order the
+    moment two of them carried different offsets, and 14:00-07:00 would sort
+    before 20:00+00:00 though it is an hour later. Normalising here is what
+    lets the comparison stay a string comparison."""
+    when = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    return when.astimezone(timezone.utc).isoformat()
 
 
 def _within(stamp: str | None, now: datetime, minutes: int) -> bool:
@@ -638,16 +689,35 @@ _UPSERT_CONVERSATION = (
 
 
 def _upsert_conversation(c, instance_key: str, workspace: str, message: dict,
-                         channel_name: str, involves: bool, stamp: str) -> int:
+                         channel_name: str, involves: bool,
+                         stamp: str) -> tuple[int, bool]:
+    """Write the conversation this message belongs to, and say whether this
+    line is what told frshty the conversation is in a direct message.
+
+    A REST batch carries no channel, so a conversation first seen through one
+    is filed with none and reads as no kind of channel at all. The websocket
+    record that names it changes nothing about the message itself, so no other
+    check would call the conversation changed, and yet every conversation in
+    that direct message can be read differently from this moment: the block
+    that gives them the messages said before them is matched on the channel.
+    The caller reopens them; see _reopen_the_conversations_it_is_context_for."""
     ts, thread_ts = message["ts"], message["thread_ts"]
+    before = c.execute(
+        "SELECT id, channel_id FROM slack_conversations"
+        " WHERE instance_key=? AND workspace=? AND thread_ts=?",
+        (instance_key, workspace, thread_ts)).fetchone()
     c.execute(_UPSERT_CONVERSATION,
               (instance_key, workspace, thread_ts, message["channel"], channel_name,
                ts, ts, 1 if involves else 0, stamp, stamp))
-    row = c.execute(
-        "SELECT id FROM slack_conversations"
-        " WHERE instance_key=? AND workspace=? AND thread_ts=?",
-        (instance_key, workspace, thread_ts)).fetchone()
-    return int(row["id"])
+    if before is None:
+        row = c.execute(
+            "SELECT id FROM slack_conversations"
+            " WHERE instance_key=? AND workspace=? AND thread_ts=?",
+            (instance_key, workspace, thread_ts)).fetchone()
+        return int(row["id"]), False
+    learned = (not before["channel_id"]
+               and str(message["channel"] or "").startswith("D"))
+    return int(before["id"]), learned
 
 
 def _write_message(c, conversation_id: int, message: dict, user_name: str,
@@ -729,27 +799,103 @@ def _tombstone(c, conversation_id: int, message: dict, stamp: str) -> bool:
     scan reaches a scan later than the deletion.
 
     The deletion applies only when its line is not older than the one the
-    stored text came from, for the same reason _write_message checks."""
+    stored text came from, for the same reason _write_message checks.
+
+    text_dt moves with the deletion, on the scan's own clock, exactly as it
+    moves for an edit. A deleted message now says nothing, which is a change to
+    what it says, and _reads_as_it_was_proposed has no other way to see that a
+    message standing above a decline boundary was taken away after the operator
+    declined the task it was part of."""
     dt = message.get("dt") or ""
     row = c.execute(
-        "SELECT deleted, source_dt FROM slack_conversation_messages"
+        "SELECT deleted, source_dt, text_dt FROM slack_conversation_messages"
         " WHERE conversation_id = ? AND ts = ?",
         (conversation_id, message["ts"])).fetchone()
     if row is None:
         c.execute(
             "INSERT INTO slack_conversation_messages"
-            "(conversation_id, ts, user_id, user_name, text, source_dt, deleted,"
-            " created_at) VALUES (?, ?, '', '', '', ?, 1, ?)",
-            (conversation_id, message["ts"], dt, stamp))
+            "(conversation_id, ts, user_id, user_name, text, source_dt, text_dt,"
+            " deleted, created_at) VALUES (?, ?, '', '', '', ?, ?, 1, ?)",
+            (conversation_id, message["ts"], dt, stamp, stamp))
         return True
     if (row["source_dt"] or "") > dt:
         return False
     changed = not row["deleted"]
     c.execute(
-        "UPDATE slack_conversation_messages SET deleted = 1, text = '', source_dt = ?"
-        " WHERE conversation_id = ? AND ts = ?",
-        (dt, conversation_id, message["ts"]))
+        "UPDATE slack_conversation_messages SET deleted = 1, text = '',"
+        " source_dt = ?, text_dt = ? WHERE conversation_id = ? AND ts = ?",
+        (dt, stamp if changed else (row["text_dt"] or ""), conversation_id,
+         message["ts"]))
     return changed
+
+
+def _reopen_the_conversations_it_is_context_for(c, instance_key: str,
+                                                floors: dict[int, str],
+                                                stamp: str) -> None:
+    """Clear the judgement of every conversation that reads a changed message
+    as context.
+
+    A judgement answers a transcript, and clearing it when that transcript
+    changes is what stops a conversation being written off on evidence it no
+    longer holds. For a conversation in a channel the caller does that already:
+    a change to its own messages clears its own judgement. A conversation in a
+    direct message is judged from the messages that direct message said before
+    it as well; see _dm_context. Those belong to OTHER conversations, so the
+    caller's clear never reaches this one, and a message edited hours after the
+    judge said "not enough detail" would leave the request marked read to its
+    last message and no scan would look at it again.
+
+    `floors` maps each conversation this scan changed to the oldest message ts
+    the scan actually wrote in it. A conversation is reopened when it starts
+    after that ts, in the same direct message, because only a message older
+    than a conversation can be its context. Taking the bound from the changed
+    MESSAGE rather than from the conversation it belongs to is what keeps this
+    cheap: a reply to a thread whose root is a month old changes a month-old
+    conversation, and a bound taken from that root would reopen every
+    conversation of the month and spend every scan's judgement allowance on
+    transcripts that did not move. A tombstone carries the ts of the message it
+    replaces, so a deletion bounds itself the same way.
+
+    A conversation whose channel was only just learned is passed with an empty
+    floor. Its messages were filed with no channel, so nothing knew they were
+    in a direct message and nothing could read them as context; every
+    conversation in that direct message may now read differently. An empty
+    floor is older than every ts, so all of them are reopened. It happens once
+    per conversation, when a websocket record names the channel a REST batch
+    could not.
+
+    A conversation whose proposal is still waiting on the operator, or which he
+    approved, keeps its judgement: he is deciding that task, or an agent is
+    already on it. A conversation whose proposal he declined does not. A
+    decline answers the request it was opened for and nothing else, and the
+    corrected context can be what a later message in that thread was waiting
+    for; _asked_again_since_the_decline measures "asked again" from judged_ts,
+    so clearing it is what lets that thread be read once more."""
+    if not floors:
+        return
+    marks = ",".join("?" * len(floors))
+    ids = list(floors)
+    channels: dict[tuple[str, str], str] = {}
+    for row in c.execute(
+            "SELECT id, workspace, channel_id FROM slack_conversations"
+            f" WHERE id IN ({marks}) AND channel_id LIKE 'D%'", ids).fetchall():
+        key = (row["workspace"], row["channel_id"])
+        floor = floors[row["id"]]
+        if key not in channels or floor < channels[key]:
+            channels[key] = floor
+    for (workspace, channel_id), floor in channels.items():
+        c.execute(
+            "UPDATE slack_conversations SET judged_ts = '', judged_at = NULL,"
+            " updated_at = ? WHERE instance_key = ? AND workspace = ?"
+            " AND channel_id = ? AND first_ts > ?"
+            f" AND id NOT IN ({marks})"
+            " AND (proposed_at IS NULL OR EXISTS ("
+            "   SELECT 1 FROM work_items w WHERE w.id ="
+            "   slack_conversations.work_item_id"
+            f"   AND w.state IN {work_store.FINISHED_STATES_SQL}"
+            "    AND w.stop_reason = ?))",
+            [stamp, instance_key, workspace, channel_id, floor] + ids
+            + [work_store.DECLINED_REASON])
 
 
 def ingest(config: dict, instance_key: str = "", now: datetime | None = None) -> dict:
@@ -774,6 +920,18 @@ def ingest(config: dict, instance_key: str = "", now: datetime | None = None) ->
     records, complete = _read_capture(config, blob, now)
     stamp = _iso(now)
     changed: set[int] = set()
+    # The oldest message ts this scan wrote in each conversation it changed.
+    # _reopen_the_conversations_it_is_context_for reads it; the empty string
+    # means the whole direct message, which is what a newly learned channel
+    # needs.
+    floors: dict[int, str] = {}
+
+    def touched(conversation_id: int, ts: str) -> None:
+        changed.add(conversation_id)
+        held = floors.get(conversation_id)
+        if held is None or ts < held:
+            floors[conversation_id] = ts
+
     written = 0
     with db.tx() as c:
         for record in records:
@@ -784,17 +942,19 @@ def ingest(config: dict, instance_key: str = "", now: datetime | None = None) ->
                             and (message["user"] == operator_id
                                  or _mentions_operator(message["text"], operator_id)
                                  or channel.startswith("D")))
-                conversation_id = _upsert_conversation(
+                conversation_id, learned = _upsert_conversation(
                     c, instance_key, workspace, message, channel_name, involves, stamp)
+                if learned:
+                    touched(conversation_id, "")
                 if message["deleted"]:
                     if _tombstone(c, conversation_id, message, stamp):
                         written += 1
-                        changed.add(conversation_id)
+                        touched(conversation_id, message["ts"])
                     continue
                 if _write_message(c, conversation_id, message,
                                   names.get(message["user"], ""), stamp):
                     written += 1
-                    changed.add(conversation_id)
+                    touched(conversation_id, message["ts"])
         for conversation_id in changed:
             # judged_ts is cleared so an edit is judged again. An edit keeps
             # the original ts, so last_ts does not move, and the candidate
@@ -822,6 +982,8 @@ def ingest(config: dict, instance_key: str = "", now: datetime | None = None) ->
                 "  updated_at = ? WHERE id = ?",
                 (conversation_id, conversation_id, conversation_id, stamp,
                  conversation_id))
+        _reopen_the_conversations_it_is_context_for(c, instance_key, floors,
+                                                    stamp)
         # A direct message is addressed to the operator whoever wrote it, and
         # a REST batch carries no channel of its own, so involvement is settled
         # once the channel is known rather than per message.
@@ -880,10 +1042,16 @@ def _reads_as_it_was_proposed(rows: list[dict], answered_ts: str,
     a message whose create line arrives late out of a rotated capture tail: its
     ts is old, but the proposal was never built from it.
 
+    A message deleted above the line breaks the claim the same way. Its
+    tombstone is in `rows` for that reason: the row it leaves behind is the
+    only trace of it, and without it the transcript would simply be shorter
+    than the one the operator read and nothing would say so.
+
     text_dt is when frshty first held the text a message now says, on the same
     clock proposed_at is stamped from, so comparing the two answers both. A row
     with no text_dt cannot answer and counts as changed. See _write_message for
-    why neither source_dt nor the capture's own clock will do.
+    why neither source_dt nor the capture's own clock will do, and _tombstone
+    for why a deletion moves it too.
 
     Every no leaves the transcript whole and unmarked, which is the state this
     module was in before the mark existed: the judge may propose again what was
@@ -901,9 +1069,147 @@ def _reads_as_it_was_proposed(rows: list[dict], answered_ts: str,
     return True
 
 
+def _read(conn, sql: str, params: tuple) -> list[dict]:
+    """Run one read on the caller's transaction when it has one.
+
+    The transcript is rendered twice: once for the judge, and once inside the
+    transaction that decides what to write about the conversation. The second
+    render has to answer from the state that transaction holds. db.query_all
+    opens a connection of its own, so it would read outside the lock and a
+    write that landed between the render and the claim would not be seen."""
+    if conn is None:
+        return db.query_all(sql, params)
+    return [dict(row) for row in conn.execute(sql, params).fetchall()]
+
+
+def _dm_context(conversation_id: int, conn=None) -> tuple[list[dict], list[dict]]:
+    """What a direct message said before this conversation started.
+
+    Slack gives a top-level message no thread of its own, so its ts is its
+    thread_ts and it is a conversation of one. In a channel that is right: a
+    thread is where a request and the detail that explains it are kept
+    together, and the messages around it belong to other exchanges.
+
+    A direct message has no threads. People answer the previous message
+    instead of replying in it, so a request and the identifiers it needs are
+    written as separate top-level messages minutes apart, and every one of
+    them is its own conversation. Judged alone, "can you investigate how this
+    got shown on their side" names nothing an agent could start, and frshty
+    opened nothing for it. What "this" is was said in the message before.
+
+    So a conversation in a direct message is given the messages that direct
+    message said before it. They are context and never the request: the judge
+    is told to decide from the messages below them, and each of them is judged
+    as the conversation it belongs to. DM_CONTEXT_MESSAGES of them are kept,
+    the most recent first, however old they are. Age is the wrong bound —
+    a request that stood still for a month is answered by the message from a
+    month ago — and the count keeps the transcript readable.
+
+    Messages are matched on the channel, so this returns nothing for a
+    conversation seen only through a REST pull, which carries no channel.
+    That is the state the whole module is in for such a conversation: its
+    channel is unknown, so it cannot be known to be a direct message.
+
+    Returns the messages to render and the key that names the stretch of the
+    direct message they came from, which _dm_withdrew_evidence needs to ask
+    what was deleted from it.
+
+    Each message says whether the task its conversation opened still answers
+    what it asks, because a request that already opened a task must not open a
+    second one; see OPENED_MARK. text_dt comes
+    back because the block sits above the decline boundary, and
+    _reads_as_it_was_proposed has to say these messages still read as they did
+    when the declined proposal was built from them."""
+    found = _read(conn,
+                  "SELECT instance_key, workspace, channel_id, first_ts"
+                  " FROM slack_conversations WHERE id = ?", (conversation_id,))
+    row = found[0] if found else None
+    if not row or not str(row["channel_id"] or "").startswith("D"):
+        return [], ()
+    key = (row["instance_key"], row["workspace"], row["channel_id"],
+           conversation_id, row["first_ts"])
+    rows = list(reversed(_read(
+        conn,
+        "SELECT m.ts, m.user_id, m.user_name, m.text, m.text_dt,"
+        # A message carries the task its conversation opened only while it
+        # still says what it said when that task was opened. Edited since, it
+        # asks for something the operator was never shown, and a mark saying
+        # frshty had already opened a task for it would suppress the very
+        # request the edit made.
+        " CASE WHEN c.work_item_id IS NOT NULL AND c.proposed_at IS NOT NULL"
+        "       AND m.text_dt <> '' AND m.text_dt <= c.proposed_at"
+        # The task answers what this message asked, and what it asked is what
+        # the messages before it made of it. "please move this ticket to PLT"
+        # opened a task for WB-412 because the message above it said WB-412,
+        # and an edit of that message to WB-500 leaves this one asking for
+        # something the task never covered while its own text never moved.
+        "       AND NOT EXISTS (SELECT 1 FROM slack_conversation_messages e"
+        "                       JOIN slack_conversations d"
+        "                         ON d.id = e.conversation_id"
+        "                       WHERE d.instance_key = c.instance_key"
+        "                         AND d.workspace = c.workspace"
+        "                         AND d.channel_id = c.channel_id"
+        "                         AND e.ts < m.ts"
+        "                         AND (e.text_dt = '' OR e.text_dt IS NULL"
+        "                              OR e.text_dt > c.proposed_at))"
+        "      THEN 1 ELSE 0 END AS opened"
+        " FROM slack_conversation_messages m"
+        " JOIN slack_conversations c ON c.id = m.conversation_id"
+        " WHERE c.instance_key = ? AND c.workspace = ? AND c.channel_id = ?"
+        "   AND c.id <> ? AND m.deleted = 0 AND m.ts < ?"
+        " ORDER BY m.ts DESC LIMIT ?", key + (DM_CONTEXT_MESSAGES,))))
+    return rows, key
+
+
+def _dm_withdrew_evidence(key: tuple, conn, oldest: str, answered_ts: str,
+                          answered_at: str) -> bool:
+    """Whether the direct message lost a message the declined proposal read.
+
+    ANSWERED_MARK claims the operator saw everything above it. A message the
+    block showed him and that has since been deleted is not above the line any
+    more, it is simply gone, and the transcript is shorter than the one he read
+    with nothing in it saying so. _reads_as_it_was_proposed cannot see that,
+    because a deleted message is not in the block it is given.
+
+    `oldest` is how far back the block reached when it was whole. A block
+    holding fewer messages than it may hold reached to the start of the direct
+    message, so every tombstone before this conversation was once inside it. A
+    full one reached at least as far back as its oldest surviving message,
+    because every message deleted from it let the block take in an older one.
+
+    This asks whether such a message exists rather than fetching them, so the
+    answer costs one row however many messages the direct message has lost.
+    text_dt is compared in SQL, where these stamps order lexically: both sides
+    are datetime.isoformat of an aware UTC datetime, so they share a width up
+    to the microseconds, and a stamp without them sorts before the same second
+    with them."""
+    if not key or not answered_ts:
+        return False
+    return bool(_read(
+        conn,
+        "SELECT 1 FROM slack_conversation_messages m"
+        " JOIN slack_conversations c ON c.id = m.conversation_id"
+        " WHERE c.instance_key = ? AND c.workspace = ? AND c.channel_id = ?"
+        "   AND c.id <> ? AND m.ts < ? AND m.deleted = 1 AND m.ts >= ?"
+        "   AND m.ts <= ? AND (m.text_dt IS NULL OR m.text_dt = ''"
+        "                      OR m.text_dt > ?) LIMIT 1",
+        key + (oldest, answered_ts, answered_at)))
+
+
+def _line(row: dict, names: dict, operator_id: str) -> str:
+    who = row["user_name"] or names.get(row["user_id"], "") or row["user_id"]
+    if operator_id and row["user_id"] == operator_id:
+        who = f"{who} {OPERATOR_MARK}"
+    if row.get("opened"):
+        who = f"{who} {OPENED_MARK}"
+    when = datetime.fromtimestamp(_ts_value(row["ts"]), tz=timezone.utc)
+    text = _quote(slack_monitor._resolve_names(row["text"], names))
+    return f"[{when.strftime('%Y-%m-%d %H:%M UTC')}] {who}: {text}"
+
+
 def _transcript(conversation_id: int, names: dict, operator_id: str,
-                answered_ts: str = "",
-                answered_at: str = "") -> tuple[str, list[str], bool]:
+                answered_ts: str = "", answered_at: str = "",
+                conn=None) -> tuple[str, list[str], bool, bool]:
     """Render one conversation for the judge and for the brief.
 
     The whole thread goes in, however old the start of it is. A thread that
@@ -963,12 +1269,29 @@ def _transcript(conversation_id: int, names: dict, operator_id: str,
     when somebody asks the operator for it, so the reader of the transcript
     has to be able to tell which side of the exchange the operator is on. A
     display name does not say that: two people can share one, and the name the
-    capture holds for the operator is whatever Slack last reported."""
-    rows = db.query_all(
-        "SELECT ts, user_id, user_name, text, text_dt"
-        " FROM slack_conversation_messages"
-        " WHERE conversation_id = ? AND deleted = 0 ORDER BY ts", (conversation_id,))
-    if answered_ts and not _reads_as_it_was_proposed(rows, answered_ts, answered_at):
+    capture holds for the operator is whatever Slack last reported.
+
+    A conversation in a direct message opens with what that direct message
+    said before it, between CONTEXT_OPEN_MARK and CONTEXT_CLOSE_MARK; see
+    _dm_context. That block is built after the boundary pass and prepended, so
+    it takes no part in placing ANSWERED_MARK: those messages are all older
+    than the proposal that drew the line, and a line drawn above them would
+    claim the operator declined a task opened from a message he was only shown
+    for reference. A conversation with nothing left to read gets no block
+    either — an empty transcript is how this tells the caller there is nothing
+    to judge, and context alone is not something to judge. The fourth value
+    returned says whether the block was drawn, for the same reason the third
+    says whether the boundary was."""
+    held = _read(conn,
+                 "SELECT ts, user_id, user_name, text, text_dt, deleted"
+                 " FROM slack_conversation_messages"
+                 " WHERE conversation_id = ? ORDER BY ts", (conversation_id,))
+    rows = [row for row in held if not row["deleted"]]
+    context, key = _dm_context(conversation_id, conn) if rows else ([], ())
+    oldest = context[0]["ts"] if len(context) == DM_CONTEXT_MESSAGES else ""
+    if answered_ts and (
+            not _reads_as_it_was_proposed(context + held, answered_ts, answered_at)
+            or _dm_withdrew_evidence(key, conn, oldest, answered_ts, answered_at)):
         answered_ts = ""
     head = TRANSCRIPT_HEAD_MESSAGES
     if answered_ts:
@@ -981,20 +1304,16 @@ def _transcript(conversation_id: int, names: dict, operator_id: str,
         rows = rows[:head] + rows[len(rows) - keep:]
     if gap:
         answered_ts = ""
-    entries: list[tuple[str, str]] = []
     participants: list[str] = []
-    for index, row in enumerate(rows):
+    for row in context + rows:
         who = row["user_name"] or names.get(row["user_id"], "") or row["user_id"]
         if who not in participants:
             participants.append(who)
-        if operator_id and row["user_id"] == operator_id:
-            who = f"{who} {OPERATOR_MARK}"
+    entries: list[tuple[str, str]] = []
+    for index, row in enumerate(rows):
         if gap and index == head:
             entries.append((gap[0]["ts"], ELIDED_MARK.format(count=len(gap))))
-        when = datetime.fromtimestamp(_ts_value(row["ts"]), tz=timezone.utc)
-        text = _quote(slack_monitor._resolve_names(row["text"], names))
-        entries.append(
-            (row["ts"], f"[{when.strftime('%Y-%m-%d %H:%M UTC')}] {who}: {text}"))
+        entries.append((row["ts"], _line(row, names, operator_id)))
     lines, marked, drawn = [], False, False
     for ts, line in entries:
         if answered_ts and not marked and ts > answered_ts:
@@ -1003,7 +1322,12 @@ def _transcript(conversation_id: int, names: dict, operator_id: str,
                 drawn = True
                 lines.append(ANSWERED_MARK)
         lines.append(line)
-    return "\n".join(lines), participants, drawn
+    shown = bool(lines and context)
+    if shown:
+        lines = ([CONTEXT_OPEN_MARK]
+                 + [_line(row, names, operator_id) for row in context]
+                 + [CONTEXT_CLOSE_MARK] + lines)
+    return "\n".join(lines), participants, drawn, shown
 
 
 def _channel_label(row: dict, names: dict) -> str:
@@ -1215,11 +1539,19 @@ def _proposals_today(instance_key: str, now: datetime) -> int:
 
 
 def _judge(row: dict, transcript: str, participants: list[str], channel: str,
-           operator: str, answered: bool = False) -> dict | None:
+           operator: str, answered: bool = False,
+           context: bool = False) -> dict | None:
+    rules = ""
+    if context:
+        rules += CONTEXT_RULE.format(opened=CONTEXT_OPEN_MARK,
+                                     closed=CONTEXT_CLOSE_MARK,
+                                     opened_mark=OPENED_MARK)
+    if answered:
+        rules += DECLINED_RULE.format(answered=ANSWERED_MARK)
     raw = run_haiku(JUDGE_PROMPT.format(
         operator=operator or "the operator",
         mark=OPERATOR_MARK,
-        prior=DECLINED_RULE.format(answered=ANSWERED_MARK) if answered else "",
+        prior=rules,
         workspace=row["workspace"] or "(unknown)",
         channel=channel,
         participants=", ".join(participants) or "(unknown)",
@@ -1284,7 +1616,27 @@ def _record_attempt(conversation_id: int, now: datetime) -> None:
         (stamp, stamp, conversation_id))
 
 
-def _record_judgement(conversation_id: int, last_ts: str, now: datetime) -> None:
+def _reads_as_judged(row: dict, names: dict, operator_id: str, answered_ts: str,
+                     transcript: str, conn) -> bool:
+    """Whether the conversation still reads exactly as the judge read it.
+
+    The verdict answers one transcript. Between the render that produced it and
+    the write that acts on it sits a model call, so the evidence can move: a
+    message added, edited or deleted, in this conversation or in the direct
+    message context above it. The revision on this conversation catches the
+    first kind and not the second, because a context message belongs to another
+    conversation and raises that one's revision instead.
+
+    Comparing the render catches all of it at once, and it is run on the
+    caller's transaction so nothing can land between the answer and the write
+    it decides. A no writes nothing at all: the conversation keeps no
+    judgement, and the next scan reads the whole of it again."""
+    return _transcript(row["id"], names, operator_id, answered_ts,
+                       row["proposed_at"] or "", conn=conn)[0] == transcript
+
+
+def _record_judgement(conversation_id: int, last_ts: str, now: datetime,
+                      conn=None) -> None:
     """Mark how far this conversation has been read.
 
     The watermark only ever moves forward. Two scans can judge one
@@ -1295,10 +1647,13 @@ def _record_judgement(conversation_id: int, last_ts: str, now: datetime) -> None
     thread would then look like it had asked again the moment the operator
     declined that proposal, and the same request would be proposed twice."""
     stamp = _iso(now)
-    db.execute(
-        "UPDATE slack_conversations SET judged_ts = MAX(judged_ts, ?),"
-        " judged_at = ?, updated_at = ? WHERE id = ?",
-        (last_ts, stamp, stamp, conversation_id))
+    sql = ("UPDATE slack_conversations SET judged_ts = MAX(judged_ts, ?),"
+           " judged_at = ?, updated_at = ? WHERE id = ?")
+    params = (last_ts, stamp, stamp, conversation_id)
+    if conn is None:
+        db.execute(sql, params)
+    else:
+        conn.execute(sql, params)
 
 
 def propose(config: dict, instance_key: str = "", now: datetime | None = None) -> list[dict]:
@@ -1336,6 +1691,18 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
     request that message opened would then never be proposed. proposed_ts only
     moves when a proposal is opened, which is the only moment the operator is
     given something to decide.
+
+    The transcript is rendered a second time before the claim, and a proposal
+    is opened only when it still reads exactly as it did when the judge read
+    it. The claim itself is a revision on this conversation, and a conversation
+    in a direct message is judged from messages that belong to OTHER
+    conversations; see _dm_context. ingest raises the revision of the
+    conversation each of those messages belongs to, not of this one, so an edit
+    or a deletion inside the context block during the model call would pass the
+    claim and open a proposal from evidence that has since changed. Comparing
+    the render covers all of it at once: the block, this conversation's own
+    messages, and the boundary drawn between them. It runs only when a proposal
+    is about to be opened, so it costs two queries a few times a day.
 
     Returns the proposals opened and what the capture reads inside this call
     added to the index, so the caller can report every message the scan
@@ -1390,14 +1757,14 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
         row = fresh
         judged += 1
         answered_ts = row["proposed_ts"] if row["proposed_at"] else ""
-        transcript, participants, answered = _transcript(
+        transcript, participants, answered, context = _transcript(
             row["id"], names, operator_id, answered_ts, row["proposed_at"] or "")
         if not transcript:
             _record_judgement(row["id"], row["last_ts"], tick)
             continue
         channel = _channel_label(row, names)
         verdict = _judge(row, transcript, participants, channel, operator,
-                         answered=answered)
+                         answered=answered, context=context)
         if verdict is None:
             _record_attempt(row["id"], tick)
             log.emit("slack_proposal_judge_failed",
@@ -1407,8 +1774,27 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
             continue
         objective = str(verdict.get("objective") or "").strip()[:MAX_OBJECTIVE_CHARS]
         reason = str(verdict.get("reason") or "").strip()
+        # Slack did not stop while the model read. The capture is folded in
+        # once more before anything at all is written about this conversation,
+        # so both verdicts are decided against the index as it stands now.
+        scan = ingest(config, instance_key=instance_key, now=tick)
+        counts["messages"] += scan["messages"]
+        counts["conversations"] += scan["conversations"]
+        if not scan["complete"]:
+            break
         if verdict.get("actionable") is not True or not objective:
-            _record_judgement(row["id"], row["last_ts"], tick)
+            # A no is written only when the transcript still reads as the judge
+            # read it. A conversation in a direct message is judged from
+            # messages that belong to other conversations, and ingest raises
+            # THEIR revision and clears THEIR judgement, not this one's. So a
+            # context message edited during the model call to name the ticket
+            # the judge said was missing would otherwise leave this
+            # conversation marked read to its last message and never judged
+            # again, which hides a request nobody ever answered.
+            with db.tx() as c:
+                if _reads_as_judged(row, names, operator_id, answered_ts,
+                                    transcript, c):
+                    _record_judgement(row["id"], row["last_ts"], tick, conn=c)
             continue
         contexts = [c for c in (instance_key, SLACK_TAG) if c]
         tags = work_tags.derive_tags(objective, contexts,
@@ -1425,18 +1811,14 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
         # leaves a task the conversation does not know about, and the next
         # scan opens a second one for the same request.
         #
-        # Slack did not stop while the model read either. The capture is
-        # folded in once more so a message that landed during the call raises
-        # the revision and the claim below refuses. This is a check and then
-        # an act on a file another process appends to, so a message that lands
-        # between these two statements is still missed. The window went from a
-        # model call to two statements; closing it outright would need a lock
-        # on a file frshty does not write.
-        scan = ingest(config, instance_key=instance_key, now=tick)
-        counts["messages"] += scan["messages"]
-        counts["conversations"] += scan["conversations"]
-        if not scan["complete"]:
-            break
+        # The transcript is rendered again inside that transaction, on its
+        # connection, and the proposal is opened only when it still reads as
+        # the judge read it. That covers the context block, whose messages
+        # belong to other conversations and so raise no revision here. Reading
+        # it outside the transaction would leave the same gap one statement
+        # wide: BEGIN IMMEDIATE holds the write lock, so nothing can land
+        # between this render and the claim below it.
+        #
         # The mark is also the claim. It is written first, and only against a
         # conversation whose revision still matches the transcript above and
         # which still carries the proposal the transcript was read against:
@@ -1460,6 +1842,9 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
         declined = row["work_item_id"] if row["proposed_at"] else None
         whole = row["message_count"] <= MAX_TRANSCRIPT_MESSAGES
         with db.tx() as c:
+            if not _reads_as_judged(row, names, operator_id, answered_ts,
+                                    transcript, c):
+                continue
             claimed = c.execute(
                 _CLAIM_CONVERSATION,
                 (row["last_ts"], stamp, row["last_ts"] if whole else "", stamp,
