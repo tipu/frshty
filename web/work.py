@@ -104,9 +104,9 @@ def api_work_thread_task(root_id: int, body: dict):
             status_code=409)
     result = work_launch.launch_followup(thread["continue_from"], body.get("text") or "",
                                          cwd=body.get("cwd") or "",
-                                         contexts=body.get("contexts") or [],
-                                         slack=bool(body.get("slack")),
-                                         agent=body.get("agent") or "claude")
+                                         contexts=body.get("contexts"),
+                                         slack=body.get("slack"),
+                                         agent=body.get("agent") or "")
     if "error" in result:
         status = 503 if "personal instance" in result["error"] else (
             500 if "launch failed" in result["error"] else 400)
@@ -215,11 +215,17 @@ def api_work_btw(item_id: int, body: dict):
 
 @router.post("/api/work/items/{item_id}/followup")
 def api_work_followup(item_id: int, body: dict):
+    """Launch a task that continues one finished task.
+
+    The board offers this on a task the agent reported done, where the
+    operator has read the report and wants the next run without leaving the
+    board. A body that carries no projects and no agent inherits both from
+    the source task, so the follow-up runs where its source ran."""
     result = work_launch.launch_followup(item_id, body.get("text") or "",
                                          cwd=body.get("cwd") or "",
-                                         contexts=body.get("contexts") or [],
-                                         slack=bool(body.get("slack")),
-                                         agent=body.get("agent") or "claude")
+                                         contexts=body.get("contexts"),
+                                         slack=body.get("slack"),
+                                         agent=body.get("agent") or "")
     if "error" in result:
         status = 503 if "personal instance" in result["error"] else (
             500 if "launch failed" in result["error"] else 400)

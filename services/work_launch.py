@@ -524,15 +524,40 @@ def resume_session(item_id: int) -> bool:
 
 
 def launch_followup(source_item_id: int, objective: str, cwd: str = "",
-                    contexts: list[str] | None = None, slack: bool = False,
-                    agent: str = "claude") -> dict:
-    source = db.query_one("SELECT id, state FROM work_items WHERE id = ?", (source_item_id,))
+                    contexts: list[str] | None = None, slack: bool | None = None,
+                    agent: str = "") -> dict:
+    """Launch a task that continues a finished task.
+
+    A caller that names the projects, the Slack archive, the working directory
+    or the agent gets exactly those. A caller that omits them inherits them
+    from the source task, so a follow-up typed in one box runs where its
+    source ran. The inherited directory is the one the source run started in,
+    which is the resolved directory, not the project the operator picked. An
+    inherited directory that no longer exists is dropped, so a follow-up never
+    fails on a directory the caller did not name. Passing an empty context
+    list is a choice, not an omission: it launches with no project context."""
+    source = db.query_one(
+        "SELECT i.id, i.state, i.contexts, i.launch_cwd, "
+        "(SELECT provider FROM work_runs r WHERE r.work_item_id = i.id "
+        "ORDER BY r.id DESC LIMIT 1) AS last_provider, "
+        "(SELECT cwd FROM work_runs r WHERE r.work_item_id = i.id "
+        "ORDER BY r.id DESC LIMIT 1) AS last_cwd "
+        "FROM work_items i WHERE i.id = ?", (source_item_id,))
     if not source:
         return {"error": f"unknown source work item: {source_item_id}"}
     if source["state"] not in work_store.FINISHED_STATES:
         return {"error": f"source work item {source_item_id} is not done (state: {source['state']})"}
-    return launch(objective, cwd=cwd, contexts=contexts, slack=slack,
-                  source_item_id=source_item_id, agent=agent)
+    if contexts is None:
+        labels = [c for c in (source["contexts"] or "").split(",") if c]
+        contexts = [c for c in labels if c != SLACK_LABEL]
+        if slack is None:
+            slack = SLACK_LABEL in labels
+        inherited_cwd = source["last_cwd"] or source["launch_cwd"] or ""
+        if not cwd and os.path.isdir(inherited_cwd):
+            cwd = inherited_cwd
+    return launch(objective, cwd=cwd, contexts=contexts, slack=bool(slack),
+                  source_item_id=source_item_id,
+                  agent=agent or source["last_provider"] or "claude")
 
 
 PUSH_GATE_TEST_TIMEOUT = TEST_RUN_TIMEOUT // 3
