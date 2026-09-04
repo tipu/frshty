@@ -154,6 +154,12 @@ def main():
     port = args.port or _config["job"]["port"]
 
     host = args.host or _config["job"].get("bind", "127.0.0.1")
+    # The work hook asks the board for a worktree from its own process, so it
+    # needs the address the listener is actually on. An instance's _base_url
+    # is a public host name behind a proxy, and --port moves the listener
+    # without changing any config.
+    cfg.write_board_file(
+        f"http://{'127.0.0.1' if host in ('0.0.0.0', '::', '') else host}:{port}")
     # Always disable reload: event system (started before uvicorn) handles cron internally
     reload = False
     src = Path(__file__).parent

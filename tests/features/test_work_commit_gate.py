@@ -76,22 +76,24 @@ class TestAttributionMatch:
 
 
 class TestGateCommit:
-    def test_allows_a_clean_commit(self):
+    def test_allows_a_clean_commit(self, tmp_path):
         item_id, sid = _mkrun("clean commit")
-        out = work_launch.gate_commit(sid, 'git commit -m "fix: drop the stale index"')
+        out = work_launch.gate_commit(
+            sid, 'git commit -m "fix: drop the stale index"', str(tmp_path))
         assert out["decision"] == "allow"
         assert _gate_events(item_id) == []
 
-    def test_allows_a_command_that_does_not_commit(self):
+    def test_allows_a_command_that_does_not_commit(self, tmp_path):
         item_id, sid = _mkrun("no commit")
-        out = work_launch.gate_commit(sid, f"echo {SESSION_LINK}")
+        out = work_launch.gate_commit(sid, f"echo {SESSION_LINK}", str(tmp_path))
         assert out["decision"] == "allow"
         assert _gate_events(item_id) == []
 
     def test_denies_a_session_link_trailer(self):
         item_id, sid = _mkrun("session link commit")
         out = work_launch.gate_commit(
-            sid, _heredoc_commit(f"fix: drop the stale index\n\nClaude-Session: {SESSION_LINK}"))
+            sid, _heredoc_commit(f"fix: drop the stale index\n\nClaude-Session: {SESSION_LINK}"),
+            "/tmp")
         assert out["decision"] == "deny"
         assert "session link" in out["reason"]
         payload = json.loads(_gate_events(item_id)[0]["payload"])
@@ -101,7 +103,8 @@ class TestGateCommit:
     def test_denies_a_co_author_trailer(self):
         item_id, sid = _mkrun("co-author commit")
         out = work_launch.gate_commit(
-            sid, _heredoc_commit("fix: x\n\nCo-Authored-By: Claude <noreply@anthropic.com>"))
+            sid, _heredoc_commit("fix: x\n\nCo-Authored-By: Claude <noreply@anthropic.com>"),
+            "/tmp")
         assert out["decision"] == "deny"
         assert len(_gate_events(item_id)) == 1
 

@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import tomllib
@@ -109,6 +110,56 @@ def ticket_worktree_path(config: dict, ticket_slug: str, repo_name: str) -> Path
     if ws["ticket_layout"] == "workspace":
         return tickets_dir / ticket_slug / "workspace" / repo_name
     return tickets_dir / ticket_slug / repo_name
+
+
+TASK_WORKTREE_ROOT = Path.home() / ".frshty" / "worktrees"
+BOARD_FILE = Path.home() / ".frshty" / "board.json"
+_BOARD_URL = ""
+
+
+def write_board_file(base_url: str) -> None:
+    """Publish the address the board actually listens on.
+
+    The work hook runs as its own python3 process and resolves no instance
+    config, so a gate that has to ask the server for a worktree needs the
+    address from somewhere.
+
+    This must be the bound address, not an instance's `_base_url`. Every
+    instance here names a public host over https, and a --port override moves
+    the listener without changing any config, so a gate pointed at either one
+    reaches nothing and denies every write."""
+    global _BOARD_URL
+    if not base_url:
+        return
+    _BOARD_URL = base_url
+    BOARD_FILE.parent.mkdir(parents=True, exist_ok=True)
+    BOARD_FILE.write_text(json.dumps({"base_url": base_url}) + "\n")
+
+
+def board_url() -> str:
+    """The address the board listens on, "" when no server has published one."""
+    if _BOARD_URL:
+        return _BOARD_URL
+    try:
+        return str(json.loads(BOARD_FILE.read_text()).get("base_url") or "")
+    except (OSError, ValueError):
+        return ""
+
+
+def task_worktree_path(config: dict | None, project_key: str, item_id: int,
+                       repo_name: str) -> Path:
+    """Where one work item's worktree of one repository lives.
+
+    Outside the project tree on purpose. Ticket worktrees live under
+    <root>/<tickets_dir>/ and the ticket sweeps walk that directory, so a task
+    worktree placed there would be read as a ticket. The shape follows
+    ticket_layout, because workspace.run_commands entries are written against
+    it. A project with no loaded config uses the flat layout."""
+    ws = (config or {}).get("workspace") or {}
+    base = TASK_WORKTREE_ROOT / (project_key or "adhoc") / f"work-{item_id}"
+    if ws.get("ticket_layout") == "workspace":
+        return base / "workspace" / repo_name
+    return base / repo_name
 
 
 def save_feature_toggle(config: dict, feature: str, enabled: bool):

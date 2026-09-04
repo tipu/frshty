@@ -38,13 +38,31 @@ import core.log as log
 PRE_COMMIT_TIMEOUT = 600
 
 
-def _worktree_holding_branch(repo_path: Path, branch: str) -> Path | None:
+def run_git_status(cwd, args: list[str],
+                   timeout: int = 60) -> subprocess.CompletedProcess:
+    """Run a git command whose exit status is the answer the caller reads.
+
+    `run_git` is the default, and it raises on a status the caller did not
+    allow so that nothing turns a failure into a fact. A few commands answer
+    with their status instead of their output: `worktree add` on a branch
+    another worktree already holds, `branch` on a name that exists,
+    `branch -d` on an unmerged branch. This is the one place that raw call
+    lives. Every caller must read .returncode before it reads .stdout.
+    A git that cannot even be started comes back as a non-zero status with the
+    reason in .stderr, so a caller never has to tell the two apart."""
+    try:
+        return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True,
+                              text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError) as e:
+        return subprocess.CompletedProcess(["git", *args], 1, "",
+                                           f"{type(e).__name__}: {e}")
+
+
+def worktree_holding_branch(repo_path: Path, branch: str) -> Path | None:
     """Return the path of the existing worktree that currently has `branch`
     checked out, or None. Parses `git worktree list --porcelain`."""
-    result = subprocess.run(
-        ["git", "worktree", "list", "--porcelain"],
-        cwd=str(repo_path), capture_output=True, text=True, timeout=30,
-    )
+    result = run_git_status(repo_path, ["worktree", "list", "--porcelain"],
+                            timeout=30)
     if result.returncode != 0:
         return None
     current = None
@@ -56,6 +74,34 @@ def _worktree_holding_branch(repo_path: Path, branch: str) -> Path | None:
             if ref == f"refs/heads/{branch}":
                 return Path(current)
     return None
+
+
+_worktree_holding_branch = worktree_holding_branch
+
+
+def git_dirs(directory) -> tuple[str, str]:
+    """The absolute (--git-dir, --git-common-dir) of `directory`, ("", "") when
+    it is not inside a git checkout.
+
+    --path-format=absolute is required. Without it a subdirectory of a
+    canonical checkout prints `/repo/.git` and `../.git`, which differ as
+    strings, so a raw comparison calls a canonical checkout a worktree."""
+    try:
+        result = run_git(directory, ["rev-parse", "--path-format=absolute",
+                                     "--git-dir", "--git-common-dir"], timeout=30)
+    except (GitCommandError, OSError, subprocess.SubprocessError):
+        return "", ""
+    lines = [ln.strip() for ln in result.stdout.splitlines() if ln.strip()]
+    if len(lines) < 2:
+        return "", ""
+    return os.path.realpath(lines[0]), os.path.realpath(lines[1])
+
+
+def is_worktree(directory) -> bool:
+    """Whether `directory` sits in a linked worktree rather than in the
+    canonical checkout. False when it is not in a git checkout at all."""
+    git_dir, common_dir = git_dirs(directory)
+    return bool(git_dir) and git_dir != common_dir
 
 
 def add_or_reuse_worktree(repo_path: Path, worktree_path: Path, branch: str,

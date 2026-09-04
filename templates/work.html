@@ -97,6 +97,13 @@
         <span class="ln-chipsel" v-if="targetMeta.slackAvailable" :class="{ on: intakeSlack }"
               title="tell the run to read the slack_int capture archive for the selected project's org"
               @click="intakeSlack = !intakeSlack">slack_int</span>
+        <span class="ln-chipsel" title="the repository this task gets its own worktree of. auto picks it when exactly one resolves. no worktree runs in the shared checkout.">worktree:
+          <select v-model="intakeRepo" :disabled="!targetMeta.personalLoaded || intakeBusy">
+            <option value="">auto</option>
+            <option v-for="r in intakeRepos" :key="r" :value="r">{{ r }}</option>
+            <option value="__none__">no worktree</option>
+          </select>
+        </span>
         <span class="ln-hint" v-if="intakeBusy">launching…</span>
         <span class="ln-hint" v-else>no thread — this task stands alone</span>
       </div>
@@ -253,6 +260,7 @@ frshtyApp({
       groups: { proposed: [], needs_ack: [], needs_you: [], agent_working: [], waiting_external: [], failed_stale: [], done: [] },
       personalLoaded: false, intakeText: "", intakeError: "", intakeBusy: false,
       projects: [], slackAvailable: false, intakeContexts: [], intakeSlack: false, moreOpen: false,
+      intakeRepo: "",
       agents: ["claude"], intakeAgent: localStorage.getItem("workAgent") || "claude",
       connError: "", replyText: {}, sumOpen: {}, approveBusy: {}, linkmap: null, threads: [],
       fupOpen: {}, fupText: {}, fupBusy: {}, fupError: {},
@@ -303,6 +311,14 @@ frshtyApp({
       return [...this.primaryProjects,
               ...this.extraProjects.filter(p => this.intakeContexts.includes(p.key))];
     },
+    intakeRepos() {
+      const names = [];
+      for (const p of this.targetMeta.projects || []) {
+        if (!this.intakeContexts.includes(p.key)) continue;
+        for (const r of p.repos || []) if (!names.includes(r)) names.push(r);
+      }
+      return names;
+    },
   },
   methods: {
     lk(text) { return window.frshtyLinkify(text, this.linkmap); },
@@ -339,6 +355,7 @@ frshtyApp({
     onTargetChange() {
       this.intakeContexts = [];
       this.intakeSlack = false;
+      this.intakeRepo = "";
       const agents = this.targetMeta.agents || ["claude"];
       if (!agents.includes(this.intakeAgent)) this.intakeAgent = agents[0];
     },
@@ -542,12 +559,15 @@ frshtyApp({
         const r = await fetch(this.apiUrl(this.target, "/api/work/intake"), {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text: this.intakeText, agent: this.intakeAgent,
-                                 contexts: this.intakeContexts, slack: this.intakeSlack }),
+                                 contexts: this.intakeContexts, slack: this.intakeSlack,
+                                 repo: this.intakeRepo === "__none__" ? "" : this.intakeRepo,
+                                 no_worktree: this.intakeRepo === "__none__" }),
         });
         const d = await r.json();
         if (!r.ok) { this.intakeError = d.error || "intake failed (HTTP " + r.status + ")"; return; }
         localStorage.setItem("workAgent", this.intakeAgent);
         this.intakeText = ""; this.intakeContexts = []; this.intakeSlack = false;
+        this.intakeRepo = "";
         this.$nextTick(() => this.grow(this.$refs.intakeBox));
         await this.refresh();
       } catch (e) {
