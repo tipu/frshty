@@ -47,7 +47,9 @@ CONTINUE_PROMPT = (
     "Never send outward "
     "communications (Slack messages, GitHub or Bitbucket comments, emails, "
     "posts to external services) unless the operator explicitly asked for that "
-    "in this conversation; draft the content and ask instead. If the objective "
+    "in this conversation; draft the content and ask instead. "
+    "Write any report, summary or other prose document for the operator as a "
+    "self-contained .html file, never as Markdown or plain text. If the objective "
     f"is fully met, end your message with the single line {DONE_MARKER}."
 )
 
