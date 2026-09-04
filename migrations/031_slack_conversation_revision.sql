@@ -1,0 +1,1 @@
+ALTER TABLE slack_conversations ADD COLUMN revision INTEGER NOT NULL DEFAULT 0;

@@ -71,16 +71,22 @@ pr_autofix = false                # github only: every newly created PR gets a c
 #                                     # derives the other.
 # raw_path = "/path/to/slack_int/messages/myworkspace/messages.jsonl"
 # workspace = "myworkspace"
-# user_id = "UXXXXXXX"
+# user_id = "UXXXXXXX"                # your own slack id. It decides who is asking whom: a
+#                                     # request you wrote is you asking somebody else, and it
+#                                     # never becomes a task.
 # propose_tasks = false               # when true, frshty reads the conversations this user is
-#                                     # part of and opens a task on /tasks for the ones that ask
-#                                     # for concrete work. Every such task lands in the
-#                                     # `proposed` group and never runs until you approve it.
+#                                     # part of and opens a task on /tasks for the ones where
+#                                     # somebody else asks this user for concrete work. Every
+#                                     # such task lands in the `proposed` group and never runs
+#                                     # until you approve it.
 # propose_settle_minutes = 10         # a conversation is judged only once its last message is
 #                                     # this old, so a thread still being typed is left alone
 # propose_max_age_hours = 48          # never propose from a conversation older than this
 # propose_max_per_day = 3             # ceiling on proposals opened for this instance per day
 # propose_max_judgements_per_scan = 3 # ceiling on model calls per scan
+# propose_judge_retry_minutes = 60    # a conversation the model answered nothing for is
+#                                     # held back this long, so it cannot spend the
+#                                     # allowance every scan and starve the ones behind it
 
 # [timesheet]
 # recurring = [
