@@ -252,13 +252,22 @@ def release_proposal(item_id: int) -> None:
 
 
 def add_run(item_id: int, session_id: str, tmux_key: str, cwd: str,
-            provider: str = "claude") -> int:
+            provider: str = "claude", env_recorded: bool = False,
+            env_key: str = "", env_config_dir: str = "") -> int:
+    """Record one agent session of a work item.
+
+    `env_recorded` says the caller resolved the agent environment and wrote it
+    into env_key and env_config_dir. An empty directory then means the run uses
+    no configuration directory, which is a different statement from a run that
+    never recorded one."""
     now = _now()
     with db.tx() as c:
         cur = c.execute(
-            "INSERT INTO work_runs(work_item_id, provider, session_id, tmux_key, cwd, started_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (item_id, provider, session_id, tmux_key, cwd, now),
+            "INSERT INTO work_runs(work_item_id, provider, session_id, tmux_key, cwd, "
+            "env_recorded, env_key, env_config_dir, started_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (item_id, provider, session_id, tmux_key, cwd, 1 if env_recorded else 0,
+             env_key, env_config_dir, now),
         )
         run_id = cur.lastrowid
         c.execute(
