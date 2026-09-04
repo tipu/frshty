@@ -264,6 +264,25 @@ class TestLaunchContexts:
         assert "datapipe, portal" in block
         assert "messages.jsonl" in block
 
+    def test_context_block_lists_project_rules(self, monkeypatch, tmp_path):
+        from services import work_launch
+        instances, root = self._instances(tmp_path)
+        monkeypatch.setattr(work_launch.runtime, "instances", lambda: instances)
+        (tmp_path / "apex-root" / "CLAUDE.md").write_text("root rules")
+        (tmp_path / "apex-root" / "datapipe").mkdir()
+        (tmp_path / "apex-root" / "datapipe" / "CLAUDE.md").write_text("repo rules")
+        block = work_launch._context_block(["apexco"], slack=False)
+        assert f"rules: {root}/CLAUDE.md, {root}/datapipe/CLAUDE.md" in block
+        assert "Read every file listed as rules above before you do anything else" in block
+
+    def test_context_block_omits_rules_when_no_claude_md(self, monkeypatch, tmp_path):
+        from services import work_launch
+        instances, _ = self._instances(tmp_path)
+        monkeypatch.setattr(work_launch.runtime, "instances", lambda: instances)
+        block = work_launch._context_block(["apexco"], slack=False)
+        assert "rules:" not in block
+        assert "Read every file listed as rules" not in block
+
     def test_context_block_empty_when_nothing_selected(self, monkeypatch, tmp_path):
         from services import work_launch
         instances, _ = self._instances(tmp_path)

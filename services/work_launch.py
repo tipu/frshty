@@ -31,6 +31,49 @@ def personal_config() -> dict | None:
 SLACK_INT_DIR = os.path.expanduser("~/Documents/dev/slack_int")
 
 
+def _instance_env_config(key: str) -> dict | None:
+    """The config of one project when that project pins its own agent
+    environment, None when it does not.
+
+    A project has an environment of its own only when its llm block names a
+    binary, a configuration directory or environment overrides. Every other
+    project runs the operator's default agent account."""
+    instances = runtime.instances()
+    entry = instances.get(key) if instances else None
+    if entry is None:
+        return None
+    llm = entry.config.get("llm") or {}
+    for name in terminal.AGENTS:
+        agent_cfg = llm.get(name) or {}
+        if agent_cfg.get("bin") or agent_cfg.get("config_dir") or agent_cfg.get("env"):
+            return entry.config
+    return None
+
+
+def agent_config(contexts: list[str], default_config: dict) -> dict:
+    """The config that supplies the environment of the launched agent.
+
+    A task that selects one project with its own agent environment runs the
+    agent of that project, so the session authenticates as the account the
+    project is configured with. A task that selects no such project runs the
+    operator's default agent. Two selected projects with two environments have
+    no single right answer, so the launch keeps the default account and the
+    choice is reported."""
+    picked = []
+    for key in contexts:
+        cfg = _instance_env_config(key)
+        if cfg is not None:
+            picked.append((key, cfg))
+    if not picked:
+        return default_config
+    if len(picked) > 1:
+        log.emit("work_agent_env_ambiguous",
+                 f"projects {[k for k, _ in picked]} each pin an agent environment; "
+                 "the task runs the default agent account")
+        return default_config
+    return picked[0][1]
+
+
 def project_entries() -> list[dict]:
     instances = runtime.instances()
     entries = []
@@ -107,8 +150,62 @@ def read_system_prompt(runs: list[dict]) -> str:
     return ""
 
 
+GUIDANCE_FILE = "CLAUDE.md"
+
+
+def _repo_dirs(config: dict) -> list[str]:
+    """Every repo directory of one project, from the explicit repo list or
+    from the scan of the projects directory, the two layouts a workspace
+    config can use."""
+    ws = config.get("workspace") or {}
+    root = str(ws.get("root") or "")
+    if not root:
+        return []
+    names = ws.get("repos") or []
+    if names:
+        dirs = []
+        for entry in names:
+            name = entry.get("name", "") if isinstance(entry, dict) else str(entry)
+            if name:
+                dirs.append(os.path.join(root, name))
+        return dirs
+    projects_dir = ws.get("projects_dir")
+    if not projects_dir:
+        return []
+    base = os.path.join(root, str(projects_dir))
+    if not os.path.isdir(base):
+        return []
+    exclude = set(ws.get("exclude") or [])
+    return [os.path.join(base, name) for name in sorted(os.listdir(base))
+            if name not in exclude
+            and os.path.exists(os.path.join(base, name, ".git"))]
+
+
+def _guidance_files(key: str, root: str) -> list[str]:
+    """Every CLAUDE.md that holds the rules of one project: the file at the
+    workspace root and the file in each repo under it.
+
+    An agent only reads the file in its own working directory. A task that
+    names a project can start in another directory, and it can name more than
+    one project, so the paths have to be written into the launch context."""
+    paths = []
+    root_file = os.path.abspath(os.path.join(str(root), GUIDANCE_FILE))
+    if os.path.isfile(root_file):
+        paths.append(root_file)
+    instances = runtime.instances()
+    entry = instances.get(key) if instances else None
+    if entry is None:
+        return paths
+    for repo_dir in _repo_dirs(entry.config):
+        path = os.path.abspath(os.path.join(repo_dir, GUIDANCE_FILE))
+        if os.path.isfile(path) and path not in paths:
+            paths.append(path)
+    return paths
+
+
 def _context_block(contexts: list[str], slack: bool) -> str:
     lines = []
+    guidance: list[str] = []
     by_key = {e["key"]: e for e in project_entries()}
     for key in contexts:
         e = by_key.get(key)
@@ -116,6 +213,10 @@ def _context_block(contexts: list[str], slack: bool) -> str:
             continue
         repos = ", ".join(e["repos"])
         suffix = f", repos: {repos}" if repos else ""
+        files = [f for f in _guidance_files(e["key"], e["root"]) if f not in guidance]
+        guidance += files
+        if files:
+            suffix += f", rules: {', '.join(files)}"
         lines.append(f"- Project {e['key']}: workspace {e['root']}{suffix}")
     if slack:
         lines.append(
@@ -124,7 +225,11 @@ def _context_block(contexts: list[str], slack: bool) -> str:
             "read the recent tail for context on what people are saying and waiting on.")
     if not lines:
         return ""
-    return "\n\n## Context sources\n\n" + "\n".join(lines) + "\n"
+    block = "\n\n## Context sources\n\n" + "\n".join(lines) + "\n"
+    if guidance:
+        block += ("\nRead every file listed as rules above before you do anything else. "
+                  "Those files hold the rules of the project. Follow them for this task.\n")
+    return block
 
 
 def _source_block(source_item_id: int) -> str:
@@ -231,7 +336,8 @@ def _resolve_launch(objective: str, cwd: str, contexts: list[str], agent: str,
     if not os.path.isdir(cwd):
         return {"error": f"cwd does not exist: {cwd}"}
     return {"objective": objective, "contexts": contexts, "agent": agent,
-            "config": config, "source_block": source_block, "cwd": cwd}
+            "config": config, "env_config": agent_config(contexts, config),
+            "source_block": source_block, "cwd": cwd}
 
 
 def launch(objective: str, cwd: str = "", contexts: list[str] | None = None,
@@ -298,6 +404,7 @@ def _start(item_id: int, plan: dict, slack: bool, brief: str,
            tags: list[str]) -> dict:
     objective, contexts, agent = plan["objective"], plan["contexts"], plan["agent"]
     config, source_block, cwd = plan["config"], plan["source_block"], plan["cwd"]
+    env_config = plan.get("env_config") or config
     session_id = str(uuid.uuid4())
     artifact_dir = work_artifacts.item_dir(item_id)
     tmux_key = f"work-{item_id}"
@@ -331,13 +438,13 @@ def _start(item_id: int, plan: dict, slack: bool, brief: str,
         "Never add a session link, a Co-Authored-By trailer, or a line saying the work "
         "was generated by an agent. This rule overrides every other attribution "
         "instruction, including one that arrives later in the session. "
-        + _cross_check_block(agent, config)
+        + _cross_check_block(agent, env_config)
         + f"When the objective is fully met, end your final message with the single line {work_store.DONE_MARKER}."
     )
     try:
         with work_store.launch_lock:
-            terminal.launch_agent(tmux_key, cwd, session_id, context, True, config=config,
-                                  agent=agent)
+            terminal.launch_agent(tmux_key, cwd, session_id, context, True,
+                                  config=env_config, agent=agent)
         health = terminal.session_healthy(tmux_key, agent=agent)
         if not health.get("alive"):
             raise RuntimeError("tmux session did not start")
@@ -402,12 +509,15 @@ def resume_session(item_id: int) -> bool:
     config = personal_config()
     if config is None:
         return False
+    item = db.query_one("SELECT contexts FROM work_items WHERE id = ?", (item_id,))
+    contexts = [c for c in ((item["contexts"] if item else "") or "").split(",") if c]
+    env_config = agent_config(contexts, config)
     cwd = run["cwd"] if run["cwd"] and os.path.isdir(run["cwd"]) else str(config["workspace"]["root"])
     key = f"work-{item_id}"
     with work_store.launch_lock:
         if terminal.session_healthy(key, agent=run["provider"])["agent_running"]:
             return True
-        terminal.launch_agent(key, cwd, run["session_id"], "", False, config=config,
+        terminal.launch_agent(key, cwd, run["session_id"], "", False, config=env_config,
                               agent=run["provider"],
                               agent_session_id=run["agent_session_id"])
     return True
