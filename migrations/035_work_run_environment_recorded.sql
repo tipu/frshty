@@ -1,0 +1,1 @@
+ALTER TABLE work_runs ADD COLUMN env_recorded INTEGER NOT NULL DEFAULT 0;

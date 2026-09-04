@@ -31,47 +31,53 @@ def personal_config() -> dict | None:
 SLACK_INT_DIR = os.path.expanduser("~/Documents/dev/slack_int")
 
 
-def _instance_env_config(key: str) -> dict | None:
-    """The config of one project when that project pins its own agent
-    environment, None when it does not.
-
-    A project has an environment of its own only when its llm block names a
-    binary, a configuration directory or environment overrides. Every other
-    project runs the operator's default agent account."""
+def _instance_config(key: str) -> dict | None:
+    """The config of one project, None when that project is not loaded."""
     instances = runtime.instances()
     entry = instances.get(key) if instances else None
-    if entry is None:
+    return entry.config if entry is not None else None
+
+
+def _instance_env_config(key: str, agent: str) -> dict | None:
+    """The config of one project when that project pins its own environment
+    for `agent`, None when it does not.
+
+    A project pins the environment of an agent when its llm block names a
+    binary, a configuration directory or environment overrides for that agent.
+    Every other project runs the operator's default account. The test is per
+    agent, because a project that pins codex says nothing about the claude
+    account a claude task must use."""
+    config = _instance_config(key)
+    if config is None:
         return None
-    llm = entry.config.get("llm") or {}
-    for name in terminal.AGENTS:
-        agent_cfg = llm.get(name) or {}
-        if agent_cfg.get("bin") or agent_cfg.get("config_dir") or agent_cfg.get("env"):
-            return entry.config
+    agent_cfg = ((config.get("llm") or {}).get(agent)) or {}
+    if agent_cfg.get("bin") or agent_cfg.get("config_dir") or agent_cfg.get("env"):
+        return config
     return None
 
 
-def agent_config(contexts: list[str], default_config: dict) -> dict:
-    """The config that supplies the environment of the launched agent.
+def agent_config(contexts: list[str], default_config: dict,
+                 agent: str = "claude") -> dict:
+    """The project whose environment the launched agent runs with.
 
-    A task that selects one project with its own agent environment runs the
-    agent of that project, so the session authenticates as the account the
-    project is configured with. A task that selects no such project runs the
-    operator's default agent. Two selected projects with two environments have
-    no single right answer, so the launch keeps the default account and the
-    choice is reported."""
+    A task that selects one project with its own environment for this agent
+    runs as the account that project is configured with, and the returned key
+    names that project. A task that selects no such project runs the
+    operator's default account under the empty key. Two selected projects with
+    two environments have no single right answer, and running as a third
+    account would be wrong, so the launch is refused."""
     picked = []
-    for key in contexts:
-        cfg = _instance_env_config(key)
+    for key in dict.fromkeys(contexts):
+        cfg = _instance_env_config(key, agent)
         if cfg is not None:
             picked.append((key, cfg))
     if not picked:
-        return default_config
+        return {"key": "", "config": default_config}
     if len(picked) > 1:
-        log.emit("work_agent_env_ambiguous",
-                 f"projects {[k for k, _ in picked]} each pin an agent environment; "
-                 "the task runs the default agent account")
-        return default_config
-    return picked[0][1]
+        names = ", ".join(k for k, _ in picked)
+        return {"error": f"projects {names} each pin their own {agent} environment; "
+                         "select one of them"}
+    return {"key": picked[0][0], "config": picked[0][1]}
 
 
 def project_entries() -> list[dict]:
@@ -335,8 +341,11 @@ def _resolve_launch(objective: str, cwd: str, contexts: list[str], agent: str,
     cwd = cwd or str(config["workspace"]["root"])
     if not os.path.isdir(cwd):
         return {"error": f"cwd does not exist: {cwd}"}
+    env = agent_config(contexts, config, agent)
+    if "error" in env:
+        return env
     return {"objective": objective, "contexts": contexts, "agent": agent,
-            "config": config, "env_config": agent_config(contexts, config),
+            "config": config, "env_key": env["key"], "env_config": env["config"],
             "source_block": source_block, "cwd": cwd}
 
 
@@ -408,7 +417,10 @@ def _start(item_id: int, plan: dict, slack: bool, brief: str,
     session_id = str(uuid.uuid4())
     artifact_dir = work_artifacts.item_dir(item_id)
     tmux_key = f"work-{item_id}"
-    run_id = work_store.add_run(item_id, session_id, tmux_key, cwd, provider=agent)
+    run_id = work_store.add_run(
+        item_id, session_id, tmux_key, cwd, provider=agent, env_recorded=True,
+        env_key=plan.get("env_key", ""),
+        env_config_dir=terminal.agent_config_dir(env_config, agent))
     context = (
         f"# Work item {item_id}\n\n## Objective\n\n{objective}\n"
         + source_block + _context_block(contexts, slack) + (brief or "") + "\n"
@@ -498,20 +510,40 @@ def resume_session(item_id: int) -> bool:
     session in the run's cwd and relaunch Claude with --resume on the item's
     original session id.
 
+    The run records the project whose environment the launch used and the
+    configuration directory it resolved to. The recorded directory is the
+    authority, so a resume finds the same conversation after the project
+    config changed. A project that no longer loads refuses the resume, because
+    every other account starts a different conversation, and a config that
+    stopped loading is a state the operator can repair. A run that recorded no
+    environment at all started before the columns existed, and it keeps the
+    live config the way it always did.
+
     No-op while the agent is still running, checked under launch_lock so two
     concurrent terminal connects cannot both relaunch it. A surviving tmux
     pane with no agent is respawned with the resume command."""
     run = db.query_one(
-        "SELECT session_id, cwd, provider, agent_session_id FROM work_runs "
-        "WHERE work_item_id = ? ORDER BY id DESC LIMIT 1", (item_id,))
+        "SELECT session_id, cwd, provider, agent_session_id, env_recorded, env_key, "
+        "env_config_dir FROM work_runs WHERE work_item_id = ? ORDER BY id DESC LIMIT 1",
+        (item_id,))
     if not run:
         return False
     config = personal_config()
     if config is None:
         return False
-    item = db.query_one("SELECT contexts FROM work_items WHERE id = ?", (item_id,))
-    contexts = [c for c in ((item["contexts"] if item else "") or "").split(",") if c]
-    env_config = agent_config(contexts, config)
+    env_config = config
+    if run["env_recorded"]:
+        base = config
+        if run["env_key"]:
+            base = _instance_config(run["env_key"])
+            if base is None:
+                log.emit("work_agent_env_missing",
+                         f"work item {item_id}: project {run['env_key']} no longer "
+                         "loads, so the environment of the launch cannot be rebuilt; "
+                         "the session is not resumed")
+                return False
+        env_config = terminal.with_config_dir(base, run["provider"],
+                                              run["env_config_dir"])
     cwd = run["cwd"] if run["cwd"] and os.path.isdir(run["cwd"]) else str(config["workspace"]["root"])
     key = f"work-{item_id}"
     with work_store.launch_lock:
