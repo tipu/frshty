@@ -172,29 +172,43 @@ def create_item(objective: str, scope: str = "ad-hoc", scope_ref: str = "",
 
 def create_proposal(objective: str, note: str = "", instance_key: str | None = None,
                     contexts: str = "", tags: str = "", cwd: str = "",
-                    brief: str = "") -> int:
+                    brief: str = "", conn=None) -> int:
     """Put a task on the board that no agent has started.
 
     frshty writes this when it decides by itself that something needs doing.
     The operator approves it before an agent reads it, so the row carries the
     launch arguments an approval will need: the working directory and the
-    brief that gives the agent the evidence frshty acted on."""
-    now = _now()
+    brief that gives the agent the evidence frshty acted on.
+
+    `conn` lets a caller that has to record the proposal somewhere else write
+    both rows in one transaction. db.tx opens its own connection and takes an
+    immediate lock, so a caller cannot nest it; passing the open connection is
+    what makes the two writes commit or roll back together."""
+    if conn is not None:
+        return _insert_proposal(conn, objective, note, instance_key, contexts,
+                                tags, cwd, brief)
     with db.tx() as c:
-        cur = c.execute(
-            "INSERT INTO work_items(objective, scope, instance_key, contexts, tags, "
-            "state, current_checkpoint, launch_cwd, launch_brief, created_at, updated_at) "
-            "VALUES (?, 'proposal', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (objective, instance_key, contexts, tags, PROPOSED_STATE, note, cwd,
-             brief, now, now),
-        )
-        item_id = cur.lastrowid
-        c.execute(
-            "INSERT INTO work_events(work_item_id, kind, payload, created_at) "
-            "VALUES (?, 'proposal_created', ?, ?)",
-            (item_id, db.dump_json({"note": note}), now),
-        )
-        return item_id
+        return _insert_proposal(c, objective, note, instance_key, contexts,
+                                tags, cwd, brief)
+
+
+def _insert_proposal(c, objective: str, note: str, instance_key: str | None,
+                     contexts: str, tags: str, cwd: str, brief: str) -> int:
+    now = _now()
+    cur = c.execute(
+        "INSERT INTO work_items(objective, scope, instance_key, contexts, tags, "
+        "state, current_checkpoint, launch_cwd, launch_brief, created_at, updated_at) "
+        "VALUES (?, 'proposal', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (objective, instance_key, contexts, tags, PROPOSED_STATE, note, cwd,
+         brief, now, now),
+    )
+    item_id = cur.lastrowid
+    c.execute(
+        "INSERT INTO work_events(work_item_id, kind, payload, created_at) "
+        "VALUES (?, 'proposal_created', ?, ?)",
+        (item_id, db.dump_json({"note": note}), now),
+    )
+    return item_id
 
 
 def claim_proposal(item_id: int) -> bool:
