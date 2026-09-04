@@ -23,7 +23,9 @@ def fix_pr_comments(ctx: TaskContext) -> TaskResult:
     return TaskResult("ok", reason or "") if ok else TaskResult("failed", reason)
 
 
-@task("poll_reviewer", preconditions=[feature_enabled("review_prs")], timeout=120)
+@task("poll_reviewer",
+      preconditions=[feature_enabled("review_prs"), feature_enabled("auto_review")],
+      timeout=120)
 def poll_reviewer(ctx: TaskContext) -> TaskResult:
     from features import reviewer
     reviewer.check(ctx.config)

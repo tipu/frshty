@@ -905,3 +905,52 @@ class TestSkippedPrTracking:
 
     def test_unreviewed_pr_is_tracked(self):
         assert reviewer._pr_needs_tracking({}, make_pr(repo="backend", id=7, head_sha="abc"))
+
+
+class TestAutoReviewRouting:
+    """auto_review off means frshty never starts a review by itself. The rest
+    of review_prs stays on, and the operator can still start one on /reviews."""
+
+    def _tasks(self, features):
+        from core.registry import Instances
+        from core.tasks.routes import _cron_routes
+        instances = Instances()
+        reg = instances.add({"job": {"key": "quill"}, "features": features,
+                             "workspace": {"root": "/tmp/ws"}})
+        return [j["task"] for j in _cron_routes({"instance_key": "quill"},
+                                                {"quill": reg})]
+
+    def test_auto_review_on_enqueues_the_poll(self):
+        assert "poll_reviewer" in self._tasks({"review_prs": True, "auto_review": True})
+
+    def test_auto_review_off_does_not_enqueue_the_poll(self):
+        assert "poll_reviewer" not in self._tasks({"review_prs": True, "auto_review": False})
+
+    def test_auto_review_off_keeps_the_rest_of_review_prs(self):
+        tasks = self._tasks({"review_prs": True, "auto_review": False})
+        assert "poll_own_prs" in tasks
+        assert "poll_peer_reviews" in tasks
+
+    def test_the_poll_is_gated_by_the_flag_at_the_task_too(self):
+        from core.tasks.registry import get_task
+
+        class Ctx:
+            config = {"features": {"review_prs": True, "auto_review": False}}
+            ticket_key = None
+            payload: dict = {}
+            instance_key = "quill"
+
+        checks = [c(Ctx())[0] for c in get_task("poll_reviewer")["preconditions"]]
+        assert False in checks
+
+    def test_a_config_without_the_flag_still_auto_reviews(self, tmp_path):
+        import core.config as cfg
+
+        path = tmp_path / "inst.toml"
+        path.write_text(
+            '[job]\nkey = "inst"\nport = 9000\n\n'
+            '[workspace]\nroot = "/tmp/ws"\n\n'
+            '[features]\nreview_prs = true\n')
+        config = cfg.load_config(str(path))
+        assert config["features"]["auto_review"] is True
+        assert "poll_reviewer" in self._tasks(config["features"])

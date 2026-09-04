@@ -55,6 +55,7 @@ auto_merge = false
 
 [features]
 review_prs = false
+auto_review = true                # default true. when false, frshty never starts a code review on its own. the PRs waiting on this user are still listed on /reviews and /today, and a review runs only when the operator starts one there. the rest of review_prs (own-PR comments, CI fixes, the peer-review list) is unaffected.
 tickets = true
 slack = false
 timesheet = false
@@ -139,6 +140,8 @@ pr_autofix = false                # github only: every newly created PR gets a c
 # [llm.claude]
 # bin = "claude"                      # executable name or absolute path
 # config_dir = "~/.aimyable-claude"   # sets CLAUDE_CONFIG_DIR for this instance
+#                                     # a work board task that selects this project
+#                                     # also runs its agent with this environment
 # args = ["--dangerously-skip-permissions"]  # optional extra args prepended to every Claude invocation
 # [llm.claude.env]
 # SOME_OTHER_VAR = "value"
