@@ -45,7 +45,7 @@ _LABEL_PREFIX = re.compile(r"^(subject|commit subject|commit message)\s*:\s*", r
 _LIST_MARKER = re.compile(r"^([-*•]\s+|\d+[.)]\s+)")
 
 _CONTROL = re.compile(
-    "[\x00-\x1f\x7f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff"
+    "[\x00-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff"
     "\ud800-\udfff]"
 )
 
@@ -57,8 +57,10 @@ _ISSUE_DIRECTIVE = re.compile(
     r"\b(fix|fixes|fixed|close|closes|closed|resolve|resolves|resolved)\s+"
     r"[\w./-]*#\d+", re.IGNORECASE)
 
-_CI_DIRECTIVE = re.compile(r"\[\s*(skip|no)[ -]ci\s*\]|\[\s*ci[ -]skip\s*\]|skip-checks",
-                           re.IGNORECASE)
+_CI_DIRECTIVE = re.compile(
+    r"\[\s*(skip|no)[ -](ci|actions|build)\s*\]"
+    r"|\[\s*(ci|actions|build)[ -]skip\s*\]"
+    r"|skip-checks", re.IGNORECASE)
 
 _PREAMBLE_OPENERS = (
     "here is", "here's", "here are", "sure", "certainly", "of course",
@@ -119,15 +121,16 @@ def _first_sentence(line: str) -> str:
 
     A model that answers with two sentences must not put both in the subject.
     An abbreviation ends in a full stop without ending a sentence, so a cut
-    after one is not made. A first sentence too short to be a subject is still
-    cut: the length check that follows then sends the reply to the fallback,
-    which is better than committing two sentences."""
-    head = _SENTENCE_END.split(line, maxsplit=1)[0]
-    if head == line:
-        return line
-    if head.rsplit(" ", 1)[-1] in _ABBREVIATIONS:
-        return line
-    return head
+    after one is not made and the search moves on to the next full stop. A
+    first sentence too short to be a subject is still cut: the length check
+    that follows then sends the reply to the fallback, which is better than
+    committing two sentences."""
+    for match in _SENTENCE_END.finditer(line):
+        head = line[:match.start()]
+        if head.rsplit(" ", 1)[-1] in _ABBREVIATIONS:
+            continue
+        return head
+    return line
 
 
 def safe_message(message: str) -> str:
@@ -210,7 +213,8 @@ def pending_diff(repo_dir) -> str:
         status = git_util.run_git(repo_dir, ["status", "--porcelain"], timeout=30).stdout
         stat = git_util.run_git(repo_dir, ["diff", "HEAD", "--stat"], timeout=30).stdout
         patch = git_util.run_git(repo_dir, ["diff", "HEAD", "--unified=1"], timeout=60).stdout
-    except (git_util.GitCommandError, subprocess.SubprocessError, OSError) as e:
+    except (git_util.GitCommandError, subprocess.SubprocessError, OSError,
+            UnicodeDecodeError) as e:
         log.emit("commit_subject_diff_failed",
                  f"{repo_dir}: could not read the pending diff for a commit subject: {e}",
                  meta={"repo_dir": str(repo_dir), "error": str(e)[:200]})
@@ -252,7 +256,15 @@ def commit_subject(repo_dir, fallback: str, context: str = "",
                        "raw": (raw or "")[:200]})
         return safe_fallback
     if ticket_key:
-        subject = re.sub(rf"^{re.escape(ticket_key.lower())}\b[\s:-]*", "", subject)
+        subject = re.sub(rf"\b{re.escape(ticket_key.lower())}\b[\s:-]*", " ", subject)
+        subject = re.sub(r"\s+", " ", subject).strip(" -:")
+        if len(subject) < MIN_SUBJECT_CHARS:
+            log.emit("commit_subject_fallback",
+                     f"{repo_dir}: the model subject was only the ticket key, using "
+                     f"\"{safe_fallback}\"",
+                     meta={"repo_dir": str(repo_dir), "fallback": safe_fallback,
+                           "raw": (raw or "")[:200]})
+            return safe_fallback
     prefix = subject_prefix(fallback, ticket_key)
     budget = max(MIN_SUBJECT_CHARS, MESSAGE_LIMIT - len(prefix))
     return safe_message(f"{prefix}{_truncate(subject, budget)}")
