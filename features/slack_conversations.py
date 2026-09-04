@@ -40,6 +40,14 @@ A declined proposal answers the request it was opened for, not the thread it
 came from. So the thread comes back as soon as somebody else asks again in it,
 and frshty reads the whole exchange once more. See
 _asked_again_since_the_decline.
+
+Reading the whole exchange is the point: a thread that stood still for a month
+and then gained "any movement on this?" says what it wants only in the message
+from a month ago. Nothing ages a message out of this index, so the whole thread
+is still there and the judge and the work agent both get all of it. What the
+judge also gets is a line saying how far the declined proposal read, so the
+request the operator turned down stays context rather than becoming a second
+proposal. See _transcript and DECLINED_RULE.
 """
 import hashlib
 import json
@@ -67,10 +75,15 @@ DEFAULT_MAX_PROPOSALS_PER_DAY = 3
 DEFAULT_MAX_JUDGEMENTS_PER_SCAN = 3
 DEFAULT_JUDGE_RETRY_MINUTES = 60
 MAX_TRANSCRIPT_MESSAGES = 60
+TRANSCRIPT_HEAD_MESSAGES = 5
 MAX_MESSAGE_CHARS = 6000
 MAX_OBJECTIVE_CHARS = 400
 MAX_NOTE_CHARS = 200
 OPERATOR_MARK = "(the operator)"
+ANSWERED_MARK = ("--- the operator already read everything above and declined"
+                 " the task it opened; only what follows is new ---")
+ELIDED_MARK = ("--- {count} messages of this thread are left out here; it is"
+               " longer than what you can see ---")
 
 # A message that carries one of these subtypes is a channel event, not
 # something a person said. message_changed and message_deleted are not here:
@@ -121,7 +134,7 @@ written by the operator, asks the reader to approve that pull request and asks
 the operator for nothing.
 
 Return objective as an empty string when actionable is false.
-
+{prior}
 ## Conversation
 
 Workspace: {workspace}
@@ -129,6 +142,24 @@ Channel: {channel}
 Participants: {participants}
 
 {transcript}
+"""
+
+DECLINED_RULE = """
+This conversation already opened a task and the operator declined it. This line
+
+{answered}
+
+marks how far the operator read. Everything above it is answered: the operator
+saw those requests and said no to the task they opened. The messages below it
+are the only ones that have not been decided.
+
+Judge the messages below that line alone. Read the ones above it only to learn
+what "this", "it" and "the ticket" refer to.
+
+actionable is true only when the messages below that line ask for work that the
+declined task did not already cover. A message that chases, thanks,
+acknowledges, or asks again for what was already asked above the line is not
+actionable. objective describes the new request, never the declined one.
 """
 
 
@@ -639,20 +670,37 @@ def _write_message(c, conversation_id: int, message: dict, user_name: str,
 
     Only a change to the text or to the deletion is reported as a change, so
     re-reading the same bytes still writes no new evidence and leaves the
-    conversation's judgement alone."""
+    conversation's judgement alone.
+
+    text_dt answers a different question: when frshty first held the text this
+    message now says. It is the scan's own clock, not the capture's, and it
+    moves only when the stored text actually changes.
+
+    Both halves of that matter. The capture's clock says when slack_int wrote
+    the line, and a line can be written long before frshty reads it: a rotated
+    tail is read a scan later than the file that replaced it. A message the
+    capture stamped an hour ago can therefore be indexed now, and its capture
+    stamp would claim it was in the index all along. The scan's clock cannot
+    say that. And source_dt moves on every line that is not older, including a
+    REST pull that repeats a thread word for word, so it answers "when was this
+    last seen" rather than "when did this last change".
+
+    _reads_as_it_was_proposed asks whether a message said what it says now at
+    the moment a proposal was claimed. proposed_at is stamped from the same
+    scan clock, so the two compare."""
     text = message["text"][:MAX_MESSAGE_CHARS]
     dt = message.get("dt") or ""
     row = c.execute(
-        "SELECT text, deleted, source_dt FROM slack_conversation_messages"
+        "SELECT text, deleted, source_dt, text_dt FROM slack_conversation_messages"
         " WHERE conversation_id = ? AND ts = ?",
         (conversation_id, message["ts"])).fetchone()
     if row is None:
         c.execute(
             "INSERT INTO slack_conversation_messages"
-            "(conversation_id, ts, user_id, user_name, text, source_dt, created_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "(conversation_id, ts, user_id, user_name, text, source_dt, text_dt,"
+            " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (conversation_id, message["ts"], message["user"], user_name, text,
-             dt, stamp))
+             dt, stamp, stamp))
         return True
     if (row["source_dt"] or "") > dt:
         return False
@@ -662,9 +710,10 @@ def _write_message(c, conversation_id: int, message: dict, user_name: str,
     # from; leaving it out would render the message with no name against it.
     c.execute(
         "UPDATE slack_conversation_messages"
-        " SET text = ?, deleted = 0, source_dt = ?, user_id = ?, user_name = ?"
-        " WHERE conversation_id = ? AND ts = ?",
-        (text, dt, message["user"], user_name, conversation_id, message["ts"]))
+        " SET text = ?, deleted = 0, source_dt = ?, text_dt = ?, user_id = ?,"
+        " user_name = ? WHERE conversation_id = ? AND ts = ?",
+        (text, dt, stamp if changed else (row["text_dt"] or ""), message["user"],
+         user_name, conversation_id, message["ts"]))
     return changed
 
 
@@ -790,13 +839,125 @@ def ingest(config: dict, instance_key: str = "", now: datetime | None = None) ->
     return {"messages": written, "conversations": len(changed), "complete": complete}
 
 
-def _transcript(conversation_id: int, names: dict,
-                operator_id: str) -> tuple[str, list[str]]:
+def _quote(text: str) -> str:
+    """One Slack message, rendered so that nothing inside it can pass for a
+    line frshty wrote.
+
+    A transcript line frshty writes starts at the left margin: a message opens
+    with its bracketed time, ANSWERED_MARK and ELIDED_MARK open with three
+    dashes. A message body is free text and can hold newlines, so without this
+    a person could write the text of either mark, or a whole "[time] Danial
+    (the operator):" line, and it would arrive at the judge indistinguishable
+    from the ones frshty puts there. Indenting every line of the body after the
+    first leaves the left margin to frshty alone.
+
+    str.splitlines decides where a line ends, so the indent follows every break
+    a reader would see one at: a carriage return alone, a CRLF pair, a form
+    feed, and the Unicode line and paragraph separators, not the newline
+    character by itself."""
+    return "\n    ".join(text.splitlines())
+
+
+def _stamp(value: str) -> datetime | None:
+    try:
+        when = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)
+
+
+def _reads_as_it_was_proposed(rows: list[dict], answered_ts: str,
+                              answered_at: str) -> bool:
+    """Whether every message a proposal was built from still says what it said
+    when that proposal was built.
+
+    ANSWERED_MARK claims the operator saw everything above it and declined the
+    task it opened. A message ABOVE the line that has changed since breaks that
+    claim, and a Slack ts cannot catch it: an edit keeps the timestamp of the
+    message it edits, so an author who edits "move WB-412" into "move WB-500"
+    after the decline leaves a request the operator never saw sitting above the
+    line, and the rule would tell the judge it was declined. The same holds for
+    a message whose create line arrives late out of a rotated capture tail: its
+    ts is old, but the proposal was never built from it.
+
+    text_dt is when frshty first held the text a message now says, on the same
+    clock proposed_at is stamped from, so comparing the two answers both. A row
+    with no text_dt cannot answer and counts as changed. See _write_message for
+    why neither source_dt nor the capture's own clock will do.
+
+    Every no leaves the transcript whole and unmarked, which is the state this
+    module was in before the mark existed: the judge may propose again what was
+    declined, and the operator sees it and says no a second time. The other
+    direction hides a request nobody ever read."""
+    when = _stamp(answered_at)
+    if when is None:
+        return False
+    for row in rows:
+        if row["ts"] > answered_ts:
+            return True
+        wrote = _stamp(row["text_dt"])
+        if wrote is None or wrote > when:
+            return False
+    return True
+
+
+def _transcript(conversation_id: int, names: dict, operator_id: str,
+                answered_ts: str = "",
+                answered_at: str = "") -> tuple[str, list[str], bool]:
     """Render one conversation for the judge and for the brief.
 
-    A long thread is trimmed to its most recent messages, but the root always
-    survives: it is the message that names the ticket, the board or the link
-    the rest of the thread refers to as "this".
+    The whole thread goes in, however old the start of it is. A thread that
+    stood still for a month and then gained one message is judged from every
+    message it holds, because the new one is almost always the only one that
+    cannot be read on its own: "any movement on this?" names no ticket, no
+    board and no repository, and the message that does is the one from a month
+    ago. Nothing ages a message out of the index, so the whole exchange is
+    still there to read.
+
+    A thread longer than MAX_TRANSCRIPT_MESSAGES is the one case where it does
+    not all fit. Its opening and its most recent messages are kept and the gap
+    between them carries ELIDED_MARK, saying how many messages are missing.
+    TRANSCRIPT_HEAD_MESSAGES of the opening are kept rather than the root
+    alone, because the identifiers the rest of the thread calls "this" are
+    named in the first exchange and not always in its first message. Saying
+    that messages are missing is the part that matters: a judge told nothing
+    would read the trimmed thread as the whole of it and answer "already
+    resolved" or "not enough detail" about an exchange it never saw.
+
+    The opening gives that budget back when a boundary leaves too little room
+    for the messages below it. Those are the ones being judged, and the ones
+    above are only there to say what they refer to, so the trim never drops a
+    message the operator has not decided on while an older one could go
+    instead. The root survives either way.
+
+    `answered_ts` and `answered_at` are how far a declined proposal read this
+    thread and when it was opened. Passing them puts ANSWERED_MARK between the
+    last message that proposal was built from and the first message that came
+    after it. A thread that had to be trimmed gets no line at all. The messages
+    in its gap were left out of the transcript the declined proposal was judged
+    from and out of the brief the operator read, so nobody ever saw them, and a
+    line drawn over a thread with a hole in it claims a reading that never
+    happened. Such a thread reopens whole and unmarked, and at worst proposes
+    again what was declined.
+
+    Handing the judge the whole thread without that line is what let a decline
+    be undone: the thread comes back when somebody writes in it again, the
+    request the operator declined is still sitting in the transcript, and a
+    "thanks, any update?" that asks for nothing new would open the declined
+    task a second time.
+
+    The mark is left out when it would divide nothing — no message on one side
+    of it — and when the messages above it no longer read as they did when the
+    proposal was built; see _reads_as_it_was_proposed. The third value returned
+    says whether it was drawn, so the judge is never told about a boundary it
+    cannot see. That answer comes from here rather than from looking for the
+    mark in the finished transcript, because a person can write the text of the
+    mark into a Slack message and the transcript would then claim a boundary
+    the operator never drew.
+
+    The render is built as entries first, each one the timestamp it stands at
+    and the line to print, and the boundary is placed in a second pass over
+    them.
 
     Every line the operator wrote carries OPERATOR_MARK. A request only counts
     when somebody asks the operator for it, so the reader of the transcript
@@ -804,21 +965,45 @@ def _transcript(conversation_id: int, names: dict,
     display name does not say that: two people can share one, and the name the
     capture holds for the operator is whatever Slack last reported."""
     rows = db.query_all(
-        "SELECT ts, user_id, user_name, text FROM slack_conversation_messages"
+        "SELECT ts, user_id, user_name, text, text_dt"
+        " FROM slack_conversation_messages"
         " WHERE conversation_id = ? AND deleted = 0 ORDER BY ts", (conversation_id,))
+    if answered_ts and not _reads_as_it_was_proposed(rows, answered_ts, answered_at):
+        answered_ts = ""
+    head = TRANSCRIPT_HEAD_MESSAGES
+    if answered_ts:
+        since = sum(1 for r in rows if r["ts"] > answered_ts)
+        head = min(head, max(1, MAX_TRANSCRIPT_MESSAGES - since))
+    gap: list[dict] = []
     if len(rows) > MAX_TRANSCRIPT_MESSAGES:
-        rows = rows[:1] + rows[-(MAX_TRANSCRIPT_MESSAGES - 1):]
-    lines, participants = [], []
-    for row in rows:
+        keep = MAX_TRANSCRIPT_MESSAGES - head
+        gap = rows[head:len(rows) - keep]
+        rows = rows[:head] + rows[len(rows) - keep:]
+    if gap:
+        answered_ts = ""
+    entries: list[tuple[str, str]] = []
+    participants: list[str] = []
+    for index, row in enumerate(rows):
         who = row["user_name"] or names.get(row["user_id"], "") or row["user_id"]
         if who not in participants:
             participants.append(who)
         if operator_id and row["user_id"] == operator_id:
             who = f"{who} {OPERATOR_MARK}"
+        if gap and index == head:
+            entries.append((gap[0]["ts"], ELIDED_MARK.format(count=len(gap))))
         when = datetime.fromtimestamp(_ts_value(row["ts"]), tz=timezone.utc)
-        text = slack_monitor._resolve_names(row["text"], names)
-        lines.append(f"[{when.strftime('%Y-%m-%d %H:%M UTC')}] {who}: {text}")
-    return "\n".join(lines), participants
+        text = _quote(slack_monitor._resolve_names(row["text"], names))
+        entries.append(
+            (row["ts"], f"[{when.strftime('%Y-%m-%d %H:%M UTC')}] {who}: {text}"))
+    lines, marked, drawn = [], False, False
+    for ts, line in entries:
+        if answered_ts and not marked and ts > answered_ts:
+            marked = True
+            if lines:
+                drawn = True
+                lines.append(ANSWERED_MARK)
+        lines.append(line)
+    return "\n".join(lines), participants, drawn
 
 
 def _channel_label(row: dict, names: dict) -> str:
@@ -852,7 +1037,7 @@ _DECLINED_PROPOSAL = (
 
 _CLAIM_CONVERSATION = (
     "UPDATE slack_conversations SET judged_ts = ?, judged_at = ?,"
-    " proposed_at = ?, updated_at = ? WHERE id = ? AND revision = ?"
+    " proposed_ts = ?, proposed_at = ?, updated_at = ? WHERE id = ? AND revision = ?"
     " AND (proposed_at IS NULL"
     "      OR (work_item_id = ? AND EXISTS (" + _DECLINED_PROPOSAL + ")))"
 )
@@ -1030,10 +1215,11 @@ def _proposals_today(instance_key: str, now: datetime) -> int:
 
 
 def _judge(row: dict, transcript: str, participants: list[str], channel: str,
-           operator: str) -> dict | None:
+           operator: str, answered: bool = False) -> dict | None:
     raw = run_haiku(JUDGE_PROMPT.format(
         operator=operator or "the operator",
         mark=OPERATOR_MARK,
+        prior=DECLINED_RULE.format(answered=ANSWERED_MARK) if answered else "",
         workspace=row["workspace"] or "(unknown)",
         channel=channel,
         participants=", ".join(participants) or "(unknown)",
@@ -1119,6 +1305,38 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
     """Judge the settled conversations and open a task for the ones that ask
     for work.
 
+    A conversation that still carries a proposal mark and reaches the judge is
+    one whose proposal the operator declined and which somebody has asked in
+    again, because _is_candidate lets no other kind through. proposed_ts is how
+    far that declined proposal read it, so it is handed to _transcript and the
+    request the operator turned down is given to the judge as context rather
+    than as a second proposal.
+
+    proposed_ts is written only when the transcript that proposal was judged
+    from held the whole thread. _transcript trims exactly when a thread has
+    more non-deleted messages than it can carry, which is what message_count
+    counts, so that comparison says whether the operator was shown all of it.
+    A thread that was trimmed then keeps an empty proposed_ts and never gets a
+    line, because deletions can later bring it back under the limit and hide
+    that it ever was too long.
+
+    Each candidate is handled at its own moment of the scan, one microsecond
+    apart. One clock for the whole scan cannot order the work inside it, and
+    that order decides a boundary: a message edited after this candidate opened
+    a proposal is read in by the ingest the NEXT candidate runs, and stamped
+    with the scan clock it would carry the same moment as the proposal it
+    postdates. _reads_as_it_was_proposed would then take the edit as evidence
+    the operator had already seen.
+
+    proposed_ts is a separate column from judged_ts because judged_ts moves on
+    without the operator. A reopened thread the judge answers "not actionable"
+    advances judged_ts and leaves the decline in place, so a later message in
+    the same thread would find judged_ts pointing at a message the operator
+    never saw, and the mark would tell the judge that message was declined. The
+    request that message opened would then never be proposed. proposed_ts only
+    moves when a proposal is opened, which is the only moment the operator is
+    given something to decide.
+
     Returns the proposals opened and what the capture reads inside this call
     added to the index, so the caller can report every message the scan
     indexed and not only the ones its first read found."""
@@ -1138,9 +1356,10 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
     opened: list[dict] = []
     counts = {"messages": 0, "conversations": 0, "reopened": 0}
     judged = 0
-    for row in _candidates(instance_key, config, now):
+    for index, row in enumerate(_candidates(instance_key, config, now)):
         if judged >= max_judgements or len(opened) >= budget:
             break
+        tick = now + timedelta(microseconds=index)
         # Slack does not stop while the scan works. A message that landed
         # since the scan's own ingest is in the capture file and nowhere else,
         # so the conversation in the database still looks settled. Folding the
@@ -1148,7 +1367,7 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
         # model see it and what makes the revision the claim compares against
         # the one the transcript was built from. It costs one read of the
         # bytes written since the last one.
-        scan = ingest(config, instance_key=instance_key, now=now)
+        scan = ingest(config, instance_key=instance_key, now=tick)
         counts["messages"] += scan["messages"]
         counts["conversations"] += scan["conversations"]
         if not scan["complete"]:
@@ -1170,14 +1389,17 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
             continue
         row = fresh
         judged += 1
-        transcript, participants = _transcript(row["id"], names, operator_id)
+        answered_ts = row["proposed_ts"] if row["proposed_at"] else ""
+        transcript, participants, answered = _transcript(
+            row["id"], names, operator_id, answered_ts, row["proposed_at"] or "")
         if not transcript:
-            _record_judgement(row["id"], row["last_ts"], now)
+            _record_judgement(row["id"], row["last_ts"], tick)
             continue
         channel = _channel_label(row, names)
-        verdict = _judge(row, transcript, participants, channel, operator)
+        verdict = _judge(row, transcript, participants, channel, operator,
+                         answered=answered)
         if verdict is None:
-            _record_attempt(row["id"], now)
+            _record_attempt(row["id"], tick)
             log.emit("slack_proposal_judge_failed",
                      f"[{instance_key}] the model returned nothing for the"
                      f" conversation in {channel} at {row['thread_ts']}",
@@ -1186,7 +1408,7 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
         objective = str(verdict.get("objective") or "").strip()[:MAX_OBJECTIVE_CHARS]
         reason = str(verdict.get("reason") or "").strip()
         if verdict.get("actionable") is not True or not objective:
-            _record_judgement(row["id"], row["last_ts"], now)
+            _record_judgement(row["id"], row["last_ts"], tick)
             continue
         contexts = [c for c in (instance_key, SLACK_TAG) if c]
         tags = work_tags.derive_tags(objective, contexts,
@@ -1210,7 +1432,7 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
         # between these two statements is still missed. The window went from a
         # model call to two statements; closing it outright would need a lock
         # on a file frshty does not write.
-        scan = ingest(config, instance_key=instance_key, now=now)
+        scan = ingest(config, instance_key=instance_key, now=tick)
         counts["messages"] += scan["messages"]
         counts["conversations"] += scan["conversations"]
         if not scan["complete"]:
@@ -1234,14 +1456,15 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
         # that is already out of date and then be blocked from ever being
         # judged again. The loser writes nothing and the next scan reads the
         # whole conversation.
-        stamp = _iso(now)
+        stamp = _iso(tick)
         declined = row["work_item_id"] if row["proposed_at"] else None
+        whole = row["message_count"] <= MAX_TRANSCRIPT_MESSAGES
         with db.tx() as c:
             claimed = c.execute(
                 _CLAIM_CONVERSATION,
-                (row["last_ts"], stamp, stamp, stamp, row["id"], row["revision"],
-                 row["work_item_id"], row["work_item_id"],
-                 work_store.DECLINED_REASON))
+                (row["last_ts"], stamp, row["last_ts"] if whole else "", stamp,
+                 stamp, row["id"], row["revision"], row["work_item_id"],
+                 row["work_item_id"], work_store.DECLINED_REASON))
             if claimed.rowcount != 1:
                 continue
             item_id = work_store.create_proposal(
