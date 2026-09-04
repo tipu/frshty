@@ -329,3 +329,95 @@ class TestPromptRule:
              patch("core.tasks.tickets.run_claude_code", return_value=None) as fixer:
             T.fix_review_findings(ctx)
         assert commit_message.COMMIT_SUBJECT_RULE in fixer.call_args[0][0]
+
+
+class TestUntrustedTextCannotSteerTheBuild:
+    """A fallback carries a path the review platform supplied, so it is
+    untrusted. A directive inside it must never reach the commit."""
+
+    @pytest.mark.parametrize("directive", [
+        "[skip ci]", "[ci skip]", "[no ci]",
+        "[skip actions]", "[actions skip]", "[no build]",
+    ])
+    def test_a_ci_directive_is_refused(self, directive):
+        got = commit_message.safe_message(
+            f"fix: address review comment on src/{directive}/report.py")
+        assert got == commit_message.DEFAULT_SUBJECT
+
+    def test_a_c1_control_character_is_stripped(self):
+        got = commit_message.safe_message("fix: restore the row\u0080 count")
+        assert "\u0080" not in got
+        assert got == "fix: restore the row count"
+
+    def test_every_control_range_leaves_one_printable_line(self):
+        raw = "fix: restore\u0085 the\u200b row count\u202e now"
+        got = commit_message.safe_message(raw)
+        assert got == "fix: restore the row count now"
+        assert "\n" not in got
+
+
+class TestOneSentenceOnly:
+    def test_an_abbreviation_does_not_disable_the_sentence_cut(self):
+        got = commit_message.clean_subject(
+            "guard items, e.g. empty lists. reset the retry count")
+        assert got == "guard items, e.g. empty lists"
+
+    def test_a_sentence_without_an_abbreviation_still_cuts(self):
+        got = commit_message.clean_subject(
+            "reset the retry count. drop the stale row")
+        assert got == "reset the retry count"
+
+    def test_a_single_sentence_is_left_whole(self):
+        got = commit_message.clean_subject("reset the retry count for a poller")
+        assert got == "reset the retry count for a poller"
+
+
+class TestUnreadableDiff:
+    def test_a_diff_that_is_not_utf8_falls_back_instead_of_raising(self, tmp_path):
+        repo = _repo(tmp_path / "repo")
+        (repo / "a.py").write_bytes(b"x = 1\nbad \xff byte\n")
+        with patch("core.commit_message.run_haiku",
+                   return_value="describe the changed byte"):
+            got = commit_message.commit_subject(repo, "fix: DEV-9 fallback wording",
+                                                ticket_key="DEV-9")
+        assert got == "fix: DEV-9 fallback wording"
+
+    def test_the_same_repo_read_as_text_really_does_raise(self, tmp_path):
+        """The negative control for the test above: without the guard the read
+        raises, so the fallback is doing real work."""
+        repo = _repo(tmp_path / "repo")
+        (repo / "a.py").write_bytes(b"x = 1\nbad \xff byte\n")
+        with pytest.raises(UnicodeDecodeError):
+            git_util.run_git(repo, ["diff", "HEAD", "--unified=1"], timeout=60)
+
+
+class TestTicketKeyAppearsOnce:
+    def test_a_key_in_the_middle_of_the_subject_is_not_duplicated(self, tmp_path):
+        repo = _repo(tmp_path / "repo")
+        (repo / "a.py").write_text("x = 2\n")
+        with patch("core.commit_message.run_haiku",
+                   return_value="update DEV-635 retry handling"):
+            got = commit_message.commit_subject(
+                repo, "fix: address tri-review findings for DEV-635",
+                ticket_key="DEV-635")
+        assert got.lower().count("dev-635") == 1
+        assert got == "fix: DEV-635 update retry handling"
+
+    def test_a_subject_that_is_only_the_key_falls_back(self, tmp_path):
+        repo = _repo(tmp_path / "repo")
+        (repo / "a.py").write_text("x = 2\n")
+        with patch("core.commit_message.run_haiku", return_value="DEV-635 ok"):
+            got = commit_message.commit_subject(
+                repo, "fix: address tri-review findings for DEV-635",
+                ticket_key="DEV-635")
+        assert got == "fix: address tri-review findings for DEV-635"
+
+    def test_a_longer_key_is_still_not_stripped_from_the_middle(self, tmp_path):
+        repo = _repo(tmp_path / "repo")
+        (repo / "a.py").write_text("x = 2\n")
+        with patch("core.commit_message.run_haiku",
+                   return_value="port the DEV-6350 guard into the poller"):
+            got = commit_message.commit_subject(
+                repo, "fix: address tri-review findings for DEV-635",
+                ticket_key="DEV-635")
+        assert "dev-6350" in got

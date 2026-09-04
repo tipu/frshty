@@ -2395,8 +2395,10 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                         ticket["key"],
                         message=commit_subject(
                             wt,
-                            f"fix: address review comment on {comment.get('path', 'unknown')}",
+                            f"fix: {ticket['key']} address review comment on "
+                            f"{comment.get('path', 'unknown')}",
                             comment["body"],
+                            ticket_key=ticket["key"],
                         ),
                     )
                     commit_rc = commit_outcome.exit_code
