@@ -272,8 +272,12 @@ def launch_claude(key: str, cwd: str, session_uuid: str, context: str, first_run
 
     First launch pins a deterministic --session-id and seeds context via
     --append-system-prompt; later launches resume the same id so closing the
-    browser (or the process dying) returns to the same conversation. No-op if
-    Claude is already running in the pane — the websocket just reattaches."""
+    browser (or the process dying) returns to the same conversation. A resume
+    re-reads the launch context file and appends it again, because
+    --append-system-prompt applies to one invocation only: without this the
+    resumed session loses every launch rule, such as the format a report has
+    to be written in. No-op if Claude is already running in the pane — the
+    websocket just reattaches."""
     if session_healthy(key).get("agent_running"):
         return
     if first_run:
@@ -286,7 +290,10 @@ def launch_claude(key: str, cwd: str, session_uuid: str, context: str, first_run
             f"--append-system-prompt \"$(cat {shlex.quote(ctx_path)})\""
         )
     else:
+        ctx_path = os.path.join(LAUNCH_CONTEXT_DIR, f"{session_uuid}.md")
         cmd = f"{claude_cmd(config)} --resume {shlex.quote(session_uuid)}"
+        if os.path.isfile(ctx_path) and os.path.getsize(ctx_path) > 0:
+            cmd += f" --append-system-prompt \"$(cat {shlex.quote(ctx_path)})\""
     launch_pane_command(key, cwd, cmd)
 
 

@@ -413,7 +413,8 @@ line that makes the decision. Then propose the smallest remedy. Do not push
 code and do not post anything to the PR until the operator approves the remedy
 with AskUserQuestion. Reading anything is unrestricted.
 
-Write the diagnosis as a markdown report artifact and print its ARTIFACT line.
+Write the diagnosis as a self-contained HTML report artifact and print its
+ARTIFACT line.
 """
 
 
