@@ -90,7 +90,10 @@ def as_capture_record(record: dict) -> dict | None:
 
     A bot message is given back the `bot_message` subtype that the filter
     replaced with a `bot` name. Both scanners skip that subtype, and without
-    it a bot would enter the conversation index as a person."""
+    it a bot would enter the conversation index as a person. It goes on the
+    message, not on the wrapper, because an edit is read from the message
+    under the wrapper and a bot that edits its own message would otherwise
+    arrive with nothing left to say it is a bot."""
     if not isinstance(record, dict) or record.get("kind") == "file":
         return None
     ts = str(record.get("ts") or "")
@@ -98,10 +101,14 @@ def as_capture_record(record: dict) -> dict | None:
         return None
     channel = str(record.get("ch") or "")
     subtype = str(record.get("subtype") or "")
-    if record.get("bot"):
-        subtype = "bot_message"
+    edited = bool(record.get("edited")) or subtype == "message_changed"
+    deleted = bool(record.get("deleted")) or subtype == "message_deleted"
     message = {"type": "message", "ts": ts, "user": str(record.get("user") or ""),
                "text": record.get("text") or ""}
+    if record.get("bot"):
+        message["subtype"] = "bot_message"
+    elif subtype and not edited and not deleted:
+        message["subtype"] = subtype
     thread_ts = str(record.get("thread_ts") or "")
     if thread_ts:
         message["thread_ts"] = thread_ts
@@ -109,18 +116,16 @@ def as_capture_record(record: dict) -> dict | None:
     if name:
         message["user_profile"] = {"real_name": name}
 
-    if record.get("deleted") or subtype == "message_deleted":
+    if deleted:
         payload = {"type": "message", "subtype": "message_deleted",
                    "channel": channel, "deleted_ts": ts,
                    "previous_message": message}
-    elif record.get("edited") or subtype == "message_changed":
+    elif edited:
         payload = {"type": "message", "subtype": "message_changed",
                    "channel": channel, "message": message}
     else:
         payload = dict(message)
         payload["channel"] = channel
-        if subtype:
-            payload["subtype"] = subtype
     return {"dt": str(record.get("dt") or ""),
             "source": str(record.get("src") or ""),
             "workspace": str(record.get("ws") or ""),
