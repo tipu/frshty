@@ -65,13 +65,13 @@ from pathlib import Path
 
 import core.db as db
 import core.log as log
+import core.slack_capture as slack_capture
 import core.state as state
 from core.claude_runner import extract_json, run_haiku
 from features import slack_monitor
 from services import work_launch, work_store, work_tags
 
 SLACK_TAG = "slack"
-CAPTURE_FILE = "messages.jsonl"
 STATE_MODULE = "slack_conversations"
 BOOTSTRAP_BYTES = 32 * 1024 * 1024
 OFFSET_MEMORY_DAYS = 14
@@ -245,24 +245,23 @@ def enabled(config: dict) -> bool:
 def capture_path(config: dict) -> str:
     """The live capture file for this instance.
 
-    core.config derives one of messages_dir and raw_path from the other, so
-    either key names the same file. A config read straight from tomllib in a
-    test has not been through that, so the directory is honoured here too."""
+    slack_int writes filtered.jsonl beside messages.jsonl, holding the same
+    messages with the transport noise removed. That is the file this scan
+    reads; the raw log is the fallback for a capture slack_int has not
+    filtered. core.slack_capture decides between them, and core.config derives
+    one of messages_dir and raw_path from the other, so either key names the
+    same directory."""
     slack = _settings(config)
-    raw_path = str(slack.get("raw_path") or "").strip()
-    if raw_path:
-        return os.path.expanduser(raw_path)
-    messages_dir = str(slack.get("messages_dir") or "").strip()
-    if messages_dir:
-        return str(Path(os.path.expanduser(messages_dir)) / CAPTURE_FILE)
-    return ""
+    return slack_capture.live_path(str(slack.get("messages_dir") or "").strip(),
+                                   str(slack.get("raw_path") or "").strip())
 
 
 def _capture_files(config: dict) -> tuple[list[str], bool]:
     """The live capture and its rotated siblings, newest first, and whether
     the directory was actually listed.
 
-    slack_int rotates messages.jsonl to messages.jsonl.1 and so on. A scan
+    slack_int rotates its logs, filtered.jsonl to filtered.jsonl.1 and so on,
+    and the same for the raw log it falls back to. A scan
     that only ever read the live file would lose everything written to the old
     file after the previous scan, every time it rotates. Reading the directory
     keeps that tail reachable; _read_capture then reads each file from its own
@@ -305,9 +304,21 @@ def _operator_id(config: dict) -> str:
             or str((state.load("slack") or {}).get("user_id") or "").strip())
 
 
-def _names() -> dict:
-    names = (state.load("slack") or {}).get("names")
-    return names if isinstance(names, dict) else {}
+def _names(config: dict) -> dict:
+    """Every display name this instance can put against an id.
+
+    features/slack_monitor.py stores the names it resolves from the Slack API
+    in state, and slack_int indexes the ones it saw in the capture into
+    users.json beside the filtered log. The stored names win: they come from
+    the live API, and the indexed ones are as old as the last time slack_int
+    rebuilt the index."""
+    slack = _settings(config)
+    names = slack_capture.user_names(str(slack.get("messages_dir") or "").strip(),
+                                     str(slack.get("raw_path") or "").strip())
+    stored = (state.load("slack") or {}).get("names")
+    if isinstance(stored, dict):
+        names.update(stored)
+    return names
 
 
 def _endpoint_channel(record: dict) -> str:
@@ -458,8 +469,13 @@ def _read_one(f, offset: int) -> tuple[list[dict], int]:
             record = json.loads(line)
         except ValueError:
             continue
-        if isinstance(record, dict):
-            records.append(record)
+        if not isinstance(record, dict):
+            continue
+        if slack_capture.is_filtered_record(record):
+            record = slack_capture.as_capture_record(record)
+            if record is None:
+                continue
+        records.append(record)
     return records, complete
 
 
@@ -914,7 +930,7 @@ def ingest(config: dict, instance_key: str = "", now: datetime | None = None) ->
     now = now or _now()
     workspace = str(_settings(config).get("workspace") or "")
     operator_id = _operator_id(config)
-    names = _names()
+    names = _names(config)
     blob = state.load(STATE_MODULE) or {}
 
     records, complete = _read_capture(config, blob, now)
@@ -1717,7 +1733,7 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
     if budget <= 0 or max_judgements <= 0:
         return [], {"messages": 0, "conversations": 0, "reopened": 0}
 
-    names = _names()
+    names = _names(config)
     operator_id = _operator_id(config)
     operator = names.get(operator_id, "") or operator_id
     opened: list[dict] = []
