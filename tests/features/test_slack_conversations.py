@@ -1577,22 +1577,33 @@ def test_a_rotation_between_the_listing_and_the_open_keeps_the_old_offset(tmp_pa
     assert list(before) == [old_key]
 
     real_capture_files = sc._capture_files
+    listings = []
     rotated = []
 
     def rotate_after_listing(cfg):
         paths, listed = real_capture_files(cfg)
+        listings.append(True)
         # The rotation lands after _read_capture has its path list and before
-        # it opens them, which is the race this test is about.
-        rotated.append(True)
-        live.rename(folder / "messages.jsonl.1")
-        live.write_text(
-            json.dumps(_ws("1788458500.000200", ERIK, "new file")) + "\n")
+        # it opens them, which is the race this test is about. That is the
+        # second listing of the scan, because ingest lists once itself before
+        # it. It happens exactly once: a second rotation renames the new live
+        # file over the renamed one and deletes it, which frees the inode this
+        # test follows, and a filesystem that reuses it hands the position
+        # under test to a file written afterwards.
+        if len(listings) == 2:
+            rotated.append(True)
+            live.rename(folder / "messages.jsonl.1")
+            live.write_text(
+                json.dumps(_ws("1788458500.000200", ERIK, "new file")) + "\n")
         return paths, listed
 
     with patch.object(sc, "_capture_files", rotate_after_listing):
         sc.ingest(config, instance_key="atropos", now=NOW)
 
     assert rotated, "the rotation has to have happened"
+    assert _key(folder / "messages.jsonl.1") == old_key, (
+        "the renamed file is still on disk, so its inode was never freed and "
+        "handed to another file")
     after = _positions()
     assert after[old_key] == before[old_key], (
         "the renamed file keeps the position the scan reached in it")
