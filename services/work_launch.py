@@ -232,9 +232,12 @@ def _context_block(contexts: list[str], slack: bool) -> str:
         lines.append(f"- Project {e['key']}: workspace {e['root']}{suffix}")
     if slack:
         lines.append(
-            f"- Slack: a local capture archive at {SLACK_INT_DIR}/messages/<workspace>/messages.jsonl "
-            "holds each org's messages. Pick the workspace directory matching this project and "
-            "read the recent tail for context on what people are saying and waiting on.")
+            f"- Slack: a local capture archive at {SLACK_INT_DIR}/messages/<workspace>/filtered.jsonl "
+            "holds each org's messages, one json record per line, with the transport noise "
+            "removed. Pick the workspace directory matching this project and read the recent "
+            "tail for context on what people are saying and waiting on. messages.jsonl beside "
+            "it is the raw capture and is mostly noise; read it only when the filtered log is "
+            "missing something you need.")
     if not lines:
         return ""
     block = "\n\n## Context sources\n\n" + "\n".join(lines) + "\n"
