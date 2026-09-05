@@ -262,7 +262,7 @@ class TestLaunchContexts:
         block = work_launch._context_block(["aimyable"], slack=True)
         assert "Project aimyable" in block and root in block
         assert "apipe, portal" in block
-        assert "messages.jsonl" in block
+        assert "filtered.jsonl" in block
 
     def test_context_block_lists_project_rules(self, monkeypatch, tmp_path):
         from services import work_launch

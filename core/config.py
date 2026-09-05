@@ -4,8 +4,10 @@ import re
 import tomllib
 from pathlib import Path
 
+import core.slack_capture as slack_capture
 
-SLACK_CAPTURE_FILE = "messages.jsonl"
+
+SLACK_CAPTURE_FILE = slack_capture.RAW_FILE
 
 
 def _resolve_slack_paths(slack: dict) -> None:
@@ -15,7 +17,12 @@ def _resolve_slack_paths(slack: dict) -> None:
     into: the live messages.jsonl plus its rotated siblings. raw_path names
     the live file alone and predates it. A config that sets either one gets
     the other, so an existing config keeps working and a new one only has to
-    name the directory."""
+    name the directory.
+
+    Both keys name the raw log. The scanners read filtered.jsonl from the same
+    directory when slack_int has written one; core.slack_capture makes that
+    choice, because the filtered log appears while frshty is running and a
+    path resolved once at load would never see it."""
     messages_dir = str(slack.get("messages_dir") or "").strip()
     raw_path = str(slack.get("raw_path") or "").strip()
     if messages_dir and not raw_path:
