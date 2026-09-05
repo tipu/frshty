@@ -187,6 +187,31 @@ def test_a_bot_message_gets_back_the_subtype_that_skips_it():
     assert payload["subtype"] == "bot_message"
 
 
+def test_an_edited_bot_message_is_still_a_bot_message():
+    """An edit is read from the message under the wrapper. A bot marker left
+    on the wrapper alone would be dropped there, and the bot would enter the
+    conversation index as a person."""
+    payload = slack_capture.as_capture_record(
+        _filtered(ROOT_TS, "B0DEPLOY", "deploy finished in 4m", bot="Deploybot",
+                  subtype="message_changed", edited=True))["payload"]
+
+    assert payload["subtype"] == "message_changed"
+    assert payload["message"]["subtype"] == "bot_message"
+
+
+def test_an_edited_bot_message_opens_no_conversation(tmp_path):
+    _write(tmp_path, "filtered.jsonl", [
+        _filtered(ROOT_TS, "B0DEPLOY", "deploy finished", bot="Deploybot"),
+        _filtered(ROOT_TS, "B0DEPLOY", "deploy finished in 4m", bot="Deploybot",
+                  subtype="message_changed", edited=True),
+    ])
+
+    counts = sc.ingest(_config(tmp_path), instance_key="atropos", now=NOW)
+
+    assert counts["messages"] == 0
+    assert _conversations() == []
+
+
 def test_a_file_record_is_not_a_message():
     record = {"dt": "2026-09-03T19:00:00+00:00", "ts": "1788458400.000100",
               "ws": WORKSPACE, "ch": "", "user": ERIK, "kind": "file",
