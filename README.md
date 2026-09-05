@@ -129,7 +129,7 @@ config_dir = "~/.aimyable-claude"
 args = ["--dangerously-skip-permissions"]
 ```
 
-**Slack.** Requires [slack-proxy-tools](https://github.com/tipu/slack-proxy-tools) checked out and running. Point `[slack] messages_dir` at the directory it writes that instance's capture into and set `user_id` to your Slack id. Add `propose_tasks = true` to let frshty open tasks from what people ask you for in a thread.
+**Slack.** Requires [slack-proxy-tools](https://github.com/tipu/slack-proxy-tools) checked out and running. Point `[slack] messages_dir` at the directory it writes that instance's capture into and set `user_id` to your Slack id. frshty reads `filtered.jsonl` from that directory, the low noise log the capture distils from `messages.jsonl`, and falls back to the raw log when there is no filtered one. Set `user_id`: the filtered log drops the boot payloads frshty used to discover it from. Add `propose_tasks = true` to let frshty open tasks from what people ask you for in a thread.
 
 **Security.** Binds to `127.0.0.1`. Endpoints are unauthenticated. Do not expose it without putting your own auth in front.
 
