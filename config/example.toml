@@ -66,15 +66,22 @@ pr_autofix = false                # github only: every newly created PR gets a c
 
 # [slack]
 # messages_dir = "/path/to/slack_int/messages/myworkspace"
-#                                     # the directory holding this instance's slack capture
-#                                     # (messages.jsonl plus its rotated siblings). raw_path
-#                                     # names the live file alone; set either one and frshty
-#                                     # derives the other.
+#                                     # the directory holding this instance's slack capture.
+#                                     # frshty reads filtered.jsonl from it, the low noise log
+#                                     # slack_int distils from messages.jsonl, and falls back
+#                                     # to messages.jsonl when there is no filtered log yet.
+#                                     # Rotated siblings of either are read too. raw_path names
+#                                     # the raw file alone; set either one and frshty derives
+#                                     # the other.
 # raw_path = "/path/to/slack_int/messages/myworkspace/messages.jsonl"
-# workspace = "myworkspace"
+# workspace = "myworkspace"           # must match the capture directory name: a filtered
+#                                     # record names the workspace it came from and frshty
+#                                     # reads only the ones that match.
 # user_id = "UXXXXXXX"                # your own slack id. It decides who is asking whom: a
 #                                     # request you wrote is you asking somebody else, and it
-#                                     # never becomes a task.
+#                                     # never becomes a task. Set it: the filtered log drops
+#                                     # the boot payloads frshty used to discover it from, so
+#                                     # without it no mention and no direct message is seen.
 # propose_tasks = false               # when true, frshty reads the conversations this user is
 #                                     # part of and opens a task on /tasks for the ones where
 #                                     # somebody else asks this user for concrete work. Every

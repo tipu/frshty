@@ -6,6 +6,7 @@ from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 import core.log as log
+import core.slack_capture as slack_capture
 import core.state as state
 from core.claude_runner import run_haiku, extract_json
 
@@ -28,8 +29,10 @@ def _msg_ts_iso(record: dict) -> str:
 
 def check(config: dict):
     slack_cfg = config.get("slack", {})
-    raw_path = slack_cfg.get("raw_path")
-    if not raw_path or not Path(raw_path).exists():
+    messages_dir = str(slack_cfg.get("messages_dir") or "")
+    raw_path = str(slack_cfg.get("raw_path") or "")
+    capture = slack_capture.live_path(messages_dir, raw_path)
+    if not capture or not Path(capture).exists():
         return
 
     workspace = slack_cfg.get("workspace", "")
@@ -42,12 +45,17 @@ def check(config: dict):
     notify_cutoff_iso = (datetime.now(timezone.utc) - timedelta(hours=notify_max_age_hours)).isoformat()
 
     sl = state.load("slack")
-    user_id = sl.get("user_id", "")
-    team_id = sl.get("team_id", "")
-    offset = sl.get("file_offset", 0)
+    # The configured id wins over the discovered one. Discovery reads the boot
+    # payloads, and the filtered capture drops them because they carry no
+    # message, so on a filtered capture config is the only source there is.
+    user_id = str(slack_cfg.get("user_id") or "").strip() or sl.get("user_id", "")
+    team_id = str(slack_cfg.get("team_id") or "").strip() or sl.get("team_id", "")
+    name = Path(capture).name
+    offsets = _offsets(sl)
+    offset = offsets.get(name, 0)
     last_dt = sl.get("last_dt", "")
 
-    file_size = Path(raw_path).stat().st_size
+    file_size = Path(capture).stat().st_size
     rotated = offset > file_size
     if rotated:
         offset = 0
@@ -57,27 +65,41 @@ def check(config: dict):
     if not last_dt:
         now_iso = datetime.now(timezone.utc).isoformat()
         sl["last_dt"] = now_iso
-        sl["file_offset"] = file_size
+        offsets[name] = file_size
+        sl["offsets"] = offsets
         state.save("slack", sl)
         return
 
-    with open(raw_path) as f:
+    with open(capture) as f:
         f.seek(offset)
         new_lines = f.readlines()
         new_offset = f.tell()
 
     if not new_lines:
-        sl["file_offset"] = new_offset
+        offsets[name] = new_offset
+        sl["offsets"] = offsets
         state.save("slack", sl)
         return
 
     names = sl.get("names", {})
+    for uid, display in slack_capture.user_names(messages_dir, raw_path).items():
+        names.setdefault(uid, display)
     messages = []
+    # A message can reach the capture twice, once live and once in a REST
+    # history pull. The raw log hid the second copy, because a REST batch has
+    # no text on the record itself and this scan reads one message per record.
+    # The filtered log unpacks the batch, so the copy is a record like any
+    # other and would raise a second attention event for one message.
+    seen = set()
     for line in new_lines:
         try:
             record = json.loads(line.strip())
         except json.JSONDecodeError:
             continue
+        if slack_capture.is_filtered_record(record):
+            record = slack_capture.as_capture_record(record)
+            if record is None:
+                continue
         # High-water mark against the SLACK message time, not slack_int's record
         # time — REST history pulls land with dt=now but payload.ts = weeks ago.
         if last_dt and _msg_ts_iso(record) <= last_dt:
@@ -93,10 +115,29 @@ def check(config: dict):
             if team_id:
                 sl["team_id"] = team_id
         _collect_names(record, names)
+        text = _extract_text(record)
+        if text:
+            key = (_extract_channel(record),
+                   record.get("payload", {}).get("ts", ""), text)
+            if key in seen:
+                continue
+            seen.add(key)
         messages.append(record)
     sl["names"] = names
+    _warn_when_the_operator_has_no_id(base_url, sl, user_id)
 
-    mentions = [m for m in messages if _is_mention(m, user_id) or _is_dm_to_me(m, user_id)]
+    # A message pulled over REST names no channel: the channel travelled in
+    # the POST body, which the capture does not keep. The raw log never got
+    # this far with one, because a REST batch carries no text on the record
+    # itself and this scan reads one message per record. The filtered log
+    # unpacks the batch, and acting on a message with no channel would raise
+    # an attention event against no channel and store a reply context that
+    # chat.postMessage rejects. So the mention and thread paths take only the
+    # messages that name where they were said. The rest still count: they move
+    # the high-water mark, and the conversation index reads them, where a
+    # thread gets its channel from the record that delivered it live.
+    addressed = [m for m in messages if _extract_channel(m) != ""]
+    mentions = [m for m in addressed if _is_mention(m, user_id) or _is_dm_to_me(m, user_id)]
     # Only emit + triage for mentions young enough to be actionable. Older ones
     # still clear the high-water mark so they won't re-surface, but don't spam.
     mentions = [m for m in mentions if _msg_ts_iso(m) > notify_cutoff_iso]
@@ -164,7 +205,7 @@ def check(config: dict):
             links={"detail": f"{base_url}/slack"},
             meta={"channel": channel, "text": text[:200], "suggested_response": suggested, "action": action, "reply_id": reply_id})
 
-    thread_msgs = [m for m in messages if _is_in_thread(m, user_id)]
+    thread_msgs = [m for m in addressed if _is_in_thread(m, user_id)]
     thread_msgs = [m for m in thread_msgs if _msg_ts_iso(m) > notify_cutoff_iso]
     for msg in thread_msgs:
         text = _extract_text(msg)
@@ -188,7 +229,10 @@ def check(config: dict):
         for m in messages:
             ch_id = _extract_channel(m)
             text = _extract_text(m)
-            if not text or ch_id.startswith("D"):
+            # A message pulled over REST names no channel, so there is no
+            # channel to digest it under. The raw log never reached here with
+            # one, because a REST batch carries no text on the record itself.
+            if not text or not ch_id or ch_id.startswith("D"):
                 continue
             ch_name = names.get(ch_id, ch_id)
             if not ch_name.startswith("#"):
@@ -218,7 +262,8 @@ def check(config: dict):
                 }
     sl["channel_digests"] = channel_digests
 
-    sl["file_offset"] = new_offset
+    offsets[name] = new_offset
+    sl["offsets"] = offsets
     if messages:
         last_record_dt = max(_msg_ts_iso(m) for m in messages)
         if last_record_dt:
@@ -240,6 +285,44 @@ def check(config: dict):
     sl["mentions"] = existing_mentions[-50:]
 
     state.save("slack", sl)
+
+
+def _offsets(sl: dict) -> dict:
+    """Where the last scan stopped in each capture file it read.
+
+    The position is keyed by file name because there is more than one capture
+    file to read now: filtered.jsonl when slack_int has written one, and
+    messages.jsonl when it has not. One shared position would be applied to
+    whichever file this scan opens, and a position taken in a 160 MB raw log
+    would put a scan of a 1 MB filtered log past its end. An older state file
+    holds one bare position and no name; it is read as the raw log's."""
+    offsets = sl.get("offsets")
+    if not isinstance(offsets, dict):
+        offsets = {}
+        legacy = sl.get("file_offset")
+        if isinstance(legacy, int):
+            offsets[slack_capture.RAW_FILE] = legacy
+    return {str(k): v for k, v in offsets.items() if isinstance(v, int)}
+
+
+def _warn_when_the_operator_has_no_id(base_url: str, sl: dict, user_id: str) -> None:
+    """Say so once when nothing can name the operator.
+
+    Without an id no message is a mention and no message is a direct message,
+    so this scan reads the whole capture and raises nothing, silently. The
+    filtered capture makes that reachable: discovery read the boot payloads
+    and the filter drops them, so a capture that has never been scanned raw
+    has no id to carry forward and `[slack] user_id` has to supply it."""
+    if user_id:
+        sl.pop("user_id_missing", None)
+        return
+    if sl.get("user_id_missing"):
+        return
+    sl["user_id_missing"] = True
+    log.emit("slack_user_id_missing",
+             "slack: no user id for this workspace, so no mention or direct "
+             "message is detected; set [slack] user_id",
+             links={"detail": f"{base_url}/slack"})
 
 
 def _gather_surrounding(mention: dict, messages: list, names: dict) -> str:
@@ -310,7 +393,7 @@ def _collect_names(record: dict, names: dict):
     for u in payload.get("users", []):
         if isinstance(u, dict) and u.get("id"):
             names[u["id"]] = u.get("real_name") or u.get("name", "")
-    if record.get("source") == "ws" and payload.get("type") == "message":
+    if payload.get("type") == "message":
         uid = payload.get("user", "")
         if uid and uid not in names:
             profile = payload.get("user_profile", {})
@@ -357,6 +440,11 @@ def _extract_user_id(record: dict, workspace: str) -> str:
 
 
 def _matches_workspace(record: dict, workspace: str, team_id: str = "") -> bool:
+    # A filtered record names its workspace outright, which is what the team
+    # id and the endpoint below are read to work out for a raw one.
+    named = str(record.get("workspace") or "")
+    if named:
+        return named == workspace
     if record.get("source") == "ws":
         if not team_id:
             return True
@@ -450,10 +538,11 @@ def _resolve_channel_names(config: dict, names: dict):
         return
 
     slack_cfg = config.get("slack", {})
-    tokens_path = slack_cfg.get("raw_path", "")
-    if not tokens_path:
+    folder = slack_capture.capture_dir(str(slack_cfg.get("messages_dir") or ""),
+                                       str(slack_cfg.get("raw_path") or ""))
+    if not folder:
         return
-    tokens_file = str(Path(tokens_path).parent.parent / "tokens.json")
+    tokens_file = str(Path(folder).parent / "tokens.json")
     workspace = slack_cfg.get("workspace", "")
     try:
         tokens = json.loads(Path(tokens_file).read_text())
