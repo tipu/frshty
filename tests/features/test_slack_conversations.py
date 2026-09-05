@@ -1577,16 +1577,21 @@ def test_a_rotation_between_the_listing_and_the_open_keeps_the_old_offset(tmp_pa
     assert list(before) == [old_key]
 
     real_capture_files = sc._capture_files
+    calls = []
     rotated = []
 
     def rotate_after_listing(cfg):
         paths, listed = real_capture_files(cfg)
+        calls.append(paths)
         # The rotation lands after _read_capture has its path list and before
-        # it opens them, which is the race this test is about.
-        rotated.append(True)
-        live.rename(folder / "messages.jsonl.1")
-        live.write_text(
-            json.dumps(_ws("1788458500.000200", ERIK, "new file")) + "\n")
+        # it opens them, which is the race this test is about. ingest lists the
+        # directory to check the capture is configured before _read_capture
+        # lists it, so _read_capture's own listing is the second call.
+        if len(calls) == 2:
+            rotated.append(True)
+            live.rename(folder / "messages.jsonl.1")
+            live.write_text(
+                json.dumps(_ws("1788458500.000200", ERIK, "new file")) + "\n")
         return paths, listed
 
     with patch.object(sc, "_capture_files", rotate_after_listing):
