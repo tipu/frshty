@@ -21,12 +21,24 @@ The cost is that two messages in different channels sharing one ts would merge.
 Measured over the atropos capture — 24,192 records, 375 distinct message
 timestamps — no timestamp appeared in more than one channel.
 
-A direct message has no threads. People answer the previous message rather than
+A thread is not how most requests are written. A direct message has no threads
+at all, and in a channel people answer the previous message as often as they
 reply in it, so one request is written as several top-level messages minutes
 apart and each of them is a conversation of one. Judged alone, none of them
-names what the others were about. So a conversation in a direct message is
-given what that direct message said before it, marked as context and judged
-from the messages below it. See _dm_context.
+names what the others were about. So a conversation is given what its channel
+said before it, marked as context and judged from the messages below it. See
+_prior_context. The rule is the same for a channel and for a direct message,
+because Slack files both as a channel and the shape of the failure is the same
+in both.
+
+Who is in the exchange is decided by the channel, not by the message. A request
+made in a channel names the operator at most once, in the message that opens
+the exchange or in the reply that hands the work over, and the message that
+says what is actually wanted names him nowhere. Reading only the messages that
+name him would therefore read every one of these exchanges at the one point
+where it says nothing an agent could start. So a channel the operator writes in
+or is named in is a channel of his, and every conversation in it is read. See
+_spread_involvement_across_the_channel.
 
 A conversation the operator is part of, that has stopped moving, that somebody
 other than the operator wrote in, and that no proposal covers yet, is read once
@@ -83,7 +95,7 @@ DEFAULT_MAX_JUDGEMENTS_PER_SCAN = 3
 DEFAULT_JUDGE_RETRY_MINUTES = 60
 MAX_TRANSCRIPT_MESSAGES = 60
 TRANSCRIPT_HEAD_MESSAGES = 5
-DM_CONTEXT_MESSAGES = 20
+CONTEXT_MESSAGES = 20
 MAX_MESSAGE_CHARS = 6000
 MAX_OBJECTIVE_CHARS = 400
 MAX_NOTE_CHARS = 200
@@ -92,11 +104,10 @@ ANSWERED_MARK = ("--- the operator already read everything above and declined"
                  " the task it opened; only what follows is new ---")
 ELIDED_MARK = ("--- {count} messages of this thread are left out here; it is"
                " longer than what you can see ---")
-CONTEXT_OPEN_MARK = ("--- what this direct message said before the conversation"
+CONTEXT_OPEN_MARK = ("--- what this channel said before the conversation"
                      " below; it is here so the conversation below can be read,"
                      " and it is not what you are judging ---")
 CONTEXT_CLOSE_MARK = ("--- the conversation you are judging starts here ---")
-OPENED_MARK = "(frshty already opened a task for this message)"
 
 # A message that carries one of these subtypes is a channel event, not
 # something a person said. message_changed and message_deleted are not here:
@@ -176,7 +187,7 @@ actionable. objective describes the new request, never the declined one.
 """
 
 CONTEXT_RULE = """
-The transcript opens with what this direct message said earlier. That part runs
+The transcript opens with what this channel said earlier. That part runs
 from
 
 {opened}
@@ -192,16 +203,17 @@ a request that appears only above it is not this one's to open. Read what is
 above the second line, use the identifiers it names in objective, and decide
 from what is below it.
 
-A message above the line marked "{opened_mark}" already opened a task for what
-it asks. A message below the line that repeats, chases, adds a detail to, or
-asks again for that work is not actionable: the task for it is open and the
-operator is deciding it. objective describes the new request, never the one
-that is already open.
+They are the messages that came before, not the messages that belong together.
+A channel carries several exchanges at once, so some of them are about
+something else entirely. Use the ones the conversation below points at and
+ignore the rest.
 
-Nothing else above the line covers anything. A request above the line without
-that mark opened no task, whoever wrote it and however old it is, so when the
-conversation below the line asks the operator for that work it is the one that
-carries it, and it is actionable.
+Nothing above the line covers anything, whoever wrote it, however old it is,
+and whatever frshty has already done about it. A message above the line is
+judged as its own conversation. When the conversation below the line asks the
+operator for work, it is the one that carries that request, and it is
+actionable. frshty would rather show the operator the same request twice, which
+he declines, than hide one nobody reads.
 """
 
 
@@ -692,15 +704,16 @@ def _upsert_conversation(c, instance_key: str, workspace: str, message: dict,
                          channel_name: str, involves: bool,
                          stamp: str) -> tuple[int, bool]:
     """Write the conversation this message belongs to, and say whether this
-    line is what told frshty the conversation is in a direct message.
+    line is what told frshty which channel the conversation is in.
 
     A REST batch carries no channel, so a conversation first seen through one
-    is filed with none and reads as no kind of channel at all. The websocket
-    record that names it changes nothing about the message itself, so no other
-    check would call the conversation changed, and yet every conversation in
-    that direct message can be read differently from this moment: the block
-    that gives them the messages said before them is matched on the channel.
-    The caller reopens them; see _reopen_the_conversations_it_is_context_for."""
+    is filed with none and reads as belonging to no channel at all. The
+    websocket record that names it changes nothing about the message itself, so
+    no other check would call the conversation changed, and yet every
+    conversation in that channel can be read differently from this moment: the
+    block that gives them the messages said before them is matched on the
+    channel, and so is the test that says the operator is in the exchange. The
+    caller reopens them; see _reopen_the_conversations_it_is_context_for."""
     ts, thread_ts = message["ts"], message["thread_ts"]
     before = c.execute(
         "SELECT id, channel_id FROM slack_conversations"
@@ -715,8 +728,7 @@ def _upsert_conversation(c, instance_key: str, workspace: str, message: dict,
             " WHERE instance_key=? AND workspace=? AND thread_ts=?",
             (instance_key, workspace, thread_ts)).fetchone()
         return int(row["id"]), False
-    learned = (not before["channel_id"]
-               and str(message["channel"] or "").startswith("D"))
+    learned = not before["channel_id"] and bool(message["channel"])
     return int(before["id"]), learned
 
 
@@ -829,6 +841,27 @@ def _tombstone(c, conversation_id: int, message: dict, stamp: str) -> bool:
     return changed
 
 
+# A conversation whose proposal is still waiting on the operator, or which he
+# approved. Its judgement stands whatever changes around it: he is deciding
+# that task, or an agent is already on the work.
+#
+# A declined one is not undecided, so a change to the messages it reads brings
+# it back. Note that this is about the messages AROUND it. A change to its own
+# messages leaves its judgement where it is; the caller writes that, and it has
+# to, because judged_ts is the watermark _asked_again_since_the_decline
+# measures "asked again" from. Clearing it there would make every message the
+# operator already declined count as a new request and the same task would be
+# proposed a second time. An edit inside a declined thread therefore does not
+# bring it back, which is what the module already says an edit does: it keeps
+# the timestamp of the message it edits, so nothing about it is new.
+_UNDECIDED = (
+    "proposed_at IS NOT NULL AND NOT EXISTS ("
+    "  SELECT 1 FROM work_items w WHERE w.id = slack_conversations.work_item_id"
+    f"  AND w.state IN {work_store.FINISHED_STATES_SQL}"
+    "   AND w.stop_reason = ?)"
+)
+
+
 def _reopen_the_conversations_it_is_context_for(c, instance_key: str,
                                                 floors: dict[int, str],
                                                 stamp: str) -> None:
@@ -837,32 +870,32 @@ def _reopen_the_conversations_it_is_context_for(c, instance_key: str,
 
     A judgement answers a transcript, and clearing it when that transcript
     changes is what stops a conversation being written off on evidence it no
-    longer holds. For a conversation in a channel the caller does that already:
-    a change to its own messages clears its own judgement. A conversation in a
-    direct message is judged from the messages that direct message said before
-    it as well; see _dm_context. Those belong to OTHER conversations, so the
-    caller's clear never reaches this one, and a message edited hours after the
-    judge said "not enough detail" would leave the request marked read to its
-    last message and no scan would look at it again.
+    longer holds. The caller does that for a conversation's own messages: a
+    change to one of them clears that conversation's judgement. A conversation
+    is judged from the messages its channel said before it as well; see
+    _prior_context. Those belong to OTHER conversations, so the caller's clear
+    never reaches this one, and a message edited hours after the judge said
+    "not enough detail" would leave the request marked read to its last message
+    and no scan would look at it again.
 
     `floors` maps each conversation this scan changed to the oldest message ts
     the scan actually wrote in it. A conversation is reopened when it starts
-    after that ts, in the same direct message, because only a message older
-    than a conversation can be its context. Taking the bound from the changed
-    MESSAGE rather than from the conversation it belongs to is what keeps this
-    cheap: a reply to a thread whose root is a month old changes a month-old
+    after that ts, in the same channel, because only a message older than a
+    conversation can be its context. Taking the bound from the changed MESSAGE
+    rather than from the conversation it belongs to is what keeps this cheap: a
+    reply to a thread whose root is a month old changes a month-old
     conversation, and a bound taken from that root would reopen every
     conversation of the month and spend every scan's judgement allowance on
     transcripts that did not move. A tombstone carries the ts of the message it
     replaces, so a deletion bounds itself the same way.
 
     A conversation whose channel was only just learned is passed with an empty
-    floor. Its messages were filed with no channel, so nothing knew they were
-    in a direct message and nothing could read them as context; every
-    conversation in that direct message may now read differently. An empty
-    floor is older than every ts, so all of them are reopened. It happens once
-    per conversation, when a websocket record names the channel a REST batch
-    could not.
+    floor. Its messages were filed with no channel, so nothing knew which
+    channel they were in and nothing could read them as context; every
+    conversation in that channel may now read differently. An empty floor is
+    older than every ts, so all of them are reopened. It happens once per
+    conversation, when a websocket record names the channel a REST batch could
+    not.
 
     A conversation whose proposal is still waiting on the operator, or which he
     approved, keeps its judgement: he is deciding that task, or an agent is
@@ -870,7 +903,13 @@ def _reopen_the_conversations_it_is_context_for(c, instance_key: str,
     decline answers the request it was opened for and nothing else, and the
     corrected context can be what a later message in that thread was waiting
     for; _asked_again_since_the_decline measures "asked again" from judged_ts,
-    so clearing it is what lets that thread be read once more."""
+    so clearing it is what lets that thread be read once more.
+
+    A conversation this scan changed is not held out of that. The caller's own
+    update keeps the judgement of every conversation that carries a proposal,
+    declined ones included, so a declined thread that gained a message in the
+    same scan as the correction to its context would otherwise be the one case
+    the correction never reached."""
     if not floors:
         return
     marks = ",".join("?" * len(floors))
@@ -878,7 +917,7 @@ def _reopen_the_conversations_it_is_context_for(c, instance_key: str,
     channels: dict[tuple[str, str], str] = {}
     for row in c.execute(
             "SELECT id, workspace, channel_id FROM slack_conversations"
-            f" WHERE id IN ({marks}) AND channel_id LIKE 'D%'", ids).fetchall():
+            f" WHERE id IN ({marks}) AND channel_id <> ''", ids).fetchall():
         key = (row["workspace"], row["channel_id"])
         floor = floors[row["id"]]
         if key not in channels or floor < channels[key]:
@@ -888,14 +927,53 @@ def _reopen_the_conversations_it_is_context_for(c, instance_key: str,
             "UPDATE slack_conversations SET judged_ts = '', judged_at = NULL,"
             " updated_at = ? WHERE instance_key = ? AND workspace = ?"
             " AND channel_id = ? AND first_ts > ?"
-            f" AND id NOT IN ({marks})"
-            " AND (proposed_at IS NULL OR EXISTS ("
-            "   SELECT 1 FROM work_items w WHERE w.id ="
-            "   slack_conversations.work_item_id"
-            f"   AND w.state IN {work_store.FINISHED_STATES_SQL}"
-            "    AND w.stop_reason = ?))",
-            [stamp, instance_key, workspace, channel_id, floor] + ids
-            + [work_store.DECLINED_REASON])
+            f" AND NOT ({_UNDECIDED})",
+            (stamp, instance_key, workspace, channel_id, floor,
+             work_store.DECLINED_REASON))
+
+
+def _spread_involvement_across_the_channel(c, instance_key: str) -> None:
+    """Mark every conversation of a channel the operator is in.
+
+    A message is filed as involving the operator when he wrote it or it
+    mentions him. That is the wrong bound on a conversation, because a request
+    made in a channel names him at most once. It is named in the message that
+    opens the exchange, or in the reply that hands the work over, and the
+    message that says what is actually wanted names him nowhere. Every one of
+    those was filed as involving nobody and no scan ever read it, which is the
+    failure this is here to end: a request written into a channel has to reach
+    the judge whether or not the message carrying it says his name.
+
+    So a channel the operator is in makes every conversation in it a
+    conversation of his. A channel he is in is one where at least one
+    conversation was already filed as involving him, in the same workspace,
+    which is how _reopen_the_conversations_it_is_context_for names a channel
+    too. That is monotone: a channel joins the set on the first message he
+    writes or is named in, and the set only grows.
+
+    Deciding it here, per channel, rather than per conversation from the
+    messages around it, is what keeps the rule one that a reader can hold. The
+    alternative is a distance — the operator within so many messages — and
+    every choice of distance draws a line through a real exchange somewhere.
+
+    This does not decide that a request is aimed at the operator. It decides
+    that the conversation is worth reading. Who asks whom is settled after it,
+    by _somebody_else_spoke on the author of the messages and by the judge on
+    what they say, and both of those already have the operator's name.
+
+    The cost is model calls on conversations that turn out to hold no request.
+    Measured over the aimyable and quill captures, across their last 30 and
+    last 90 days, it is between 3.5 and 4.6 conversations a day that no scan
+    would have read before. propose_max_judgements_per_scan is what bounds it
+    should a busier channel ever arrive."""
+    c.execute(
+        "UPDATE slack_conversations SET involves_operator = 1"
+        " WHERE instance_key = ? AND involves_operator = 0 AND channel_id <> ''"
+        " AND (workspace, channel_id) IN ("
+        "   SELECT workspace, channel_id FROM slack_conversations"
+        "   WHERE instance_key = ? AND involves_operator = 1"
+        "     AND channel_id <> '')",
+        (instance_key, instance_key))
 
 
 def ingest(config: dict, instance_key: str = "", now: datetime | None = None) -> dict:
@@ -922,8 +1000,7 @@ def ingest(config: dict, instance_key: str = "", now: datetime | None = None) ->
     changed: set[int] = set()
     # The oldest message ts this scan wrote in each conversation it changed.
     # _reopen_the_conversations_it_is_context_for reads it; the empty string
-    # means the whole direct message, which is what a newly learned channel
-    # needs.
+    # means the whole channel, which is what a newly learned channel needs.
     floors: dict[int, str] = {}
 
     def touched(conversation_id: int, ts: str) -> None:
@@ -991,6 +1068,7 @@ def ingest(config: dict, instance_key: str = "", now: datetime | None = None) ->
             "UPDATE slack_conversations SET involves_operator = 1"
             " WHERE instance_key = ? AND involves_operator = 0"
             " AND channel_id LIKE 'D%'", (instance_key,))
+        _spread_involvement_across_the_channel(c, instance_key)
 
     blob["last_ingest_at"] = _iso(now)
     state.save(STATE_MODULE, blob)
@@ -1082,88 +1160,69 @@ def _read(conn, sql: str, params: tuple) -> list[dict]:
     return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
 
-def _dm_context(conversation_id: int, conn=None) -> tuple[list[dict], list[dict]]:
-    """What a direct message said before this conversation started.
+def _prior_context(conversation_id: int, conn=None) -> tuple[list[dict], tuple]:
+    """What this conversation's channel said before it started.
 
     Slack gives a top-level message no thread of its own, so its ts is its
-    thread_ts and it is a conversation of one. In a channel that is right: a
-    thread is where a request and the detail that explains it are kept
-    together, and the messages around it belong to other exchanges.
+    thread_ts and it is a conversation of one. A direct message has no threads
+    at all, and a channel has them but nobody is obliged to use them. People
+    answer the previous message instead of replying in it, so a request and the
+    identifiers it needs are written as separate top-level messages minutes
+    apart, and every one of them is its own conversation. Judged alone, "can
+    you investigate how this got shown on their side" names nothing an agent
+    could start, and frshty opened nothing for it. What "this" is was said in
+    the message before.
 
-    A direct message has no threads. People answer the previous message
-    instead of replying in it, so a request and the identifiers it needs are
-    written as separate top-level messages minutes apart, and every one of
-    them is its own conversation. Judged alone, "can you investigate how this
-    got shown on their side" names nothing an agent could start, and frshty
-    opened nothing for it. What "this" is was said in the message before.
+    So a conversation is given the messages its channel said before it. They
+    are context and never the request: the judge is told to decide from the
+    messages below them, and each of them is judged as the conversation it
+    belongs to. CONTEXT_MESSAGES of them are kept, the most recent first,
+    however old they are. Age is the wrong bound — a request that stood still
+    for a month is answered by the message from a month ago — and the count
+    keeps the transcript readable. The count also scales itself to the channel:
+    twenty messages back is an hour of a busy channel and a fortnight of a
+    quiet one, which is about how far back a reader would look in either.
 
-    So a conversation in a direct message is given the messages that direct
-    message said before it. They are context and never the request: the judge
-    is told to decide from the messages below them, and each of them is judged
-    as the conversation it belongs to. DM_CONTEXT_MESSAGES of them are kept,
-    the most recent first, however old they are. Age is the wrong bound —
-    a request that stood still for a month is answered by the message from a
-    month ago — and the count keeps the transcript readable.
+    A thread gets the block as well. A thread root is a top-level message like
+    any other and it is written into a channel that was already talking; "^
+    this needs doing" opens a thread that says nothing on its own. The block
+    costs a thread that does not need it a few lines the judge is told to
+    ignore, and CONTEXT_RULE says a channel carries several exchanges at once.
 
     Messages are matched on the channel, so this returns nothing for a
-    conversation seen only through a REST pull, which carries no channel.
-    That is the state the whole module is in for such a conversation: its
-    channel is unknown, so it cannot be known to be a direct message.
+    conversation seen only through a REST pull, which carries no channel. That
+    is the state the whole module is in for such a conversation: nothing can say
+    which exchange it belongs to.
 
     Returns the messages to render and the key that names the stretch of the
-    direct message they came from, which _dm_withdrew_evidence needs to ask
-    what was deleted from it.
+    channel they came from, which _context_withdrew_evidence needs to ask what
+    was deleted from it.
 
-    Each message says whether the task its conversation opened still answers
-    what it asks, because a request that already opened a task must not open a
-    second one; see OPENED_MARK. text_dt comes
-    back because the block sits above the decline boundary, and
+    text_dt comes back because the block sits above the decline boundary, and
     _reads_as_it_was_proposed has to say these messages still read as they did
     when the declined proposal was built from them."""
     found = _read(conn,
                   "SELECT instance_key, workspace, channel_id, first_ts"
                   " FROM slack_conversations WHERE id = ?", (conversation_id,))
     row = found[0] if found else None
-    if not row or not str(row["channel_id"] or "").startswith("D"):
+    if not row or not str(row["channel_id"] or ""):
         return [], ()
     key = (row["instance_key"], row["workspace"], row["channel_id"],
            conversation_id, row["first_ts"])
     rows = list(reversed(_read(
         conn,
-        "SELECT m.ts, m.user_id, m.user_name, m.text, m.text_dt,"
-        # A message carries the task its conversation opened only while it
-        # still says what it said when that task was opened. Edited since, it
-        # asks for something the operator was never shown, and a mark saying
-        # frshty had already opened a task for it would suppress the very
-        # request the edit made.
-        " CASE WHEN c.work_item_id IS NOT NULL AND c.proposed_at IS NOT NULL"
-        "       AND m.text_dt <> '' AND m.text_dt <= c.proposed_at"
-        # The task answers what this message asked, and what it asked is what
-        # the messages before it made of it. "please move this ticket to PLT"
-        # opened a task for WB-412 because the message above it said WB-412,
-        # and an edit of that message to WB-500 leaves this one asking for
-        # something the task never covered while its own text never moved.
-        "       AND NOT EXISTS (SELECT 1 FROM slack_conversation_messages e"
-        "                       JOIN slack_conversations d"
-        "                         ON d.id = e.conversation_id"
-        "                       WHERE d.instance_key = c.instance_key"
-        "                         AND d.workspace = c.workspace"
-        "                         AND d.channel_id = c.channel_id"
-        "                         AND e.ts < m.ts"
-        "                         AND (e.text_dt = '' OR e.text_dt IS NULL"
-        "                              OR e.text_dt > c.proposed_at))"
-        "      THEN 1 ELSE 0 END AS opened"
+        "SELECT m.ts, m.user_id, m.user_name, m.text, m.text_dt"
         " FROM slack_conversation_messages m"
         " JOIN slack_conversations c ON c.id = m.conversation_id"
         " WHERE c.instance_key = ? AND c.workspace = ? AND c.channel_id = ?"
         "   AND c.id <> ? AND m.deleted = 0 AND m.ts < ?"
-        " ORDER BY m.ts DESC LIMIT ?", key + (DM_CONTEXT_MESSAGES,))))
+        " ORDER BY m.ts DESC LIMIT ?", key + (CONTEXT_MESSAGES,))))
     return rows, key
 
 
-def _dm_withdrew_evidence(key: tuple, conn, oldest: str, answered_ts: str,
-                          answered_at: str) -> bool:
-    """Whether the direct message lost a message the declined proposal read.
+def _context_withdrew_evidence(key: tuple, conn, oldest: str, answered_ts: str,
+                               answered_at: str) -> bool:
+    """Whether the channel lost a message the declined proposal read.
 
     ANSWERED_MARK claims the operator saw everything above it. A message the
     block showed him and that has since been deleted is not above the line any
@@ -1172,13 +1231,13 @@ def _dm_withdrew_evidence(key: tuple, conn, oldest: str, answered_ts: str,
     because a deleted message is not in the block it is given.
 
     `oldest` is how far back the block reached when it was whole. A block
-    holding fewer messages than it may hold reached to the start of the direct
-    message, so every tombstone before this conversation was once inside it. A
+    holding fewer messages than it may hold reached to the start of the
+    channel, so every tombstone before this conversation was once inside it. A
     full one reached at least as far back as its oldest surviving message,
     because every message deleted from it let the block take in an older one.
 
     This asks whether such a message exists rather than fetching them, so the
-    answer costs one row however many messages the direct message has lost.
+    answer costs one row however many messages the channel has lost.
     text_dt is compared in SQL, where these stamps order lexically: both sides
     are datetime.isoformat of an aware UTC datetime, so they share a width up
     to the microseconds, and a stamp without them sorts before the same second
@@ -1200,8 +1259,6 @@ def _line(row: dict, names: dict, operator_id: str) -> str:
     who = row["user_name"] or names.get(row["user_id"], "") or row["user_id"]
     if operator_id and row["user_id"] == operator_id:
         who = f"{who} {OPERATOR_MARK}"
-    if row.get("opened"):
-        who = f"{who} {OPENED_MARK}"
     when = datetime.fromtimestamp(_ts_value(row["ts"]), tz=timezone.utc)
     text = _quote(slack_monitor._resolve_names(row["text"], names))
     return f"[{when.strftime('%Y-%m-%d %H:%M UTC')}] {who}: {text}"
@@ -1271,10 +1328,10 @@ def _transcript(conversation_id: int, names: dict, operator_id: str,
     display name does not say that: two people can share one, and the name the
     capture holds for the operator is whatever Slack last reported.
 
-    A conversation in a direct message opens with what that direct message
-    said before it, between CONTEXT_OPEN_MARK and CONTEXT_CLOSE_MARK; see
-    _dm_context. That block is built after the boundary pass and prepended, so
-    it takes no part in placing ANSWERED_MARK: those messages are all older
+    A conversation opens with what its channel said before it, between
+    CONTEXT_OPEN_MARK and CONTEXT_CLOSE_MARK; see _prior_context. That block is
+    built after the boundary pass and prepended, so it takes no part in placing
+    ANSWERED_MARK: those messages are all older
     than the proposal that drew the line, and a line drawn above them would
     claim the operator declined a task opened from a message he was only shown
     for reference. A conversation with nothing left to read gets no block
@@ -1287,11 +1344,11 @@ def _transcript(conversation_id: int, names: dict, operator_id: str,
                  " FROM slack_conversation_messages"
                  " WHERE conversation_id = ? ORDER BY ts", (conversation_id,))
     rows = [row for row in held if not row["deleted"]]
-    context, key = _dm_context(conversation_id, conn) if rows else ([], ())
-    oldest = context[0]["ts"] if len(context) == DM_CONTEXT_MESSAGES else ""
+    context, key = _prior_context(conversation_id, conn) if rows else ([], ())
+    oldest = context[0]["ts"] if len(context) == CONTEXT_MESSAGES else ""
     if answered_ts and (
             not _reads_as_it_was_proposed(context + held, answered_ts, answered_at)
-            or _dm_withdrew_evidence(key, conn, oldest, answered_ts, answered_at)):
+            or _context_withdrew_evidence(key, conn, oldest, answered_ts, answered_at)):
         answered_ts = ""
     head = TRANSCRIPT_HEAD_MESSAGES
     if answered_ts:
@@ -1500,7 +1557,12 @@ def _candidates(instance_key: str, config: dict, now: datetime) -> list[dict]:
     than judged and rejected. It costs no model call, and it spends none of
     the scan's judgement allowance on a thread that cannot hold a request
     aimed at the operator. It is dropped without a judgement mark, so the
-    reply that turns it into a real request makes it a candidate at once."""
+    reply that turns it into a real request makes it a candidate at once.
+
+    involves_operator is a property of the channel, not of the messages of one
+    conversation; see _spread_involvement_across_the_channel. So a conversation
+    that names the operator nowhere is still read when it stands in a channel
+    he is in, which is where a request written without a thread puts it."""
     operator_id = _operator_id(config)
     rows = db.query_all(
         "SELECT * FROM slack_conversations"
@@ -1544,8 +1606,7 @@ def _judge(row: dict, transcript: str, participants: list[str], channel: str,
     rules = ""
     if context:
         rules += CONTEXT_RULE.format(opened=CONTEXT_OPEN_MARK,
-                                     closed=CONTEXT_CLOSE_MARK,
-                                     opened_mark=OPENED_MARK)
+                                     closed=CONTEXT_CLOSE_MARK)
     if answered:
         rules += DECLINED_RULE.format(answered=ANSWERED_MARK)
     raw = run_haiku(JUDGE_PROMPT.format(
@@ -1695,8 +1756,8 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
     The transcript is rendered a second time before the claim, and a proposal
     is opened only when it still reads exactly as it did when the judge read
     it. The claim itself is a revision on this conversation, and a conversation
-    in a direct message is judged from messages that belong to OTHER
-    conversations; see _dm_context. ingest raises the revision of the
+    is judged from messages that belong to OTHER conversations; see
+    _prior_context. ingest raises the revision of the
     conversation each of those messages belongs to, not of this one, so an edit
     or a deletion inside the context block during the model call would pass the
     claim and open a proposal from evidence that has since changed. Comparing
@@ -1784,9 +1845,9 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
             break
         if verdict.get("actionable") is not True or not objective:
             # A no is written only when the transcript still reads as the judge
-            # read it. A conversation in a direct message is judged from
-            # messages that belong to other conversations, and ingest raises
-            # THEIR revision and clears THEIR judgement, not this one's. So a
+            # read it. A conversation is judged from messages that belong to
+            # other conversations, and ingest raises THEIR revision and clears
+            # THEIR judgement, not this one's. So a
             # context message edited during the model call to name the ticket
             # the judge said was missing would otherwise leave this
             # conversation marked read to its last message and never judged

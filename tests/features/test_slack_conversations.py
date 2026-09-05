@@ -20,6 +20,7 @@ NOW = datetime(2026, 9, 3, 20, 0, tzinfo=timezone.utc)
 OPERATOR = "U0OPERATOR"
 ERIK = "U0ERIK"
 CHANNEL = "C0PLATFORM"
+OTHER_CHANNEL = "C0SUPPORT"
 DM = "D0COLLEAGUE"
 ROOT_TS = "1788458400.000100"
 PR_REQUEST = ("approve when you can: "
@@ -172,15 +173,25 @@ def test_channel_noise_is_skipped(tmp_path):
     assert _conversations() == []
 
 
-def test_operator_involvement_is_recorded(tmp_path):
+def test_operator_involvement_follows_the_channel(tmp_path):
+    """A request made in a channel names the operator at most once. The message
+    that names him and the message that says what is wanted are different
+    messages, so involvement is a property of the channel and not of the
+    message: naming him anywhere in a channel makes every conversation in it
+    one of his."""
     _capture(tmp_path, [
         _ws("1788458400.000100", ERIK, "who owns the exporter?"),
         _ws("1788458500.000100", ERIK, f"<@{OPERATOR}> can you look at the exporter?"),
+        _ws("1788458600.000100", ERIK, "the cohort one, it duplicates rows",
+            channel=OTHER_CHANNEL),
     ])
     sc.ingest(_config(tmp_path), instance_key="atropos", now=NOW)
     involved = {r["thread_ts"]: r["involves_operator"] for r in _conversations()}
-    assert involved["1788458400.000100"] == 0
-    assert involved["1788458500.000100"] == 1
+    assert involved["1788458500.000100"] == 1, "the message that names him"
+    assert involved["1788458400.000100"] == 1, (
+        "and the one before it in the same channel, which names nobody")
+    assert involved["1788458600.000100"] == 0, (
+        "a channel no message of names him in is not his")
 
 
 # --- the proposal ----------------------------------------------------------
@@ -2349,7 +2360,7 @@ def test_a_later_candidate_is_judged_on_the_index_the_scan_left(tmp_path):
     The newer conversation is the one that loses here, and it should. The
     message that landed during its model call sits before it in the same
     direct message, which makes it part of the context the judge is given and
-    was not shown; see _dm_context. Its verdict was reached on a transcript the
+    was not shown; see _prior_context. Its verdict was reached on a transcript the
     index no longer holds, so no proposal may be built on it. It keeps no
     judgement mark, so the next scan reads the whole of it again."""
     _capture(tmp_path, [
@@ -2456,7 +2467,7 @@ def test_a_capture_the_scan_could_not_read_whole_proposes_nothing(tmp_path):
     sibling.write_text(json.dumps(_ws("1788458300.000100", ERIK, "older")) + "\n")
     config = _config(tmp_path, propose_tasks=True)
     sc.ingest(config, instance_key="atropos", now=NOW)
-    assert len(sc._candidates("atropos", config, NOW)) == 1
+    assert ROOT_TS in [r["thread_ts"] for r in sc._candidates("atropos", config, NOW)]
 
     with _unreadable(sibling), \
          patch.object(sc, "run_haiku", return_value=_verdict()) as haiku, \
@@ -2701,7 +2712,7 @@ def test_a_sibling_deleted_mid_scan_proposes_nothing(tmp_path):
         json.dumps(_ws("1788458350.000100", ERIK, "middle")) + "\n")
     config = _config(tmp_path, propose_tasks=True)
     sc.ingest(config, instance_key="atropos", now=NOW)
-    assert len(sc._candidates("atropos", config, NOW)) == 1
+    assert ROOT_TS in [r["thread_ts"] for r in sc._candidates("atropos", config, NOW)]
 
     oldest.unlink()
 
@@ -2739,7 +2750,7 @@ def test_a_sibling_that_went_away_only_stops_one_scan(tmp_path):
 DM_FIRST_TS = "1788458400.000100"
 DM_SECOND_TS = "1788458500.000200"
 DM_THIRD_TS = "1788458600.000300"
-CONTEXT_RULE_LINE = "The transcript opens with what this direct message said earlier."
+CONTEXT_RULE_LINE = "The transcript opens with what this channel said earlier."
 
 
 def _dm_exchange():
@@ -2788,23 +2799,24 @@ def test_a_dm_request_is_judged_with_what_the_dm_said_before_it(tmp_path):
     assert opened["proposed"] == 1
 
 
-def test_a_thread_in_a_channel_is_judged_without_the_rest_of_the_channel(tmp_path):
-    """The oracle for the test above. A thread in a channel already holds the
-    request and the detail that explains it, and the messages around it belong
-    to other exchanges, so no block is drawn and the judge sees the thread
-    alone. Without this the assertions above would pass on code that pulled in
-    every neighbouring message everywhere."""
+def test_a_conversation_is_never_given_another_channels_messages(tmp_path):
+    """The oracle for the test above. The block is what THIS channel said
+    before the conversation, so a message from another channel is never in it
+    however close in time it sits. Without this the assertions above would pass
+    on code that pulled in every neighbouring message everywhere."""
     _capture(tmp_path, [
-        _ws(DM_FIRST_TS, ERIK, "does the WB board look familiar to you?"),
-        _ws(DM_SECOND_TS, OPERATOR, "that is the old cohort export board"),
-        _ws(DM_THIRD_TS, ERIK, f"<@{OPERATOR}> can you move this to PLT"),
+        _ws(DM_FIRST_TS, ERIK, "does the WB board look familiar to you?",
+            channel=OTHER_CHANNEL),
+        _ws(DM_SECOND_TS, OPERATOR, "that is the old cohort export board",
+            channel=OTHER_CHANNEL),
+        _ws(DM_THIRD_TS, ERIK, "can you move this to PLT and drop the old one",
+            channel=DM),
     ])
     _, haiku = _run(tmp_path, _verdict(), propose_max_judgements_per_scan=1)
 
     prompt = _judged_prompt(haiku)
-    assert CONTEXT_RULE_LINE not in prompt
-    assert sc.CONTEXT_OPEN_MARK not in prompt and sc.CONTEXT_CLOSE_MARK not in prompt
     assert "does the WB board look familiar" not in prompt
+    assert "that is the old cohort export board" not in prompt
     assert "can you move this to PLT" in prompt
 
 
@@ -2896,7 +2908,7 @@ def test_the_context_block_keeps_the_messages_nearest_the_request(tmp_path):
     request points at are the ones just before it, so the block holds the last
     DM_CONTEXT_MESSAGES of them and drops the older ones."""
     lines = [_ws(f"178845{800 + i:04d}.000100", ERIK, f"earlier {i}", channel=DM)
-             for i in range(sc.DM_CONTEXT_MESSAGES + 4)]
+             for i in range(sc.CONTEXT_MESSAGES + 4)]
     lines.append(_ws("1788459900.000100", ERIK, "can you move this to PLT",
                      channel=DM))
     _capture(tmp_path, lines)
@@ -2905,8 +2917,8 @@ def test_the_context_block_keeps_the_messages_nearest_the_request(tmp_path):
     rendered = _judged_prompt(haiku).split("## Conversation")[1].split("\n")
     body = rendered[rendered.index(sc.CONTEXT_OPEN_MARK) + 1:
                     rendered.index(sc.CONTEXT_CLOSE_MARK)]
-    assert len(body) == sc.DM_CONTEXT_MESSAGES
-    assert body[-1].endswith(f"earlier {sc.DM_CONTEXT_MESSAGES + 3}")
+    assert len(body) == sc.CONTEXT_MESSAGES
+    assert body[-1].endswith(f"earlier {sc.CONTEXT_MESSAGES + 3}")
     assert body[0].endswith("earlier 4")
 
 
@@ -3302,118 +3314,12 @@ def test_learning_a_dm_channel_reopens_what_it_can_now_be_context_for(tmp_path):
     row = db.query_one("SELECT * FROM slack_conversations WHERE thread_ts = ?",
                        (DM_THIRD_TS,))
     assert row["judged_ts"] == "" and sc._is_candidate(row, config, NOW, OPERATOR)
-def test_a_context_message_that_opened_a_task_says_so(tmp_path):
-    """A pending proposal outlives the window its message sits in. The cutoff
-    alone would tell the judge that message opened nothing, and the same
-    request would be proposed a second time beside the one the operator has
-    not decided yet."""
-    _capture(tmp_path, [_ws(DM_FIRST_TS, ERIK, "please move WB-412 to PLT",
-                            channel=DM)])
-    _run(tmp_path, _verdict(), propose_max_judgements_per_scan=1)
-    assert _item_ids(), "the first message opened a task"
-
-    _capture(tmp_path, [_ws(DM_THIRD_TS, ERIK, "please move it today", channel=DM)])
-    _, haiku = _run(tmp_path, _verdict(actionable=False),
-                    propose_max_judgements_per_scan=1)
-
-    prompt = _judged_prompt(haiku)
-    rendered = prompt.split("## Conversation")[1].split("\n")
-    assert [line for line in rendered
-            if sc.OPENED_MARK in line and line.endswith("please move WB-412 to PLT")]
-    assert not [line for line in rendered
-                if sc.OPENED_MARK in line and line.endswith("please move it today")]
-    assert sc.OPENED_MARK in prompt.split("## Conversation")[0], (
-        "and the rule that uses the mark is given to the judge")
-
-
-def test_a_context_message_edited_after_its_task_stops_saying_it_opened_one(tmp_path):
-    """OPENED_MARK says frshty already opened a task for what this message
-    asks. Edited since, it asks for something the task never covered, and the
-    mark would suppress the request the edit made."""
-    _capture(tmp_path, [_ws(DM_FIRST_TS, ERIK, "please move WB-412 to PLT",
-                            channel=DM)])
-    _run(tmp_path, _verdict(), propose_max_judgements_per_scan=1)
-    assert _item_ids()
-
-    _capture(tmp_path, [
-        {"dt": "2026-09-03T19:40:00+00:00", "source": "ws", "endpoint": "e",
-         "payload": {"type": "message", "subtype": "message_changed",
-                     "channel": DM,
-                     "message": {"type": "message", "ts": DM_FIRST_TS,
-                                 "user": ERIK,
-                                 "text": "please move WB-500 to PLT"}}},
-        _ws(DM_THIRD_TS, ERIK, "please move WB-500 to PLT today", channel=DM),
-    ])
-    _, haiku = _run(tmp_path, _verdict(actionable=False),
-                    now=NOW + timedelta(minutes=5),
-                    propose_max_judgements_per_scan=1)
-
-    prompt = _judged_prompt(haiku)
-    assert "WB-500 to PLT" in prompt
-    assert sc.OPENED_MARK not in prompt.split("## Conversation")[1], (
-        "the task the conversation opened does not answer what it asks now")
-
-
-def test_a_context_message_that_held_still_keeps_its_task_mark(tmp_path):
-    """The oracle for the test above. The same message, no edit, and the mark
-    stays. Without this the assertion above would pass on code that had
-    stopped marking anything."""
-    _capture(tmp_path, [_ws(DM_FIRST_TS, ERIK, "please move WB-412 to PLT",
-                            channel=DM)])
-    _run(tmp_path, _verdict(), propose_max_judgements_per_scan=1)
-
-    _capture(tmp_path, [_ws(DM_THIRD_TS, ERIK, "please move WB-412 to PLT today",
-                            channel=DM)])
-    _, haiku = _run(tmp_path, _verdict(actionable=False),
-                    now=NOW + timedelta(minutes=5),
-                    propose_max_judgements_per_scan=1)
-
-    assert sc.OPENED_MARK in _judged_prompt(haiku).split("## Conversation")[1]
-
-
-def test_every_stamp_this_module_writes_is_utc(tmp_path):
-    """The stamps are ordered as strings, in SQL and in the candidate tests.
-    An isoformat that kept the offset it was given would sort 14:00-07:00
-    before 20:00+00:00, though it is an hour later."""
     utc = datetime(2026, 9, 3, 21, 0, tzinfo=timezone.utc)
     other = utc.astimezone(timezone(timedelta(hours=-7)))
     assert sc._iso(other) == sc._iso(utc)
     assert sc._iso(utc) > sc._iso(utc - timedelta(hours=1))
     assert sc._iso(other) > sc._iso(datetime(2026, 9, 3, 20, 0,
                                              tzinfo=timezone.utc))
-
-
-def test_an_edited_subject_takes_the_task_mark_off_the_request_it_named(tmp_path):
-    """A task answers what a message asked, and what it asked is what the
-    messages before it made of it. "please move this ticket to PLT" opened a
-    task for WB-412 because the message above it said WB-412. Edit that
-    message to WB-500 and this one asks for something the task never covered,
-    while its own text never moved."""
-    _capture(tmp_path, [
-        _ws(DM_FIRST_TS, ERIK, "the ticket is WB-412", channel=DM),
-        _ws(DM_SECOND_TS, ERIK, "please move this ticket to PLT", channel=DM),
-    ])
-    _run(tmp_path, _verdict(), propose_max_judgements_per_scan=1)
-    assert _item_ids()
-
-    _capture(tmp_path, [
-        {"dt": "2026-09-03T19:40:00+00:00", "source": "ws", "endpoint": "e",
-         "payload": {"type": "message", "subtype": "message_changed",
-                     "channel": DM,
-                     "message": {"type": "message", "ts": DM_FIRST_TS,
-                                 "user": ERIK, "text": "the ticket is WB-500"}}},
-        _ws(DM_THIRD_TS, ERIK, "please move WB-500 to PLT today", channel=DM),
-    ])
-    _, haiku = _run(tmp_path, _verdict(actionable=False),
-                    now=NOW + timedelta(minutes=5),
-                    propose_max_judgements_per_scan=1)
-
-    prompt = _judged_prompt(haiku)
-    assert "please move this ticket to PLT" in prompt
-    assert sc.OPENED_MARK not in prompt.split("## Conversation")[1], (
-        "what that task covered is not what this message asks any more")
-
-
 def test_a_declined_thread_is_reopened_when_its_context_is_corrected(tmp_path):
     """A decline answers the request it was opened for and nothing else. A
     later message in the same thread that named too little can be waiting on
@@ -3479,3 +3385,218 @@ def test_a_pending_proposal_keeps_its_judgement_when_the_context_moves(tmp_path)
                        (DM_SECOND_TS,))
     assert row["judged_ts"] == before["judged_ts"] and row["judged_ts"]
     assert not sc._is_candidate(row, config, NOW + timedelta(minutes=5), OPERATOR)
+
+
+def test_a_declined_thread_changed_by_the_same_scan_is_still_reopened(tmp_path):
+    """A conversation the scan changed keeps its judgement whenever it carries
+    a proposal, declined ones included. Holding it out of the context pass as
+    well would leave one case the correction never reaches: a declined thread
+    that gains a message in the same scan that corrects what it points at."""
+    _capture(tmp_path, [
+        _ws(DM_FIRST_TS, ERIK, "the other one is broken too", channel=DM),
+        _ws(DM_SECOND_TS, ERIK, "please move WB-412 to PLT", channel=DM),
+    ])
+    _run(tmp_path, _verdict(), propose_max_judgements_per_scan=1)
+    item_id = _item_ids()[0]
+    assert work_store.apply_action(item_id, "decline") == {
+        "id": item_id, "action": "decline"}
+
+    config = _config(tmp_path, propose_tasks=True,
+                     propose_max_judgements_per_scan=1)
+    _capture(tmp_path, [_ws(LATE_TS, ERIK, "also please move that other ticket",
+                            thread_ts=DM_SECOND_TS, channel=DM)])
+    _run(tmp_path, _verdict(actionable=False), now=MONTH_LATER,
+         propose_max_judgements_per_scan=1)
+    assert db.query_one("SELECT judged_ts FROM slack_conversations"
+                        " WHERE thread_ts = ?", (DM_SECOND_TS,))["judged_ts"]
+
+    # One scan carries both: the correction to the context and a message in the
+    # declined thread itself.
+    _capture(tmp_path, [
+        {"dt": "2026-09-04T19:00:00+00:00", "source": "ws", "endpoint": "e",
+         "payload": {"type": "message", "subtype": "message_changed",
+                     "channel": DM,
+                     "message": {"type": "message", "ts": DM_FIRST_TS,
+                                 "user": ERIK, "text": "WB-500 is broken too"}}},
+        {"dt": "2026-09-04T19:00:01+00:00", "source": "ws", "endpoint": "e",
+         "payload": {"type": "message", "subtype": "message_changed",
+                     "channel": DM, "ts": LATE_TS, "thread_ts": DM_SECOND_TS,
+                     "message": {"type": "message", "ts": LATE_TS,
+                                 "thread_ts": DM_SECOND_TS, "user": ERIK,
+                                 "text": "also please move that other one"}}},
+    ])
+    sc.ingest(config, instance_key="atropos", now=MONTH_LATER)
+
+    row = db.query_one("SELECT * FROM slack_conversations WHERE thread_ts = ?",
+                       (DM_SECOND_TS,))
+    assert row["judged_ts"] == ""
+    assert sc._is_candidate(row, config, MONTH_LATER, OPERATOR)
+
+
+def test_every_stamp_this_module_writes_is_utc(tmp_path):
+    """The stamps are ordered as strings, in SQL and in the candidate tests.
+    An isoformat that kept the offset it was given would sort 14:00-07:00
+    before 20:00+00:00, though it is an hour later."""
+    utc = datetime(2026, 9, 3, 21, 0, tzinfo=timezone.utc)
+    other = utc.astimezone(timezone(timedelta(hours=-7)))
+    assert sc._iso(other) == sc._iso(utc)
+    assert sc._iso(utc) > sc._iso(utc - timedelta(hours=1))
+    assert sc._iso(other) > sc._iso(datetime(2026, 9, 3, 20, 0,
+                                             tzinfo=timezone.utc))
+
+
+# --- a conversation in a channel is not always a thread --------------------
+
+RUN_FIRST_TS = "1788458400.000100"
+RUN_SECOND_TS = "1788458500.000200"
+RUN_THIRD_TS = "1788458600.000300"
+
+
+def _channel_run(mention=True):
+    """A request written into a channel without a thread: three top-level
+    messages, so three conversations of one. The mention is on the first, the
+    identifiers are on the second, and the ask is on the third."""
+    opener = "quick one about the cohort export"
+    return [
+        _ws(RUN_FIRST_TS, ERIK,
+            f"<@{OPERATOR}> {opener}" if mention else opener),
+        _ws(RUN_SECOND_TS, ERIK, "WB-412 duplicates rows on the WB board"),
+        _ws(RUN_THIRD_TS, ERIK,
+            "can you move it to PLT and put it in the TRIAGE sprint"),
+    ]
+
+
+def test_a_channel_request_without_a_thread_is_judged_with_what_came_before_it(tmp_path):
+    """The reported failure. Nobody is obliged to use a thread, so a request
+    made in a channel arrives as a run of top-level messages. The message that
+    names the operator asks for nothing, and the message that asks for
+    something names neither the operator nor the ticket. Judged one at a time
+    with nothing above them, none of them is actionable and frshty opens
+    nothing."""
+    _capture(tmp_path, _channel_run())
+    opened, haiku = _run(tmp_path, _verdict(), propose_max_judgements_per_scan=1)
+
+    prompt = _judged_prompt(haiku)
+    rendered = prompt.split("## Conversation")[1].split("\n")
+    assert CONTEXT_RULE_LINE in prompt, "the judge is told what the block is"
+    body = rendered[rendered.index(sc.CONTEXT_OPEN_MARK):
+                    rendered.index(sc.CONTEXT_CLOSE_MARK)]
+    assert [line for line in body if line.endswith("quick one about the cohort export")]
+    assert [line for line in body
+            if line.endswith("WB-412 duplicates rows on the WB board")], (
+        "the ticket the ask calls 'it' is in the block")
+    assert [line for line in rendered[rendered.index(sc.CONTEXT_CLOSE_MARK):]
+            if line.endswith("can you move it to PLT and put it in the TRIAGE sprint")], (
+        "and the ask is the only message being judged")
+    assert opened["proposed"] == 1
+
+
+def test_a_channel_message_is_read_although_it_names_the_operator_nowhere(tmp_path):
+    """The message that carries the ask carries no mention. It is read because
+    it stands in a channel the operator is named in."""
+    _capture(tmp_path, _channel_run())
+    config = _config(tmp_path)
+    sc.ingest(config, instance_key="atropos", now=NOW)
+
+    row = db.query_one("SELECT * FROM slack_conversations WHERE thread_ts = ?",
+                       (RUN_THIRD_TS,))
+    assert f"<@{OPERATOR}>" not in _messages(row["id"])[0]["text"]
+    assert sc._is_candidate(row, config, NOW, OPERATOR)
+
+
+def test_a_channel_message_with_no_operator_above_it_is_never_read(tmp_path):
+    """The oracle for the two tests above. The same run with the mention taken
+    off the first message, so the operator is in none of the three
+    conversations and in none of their context. Without this they would pass on
+    code that read every message of every channel."""
+    _capture(tmp_path, _channel_run(mention=False))
+    opened, haiku = _run(tmp_path, _verdict())
+
+    assert haiku.call_count == 0
+    assert opened["proposed"] == 0
+    config = _config(tmp_path)
+    for row in _conversations():
+        assert not sc._is_candidate(row, config, NOW, OPERATOR)
+
+
+def test_a_channel_the_operator_is_named_in_reaches_all_of_it(tmp_path):
+    """The channel is the bound, so it reaches as far back as the channel goes.
+    A conversation CONTEXT_MESSAGES and more before the message that names him
+    is out of every block the judge will read, and it is still read, because
+    the question this answers is which channel the request stands in."""
+    _capture(tmp_path,
+             [_ws("1788450800.000100", ERIK, "can you fix it today")]
+             + [_ws(f"178845{801 + i:04d}.000100", ERIK, f"filler {i}")
+                for i in range(sc.CONTEXT_MESSAGES + 2)]
+             + [_ws("1788459900.000100", ERIK, f"<@{OPERATOR}> ping")])
+    config = _config(tmp_path)
+    sc.ingest(config, instance_key="atropos", now=NOW)
+
+    row = db.query_one("SELECT * FROM slack_conversations WHERE thread_ts = ?",
+                       ("1788450800.000100",))
+    assert sc._is_candidate(row, config, NOW, OPERATOR)
+    later = db.query_one("SELECT * FROM slack_conversations WHERE thread_ts = ?",
+                         ("1788459900.000100",))
+    block = [m["text"] for m in sc._prior_context(later["id"])[0]]
+    assert "can you fix it today" not in block, (
+        "and it is out of reach of the block that names him")
+
+
+def test_a_channel_context_edited_after_a_no_verdict_is_judged_again(tmp_path):
+    """A no answers one transcript. Correcting the context is a different
+    transcript, and the corrected message belongs to another conversation, so
+    ingest clears that one's judgement and not this one's. Without reopening
+    the conversations a changed message is context for, the request stays
+    marked read and no scan looks at it again."""
+    _capture(tmp_path, [
+        _ws(RUN_FIRST_TS, OPERATOR, "which export is broken?"),
+        _ws(RUN_SECOND_TS, ERIK, "the customer export is broken"),
+        _ws(RUN_THIRD_TS, ERIK, "can you fix this"),
+    ])
+    config = _config(tmp_path, propose_tasks=True,
+                     propose_max_judgements_per_scan=1)
+    _run(tmp_path, _verdict(actionable=False), propose_max_judgements_per_scan=1)
+    assert db.query_one("SELECT judged_ts FROM slack_conversations"
+                        " WHERE thread_ts = ?", (RUN_THIRD_TS,))["judged_ts"]
+
+    _capture(tmp_path, [{
+        "dt": "2026-09-03T19:40:00+00:00", "source": "ws", "endpoint": "e",
+        "payload": {"type": "message", "subtype": "message_changed",
+                    "channel": CHANNEL,
+                    "message": {"type": "message", "ts": RUN_SECOND_TS,
+                                "user": ERIK,
+                                "text": "WB-412 in acme/exporter is broken"}}}])
+    sc.ingest(config, instance_key="atropos", now=NOW)
+
+    row = db.query_one("SELECT * FROM slack_conversations WHERE thread_ts = ?",
+                       (RUN_THIRD_TS,))
+    assert row["judged_ts"] == "" and row["judged_at"] is None
+    assert sc._is_candidate(row, config, NOW, OPERATOR)
+
+
+def test_learning_a_channel_reopens_what_it_can_now_be_context_for(tmp_path):
+    """A REST batch carries no channel, so the message it delivers is filed
+    under none and nothing can read it as part of the channel. The websocket
+    record that names the channel changes no text, so no other check calls
+    anything changed, and yet the block can now show it."""
+    _capture(tmp_path, [_rest([
+        {"type": "message", "ts": RUN_FIRST_TS, "user": ERIK,
+         "text": "WB-412 in acme/exporter is broken"}]),
+        _ws(RUN_THIRD_TS, ERIK, f"<@{OPERATOR}> can you fix this")])
+    config = _config(tmp_path, propose_tasks=True,
+                     propose_max_judgements_per_scan=1)
+    _run(tmp_path, _verdict(actionable=False), propose_max_judgements_per_scan=1)
+    assert db.query_one("SELECT judged_ts FROM slack_conversations"
+                        " WHERE thread_ts = ?", (RUN_THIRD_TS,))["judged_ts"]
+    assert db.query_one("SELECT channel_id FROM slack_conversations"
+                        " WHERE thread_ts = ?", (RUN_FIRST_TS,))["channel_id"] == ""
+
+    _capture(tmp_path, [_ws(RUN_FIRST_TS, ERIK,
+                            "WB-412 in acme/exporter is broken")])
+    sc.ingest(config, instance_key="atropos", now=NOW)
+
+    assert db.query_one("SELECT channel_id FROM slack_conversations"
+                        " WHERE thread_ts = ?", (RUN_FIRST_TS,))["channel_id"] == CHANNEL
+    row = db.query_one("SELECT * FROM slack_conversations WHERE thread_ts = ?",
+                       (RUN_THIRD_TS,))
+    assert row["judged_ts"] == "" and sc._is_candidate(row, config, NOW, OPERATOR)
