@@ -404,6 +404,45 @@ def test_an_edit_in_the_filtered_log_raises_no_second_mention(tmp_path):
     assert len(_mention_events()) == 1
 
 
+def test_a_message_that_names_no_channel_raises_no_event(tmp_path):
+    """A message pulled over REST names no channel. An event for it would say
+    the mention was in no channel, and it would store a reply context that
+    chat.postMessage rejects with channel_not_found. 1595 of the 3934 messages
+    in the live filtered archive name no channel."""
+    _armed_state()
+    _write(tmp_path, "filtered.jsonl", [
+        dict(_filtered(_recent_ts(), ERIK, f"<@{OPERATOR}> look at WB-412",
+                       name="Erik"), ch="", src="conversations.history")])
+
+    with patch.object(slack_monitor, "run_haiku", return_value="REPLY"):
+        slack_monitor.check(_config(tmp_path))
+
+    assert _mention_events() == []
+    assert state.load("slack").get("replies", {}) == {}
+
+
+def test_the_copy_that_names_the_channel_is_the_one_that_is_used(tmp_path):
+    """The same message reaches the capture live, naming its channel, and
+    again in a REST pull that names none. Exactly one event is raised, and it
+    carries the real channel and a reply context that can be replied to."""
+    _armed_state()
+    ts = _recent_ts()
+    text = f"<@{OPERATOR}> can you look at WB-412"
+    _write(tmp_path, "filtered.jsonl", [
+        dict(_filtered(ts, ERIK, text, name="Erik"), ch="",
+             src="conversations.history"),
+        _filtered(ts, ERIK, text, name="Erik"),
+    ])
+
+    with patch.object(slack_monitor, "run_haiku", return_value="REPLY"):
+        slack_monitor.check(_config(tmp_path))
+
+    events = _mention_events()
+    assert len(events) == 1
+    assert json.loads(events[0]["meta"])["channel"] == "#platform"
+    assert state.load("slack")["replies"][ts]["channel"] == CHANNEL
+
+
 def test_a_message_from_another_workspace_is_not_read(tmp_path):
     _armed_state()
     ts = _recent_ts()

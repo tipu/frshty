@@ -126,7 +126,18 @@ def check(config: dict):
     sl["names"] = names
     _warn_when_the_operator_has_no_id(base_url, sl, user_id)
 
-    mentions = [m for m in messages if _is_mention(m, user_id) or _is_dm_to_me(m, user_id)]
+    # A message pulled over REST names no channel: the channel travelled in
+    # the POST body, which the capture does not keep. The raw log never got
+    # this far with one, because a REST batch carries no text on the record
+    # itself and this scan reads one message per record. The filtered log
+    # unpacks the batch, and acting on a message with no channel would raise
+    # an attention event against no channel and store a reply context that
+    # chat.postMessage rejects. So the mention and thread paths take only the
+    # messages that name where they were said. The rest still count: they move
+    # the high-water mark, and the conversation index reads them, where a
+    # thread gets its channel from the record that delivered it live.
+    addressed = [m for m in messages if _extract_channel(m) != ""]
+    mentions = [m for m in addressed if _is_mention(m, user_id) or _is_dm_to_me(m, user_id)]
     # Only emit + triage for mentions young enough to be actionable. Older ones
     # still clear the high-water mark so they won't re-surface, but don't spam.
     mentions = [m for m in mentions if _msg_ts_iso(m) > notify_cutoff_iso]
@@ -194,7 +205,7 @@ def check(config: dict):
             links={"detail": f"{base_url}/slack"},
             meta={"channel": channel, "text": text[:200], "suggested_response": suggested, "action": action, "reply_id": reply_id})
 
-    thread_msgs = [m for m in messages if _is_in_thread(m, user_id)]
+    thread_msgs = [m for m in addressed if _is_in_thread(m, user_id)]
     thread_msgs = [m for m in thread_msgs if _msg_ts_iso(m) > notify_cutoff_iso]
     for msg in thread_msgs:
         text = _extract_text(msg)
