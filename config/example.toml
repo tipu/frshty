@@ -87,8 +87,11 @@ pr_autofix = false                # github only: every newly created PR gets a c
 #                                     # somebody else asks this user for concrete work. Every
 #                                     # such task lands in the `proposed` group and never runs
 #                                     # until you approve it.
-# propose_settle_minutes = 10         # a conversation is judged only once its last message is
-#                                     # this old, so a thread still being typed is left alone
+# propose_settle_minutes = 5          # a conversation is judged only once its last message is
+#                                     # this old, so a thread still being typed is left alone.
+#                                     # frshty watches the capture file and runs the scan when
+#                                     # this window runs out, so this value is what decides how
+#                                     # long a request waits before it is proposed.
 # propose_max_age_hours = 48          # never propose from a conversation older than this
 # propose_max_per_day = 3             # ceiling on proposals opened for this instance per day
 # propose_max_judgements_per_scan = 3 # ceiling on model calls per scan

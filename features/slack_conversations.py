@@ -88,7 +88,7 @@ STATE_MODULE = "slack_conversations"
 BOOTSTRAP_BYTES = 32 * 1024 * 1024
 OFFSET_MEMORY_DAYS = 14
 HEAD_BYTES = 4096
-DEFAULT_SETTLE_MINUTES = 10
+DEFAULT_SETTLE_MINUTES = 5
 DEFAULT_MAX_AGE_HOURS = 48
 DEFAULT_MAX_PROPOSALS_PER_DAY = 3
 DEFAULT_MAX_JUDGEMENTS_PER_SCAN = 3
@@ -252,6 +252,21 @@ def _settings(config: dict) -> dict:
 
 def enabled(config: dict) -> bool:
     return bool(_settings(config).get("propose_tasks"))
+
+
+def settle_minutes(config: dict) -> int:
+    """How long a conversation must stand still before it is judged."""
+    return int(_settings(config).get("propose_settle_minutes",
+                                     DEFAULT_SETTLE_MINUTES))
+
+
+def settle_seconds(config: dict) -> int:
+    """settle_minutes in seconds, for the capture watch in core.runtime.
+
+    The watch wakes the scan when the window it opened over a message has run
+    out, so the wait between a Slack message and the task it proposes is the
+    window itself and not the interval of whatever poll notices it next."""
+    return settle_minutes(config) * 60
 
 
 def capture_path(config: dict) -> str:
@@ -1510,7 +1525,7 @@ def _is_candidate(row: dict, config: dict, now: datetime,
         # ever seen of it. There is nothing to read and nothing to ask for.
         return False
     settings = _settings(config)
-    settle = int(settings.get("propose_settle_minutes", DEFAULT_SETTLE_MINUTES))
+    settle = settle_minutes(config)
     max_age = int(settings.get("propose_max_age_hours", DEFAULT_MAX_AGE_HOURS))
     retry = int(settings.get("propose_judge_retry_minutes", DEFAULT_JUDGE_RETRY_MINUTES))
     last = _ts_value(row["last_ts"])
