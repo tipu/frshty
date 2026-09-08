@@ -20,7 +20,7 @@ from core.config import get_repos
 from features.platforms import make_platform
 from features.ticket_systems import make_ticket_system
 from services import review_store
-from web.sandbox import origin_is_opaque
+from web.origin import origin_is_opaque
 from web.state import _config, active_config
 
 
