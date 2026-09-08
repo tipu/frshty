@@ -13,14 +13,8 @@ that would carry no policy of its own, and object-src stops the same trick
 through object and embed. A board artifact is a self-contained page; it has
 nothing on the network to fetch.
 
-`origin_is_opaque` guards the WebSocket routes, which CORS does not cover: a
-handshake carries an Origin header the server must check itself. A sandboxed
-document has no origin of its own and sends `null`, which the board's own pages
-never do. It is not a general cross-origin check. Three hostnames reach this
-board and Caddy rewrites Host to the canonical one for two of them, so the
-request's Host header does not identify the browser's origin; naming the
-board's browser-facing hostnames is operator configuration this module does not
-have.
+A sandboxed page sends `Origin: null`, which is why web.origin refuses that
+value on every guarded route and on both WebSocket handshakes.
 """
 
 DATA = "sandbox"
@@ -33,7 +27,3 @@ _PAGE_SUFFIXES = (".html", ".htm")
 
 def policy_for(path: str) -> str:
     return PAGE if path.lower().endswith(_PAGE_SUFFIXES) else DATA
-
-
-def origin_is_opaque(origin: str) -> bool:
-    return origin.strip().lower() == "null"

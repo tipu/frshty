@@ -1,6 +1,7 @@
 import pytest
 
-from web.sandbox import DATA, PAGE, origin_is_opaque, policy_for
+from web.origin import origin_is_opaque
+from web.sandbox import DATA, PAGE, policy_for
 
 
 class TestSandboxPolicy:
