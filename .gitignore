@@ -15,7 +15,7 @@ wheels/
 # Job configs (contain tokens/account IDs)
 config/*.toml
 !config/example.toml
-!config/discovery.toml
+!config/discovery.example.toml
 !config/peers.example.toml
 
 # Scratch scripts (may contain hardcoded credentials)
