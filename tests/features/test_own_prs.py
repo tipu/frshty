@@ -1142,6 +1142,184 @@ class TestCommitFix:
         assert msg == "fix: address review comment on a.txt"
 
 
+class TestCommitFixAgentCommittedItself:
+    """Observed live on quill#4561 (2026-09-08): review comments 5577340566
+    and 5577373733 were fixed four times and abandoned four times. Each
+    fix run committed its own work inside the worktree (db8e2df8, b6692376,
+    57188856, 52bb95d0), so `add -A` plus `diff --cached --quiet` found a
+    clean index, `_commit_fix` returned "no changes produced", the push never
+    ran, and the next poll hard-reset the worktree to origin and threw the
+    commit away. error_count reached 4, passed MAX_COMMENT_RETRIES, and the
+    comments were abandoned with the fix never delivered."""
+
+    def _init_repo(self, path):
+        import subprocess
+        path.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=str(path), check=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=str(path), check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=str(path), check=True)
+        subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=str(path), check=True)
+        (path / "a.txt").write_text("one\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(path), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=str(path), check=True)
+        return path
+
+    def _head(self, repo):
+        import subprocess
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo),
+                              capture_output=True, text=True, check=True).stdout.strip()
+
+    def test_self_committed_fix_is_accepted(self, tmp_path):
+        import subprocess
+        repo = self._init_repo(tmp_path / "repo")
+        head_before = self._head(repo)
+        (repo / "a.txt").write_text("two\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "fix: agent committed this itself"],
+                       cwd=str(repo), check=True)
+
+        ok, reason = own_prs._commit_fix(
+            repo, "fix: address review comment on a.txt", head_before=head_before)
+
+        assert ok is True
+        assert reason == ""
+        assert self._head(repo) != head_before
+
+    def test_clean_worktree_and_unmoved_head_still_reports_no_changes(self, tmp_path):
+        repo = self._init_repo(tmp_path / "repo")
+
+        ok, reason = own_prs._commit_fix(
+            repo, "fix: address review comment on a.txt", head_before=self._head(repo))
+
+        assert ok is False
+        assert reason == "no changes produced"
+
+    def test_unreadable_head_before_reports_no_changes(self, tmp_path):
+        repo = self._init_repo(tmp_path / "repo")
+
+        ok, reason = own_prs._commit_fix(
+            repo, "fix: address review comment on a.txt", head_before="")
+
+        assert ok is False
+        assert reason == "no changes produced"
+
+    def test_a_base_merge_moving_head_is_not_a_fix(self, tmp_path):
+        """These worktrees are reused across features and across processes, so
+        a base-branch merge can move HEAD while the fix agent runs. A moved
+        HEAD alone would push the merge and report the comment answered."""
+        import subprocess
+        repo = self._init_repo(tmp_path / "repo")
+        subprocess.run(["git", "checkout", "-q", "-b", "base"], cwd=str(repo), check=True)
+        (repo / "b.txt").write_text("base work\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "base work"], cwd=str(repo), check=True)
+        subprocess.run(["git", "checkout", "-q", "-"], cwd=str(repo), check=True)
+        head_before = self._head(repo)
+        subprocess.run(["git", "merge", "-q", "--no-ff", "-m", "Merge base", "base"],
+                       cwd=str(repo), check=True)
+
+        ok, reason = own_prs._commit_fix(
+            repo, "fix: address review comment on a.txt", head_before=head_before)
+
+        assert self._head(repo) != head_before
+        assert ok is False
+        assert reason == "no changes produced"
+
+    def test_another_pollers_reset_moving_head_is_not_a_fix(self, tmp_path):
+        import subprocess
+        repo = self._init_repo(tmp_path / "repo")
+        (repo / "a.txt").write_text("two\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "landed elsewhere"],
+                       cwd=str(repo), check=True)
+        ahead = self._head(repo)
+        subprocess.run(["git", "reset", "-q", "--hard", "HEAD~1"], cwd=str(repo), check=True)
+        head_before = self._head(repo)
+        subprocess.run(["git", "reset", "-q", "--hard", ahead], cwd=str(repo), check=True)
+
+        ok, reason = own_prs._commit_fix(
+            repo, "fix: address review comment on a.txt", head_before=head_before)
+
+        assert self._head(repo) != head_before
+        assert ok is False
+        assert reason == "no changes produced"
+
+    def test_a_self_commit_the_agent_then_reset_over_is_accepted(self, tmp_path):
+        """`reset --hard HEAD` after committing leaves HEAD on the agent's own
+        commit and a clean tree. Reading only the newest reflog entry would see
+        the reset and discard a delivered fix."""
+        import subprocess
+        repo = self._init_repo(tmp_path / "repo")
+        head_before = self._head(repo)
+        (repo / "a.txt").write_text("two\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "fix: real work"],
+                       cwd=str(repo), check=True)
+        committed = self._head(repo)
+        subprocess.run(["git", "reset", "-q", "--hard", "HEAD"], cwd=str(repo), check=True)
+
+        ok, reason = own_prs._commit_fix(
+            repo, "fix: address review comment on a.txt", head_before=head_before)
+
+        assert self._head(repo) == committed
+        assert ok is True
+        assert reason == ""
+
+    def test_an_amended_commit_is_accepted(self, tmp_path):
+        import subprocess
+        repo = self._init_repo(tmp_path / "repo")
+        head_before = self._head(repo)
+        (repo / "a.txt").write_text("two\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "fix: first pass"],
+                       cwd=str(repo), check=True)
+        (repo / "a.txt").write_text("three\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "--amend", "-m", "fix: second pass"],
+                       cwd=str(repo), check=True)
+
+        ok, reason = own_prs._commit_fix(
+            repo, "fix: address review comment on a.txt", head_before=head_before)
+
+        assert ok is True
+        assert reason == ""
+
+    def test_batch_pushes_a_self_committed_fix(self, tmp_path):
+        import subprocess
+        repo = self._init_repo(tmp_path / "worktree")
+
+        def fake_run_claude_code(*a, **kw):
+            (repo / "a.txt").write_text("two\n")
+            subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+            subprocess.run(["git", "commit", "-q", "-m", "fix: agent committed this itself"],
+                           cwd=str(repo), check=True)
+            return "done"
+
+        platform = MagicMock()
+        platform.get_pr_comments.return_value = [
+            make_comment(id=10, author_id="r1", body="Fix this"),
+        ]
+        platform.push_branch.return_value = {"ok": True}
+        platform.resolve_comment.return_value = {"status": "resolved"}
+
+        config = {"job": {"key": "test"}, "_base_url": "http://x", "_state_dir": tmp_path}
+        payload = {"pr": make_pr(), "comment_ids": ["10"]}
+
+        with patch("features.own_prs.make_platform", return_value=platform), \
+             patch("features.own_prs._ensure_worktree", return_value=repo), \
+             patch("features.own_prs.run_claude_code", side_effect=fake_run_claude_code), \
+             patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.log.emit"):
+            mock_comments.settled_comment_ids.return_value = set()
+            ok, reason = own_prs.fix_comments_batch(config, payload)
+
+        assert ok is True
+        assert reason is None
+        platform.push_branch.assert_called_once()
+        mock_comments.mark_comment_error.assert_not_called()
+        mock_comments.mark_comment_processed.assert_called_once()
+
+
 class TestEnsureWorktree:
     def test_uses_correct_repo(self, tmp_path):
         repo_a = tmp_path / "repo-a"

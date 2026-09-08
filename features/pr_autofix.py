@@ -330,6 +330,7 @@ def run(config: dict, payload: dict) -> tuple[bool, str | None]:
 
             git_util.run_git(worktree, ["reset", "--hard", f"origin/{pr['branch']}"])
             git_util.run_git(worktree, ["clean", "-fd"])
+            head_before = git_util.head_sha(worktree)
 
             findings_list = "\n\n".join(
                 f"[{i + 1}] ({f['severity']}) {f.get('path', '')}:{f.get('line', '')} — {f.get('title', '')}\n"
@@ -350,20 +351,21 @@ def run(config: dict, payload: dict) -> tuple[bool, str | None]:
             git_util.run_git(worktree, ["add", "-A"])
             staged = git_util.run_git(worktree, ["diff", "--cached", "--quiet"],
                                       allowed_codes=(0, 1)).returncode != 0
-            if not staged:
-                return _fail("fix run produced no changes")
-            commit = git_util.commit_with_hooks(
-                worktree,
-                message=commit_subject(
+            if staged:
+                commit = git_util.commit_with_hooks(
                     worktree,
-                    f"fix: resolve {len(findings)} critical/high review finding(s)",
-                    findings_list,
-                ),
-                timeout=900,
-            )
-            if commit.returncode != 0:
-                detail = (commit.stderr or commit.stdout or "").strip()[:200]
-                return _fail(f"commit failed: {detail}")
+                    message=commit_subject(
+                        worktree,
+                        f"fix: resolve {len(findings)} critical/high review finding(s)",
+                        findings_list,
+                    ),
+                    timeout=900,
+                )
+                if commit.returncode != 0:
+                    detail = (commit.stderr or commit.stdout or "").strip()[:200]
+                    return _fail(f"commit failed: {detail}")
+            elif not git_util.agent_committed(worktree, head_before):
+                return _fail("fix run produced no changes")
 
             push = platform.push_branch(worktree, pr["branch"])
             if isinstance(push, dict) and not push.get("ok", True):
