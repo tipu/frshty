@@ -9,6 +9,7 @@ import core.terminal as terminal
 from services import (work_artifacts, work_debrief, work_launch, work_peers,
                       work_store, work_tags, work_worktree)
 from web.pages import _template
+from web.sandbox import policy_for
 
 
 router = APIRouter()
@@ -377,7 +378,7 @@ def _serve_artifact(artifact_id: int, real: str, shown: str):
             {"error": f"artifact path outside the run's workspace: {shown}"},
             status_code=403)
     resp = FileResponse(real)
-    resp.headers["Content-Security-Policy"] = "sandbox"
+    resp.headers["Content-Security-Policy"] = policy_for(real)
     return resp
 
 
