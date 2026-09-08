@@ -117,14 +117,14 @@ class TestCodexLaunch:
 
     def test_a_claude_run_is_cross_checked_by_codex(self, tmp_path, monkeypatch):
         prompt = _launch_prompt(tmp_path, monkeypatch, "claude")
-        assert "Double check your analysis and your code with codex" in prompt
+        assert "double check the change with codex once" in prompt
         assert "codex exec" in prompt
         assert "--skip-git-repo-check" in prompt
         assert "with claude" not in prompt
 
     def test_a_codex_run_is_cross_checked_by_claude(self, tmp_path, monkeypatch):
         prompt = _launch_prompt(tmp_path, monkeypatch, "codex")
-        assert "Double check your analysis and your code with claude" in prompt
+        assert "double check the change with claude once" in prompt
         assert "claude --dangerously-skip-permissions -p" in prompt
         assert "with codex" not in prompt
 
@@ -143,6 +143,32 @@ class TestCodexLaunch:
             assert "style, naming, formatting, comment wording, and test coverage" in prompt
             assert f"Tell {other} to give the severity and the concrete failure case" in prompt
             assert "find what is wrong" not in prompt
+
+    def test_a_task_that_changed_no_code_is_released_from_the_review(self, tmp_path,
+                                                                     monkeypatch):
+        for agent, other in (("claude", "codex"), ("codex", "claude")):
+            prompt = _launch_prompt(tmp_path, monkeypatch, agent)
+            assert f"If you changed code, double check the change with {other} once" in prompt
+            assert f"If you changed no code, do not run {other}" in prompt
+            assert "Double check your analysis and your code" not in prompt
+
+    def test_the_review_is_capped_at_two_passes(self, tmp_path, monkeypatch):
+        for agent, other in (("claude", "codex"), ("codex", "claude")):
+            prompt = _launch_prompt(tmp_path, monkeypatch, agent)
+            assert f"Run {other} a second time only when you fixed a high or " \
+                   "critical finding" in prompt
+            assert "Never run it a third time" in prompt
+
+    def test_the_brief_stops_a_question_task_at_the_answer(self, tmp_path, monkeypatch):
+        prompt = _launch_prompt(tmp_path, monkeypatch, "claude")
+        assert "Do only what the objective asks" in prompt
+        assert "If the objective is a question, answer it and stop" in prompt
+        assert "do not build, install or change anything to answer it" in prompt
+
+    def test_the_brief_forbids_a_shell_loop_that_polls(self, tmp_path, monkeypatch):
+        prompt = _launch_prompt(tmp_path, monkeypatch, "claude")
+        assert "Do not wait for a process in a shell loop that sleeps and checks" in prompt
+        assert "Run the long command in the background" in prompt
 
     def test_the_prompt_puts_the_question_file_on_stdin(self, tmp_path, monkeypatch):
         prompt = _launch_prompt(tmp_path, monkeypatch, "claude")
