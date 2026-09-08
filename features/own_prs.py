@@ -1,5 +1,4 @@
 import subprocess
-import threading
 import traceback
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -31,13 +30,7 @@ def _push_fix_deadline(config, seen) -> None:
 
 # _ensure_worktree resets the shared PR worktree to origin, so concurrent
 # jobs on the same PR silently destroy each other's uncommitted work.
-_worktree_locks: dict[str, threading.Lock] = {}
-_worktree_locks_guard = threading.Lock()
-
-
-def _worktree_lock(pr_key: str) -> threading.Lock:
-    with _worktree_locks_guard:
-        return _worktree_locks.setdefault(pr_key, threading.Lock())
+_worktree_lock = git_util.worktree_lock
 
 
 def _ticket_owns(pr: dict) -> str:
