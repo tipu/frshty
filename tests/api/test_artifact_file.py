@@ -133,3 +133,41 @@ class TestArtifactAssetRouting:
             asset = client.get(f"/api/work/artifact_file/{artifact_id}/shot.png")
             assert asset.status_code == 200
             assert asset.headers["content-type"] == "image/png"
+
+
+class TestArtifactSandboxPolicy:
+    def _app(self):
+        app = FastAPI()
+        app.include_router(work_routes.router)
+        return app
+
+    def test_html_artifact_may_run_its_own_scripts(self, tmp_path, monkeypatch):
+        artifact_id = _seed_report(tmp_path, monkeypatch)
+        with TestClient(self._app()) as client:
+            page = client.get(f"/api/work/artifact_file/{artifact_id}/")
+        policy = page.headers["content-security-policy"]
+        assert policy.split()[0] == "sandbox"
+        for token in ("allow-scripts", "allow-modals", "allow-popups",
+                      "allow-popups-to-escape-sandbox", "allow-downloads"):
+            assert token in policy
+        assert "connect-src blob: data:" in policy
+
+    def test_no_artifact_policy_grants_the_board_origin(self, tmp_path, monkeypatch):
+        artifact_id = _seed_report(tmp_path, monkeypatch)
+        with TestClient(self._app()) as client:
+            page = client.get(f"/api/work/artifact_file/{artifact_id}/")
+            asset = client.get(f"/api/work/artifact_file/{artifact_id}/shot.png")
+        for resp in (page, asset):
+            assert "allow-same-origin" not in resp.headers["content-security-policy"]
+
+    def test_non_page_artifact_runs_nothing(self, tmp_path, monkeypatch):
+        artifact_id = _seed_report(tmp_path, monkeypatch)
+        with TestClient(self._app()) as client:
+            asset = client.get(f"/api/work/artifact_file/{artifact_id}/shot.png")
+        assert asset.headers["content-security-policy"] == "sandbox"
+
+    def test_markdown_artifact_runs_nothing(self, tmp_path, monkeypatch):
+        artifact_id = _seed(tmp_path, monkeypatch, "run-workspace")
+        with TestClient(self._app()) as client:
+            resp = client.get(f"/api/work/artifact_file/{artifact_id}")
+        assert resp.headers["content-security-policy"] == "sandbox"
