@@ -213,7 +213,7 @@ frshtyApp({
       return new Set(this.thread.artifacts.map(a => a.work_item_id)).size;
     },
     primaryProjects() {
-      const order = ["aimyable", "quill", "clarivis", "algotrader2"];
+      const order = ["aimyable", "quill", "clarivis", "algotrader2", "frshty"];
       return order.map(k => this.projects.find(p => p.key === k)).filter(Boolean);
     },
     extraProjects() {

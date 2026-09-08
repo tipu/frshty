@@ -299,7 +299,7 @@ frshtyApp({
     },
     primaryProjects() {
       if (this.target) return this.targetMeta.projects;
-      const order = ["aimyable", "quill", "clarivis", "algotrader2"];
+      const order = ["aimyable", "quill", "clarivis", "algotrader2", "frshty"];
       return order.map(k => this.projects.find(p => p.key === k)).filter(Boolean);
     },
     extraProjects() {
