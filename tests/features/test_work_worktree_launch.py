@@ -69,6 +69,16 @@ class TestLaunch:
         assert str(project["repo"]) in context
         assert "Do not detach HEAD" in context
 
+    def test_the_commit_and_the_pull_request_wait_for_a_code_change(self, project):
+        with patch("services.work_launch.terminal.launch_agent") as launched, \
+             patch("services.work_launch.terminal.session_healthy",
+                   return_value={"alive": True, "agent_running": True}):
+            work_launch.launch("answer the question", contexts=["proj"])
+        context = launched.call_args.args[3]
+        assert "If you change code, commit and push on this branch" in context
+        assert "If you change no code, do not commit and do not open a pull request" \
+            in context
+
     def test_no_worktree_keeps_the_task_in_the_workspace_root(self, project):
         with patch("services.work_launch.terminal.launch_agent") as launched, \
              patch("services.work_launch.terminal.session_healthy",
