@@ -38,6 +38,22 @@ def _cron_routes(event: dict, registries: dict) -> list[dict]:
     return jobs
 
 
+def _slack_routes(event: dict, registries: dict) -> list[dict]:
+    """The scan that reads one instance's Slack capture, off the fast path.
+
+    core.runtime raises slack_tick when the capture grew and again when the
+    settle window that message opened has run out, so the wait between a Slack
+    message and the task it proposes is that window rather than the cron
+    interval that happens to notice it next. The same scan still runs from the
+    cron fan-out, which is what covers a scan needed for a reason no file
+    records."""
+    instance_key = event.get("instance_key")
+    reg = registries.get(instance_key)
+    if not reg or not (reg.config.get("features") or {}).get("slack"):
+        return []
+    return [{"instance_key": instance_key, "task": "slack_conversation_scan"}]
+
+
 def _ui_retry(event: dict, registries: dict) -> list[dict]:
     p = event.get("payload", {})
     return [{"instance_key": event["instance_key"], "task": p["task"],
@@ -70,6 +86,7 @@ def _ticket_advance(event: dict, registries: dict) -> list[dict]:
 
 
 register(kind_is("cron_tick"), _cron_routes)
+register(kind_is("slack_tick"), _slack_routes)
 register(kind_is("ui_retry"), _ui_retry)
 register(kind_is("ui_set_state"), _ui_set_state)
 register(kind_is("ui_notes"), _ui_notes)

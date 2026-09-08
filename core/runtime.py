@@ -17,6 +17,7 @@ import core.db as db
 import core.log as log
 import core.queue as q
 import core.scheduler as scheduler
+import core.slack_capture as slack_capture
 import core.tasks  # noqa: F401  (registers tasks + routes)
 import core.tz as _ctz
 from core.beat import BeatThread
@@ -53,6 +54,8 @@ _DEFAULT_TICK_INTERVAL = 360
 # smallest per-instance interval, clamped here so a misconfigured 1s value
 # can't busy-spin the thread.
 _MIN_TICK_FLOOR = 15
+_SLACK_WATCH_INTERVAL = 15
+_SLACK_SETTLE_MARGIN = 5
 
 
 def _quiet_hours_for(config: dict) -> tuple[int, int] | None:
@@ -80,6 +83,101 @@ def _in_quiet_hours(now_local: datetime, quiet: tuple[int, int]) -> bool:
     return h >= start or h < end
 
 
+def _is_quiet_now(config: dict, now_local: datetime) -> bool:
+    quiet = _quiet_hours_for(config)
+    return quiet is not None and _in_quiet_hours(now_local, quiet)
+
+
+def _slack_watched(config: dict) -> bool:
+    return bool((config.get("features") or {}).get("slack")) and bool(
+        _watched_capture(config))
+
+
+def _slack_conversations():
+    """features.slack_conversations, imported at call time.
+
+    It reaches back into this module through services.work_launch, so an
+    import at the top of core.runtime is a cycle."""
+    from features import slack_conversations
+    return slack_conversations
+
+
+def _watched_capture(config: dict) -> str:
+    """The Slack capture file this watch reads, or "" when there is none.
+
+    Only slack_int's filtered log is watched. Its raw log keeps every
+    intercepted frame, pings and typing included, so its size and its time
+    move whether or not anybody said anything. Watching it would raise a scan
+    on every wake and would push the settle deadline out for as long as the
+    workspace stayed connected. An instance whose capture slack_int has not
+    filtered keeps the cron cadence and nothing else changes for it."""
+    path = _slack_conversations().capture_path(config)
+    if not path or not slack_capture.is_filtered(path):
+        return ""
+    return path
+
+
+def _capture_mark(path: str) -> tuple[int, int]:
+    """Size and modification time of one Slack capture file.
+
+    slack_int appends a line to the filtered log for each message, so the pair
+    changes exactly when a message lands, and a rotation changes it too
+    because the new file starts empty. A file that cannot be read marks as
+    (0, 0); the scan itself is what reports a capture it could not read."""
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return (0, 0)
+    return (stat.st_size, stat.st_mtime_ns)
+
+
+def _slack_pulse(mark: tuple[int, int], seen: tuple[int, int] | None,
+                 pending: list[float], settle_seconds: int,
+                 now_ts: float) -> tuple[bool, list[float]]:
+    """Whether to scan this instance's Slack capture now, and the settle
+    windows still to run out after it.
+
+    Two moments are worth a scan. One is a capture that grew, which puts the
+    message into the conversation index while it is new. The other is the end
+    of the settle window that message opened, which is when the conversation
+    it belongs to first becomes something the judge may read. Between them
+    there is nothing to do, so nothing is emitted.
+
+    Each write to the capture opens its own window, and every open window is
+    kept. One window per instance would be wrong: the next message in the
+    workspace would push the deadline of a request that had already stopped
+    moving out to its own, and the request would wait for the cron backstop
+    instead. That message is usually in another conversation entirely, and a
+    bot posting into a channel does it too.
+
+    The list bounds itself. A wake appends at most one deadline, because the
+    mark is compared once per wake, and a deadline lives at most
+    settle_seconds + _SLACK_SETTLE_MARGIN. Wakes are at least _MIN_TICK_FLOOR
+    apart, so the list holds at most one entry per floor-length step of one
+    settle window. Nothing is dropped to keep it short: the newest deadline is
+    the one the newest message needs, and no later write recreates it once
+    the workspace goes quiet.
+
+    A mark this process has not seen before counts as growth. That is what a
+    restart looks like from here, and the scan it triggers is what picks up a
+    conversation that settled while the process was down.
+
+    The cron fan-out still schedules the same scan on its own cadence, so a
+    conversation that needs another scan for a reason no file records — a
+    judgement allowance spent, a back-off that has run out — is not left to
+    this."""
+    windows = list(pending)
+    pulse = False
+    if seen is None or mark != seen:
+        pulse = True
+        due = now_ts + settle_seconds + _SLACK_SETTLE_MARGIN
+        if due not in windows:
+            windows.append(due)
+    if any(due <= now_ts for due in windows):
+        pulse = True
+    return pulse, sorted(due for due in windows if due > now_ts)
+
+
 def _should_emit_cron(config: dict, last_emit_ts: float, now_ts: float, now_local: datetime) -> bool:
     quiet = _quiet_hours_for(config)
     elapsed = now_ts - last_emit_ts
@@ -95,12 +193,19 @@ def _ticker_sleep_seconds() -> int:
     """Base sleep for the ticker thread: the smallest per-instance tick
     interval (so the fastest workspace can actually fire at its cadence),
     floored to avoid busy-spinning. Each instance is still gated by
-    _should_emit_cron, so waking often is cheap when nothing is due."""
+    _should_emit_cron, so waking often is cheap when nothing is due.
+
+    An instance that watches a Slack capture pulls the sleep down to
+    _SLACK_WATCH_INTERVAL, because that watch is what decides how long a
+    Slack message waits before the scan that reads it runs."""
     intervals = [_DEFAULT_TICK_INTERVAL]
     if _instances is not None:
         for k in _instances.keys():
             try:
-                intervals.append(_tick_interval_for(_instances.get(k).config))
+                config = _instances.get(k).config
+                intervals.append(_tick_interval_for(config))
+                if _slack_watched(config):
+                    intervals.append(_SLACK_WATCH_INTERVAL)
             except Exception:
                 pass
     return max(_MIN_TICK_FLOOR, min(intervals))
@@ -108,6 +213,8 @@ def _ticker_sleep_seconds() -> int:
 
 def _cron_ticker(interval: int = 240) -> None:
     last_emit: dict[str, float] = {}
+    marks: dict[str, tuple[int, int]] = {}
+    pending: dict[str, list[float]] = {}
     while not _cron_stop.is_set():
         if _instances is not None:
             now_ts = time.time()
@@ -115,17 +222,48 @@ def _cron_ticker(interval: int = 240) -> None:
             for instance_key in _instances.keys():
                 try:
                     config = _instances.get(instance_key).config
-                    if not _should_emit_cron(config, last_emit.get(instance_key, 0.0), now_ts, now_local):
-                        continue
-                    q.emit_event(source="cron", kind="cron_tick",
-                                  payload={"at": datetime.now(timezone.utc).isoformat()},
-                                  instance_key=instance_key)
-                    last_emit[instance_key] = now_ts
+                    if _should_emit_cron(config, last_emit.get(instance_key, 0.0), now_ts, now_local):
+                        q.emit_event(source="cron", kind="cron_tick",
+                                      payload={"at": datetime.now(timezone.utc).isoformat()},
+                                      instance_key=instance_key)
+                        last_emit[instance_key] = now_ts
+                    _emit_slack_tick(instance_key, config, marks, pending,
+                                     now_ts, now_local)
                 except Exception as e:
                     log.emit("cron_emit_error", f"{type(e).__name__}: {e}")
         wait_time = _ticker_sleep_seconds() if interval > 0 else interval
         if _cron_stop.wait(wait_time):
             return
+
+
+def _emit_slack_tick(instance_key: str, config: dict, marks: dict,
+                     pending: dict, now_ts: float, now_local: datetime) -> None:
+    """Raise slack_tick for one instance when its capture asks for a scan.
+
+    Quiet hours are left alone. The cron cadence already drops to
+    quiet_cadence at night, and a fast path that ignored that would make
+    frshty open tasks at 3am that it did not open before."""
+    if not (config.get("features") or {}).get("slack"):
+        return
+    if _is_quiet_now(config, now_local):
+        return
+    path = _watched_capture(config)
+    if not path:
+        return
+    mark = _capture_mark(path)
+    pulse, windows = _slack_pulse(mark, marks.get(instance_key),
+                                  pending.get(instance_key, []),
+                                  _slack_conversations().settle_seconds(config),
+                                  now_ts)
+    marks[instance_key] = mark
+    if windows:
+        pending[instance_key] = windows
+    else:
+        pending.pop(instance_key, None)
+    if pulse:
+        q.emit_event(source="slack_watch", kind="slack_tick",
+                     payload={"at": datetime.now(timezone.utc).isoformat()},
+                     instance_key=instance_key)
 
 
 _beat: BeatThread | None = None
