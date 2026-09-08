@@ -20,6 +20,7 @@ from core.config import get_repos
 from features.platforms import make_platform
 from features.ticket_systems import make_ticket_system
 from services import review_store
+from web.sandbox import origin_is_opaque
 from web.state import _config, active_config
 
 
@@ -467,6 +468,9 @@ def api_start_discuss(repo: str, pr_id: int, body: dict):
 @router.websocket("/ws/discuss/{session_id}")
 async def ws_discuss(websocket: WebSocket, session_id: str):
     from web.state import host_is_disabled, multi_apply_host, multi_reset
+    if origin_is_opaque(websocket.headers.get("origin", "")):
+        await websocket.close(code=1008, reason="opaque origin")
+        return
     if host_is_disabled(websocket.headers.get("host")):
         await websocket.close(code=1011, reason="instance disabled")
         return
