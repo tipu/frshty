@@ -1,0 +1,16 @@
+# Instances this host aggregates on the global task board.
+# Copy to config/discovery.toml. That file is host-local: git ignores it, so a
+# checkout on another machine never advertises this host's instances.
+#
+# key           instance key, matches the job key in config/<key>.toml
+# base_url      the instance's frshty root, reachable from this host
+# platform      github or bitbucket
+# ticket_system jira, linear, or prd
+
+# [instances]
+#
+# [[instances.list]]
+# key = "example"
+# base_url = "https://example.frshty.localhost"
+# platform = "github"
+# ticket_system = "linear"
