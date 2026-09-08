@@ -26,6 +26,7 @@ from core.config import get_repos
 from core.ticket_status import TicketStatus
 from features.platforms import make_platform
 from services import ticket_doctor, work_launch
+from web.sandbox import origin_is_opaque, policy_for
 from web.state import _config, events_enabled
 
 
@@ -832,12 +833,17 @@ def api_ticket_docs_file(key: str, filename: str):
         return JSONResponse({"error": "invalid path"}, status_code=400)
     if not target.is_file():
         return JSONResponse({"error": "file not found"}, status_code=404)
-    return FileResponse(str(target), media_type=_DOC_MIME[suffix])
+    resp = FileResponse(str(target), media_type=_DOC_MIME[suffix])
+    resp.headers["Content-Security-Policy"] = policy_for(filename)
+    return resp
 
 
 @router.websocket("/ws/terminal/{key}")
 async def ws_terminal(websocket: WebSocket, key: str):
     from web.state import host_is_disabled, multi_apply_host, multi_reset
+    if origin_is_opaque(websocket.headers.get("origin", "")):
+        await websocket.close(code=1008, reason="opaque origin")
+        return
     if host_is_disabled(websocket.headers.get("host")):
         await websocket.close(code=1011, reason="instance disabled")
         return
