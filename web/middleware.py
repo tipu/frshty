@@ -4,10 +4,13 @@ from uuid import uuid4
 from starlette.responses import JSONResponse
 
 from services import usage
+import web.origin as origin
 from web.state import _disabled_hosts, multi_apply_host, multi_reset
 
 
 def install(app):
+    origin.install(app)
+
     @app.middleware("http")
     async def revalidate_static(request, call_next):
         """Make the browser check /static before reusing it.
