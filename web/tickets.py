@@ -26,7 +26,8 @@ from core.config import get_repos
 from core.ticket_status import TicketStatus
 from features.platforms import make_platform
 from services import ticket_doctor, work_launch
-from web.sandbox import origin_is_opaque, policy_for
+from web.origin import origin_is_opaque
+from web.sandbox import policy_for
 from web.state import _config, events_enabled
 
 
