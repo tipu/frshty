@@ -156,6 +156,30 @@ class TestTickets:
         assert resp.headers["content-type"].startswith("text/plain")
         assert resp.text == "# findings\n"
 
+    def test_docs_file_lets_an_html_document_run_its_own_scripts(self, client, tmp_path):
+        slug = "T-1-slug"
+        state.save("tickets", {"T-1": {"status": "done", "slug": slug}})
+        docs_dir = tmp_path / "tickets" / slug / "docs"
+        docs_dir.mkdir(parents=True)
+        (docs_dir / "change-explainer.html").write_text("<p>explainer</p>")
+        resp = client.get("/api/tickets/T-1/docs/change-explainer.html")
+        assert resp.status_code == 200
+        policy = resp.headers["content-security-policy"]
+        assert policy.split()[0] == "sandbox"
+        assert "allow-scripts" in policy
+        assert "connect-src blob: data:" in policy
+        assert "allow-same-origin" not in policy
+
+    def test_docs_file_runs_nothing_for_a_non_page_document(self, client, tmp_path):
+        slug = "T-1-slug"
+        state.save("tickets", {"T-1": {"status": "done", "slug": slug}})
+        docs_dir = tmp_path / "tickets" / slug / "docs"
+        docs_dir.mkdir(parents=True)
+        (docs_dir / "diagram.svg").write_text("<svg xmlns='http://www.w3.org/2000/svg'/>")
+        resp = client.get("/api/tickets/T-1/docs/diagram.svg")
+        assert resp.status_code == 200
+        assert resp.headers["content-security-policy"] == "sandbox"
+
     def test_docs_file_rejects_a_file_type_outside_the_whitelist(self, client, tmp_path):
         slug = "T-1-slug"
         state.save("tickets", {"T-1": {"status": "done", "slug": slug}})
