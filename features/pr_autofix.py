@@ -7,7 +7,6 @@ Pre-existing open PRs are baselined on the first poll and never touched.
 GitHub-only. Enabled per instance via features.pr_autofix.
 """
 import json
-import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -49,13 +48,7 @@ REVIEW_PROMPT = (
     "handling, contract breakage. Do not report style, naming, or preference issues.\n"
 )
 
-_worktree_locks: dict[str, threading.Lock] = {}
-_worktree_locks_guard = threading.Lock()
-
-
-def _worktree_lock(pr_key: str) -> threading.Lock:
-    with _worktree_locks_guard:
-        return _worktree_locks.setdefault(pr_key, threading.Lock())
+_worktree_lock = git_util.worktree_lock
 
 
 def _now() -> str:

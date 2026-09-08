@@ -1284,6 +1284,238 @@ class TestCommitFixAgentCommittedItself:
         assert ok is True
         assert reason == ""
 
+    def test_a_base_merge_over_the_agents_own_commit_is_accepted(self, tmp_path):
+        """An agent that commits and then runs `git pull` leaves a merge on
+        top of its own commit. Reading only the commit HEAD points at sees the
+        merge, discards a delivered fix, and the next reset destroys it."""
+        import subprocess
+        repo = self._init_repo(tmp_path / "repo")
+        subprocess.run(["git", "checkout", "-q", "-b", "base"], cwd=str(repo), check=True)
+        (repo / "b.txt").write_text("base work\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "base work"], cwd=str(repo), check=True)
+        subprocess.run(["git", "checkout", "-q", "-"], cwd=str(repo), check=True)
+        head_before = self._head(repo)
+        (repo / "a.txt").write_text("two\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "fix: real work"],
+                       cwd=str(repo), check=True)
+        committed = self._head(repo)
+        subprocess.run(["git", "merge", "-q", "--no-ff", "-m", "Merge base", "base"],
+                       cwd=str(repo), check=True)
+
+        ok, reason = own_prs._commit_fix(
+            repo, "fix: address review comment on a.txt", head_before=head_before)
+
+        assert ok is True
+        assert reason == ""
+        parents = subprocess.run(["git", "rev-list", "--first-parent", "-2", "HEAD"],
+                                 cwd=str(repo), capture_output=True, text=True,
+                                 check=True).stdout.split()
+        assert committed in parents
+
+    def test_an_amend_of_the_published_starting_commit_is_not_a_fix(self, tmp_path):
+        """Rewriting the commit the run started from abandons it, so the push
+        that would publish the rewrite is not a fast-forward. Reporting a fix
+        here spends the retry on a push git will refuse."""
+        import subprocess
+        repo = self._init_repo(tmp_path / "repo")
+        head_before = self._head(repo)
+        (repo / "a.txt").write_text("two\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "--amend", "-m", "fix: rewrote the tip"],
+                       cwd=str(repo), check=True)
+
+        ok, reason = own_prs._commit_fix(
+            repo, "fix: address review comment on a.txt", head_before=head_before)
+
+        assert self._head(repo) != head_before
+        assert ok is False
+        assert reason == "no changes produced"
+
+    def test_a_reverted_fix_is_not_a_fix(self, tmp_path):
+        """Committing a fix and then reverting it ends where the run started.
+        Counting the commit would push a change and its undo and report the
+        review comment answered."""
+        import subprocess
+        repo = self._init_repo(tmp_path / "repo")
+        head_before = self._head(repo)
+        (repo / "a.txt").write_text("two\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "fix: real work"],
+                       cwd=str(repo), check=True)
+        subprocess.run(["git", "revert", "--no-edit", "HEAD"], cwd=str(repo),
+                       check=True, capture_output=True)
+
+        ok, reason = own_prs._commit_fix(
+            repo, "fix: address review comment on a.txt", head_before=head_before)
+
+        assert self._head(repo) != head_before
+        assert ok is False
+        assert reason == "no changes produced"
+
+    def test_head_before_as_a_merges_second_parent_is_not_a_fix(self, tmp_path):
+        """A merge made on a side line carries `head_before` as its second
+        parent. HEAD is then an ancestor's descendant without continuing the
+        line this run started on, and the commits it added are someone
+        else's."""
+        import subprocess
+        repo = self._init_repo(tmp_path / "repo")
+        root = self._head(repo)
+        (repo / "a.txt").write_text("second\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "second on main"],
+                       cwd=str(repo), check=True)
+        head_before = self._head(repo)
+        subprocess.run(["git", "checkout", "-q", "-b", "side", root],
+                       cwd=str(repo), check=True)
+        (repo / "foreign.txt").write_text("foreign\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "foreign work"],
+                       cwd=str(repo), check=True)
+        subprocess.run(["git", "merge", "-q", "--no-ff", "-m", "Merge main", head_before],
+                       cwd=str(repo), check=True)
+
+        ok, reason = own_prs._commit_fix(
+            repo, "fix: address review comment on a.txt", head_before=head_before)
+
+        parents = subprocess.run(["git", "rev-list", "--no-walk", "--parents", "HEAD"],
+                                 cwd=str(repo), capture_output=True, text=True,
+                                 check=True).stdout.split()
+        assert parents[2] == head_before
+        assert ok is False
+        assert reason == "no changes produced"
+
+    def test_a_reverted_fix_hidden_by_a_base_merge_is_not_a_fix(self, tmp_path):
+        """The run commits the fix, reverts it, then merges a base update that
+        touches a different file. Comparing whole trees sees the base change
+        and calls the run productive while the fix itself is gone."""
+        import subprocess
+        repo = self._init_repo(tmp_path / "repo")
+        subprocess.run(["git", "checkout", "-q", "-b", "base"], cwd=str(repo), check=True)
+        (repo / "other.txt").write_text("base work\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "base touches another file"],
+                       cwd=str(repo), check=True)
+        subprocess.run(["git", "checkout", "-q", "-"], cwd=str(repo), check=True)
+        head_before = self._head(repo)
+        (repo / "a.txt").write_text("two\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "fix: real work"],
+                       cwd=str(repo), check=True)
+        subprocess.run(["git", "revert", "--no-edit", "HEAD"], cwd=str(repo),
+                       check=True, capture_output=True)
+        subprocess.run(["git", "merge", "-q", "--no-ff", "-m", "Merge base", "base"],
+                       cwd=str(repo), check=True)
+
+        ok, reason = own_prs._commit_fix(
+            repo, "fix: address review comment on a.txt", head_before=head_before)
+
+        assert subprocess.run(["git", "diff", "--quiet", head_before, "HEAD"],
+                              cwd=str(repo)).returncode == 1
+        assert (repo / "a.txt").read_text() == "one\n"
+        assert ok is False
+        assert reason == "no changes produced"
+
+    def test_a_committed_submodule_bump_counts_even_when_diffs_ignore_it(self, tmp_path):
+        """quill and quill-ios both carry .gitmodules. A repo that sets
+        submodule.<name>.ignore hides a committed gitlink change from
+        `git diff`, so a fix that moves a dependency to a fixed revision would
+        read as no change and be reset away."""
+        import subprocess
+        sub = self._init_repo(tmp_path / "dep")
+        repo = self._init_repo(tmp_path / "repo")
+        subprocess.run(["git", "-c", "protocol.file.allow=always", "submodule",
+                        "add", "-q", str(sub), "lib"], cwd=str(repo), check=True,
+                       capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "add lib"], cwd=str(repo), check=True)
+        subprocess.run(["git", "config", "-f", ".gitmodules", "submodule.lib.ignore", "all"],
+                       cwd=str(repo), check=True)
+        subprocess.run(["git", "add", ".gitmodules"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "ignore lib in diffs"],
+                       cwd=str(repo), check=True)
+        (sub / "a.txt").write_text("fixed\n")
+        subprocess.run(["git", "commit", "-q", "-am", "dependency fix"], cwd=str(sub), check=True)
+        fixed_rev = self._head(sub)
+        head_before = self._head(repo)
+        subprocess.run(["git", "fetch", "-q", "origin"], cwd=str(repo / "lib"), check=True)
+        subprocess.run(["git", "checkout", "-q", fixed_rev], cwd=str(repo / "lib"), check=True)
+        subprocess.run(["git", "add", "--force", "lib"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "fix: move lib to the fixed revision"],
+                       cwd=str(repo), check=True)
+
+        ok, reason = own_prs._commit_fix(
+            repo, "fix: address review comment on lib", head_before=head_before)
+
+        assert subprocess.run(["git", "diff", "--quiet", head_before, "HEAD"],
+                              cwd=str(repo)).returncode == 0
+        assert ok is True
+        assert reason == ""
+
+    def test_a_changed_path_is_not_read_as_a_pathspec_pattern(self, tmp_path):
+        """quill's webAppNext is built out of names like app/[id]/page.tsx.
+        Git reads that `[id]` as a character class and `--` does not make it
+        literal, so a change to app/i/page.tsx would answer for a file the
+        run never touched."""
+        import subprocess
+        repo = self._init_repo(tmp_path / "repo")
+        (repo / "app" / "[id]").mkdir(parents=True)
+        (repo / "app" / "i").mkdir(parents=True)
+        (repo / "app" / "[id]" / "page.tsx").write_text("route\n")
+        (repo / "app" / "i" / "page.tsx").write_text("other\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "routes"], cwd=str(repo), check=True)
+        subprocess.run(["git", "checkout", "-q", "-b", "base"], cwd=str(repo), check=True)
+        (repo / "app" / "i" / "page.tsx").write_text("base changed this\n")
+        subprocess.run(["git", "commit", "-q", "-am", "base changes the other route"],
+                       cwd=str(repo), check=True)
+        subprocess.run(["git", "checkout", "-q", "-"], cwd=str(repo), check=True)
+        head_before = self._head(repo)
+        (repo / "app" / "[id]" / "page.tsx").write_text("fixed\n")
+        subprocess.run(["git", "commit", "-q", "-am", "fix: the id route"],
+                       cwd=str(repo), check=True)
+        subprocess.run(["git", "revert", "--no-edit", "HEAD"], cwd=str(repo),
+                       check=True, capture_output=True)
+        subprocess.run(["git", "merge", "-q", "--no-ff", "-m", "Merge base", "base"],
+                       cwd=str(repo), check=True)
+
+        ok, reason = own_prs._commit_fix(
+            repo, "fix: address review comment", head_before=head_before)
+
+        assert (repo / "app" / "[id]" / "page.tsx").read_text() == "route\n"
+        assert ok is False
+        assert reason == "no changes produced"
+
+    def test_a_fix_amended_into_a_merge_is_accepted(self, tmp_path):
+        """An agent that merges the base, edits the code and runs
+        `git commit --amend` puts the fix into the merge commit itself. That
+        writes `commit (amend):`, unlike finalising a merge, so the fix is that
+        commit's own content and reading no paths for it would discard it."""
+        import subprocess
+        repo = self._init_repo(tmp_path / "repo")
+        subprocess.run(["git", "checkout", "-q", "-b", "base"], cwd=str(repo), check=True)
+        (repo / "b.txt").write_text("base work\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "base work"], cwd=str(repo), check=True)
+        subprocess.run(["git", "checkout", "-q", "-"], cwd=str(repo), check=True)
+        head_before = self._head(repo)
+        subprocess.run(["git", "merge", "-q", "--no-ff", "-m", "Merge base", "base"],
+                       cwd=str(repo), check=True)
+        (repo / "a.txt").write_text("fixed\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "--amend", "--no-edit"],
+                       cwd=str(repo), check=True)
+
+        ok, reason = own_prs._commit_fix(
+            repo, "fix: address review comment on a.txt", head_before=head_before)
+
+        subject = subprocess.run(["git", "reflog", "-1", "--format=%gs"], cwd=str(repo),
+                                 capture_output=True, text=True, check=True).stdout
+        assert subject.startswith("commit (amend):")
+        assert (repo / "a.txt").read_text() == "fixed\n"
+        assert ok is True
+        assert reason == ""
+
     def test_batch_pushes_a_self_committed_fix(self, tmp_path):
         import subprocess
         repo = self._init_repo(tmp_path / "worktree")
@@ -1408,3 +1640,17 @@ class TestTicketOwnership:
         calls["comments"].assert_called_once()
         calls["base"].assert_not_called()
         calls["ci"].assert_not_called()
+
+
+class TestWorktreeLockIsShared:
+    """`add_or_reuse_worktree` hands out whichever worktree already holds the
+    branch, so own_prs and pr_autofix can be given the same directory for the
+    same PR. A lock registry per feature would let both enter it at once."""
+
+    def test_both_features_take_the_same_lock_for_one_pr(self):
+        from features import pr_autofix
+        import core.git_util as git_util
+
+        assert own_prs._worktree_lock("quill/4561") is pr_autofix._worktree_lock("quill/4561")
+        assert own_prs._worktree_lock("quill/4561") is git_util.worktree_lock("quill/4561")
+        assert own_prs._worktree_lock("quill/4561") is not own_prs._worktree_lock("quill/4562")
