@@ -19,12 +19,6 @@ platform = "github"
 ticket_system = "linear"
 
 [[instances.list]]
-key = "lumeninv"
-base_url = "https://lumeninv.frshty.localhost"
-platform = "github"
-ticket_system = "prd"
-
-[[instances.list]]
 key = "bh"
 base_url = "https://bh.frshty.localhost"
 platform = "github"
