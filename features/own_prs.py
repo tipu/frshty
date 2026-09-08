@@ -426,7 +426,8 @@ def _comment_fix_tools(worktree: Path) -> list[str]:
     ]
 
 
-def _commit_fix(worktree, message, context: str = "") -> tuple[bool, str]:
+def _commit_fix(worktree, message, context: str = "",
+                head_before: str = "") -> tuple[bool, str]:
     try:
         git_util.run_git(worktree, ["add", "-A"], timeout=60)
         staged = git_util.run_git(worktree, ["diff", "--cached", "--quiet"],
@@ -434,6 +435,8 @@ def _commit_fix(worktree, message, context: str = "") -> tuple[bool, str]:
     except git_util.GitCommandError as e:
         return False, f"could not stage the fix: {e}"[:200]
     if not staged:
+        if git_util.agent_committed(worktree, head_before):
+            return True, ""
         return False, "no changes produced"
     if context:
         message = commit_subject(worktree, message, context)
@@ -468,6 +471,7 @@ def fix_comment(config, payload) -> tuple[bool, str | None]:
                 f"Review comment: {comment['body']}\n\nFix this review comment.\n\n"
                 + COMMIT_SUBJECT_RULE
             )
+            head_before = git_util.head_sha(worktree)
             result = run_claude_code(context, cwd=worktree, timeout=600,
                                      allowed_tools=_comment_fix_tools(worktree))
             if result is None:
@@ -479,7 +483,7 @@ def fix_comment(config, payload) -> tuple[bool, str | None]:
 
             committed, commit_reason = _commit_fix(
                 worktree, f"fix: address review comment on {comment.get('path', 'unknown')}",
-                context=comment["body"])
+                context=comment["body"], head_before=head_before)
             if not committed:
                 log.emit("pr_comment_blocked", f"{pr_ref}: {commit_reason} — {comment['body'][:80]}", links=links, meta={**meta, "reason": commit_reason})
                 comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, commit_reason)
@@ -578,6 +582,7 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
                 f"Address ALL of them.\n\n{comment_list}\n\nFix every review comment above.\n\n"
                 + COMMIT_SUBJECT_RULE
             )
+            head_before = git_util.head_sha(worktree)
             result = run_claude_code(context, cwd=worktree, timeout=900,
                                      allowed_tools=_comment_fix_tools(worktree))
             if result is None:
@@ -585,7 +590,7 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
 
             committed, commit_reason = _commit_fix(
                 worktree, f"fix: address {len(pending)} review comments",
-                context=comment_list)
+                context=comment_list, head_before=head_before)
             if not committed:
                 return _fail_all(pending_ids, commit_reason)
 
