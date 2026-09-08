@@ -1,3 +1,4 @@
+import subprocess
 from unittest.mock import patch, MagicMock
 
 from features import pr_autofix
@@ -222,3 +223,102 @@ class TestFixCommitSubject:
         for name in ("claude", "codex"):
             assert name not in fallback.lower(), (
                 f"the fallback commit subject must name no tool; got {fallback!r}")
+
+
+class TestFixRunCommitsItself:
+    """Observed live on clarivis#229 (2026-09-08): three autofix passes each
+    committed their own work in the worktree (2445f10, 9ed7dbd, 560c934) and
+    each was reported as "fix run produced no changes". `add -A` plus
+    `diff --cached --quiet` sees a clean index after a self-commit, so the
+    push never ran and the next pass hard-reset the worktree to origin and
+    destroyed the commit."""
+
+    def _init_repo(self, tmp_path, branch):
+        origin = tmp_path / "origin.git"
+        path = tmp_path / "worktree"
+        subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+        subprocess.run(["git", "clone", "-q", str(origin), str(path)], check=True)
+        for key, value in (("user.email", "t@t"), ("user.name", "t"),
+                           ("commit.gpgsign", "false")):
+            subprocess.run(["git", "config", key, value], cwd=str(path), check=True)
+        (path / "a.py").write_text("one\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(path), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=str(path), check=True)
+        subprocess.run(["git", "checkout", "-q", "-b", branch], cwd=str(path), check=True)
+        subprocess.run(["git", "push", "-q", "-u", "origin", branch], cwd=str(path), check=True)
+        return path
+
+    def _run(self, tmp_path, fixer):
+        repo = self._init_repo(tmp_path, "fix/thing")
+        findings = [{"severity": "critical", "path": "a.py", "line": 3,
+                     "title": "empty page raises", "body": "guard the empty list"}]
+        platform = MagicMock()
+        platform.get_pr_diff.return_value = "diff --git a/a.py b/a.py\n"
+        platform.push_branch.return_value = {"ok": True}
+        config = {**_config(), "_state_dir": tmp_path, "_base_url": "http://base"}
+
+        with patch("features.pr_autofix.make_platform", return_value=platform), \
+             patch("features.pr_autofix._ensure_worktree", return_value=repo), \
+             patch("features.pr_autofix._claude_review", return_value={"findings": []}), \
+             patch("features.pr_autofix._codex_review", return_value={"findings": []}), \
+             patch("features.pr_autofix._normalize_findings", return_value=findings), \
+             patch("features.pr_autofix._consolidate", return_value=findings), \
+             patch("features.pr_autofix._write_artifacts"), \
+             patch("features.pr_autofix.run_claude_code", side_effect=fixer(repo)), \
+             patch("features.pr_autofix.state.load", return_value={}), \
+             patch("features.pr_autofix.state.save"), \
+             patch("features.pr_autofix.log.emit"):
+            ok, reason = pr_autofix.run(config, {"pr": make_pr(branch="fix/thing")})
+        return ok, reason, platform, repo
+
+    def test_a_self_committed_fix_is_pushed(self, tmp_path):
+        def fixer(repo):
+            def _run(*a, **kw):
+                (repo / "a.py").write_text("two\n")
+                subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+                subprocess.run(["git", "commit", "-q", "-m", "fix: guard the empty list"],
+                               cwd=str(repo), check=True)
+                return "fixed"
+            return _run
+
+        ok, reason, platform, _ = self._run(tmp_path, fixer)
+
+        assert ok is True, reason
+        platform.push_branch.assert_called_once()
+
+    def test_an_untouched_worktree_still_fails(self, tmp_path):
+        def fixer(repo):
+            return lambda *a, **kw: "fixed"
+
+        ok, reason, platform, _ = self._run(tmp_path, fixer)
+
+        assert ok is False
+        assert reason == "fix run produced no changes"
+        platform.push_branch.assert_not_called()
+
+    def test_a_base_merge_during_the_run_is_not_a_fix(self, tmp_path):
+        """`add_or_reuse_worktree` hands this directory to other features and
+        to other processes, so a base-branch merge can move HEAD while the fix
+        agent runs. A moved HEAD alone would push the merge and record every
+        finding as fixed with the defect untouched."""
+        def fixer(repo):
+            def _run(*a, **kw):
+                subprocess.run(["git", "checkout", "-q", "-b", "other"],
+                               cwd=str(repo), check=True)
+                (repo / "b.py").write_text("unrelated\n")
+                subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+                subprocess.run(["git", "commit", "-q", "-m", "unrelated work"],
+                               cwd=str(repo), check=True)
+                subprocess.run(["git", "checkout", "-q", "fix/thing"],
+                               cwd=str(repo), check=True)
+                subprocess.run(["git", "merge", "-q", "--no-ff", "-m", "Merge other", "other"],
+                               cwd=str(repo), check=True)
+                return "fixed"
+            return _run
+
+        ok, reason, platform, repo = self._run(tmp_path, fixer)
+
+        assert (repo / "a.py").read_text() == "one\n"
+        assert ok is False
+        assert reason == "fix run produced no changes"
+        platform.push_branch.assert_not_called()

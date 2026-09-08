@@ -525,6 +525,58 @@ def run_git(cwd, args: list[str], *, allowed_codes=(0,), timeout: int = 60):
     return result
 
 
+def head_sha(worktree) -> str:
+    """The worktree's HEAD sha, or "" when git cannot report it."""
+    try:
+        return run_git(worktree, ["rev-parse", "HEAD"], timeout=30).stdout.strip()
+    except (GitCommandError, subprocess.SubprocessError, OSError):
+        return ""
+
+
+AGENT_COMMIT_REFLOG_PREFIXES = ("commit:", "commit (amend):", "commit (initial):")
+REFLOG_SCAN_DEPTH = 50
+
+
+def agent_committed(worktree, head_before: str) -> bool:
+    """Whether the agent that just ran in `worktree` committed its own work.
+
+    An agent handed a worktree may run `git commit` itself. That leaves nothing
+    staged, so `add -A` followed by `diff --cached --quiet` reads a delivered
+    fix as "no changes produced" and the caller discards the commit.
+
+    A moved HEAD alone does not say the agent moved it. These worktrees are
+    reused across features and across processes — `add_or_reuse_worktree` hands
+    out whichever worktree already holds the branch — so a base-branch merge or
+    another poller's `reset --hard` can move HEAD while the agent runs. The HEAD
+    reflog records what performed each move, so require that the commit HEAD now
+    points at was itself created by a commit, not arrived at by a merge, reset,
+    rebase or checkout. The scan walks back only as far as `head_before`, which
+    is where this run started, and a plain commit anywhere in that span still
+    counts: an agent that commits and then runs `reset --hard HEAD` leaves the
+    reset on top of its own commit entry.
+
+    Anything else returns False, which costs the caller one retry rather than
+    pushing work no agent produced and reporting it as a fix. An unreadable HEAD
+    or reflog does the same, so a git failure never reports work that may not
+    exist.
+    """
+    head_after = head_sha(worktree)
+    if not head_before or not head_after or head_after == head_before:
+        return False
+    try:
+        result = run_git(worktree, ["reflog", "-n", str(REFLOG_SCAN_DEPTH),
+                                    "--format=%H %gs"], timeout=30)
+    except (GitCommandError, subprocess.SubprocessError, OSError):
+        return False
+    for line in result.stdout.splitlines():
+        sha, _, subject = line.partition(" ")
+        if sha == head_before:
+            return False
+        if sha == head_after and subject.startswith(AGENT_COMMIT_REFLOG_PREFIXES):
+            return True
+    return False
+
+
 def is_dirty(worktree) -> bool:
     """Whether the worktree has tracked or untracked changes. Raises if unknown.
 
