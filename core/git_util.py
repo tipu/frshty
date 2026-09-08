@@ -29,6 +29,7 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,6 +37,24 @@ import core.log as log
 
 
 PRE_COMMIT_TIMEOUT = 600
+
+_worktree_locks: dict[str, threading.Lock] = {}
+_worktree_locks_guard = threading.Lock()
+
+
+def worktree_lock(key: str) -> threading.Lock:
+    """The lock that serialises every writer of one PR's worktree.
+
+    `add_or_reuse_worktree` hands out whichever worktree already holds the
+    branch, so two features asking for the same PR can be given the same
+    directory even though each computes a different path for it. A registry
+    per feature therefore guards nothing: each takes its own lock, both enter,
+    and one resets or commits under the other. Every writer has to queue on the
+    same lock, so this registry is process-wide and the key is the PR, which is
+    what both features already have before they ask for a worktree.
+    """
+    with _worktree_locks_guard:
+        return _worktree_locks.setdefault(key, threading.Lock())
 
 
 def run_git_status(cwd, args: list[str],
@@ -537,6 +556,47 @@ AGENT_COMMIT_REFLOG_PREFIXES = ("commit:", "commit (amend):", "commit (initial):
 REFLOG_SCAN_DEPTH = 50
 
 
+def _commit_survives(worktree, commit: str, head_before: str,
+                     head_after: str) -> bool:
+    """Whether `commit`'s own changes are still in HEAD.
+
+    A run that commits a fix and then undoes it has delivered nothing, and the
+    undo can be hidden: a base merge in the same run changes other files, so
+    comparing whole trees says the run produced something when the fix itself
+    is gone. Comparing only the paths this commit touched answers the question
+    the caller actually has.
+
+    `--ignore-submodules=none` on both reads is required, not tidiness. A repo
+    that sets `submodule.<name>.ignore` — quill and quill-ios both carry
+    `.gitmodules` — otherwise hides a committed gitlink change, and a fix that
+    moves a dependency to a fixed revision reads as no change at all.
+
+    `--literal-pathspecs` is required for the same kind of reason. A changed
+    path is a name, not a pattern, and `--` does not make it one: git reads the
+    `[id]` in `app/[id]/page.tsx` as a character class, so a change to
+    `app/i/page.tsx` answers for a file nobody touched. quill's webAppNext is
+    built out of such names.
+
+    `--diff-merges=first-parent` reports what a merge commit changed against
+    the line it was made on. A merge is normally not a candidate, because
+    finalising one writes `commit (merge):`, but an agent that merges the base,
+    edits the code and runs `git commit --amend` puts the fix into the merge
+    commit itself and that writes `commit (amend):`. Without this the merge
+    lists no paths and a delivered fix is discarded.
+    """
+    paths = [path for path in run_git(
+        worktree, ["diff-tree", "-r", "--no-commit-id", "--name-only", "-z",
+                   "--ignore-submodules=none", "--diff-merges=first-parent",
+                   commit],
+        timeout=30).stdout.split("\0") if path]
+    if not paths:
+        return False
+    return run_git(worktree, ["--literal-pathspecs", "diff", "--quiet",
+                              "--ignore-submodules=none",
+                              head_before, head_after, "--", *paths],
+                   allowed_codes=(0, 1), timeout=60).returncode != 0
+
+
 def agent_committed(worktree, head_before: str) -> bool:
     """Whether the agent that just ran in `worktree` committed its own work.
 
@@ -547,33 +607,65 @@ def agent_committed(worktree, head_before: str) -> bool:
     A moved HEAD alone does not say the agent moved it. These worktrees are
     reused across features and across processes — `add_or_reuse_worktree` hands
     out whichever worktree already holds the branch — so a base-branch merge or
-    another poller's `reset --hard` can move HEAD while the agent runs. The HEAD
-    reflog records what performed each move, so require that the commit HEAD now
-    points at was itself created by a commit, not arrived at by a merge, reset,
-    rebase or checkout. The scan walks back only as far as `head_before`, which
-    is where this run started, and a plain commit anywhere in that span still
-    counts: an agent that commits and then runs `reset --hard HEAD` leaves the
-    reset on top of its own commit entry.
+    another poller's `reset --hard` can move HEAD while the agent runs. Four
+    conditions therefore have to hold together.
+
+    `head_before` must sit on HEAD's own first-parent chain, which is what makes
+    HEAD a continuation of the commit this run started from. An ancestor test is
+    not enough: a merge whose second parent is `head_before` passes it while
+    HEAD descends from somebody else's line. That also rejects a run that
+    rewrote or abandoned its starting commit — an amend of the published tip, a
+    rebase, a reset onto a divergent commit — because the push that would
+    publish such a HEAD is not a fast-forward.
+
+    The commit must be one of the commits that chain added, so side history a
+    merge made reachable does not qualify as this run's work.
+
+    The HEAD reflog must attribute that commit to a commit operation rather than
+    to a merge, a reset, a rebase or a checkout. The scan walks back only as far
+    as `head_before`, which is where this run started. A commit the agent has
+    since built on top of still counts: it commits, then merges the base or
+    resets over its own commit, and the commit entry is still within the span.
+    A merge the agent resolved and committed is recorded as `commit (merge):`
+    and is not one of these, because finalising a merge is not authoring a fix.
+    A merge the agent amended a fix into is recorded as `commit (amend):` and
+    does count, because the fix is that commit's own content.
+
+    Its changes must still be in HEAD, which `_commit_survives` decides. A run
+    that committed and then reverted has delivered nothing to push.
 
     Anything else returns False, which costs the caller one retry rather than
-    pushing work no agent produced and reporting it as a fix. An unreadable HEAD
-    or reflog does the same, so a git failure never reports work that may not
-    exist.
+    pushing work no agent produced and reporting it as a fix. An unreadable
+    HEAD, reflog, revision list or diff does the same, so a git failure never
+    reports work that may not exist.
     """
     head_after = head_sha(worktree)
     if not head_before or not head_after or head_after == head_before:
         return False
     try:
+        added = run_git(worktree, ["rev-list", "--first-parent",
+                                   f"{head_before}..{head_after}"],
+                        timeout=30).stdout.split()
+        if not added:
+            return False
+        chain = run_git(worktree, ["rev-list", "--first-parent",
+                                   "-n", str(len(added) + 1), head_after],
+                        timeout=30).stdout.split()
+        if not chain or chain[-1] != head_before:
+            return False
         result = run_git(worktree, ["reflog", "-n", str(REFLOG_SCAN_DEPTH),
                                     "--format=%H %gs"], timeout=30)
+        contributed = set(added)
+        for line in result.stdout.splitlines():
+            sha, _, subject = line.partition(" ")
+            if sha == head_before:
+                return False
+            if (sha in contributed
+                    and subject.startswith(AGENT_COMMIT_REFLOG_PREFIXES)
+                    and _commit_survives(worktree, sha, head_before, head_after)):
+                return True
     except (GitCommandError, subprocess.SubprocessError, OSError):
         return False
-    for line in result.stdout.splitlines():
-        sha, _, subject = line.partition(" ")
-        if sha == head_before:
-            return False
-        if sha == head_after and subject.startswith(AGENT_COMMIT_REFLOG_PREFIXES):
-            return True
     return False
 
 
