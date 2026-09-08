@@ -14,7 +14,7 @@ PUSH_GATE_TIMEOUT = 2700
 WRITE_GATE_TIMEOUT = 300
 WRITE_GATE_MATCHER = "Edit|Write|NotebookEdit|MultiEdit"
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
-SKIP_CONFIGS = ("example.toml", "discovery.toml", "peers.toml", "peers.example.toml")
+SKIP_CONFIGS = ("example.toml", "discovery.toml", "discovery.example.toml", "peers.toml", "peers.example.toml")
 
 
 def claude_config_dirs() -> list[str]:
