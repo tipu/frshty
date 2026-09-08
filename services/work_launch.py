@@ -296,24 +296,34 @@ def _reviewer_cmd(agent: str, config: dict) -> tuple[str, str]:
 
 
 def _cross_check_block(agent: str, config: dict) -> str:
-    """Tell the working agent to have the other model check its work.
+    """Tell the working agent to have the other model check a code change.
 
     A claude session is checked by codex. A codex session is checked by
     claude. The reviewer is asked for high and critical defects only. A
-    style note must never hold up the report."""
+    style note must never hold up the report.
+
+    The review is a step of a code change, not a step of every task. Measured
+    over work items 9200-9329, the reviewer and the polling that waits for it
+    took 30 percent of all tool time, and it ran on tasks that changed no
+    file, because the wording presupposed a change and gated the report on
+    the review. So the first sentence states the condition, the last sentence
+    states what to do when the condition does not hold, and the number of
+    passes is capped."""
     other, cmd = _reviewer_cmd(agent, config)
     return (
-        f"Double check your analysis and your code with {other} before you report the "
-        f"work done. Write your question to a file. Give {other} the claim you make and "
-        f"the files you changed. Ask {other} to report only high severity and critical "
-        "defects: a wrong result, a crash, data loss, a security hole, a broken contract "
-        "between caller and callee, or any behavior that differs from the stated "
-        f"objective. Tell {other} to skip every nit that does not change behavior, "
-        "including style, naming, formatting, comment wording, and test coverage "
-        f"suggestions. Tell {other} to give the severity and the concrete failure case "
-        f"for each finding. Run `{cmd}` from the "
+        f"If you changed code, double check the change with {other} once before you "
+        f"report the work done. Write your question to a file. Give {other} the claim "
+        f"you make and the files you changed. Ask {other} to report only high severity "
+        "and critical defects: a wrong result, a crash, data loss, a security hole, a "
+        "broken contract between caller and callee, or any behavior that differs from "
+        f"the stated objective. Tell {other} to skip every nit that does not change "
+        "behavior, including style, naming, formatting, comment wording, and test "
+        f"coverage suggestions. Tell {other} to give the severity and the concrete "
+        f"failure case for each finding. Run `{cmd}` from the "
         "working directory with that file on stdin. Fix every finding you agree with. "
-        "State every finding you rejected and the reason. "
+        f"State every finding you rejected and the reason. Run {other} a second time "
+        "only when you fixed a high or critical finding. Never run it a third time. If "
+        f"you changed no code, do not run {other}, and say so in your checkpoint. "
     )
 
 
@@ -499,7 +509,16 @@ def _start(item_id: int, plan: dict, slack: bool, brief: str,
             + source_block + _context_block(contexts, slack)
             + (work_worktree.context_block(worktree_row) if worktree_row else "")
             + (brief or "") + "\n"
-            "Work toward the objective. When you stop, state a one-line checkpoint. "
+            "Work toward the objective. Do only what the objective asks. If the "
+            "objective is a question, answer it and stop: do not build, install or "
+            "change anything to answer it. If you see other work worth doing, name "
+            "it in your checkpoint and leave it undone. "
+            "Do not wait for a process in a shell loop that sleeps and checks, because "
+            "each pass of that loop costs a full turn. Run the long command in the "
+            "background and use the notification your harness sends when it ends. If "
+            "your harness sends no such notification, run the command in the "
+            "foreground with a timeout long enough to hold it. "
+            "When you stop, state a one-line checkpoint. "
             "When you hit a decision point, decide yourself by default: pick the "
             "most correct, cleanest, simplest option and keep going. Ask the "
             "operator only when you truly cannot decide — the choice is "
