@@ -170,6 +170,10 @@
         },
     };
 
+    window.frshtyTerminalWindow = function (id, peer) {
+        return 'terminal-' + (peer ? peer + '-' : '') + id;
+    };
+
     window.FrshtyNav = FrshtyNav;
     window.PrSubmitModal = PrSubmitModal;
 

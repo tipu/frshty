@@ -9,14 +9,44 @@
 <script src="/static/vendor/xterm-addon-fit.js"></script>
 <style>
 html, body { margin: 0; height: 100%; background: #0a0a0f; }
-#term { height: 100%; }
+body { display: flex; flex-direction: column; }
+#bar { flex: none; box-sizing: border-box; height: 34px; display: flex; align-items: center; gap: 12px;
+       padding: 0 14px; background: #0d0d13; border-bottom: 1px solid #2a2a35;
+       font: 12px/1 system-ui, sans-serif; color: #777; }
+#bar a { color: #93c5fd; text-decoration: none; white-space: nowrap; }
+#bar a:hover { text-decoration: underline; }
+#objective { color: #d5d5dc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#state { white-space: nowrap; }
+#term { flex: 1; min-height: 0; }
 </style>
 <script src="/static/frshty-usage.js"></script>
 </head>
 <body>
+<div id="bar">
+  <a id="back" href="/tasks">← tasks</a>
+  <span id="objective"></span>
+  <span id="state"></span>
+</div>
 <div id="term"></div>
 <script>
 const key = location.pathname.split("/")[2];
+const back = document.getElementById("back");
+back.href = "/tasks/" + key;
+back.textContent = "← task #" + key;
+document.title = document.title + " #" + key;
+fetch("/api/work/items/" + key + "/summary")
+  .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+  .then((d) => {
+    const item = d.item;
+    if (!item) throw new Error("no such task");
+    document.getElementById("objective").textContent = item.objective || "";
+    document.getElementById("state").textContent = "· " + String(item.state || "").replace("_", " ");
+    document.title = document.title + " — " + (item.objective || "");
+  })
+  .catch((e) => {
+    document.getElementById("objective").textContent =
+      "could not read task #" + key + ": " + (e.message || String(e));
+  });
 const term = new Terminal({
   cursorBlink: true, fontSize: 14,
   fontFamily: "'JetBrains Mono', Menlo, monospace",
