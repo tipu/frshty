@@ -682,7 +682,7 @@ frshtyApp({
     },
     openTerminal(it) {
       const base = it.peer ? this.peerBase(it.peer) : "";
-      window.open(`${base}/tasks/${it.id}/terminal`, "_blank");
+      window.open(`${base}/tasks/${it.id}/terminal`, window.frshtyTerminalWindow(it.id, it.peer));
     },
     ago(iso) {
       const s = (Date.now() - new Date(iso).getTime()) / 1000;
