@@ -62,7 +62,7 @@
     <span class="text-xs text-gray-500 ml-2">#{{ item.id }} · {{ item.scope }} · {{ item.instance_key || 'no instance' }} · continues {{ item.continues_used }}/{{ item.continue_cap }}<span v-if="provider"> · {{ provider }}</span><span v-if="item.contexts"> · {{ item.contexts }}</span></span>
     <span v-if="peer" class="badge b-other" :title="'this task runs on the ' + peer + ' host'">⇄ {{ peer }}</span>
     <a v-if="sourceItem" :href="taskHref(sourceItem.id)" class="text-xs text-blue-400 underline ml-3" :title="sourceItem.objective">follows #{{ sourceItem.id }}</a>
-    <a :href="terminalHref" target="_blank" class="text-xs text-blue-400 underline ml-3">open terminal</a>
+    <a :href="terminalHref" :target="terminalWindow" class="text-xs text-blue-400 underline ml-3">open terminal</a>
   </div>
   <div class="mt-1 text-xs text-gray-500" v-if="worktree"
        :title="'shared checkout: ' + worktree.repo_path">
@@ -309,6 +309,10 @@ const app = frshtyApp({
     terminalHref() {
       if (!this.item) return "";
       return (this.peerBase || "") + "/tasks/" + this.item.id + "/terminal";
+    },
+    terminalWindow() {
+      if (!this.item) return "_blank";
+      return window.frshtyTerminalWindow(this.item.id, this.peer);
     },
     provider() {
       return this.runs.length ? this.runs[this.runs.length - 1].provider : "";
