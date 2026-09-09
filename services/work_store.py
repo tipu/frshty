@@ -74,6 +74,8 @@ _EVENT_TRANSITIONS = {
     "Notification": (None, "needs_you", "Notification"),
     "SessionEnd": ("finished", "needs_you", "Session ended"),
 }
+AGENT_WORK_EVENT_KINDS = tuple(k for k in _EVENT_TRANSITIONS if k != "SessionEnd")
+LAUNCH_FAILED_STATUS = "launch_failed"
 
 
 def _now() -> str:
@@ -300,6 +302,38 @@ def record_run_cwd(session_id: str, cwd: str) -> None:
         c.execute("UPDATE work_runs SET cwd = ? WHERE session_id = ?", (cwd, session_id))
 
 
+def run_reached_an_agent(run_id: int) -> bool:
+    """Whether an agent ever started on this run.
+
+    A launch_failed run never counts, whichever agent it ran. That is what
+    the launch path records when nothing reached an agent, and what the
+    kickoff records when it could not deliver the objective, so the run holds
+    no work even if a session started under it.
+
+    Past that, only a claude run can be read from its events. Claude fires
+    SessionStart the moment a session starts, so a claude run that recorded no
+    agent event started no session: it claimed no session id, read no prompt,
+    and has nothing anyone could resume. SessionEnd does not count on its own,
+    because a Claude that quit on its directory-trust question emits it
+    without ever having started a session.
+
+    Codex says nothing until its first turn ends
+    (scripts/codex_notify.py:53), so silence on a codex run is ordinary work
+    in progress and cannot be read as a launch that never landed."""
+    run = db.query_one("SELECT provider, status FROM work_runs WHERE id = ?", (run_id,))
+    if not run or run["status"] == LAUNCH_FAILED_STATUS:
+        return False
+    if run["provider"] != "claude":
+        return True
+    placeholders = ", ".join("?" for _ in AGENT_WORK_EVENT_KINDS)
+    row = db.query_one(
+        f"SELECT 1 AS present FROM work_events WHERE work_run_id = ? "
+        f"AND kind IN ({placeholders}) LIMIT 1",
+        (run_id, *AGENT_WORK_EVENT_KINDS),
+    )
+    return bool(row)
+
+
 def mark_launch_failed(run_id: int, error: str) -> None:
     now = _now()
     with db.tx() as c:
@@ -307,8 +341,8 @@ def mark_launch_failed(run_id: int, error: str) -> None:
         if not row:
             return
         item_id = row["work_item_id"]
-        c.execute("UPDATE work_runs SET status = 'launch_failed', finished_at = ? WHERE id = ?",
-                  (now, run_id))
+        c.execute("UPDATE work_runs SET status = ?, finished_at = ? WHERE id = ?",
+                  (LAUNCH_FAILED_STATUS, now, run_id))
         c.execute(
             "UPDATE work_items SET state = 'failed_stale', stop_reason = ?, updated_at = ? WHERE id = ?",
             (f"launch failed: {error}", now, item_id),
@@ -318,6 +352,52 @@ def mark_launch_failed(run_id: int, error: str) -> None:
             "VALUES (?, ?, 'launch_failed', ?, ?)",
             (item_id, run_id, db.dump_json({"error": error}), now),
         )
+
+
+def mark_run_relaunched(run_id: int) -> bool:
+    """Put a run that never reached an agent back where a launch leaves it.
+
+    A relaunch of such a run starts a new agent on the same session id, so
+    leaving the failure recorded would report a working task as dead: the
+    board would still show failed_stale, and `run_reached_an_agent` would
+    still answer no for a codex run, which says nothing until its first turn
+    ends. A claude run corrects itself on its first hook; this makes the
+    relaunch honest from the moment it is made.
+
+    False when the run turns out to have reached an agent after all, or when
+    the operator has closed the task. The caller decides to relaunch before it
+    takes the launch lock, and both can happen in between: a codex turn that
+    finished in that window has already put the item in needs_ack, and
+    overwriting that with agent_working would lose a completed run. Both are
+    read inside this transaction, so the reset happens only while the run is
+    still the empty one and the task is still open."""
+    now = _now()
+    placeholders = ", ".join("?" for _ in AGENT_WORK_EVENT_KINDS)
+    with db.tx() as c:
+        row = c.execute(
+            "SELECT r.work_item_id AS work_item_id, i.state AS state"
+            " FROM work_runs r JOIN work_items i ON i.id = r.work_item_id"
+            " WHERE r.id = ?", (run_id,)).fetchone()
+        if not row or row["state"] in FINISHED_STATES:
+            return False
+        started = c.execute(
+            f"SELECT 1 FROM work_events WHERE work_run_id = ? "
+            f"AND kind IN ({placeholders}) LIMIT 1",
+            (run_id, *AGENT_WORK_EVENT_KINDS),
+        ).fetchone()
+        if started:
+            return False
+        c.execute("UPDATE work_runs SET status = 'launched', finished_at = NULL "
+                  "WHERE id = ?", (run_id,))
+        c.execute(
+            "UPDATE work_items SET state = 'agent_working', stop_reason = '', "
+            "pending_question = '', snoozed_until = NULL, updated_at = ? WHERE id = ?",
+            (now, row["work_item_id"]),
+        )
+        c.execute(
+            "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+            "VALUES (?, ?, 'run_resumed', '{}', ?)", (row["work_item_id"], run_id, now))
+    return True
 
 
 def is_wakeup_prompt(prompt: str) -> bool:
@@ -1309,13 +1389,17 @@ def sweep_stale_items(now: datetime | None = None) -> list[dict]:
     session blocked in a tool call until STUCK_AFTER_MINUTES and then hands
     it to the operator, synthesizes the missed Stop for a live-but-idle
     session so the question/done/autocontinue path runs, and marks the item
-    failed_stale when the agent process is gone. A codex rollout is written
-    only between tool calls, so pane activity counts as freshness too. A
-    second pass runs the autocontinue decision for a needs_you item whose
-    idle-stop hook was dropped before it made one. A third pass fails an
-    agent_working item that has no run at all: the launch path writes the item
-    before the run, so a process that dies in that window leaves a row the
-    join below can never reach.
+    failed_stale when the agent process is gone. A run that delivered not one
+    agent event never reached an agent, so it is recorded as launch_failed
+    rather than stopped, for the reason mark_launch_failed uses that status:
+    nothing read that objective, the item covers no work, and
+    manager/watchdog.py has to stay free to open the task again. A codex
+    rollout is written only between tool calls, so pane activity counts as
+    freshness too. A second pass runs the autocontinue decision for a
+    needs_you item whose idle-stop hook was dropped before it made one. A
+    third pass fails an agent_working item that has no run at all: the launch
+    path writes the item before the run, so a process that dies in that window
+    leaves a row the join below can never reach.
     """
     now_dt = now or datetime.now(timezone.utc)
     cutoff = (now_dt - timedelta(minutes=STALE_AFTER_MINUTES)).isoformat()
@@ -1352,17 +1436,21 @@ def sweep_stale_items(now: datetime | None = None) -> list[dict]:
             actions.append({"id": row["item_id"], "action": "refreshed"})
             continue
         if not agent_running(row["tmux_key"], row["provider"]):
+            started = run_reached_an_agent(row["run_id"])
+            reason = ("Agent process gone without a Stop event" if started else
+                      "The agent never started; the launch reached no session")
             flipped = 0
             with db.tx() as c:
                 flipped = c.execute(
                     "UPDATE work_items SET state = 'failed_stale', "
-                    "stop_reason = 'Agent process gone without a Stop event', "
-                    "updated_at = ? WHERE id = ? AND state = 'agent_working'",
-                    (_now(), row["item_id"]),
+                    "stop_reason = ?, updated_at = ? WHERE id = ? "
+                    "AND state = 'agent_working'",
+                    (reason, _now(), row["item_id"]),
                 ).rowcount
                 if flipped:
-                    c.execute("UPDATE work_runs SET status = 'stopped' WHERE id = ?",
-                              (row["run_id"],))
+                    c.execute("UPDATE work_runs SET status = ? WHERE id = ?",
+                              ("stopped" if started else LAUNCH_FAILED_STATUS,
+                               row["run_id"]))
                     c.execute(
                         "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
                         "VALUES (?, ?, 'stale_failed', '{}', ?)",
