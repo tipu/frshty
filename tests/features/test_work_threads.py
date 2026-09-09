@@ -297,6 +297,14 @@ class TestRoutes:
         assert "<frshty-shell" in r.text
         assert "frshtyApp({" in r.text
 
+    def test_task_terminal_page_names_the_task_and_links_back(self):
+        r = _client().get("/tasks/1/terminal")
+        assert r.status_code == 200
+        assert 'back.href = "/tasks/" + key;' in r.text
+        assert '"\u2190 task #" + key' in r.text
+        assert 'fetch("/api/work/items/" + key + "/summary")' in r.text
+        assert 'document.title = document.title + " #" + key;' in r.text
+
     def test_threads_page_renders(self):
         r = _client().get("/threads")
         assert r.status_code == 200
@@ -594,3 +602,39 @@ class TestPeerAwareThreads:
     def test_the_thread_page_reports_an_unknown_peer(self):
         text = self._read("templates/thread_detail.html")
         assert "unknown peer" in text
+
+
+class TestTerminalWindowReuse:
+    def _read(self, name):
+        return pathlib.Path(name).read_text()
+
+    def test_the_window_name_helper_keys_on_the_task_and_the_peer(self):
+        nav = self._read("static/frshty-nav.js")
+        assert "window.frshtyTerminalWindow = function (id, peer)" in nav
+        assert "return 'terminal-' + (peer ? peer + '-' : '') + id;" in nav
+
+    def test_the_task_page_opens_the_terminal_in_one_window_per_task(self):
+        text = self._read("templates/work_detail.html")
+        assert ':href="terminalHref" :target="terminalWindow"' in text
+        assert ':href="terminalHref" target="_blank"' not in text
+        assert "return window.frshtyTerminalWindow(this.item.id, this.peer);" in text
+
+    def test_the_thread_page_opens_the_terminal_in_one_window_per_task(self):
+        text = self._read("templates/thread_detail.html")
+        assert ':href="terminalHref(t.id)" :target="terminalWindow(t.id)"' in text
+        assert ':href="terminalHref(t.id)" target="_blank"' not in text
+        assert "return window.frshtyTerminalWindow(id, this.peer);" in text
+
+    def test_the_board_opens_the_terminal_in_one_window_per_task(self):
+        text = self._read("templates/work.html")
+        assert "window.open(`${base}/tasks/${it.id}/terminal`, window.frshtyTerminalWindow(it.id, it.peer));" in text
+        assert '/terminal`, "_blank")' not in text
+
+    def test_every_page_that_opens_a_terminal_loads_the_window_name_helper(self):
+        for name in ("templates/work.html", "templates/work_detail.html", "templates/thread_detail.html"):
+            assert "/static/frshty-nav.js" in self._read(name), name
+
+    def test_the_rendered_task_page_carries_the_window_name(self):
+        r = _client().get("/tasks/1")
+        assert r.status_code == 200
+        assert ':target="terminalWindow"' in r.text
