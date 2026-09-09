@@ -420,6 +420,18 @@ def _ensure_work_item(instance_key: str, m: dict, key: str, cwd: str):
         log.emit("work_item_link_failed", f"[{instance_key}] {key}: {type(e).__name__}: {e}")
 
 
+def _reached_an_agent(session_id: str) -> bool:
+    """Whether the run of this launch ever started an agent.
+
+    `seeded` records that a launch was made, not that Claude came up. A Claude
+    that quit on its directory-trust question leaves the flag set and no
+    conversation, and `--resume` on that session id then answers "No
+    conversation found" at every later launch. A run with no agent event is
+    seeded again from the start."""
+    run = db.query_one("SELECT id FROM work_runs WHERE session_id = ?", (session_id,))
+    return bool(run) and work_store.run_reached_an_agent(int(run["id"]))
+
+
 @router.post("/api/today/launch")
 def api_today_launch(body: dict):
     instance_key = _config.get("job", {}).get("key", "")
@@ -465,7 +477,7 @@ def api_today_launch(body: dict):
         _ensure_work_item(instance_key, m, key, cwd)
         return {"key": key, "status": "running", "title": m["title"], "session_id": m["sid"]}
 
-    first_run = not m.get("seeded")
+    first_run = not m.get("seeded") or not _reached_an_agent(m["sid"])
     context = _build_context(loop_type, ticket_key, repo, pr_id) if first_run else ""
     try:
         terminal.launch_claude(key, cwd, m["sid"], context, first_run, config=_config)
