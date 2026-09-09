@@ -561,7 +561,7 @@ def _start(item_id: int, plan: dict, slack: bool, brief: str,
             work_store.mark_launch_failed(run_id, f"{type(e).__name__}: {e}")
             log.emit("work_launch_failed", f"work item {item_id}: {type(e).__name__}: {e}")
             return {"error": f"launch failed: {e}", "item_id": item_id}
-    threading.Thread(target=_kickoff, args=(tmux_key, run_id, agent), daemon=True).start()
+    start_kickoff(tmux_key, run_id, agent)
     if len(tags) < work_tags.MAX_TAGS:
         work_tags.schedule_implicit_tags(item_id, objective, config)
     return {"item_id": item_id, "run_id": run_id, "session_id": session_id,
@@ -622,11 +622,25 @@ def resume_session(item_id: int) -> bool:
     checkout a pre-feature run recorded. A worktree the sweep removed is
     rebuilt on the same branch instead of being lost.
 
+    A run that never produced a single agent event started no conversation,
+    so there is nothing to resume: `--resume` on its session id answers "No
+    conversation found" and the pane drops to a shell. Such a run is launched
+    again as a first run instead, on the same session id and the same seed
+    text, and is kicked off the way `_start` kicks off a new one, and the run
+    stops reporting the failure it replaces. That is the only path on the
+    board that restarts a task whose agent never started. A finished task is
+    exempt: opening its terminal must not start an agent on work the operator
+    already closed, and so is a run whose agent turns out to have reported in
+    while this call was resolving, which is what mark_run_relaunched refusing
+    the reset means. A relaunch whose seed file is gone is seeded from the
+    objective instead, so the agent is never started with nothing to do, and a
+    relaunch that cannot open its pane goes back to being a failed launch.
+
     No-op while the agent is still running, checked under launch_lock so two
     concurrent terminal connects cannot both relaunch it. A surviving tmux
     pane with no agent is respawned with the resume command."""
     run = db.query_one(
-        "SELECT session_id, cwd, provider, agent_session_id, env_recorded, env_key, "
+        "SELECT id, session_id, cwd, provider, agent_session_id, env_recorded, env_key, "
         "env_config_dir FROM work_runs WHERE work_item_id = ? ORDER BY id DESC LIMIT 1",
         (item_id,))
     if not run:
@@ -648,8 +662,11 @@ def resume_session(item_id: int) -> bool:
         env_config = terminal.with_config_dir(base, run["provider"],
                                               run["env_config_dir"])
     item = db.query_one(
-        "SELECT objective, contexts, worktree_opt_out FROM work_items WHERE id = ?",
+        "SELECT objective, contexts, state, worktree_opt_out FROM work_items WHERE id = ?",
         (item_id,))
+    never_started = (item is not None
+                     and item["state"] not in work_store.FINISHED_STATES
+                     and not work_store.run_reached_an_agent(int(run["id"])))
     recorded = run["cwd"] if run["cwd"] and os.path.isdir(run["cwd"]) else ""
     contexts = [c for c in ((item["contexts"] if item else "") or "").split(",")
                 if c and c != SLACK_LABEL]
@@ -700,9 +717,22 @@ def resume_session(item_id: int) -> bool:
             return False
         if cwd != run["cwd"]:
             work_store.record_run_cwd(run["session_id"], cwd)
-        terminal.launch_agent(key, cwd, run["session_id"], "", False, config=env_config,
-                              agent=run["provider"],
-                              agent_session_id=run["agent_session_id"])
+        seed = ""
+        if never_started:
+            never_started = work_store.mark_run_relaunched(int(run["id"]))
+        if never_started and not read_system_prompt([{"session_id": run["session_id"]}]).strip():
+            seed = f"# Work item {item_id}\n\n## Objective\n\n{item['objective']}\n"
+        try:
+            terminal.launch_agent(key, cwd, run["session_id"], seed, never_started,
+                                  config=env_config, agent=run["provider"],
+                                  agent_session_id=run["agent_session_id"])
+        except Exception as e:
+            if never_started:
+                work_store.mark_launch_failed(int(run["id"]),
+                                              f"{type(e).__name__}: {e}")
+            raise
+    if never_started:
+        start_kickoff(key, int(run["id"]), run["provider"])
     return True
 
 
@@ -1136,40 +1166,118 @@ def _gate_one_push(session_id: str, command: str, start_dir: str) -> dict:
 
 TRUST_PROMPT_TRIES = 8
 TRUST_PROMPT_INTERVAL = 2
+_kickoff_generations: dict[str, int] = {}
+_kickoff_guard = threading.Lock()
 
 
-def _answer_trust_prompt(tmux_key: str) -> bool:
+def start_kickoff(tmux_key: str, run_id: int, agent: str = "claude") -> int:
+    """Kick one pane off in the background, superseding any earlier kickoff.
+
+    A kickoff polls its pane for up to a minute and a half. A relaunch made
+    inside that window would otherwise put a second kickoff on the same pane,
+    and the two would answer the same trust question and send the objective
+    prompt twice. Each start takes the pane's next generation, and a kickoff
+    stops as soon as the pane belongs to a newer one. The newest launch is
+    always the one that delivers the prompt, and an older one never fails the
+    launch that replaced it. Returns the generation it started.
+
+    A thread that cannot start raises, and writes nothing: the agent may
+    already be live, and `launch_proposed` keeps a task whose launch raised
+    after its session started."""
+    with _kickoff_guard:
+        generation = _kickoff_generations.get(tmux_key, 0) + 1
+        _kickoff_generations[tmux_key] = generation
+    threading.Thread(target=_kickoff, args=(tmux_key, run_id, agent, generation),
+                     daemon=True).start()
+    return generation
+
+
+def _owns_pane(tmux_key: str, generation: int) -> bool:
+    """Whether this kickoff is still the newest one for the pane.
+
+    The caller holds `_kickoff_guard`, so the answer and the act it guards are
+    one critical section. A relaunch that landed between them has already
+    reset the run, and the older kickoff's prompt or failure would hit it."""
+    return not generation or _kickoff_generations.get(tmux_key, 0) == generation
+
+
+def _superseded(tmux_key: str, generation: int) -> bool:
+    with _kickoff_guard:
+        return not _owns_pane(tmux_key, generation)
+
+
+def _fail_if_current(tmux_key: str, generation: int, run_id: int, error: str) -> None:
+    """Record a kickoff failure only while this kickoff still owns the pane."""
+    with _kickoff_guard:
+        if _owns_pane(tmux_key, generation):
+            work_store.mark_launch_failed(run_id, error)
+
+
+def _answer_codex_trust_prompt(tmux_key: str) -> bool:
     """Clear the codex directory-trust question before the readiness check.
 
     Codex holds the pane on the question while its process is already up, so
     the readiness check would call the run healthy and return with the
-    question still on screen."""
+    question still on screen. It can take ten seconds to render, which is
+    longer than the first pass of the kickoff loop, so it is polled here."""
     for _ in range(TRUST_PROMPT_TRIES):
         time.sleep(TRUST_PROMPT_INTERVAL)
-        if terminal.answer_codex_trust(tmux_key):
+        if terminal.answer_trust(tmux_key, "codex"):
             return True
     return False
 
 
-def _kickoff(tmux_key: str, run_id: int, agent: str = "claude"):
+def _kickoff(tmux_key: str, run_id: int, agent: str = "claude", generation: int = 0):
     """Confirm the agent CLI came up, and give Claude its first prompt.
 
     Claude is seeded through --append-system-prompt, so it sits idle until a
     prompt arrives. Codex takes the same context as its first prompt on the
-    command line, so it is already working and needs no kickoff message."""
+    command line, so it is already working and needs no kickoff message.
+
+    Both agents ask whether the directory is trusted the first time they open
+    one, and both hold the pane on that question with their process already
+    up, so the readiness check alone calls the run healthy while nothing has
+    started. The question is answered before the run counts as ready, and
+    again after the settling sleep, because it can render inside it. Claude
+    preselects `No, exit`, so a kickoff prompt sent into the question quits
+    Claude and the board reports an agent that went away rather than one that
+    never started.
+
+    One directory is trusted once, so the question is answered at most once
+    per kickoff. Without that latch a pane that still reads as the question
+    would take every pass of this loop and the readiness check would never
+    run, which fails a launch whose agent is working. Answering settles in
+    place rather than taking a pass, so a question answered on the last pass
+    still gets its readiness check and its prompt.
+
+    A kickoff that a newer one has replaced stops where it stands, and never
+    reports the launch it no longer speaks for as failed."""
     try:
-        if agent == "codex":
-            _answer_trust_prompt(tmux_key)
+        answered = _answer_codex_trust_prompt(tmux_key) if agent == "codex" else False
         for _ in range(30):
             time.sleep(3)
-            if terminal.session_healthy(tmux_key, agent=agent).get("agent_running"):
+            if _superseded(tmux_key, generation):
+                return
+            if not answered and terminal.answer_trust(tmux_key, agent):
+                answered = True
+                time.sleep(3)
+            if not terminal.session_healthy(tmux_key, agent=agent).get("agent_running"):
+                continue
+            time.sleep(4)
+            if not answered and terminal.answer_trust(tmux_key, agent):
+                answered = True
                 time.sleep(4)
-                if agent != "claude":
+            if agent != "claude":
+                return
+            with _kickoff_guard:
+                if not _owns_pane(tmux_key, generation):
                     return
-                if work_store.tmux_send(tmux_key, "Begin the objective from your system prompt now."):
+                if work_store.tmux_send(
+                        tmux_key, "Begin the objective from your system prompt now."):
                     return
-                break
-        work_store.mark_launch_failed(
-            run_id, f"kickoff never delivered: {agent} did not start in the pane")
+            break
+        _fail_if_current(tmux_key, generation, run_id,
+                         f"kickoff never delivered: {agent} did not start in the pane")
     except Exception as e:
-        work_store.mark_launch_failed(run_id, f"kickoff error: {type(e).__name__}: {e}")
+        _fail_if_current(tmux_key, generation, run_id,
+                         f"kickoff error: {type(e).__name__}: {e}")

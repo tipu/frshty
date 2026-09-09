@@ -65,7 +65,7 @@ def _blocked_comment(resource_id, comment_id, error_count=3, tracked=True):
 
 
 def _work_item(item_id, objective, item_state="agent_working", archived_at=None,
-               contexts="", run_status="running"):
+               contexts="", run_status="running", agent_started=None):
     db.execute(
         "INSERT INTO work_items(id, objective, state, archived_at, contexts,"
         " created_at, updated_at)"
@@ -73,14 +73,24 @@ def _work_item(item_id, objective, item_state="agent_working", archived_at=None,
         (item_id, objective, item_state, archived_at, contexts),
     )
     if run_status:
-        _work_run(item_id, run_status)
+        started = run_status != "launch_failed" if agent_started is None else agent_started
+        _work_run(item_id, run_status, started)
 
 
-def _work_run(item_id, status):
+def _work_run(item_id, status, agent_started=True):
     db.execute(
         "INSERT INTO work_runs(work_item_id, session_id, tmux_key, cwd, status, started_at)"
         " VALUES (?, ?, ?, '/tmp', ?, '2026-09-01T00:00:00Z')",
         (item_id, f"sid-{item_id}", f"work-{item_id}", status),
+    )
+    if not agent_started:
+        return
+    run_id = db.query_one("SELECT id FROM work_runs WHERE work_item_id=?"
+                          " ORDER BY id DESC LIMIT 1", (item_id,))["id"]
+    db.execute(
+        "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at)"
+        " VALUES (?, ?, 'SessionStart', '{}', '2026-09-01T00:00:00Z')",
+        (item_id, run_id),
     )
 
 
@@ -305,6 +315,21 @@ class TestAlreadyCovered:
         opened, _, _ = _scan(_config(), NOW + timedelta(hours=7))
 
         assert opened == []
+
+    def test_a_stopped_run_that_never_started_an_agent_does_not_cover(self):
+        """WB-209 sat wedged for five days in this exact shape: the doctor task
+        launched, Claude quit on its folder-trust question, and the stale sweep
+        recorded the run as stopped. The item held no work and no agent had
+        read the objective, yet it silenced the bucket on every scan."""
+        _park_ticket("DEV-229")
+        _work_item(13, "Doctor ticket DEV-229 (test, status pr_failed).",
+                   item_state="failed_stale", contexts="test,frshty",
+                   run_status="stopped", agent_started=False)
+        _scan(_config(), NOW)
+
+        opened, _, _ = _scan(_config(), NOW + timedelta(hours=7))
+
+        assert [o["entity_id"] for o in opened] == ["DEV-229"]
 
 
 class TestSnooze:

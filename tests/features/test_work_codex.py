@@ -756,12 +756,95 @@ class TestCodexTrustPrompt:
         assert order[0] == "trust"
         assert "health" not in order[:1]
 
-    def test_kickoff_skips_the_trust_question_for_claude(self, monkeypatch):
-        answered = MagicMock()
+    def test_kickoff_asks_the_claude_question_not_the_codex_one(self, monkeypatch):
+        codex_answer = MagicMock()
+        claude_answer = MagicMock(return_value=False)
         monkeypatch.setattr(work_launch.time, "sleep", lambda s: None)
-        monkeypatch.setattr(work_launch.terminal, "answer_codex_trust", answered)
+        monkeypatch.setattr(work_launch.terminal, "answer_codex_trust", codex_answer)
+        monkeypatch.setattr(work_launch.terminal, "answer_claude_trust", claude_answer)
         monkeypatch.setattr(work_launch.terminal, "session_healthy",
                             lambda k, agent="claude": {"alive": True, "agent_running": True})
         monkeypatch.setattr(work_store, "tmux_send", MagicMock(return_value=True))
         work_launch._kickoff("work-1", 1, "claude")
-        answered.assert_not_called()
+        codex_answer.assert_not_called()
+        assert claude_answer.call_count >= 1
+
+    def test_kickoff_sends_no_prompt_while_the_claude_question_shows(self, monkeypatch):
+        """Claude preselects `No, exit`, so a prompt sent into the question
+        quits Claude. WB-209, WB-283 and LSC-51 each died that way."""
+        monkeypatch.setattr(work_launch.time, "sleep", lambda s: None)
+        order = []
+
+        def fake_answer(key):
+            order.append("trust")
+            return order.count("trust") == 1
+
+        def fake_health(key, agent="claude"):
+            order.append("health")
+            return {"alive": True, "agent_running": True}
+
+        monkeypatch.setattr(work_launch.terminal, "answer_claude_trust", fake_answer)
+        monkeypatch.setattr(work_launch.terminal, "session_healthy", fake_health)
+        sender = MagicMock(return_value=True)
+        monkeypatch.setattr(work_store, "tmux_send", sender)
+        work_launch._kickoff("work-1", 1, "claude")
+        assert order == ["trust", "health"]
+        sender.assert_called_once()
+
+    def test_a_question_answered_on_the_last_pass_still_gets_the_prompt(self, monkeypatch):
+        """Codex can take ten seconds to render the question, longer than one
+        pass of the loop. A pass spent answering must not be the pass that
+        would have delivered the prompt."""
+        monkeypatch.setattr(work_launch.time, "sleep", lambda s: None)
+        passes = []
+
+        def fake_health(key, agent="claude"):
+            passes.append(1)
+            return {"alive": True, "agent_running": len(passes) >= 30}
+
+        answers = [False] * 29 + [True]
+        monkeypatch.setattr(work_launch.terminal, "answer_claude_trust",
+                            lambda k: answers.pop(0) if answers else False)
+        monkeypatch.setattr(work_launch.terminal, "session_healthy", fake_health)
+        sender = MagicMock(return_value=True)
+        failed = MagicMock()
+        monkeypatch.setattr(work_store, "tmux_send", sender)
+        monkeypatch.setattr(work_store, "mark_launch_failed", failed)
+        work_launch._kickoff("work-1", 1, "claude")
+        sender.assert_called_once()
+        failed.assert_not_called()
+
+    def test_codex_question_is_polled_before_the_readiness_check(self, monkeypatch):
+        """The codex process is up while the question shows, so the readiness
+        check alone returns with the question on screen."""
+        monkeypatch.setattr(work_launch.time, "sleep", lambda s: None)
+        order = []
+
+        def fake_answer(key):
+            order.append("trust")
+            return order.count("trust") == 5
+
+        monkeypatch.setattr(work_launch.terminal, "answer_codex_trust", fake_answer)
+        monkeypatch.setattr(work_launch.terminal, "session_healthy",
+                            lambda k, agent="codex": order.append("health") or
+                            {"alive": True, "agent_running": True})
+        monkeypatch.setattr(work_store, "tmux_send", MagicMock(return_value=True))
+        work_launch._kickoff("work-1", 1, "codex")
+        assert order[:5] == ["trust"] * 5
+        assert order.count("trust") == 5
+
+    def test_a_pane_that_always_reads_as_the_question_still_gets_the_prompt(self, monkeypatch):
+        """The question's lines stay on screen after it is answered, and an
+        agent can print them itself. Taking every pass of the loop would keep
+        the readiness check from ever running and fail a working launch."""
+        monkeypatch.setattr(work_launch.time, "sleep", lambda s: None)
+        monkeypatch.setattr(work_launch.terminal, "answer_claude_trust", lambda k: True)
+        monkeypatch.setattr(work_launch.terminal, "session_healthy",
+                            lambda k, agent="claude": {"alive": True, "agent_running": True})
+        sender = MagicMock(return_value=True)
+        failed = MagicMock()
+        monkeypatch.setattr(work_store, "tmux_send", sender)
+        monkeypatch.setattr(work_store, "mark_launch_failed", failed)
+        work_launch._kickoff("work-1", 1, "claude")
+        sender.assert_called_once()
+        failed.assert_not_called()
