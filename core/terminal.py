@@ -242,6 +242,10 @@ def pane_text(ticket_key: str) -> str:
 
 
 CODEX_TRUST_PROMPT = "Do you trust the contents of this directory?"
+CLAUDE_TRUST_PROMPT = "Yes, I trust this folder"
+CLAUDE_TRUST_DECLINE = "No, exit"
+CLAUDE_TRUST_FOOTER = "Enter to confirm"
+SELECTED_MARKER = "❯"
 
 
 def answer_codex_trust(ticket_key: str) -> bool:
@@ -266,6 +270,63 @@ def answer_codex_trust(ticket_key: str) -> bool:
     return True
 
 
+def answer_claude_trust(ticket_key: str) -> bool:
+    """Accept the Claude folder-trust question when the pane shows it.
+
+    Claude asks it the first time it opens a directory, before it starts the
+    session it was given, so a work run in a directory Claude has not seen
+    sits on the question: the process is up, no session id is ever claimed and
+    no hook reaches the board. `No, exit` is preselected, so the kickoff
+    prompt's Enter answers the question by quitting Claude, and the board then
+    reports an agent that went away rather than one that never started. The
+    answer is yes because the launcher already runs Claude with permissions
+    bypassed and frshty chose the directory.
+
+    The question has to be the live bottom of the pane, not text anywhere on
+    it. Its lines stay on screen after Claude exits, and an agent can print
+    them itself, so matching the words alone would send keys into a shell or
+    into a working session. Only a question waiting for an answer ends the
+    pane with its confirm footer."""
+    text = pane_text(ticket_key)
+    if CLAUDE_TRUST_PROMPT not in text:
+        return False
+    tail = [ln for ln in text.splitlines() if ln.strip()]
+    if not tail or CLAUDE_TRUST_FOOTER not in tail[-1]:
+        return False
+    keys = ["Enter"]
+    for line in text.splitlines():
+        if CLAUDE_TRUST_DECLINE in line and SELECTED_MARKER in line:
+            keys = ["Down", "Enter"]
+            break
+    subprocess.run(
+        [_tmux_bin(), "-S", TMUX_SOCKET, "send-keys", "-t",
+         _tmux_session_name(ticket_key), *keys],
+        capture_output=True,
+    )
+    return True
+
+
+def answer_trust(ticket_key: str, agent: str = "claude") -> bool:
+    """Accept the directory-trust question of whichever agent runs in the pane."""
+    if agent == "codex":
+        return answer_codex_trust(ticket_key)
+    return answer_claude_trust(ticket_key)
+
+
+def launch_context_path(session_uuid: str, context: str) -> str:
+    """The file holding a first run's seed text.
+
+    Written once, at the first launch. A relaunch of a run that never started
+    passes no context because the text it was launched with is already on
+    disk, so an empty context keeps the file rather than truncating it."""
+    os.makedirs(LAUNCH_CONTEXT_DIR, exist_ok=True)
+    path = os.path.join(LAUNCH_CONTEXT_DIR, f"{session_uuid}.md")
+    if context or not os.path.isfile(path):
+        with open(path, "w") as f:
+            f.write(context or "")
+    return path
+
+
 def launch_claude(key: str, cwd: str, session_uuid: str, context: str, first_run: bool,
                   config: dict | None = None):
     """Start (or resume) a Claude conversation in the `key` tmux session.
@@ -281,10 +342,7 @@ def launch_claude(key: str, cwd: str, session_uuid: str, context: str, first_run
     if session_healthy(key).get("agent_running"):
         return
     if first_run:
-        os.makedirs(LAUNCH_CONTEXT_DIR, exist_ok=True)
-        ctx_path = os.path.join(LAUNCH_CONTEXT_DIR, f"{session_uuid}.md")
-        with open(ctx_path, "w") as f:
-            f.write(context or "")
+        ctx_path = launch_context_path(session_uuid, context)
         cmd = (
             f"{claude_cmd(config)} --session-id {shlex.quote(session_uuid)} "
             f"--append-system-prompt \"$(cat {shlex.quote(ctx_path)})\""
@@ -312,10 +370,7 @@ def launch_codex(key: str, cwd: str, session_uuid: str, context: str, first_run:
         return
     notify = _codex_notify_flag(session_uuid)
     if first_run:
-        os.makedirs(LAUNCH_CONTEXT_DIR, exist_ok=True)
-        ctx_path = os.path.join(LAUNCH_CONTEXT_DIR, f"{session_uuid}.md")
-        with open(ctx_path, "w") as f:
-            f.write(context or "")
+        ctx_path = launch_context_path(session_uuid, context)
         cmd = f"{codex_cmd(config)} {notify} \"$(cat {shlex.quote(ctx_path)})\""
     else:
         target = shlex.quote(agent_session_id) if agent_session_id else "--last"
