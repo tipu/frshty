@@ -120,7 +120,7 @@
                 <span class="ln-tag" v-for="tag in tags(t)" :key="tag">{{ tag }}</span>
                 <span class="ln-right">
                   <a class="ln-btn ln-btn-sm ln-btn-ghost" v-if="t.summary" :href="taskHref(t.id, '/summary')" target="_blank">Summary</a>
-                  <a class="ln-btn ln-btn-sm ln-btn-ghost" v-if="t.last_tmux_key && t.state !== 'done' && t.state !== 'needs_ack'" :href="terminalHref(t.id)" target="_blank">Terminal</a>
+                  <a class="ln-btn ln-btn-sm ln-btn-ghost" v-if="t.last_tmux_key && t.state !== 'done' && t.state !== 'needs_ack'" :href="terminalHref(t.id)" :target="terminalWindow(t.id)">Terminal</a>
                   <span>{{ $relTime(t.updated_at) }}</span>
                 </span>
               </div>
@@ -241,6 +241,9 @@ frshtyApp({
     },
     terminalHref(id) {
       return (this.peerBase || "") + "/tasks/" + id + "/terminal";
+    },
+    terminalWindow(id) {
+      return window.frshtyTerminalWindow(id, this.peer);
     },
     artifactUrl(a) {
       return (this.peerBase || "") + "/api/work/artifact_file/" + a.id;
