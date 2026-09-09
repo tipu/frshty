@@ -2,12 +2,28 @@ import base64
 import sys
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 import core.db as db
 from services import work_store
 
 
 def _mkitem(objective="do the thing", **kw):
     return work_store.create_item(objective, **kw)
+
+
+def _mkrun(item_id, session_id, tmux_key, cwd, agent_started=True, **kw):
+    """A run, with the SessionStart its agent would have delivered.
+
+    A run holding no agent event is one whose agent never started, and the
+    resume and sweep paths both read that as work nobody can resume."""
+    run_id = work_store.add_run(item_id, session_id, tmux_key, cwd, **kw)
+    if agent_started:
+        db.execute(
+            "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at)"
+            " VALUES (?, ?, 'SessionStart', '{}', ?)",
+            (item_id, run_id, datetime.now(timezone.utc).isoformat()))
+    return run_id
 
 
 class TestMigration:
@@ -725,10 +741,16 @@ class TestAutocontinue:
 
 
 class TestStaleSweep:
-    def _mkstale(self, tmp_path, tail_text="Working on step 3.", minutes=40):
+    def _mkstale(self, tmp_path, tail_text="Working on step 3.", minutes=40,
+                 agent_started=True):
         import json as _json
         item_id = _mkitem("stale sweep item")
         run_id = work_store.add_run(item_id, f"sid-sweep-{item_id}", f"work-{item_id}", "/tmp")
+        if agent_started:
+            db.execute(
+                "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at)"
+                " VALUES (?, ?, 'SessionStart', '{}', ?)",
+                (item_id, run_id, datetime.now(timezone.utc).isoformat()))
         transcript = tmp_path / f"t-{item_id}.jsonl"
         transcript.write_text(_json.dumps(
             {"type": "assistant", "message": {"content": [{"type": "text", "text": tail_text}]}}
@@ -769,6 +791,21 @@ class TestStaleSweep:
         kinds = {e["kind"] for e in db.query_all(
             "SELECT kind FROM work_events WHERE work_item_id = ?", (item_id,))}
         assert "stale_failed" in kinds
+
+    def test_run_that_never_reached_an_agent_is_marked_launch_failed(self, tmp_path, monkeypatch):
+        """No hook of this run ever landed, so no agent read the objective.
+        Recording it as stopped told manager/watchdog.py that resumable work
+        existed, and the entity it was opened for stayed silenced forever."""
+        item_id, run_id, transcript = self._mkstale(tmp_path, agent_started=False)
+        self._age_transcript(transcript)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": False)
+        actions = work_store.sweep_stale_items()
+        assert {"id": item_id, "action": "failed"} in actions
+        item = db.query_one("SELECT state, stop_reason FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "failed_stale"
+        assert "never started" in item["stop_reason"]
+        run = db.query_one("SELECT status FROM work_runs WHERE id = ?", (run_id,))
+        assert run["status"] == "launch_failed"
 
     def test_live_idle_session_gets_synthesized_stop_and_continues(self, tmp_path, monkeypatch):
         from unittest.mock import MagicMock
@@ -1735,7 +1772,7 @@ class TestSuspendResume:
         from services import work_launch
         item_id = _mkitem("resume item")
         sid = f"sid-resume-{item_id}"
-        work_store.add_run(item_id, sid, f"work-{item_id}", str(tmp_path))
+        _mkrun(item_id, sid, f"work-{item_id}", str(tmp_path))
         config = {"workspace": {"root": tmp_path}}
         monkeypatch.setattr(work_launch, "personal_config", lambda: config)
         monkeypatch.setattr(terminal, "session_healthy",
@@ -1757,7 +1794,7 @@ class TestSuspendResume:
         from services import work_launch
         item_id = _mkitem("resume gone cwd item")
         sid = f"sid-resume2-{item_id}"
-        work_store.add_run(item_id, sid, f"work-{item_id}", str(tmp_path / "deleted"))
+        _mkrun(item_id, sid, f"work-{item_id}", str(tmp_path / "deleted"))
         config = {"workspace": {"root": tmp_path}}
         monkeypatch.setattr(work_launch, "personal_config", lambda: config)
         monkeypatch.setattr(terminal, "session_healthy",
@@ -1773,7 +1810,7 @@ class TestSuspendResume:
         from services import work_launch
         item_id = _mkitem("resume empty pane item")
         sid = f"sid-resume-empty-{item_id}"
-        work_store.add_run(item_id, sid, f"work-{item_id}", str(tmp_path))
+        _mkrun(item_id, sid, f"work-{item_id}", str(tmp_path))
         config = {"workspace": {"root": tmp_path}}
         monkeypatch.setattr(work_launch, "personal_config", lambda: config)
         monkeypatch.setattr(terminal, "session_healthy",
@@ -1784,12 +1821,272 @@ class TestSuspendResume:
         launcher.assert_called_once_with(f"work-{item_id}", str(tmp_path), sid, "", False,
                                          config=config, agent="claude", agent_session_id="")
 
+    def test_resume_relaunches_a_run_whose_agent_never_started(self, tmp_path, monkeypatch):
+        """`claude --resume` on a session id no conversation carries answers
+        "No conversation found" and drops the pane to a shell, so the operator
+        cannot restart a task whose agent never came up. It is launched as a
+        first run instead, on the same session id, and kicked off."""
+        from unittest.mock import MagicMock
+        import core.terminal as terminal
+        from services import work_launch
+        item_id = _mkitem("never started item")
+        sid = f"sid-resume-dead-{item_id}"
+        _mkrun(item_id, sid, f"work-{item_id}", str(tmp_path), agent_started=False)
+        config = {"workspace": {"root": tmp_path}}
+        monkeypatch.setattr(work_launch, "personal_config", lambda: config)
+        monkeypatch.setattr(terminal, "session_healthy",
+                            lambda k, agent="claude": {"alive": True, "agent_running": False})
+        launcher = MagicMock()
+        monkeypatch.setattr(terminal, "launch_agent", launcher)
+        kicked = MagicMock()
+        monkeypatch.setattr(work_launch.threading, "Thread", kicked)
+        assert work_launch.resume_session(item_id) is True
+        assert launcher.call_args[0][:3] == (f"work-{item_id}", str(tmp_path), sid)
+        assert launcher.call_args[0][4] is True
+        assert kicked.call_args.kwargs["target"] is work_launch._kickoff
+
+    def test_a_session_end_alone_does_not_count_as_an_agent(self, tmp_path, monkeypatch):
+        """WB-209's pane was respawned four days after its launch, and the
+        Claude that had sat on the folder-trust question emitted SessionEnd on
+        its way out. That hook is the only one the run ever recorded, and it
+        proves a process exited, not that a session ran."""
+        from unittest.mock import MagicMock
+        import core.terminal as terminal
+        from services import work_launch
+        item_id = _mkitem("session end only item")
+        sid = f"sid-resume-end-{item_id}"
+        run_id = _mkrun(item_id, sid, f"work-{item_id}", str(tmp_path), agent_started=False)
+        db.execute(
+            "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at)"
+            " VALUES (?, ?, 'SessionEnd', '{}', ?)",
+            (item_id, run_id, datetime.now(timezone.utc).isoformat()))
+        assert work_store.run_reached_an_agent(run_id) is False
+        config = {"workspace": {"root": tmp_path}}
+        monkeypatch.setattr(work_launch, "personal_config", lambda: config)
+        monkeypatch.setattr(terminal, "session_healthy",
+                            lambda k, agent="claude": {"alive": True, "agent_running": False})
+        launcher = MagicMock()
+        monkeypatch.setattr(terminal, "launch_agent", launcher)
+        monkeypatch.setattr(work_launch.threading, "Thread", MagicMock())
+        assert work_launch.resume_session(item_id) is True
+        assert launcher.call_args[0][4] is True
+
+    def test_a_codex_run_inside_its_first_turn_counts_as_reached(self, tmp_path, monkeypatch):
+        """Codex reports nothing until its first turn ends, so silence on a
+        codex run is work in progress. Reading it as a launch that never
+        landed would resume a working thread from the start and would let the
+        watchdog open a second task beside it."""
+        from unittest.mock import MagicMock
+        import core.terminal as terminal
+        from services import work_launch
+        item_id = _mkitem("codex first turn item")
+        sid = f"sid-resume-codex-{item_id}"
+        run_id = _mkrun(item_id, sid, f"work-{item_id}", str(tmp_path),
+                        agent_started=False, provider="codex")
+        assert work_store.run_reached_an_agent(run_id) is True
+        config = {"workspace": {"root": tmp_path}}
+        monkeypatch.setattr(work_launch, "personal_config", lambda: config)
+        monkeypatch.setattr(terminal, "session_healthy",
+                            lambda k, agent="claude": {"alive": True, "agent_running": False})
+        launcher = MagicMock()
+        monkeypatch.setattr(terminal, "launch_agent", launcher)
+        assert work_launch.resume_session(item_id) is True
+        assert launcher.call_args[0][4] is False
+
+    def test_a_relaunch_stops_reporting_the_failure_it_replaces(self, tmp_path, monkeypatch):
+        """A codex run says nothing until its first turn ends, so a relaunch
+        that left launch_failed on the run would report a working task as
+        dead and let the watchdog open a second task beside it."""
+        from unittest.mock import MagicMock
+        import core.terminal as terminal
+        from services import work_launch
+        item_id = _mkitem("relaunched codex item")
+        sid = f"sid-relaunch-{item_id}"
+        run_id = _mkrun(item_id, sid, f"work-{item_id}", str(tmp_path),
+                        agent_started=False, provider="codex")
+        work_store.mark_launch_failed(run_id, "tmux did not start")
+        assert work_store.run_reached_an_agent(run_id) is False
+        config = {"workspace": {"root": tmp_path}}
+        monkeypatch.setattr(work_launch, "personal_config", lambda: config)
+        monkeypatch.setattr(terminal, "session_healthy",
+                            lambda k, agent="claude": {"alive": True, "agent_running": False})
+        monkeypatch.setattr(terminal, "launch_agent", MagicMock())
+        monkeypatch.setattr(work_launch.threading, "Thread", MagicMock())
+        assert work_launch.resume_session(item_id) is True
+        assert work_store.run_reached_an_agent(run_id) is True
+        item = db.query_one("SELECT state, stop_reason FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "agent_working"
+        assert item["stop_reason"] == ""
+
+    def test_a_relaunch_keeps_an_agent_that_reported_in_first(self, tmp_path, monkeypatch):
+        """The relaunch is decided before the launch lock is taken, and a hook
+        can land in that window. A codex turn that finished there has already
+        put the item in needs_ack, and resetting it would lose a finished run."""
+        from unittest.mock import MagicMock
+        import core.terminal as terminal
+        from services import work_launch
+        item_id = _mkitem("raced relaunch item")
+        sid = f"sid-raced-{item_id}"
+        run_id = _mkrun(item_id, sid, f"work-{item_id}", str(tmp_path), agent_started=False)
+        config = {"workspace": {"root": tmp_path}}
+        monkeypatch.setattr(work_launch, "personal_config", lambda: config)
+        monkeypatch.setattr(terminal, "session_healthy",
+                            lambda k, agent="claude": {"alive": True, "agent_running": False})
+        launcher = MagicMock()
+        monkeypatch.setattr(terminal, "launch_agent", launcher)
+        kicked = MagicMock()
+        monkeypatch.setattr(work_launch, "start_kickoff", kicked)
+        db.execute("UPDATE work_items SET state = 'needs_ack' WHERE id = ?", (item_id,))
+        db.execute(
+            "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at)"
+            " VALUES (?, ?, 'Stop', '{}', ?)",
+            (item_id, run_id, datetime.now(timezone.utc).isoformat()))
+        assert work_store.mark_run_relaunched(run_id) is False
+        assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                            (item_id,))["state"] == "needs_ack"
+
+    def test_a_newer_kickoff_supersedes_the_one_it_replaces(self, monkeypatch):
+        """A kickoff polls its pane for up to a minute and a half. Two on the
+        same pane answer the same trust question and send the objective prompt
+        twice, and the older one would fail the launch that replaced it."""
+        from unittest.mock import MagicMock
+        from services import work_launch
+        started = MagicMock()
+        monkeypatch.setattr(work_launch.threading, "Thread", started)
+        old = work_launch.start_kickoff("work-dup", 1, "claude")
+        new = work_launch.start_kickoff("work-dup", 1, "claude")
+        assert new != old
+        assert work_launch._superseded("work-dup", old) is True
+        assert work_launch._superseded("work-dup", new) is False
+        assert started.call_count == 2
+        monkeypatch.setattr(work_launch.time, "sleep", lambda s: None)
+        monkeypatch.setattr(work_launch.terminal, "answer_trust", lambda k, a: False)
+        monkeypatch.setattr(work_launch.terminal, "session_healthy",
+                            lambda k, agent="claude": {"alive": True, "agent_running": False})
+        failed = MagicMock()
+        monkeypatch.setattr(work_store, "mark_launch_failed", failed)
+        work_launch._kickoff("work-dup", 1, "claude", old)
+        failed.assert_not_called()
+        work_launch._kickoff_generations.pop("work-dup", None)
+
+    def test_a_relaunch_that_cannot_open_its_pane_is_a_failed_launch(self, tmp_path, monkeypatch):
+        """The reset lands before the pane opens. A pane that does not open
+        would otherwise leave the run reported as working."""
+        from unittest.mock import MagicMock
+        import core.terminal as terminal
+        from services import work_launch
+        item_id = _mkitem("relaunch tmux dead item")
+        run_id = _mkrun(item_id, f"sid-notmux-{item_id}", f"work-{item_id}",
+                        str(tmp_path), agent_started=False, provider="codex")
+        work_store.mark_launch_failed(run_id, "tmux did not start")
+        config = {"workspace": {"root": tmp_path}}
+        monkeypatch.setattr(work_launch, "personal_config", lambda: config)
+        monkeypatch.setattr(terminal, "session_healthy",
+                            lambda k, agent="claude": {"alive": True, "agent_running": False})
+        monkeypatch.setattr(terminal, "launch_agent",
+                            MagicMock(side_effect=RuntimeError("could not launch agent pane")))
+        monkeypatch.setattr(work_launch, "start_kickoff", MagicMock())
+        with pytest.raises(RuntimeError):
+            work_launch.resume_session(item_id)
+        assert work_store.run_reached_an_agent(run_id) is False
+        assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                            (item_id,))["state"] == "failed_stale"
+
+    def test_a_relaunch_without_a_seed_file_carries_the_objective(self, tmp_path, monkeypatch):
+        """A launch that failed before writing its seed leaves none. Starting
+        the agent with an empty system prompt would give it nothing to do."""
+        from unittest.mock import MagicMock
+        import core.terminal as terminal
+        from services import work_launch
+        monkeypatch.setattr(terminal, "LAUNCH_CONTEXT_DIR", str(tmp_path / "launch"))
+        item_id = _mkitem("relaunch without seed item")
+        _mkrun(item_id, f"sid-noseed-{item_id}", f"work-{item_id}", str(tmp_path),
+               agent_started=False)
+        config = {"workspace": {"root": tmp_path}}
+        monkeypatch.setattr(work_launch, "personal_config", lambda: config)
+        monkeypatch.setattr(terminal, "session_healthy",
+                            lambda k, agent="claude": {"alive": True, "agent_running": False})
+        launcher = MagicMock()
+        monkeypatch.setattr(terminal, "launch_agent", launcher)
+        monkeypatch.setattr(work_launch, "start_kickoff", MagicMock())
+        assert work_launch.resume_session(item_id) is True
+        assert launcher.call_args[0][4] is True
+        assert "relaunch without seed item" in launcher.call_args[0][3]
+
+    def test_a_relaunch_keeps_the_seed_file_it_already_has(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+        import core.terminal as terminal
+        from services import work_launch
+        monkeypatch.setattr(terminal, "LAUNCH_CONTEXT_DIR", str(tmp_path / "launch"))
+        item_id = _mkitem("relaunch with seed item")
+        sid = f"sid-seeded-{item_id}"
+        _mkrun(item_id, sid, f"work-{item_id}", str(tmp_path), agent_started=False)
+        terminal.launch_context_path(sid, "the original brief")
+        config = {"workspace": {"root": tmp_path}}
+        monkeypatch.setattr(work_launch, "personal_config", lambda: config)
+        monkeypatch.setattr(terminal, "session_healthy",
+                            lambda k, agent="claude": {"alive": True, "agent_running": False})
+        launcher = MagicMock()
+        monkeypatch.setattr(terminal, "launch_agent", launcher)
+        monkeypatch.setattr(work_launch, "start_kickoff", MagicMock())
+        assert work_launch.resume_session(item_id) is True
+        assert launcher.call_args[0][3] == ""
+        assert terminal.launch_context_path(sid, "") .endswith(f"{sid}.md")
+        assert open(terminal.launch_context_path(sid, "")).read() == "the original brief"
+
+    def test_a_relaunch_never_reopens_a_task_the_operator_closed(self, tmp_path):
+        """The relaunch is decided before the launch lock is taken, and the
+        operator can close the task in that window."""
+        item_id = _mkitem("closed while resuming item")
+        run_id = _mkrun(item_id, f"sid-closed-{item_id}", f"work-{item_id}",
+                        str(tmp_path), agent_started=False)
+        db.execute("UPDATE work_items SET state = 'done' WHERE id = ?", (item_id,))
+        assert work_store.mark_run_relaunched(run_id) is False
+        assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                            (item_id,))["state"] == "done"
+
+    def test_a_claude_kickoff_that_failed_did_not_reach_an_agent(self, tmp_path):
+        """Claude can start its session and then die before the kickoff hands
+        it the objective. The session id exists and SessionStart landed, but
+        no agent read the objective, so the item covers no work."""
+        item_id = _mkitem("claude kickoff failed item")
+        run_id = _mkrun(item_id, f"sid-kofail-{item_id}", f"work-{item_id}", str(tmp_path))
+        assert work_store.run_reached_an_agent(run_id) is True
+        work_store.mark_launch_failed(run_id, "kickoff never delivered")
+        assert work_store.run_reached_an_agent(run_id) is False
+
+    def test_a_codex_launch_that_failed_did_not_reach_an_agent(self, tmp_path):
+        item_id = _mkitem("codex failed launch item")
+        run_id = _mkrun(item_id, f"sid-codexfail-{item_id}", f"work-{item_id}",
+                        str(tmp_path), agent_started=False, provider="codex")
+        work_store.mark_launch_failed(run_id, "tmux did not start")
+        assert work_store.run_reached_an_agent(run_id) is False
+
+    def test_resume_of_a_finished_item_never_starts_an_agent(self, tmp_path, monkeypatch):
+        """A task the operator closed keeps the resume it always had: opening
+        its terminal must read the conversation back, not run an agent on it."""
+        from unittest.mock import MagicMock
+        import core.terminal as terminal
+        from services import work_launch
+        item_id = _mkitem("closed never started item")
+        sid = f"sid-resume-done-{item_id}"
+        _mkrun(item_id, sid, f"work-{item_id}", str(tmp_path), agent_started=False)
+        db.execute("UPDATE work_items SET state = 'done' WHERE id = ?", (item_id,))
+        config = {"workspace": {"root": tmp_path}}
+        monkeypatch.setattr(work_launch, "personal_config", lambda: config)
+        monkeypatch.setattr(terminal, "session_healthy",
+                            lambda k, agent="claude": {"alive": True, "agent_running": False})
+        launcher = MagicMock()
+        monkeypatch.setattr(terminal, "launch_agent", launcher)
+        assert work_launch.resume_session(item_id) is True
+        assert launcher.call_args[0][4] is False
+
     def test_resume_noop_while_agent_running(self, tmp_path, monkeypatch):
         from unittest.mock import MagicMock
         import core.terminal as terminal
         from services import work_launch
         item_id = _mkitem("resume alive item")
-        work_store.add_run(item_id, f"sid-resume3-{item_id}", f"work-{item_id}", str(tmp_path))
+        _mkrun(item_id, f"sid-resume3-{item_id}", f"work-{item_id}", str(tmp_path))
         monkeypatch.setattr(work_launch, "personal_config",
                             lambda: {"workspace": {"root": tmp_path}})
         monkeypatch.setattr(terminal, "session_healthy",
