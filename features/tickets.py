@@ -1322,6 +1322,7 @@ def check(config: dict, instance_key: str = ""):
                 ts["url"] = ticket.get("url", "")
                 ts["status"] = mapped
                 if mapped not in ("new", "planning", "reviewing"):
+                    ts = _reconcile_prs(ts, open_prs, key)
                     _save_ticket_if_unmoved(key, ts, loaded_status)
                     continue
 
