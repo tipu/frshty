@@ -297,6 +297,14 @@ class TestRoutes:
         assert "<frshty-shell" in r.text
         assert "frshtyApp({" in r.text
 
+    def test_task_terminal_page_names_the_task_and_links_back(self):
+        r = _client().get("/tasks/1/terminal")
+        assert r.status_code == 200
+        assert 'back.href = "/tasks/" + key;' in r.text
+        assert '"\u2190 task #" + key' in r.text
+        assert 'fetch("/api/work/items/" + key + "/summary")' in r.text
+        assert 'document.title = document.title + " #" + key;' in r.text
+
     def test_threads_page_renders(self):
         r = _client().get("/threads")
         assert r.status_code == 200
