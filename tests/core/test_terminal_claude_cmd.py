@@ -81,3 +81,85 @@ class TestWithConfigDir:
         config = {"llm": {"claude": {"config_dir": "~/.new"}}}
         terminal.with_config_dir(config, "claude", "~/.recorded")
         assert config["llm"]["claude"]["config_dir"] == "~/.new"
+
+
+CLAUDE_TRUST_PANE = (
+    "─────────────────────────────────────────────\n"
+    " Accessing workspace:\n"
+    " /Users/danial/dev/frshty\n"
+    " Quick safety check: Is this a project you created or one you trust?\n"
+    " Claude Code'll be able to read, edit, and execute files here.\n"
+    " Security guide\n"
+    " ❯ No, exit\n"
+    "   Yes, I trust this folder\n"
+    " Enter to confirm · Esc to cancel\n"
+)
+CLAUDE_TRUST_PANE_YES_SELECTED = CLAUDE_TRUST_PANE.replace(
+    " ❯ No, exit\n   Yes, I trust this folder\n",
+    "   No, exit\n ❯ Yes, I trust this folder\n")
+CLAUDE_READY_PANE = "❯ Try \"how do I log an error?\"\n  ? for shortcuts\n"
+
+
+class TestClaudeTrustPrompt:
+    """WB-209, WB-283 and LSC-51 each sat on this question for days. Claude was
+    up, so the launch reported a healthy run, and the kickoff prompt's Enter
+    took the preselected `No, exit`."""
+
+    def _calls(self, monkeypatch, pane):
+        from unittest.mock import MagicMock
+        calls = []
+        monkeypatch.setattr(terminal, "_tmux_session_exists", lambda n: True)
+        monkeypatch.setattr(terminal.subprocess, "run",
+                            lambda argv, **kw: calls.append(argv) or MagicMock(returncode=0))
+        monkeypatch.setattr(terminal, "pane_text", lambda k: pane)
+        return calls
+
+    def test_the_decline_is_stepped_over_before_enter(self, monkeypatch):
+        calls = self._calls(monkeypatch, CLAUDE_TRUST_PANE)
+        assert terminal.answer_claude_trust("work-1") is True
+        assert calls[-1][-4:] == ["-t", "term-work-1", "Down", "Enter"]
+
+    def test_enter_alone_when_the_answer_is_already_selected(self, monkeypatch):
+        calls = self._calls(monkeypatch, CLAUDE_TRUST_PANE_YES_SELECTED)
+        assert terminal.answer_claude_trust("work-1") is True
+        assert calls[-1][-3:] == ["-t", "term-work-1", "Enter"]
+
+    def test_nothing_is_sent_without_the_question(self, monkeypatch):
+        calls = self._calls(monkeypatch, CLAUDE_READY_PANE)
+        assert terminal.answer_claude_trust("work-1") is False
+        assert calls == []
+
+    def test_nothing_is_sent_once_the_question_is_no_longer_the_bottom(self, monkeypatch):
+        """The lines stay on screen after Claude exits, above the shell it
+        drops back to, and an agent can print them itself."""
+        calls = self._calls(monkeypatch, CLAUDE_TRUST_PANE + "~/dev/frshty (main*) \u00bb\n")
+        assert terminal.answer_claude_trust("work-1") is False
+        assert calls == []
+
+    def test_answer_trust_routes_by_agent(self, monkeypatch):
+        from unittest.mock import MagicMock
+        claude, codex = MagicMock(return_value=True), MagicMock(return_value=True)
+        monkeypatch.setattr(terminal, "answer_claude_trust", claude)
+        monkeypatch.setattr(terminal, "answer_codex_trust", codex)
+        assert terminal.answer_trust("work-1", "claude") is True
+        claude.assert_called_once_with("work-1")
+        codex.assert_not_called()
+        assert terminal.answer_trust("work-1", "codex") is True
+        codex.assert_called_once_with("work-1")
+
+
+class TestLaunchContextPath:
+    def test_a_relaunch_without_context_keeps_the_seed_text(self, tmp_path, monkeypatch):
+        """A run that never started is launched again as a first run, and it
+        passes no context because the text is already on disk."""
+        monkeypatch.setattr(terminal, "LAUNCH_CONTEXT_DIR", str(tmp_path))
+        path = terminal.launch_context_path("sid-1", "the brief")
+        assert terminal.launch_context_path("sid-1", "") == path
+        assert open(path).read() == "the brief"
+
+    def test_a_first_launch_writes_the_context(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(terminal, "LAUNCH_CONTEXT_DIR", str(tmp_path))
+        path = terminal.launch_context_path("sid-2", "first text")
+        assert open(path).read() == "first text"
+        terminal.launch_context_path("sid-2", "second text")
+        assert open(path).read() == "second text"
