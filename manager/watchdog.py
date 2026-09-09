@@ -60,7 +60,6 @@ _LIVE_JOB_STATES = ("queued", "running")
 LIVE_JOB_MAX_AGE_HOURS = 6
 _FINISHED_ITEM_STATES = ("needs_ack", "done")
 _FENCE_BUCKET = "migration"
-_FAILED_RUN_STATUS = "launch_failed"
 _NON_COVERING_JOBS = frozenset({"advance_ticket"})
 
 
@@ -313,19 +312,22 @@ def covered_by_open_task(entry: Entry, instance_key: str) -> int | None:
     A task the operator typed himself counts. So does a doctor run he started
     from the ticket page: its objective carries the ticket key. A finished item
     does not: its answer has already been delivered, so a condition that
-    outlived it is a new question. Neither does an item whose latest run is
-    launch_failed, which is what work_launch leaves behind when tmux does not
-    start (services/work_launch.py:268) — no agent ever read that objective, so
-    it covers nothing and would otherwise block every retry forever. The test
-    is the run, not the item state: failed_stale also means an agent that
-    started and died, and that work exists and is resumable.
+    outlived it is a new question. Neither does an item whose latest run never
+    reached an agent, which is what work_store.run_reached_an_agent answers:
+    tmux that did not start, a kickoff that was never taken, or an agent that
+    quit on its directory-trust question. No agent read that objective, so the
+    item covers nothing and would otherwise block every retry forever. The
+    test is the run's own record, not the item state: failed_stale also means
+    an agent that started and died, and that work exists and is resumable.
+    That test costs a query per item, so it runs last, on the one item whose
+    objective already names this entity.
 
     A proposal covers, even though it has no run at all. It is a task frshty
     already opened about this entity that is waiting for the operator to
     approve or decline it. Opening a second task beside it would put the same
     entity in front of him twice, and approving both would run two agents on
-    it. Unlike a launch_failed item it is visible on the board and asks for a
-    decision, so it does not silence the watchdog indefinitely.
+    it. Unlike an item whose agent never started it is visible on the board
+    and asks for a decision, so it does not silence the watchdog indefinitely.
 
     A task tagged for another project does not count: one project's work must
     not silence another's. The frshty label is not a project for this purpose —
@@ -341,17 +343,14 @@ def covered_by_open_task(entry: Entry, instance_key: str) -> int | None:
     placeholders = ", ".join("?" for _ in _FINISHED_ITEM_STATES)
     rows = db.query_all(
         "SELECT w.id, w.objective, w.contexts, w.state,"
-        " (SELECT status FROM work_runs WHERE work_item_id = w.id"
-        "  ORDER BY id DESC LIMIT 1) AS last_run_status"
+        " (SELECT r.id FROM work_runs r WHERE r.work_item_id = w.id"
+        "  ORDER BY r.id DESC LIMIT 1) AS last_run_id"
         " FROM work_items w"
         f" WHERE w.archived_at IS NULL AND w.state NOT IN ({placeholders})",
         tuple(_FINISHED_ITEM_STATES),
     )
     needles = _needles(entry)
     for r in rows:
-        if (r["state"] != work_store.PROPOSED_STATE
-                and r["last_run_status"] in (None, _FAILED_RUN_STATUS)):
-            continue
         projects = [c for c in (r["contexts"] or "").split(",")
                     if c and c != FRSHTY_TAG]
         if projects:
@@ -360,7 +359,11 @@ def covered_by_open_task(entry: Entry, instance_key: str) -> int | None:
         elif not unscoped_covers:
             continue
         objective = r["objective"] or ""
-        if any(n.search(objective) for n in needles):
+        if not any(n.search(objective) for n in needles):
+            continue
+        if r["state"] == work_store.PROPOSED_STATE:
+            return int(r["id"])
+        if r["last_run_id"] and work_store.run_reached_an_agent(int(r["last_run_id"])):
             return int(r["id"])
     return None
 
