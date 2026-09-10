@@ -3,6 +3,7 @@ must execute sequentially through the pipeline, never two at once. Without the
 per-repo serialization gate, all 10 land at pr_failed because their concurrent
 PRs conflict on the shared file."""
 import json
+import re
 import subprocess
 import threading
 import time
@@ -285,8 +286,10 @@ def test_ten_concurrent_prd_tickets_serialize_and_complete(tmp_path):
             return "flow-doc-written"
 
         if "Run /tri-review" in prompt:
+            named = re.findall(r"^- (\S+): worktree ", prompt, re.MULTILINE)
+            body = "".join(f"## {name}\n\nAll good.\n\n" for name in named)
             (cwd / "docs" / "tri-review.md").write_text(
-                "# Tri Review\n\nAll good.\n\nVERDICT: PASS\n"
+                f"# Tri Review\n\n{body}VERDICT: PASS\n"
             )
             return "reviewed"
         if "Read docs/tri-review.md and identify" in prompt:
