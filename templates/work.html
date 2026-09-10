@@ -129,8 +129,9 @@
           <div class="ln-task-top">
             <div style="min-width:0">
               <a class="ln-task-title" :href="taskHref(it)">{{ it.objective }}</a>
-              <div class="ln-task-note ln-task-note-warn" v-if="it.stop_reason" v-html="lkFor(it, note(it.stop_reason))"></div>
-              <div class="ln-task-note" v-else-if="note(it.current_checkpoint)">{{ note(it.current_checkpoint) }}</div>
+              <div class="ln-task-note ln-task-note-warn" v-if="stopNote(it)" v-html="lkFor(it, stopNote(it))"></div>
+              <div class="ln-task-note" v-if="progressNote(it)"
+                   title="the newest PROGRESS line this agent printed">{{ progressNote(it) }}</div>
             </div>
             <div class="ln-task-id">#{{ it.id }}</div>
           </div>
@@ -402,6 +403,19 @@ frshtyApp({
     note(text) {
       const line = (text || "").trim();
       return line.length > 200 ? line.slice(0, 200).trimEnd() + "…" : line;
+    },
+    progressNote(it) {
+      return this.note(it.latest_progress || it.current_checkpoint);
+    },
+    stopNote(it) {
+      const raw = it.stop_reason || "";
+      if (!this.progressNote(it)) return this.note(raw);
+      const kept = raw.split("\n")
+        .map(l => { const i = l.indexOf("PROGRESS:"); return i < 0 ? l : l.slice(0, i); })
+        .filter(l => l.trim())
+        .join("\n")
+        .trim();
+      return this.note(kept.endsWith(":") ? kept.slice(0, -1) : kept);
     },
     tagsOf(it) {
       const tags = (it.tags || "").split(",").filter(Boolean);
