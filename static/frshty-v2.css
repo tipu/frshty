@@ -33,6 +33,7 @@ body { display: block; }
   --ln-amber: #f5b544;
   --ln-red: #ef5b5b;
   --ln-violet: #b276ff;
+  --ln-gold: #e3b341;
   --ln-mono: "JetBrains Mono", "SF Mono", ui-monospace, monospace;
   --ln-sans: "Inter", -apple-system, "SF Pro Text", system-ui, sans-serif;
 
@@ -219,6 +220,7 @@ select option, select optgroup { background-color: #0b0c10; color: #e7e8ec; }
 .ln-pill-amber { background: rgb(245 181 68 / 0.15); color: var(--ln-amber); }
 .ln-pill-red { background: rgb(239 91 91 / 0.15); color: var(--ln-red); }
 .ln-pill-violet { background: rgb(178 118 255 / 0.15); color: var(--ln-violet); }
+.ln-pill-gold { background: rgb(227 179 65 / 0.15); color: var(--ln-gold); }
 .ln-pill-state-changes_requested { background: rgb(239 91 91 / 0.15); color: var(--ln-red); }
 .ln-pill-state-approved { background: rgb(56 197 138 / 0.15); color: var(--ln-green); }
 .ln-pill-state-in_review { background: rgb(79 140 255 / 0.15); color: var(--ln-blue); }
@@ -346,6 +348,7 @@ select option, select optgroup { background-color: #0b0c10; color: #e7e8ec; }
 .ln-chipsel:hover { border-color: var(--ln-border-hi); color: var(--ln-text); }
 .ln-chipsel.on { border-color: var(--ln-accent); color: var(--ln-accent-2); }
 .ln-chipsel select { all: unset; cursor: pointer; color: inherit; }
+.ln-chipsel.crit.on { border-color: var(--ln-gold); color: var(--ln-gold); }
 .ln-hint { font-size: 11.5px; color: var(--ln-text-4); }
 .ln-board { display: grid; grid-template-columns: minmax(0,1fr) 300px; gap: 20px; align-items: start; }
 .ln-group + .ln-group { margin-top: 20px; }
@@ -360,6 +363,8 @@ select option, select optgroup { background-color: #0b0c10; color: #e7e8ec; }
 .ln-task.waiting_external { --ln-state: var(--ln-text-4); }
 .ln-task.failed_stale { --ln-state: var(--ln-red); }
 .ln-task.done { --ln-state: var(--ln-green); }
+.ln-task.critical { border-color: var(--ln-gold); box-shadow: 0 0 0 1px var(--ln-gold); }
+.ln-task.critical:hover { border-color: var(--ln-gold); }
 .ln-task-top { display: flex; gap: 14px; justify-content: space-between; align-items: flex-start; }
 .ln-task-title { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; font-size: 13.5px; font-weight: 500; color: var(--ln-text); text-decoration: none; }
 a.ln-task-title:hover { text-decoration: underline; }
