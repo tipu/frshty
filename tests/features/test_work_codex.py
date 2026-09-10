@@ -117,14 +117,14 @@ class TestCodexLaunch:
 
     def test_a_claude_run_is_cross_checked_by_codex(self, tmp_path, monkeypatch):
         prompt = _launch_prompt(tmp_path, monkeypatch, "claude")
-        assert "double check the change with codex once" in prompt
+        assert "double check the change with codex before you" in prompt
         assert "codex exec" in prompt
         assert "--skip-git-repo-check" in prompt
         assert "with claude" not in prompt
 
     def test_a_codex_run_is_cross_checked_by_claude(self, tmp_path, monkeypatch):
         prompt = _launch_prompt(tmp_path, monkeypatch, "codex")
-        assert "double check the change with claude once" in prompt
+        assert "double check the change with claude before you" in prompt
         assert "claude --dangerously-skip-permissions --session-id <session-id> -p" in prompt
         assert "with codex" not in prompt
 
@@ -134,16 +134,25 @@ class TestCodexLaunch:
             assert reviewer["first"].split()[-1] in ("-", "-p")
             assert reviewer["resume"].split()[-1] in ("-", "-p")
 
-    def test_the_second_pass_resumes_the_first_session(self, tmp_path, monkeypatch):
-        for agent, resume in (
-                ("claude", "codex exec resume <session-id> "
-                           "--dangerously-bypass-approvals-and-sandbox "
-                           "--skip-git-repo-check -"),
-                ("codex", "claude --dangerously-skip-permissions --resume <session-id> -p")):
+    def test_a_later_pass_resumes_the_first_session(self, tmp_path, monkeypatch):
+        for agent, other, resume in (
+                ("claude", "codex",
+                 "codex exec resume <session-id> "
+                 "--dangerously-bypass-approvals-and-sandbox --skip-git-repo-check -"),
+                ("codex", "claude",
+                 "claude --dangerously-skip-permissions --resume <session-id> -p")):
             prompt = _launch_prompt(tmp_path, monkeypatch, agent)
-            assert f"run that second pass as `{resume}`" in prompt
+            assert f"Run {other} again when a high or critical finding is left " \
+                   "that you did not reject" in prompt
+            assert f"run that pass as `{resume}`" in prompt
             assert "with the session id of the first run" in prompt
             assert "instead of reading the tree again" in prompt
+
+    def test_a_later_pass_sends_only_what_changed(self, tmp_path, monkeypatch):
+        for agent, other in (("claude", "codex"), ("codex", "claude")):
+            prompt = _launch_prompt(tmp_path, monkeypatch, agent)
+            assert "A resumed session already holds the earlier passes, so give " \
+                   f"{other} only what changed since the pass before it" in prompt
 
     def test_the_prompt_says_where_the_session_id_comes_from(self, tmp_path, monkeypatch):
         codex_checks = _launch_prompt(tmp_path, monkeypatch, "claude")
@@ -178,16 +187,25 @@ class TestCodexLaunch:
                                                                      monkeypatch):
         for agent, other in (("claude", "codex"), ("codex", "claude")):
             prompt = _launch_prompt(tmp_path, monkeypatch, agent)
-            assert f"If you changed code, double check the change with {other} once" in prompt
+            assert f"If you changed code, double check the change with {other} before" in prompt
             assert f"If you changed no code, do not run {other}" in prompt
             assert "Double check your analysis and your code" not in prompt
 
-    def test_the_review_is_capped_at_two_passes(self, tmp_path, monkeypatch):
+    def test_the_review_stops_on_the_verdict(self, tmp_path, monkeypatch):
         for agent, other in (("claude", "codex"), ("codex", "claude")):
             prompt = _launch_prompt(tmp_path, monkeypatch, agent)
-            assert f"Run {other} a second time only when you fixed a high or " \
-                   "critical finding" in prompt
-            assert "Never run it a third time" in prompt
+            assert f"Stop when {other} reports no high or critical defect" in prompt
+            assert "every finding still open is one you rejected with a stated " \
+                   "reason" in prompt
+            assert "a second time only when you fixed" not in prompt
+            assert "Never run it a third time" not in prompt
+
+    def test_the_review_is_capped_at_four_passes(self, tmp_path, monkeypatch):
+        for agent in ("claude", "codex"):
+            prompt = _launch_prompt(tmp_path, monkeypatch, agent)
+            assert "Run at most four passes in total" in prompt
+            assert "Stop at the fourth pass even when a finding is still open, and " \
+                   "name that finding in your checkpoint" in prompt
 
     def test_the_brief_stops_a_question_task_at_the_answer(self, tmp_path, monkeypatch):
         prompt = _launch_prompt(tmp_path, monkeypatch, "claude")
