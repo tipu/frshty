@@ -771,7 +771,7 @@ class TestRequiredFollowups:
         """launch_followup reads an omitted project, archive or agent as
         "inherit". Naming them launches a codex task's follow-up as claude in
         the default workspace."""
-        item_id = self._finished_with_followup("inherit context", True)
+        self._finished_with_followup("inherit context", True)
         seen = {}
         monkeypatch.setattr(
             work_debrief, "_deliver_work_item",
