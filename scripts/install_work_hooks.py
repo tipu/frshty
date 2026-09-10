@@ -13,6 +13,16 @@ DEFAULT_DIRS = ("~/.claude", "~/.quill-claude", "~/.aimyable-claude")
 PUSH_GATE_TIMEOUT = 2700
 WRITE_GATE_TIMEOUT = 300
 WRITE_GATE_MATCHER = "Edit|Write|NotebookEdit|MultiEdit"
+# Every tool that could carry a message to a person. The matcher is a
+# regular expression over the tool name, and a name this pattern misses
+# never reaches the correspondence gate at all, so it is deliberately
+# wider than the gate: work_hook decides, this only decides what it sees.
+CORRESPONDENCE_MATCHER = (
+    "(?i).*(slack|discord|telegram|twilio|whatsapp|gmail|outlook|mailgun"
+    "|sendgrid|postmark|mail|email|github|gitlab|bitbucket|linear|jira"
+    "|atlassian).*"
+)
+CORRESPONDENCE_GATE_TIMEOUT = 15
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 SKIP_CONFIGS = ("example.toml", "discovery.toml", "discovery.example.toml", "peers.toml", "peers.example.toml")
 
@@ -58,6 +68,9 @@ def _wanted_entries(event: str, command: str) -> list[dict]:
             {"matcher": WRITE_GATE_MATCHER,
              "hooks": [{"type": "command", "command": command,
                         "timeout": WRITE_GATE_TIMEOUT}]},
+            {"matcher": CORRESPONDENCE_MATCHER,
+             "hooks": [{"type": "command", "command": command,
+                        "timeout": CORRESPONDENCE_GATE_TIMEOUT}]},
         ]
     return [{"matcher": "",
              "hooks": [{"type": "command", "command": command, "timeout": 5, "async": True}]}]

@@ -2,6 +2,8 @@ import json
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
+import pytest
+
 import core.db as db
 from services import work_debrief, work_store
 
@@ -189,6 +191,10 @@ class TestDeliverSlack:
         return base
 
     def _patch_env(self, monkeypatch):
+        # These cover the delivery rules below the correspondence gate, so the
+        # instance they run against is one that allows a message at all.
+        monkeypatch.setattr(work_debrief.work_launch, "personal_config",
+                            lambda: {"features": {"correspondence": True}})
         monkeypatch.setattr(work_debrief.os.path, "isdir", lambda p: True)
         monkeypatch.setattr(work_debrief, "_known_workspaces", lambda: ["aimyable"])
         monkeypatch.setattr(work_debrief, "_resolve_recipient",
@@ -218,6 +224,18 @@ class TestDeliverSlack:
         import pytest
         with pytest.raises(RuntimeError, match="channel targets"):
             work_debrief._deliver_slack(self._row(recipient="C0123ABC"))
+
+
+class TestDeliverSlackIsGated:
+    def test_a_closed_instance_refuses_before_any_delivery_rule(self, monkeypatch):
+        monkeypatch.setattr(work_debrief.work_launch, "personal_config",
+                            lambda: {"features": {"correspondence": False}})
+        monkeypatch.setattr(work_debrief, "_slack_send",
+                            lambda *a: pytest.fail("a closed instance sent a message"))
+        with pytest.raises(RuntimeError, match="correspondence gate"):
+            work_debrief._deliver_slack(
+                {"kind": "slack_message", "workspace": "aimyable",
+                 "recipient": "Sam", "draft": "hi"})
 
 
 class TestScanner:
