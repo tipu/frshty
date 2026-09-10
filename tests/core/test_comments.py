@@ -455,3 +455,54 @@ class TestTimestampNormalization:
         )
         # Should store created_at
         assert row["comment_edited_at"] == "2026-04-28T10:00:00Z"
+
+
+class TestDeletedTombstoneRevival:
+    def test_a_comment_the_platform_still_reports_comes_back(self, instance_key, resource_type, resource_id):
+        """'deleted' is a tombstone no other query reads, so a comment wrongly
+        marked deleted is owed an answer forever. Only the platform's list can
+        settle whether a comment exists."""
+        comments.mark_comment_processing(instance_key, resource_type, resource_id, "1", "2026-01-01T00:00:00Z")
+        comments.mark_comment_deleted(instance_key, resource_type, resource_id, "1")
+
+        detection = comments.fetch_and_detect_comments(
+            instance_key, None, resource_type, resource_id,
+            platform_comments=[{"id": "1", "body": "fix this", "created_at": "2026-01-01T00:00:00Z"}],
+        )
+
+        assert [c["id"] for c in detection["edited"]] == ["1"]
+        assert detection["new"] == []
+        assert detection["deleted"] == []
+
+    def test_a_comment_the_platform_no_longer_reports_stays_deleted(self, instance_key, resource_type, resource_id):
+        comments.mark_comment_processing(instance_key, resource_type, resource_id, "1", "2026-01-01T00:00:00Z")
+        comments.mark_comment_deleted(instance_key, resource_type, resource_id, "1")
+
+        detection = comments.fetch_and_detect_comments(
+            instance_key, None, resource_type, resource_id, platform_comments=[],
+        )
+
+        assert detection["edited"] == []
+        assert detection["new"] == []
+
+
+class TestSettledIdsAgainstFalseTombstones:
+    def test_a_deleted_id_the_platform_still_reports_is_not_settled(self, instance_key, resource_type, resource_id):
+        """A settled id keeps its thread resolved, and a resolved comment is
+        filtered out before it can ever be registered again."""
+        comments.mark_comment_processing(instance_key, resource_type, resource_id, "root", "2026-01-01T00:00:00Z")
+        comments.mark_comment_processed(instance_key, resource_type, resource_id, "root")
+        comments.mark_comment_processing(instance_key, resource_type, resource_id, "reply", "2026-01-01T00:00:00Z")
+        comments.mark_comment_deleted(instance_key, resource_type, resource_id, "reply")
+
+        settled = comments.settled_comment_ids(
+            instance_key, resource_type, resource_id, {"root", "reply"})
+
+        assert settled == {"root"}
+
+    def test_a_deleted_id_the_platform_dropped_stays_settled(self, instance_key, resource_type, resource_id):
+        comments.mark_comment_processing(instance_key, resource_type, resource_id, "reply", "2026-01-01T00:00:00Z")
+        comments.mark_comment_deleted(instance_key, resource_type, resource_id, "reply")
+
+        assert comments.settled_comment_ids(
+            instance_key, resource_type, resource_id, {"other"}) == {"reply"}

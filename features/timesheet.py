@@ -625,7 +625,7 @@ def _fetch_pr_reviews(config: dict, start: str, end: str) -> dict:
 
     def fetch_comments(pr):
         try:
-            return pr, platform.get_pr_comments(pr["repo"], pr["id"])
+            return pr, platform.get_pr_comments(pr["repo"], pr["id"]) or []
         except Exception:
             return pr, []
 

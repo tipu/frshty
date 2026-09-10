@@ -19,6 +19,11 @@ def fetch_and_detect_comments(
         resource_type: 'pr' or 'ticket'
         resource_id: PR key (e.g., 'repo/123') or ticket key
 
+    A comment the platform still reports whose stored state is 'deleted' comes
+    back as edited. That state is a tombstone: nothing reads it again, so the
+    comment is owed an answer forever. Only the platform's own list can settle
+    whether a comment exists, and it just said this one does.
+
     Returns:
         {
             "new": [{"id": "...", "body": "...", "author_id": "...", "created_at": "...", ...}],
@@ -30,7 +35,7 @@ def fetch_and_detect_comments(
     # Fetch all comments from platform (unless caller already fetched them)
     if platform_comments is None:
         if resource_type == "pr":
-            platform_comments = platform.get_pr_comments(resource_id.split("/")[0], int(resource_id.split("/")[1]))
+            platform_comments = platform.get_pr_comments(resource_id.split("/")[0], int(resource_id.split("/")[1])) or []
         elif resource_type == "ticket":
             platform_comments = platform.get_ticket_comments(resource_id)
         else:
@@ -65,8 +70,14 @@ def fetch_and_detect_comments(
             existing_timestamp = existing_map[comment_id].get("comment_edited_at")
             existing_state = existing_map[comment_id].get("state")
 
+            if existing_state == "deleted":
+                edited_comments.append({
+                    **comment,
+                    "previously_at": existing_timestamp,
+                    "revived_from_deleted": True,
+                })
             # If timestamps match and comment was previously processed, it's unchanged
-            if current_timestamp == existing_timestamp and existing_state == "processed":
+            elif current_timestamp == existing_timestamp and existing_state == "processed":
                 unchanged_count += 1
             # If timestamp is different, it's been edited
             elif current_timestamp != existing_timestamp:
@@ -285,21 +296,29 @@ def settled_comment_ids(
     instance_key: str,
     resource_type: str,
     resource_id: str,
+    present_ids: set | None = None,
 ) -> set[str]:
     """Ids frshty is finished with: processed, or gone from the platform.
 
     Everything else — never recorded, new, deferred, processing — is still
-    owed an answer."""
+    owed an answer. A 'deleted' row whose id the platform still reports is a
+    false tombstone: the comment is there, so it is neither gone nor settled,
+    and counting it as settled keeps its thread resolved and its revival out
+    of reach. Pass the ids the platform reported to drop those."""
     rows = db.query_all(
         """
-        SELECT comment_id
+        SELECT comment_id, state
         FROM comment_state
         WHERE instance_key = ? AND resource_type = ? AND resource_id = ?
         AND state IN ('processed', 'deleted')
         """,
         (instance_key, resource_type, resource_id),
     )
-    return {str(row["comment_id"]) for row in rows}
+    present = present_ids or set()
+    return {
+        str(row["comment_id"]) for row in rows
+        if not (row["state"] == "deleted" and str(row["comment_id"]) in present)
+    }
 
 
 def get_unprocessed_comments(

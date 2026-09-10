@@ -1,3 +1,4 @@
+import json
 from unittest.mock import patch, MagicMock
 
 from features.platforms import make_platform, GitHubPlatform, BitbucketPlatform, _parse_ts
@@ -349,9 +350,20 @@ class TestGitHubGetPrComments:
     def test_the_query_asks_for_issue_comments(self):
         assert " comments(first:100){nodes{" in GitHubPlatform._REVIEW_COMMENTS_QUERY
 
-    def test_fetch_failure_is_empty(self):
+    def test_read_failure_is_none_not_empty(self):
+        """Callers reconcile stored comment state against this list and read a
+        missing id as a deleted comment. An empty list for a failed read
+        retires every open comment on the PR."""
         p = _gh_platform()
         with patch.object(p, "_run_gh", return_value=_gh_result(stderr="boom", returncode=1)):
+            assert p.get_pr_comments("r", 1) is None
+
+    def test_pr_with_no_comments_is_empty_not_none(self):
+        p = _gh_platform()
+        payload = {"data": {"repository": {"pullRequest": {
+            "reviews": {"nodes": []}, "comments": {"nodes": []}, "reviewThreads": {"nodes": []},
+        }}}}
+        with patch.object(p, "_run_gh", return_value=_gh_result(stdout=json.dumps(payload))):
             assert p.get_pr_comments("r", 1) == []
 
 
