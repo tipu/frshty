@@ -121,7 +121,7 @@
                 <span class="ln-tag" v-for="tag in tags(t)" :key="tag">{{ tag }}</span>
                 <span class="ln-right">
                   <a class="ln-btn ln-btn-sm ln-btn-ghost" v-if="t.summary" :href="taskHref(t.id, '/summary')" target="_blank">Summary</a>
-                  <a class="ln-btn ln-btn-sm ln-btn-ghost" v-if="t.last_tmux_key && t.state !== 'done' && t.state !== 'needs_ack'" :href="terminalHref(t.id)" :target="terminalWindow(t.id)">Terminal</a>
+                  <a class="ln-btn ln-btn-sm ln-btn-ghost" v-if="t.last_tmux_key && t.state !== 'done' && t.state !== 'needs_ack' && t.state !== 'canceled'" :href="terminalHref(t.id)" :target="terminalWindow(t.id)">Terminal</a>
                   <span>{{ $relTime(t.updated_at) }}</span>
                 </span>
               </div>
@@ -174,11 +174,11 @@
 <script>
 const STATE_LABELS = {
   needs_ack: "✓ Agent reported done", needs_you: "● Needs you", agent_working: "● Working",
-  waiting_external: "○ Waiting", failed_stale: "● Stale", done: "✓ Done",
+  waiting_external: "○ Waiting", failed_stale: "● Stale", canceled: "⊘ Canceled", done: "✓ Done",
 };
 const STATE_PILLS = {
   needs_ack: "ln-pill-green", needs_you: "ln-pill-amber", agent_working: "ln-pill-blue",
-  waiting_external: "ln-pill-ghost", failed_stale: "ln-pill-red", done: "ln-pill-green",
+  waiting_external: "ln-pill-ghost", failed_stale: "ln-pill-red", canceled: "ln-pill-ghost", done: "ln-pill-green",
 };
 frshtyApp({
   data() {
