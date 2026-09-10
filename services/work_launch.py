@@ -330,15 +330,30 @@ def _cross_check_block(agent: str, config: dict) -> str:
     file, because the wording presupposed a change and gated the report on
     the review. So the first sentence states the condition, the last sentence
     states what to do when the condition does not hold, and the number of
-    passes is capped.
+    passes is bounded.
 
-    The second pass resumes the session the first pass opened, so the
-    reviewer keeps what it already read. _reviewer_cmd holds both command
-    lines and the hint that says where the session id comes from."""
+    The verdict ends the loop, not a pass count. Measured over the 33 work
+    items that ran a cross check in September 2026, 16 converged in one pass
+    and 8 in two, so a two pass cap fitted 24 of them. The other 9 needed
+    three passes or more. One ran 8 passes and still shipped two high
+    severity races, because the cap cut the loop off while findings were
+    open. So the loop stops on the verdict instead: the reviewer reports no
+    high or critical defect, or every finding still open is one the agent
+    rejected with a stated reason. Four passes is the hard ceiling, which
+    covers every one of the 33 except the item that never converged.
+
+    Every pass after the first resumes the session the first pass opened, so
+    the reviewer keeps what it already read. _reviewer_cmd holds both command
+    lines and the hint that says where the session id comes from. A resumed
+    session holds the earlier passes in full, so a later pass sends only what
+    changed since the pass before it. Measured on codex-cli 0.153.4, a
+    resumed pass that asked one question without repeating the first pass's
+    material cost 247 tokens, and the same question in a fresh session cost
+    3165 tokens and could not answer it."""
     reviewer = _reviewer_cmd(agent, config)
     other = reviewer["other"]
     return (
-        f"If you changed code, double check the change with {other} once before you "
+        f"If you changed code, double check the change with {other} before you "
         f"report the work done. Write your question to a file. Give {other} the claim "
         f"you make and the files you changed. Ask {other} to report only high severity "
         "and critical defects: a wrong result, a crash, data loss, a security hole, a "
@@ -349,12 +364,16 @@ def _cross_check_block(agent: str, config: dict) -> str:
         f"failure case for each finding. Keep the session id of the {other} run: "
         f"{reviewer['id_hint']}. Run `{reviewer['first']}` from the "
         "working directory with that file on stdin. Fix every finding you agree with. "
-        f"State every finding you rejected and the reason. Run {other} a second time "
-        "only when you fixed a high or critical finding, and run that second pass as "
-        f"`{reviewer['resume']}` with the session id of the first run, so {other} "
-        "keeps the context of the first pass instead of reading the tree again. Never "
-        f"run it a third time. If you changed no code, do not run {other}, and say so "
-        "in your checkpoint. "
+        f"State every finding you rejected and the reason. Run {other} again when a "
+        "high or critical finding is left that you did not reject, and run that pass "
+        f"as `{reviewer['resume']}` with the session id of the first run, so {other} "
+        "keeps the context of the earlier passes instead of reading the tree again. A "
+        f"resumed session already holds the earlier passes, so give {other} only what "
+        f"changed since the pass before it. Stop when {other} reports no high or "
+        "critical defect, or when every finding still open is one you rejected with a "
+        "stated reason. Run at most four passes in total. Stop at the fourth pass even "
+        "when a finding is still open, and name that finding in your checkpoint. If "
+        f"you changed no code, do not run {other}, and say so in your checkpoint. "
     )
 
 
