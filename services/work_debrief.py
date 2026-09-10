@@ -5,6 +5,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
+import core.correspondence as correspondence
 import core.db as db
 import core.llm as llm
 import core.log as log
@@ -125,7 +126,7 @@ def _parse_debrief(raw: str) -> dict:
             "workspace": (f.get("workspace") or "").strip()[:80],
             "recipient": (f.get("recipient") or "").strip()[:200],
             "draft": draft[:2000],
-            "required": (bool(f.get("required")) and kind == "work_item"
+            "required": (f.get("required") is True and kind == "work_item"
                          and unfinished in UNFINISHED_ACTIONS),
         })
     return {"summary": data["summary"].strip()[:2000], "followups": followups[:3]}
@@ -475,6 +476,10 @@ def _slack_send(workspace: str, channel: str, text: str) -> dict:
 
 
 def _deliver_slack(row) -> str:
+    config = work_launch.personal_config()
+    if not (correspondence.allowed(config) if config
+            else correspondence.allowed_on_disk()):
+        raise RuntimeError(correspondence.DENY_REASON)
     if not os.path.isdir(SLACK_INT_DIR):
         raise RuntimeError(f"slack_int not found at {SLACK_INT_DIR} on this host")
     if not row["workspace"]:
