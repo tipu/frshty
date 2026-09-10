@@ -595,6 +595,10 @@ class TestCommitGateRewrite:
         assert work_launch.parse_commit('# git commit -am "fix"') is None
         assert work_launch.parse_commit('printf done # next; git commit -m fix') is None
         assert work_launch.parse_commit('git commit -m "a # b"') == {"chdir": ""}
+        # A quote carries across lines, so a hash inside a message written over
+        # several lines is text, not a comment that would truncate the quote.
+        assert work_launch.parse_commit(
+            'git commit -m "fix the thing\nsee issue #42 for why"') == {"chdir": ""}
 
     def test_an_apostrophe_in_a_comment_still_finds_the_message_file(self, tmp_path):
         """The apostrophe used to make the whole command untokenizable, and the

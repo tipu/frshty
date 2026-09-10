@@ -858,8 +858,10 @@ def _strip_comments(command: str) -> str:
     also keeps the other half right: a `;` or an apostrophe inside a comment is
     text the shell never reads."""
     out = []
+    # The quote carries across lines, because a shell quote does: a message
+    # written over several lines is one argument, and a `#` inside it is text.
+    quote = ""
     for line in command.split("\n"):
-        quote = ""
         cut = None
         for i, char in enumerate(line):
             if quote:
