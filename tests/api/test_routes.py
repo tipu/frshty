@@ -551,6 +551,41 @@ class TestSubmitPrScopeGate:
         platform.create_pr.assert_called_once()
         assert state.load("tickets")["SCOPE-4"]["status"] == "in_review"
 
+    def test_the_verdict_is_read_after_the_commit(self, client, tmp_path):
+        """This endpoint runs git add -A and git commit on every worktree before
+        it pushes. The commit moves HEAD, and the scope fingerprint is keyed on
+        the branch diff, so a verdict read before the commit belongs to a state
+        no reviewer saw. The verdict must be read after the commit and before
+        the first push."""
+        from web import tickets as web_tickets
+        key, slug = "SCOPE-6", "SCOPE-6-s"
+        (tmp_path / "tickets" / slug / "repo1").mkdir(parents=True)
+        state.save("tickets", {key: {"status": "pr_ready", "slug": slug,
+                                     "branch": "b", "summary": "s"}})
+        committed = {"done": False}
+
+        def fake_run(cmd, *args, **kwargs):
+            if "commit" in cmd:
+                committed["done"] = True
+            return MagicMock(returncode=0, stdout="b\n", stderr="")
+
+        platform = MagicMock()
+        platform.push_branch.return_value = {"ok": True}
+        platform.create_pr.return_value = {"url": "http://pr/1", "id": 1}
+        with patch("features.tickets._scope_review_state",
+                   lambda c, t: "pending" if committed["done"] else "pass"), \
+             patch("web.tickets.make_platform", return_value=platform), \
+             patch("web.tickets.subprocess.run", fake_run), \
+             patch("web.tickets._changed_files", return_value=["a.py"]), \
+             patch("web.tickets._is_meaningful_change", return_value=True):
+            resp = web_tickets._submit_pr_sync(
+                key, {"repos": [{"name": "repo1", "title": "t", "description": "d"}]})
+
+        assert resp.status_code == 409, getattr(resp, "body", resp)
+        platform.push_branch.assert_not_called()
+        platform.create_pr.assert_not_called()
+        assert state.load("tickets")[key]["status"] == "pr_ready"
+
     def test_disabled_verdict_opens_the_pr(self, client, tmp_path):
         resp, platform = self._submit(client, tmp_path, "SCOPE-5", "disabled")
         assert getattr(resp, "status_code", 200) == 200, getattr(resp, "body", resp)
