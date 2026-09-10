@@ -1164,8 +1164,7 @@ class TestQuestions:
     def test_record_question_sets_pending(self):
         import json as _json
         item_id, sid = self._mkrun("question item")
-        ok = work_store.record_question(sid, self.QUESTIONS)
-        assert ok is True
+        assert work_store.record_question(sid, self.QUESTIONS) == "recorded"
         item = db.query_one(
             "SELECT state, stop_reason, pending_question FROM work_items WHERE id = ?", (item_id,))
         assert item["state"] == "needs_you"
@@ -1177,19 +1176,19 @@ class TestQuestions:
         assert "question_asked" in kinds
 
     def test_record_question_unknown_session(self):
-        assert work_store.record_question("sid-q-nope", self.QUESTIONS) is False
+        assert work_store.record_question("sid-q-nope", self.QUESTIONS) == ""
 
     def test_record_question_empty_input(self):
         item_id, sid = self._mkrun("question empty")
-        assert work_store.record_question(sid, {}) is False
-        assert work_store.record_question(sid, {"questions": [{"question": " "}]}) is False
+        assert work_store.record_question(sid, {}) == ""
+        assert work_store.record_question(sid, {"questions": [{"question": " "}]}) == ""
         item = db.query_one("SELECT pending_question FROM work_items WHERE id = ?", (item_id,))
         assert item["pending_question"] == ""
 
     def test_record_question_done_item_refused(self):
         item_id, sid = self._mkrun("question done")
         work_store.apply_action(item_id, "done")
-        assert work_store.record_question(sid, self.QUESTIONS) is False
+        assert work_store.record_question(sid, self.QUESTIONS) == ""
 
     def test_pending_question_blocks_autocontinue(self, monkeypatch):
         from unittest.mock import MagicMock
@@ -2331,7 +2330,7 @@ class TestIdleNotificationContinues:
         tail = ("API Error: 529 Overloaded. This is a server-side issue, usually "
                 "temporary — try again in a moment. If it persists, check "
                 "https://status.claude.com.")
-        assert work_store._looks_like_question(tail) is False
+        assert work_store._blocked_on_operator(tail) is False
 
     def test_hook_continues_on_idle_notification(self, tmp_path):
         import json
