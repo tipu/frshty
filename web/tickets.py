@@ -328,21 +328,9 @@ def _submit_pr_sync(ticket_key: str, data: dict):
     if not slug:
         return JSONResponse({"error": "No slug found"}, status_code=400)
 
-    scope = _tickets_mod._scope_review_state(_config, ticket)
-    force = bool(data.get("force"))
-    if scope in ("pending", "fail") and not force:
-        ws = _config["workspace"]
-        report = Path(ws["root"]) / ws["tickets_dir"] / slug / "docs" / "scope-review.md"
-        return JSONResponse(
-            {"error": f"consensus scope review is {scope}; PR creation is blocked. "
-                      f"Resubmit with force: true to open the PR anyway",
-             "scope_review": scope,
-             "reason": (ticket.get("scope_review") or {}).get("reason", ""),
-             "report": str(report)},
-            status_code=409)
-
     platform = make_platform(_config)
     prs = []
+    staged = []
 
     for r in repos_in:
         repo_name = r["name"]
@@ -368,7 +356,23 @@ def _submit_pr_sync(ticket_key: str, data: dict):
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             cwd=str(wt), capture_output=True, text=True, timeout=10).stdout.strip()
         push_branch = actual_branch or ticket.get("branch", "")
+        staged.append((r, wt, base_branch, push_branch))
 
+    scope = _tickets_mod._scope_review_state(_config, ticket)
+    force = bool(data.get("force"))
+    if scope in ("pending", "fail") and not force:
+        ws = _config["workspace"]
+        report = Path(ws["root"]) / ws["tickets_dir"] / slug / "docs" / "scope-review.md"
+        return JSONResponse(
+            {"error": f"consensus scope review is {scope}; PR creation is blocked. "
+                      f"Resubmit with force: true to open the PR anyway",
+             "scope_review": scope,
+             "reason": (ticket.get("scope_review") or {}).get("reason", ""),
+             "report": str(report)},
+            status_code=409)
+
+    for r, wt, base_branch, push_branch in staged:
+        repo_name = r["name"]
         pushed = platform.push_branch(wt, push_branch)
         if not pushed.get("ok"):
             return JSONResponse({"error": f"Failed to push {repo_name}: {pushed.get('error', 'unknown')}"}, status_code=400)
