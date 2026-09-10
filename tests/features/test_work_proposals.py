@@ -215,3 +215,66 @@ def test_the_sweep_fails_a_task_whose_launch_never_made_a_run():
                         (stranded,))["stop_reason"] == "The launch never started a session"
     assert db.query_one("SELECT state FROM work_items WHERE id = ?",
                         (ran,))["state"] == "agent_working"
+
+
+def test_approving_a_followup_proposal_runs_it_on_the_source_agent(tmp_path):
+    """A proposal the board wrote from a codex task's debrief continues that
+    task. The approve button sends whichever agent the intake box last showed,
+    so the proposal's own source decides which agent runs it."""
+    source = work_store.create_item("the task that ran on codex")
+    work_store.add_run(source, "sess-codex", "work-codex", str(tmp_path), provider="codex")
+    item_id = _proposal(source_item_id=source)
+    config = _personal_config(tmp_path)
+    with patch.object(work_launch, "personal_config", return_value=config), \
+         patch.object(work_launch, "project_entries", return_value=[]), \
+         patch.object(work_launch.terminal, "launch_agent"), \
+         patch.object(work_launch.terminal, "session_healthy", return_value={"alive": True}), \
+         patch.object(work_launch.threading, "Thread"), \
+         patch.object(work_launch.work_tags, "schedule_implicit_tags"):
+        result = work_launch.launch_proposed(item_id, agent="claude")
+
+    assert result["item_id"] == item_id
+    assert db.query_one("SELECT provider FROM work_runs WHERE work_item_id = ?",
+                        (item_id,))["provider"] == "codex"
+
+
+def test_approving_a_proposal_with_no_source_uses_the_agent_the_operator_picked(tmp_path):
+    item_id = _proposal()
+    config = _personal_config(tmp_path)
+    with patch.object(work_launch, "personal_config", return_value=config), \
+         patch.object(work_launch, "project_entries", return_value=[]), \
+         patch.object(work_launch.terminal, "launch_agent"), \
+         patch.object(work_launch.terminal, "session_healthy", return_value={"alive": True}), \
+         patch.object(work_launch.threading, "Thread"), \
+         patch.object(work_launch.work_tags, "schedule_implicit_tags"):
+        work_launch.launch_proposed(item_id, agent="codex")
+
+    assert db.query_one("SELECT provider FROM work_runs WHERE work_item_id = ?",
+                        (item_id,))["provider"] == "codex"
+
+
+def test_approving_a_followup_proposal_survives_a_collected_worktree(tmp_path):
+    """The proposal waits for the operator, and the worktree it recorded can
+    be reclaimed while it waits. A recorded directory that has gone is
+    dropped, the way a follow-up drops an inherited directory that no longer
+    exists, so the operator can still approve the task."""
+    source = work_store.create_item("the task whose worktree was reclaimed")
+    gone = tmp_path / "collected-worktree"
+    work_store.add_run(source, "sess-gone", "work-gone", str(gone))
+    item_id = _proposal(source_item_id=source)
+    with db.tx() as c:
+        c.execute("UPDATE work_items SET launch_cwd = ? WHERE id = ?",
+                  (str(gone), item_id))
+    config = _personal_config(tmp_path)
+    with patch.object(work_launch, "personal_config", return_value=config), \
+         patch.object(work_launch, "project_entries", return_value=[]), \
+         patch.object(work_launch.terminal, "launch_agent"), \
+         patch.object(work_launch.terminal, "session_healthy", return_value={"alive": True}), \
+         patch.object(work_launch.threading, "Thread"), \
+         patch.object(work_launch.work_tags, "schedule_implicit_tags"):
+        result = work_launch.launch_proposed(item_id)
+
+    assert "error" not in result, result
+    assert result["state"] == "agent_working"
+    assert db.query_one("SELECT cwd FROM work_runs WHERE work_item_id = ?",
+                        (item_id,))["cwd"] == str(config["workspace"]["root"])
