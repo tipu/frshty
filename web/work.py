@@ -157,8 +157,16 @@ def api_work_archive_completed():
 
 @router.post("/api/work/items/{item_id}/action")
 def api_work_action(item_id: int, body: dict):
-    result = work_store.apply_action(item_id, (body.get("action") or "").strip(),
-                                     until=body.get("until"))
+    """Apply one operator action to one task.
+
+    Cancel goes through work_launch, because it is the only action that has to
+    reach outside the database: it kills the tmux session the agent runs in.
+    Every other action is a state change and nothing else."""
+    action = (body.get("action") or "").strip()
+    if action == "cancel":
+        result = work_launch.cancel(item_id)
+    else:
+        result = work_store.apply_action(item_id, action, until=body.get("until"))
     if "error" in result:
         return JSONResponse(result, status_code=400)
     return result
