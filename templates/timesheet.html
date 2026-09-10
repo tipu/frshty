@@ -3,6 +3,7 @@
 <head>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Timesheet — frshty</title>
 <script src="/static/tailwind.js"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
@@ -11,6 +12,7 @@
 <script src="/static/frshty-shell.js"></script>
 <link rel="stylesheet" href="/static/frshty.css">
 <link rel="stylesheet" href="/static/frshty-v2.css">
+<link rel="stylesheet" href="/static/frshty-mobile.css">
 <style>
 table { border-collapse: collapse; width: 100%; }
 th, td { padding: 6px 10px; border: 1px solid #2a2a2a; text-align: left; font-size: 13px; vertical-align: top; }
@@ -37,7 +39,7 @@ button { cursor: pointer; }
 
 
 
-<div class="flex items-center gap-3 mb-4">
+<div class="feed-tools flex items-center gap-3 mb-4">
     <input type="date" v-model="startDate" />
     <span class="text-gray-500">→</span>
     <input type="date" v-model="endDate" />
@@ -48,7 +50,7 @@ button { cursor: pointer; }
     <span v-if="msg" class="msg" :class="msgKind === 'err' ? 'msg-err' : 'msg-ok'">{{ msg }}</span>
 </div>
 
-<div class="flex gap-4">
+<div class="ts-layout flex gap-4">
     <div class="w-52 flex-shrink-0 self-start" style="position:sticky;top:calc(var(--ln-topbar-h) + 16px)">
         <div class="card p-3 mb-3">
             <span class="text-gray-400 text-sm">Total to log:</span>
