@@ -71,8 +71,10 @@ proposal. See _transcript and DECLINED_RULE.
 import hashlib
 import json
 import os
+import re
 import urllib.parse
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from pathlib import Path
 
 import core.db as db
@@ -1610,6 +1612,46 @@ def _candidates(instance_key: str, config: dict, now: datetime) -> list[dict]:
     return out
 
 
+REPEAT_PROPOSAL_RATIO = 0.85
+# Anything with a digit in it: a ticket key, a PR number, a count of days. Two
+# objectives that name different ones are different requests however alike the
+# rest of the wording reads, and "move WB-412" against "move WB-500" is one
+# character short of identical.
+_IDENTIFIER_RE = re.compile(r"[a-z0-9][a-z0-9._/#-]*\d[a-z0-9._/#-]*")
+
+
+def _normalise_objective(text: str) -> str:
+    return " ".join((text or "").lower().split())
+
+
+def _identifiers(text: str) -> set:
+    return set(_IDENTIFIER_RE.findall(text))
+
+
+def _repeats_a_declined_proposal(item_id, objective: str) -> bool:
+    """Whether this objective is the one the operator already declined.
+
+    The judge is told to ignore a request that was answered above the decline
+    line, and it does not always. Two of the five proposals in the review
+    window were a reworded second run at a task the operator had turned down,
+    and each one cost him the same decision twice. The test is textual, so it
+    stops a repeat and lets a genuinely different request through."""
+    if not item_id or not objective:
+        return False
+    row = db.query_one(
+        "SELECT objective FROM work_items WHERE id = ? AND stop_reason = ?",
+        (item_id, work_store.DECLINED_REASON))
+    if not row:
+        return False
+    declined = _normalise_objective(row["objective"])
+    fresh = _normalise_objective(objective)
+    if not declined or not fresh:
+        return False
+    if _identifiers(declined) != _identifiers(fresh):
+        return False
+    return SequenceMatcher(None, declined, fresh).ratio() >= REPEAT_PROPOSAL_RATIO
+
+
 def _proposals_today(instance_key: str, now: datetime) -> int:
     """How many tasks this instance proposed in the last 24 hours.
 
@@ -1883,6 +1925,18 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
             # the judge said was missing would otherwise leave this
             # conversation marked read to its last message and never judged
             # again, which hides a request nobody ever answered.
+            with db.tx() as c:
+                if _reads_as_judged(row, names, operator_id, answered_ts,
+                                    transcript, c):
+                    _record_judgement(row["id"], row["last_ts"], tick, conn=c)
+            continue
+        if _repeats_a_declined_proposal(row["work_item_id"], objective):
+            log.emit("slack_proposal_repeat_dropped",
+                     f"[{instance_key}] {channel} asks again for work the"
+                     f" operator already declined as task {row['work_item_id']};"
+                     f" no second task opened",
+                     meta={"thread_ts": row["thread_ts"], "channel": channel,
+                           "declined": row["work_item_id"]})
             with db.tx() as c:
                 if _reads_as_judged(row, names, operator_id, answered_ts,
                                     transcript, c):
