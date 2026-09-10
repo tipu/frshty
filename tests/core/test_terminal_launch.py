@@ -30,7 +30,7 @@ class TestLaunchPaneCommand:
         terminal.launch_pane_command("work-8", str(tmp_path), "codex resume --last")
 
         args = run.call_args.args[0]
-        assert args[3:9] == ["respawn-pane", "-k", "-t", "term-work-8", "-c", str(tmp_path)]
+        assert args[3:9] == ["respawn-pane", "-k", "-t", "=term-work-8:", "-c", str(tmp_path)]
         assert args[-1] == "codex resume --last; exec /test/shell -l"
         assert "send-keys" not in args
 
