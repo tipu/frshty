@@ -520,8 +520,9 @@ class TestThreadDetailRoutes:
         seen = {}
 
         def fake_launch(objective, cwd="", contexts=None, slack=False,
-                        source_item_id=None, agent="claude"):
-            seen.update(objective=objective, source_item_id=source_item_id, agent=agent)
+                        source_item_id=None, agent="claude", critical=False):
+            seen.update(objective=objective, source_item_id=source_item_id, agent=agent,
+                        critical=critical)
             return {"item_id": 4242}
 
         from services import work_launch
@@ -529,7 +530,8 @@ class TestThreadDetailRoutes:
         r = _client().post(f"/api/work/threads/{ids[0]}/tasks",
                            json={"text": "the next task", "agent": "codex"})
         assert r.status_code == 200
-        assert seen == {"objective": "the next task", "source_item_id": ids[1], "agent": "codex"}
+        assert seen == {"objective": "the next task", "source_item_id": ids[1],
+                        "agent": "codex", "critical": False}
 
 
 class TestBoardUi:
