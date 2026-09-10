@@ -826,10 +826,32 @@ class TestRequiredFollowups:
         work_debrief.propose_required_followups()
         assert _events(item_id, "followup_sent") == []
 
+    def test_a_draft_on_a_long_archived_task_is_not_proposed(self, monkeypatch):
+        """Item 9382 came from a task archived fourteen days earlier. The
+        operator had closed that task, so its draft must not reach the board
+        again."""
+        item_id = self._finished_with_followup("archived long ago", True)
+        stale = (datetime.now(timezone.utc)
+                 - timedelta(hours=work_debrief.ARCHIVE_WINDOW_HOURS + 1)).isoformat()
+        db.execute("UPDATE work_items SET archived_at = ? WHERE id = ?", (stale, item_id))
+        monkeypatch.setattr(work_launch, "project_entries", lambda: [])
+        assert [o["item_id"] for o in work_debrief.propose_required_followups()] != [item_id]
+        assert self._children(item_id) == []
+        assert _events(item_id, "followup_proposed") == []
+
+    def test_a_draft_on_a_freshly_archived_task_is_still_proposed(self, monkeypatch):
+        item_id = self._finished_with_followup("archived just now", True)
+        db.execute("UPDATE work_items SET archived_at = ? WHERE id = ?",
+                   (work_store._now(), item_id))
+        monkeypatch.setattr(work_launch, "project_entries", lambda: [])
+        assert [o["item_id"] for o in work_debrief.propose_required_followups()] == [item_id]
+        assert len(self._children(item_id)) == 1
+
     def test_the_parser_only_marks_a_work_item_required(self):
         parsed = work_debrief._parse_debrief(json.dumps({"summary": "s", "followups": [
-            {"kind": "work_item", "required": True, "draft": "push it"},
-            {"kind": "slack_message", "required": True, "recipient": "Sam", "draft": "ping"},
+            {"kind": "work_item", "required": True, "unfinished": "push", "draft": "push it"},
+            {"kind": "slack_message", "required": True, "unfinished": "push",
+             "recipient": "Sam", "draft": "ping"},
         ]}))
         assert parsed["followups"][0]["required"] is True
         assert parsed["followups"][1]["required"] is False
