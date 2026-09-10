@@ -369,12 +369,14 @@ class BitbucketPlatform(_CIMonitorMixin):
                     results.append(self._normalize_pr(pr, repo))
         return results
 
-    def get_pr_comments(self, repo: str, pr_id: int) -> list[dict]:
+    def get_pr_comments(self, repo: str, pr_id: int) -> list[dict] | None:
+        """The PR's comments, or None when the read failed. See
+        GitHubPlatform._review_data for why the two cases must differ."""
         url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}/comments?pagelen=100"
         with external_log.client("bitbucket", auth=self._auth(), timeout=30) as client:
             resp = client.get(url)
             if resp.status_code != 200:
-                return []
+                return None
             out = [
                 {
                     "id": c["id"],
@@ -832,21 +834,29 @@ class GitHubPlatform(_CIMonitorMixin):
         "}}}}}}}"
     )
 
-    def _review_data(self, repo: str, pr_id: int) -> dict:
+    def _review_data(self, repo: str, pr_id: int) -> dict | None:
+        """The PR's review payload, or None when the read failed.
+
+        A caller that reconciles stored state against this payload must be
+        able to tell a failed read from a PR that carries nothing. Returning
+        an empty payload for both makes a transport error indistinguishable
+        from a reviewer deleting every comment."""
         full = self._resolve_repo(repo)
         owner, _, name = full.partition("/")
         data = self._graphql(self._REVIEW_COMMENTS_QUERY, owner=owner, name=name, number=pr_id)
         if not data:
-            return {}
-        return (((data.get("data") or {}).get("repository") or {}).get("pullRequest") or {})
+            return None
+        return ((data.get("data") or {}).get("repository") or {}).get("pullRequest")
 
     def _review_threads(self, repo: str, pr_id: int) -> list[dict]:
-        pr = self._review_data(repo, pr_id)
+        pr = self._review_data(repo, pr_id) or {}
         return (pr.get("reviewThreads") or {}).get("nodes") or []
 
-    def get_pr_comments(self, repo: str, pr_id: int) -> list[dict]:
+    def get_pr_comments(self, repo: str, pr_id: int) -> list[dict] | None:
         out: list[dict] = []
         pr = self._review_data(repo, pr_id)
+        if pr is None:
+            return None
         for t in (pr.get("reviewThreads") or {}).get("nodes") or []:
             resolved = bool(t.get("isResolved"))
             thread_id = t.get("id", "")

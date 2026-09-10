@@ -59,3 +59,13 @@ def test_ignores_processed_and_below_threshold():
     out = staleness.blocked_pr_comments("test")
 
     assert out == []
+
+
+def test_a_deleted_comment_leaves_the_bucket():
+    """A comment gone from the platform keeps the error_count of its last live
+    attempt and can never reach 'processed'. Reading only 'processed' as
+    finished pins it in the bucket for good."""
+    _set_instance()
+    _insert_comment("saas-dashboard/300", "c-deleted", "deleted", 6, "no changes produced")
+
+    assert staleness.blocked_pr_comments("test") == []
