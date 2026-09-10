@@ -1271,6 +1271,10 @@ def _asks_operator(text: str) -> bool:
     return bool(_OPERATOR_ASK_RE.search(text[-300:]))
 
 
+_TRAILING_EMPHASIS = "*_`\"'’)]"
+_OPTION_LINE_RE = re.compile(r"^\s*(?:[-*•+]|\(?\d+[.)])\s+")
+
+
 def _ends_on_a_question(text: str) -> bool:
     """Whether the agent's last message ends by asking something.
 
@@ -1278,10 +1282,21 @@ def _ends_on_a_question(text: str) -> bool:
     it parked 24 items whose agent had asked the operator nothing: a rhetorical
     question, a heading, a shell snippet and an offer to do the next step all
     carry one somewhere, and none of them is a request the operator can answer.
-    A message that ends on the question mark is a different thing, and it is
-    the only question an agent with no AskUserQuestion tool can ask."""
+    A message that ends on the question is a different thing, and it is the
+    only question an agent with no AskUserQuestion tool can ask.
+
+    The question does not have to be the very last line. An agent that asks
+    writes the options under it, so the walk steps back over list items, and
+    over the emphasis a bold question ends in. It steps over nothing else: a
+    markdown heading that asks something is not a list item, and stopping there
+    is what keeps "## What changed?" from parking the item again."""
     lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
-    return bool(lines) and lines[-1].endswith("?")
+    for line in reversed(lines[-5:]):
+        if line.rstrip(_TRAILING_EMPHASIS).endswith("?"):
+            return True
+        if not _OPTION_LINE_RE.match(line):
+            return False
+    return False
 
 
 def _blocked_on_operator(text: str) -> bool:
@@ -1914,16 +1929,20 @@ def auto_archive_quiet_items(now: datetime | None = None) -> list[int]:
     460 operator clicks answered 455 tasks, and 177 tasks the agent reported
     done were never acknowledged at all: the acknowledgement carries no
     decision, so it is bookkeeping. A task qualifies when the agent reported
-    it done, it asked no question, no gate denied it, and a day has passed. A
-    task that asked something, or that a gate stopped, keeps waiting for a
-    real read. Reopen is the undo, and it already exists."""
+    it done, it asked no question, no gate denied it, and a day has passed
+    since its newest report. The newest one is what counts: a task completed
+    two days ago, reopened, and completed again a minute ago carries a result
+    nobody has read, and the old report must not file it. A task that asked
+    something,
+    or that a gate stopped, keeps waiting for a real read. Reopen is the undo,
+    and it already exists."""
     now = now or datetime.now(timezone.utc)
     cutoff = (now - timedelta(hours=AUTO_ARCHIVE_AFTER_HOURS)).isoformat()
     rows = db.query_all(
         "SELECT i.id FROM work_items i WHERE i.state = 'needs_ack' "
         "AND i.archived_at IS NULL "
-        "AND EXISTS(SELECT 1 FROM work_events e WHERE e.work_item_id = i.id "
-        "AND e.kind = 'self_reported_done' AND e.created_at <= ?) "
+        "AND (SELECT MAX(e.created_at) FROM work_events e "
+        "WHERE e.work_item_id = i.id AND e.kind = 'self_reported_done') <= ? "
         f"AND NOT EXISTS(SELECT 1 FROM work_events e WHERE e.work_item_id = i.id "
         f"AND e.kind IN {_NOISY_EVENT_KINDS_SQL}) "
         "AND NOT EXISTS(SELECT 1 FROM work_events e WHERE e.work_item_id = i.id "
