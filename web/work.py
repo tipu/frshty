@@ -270,6 +270,7 @@ def api_work_detail(item_id: int):
     if "error" in result:
         return JSONResponse(result, status_code=404)
     result["followups"] = work_debrief.followups_for(item_id)
+    result["debrief_status"] = work_debrief.debrief_status(item_id)
     result["projects"] = work_launch.project_entries()
     result["agents"] = list(terminal.AGENTS)
     result["slack_available"] = work_launch.slack_available()

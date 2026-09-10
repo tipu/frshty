@@ -111,11 +111,17 @@
   </div>
   <div class="sec" v-if="provider === 'claude'">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Side question</h2>
-    <div class="text-xs text-gray-600 mb-2">Typed into the live terminal as /btw. The run is not interrupted and the question never enters its conversation. The answer comes from a fork with no tools, so it can only reason about what the session already knows.</div>
+    <div class="text-xs text-gray-600 mb-2">Ask reads the session without interrupting it: the question is typed as /btw, it never enters the conversation, and the answer comes from a fork with no tools. Correct sends the text into the conversation itself, so the working agent reads it and acts on it. Use Correct for anything the agent has to change.</div>
     <form @submit.prevent="askBtw">
       <input class="wintake" style="width:100%; background:#101018; border:1px solid #2a2a35; border-radius:8px; padding:10px 14px; color:#e0e0e0"
              v-model="btwText" :disabled="btwBusy"
              :placeholder="btwBusy ? 'waiting for the answer…' : 'Ask the session a quick question…'" />
+      <div class="mt-2 flex gap-2">
+        <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#1e293b;color:#93c5fd"
+              @click="askBtw">ask (no interrupt)</span>
+        <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#3b2f14;color:#fbbf24"
+              @click="correct">correct (into the conversation)</span>
+      </div>
     </form>
     <div class="text-xs text-red-400 mt-1" v-if="btwError">{{ btwError }}</div>
     <div class="tl-box mt-2" v-if="btwLog.length">
@@ -130,6 +136,8 @@
   <div class="sec" v-if="item.summary || finished">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Summary</h2>
     <div class="text-sm" style="white-space:pre-wrap" v-if="item.summary" v-html="lk(item.summary)"></div>
+    <div class="text-xs text-gray-600" v-else-if="debriefStatus === 'retrying'">No summary yet. The debrief is waiting to retry.</div>
+    <div class="text-xs text-red-400" v-else-if="debriefStatus === 'exhausted'">No summary. The debrief spent its attempts; press regenerate to try again.</div>
     <div class="text-xs text-gray-600" v-else>No summary yet.</div>
     <div class="mt-1">
       <a :href="taskHref(item.id, '/summary')" target="_blank" class="text-xs text-blue-400 underline">open summary page</a>
@@ -291,7 +299,7 @@ const app = frshtyApp({
                     timelineCap: 100, timelineFull: false,
                     timelineImagesOpen: {},
                     systemPrompt: "", showPrompt: false,
-                    btwText: "", btwError: "", btwBusy: false,
+                    btwText: "", btwError: "", btwBusy: false, debriefStatus: "",
                     followups: [], fuText: {}, fuCtx: {}, fuSlack: {}, fuAgent: {}, fuError: {},
                     sourceItem: null, followupChildren: [], worktree: null,
                     fupText: "", fupCtx: [], fupSlack: false, fupError: "", fupBusy: false,
@@ -468,6 +476,7 @@ const app = frshtyApp({
           document.title = this._baseTitle.replace("Work item", snip);
         }
         this.followups = d.followups || [];
+        this.debriefStatus = d.debrief_status || "";
         this.sourceItem = d.source_item || null; this.followupChildren = d.followup_children || [];
         this.worktree = d.worktree || null;
         this.projects = d.projects || []; this.slackAvailable = !!d.slack_available;
@@ -588,6 +597,24 @@ const app = frshtyApp({
         await this.refresh();
       } catch (e) {
         this.btwError = "ask failed: " + e.message;
+      } finally {
+        this.btwBusy = false;
+      }
+    },
+    async correct() {
+      const text = this.btwText.trim();
+      if (!text || this.btwBusy) return;
+      this.btwBusy = true; this.btwError = "";
+      try {
+        const r = await fetch(this.api(`/api/work/items/${this.item.id}/reply`), {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+        });
+        if (!r.ok) { const d = await r.json(); this.btwError = d.error || ("correction failed HTTP " + r.status); return; }
+        this.btwText = "";
+        await this.refresh();
+      } catch (e) {
+        this.btwError = "correction failed: " + e.message;
       } finally {
         this.btwBusy = false;
       }

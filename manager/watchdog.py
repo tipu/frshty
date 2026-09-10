@@ -412,9 +412,14 @@ with Python, for example
 `python3 -c "import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute('select ...').fetchall())" <db path>`.
 
 Find the exact reason the comment is not being answered. Name the file and
-line that makes the decision. Then propose the smallest remedy. Do not push
-code and do not post anything to the PR until the operator approves the remedy
-with AskUserQuestion. Reading anything is unrestricted.
+line that makes the decision. Then apply the smallest remedy. Diagnose and
+repair within this task's recorded authority: local code fixes and their tests,
+bounded retries through the normal job API once you have fixed the cause, and
+delivery to destinations this project already authorises. Ask only for an action
+outside that authority, naming the exact change and its effect. Broader state
+rewrites, new external communications and release decisions stay outside it.
+Posting to the PR is an external communication, so it stays outside. Reading
+anything is unrestricted.
 
 Write the diagnosis as a self-contained HTML report artifact and print its
 ARTIFACT line.
@@ -452,7 +457,7 @@ def _description(instance_key: str, rule: Rule, entry: Entry, observation: dict,
         f"{observation['first_seen_at']}.{held} No open task covers it. "
         f"Evidence: {entry.detail}. The fault this bucket reports is that "
         f"{rule.fault} Find why frshty stopped, name the file and line that "
-        f"decides it, and propose the smallest remedy."
+        f"decides it, and apply the smallest remedy."
     )
 
 

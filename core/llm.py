@@ -54,6 +54,10 @@ _LLM_LIMIT_PATTERNS = (
     "key limit exceeded",
     "requires more credits",
     "monthly usage limit",
+    "individual spend limit",
+    "/usage-credits",
+    "session limit resets",
+    "weekly limit resets",
 )
 _MIN_PLAN_BYTES = int(os.environ.get("FRSHTY_MIN_PLAN_BYTES", "400"))
 

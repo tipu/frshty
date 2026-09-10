@@ -69,12 +69,17 @@ class TestRunDebrief:
         db.execute("UPDATE work_items SET state = 'needs_ack' WHERE id = ?", (item_id,))
         assert item_id in work_debrief._pending_done_items()
 
-    def test_no_transcript_fails_once(self):
+    def test_no_transcript_postpones_without_spending_the_budget(self):
+        """A transcript that is not there yet is not a bad summary, so it must
+        not spend one of the three attempts the content itself gets."""
         item_id = _done_item("no transcript")
         out = work_debrief.run_debrief(item_id)
-        assert out["error"] == "no transcript"
-        assert item_id in work_debrief._pending_done_items()
-        for _ in range(work_debrief.MAX_FAILED_ATTEMPTS - 1):
+        assert "no transcript" in out["error"]
+        assert db.query_all(
+            "SELECT id FROM work_events WHERE work_item_id = ? AND kind = 'debrief_failed'",
+            (item_id,)) == []
+        assert item_id not in work_debrief._pending_done_items(), "it waits for its retry time"
+        for _ in range(work_debrief.MAX_FAILED_ATTEMPTS):
             work_debrief._record_debrief_event(item_id, "debrief_failed", {})
         assert item_id not in work_debrief._pending_done_items()
 
