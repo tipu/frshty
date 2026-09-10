@@ -21,7 +21,8 @@ from core.config import base_branch_for, get_repos, ticket_worktree_path
 from core.deps import relink_shared_venv
 from core.consensus_plan import run_consensus_plan
 from core.consensus_scope import (
-    SCOPE_FANOUT_TIMEOUT, run_scope_review, scope_fingerprint,
+    SCOPE_FANOUT_TIMEOUT, repos_with_branch_diff, run_scope_review,
+    scope_fingerprint,
 )
 from core.tasks.registry import TaskContext, TaskResult, task
 import features.defence as defence
@@ -1433,16 +1434,37 @@ def start_reviewing(ctx: TaskContext) -> TaskResult:
     ticket_dir = _ticket_dir(ctx)
     if not ticket_dir.is_dir():
         return TaskResult("failed", f"ticket dir missing: {ticket_dir}")
+    ts = state.load_ticket(ctx.ticket_key or "") or {}
+    repos = repos_with_branch_diff(ctx.config, ts.get("slug") or "")
+    repo_block = ""
+    if repos:
+        repo_block = (
+            "Review every repository listed below. Each one carries a branch diff, "
+            "and each one must be named in docs/tri-review.md with its own findings. "
+            "Derive each diff with git -C <worktree> diff origin/<base branch>...HEAD.\n"
+            + "\n".join(f"- {name}: worktree {wt}, base branch origin/{base}"
+                        for name, wt, base in repos)
+            + "\n"
+        )
     prompt = (
         "Run /tri-review and save the full output to docs/tri-review.md. "
+        + repo_block +
         "In the Verdict section, include a line reading exactly 'VERDICT: PASS' "
         "if no blocking findings remain unresolved, or 'VERDICT: FAIL' otherwise."
     )
     log.emit("ticket_review_started", f"Headless /tri-review for {ctx.ticket_key}",
-             meta={"ticket": ctx.ticket_key})
+             meta={"ticket": ctx.ticket_key,
+                   "repos": [name for name, _, _ in repos]})
     result = run_claude_code(prompt, cwd=ticket_dir, timeout=REVIEW_TIMEOUT)
     if result is None:
         return TaskResult("failed", "claude returned non-zero or empty")
+    review = ticket_dir / "docs" / "tri-review.md"
+    text = review.read_text(errors="replace") if review.is_file() else ""
+    missing = [name for name, _, _ in repos
+               if not re.search(re.escape(name) + r"(?![\w.-])", text)]
+    if missing:
+        return TaskResult("failed",
+                          "docs/tri-review.md does not cover " + ", ".join(missing))
     return TaskResult("ok")
 
 
