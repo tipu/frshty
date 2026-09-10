@@ -344,3 +344,77 @@ class TestBackfillArtifacts:
                      payload={"pr_url": "http://pr/1", "repo": "myrepo"}))
         assert result.status == "failed"
         assert result.reason == "claude returned non-zero or empty"
+
+
+class TestStartReviewing:
+    """The tri-review step must name every repo that carries a branch diff.
+
+    For DEV-635 it reviewed four of five repos and skipped
+    windows-rpa-client-schema, the repo that carried the dead code into PR #19,
+    because the prompt left the choice of worktrees to the model."""
+
+    def _repos(self, config):
+        root = config["workspace"]["root"] / "tickets" / SLUG
+        return [("windows-rpa-client", root / "windows-rpa-client", "main"),
+                ("windows-rpa-client-schema", root / "windows-rpa-client-schema", "main")]
+
+    def _run(self, fake_config, review_text):
+        _seed(status="reviewing")
+        d = _ticket_dir(fake_config)
+        if review_text is not None:
+            (d / "docs" / "tri-review.md").write_text(review_text)
+        runner = MagicMock(return_value="done")
+        with patch("core.tasks.tickets.repos_with_branch_diff",
+                   return_value=self._repos(fake_config)), \
+             patch("core.tasks.tickets.run_claude_code", runner), \
+             patch("core.tasks.tickets.log.emit"):
+            result = T.start_reviewing(_ctx(fake_config, "start_reviewing"))
+        return result, runner.call_args.args[0]
+
+    def test_the_prompt_names_every_repo_with_a_branch_diff(self, fake_config, tmp_state):
+        _, prompt = self._run(fake_config, "windows-rpa-client\nwindows-rpa-client-schema\n")
+        assert "windows-rpa-client-schema" in prompt
+        assert "must be named in docs/tri-review.md" in prompt
+
+    def test_a_skipped_repo_fails_the_task(self, fake_config, tmp_state):
+        result, _ = self._run(fake_config, "reviewed windows-rpa-client only\n")
+        assert result.status == "failed"
+        assert result.reason == "docs/tri-review.md does not cover windows-rpa-client-schema"
+
+    def test_a_repo_name_that_is_a_prefix_of_another_is_not_counted_covered(
+            self, fake_config, tmp_state):
+        result, _ = self._run(fake_config, "## windows-rpa-client-schema\nAll good.\n")
+        assert result.status == "failed"
+        assert result.reason == "docs/tri-review.md does not cover windows-rpa-client"
+
+    def test_a_missing_report_fails_the_task(self, fake_config, tmp_state):
+        result, _ = self._run(fake_config, None)
+        assert result.status == "failed"
+        assert "windows-rpa-client" in result.reason
+
+    def test_full_coverage_passes(self, fake_config, tmp_state):
+        result, _ = self._run(
+            fake_config,
+            "## windows-rpa-client\n## windows-rpa-client-schema\nVERDICT: PASS\n")
+        assert result.status == "ok"
+
+    def test_no_branch_diff_leaves_the_original_prompt(self, fake_config, tmp_state):
+        _seed(status="reviewing")
+        _ticket_dir(fake_config)
+        runner = MagicMock(return_value="done")
+        with patch("core.tasks.tickets.repos_with_branch_diff", return_value=[]), \
+             patch("core.tasks.tickets.run_claude_code", runner), \
+             patch("core.tasks.tickets.log.emit"):
+            result = T.start_reviewing(_ctx(fake_config, "start_reviewing"))
+        assert result.status == "ok"
+        assert "must be named in docs/tri-review.md" not in runner.call_args.args[0]
+
+    def test_a_runner_that_returns_nothing_fails(self, fake_config, tmp_state):
+        _seed(status="reviewing")
+        _ticket_dir(fake_config)
+        with patch("core.tasks.tickets.repos_with_branch_diff", return_value=[]), \
+             patch("core.tasks.tickets.run_claude_code", return_value=None), \
+             patch("core.tasks.tickets.log.emit"):
+            result = T.start_reviewing(_ctx(fake_config, "start_reviewing"))
+        assert result.status == "failed"
+        assert result.reason == "claude returned non-zero or empty"

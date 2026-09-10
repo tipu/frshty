@@ -5,6 +5,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+import core.db as db
 import core.state as state
 import core.log as log
 
@@ -486,6 +487,74 @@ class TestManualTransitionEnqueuesAdvance:
         assert resp.status_code == 200, resp.text
         jobs = self._advance_jobs(key)
         assert len(jobs) == 1, "start-dev must enqueue advance_ticket"
+
+
+class TestSubmitPrScopeGate:
+    """The manual Submit PR path must honour the consensus scope verdict.
+
+    Both auto_pr and auto_merge are false on the aimyable instance, so the
+    three dispatcher-side gates never run there and this endpoint was the only
+    way a branch reached a PR."""
+
+    def _submit(self, client, tmp_path, key, scope, **data):
+        from web import tickets as web_tickets
+        slug = f"{key}-s"
+        (tmp_path / "tickets" / slug / "repo1").mkdir(parents=True)
+        state.save("tickets", {key: {"status": "pr_ready", "slug": slug,
+                                     "branch": "b", "summary": "s",
+                                     "scope_review": {"verdict": "fail",
+                                                      "reason": "votes codex=FAIL"}}})
+        platform = MagicMock()
+        platform.push_branch.return_value = {"ok": True}
+        platform.create_pr.return_value = {"url": "http://pr/1", "id": 1}
+        with patch("features.tickets._scope_review_state", return_value=scope), \
+             patch("web.tickets.make_platform", return_value=platform), \
+             patch("web.tickets.subprocess.run",
+                   return_value=MagicMock(returncode=0, stdout="b\n", stderr="")), \
+             patch("web.tickets._changed_files", return_value=["a.py"]), \
+             patch("web.tickets._is_meaningful_change", return_value=True):
+            resp = web_tickets._submit_pr_sync(
+                key,
+                {"repos": [{"name": "repo1", "title": "t", "description": "d"}],
+                 **data})
+        return resp, platform
+
+    def test_fail_verdict_blocks_the_pr(self, client, tmp_path):
+        resp, platform = self._submit(client, tmp_path, "SCOPE-1", "fail")
+        assert resp.status_code == 409, getattr(resp, "body", resp)
+        body = json.loads(resp.body)
+        assert body["scope_review"] == "fail"
+        assert body["reason"] == "votes codex=FAIL"
+        assert body["report"].endswith("docs/scope-review.md")
+        platform.create_pr.assert_not_called()
+        assert state.load("tickets")["SCOPE-1"]["status"] == "pr_ready"
+
+    def test_pending_verdict_blocks_the_pr(self, client, tmp_path):
+        resp, platform = self._submit(client, tmp_path, "SCOPE-2", "pending")
+        assert resp.status_code == 409, getattr(resp, "body", resp)
+        platform.create_pr.assert_not_called()
+        assert state.load("tickets")["SCOPE-2"]["status"] == "pr_ready"
+
+    def test_force_opens_the_pr_and_records_the_override(self, client, tmp_path):
+        resp, platform = self._submit(client, tmp_path, "SCOPE-3", "fail", force=True)
+        assert getattr(resp, "status_code", 200) == 200, getattr(resp, "body", resp)
+        platform.create_pr.assert_called_once()
+        assert state.load("tickets")["SCOPE-3"]["status"] == "in_review"
+        rows = db.query_all(
+            "SELECT reason FROM ticket_transitions WHERE ticket_key=?"
+            " ORDER BY id DESC LIMIT 1", ("SCOPE-3",))
+        assert "scope review fail overridden" in rows[0]["reason"]
+
+    def test_pass_verdict_opens_the_pr(self, client, tmp_path):
+        resp, platform = self._submit(client, tmp_path, "SCOPE-4", "pass")
+        assert getattr(resp, "status_code", 200) == 200, getattr(resp, "body", resp)
+        platform.create_pr.assert_called_once()
+        assert state.load("tickets")["SCOPE-4"]["status"] == "in_review"
+
+    def test_disabled_verdict_opens_the_pr(self, client, tmp_path):
+        resp, platform = self._submit(client, tmp_path, "SCOPE-5", "disabled")
+        assert getattr(resp, "status_code", 200) == 200, getattr(resp, "body", resp)
+        platform.create_pr.assert_called_once()
 
 
 class TestDiscardTicket:
