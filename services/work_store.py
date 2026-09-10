@@ -1286,15 +1286,16 @@ def _ends_on_a_question(text: str) -> bool:
     only question an agent with no AskUserQuestion tool can ask.
 
     The question does not have to be the very last line. An agent that asks
-    writes the options under it, so the walk steps back over list items, and
-    over the emphasis a bold question ends in. It steps over nothing else: a
-    markdown heading that asks something is not a list item, and stopping there
-    is what keeps "## What changed?" from parking the item again."""
-    lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
-    for line in reversed(lines[-5:]):
-        if line.rstrip(_TRAILING_EMPHASIS).endswith("?"):
+    writes the options under it, so the walk steps back over list items and
+    over the lines they wrap onto, and over the emphasis a bold question ends
+    in. It steps over nothing else: a markdown heading that asks something is
+    neither a list item nor indented, and stopping there is what keeps
+    "## What changed?" from parking the item again."""
+    lines = [line for line in (text or "").splitlines() if line.strip()]
+    for line in reversed(lines[-8:]):
+        if line.strip().rstrip(_TRAILING_EMPHASIS).endswith("?"):
             return True
-        if not _OPTION_LINE_RE.match(line):
+        if not _OPTION_LINE_RE.match(line) and not line[:1].isspace():
             return False
     return False
 
