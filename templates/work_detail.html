@@ -59,6 +59,10 @@
   </div>
   <div class="mt-1">
     <span :class="['badge', badgeCls]">{{ stateLabel }}</span>
+    <span class="ln-pill ml-2" style="cursor:pointer"
+          :class="item.critical ? 'ln-pill-gold' : 'ln-pill-ghost'"
+          :title="item.critical ? 'drop the critical mark' : 'mark this task critical'"
+          @click="act(item.critical ? 'critical_off' : 'critical_on')">{{ item.critical ? '★ Critical' : '☆ Mark critical' }}</span>
     <span class="text-xs text-gray-500 ml-2">#{{ item.id }} · {{ item.scope }} · {{ item.instance_key || 'no instance' }} · continues {{ item.continues_used }}/{{ item.continue_cap }}<span v-if="provider"> · {{ provider }}</span><span v-if="item.contexts"> · {{ item.contexts }}</span></span>
     <span v-if="peer" class="badge b-other" :title="'this task runs on the ' + peer + ' host'">⇄ {{ peer }}</span>
     <a v-if="sourceItem" :href="taskHref(sourceItem.id)" class="text-xs text-blue-400 underline ml-3" :title="sourceItem.objective">follows #{{ sourceItem.id }}</a>
