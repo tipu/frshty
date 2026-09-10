@@ -232,7 +232,7 @@ def _live_item(run: dict | None) -> int | None:
     second work item that could not see the first one's findings. DEV-678 got
     two runs twenty seconds apart and both asked the operator the same
     question. The live run is the thread the second report belongs in."""
-    if not run or run["state"] in work_store.FINISHED_STATES:
+    if not run or run["state"] in work_store.CLOSED_STATES:
         return None
     return int(run["item_id"])
 
@@ -304,7 +304,7 @@ def history(config: dict, key: str, limit: int = HISTORY_LIMIT) -> list[dict]:
             "description": r["description"],
             "created_at": r["created_at"],
             "state": item_state,
-            "running": bool(item_state) and item_state not in work_store.FINISHED_STATES,
+            "running": bool(item_state) and item_state not in work_store.CLOSED_STATES,
             "question": r["pending_question"] or "",
             "outcome": (r["summary"] or r["current_checkpoint"] or "").strip(),
             "updated_at": r["updated_at"] or r["created_at"],
