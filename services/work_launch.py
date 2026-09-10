@@ -1275,26 +1275,41 @@ def gate_commit(session_id: str, command: str, cwd: str = "") -> dict:
         except OSError:
             continue
     found = attribution_match(text)
+    reason = "no agent attribution"
+    rewritten = ""
     if found:
         label, match = found
         fixed = _rewrite_commit(command, cwd)
-        if fixed is not None:
-            work_store.record_gate(
-                session_id, "commit_gate", "stripped",
-                {"command": command[:300], "label": label, "match": match,
-                 "removed": [m for _, m in fixed["removed"]][:10]})
-            return {"decision": "allow", "command": fixed["command"],
-                    "reason": f"agent attribution removed ({label}): {match}"}
-        work_store.record_gate(session_id, "commit_gate", "fail",
-                               {"command": command[:300], "label": label, "match": match})
-        return {"decision": "deny",
-                "reason": _COMMIT_DENY_REASON.format(label=label, match=match)}
+        if fixed is None:
+            work_store.record_gate(session_id, "commit_gate", "fail",
+                                   {"command": command[:300], "label": label,
+                                    "match": match})
+            return {"decision": "deny",
+                    "reason": _COMMIT_DENY_REASON.format(label=label, match=match)}
+        work_store.record_gate(
+            session_id, "commit_gate", "stripped",
+            {"command": command[:300], "label": label, "match": match,
+             "removed": [m for _, m in fixed["removed"]][:10]})
+        # The shared-checkout test still has to run, and it has to run against
+        # the command git will be handed. Returning here would let a corrected
+        # message carry a commit into the shared checkout that the same
+        # command was denied for before the rewrite existed.
+        rewritten = fixed["command"]
+        command = rewritten
+        reason = f"agent attribution removed ({label}): {match}"
+
+    def allow() -> dict:
+        out = {"decision": "allow", "reason": reason}
+        if rewritten:
+            out["command"] = rewritten
+        return out
+
     item = work_worktree.session_item(session_id)
     if item is None or item["worktree_opt_out"]:
-        return {"decision": "allow", "reason": "no agent attribution"}
+        return allow()
     shared = _commit_repos(command, cwd)
     if not shared:
-        return {"decision": "allow", "reason": "no agent attribution"}
+        return allow()
     work_store.record_gate(session_id, "commit_gate", "fail",
                            {"command": command[:300], "shared": shared})
     # Keyed on the repository that was denied. A task can hold a worktree of
