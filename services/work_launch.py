@@ -387,7 +387,7 @@ def _resolve_launch(objective: str, cwd: str, contexts: list[str], agent: str,
 def launch(objective: str, cwd: str = "", contexts: list[str] | None = None,
            slack: bool = False, source_item_id: int | None = None,
            agent: str = "claude", brief: str = "", repo: str = "",
-           no_worktree: bool = False) -> dict:
+           no_worktree: bool = False, critical: bool = False) -> dict:
     plan = _resolve_launch(objective, cwd, contexts or [], agent, source_item_id,
                            repo_pick=repo, no_worktree=no_worktree)
     if "error" in plan:
@@ -399,7 +399,7 @@ def launch(objective: str, cwd: str = "", contexts: list[str] | None = None,
                                  [e["key"] for e in project_entries()])
     item_id = work_store.create_item(objective, instance_key="personal", contexts=labels,
                                      source_item_id=source_item_id, tags=",".join(tags),
-                                     worktree_opt_out=no_worktree)
+                                     worktree_opt_out=no_worktree, critical=critical)
     return _start(item_id, plan, slack, brief, tags)
 
 
@@ -744,7 +744,7 @@ def resume_session(item_id: int) -> bool:
 
 def launch_followup(source_item_id: int, objective: str, cwd: str = "",
                     contexts: list[str] | None = None, slack: bool | None = None,
-                    agent: str = "") -> dict:
+                    agent: str = "", critical: bool | None = None) -> dict:
     """Launch a task that continues a finished task.
 
     A caller that names the projects, the Slack archive, the working directory
@@ -754,9 +754,13 @@ def launch_followup(source_item_id: int, objective: str, cwd: str = "",
     which is the resolved directory, not the project the operator picked. An
     inherited directory that no longer exists is dropped, so a follow-up never
     fails on a directory the caller did not name. Passing an empty context
-    list is a choice, not an omission: it launches with no project context."""
+    list is a choice, not an omission: it launches with no project context.
+
+    The critical mark is inherited the same way. Work that continues critical
+    work is critical, so the follow-up carries the mark unless the caller
+    sends one of its own."""
     source = db.query_one(
-        "SELECT i.id, i.state, i.contexts, i.launch_cwd, "
+        "SELECT i.id, i.state, i.contexts, i.launch_cwd, i.critical, "
         "(SELECT provider FROM work_runs r WHERE r.work_item_id = i.id "
         "ORDER BY r.id DESC LIMIT 1) AS last_provider, "
         "(SELECT cwd FROM work_runs r WHERE r.work_item_id = i.id "
@@ -787,9 +791,12 @@ def launch_followup(source_item_id: int, objective: str, cwd: str = "",
                          or source["launch_cwd"] or "")
         if os.path.isdir(inherited_cwd):
             cwd = inherited_cwd
+    if critical is None:
+        critical = bool(source["critical"])
     return launch(objective, cwd=cwd, contexts=contexts, slack=bool(slack),
                   source_item_id=source_item_id,
-                  agent=agent or source["last_provider"] or "claude")
+                  agent=agent or source["last_provider"] or "claude",
+                  critical=bool(critical))
 
 
 PUSH_GATE_TEST_TIMEOUT = TEST_RUN_TIMEOUT // 3
