@@ -2251,7 +2251,7 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
     for pr in prs:
         pr_key = f"{pr['repo']}/{pr['id']}"
         last_seen = last_comment_ids.get(pr_key, 0)
-        comments = platform.get_pr_comments(pr["repo"], pr["id"])
+        comments = platform.get_pr_comments(pr["repo"], pr["id"]) or []
         pr["unresolved_comments"] = [
             {
                 "url": c.get("html_url", ""),
