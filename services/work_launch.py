@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import core.config as core_config
@@ -845,15 +846,40 @@ def _strip_heredocs(command: str) -> str:
     return "\n".join(kept)
 
 
+def _strip_comments(command: str) -> str:
+    """`command` with every shell comment removed, line by line.
+
+    A comment runs to the end of its own line. shlex has no concept of a line:
+    it drops everything after the first `#` in its whole input, and this module
+    folds newlines into `;` before tokenizing, so one commented line took every
+    command after it with it. `cd /repo # note` followed by `git commit`
+    produced no commit at all and every gate keyed on finding one let it
+    through. Removing the comments here, and only to the end of their line,
+    also keeps the other half right: a `;` or an apostrophe inside a comment is
+    text the shell never reads."""
+    out = []
+    for line in command.split("\n"):
+        quote = ""
+        cut = None
+        for i, char in enumerate(line):
+            if quote:
+                if char == quote:
+                    quote = ""
+            elif char in "'\"":
+                quote = char
+            elif char == "#" and (i == 0 or line[i - 1] in " \t"):
+                cut = i
+                break
+        out.append(line if cut is None else line[:cut])
+    return "\n".join(out)
+
+
 def _tokenize(command: str) -> list[str] | None:
     """Shell tokens of `command`, or None when shlex cannot tokenize it.
 
-    `#` is an ordinary character here. shlex reads it as a comment introducer
-    and drops the rest of its input, and newlines are folded into `;` before
-    tokenizing, so one commented line took every command after it with it:
-    `cd /repo # note` followed by `git commit` produced no commit at all, and
-    every gate keyed on finding one let it through."""
-    lex = shlex.shlex(command.replace("\n", " ; "), posix=True,
+    Comments are removed first, per line, and `#` is an ordinary character
+    after that: see _strip_comments for what shlex does with one otherwise."""
+    lex = shlex.shlex(_strip_comments(command).replace("\n", " ; "), posix=True,
                       punctuation_chars=True)
     lex.commenters = ""
     lex.whitespace_split = True
@@ -981,6 +1007,12 @@ def _gate_tests(repo: Path) -> dict:
 
 
 _DEP_DIRS = ("node_modules", ".venv", "venv", "vendor")
+_POINTS_INTO_DEPTH = 4
+BASELINE_MAX_AGE_SECONDS = 6 * 3600
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 _baseline_guard = threading.Lock()
 _BASELINE_FILE = "frshty-push-gate-baseline.json"
 
@@ -1004,52 +1036,75 @@ def _points_into(directory: Path, repo: Path) -> bool:
     inside its dependency directory. Linking such a directory into the
     baseline checkout would make the baseline import the code under test, so
     the baseline would report whatever HEAD does and the gate would call every
-    regression pre-existing. The check is shallow on purpose: a real
-    dependency tree is enormous, and both shapes that matter sit near its top.
+    regression pre-existing. The walk stops at _POINTS_INTO_DEPTH and never
+    follows a link: a node_modules tree is enormous and can hold a cycle, and
+    both shapes that matter sit near its top.
     """
-    marker = str(repo.resolve())
+    marker, inner = str(repo.resolve()), str(directory.resolve())
+
+    def outside_the_tree(target: str) -> bool:
+        """A path in the repository but not inside the dependency tree itself.
+
+        A dependency tree is full of links into its own directory: pnpm builds
+        one for every package it stores. Those resolve inside the repository
+        and mean nothing. The link that matters points at the repository's own
+        source, which sits outside the tree."""
+        return target.startswith(marker) and not target.startswith(inner)
+
+    root = str(directory)
     try:
-        for entry in directory.rglob("*"):
-            if entry.is_symlink():
-                try:
-                    if str(entry.resolve()).startswith(marker):
+        for here, dirs, files in os.walk(root, followlinks=False):
+            if here[len(root):].count(os.sep) >= _POINTS_INTO_DEPTH:
+                dirs[:] = []
+            for name in list(dirs) + files:
+                entry = Path(here) / name
+                if entry.is_symlink():
+                    try:
+                        if outside_the_tree(str(entry.resolve())):
+                            return True
+                    except OSError:
+                        continue
+                elif entry.suffix in (".pth", ".egg-link"):
+                    try:
+                        body = entry.read_text(errors="replace")
+                    except OSError:
+                        continue
+                    if any(outside_the_tree(line.strip())
+                           for line in body.splitlines() if line.strip()):
                         return True
-                except OSError:
-                    continue
-            elif entry.suffix in (".pth", ".egg-link") and entry.is_file():
-                try:
-                    if marker in entry.read_text(errors="replace"):
-                        return True
-                except OSError:
-                    continue
-            if len(entry.relative_to(directory).parts) > 4:
-                continue
     except OSError:
         return True
     return False
 
 
-def _link_dependencies(repo: Path, into: Path) -> list[str]:
-    """Point a throwaway checkout at the dependencies the real one installed.
+def _link_dependencies(repo: Path, into: Path) -> tuple[list[str], list[str]]:
+    """Point a throwaway checkout at the dependencies the real one installed,
+    and name the ones it could not use.
 
     A fresh worktree carries no node_modules and no virtualenv, so a suite run
     in it would fail for want of its dependencies rather than for anything the
     baseline says. Linking them makes the baseline run the same suite with the
     same dependencies as the push under test. A dependency tree that reaches
-    back into the repository is never linked: see _points_into."""
+    back into the repository is never linked: see _points_into. A refusal is
+    returned rather than swallowed, because a baseline run without the
+    dependencies fails for the wrong reason, and the caller reads a failing
+    baseline as permission to push."""
     linked: list[str] = []
+    refused: list[str] = []
     for name in _DEP_DIRS:
         source, target = repo / name, into / name
         if not source.is_dir() or target.exists():
             continue
         if _points_into(source, repo):
+            refused.append(name)
             continue
         try:
             target.symlink_to(source, target_is_directory=True)
         except OSError:
+            refused.append(name)
             continue
         linked.append(name)
-    return linked
+    return linked, refused
 
 
 def _baseline_store(repo: Path) -> Path | None:
@@ -1089,16 +1144,37 @@ def _read_baseline(store: Path | None, base_sha: str, head_cmd: str) -> dict | N
         return None
     if held.get("base") != base_sha or held.get("head_cmd") != head_cmd:
         return None
+    # The record says what the suite did with the dependencies that were
+    # installed when it ran. Repairing a broken dependency changes that answer
+    # and changes no commit, so the record is given a life rather than being
+    # trusted for as long as the branch exists.
+    try:
+        age = (datetime.now(timezone.utc)
+               - datetime.fromisoformat(held.get("at") or "")).total_seconds()
+    except (TypeError, ValueError):
+        return None
+    if age < 0 or age > BASELINE_MAX_AGE_SECONDS:
+        return None
     return held
 
 
 def _write_baseline(store: Path | None, outcome: dict) -> None:
+    """Replace the cached outcome in one step.
+
+    Written in place, a reader in another process can catch the file half
+    written. That reader would fail to parse it and rerun the baseline, which
+    is safe but wasteful, and os.replace costs nothing."""
     if store is None:
         return
+    scratch = store.with_suffix(f".{os.getpid()}.tmp")
     try:
-        store.write_text(json.dumps(outcome))
+        scratch.write_text(json.dumps(outcome))
+        os.replace(scratch, store)
     except (OSError, TypeError, ValueError):
-        pass
+        try:
+            scratch.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _baseline_tests(repo: Path, base_sha: str, head_cmd: str) -> dict:
@@ -1132,17 +1208,25 @@ def _run_baseline(repo: Path, base_sha: str, head_cmd: str) -> dict:
     a gate, and a gate that raises inside the hook prints nothing, so the push
     it could not judge would go through unexamined."""
     outcome = {"result": "unresolved", "cmd": "", "note": "", "base": base_sha,
-               "head_cmd": head_cmd}
-    holder = tempfile.mkdtemp(prefix="frshty-gate-baseline-")
-    tree = Path(holder) / "tree"
+               "head_cmd": head_cmd, "at": _now_iso()}
+    holder, tree = "", Path("")
     try:
+        # Inside the guard. mkdtemp raises when the temporary filesystem is
+        # full, and an exception here reaches the hook, which prints nothing,
+        # so the push the gate could not judge would go through unexamined.
+        holder = tempfile.mkdtemp(prefix="frshty-gate-baseline-")
+        tree = Path(holder) / "tree"
         try:
             git_util.run_git(repo, ["worktree", "add", "--detach", "--force",
                                     str(tree), base_sha], timeout=300)
         except (git_util.GitCommandError, subprocess.TimeoutExpired, OSError) as e:
             outcome["note"] = f"could not check out the merge base: {type(e).__name__}: {e}"[:300]
             return outcome
-        linked = _link_dependencies(repo, tree)
+        linked, refused = _link_dependencies(repo, tree)
+        if refused:
+            outcome["note"] = ("the baseline cannot use these dependencies, so it "
+                               "would fail for the wrong reason: " + ", ".join(refused))
+            return outcome
         runner = _detect_runner(tree)
         if runner is None or runner[0][0] == _NO_LOCAL_PY_VENV_SENTINEL:
             outcome["note"] = "the merge base resolves no test runner"
@@ -1155,6 +1239,7 @@ def _run_baseline(repo: Path, base_sha: str, head_cmd: str) -> dict:
         outcome = {
             **_run_repo_tests(tree, cmd, env, timeout=PUSH_GATE_TEST_TIMEOUT),
             "cmd": baseline_cmd, "base": base_sha, "head_cmd": head_cmd,
+            "at": _now_iso(),
             "note": "dependencies linked: " + (", ".join(linked) or "none"),
         }
         return outcome
@@ -1165,12 +1250,14 @@ def _run_baseline(repo: Path, base_sha: str, head_cmd: str) -> dict:
         # Unconditional. `worktree add` can register the checkout and then time
         # out, and removing only the directory would leave the registration
         # behind for every later `git worktree list` to report.
-        for args in (["worktree", "remove", "--force", str(tree)], ["worktree", "prune"]):
-            try:
-                git_util.run_git(repo, args, timeout=120)
-            except (git_util.GitCommandError, subprocess.TimeoutExpired, OSError):
-                pass
-        shutil.rmtree(holder, ignore_errors=True)
+        if holder:
+            for args in (["worktree", "remove", "--force", str(tree)],
+                         ["worktree", "prune"]):
+                try:
+                    git_util.run_git(repo, args, timeout=120)
+                except (git_util.GitCommandError, subprocess.TimeoutExpired, OSError):
+                    pass
+            shutil.rmtree(holder, ignore_errors=True)
 
 
 def _deny_reason(stage: str, detail: str) -> str:
@@ -1281,29 +1368,56 @@ def _command_tokens(command: str) -> list[str] | None:
     return _tokenize(_strip_heredocs(command))
 
 
-_MESSAGE_FLAGS = ("-m", "--message", "-F", "--file")
+_LONG_MESSAGE_FLAGS = ("--message", "--file")
+
+
+def _takes_a_message(token: str) -> bool:
+    """Whether the next token is the message this flag introduces.
+
+    git accepts the short flags bundled, so -m, -am and -aem all take the
+    message next. A long flag that carries its value after an = introduces
+    nothing."""
+    if token in _LONG_MESSAGE_FLAGS or token in ("-F",):
+        return True
+    return (token.startswith("-") and not token.startswith("--")
+            and "=" not in token and token.endswith(("m", "F")))
+
+
+def _carries_a_message(token: str) -> bool:
+    """Whether this single token is itself a message argument."""
+    return token.startswith(("-m", "--message=", "-F", "--file="))
+
+
+def _substitutes(text: str) -> bool:
+    """Whether this argument runs a command to build itself."""
+    return "$(" in text or "`" in text
 
 
 def _only_the_message_changed(before: list[str], after: list[str]) -> bool:
-    """Whether a rewrite touched nothing but commit message arguments.
+    """Whether a rewrite touched nothing but commit message text.
 
     Removing a whole line removes whatever that line ran. `cd /other/repo #
     Generated with Claude` reads as attribution and is a `cd`, and dropping it
     sends the commit to a different repository while both a shlex parse and a
-    `git commit` parse still succeed. So the tokens outside the heredocs have
-    to line up one for one, and every token that differs has to be the value of
-    a message flag."""
+    `git commit` parse still succeed. So the tokens have to line up one for
+    one, and every token that differs has to be a commit message.
+
+    A message argument can still run commands: `-m "$(git add b; printf fix)"`
+    is a message and a command substitution, and dropping a line inside it
+    changes what gets committed. So a differing argument that substitutes is
+    accepted only when nothing outside its heredoc bodies moved, which is the
+    `-m "$(cat <<'MSG' ... MSG)"` the agents actually write."""
     if len(before) != len(after):
         return False
     for i, (was, now) in enumerate(zip(before, after)):
         if was == now:
             continue
-        if i and before[i - 1] in _MESSAGE_FLAGS:
-            continue
-        if any(was.startswith(f) and now.startswith(f)
-               for f in ("-m", "--message=", "-F", "--file=")):
-            continue
-        return False
+        if not (_carries_a_message(was) and _carries_a_message(now)
+                or (i and _takes_a_message(before[i - 1])
+                    and before[i - 1] == after[i - 1])):
+            return False
+        if _substitutes(was) and _strip_heredocs(was) != _strip_heredocs(now):
+            return False
     return True
 
 
