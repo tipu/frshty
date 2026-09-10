@@ -3,6 +3,7 @@ import os
 import subprocess
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 
 import core.db as db
 import core.llm as llm
@@ -12,7 +13,18 @@ from services import work_artifacts, work_launch, work_store, work_worktree
 SCAN_INTERVAL = 60
 DEBRIEF_TIMEOUT = 300
 DIALOGUE_CAP = 150000
+# The content-generation budget: how many times a debrief may fail on its own
+# output before the item is left alone, and for how long. It is rolling, so an
+# item that failed for a reason that has since gone away is tried again the
+# next day instead of staying empty for ever. HARD_FAILED_ATTEMPTS stops an
+# item that can never be debriefed from spending that allowance for ever.
 MAX_FAILED_ATTEMPTS = 3
+FAILED_WINDOW_HOURS = 24
+HARD_FAILED_ATTEMPTS = 12
+# A quota outage and a missing transcript are not failures of the summary. They
+# postpone it, and they never spend the budget above.
+POSTPONE_SECONDS = 1800
+MAX_POSTPONED_ATTEMPTS = 8
 SLACK_INT_DIR = os.path.expanduser("~/Documents/dev/slack_int")
 BROADCAST_MARKERS = ("<!channel>", "<!here>", "@channel", "@here")
 
@@ -25,7 +37,7 @@ Answer with ONE json object, nothing else:
 {
   "summary": "<the outcome. terse, plain, short, informative. 3-6 lines separated by \\n. what was done, what changed, concrete links (PR URLs, file paths), what is still open. no filler, no headers, no markdown>",
   "followups": [
-    {"kind": "work_item", "draft": "<outcome objective for a new agent run>"},
+    {"kind": "work_item", "required": true, "draft": "<outcome objective for a new agent run>"},
     {"kind": "slack_message", "workspace": "<slack workspace key>", "recipient": "<person name or email>", "draft": "<message draft>"}
   ]
 }
@@ -34,6 +46,12 @@ Rules for followups:
 - Prefer kind work_item: when the next step is work an agent can do itself (resolve merge
   conflicts, fix CI, implement a follow-up change, open a PR), propose a work_item whose
   draft is the outcome objective for a new run.
+- required is true only when the run left authorised work of THIS objective unfinished:
+  a change it made but did not commit, push, merge or release, or a step it named and did
+  not take. Everything the run could have done and did not is required. Everything beyond
+  the objective — a new feature, an improvement it noticed, an optional expansion — is
+  required false. A required work_item runs by itself; the operator sends every other one.
+  A slack_message is never required: only the operator sends a message.
 - Propose slack_message only when a specific person waits on this outcome and only a human
   message moves it (a reviewer to ping, a teammate to unblock). Put the concrete link
   (PR URL) in the draft. Write it short and direct, verdict first, no greetings, no sign-off.
@@ -84,6 +102,7 @@ def _parse_debrief(raw: str) -> dict:
             "workspace": (f.get("workspace") or "").strip()[:80],
             "recipient": (f.get("recipient") or "").strip()[:200],
             "draft": draft[:2000],
+            "required": bool(f.get("required")) and kind == "work_item",
         })
     return {"summary": data["summary"].strip()[:2000], "followups": followups[:3]}
 
@@ -95,6 +114,48 @@ def _record_debrief_event(item_id: int, kind: str, payload: dict) -> None:
             "VALUES (?, ?, ?, ?)",
             (item_id, kind, db.dump_json(payload), work_store._now()),
         )
+
+
+def _postpone(item_id: int, reason: str, seconds: int = POSTPONE_SECONDS) -> dict:
+    """Put the debrief off without spending the content-generation budget.
+
+    A usage-limit outage is not a bad summary. 92 debriefs failed on one, each
+    spending one of the three lifetime attempts, and 35 items ended with no
+    summary that will ever be written. The reason for that postponement is
+    outside the item, so it must not count against the item. The postponement
+    is still bounded: an item that cannot be debriefed at all is skipped after
+    MAX_POSTPONED_ATTEMPTS so it stops being retried for ever."""
+    held = db.query_all(
+        "SELECT payload FROM work_events WHERE work_item_id = ? "
+        "AND kind = 'debrief_postponed'", (item_id,))
+    if len(held) + 1 >= MAX_POSTPONED_ATTEMPTS:
+        _record_debrief_event(item_id, "debrief_skipped",
+                              {"reason": reason, "postponed": len(held) + 1})
+        return {"error": f"{reason}; debrief skipped after {len(held) + 1} postponements"}
+    retry_after = (datetime.now(timezone.utc)
+                   + timedelta(seconds=max(1, seconds))).isoformat()
+    _record_debrief_event(item_id, "debrief_postponed",
+                          {"reason": reason, "retry_after": retry_after})
+    return {"error": f"{reason}; debrief postponed until {retry_after}"}
+
+
+def _run_revision(item_id: int) -> dict:
+    """What the newest run of an item looks like right now.
+
+    A summary is keyed to this. Any past successful debrief used to settle an
+    item for good, so work done after it — an operator reply, a reopen, a new
+    run — left the board showing a summary of the session before it."""
+    run = db.query_one(
+        "SELECT id, transcript_path, provider, cwd, started_at, agent_session_id "
+        "FROM work_runs WHERE work_item_id = ? ORDER BY id DESC LIMIT 1", (item_id,))
+    if not run:
+        return {"run_id": 0, "transcript_size": 0}
+    path = work_store.resolve_transcript_path(run)
+    try:
+        size = os.path.getsize(path) if path else 0
+    except OSError:
+        size = 0
+    return {"run_id": int(run["id"]), "transcript_size": size}
 
 
 _debrief_locks: dict[int, threading.Lock] = {}
@@ -132,12 +193,14 @@ def _run_debrief_locked(item_id: int) -> dict:
             transcript_path = candidate
             break
     if not transcript_path:
-        _record_debrief_event(item_id, "debrief_failed", {"error": "no transcript"})
-        return {"error": "no transcript"}
+        return _postpone(item_id, "no transcript")
+    # Sampled before the dialogue is rendered. Taken afterwards, a message
+    # written between the two reads would be stamped onto a summary that never
+    # saw it, and the item would count as current for ever.
+    revision = _run_revision(item_id)
     dialogue = _render_dialogue(transcript_path)
     if not dialogue.strip():
-        _record_debrief_event(item_id, "debrief_failed", {"error": "empty dialogue"})
-        return {"error": "empty dialogue"}
+        return _postpone(item_id, "empty dialogue")
     header = (
         f"TRUSTED ITEM FIELDS\n"
         f"objective: {item['objective']}\n"
@@ -151,7 +214,7 @@ def _run_debrief_locked(item_id: int) -> dict:
         result = _parse_debrief(raw)
     except Exception as e:
         if llm.consume_guard_blocked():
-            return {"error": "llm guard active; debrief postponed"}
+            return _postpone(item_id, "llm guard active")
         _record_debrief_event(item_id, "debrief_failed",
                               {"error": f"{type(e).__name__}: {e}"[:300]})
         return {"error": f"{type(e).__name__}: {e}"}
@@ -165,13 +228,87 @@ def _run_debrief_locked(item_id: int) -> dict:
         for f in result["followups"]:
             c.execute(
                 "INSERT INTO work_followups(work_item_id, kind, workspace, recipient, "
-                "draft, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (item_id, f["kind"], f["workspace"], f["recipient"], f["draft"], now, now),
+                "draft, required, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (item_id, f["kind"], f["workspace"], f["recipient"], f["draft"],
+                 1 if f["required"] else 0, now, now),
             )
     _record_debrief_event(item_id, "debrief_done",
-                          {"followups": len(result["followups"])})
+                          {"followups": len(result["followups"]), **revision})
     return {"id": item_id, "summary": result["summary"],
             "followups": len(result["followups"])}
+
+
+_DEBRIEF_EVENT_KINDS_SQL = ("('debrief_done', 'debrief_failed', "
+                            "'debrief_skipped', 'debrief_postponed')")
+
+
+def _debrief_events(item_id: int | None = None) -> dict[int, dict]:
+    """What every item's debrief history amounts to, keyed by item.
+
+    Each entry holds the newest debrief_done payload, whether the item was
+    skipped for good, the failures inside the rolling window, the failures
+    over the item's whole life, and the time a postponement asked to be
+    retried at. `item_id` narrows the read to one item, for a caller that
+    wants one answer rather than the scan's whole picture."""
+    window = (datetime.now(timezone.utc)
+              - timedelta(hours=FAILED_WINDOW_HOURS)).isoformat()
+    where = f"kind IN {_DEBRIEF_EVENT_KINDS_SQL}"
+    params: tuple = ()
+    if item_id is not None:
+        where += " AND work_item_id = ?"
+        params = (item_id,)
+    state: dict[int, dict] = {}
+    for e in db.query_all(
+            "SELECT work_item_id, kind, payload, created_at FROM work_events "
+            f"WHERE {where} ORDER BY id", params):
+        row = state.setdefault(e["work_item_id"], {
+            "done": None, "skipped": False, "recent_failures": 0,
+            "failures": 0, "retry_after": ""})
+        if e["kind"] == "debrief_done":
+            row["done"] = db.load_json(e, "payload")
+            row["recent_failures"] = 0
+            row["retry_after"] = ""
+        elif e["kind"] == "debrief_skipped":
+            row["skipped"] = True
+        elif e["kind"] == "debrief_failed":
+            row["failures"] += 1
+            if e["created_at"] >= window:
+                row["recent_failures"] += 1
+        else:
+            row["retry_after"] = db.load_json(e, "payload").get("retry_after", "")
+    return state
+
+
+def debrief_status(item_id: int) -> str:
+    """Where the summary of one item stands: "", "retrying" or "exhausted".
+
+    The detail page said "No summary yet" for an item whose debrief had failed
+    three times and would never run again, and for one that is about to run.
+    They are different states and the operator has to be able to tell them
+    apart."""
+    row = _debrief_events(item_id).get(item_id)
+    if not row:
+        return ""
+    if row["skipped"] or row["failures"] >= HARD_FAILED_ATTEMPTS:
+        return "exhausted"
+    if row["recent_failures"] >= MAX_FAILED_ATTEMPTS or row["retry_after"]:
+        return "retrying"
+    return ""
+
+
+def _debrief_is_current(payload: dict | None, item_id: int) -> bool:
+    """Whether a recorded debrief still describes the newest run of an item.
+
+    A payload from before this became a question carries no run id, and is
+    taken as current: rewriting every summary on the board is not what keying
+    the summary to the run is for."""
+    if payload is None:
+        return False
+    if "run_id" not in payload:
+        return True
+    now = _run_revision(item_id)
+    return (payload.get("run_id") == now["run_id"]
+            and payload.get("transcript_size") == now["transcript_size"])
 
 
 def _pending_done_items() -> list:
@@ -185,17 +322,24 @@ def _pending_done_items() -> list:
         f"SELECT id FROM work_items WHERE state IN {work_store.FINISHED_STATES_SQL} "
         "AND EXISTS(SELECT 1 FROM work_runs r WHERE r.work_item_id = work_items.id) "
         "ORDER BY id")
-    events = db.query_all(
-        "SELECT work_item_id, kind FROM work_events "
-        "WHERE kind IN ('debrief_done', 'debrief_failed', 'debrief_skipped')")
-    settled = {e["work_item_id"] for e in events if e["kind"] != "debrief_failed"}
-    failed_counts: dict[int, int] = {}
-    for e in events:
-        if e["kind"] == "debrief_failed":
-            failed_counts[e["work_item_id"]] = failed_counts.get(e["work_item_id"], 0) + 1
-    return [r["id"] for r in done
-            if r["id"] not in settled
-            and failed_counts.get(r["id"], 0) < MAX_FAILED_ATTEMPTS]
+    state = _debrief_events()
+    now = work_store._now()
+    pending = []
+    for r in done:
+        row = state.get(r["id"])
+        if row is None:
+            pending.append(r["id"])
+            continue
+        if row["skipped"] or row["failures"] >= HARD_FAILED_ATTEMPTS:
+            continue
+        if row["recent_failures"] >= MAX_FAILED_ATTEMPTS:
+            continue
+        if row["retry_after"] and row["retry_after"] > now:
+            continue
+        if _debrief_is_current(row["done"], r["id"]):
+            continue
+        pending.append(r["id"])
+    return pending
 
 
 def _scan_loop():
@@ -225,6 +369,17 @@ def _scan_loop():
         except Exception as e:
             log.emit("work_worktree_gc_error", f"{type(e).__name__}: {e}")
         try:
+            work_store.sweep_progress()
+        except Exception as e:
+            log.emit("work_progress_sweep_error", f"{type(e).__name__}: {e}")
+        try:
+            for item_id in work_store.auto_archive_quiet_items():
+                log.emit("work_auto_archived",
+                         f"work item {item_id}: acknowledged and archived by itself; "
+                         "it asked nothing and failed no gate")
+        except Exception as e:
+            log.emit("work_auto_archive_error", f"{type(e).__name__}: {e}")
+        try:
             for act in work_store.sweep_stale_items():
                 if act["action"] != "refreshed":
                     log.emit("work_stale_sweep",
@@ -239,6 +394,13 @@ def _scan_loop():
                          + (result.get("error") or f"{result.get('followups')} followups"))
         except Exception as e:
             log.emit("work_debrief_error", f"{type(e).__name__}: {e}")
+        try:
+            for done in dispatch_required_followups():
+                log.emit("work_followup_auto",
+                         f"work item {done['item_id']}: ran the required "
+                         f"follow-up by itself; {done['detail']}")
+        except Exception as e:
+            log.emit("work_followup_auto_error", f"{type(e).__name__}: {e}")
 
 
 def start_scanner() -> None:
@@ -295,7 +457,8 @@ def _deliver_slack(row) -> str:
             f"ts={result.get('ts', '')}")
 
 
-def _deliver_work_item(row, contexts: list[str], slack: bool, agent: str) -> str:
+def _deliver_work_item(row, contexts: list[str] | None, slack: bool | None,
+                       agent: str) -> str:
     result = work_launch.launch_followup(row["work_item_id"], row["draft"],
                                          contexts=contexts, slack=slack, agent=agent)
     if "error" in result:
@@ -304,8 +467,13 @@ def _deliver_work_item(row, contexts: list[str], slack: bool, agent: str) -> str
 
 
 def send_followup(followup_id: int, text: str | None = None,
-                  contexts: list[str] | None = None, slack: bool = False,
+                  contexts: list[str] | None = None, slack: bool | None = False,
                   agent: str = "claude") -> dict:
+    """Act on one follow-up draft.
+
+    `contexts` None, `slack` None and `agent` "" mean inherit from the source
+    task rather than launch with nothing, which is what launch_followup reads
+    an omission as."""
     now = work_store._now()
     with db.tx() as c:
         row = c.execute("SELECT * FROM work_followups WHERE id = ?", (followup_id,)).fetchone()
@@ -322,8 +490,10 @@ def send_followup(followup_id: int, text: str | None = None,
     row = db.query_one("SELECT * FROM work_followups WHERE id = ?", (followup_id,))
     try:
         if row["kind"] == "work_item":
+            picked = (None if contexts is None
+                      else [c for c in contexts if isinstance(c, str)])
             detail = _deliver_work_item(
-                row, [c for c in (contexts or []) if isinstance(c, str)], bool(slack), agent)
+                row, picked, None if slack is None else bool(slack), agent)
         else:
             detail = _deliver_slack(row)
         status = "sent"
@@ -343,6 +513,67 @@ def send_followup(followup_id: int, text: str | None = None,
     if status == "failed":
         return {"error": detail}
     return {"id": followup_id, "status": status, "detail": detail}
+
+
+AUTO_FOLLOWUP_DEPTH = 2
+
+
+def _auto_chain_depth(item_id: int) -> int:
+    """How many tasks in a row the board launched by itself before this one.
+
+    An unfinished delivery step is worth one automatic run. A chain of them
+    is a loop, so the chain is counted and stopped."""
+    def source_of(target):
+        row = db.query_one("SELECT source_item_id FROM work_items WHERE id = ?", (target,))
+        return row["source_item_id"] if row else None
+
+    depth, seen = 0, set()
+    current = source_of(item_id)
+    while current and current not in seen:
+        seen.add(current)
+        launched = db.query_one(
+            "SELECT 1 AS present FROM work_events WHERE work_item_id = ? "
+            "AND kind = 'followup_auto_sent' LIMIT 1", (current,))
+        if not launched:
+            break
+        depth += 1
+        current = source_of(current)
+    return depth
+
+
+def dispatch_required_followups() -> list[dict]:
+    """Run the follow-ups that finish work this task was already authorised to
+    do, and leave every other draft to the operator.
+
+    309 follow-up drafts were open at review time and most are optional
+    expansion beyond a finished analysis. The ones that matter are the two
+    that told a later agent to push branches an earlier agent had already
+    verified: authorised work the run left undone. Only a work_item follow-up
+    the debrief marked required runs by itself. A slack_message never does,
+    because sending one is an outward communication."""
+    rows = db.query_all(
+        "SELECT f.id, f.work_item_id FROM work_followups f "
+        "JOIN work_items i ON i.id = f.work_item_id "
+        "WHERE f.status = 'draft' AND f.required = 1 AND f.kind = 'work_item' "
+        f"AND i.state IN {work_store.FINISHED_STATES_SQL} "
+        "AND COALESCE(i.pending_question, '') = '' ORDER BY f.id")
+    sent = []
+    for row in rows:
+        if _auto_chain_depth(row["work_item_id"]) >= AUTO_FOLLOWUP_DEPTH:
+            continue
+        # No context arguments: send_followup passes them straight to
+        # launch_followup, where omitting them is what makes the follow-up
+        # inherit the source task's projects, Slack archive, directory and
+        # agent. Naming them would launch a codex task's follow-up as claude in
+        # the default workspace.
+        result = send_followup(row["id"], contexts=None, slack=None, agent="")
+        if "error" in result:
+            continue
+        _record_debrief_event(row["work_item_id"], "followup_auto_sent",
+                              {"followup_id": row["id"], "detail": result["detail"]})
+        sent.append({"id": row["id"], "item_id": row["work_item_id"],
+                     "detail": result["detail"]})
+    return sent
 
 
 def dismiss_followup(followup_id: int) -> dict:

@@ -281,6 +281,20 @@ class TestCommitGateRepository:
         assert out["need_worktree"] == str(repo)
         assert "shared checkout" in out["reason"]
 
+    def test_a_stripped_message_does_not_carry_a_commit_into_the_shared_checkout(self, tmp_path):
+        """The gate corrects an attributed message rather than denying it. That
+        correction must not become a way past the shared-checkout rule: the
+        rewritten command is what git would run, so it is what gets tested."""
+        repo = make_repo(tmp_path)
+        item_id = work_store.create_item("r6 attributed commit")
+        sid = _run(item_id)
+        command = ('git commit -m "$(cat <<\'MSG\'\nfix: thing\n\n'
+                   'Claude-Session: https://claude.ai/code/session_01C\nMSG\n)"')
+        out = work_launch.gate_commit(sid, command, str(repo))
+        assert out["decision"] == "deny"
+        assert out["need_worktree"] == str(repo)
+        assert "shared checkout" in out["reason"]
+
     def test_allows_a_commit_inside_a_worktree(self, tmp_path):
         repo = make_repo(tmp_path)
         wt = tmp_path / "linked"

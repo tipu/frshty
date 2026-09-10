@@ -1,0 +1,1 @@
+ALTER TABLE work_followups ADD COLUMN required INTEGER NOT NULL DEFAULT 0;

@@ -69,12 +69,17 @@ class TestRunDebrief:
         db.execute("UPDATE work_items SET state = 'needs_ack' WHERE id = ?", (item_id,))
         assert item_id in work_debrief._pending_done_items()
 
-    def test_no_transcript_fails_once(self):
+    def test_no_transcript_postpones_without_spending_the_budget(self):
+        """A transcript that is not there yet is not a bad summary, so it must
+        not spend one of the three attempts the content itself gets."""
         item_id = _done_item("no transcript")
         out = work_debrief.run_debrief(item_id)
-        assert out["error"] == "no transcript"
-        assert item_id in work_debrief._pending_done_items()
-        for _ in range(work_debrief.MAX_FAILED_ATTEMPTS - 1):
+        assert "no transcript" in out["error"]
+        assert db.query_all(
+            "SELECT id FROM work_events WHERE work_item_id = ? AND kind = 'debrief_failed'",
+            (item_id,)) == []
+        assert item_id not in work_debrief._pending_done_items(), "it waits for its retry time"
+        for _ in range(work_debrief.MAX_FAILED_ATTEMPTS):
             work_debrief._record_debrief_event(item_id, "debrief_failed", {})
         assert item_id not in work_debrief._pending_done_items()
 
@@ -133,6 +138,9 @@ class TestSend:
         assert row["status"] == "failed"
 
     def test_work_item_kind_launches(self, monkeypatch):
+        """A caller that names no projects inherits the source task's, because
+        that is what launch_followup reads an omitted list as. Passing an empty
+        list instead would launch every automatic follow-up with no project."""
         fid = self._draft(kind="work_item")
         launched = MagicMock(return_value={"item_id": 42})
         monkeypatch.setattr(work_debrief.work_launch, "launch_followup", launched)
@@ -141,8 +149,19 @@ class TestSend:
         assert "#42" in out["detail"]
         item_id = db.query_one("SELECT work_item_id FROM work_followups WHERE id = ?",
                                (fid,))["work_item_id"]
-        launched.assert_called_once_with(item_id, "hi", contexts=[], slack=False,
+        launched.assert_called_once_with(item_id, "hi", contexts=None, slack=False,
                                         agent="claude")
+
+    def test_work_item_kind_inherits_everything_when_nothing_is_named(self, monkeypatch):
+        fid = self._draft(kind="work_item")
+        launched = MagicMock(return_value={"item_id": 44})
+        monkeypatch.setattr(work_debrief.work_launch, "launch_followup", launched)
+        assert work_debrief.send_followup(
+            fid, contexts=None, slack=None, agent="")["status"] == "sent"
+        item_id = db.query_one("SELECT work_item_id FROM work_followups WHERE id = ?",
+                               (fid,))["work_item_id"]
+        launched.assert_called_once_with(item_id, "hi", contexts=None, slack=None,
+                                        agent="")
 
     def test_work_item_kind_passes_contexts(self, monkeypatch):
         fid = self._draft(kind="work_item")

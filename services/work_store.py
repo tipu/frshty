@@ -30,11 +30,29 @@ TMUX_SOCKET = os.path.expanduser("~/.frshty-tmux")
 AGENTS = ("claude", "codex")
 DONE_MARKER = "WORK_DONE"
 ARTIFACT_MARKER = "ARTIFACT:"
+PROGRESS_MARKER = "PROGRESS:"
 _IMAGE_ID_RE = re.compile(r"^(\d+)-(\d+)$")
 _IMAGE_MEDIA_RE = re.compile(r"^image/[a-z0-9.+-]+$")
 _MAX_IMAGE_BASE64 = 64 * 1024 * 1024
+DELIVERY_RULE = (
+    "Delivery is part of the objective, never other work. If the change is "
+    "correct and its tests pass, commit it, push it, open the pull request, "
+    "merge it when it is mergeable, and run whatever this repository does to "
+    "release it. A change you left uncommitted, unpushed or unreleased is not "
+    "done. Scope discipline applies to new features and to code you were not "
+    "asked to touch. It never applies to shipping the thing you just built. "
+    "Do not end with an offer. If the next step is inside the objective, do "
+    "it. If it is outside, file it as a follow-up and say you filed it. "
+    "\"Say the word and I will\" is not a checkpoint. "
+)
+PROGRESS_RULE = (
+    "Every time you finish a phase, and at least every ten minutes of tool "
+    f"work, print one line starting {PROGRESS_MARKER} that names what you "
+    "just established and what you are doing next. "
+)
 CONTINUE_PROMPT = (
-    "Continue toward the objective. When you hit a decision point, decide "
+    "Continue toward the objective. " + DELIVERY_RULE + PROGRESS_RULE +
+    "When you hit a decision point, decide "
     "yourself by default: pick the most correct, cleanest, simplest option and "
     "keep going. Ask the operator only when you truly cannot decide — the "
     "choice is irreversible or destructive, or it depends on operator intent "
@@ -497,23 +515,71 @@ def record_agent_session(session_id: str, agent_session_id: str) -> bool:
         return bool(cur.rowcount)
 
 
-def record_question(session_id: str, tool_input: dict) -> bool:
+def _question_keys(questions: list) -> set[str]:
+    """One comparable key per question: its header, or its text when it has
+    no header."""
+    keys = set()
+    for q in questions:
+        if not isinstance(q, dict):
+            continue
+        key = " ".join(((q.get("header") or q.get("question") or "").strip()).split())
+        if key:
+            keys.add(key.lower())
+    return keys
+
+
+def is_duplicate_question(pending: str, questions: list) -> bool:
+    """Whether every question in this ask is already unanswered on the board.
+
+    Item 93 asked the same four questions six times over two days and was
+    answered once. A second ask reaches the operator as a new pending
+    question, replaces the first one, and tells him nothing he has not already
+    been shown. Keys are compared by header, because the header is what the
+    board renders and what a repeat keeps identical while it rewords the
+    question."""
+    if not pending or not questions:
+        return False
+    try:
+        held = json.loads(pending)
+    except ValueError:
+        return False
+    held_questions = held.get("questions") if isinstance(held, dict) else None
+    if not isinstance(held_questions, list):
+        return False
+    asked = _question_keys(questions)
+    return bool(asked) and asked <= _question_keys(held_questions)
+
+
+def record_question(session_id: str, tool_input: dict) -> str:
+    """Record one AskUserQuestion against the item, and say what happened.
+
+    Returns "recorded" when the question is now on the board, "duplicate" when
+    it repeats one already unanswered there, and "" when this session owns no
+    live work item."""
     questions = (tool_input or {}).get("questions") or []
     questions = [q for q in questions if isinstance(q, dict) and (q.get("question") or "").strip()]
     if not questions:
-        return False
+        return ""
     now = _now()
     with db.tx() as c:
         run = c.execute(
             "SELECT id, work_item_id FROM work_runs WHERE session_id = ?", (session_id,)
         ).fetchone()
         if not run:
-            return False
+            return ""
         item = c.execute(
-            "SELECT state FROM work_items WHERE id = ?", (run["work_item_id"],)
+            "SELECT state, pending_question FROM work_items WHERE id = ?",
+            (run["work_item_id"],)
         ).fetchone()
         if not item or item["state"] in FINISHED_STATES:
-            return False
+            return ""
+        if is_duplicate_question(item["pending_question"], questions):
+            c.execute(
+                "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+                "VALUES (?, ?, 'question_dropped', ?, ?)",
+                (run["work_item_id"], run["id"], db.dump_json({"questions": questions}), now),
+            )
+            return "duplicate"
         first = (questions[0].get("question") or "").strip()
         c.execute(
             "UPDATE work_items SET state = 'needs_you', stop_reason = ?, "
@@ -525,7 +591,7 @@ def record_question(session_id: str, tool_input: dict) -> bool:
             "VALUES (?, ?, 'question_asked', ?, ?)",
             (run["work_item_id"], run["id"], db.dump_json({"questions": questions}), now),
         )
-    return True
+    return "recorded"
 
 
 def record_gate(session_id: str, kind: str, verdict: str, payload: dict) -> bool:
@@ -574,7 +640,7 @@ def apply_action(item_id: int, action: str, until: str | None = None) -> dict:
         elif action == "reopen":
             c.execute(
                 "UPDATE work_items SET state = 'needs_you', snoozed_until = NULL, "
-                "archived_at = NULL, updated_at = ? WHERE id = ?",
+                "archived_at = NULL, continues_used = 0, updated_at = ? WHERE id = ?",
                 (now, item_id),
             )
         elif action == "ack":
@@ -909,6 +975,61 @@ def record_artifacts(session_id: str, transcript_path: str,
     return added
 
 
+def record_progress(session_id: str, transcript_path: str,
+                    texts: list[str] | None = None) -> str:
+    """Publish the newest PROGRESS: line of a run as the item's checkpoint.
+
+    The board shows nothing between launch and finish, so the operator asks:
+    26 of 75 side questions are status polls. The median run is 31 minutes and
+    the 90th percentile is 16 hours, and the only progress signal until now was
+    stop_reason, which is written when the agent stops. Returns the line it
+    published, or "" when there is none or it is already the checkpoint."""
+    source = _assistant_texts(transcript_path) if texts is None else texts
+    newest = ""
+    for text in source:
+        for line in text.splitlines():
+            idx = line.find(PROGRESS_MARKER)
+            if idx >= 0:
+                newest = line[idx + len(PROGRESS_MARKER):].strip()[:300]
+    if not newest:
+        return ""
+    now = _now()
+    with db.tx() as c:
+        run = c.execute(
+            "SELECT id, work_item_id FROM work_runs WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        if not run:
+            return ""
+        item = c.execute("SELECT current_checkpoint FROM work_items WHERE id = ?",
+                         (run["work_item_id"],)).fetchone()
+        if not item or item["current_checkpoint"] == newest:
+            return ""
+        c.execute("UPDATE work_items SET current_checkpoint = ? WHERE id = ?",
+                  (newest, run["work_item_id"]))
+        c.execute(
+            "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+            "VALUES (?, ?, 'progress', ?, ?)",
+            (run["work_item_id"], run["id"], db.dump_json({"text": newest}), now),
+        )
+    return newest
+
+
+def sweep_progress() -> list[dict]:
+    """Refresh the checkpoint of every running item from its transcript."""
+    rows = db.query_all(
+        "SELECT i.id AS item_id, r.id, r.session_id, r.transcript_path, r.provider, "
+        "r.cwd, r.started_at, r.agent_session_id FROM work_items i "
+        "JOIN work_runs r ON r.id = (SELECT r2.id FROM work_runs r2 "
+        "WHERE r2.work_item_id = i.id ORDER BY r2.id DESC LIMIT 1) "
+        "WHERE i.state = 'agent_working'")
+    moved = []
+    for row in rows:
+        line = record_progress(row["session_id"], resolve_transcript_path(row))
+        if line:
+            moved.append({"id": row["item_id"], "progress": line})
+    return moved
+
+
 def _salient_arg(name: str, inp: dict) -> str:
     if not isinstance(inp, dict):
         return ""
@@ -1139,10 +1260,6 @@ def find_artifacts(query: str = "", limit: int = 20) -> list[dict]:
     )
 
 
-def _looks_like_question(text: str) -> bool:
-    return "?" in text[-300:]
-
-
 def _asks_operator(text: str) -> bool:
     """True when the agent's last message asks the operator to hand something over.
 
@@ -1154,8 +1271,51 @@ def _asks_operator(text: str) -> bool:
     return bool(_OPERATOR_ASK_RE.search(text[-300:]))
 
 
+_TRAILING_EMPHASIS = "*_`\"'’)]"
+_OPTION_LINE_RE = re.compile(r"^\s*(?:[-*•+]|\(?\d+[.)])\s+")
+
+
+def _ends_on_a_question(text: str) -> bool:
+    """Whether the agent's last message ends by asking something.
+
+    A question mark anywhere in the last 300 characters used to be enough, and
+    it parked 24 items whose agent had asked the operator nothing: a rhetorical
+    question, a heading, a shell snippet and an offer to do the next step all
+    carry one somewhere, and none of them is a request the operator can answer.
+    A message that ends on the question is a different thing, and it is the
+    only question an agent with no AskUserQuestion tool can ask.
+
+    The question does not have to be the very last line. An agent that asks
+    writes the options under it, so the walk steps back over list items and
+    over the lines they wrap onto, and over the emphasis a bold question ends
+    in. It steps over nothing else: a markdown heading that asks something is
+    neither a list item nor indented, and stopping there is what keeps
+    "## What changed?" from parking the item again."""
+    lines = [line for line in (text or "").splitlines() if line.strip()]
+    for line in reversed(lines[-8:]):
+        if line.strip().rstrip(_TRAILING_EMPHASIS).endswith("?"):
+            return True
+        if not _OPTION_LINE_RE.match(line) and not line[:1].isspace():
+            return False
+    return False
+
+
 def _blocked_on_operator(text: str) -> bool:
-    return _looks_like_question(text) or _asks_operator(text)
+    return _ends_on_a_question(text) or _asks_operator(text)
+
+
+def _record_stop(c, run: dict, outcome: str, reason: str, now: str) -> None:
+    """Write down why the board stopped pushing this item forward.
+
+    maybe_autocontinue used to return "capped" and write nothing, so an item
+    that stopped because its budget was spent looked the same on the board as
+    one whose agent chose to stop."""
+    c.execute(
+        "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+        "VALUES (?, ?, 'autocontinue_stopped', ?, ?)",
+        (run["work_item_id"], run["id"],
+         db.dump_json({"outcome": outcome, "reason": reason}), now),
+    )
 
 
 def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None = None) -> str:
@@ -1166,6 +1326,13 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
     message over directly: the codex notify program is given the message, so
     it does not have to wait for the rollout file to catch up."""
     tail = last_assistant_text(transcript_path) if tail is None else tail.strip()
+    final_lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
+    finished = bool(final_lines) and final_lines[-1] == DONE_MARKER
+    # Reading the transcript for background work happens before the
+    # transaction, because it opens a file, and it is skipped for a turn that
+    # is finished or is waiting on the operator, which are decided first.
+    bg_pending = (not finished and not _blocked_on_operator(tail)
+                  and bool(pending_background_tasks(transcript_path)))
     now = _now()
     with db.tx() as c:
         run = c.execute(
@@ -1188,8 +1355,7 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
                 (run["work_item_id"], run["id"], now),
             )
             return "question"
-        final_lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
-        if final_lines and final_lines[-1] == DONE_MARKER:
+        if finished:
             c.execute(
                 "UPDATE work_items SET state = 'needs_ack', stop_reason = '', "
                 "pending_question = '', current_checkpoint = ?, updated_at = ? WHERE id = ?",
@@ -1213,9 +1379,28 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
                 (run["work_item_id"], run["id"], now),
             )
             return "question"
+        if bg_pending:
+            # A turn that ends on a background task is not idle work the
+            # board can push forward. Ten items reached the continuation cap
+            # and eight of them spent every continuation inside four minutes,
+            # each one telling the board again that it was waiting.
+            c.execute(
+                "UPDATE work_items SET state = 'waiting_external', snoozed_until = ?, "
+                "stop_reason = ?, updated_at = ? WHERE id = ?",
+                ((datetime.now(timezone.utc)
+                  + timedelta(hours=BG_WAIT_RECHECK_HOURS)).isoformat(),
+                 f"Waiting on a background task: {excerpt}" if excerpt
+                 else "Waiting on a background task", now, run["work_item_id"]),
+            )
+            _record_stop(c, run, "waiting_external", "a background task is still running", now)
+            return "waiting_external"
         if not item["autocontinue"]:
+            _record_stop(c, run, "disabled", "autocontinue is off for this item", now)
             return "disabled"
         if item["continues_used"] >= item["continue_cap"]:
+            _record_stop(c, run, "capped",
+                         f"the continuation budget of {item['continue_cap']} is spent; "
+                         "an operator reply or a reopen gives a new one", now)
             return "capped"
     sent = tmux_send(run["tmux_key"], CONTINUE_PROMPT)
     now = _now()
@@ -1261,9 +1446,13 @@ def reply(item_id: int, text: str) -> dict:
     if not tmux_send(run["tmux_key"], text):
         return {"error": "tmux session gone"}
     with db.tx() as c:
+        # An operator reply is new work for the item, so it gets a new
+        # continuation budget. Without this an item that spent its budget
+        # before the reply stops again on the first turn after it.
         c.execute(
             "UPDATE work_items SET state = 'agent_working', stop_reason = '', "
-            "pending_question = '', snoozed_until = NULL, updated_at = ? WHERE id = ?",
+            "pending_question = '', snoozed_until = NULL, continues_used = 0, "
+            "updated_at = ? WHERE id = ?",
             (now, item_id),
         )
         c.execute("UPDATE work_runs SET status = 'running' WHERE id = ?", (run["id"],))
@@ -1729,6 +1918,56 @@ def archive_completed() -> int:
         return c.execute(
             "UPDATE work_items SET archived_at = ? WHERE state = 'done' AND archived_at IS NULL",
             (now,)).rowcount
+
+
+AUTO_ARCHIVE_AFTER_HOURS = 24
+_NOISY_EVENT_KINDS_SQL = "('question_asked', 'question_detected', 'stale_failed')"
+
+
+def auto_archive_quiet_items(now: datetime | None = None) -> list[int]:
+    """Complete and file a reported task that asked the operator nothing.
+
+    460 operator clicks answered 455 tasks, and 177 tasks the agent reported
+    done were never acknowledged at all: the acknowledgement carries no
+    decision, so it is bookkeeping. A task qualifies when the agent reported
+    it done, it asked no question, no gate denied it, and a day has passed
+    since its newest report. The newest one is what counts: a task completed
+    two days ago, reopened, and completed again a minute ago carries a result
+    nobody has read, and the old report must not file it. A task that asked
+    something,
+    or that a gate stopped, keeps waiting for a real read. Reopen is the undo,
+    and it already exists."""
+    now = now or datetime.now(timezone.utc)
+    cutoff = (now - timedelta(hours=AUTO_ARCHIVE_AFTER_HOURS)).isoformat()
+    rows = db.query_all(
+        "SELECT i.id FROM work_items i WHERE i.state = 'needs_ack' "
+        "AND i.archived_at IS NULL "
+        "AND (SELECT MAX(e.created_at) FROM work_events e "
+        "WHERE e.work_item_id = i.id AND e.kind = 'self_reported_done') <= ? "
+        f"AND NOT EXISTS(SELECT 1 FROM work_events e WHERE e.work_item_id = i.id "
+        f"AND e.kind IN {_NOISY_EVENT_KINDS_SQL}) "
+        "AND NOT EXISTS(SELECT 1 FROM work_events e WHERE e.work_item_id = i.id "
+        "AND e.kind IN ('push_gate', 'commit_gate') "
+        "AND json_extract(e.payload, '$.verdict') = 'fail')",
+        (cutoff,))
+    archived: list[int] = []
+    stamp = _now()
+    for row in rows:
+        with db.tx() as c:
+            moved = c.execute(
+                "UPDATE work_items SET state = 'done', stop_reason = '', "
+                "pending_question = '', archived_at = ?, updated_at = ? "
+                "WHERE id = ? AND state = 'needs_ack' AND archived_at IS NULL",
+                (stamp, stamp, row["id"])).rowcount
+            if moved:
+                c.execute(
+                    "INSERT INTO work_events(work_item_id, kind, payload, created_at) "
+                    "VALUES (?, 'auto_archived', ?, ?)",
+                    (row["id"], db.dump_json({"after_hours": AUTO_ARCHIVE_AFTER_HOURS}),
+                     stamp))
+        if moved:
+            archived.append(row["id"])
+    return archived
 
 
 def archive_thread(root_id: int) -> dict:
