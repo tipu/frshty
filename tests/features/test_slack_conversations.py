@@ -196,6 +196,12 @@ def test_operator_involvement_follows_the_channel(tmp_path):
 
 # --- the proposal ----------------------------------------------------------
 
+# What the judge writes for the follow-on request in a thread whose first
+# proposal the operator declined. It has to differ from the declined
+# objective: an identical one is the repeat the proposer now drops.
+SECOND_REQUEST = "Move WB-500 to the PLT board and assign it to the TRIAGE sprint."
+
+
 def _verdict(actionable=True, objective="Move WB-412 to the PLT board and assign "
                                         "it to the TRIAGE sprint.",
              reason="Erik asked for the board move"):
@@ -396,7 +402,7 @@ def test_a_new_message_reopens_a_declined_thread(tmp_path):
     declined = _declined_proposal(tmp_path)
     _capture(tmp_path, [_ws(REPLY_TS, ERIK, "and please also move WB-500 to PLT",
                             thread_ts=ROOT_TS)])
-    opened, haiku = _run(tmp_path, _verdict())
+    opened, haiku = _run(tmp_path, _verdict(objective=SECOND_REQUEST))
 
     assert haiku.call_count == 1, "the thread is judged again"
     assert opened["reopened"] == 1
@@ -580,7 +586,7 @@ def test_a_stale_verdict_never_moves_the_judgement_back(tmp_path):
     def a_second_scan_wins_while_the_model_reads(prompt, **kwargs):
         _capture(tmp_path, [_ws(later_ts, ERIK, "and WB-600 as well",
                                 thread_ts=ROOT_TS)])
-        with patch.object(sc, "run_haiku", return_value=_verdict()), \
+        with patch.object(sc, "run_haiku", return_value=_verdict(objective=SECOND_REQUEST)), \
              patch.object(sc.work_launch, "project_entries", return_value=[]):
             sc.check(config, instance_key="atropos", now=NOW)
         return _verdict(actionable=False)
@@ -741,7 +747,7 @@ def test_the_boundary_line_reaches_the_work_agent(tmp_path):
     _declined_proposal(tmp_path)
     _capture(tmp_path, [_ws(LATE_TS, ERIK, "and please also move WB-500 to PLT",
                             thread_ts=ROOT_TS)])
-    opened, _ = _run(tmp_path, _verdict(), now=MONTH_LATER)
+    opened, _ = _run(tmp_path, _verdict(objective=SECOND_REQUEST), now=MONTH_LATER)
 
     assert opened["reopened"] == 1
     brief = db.query_one("SELECT launch_brief FROM work_items"
@@ -769,7 +775,7 @@ def test_a_reopen_the_judge_rejected_does_not_move_the_boundary(tmp_path):
 
     _capture(tmp_path, [_ws(LATE_TS, ERIK, "it is DEV-99 in the acme/app repo",
                             thread_ts=ROOT_TS)])
-    opened, haiku = _run(tmp_path, _verdict(), now=MONTH_LATER)
+    opened, haiku = _run(tmp_path, _verdict(objective=SECOND_REQUEST), now=MONTH_LATER)
 
     assert haiku.call_count == 1
     prompt = haiku.call_args[0][0]
@@ -796,7 +802,7 @@ def test_a_message_edited_after_the_decline_takes_the_boundary_away(tmp_path):
                                 "thread_ts": ROOT_TS, "user": ERIK,
                                 "text": "actually move WB-500 to PLT instead"}}}])
     _capture(tmp_path, [_ws(LATE_TS, ERIK, CHASE, thread_ts=ROOT_TS)])
-    opened, haiku = _run(tmp_path, _verdict(), now=MONTH_LATER)
+    opened, haiku = _run(tmp_path, _verdict(objective=SECOND_REQUEST), now=MONTH_LATER)
 
     assert haiku.call_count == 1
     prompt = haiku.call_args[0][0]
@@ -913,7 +919,7 @@ def test_a_capture_line_read_late_takes_the_boundary_away(tmp_path):
                                 "thread_ts": ROOT_TS, "user": ERIK,
                                 "text": "actually move WB-500 to PLT instead"}}}])
     _capture(tmp_path, [_ws(LATE_TS, ERIK, CHASE, thread_ts=ROOT_TS)])
-    opened, haiku = _run(tmp_path, _verdict(), now=MONTH_LATER)
+    opened, haiku = _run(tmp_path, _verdict(objective=SECOND_REQUEST), now=MONTH_LATER)
 
     row = _messages(_conversations()[0]["id"])[1]
     assert row["source_dt"] == "2026-09-03T19:30:00+00:00", (
@@ -937,7 +943,7 @@ def test_a_thread_proposed_before_the_boundary_existed_draws_no_line(tmp_path):
     _declined_proposal(tmp_path)
     db.execute("UPDATE slack_conversations SET proposed_ts = ''")
     _capture(tmp_path, [_ws(LATE_TS, ERIK, CHASE, thread_ts=ROOT_TS)])
-    opened, haiku = _run(tmp_path, _verdict(), now=MONTH_LATER)
+    opened, haiku = _run(tmp_path, _verdict(objective=SECOND_REQUEST), now=MONTH_LATER)
 
     assert haiku.call_count == 1, "the thread still reopens"
     prompt = haiku.call_args[0][0]
@@ -955,7 +961,7 @@ def test_a_thread_long_enough_to_be_trimmed_reopens_without_a_boundary(tmp_path)
     _capture(tmp_path, [
         _ws(f"17910505{i:02d}.000900", ERIK, f"chase {i}", thread_ts=ROOT_TS)
         for i in range(sc.MAX_TRANSCRIPT_MESSAGES)])
-    opened, haiku = _run(tmp_path, _verdict(), now=MONTH_LATER)
+    opened, haiku = _run(tmp_path, _verdict(objective=SECOND_REQUEST), now=MONTH_LATER)
 
     assert haiku.call_count == 1
     prompt = haiku.call_args[0][0]
@@ -1125,7 +1131,7 @@ def test_the_daily_budget_counts_every_task_one_thread_opened(tmp_path):
     _declined_proposal(tmp_path)
     _capture(tmp_path, [_ws(REPLY_TS, ERIK, "and please also move WB-500 to PLT",
                             thread_ts=ROOT_TS)])
-    opened, _ = _run(tmp_path, _verdict(), propose_max_per_day=2)
+    opened, _ = _run(tmp_path, _verdict(objective=SECOND_REQUEST), propose_max_per_day=2)
     assert opened["proposed"] == 1, "the second task fits inside the cap"
     assert sc._proposals_today("atropos", NOW) == 2
 

@@ -197,9 +197,12 @@ Find the exact reason the ticket is not moving. Name the file and line that
 makes the decision. Say whether the cause is ticket state, a failing job, a
 precondition that never clears, a scheduler row, or a bug in the frshty code.
 
-Then propose the smallest remedy. Do not change ticket state, do not enqueue or
-retry jobs, and do not edit or push frshty code until the operator approves the
-remedy with AskUserQuestion. Reading anything is unrestricted.
+Then apply the smallest remedy. Diagnose and repair within this task's recorded
+authority: local code fixes and their tests, bounded retries through the normal
+job API once you have fixed the cause, and delivery to destinations this project
+already authorises. Ask only for an action outside that authority, naming the
+exact change and its effect. Broader state rewrites, new external communications
+and release decisions stay outside it. Reading anything is unrestricted.
 
 Write the diagnosis as a self-contained HTML report artifact and print its
 ARTIFACT line.
