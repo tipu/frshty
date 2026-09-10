@@ -13,6 +13,7 @@ import subprocess
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 import core.state as state
+import core.tmux as tmux_target
 
 MAX_SCROLLBACK = 1024 * 1024
 TMUX_SOCKET = os.path.expanduser("~/.frshty-tmux")
@@ -121,7 +122,7 @@ def _tmux_session_name(ticket_key: str) -> str:
 
 def _tmux_session_exists(session_name: str) -> bool:
     result = subprocess.run(
-        [_tmux_bin(), "-S", TMUX_SOCKET, "has-session", "-t", session_name],
+        [_tmux_bin(), "-S", TMUX_SOCKET, "has-session", "-t", tmux_target.session(session_name)],
         capture_output=True,
     )
     return result.returncode == 0
@@ -143,7 +144,8 @@ def session_healthy(ticket_key: str, agent: str = "claude") -> dict:
         return {"alive": False, "agent_running": False}
 
     result = subprocess.run(
-        [_tmux_bin(), "-S", TMUX_SOCKET, "list-panes", "-t", session_name, "-F", "#{pane_pid}"],
+        [_tmux_bin(), "-S", TMUX_SOCKET, "list-panes", "-t", tmux_target.pane(session_name),
+         "-F", "#{pane_pid}"],
         capture_output=True, text=True,
     )
     if result.returncode != 0 or not result.stdout.strip():
@@ -215,7 +217,7 @@ def launch_pane_command(ticket_key: str, cwd: str, command: str):
     pane_command = f"{command}; exec {shlex.quote(login_shell)} -l"
     if _tmux_session_exists(session_name):
         args = [
-            _tmux_bin(), "-S", TMUX_SOCKET, "respawn-pane", "-k", "-t", session_name,
+            _tmux_bin(), "-S", TMUX_SOCKET, "respawn-pane", "-k", "-t", tmux_target.pane(session_name),
             "-c", cwd, pane_command,
         ]
     else:
@@ -235,7 +237,7 @@ def pane_text(ticket_key: str) -> str:
     if not _tmux_session_exists(session_name):
         return ""
     out = subprocess.run(
-        [_tmux_bin(), "-S", TMUX_SOCKET, "capture-pane", "-t", session_name, "-p"],
+        [_tmux_bin(), "-S", TMUX_SOCKET, "capture-pane", "-t", tmux_target.pane(session_name), "-p"],
         capture_output=True, text=True,
     )
     return out.stdout if out.returncode == 0 else ""
@@ -264,7 +266,7 @@ def answer_codex_trust(ticket_key: str) -> bool:
         return False
     subprocess.run(
         [_tmux_bin(), "-S", TMUX_SOCKET, "send-keys", "-t",
-         _tmux_session_name(ticket_key), "Enter"],
+         tmux_target.pane(_tmux_session_name(ticket_key)), "Enter"],
         capture_output=True,
     )
     return True
@@ -300,7 +302,7 @@ def answer_claude_trust(ticket_key: str) -> bool:
             break
     subprocess.run(
         [_tmux_bin(), "-S", TMUX_SOCKET, "send-keys", "-t",
-         _tmux_session_name(ticket_key), *keys],
+         tmux_target.pane(_tmux_session_name(ticket_key)), *keys],
         capture_output=True,
     )
     return True
@@ -412,7 +414,7 @@ def _get_or_spawn(ticket_key: str, cwd: str):
             os.chdir(cwd)
             os.execve(
                 _tmux_bin(),
-                [_tmux_bin(), "-S", TMUX_SOCKET, "attach-session", "-t", session_name],
+                [_tmux_bin(), "-S", TMUX_SOCKET, "attach-session", "-t", tmux_target.session(session_name)],
                 env,
             )
         except Exception as e:
@@ -474,7 +476,8 @@ def kill_terminal(ticket_key: str):
             pass
 
     if _tmux_session_exists(session_name):
-        subprocess.run([_tmux_bin(), "-S", TMUX_SOCKET, "kill-session", "-t", session_name], capture_output=True)
+        subprocess.run([_tmux_bin(), "-S", TMUX_SOCKET, "kill-session", "-t",
+                        tmux_target.session(session_name)], capture_output=True)
 
 
 async def terminal_handler(websocket: WebSocket, ticket_key: str, config: dict):
@@ -485,7 +488,8 @@ async def terminal_handler(websocket: WebSocket, ticket_key: str, config: dict):
             session_name = _tmux_session_name(ticket_key)
             if _tmux_session_exists(session_name):
                 result = subprocess.run(
-                    [_tmux_bin(), "-S", TMUX_SOCKET, "display-message", "-t", session_name, "-p", "#{pane_current_path}"],
+                    [_tmux_bin(), "-S", TMUX_SOCKET, "display-message", "-t",
+                     tmux_target.pane(session_name), "-p", "#{pane_current_path}"],
                     capture_output=True, text=True, timeout=5,
                 )
                 cwd = result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else str(config["workspace"]["root"])
