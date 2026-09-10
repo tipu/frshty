@@ -105,7 +105,7 @@
         <div class="ln-tl">
           <div class="ln-tl-item" :class="t.state" v-for="t in orderedTasks" :key="t.id">
             <div class="ln-tl-node"></div>
-            <article class="ln-task" :class="t.state">
+            <article class="ln-task" :class="[t.state, { critical: t.critical }]">
               <div class="ln-task-top">
                 <a class="ln-task-title" :href="taskHref(t.id)">{{ t.objective }}</a>
                 <div class="ln-task-id">#{{ t.id }}</div>
@@ -113,6 +113,7 @@
               <div class="ln-task-note" v-if="note(t)">{{ note(t) }}</div>
               <div class="ln-task-foot">
                 <span class="ln-pill" :class="statePill(t.state)">{{ stateLabel(t) }}</span>
+                <span class="ln-pill ln-pill-gold" v-if="t.critical" title="you marked this task critical">★ Critical</span>
                 <span class="ln-pill ln-pill-ghost" v-if="t.archived_at"
                       title="this task is in the archive, not on the board">Archived</span>
                 <span v-if="t.last_provider">{{ t.last_provider }}</span>
