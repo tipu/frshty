@@ -806,10 +806,29 @@ class TestRequiredFollowups:
             work_debrief.dispatch_required_followups()
         assert _events(chain[-1], "followup_auto_sent") == []
 
+    def test_a_draft_on_a_long_archived_task_is_not_dispatched(self):
+        """Item 9382 was launched from a task archived fourteen days earlier.
+        The operator had closed that task, so its draft must not run."""
+        item_id = self._finished_with_followup("archived long ago", True)
+        old = (datetime.now(timezone.utc)
+               - timedelta(hours=work_debrief.ARCHIVE_WINDOW_HOURS + 1)).isoformat()
+        db.execute("UPDATE work_items SET archived_at = ? WHERE id = ?", (old, item_id))
+        assert [s["item_id"] for s in work_debrief.dispatch_required_followups()] != [item_id]
+        assert _events(item_id, "followup_auto_sent") == []
+
+    def test_a_draft_on_a_freshly_archived_task_still_dispatches(self, monkeypatch):
+        item_id = self._finished_with_followup("archived just now", True)
+        db.execute("UPDATE work_items SET archived_at = ? WHERE id = ?",
+                   (work_store._now(), item_id))
+        monkeypatch.setattr(work_debrief, "_deliver_work_item",
+                            lambda row, contexts, slack, agent: "launched work item #999")
+        assert [s["item_id"] for s in work_debrief.dispatch_required_followups()] == [item_id]
+
     def test_the_parser_only_marks_a_work_item_required(self):
         parsed = work_debrief._parse_debrief(json.dumps({"summary": "s", "followups": [
-            {"kind": "work_item", "required": True, "draft": "push it"},
-            {"kind": "slack_message", "required": True, "recipient": "Sam", "draft": "ping"},
+            {"kind": "work_item", "required": True, "unfinished": "push", "draft": "push it"},
+            {"kind": "slack_message", "required": True, "unfinished": "push",
+             "recipient": "Sam", "draft": "ping"},
         ]}))
         assert parsed["followups"][0]["required"] is True
         assert parsed["followups"][1]["required"] is False
