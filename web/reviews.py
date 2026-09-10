@@ -597,7 +597,7 @@ def api_presentation(repo: str, pr_id: int):
 @router.get("/api/reviews/{repo}/{pr_id}/bb-comments")
 def api_bb_comments(repo: str, pr_id: int):
     platform = make_platform(_config)
-    comments = platform.get_pr_comments(repo, pr_id)
+    comments = platform.get_pr_comments(repo, pr_id) or []
     names = list({c["author_name"] for c in comments if c.get("author_name")})
     initials = []
     for name in names:
