@@ -756,7 +756,7 @@ class TestCodexTrustPrompt:
                             lambda argv, **kw: calls.append(argv) or MagicMock(returncode=0))
         monkeypatch.setattr(terminal, "pane_text", lambda k: TRUST_PANE)
         assert terminal.answer_codex_trust("work-1") is True
-        assert calls[-1][-3:] == ["-t", "term-work-1", "Enter"]
+        assert calls[-1][-3:] == ["-t", "=term-work-1:", "Enter"]
         calls.clear()
         monkeypatch.setattr(terminal, "pane_text", lambda k: READY_PANE)
         assert terminal.answer_codex_trust("work-1") is False
