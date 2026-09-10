@@ -1,6 +1,9 @@
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch, MagicMock
 
+import core.comments as comments
+import core.db as db
+import core.state as state
 from features import own_prs
 from tests.conftest import make_pr, make_comment
 
@@ -120,6 +123,7 @@ class TestCheckComments:
         pr = make_pr()
         config = {"bitbucket": {"user_account_id": "me"}}
         with patch("features.own_prs.comments") as mock_comments:
+            mock_comments.has_comment_state.return_value = False
             mock_comments.fetch_and_detect_comments.return_value = {"new": [], "edited": []}
             mock_comments.get_unprocessed_comments.return_value = []
             mock_comments.get_deferred_comments.return_value = []
@@ -538,7 +542,7 @@ class TestCheckComments:
 
     def test_reclaim_marks_deleted_when_gone_upstream(self, tmp_path):
         platform = MagicMock()
-        platform.get_pr_comments.return_value = []
+        platform.get_pr_comments.return_value = [make_comment(id=10, author_id="reviewer1")]
         pr = make_pr()
         config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
 
@@ -552,7 +556,142 @@ class TestCheckComments:
             mock_comments.get_deferred_comments.return_value = []
             own_prs._check_comments(config, "test", platform, pr, "http://base")
         mock_comments.mark_comment_deleted.assert_called_once()
+        assert mock_comments.mark_comment_deleted.call_args[0][3] == "99"
         mock_enqueue.assert_not_called()
+
+    def test_failed_read_touches_nothing(self, tmp_path):
+        """A failed read used to look exactly like a PR with no comments.
+        Reconciling against it marks every open comment deleted, and a deleted
+        comment is never retried again."""
+        platform = MagicMock()
+        platform.get_pr_comments.return_value = None
+        pr = make_pr()
+        config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
+
+        with patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.q.enqueue_job") as mock_enqueue, \
+             patch("features.own_prs.log.emit") as mock_emit:
+            mock_comments.fetch_and_detect_comments.return_value = {"new": [], "edited": []}
+            mock_comments.get_unprocessed_comments.return_value = [
+                {"comment_id": "99", "state": "new", "error_count": 1, "last_checked_at": None},
+            ]
+            mock_comments.get_deferred_comments.return_value = []
+            own_prs._check_comments(config, "test", platform, pr, "http://base")
+        mock_comments.mark_comment_deleted.assert_not_called()
+        mock_comments.get_unprocessed_comments.assert_not_called()
+        mock_comments.get_deferred_comments.assert_not_called()
+        mock_enqueue.assert_not_called()
+        assert any(c.args[0] == "pr_comments_read_failed" for c in mock_emit.call_args_list)
+
+    def test_a_false_tombstone_in_a_resolved_thread_gets_registered(self, tmp_path):
+        """A wrongly deleted follow-up counted as settled leaves its thread
+        resolved, and a resolved comment never reaches registration."""
+        root = make_comment(id=10, author_id="r1", resolved=True, thread_id="T1")
+        reply = make_comment(id=11, author_id="r1", body="still wrong", resolved=True, thread_id="T1")
+        platform = MagicMock()
+        platform.get_pr_comments.return_value = [root, reply]
+        pr = make_pr()
+        config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
+
+        with patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.run_balanced",
+                   return_value='{"results": [{"id": 0, "actionable": true, "reason": "clear"}]}'), \
+             patch("features.own_prs.q.enqueue_job"), \
+             patch("features.own_prs.log"):
+            mock_comments.settled_comment_ids.return_value = {"10"}
+            mock_comments.fetch_and_detect_comments.return_value = {"new": [], "edited": [reply]}
+            mock_comments.get_unprocessed_comments.return_value = []
+            mock_comments.get_deferred_comments.return_value = []
+            own_prs._check_comments(config, "test", platform, pr, "http://base", seen={})
+
+        assert mock_comments.settled_comment_ids.call_args[0][3] == {"10", "11"}
+        mock_comments.mark_comment_processing.assert_called_once()
+        assert mock_comments.mark_comment_processing.call_args[0][3] == "11"
+
+    def test_a_genuinely_emptied_pr_still_reconciles(self, tmp_path):
+        """An honest empty read must still settle the rows it leaves behind,
+        or a reviewer who deletes every comment freezes them for good."""
+        platform = MagicMock()
+        platform.get_pr_comments.return_value = []
+        pr = make_pr()
+        config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"}, "workspace": {"repos": []}}
+
+        with patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.q.enqueue_job"), \
+             patch("features.own_prs.log"):
+            mock_comments.has_comment_state.return_value = True
+            mock_comments.fetch_and_detect_comments.return_value = {"new": [], "edited": []}
+            mock_comments.get_unprocessed_comments.return_value = [
+                {"comment_id": "99", "state": "new", "error_count": 1, "last_checked_at": None},
+            ]
+            mock_comments.get_deferred_comments.return_value = []
+            own_prs._check_comments(config, "test", platform, pr, "http://base")
+        mock_comments.mark_comment_deleted.assert_called_once()
+        assert mock_comments.mark_comment_deleted.call_args[0][3] == "99"
+
+class TestFalseTombstoneRecovery:
+    """End-to-end against a real database: no row the platform still reports
+    may stay marked deleted, because 'deleted' silences the comment and pins
+    its thread shut against every later reply."""
+
+    def _config(self, tmp_path):
+        return {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"},
+                "workspace": {"repos": []}}
+
+    def _run(self, tmp_path, platform_comments):
+        platform = MagicMock()
+        platform.get_pr_comments.return_value = platform_comments
+        with patch("features.own_prs.run_balanced",
+                   return_value='{"results": [{"id": 0, "actionable": true, "reason": "clear"}]}'), \
+             patch("features.own_prs.q.enqueue_job"), \
+             patch("features.own_prs.log"):
+            own_prs._check_comments(self._config(tmp_path), "test", platform,
+                                    make_pr(repo="r", id=1), "http://base", seen={})
+
+    def _state(self, comment_id):
+        row = db.query_one(
+            "SELECT state FROM comment_state WHERE resource_id='r/1' AND comment_id=?",
+            (comment_id,))
+        return row["state"] if row else None
+
+    def test_a_tombstone_in_a_resolved_thread_settles_and_lets_the_next_reply_in(
+            self, fresh_db, tmp_path):
+        state.init("test")
+        root = make_comment(id=10, author_id="reviewer1", resolved=True, thread_id="T1",
+                            created_at="2026-01-01T00:00:00Z", updated_at="2026-01-01T00:00:00Z")
+        comments.mark_comment_processing("test", "pr", "r/1", "10", "2026-01-01T00:00:00Z")
+        comments.mark_comment_deleted("test", "pr", "r/1", "10")
+
+        self._run(tmp_path, [root])
+        assert self._state("10") == "processed"
+
+        reply = make_comment(id=11, author_id="reviewer1", body="still wrong", resolved=True,
+                             thread_id="T1", parent_id=10,
+                             created_at="2026-02-01T00:00:00Z", updated_at="2026-02-01T00:00:00Z")
+        self._run(tmp_path, [root, reply])
+        assert self._state("11") == "deferred"
+
+    def test_a_tombstone_in_a_live_thread_is_registered_not_settled(self, fresh_db, tmp_path):
+        state.init("test")
+        live = make_comment(id=10, author_id="reviewer1", body="fix this", thread_id="T1",
+                            created_at="2026-01-01T00:00:00Z", updated_at="2026-01-01T00:00:00Z")
+        comments.mark_comment_processing("test", "pr", "r/1", "10", "2026-01-01T00:00:00Z")
+        comments.mark_comment_deleted("test", "pr", "r/1", "10")
+
+        self._run(tmp_path, [live])
+        assert self._state("10") == "deferred"
+
+    def test_a_comment_the_platform_dropped_keeps_its_tombstone(self, fresh_db, tmp_path):
+        state.init("test")
+        other = make_comment(id=20, author_id="reviewer1", thread_id="T2",
+                             created_at="2026-01-01T00:00:00Z", updated_at="2026-01-01T00:00:00Z")
+        comments.mark_comment_seen("test", "pr", "r/1", "20", "2026-01-01T00:00:00Z")
+        comments.mark_comment_processing("test", "pr", "r/1", "10", "2026-01-01T00:00:00Z")
+        comments.mark_comment_deleted("test", "pr", "r/1", "10")
+
+        self._run(tmp_path, [other])
+        assert self._state("10") == "deleted"
+
 
 class TestReopenAnsweredThreads:
     def test_reply_after_resolve_clears_the_flag_on_the_whole_thread(self):
@@ -962,6 +1101,28 @@ class TestFixCommentsBatch:
         platform.push_branch.assert_called_once()
         assert platform.resolve_comment.call_count == 2
         assert mock_comments.mark_comment_processed.call_count == 2
+
+    def test_failed_read_holds_the_batch_instead_of_deleting_it(self, tmp_path):
+        """Marking the batch deleted retires live reviewer comments for good.
+        Holding them leaves them in 'processing' for the reclaim pass."""
+        platform = MagicMock()
+        platform.get_pr_comments.return_value = None
+
+        with patch("features.own_prs.make_platform", return_value=platform), \
+             patch("features.own_prs._ensure_worktree", return_value=tmp_path) as mock_wt, \
+             patch("features.own_prs.run_claude_code") as mock_claude, \
+             patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.log.emit") as mock_emit:
+            ok, reason = own_prs.fix_comments_batch(self._config(tmp_path), self._payload())
+
+        assert ok is False
+        assert reason == "could not read comments"
+        mock_comments.mark_comment_deleted.assert_not_called()
+        mock_comments.mark_comment_error.assert_not_called()
+        mock_wt.assert_not_called()
+        mock_claude.assert_not_called()
+        platform.push_branch.assert_not_called()
+        assert any(c.args[0] == "pr_comments_read_failed" for c in mock_emit.call_args_list)
 
     def test_general_review_body_skips_thread_resolution(self, tmp_path):
         platform = MagicMock()

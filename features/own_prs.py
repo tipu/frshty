@@ -169,6 +169,20 @@ def _reopen_answered_threads(platform_comments: list, settled_ids: set, self_id:
     return reopened
 
 
+def _settle_revived_tombstones(instance_key, pr_key, detection, keep_ids) -> None:
+    """A comment the platform still reports must not stay marked deleted.
+
+    Detection hands such a row back as edited so the poll can answer it. One
+    the poll will not answer — our own comment, or one in a thread a human
+    resolved — still has to lose its tombstone. 'deleted' is a settled state
+    no query reads again, so leaving it there keeps the comment invisible and
+    keeps its thread from ever reopening when the reviewer replies to it."""
+    for c in detection["edited"]:
+        comment_id = str(c["id"])
+        if c.get("revived_from_deleted") and comment_id not in keep_ids:
+            comments.mark_comment_processed(instance_key, "pr", pr_key, comment_id)
+
+
 def _check_comments(config, instance_key, platform, pr, base_url, seen=None, ticket_key=None):
     user_id = _self_id(config, platform)
     pr_key = f"{pr['repo']}/{pr['id']}"
@@ -177,9 +191,17 @@ def _check_comments(config, instance_key, platform, pr, base_url, seen=None, tic
         seen = {}
 
     platform_comments = platform.get_pr_comments(pr["repo"], pr["id"])
+    if platform_comments is None:
+        log.emit("pr_comments_read_failed",
+                 f"{pr_ref}: could not read comments — reconcile skipped",
+                 links={"pr": pr["url"], "detail": f"{base_url}/"},
+                 meta={"repo": pr["repo"], "pr_id": pr["id"]})
+        return
     first_sight = not comments.has_comment_state(instance_key, "pr", pr_key)
+    present_ids = {str(c["id"]) for c in platform_comments}
     for thread_key in _reopen_answered_threads(
-            platform_comments, comments.settled_comment_ids(instance_key, "pr", pr_key), user_id):
+            platform_comments,
+            comments.settled_comment_ids(instance_key, "pr", pr_key, present_ids), user_id):
         log.emit("pr_thread_reopened",
                  f"{pr_ref}: reviewer replied after the thread was resolved",
                  links={"pr": pr["url"], "detail": f"{base_url}/"},
@@ -207,6 +229,9 @@ def _check_comments(config, instance_key, platform, pr, base_url, seen=None, tic
             if c.get("comment_kind") != kind or str(c["id"]) in keep_ids
         ]
         seen[flag] = True
+
+    _settle_revived_tombstones(instance_key, pr_key, detection,
+                               {str(c["id"]) for c in all_to_process})
 
     handled = set()
     if all_to_process:
@@ -546,8 +571,16 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
     try:
         with _worktree_lock(pr_key):
             fetched = platform.get_pr_comments(pr["repo"], pr["id"])
-            _reopen_answered_threads(fetched, comments.settled_comment_ids(instance_key, "pr", pr_key),
-                                     _self_id(config, platform))
+            if fetched is None:
+                log.emit("pr_comments_read_failed",
+                         f"{pr_ref}: could not read comments — batch held for retry",
+                         links=links, meta=meta)
+                return False, "could not read comments"
+            _reopen_answered_threads(
+                fetched,
+                comments.settled_comment_ids(instance_key, "pr", pr_key,
+                                             {str(c["id"]) for c in fetched}),
+                _self_id(config, platform))
             by_id = {str(c["id"]): c for c in fetched}
             pending = []
             for cid in comment_ids:

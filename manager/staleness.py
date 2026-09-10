@@ -47,15 +47,18 @@ def needs_classification(instance_key: str) -> list[dict]:
 
 def blocked_pr_comments(instance_key: str) -> list[dict]:
     """PR review comments frshty tried to auto-fix but couldn't (worktree,
-    Claude, or push failure). Surfaced from comment_state rows stuck in a
-    non-processed state with repeated errors. Self-clears once the comment is
-    finally processed. Serves: catastrophic blockers that would otherwise sit
-    silent in the event log."""
+    Claude, or push failure). Surfaced from comment_state rows still owed an
+    answer with repeated errors. Self-clears once the comment is settled —
+    processed, or gone from the platform. A deleted comment keeps the
+    error_count of its last live attempt and can never reach 'processed', so
+    reading only 'processed' as finished pins it in this bucket for good.
+    Serves: catastrophic blockers that would otherwise sit silent in the
+    event log."""
     rows = db.query_all(
         "SELECT resource_id, comment_id, error_count, last_error, last_checked_at"
         " FROM comment_state"
         " WHERE instance_key=? AND resource_type='pr'"
-        " AND state != 'processed' AND error_count >= 2"
+        " AND state NOT IN ('processed', 'deleted') AND error_count >= 2"
         " AND COALESCE(last_error, '') != ''"
         " ORDER BY error_count DESC LIMIT ?",
         (instance_key, _LIMIT),
