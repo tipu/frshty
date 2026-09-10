@@ -540,7 +540,7 @@ def context_block(row: dict) -> str:
 def _finished_long_enough(item: dict, now: datetime) -> bool:
     if item["archived_at"]:
         return True
-    if item["state"] not in work_store.FINISHED_STATES:
+    if item["state"] not in work_store.CLOSED_STATES:
         return False
     updated = (item["updated_at"] or "").strip()
     try:

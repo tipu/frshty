@@ -363,6 +363,7 @@ select option, select optgroup { background-color: #0b0c10; color: #e7e8ec; }
 .ln-task.waiting_external { --ln-state: var(--ln-text-4); }
 .ln-task.failed_stale { --ln-state: var(--ln-red); }
 .ln-task.done { --ln-state: var(--ln-green); }
+.ln-task.canceled { --ln-state: var(--ln-text-4); }
 .ln-task.critical { border-color: var(--ln-gold); box-shadow: 0 0 0 1px var(--ln-gold); }
 .ln-task.critical:hover { border-color: var(--ln-gold); }
 .ln-task-top { display: flex; gap: 14px; justify-content: space-between; align-items: flex-start; }

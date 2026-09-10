@@ -117,12 +117,12 @@ class TestClaudeTrustPrompt:
     def test_the_decline_is_stepped_over_before_enter(self, monkeypatch):
         calls = self._calls(monkeypatch, CLAUDE_TRUST_PANE)
         assert terminal.answer_claude_trust("work-1") is True
-        assert calls[-1][-4:] == ["-t", "term-work-1", "Down", "Enter"]
+        assert calls[-1][-4:] == ["-t", "=term-work-1:", "Down", "Enter"]
 
     def test_enter_alone_when_the_answer_is_already_selected(self, monkeypatch):
         calls = self._calls(monkeypatch, CLAUDE_TRUST_PANE_YES_SELECTED)
         assert terminal.answer_claude_trust("work-1") is True
-        assert calls[-1][-3:] == ["-t", "term-work-1", "Enter"]
+        assert calls[-1][-3:] == ["-t", "=term-work-1:", "Enter"]
 
     def test_nothing_is_sent_without_the_question(self, monkeypatch):
         calls = self._calls(monkeypatch, CLAUDE_READY_PANE)
