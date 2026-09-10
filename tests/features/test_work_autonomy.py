@@ -56,13 +56,13 @@ def _repo_with_origin(tmp_path):
 
 class TestDeliveryRule:
     def test_launch_and_continue_prompts_put_delivery_inside_the_objective(self):
-        for prompt in (work_store.DELIVERY_RULE, work_store.CONTINUE_PROMPT):
+        for prompt in (work_store.DELIVERY_RULE, work_store.continue_prompt()):
             assert "Delivery is part of the objective" in prompt
             assert "Do not end with an offer" in prompt
 
     def test_progress_rule_names_the_marker(self):
         assert work_store.PROGRESS_MARKER in work_store.PROGRESS_RULE
-        assert work_store.PROGRESS_MARKER in work_store.CONTINUE_PROMPT
+        assert work_store.PROGRESS_MARKER in work_store.continue_prompt()
 
 
 class TestPushGateBaseline:
@@ -825,6 +825,13 @@ class TestRequiredFollowups:
                             lambda *a, **k: pytest.fail("a follow-up launched itself"))
         work_debrief.propose_required_followups()
         assert _events(item_id, "followup_sent") == []
+
+    def test_a_string_false_does_not_mark_a_followup_required(self):
+        parsed = work_debrief._parse_debrief(json.dumps({"summary": "s", "followups": [
+            {"kind": "work_item", "required": "false", "unfinished": "push",
+             "draft": "push it"},
+        ]}))
+        assert parsed["followups"][0]["required"] is False
 
     def test_a_draft_on_a_long_archived_task_is_not_proposed(self, monkeypatch):
         """Item 9382 came from a task archived fourteen days earlier. The
