@@ -1760,6 +1760,7 @@ def sweep_stale_items(now: datetime | None = None) -> list[dict]:
         }
         record_event(row["session_id"], "Stop", payload)
         record_artifacts(row["session_id"], transcript_path)
+        record_progress(row["session_id"], transcript_path)
         outcome = maybe_autocontinue(row["session_id"], transcript_path)
         actions.append({"id": row["item_id"], "action": f"stop_synthesized:{outcome}"})
     actions.extend(fail_runless_items(cutoff))
@@ -1873,7 +1874,12 @@ def grouped_items(now: datetime | None = None, q: str = "",
 
     A search reads the whole task history, so a search on the board also
     returns the archived tasks. Without them a completed task becomes
-    unfindable the moment it is archived."""
+    unfindable the moment it is archived.
+
+    Every row carries the newest PROGRESS line its agent printed. The line
+    comes from the progress events, not from current_checkpoint, because a
+    run that reports itself done overwrites current_checkpoint with the tail
+    of its last message and would hide the progress line."""
     now = now or datetime.now(timezone.utc)
     stale_cutoff = (now - timedelta(minutes=STALE_AFTER_MINUTES)).isoformat()
     now_iso = now.isoformat()
@@ -1884,6 +1890,8 @@ def grouped_items(now: datetime | None = None, q: str = "",
         "(SELECT session_id FROM work_runs r WHERE r.work_item_id = i.id ORDER BY r.id DESC LIMIT 1) AS last_session_id, "
         "(SELECT tmux_key FROM work_runs r WHERE r.work_item_id = i.id ORDER BY r.id DESC LIMIT 1) AS last_tmux_key, "
         "(SELECT provider FROM work_runs r WHERE r.work_item_id = i.id ORDER BY r.id DESC LIMIT 1) AS last_provider, "
+        "(SELECT payload FROM work_events e WHERE e.work_item_id = i.id "
+        "AND e.kind = 'progress' ORDER BY e.id DESC LIMIT 1) AS latest_progress_payload, "
         "(SELECT created_at FROM work_events e WHERE e.work_item_id = i.id "
         "AND e.kind IN ('operator_done', 'operator_ack', 'self_reported_done') "
         "ORDER BY e.id DESC LIMIT 1) AS completed_at, "
@@ -1905,6 +1913,8 @@ def grouped_items(now: datetime | None = None, q: str = "",
             continue
         if archived and not row["archived_at"]:
             continue
+        row["latest_progress"] = db.load_json(row, "latest_progress_payload").get("text") or ""
+        row.pop("latest_progress_payload", None)
         state = row["state"]
         if state == "needs_ack":
             groups["needs_ack"].append(row)

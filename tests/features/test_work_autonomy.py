@@ -28,6 +28,14 @@ def _mkrun(objective="autonomy item", provider="claude"):
     return item_id, sid
 
 
+def _board_row(item_id):
+    for rows in work_store.grouped_items().values():
+        for row in rows:
+            if row["id"] == item_id:
+                return row
+    raise AssertionError(f"work item {item_id} is on no board group")
+
+
 def _events(item_id, kind):
     return db.query_all(
         "SELECT payload FROM work_events WHERE work_item_id = ? AND kind = ? ORDER BY id",
@@ -430,6 +438,24 @@ class TestProgressLines:
         item_id, sid = _mkrun("no progress")
         assert work_store.record_progress(sid, "", texts=["ordinary text"]) == ""
         assert _events(item_id, "progress") == []
+
+    def test_the_board_row_carries_the_newest_progress_line(self):
+        item_id, sid = _mkrun("board progress")
+        work_store.record_progress(sid, "", texts=["PROGRESS: first", "PROGRESS: second"])
+        assert _board_row(item_id)["latest_progress"] == "second"
+
+    def test_a_self_reported_finish_does_not_hide_the_progress_line(self):
+        item_id, sid = _mkrun("finished progress")
+        work_store.record_progress(sid, "", texts=["PROGRESS: shipped the fix"])
+        db.execute("UPDATE work_items SET current_checkpoint = ?, state = 'needs_ack' "
+                   "WHERE id = ?", ("the tail of the last message", item_id))
+        row = _board_row(item_id)
+        assert row["current_checkpoint"] == "the tail of the last message"
+        assert row["latest_progress"] == "shipped the fix"
+
+    def test_a_row_without_a_progress_line_reports_an_empty_string(self):
+        item_id, _ = _mkrun("silent item")
+        assert _board_row(item_id)["latest_progress"] == ""
 
 
 class TestStopDetector:

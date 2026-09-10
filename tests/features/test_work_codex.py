@@ -333,6 +333,34 @@ class TestCodexNotify:
         assert art["path"] == "/tmp/report.html"
         assert art["note"] == "the report"
 
+    def test_a_progress_line_survives_a_finish_in_the_same_turn(self):
+        item_id, sid = _mkrun("codex notify progress")
+        r = self._notify(sid, {"type": "agent-turn-complete", "thread-id": "thread-4",
+                               "last-assistant-message": "PROGRESS: cut the release branch\nWORK_DONE"})
+        assert r.returncode == 0, r.stderr
+        item = db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "needs_ack"
+        events = db.query_all("SELECT payload FROM work_events WHERE work_item_id = ? "
+                              "AND kind = 'progress'", (item_id,))
+        assert [json.loads(e["payload"])["text"] for e in events] == ["cut the release branch"]
+
+    def test_a_progress_line_from_an_earlier_message_is_recorded(self, tmp_path):
+        item_id, sid = _mkrun("codex notify earlier progress")
+        _rollout(tmp_path, "thread-5", [
+            {"type": "AgentMessage",
+             "content": [{"type": "Text", "text": "PROGRESS: migrations applied"}]},
+            {"type": "AgentMessage", "phase": "final_answer",
+             "content": [{"type": "Text", "text": "Done.\nWORK_DONE"}]}])
+        r = self._notify(sid, {"type": "agent-turn-complete", "thread-id": "thread-5",
+                               "last-assistant-message": "Done.\nWORK_DONE"},
+                         codex_home=tmp_path)
+        assert r.returncode == 0, r.stderr
+        item = db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "needs_ack"
+        events = db.query_all("SELECT payload FROM work_events WHERE work_item_id = ? "
+                              "AND kind = 'progress'", (item_id,))
+        assert [json.loads(e["payload"])["text"] for e in events] == ["migrations applied"]
+
     def test_foreign_session_writes_nothing(self):
         before = db.query_one("SELECT COUNT(*) AS n FROM work_events")["n"]
         r = self._notify("sid-not-a-work-session",
