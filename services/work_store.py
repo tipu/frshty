@@ -55,7 +55,7 @@ PROGRESS_RULE = (
     f"work, print one line starting {PROGRESS_MARKER} that names what you "
     "just established and what you are doing next. "
 )
-CONTINUE_PROMPT = (
+CONTINUE_PROMPT_TEMPLATE = (
     "Continue toward the objective. " + DELIVERY_RULE + PROGRESS_RULE +
     "When you hit a decision point, decide "
     "yourself by default: pick the most correct, cleanest, simplest option and "
@@ -67,14 +67,25 @@ CONTINUE_PROMPT = (
     "Use that same tool for anything only the operator can supply — a "
     "secret, a one-time code, an approval — not only for a decision. A "
     "request written in prose does not reach the operator. "
-    "Never send outward "
-    "communications (Slack messages, GitHub or Bitbucket comments, emails, "
-    "posts to external services) unless the operator explicitly asked for that "
-    "in this conversation; draft the content and ask instead. "
+    "{correspondence}"
     "Write any report, summary or other prose document for the operator as a "
     "self-contained .html file, never as Markdown or plain text. If the objective "
     f"is fully met, end your message with the single line {DONE_MARKER}."
 )
+
+
+def continue_prompt() -> str:
+    """The autocontinue message, carrying this instance's correspondence rule.
+
+    The rule cannot be baked into the constant, because whether the instance
+    lets a task message a person is read off its config and a resumed run has
+    to hear the same rule its launch prompt gave it. work_launch is imported
+    here rather than at the top because work_launch imports this module."""
+    from services import work_launch
+    return CONTINUE_PROMPT_TEMPLATE.format(
+        correspondence=work_launch._correspondence_rule(
+            work_launch.personal_config() or {}))
+
 
 _OPERATOR_ASK_RE = re.compile(
     r"(?:^|[.!?\n]\s+|\u2014\s*)(?:please\s+)?"
@@ -1457,7 +1468,7 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
                          f"the continuation budget of {item['continue_cap']} is spent; "
                          "an operator reply or a reopen gives a new one", now)
             return "capped"
-    sent = tmux_send(run["tmux_key"], CONTINUE_PROMPT)
+    sent = tmux_send(run["tmux_key"], continue_prompt())
     now = _now()
     with db.tx() as c:
         current = c.execute("SELECT state FROM work_items WHERE id = ?",
