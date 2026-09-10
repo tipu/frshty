@@ -503,6 +503,12 @@ def _start(item_id: int, plan: dict, slack: bool, brief: str,
             log.emit("work_launch_failed",
                      f"work item {item_id}: working directory {cwd} is gone")
             return {"error": f"cwd does not exist: {cwd}", "item_id": item_id}
+        if work_store.is_canceled(item_id):
+            log.emit("work_launch_canceled",
+                     f"work item {item_id} was canceled while its launch was "
+                     "still materializing, so no agent is started")
+            return {"error": "the task was canceled before its agent started",
+                    "item_id": item_id}
         run_id = work_store.add_run(
             item_id, session_id, tmux_key, cwd, provider=agent, env_recorded=True,
             env_key=plan.get("env_key", ""),
@@ -575,6 +581,40 @@ def _start(item_id: int, plan: dict, slack: bool, brief: str,
             "cwd": cwd, "worktree": worktree_row.get("path", "")}
 
 
+def cancel(item_id: int) -> dict:
+    """Stop one task: mark it canceled and kill the pane its agent runs in.
+
+    The operator presses this when the work must not continue. The state
+    change on its own would leave the agent running and still writing to the
+    repository, so the tmux session goes with it. A kickoff still polling that
+    pane is superseded first, because a kickoff that outlives its pane reports
+    the launch as failed and would put the canceled task back on the board.
+
+    The pane is killed only after the state change lands, so a task that
+    cannot be canceled keeps its session.
+
+    The whole cancel runs under launch_lock, which is the lock a launch and a
+    resume hold while they open their pane. Both re-read the state inside it,
+    so a cancel either lands first and stops the launch, or lands second and
+    kills the pane that launch just opened. Without the lock a cancel could
+    fall in the middle and leave an agent running on a canceled task."""
+    with work_store.launch_lock:
+        rows = db.query_all(
+            "SELECT DISTINCT tmux_key FROM work_runs WHERE work_item_id = ? "
+            "AND tmux_key != ''", (item_id,))
+        keys = [r["tmux_key"] for r in rows] or [f"work-{item_id}"]
+        result = work_store.apply_action(item_id, "cancel")
+        if "error" in result:
+            return result
+        for key in keys:
+            supersede_kickoff(key)
+            terminal.kill_terminal(key)
+    log.emit("work_canceled",
+             f"work item {item_id} canceled; killed session(s): {sorted(keys)}")
+    result["killed"] = keys
+    return result
+
+
 WORK_SESSION_PREFIX = "term-work-"
 SUSPEND_IDLE_SECONDS = 30 * 60
 
@@ -599,7 +639,7 @@ def suspend_idle_done_sessions(now: float | None = None) -> list[int]:
         if not suffix.isdigit() or now - s["activity"] < SUSPEND_IDLE_SECONDS:
             continue
         item = db.query_one("SELECT state FROM work_items WHERE id = ?", (int(suffix),))
-        if item is not None and item["state"] not in work_store.FINISHED_STATES:
+        if item is not None and item["state"] not in work_store.CLOSED_STATES:
             continue
         terminal.kill_terminal(f"work-{suffix}")
         killed.append(int(suffix))
@@ -642,6 +682,10 @@ def resume_session(item_id: int) -> bool:
     objective instead, so the agent is never started with nothing to do, and a
     relaunch that cannot open its pane goes back to being a failed launch.
 
+    A canceled task is not resumed at all. Cancelling kills the pane on
+    purpose, and opening the task's terminal page calls this, so any resume
+    here would start the agent again on work the operator just stopped.
+
     No-op while the agent is still running, checked under launch_lock so two
     concurrent terminal connects cannot both relaunch it. A surviving tmux
     pane with no agent is respawned with the resume command."""
@@ -670,8 +714,10 @@ def resume_session(item_id: int) -> bool:
     item = db.query_one(
         "SELECT objective, contexts, state, worktree_opt_out FROM work_items WHERE id = ?",
         (item_id,))
+    if item is not None and item["state"] == work_store.CANCELED_STATE:
+        return False
     never_started = (item is not None
-                     and item["state"] not in work_store.FINISHED_STATES
+                     and item["state"] not in work_store.CLOSED_STATES
                      and not work_store.run_reached_an_agent(int(run["id"])))
     recorded = run["cwd"] if run["cwd"] and os.path.isdir(run["cwd"]) else ""
     contexts = [c for c in ((item["contexts"] if item else "") or "").split(",")
@@ -697,6 +743,8 @@ def resume_session(item_id: int) -> bool:
     # the directory between the check and tmux opening it, because a tmux
     # session whose -c directory is gone starts in $HOME instead of failing.
     with work_store.launch_lock:
+        if work_store.is_canceled(item_id):
+            return False
         if terminal.session_healthy(key, agent=run["provider"])["agent_running"]:
             return True
         if not cwd or not os.path.isdir(cwd):
@@ -1714,6 +1762,19 @@ def start_kickoff(tmux_key: str, run_id: int, agent: str = "claude") -> int:
         _kickoff_generations[tmux_key] = generation
     threading.Thread(target=_kickoff, args=(tmux_key, run_id, agent, generation),
                      daemon=True).start()
+    return generation
+
+
+def supersede_kickoff(tmux_key: str) -> int:
+    """Take the pane's next generation without starting a kickoff on it.
+
+    A kickoff that no longer owns its pane stops where it stands and reports
+    nothing. That is what a cancel needs: the pane is about to be killed, so
+    the kickoff polling it is guaranteed to fail, and its failure would put
+    the canceled task back on the board as failed_stale."""
+    with _kickoff_guard:
+        generation = _kickoff_generations.get(tmux_key, 0) + 1
+        _kickoff_generations[tmux_key] = generation
     return generation
 
 
