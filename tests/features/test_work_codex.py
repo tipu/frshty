@@ -125,13 +125,43 @@ class TestCodexLaunch:
     def test_a_codex_run_is_cross_checked_by_claude(self, tmp_path, monkeypatch):
         prompt = _launch_prompt(tmp_path, monkeypatch, "codex")
         assert "double check the change with claude once" in prompt
-        assert "claude --dangerously-skip-permissions -p" in prompt
+        assert "claude --dangerously-skip-permissions --session-id <session-id> -p" in prompt
         assert "with codex" not in prompt
 
     def test_the_reviewer_question_goes_on_stdin(self):
         for agent in ("claude", "codex"):
-            _, cmd = work_launch._reviewer_cmd(agent, {})
-            assert cmd.split()[-1] in ("-", "-p")
+            reviewer = work_launch._reviewer_cmd(agent, {})
+            assert reviewer["first"].split()[-1] in ("-", "-p")
+            assert reviewer["resume"].split()[-1] in ("-", "-p")
+
+    def test_the_second_pass_resumes_the_first_session(self, tmp_path, monkeypatch):
+        for agent, resume in (
+                ("claude", "codex exec resume <session-id> "
+                           "--dangerously-bypass-approvals-and-sandbox "
+                           "--skip-git-repo-check -"),
+                ("codex", "claude --dangerously-skip-permissions --resume <session-id> -p")):
+            prompt = _launch_prompt(tmp_path, monkeypatch, agent)
+            assert f"run that second pass as `{resume}`" in prompt
+            assert "with the session id of the first run" in prompt
+            assert "instead of reading the tree again" in prompt
+
+    def test_the_prompt_says_where_the_session_id_comes_from(self, tmp_path, monkeypatch):
+        codex_checks = _launch_prompt(tmp_path, monkeypatch, "claude")
+        assert "Keep the session id of the codex run" in codex_checks
+        assert "writes a `session id: <session-id>` line on stderr" in codex_checks
+        claude_checks = _launch_prompt(tmp_path, monkeypatch, "codex")
+        assert "Keep the session id of the claude run" in claude_checks
+        assert "pick a fresh uuid with `uuidgen` and pass it as the id" in claude_checks
+
+    def test_the_resume_command_carries_the_config_dir(self):
+        config = {"llm": {"claude": {"config_dir": "~/.quill-claude"},
+                          "codex": {"config_dir": "~/.alt-codex"}}}
+        claude = work_launch._reviewer_cmd("codex", config)
+        codex = work_launch._reviewer_cmd("claude", config)
+        assert claude["resume"].startswith(
+            f"CLAUDE_CONFIG_DIR={os.path.expanduser('~/.quill-claude')} ")
+        assert codex["resume"].startswith(
+            f"CODEX_HOME={os.path.expanduser('~/.alt-codex')} ")
 
     def test_the_reviewer_is_asked_for_high_and_critical_defects_only(self, tmp_path,
                                                                       monkeypatch):
@@ -181,8 +211,8 @@ class TestCodexLaunch:
                                      "env": {"CLAUDE_CONFIG_DIR": "~/.chosen"}},
                           "codex": {"config_dir": "~/.ignored",
                                     "env": {"CODEX_HOME": "~/.chosen"}}}}
-        _, claude_cmd = work_launch._reviewer_cmd("codex", config)
-        _, codex_cmd = work_launch._reviewer_cmd("claude", config)
+        claude_cmd = work_launch._reviewer_cmd("codex", config)["first"]
+        codex_cmd = work_launch._reviewer_cmd("claude", config)["first"]
         assert claude_cmd.startswith(f"CLAUDE_CONFIG_DIR={os.path.expanduser('~/.chosen')} ")
         assert codex_cmd.startswith(f"CODEX_HOME={os.path.expanduser('~/.chosen')} ")
         assert ".ignored" not in claude_cmd and ".ignored" not in codex_cmd
@@ -190,8 +220,8 @@ class TestCodexLaunch:
     def test_a_binary_path_with_a_space_is_quoted(self):
         config = {"llm": {"claude": {"bin": "/opt/Claude CLI/claude"},
                           "codex": {"bin": "/opt/Codex CLI/codex"}}}
-        _, claude_cmd = work_launch._reviewer_cmd("codex", config)
-        _, codex_cmd = work_launch._reviewer_cmd("claude", config)
+        claude_cmd = work_launch._reviewer_cmd("codex", config)["first"]
+        codex_cmd = work_launch._reviewer_cmd("claude", config)["first"]
         assert claude_cmd.startswith("'/opt/Claude CLI/claude' ")
         assert codex_cmd.startswith("'/opt/Codex CLI/codex' ")
 
@@ -200,8 +230,8 @@ class TestCodexLaunch:
                                      "env": {"ANTHROPIC_API_KEY": "sk-secret"}},
                           "codex": {"config_dir": "~/.alt-codex",
                                     "env": {"OPENAI_API_KEY": "sk-secret"}}}}
-        _, claude_cmd = work_launch._reviewer_cmd("codex", config)
-        _, codex_cmd = work_launch._reviewer_cmd("claude", config)
+        claude_cmd = work_launch._reviewer_cmd("codex", config)["first"]
+        codex_cmd = work_launch._reviewer_cmd("claude", config)["first"]
         assert "sk-secret" not in claude_cmd and "sk-secret" not in codex_cmd
         assert claude_cmd.startswith(f"CLAUDE_CONFIG_DIR={os.path.expanduser('~/.quill-claude')} ")
         assert codex_cmd.startswith(f"CODEX_HOME={os.path.expanduser('~/.alt-codex')} ")

@@ -272,32 +272,50 @@ def _source_block(source_item_id: int) -> str:
     return "\n\n## Previous work item\n\n" + "\n".join(lines) + "\n"
 
 
-def _reviewer_cmd(agent: str, config: dict) -> tuple[str, str]:
-    """The other model's name and the command line that runs it once.
+def _reviewer_cmd(agent: str, config: dict) -> dict:
+    """The other model's name, the command that runs it, and the command that
+    resumes it.
 
     Only the config directory variable is carried, and an env override of it
     wins over config_dir, the precedence core.terminal already uses. The pane
     environment drops CLAUDE_CONFIG_DIR and CODEX_HOME, so a bare command
     would authenticate as the operator's default account, but the rest of an
     instance's env overrides may hold secrets and must stay out of the
-    prompt. Both commands read the question from stdin."""
+    prompt. Both commands read the question from stdin.
+
+    A second pass resumes the first pass's session instead of starting a new
+    one. A new process no longer knows what it read, so it reads the tree
+    again and re-derives a position it already held. Measured on codex-cli
+    0.153.4, a fresh run answered one question about one file for 3503
+    uncached input tokens and a resumed run answered the same question for
+    1151. The two models expose the session id differently. Codex chooses the
+    id and prints it. Claude accepts an id the caller picks. So each side
+    carries the hint that fits it."""
     llm = (config or {}).get("llm") or {}
     if agent == "codex":
         cfg = llm.get("claude") or {}
-        var, tail = "CLAUDE_CONFIG_DIR", "--dangerously-skip-permissions -p"
-        default_bin = "claude"
+        var, default_bin = "CLAUDE_CONFIG_DIR", "claude"
+        first = "--dangerously-skip-permissions --session-id <session-id> -p"
+        resume = "--dangerously-skip-permissions --resume <session-id> -p"
+        hint = "pick a fresh uuid with `uuidgen` and pass it as the id"
     else:
         cfg = llm.get("codex") or {}
-        var = "CODEX_HOME"
-        tail = "exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check -"
-        default_bin = "codex"
+        var, default_bin = "CODEX_HOME", "codex"
+        first = "exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check -"
+        resume = ("exec resume <session-id> --dangerously-bypass-approvals-and-sandbox "
+                  "--skip-git-repo-check -")
+        hint = ("the first run writes a `session id: <session-id>` line on stderr, so "
+                "send stderr to a file and read the id from it")
     env = {str(k): str(v) for k, v in (cfg.get("env") or {}).items()}
     config_dir = env.get(var) or cfg.get("config_dir")
     prefix = ""
     if config_dir:
         prefix = f"{var}={shlex.quote(os.path.expanduser(str(config_dir)))} "
     bin_name = shlex.quote(str(cfg.get("bin", default_bin)))
-    return ("claude" if agent == "codex" else "codex"), f"{prefix}{bin_name} {tail}"
+    return {"other": "claude" if agent == "codex" else "codex",
+            "first": f"{prefix}{bin_name} {first}",
+            "resume": f"{prefix}{bin_name} {resume}",
+            "id_hint": hint}
 
 
 def _cross_check_block(agent: str, config: dict) -> str:
@@ -313,8 +331,13 @@ def _cross_check_block(agent: str, config: dict) -> str:
     file, because the wording presupposed a change and gated the report on
     the review. So the first sentence states the condition, the last sentence
     states what to do when the condition does not hold, and the number of
-    passes is capped."""
-    other, cmd = _reviewer_cmd(agent, config)
+    passes is capped.
+
+    The second pass resumes the session the first pass opened, so the
+    reviewer keeps what it already read. _reviewer_cmd holds both command
+    lines and the hint that says where the session id comes from."""
+    reviewer = _reviewer_cmd(agent, config)
+    other = reviewer["other"]
     return (
         f"If you changed code, double check the change with {other} once before you "
         f"report the work done. Write your question to a file. Give {other} the claim "
@@ -324,11 +347,15 @@ def _cross_check_block(agent: str, config: dict) -> str:
         f"the stated objective. Tell {other} to skip every nit that does not change "
         "behavior, including style, naming, formatting, comment wording, and test "
         f"coverage suggestions. Tell {other} to give the severity and the concrete "
-        f"failure case for each finding. Run `{cmd}` from the "
+        f"failure case for each finding. Keep the session id of the {other} run: "
+        f"{reviewer['id_hint']}. Run `{reviewer['first']}` from the "
         "working directory with that file on stdin. Fix every finding you agree with. "
         f"State every finding you rejected and the reason. Run {other} a second time "
-        "only when you fixed a high or critical finding. Never run it a third time. If "
-        f"you changed no code, do not run {other}, and say so in your checkpoint. "
+        "only when you fixed a high or critical finding, and run that second pass as "
+        f"`{reviewer['resume']}` with the session id of the first run, so {other} "
+        "keeps the context of the first pass instead of reading the tree again. Never "
+        f"run it a third time. If you changed no code, do not run {other}, and say so "
+        "in your checkpoint. "
     )
 
 
