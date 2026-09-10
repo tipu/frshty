@@ -328,6 +328,19 @@ def _submit_pr_sync(ticket_key: str, data: dict):
     if not slug:
         return JSONResponse({"error": "No slug found"}, status_code=400)
 
+    scope = _tickets_mod._scope_review_state(_config, ticket)
+    force = bool(data.get("force"))
+    if scope in ("pending", "fail") and not force:
+        ws = _config["workspace"]
+        report = Path(ws["root"]) / ws["tickets_dir"] / slug / "docs" / "scope-review.md"
+        return JSONResponse(
+            {"error": f"consensus scope review is {scope}; PR creation is blocked. "
+                      f"Resubmit with force: true to open the PR anyway",
+             "scope_review": scope,
+             "reason": (ticket.get("scope_review") or {}).get("reason", ""),
+             "report": str(report)},
+            status_code=409)
+
     platform = make_platform(_config)
     prs = []
 
@@ -372,8 +385,14 @@ def _submit_pr_sync(ticket_key: str, data: dict):
     if not prs:
         return JSONResponse({"error": "No PRs were created"}, status_code=400)
 
+    reason = "manual create-pr"
+    if force and scope in ("pending", "fail"):
+        reason = f"manual create-pr, scope review {scope} overridden"
+        log.emit("ticket_scope_review_overridden",
+                 f"{ticket_key}: PR opened over a {scope} consensus scope review",
+                 meta={"ticket": ticket_key, "scope_review": scope})
     try:
-        state.transition_ticket(ticket_key, "in_review", reason="manual create-pr", prs=prs)
+        state.transition_ticket(ticket_key, "in_review", reason=reason, prs=prs)
     except state.TicketStateError as e:
         log.emit("ticket_pr_transition_failed",
                  f"PRs created for {ticket_key} but transition to in_review failed: {e}",
