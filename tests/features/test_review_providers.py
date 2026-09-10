@@ -197,13 +197,13 @@ class TestSeverityRulesAreInEveryPersonaPrompt:
     prior, and claude's prior filed silent data loss as a suggestion."""
 
     def test_the_peer_pr_prompt_carries_them(self):
-        for persona in reviewer.PERSONAS.values():
+        for persona in reviewer.PROMPT_PERSONAS.values():
             prompt = reviewer._build_persona_prompt(
                 persona, _pr(), Path("/tmp/diff.txt"), ["a.ts"], "", None)
             assert "Silent data loss is blocking." in prompt
 
     def test_the_ticket_prompt_carries_them(self):
-        for persona in reviewer.PERSONAS.values():
+        for persona in reviewer.PROMPT_PERSONAS.values():
             prompt = reviewer._build_ticket_persona_prompt(
                 persona, "DEV-1", "goal", ["section"], True)
             assert "Silent data loss is blocking." in prompt
@@ -211,5 +211,66 @@ class TestSeverityRulesAreInEveryPersonaPrompt:
     def test_no_persona_still_invites_an_approval(self):
         """Three personas each ended with an instruction to approve. An empty
         finding list is the neutral way to say the same thing."""
-        for persona in reviewer.PERSONAS.values():
+        for persona in reviewer.PROMPT_PERSONAS.values():
             assert "say so and approve" not in persona
+
+
+class TestCodexRunsOneSessionPerReview:
+    """Each codex session is cold and reads the whole checkout again. Three
+    sessions, one per persona, paid for that read three times on one diff and
+    burned the weekly quota. Codex reviews the combined persona in one session."""
+
+    def _fan_out(self, providers):
+        prompts = {name: f"prompt-{name}" for name in reviewer.PROMPT_PERSONAS}
+        with patch.object(reviewer, "_run_single_persona",
+                          side_effect=lambda t: (t[0], None)) as claude, \
+             patch.object(reviewer, "_run_codex_persona",
+                          side_effect=lambda t: (t[0], None)) as codex:
+            reviewer._run_personas_for_providers(prompts, list(providers), worktree=None,
+                                                 model=None, run_key="quill-4536")
+        return claude, codex
+
+    def _names(self, mock):
+        return [call.args[0][0] for call in mock.call_args_list]
+
+    def test_codex_is_asked_once(self):
+        _claude, codex = self._fan_out(("claude", "codex"))
+        assert codex.call_count == 1
+
+    def test_the_one_codex_session_gets_the_combined_prompt(self):
+        _claude, codex = self._fan_out(("claude", "codex"))
+        assert self._names(codex) == [reviewer.CODEX_PERSONA]
+        assert codex.call_args.args[0][1] == f"prompt-{reviewer.CODEX_PERSONA}"
+
+    def test_claude_still_runs_one_session_per_persona(self):
+        claude, _codex = self._fan_out(("claude", "codex"))
+        assert sorted(self._names(claude)) == sorted(reviewer.PERSONAS)
+
+    def test_claude_never_gets_the_combined_persona(self):
+        claude, _codex = self._fan_out(("claude",))
+        assert reviewer.CODEX_PERSONA not in self._names(claude)
+
+
+class TestTheCombinedPersonaKeepsEveryLens:
+    """One session replaces three, so the one prompt has to carry all three
+    concerns. A lens dropped here is a class of defect nobody looks for."""
+
+    def test_it_names_all_three_lenses(self):
+        text = reviewer.PERSONA_COMBINED
+        assert "Lens 1, spec:" in text
+        assert "Lens 2, production breakage:" in text
+        assert "Lens 3, maintainability:" in text
+
+    def test_it_carries_the_focus_of_each_source_persona(self):
+        text = reviewer.PERSONA_COMBINED
+        for line in ("Requirements coverage:", "Race conditions and data integrity:",
+                     "Security: SQL injection", "DRY violations:", "Commented-out code:"):
+            assert line in text, line
+
+    def test_it_does_not_send_a_lens_to_another_reviewer(self):
+        """Each source persona tells the model to leave the other two lanes
+        alone. One session has no other reviewer to leave them to."""
+        assert "other reviewers' jobs" not in reviewer.PERSONA_COMBINED
+
+    def test_it_still_invites_an_empty_finding_list(self):
+        assert "An empty issues list is a valid answer" in reviewer.PERSONA_COMBINED
