@@ -158,8 +158,80 @@ class TestPushGateBaseline:
         (repo / "node_modules").mkdir()
         tree = tmp_path / "tree"
         tree.mkdir()
-        assert work_launch._link_dependencies(repo, tree) == ["node_modules"]
+        assert work_launch._link_dependencies(repo, tree) == (["node_modules"], [".venv"])
         assert not (tree / ".venv").exists()
+
+    def test_a_workspace_link_is_read_but_an_internal_one_is_not(self, tmp_path):
+        """A dependency tree is full of links into its own directory: pnpm
+        builds one per stored package. Reading those as workspace links would
+        refuse to link node_modules in every repository that has one."""
+        repo = tmp_path / "repo"
+        modules = repo / "node_modules"
+        (modules / "store").mkdir(parents=True)
+        (modules / "internal").symlink_to(modules / "store", target_is_directory=True)
+        (modules / "loop").symlink_to(modules, target_is_directory=True)
+        assert work_launch._points_into(modules, repo) is False
+        (repo / "packages" / "core").mkdir(parents=True)
+        (modules / "core").symlink_to(repo / "packages" / "core", target_is_directory=True)
+        assert work_launch._points_into(modules, repo) is True
+
+    def test_a_virtualenv_of_ordinary_dependencies_is_linked(self, tmp_path):
+        repo = tmp_path / "repo"
+        site = repo / ".venv" / "lib" / "site-packages"
+        site.mkdir(parents=True)
+        (site / "other.pth").write_text("/usr/lib/python3/dist-packages\n")
+        tree = tmp_path / "tree"
+        tree.mkdir()
+        assert work_launch._link_dependencies(repo, tree) == ([".venv"], [])
+
+    def test_an_internal_bin_link_does_not_refuse_the_whole_tree(self, tmp_path):
+        """node_modules/.bin/jest -> ../jest/bin/jest.js resolves inside the
+        repository. Reading it as a workspace link would refuse node_modules in
+        every repository that has one."""
+        repo = tmp_path / "repo"
+        (repo / "node_modules" / "jest" / "bin").mkdir(parents=True)
+        (repo / "node_modules" / "jest" / "bin" / "jest.js").write_text("x")
+        (repo / "node_modules" / ".bin").mkdir()
+        (repo / "node_modules" / ".bin" / "jest").symlink_to("../jest/bin/jest.js")
+        assert work_launch._points_into(repo / "node_modules", repo) is False
+
+    def test_a_baseline_that_cannot_use_the_dependencies_is_unresolved(self, tmp_path, monkeypatch):
+        """A baseline run without the dependencies fails for the wrong reason,
+        and a failing baseline is what lets the push through."""
+        item_id, sid = _mkrun("refused dependencies")
+        repo = _repo_with_origin(tmp_path)
+        (repo / "node_modules" / "pkg").mkdir(parents=True)
+        (repo / "src").mkdir()
+        (repo / "node_modules" / "own").symlink_to(repo / "src", target_is_directory=True)
+        monkeypatch.setattr(work_launch, "_repo_root", lambda d: repo)
+        self._lint_passes(monkeypatch)
+        monkeypatch.setattr(work_launch, "_detect_runner",
+                            lambda d: (["bash", "-c", "echo boom; exit 1"], {}))
+        out = work_launch.gate_push(sid, "git push", str(repo))
+        assert out["decision"] == "deny"
+        payload = json.loads(_events(item_id, "push_gate")[0]["payload"])
+        assert payload["baseline"]["result"] == "unresolved"
+        assert "node_modules" in payload["baseline"]["note"]
+
+    def test_a_baseline_that_cannot_make_its_directory_is_unresolved(self, tmp_path, monkeypatch):
+        def full_disk(prefix=""):
+            raise OSError("No space left on device")
+
+        monkeypatch.setattr(work_launch.tempfile, "mkdtemp", full_disk)
+        out = work_launch._run_baseline(_repo_with_origin(tmp_path), "abc123", "anything")
+        assert out["result"] == "unresolved"
+        assert "OSError" in out["note"]
+
+    def test_a_cached_baseline_expires(self, tmp_path):
+        store = tmp_path / "baseline.json"
+        old = (datetime.now(timezone.utc)
+               - timedelta(seconds=work_launch.BASELINE_MAX_AGE_SECONDS + 60)).isoformat()
+        work_launch._write_baseline(store, {"base": "sha", "head_cmd": "cmd",
+                                            "result": "fail", "at": old})
+        assert work_launch._read_baseline(store, "sha", "cmd") is None
+        work_launch._write_baseline(store, {"base": "sha", "head_cmd": "cmd",
+                                            "result": "fail", "at": work_launch._now_iso()})
+        assert work_launch._read_baseline(store, "sha", "cmd")["result"] == "fail"
 
     def test_a_baseline_leaves_no_worktree_and_no_temporary_directory(self, tmp_path, monkeypatch):
         repo = _repo_with_origin(tmp_path)
@@ -379,6 +451,13 @@ class TestStopDetector:
             "- production, it is the release branch\n"
             "- staging, and I verify there first") is True
 
+    def test_a_question_whose_options_wrap_still_parks_the_item(self):
+        assert work_store._blocked_on_operator(
+            "Which destination should I use?\n"
+            "- staging\n"
+            "  (internal only)\n"
+            "- production") is True
+
     def test_a_heading_above_prose_still_does_not_park_the_item(self):
         assert work_store._blocked_on_operator(
             "## What changed?\nThe gate now reads the merge base.") is False
@@ -506,12 +585,47 @@ class TestCommitGateRewrite:
         assert out["decision"] == "deny"
         assert json.loads(_events(item_id, "commit_gate")[0]["payload"])["verdict"] == "fail"
 
-    def test_a_comment_does_not_hide_the_commit_from_the_gate(self, tmp_path):
-        """shlex reads # as a comment introducer and newlines are folded into
-        ';' before tokenizing, so one commented line took every command after
-        it with it and the gate found no commit to gate."""
+    def test_a_comment_ends_at_its_own_line(self, tmp_path):
+        """shlex reads # as a comment introducer for its whole input, and
+        newlines are folded into ';' before tokenizing, so one commented line
+        took every command after it with it. A comment ends at its line: what
+        follows on the next line is a command, and what follows on its own line
+        is not."""
         assert work_launch.parse_commit('cd /x # note\ngit commit -am "fix"') == {"chdir": "/x"}
         assert work_launch.parse_commit('# git commit -am "fix"') is None
+        assert work_launch.parse_commit('printf done # next; git commit -m fix') is None
+        assert work_launch.parse_commit('git commit -m "a # b"') == {"chdir": ""}
+
+    def test_an_apostrophe_in_a_comment_still_finds_the_message_file(self, tmp_path):
+        """The apostrophe used to make the whole command untokenizable, and the
+        message file then went unread while the commit itself was still found."""
+        _, sid = _mkrun("apostrophe comment")
+        message = tmp_path / "msg.txt"
+        message.write_text("fix the gate\n\nClaude-Session: https://claude.ai/code/s01\n")
+        out = work_launch.gate_commit(
+            sid, "git commit -F msg.txt # don't add trailers", str(tmp_path))
+        assert out["decision"] == "allow"
+        assert "Claude-Session" not in message.read_text()
+
+    def test_a_message_that_runs_commands_is_never_rewritten(self, tmp_path):
+        """`-m "$(git add b; printf fix)"` is a message and a command
+        substitution. Dropping a line inside it changes what gets committed."""
+        item_id, sid = _mkrun("substituting message")
+        command = ('git commit -m "$(\ngit add b # Generated with Claude\n'
+                   'printf fix\n)"')
+        out = work_launch.gate_commit(sid, command, str(tmp_path))
+        assert out["decision"] == "deny"
+        assert json.loads(_events(item_id, "commit_gate")[0]["payload"])["verdict"] == "fail"
+
+    def test_the_bundled_short_flag_still_carries_a_message(self, tmp_path):
+        """git takes its short flags bundled, so -am introduces the message
+        exactly as -m does."""
+        _, sid = _mkrun("bundled flag commit")
+        out = work_launch.gate_commit(
+            sid, 'git commit -am "fix the gate\nGenerated with Claude\n"', str(tmp_path))
+        assert out["decision"] == "allow"
+        assert "Generated with Claude" not in out["command"]
+        assert "fix the gate" in out["command"]
 
     def test_an_unrelated_dash_f_argument_is_not_read_as_a_message_file(self, tmp_path):
         """-F is not only git's flag. `grep -F README.md` used to hand the gate
