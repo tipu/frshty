@@ -436,18 +436,35 @@ def launch_proposed(item_id: int, agent: str = "claude") -> dict:
     The item is already on the board with its objective, project labels,
     working directory and brief, so approval only has to resolve the launch,
     claim the row and start the session. A resolve that fails leaves the
-    proposal where it was; a claim that loses a race reports it."""
+    proposal where it was; a claim that loses a race reports it.
+
+    A proposal that continues a finished task runs on the agent that ran that
+    task. The board writes such a proposal from the source task's own debrief,
+    so approving it must not move a codex task's follow-up onto claude, and
+    the approve button sends whichever agent the intake box last showed.
+
+    Such a proposal also waits, and the worktree it recorded can be reclaimed
+    while it waits. A recorded directory that has gone is dropped, the way
+    _followup_context drops an inherited directory that no longer exists, so
+    approval resolves a new one instead of refusing every approval."""
     item = db.query_one(
-        "SELECT id, state, objective, contexts, tags, source_item_id, launch_cwd, "
-        "launch_brief, worktree_opt_out FROM work_items WHERE id = ?", (item_id,))
+        "SELECT i.id, i.state, i.objective, i.contexts, i.tags, i.source_item_id, "
+        "i.launch_cwd, i.launch_brief, i.worktree_opt_out, "
+        "(SELECT r.provider FROM work_runs r WHERE r.work_item_id = i.source_item_id "
+        "ORDER BY r.id DESC LIMIT 1) AS source_provider "
+        "FROM work_items i WHERE i.id = ?", (item_id,))
     if not item:
         return {"error": "unknown work item"}
     if item["state"] != work_store.PROPOSED_STATE:
         return {"error": f"work item {item_id} is not awaiting approval "
                          f"(state: {item['state']})"}
+    agent = item["source_provider"] or agent
+    cwd = item["launch_cwd"]
+    if item["source_item_id"] and cwd and not os.path.isdir(cwd):
+        cwd = ""
     labels = [c for c in (item["contexts"] or "").split(",") if c]
     slack = SLACK_LABEL in labels
-    plan = _resolve_launch(item["objective"], item["launch_cwd"],
+    plan = _resolve_launch(item["objective"], cwd,
                            [c for c in labels if c != SLACK_LABEL], agent,
                            item["source_item_id"],
                            no_worktree=bool(item["worktree_opt_out"]),
@@ -769,10 +786,9 @@ def resume_session(item_id: int) -> bool:
     return True
 
 
-def launch_followup(source_item_id: int, objective: str, cwd: str = "",
-                    contexts: list[str] | None = None, slack: bool | None = None,
-                    agent: str = "", critical: bool | None = None) -> dict:
-    """Launch a task that continues a finished task.
+def _followup_context(source_item_id: int, cwd: str, contexts: list[str] | None,
+                      slack: bool | None, agent: str, critical: bool | None) -> dict:
+    """What a task that continues a finished task inherits from it.
 
     A caller that names the projects, the Slack archive, the working directory
     or the agent gets exactly those. A caller that omits them inherits them
@@ -820,10 +836,47 @@ def launch_followup(source_item_id: int, objective: str, cwd: str = "",
             cwd = inherited_cwd
     if critical is None:
         critical = bool(source["critical"])
-    return launch(objective, cwd=cwd, contexts=contexts, slack=bool(slack),
-                  source_item_id=source_item_id,
-                  agent=agent or source["last_provider"] or "claude",
-                  critical=bool(critical))
+    return {"cwd": cwd, "contexts": contexts, "slack": bool(slack),
+            "agent": agent or source["last_provider"] or "claude",
+            "critical": bool(critical)}
+
+
+def launch_followup(source_item_id: int, objective: str, cwd: str = "",
+                    contexts: list[str] | None = None, slack: bool | None = None,
+                    agent: str = "", critical: bool | None = None) -> dict:
+    """Launch a task that continues a finished task.
+
+    _followup_context resolves what the follow-up takes from its source."""
+    inherited = _followup_context(source_item_id, cwd, contexts, slack, agent, critical)
+    if "error" in inherited:
+        return inherited
+    return launch(objective, cwd=inherited["cwd"], contexts=inherited["contexts"],
+                  slack=inherited["slack"], source_item_id=source_item_id,
+                  agent=inherited["agent"], critical=inherited["critical"])
+
+
+def propose_followup(source_item_id: int, objective: str, note: str = "") -> dict:
+    """Put a task that continues a finished task on the board for approval.
+
+    A follow-up the board wrote by itself is opened here instead of launched.
+    It carries everything launch_followup would have inherited, so the run the
+    operator approves starts in the directory its source ran in, with the same
+    projects and the same Slack archive, and launch_proposed reads the agent
+    back off the source. Nothing runs until the operator approves it."""
+    objective = (objective or "").strip()
+    if not objective:
+        return {"error": "empty objective"}
+    inherited = _followup_context(source_item_id, "", None, None, "", None)
+    if "error" in inherited:
+        return inherited
+    labels = inherited["contexts"] + ([SLACK_LABEL] if inherited["slack"] else [])
+    tags = work_tags.derive_tags(objective, labels,
+                                 [e["key"] for e in project_entries()])
+    item_id = work_store.create_proposal(
+        objective, note=note, instance_key="personal", contexts=",".join(labels),
+        tags=",".join(tags), cwd=inherited["cwd"], source_item_id=source_item_id,
+        critical=inherited["critical"])
+    return {"item_id": item_id}
 
 
 PUSH_GATE_TEST_TIMEOUT = TEST_RUN_TIMEOUT // 3
