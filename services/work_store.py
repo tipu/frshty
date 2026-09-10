@@ -21,6 +21,7 @@ GROUPS = ("proposed", "needs_ack", "needs_you", "agent_working", "waiting_extern
 FINISHED_STATES = ("needs_ack", "done")
 FINISHED_STATES_SQL = "('needs_ack', 'done')"
 _ACK_EVENT_KINDS_SQL = "('operator_done', 'operator_ack')"
+_PROPOSAL_ACTIONS = ("decline", "critical_on", "critical_off")
 
 launch_lock = threading.Lock()
 _send_locks: dict[str, threading.Lock] = {}
@@ -183,15 +184,15 @@ def is_idle_stop(kind: str, payload: dict) -> bool:
 def create_item(objective: str, scope: str = "ad-hoc", scope_ref: str = "",
                 instance_key: str | None = None, contexts: str = "",
                 source_item_id: int | None = None, tags: str = "",
-                worktree_opt_out: bool = False) -> int:
+                worktree_opt_out: bool = False, critical: bool = False) -> int:
     now = _now()
     with db.tx() as c:
         cur = c.execute(
             "INSERT INTO work_items(objective, scope, scope_ref, instance_key, contexts, "
-            "source_item_id, tags, worktree_opt_out, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "source_item_id, tags, worktree_opt_out, critical, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (objective, scope, scope_ref, instance_key, contexts, source_item_id, tags,
-             1 if worktree_opt_out else 0, now, now),
+             1 if worktree_opt_out else 0, 1 if critical else 0, now, now),
         )
         return cur.lastrowid
 
@@ -617,7 +618,7 @@ def apply_action(item_id: int, action: str, until: str | None = None) -> dict:
         item = c.execute("SELECT id, state FROM work_items WHERE id = ?", (item_id,)).fetchone()
         if not item:
             return {"error": "unknown work item"}
-        if item["state"] == PROPOSED_STATE and action != "decline":
+        if item["state"] == PROPOSED_STATE and action not in _PROPOSAL_ACTIONS:
             # A proposal has no run. Every other action would leave it in a
             # state that assumes one: snooze parks it in waiting_external and
             # the board then shows it as needs_you with nothing to reply to,
@@ -637,6 +638,9 @@ def apply_action(item_id: int, action: str, until: str | None = None) -> dict:
         elif action in ("autocontinue_on", "autocontinue_off"):
             c.execute("UPDATE work_items SET autocontinue = ?, updated_at = ? WHERE id = ?",
                       (1 if action == "autocontinue_on" else 0, now, item_id))
+        elif action in ("critical_on", "critical_off"):
+            c.execute("UPDATE work_items SET critical = ? WHERE id = ?",
+                      (1 if action == "critical_on" else 0, item_id))
         elif action == "reopen":
             c.execute(
                 "UPDATE work_items SET state = 'needs_you', snoozed_until = NULL, "
