@@ -107,7 +107,8 @@ def api_work_thread_task(root_id: int, body: dict):
                                          cwd=body.get("cwd") or "",
                                          contexts=body.get("contexts"),
                                          slack=body.get("slack"),
-                                         agent=body.get("agent") or "")
+                                         agent=body.get("agent") or "",
+                                         critical=body.get("critical"))
     if "error" in result:
         status = 503 if "personal instance" in result["error"] else (
             500 if "launch failed" in result["error"] else 400)
@@ -216,7 +217,8 @@ def api_work_intake(body: dict):
                                 slack=bool(body.get("slack")),
                                 agent=body.get("agent") or "claude",
                                 repo=body.get("repo") or "",
-                                no_worktree=bool(body.get("no_worktree")))
+                                no_worktree=bool(body.get("no_worktree")),
+                                critical=bool(body.get("critical")))
     if "error" in result:
         status = 503 if "personal instance" in result["error"] else (
             500 if "launch failed" in result["error"] else 400)
@@ -256,7 +258,8 @@ def api_work_followup(item_id: int, body: dict):
                                          cwd=body.get("cwd") or "",
                                          contexts=body.get("contexts"),
                                          slack=body.get("slack"),
-                                         agent=body.get("agent") or "")
+                                         agent=body.get("agent") or "",
+                                         critical=body.get("critical"))
     if "error" in result:
         status = 503 if "personal instance" in result["error"] else (
             500 if "launch failed" in result["error"] else 400)

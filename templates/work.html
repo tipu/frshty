@@ -97,6 +97,9 @@
         <span class="ln-chipsel" v-if="targetMeta.slackAvailable" :class="{ on: intakeSlack }"
               title="tell the run to read the slack_int capture archive for the selected project's org"
               @click="intakeSlack = !intakeSlack">slack_int</span>
+        <span class="ln-chipsel crit" :class="{ on: intakeCritical }"
+              title="mark this task critical; its card gets a gold border on the board"
+              @click="intakeCritical = !intakeCritical">★ critical</span>
         <span class="ln-chipsel" title="the repository this task gets its own worktree of. auto picks it when exactly one resolves. no worktree runs in the shared checkout.">worktree:
           <select v-model="intakeRepo" :disabled="!targetMeta.personalLoaded || intakeBusy">
             <option value="">auto</option>
@@ -120,7 +123,7 @@
                   v-if="g === 'done' && view === 'board' && !searchText.trim() && !tagFilter.length"
                   title="move every completed task to the archive" @click="archiveCompleted">Archive all</button>
         </div>
-        <article class="ln-task" :class="g" v-for="it in groups[g]" :key="rowKey(it)">
+        <article class="ln-task" :class="[g, { critical: it.critical }]" v-for="it in groups[g]" :key="rowKey(it)">
           <div class="ln-task-top">
             <div style="min-width:0">
               <a class="ln-task-title" :href="taskHref(it)">{{ it.objective }}</a>
@@ -131,6 +134,7 @@
           </div>
           <div class="ln-task-foot">
             <span class="ln-pill" :class="statePill(g, it)">{{ stateText(g, it) }}</span>
+            <span class="ln-pill ln-pill-gold" v-if="it.critical" title="you marked this task critical">★ Critical</span>
             <span class="ln-pill ln-pill-ghost" v-if="it.peer" :title="'this task runs on the ' + it.peer + ' host'">⇄ {{ it.peer }}</span>
             <span class="ln-pill ln-pill-ghost" v-if="view === 'board' && it.archived_at"
                   title="this task is in the archive, not on the board">Archived</span>
@@ -178,6 +182,9 @@
                   auto {{ it.autocontinue ? 'on' : 'off' }} ({{ it.continues_used }}/{{ it.continue_cap }})
                 </button>
               </template>
+              <button class="ln-btn ln-btn-sm ln-btn-ghost"
+                      :title="it.critical ? 'drop the critical mark' : 'mark this task critical'"
+                      @click="act(it, it.critical ? 'critical_off' : 'critical_on')">{{ it.critical ? '★ critical' : '☆ critical' }}</button>
               <a class="ln-btn ln-btn-sm" :href="taskHref(it)">Open task</a>
             </span>
           </div>
@@ -260,6 +267,7 @@ frshtyApp({
       groups: { proposed: [], needs_ack: [], needs_you: [], agent_working: [], waiting_external: [], failed_stale: [], done: [] },
       personalLoaded: false, intakeText: "", intakeError: "", intakeBusy: false,
       projects: [], slackAvailable: false, intakeContexts: [], intakeSlack: false, moreOpen: false,
+      intakeCritical: false,
       intakeRepo: "",
       agents: ["claude"], intakeAgent: localStorage.getItem("workAgent") || "claude",
       connError: "", replyText: {}, sumOpen: {}, approveBusy: {}, linkmap: null, threads: [],
@@ -560,6 +568,7 @@ frshtyApp({
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text: this.intakeText, agent: this.intakeAgent,
                                  contexts: this.intakeContexts, slack: this.intakeSlack,
+                                 critical: this.intakeCritical,
                                  repo: this.intakeRepo === "__none__" ? "" : this.intakeRepo,
                                  no_worktree: this.intakeRepo === "__none__" }),
         });
@@ -567,6 +576,7 @@ frshtyApp({
         if (!r.ok) { this.intakeError = d.error || "intake failed (HTTP " + r.status + ")"; return; }
         localStorage.setItem("workAgent", this.intakeAgent);
         this.intakeText = ""; this.intakeContexts = []; this.intakeSlack = false;
+        this.intakeCritical = false;
         this.intakeRepo = "";
         this.$nextTick(() => this.grow(this.$refs.intakeBox));
         await this.refresh();
