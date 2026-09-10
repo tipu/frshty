@@ -7,6 +7,7 @@ from pathlib import Path
 
 import httpx
 
+import core.correspondence as correspondence
 import core.log as log
 from core import external_log
 from core.config import resolve_env, get_repos, base_branch_for
@@ -486,6 +487,8 @@ class BitbucketPlatform(_CIMonitorMixin):
             }
 
     def post_pr_comment(self, repo: str, pr_id: int, body: str, path: str | None = None, line: int | None = None, parent_id: int | None = None) -> dict:
+        if not correspondence.allowed(self.config):
+            return {"status": "error", "detail": correspondence.DENY_REASON}
         url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}/comments"
         payload = {"content": {"raw": body}}
         if path and line:
@@ -499,6 +502,8 @@ class BitbucketPlatform(_CIMonitorMixin):
             return {"status": "error", "detail": resp.text}
 
     def edit_pr_comment(self, repo: str, pr_id: int, comment_id: int, body: str) -> dict:
+        if not correspondence.allowed(self.config):
+            return {"status": "error", "detail": correspondence.DENY_REASON}
         url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}/comments/{comment_id}"
         with external_log.client("bitbucket", auth=self._auth(), timeout=30) as client:
             resp = client.put(url, json={"content": {"raw": body}})
@@ -1023,6 +1028,8 @@ class GitHubPlatform(_CIMonitorMixin):
         }
 
     def post_pr_comment(self, repo: str, pr_id: int, body: str, path: str | None = None, line: int | None = None, parent_id: int | None = None) -> dict:
+        if not correspondence.allowed(self.config):
+            return {"status": "error", "detail": correspondence.DENY_REASON}
         full = self._resolve_repo(repo)
         if parent_id:
             result = self._run_gh([
@@ -1049,6 +1056,8 @@ class GitHubPlatform(_CIMonitorMixin):
         return {"status": "error", "detail": result.stderr}
 
     def edit_pr_comment(self, repo: str, pr_id: int, comment_id: int, body: str) -> dict:
+        if not correspondence.allowed(self.config):
+            return {"status": "error", "detail": correspondence.DENY_REASON}
         full = self._resolve_repo(repo)
         result = self._run_gh([
             "api", "-X", "PATCH", f"repos/{full}/pulls/comments/{comment_id}",

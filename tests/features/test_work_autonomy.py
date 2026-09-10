@@ -54,13 +54,13 @@ def _repo_with_origin(tmp_path):
 
 class TestDeliveryRule:
     def test_launch_and_continue_prompts_put_delivery_inside_the_objective(self):
-        for prompt in (work_store.DELIVERY_RULE, work_store.CONTINUE_PROMPT):
+        for prompt in (work_store.DELIVERY_RULE, work_store.continue_prompt()):
             assert "Delivery is part of the objective" in prompt
             assert "Do not end with an offer" in prompt
 
     def test_progress_rule_names_the_marker(self):
         assert work_store.PROGRESS_MARKER in work_store.PROGRESS_RULE
-        assert work_store.PROGRESS_MARKER in work_store.CONTINUE_PROMPT
+        assert work_store.PROGRESS_MARKER in work_store.continue_prompt()
 
 
 class TestPushGateBaseline:
@@ -805,6 +805,54 @@ class TestRequiredFollowups:
             chain.append(child)
             work_debrief.dispatch_required_followups()
         assert _events(chain[-1], "followup_auto_sent") == []
+
+    def test_the_scan_leaves_required_followups_alone_by_default(self, monkeypatch):
+        item_id = self._finished_with_followup("required delivery", True)
+        monkeypatch.setattr(work_launch, "personal_config", lambda: {"features": {}})
+        monkeypatch.setattr(work_debrief, "_deliver_work_item",
+                            lambda row, contexts, slack, agent: "launched work item #999")
+        assert work_debrief.sweep_required_followups() == []
+        assert _events(item_id, "followup_auto_sent") == []
+
+    def test_the_scan_dispatches_when_the_instance_enables_it(self, monkeypatch):
+        item_id = self._finished_with_followup("required delivery", True)
+        monkeypatch.setattr(work_launch, "personal_config",
+                            lambda: {"features": {"auto_followups": True}})
+        monkeypatch.setattr(work_debrief, "_deliver_work_item",
+                            lambda row, contexts, slack, agent: "launched work item #999")
+        assert item_id in [s["item_id"] for s in work_debrief.sweep_required_followups()]
+        assert len(_events(item_id, "followup_auto_sent")) == 1
+
+    def test_the_scan_spends_a_launch_budget(self, monkeypatch):
+        """Depth caps one chain. Only the budget caps how many chains start.
+
+        Turning the dispatch on drained twelve required drafts in one pass and
+        put twelve agent sessions on the board inside five seconds."""
+        monkeypatch.setattr(work_launch, "personal_config",
+                            lambda: {"features": {"auto_followups": True}})
+        monkeypatch.setattr(work_debrief, "_deliver_work_item",
+                            lambda row, contexts, slack, agent: "launched work item #999")
+        monkeypatch.setattr(work_debrief, "_auto_sent_today", lambda: 0)
+        for n in range(work_debrief.AUTO_FOLLOWUP_PER_SCAN + 3):
+            self._finished_with_followup(f"backlog {n}", True)
+        first = work_debrief.sweep_required_followups()
+        assert len(first) == work_debrief.AUTO_FOLLOWUP_PER_SCAN
+
+    def test_the_day_budget_stops_the_scan_entirely(self, monkeypatch):
+        monkeypatch.setattr(work_launch, "personal_config",
+                            lambda: {"features": {"auto_followups": True}})
+        monkeypatch.setattr(work_debrief, "_deliver_work_item",
+                            lambda row, contexts, slack, agent: "launched work item #999")
+        monkeypatch.setattr(work_debrief, "_auto_sent_today",
+                            lambda: work_debrief.AUTO_FOLLOWUP_PER_DAY)
+        self._finished_with_followup("over budget", True)
+        assert work_debrief.sweep_required_followups() == []
+
+    def test_a_string_false_does_not_mark_a_followup_required(self):
+        parsed = work_debrief._parse_debrief(json.dumps({"summary": "s", "followups": [
+            {"kind": "work_item", "required": "false", "draft": "push it"},
+        ]}))
+        assert parsed["followups"][0]["required"] is False
 
     def test_the_parser_only_marks_a_work_item_required(self):
         parsed = work_debrief._parse_debrief(json.dumps({"summary": "s", "followups": [

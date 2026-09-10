@@ -5,6 +5,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 
+import core.correspondence as correspondence
 import core.db as db
 import core.llm as llm
 import core.log as log
@@ -102,7 +103,7 @@ def _parse_debrief(raw: str) -> dict:
             "workspace": (f.get("workspace") or "").strip()[:80],
             "recipient": (f.get("recipient") or "").strip()[:200],
             "draft": draft[:2000],
-            "required": bool(f.get("required")) and kind == "work_item",
+            "required": f.get("required") is True and kind == "work_item",
         })
     return {"summary": data["summary"].strip()[:2000], "followups": followups[:3]}
 
@@ -342,6 +343,31 @@ def _pending_done_items() -> list:
     return pending
 
 
+def _auto_followups_enabled() -> bool:
+    """Whether the scan may launch a required follow-up by itself."""
+    config = work_launch.personal_config() or {}
+    return bool((config.get("features") or {}).get("auto_followups"))
+
+
+def sweep_required_followups() -> list[dict]:
+    """The scan step that dispatches required follow-ups, when the instance
+    allows it.
+
+    One pass drained a backlog of twelve required drafts and put twelve agent
+    sessions on the board at once, so the automatic dispatch is opt-in through
+    features.auto_followups and defaults off. The flag gates this step alone.
+    The operator still sends any draft by hand from the task page, and the
+    dispatch itself keeps its own rules about kind, required and chain depth."""
+    if not _auto_followups_enabled():
+        return []
+    sent = dispatch_required_followups()
+    for done in sent:
+        log.emit("work_followup_auto",
+                 f"work item {done['item_id']}: ran the required "
+                 f"follow-up by itself; {done['detail']}")
+    return sent
+
+
 def _scan_loop():
     try:
         seen_any = db.query_one(
@@ -395,10 +421,7 @@ def _scan_loop():
         except Exception as e:
             log.emit("work_debrief_error", f"{type(e).__name__}: {e}")
         try:
-            for done in dispatch_required_followups():
-                log.emit("work_followup_auto",
-                         f"work item {done['item_id']}: ran the required "
-                         f"follow-up by itself; {done['detail']}")
+            sweep_required_followups()
         except Exception as e:
             log.emit("work_followup_auto_error", f"{type(e).__name__}: {e}")
 
@@ -437,6 +460,10 @@ def _slack_send(workspace: str, channel: str, text: str) -> dict:
 
 
 def _deliver_slack(row) -> str:
+    config = work_launch.personal_config()
+    if not (correspondence.allowed(config) if config
+            else correspondence.allowed_on_disk()):
+        raise RuntimeError(correspondence.DENY_REASON)
     if not os.path.isdir(SLACK_INT_DIR):
         raise RuntimeError(f"slack_int not found at {SLACK_INT_DIR} on this host")
     if not row["workspace"]:
@@ -516,6 +543,12 @@ def send_followup(followup_id: int, text: str | None = None,
 
 
 AUTO_FOLLOWUP_DEPTH = 2
+# The launch budget. Depth caps how far one chain runs; it does not cap how
+# many chains start at once. Turning the dispatch on drained a backlog of
+# twelve required drafts in a single pass and put twelve agent sessions on
+# the board, which is the failure this bounds.
+AUTO_FOLLOWUP_PER_SCAN = 2
+AUTO_FOLLOWUP_PER_DAY = 6
 
 
 def _auto_chain_depth(item_id: int) -> int:
@@ -541,6 +574,18 @@ def _auto_chain_depth(item_id: int) -> int:
     return depth
 
 
+def _auto_sent_today() -> int:
+    """Follow-ups this dispatch launched by itself in the last 24 hours.
+
+    The event row is the ledger, not the work item, because a follow-up the
+    operator sent by hand writes no such row and must not spend the budget
+    the automatic dispatch runs on."""
+    row = db.query_one(
+        "SELECT COUNT(*) AS n FROM work_events WHERE kind = 'followup_auto_sent'"
+        " AND datetime(created_at) > datetime('now', '-24 hours')")
+    return int(row["n"]) if row else 0
+
+
 def dispatch_required_followups() -> list[dict]:
     """Run the follow-ups that finish work this task was already authorised to
     do, and leave every other draft to the operator.
@@ -550,7 +595,17 @@ def dispatch_required_followups() -> list[dict]:
     that told a later agent to push branches an earlier agent had already
     verified: authorised work the run left undone. Only a work_item follow-up
     the debrief marked required runs by itself. A slack_message never does,
-    because sending one is an outward communication."""
+    because sending one is an outward communication.
+
+    Two budgets bound the volume. Depth stops one chain from running on for
+    ever. The per-scan and per-day counts stop many chains from starting at
+    once: without them the first scan after the feature is enabled drains
+    every eligible draft in the table, which is how twelve agent sessions
+    landed on the board inside five seconds."""
+    budget = min(AUTO_FOLLOWUP_PER_SCAN,
+                 max(0, AUTO_FOLLOWUP_PER_DAY - _auto_sent_today()))
+    if budget <= 0:
+        return []
     rows = db.query_all(
         "SELECT f.id, f.work_item_id FROM work_followups f "
         "JOIN work_items i ON i.id = f.work_item_id "
@@ -573,6 +628,8 @@ def dispatch_required_followups() -> list[dict]:
                               {"followup_id": row["id"], "detail": result["detail"]})
         sent.append({"id": row["id"], "item_id": row["work_item_id"],
                      "detail": result["detail"]})
+        if len(sent) >= budget:
+            break
     return sent
 
 
