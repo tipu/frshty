@@ -64,7 +64,7 @@ class TestPromptTone:
         assert "Don't explain why it's wrong" not in reviewer.BODY_RULES
 
     def test_every_persona_asks_for_multi_turn_work(self):
-        for name, text in reviewer.PERSONAS.items():
+        for name, text in reviewer.PROMPT_PERSONAS.items():
             assert "HOW TO WORK:" in text, name
             assert "Do not answer from the diff alone." in text, name
             assert "Take as many tool calls as you need." in text, name
