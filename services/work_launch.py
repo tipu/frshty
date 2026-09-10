@@ -1,10 +1,14 @@
+import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import core.config as core_config
@@ -513,12 +517,14 @@ def _start(item_id: int, plan: dict, slack: bool, brief: str,
             "objective is a question, answer it and stop: do not build, install or "
             "change anything to answer it. If you see other work worth doing, name "
             "it in your checkpoint and leave it undone. "
+            + work_store.DELIVERY_RULE +
             "Do not wait for a process in a shell loop that sleeps and checks, because "
             "each pass of that loop costs a full turn. Run the long command in the "
             "background and use the notification your harness sends when it ends. If "
             "your harness sends no such notification, run the command in the "
             "foreground with a timeout long enough to hold it. "
             "When you stop, state a one-line checkpoint. "
+            + work_store.PROGRESS_RULE +
             "When you hit a decision point, decide yourself by default: pick the "
             "most correct, cleanest, simplest option and keep going. Ask the "
             "operator only when you truly cannot decide — the choice is "
@@ -840,10 +846,44 @@ def _strip_heredocs(command: str) -> str:
     return "\n".join(kept)
 
 
+def _strip_comments(command: str) -> str:
+    """`command` with every shell comment removed, line by line.
+
+    A comment runs to the end of its own line. shlex has no concept of a line:
+    it drops everything after the first `#` in its whole input, and this module
+    folds newlines into `;` before tokenizing, so one commented line took every
+    command after it with it. `cd /repo # note` followed by `git commit`
+    produced no commit at all and every gate keyed on finding one let it
+    through. Removing the comments here, and only to the end of their line,
+    also keeps the other half right: a `;` or an apostrophe inside a comment is
+    text the shell never reads."""
+    out = []
+    # The quote carries across lines, because a shell quote does: a message
+    # written over several lines is one argument, and a `#` inside it is text.
+    quote = ""
+    for line in command.split("\n"):
+        cut = None
+        for i, char in enumerate(line):
+            if quote:
+                if char == quote:
+                    quote = ""
+            elif char in "'\"":
+                quote = char
+            elif char == "#" and (i == 0 or line[i - 1] in " \t"):
+                cut = i
+                break
+        out.append(line if cut is None else line[:cut])
+    return "\n".join(out)
+
+
 def _tokenize(command: str) -> list[str] | None:
-    """Shell tokens of `command`, or None when shlex cannot tokenize it."""
-    lex = shlex.shlex(command.replace("\n", " ; "), posix=True,
+    """Shell tokens of `command`, or None when shlex cannot tokenize it.
+
+    Comments are removed first, per line, and `#` is an ordinary character
+    after that: see _strip_comments for what shlex does with one otherwise."""
+    lex = shlex.shlex(_strip_comments(command).replace("\n", " ; "), posix=True,
                       punctuation_chars=True)
+    lex.commenters = ""
     lex.whitespace_split = True
     try:
         return list(lex)
@@ -923,11 +963,10 @@ def _repo_root(start_dir: str) -> Path | None:
     return Path(top) if top else None
 
 
-def _outgoing_files(repo: Path) -> list[str] | None:
-    """Files changed between the remote base and HEAD, or None when no remote
-    base exists to diff against. Base preference: the branch upstream, then
-    origin/HEAD."""
-    base = ""
+def _diff_base(repo: Path) -> str:
+    """The remote ref an outgoing change is measured against, "" when none.
+
+    Preference: the branch upstream, then origin/HEAD."""
     for probe in (["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
                   ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]):
         try:
@@ -935,7 +974,14 @@ def _outgoing_files(repo: Path) -> list[str] | None:
         except (git_util.GitCommandError, subprocess.TimeoutExpired, OSError):
             base = ""
         if base:
-            break
+            return base
+    return ""
+
+
+def _outgoing_files(repo: Path) -> list[str] | None:
+    """Files changed between the remote base and HEAD, or None when no remote
+    base exists to diff against."""
+    base = _diff_base(repo)
     if not base:
         return None
     try:
@@ -962,12 +1008,283 @@ def _gate_tests(repo: Path) -> dict:
     return outcome
 
 
+_DEP_DIRS = ("node_modules", ".venv", "venv", "vendor")
+_POINTS_INTO_DEPTH = 4
+BASELINE_MAX_AGE_SECONDS = 6 * 3600
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+_baseline_guard = threading.Lock()
+_BASELINE_FILE = "frshty-push-gate-baseline.json"
+
+
+def _merge_base(repo: Path) -> str:
+    """The commit the branch forked from its remote base, "" when unknown."""
+    base = _diff_base(repo)
+    if not base:
+        return ""
+    try:
+        return git_util.run_git(repo, ["merge-base", base, "HEAD"],
+                                timeout=30).stdout.strip()
+    except (git_util.GitCommandError, subprocess.TimeoutExpired, OSError):
+        return ""
+
+
+def _points_into(directory: Path, repo: Path) -> bool:
+    """Whether an installed dependency tree carries a path back into `repo`.
+
+    An editable install and a workspace link put the repository's own source
+    inside its dependency directory. Linking such a directory into the
+    baseline checkout would make the baseline import the code under test, so
+    the baseline would report whatever HEAD does and the gate would call every
+    regression pre-existing. The walk stops at _POINTS_INTO_DEPTH and never
+    follows a link: a node_modules tree is enormous and can hold a cycle, and
+    both shapes that matter sit near its top.
+    """
+    marker, inner = str(repo.resolve()), str(directory.resolve())
+
+    def outside_the_tree(target: str) -> bool:
+        """A path in the repository but not inside the dependency tree itself.
+
+        A dependency tree is full of links into its own directory: pnpm builds
+        one for every package it stores. Those resolve inside the repository
+        and mean nothing. The link that matters points at the repository's own
+        source, which sits outside the tree."""
+        return target.startswith(marker) and not target.startswith(inner)
+
+    root = str(directory)
+    try:
+        for here, dirs, files in os.walk(root, followlinks=False):
+            if here[len(root):].count(os.sep) >= _POINTS_INTO_DEPTH:
+                dirs[:] = []
+            for name in list(dirs) + files:
+                entry = Path(here) / name
+                if entry.is_symlink():
+                    try:
+                        if outside_the_tree(str(entry.resolve())):
+                            return True
+                    except OSError:
+                        continue
+                elif entry.suffix in (".pth", ".egg-link"):
+                    try:
+                        body = entry.read_text(errors="replace")
+                    except OSError:
+                        continue
+                    if any(outside_the_tree(line.strip())
+                           for line in body.splitlines() if line.strip()):
+                        return True
+    except OSError:
+        return True
+    return False
+
+
+def _link_dependencies(repo: Path, into: Path) -> tuple[list[str], list[str]]:
+    """Point a throwaway checkout at the dependencies the real one installed,
+    and name the ones it could not use.
+
+    A fresh worktree carries no node_modules and no virtualenv, so a suite run
+    in it would fail for want of its dependencies rather than for anything the
+    baseline says. Linking them makes the baseline run the same suite with the
+    same dependencies as the push under test. A dependency tree that reaches
+    back into the repository is never linked: see _points_into. A refusal is
+    returned rather than swallowed, because a baseline run without the
+    dependencies fails for the wrong reason, and the caller reads a failing
+    baseline as permission to push."""
+    linked: list[str] = []
+    refused: list[str] = []
+    for name in _DEP_DIRS:
+        source, target = repo / name, into / name
+        if not source.is_dir() or target.exists():
+            continue
+        if _points_into(source, repo):
+            refused.append(name)
+            continue
+        try:
+            target.symlink_to(source, target_is_directory=True)
+        except OSError:
+            refused.append(name)
+            continue
+        linked.append(name)
+    return linked, refused
+
+
+def _baseline_store(repo: Path) -> Path | None:
+    """The file the baseline outcome is cached in, beside the repository's own
+    git metadata.
+
+    A process-local cache is no cache at all here: the gate runs inside a hook
+    that starts a fresh Python process for every tool call, so each push would
+    pay for the baseline again. The git common directory is the one place that
+    is per repository, already writable, and shared by every worktree of it."""
+    try:
+        common = git_util.run_git(repo, ["rev-parse", "--git-common-dir"],
+                                  timeout=30).stdout.strip()
+    except (git_util.GitCommandError, subprocess.TimeoutExpired, OSError):
+        return None
+    if not common:
+        return None
+    path = Path(common)
+    if not path.is_absolute():
+        path = (repo / path).resolve()
+    return path / _BASELINE_FILE
+
+
+def _read_baseline(store: Path | None, base_sha: str, head_cmd: str) -> dict | None:
+    """The cached outcome for exactly this base commit and this suite.
+
+    The command is part of the key. A cached failure for `npm run test` says
+    nothing about `npm run test:unit`, and answering with it would excuse a
+    suite the baseline never ran."""
+    if store is None:
+        return None
+    try:
+        held = json.loads(store.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(held, dict):
+        return None
+    if held.get("base") != base_sha or held.get("head_cmd") != head_cmd:
+        return None
+    # The record says what the suite did with the dependencies that were
+    # installed when it ran. Repairing a broken dependency changes that answer
+    # and changes no commit, so the record is given a life rather than being
+    # trusted for as long as the branch exists.
+    try:
+        age = (datetime.now(timezone.utc)
+               - datetime.fromisoformat(held.get("at") or "")).total_seconds()
+    except (TypeError, ValueError):
+        return None
+    if age < 0 or age > BASELINE_MAX_AGE_SECONDS:
+        return None
+    return held
+
+
+def _write_baseline(store: Path | None, outcome: dict) -> None:
+    """Replace the cached outcome in one step.
+
+    Written in place, a reader in another process can catch the file half
+    written. That reader would fail to parse it and rerun the baseline, which
+    is safe but wasteful, and os.replace costs nothing."""
+    if store is None:
+        return
+    scratch = store.with_suffix(f".{os.getpid()}.tmp")
+    try:
+        scratch.write_text(json.dumps(outcome))
+        os.replace(scratch, store)
+    except (OSError, TypeError, ValueError):
+        try:
+            scratch.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _baseline_tests(repo: Path, base_sha: str, head_cmd: str) -> dict:
+    """Run the repository's own suite at the merge base, and cache the answer.
+
+    The gate exists to catch a test the change broke, not to report a suite
+    that was already red before the branch existed. A monorepo whose desktop
+    package cannot start Electron on this host fails every push, for reasons
+    the change never touched, and the only exit the agent has left is to ask
+    the operator to run the push. So a failing suite is measured against the
+    same suite at the merge base.
+
+    The answer is cached per repository, per base commit and per suite command,
+    in a file beside the repository's git metadata, because every push runs the
+    gate in a new process. `result` is "unresolved" when the baseline could not
+    be established, and the caller then keeps denying."""
+    store = _baseline_store(repo)
+    with _baseline_guard:
+        cached = _read_baseline(store, base_sha, head_cmd)
+        if cached is not None:
+            return cached
+        outcome = _run_baseline(repo, base_sha, head_cmd)
+        _write_baseline(store, outcome)
+        return outcome
+
+
+def _run_baseline(repo: Path, base_sha: str, head_cmd: str) -> dict:
+    """One baseline run, with its checkout removed whatever happens.
+
+    Every failure path returns "unresolved" rather than raising: the caller is
+    a gate, and a gate that raises inside the hook prints nothing, so the push
+    it could not judge would go through unexamined."""
+    outcome = {"result": "unresolved", "cmd": "", "note": "", "base": base_sha,
+               "head_cmd": head_cmd, "at": _now_iso()}
+    holder, tree = "", Path("")
+    try:
+        # Inside the guard. mkdtemp raises when the temporary filesystem is
+        # full, and an exception here reaches the hook, which prints nothing,
+        # so the push the gate could not judge would go through unexamined.
+        holder = tempfile.mkdtemp(prefix="frshty-gate-baseline-")
+        tree = Path(holder) / "tree"
+        try:
+            git_util.run_git(repo, ["worktree", "add", "--detach", "--force",
+                                    str(tree), base_sha], timeout=300)
+        except (git_util.GitCommandError, subprocess.TimeoutExpired, OSError) as e:
+            outcome["note"] = f"could not check out the merge base: {type(e).__name__}: {e}"[:300]
+            return outcome
+        linked, refused = _link_dependencies(repo, tree)
+        if refused:
+            outcome["note"] = ("the baseline cannot use these dependencies, so it "
+                               "would fail for the wrong reason: " + ", ".join(refused))
+            return outcome
+        runner = _detect_runner(tree)
+        if runner is None or runner[0][0] == _NO_LOCAL_PY_VENV_SENTINEL:
+            outcome["note"] = "the merge base resolves no test runner"
+            return outcome
+        cmd, env = runner
+        baseline_cmd = " ".join(cmd).replace(str(tree), str(repo))
+        if baseline_cmd != head_cmd:
+            outcome["note"] = f"the merge base runs a different suite: {baseline_cmd}"
+            return outcome
+        outcome = {
+            **_run_repo_tests(tree, cmd, env, timeout=PUSH_GATE_TEST_TIMEOUT),
+            "cmd": baseline_cmd, "base": base_sha, "head_cmd": head_cmd,
+            "at": _now_iso(),
+            "note": "dependencies linked: " + (", ".join(linked) or "none"),
+        }
+        return outcome
+    except Exception as e:
+        outcome["note"] = f"the baseline run failed: {type(e).__name__}: {e}"[:300]
+        return outcome
+    finally:
+        # Unconditional. `worktree add` can register the checkout and then time
+        # out, and removing only the directory would leave the registration
+        # behind for every later `git worktree list` to report.
+        if holder:
+            for args in (["worktree", "remove", "--force", str(tree)],
+                         ["worktree", "prune"]):
+                try:
+                    git_util.run_git(repo, args, timeout=120)
+                except (git_util.GitCommandError, subprocess.TimeoutExpired, OSError):
+                    pass
+            shutil.rmtree(holder, ignore_errors=True)
+
+
 def _deny_reason(stage: str, detail: str) -> str:
     return (f"Push blocked by the work-layer code gate: {stage} failed.\n\n"
             f"{detail.strip()}\n\n"
             "Fix the failures, commit the fixes, and run the push again; the "
             "gate reruns on every push. Do not bypass the gate by loosening "
             "the linter, skipping tests, or pushing another way.")
+
+
+def _baseline_note(baseline: dict) -> str:
+    """What the gate learned from the merge base, for the denied agent.
+
+    Silence would leave the agent guessing whether the failure is its own. A
+    baseline that passed says the change broke the suite. A baseline that could
+    not be established says why, so the agent fixes that instead of asking the
+    operator to run the push."""
+    if not baseline:
+        return ""
+    if baseline.get("result") == "pass":
+        return (f"\n\nThe same suite passes at the merge base "
+                f"{baseline['base'][:12]}, so this change is what broke it.")
+    return (f"\n\nThe gate could not measure the merge base "
+            f"{baseline['base'][:12]}: {baseline.get('note') or baseline.get('result')}. "
+            "Until it can, every failure of this suite blocks the push.")
 
 
 _ATTRIBUTION_PATTERNS = (
@@ -1032,6 +1349,162 @@ def attribution_match(text: str) -> tuple[str, str] | None:
     return None
 
 
+def _strip_attribution_lines(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """`text` without any line that credits the agent, and what was removed."""
+    kept: list[str] = []
+    removed: list[tuple[str, str]] = []
+    for line in text.split("\n"):
+        found = attribution_match(line)
+        if found:
+            removed.append(found)
+            continue
+        kept.append(line)
+    return "\n".join(kept), removed
+
+
+def _command_tokens(command: str) -> list[str] | None:
+    """The shell tokens of `command` with every heredoc body left out.
+
+    A heredoc body is data. What is left is what the shell will execute, and
+    that is what a rewrite must not change."""
+    return _tokenize(_strip_heredocs(command))
+
+
+_LONG_MESSAGE_FLAGS = ("--message", "--file")
+
+
+def _takes_a_message(token: str) -> bool:
+    """Whether the next token is the message this flag introduces.
+
+    git accepts the short flags bundled, so -m, -am and -aem all take the
+    message next. A long flag that carries its value after an = introduces
+    nothing."""
+    if token in _LONG_MESSAGE_FLAGS or token in ("-F",):
+        return True
+    return (token.startswith("-") and not token.startswith("--")
+            and "=" not in token and token.endswith(("m", "F")))
+
+
+def _carries_a_message(token: str) -> bool:
+    """Whether this single token is itself a message argument."""
+    return token.startswith(("-m", "--message=", "-F", "--file="))
+
+
+def _substitutes(text: str) -> bool:
+    """Whether this argument runs a command to build itself."""
+    return "$(" in text or "`" in text
+
+
+def _only_the_message_changed(before: list[str], after: list[str]) -> bool:
+    """Whether a rewrite touched nothing but commit message text.
+
+    Removing a whole line removes whatever that line ran. `cd /other/repo #
+    Generated with Claude` reads as attribution and is a `cd`, and dropping it
+    sends the commit to a different repository while both a shlex parse and a
+    `git commit` parse still succeed. So the tokens have to line up one for
+    one, and every token that differs has to be a commit message.
+
+    A message argument can still run commands: `-m "$(git add b; printf fix)"`
+    is a message and a command substitution, and dropping a line inside it
+    changes what gets committed. So a differing argument that substitutes is
+    accepted only when nothing outside its heredoc bodies moved, which is the
+    `-m "$(cat <<'MSG' ... MSG)"` the agents actually write."""
+    if len(before) != len(after):
+        return False
+    for i, (was, now) in enumerate(zip(before, after)):
+        if was == now:
+            continue
+        if not (_carries_a_message(was) and _carries_a_message(now)
+                or (i and _takes_a_message(before[i - 1])
+                    and before[i - 1] == after[i - 1])):
+            return False
+        if _substitutes(was) and _strip_heredocs(was) != _strip_heredocs(now):
+            return False
+    return True
+
+
+def _commit_message_files(command: str, cwd: str) -> list[Path]:
+    """The message files the `git commit` in this command line actually reads.
+
+    Scanned per segment, because -F is not only git's flag: `git commit -m fix
+    && grep -F README.md log` used to hand the gate README.md as a commit
+    message, and a gate that corrects a message would have rewritten it."""
+    found: list[Path] = []
+    for tokens in _commit_segments(command):
+        for path in _message_files(tokens):
+            found.append(Path(os.path.join(cwd or ".", path)))
+    return found
+
+
+def _commit_segments(command: str) -> list[list[str]]:
+    """The tokens of every pipeline segment that runs `git commit`."""
+    tokens = _command_tokens(command)
+    if tokens is None:
+        return []
+    out: list[list[str]] = []
+    segment: list[str] = []
+    for tok in tokens + ["\n"]:
+        if tok in _SHELL_SEPARATORS:
+            if _segment_git(segment, "commit") is not None:
+                out.append(segment)
+            segment = []
+        else:
+            segment.append(tok)
+    return out
+
+
+def _rewrite_commit(command: str, cwd: str) -> dict | None:
+    """The same commit with the agent attribution removed, or None when the
+    gate cannot produce one it can vouch for.
+
+    The operator wants no agent attribution in the history, and the harness
+    issues a system reminder later in the session telling the agent to append
+    a session link. The agent follows the newer, more specific instruction and
+    the gate denied the commit, once per session, for a line neither of them
+    is going to stop writing. Correcting the message costs nothing and ends
+    that argument.
+
+    The rewrite drops whole lines. It is taken only when the original command
+    parsed, the rewritten one still parses, it still runs a commit, and no
+    attribution survives anywhere the message comes from. Anything else denies,
+    because a gate that hands git a command it cannot read is worse than a gate
+    that asks for a new message."""
+    before = _command_tokens(command)
+    if before is None:
+        return None
+    fixed, removed = _strip_attribution_lines(command)
+    after = _command_tokens(fixed)
+    if after is None or parse_commit(fixed) is None:
+        return None
+    if not _only_the_message_changed(before, after):
+        return None
+    files: list[tuple[Path, str]] = []
+    for message_file in _commit_message_files(fixed, cwd):
+        try:
+            if not message_file.is_file() or message_file.stat().st_size > _MESSAGE_FILE_MAX:
+                continue
+            body = message_file.read_text(errors="replace")
+        except OSError:
+            return None
+        clean, dropped = _strip_attribution_lines(body)
+        if not dropped:
+            continue
+        if not clean.strip():
+            return None
+        removed += dropped
+        files.append((message_file, clean))
+    if not removed:
+        return None
+    if attribution_match(fixed + "\n" + "\n".join(body for _, body in files)):
+        return None
+    for message_file, body in files:
+        try:
+            message_file.write_text(body)
+        except OSError:
+            return None
+    return {"command": fixed, "removed": removed}
+
+
 _SHARED_COMMIT_DENY = (
     "Commit blocked by the work-layer commit gate: {repo} is a shared "
     "checkout. Other agents hold uncommitted work in it, and `git add -A` "
@@ -1074,8 +1547,7 @@ def gate_commit(session_id: str, command: str, cwd: str = "") -> dict:
     if parse_commit(command) is None:
         return {"decision": "allow", "reason": "not a commit"}
     text = command
-    for path in _message_files(_tokenize(command)):
-        message_file = Path(os.path.join(cwd or ".", path))
+    for message_file in _commit_message_files(command, cwd):
         try:
             if not message_file.is_file() or message_file.stat().st_size > _MESSAGE_FILE_MAX:
                 continue
@@ -1083,18 +1555,41 @@ def gate_commit(session_id: str, command: str, cwd: str = "") -> dict:
         except OSError:
             continue
     found = attribution_match(text)
+    reason = "no agent attribution"
+    rewritten = ""
     if found:
         label, match = found
-        work_store.record_gate(session_id, "commit_gate", "fail",
-                               {"command": command[:300], "label": label, "match": match})
-        return {"decision": "deny",
-                "reason": _COMMIT_DENY_REASON.format(label=label, match=match)}
+        fixed = _rewrite_commit(command, cwd)
+        if fixed is None:
+            work_store.record_gate(session_id, "commit_gate", "fail",
+                                   {"command": command[:300], "label": label,
+                                    "match": match})
+            return {"decision": "deny",
+                    "reason": _COMMIT_DENY_REASON.format(label=label, match=match)}
+        work_store.record_gate(
+            session_id, "commit_gate", "stripped",
+            {"command": command[:300], "label": label, "match": match,
+             "removed": [m for _, m in fixed["removed"]][:10]})
+        # The shared-checkout test still has to run, and it has to run against
+        # the command git will be handed. Returning here would let a corrected
+        # message carry a commit into the shared checkout that the same
+        # command was denied for before the rewrite existed.
+        rewritten = fixed["command"]
+        command = rewritten
+        reason = f"agent attribution removed ({label}): {match}"
+
+    def allow() -> dict:
+        out = {"decision": "allow", "reason": reason}
+        if rewritten:
+            out["command"] = rewritten
+        return out
+
     item = work_worktree.session_item(session_id)
     if item is None or item["worktree_opt_out"]:
-        return {"decision": "allow", "reason": "no agent attribution"}
+        return allow()
     shared = _commit_repos(command, cwd)
     if not shared:
-        return {"decision": "allow", "reason": "no agent attribution"}
+        return allow()
     work_store.record_gate(session_id, "commit_gate", "fail",
                            {"command": command[:300], "shared": shared})
     # Keyed on the repository that was denied. A task can hold a worktree of
@@ -1151,15 +1646,38 @@ def _gate_one_push(session_id: str, command: str, start_dir: str) -> dict:
                 "reason": _deny_reason(
                     "lint", f"pre-commit ({lint['status']}, exit "
                     f"{lint['exit_code']}):\n{lint['output'][-_GATE_TAIL:]}")}
+    if files == [] and parse_commit(command) is None:
+        # Only when nothing on this command line commits. `git commit -m fix &&
+        # git push` reads as no outgoing change, because the commit that makes
+        # the change outgoing has not run yet, and skipping the suite there
+        # would push exactly the work the gate exists to test.
+        payload["tests"] = {"result": "skipped", "cmd": "", "exit_code": 0,
+                            "tail": "the push carries no file change in this "
+                                    "repository; the suite was not run"}
+        work_store.record_gate(session_id, "push_gate", "pass", payload)
+        return {"decision": "allow", "reason": "no outgoing change in this repository"}
     tests = _gate_tests(repo)
     payload["tests"] = {**tests, "tail": (tests.get("tail") or "")[-_GATE_TAIL:]}
     if tests["result"] not in ("pass", "no_runner"):
+        baseline = {}
+        if tests["result"] == "fail" and tests.get("cmd"):
+            base_sha = _merge_base(repo)
+            if base_sha:
+                baseline = _baseline_tests(repo, base_sha, tests["cmd"])
+                payload["baseline"] = {
+                    **baseline, "tail": (baseline.get("tail") or "")[-_GATE_TAIL:]}
+        if baseline.get("result") == "fail":
+            work_store.record_gate(session_id, "push_gate", "already_red", payload)
+            return {"decision": "allow",
+                    "reason": f"the suite already failed at the merge base "
+                              f"{baseline['base'][:12]}; the change did not break it"}
         work_store.record_gate(session_id, "push_gate", "fail", payload)
         return {"decision": "deny",
                 "reason": _deny_reason(
                     "the test suite", f"{tests.get('cmd') or 'tests'} "
                     f"({tests['result']}, exit {tests.get('exit_code')}):\n"
-                    f"{(tests.get('tail') or '')[-_GATE_TAIL:]}")}
+                    f"{(tests.get('tail') or '')[-_GATE_TAIL:]}")
+                + _baseline_note(baseline)}
     work_store.record_gate(session_id, "push_gate", "pass", payload)
     return {"decision": "allow", "reason": "lint and tests passed"}
 

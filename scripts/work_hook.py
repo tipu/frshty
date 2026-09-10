@@ -18,6 +18,20 @@ QUESTION_DENY_REASON = (
     "later question or request: it is the only way one reaches the operator."
 )
 
+ATTRIBUTION_STRIPPED_REASON = (
+    "The work-layer commit gate removed the agent attribution from this "
+    "commit message and let the commit through. Nothing else changed. Write "
+    "the next message about the change only: no session link, no "
+    "Co-Authored-By trailer, no line saying an agent produced the work."
+)
+
+QUESTION_DUPLICATE_REASON = (
+    "You already asked this question and it is unanswered on the work board, "
+    "so this second ask was dropped and the operator did not see it. Do not "
+    "ask it again. Work on whatever does not depend on the answer, and say "
+    "what you are still blocked on when you stop."
+)
+
 WRITE_TOOLS = ("Edit", "Write", "NotebookEdit", "MultiEdit")
 
 NO_BOARD_REASON = (
@@ -198,12 +212,15 @@ def main() -> int:
             tool = data.get("tool_name") or ""
             if tool == "AskUserQuestion":
                 work_store = _bind_db()
-                if work_store.record_question(session_id, data.get("tool_input") or {}):
+                outcome = work_store.record_question(session_id, data.get("tool_input") or {})
+                if outcome:
                     print(json.dumps({
                         "hookSpecificOutput": {
                             "hookEventName": "PreToolUse",
                             "permissionDecision": "deny",
-                            "permissionDecisionReason": QUESTION_DENY_REASON,
+                            "permissionDecisionReason":
+                                QUESTION_DUPLICATE_REASON if outcome == "duplicate"
+                                else QUESTION_DENY_REASON,
                         }
                     }))
                 return 0
@@ -226,6 +243,7 @@ def main() -> int:
                 from services import work_launch
                 cwd = data.get("cwd") or ""
                 gate = {"decision": "allow", "reason": "not gated"}
+                rewritten = ""
                 if "commit" in command:
                     gate = work_launch.gate_commit(session_id, command, cwd)
                     if gate.get("need_worktree"):
@@ -233,6 +251,11 @@ def main() -> int:
                             session_id, {"id": gate["item_id"]},
                             gate["need_worktree"], gate["need_worktree"],
                             "Commit", "commit gate")
+                    # The commit gate strips agent attribution rather than
+                    # denying it, so everything after it gates the command git
+                    # will actually run.
+                    rewritten = gate.get("command") or ""
+                    command = rewritten or command
                 if gate["decision"] == "allow" and "push" in command:
                     gate = work_launch.gate_push(session_id, command, cwd)
                 if gate["decision"] == "deny":
@@ -241,6 +264,16 @@ def main() -> int:
                             "hookEventName": "PreToolUse",
                             "permissionDecision": "deny",
                             "permissionDecisionReason": gate["reason"],
+                        }
+                    }))
+                elif rewritten:
+                    print(json.dumps({
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "allow",
+                            "permissionDecisionReason": ATTRIBUTION_STRIPPED_REASON,
+                            "updatedInput": {**(data.get("tool_input") or {}),
+                                             "command": rewritten},
                         }
                     }))
                 return 0
@@ -261,6 +294,7 @@ def main() -> int:
         work_store.record_event(session_id, kind, payload)
         if work_store.is_idle_stop(kind, payload):
             work_store.record_artifacts(session_id, transcript_path)
+            work_store.record_progress(session_id, transcript_path)
             work_store.maybe_autocontinue(session_id, transcript_path)
     except Exception:
         if os.environ.get("WORK_HOOK_DEBUG"):
