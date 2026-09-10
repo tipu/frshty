@@ -12,6 +12,7 @@
 <script src="/static/frshty-shell.js"></script>
 <link rel="stylesheet" href="/static/frshty.css">
 <link rel="stylesheet" href="/static/frshty-v2.css">
+<link rel="stylesheet" href="/static/frshty-mobile.css">
 <style>
 .unread { font-weight: 600; border-left: 3px solid #3b82f6; }
 .read { opacity: 0.4; }
@@ -86,7 +87,7 @@
 <section class="mb-4">
     <div class="flex items-center justify-between mb-2">
         <h2 class="text-sm font-bold text-yellow-400 uppercase tracking-wider">⚠ Needs Attention</h2>
-        <div class="flex items-center gap-3 text-xs">
+        <div class="feed-tools flex items-center gap-3 text-xs">
             <span class="text-gray-500">{{ attentionItems.length ? attentionItems.length + ' items' : '' }}</span>
             <button @click="dismissAttention" class="text-gray-600 hover:text-red-400">dismiss all</button>
         </div>
@@ -117,7 +118,7 @@
 <section>
     <div class="flex items-center justify-between mb-2">
         <h2 class="text-sm font-bold text-gray-400 uppercase tracking-wider">Event Feed</h2>
-        <div class="flex gap-2 text-xs items-center">
+        <div class="feed-tools flex gap-2 text-xs items-center">
             <select v-model="noiseMode" class="bg-gray-900 border border-gray-700 text-gray-300 text-xs px-1 py-0.5 rounded">
                 <option value="useful">useful</option>
                 <option value="noise">noise</option>

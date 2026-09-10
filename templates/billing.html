@@ -3,6 +3,7 @@
 <head>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Billing — frshty</title>
 <script src="/static/tailwind.js"></script>
 <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
@@ -11,6 +12,7 @@
 <script src="/static/frshty-shell.js"></script>
 <link rel="stylesheet" href="/static/frshty.css">
 <link rel="stylesheet" href="/static/frshty-v2.css">
+<link rel="stylesheet" href="/static/frshty-mobile.css">
 <style>
 .subtitle { font-size: 13px; color: #666; }
 .legend { display: flex; gap: 20px; margin-bottom: 16px; font-size: 12px; }
@@ -84,7 +86,7 @@
     <span v-if="msg" class="msg" :class="msgKind === 'err' ? 'msg-err' : 'msg-ok'">{{ msg }}</span>
 </div>
 
-<div>
+<div class="bill-grid">
     <div class="header-row"><div></div><div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div><div></div></div>
     <template v-for="(week, wIdx) in weeks" :key="week.weekStart">
         <div v-if="week.divider" class="divider"></div>

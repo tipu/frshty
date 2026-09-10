@@ -1,0 +1,142 @@
+/* frshty mobile — the narrow-viewport half of the v2 design system.
+   Every rule in this file sits inside a max-width media query, so a window
+   wider than the breakpoint reads nothing here and keeps the desktop layout
+   byte for byte. The only exception is the .ln-mobilebar default below, which
+   hides the drawer button that frshty-shell.js renders on every page.
+   ================================================================== */
+
+.ln-mobilebar { display: none; }
+.ln-scrim { display: none; }
+
+@media (max-width: 820px) {
+
+/* Rail → off-canvas drawer. The shell renders the button that opens it. */
+.ln-root { grid-template-columns: minmax(0, 1fr); }
+.ln-rail {
+  position: fixed;
+  top: 0; bottom: 0; left: 0;
+  z-index: 40;
+  width: 264px;
+  height: 100dvh;
+  overflow-y: auto;
+  border-right: 1px solid var(--ln-border-hi);
+  transform: translateX(-100%);
+  transition: transform 0.18s ease;
+}
+.ln-rail.on { transform: none; }
+.ln-scrim { display: block; position: fixed; inset: 0; z-index: 39; background: rgb(0 0 0 / 0.55); }
+
+.ln-mobilebar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  padding: 8px 14px;
+  background: var(--ln-bg);
+  border-bottom: 1px solid var(--ln-border);
+}
+.ln-mobilebar-btn {
+  all: unset;
+  cursor: pointer;
+  width: 40px; height: 40px;
+  display: grid; place-items: center;
+  border-radius: 8px;
+  border: 1px solid var(--ln-border-hi);
+  background: var(--ln-surface);
+  color: var(--ln-text);
+  font-size: 17px;
+}
+.ln-mobilebar-title { font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Page frame */
+.ln-page { padding: 0 14px 56px; gap: 18px; }
+.ln-topbar {
+  top: var(--ln-mobilebar-h, 0px);
+  margin: 0 -14px 4px;
+  padding-left: 14px; padding-right: 14px;
+  flex-wrap: wrap;
+  gap: 8px;
+  row-gap: 6px;
+}
+.ln-topbar-actions { flex-wrap: wrap; }
+
+.ln-hero { align-items: flex-start; gap: 14px; }
+.ln-title { font-size: 22px; }
+.ln-subtitle { font-size: 13px; }
+
+/* One column everywhere a side panel sits next to the main content. */
+.ln-board,
+.ln-thread-grid,
+.ln-pr-grid,
+.ln-rev-cols,
+.ln-slack-grid,
+.ln-cfg-grid,
+.ln-task-compose,
+.tlA { grid-template-columns: minmax(0, 1fr); }
+
+.ln-attn-grid,
+.ln-kanban,
+.ln-ts-row,
+.ln-sched { grid-template-columns: minmax(0, 1fr); }
+.ln-sched-rail { height: 3px; }
+
+.ln-kpi-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.ln-kpi-row-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.ln-inst-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+
+/* The feed drops its fixed trailing column and puts it under the title. */
+.ln-feed-row { grid-template-columns: 22px minmax(0, 1fr); }
+.ln-feed-trailing { grid-column: 2; flex-direction: row; flex-wrap: wrap; align-items: center; }
+
+/* Forms. 16px is the size below which iOS Safari zooms the page on focus. */
+.ln-input, .ln-select, .ln-textarea {
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  font-size: 16px;
+}
+.ln-input-sm { min-width: 0; }
+.ln-task-compose .ln-btn { width: 100%; box-sizing: border-box; justify-content: center; }
+
+/* Touch targets. A pointer needs about 40px; the desktop sizes are half that. */
+.ln-navitem { padding: 9px 10px; font-size: 14px; }
+.ln-btn { padding: 8px 13px; font-size: 13px; }
+.ln-btn-sm { padding: 6px 11px; font-size: 12.5px; }
+.ln-seg-btn { padding: 7px 12px; font-size: 12.5px; }
+.ln-chipsel { padding: 5px 9px; font-size: 12px; }
+.ln-icon-btn { width: 34px; height: 34px; font-size: 14px; }
+.ln-cmdk { padding: 9px 10px; }
+
+/* A phone has no hover, so anything revealed by hover has to start visible. */
+.ln-row-actions { opacity: 1; }
+.ln-tkt-discard { opacity: 1; }
+
+/* Rows that pack a title, pills and a trailing id into one line wrap instead. */
+.ln-thread-row-head { flex-wrap: wrap; }
+.ln-thread-row-head .ln-task-id { margin-left: 0 !important; }
+.feed-tools { flex-wrap: wrap; }
+.feed-row > .flex { flex-wrap: wrap; }
+
+/* A long path or url in a one-line summary breaks instead of running off. */
+.summary-line, .summary-full, .ln-task-note, .ln-feed-title { overflow-wrap: anywhere; }
+
+/* Wide blocks scroll inside their own box instead of widening the page. */
+.ln-ts, .ln-bill, .ln-editor, .ln-diff-body, .ln-wl { overflow-x: auto; }
+.ln-page pre { overflow-x: auto; }
+.ln-page table { display: block; max-width: 100%; overflow-x: auto; }
+.bill-grid { overflow-x: auto; }
+.bill-grid .header-row, .bill-grid .week-row { min-width: 640px; }
+.ts-layout { flex-direction: column; }
+.ts-layout > .w-52 { width: 100% !important; position: static !important; }
+
+/* The PR modal fills the screen rather than 70vw of it. */
+.ln-modal {
+  width: calc(100vw - 20px) !important;
+  height: 92dvh !important;
+  margin: 0 !important;
+  padding: 14px !important;
+}
+
+}

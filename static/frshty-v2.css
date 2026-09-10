@@ -335,6 +335,7 @@ select option, select optgroup { background-color: #0b0c10; color: #e7e8ec; }
 .ln-thread-row { padding: 11px 14px; border-bottom: 1px solid var(--ln-border); cursor: pointer; }
 .ln-thread-row:last-child { border-bottom: none; }
 .ln-thread-row:hover { background: var(--ln-surface-2); }
+.ln-thread-row-head { display: flex; gap: 8px; align-items: center; }
 .ln-thread-row-title { font-size: 12.5px; font-weight: 500; color: var(--ln-text); }
 .ln-thread-row-meta { display: flex; justify-content: space-between; gap: 10px; margin-top: 5px; font-size: 11px; color: var(--ln-text-4); }
 
