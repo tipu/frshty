@@ -3,6 +3,7 @@
 <head>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Threads — frshty</title>
 <script src="/static/vendor/vue.global.prod.js"></script>
 <script src="/static/frshty-time.js"></script>
@@ -10,6 +11,7 @@
 <script src="/static/frshty-shell.js"></script>
 <link rel="stylesheet" href="/static/frshty.css">
 <link rel="stylesheet" href="/static/frshty-v2.css">
+<link rel="stylesheet" href="/static/frshty-mobile.css">
 <script src="/static/frshty-usage.js"></script>
 </head>
 <body>
@@ -39,7 +41,7 @@
   <div class="ln-card ln-thread-list" v-if="threads.length">
     <div class="ln-thread-row" v-for="t in threads" :key="(t.peer || 'local') + '#' + t.root_id"
          @click="open(t.root_id, t.peer)">
-      <div style="display:flex;gap:8px;align-items:center">
+      <div class="ln-thread-row-head">
         <div class="ln-thread-row-title">{{ t.title }}</div>
         <span class="ln-pill ln-pill-ghost" v-if="t.peer" :title="'this thread runs on the ' + t.peer + ' host'">⇄ {{ t.peer }}</span>
         <span class="ln-tag" v-for="p in t.projects" :key="p">{{ p }}</span>

@@ -106,7 +106,7 @@
         template: `
             <teleport to="body">
                 <div v-if="open" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
-                    <div class="card p-6 w-[70vw] h-[85vh] mx-4 flex flex-col">
+                    <div class="card ln-modal p-6 w-[70vw] h-[85vh] mx-4 flex flex-col">
                         <div class="flex items-center justify-between mb-4 pb-4 border-b border-gray-700">
                             <h2 class="text-lg font-bold">Submit PR</h2>
                             <div class="flex items-center gap-3">
