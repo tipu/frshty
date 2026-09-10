@@ -199,7 +199,8 @@ def create_item(objective: str, scope: str = "ad-hoc", scope_ref: str = "",
 
 def create_proposal(objective: str, note: str = "", instance_key: str | None = None,
                     contexts: str = "", tags: str = "", cwd: str = "",
-                    brief: str = "", conn=None, now: str | None = None) -> int:
+                    brief: str = "", conn=None, now: str | None = None,
+                    source_item_id: int | None = None, critical: bool = False) -> int:
     """Put a task on the board that no agent has started.
 
     frshty writes this when it decides by itself that something needs doing.
@@ -214,25 +215,31 @@ def create_proposal(objective: str, note: str = "", instance_key: str | None = N
 
     `now` lets a caller stamp the row with the moment its own scan reads, so a
     count over created_at answers the same question that caller's other counts
-    answer. It defaults to the wall clock."""
+    answer. It defaults to the wall clock.
+
+    `source_item_id` marks a proposal that continues a finished task, so the
+    approved run reads that task's report and the board threads the two
+    together. `critical` carries the source task's mark onto it."""
     if conn is not None:
         return _insert_proposal(conn, objective, note, instance_key, contexts,
-                                tags, cwd, brief, now)
+                                tags, cwd, brief, now, source_item_id, critical)
     with db.tx() as c:
         return _insert_proposal(c, objective, note, instance_key, contexts,
-                                tags, cwd, brief, now)
+                                tags, cwd, brief, now, source_item_id, critical)
 
 
 def _insert_proposal(c, objective: str, note: str, instance_key: str | None,
                      contexts: str, tags: str, cwd: str, brief: str,
-                     now: str | None = None) -> int:
+                     now: str | None = None, source_item_id: int | None = None,
+                     critical: bool = False) -> int:
     now = now or _now()
     cur = c.execute(
         "INSERT INTO work_items(objective, scope, instance_key, contexts, tags, "
-        "state, current_checkpoint, launch_cwd, launch_brief, created_at, updated_at) "
-        "VALUES (?, 'proposal', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "state, current_checkpoint, launch_cwd, launch_brief, source_item_id, "
+        "critical, created_at, updated_at) "
+        "VALUES (?, 'proposal', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (objective, instance_key, contexts, tags, PROPOSED_STATE, note, cwd,
-         brief, now, now),
+         brief, source_item_id, 1 if critical else 0, now, now),
     )
     item_id = cur.lastrowid
     c.execute(

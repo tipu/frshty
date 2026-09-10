@@ -50,7 +50,8 @@ Rules for followups:
   a change it made but did not commit, push, merge or release, or a step it named and did
   not take. Everything the run could have done and did not is required. Everything beyond
   the objective — a new feature, an improvement it noticed, an optional expansion — is
-  required false. A required work_item runs by itself; the operator sends every other one.
+  required false. A required work_item is put on the board as a proposal for the operator
+  to approve; the operator sends every other one. Nothing you propose runs by itself.
   A slack_message is never required: only the operator sends a message.
 - Propose slack_message only when a specific person waits on this outcome and only a human
   message moves it (a reviewer to ping, a teammate to unblock). Put the concrete link
@@ -395,12 +396,12 @@ def _scan_loop():
         except Exception as e:
             log.emit("work_debrief_error", f"{type(e).__name__}: {e}")
         try:
-            for done in dispatch_required_followups():
-                log.emit("work_followup_auto",
-                         f"work item {done['item_id']}: ran the required "
-                         f"follow-up by itself; {done['detail']}")
+            for open_one in propose_required_followups():
+                log.emit("work_followup_proposed",
+                         f"work item {open_one['item_id']}: the required "
+                         f"follow-up waits for your approval; {open_one['detail']}")
         except Exception as e:
-            log.emit("work_followup_auto_error", f"{type(e).__name__}: {e}")
+            log.emit("work_followup_proposed_error", f"{type(e).__name__}: {e}")
 
 
 def start_scanner() -> None:
@@ -515,65 +516,78 @@ def send_followup(followup_id: int, text: str | None = None,
     return {"id": followup_id, "status": status, "detail": detail}
 
 
-AUTO_FOLLOWUP_DEPTH = 2
+def propose_followup(followup_id: int) -> dict:
+    """Open one follow-up draft as a proposal the operator approves.
+
+    The draft is claimed the way send_followup claims one, so a draft is
+    proposed once even when two scans overlap. The proposal carries the
+    source task's projects, Slack archive, directory and critical mark; the
+    agent is read back off the source when the operator approves."""
+    now = work_store._now()
+    with db.tx() as c:
+        row = c.execute("SELECT * FROM work_followups WHERE id = ?", (followup_id,)).fetchone()
+        if not row:
+            return {"error": "unknown followup"}
+        if row["kind"] != "work_item":
+            return {"error": f"cannot propose kind '{row['kind']}'"}
+        claimed = c.execute(
+            "UPDATE work_followups SET status = 'proposing', updated_at = ? "
+            "WHERE id = ? AND status = 'draft'", (now, followup_id))
+        if claimed.rowcount != 1:
+            return {"error": f"followup is not a draft (status: {row['status']})"}
+    try:
+        result = work_launch.propose_followup(
+            row["work_item_id"], row["draft"],
+            note=f"the debrief of work item {row['work_item_id']} reported this "
+                 "work as authorised and unfinished")
+        if "error" in result:
+            raise RuntimeError(result["error"])
+        detail = f"proposed work item #{result['item_id']}"
+        status = "proposed"
+    except Exception as e:
+        detail = f"{type(e).__name__}: {e}"[:300]
+        status = "failed"
+    now = work_store._now()
+    with db.tx() as c:
+        c.execute("UPDATE work_followups SET status = ?, detail = ?, updated_at = ? WHERE id = ?",
+                  (status, detail, now, followup_id))
+        c.execute(
+            "INSERT INTO work_events(work_item_id, kind, payload, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (row["work_item_id"], "followup_" + status,
+             db.dump_json({"followup_id": followup_id, "detail": detail}), now),
+        )
+    if status == "failed":
+        return {"error": detail}
+    return {"id": followup_id, "status": status, "detail": detail}
 
 
-def _auto_chain_depth(item_id: int) -> int:
-    """How many tasks in a row the board launched by itself before this one.
+def propose_required_followups() -> list[dict]:
+    """Put every follow-up the debrief marked required on the board for the
+    operator to approve, and leave every other draft where it is.
 
-    An unfinished delivery step is worth one automatic run. A chain of them
-    is a loop, so the chain is counted and stopped."""
-    def source_of(target):
-        row = db.query_one("SELECT source_item_id FROM work_items WHERE id = ?", (target,))
-        return row["source_item_id"] if row else None
-
-    depth, seen = 0, set()
-    current = source_of(item_id)
-    while current and current not in seen:
-        seen.add(current)
-        launched = db.query_one(
-            "SELECT 1 AS present FROM work_events WHERE work_item_id = ? "
-            "AND kind = 'followup_auto_sent' LIMIT 1", (current,))
-        if not launched:
-            break
-        depth += 1
-        current = source_of(current)
-    return depth
-
-
-def dispatch_required_followups() -> list[dict]:
-    """Run the follow-ups that finish work this task was already authorised to
-    do, and leave every other draft to the operator.
-
-    309 follow-up drafts were open at review time and most are optional
-    expansion beyond a finished analysis. The ones that matter are the two
-    that told a later agent to push branches an earlier agent had already
-    verified: authorised work the run left undone. Only a work_item follow-up
-    the debrief marked required runs by itself. A slack_message never does,
-    because sending one is an outward communication."""
+    A required follow-up is work the run was already authorised to do and did
+    not finish, so it is worth a task of its own. It is not worth starting one
+    without the operator. The board started twelve of them in ten seconds on
+    2026-09-10; one came from an item archived two weeks earlier, and its run
+    pushed a branch and replied on a merged pull request. A proposal is the
+    board's own approval channel, so a required follow-up goes through it and
+    nothing runs until the operator clicks approve. A slack_message never
+    reaches this path, because sending one is an outward communication."""
     rows = db.query_all(
         "SELECT f.id, f.work_item_id FROM work_followups f "
         "JOIN work_items i ON i.id = f.work_item_id "
         "WHERE f.status = 'draft' AND f.required = 1 AND f.kind = 'work_item' "
         f"AND i.state IN {work_store.FINISHED_STATES_SQL} "
         "AND COALESCE(i.pending_question, '') = '' ORDER BY f.id")
-    sent = []
+    opened = []
     for row in rows:
-        if _auto_chain_depth(row["work_item_id"]) >= AUTO_FOLLOWUP_DEPTH:
-            continue
-        # No context arguments: send_followup passes them straight to
-        # launch_followup, where omitting them is what makes the follow-up
-        # inherit the source task's projects, Slack archive, directory and
-        # agent. Naming them would launch a codex task's follow-up as claude in
-        # the default workspace.
-        result = send_followup(row["id"], contexts=None, slack=None, agent="")
+        result = propose_followup(row["id"])
         if "error" in result:
             continue
-        _record_debrief_event(row["work_item_id"], "followup_auto_sent",
-                              {"followup_id": row["id"], "detail": result["detail"]})
-        sent.append({"id": row["id"], "item_id": row["work_item_id"],
-                     "detail": result["detail"]})
-    return sent
+        opened.append({"id": row["id"], "item_id": row["work_item_id"],
+                       "detail": result["detail"]})
+    return opened
 
 
 def dismiss_followup(followup_id: int) -> dict:
