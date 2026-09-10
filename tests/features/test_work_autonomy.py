@@ -76,7 +76,6 @@ class TestPushGateBaseline:
         self._lint_passes(monkeypatch)
         monkeypatch.setattr(work_launch, "_detect_runner",
                             lambda d: (["bash", "-c", "echo boom; exit 1"], {}))
-        work_launch._baseline_cache.clear()
         out = work_launch.gate_push(sid, "git push", str(repo))
         assert out["decision"] == "allow"
         assert "merge base" in out["reason"]
@@ -94,7 +93,6 @@ class TestPushGateBaseline:
         (repo / "boom").write_text("")
         runner = ["bash", "-c", "test ! -e boom || { echo boom; exit 1; }"]
         monkeypatch.setattr(work_launch, "_detect_runner", lambda d: (runner, {}))
-        work_launch._baseline_cache.clear()
         out = work_launch.gate_push(sid, "git push", str(repo))
         assert out["decision"] == "deny"
         assert "passes at the merge base" in out["reason"]
@@ -109,7 +107,6 @@ class TestPushGateBaseline:
         self._lint_passes(monkeypatch)
         monkeypatch.setattr(work_launch, "_detect_runner",
                             lambda d: (["bash", "-c", "echo 1 failed; exit 1"], {}))
-        work_launch._baseline_cache.clear()
         out = work_launch.gate_push(sid, "git push", str(tmp_path))
         assert out["decision"] == "deny"
         assert json.loads(_events(item_id, "push_gate")[0]["payload"])["verdict"] == "fail"
@@ -121,7 +118,6 @@ class TestPushGateBaseline:
         self._lint_passes(monkeypatch)
         monkeypatch.setattr(work_launch, "_detect_runner",
                             lambda d: (["bash", "-c", "echo boom; exit 1"], {}))
-        work_launch._baseline_cache.clear()
         runs = []
         real = work_launch._run_repo_tests
 
@@ -133,6 +129,65 @@ class TestPushGateBaseline:
         work_launch.gate_push(sid, "git push", str(repo))
         work_launch.gate_push(sid, "git push", str(repo))
         assert len([r for r in runs if r != str(repo)]) == 1
+        assert work_launch._baseline_store(repo).is_file(), "the answer outlives the process"
+
+    def test_a_cached_baseline_never_answers_for_a_different_suite(self, tmp_path, monkeypatch):
+        _, sid = _mkrun("different suite")
+        repo = _repo_with_origin(tmp_path)
+        monkeypatch.setattr(work_launch, "_repo_root", lambda d: repo)
+        self._lint_passes(monkeypatch)
+        monkeypatch.setattr(work_launch, "_detect_runner",
+                            lambda d: (["bash", "-c", "echo boom; exit 1"], {}))
+        assert work_launch.gate_push(sid, "git push", str(repo))["decision"] == "allow"
+        # A different suite at HEAD, still failing. The cached answer is about
+        # the old command and must not excuse this one.
+        monkeypatch.setattr(work_launch, "_detect_runner",
+                            lambda d: (["bash", "-c", "echo other; exit 1"], {}))
+        monkeypatch.setattr(work_launch, "_run_baseline",
+                            lambda repo, base, head: {"result": "unresolved", "base": base,
+                                                      "head_cmd": head, "note": "stub", "cmd": ""})
+        assert work_launch.gate_push(sid, "git push", str(repo))["decision"] == "deny"
+
+    def test_a_dependency_tree_that_reaches_into_the_repository_is_not_linked(self, tmp_path):
+        """An editable install points the virtualenv at the code under test, so
+        linking it would make the baseline run HEAD and call every regression
+        pre-existing."""
+        repo = tmp_path / "repo"
+        (repo / ".venv" / "lib" / "site-packages").mkdir(parents=True)
+        (repo / ".venv" / "lib" / "site-packages" / "app.pth").write_text(str(repo) + "\n")
+        (repo / "node_modules").mkdir()
+        tree = tmp_path / "tree"
+        tree.mkdir()
+        assert work_launch._link_dependencies(repo, tree) == ["node_modules"]
+        assert not (tree / ".venv").exists()
+
+    def test_a_baseline_leaves_no_worktree_and_no_temporary_directory(self, tmp_path, monkeypatch):
+        repo = _repo_with_origin(tmp_path)
+
+        def boom(_):
+            raise TypeError("bad package.json")
+
+        monkeypatch.setattr(work_launch, "_detect_runner", boom)
+        out = work_launch._run_baseline(repo, work_launch._merge_base(repo), "anything")
+        assert out["result"] == "unresolved"
+        assert "TypeError" in out["note"]
+        listed = subprocess.run(["git", "worktree", "list"], cwd=repo,
+                                capture_output=True, text=True).stdout
+        assert "frshty-gate-baseline" not in listed
+
+    def test_a_commit_on_the_same_line_as_the_push_still_runs_the_suite(self, tmp_path, monkeypatch):
+        """`git commit -m fix && git push` reads as no outgoing change, because
+        the commit has not run yet. Skipping the suite there would push exactly
+        the work the gate exists to test."""
+        _, sid = _mkrun("commit then push")
+        monkeypatch.setattr(work_launch, "_repo_root", lambda d: tmp_path)
+        monkeypatch.setattr(work_launch, "_outgoing_files", lambda r: [])
+        self._lint_passes(monkeypatch)
+        monkeypatch.setattr(work_launch, "_detect_runner",
+                            lambda d: (["bash", "-c", "echo 1 failed; exit 1"], {}))
+        out = work_launch.gate_push(sid, 'git commit -m "fix" && git push', str(tmp_path))
+        assert out["decision"] == "deny"
+        assert "1 failed" in out["reason"]
 
     def test_a_push_that_changes_nothing_here_does_not_run_the_suite(self, tmp_path, monkeypatch):
         item_id, sid = _mkrun("nothing outgoing")
@@ -234,6 +289,24 @@ class TestDebriefBudget:
         work_store.add_run(item_id, f"sid-again-{item_id}", f"work-{item_id}", "/tmp")
         assert item_id in work_debrief._pending_done_items()
 
+    def test_a_message_written_during_the_debrief_leaves_the_item_pending(self, tmp_path, monkeypatch):
+        """The revision is what says the summary is current. Sampled after the
+        dialogue was rendered, a message written between the two reads would be
+        stamped onto a summary that never saw it."""
+        item_id = self._done_item(tmp_path, "raced summary")
+        path = db.query_one("SELECT transcript_path FROM work_runs WHERE work_item_id = ?",
+                            (item_id,))["transcript_path"]
+
+        def grows_the_transcript(prompt):
+            with open(path, "a") as f:
+                f.write(json.dumps({"type": "assistant", "message": {"content": [
+                    {"type": "text", "text": "one more correction"}]}}) + "\n")
+            return json.dumps({"summary": "done", "followups": []})
+
+        monkeypatch.setattr(work_debrief, "_run_claude", grows_the_transcript)
+        work_debrief.run_debrief(item_id)
+        assert item_id in work_debrief._pending_done_items()
+
     def test_an_old_summary_without_a_run_id_stays_settled(self, tmp_path, monkeypatch):
         item_id = self._done_item(tmp_path, "legacy summary")
         work_debrief._record_debrief_event(item_id, "debrief_done", {"followups": 0})
@@ -295,6 +368,20 @@ class TestStopDetector:
     def test_a_real_request_still_parks_the_item(self):
         assert work_store._blocked_on_operator(
             "Send another code when the prompt appears.") is True
+
+    def test_a_question_written_in_bold_still_parks_the_item(self):
+        assert work_store._blocked_on_operator(
+            "**Should I delete the production database?**") is True
+
+    def test_a_question_followed_by_its_options_still_parks_the_item(self):
+        assert work_store._blocked_on_operator(
+            "Should I deploy to production or staging?\n"
+            "- production, it is the release branch\n"
+            "- staging, and I verify there first") is True
+
+    def test_a_heading_above_prose_still_does_not_park_the_item(self):
+        assert work_store._blocked_on_operator(
+            "## What changed?\nThe gate now reads the merge base.") is False
 
     def test_a_spent_budget_records_why_it_stopped(self, tmp_path):
         item_id, sid = _mkrun("capped item")
@@ -409,6 +496,36 @@ class TestCommitGateRewrite:
         assert "Claude-Session" not in message.read_text()
         assert "Gate the push on the delta" in message.read_text()
 
+    def test_a_rewrite_that_would_drop_a_command_is_refused(self, tmp_path):
+        """`cd /elsewhere # Generated with Claude` reads as attribution and is a
+        cd. Dropping the line sends the commit to another repository, and both
+        the shlex parse and the git parse still succeed."""
+        item_id, sid = _mkrun("cd line commit")
+        command = f'cd {tmp_path} # Generated with Claude\ngit commit -am "fix"'
+        out = work_launch.gate_commit(sid, command, "/tmp")
+        assert out["decision"] == "deny"
+        assert json.loads(_events(item_id, "commit_gate")[0]["payload"])["verdict"] == "fail"
+
+    def test_a_comment_does_not_hide_the_commit_from_the_gate(self, tmp_path):
+        """shlex reads # as a comment introducer and newlines are folded into
+        ';' before tokenizing, so one commented line took every command after
+        it with it and the gate found no commit to gate."""
+        assert work_launch.parse_commit('cd /x # note\ngit commit -am "fix"') == {"chdir": "/x"}
+        assert work_launch.parse_commit('# git commit -am "fix"') is None
+
+    def test_an_unrelated_dash_f_argument_is_not_read_as_a_message_file(self, tmp_path):
+        """-F is not only git's flag. `grep -F README.md` used to hand the gate
+        README.md as a commit message, and correcting a message would then have
+        rewritten the documentation."""
+        item_id, sid = _mkrun("unrelated dash f")
+        readme = tmp_path / "README.md"
+        readme.write_text("docs\n\nGenerated with Claude\n\nmore docs\n")
+        out = work_launch.gate_commit(
+            sid, 'git commit -m "fix the gate" && grep -F README.md log', str(tmp_path))
+        assert out["decision"] == "allow"
+        assert "Generated with Claude" in readme.read_text()
+        assert _events(item_id, "commit_gate") == []
+
     def test_a_clean_commit_is_untouched(self, tmp_path):
         item_id, sid = _mkrun("clean commit")
         out = work_launch.gate_commit(sid, 'git commit -m "fix the gate"', str(tmp_path))
@@ -455,6 +572,18 @@ class TestAutoArchive:
         item_id, _ = self._reported_done("fresh task", age_hours=1)
         assert item_id not in work_store.auto_archive_quiet_items()
 
+    def test_a_reopened_task_waits_on_its_newest_report(self):
+        """A task completed two days ago, reopened, and completed again a
+        minute ago has a result nobody has read."""
+        item_id, _ = self._reported_done("reopened task")
+        with db.tx() as c:
+            c.execute("INSERT INTO work_events(work_item_id, kind, payload, created_at) "
+                      "VALUES (?, 'self_reported_done', '{}', ?)",
+                      (item_id, work_store._now()))
+            c.execute("UPDATE work_items SET updated_at = ? WHERE id = ?",
+                      (work_store._now(), item_id))
+        assert item_id not in work_store.auto_archive_quiet_items()
+
     def test_a_task_that_asked_something_waits_for_a_real_read(self):
         item_id, sid = self._reported_done("asked something")
         with db.tx() as c:
@@ -481,6 +610,12 @@ class TestRepeatProposals:
         assert slack_conversations._repeats_a_declined_proposal(
             item_id,
             "Add an \"Exclude Saturday and Sunday\" option under audio deletion hours") is True
+
+    def test_two_requests_that_differ_only_in_a_number_are_both_opened(self):
+        item_id = work_store.create_proposal("Delete audio older than 7 days")
+        work_store.apply_action(item_id, "decline")
+        assert slack_conversations._repeats_a_declined_proposal(
+            item_id, "Delete audio older than 9 days") is False
 
     def test_a_different_request_still_opens_a_task(self):
         item_id = work_store.create_proposal("Investigate how the Copilot Probe was enrolled")
@@ -513,6 +648,19 @@ class TestRequiredFollowups:
         sent = work_debrief.dispatch_required_followups()
         assert [s["item_id"] for s in sent] == [item_id]
         assert len(_events(item_id, "followup_auto_sent")) == 1
+
+    def test_an_automatic_followup_inherits_the_source_task_context(self, monkeypatch):
+        """launch_followup reads an omitted project, archive or agent as
+        "inherit". Naming them launches a codex task's follow-up as claude in
+        the default workspace."""
+        item_id = self._finished_with_followup("inherit context", True)
+        seen = {}
+        monkeypatch.setattr(
+            work_debrief, "_deliver_work_item",
+            lambda row, contexts, slack, agent: seen.update(
+                contexts=contexts, slack=slack, agent=agent) or "launched work item #999")
+        work_debrief.dispatch_required_followups()
+        assert seen == {"contexts": None, "slack": None, "agent": ""}
 
     def test_an_optional_followup_waits_for_the_operator(self, monkeypatch):
         item_id = self._finished_with_followup("optional expansion", False)

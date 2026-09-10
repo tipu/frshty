@@ -1617,7 +1617,7 @@ REPEAT_PROPOSAL_RATIO = 0.85
 # objectives that name different ones are different requests however alike the
 # rest of the wording reads, and "move WB-412" against "move WB-500" is one
 # character short of identical.
-_IDENTIFIER_RE = re.compile(r"[a-z0-9][a-z0-9._/#-]*\d[a-z0-9._/#-]*")
+_IDENTIFIER_RE = re.compile(r"[a-z0-9._/#-]*\d[a-z0-9._/#-]*")
 
 
 def _normalise_objective(text: str) -> str:
