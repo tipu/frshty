@@ -8,6 +8,8 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import core.correspondence as correspondence  # noqa: E402  (needs the path above)
+
 DB_PATH = os.environ.get("FRSHTY_DB") or os.path.expanduser("~/.frshty/frshty.db")
 BOARD_FILE = os.environ.get("FRSHTY_BOARD_FILE") or os.path.expanduser("~/.frshty/board.json")
 
@@ -179,6 +181,43 @@ def _gate_write(session_id: str, tool_input: dict) -> str:
                 f"to the operator.")
 
 
+def _is_work_run(session_id: str) -> tuple[bool, bool]:
+    """Whether this session is a work-board run, and whether the answer is
+    trustworthy.
+
+    The second value is false when the database could not be read at all. A
+    caller that must not fail open needs to tell "not a task" apart from "no
+    answer", and one boolean cannot carry both."""
+    try:
+        probe = sqlite3.connect(DB_PATH, timeout=0.25)
+    except Exception:
+        return False, False
+    try:
+        probe.execute("PRAGMA busy_timeout = 250")
+        row = probe.execute(
+            "SELECT 1 FROM work_runs WHERE session_id = ?", (session_id,)
+        ).fetchone()
+    except Exception:
+        return False, False
+    finally:
+        probe.close()
+    return bool(row), True
+
+
+def _correspondence_deny(tool: str, tool_input: dict) -> str:
+    """The deny reason when this instance forbids a task to message a person.
+
+    The gate reads the personal instance config off disk, because every work
+    board run belongs to it and this process holds no instance registry. Bash
+    is matched on the command that sends; every other tool is matched on its
+    name, which is where an MCP server states the surface it writes to."""
+    if correspondence.allowed_on_disk():
+        return ""
+    if tool == "Bash":
+        return correspondence.bash_reason(tool_input.get("command") or "")
+    return correspondence.tool_reason(tool)
+
+
 def _bind_db():
     import core.db as db
     from services import work_store
@@ -198,18 +237,38 @@ def main() -> int:
         kind = data.get("hook_event_name") or ""
         if not session_id or not kind:
             return 0
-        probe = sqlite3.connect(DB_PATH, timeout=0.25)
-        try:
-            probe.execute("PRAGMA busy_timeout = 250")
-            row = probe.execute(
-                "SELECT 1 FROM work_runs WHERE session_id = ?", (session_id,)
-            ).fetchone()
-        finally:
-            probe.close()
+        row, readable = _is_work_run(session_id)
         if not row:
+            # A database this process cannot read leaves it unable to say
+            # whether the session is a task or the operator's own. The other
+            # gates then allow, which is right: a missed push gate costs a
+            # bad push the operator can revert. A missed correspondence gate
+            # costs a message to a person, which he cannot, so that one asks
+            # anyway and denies while the answer is unknown.
+            if not readable and kind == "PreToolUse":
+                reason = _correspondence_deny(data.get("tool_name") or "",
+                                              data.get("tool_input") or {})
+                if reason:
+                    print(json.dumps({
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": reason,
+                        }
+                    }))
             return 0
         if kind == "PreToolUse":
             tool = data.get("tool_name") or ""
+            reason = _correspondence_deny(tool, data.get("tool_input") or {})
+            if reason:
+                print(json.dumps({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": reason,
+                    }
+                }))
+                return 0
             if tool == "AskUserQuestion":
                 work_store = _bind_db()
                 outcome = work_store.record_question(session_id, data.get("tool_input") or {})

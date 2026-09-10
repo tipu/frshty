@@ -28,7 +28,8 @@ class TestLoadConfig:
             '[workspace]\nroot = "' + str(tmp_path) + '"\n'
         )
         config = load_config(str(config_file))
-        assert config["features"] == {"auto_review": True}
+        assert config["features"] == {"auto_review": True, "auto_followups": False,
+                                      "correspondence": True}
         assert config["slack"] == {}
         assert config["timesheet"] == {}
 
