@@ -1822,7 +1822,7 @@ class TestBotRewriteLoop:
     pushes a commit, the push starts the next run, and the run rewrites the
     comment again, so the PR collects commits it never asked for."""
 
-    def _run(self, comment, settled, tmp_path):
+    def _run(self, comment, answered, tmp_path):
         platform = MagicMock()
         platform.get_pr_comments.return_value = [comment]
         config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"},
@@ -1833,7 +1833,8 @@ class TestBotRewriteLoop:
              patch("features.own_prs.q.enqueue_job"), \
              patch("features.own_prs.log"):
             mock_comments.has_comment_state.return_value = True
-            mock_comments.settled_comment_ids.return_value = settled
+            mock_comments.settled_comment_ids.return_value = set()
+            mock_comments.answered_comment_ids.return_value = answered
             mock_comments.fetch_and_detect_comments.return_value = {"new": [], "edited": [comment]}
             mock_comments.get_unprocessed_comments.return_value = []
             mock_comments.get_deferred_comments.return_value = []
@@ -1856,6 +1857,13 @@ class TestBotRewriteLoop:
 
     def test_a_bot_comment_frshty_has_not_answered_is_still_queued(self, tmp_path):
         mock_comments = self._run(self._bot_report(), set(), tmp_path)
+        assert mock_comments.mark_comment_deferred.call_args.args[3] == "90"
+
+    def test_a_bot_comment_settled_without_a_push_is_still_queued(self, tmp_path):
+        """A bot placeholder read as needing no change, then rewritten with a
+        real finding, is new feedback: nothing was ever written for it."""
+        mock_comments = self._run(self._bot_report(), set(), tmp_path)
+        assert mock_comments.answered_comment_ids.called
         assert mock_comments.mark_comment_deferred.call_args.args[3] == "90"
 
     def test_a_persons_edit_of_an_answered_comment_is_still_queued(self, tmp_path):
