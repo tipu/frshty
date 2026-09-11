@@ -186,3 +186,41 @@ class TestWatchdogLaunchLedger:
         rows = conn.execute("SELECT entity_id, work_item_id, created_at"
                             " FROM watchdog_launches").fetchall()
         assert rows == [("NEC-1", 7, "2026-09-03T10:00:00Z")]
+
+
+class TestCommentFixCountBackfill:
+    """A comment_state row that predates fix_count carries no record of
+    whether frshty pushed code for it. Treat a processed row as answered so a
+    bot rewrite cannot slip one more commit through on the first poll after
+    this migration lands."""
+
+    def _db_at_041(self, tmp_path, monkeypatch):
+        staged = tmp_path / "migrations"
+        staged.mkdir()
+        for f in sorted(REPO_MIGRATIONS.glob("*.sql")):
+            if f.name >= "042_":
+                continue
+            (staged / f.name).write_text(f.read_text())
+        monkeypatch.setattr(db, "_DB_PATH", tmp_path / "m.db")
+        monkeypatch.setattr(db, "_MIGRATIONS_DIR", staged)
+        db._apply_migrations()
+        return staged
+
+    def test_a_processed_row_is_backfilled_as_answered(self, tmp_path, monkeypatch):
+        staged = self._db_at_041(tmp_path, monkeypatch)
+        conn = sqlite3.connect(tmp_path / "m.db")
+        insert = ("INSERT INTO comment_state (instance_key, resource_type, resource_id, "
+                  "comment_id, last_checked_at, state) VALUES ('i', 'pr', 'r/1', ?, 'now', ?)")
+        conn.execute(insert, ("answered", "processed"))
+        conn.execute(insert, ("open", "new"))
+        conn.commit()
+        conn.close()
+
+        (staged / "042_comment_fix_count.sql").write_text(
+            (REPO_MIGRATIONS / "042_comment_fix_count.sql").read_text())
+        db._apply_migrations()
+
+        conn = sqlite3.connect(tmp_path / "m.db")
+        rows = dict(conn.execute("SELECT comment_id, fix_count FROM comment_state"))
+        conn.close()
+        assert rows == {"answered": 1, "open": 0}
