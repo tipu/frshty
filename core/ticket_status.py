@@ -45,19 +45,29 @@ _ALLOWED: dict[TicketStatus, set[TicketStatus]] = {
     TicketStatus.done:       {TicketStatus.new, TicketStatus.pr_ready, TicketStatus.testing, TicketStatus.proving, TicketStatus.in_review},
     TicketStatus.epic:       set(),  # epic is terminal; transition() still permits → done universally
     TicketStatus.ignored:    {TicketStatus.new},  # only legal exit is un-ignore → new
-    TicketStatus.blocked:    {TicketStatus.new},
+    TicketStatus.blocked:    {TicketStatus.new, TicketStatus.planning,
+                             TicketStatus.reviewing, TicketStatus.testing,
+                             TicketStatus.proving},
 }
 
 
-def can_transition(current: str, target: str) -> bool:
+def can_transition(current: str, target: str, *, blocked_from: str | None = None) -> bool:
     try:
-        transition(current, target)
+        transition(current, target, blocked_from=blocked_from)
     except ValueError:
         return False
     return True
 
 
-def transition(current: str, target: str) -> str:
+def transition(current: str, target: str, *, blocked_from: str | None = None) -> str:
+    """The legal next status, or ValueError.
+
+    `blocked_from` is the status a blocked ticket was parked from. The table
+    above says which shapes of resume exist at all; this argument says which
+    one this ticket has earned. A caller that does not supply it leaves
+    `new` as the only exit, which is what `blocked` meant before resume
+    existed, so an unknown history never widens anything.
+    """
     cur = TicketStatus(current)
     tgt = TicketStatus(target)
     if tgt == cur:
@@ -66,4 +76,10 @@ def transition(current: str, target: str) -> str:
         return tgt.value
     if tgt not in _ALLOWED.get(cur, set()):
         raise ValueError(f"Illegal transition: {cur.value} -> {tgt.value}")
+    if cur is TicketStatus.blocked and tgt is not TicketStatus.new \
+            and tgt.value != blocked_from:
+        raise ValueError(
+            f"Illegal transition: {cur.value} -> {tgt.value}; "
+            f"blocked from {blocked_from or 'nowhere recorded'}"
+        )
     return tgt.value
