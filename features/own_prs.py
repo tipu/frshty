@@ -210,6 +210,9 @@ def _check_comments(config, instance_key, platform, pr, base_url, seen=None, tic
     detection = comments.fetch_and_detect_comments(instance_key, platform, "pr", pr_key, platform_comments=platform_comments)
     all_to_process = [c for c in detection["new"] + detection["edited"]
                       if c.get("author_id") != user_id and not c.get("resolved")]
+    all_to_process = _drop_bot_rewrites(instance_key, pr, pr_key, pr_ref, base_url,
+                                        all_to_process,
+                                        comments.answered_comment_ids(instance_key, "pr", pr_key))
     if first_sight:
         all_to_process = _baseline_existing_comments(instance_key, pr_key, all_to_process)
     # General GitHub review bodies were added to the adapter after inline
@@ -240,6 +243,34 @@ def _check_comments(config, instance_key, platform, pr, base_url, seen=None, tic
     _reclaim_stuck_comments(instance_key, pr, pr_key, pr_ref, base_url, by_id, user_id, handled, seen, ticket_key)
 
     _flush_deferred_comments(config, instance_key, pr, pr_key, pr_ref, base_url, by_id, seen, ticket_key)
+
+
+def _drop_bot_rewrites(instance_key, pr, pr_key, pr_ref, base_url, candidates, answered_ids):
+    """Settle a bot's rewrite of a comment frshty already answered with code.
+
+    A CI reporter edits one comment in place on every run instead of posting a
+    new one, so each rewrite reaches detection as an edit and re-enters the fix
+    pipeline. Answering it pushes a commit, the push starts the next run, and
+    the run rewrites the comment again: the loop feeds itself and lands commits
+    the PR never asked for. Only a comment frshty has already written code for
+    is dropped, so a bot comment that was baselined, or read as needing no
+    change, is still triaged when the bot fills it in. A person's edit is
+    always re-read."""
+    keep, dropped = [], []
+    for c in candidates:
+        if c.get("author_is_bot") and str(c["id"]) in answered_ids:
+            dropped.append(c)
+            comments.mark_comment_seen(instance_key, "pr", pr_key, str(c["id"]),
+                                       c.get("updated_at") or c.get("created_at"))
+        else:
+            keep.append(c)
+    if dropped:
+        log.emit("pr_comment_bot_rewrite_ignored",
+                 f"{pr_ref}: ignored {len(dropped)} rewritten bot comment(s) already answered",
+                 links={"pr": pr["url"], "detail": f"{base_url}/"},
+                 meta={"repo": pr["repo"], "pr_id": pr["id"],
+                       "comment_ids": [str(c["id"]) for c in dropped]})
+    return keep
 
 
 def _baseline_existing_comments(instance_key, pr_key, candidates):
@@ -513,6 +544,7 @@ def fix_comment(config, payload) -> tuple[bool, str | None]:
                 log.emit("pr_comment_blocked", f"{pr_ref}: Push failed — {comment['body'][:80]}", links=links, meta={**meta, "reason": "push failed"})
                 comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "push failed")
                 return False, "push failed"
+            comments.record_comment_fix(instance_key, "pr", pr_key, comment_id)
 
         if comment.get("resolvable", True):
             resolution = platform.resolve_comment(pr["repo"], pr["id"], int(comment_id))
@@ -624,6 +656,8 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
             push = platform.push_branch(worktree, pr["branch"])
             if isinstance(push, dict) and not push.get("ok", True):
                 return _fail_all(pending_ids, "push failed")
+            for cid in pending_ids:
+                comments.record_comment_fix(instance_key, "pr", pr_key, cid)
 
         unresolved = []
         pending_by_id = {str(c["id"]): c for c in pending}
@@ -659,20 +693,25 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
 
 def _check_ci(config, platform, pr, seen, base_url):
     from features.tickets import MAX_CI_FIX_ATTEMPTS
-    from features.pr_ci import triage_and_fix_pr, FAILED_STATES
+    from features.pr_ci import triage_and_fix_pr, ci_summary, FAILED_STATES
 
     checks = platform.get_pr_checks(pr["repo"], pr["id"])
     if checks is None:
         return
-    failing = [c for c in checks if c.get("state", "").upper() in FAILED_STATES]
-    if not failing:
-        # CI is clean on this PR — reset the per-sha dedup AND attempt counter
-        # so a future failure on a new push gets a fresh budget.
+    summary = ci_summary(checks)
+    if summary != "failing":
+        # Nothing is failing right now, so the per-sha dedup is spent. The
+        # attempt budget is only refunded once the PR is actually green:
+        # every fix push leaves the checks queued for minutes, and refunding
+        # on that window hands the fixer an unlimited budget against a check
+        # that keeps failing.
         seen.pop("ci_fix_sha", None)
         seen.pop("ci_unrelated_sha", None)
-        seen.pop("ci_fix_attempts", None)
-        seen.pop("ci_cap_emitted", None)
+        if summary == "passing":
+            seen.pop("ci_fix_attempts", None)
+            seen.pop("ci_cap_emitted", None)
         return
+    failing = [c for c in checks if c.get("state", "").upper() in FAILED_STATES]
 
     lock = _worktree_lock(f"{pr['repo']}/{pr['id']}")
     if not lock.acquire(blocking=False):
