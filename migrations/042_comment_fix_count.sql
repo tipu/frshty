@@ -1,0 +1,1 @@
+ALTER TABLE comment_state ADD COLUMN fix_count INTEGER NOT NULL DEFAULT 0;
