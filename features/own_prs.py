@@ -199,9 +199,9 @@ def _check_comments(config, instance_key, platform, pr, base_url, seen=None, tic
         return
     first_sight = not comments.has_comment_state(instance_key, "pr", pr_key)
     present_ids = {str(c["id"]) for c in platform_comments}
-    settled_ids = comments.settled_comment_ids(instance_key, "pr", pr_key, present_ids)
     for thread_key in _reopen_answered_threads(
-            platform_comments, settled_ids, user_id):
+            platform_comments,
+            comments.settled_comment_ids(instance_key, "pr", pr_key, present_ids), user_id):
         log.emit("pr_thread_reopened",
                  f"{pr_ref}: reviewer replied after the thread was resolved",
                  links={"pr": pr["url"], "detail": f"{base_url}/"},
@@ -211,7 +211,8 @@ def _check_comments(config, instance_key, platform, pr, base_url, seen=None, tic
     all_to_process = [c for c in detection["new"] + detection["edited"]
                       if c.get("author_id") != user_id and not c.get("resolved")]
     all_to_process = _drop_bot_rewrites(instance_key, pr, pr_key, pr_ref, base_url,
-                                        all_to_process, settled_ids)
+                                        all_to_process,
+                                        comments.answered_comment_ids(instance_key, "pr", pr_key))
     if first_sight:
         all_to_process = _baseline_existing_comments(instance_key, pr_key, all_to_process)
     # General GitHub review bodies were added to the adapter after inline
@@ -244,19 +245,20 @@ def _check_comments(config, instance_key, platform, pr, base_url, seen=None, tic
     _flush_deferred_comments(config, instance_key, pr, pr_key, pr_ref, base_url, by_id, seen, ticket_key)
 
 
-def _drop_bot_rewrites(instance_key, pr, pr_key, pr_ref, base_url, candidates, settled_ids):
-    """Settle a bot's rewrite of a comment frshty already answered.
+def _drop_bot_rewrites(instance_key, pr, pr_key, pr_ref, base_url, candidates, answered_ids):
+    """Settle a bot's rewrite of a comment frshty already answered with code.
 
     A CI reporter edits one comment in place on every run instead of posting a
     new one, so each rewrite reaches detection as an edit and re-enters the fix
     pipeline. Answering it pushes a commit, the push starts the next run, and
     the run rewrites the comment again: the loop feeds itself and lands commits
-    the PR never asked for. A person's edit still gets re-read, and a bot's
-    first comment is still answered — only a rewrite of an id frshty has
-    already settled is baselined away."""
+    the PR never asked for. Only a comment frshty has already written code for
+    is dropped, so a bot comment that was baselined, or read as needing no
+    change, is still triaged when the bot fills it in. A person's edit is
+    always re-read."""
     keep, dropped = [], []
     for c in candidates:
-        if c.get("author_is_bot") and str(c["id"]) in settled_ids:
+        if c.get("author_is_bot") and str(c["id"]) in answered_ids:
             dropped.append(c)
             comments.mark_comment_seen(instance_key, "pr", pr_key, str(c["id"]),
                                        c.get("updated_at") or c.get("created_at"))
@@ -542,6 +544,7 @@ def fix_comment(config, payload) -> tuple[bool, str | None]:
                 log.emit("pr_comment_blocked", f"{pr_ref}: Push failed — {comment['body'][:80]}", links=links, meta={**meta, "reason": "push failed"})
                 comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "push failed")
                 return False, "push failed"
+            comments.record_comment_fix(instance_key, "pr", pr_key, comment_id)
 
         if comment.get("resolvable", True):
             resolution = platform.resolve_comment(pr["repo"], pr["id"], int(comment_id))
@@ -653,6 +656,8 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
             push = platform.push_branch(worktree, pr["branch"])
             if isinstance(push, dict) and not push.get("ok", True):
                 return _fail_all(pending_ids, "push failed")
+            for cid in pending_ids:
+                comments.record_comment_fix(instance_key, "pr", pr_key, cid)
 
         unresolved = []
         pending_by_id = {str(c["id"]): c for c in pending}
