@@ -25,7 +25,10 @@ from pathlib import Path
 from typing import Callable
 
 import core.db as db
+from core.ticket_status import TicketStatus as _TicketStatus
 from core.ticket_status import transition as _transition
+
+_BLOCKED = _TicketStatus.blocked.value
 
 _default_instance_key: str | None = None
 _instance_key_cv: ContextVar[str | None] = ContextVar("frshty_instance_key", default=None)
@@ -382,6 +385,23 @@ def delete_ticket(key: str) -> None:
     )
 
 
+def _record_block_origin(merged: dict, prior_status: str) -> None:
+    """Remember which stage parked a ticket in `blocked`, and forget it on the
+    way out.
+
+    `blocked` is entered from planning, reviewing, testing or proving when a
+    task hard-fails and the repo gate has to be released. The stage is the only
+    thing that says where a resume may go, and the status column alone does not
+    carry it, so an operator resuming a blocked ticket would otherwise be
+    choosing a stage rather than returning to one.
+    """
+    if merged.get("status") == _BLOCKED:
+        if prior_status != _BLOCKED:
+            merged["blocked_from"] = prior_status
+        return
+    merged.pop("blocked_from", None)
+
+
 def transition_ticket(key: str, new_status: str, *, reason: str = "", **fields) -> dict:
     """Atomically transition a ticket to new_status with optional co-field updates.
 
@@ -395,7 +415,8 @@ def transition_ticket(key: str, new_status: str, *, reason: str = "", **fields) 
         raise TicketStateError(f"ticket {key}: not found, cannot transition")
     prior_status = current.get("status", "new")
     try:
-        _transition(prior_status, new_status)
+        _transition(prior_status, new_status,
+                    blocked_from=current.get("blocked_from"))
     except ValueError as e:
         _record_transition(
             _active_key(), key, prior_status, new_status,
@@ -410,9 +431,11 @@ def transition_ticket(key: str, new_status: str, *, reason: str = "", **fields) 
         merged = dict(cur)
         cur_status = cur.get("status", "new")
         try:
-            merged["status"] = _transition(cur_status, new_status)
+            merged["status"] = _transition(cur_status, new_status,
+                                           blocked_from=cur.get("blocked_from"))
         except ValueError as e:
             raise TicketStateError(str(e)) from e
+        _record_block_origin(merged, cur_status)
         for k, v in fields.items():
             if v is None:
                 merged.pop(k, None)
