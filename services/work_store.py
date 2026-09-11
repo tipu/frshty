@@ -228,9 +228,9 @@ def create_proposal(objective: str, note: str = "", instance_key: str | None = N
     immediate lock, so a caller cannot nest it; passing the open connection is
     what makes the two writes commit or roll back together.
 
-    `now` lets a caller stamp the row with the moment its own scan reads, so a
-    count over created_at answers the same question that caller's other counts
-    answer. It defaults to the wall clock.
+    `now` lets a caller stamp the row with the moment its own scan reads, so
+    the task and whatever that caller writes beside it carry one time rather
+    than two a few microseconds apart. It defaults to the wall clock.
 
     `source_item_id` marks a proposal that continues a finished task, so the
     approved run reads that task's report and the board threads the two
