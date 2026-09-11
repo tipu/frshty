@@ -292,6 +292,45 @@ def mark_comment_seen(
         )
 
 
+def record_comment_fix(
+    instance_key: str,
+    resource_type: str,
+    resource_id: str,
+    comment_id: str,
+) -> None:
+    """Count one code push frshty made to answer this comment."""
+    with db.tx() as conn:
+        conn.execute(
+            """
+            UPDATE comment_state SET fix_count = fix_count + 1
+            WHERE instance_key = ? AND resource_type = ? AND resource_id = ?
+            AND comment_id = ?
+            """,
+            (instance_key, resource_type, resource_id, comment_id),
+        )
+
+
+def answered_comment_ids(
+    instance_key: str,
+    resource_type: str,
+    resource_id: str,
+) -> set[str]:
+    """Ids frshty has already answered by pushing code.
+
+    A comment that was only baselined, or classified as needing no change,
+    is not answered: nothing was written for it, so a later rewrite of it is
+    still owed a reading."""
+    rows = db.query_all(
+        """
+        SELECT comment_id FROM comment_state
+        WHERE instance_key = ? AND resource_type = ? AND resource_id = ?
+        AND fix_count > 0
+        """,
+        (instance_key, resource_type, resource_id),
+    )
+    return {str(row["comment_id"]) for row in rows}
+
+
 def settled_comment_ids(
     instance_key: str,
     resource_type: str,

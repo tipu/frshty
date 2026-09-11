@@ -506,3 +506,23 @@ class TestSettledIdsAgainstFalseTombstones:
 
         assert comments.settled_comment_ids(
             instance_key, resource_type, resource_id, {"other"}) == {"reply"}
+
+
+class TestAnsweredComments:
+    """fix_count separates a comment frshty wrote code for from one it only
+    read and settled."""
+
+    def test_a_settled_comment_is_not_answered(self, instance_key, resource_type, resource_id):
+        comments.mark_comment_seen(instance_key, resource_type, resource_id, "c1", "2026-04-28T10:00:00Z")
+        assert comments.settled_comment_ids(instance_key, resource_type, resource_id) == {"c1"}
+        assert comments.answered_comment_ids(instance_key, resource_type, resource_id) == set()
+
+    def test_a_recorded_fix_makes_a_comment_answered(self, instance_key, resource_type, resource_id):
+        comments.mark_comment_seen(instance_key, resource_type, resource_id, "c1", "2026-04-28T10:00:00Z")
+        comments.record_comment_fix(instance_key, resource_type, resource_id, "c1")
+        assert comments.answered_comment_ids(instance_key, resource_type, resource_id) == {"c1"}
+
+    def test_answers_do_not_leak_between_resources(self, instance_key, resource_type, resource_id):
+        comments.mark_comment_seen(instance_key, resource_type, resource_id, "c1", "2026-04-28T10:00:00Z")
+        comments.record_comment_fix(instance_key, resource_type, resource_id, "c1")
+        assert comments.answered_comment_ids(instance_key, resource_type, "backend/other") == set()
