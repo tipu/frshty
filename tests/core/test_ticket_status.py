@@ -1,6 +1,6 @@
 import pytest
 
-from core.ticket_status import TicketStatus, transition, _ALLOWED
+from core.ticket_status import TicketStatus, can_transition, transition, _ALLOWED
 
 
 class TestTransitionValid:
@@ -236,6 +236,64 @@ class TestProvingState:
             transition("reviewing", "proving")
 
 
+class TestBlockedResume:
+    """A block is a pause, not a loss.
+
+    `_release_gate_on_failure` parks a ticket in `blocked` from planning,
+    reviewing, testing or proving so the per-repo gate clears. When `new` was
+    the only exit, the operator's single recovery re-ran consensus planning,
+    the flow doc, the tri-review and the test plan over work that was already
+    on disk and already committed. DEV-743 stopped in `testing` because one
+    generated test failed basedpyright; after that one line was fixed there was
+    no legal way back to `testing`.
+
+    A resume goes back to the stage the ticket was parked from and nowhere
+    else, so it re-enters a pipeline whose own preconditions still run. Every
+    other exit stays what it was: `new`, or `done`.
+    """
+
+    def test_blocked_resumes_every_status_it_can_be_entered_from(self):
+        entries = sorted(src.value for src, dsts in _ALLOWED.items()
+                         if TicketStatus.blocked in dsts)
+        assert entries
+        for status in entries:
+            assert transition("blocked", status, blocked_from=status) == status
+
+    def test_blocked_still_restarts_at_new_without_a_recorded_stage(self):
+        assert transition("blocked", "new") == "new"
+
+    def test_resume_needs_a_recorded_stage(self):
+        """A ticket that was never parked by a failing stage — an upstream
+        status_map may name `blocked` directly — has no stage to go back to,
+        so `new` stays its only exit."""
+        for status in ("planning", "reviewing", "testing", "proving"):
+            with pytest.raises(ValueError, match="Illegal transition"):
+                transition("blocked", status)
+
+    def test_resume_cannot_pick_a_different_stage(self):
+        with pytest.raises(ValueError, match="Illegal transition"):
+            transition("blocked", "proving", blocked_from="planning")
+
+    def test_can_transition_agrees_with_transition(self):
+        assert can_transition("blocked", "testing", blocked_from="testing")
+        assert not can_transition("blocked", "testing")
+        assert not can_transition("blocked", "testing", blocked_from="planning")
+
+    def test_blocked_cannot_skip_ahead_to_pr_ready(self):
+        """Resume returns to a stage that runs its gates again. It is not a
+        shortcut past them."""
+        with pytest.raises(ValueError, match="Illegal transition"):
+            transition("blocked", "pr_ready", blocked_from="pr_ready")
+
+    def test_blocked_cannot_skip_ahead_to_in_review(self):
+        with pytest.raises(ValueError, match="Illegal transition"):
+            transition("blocked", "in_review", blocked_from="in_review")
+
+    def test_blocked_cannot_declare_itself_merged(self):
+        with pytest.raises(ValueError, match="Illegal transition"):
+            transition("blocked", "merged", blocked_from="merged")
+
+
 # The graph the product is meant to have, written out here so the test does not
 # read its answer from the code under test. Every status may also stay where it
 # is and may always reach done; those two universal rules are applied below.
@@ -256,7 +314,7 @@ EXPECTED_EDGES = {
     "done": {"new", "pr_ready", "testing", "proving", "in_review"},
     "epic": set(),
     "ignored": {"new"},
-    "blocked": {"new"},
+    "blocked": {"new", "planning", "reviewing", "testing", "proving"},
 }
 
 
@@ -289,6 +347,11 @@ class TestFullMatrix:
     src in the literal table. Adding or removing an edge in
     core/ticket_status.py fails TestGraphDefinition until the table is updated,
     which is what makes a graph change intentional.
+
+    The table states which shapes of transition exist. A resume out of
+    `blocked` also needs the stage the ticket was parked from, so these pairs
+    are asked with that stage supplied; TestBlockedResume covers what happens
+    when it is absent or names a different stage.
     """
 
     @pytest.mark.parametrize(
@@ -301,8 +364,9 @@ class TestFullMatrix:
             or dst == "done"
             or dst in EXPECTED_EDGES[src]
         )
+        blocked_from = dst if src == "blocked" else None
         if expected_legal:
-            assert transition(src, dst) == dst
+            assert transition(src, dst, blocked_from=blocked_from) == dst
         else:
             with pytest.raises(ValueError, match="Illegal transition"):
-                transition(src, dst)
+                transition(src, dst, blocked_from=blocked_from)
