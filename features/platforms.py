@@ -634,6 +634,17 @@ class BitbucketPlatform(_CIMonitorMixin):
         }
 
 
+def _author_is_bot(author: dict | None) -> bool:
+    """True when a comment was written by a GitHub App rather than a person.
+
+    GraphQL types an App author as Bot and renders its login as name[bot]. The
+    login suffix is the fallback for a payload that carries no __typename."""
+    author = author or {}
+    if author.get("__typename") == "Bot":
+        return True
+    return str(author.get("login", "")).endswith("[bot]")
+
+
 class GitHubPlatform(_CIMonitorMixin):
 
     def __init__(self, config: dict):
@@ -826,16 +837,16 @@ class GitHubPlatform(_CIMonitorMixin):
         " repository(owner:$owner,name:$name){"
         " pullRequest(number:$number){"
         " reviews(first:100){nodes{"
-        " databaseId body url submittedAt updatedAt state author{login}"
+        " databaseId body url submittedAt updatedAt state author{login __typename}"
         "}}"
         " comments(first:100){nodes{"
-        " databaseId body url createdAt updatedAt author{login}"
+        " databaseId body url createdAt updatedAt author{login __typename}"
         "}}"
         " reviewThreads(first:100){nodes{"
         " id isResolved"
         " comments(first:100){nodes{"
         " databaseId body path line originalLine diffHunk url createdAt updatedAt"
-        " author{login} replyTo{databaseId}"
+        " author{login __typename} replyTo{databaseId}"
         "}}}}}}}"
     )
 
@@ -872,6 +883,7 @@ class GitHubPlatform(_CIMonitorMixin):
                     "body": c.get("body", ""),
                     "author_id": (c.get("author") or {}).get("login", ""),
                     "author_name": (c.get("author") or {}).get("login", ""),
+                    "author_is_bot": _author_is_bot(c.get("author")),
                     "path": c.get("path"),
                     "line": c.get("line") if c.get("line") is not None else c.get("originalLine"),
                     "diff_hunk": c.get("diffHunk", ""),
@@ -900,6 +912,7 @@ class GitHubPlatform(_CIMonitorMixin):
                 "body": body,
                 "author_id": (review.get("author") or {}).get("login", ""),
                 "author_name": (review.get("author") or {}).get("login", ""),
+                "author_is_bot": _author_is_bot(review.get("author")),
                 "path": None,
                 "line": None,
                 "diff_hunk": "",
@@ -928,6 +941,7 @@ class GitHubPlatform(_CIMonitorMixin):
                 "body": body,
                 "author_id": (c.get("author") or {}).get("login", ""),
                 "author_name": (c.get("author") or {}).get("login", ""),
+                "author_is_bot": _author_is_bot(c.get("author")),
                 "path": None,
                 "line": None,
                 "diff_hunk": "",
