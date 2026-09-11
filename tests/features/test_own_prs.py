@@ -1901,3 +1901,73 @@ class TestCiFixBudget:
         seen = self._seen_after([{"state": "SUCCESS", "name": "lint"}], tmp_path)
         assert "ci_fix_attempts" not in seen
         assert "ci_cap_emitted" not in seen
+
+
+class TestUnrelatedCheckRecord:
+    """A base sync gives the PR a new head every hour and a new head re-opens
+    triage, so a flaky check gets judged again and again until one roll says
+    the PR caused it."""
+
+    def _platform(self, checks):
+        platform = MagicMock()
+        platform.get_pr_checks.return_value = checks
+        return platform
+
+    def _triage(self, platform, seen, tmp_path, head="head1"):
+        worktree = tmp_path / "wt"
+        worktree.mkdir(exist_ok=True)
+        with patch("features.own_prs._ensure_worktree", return_value=worktree), \
+             patch("features.own_prs.subprocess.run") as mock_run, \
+             patch("features.pr_ci.triage_and_fix_pr",
+                   return_value={"result": "unrelated", "attempts": 0,
+                                 "failed_names": ["evals"], "reason": "flaky"}) as mock_triage, \
+             patch("features.own_prs.log.emit"):
+            mock_run.return_value = MagicMock(returncode=0, stdout=f"{head}\n")
+            own_prs._check_ci({"_state_dir": tmp_path}, platform, make_pr(), seen, "http://base")
+        return mock_triage
+
+    def test_a_check_already_read_as_unrelated_is_not_judged_again(self, tmp_path):
+        platform = self._platform([{"state": "FAILURE", "name": "evals"}])
+        seen = {"ci_unrelated_checks": ["evals"], "ci_unrelated_head": "head1"}
+        assert not self._triage(platform, seen, tmp_path).called
+
+    def test_a_base_merge_head_keeps_the_verdict(self, tmp_path):
+        platform = self._platform([{"state": "FAILURE", "name": "evals"}])
+        seen = {"ci_unrelated_checks": ["evals"], "ci_unrelated_head": "head0",
+                "base_merge_pending": True}
+        assert not self._triage(platform, seen, tmp_path).called
+        assert seen["ci_unrelated_head"] == "head1"
+
+    def test_any_other_new_head_earns_a_fresh_reading(self, tmp_path):
+        platform = self._platform([{"state": "FAILURE", "name": "evals"}])
+        seen = {"ci_unrelated_checks": ["evals"], "ci_unrelated_head": "head0"}
+        assert self._triage(platform, seen, tmp_path).called
+
+    def test_a_new_failing_check_still_reaches_triage(self, tmp_path):
+        platform = self._platform([{"state": "FAILURE", "name": "evals"},
+                                   {"state": "FAILURE", "name": "lint"}])
+        seen = {"ci_unrelated_checks": ["evals"], "ci_unrelated_head": "head1"}
+        assert self._triage(platform, seen, tmp_path).called
+
+    def test_an_unrelated_verdict_is_recorded(self, tmp_path):
+        platform = self._platform([{"state": "FAILURE", "name": "evals"}])
+        seen = {}
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        with patch("features.own_prs._ensure_worktree", return_value=worktree), \
+             patch("features.own_prs.subprocess.run") as mock_run, \
+             patch("features.pr_ci.triage_and_fix_pr",
+                   return_value={"result": "unrelated", "attempts": 0,
+                                 "failed_names": ["evals"], "reason": "flaky"}), \
+             patch("features.own_prs.log.emit"):
+            mock_run.return_value = MagicMock(returncode=0, stdout="head1\n")
+            own_prs._check_ci({"_state_dir": tmp_path}, platform, make_pr(), seen, "http://base")
+        assert seen["ci_unrelated_checks"] == ["evals"]
+
+    def test_a_recovered_check_is_forgotten(self, tmp_path):
+        platform = self._platform([{"state": "SUCCESS", "name": "evals"},
+                                   {"state": "FAILURE", "name": "lint"}])
+        seen = {"ci_unrelated_checks": ["evals"]}
+        with patch("features.own_prs._ensure_worktree", return_value=None):
+            own_prs._check_ci({"_state_dir": tmp_path}, platform, make_pr(), seen, "http://base")
+        assert seen["ci_unrelated_checks"] == []
