@@ -17,6 +17,26 @@ _SESSION_DB_PATH = None
 _SESSION_MIGRATIONS_DIR = None
 
 
+@pytest.fixture(autouse=True)
+def _retire_kickoff_threads():
+    """Stop a kickoff thread the test left running.
+
+    services.work_launch.start_kickoff spawns a daemon thread that polls a
+    pane for up to ninety seconds and then sends through
+    work_store.tmux_send. A test that launches without patching the thread
+    leaves that thread alive, and it lands inside whichever later test has
+    tmux_send patched, failing an assertion about a pane it never touched.
+    Taking each pane's next generation retires every kickoff still running,
+    which is what start_kickoff's own supersede rule does for a relaunch."""
+    yield
+    work_launch = sys.modules.get("services.work_launch")
+    if work_launch is None:
+        return
+    with work_launch._kickoff_guard:
+        for key in list(work_launch._kickoff_generations):
+            work_launch._kickoff_generations[key] += 1
+
+
 
 def _reinject_core_modules() -> None:
     """Point every loaded frshty module back at the session core.state/db/log.
