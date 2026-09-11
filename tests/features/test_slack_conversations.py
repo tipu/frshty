@@ -1124,38 +1124,75 @@ def test_the_boundary_sits_at_the_message_the_declined_task_was_built_from(tmp_p
         "a watermark below every message divides nothing, so no line is drawn")
 
 
-def test_the_daily_budget_counts_every_task_one_thread_opened(tmp_path):
-    """A thread that is declined and asked again opens a second task. The cap
-    counts tasks, so that second one spends a slot. Counting the conversations
-    that opened them would let one thread open a task a day forever."""
+def test_the_cap_counts_every_task_one_thread_opened(tmp_path):
+    """A thread that is declined and asked again opens a second task. That
+    task stands in front of the operator like any other, so it spends a slot
+    of the cap."""
     _declined_proposal(tmp_path)
     _capture(tmp_path, [_ws(REPLY_TS, ERIK, "and please also move WB-500 to PLT",
                             thread_ts=ROOT_TS)])
-    opened, _ = _run(tmp_path, _verdict(objective=SECOND_REQUEST), propose_max_per_day=2)
-    assert opened["proposed"] == 1, "the second task fits inside the cap"
-    assert sc._proposals_today("atropos", NOW) == 2
+    opened, _ = _run(tmp_path, _verdict(objective=SECOND_REQUEST),
+                     propose_max_pending=1)
+    assert opened["proposed"] == 1, "the declined task no longer holds the slot"
+    assert sc._proposals_awaiting_operator("atropos") == 1
 
-    second = _item_ids()[1]
-    assert work_store.apply_action(second, "decline") == {
-        "id": second, "action": "decline"}
-    _capture(tmp_path, [_ws("1788462100.000500", ERIK, "and WB-600 as well",
-                            thread_ts=ROOT_TS)])
-    opened, haiku = _run(tmp_path, _verdict(), propose_max_per_day=2)
+    _capture(tmp_path, [_ws("1788462100.000500", ERIK, "a different request",
+                            channel=DM)])
+    opened, haiku = _run(tmp_path, _verdict(), propose_max_pending=1)
 
     assert haiku.call_count == 0, "the cap is spent before any model call"
     assert opened["proposed"] == 0
     assert len(_item_ids()) == 2
 
 
-def test_the_daily_budget_caps_proposals(tmp_path):
+def test_the_cap_limits_the_proposals_waiting_for_the_operator(tmp_path):
     _capture(tmp_path, [
         _ws("1788458400.000100", ERIK, "first thing", channel=DM),
         _ws("1788458500.000100", ERIK, "second thing", channel=DM),
         _ws("1788458600.000100", ERIK, "third thing", channel=DM),
     ])
-    opened, _ = _run(tmp_path, _verdict(), propose_max_per_day=2)
+    opened, _ = _run(tmp_path, _verdict(), propose_max_pending=2)
     assert opened["proposed"] == 2
     assert len(db.query_all("SELECT id FROM work_items")) == 2
+
+
+def test_deciding_a_proposal_frees_its_slot_at_once(tmp_path):
+    """The cap used to count every proposal opened in the last 24 hours. Three
+    of them filled it in three minutes, the operator read and declined all
+    three within half an hour, and the next request waited a full day for the
+    clock rather than for him. The count is of proposals still waiting, so a
+    decision frees its slot in the same minute it is made."""
+    _capture(tmp_path, [
+        _ws("1788458400.000100", ERIK, "first thing", channel=DM),
+        _ws("1788458500.000100", ERIK, "second thing", channel=DM),
+    ])
+    opened, _ = _run(tmp_path, _verdict(), propose_max_pending=2)
+    assert opened["proposed"] == 2
+    assert sc._proposals_awaiting_operator("atropos") == 2
+
+    _capture(tmp_path, [_ws("1788458600.000100", ERIK, "third thing", channel=DM)])
+    opened, haiku = _run(tmp_path, _verdict(), propose_max_pending=2)
+    assert opened["proposed"] == 0, "the cap is full"
+    assert haiku.call_count == 0, "and it is spent before any model call"
+
+    for item_id in _item_ids():
+        assert work_store.apply_action(item_id, "decline") == {
+            "id": item_id, "action": "decline"}
+    assert sc._proposals_awaiting_operator("atropos") == 0
+
+    opened, _ = _run(tmp_path, _verdict(objective=SECOND_REQUEST),
+                     propose_max_pending=2)
+    assert opened["proposed"] == 1, "the third request is proposed at once"
+
+
+def test_an_approved_proposal_stops_holding_a_slot(tmp_path):
+    """Approving takes a proposal off the board as surely as declining does,
+    so it stops holding a slot too."""
+    _capture(tmp_path, _erik_thread())
+    _run(tmp_path, _verdict(), propose_max_pending=1)
+    assert sc._proposals_awaiting_operator("atropos") == 1
+    assert work_store.claim_proposal(_item_ids()[0])
+    assert sc._proposals_awaiting_operator("atropos") == 0
 
 
 def test_indexing_runs_with_proposals_switched_off(tmp_path):
@@ -1651,19 +1688,27 @@ def test_a_scan_with_no_judgement_budget_calls_the_model_never(tmp_path):
     assert db.query_all("SELECT id FROM work_items") == []
 
 
-def test_a_proposal_from_yesterday_does_not_spend_todays_budget(tmp_path):
-    """The daily cap is a rolling 24 hours, so a quiet instance is never
-    locked out by a proposal it opened two days ago."""
+def test_a_proposal_nobody_decided_holds_its_slot_however_old_it_is(tmp_path):
+    """The cap counts what waits for the operator, not what a clock says. A
+    proposal he has not read is still in front of him a day later, so it still
+    holds its slot, and the slot comes back the moment he decides."""
     _capture(tmp_path, _erik_thread())
-    _run(tmp_path, _verdict(), propose_max_per_day=1)
+    _run(tmp_path, _verdict(), propose_max_pending=1)
     assert len(db.query_all("SELECT id FROM work_items")) == 1
-    assert sc._proposals_today("atropos", NOW) == 1
-    assert sc._proposals_today("atropos", NOW + timedelta(hours=25)) == 0
+    assert sc._proposals_awaiting_operator("atropos") == 1
 
     later = NOW + timedelta(hours=25)
     _capture(tmp_path, [_ws("1788552000.000100", ERIK, "a second request",
                             channel=DM)])
-    opened, _ = _run(tmp_path, _verdict(), now=later, propose_max_per_day=1)
+    opened, haiku = _run(tmp_path, _verdict(), now=later, propose_max_pending=1)
+    assert opened["proposed"] == 0, "a day changes nothing while it stands"
+    assert haiku.call_count == 0
+
+    item_id = _item_ids()[0]
+    assert work_store.apply_action(item_id, "decline") == {
+        "id": item_id, "action": "decline"}
+    opened, _ = _run(tmp_path, _verdict(objective=SECOND_REQUEST), now=later,
+                     propose_max_pending=1)
     assert opened["proposed"] == 1
 
 
@@ -1955,7 +2000,7 @@ def test_a_conversation_the_model_never_answers_is_judged_again_later(tmp_path):
 def test_a_task_that_cannot_be_created_leaves_the_conversation_open(tmp_path):
     """The mark that says a conversation produced a task, and the task itself,
     are one transaction. Were they two, a crash between them would lose the
-    request outright and still spend the day's budget."""
+    request outright and still spend a slot of the cap."""
     _capture(tmp_path, _erik_thread())
     config = _config(tmp_path, propose_tasks=True)
     real = sc.work_store.create_proposal
@@ -1978,7 +2023,7 @@ def test_a_task_that_cannot_be_created_leaves_the_conversation_open(tmp_path):
     assert row["proposed_at"] is None, "the conversation is still open"
     assert row["work_item_id"] is None
     assert db.query_all("SELECT id FROM work_items") == []
-    assert sc._proposals_today("atropos", NOW) == 0, "no budget was spent"
+    assert sc._proposals_awaiting_operator("atropos") == 0, "no slot was spent"
     assert len(sc._candidates("atropos", config, NOW)) == 1, "it is judged again"
 
 
