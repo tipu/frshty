@@ -693,11 +693,21 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
 
 def _check_ci(config, platform, pr, seen, base_url):
     from features.tickets import MAX_CI_FIX_ATTEMPTS
-    from features.pr_ci import triage_and_fix_pr, ci_summary, FAILED_STATES
+    from features.pr_ci import (triage_and_fix_pr, ci_summary, FAILED_STATES,
+                                PENDING_STATES)
 
+    base_merged = bool(seen.pop("base_merge_pending", False))
     checks = platform.get_pr_checks(pr["repo"], pr["id"])
     if checks is None:
         return
+    # A check that has recovered is fresh information: forget the earlier
+    # verdict that its failure came from outside this PR.
+    unrelated = set(seen.get("ci_unrelated_checks") or [])
+    concluded = FAILED_STATES + PENDING_STATES
+    if unrelated:
+        unrelated -= {c["name"] for c in checks
+                      if c.get("state", "").upper() not in concluded}
+        seen["ci_unrelated_checks"] = sorted(unrelated)
     summary = ci_summary(checks)
     if summary != "failing":
         # Nothing is failing right now, so the per-sha dedup is spent. The
@@ -728,6 +738,20 @@ def _check_ci(config, platform, pr, seen, base_url):
         if seen.get("ci_fix_sha") == head or seen.get("ci_unrelated_sha") == head:
             return
 
+        # A head frshty produced by merging the base carries no new work from
+        # the PR, so a verdict that a check fails for outside reasons still
+        # holds. Without this the hourly base sync re-opened triage on the same
+        # flaky check until one roll came back "caused by us" and the fixer
+        # rewrote code the PR never touched. Any other new head is new code and
+        # earns a fresh reading, so a check the PR really breaks is still fixed.
+        if unrelated:
+            if head != seen.get("ci_unrelated_head") and not base_merged:
+                unrelated = set()
+            seen["ci_unrelated_checks"] = sorted(unrelated)
+            seen["ci_unrelated_head"] = head
+        if {c["name"] for c in failing} <= unrelated:
+            return
+
         attempts = seen.get("ci_fix_attempts", 0)
         pr_ref = f"{pr['repo']}#{pr['id']}"
         pr_link = {"pr": pr["url"], "detail": f"{base_url}/"}
@@ -755,6 +779,8 @@ def _check_ci(config, platform, pr, seen, base_url):
                      links=pr_link,
                      meta={**meta, "reason": outcome.get("reason", "")})
             seen["ci_unrelated_sha"] = head
+            seen["ci_unrelated_checks"] = sorted(unrelated | set(failed_names))
+            seen["ci_unrelated_head"] = head
             return
 
         if kind == "fixed":
@@ -806,6 +832,7 @@ def _check_base_fresh(config, platform, pr, seen, base_url):
     if result == "synced":
         seen.pop("ci_fix_sha", None)
         seen.pop("ci_unrelated_sha", None)
+        seen["base_merge_pending"] = True
         log.emit("pr_base_synced", f"{pr_ref}: merged {base_branch} into PR branch",
                  links=links, meta=meta)
     elif result == "dirty_worktree":
