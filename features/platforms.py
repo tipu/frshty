@@ -7,6 +7,7 @@ from pathlib import Path
 
 import httpx
 
+import core.correspondence as correspondence
 import core.log as log
 from core import external_log
 from core.config import resolve_env, get_repos, base_branch_for
@@ -486,6 +487,8 @@ class BitbucketPlatform(_CIMonitorMixin):
             }
 
     def post_pr_comment(self, repo: str, pr_id: int, body: str, path: str | None = None, line: int | None = None, parent_id: int | None = None) -> dict:
+        if not correspondence.allowed(self.config):
+            return {"status": "error", "detail": correspondence.DENY_REASON}
         url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}/comments"
         payload = {"content": {"raw": body}}
         if path and line:
@@ -499,6 +502,8 @@ class BitbucketPlatform(_CIMonitorMixin):
             return {"status": "error", "detail": resp.text}
 
     def edit_pr_comment(self, repo: str, pr_id: int, comment_id: int, body: str) -> dict:
+        if not correspondence.allowed(self.config):
+            return {"status": "error", "detail": correspondence.DENY_REASON}
         url = f"{self.BASE_URL}/repositories/{self.org}/{repo}/pullrequests/{pr_id}/comments/{comment_id}"
         with external_log.client("bitbucket", auth=self._auth(), timeout=30) as client:
             resp = client.put(url, json={"content": {"raw": body}})
@@ -627,6 +632,17 @@ class BitbucketPlatform(_CIMonitorMixin):
             "url": pr["links"]["html"]["href"],
             "head_sha": pr.get("source", {}).get("commit", {}).get("hash", ""),
         }
+
+
+def _author_is_bot(author: dict | None) -> bool:
+    """True when a comment was written by a GitHub App rather than a person.
+
+    GraphQL types an App author as Bot and renders its login as name[bot]. The
+    login suffix is the fallback for a payload that carries no __typename."""
+    author = author or {}
+    if author.get("__typename") == "Bot":
+        return True
+    return str(author.get("login", "")).endswith("[bot]")
 
 
 class GitHubPlatform(_CIMonitorMixin):
@@ -821,16 +837,16 @@ class GitHubPlatform(_CIMonitorMixin):
         " repository(owner:$owner,name:$name){"
         " pullRequest(number:$number){"
         " reviews(first:100){nodes{"
-        " databaseId body url submittedAt updatedAt state author{login}"
+        " databaseId body url submittedAt updatedAt state author{login __typename}"
         "}}"
         " comments(first:100){nodes{"
-        " databaseId body url createdAt updatedAt author{login}"
+        " databaseId body url createdAt updatedAt author{login __typename}"
         "}}"
         " reviewThreads(first:100){nodes{"
         " id isResolved"
         " comments(first:100){nodes{"
         " databaseId body path line originalLine diffHunk url createdAt updatedAt"
-        " author{login} replyTo{databaseId}"
+        " author{login __typename} replyTo{databaseId}"
         "}}}}}}}"
     )
 
@@ -867,6 +883,7 @@ class GitHubPlatform(_CIMonitorMixin):
                     "body": c.get("body", ""),
                     "author_id": (c.get("author") or {}).get("login", ""),
                     "author_name": (c.get("author") or {}).get("login", ""),
+                    "author_is_bot": _author_is_bot(c.get("author")),
                     "path": c.get("path"),
                     "line": c.get("line") if c.get("line") is not None else c.get("originalLine"),
                     "diff_hunk": c.get("diffHunk", ""),
@@ -895,6 +912,7 @@ class GitHubPlatform(_CIMonitorMixin):
                 "body": body,
                 "author_id": (review.get("author") or {}).get("login", ""),
                 "author_name": (review.get("author") or {}).get("login", ""),
+                "author_is_bot": _author_is_bot(review.get("author")),
                 "path": None,
                 "line": None,
                 "diff_hunk": "",
@@ -923,6 +941,7 @@ class GitHubPlatform(_CIMonitorMixin):
                 "body": body,
                 "author_id": (c.get("author") or {}).get("login", ""),
                 "author_name": (c.get("author") or {}).get("login", ""),
+                "author_is_bot": _author_is_bot(c.get("author")),
                 "path": None,
                 "line": None,
                 "diff_hunk": "",
@@ -1023,6 +1042,8 @@ class GitHubPlatform(_CIMonitorMixin):
         }
 
     def post_pr_comment(self, repo: str, pr_id: int, body: str, path: str | None = None, line: int | None = None, parent_id: int | None = None) -> dict:
+        if not correspondence.allowed(self.config):
+            return {"status": "error", "detail": correspondence.DENY_REASON}
         full = self._resolve_repo(repo)
         if parent_id:
             result = self._run_gh([
@@ -1049,6 +1070,8 @@ class GitHubPlatform(_CIMonitorMixin):
         return {"status": "error", "detail": result.stderr}
 
     def edit_pr_comment(self, repo: str, pr_id: int, comment_id: int, body: str) -> dict:
+        if not correspondence.allowed(self.config):
+            return {"status": "error", "detail": correspondence.DENY_REASON}
         full = self._resolve_repo(repo)
         result = self._run_gh([
             "api", "-X", "PATCH", f"repos/{full}/pulls/comments/{comment_id}",

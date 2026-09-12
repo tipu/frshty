@@ -117,21 +117,60 @@ class TestCodexLaunch:
 
     def test_a_claude_run_is_cross_checked_by_codex(self, tmp_path, monkeypatch):
         prompt = _launch_prompt(tmp_path, monkeypatch, "claude")
-        assert "double check the change with codex once" in prompt
+        assert "double check the change with codex before you" in prompt
         assert "codex exec" in prompt
         assert "--skip-git-repo-check" in prompt
         assert "with claude" not in prompt
 
     def test_a_codex_run_is_cross_checked_by_claude(self, tmp_path, monkeypatch):
         prompt = _launch_prompt(tmp_path, monkeypatch, "codex")
-        assert "double check the change with claude once" in prompt
-        assert "claude --dangerously-skip-permissions -p" in prompt
+        assert "double check the change with claude before you" in prompt
+        assert "claude --dangerously-skip-permissions --session-id <session-id> -p" in prompt
         assert "with codex" not in prompt
 
     def test_the_reviewer_question_goes_on_stdin(self):
         for agent in ("claude", "codex"):
-            _, cmd = work_launch._reviewer_cmd(agent, {})
-            assert cmd.split()[-1] in ("-", "-p")
+            reviewer = work_launch._reviewer_cmd(agent, {})
+            assert reviewer["first"].split()[-1] in ("-", "-p")
+            assert reviewer["resume"].split()[-1] in ("-", "-p")
+
+    def test_a_later_pass_resumes_the_first_session(self, tmp_path, monkeypatch):
+        for agent, other, resume in (
+                ("claude", "codex",
+                 "codex exec resume <session-id> "
+                 "--dangerously-bypass-approvals-and-sandbox --skip-git-repo-check -"),
+                ("codex", "claude",
+                 "claude --dangerously-skip-permissions --resume <session-id> -p")):
+            prompt = _launch_prompt(tmp_path, monkeypatch, agent)
+            assert f"Run {other} again when a high or critical finding is left " \
+                   "that you did not reject" in prompt
+            assert f"run that pass as `{resume}`" in prompt
+            assert "with the session id of the first run" in prompt
+            assert "instead of reading the tree again" in prompt
+
+    def test_a_later_pass_sends_only_what_changed(self, tmp_path, monkeypatch):
+        for agent, other in (("claude", "codex"), ("codex", "claude")):
+            prompt = _launch_prompt(tmp_path, monkeypatch, agent)
+            assert "A resumed session already holds the earlier passes, so give " \
+                   f"{other} only what changed since the pass before it" in prompt
+
+    def test_the_prompt_says_where_the_session_id_comes_from(self, tmp_path, monkeypatch):
+        codex_checks = _launch_prompt(tmp_path, monkeypatch, "claude")
+        assert "Keep the session id of the codex run" in codex_checks
+        assert "writes a `session id: <session-id>` line on stderr" in codex_checks
+        claude_checks = _launch_prompt(tmp_path, monkeypatch, "codex")
+        assert "Keep the session id of the claude run" in claude_checks
+        assert "pick a fresh uuid with `uuidgen` and pass it as the id" in claude_checks
+
+    def test_the_resume_command_carries_the_config_dir(self):
+        config = {"llm": {"claude": {"config_dir": "~/.quill-claude"},
+                          "codex": {"config_dir": "~/.alt-codex"}}}
+        claude = work_launch._reviewer_cmd("codex", config)
+        codex = work_launch._reviewer_cmd("claude", config)
+        assert claude["resume"].startswith(
+            f"CLAUDE_CONFIG_DIR={os.path.expanduser('~/.quill-claude')} ")
+        assert codex["resume"].startswith(
+            f"CODEX_HOME={os.path.expanduser('~/.alt-codex')} ")
 
     def test_the_reviewer_is_asked_for_high_and_critical_defects_only(self, tmp_path,
                                                                       monkeypatch):
@@ -148,16 +187,25 @@ class TestCodexLaunch:
                                                                      monkeypatch):
         for agent, other in (("claude", "codex"), ("codex", "claude")):
             prompt = _launch_prompt(tmp_path, monkeypatch, agent)
-            assert f"If you changed code, double check the change with {other} once" in prompt
+            assert f"If you changed code, double check the change with {other} before" in prompt
             assert f"If you changed no code, do not run {other}" in prompt
             assert "Double check your analysis and your code" not in prompt
 
-    def test_the_review_is_capped_at_two_passes(self, tmp_path, monkeypatch):
+    def test_the_review_stops_on_the_verdict(self, tmp_path, monkeypatch):
         for agent, other in (("claude", "codex"), ("codex", "claude")):
             prompt = _launch_prompt(tmp_path, monkeypatch, agent)
-            assert f"Run {other} a second time only when you fixed a high or " \
-                   "critical finding" in prompt
-            assert "Never run it a third time" in prompt
+            assert f"Stop when {other} reports no high or critical defect" in prompt
+            assert "every finding still open is one you rejected with a stated " \
+                   "reason" in prompt
+            assert "a second time only when you fixed" not in prompt
+            assert "Never run it a third time" not in prompt
+
+    def test_the_review_is_capped_at_four_passes(self, tmp_path, monkeypatch):
+        for agent in ("claude", "codex"):
+            prompt = _launch_prompt(tmp_path, monkeypatch, agent)
+            assert "Run at most four passes in total" in prompt
+            assert "Stop at the fourth pass even when a finding is still open, and " \
+                   "name that finding in your checkpoint" in prompt
 
     def test_the_brief_stops_a_question_task_at_the_answer(self, tmp_path, monkeypatch):
         prompt = _launch_prompt(tmp_path, monkeypatch, "claude")
@@ -181,8 +229,8 @@ class TestCodexLaunch:
                                      "env": {"CLAUDE_CONFIG_DIR": "~/.chosen"}},
                           "codex": {"config_dir": "~/.ignored",
                                     "env": {"CODEX_HOME": "~/.chosen"}}}}
-        _, claude_cmd = work_launch._reviewer_cmd("codex", config)
-        _, codex_cmd = work_launch._reviewer_cmd("claude", config)
+        claude_cmd = work_launch._reviewer_cmd("codex", config)["first"]
+        codex_cmd = work_launch._reviewer_cmd("claude", config)["first"]
         assert claude_cmd.startswith(f"CLAUDE_CONFIG_DIR={os.path.expanduser('~/.chosen')} ")
         assert codex_cmd.startswith(f"CODEX_HOME={os.path.expanduser('~/.chosen')} ")
         assert ".ignored" not in claude_cmd and ".ignored" not in codex_cmd
@@ -190,8 +238,8 @@ class TestCodexLaunch:
     def test_a_binary_path_with_a_space_is_quoted(self):
         config = {"llm": {"claude": {"bin": "/opt/Claude CLI/claude"},
                           "codex": {"bin": "/opt/Codex CLI/codex"}}}
-        _, claude_cmd = work_launch._reviewer_cmd("codex", config)
-        _, codex_cmd = work_launch._reviewer_cmd("claude", config)
+        claude_cmd = work_launch._reviewer_cmd("codex", config)["first"]
+        codex_cmd = work_launch._reviewer_cmd("claude", config)["first"]
         assert claude_cmd.startswith("'/opt/Claude CLI/claude' ")
         assert codex_cmd.startswith("'/opt/Codex CLI/codex' ")
 
@@ -200,8 +248,8 @@ class TestCodexLaunch:
                                      "env": {"ANTHROPIC_API_KEY": "sk-secret"}},
                           "codex": {"config_dir": "~/.alt-codex",
                                     "env": {"OPENAI_API_KEY": "sk-secret"}}}}
-        _, claude_cmd = work_launch._reviewer_cmd("codex", config)
-        _, codex_cmd = work_launch._reviewer_cmd("claude", config)
+        claude_cmd = work_launch._reviewer_cmd("codex", config)["first"]
+        codex_cmd = work_launch._reviewer_cmd("claude", config)["first"]
         assert "sk-secret" not in claude_cmd and "sk-secret" not in codex_cmd
         assert claude_cmd.startswith(f"CLAUDE_CONFIG_DIR={os.path.expanduser('~/.quill-claude')} ")
         assert codex_cmd.startswith(f"CODEX_HOME={os.path.expanduser('~/.alt-codex')} ")
@@ -284,6 +332,34 @@ class TestCodexNotify:
                            (item_id,))
         assert art["path"] == "/tmp/report.html"
         assert art["note"] == "the report"
+
+    def test_a_progress_line_survives_a_finish_in_the_same_turn(self):
+        item_id, sid = _mkrun("codex notify progress")
+        r = self._notify(sid, {"type": "agent-turn-complete", "thread-id": "thread-4",
+                               "last-assistant-message": "PROGRESS: cut the release branch\nWORK_DONE"})
+        assert r.returncode == 0, r.stderr
+        item = db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "needs_ack"
+        events = db.query_all("SELECT payload FROM work_events WHERE work_item_id = ? "
+                              "AND kind = 'progress'", (item_id,))
+        assert [json.loads(e["payload"])["text"] for e in events] == ["cut the release branch"]
+
+    def test_a_progress_line_from_an_earlier_message_is_recorded(self, tmp_path):
+        item_id, sid = _mkrun("codex notify earlier progress")
+        _rollout(tmp_path, "thread-5", [
+            {"type": "AgentMessage",
+             "content": [{"type": "Text", "text": "PROGRESS: migrations applied"}]},
+            {"type": "AgentMessage", "phase": "final_answer",
+             "content": [{"type": "Text", "text": "Done.\nWORK_DONE"}]}])
+        r = self._notify(sid, {"type": "agent-turn-complete", "thread-id": "thread-5",
+                               "last-assistant-message": "Done.\nWORK_DONE"},
+                         codex_home=tmp_path)
+        assert r.returncode == 0, r.stderr
+        item = db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "needs_ack"
+        events = db.query_all("SELECT payload FROM work_events WHERE work_item_id = ? "
+                              "AND kind = 'progress'", (item_id,))
+        assert [json.loads(e["payload"])["text"] for e in events] == ["migrations applied"]
 
     def test_foreign_session_writes_nothing(self):
         before = db.query_one("SELECT COUNT(*) AS n FROM work_events")["n"]
@@ -726,7 +802,7 @@ class TestCodexTrustPrompt:
                             lambda argv, **kw: calls.append(argv) or MagicMock(returncode=0))
         monkeypatch.setattr(terminal, "pane_text", lambda k: TRUST_PANE)
         assert terminal.answer_codex_trust("work-1") is True
-        assert calls[-1][-3:] == ["-t", "term-work-1", "Enter"]
+        assert calls[-1][-3:] == ["-t", "=term-work-1:", "Enter"]
         calls.clear()
         monkeypatch.setattr(terminal, "pane_text", lambda k: READY_PANE)
         assert terminal.answer_codex_trust("work-1") is False

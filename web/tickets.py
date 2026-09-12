@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import subprocess
 import threading
@@ -1185,6 +1186,21 @@ def api_redo_proof(key: str, body: dict):
     return {"status": "redoing", "feedback": bool(feedback)}
 
 
+def _resume_takes_the_repo_gate(ts: dict, target: str) -> bool:
+    """Whether this status change puts a blocked ticket back into a stage that
+    occupies the per-repo gate.
+
+    Nothing on this path acquires that gate. Resuming while a sibling holds it
+    leaves two rows occupying it, and `_repo_gate_blocked` then names each
+    ticket to the other, so neither can enqueue its next stage again. A blocked
+    ticket waits for the gate the same way a new one does, under the same lock
+    `start_planning` takes, so two resumes cannot both pass the check and then
+    both transition.
+    """
+    return (ts.get("status") == TicketStatus.blocked.value
+            and target in _tickets_mod._GATE_OCCUPYING_STATUSES)
+
+
 @router.post("/api/tickets/{key}/status")
 def api_set_ticket_status(key: str, body: dict):
     target = body.get("status", "")
@@ -1204,10 +1220,21 @@ def api_set_ticket_status(key: str, body: dict):
     }
     if target == "merged" and not ts.get("merged_external_status"):
         fields["merged_external_status"] = ts.get("external_status", "")
-    try:
-        state.transition_ticket(key, target, reason="manual status override", **fields)
-    except state.TicketStateError as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
+    instance_key = _config.get("job", {}).get("key", "")
+    gated = bool(instance_key) and _resume_takes_the_repo_gate(ts, target)
+    gate_lock = (_tickets_mod._gate_lock_for(instance_key) if gated
+                 else contextlib.nullcontext())
+    with gate_lock:
+        if gated:
+            blocker = _tickets_mod._repo_gate_blocked(instance_key, key, _config)
+            if blocker:
+                return JSONResponse(
+                    {"error": f"cannot resume to {target}: repo busy with {blocker}"},
+                    status_code=409)
+        try:
+            state.transition_ticket(key, target, reason="manual status override", **fields)
+        except state.TicketStateError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
     log.emit("ticket_status_override", f"Manual override {old_status} → {target} for {key}",
         links={"detail": f"{_config['_base_url']}/tickets/{key}"},
         meta={"ticket": key, "old_status": old_status, "new_status": target})

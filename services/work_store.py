@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 import core.codex_session as codex_session
 import core.db as db
+import core.tmux as tmux_target
 
 STALE_AFTER_MINUTES = 30
 STUCK_AFTER_MINUTES = 90
@@ -17,9 +18,12 @@ BG_WAIT_RECHECK_HOURS = 2
 PROPOSED_STATE = "proposed"
 DECLINED_REASON = "Proposal declined"
 GROUPS = ("proposed", "needs_ack", "needs_you", "agent_working", "waiting_external",
-          "failed_stale", "done")
+          "failed_stale", "canceled", "done")
+CANCELED_STATE = "canceled"
+CANCELED_REASON = "Canceled by the operator"
 FINISHED_STATES = ("needs_ack", "done")
 FINISHED_STATES_SQL = "('needs_ack', 'done')"
+CLOSED_STATES = FINISHED_STATES + (CANCELED_STATE,)
 _ACK_EVENT_KINDS_SQL = "('operator_done', 'operator_ack')"
 _PROPOSAL_ACTIONS = ("decline", "critical_on", "critical_off")
 
@@ -51,7 +55,7 @@ PROGRESS_RULE = (
     f"work, print one line starting {PROGRESS_MARKER} that names what you "
     "just established and what you are doing next. "
 )
-CONTINUE_PROMPT = (
+CONTINUE_PROMPT_TEMPLATE = (
     "Continue toward the objective. " + DELIVERY_RULE + PROGRESS_RULE +
     "When you hit a decision point, decide "
     "yourself by default: pick the most correct, cleanest, simplest option and "
@@ -63,14 +67,25 @@ CONTINUE_PROMPT = (
     "Use that same tool for anything only the operator can supply — a "
     "secret, a one-time code, an approval — not only for a decision. A "
     "request written in prose does not reach the operator. "
-    "Never send outward "
-    "communications (Slack messages, GitHub or Bitbucket comments, emails, "
-    "posts to external services) unless the operator explicitly asked for that "
-    "in this conversation; draft the content and ask instead. "
+    "{correspondence}"
     "Write any report, summary or other prose document for the operator as a "
     "self-contained .html file, never as Markdown or plain text. If the objective "
     f"is fully met, end your message with the single line {DONE_MARKER}."
 )
+
+
+def continue_prompt() -> str:
+    """The autocontinue message, carrying this instance's correspondence rule.
+
+    The rule cannot be baked into the constant, because whether the instance
+    lets a task message a person is read off its config and a resumed run has
+    to hear the same rule its launch prompt gave it. work_launch is imported
+    here rather than at the top because work_launch imports this module."""
+    from services import work_launch
+    return CONTINUE_PROMPT_TEMPLATE.format(
+        correspondence=work_launch._correspondence_rule(
+            work_launch.personal_config() or {}))
+
 
 _OPERATOR_ASK_RE = re.compile(
     r"(?:^|[.!?\n]\s+|\u2014\s*)(?:please\s+)?"
@@ -199,7 +214,8 @@ def create_item(objective: str, scope: str = "ad-hoc", scope_ref: str = "",
 
 def create_proposal(objective: str, note: str = "", instance_key: str | None = None,
                     contexts: str = "", tags: str = "", cwd: str = "",
-                    brief: str = "", conn=None, now: str | None = None) -> int:
+                    brief: str = "", conn=None, now: str | None = None,
+                    source_item_id: int | None = None, critical: bool = False) -> int:
     """Put a task on the board that no agent has started.
 
     frshty writes this when it decides by itself that something needs doing.
@@ -212,27 +228,33 @@ def create_proposal(objective: str, note: str = "", instance_key: str | None = N
     immediate lock, so a caller cannot nest it; passing the open connection is
     what makes the two writes commit or roll back together.
 
-    `now` lets a caller stamp the row with the moment its own scan reads, so a
-    count over created_at answers the same question that caller's other counts
-    answer. It defaults to the wall clock."""
+    `now` lets a caller stamp the row with the moment its own scan reads, so
+    the task and whatever that caller writes beside it carry one time rather
+    than two a few microseconds apart. It defaults to the wall clock.
+
+    `source_item_id` marks a proposal that continues a finished task, so the
+    approved run reads that task's report and the board threads the two
+    together. `critical` carries the source task's mark onto it."""
     if conn is not None:
         return _insert_proposal(conn, objective, note, instance_key, contexts,
-                                tags, cwd, brief, now)
+                                tags, cwd, brief, now, source_item_id, critical)
     with db.tx() as c:
         return _insert_proposal(c, objective, note, instance_key, contexts,
-                                tags, cwd, brief, now)
+                                tags, cwd, brief, now, source_item_id, critical)
 
 
 def _insert_proposal(c, objective: str, note: str, instance_key: str | None,
                      contexts: str, tags: str, cwd: str, brief: str,
-                     now: str | None = None) -> int:
+                     now: str | None = None, source_item_id: int | None = None,
+                     critical: bool = False) -> int:
     now = now or _now()
     cur = c.execute(
         "INSERT INTO work_items(objective, scope, instance_key, contexts, tags, "
-        "state, current_checkpoint, launch_cwd, launch_brief, created_at, updated_at) "
-        "VALUES (?, 'proposal', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "state, current_checkpoint, launch_cwd, launch_brief, source_item_id, "
+        "critical, created_at, updated_at) "
+        "VALUES (?, 'proposal', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (objective, instance_key, contexts, tags, PROPOSED_STATE, note, cwd,
-         brief, now, now),
+         brief, source_item_id, 1 if critical else 0, now, now),
     )
     item_id = cur.lastrowid
     c.execute(
@@ -354,10 +376,21 @@ def run_reached_an_agent(run_id: int) -> bool:
 
 
 def mark_launch_failed(run_id: int, error: str) -> None:
+    """Record that a launch never reached an agent, unless the task is closed.
+
+    A kickoff polls its pane for a minute and a half and reports a failure at
+    the end of it. An operator who cancels inside that window has already
+    killed the pane, so the kickoff is guaranteed to fail, and writing
+    failed_stale then would put a task the operator closed back on the board
+    ninety seconds after he closed it. The same holds for a task he
+    acknowledged or completed."""
     now = _now()
     with db.tx() as c:
-        row = c.execute("SELECT work_item_id FROM work_runs WHERE id = ?", (run_id,)).fetchone()
-        if not row:
+        row = c.execute(
+            "SELECT r.work_item_id AS work_item_id, i.state AS state FROM work_runs r "
+            "JOIN work_items i ON i.id = r.work_item_id WHERE r.id = ?",
+            (run_id,)).fetchone()
+        if not row or row["state"] in CLOSED_STATES:
             return
         item_id = row["work_item_id"]
         c.execute("UPDATE work_runs SET status = ?, finished_at = ? WHERE id = ?",
@@ -397,7 +430,7 @@ def mark_run_relaunched(run_id: int) -> bool:
             "SELECT r.work_item_id AS work_item_id, i.state AS state"
             " FROM work_runs r JOIN work_items i ON i.id = r.work_item_id"
             " WHERE r.id = ?", (run_id,)).fetchone()
-        if not row or row["state"] in FINISHED_STATES:
+        if not row or row["state"] in CLOSED_STATES:
             return False
         started = c.execute(
             f"SELECT 1 FROM work_events WHERE work_run_id = ? "
@@ -417,6 +450,19 @@ def mark_run_relaunched(run_id: int) -> bool:
             "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
             "VALUES (?, ?, 'run_resumed', '{}', ?)", (row["work_item_id"], run_id, now))
     return True
+
+
+def is_canceled(item_id: int) -> bool:
+    """Whether the operator has canceled this task.
+
+    A launch reads this under launch_lock, immediately before it opens the
+    pane. Materializing a worktree runs outside that lock and can take
+    minutes, so a cancel can land in the window between the plan and the
+    pane. The cancel killed a pane that did not exist yet, so without this
+    check the launch would go on to start an agent on a task the board shows
+    as canceled, and nothing left would stop it."""
+    row = db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))
+    return bool(row) and row["state"] == CANCELED_STATE
 
 
 def is_wakeup_prompt(prompt: str) -> bool:
@@ -468,7 +514,7 @@ def record_event(session_id: str, kind: str, payload: dict) -> bool:
             run_params.append(now)
         run_params.append(run["id"])
         c.execute(f"UPDATE work_runs SET {', '.join(run_sets)} WHERE id = ?", tuple(run_params))
-        if item["state"] in FINISHED_STATES:
+        if item["state"] in CLOSED_STATES:
             return True
         if item_state:
             reason = ""
@@ -572,7 +618,7 @@ def record_question(session_id: str, tool_input: dict) -> str:
             "SELECT state, pending_question FROM work_items WHERE id = ?",
             (run["work_item_id"],)
         ).fetchone()
-        if not item or item["state"] in FINISHED_STATES:
+        if not item or item["state"] in CLOSED_STATES:
             return ""
         if is_duplicate_question(item["pending_question"], questions):
             c.execute(
@@ -661,9 +707,20 @@ def apply_action(item_id: int, action: str, until: str | None = None) -> dict:
                 "stop_reason = ?, updated_at = ? WHERE id = ?",
                 (now, DECLINED_REASON, now, item_id),
             )
+        elif action == "cancel":
+            if item["state"] in CLOSED_STATES:
+                return {"error": "only an open task can be canceled"}
+            c.execute(
+                "UPDATE work_items SET state = ?, stop_reason = ?, pending_question = '', "
+                "snoozed_until = NULL, updated_at = ? WHERE id = ?",
+                (CANCELED_STATE, CANCELED_REASON, now, item_id),
+            )
+            c.execute(
+                "UPDATE work_runs SET status = 'stopped', finished_at = ? "
+                "WHERE work_item_id = ? AND finished_at IS NULL", (now, item_id))
         elif action == "archive":
-            if item["state"] not in FINISHED_STATES:
-                return {"error": "only a completed task can be archived"}
+            if item["state"] not in CLOSED_STATES:
+                return {"error": "only a completed or canceled task can be archived"}
             if item["state"] == "needs_ack":
                 c.execute("UPDATE work_items SET state = 'done', stop_reason = '', "
                           "pending_question = '', updated_at = ? WHERE id = ?",
@@ -698,7 +755,8 @@ def _pane_lock(session: str) -> threading.Lock:
 def agent_running(tmux_key: str, agent: str = "claude") -> bool:
     session = f"term-{tmux_key}"
     tmux = _tmux_bin()
-    panes = subprocess.run([tmux, "-S", TMUX_SOCKET, "list-panes", "-t", session, "-F", "#{pane_pid}"],
+    panes = subprocess.run([tmux, "-S", TMUX_SOCKET, "list-panes", "-t",
+                            tmux_target.pane(session), "-F", "#{pane_pid}"],
                            capture_output=True, text=True)
     if panes.returncode != 0 or not panes.stdout.strip():
         return False
@@ -716,8 +774,9 @@ def pane_activity(tmux_key: str) -> str:
     `session_activity` stays frozen at the time the session was created and
     reports every live pane as idle."""
     result = subprocess.run(
-        [_tmux_bin(), "-S", TMUX_SOCKET, "display-message", "-p", "-t", f"term-{tmux_key}",
-         "#{window_activity}"], capture_output=True, text=True)
+        [_tmux_bin(), "-S", TMUX_SOCKET, "display-message", "-p", "-t",
+         tmux_target.pane(f"term-{tmux_key}"), "#{window_activity}"],
+        capture_output=True, text=True)
     stamp = result.stdout.strip()
     if result.returncode != 0 or not stamp.isdigit():
         return ""
@@ -728,18 +787,21 @@ def tmux_send(tmux_key: str, text: str) -> bool:
     session = f"term-{tmux_key}"
     tmux = _tmux_bin()
     with _pane_lock(session):
-        alive = subprocess.run([tmux, "-S", TMUX_SOCKET, "has-session", "-t", session],
+        alive = subprocess.run([tmux, "-S", TMUX_SOCKET, "has-session", "-t",
+                                tmux_target.session(session)],
                                capture_output=True)
         if alive.returncode != 0:
             return False
         if not close_btw_panel(session):
             return False
-        sent = subprocess.run([tmux, "-S", TMUX_SOCKET, "send-keys", "-t", session, "-l", "--", text],
+        sent = subprocess.run([tmux, "-S", TMUX_SOCKET, "send-keys", "-t",
+                               tmux_target.pane(session), "-l", "--", text],
                               capture_output=True)
         if sent.returncode != 0:
             return False
         time.sleep(0.4)
-        enter = subprocess.run([tmux, "-S", TMUX_SOCKET, "send-keys", "-t", session, "Enter"],
+        enter = subprocess.run([tmux, "-S", TMUX_SOCKET, "send-keys", "-t",
+                                tmux_target.pane(session), "Enter"],
                               capture_output=True)
         return enter.returncode == 0
 
@@ -758,7 +820,7 @@ def _tmux_run(*args: str) -> subprocess.CompletedProcess:
 
 
 def _capture_pane(session: str) -> list[str]:
-    out = _tmux_run("capture-pane", "-t", session, "-p")
+    out = _tmux_run("capture-pane", "-t", tmux_target.pane(session), "-p")
     return out.stdout.splitlines() if out.returncode == 0 else []
 
 
@@ -797,7 +859,7 @@ def close_btw_panel(session: str) -> bool:
     it. A pane with no panel is already open for keys."""
     if not btw_overlay(_capture_pane(session)):
         return True
-    _tmux_run("send-keys", "-t", session, "Escape")
+    _tmux_run("send-keys", "-t", tmux_target.pane(session), "Escape")
     time.sleep(0.4)
     return btw_overlay(_capture_pane(session)) is None
 
@@ -839,15 +901,15 @@ def ask_btw(tmux_key: str, question: str, timeout: float = BTW_ANSWER_TIMEOUT) -
     session = f"term-{tmux_key}"
     question = " ".join(question.split())
     with _pane_lock(session):
-        if _tmux_run("has-session", "-t", session).returncode != 0:
+        if _tmux_run("has-session", "-t", tmux_target.session(session)).returncode != 0:
             return {"error": "tmux session gone"}
         if not close_btw_panel(session):
             return {"error": "a /btw panel is stuck open in the terminal"}
-        if _tmux_run("send-keys", "-t", session, "-l", "--",
+        if _tmux_run("send-keys", "-t", tmux_target.pane(session), "-l", "--",
                      f"/btw {question}").returncode != 0:
             return {"error": "tmux send failed"}
         time.sleep(0.4)
-        if _tmux_run("send-keys", "-t", session, "Enter").returncode != 0:
+        if _tmux_run("send-keys", "-t", tmux_target.pane(session), "Enter").returncode != 0:
             return {"error": "tmux send failed"}
         panel = None
         deadline = time.monotonic() + timeout
@@ -866,7 +928,7 @@ def ask_btw(tmux_key: str, question: str, timeout: float = BTW_ANSWER_TIMEOUT) -
             return {"error": "the terminal shows an answer to a different /btw question"}
         body = panel["body"]
         for _ in range(_BTW_SCROLL_LIMIT):
-            _tmux_run("send-keys", "-t", session, "Down")
+            _tmux_run("send-keys", "-t", tmux_target.pane(session), "Down")
             grew = False
             for _ in range(_BTW_SCROLL_SETTLES):
                 time.sleep(_BTW_SCROLL_SETTLE_SECONDS)
@@ -1406,7 +1468,7 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
                          f"the continuation budget of {item['continue_cap']} is spent; "
                          "an operator reply or a reopen gives a new one", now)
             return "capped"
-    sent = tmux_send(run["tmux_key"], CONTINUE_PROMPT)
+    sent = tmux_send(run["tmux_key"], continue_prompt())
     now = _now()
     with db.tx() as c:
         current = c.execute("SELECT state FROM work_items WHERE id = ?",
@@ -1432,12 +1494,19 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
 
 
 def reply(item_id: int, text: str) -> dict:
+    """Send the operator's answer into the item's pane and put it back to work.
+
+    The send is two subprocess calls outside any transaction, so the state is
+    read again before it is written. A cancel that lands in that window has
+    already killed the pane, and writing agent_working then would put a task
+    the operator closed back on the board with a dead session behind it, where
+    the next terminal connect would resume its agent."""
     now = _now()
     with db.tx() as c:
         item = c.execute("SELECT state FROM work_items WHERE id = ?", (item_id,)).fetchone()
         if not item:
             return {"error": "unknown work item"}
-        if item["state"] in FINISHED_STATES:
+        if item["state"] in CLOSED_STATES:
             return {"error": "item is finished; reopen it before replying"}
         run = c.execute(
             "SELECT id, tmux_key, provider FROM work_runs WHERE work_item_id = ? "
@@ -1450,6 +1519,10 @@ def reply(item_id: int, text: str) -> dict:
     if not tmux_send(run["tmux_key"], text):
         return {"error": "tmux session gone"}
     with db.tx() as c:
+        current = c.execute("SELECT state FROM work_items WHERE id = ?",
+                            (item_id,)).fetchone()
+        if not current or current["state"] in CLOSED_STATES:
+            return {"error": "item is finished; reopen it before replying"}
         # An operator reply is new work for the item, so it gets a new
         # continuation budget. Without this an item that spent its budget
         # before the reply stops again on the first turn after it.
@@ -1687,6 +1760,7 @@ def sweep_stale_items(now: datetime | None = None) -> list[dict]:
         }
         record_event(row["session_id"], "Stop", payload)
         record_artifacts(row["session_id"], transcript_path)
+        record_progress(row["session_id"], transcript_path)
         outcome = maybe_autocontinue(row["session_id"], transcript_path)
         actions.append({"id": row["item_id"], "action": f"stop_synthesized:{outcome}"})
     actions.extend(fail_runless_items(cutoff))
@@ -1787,6 +1861,11 @@ def grouped_items(now: datetime | None = None, q: str = "",
     acknowledges and files it in one step. An unacknowledged task is never
     archived, so it never reaches the archive view.
 
+    A task the operator canceled lands in its own canceled group, not in
+    done. It was stopped, not finished, so mixing it into the completed work
+    would overstate what the board delivered. It follows the same archive
+    rule as a completed task, and the archive view lists both groups.
+
     A completed task stays in the done group until the operator archives it.
     Archiving is the only way it leaves, so the board and the archive split
     the completed tasks between them and none of them becomes unreachable.
@@ -1795,7 +1874,12 @@ def grouped_items(now: datetime | None = None, q: str = "",
 
     A search reads the whole task history, so a search on the board also
     returns the archived tasks. Without them a completed task becomes
-    unfindable the moment it is archived."""
+    unfindable the moment it is archived.
+
+    Every row carries the newest PROGRESS line its agent printed. The line
+    comes from the progress events, not from current_checkpoint, because a
+    run that reports itself done overwrites current_checkpoint with the tail
+    of its last message and would hide the progress line."""
     now = now or datetime.now(timezone.utc)
     stale_cutoff = (now - timedelta(minutes=STALE_AFTER_MINUTES)).isoformat()
     now_iso = now.isoformat()
@@ -1806,6 +1890,8 @@ def grouped_items(now: datetime | None = None, q: str = "",
         "(SELECT session_id FROM work_runs r WHERE r.work_item_id = i.id ORDER BY r.id DESC LIMIT 1) AS last_session_id, "
         "(SELECT tmux_key FROM work_runs r WHERE r.work_item_id = i.id ORDER BY r.id DESC LIMIT 1) AS last_tmux_key, "
         "(SELECT provider FROM work_runs r WHERE r.work_item_id = i.id ORDER BY r.id DESC LIMIT 1) AS last_provider, "
+        "(SELECT payload FROM work_events e WHERE e.work_item_id = i.id "
+        "AND e.kind = 'progress' ORDER BY e.id DESC LIMIT 1) AS latest_progress_payload, "
         "(SELECT created_at FROM work_events e WHERE e.work_item_id = i.id "
         "AND e.kind IN ('operator_done', 'operator_ack', 'self_reported_done') "
         "ORDER BY e.id DESC LIMIT 1) AS completed_at, "
@@ -1814,7 +1900,7 @@ def grouped_items(now: datetime | None = None, q: str = "",
         "FROM work_items i ORDER BY i.priority DESC, i.created_at DESC"
     )
 
-    def keep_done(row: dict) -> bool:
+    def keep_closed(row: dict) -> bool:
         if archived:
             return True
         return bool(q) or not row["archived_at"]
@@ -1827,13 +1913,19 @@ def grouped_items(now: datetime | None = None, q: str = "",
             continue
         if archived and not row["archived_at"]:
             continue
+        row["latest_progress"] = db.load_json(row, "latest_progress_payload").get("text") or ""
+        row.pop("latest_progress_payload", None)
         state = row["state"]
         if state == "needs_ack":
             groups["needs_ack"].append(row)
             continue
         if state == "done":
-            if keep_done(row):
+            if keep_closed(row):
                 groups["done"].append(row)
+            continue
+        if state == CANCELED_STATE:
+            if keep_closed(row):
+                groups[CANCELED_STATE].append(row)
             continue
         if state == "waiting_external" and row["snoozed_until"] and row["snoozed_until"] <= now_iso:
             row["state"] = "needs_you"

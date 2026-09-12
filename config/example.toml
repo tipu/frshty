@@ -62,6 +62,7 @@ timesheet = false
 billing = false
 releases = false                  # tag tickets to a release; whole-release LLM inspection when all members reach merged/validation/done. optional release.md at <workspace.root>/releases/<release_key>/release.md guides the inspection prompt.
 scope_review = false              # consensus scope review (claude/codex/agy) of the branch diff when a ticket is code complete; re-runs whenever branch code changes; a fail verdict holds PR creation and auto-merge until fixed.
+correspondence = true             # default true. when false, no task on this instance may send a message to a person: slack and other chat, email, and pull request or issue comments are all refused, at the frshty seam and at the agent's own tools. reading every one of those surfaces stays open.
 pr_autofix = false                # github only: every newly created PR gets a claude+codex review; critical/high findings are consolidated and resolved directly on the PR branch (commit + push). Open PRs that predate enablement are baselined and left alone.
 
 # [slack]
@@ -93,7 +94,10 @@ pr_autofix = false                # github only: every newly created PR gets a c
 #                                     # this window runs out, so this value is what decides how
 #                                     # long a request waits before it is proposed.
 # propose_max_age_hours = 48          # never propose from a conversation older than this
-# propose_max_per_day = 3             # ceiling on proposals opened for this instance per day
+# propose_max_pending = 3             # ceiling on proposals this instance may have waiting for
+#                                     # your decision at once. Approving or declining one frees
+#                                     # its slot at once, so your own pace is what limits how
+#                                     # many are opened rather than a clock.
 # propose_max_judgements_per_scan = 3 # ceiling on model calls per scan
 # propose_judge_retry_minutes = 60    # a conversation the model answered nothing for is
 #                                     # held back this long, so it cannot spend the

@@ -1,5 +1,8 @@
 import json
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
+
+import pytest
 
 import core.db as db
 from services import work_debrief, work_store
@@ -188,6 +191,10 @@ class TestDeliverSlack:
         return base
 
     def _patch_env(self, monkeypatch):
+        # These cover the delivery rules below the correspondence gate, so the
+        # instance they run against is one that allows a message at all.
+        monkeypatch.setattr(work_debrief.work_launch, "personal_config",
+                            lambda: {"features": {"correspondence": True}})
         monkeypatch.setattr(work_debrief.os.path, "isdir", lambda p: True)
         monkeypatch.setattr(work_debrief, "_known_workspaces", lambda: ["aimyable"])
         monkeypatch.setattr(work_debrief, "_resolve_recipient",
@@ -219,6 +226,18 @@ class TestDeliverSlack:
             work_debrief._deliver_slack(self._row(recipient="C0123ABC"))
 
 
+class TestDeliverSlackIsGated:
+    def test_a_closed_instance_refuses_before_any_delivery_rule(self, monkeypatch):
+        monkeypatch.setattr(work_debrief.work_launch, "personal_config",
+                            lambda: {"features": {"correspondence": False}})
+        monkeypatch.setattr(work_debrief, "_slack_send",
+                            lambda *a: pytest.fail("a closed instance sent a message"))
+        with pytest.raises(RuntimeError, match="correspondence gate"):
+            work_debrief._deliver_slack(
+                {"kind": "slack_message", "workspace": "aimyable",
+                 "recipient": "Sam", "draft": "hi"})
+
+
 class TestScanner:
     def test_pending_excludes_debriefed_and_skipped(self):
         a = _done_item("pending a")
@@ -226,6 +245,48 @@ class TestScanner:
         work_debrief._record_debrief_event(b, "debrief_skipped", {})
         pending = work_debrief._pending_done_items()
         assert a in pending and b not in pending
+
+    def test_an_item_archived_before_the_window_is_not_debriefed(self):
+        """An item archived with no summary was reached again fourteen days
+        later. The debrief it got then produced the draft that launched a task
+        by itself."""
+        fresh = _done_item("archived just now")
+        stale = _done_item("archived long ago")
+        old = (datetime.now(timezone.utc)
+               - timedelta(hours=work_debrief.ARCHIVE_WINDOW_HOURS + 1)).isoformat()
+        db.execute("UPDATE work_items SET archived_at = ? WHERE id = ?",
+                   (work_store._now(), fresh))
+        db.execute("UPDATE work_items SET archived_at = ? WHERE id = ?", (old, stale))
+        pending = work_debrief._pending_done_items()
+        assert fresh in pending
+        assert stale not in pending
+
+
+class TestRequiredScoring:
+    def _score(self, followup):
+        parsed = work_debrief._parse_debrief(
+            json.dumps({"summary": "s", "followups": [followup]}))
+        return parsed["followups"][0]["required"]
+
+    def test_a_plan_only_output_is_not_required(self):
+        """A plan names steps nobody took. Those steps are not authorised work
+        the run left unfinished, so the draft waits for the operator."""
+        assert self._score({
+            "kind": "work_item", "required": True,
+            "draft": "step 1: add the archive window. step 2: fix required scoring.",
+        }) is False
+
+    def test_an_unpushed_commit_is_required(self):
+        assert self._score({
+            "kind": "work_item", "required": True, "unfinished": "push",
+            "draft": "push the branch and open the pull request",
+        }) is True
+
+    def test_a_step_outside_the_delivery_list_is_not_required(self):
+        assert self._score({
+            "kind": "work_item", "required": True, "unfinished": "write the plan",
+            "draft": "carry out the plan",
+        }) is False
 
 
 class TestRetryPolicy:

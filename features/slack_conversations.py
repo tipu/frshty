@@ -92,7 +92,7 @@ OFFSET_MEMORY_DAYS = 14
 HEAD_BYTES = 4096
 DEFAULT_SETTLE_MINUTES = 5
 DEFAULT_MAX_AGE_HOURS = 48
-DEFAULT_MAX_PROPOSALS_PER_DAY = 3
+DEFAULT_MAX_PENDING_PROPOSALS = 3
 DEFAULT_MAX_JUDGEMENTS_PER_SCAN = 3
 DEFAULT_JUDGE_RETRY_MINUTES = 60
 MAX_TRANSCRIPT_MESSAGES = 60
@@ -1652,24 +1652,31 @@ def _repeats_a_declined_proposal(item_id, objective: str) -> bool:
     return SequenceMatcher(None, declined, fresh).ratio() >= REPEAT_PROPOSAL_RATIO
 
 
-def _proposals_today(instance_key: str, now: datetime) -> int:
-    """How many tasks this instance proposed in the last 24 hours.
+def _proposals_awaiting_operator(instance_key: str) -> int:
+    """How many proposals this instance has standing in front of the operator.
+
+    The cap bounds what the operator is asked to decide at once. It is not a
+    quota on the day. A rolling count of every proposal opened in the last 24
+    hours held one request for a full day: three proposals filled the count in
+    three minutes, the operator read and declined all three within half an
+    hour, and the count kept their slots until the clock ran out. Counting
+    only the proposals still waiting makes the operator the pace. Deciding one
+    frees its slot at once, and a proposal nobody has decided holds its slot
+    for as long as it stands, however old it is.
 
     The tasks are counted, not the conversations that opened them. One
     conversation opens more than one task over its life: the operator declines
     a proposal, somebody asks again in the same thread, and the next scan
     proposes again. The conversation carries the stamp of its latest proposal
-    alone, so counting conversations would let one thread open a task a day
-    and never spend more than one slot of the cap.
+    alone, so counting conversations would see only the last of them.
 
-    work_store.create_proposal is what writes these rows, this module is its
-    only caller, and the scan stamps them with its own clock, so the count is
-    the same rolling 24 hours the rest of the scan measures."""
+    PROPOSED_STATE is exactly the state of a proposal nobody has decided.
+    work_store.claim_proposal takes an approved one out of it, and a decline
+    closes the task, so both leave the count the moment the operator acts."""
     row = db.query_one(
         "SELECT COUNT(*) AS n FROM work_items"
-        " WHERE instance_key = ? AND scope = 'proposal'"
-        " AND datetime(created_at) > datetime(?)",
-        (instance_key, _iso(now - timedelta(hours=24))))
+        " WHERE instance_key = ? AND scope = 'proposal' AND state = ?",
+        (instance_key, work_store.PROPOSED_STATE))
     return int(row["n"]) if row else 0
 
 
@@ -1844,10 +1851,12 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
     instance_key = instance_key or state.active_instance_key()
     now = now or _now()
     settings = _settings(config)
-    max_per_day = int(settings.get("propose_max_per_day", DEFAULT_MAX_PROPOSALS_PER_DAY))
+    max_pending = int(settings.get("propose_max_pending",
+                                   settings.get("propose_max_per_day",
+                                                DEFAULT_MAX_PENDING_PROPOSALS)))
     max_judgements = int(settings.get("propose_max_judgements_per_scan",
                                       DEFAULT_MAX_JUDGEMENTS_PER_SCAN))
-    budget = max(0, max_per_day - _proposals_today(instance_key, now))
+    budget = max(0, max_pending - _proposals_awaiting_operator(instance_key))
     if budget <= 0 or max_judgements <= 0:
         return [], {"messages": 0, "conversations": 0, "reopened": 0}
 
@@ -1953,7 +1962,7 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
         brief = _brief(row, channel, participants, transcript, reason)
         # The task and the mark that says the conversation produced it are one
         # transaction. Written separately, a crash between them either loses
-        # the request outright while still spending the daily budget, or
+        # the request outright while still spending a slot of the cap, or
         # leaves a task the conversation does not know about, and the next
         # scan opens a second one for the same request.
         #

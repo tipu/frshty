@@ -48,6 +48,16 @@ def _park_ticket(key, reason="ci_failed"):
     })
 
 
+def _block_ticket(key, reason="task run_tests failed; releasing repo gate"):
+    state.save_ticket(key, {
+        "status": "planning",
+        "slug": key.lower(),
+        "summary": f"summary for {key}",
+        "discovered_at": "2026-08-01T00:00:00Z",
+    })
+    state.transition_ticket(key, "blocked", reason=reason)
+
+
 def _blocked_comment(resource_id, comment_id, error_count=3, tracked=True):
     db.execute(
         "INSERT INTO comment_state(instance_key, resource_type, resource_id,"
@@ -517,6 +527,7 @@ class TestUnwatchedBuckets:
         state.save_ticket("DEV-322", {
             "status": "reviewing", "slug": "dev-322", "summary": "not moving",
             "discovered_at": "2026-08-01T00:00:00Z"})
+        _block_ticket("DEV-325")
 
         found = {rule.bucket: watchdog._entries(rule.bucket, "test", _config())
                  for rule in watchdog.RULES}
@@ -525,6 +536,7 @@ class TestUnwatchedBuckets:
         assert [e.entity_id for e in found["blocked_pr_comments"]] == ["api/320"]
         assert [e.entity_id for e in found["in_review_no_ci"]] == ["DEV-321"]
         assert [e.entity_id for e in found["stale_unattended"]] == ["DEV-322"]
+        assert [e.entity_id for e in found["blocked_tickets"]] == ["DEV-325"]
 
     def test_an_in_review_ticket_with_no_ci_opens_a_task_after_two_days(self):
         state.save_ticket("DEV-323", {
@@ -539,6 +551,32 @@ class TestUnwatchedBuckets:
         assert early == []
         assert [o["entity_id"] for o in late] == ["DEV-323"]
         assert "in_review_no_ci" in doctor.call_args.args[2]
+
+    def test_a_blocked_ticket_opens_a_task_after_six_hours(self):
+        """Nothing retries a blocked ticket, so the silence is the fault."""
+        _block_ticket("DEV-326", reason="task run_tests failed; releasing repo gate")
+        _scan(_config(), NOW)
+
+        early, _, _ = _scan(_config(), NOW + timedelta(hours=5, minutes=59))
+        late, doctor, _ = _scan(_config(), NOW + timedelta(hours=7))
+
+        assert early == []
+        assert [o["entity_id"] for o in late] == ["DEV-326"]
+        description = doctor.call_args.args[2]
+        assert "blocked_tickets" in description
+        assert "reason=task run_tests failed; releasing repo gate" in description
+
+    def test_a_restarted_ticket_stops_the_open(self):
+        """Negative control: the manual restart is the exit, and taking it
+        clears the bucket before the window."""
+        _block_ticket("DEV-327")
+        _scan(_config(), NOW)
+        state.reset_ticket("DEV-327", target="new", reason="operator restart")
+
+        opened, doctor, _ = _scan(_config(), NOW + timedelta(hours=7))
+
+        assert opened == []
+        assert doctor.call_count == 0
 
     def test_a_ticket_stuck_in_reviewing_opens_a_task_after_a_day(self):
         state.save_ticket("DEV-324", {

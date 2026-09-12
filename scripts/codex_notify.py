@@ -29,6 +29,11 @@ def main(argv: list[str]) -> int:
     every agent turn. It is the codex analog of the Claude Stop hook: it
     records the turn, the last assistant message and the codex thread id, then
     runs the same done/question/autocontinue decision the Claude hook runs.
+
+    Progress lines are read twice, once from the rollout and once from the
+    final message. A turn can print a progress line in an earlier message,
+    which only the rollout holds, and a rollout can lag this notification,
+    which leaves the final message as the only copy of the newest line.
     """
     try:
         session_id = argv[1] if len(argv) > 1 else ""
@@ -56,6 +61,8 @@ def main(argv: list[str]) -> int:
             "transcript_path": transcript,
         })
         work_store.record_artifacts(session_id, transcript, texts=[message])
+        work_store.record_progress(session_id, transcript)
+        work_store.record_progress(session_id, transcript, texts=[message])
         work_store.maybe_autocontinue(session_id, transcript, tail=message)
     except Exception:
         if os.environ.get("WORK_HOOK_DEBUG"):
