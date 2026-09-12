@@ -874,7 +874,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
     </div>
 </teleport>
 
-<pr-submit-modal :open="prModalOpen" :repos="prRepos" :submitting="prSubmitting" :ticket-key="key"
+<pr-submit-modal :open="prModalOpen" :repos="prRepos" :submitting="prSubmitting" :ticket-key="key" :blocked="prBlocked"
                  @close="closePrModal" @submit="onPrSubmit" />
 
 </div><!-- /.ln-page -->
@@ -945,6 +945,7 @@ frshtyApp({
         const loadError = ref(false);
         const prModalOpen = ref(false);
         const prRepos = ref([]);
+        const prBlocked = ref(null);
         const prSubmitting = ref(false);
         const sections = reactive({ notes: false, history: false, rawState: false });
         const rawStateCopied = ref(false);
@@ -1782,6 +1783,7 @@ frshtyApp({
             }
             const data = await r.json();
             prRepos.value = data.repos || [];
+            prBlocked.value = null;
             prModalOpen.value = true;
         }
 
@@ -1803,7 +1805,8 @@ frshtyApp({
                     closePrModal();
                     load();
                 } else {
-                    const err = await resp.json();
+                    const err = await resp.json().catch(() => ({}));
+                    if (err.scope_review) { prBlocked.value = err; return; }
                     alert('Error: ' + (err.error || 'Unknown error'));
                 }
             } catch (e) {
@@ -2173,7 +2176,7 @@ frshtyApp({
             selectNode, registerNodeEl, docUrl, chipOpens, openChip, hasPreview, artifactText, artifactOpen, toggleArtifact, loadTimeline,
             redoProofOpen, redoProofFeedback, redoProofSubmitting, submitRedoProof, prettyJson,
             loadError, sections, docExpanded, replyDrafts, jobOutput,
-            prModalOpen, prRepos, prSubmitting,
+            prModalOpen, prRepos, prSubmitting, prBlocked,
             jobOutputEl, terminalContainer,
             state, status, branch, terminalAlive, inProgress, stalled, hasPrs, hasCode, lockedAutoPr,
             prFailReasonLabel, prFailReasonTip, blockingBanner,
