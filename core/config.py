@@ -58,6 +58,7 @@ def load_config(path: str) -> dict:
     ws.setdefault("dep_commands", [])
 
     raw["features"].setdefault("auto_review", True)
+    raw["features"].setdefault("correspondence", True)
 
     raw["pr"].setdefault("auto_pr", True)
     raw["pr"].setdefault("auto_merge", False)

@@ -25,7 +25,10 @@ from pathlib import Path
 from typing import Callable
 
 import core.db as db
+from core.ticket_status import TicketStatus as _TicketStatus
 from core.ticket_status import transition as _transition
+
+_BLOCKED = _TicketStatus.blocked.value
 
 _default_instance_key: str | None = None
 _instance_key_cv: ContextVar[str | None] = ContextVar("frshty_instance_key", default=None)
@@ -382,6 +385,45 @@ def delete_ticket(key: str) -> None:
     )
 
 
+def _record_block_origin(merged: dict, prior_status: str) -> None:
+    """Remember which stage parked a ticket in `blocked`, and forget it on the
+    way out.
+
+    `blocked` is entered from planning, reviewing, testing or proving when a
+    task hard-fails and the repo gate has to be released. The stage is the only
+    thing that says where a resume may go, and the status column alone does not
+    carry it, so an operator resuming a blocked ticket would otherwise be
+    choosing a stage rather than returning to one.
+    """
+    if merged.get("status") == _BLOCKED:
+        if prior_status != _BLOCKED:
+            merged["blocked_from"] = prior_status
+        return
+    merged.pop("blocked_from", None)
+
+
+def _blocked_origin(key: str, current: dict) -> str | None:
+    """The stage a blocked ticket was parked from.
+
+    `_record_block_origin` writes it onto the row from now on. A ticket that was
+    already blocked when that started has no such field, and reading it as "no
+    history" would strand it: its only exit would be `new`, which is the
+    restart this exists to avoid. The transition that parked it is recorded, so
+    read the stage from there instead. Called outside the ticket transaction —
+    `update_ticket` holds a write lock that a second connection would wait on.
+    """
+    recorded = current.get("blocked_from")
+    if recorded or current.get("status") != _BLOCKED:
+        return recorded
+    row = db.query_one(
+        "SELECT prior_status FROM ticket_transitions"
+        " WHERE instance_key=? AND ticket_key=? AND new_status=? AND rejected=0"
+        " ORDER BY id DESC LIMIT 1",
+        (_active_key(), key, _BLOCKED),
+    )
+    return row["prior_status"] if row else None
+
+
 def transition_ticket(key: str, new_status: str, *, reason: str = "", **fields) -> dict:
     """Atomically transition a ticket to new_status with optional co-field updates.
 
@@ -394,8 +436,9 @@ def transition_ticket(key: str, new_status: str, *, reason: str = "", **fields) 
     if current is None:
         raise TicketStateError(f"ticket {key}: not found, cannot transition")
     prior_status = current.get("status", "new")
+    blocked_from = _blocked_origin(key, current)
     try:
-        _transition(prior_status, new_status)
+        _transition(prior_status, new_status, blocked_from=blocked_from)
     except ValueError as e:
         _record_transition(
             _active_key(), key, prior_status, new_status,
@@ -410,9 +453,12 @@ def transition_ticket(key: str, new_status: str, *, reason: str = "", **fields) 
         merged = dict(cur)
         cur_status = cur.get("status", "new")
         try:
-            merged["status"] = _transition(cur_status, new_status)
+            merged["status"] = _transition(
+                cur_status, new_status,
+                blocked_from=cur.get("blocked_from") or blocked_from)
         except ValueError as e:
             raise TicketStateError(str(e)) from e
+        _record_block_origin(merged, cur_status)
         for k, v in fields.items():
             if v is None:
                 merged.pop(k, None)

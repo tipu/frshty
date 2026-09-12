@@ -245,7 +245,8 @@ class TestArchive:
 class TestAttentionCount:
     def _board_attention(self):
         groups = work_store.grouped_items()
-        return len(groups["needs_ack"]) + len(groups["needs_you"])
+        return (len(groups["proposed"]) + len(groups["needs_ack"])
+                + len(groups["needs_you"]))
 
     def test_count_matches_the_board_groups(self):
         work_store.create_item("waiting on the operator")
