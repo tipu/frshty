@@ -21,6 +21,22 @@ FIX_TIMEOUT = 1800
 # CANCELLED/TIMED_OUT are real failures GH reports; STOPPED is Bitbucket's.
 FAILED_STATES = ("FAILURE", "FAILED", "STOPPED", "CANCELLED", "TIMED_OUT")
 PENDING_STATES = ("PENDING", "QUEUED", "IN_PROGRESS", "INPROGRESS", "WAITING", "REQUESTED", "EXPECTED")
+# An allowlist, because the set of states a forge can report is open: gh alone
+# adds ERROR, ACTION_REQUIRED, STALE and STARTUP_FAILURE, and reading "not
+# failed and not pending" as passed would call every one of them green.
+PASSED_STATES = ("SUCCESS", "NEUTRAL", "SKIPPED")
+
+KEEP_GREEN_RULE = (
+    "Before you commit, run the repository's own lint and test commands and confirm they "
+    "pass. Find them in .github/workflows/, Makefile, package.json scripts, or "
+    "pyproject.toml. A change that turns a passing check red is not a fix. Do not push it."
+)
+
+
+def green_check_names(checks) -> list[str]:
+    """Names of the checks reported as passed right now."""
+    return [c["name"] for c in (checks or [])
+            if c.get("state", "").upper() in PASSED_STATES]
 
 
 def ci_summary(checks) -> str:
@@ -102,6 +118,13 @@ def triage_and_fix_pr(platform, repo: str, pr_id: int, label: str,
         return {"result": "unrelated", "attempts": attempts,
                 "failed_names": failed_names, "reason": reason}
 
+    green_names = green_check_names(checks)
+    keep_green = (
+        f"\n\nThese checks pass on this PR right now: {', '.join(green_names)}. "
+        "Run the local equivalent of every one of them after your fix as well. They must "
+        "all still pass before you push. A fix that trades one red check for another is "
+        "not a fix: do not push it."
+    ) if green_names else ""
     fix_prompt = (
         f"CI failed: {', '.join(failed_names)}. Caused by our changes. Hint: {fix_hint}\n\n"
         "Reproduce the failure locally first. Read `gh run view --log-failed` for the exact "
@@ -110,6 +133,7 @@ def triage_and_fix_pr(platform, repo: str, pr_id: int, label: str,
         "command locally and confirm you see the same failure. Fix the code. Re-run the "
         "same command — it must pass locally before you commit. Only then commit and push. "
         "If you cannot get it green locally, do not push: say what you tried and stop."
+        + keep_green
     )
     ran = run_claude_code(fix_prompt, cwd=worktree, timeout=FIX_TIMEOUT)
     if ran is None:
