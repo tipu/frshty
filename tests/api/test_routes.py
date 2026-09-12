@@ -736,6 +736,8 @@ class TestSubmitPrScopeGate:
         assert body["report"] == "" and body["report_url"] == "", \
             "the report on disk belongs to the verdict this fingerprint replaced"
         assert "up to 30 minutes" in body["error"]
+        assert "open the PR anyway" not in body["error"], \
+            "a queued review needs no decision from the operator"
         tasks = [j["task"] for j in db.query_all(
             "SELECT task FROM jobs WHERE ticket_key=?", ("SCOPE-9",))]
         assert "scope_review" in tasks
