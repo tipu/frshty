@@ -21,6 +21,10 @@ FIX_TIMEOUT = 1800
 # CANCELLED/TIMED_OUT are real failures GH reports; STOPPED is Bitbucket's.
 FAILED_STATES = ("FAILURE", "FAILED", "STOPPED", "CANCELLED", "TIMED_OUT")
 PENDING_STATES = ("PENDING", "QUEUED", "IN_PROGRESS", "INPROGRESS", "WAITING", "REQUESTED", "EXPECTED")
+# An allowlist, because the set of states a forge can report is open: gh alone
+# adds ERROR, ACTION_REQUIRED, STALE and STARTUP_FAILURE, and reading "not
+# failed and not pending" as passed would call every one of them green.
+PASSED_STATES = ("SUCCESS", "NEUTRAL", "SKIPPED")
 
 KEEP_GREEN_RULE = (
     "Before you commit, run the repository's own lint and test commands and confirm they "
@@ -30,10 +34,9 @@ KEEP_GREEN_RULE = (
 
 
 def green_check_names(checks) -> list[str]:
-    """Names of the checks passing right now: neither failed nor still running."""
+    """Names of the checks reported as passed right now."""
     return [c["name"] for c in (checks or [])
-            if c.get("state", "").upper() not in FAILED_STATES
-            and c.get("state", "").upper() not in PENDING_STATES]
+            if c.get("state", "").upper() in PASSED_STATES]
 
 
 def ci_summary(checks) -> str:
