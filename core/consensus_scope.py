@@ -188,7 +188,10 @@ def run_scope_review(config: dict, ticket_dir: Path, slug: str, *,
 
 
 _REPORT_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
-_REPORT_BULLET_RE = re.compile(r"^\s{0,3}[-*]\s+(.*\S)\s*$")
+# Prefix only. A pattern that also captured the text would need two greedy
+# whitespace runs around it, and a reviewer that emitted a bullet marker
+# followed by a long run of spaces would then backtrack quadratically.
+_REPORT_BULLET_RE = re.compile(r"^ {0,3}[-*][ \t]")
 MAX_REPORT_FINDINGS = 12
 MAX_FINDING_CHARS = 400
 MAX_REPORT_BYTES = 512 * 1024
@@ -233,7 +236,15 @@ def report_summary(report: Path) -> dict:
             bullet = _REPORT_BULLET_RE.match(lines[j])
             if not bullet:
                 break
-            block.append(_REPORT_LINK_RE.sub(r"\1", bullet.group(1))[:MAX_FINDING_CHARS])
+            text = lines[j][bullet.end():].strip()
+            if not text:
+                break
+            # Flatten a bounded window, not the whole line: _REPORT_LINK_RE
+            # rescans to the end of its input for every unmatched "[", which is
+            # quadratic on a line built out of them. Flattening only shortens
+            # text, so a window this much wider than the cap still fills it.
+            block.append(_REPORT_LINK_RE.sub(
+                r"\1", text[:MAX_FINDING_CHARS * 4])[:MAX_FINDING_CHARS])
             j -= 1
         for finding in reversed(block):
             if finding not in findings:

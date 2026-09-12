@@ -365,15 +365,18 @@ def _scope_blocked_response(ticket_key: str, ticket: dict, slug: str, scope: str
     body["report"] = ""
     body["report_url"] = ""
     queue_state = _scope_review_queue_state(ticket_key)
-    running = {"queued": "The review is on the queue now and takes up to 30 minutes.",
-               "running": "The review is already queued and takes up to 30 minutes."}.get(
-        queue_state,
-        "frshty could not queue the review: the LLM budget guard is on, or the review "
-        "failed repeatedly. Check the ticket's jobs.")
+    next_step = {
+        "queued": "The review is on the queue now and takes up to 30 minutes. "
+                  "Submit again once it passes.",
+        "running": "The review is already queued and takes up to 30 minutes. "
+                   "Submit again once it passes.",
+    }.get(queue_state,
+          "frshty could not queue the review: the LLM budget guard is on, or the review "
+          "failed repeatedly. Check the ticket's jobs, or open the PR anyway and frshty "
+          "records the override on the ticket.")
     body["queue_state"] = queue_state
     body["error"] = ("No consensus scope review has voted on the code that is on the branch "
-                     f"now, so the PR is held. {running} Submit again once it passes, or open "
-                     "the PR anyway and frshty records the override on the ticket.")
+                     f"now, so the PR is held. {next_step}")
     return JSONResponse(body, status_code=409)
 
 
