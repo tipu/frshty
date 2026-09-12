@@ -601,7 +601,7 @@ class TestSubmitPrScopeGate:
     def _submit(self, client, tmp_path, key, scope, **data):
         from web import tickets as web_tickets
         slug = f"{key}-s"
-        (tmp_path / "tickets" / slug / "repo1").mkdir(parents=True)
+        (tmp_path / "tickets" / slug / "repo1").mkdir(parents=True, exist_ok=True)
         state.save("tickets", {key: {"status": "pr_ready", "slug": slug,
                                      "branch": "b", "summary": "s",
                                      "scope_review": {"verdict": "fail",
@@ -692,6 +692,60 @@ class TestSubmitPrScopeGate:
         resp, platform = self._submit(client, tmp_path, "SCOPE-5", "disabled")
         assert getattr(resp, "status_code", 200) == 200, getattr(resp, "body", resp)
         platform.create_pr.assert_called_once()
+
+    def test_the_fail_body_explains_the_gate_and_names_the_findings(self, client, tmp_path):
+        """The Submit PR modal renders this body. The operator decides from it,
+        so it has to say what the gate is, what the reviewers found, where the
+        full report is, and that the block can be overridden from the modal.
+        The old body only said "resubmit with force: true", which no page
+        offered."""
+        docs = tmp_path / "tickets" / "SCOPE-8-s" / "docs"
+        docs.mkdir(parents=True)
+        (docs / "scope-review.md").write_text("\n".join([
+            "Votes: agy=FAIL, codex=FAIL",
+            "Dropped voices: claude (no SCOPE VERDICT line)", "",
+            "## agy", "", "Offending changes:", "",
+            "- `repo1`: unrelated pacing fix at [src/a.ts:28](file:///x/src/a.ts#L28)",
+            "- `repo1`: duplicate route at src/urls.py:36", "",
+            "SCOPE VERDICT: FAIL", ""]))
+        resp, platform = self._submit(client, tmp_path, "SCOPE-8", "fail")
+        assert resp.status_code == 409, getattr(resp, "body", resp)
+        body = json.loads(resp.body)
+        assert body["can_force"] is True
+        assert "claude, codex and agy" in body["what"]
+        assert "open the PR anyway" in body["error"]
+        assert "force" not in body["error"]
+        assert body["votes"] == "agy=FAIL, codex=FAIL"
+        assert body["dropped"].startswith("claude")
+        assert body["findings"] == [
+            "`repo1`: unrelated pacing fix at src/a.ts:28",
+            "`repo1`: duplicate route at src/urls.py:36",
+        ]
+        assert body["report_url"] == "/api/tickets/SCOPE-8/docs/scope-review.md"
+        platform.create_pr.assert_not_called()
+
+    def test_pending_queues_the_review_that_unblocks_the_pr(self, client, tmp_path):
+        """A pending verdict needs no decision from the operator, only a review.
+        The dispatcher enqueues one on its next pass over the ticket; blocking
+        the operator without queuing it leaves them waiting on a poll cycle."""
+        resp, platform = self._submit(client, tmp_path, "SCOPE-9", "pending")
+        assert resp.status_code == 409, getattr(resp, "body", resp)
+        body = json.loads(resp.body)
+        assert body["queue_state"] == "queued"
+        assert body["findings"] == [], "a stale verdict must not show its old findings"
+        assert "up to 30 minutes" in body["error"]
+        tasks = [j["task"] for j in db.query_all(
+            "SELECT task FROM jobs WHERE ticket_key=?", ("SCOPE-9",))]
+        assert "scope_review" in tasks
+
+    def test_a_queued_review_is_not_queued_twice(self, client, tmp_path):
+        self._submit(client, tmp_path, "SCOPE-10", "pending")
+        resp, _ = self._submit(client, tmp_path, "SCOPE-10", "pending")
+        body = json.loads(resp.body)
+        assert body["queue_state"] == "running"
+        tasks = [j["task"] for j in db.query_all(
+            "SELECT task FROM jobs WHERE ticket_key=?", ("SCOPE-10",))]
+        assert tasks.count("scope_review") == 1
 
     def test_only_a_json_true_overrides_the_gate(self, client, tmp_path):
         for i, value in enumerate(["false", "0", 1, {}, [], "true"]):

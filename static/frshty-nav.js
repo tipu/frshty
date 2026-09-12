@@ -48,6 +48,7 @@
             repos: { type: Array, default: () => [] },
             submitting: { type: Boolean, default: false },
             ticketKey: { type: String, default: '' },
+            blocked: { type: Object, default: null },
         },
         emits: ['close', 'submit'],
         setup(props, ctx) {
@@ -56,19 +57,25 @@
             const activeName = ref(null);
             const regenerating = ref(false);
             const regenError = ref('');
+            const block = ref(null);
+            watch(() => props.blocked, (b) => { block.value = b || null; }, { immediate: true });
             watch(() => props.repos, (newRepos) => {
                 localRepos.value = (newRepos || []).map(r => Object.assign({}, r));
                 activeName.value = localRepos.value[0]?.name || null;
             }, { immediate: true });
             const active = computed(() => localRepos.value.find(r => r.name === activeName.value));
             const submittable = computed(() => localRepos.value.filter(r => r.has_changes !== false));
-            function submit() {
-                ctx.emit('submit', {
+            function submit(force) {
+                const payload = {
                     repos: localRepos.value
                         .filter(r => r.has_changes !== false)
                         .map(r => ({ name: r.name, title: r.title, description: r.description })),
-                });
+                };
+                if (force === true) payload.force = true;
+                block.value = null;
+                ctx.emit('submit', payload);
             }
+            function dismissBlock() { block.value = null; }
             function close() { ctx.emit('close'); }
             async function regenerate() {
                 if (!props.ticketKey || regenerating.value) return;
@@ -101,7 +108,7 @@
                     regenerating.value = false;
                 }
             }
-            return { localRepos, activeName, active, submittable, submit, close, regenerating, regenError, regenerate };
+            return { localRepos, activeName, active, submittable, submit, close, regenerating, regenError, regenerate, block, dismissBlock };
         },
         template: `
             <teleport to="body">
@@ -120,7 +127,25 @@
                             </div>
                         </div>
                         <div v-if="regenError" class="text-xs text-red-400 mb-2">{{ regenError }}</div>
-                        <div v-if="!localRepos.length" class="text-sm text-gray-400 flex-1 flex items-center justify-center">No repos with meaningful changes.</div>
+                        <div v-if="block" class="flex-1 flex flex-col overflow-hidden">
+                            <div class="rounded p-4 mb-3" style="background:#2a1a10;border:1px solid #f97316">
+                                <div class="text-sm font-bold mb-1" style="color:#fdba74">
+                                    {{ block.scope_review === 'fail' ? 'The scope review voted FAIL' : 'The scope review has not voted on this code yet' }}
+                                </div>
+                                <div class="text-sm text-gray-200">{{ block.error }}</div>
+                                <div v-if="block.what" class="text-xs text-gray-400 mt-2">{{ block.what }}</div>
+                            </div>
+                            <div v-if="block.votes || block.dropped" class="text-xs text-gray-500 mb-2">
+                                Votes: {{ block.votes || 'none' }}<span v-if="block.dropped"> · dropped: {{ block.dropped }}</span>
+                            </div>
+                            <div v-if="block.findings && block.findings.length" class="flex-1 overflow-y-auto bg-gray-900 border border-gray-700 rounded p-3">
+                                <div class="text-xs font-bold text-gray-400 mb-2">Changes the reviewers called out of scope</div>
+                                <div v-for="(f, i) in block.findings" :key="i" class="text-xs text-gray-200 font-mono whitespace-pre-wrap mb-2">• {{ f }}</div>
+                            </div>
+                            <a v-if="block.report_url" :href="block.report_url" target="_blank"
+                               class="text-xs text-blue-400 hover:underline mt-3">Read the full scope review report →</a>
+                        </div>
+                        <div v-else-if="!localRepos.length" class="text-sm text-gray-400 flex-1 flex items-center justify-center">No repos with meaningful changes.</div>
                         <template v-else>
                             <div :class="{ 'opacity-40 pointer-events-none': regenerating }" class="flex-1 flex flex-col overflow-hidden">
                             <div class="flex gap-1 mb-3 border-b border-gray-700">
@@ -150,7 +175,16 @@
                             </div>
                             </div>
                         </template>
-                        <div class="flex gap-2 mt-4 pt-4 border-t border-gray-700">
+                        <div v-if="block" class="flex gap-2 mt-4 pt-4 border-t border-gray-700">
+                            <button @click="submit(true)" :disabled="submitting"
+                                    class="flex-1 bg-orange-800 hover:bg-orange-700 text-white text-sm px-4 py-2 rounded"
+                                    :class="{ 'opacity-50 cursor-not-allowed': submitting }"
+                                    title="Open the PR over the scope verdict. frshty records the override on the ticket.">
+                                {{ submitting ? 'Submitting…' : 'Open the PR anyway' }}
+                            </button>
+                            <button @click="dismissBlock" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white text-sm px-4 py-2 rounded">Back to the PR</button>
+                        </div>
+                        <div v-else class="flex gap-2 mt-4 pt-4 border-t border-gray-700">
                             <button @click="submit" :disabled="submitting || !submittable.length"
                                     class="flex-1 bg-green-700 hover:bg-green-600 text-white text-sm px-4 py-2 rounded"
                                     :class="{ 'opacity-50 cursor-not-allowed': submitting || !submittable.length }">
