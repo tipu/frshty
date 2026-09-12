@@ -420,7 +420,7 @@ details[open] > summary { color: #d1d5db; margin-bottom: 8px; }
     <div class="card p-6 md-content" v-html="renderedBody"></div>
 </details>
 
-<pr-submit-modal :open="submitPrOpen" :repos="submitPrRepos" :submitting="submitPrBusy"
+<pr-submit-modal :open="submitPrOpen" :repos="submitPrRepos" :submitting="submitPrBusy" :blocked="submitPrBlocked"
                   @close="submitPrOpen=false" @submit="confirmSubmitPr" />
 
 
@@ -475,6 +475,7 @@ frshtyApp({
         const submitPrRepos = ref([]);
         const submitPrBusy = ref(false);
         const submitPrTicketKey = ref('');
+        const submitPrBlocked = ref(null);
 
         const renderedBody = computed(() => bodyMd.value ? marked.parse(bodyMd.value) : '');
 
@@ -687,6 +688,7 @@ frshtyApp({
                 const info = await r.json();
                 submitPrRepos.value = info.repos || [];
                 submitPrTicketKey.value = ticketKey;
+                submitPrBlocked.value = null;
                 submitPrOpen.value = true;
             } catch (e) { alert('PR info error: ' + e.message); }
         }
@@ -701,6 +703,7 @@ frshtyApp({
                 });
                 if (!r.ok) {
                     const j = await r.json().catch(() => ({}));
+                    if (j.scope_review) { submitPrBlocked.value = j; return; }
                     alert('Submit failed: ' + (j.error || r.statusText));
                     return;
                 }
@@ -836,7 +839,7 @@ frshtyApp({
         return {
             loops, counts, snoozed, generatedAt, bodyMd, policyStale, instanceName,
             running, refreshing, loadError, busy, cardError, replyDraft,
-            submitPrOpen, submitPrRepos, submitPrBusy,
+            submitPrOpen, submitPrRepos, submitPrBusy, submitPrBlocked,
             renderedBody, totalActive, totalReplyCount,
             visibleLoops, visibleCounts,
             formatBucketLabel, badgeClass, fmtRelative, replyKey,
