@@ -3,6 +3,7 @@
 <head>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Task — frshty</title>
 <script src="/static/tailwind.js"></script>
 <script src="/static/vendor/vue.global.prod.js"></script>
@@ -13,6 +14,7 @@
 <script src="/static/frshty-linkify.js"></script>
 <link rel="stylesheet" href="/static/frshty.css">
 <link rel="stylesheet" href="/static/frshty-v2.css">
+<link rel="stylesheet" href="/static/frshty-mobile.css">
 <style>
 .tl-box { max-height: 70vh; overflow-y: auto; background: #0d0d13; border: 1px solid #2a2a35; border-radius: 8px; padding: 8px 14px; }
 .tl { border-left: 2px solid #2a2a35; margin-left: 8px; padding-left: 16px; }
@@ -63,10 +65,13 @@
           :class="item.critical ? 'ln-pill-gold' : 'ln-pill-ghost'"
           :title="item.critical ? 'drop the critical mark' : 'mark this task critical'"
           @click="act(item.critical ? 'critical_off' : 'critical_on')">{{ item.critical ? '★ Critical' : '☆ Mark critical' }}</span>
+    <span class="ln-pill ln-pill-ghost ml-2" style="cursor:pointer" v-if="cancelable"
+          title="stop this task and kill the terminal its agent runs in"
+          @click="cancel()">⊘ Cancel</span>
     <span class="text-xs text-gray-500 ml-2">#{{ item.id }} · {{ item.scope }} · {{ item.instance_key || 'no instance' }} · continues {{ item.continues_used }}/{{ item.continue_cap }}<span v-if="provider"> · {{ provider }}</span><span v-if="item.contexts"> · {{ item.contexts }}</span></span>
     <span v-if="peer" class="badge b-other" :title="'this task runs on the ' + peer + ' host'">⇄ {{ peer }}</span>
     <a v-if="sourceItem" :href="taskHref(sourceItem.id)" class="text-xs text-blue-400 underline ml-3" :title="sourceItem.objective">follows #{{ sourceItem.id }}</a>
-    <a :href="terminalHref" :target="terminalWindow" class="text-xs text-blue-400 underline ml-3">open terminal</a>
+    <a v-if="item.state !== 'canceled'" :href="terminalHref" :target="terminalWindow" class="text-xs text-blue-400 underline ml-3">open terminal</a>
   </div>
   <div class="mt-1 text-xs text-gray-500" v-if="worktree"
        :title="'shared checkout: ' + worktree.repo_path">
@@ -98,6 +103,17 @@
             @click="act('archive')">acknowledge and archive</span>
       <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#3f1d1d;color:#fca5a5"
             @click="act('reopen')">reopen</span>
+      <span class="text-xs text-red-400" v-if="actError">{{ actError }}</span>
+    </div>
+  </div>
+  <div class="sec" v-if="item.state === 'canceled'">
+    <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Canceled</h2>
+    <div class="text-xs text-gray-600 mb-2">You canceled this task and its terminal was killed. Reopen it to put it back on the board; no agent starts again by itself.</div>
+    <div class="flex flex-wrap gap-2 items-center">
+      <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#3f1d1d;color:#fca5a5"
+            @click="act('reopen')">reopen</span>
+      <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#1e293b;color:#cbd5e1"
+            @click="act('archive')">archive</span>
       <span class="text-xs text-red-400" v-if="actError">{{ actError }}</span>
     </div>
   </div>
@@ -360,10 +376,15 @@ const app = frshtyApp({
     finished() {
       return !!this.item && (this.item.state === "done" || this.item.state === "needs_ack");
     },
+    cancelable() {
+      return !!this.item && !this.finished
+             && this.item.state !== "proposed" && this.item.state !== "canceled";
+    },
     stateLabel() {
       if (!this.item) return "";
       if (this.item.state === "proposed") return "proposed by frshty — approve it to start";
       if (this.item.state === "needs_ack") return "agent reported done — acknowledge it";
+      if (this.item.state === "canceled") return "canceled — the terminal was killed";
       if (this.item.state === "done")
         return this.item.done_source === "operator" ? "done — you confirmed"
              : this.item.done_source === "agent" ? "done — agent-reported, not verified by you"
@@ -558,6 +579,10 @@ const app = frshtyApp({
         this.approveBusy = false;
       }
       await this.refresh();
+    },
+    cancel() {
+      if (!confirm("Cancel task #" + this.item.id + "? The agent's terminal is killed and the task is marked canceled.")) return;
+      this.act("cancel");
     },
     async act(action) {
       this.actError = "";

@@ -3,6 +3,7 @@
 <head>
 <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Tasks — frshty</title>
 <script src="/static/vendor/vue.global.prod.js"></script>
 <script src="/static/frshty-time.js"></script>
@@ -12,6 +13,7 @@
 <script src="/static/frshty-linkify.js"></script>
 <link rel="stylesheet" href="/static/frshty.css">
 <link rel="stylesheet" href="/static/frshty-v2.css">
+<link rel="stylesheet" href="/static/frshty-mobile.css">
 <style>
 .wintake { width: 100%; background: var(--ln-bg); border: 1px solid var(--ln-border-hi); border-radius: 6px; padding: 7px 10px; color: var(--ln-text); font-size: 12.5px; }
 .wsum { white-space: pre-wrap; font-size: 12.5px; color: var(--ln-text-2); background: var(--ln-bg); border: 1px solid var(--ln-border); border-radius: 6px; padding: 8px 12px; margin-top: 8px; }
@@ -127,8 +129,9 @@
           <div class="ln-task-top">
             <div style="min-width:0">
               <a class="ln-task-title" :href="taskHref(it)">{{ it.objective }}</a>
-              <div class="ln-task-note ln-task-note-warn" v-if="it.stop_reason" v-html="lkFor(it, note(it.stop_reason))"></div>
-              <div class="ln-task-note" v-else-if="note(it.current_checkpoint)">{{ note(it.current_checkpoint) }}</div>
+              <div class="ln-task-note ln-task-note-warn" v-if="stopNote(it)" v-html="lkFor(it, stopNote(it))"></div>
+              <div class="ln-task-note" v-if="progressNote(it)"
+                   title="the newest PROGRESS line this agent printed">{{ progressNote(it) }}</div>
             </div>
             <div class="ln-task-id">#{{ it.id }}</div>
           </div>
@@ -171,10 +174,22 @@
                         title="take this completed task off the board" @click="act(it, 'archive')">Archive</button>
                 <button class="ln-btn ln-btn-sm ln-btn-ghost" @click="act(it, 'reopen')">Reopen</button>
               </template>
+              <template v-else-if="g === 'canceled'">
+                <button class="ln-btn ln-btn-sm ln-btn-ghost" v-if="view === 'archive' || it.archived_at"
+                        @click="act(it, 'unarchive')">Unarchive</button>
+                <button class="ln-btn ln-btn-sm ln-btn-ghost" v-else
+                        title="take this canceled task off the board" @click="act(it, 'archive')">Archive</button>
+                <button class="ln-btn ln-btn-sm ln-btn-ghost"
+                        title="put it back on the board; the agent does not start again by itself"
+                        @click="act(it, 'reopen')">Reopen</button>
+              </template>
               <template v-else>
                 <button class="ln-btn ln-btn-sm ln-btn-ghost" v-if="it.last_tmux_key" @click="openTerminal(it)">Terminal</button>
                 <button class="ln-btn ln-btn-sm ln-btn-ghost" @click="act(it, 'done')">Done</button>
                 <button class="ln-btn ln-btn-sm ln-btn-ghost" @click="snooze(it)">Snooze</button>
+                <button class="ln-btn ln-btn-sm ln-btn-ghost"
+                        title="stop this task and kill the terminal its agent runs in"
+                        @click="cancel(it)">Cancel</button>
                 <button class="ln-btn ln-btn-sm ln-btn-ghost" v-if="g === 'failed_stale' || g === 'waiting_external'"
                         @click="act(it, 'reopen')">Reopen</button>
                 <button class="ln-btn ln-btn-sm ln-btn-ghost"
@@ -252,19 +267,21 @@
 const STATE_PILLS = {
   proposed: "ln-pill-violet",
   needs_ack: "ln-pill-green", needs_you: "ln-pill-amber", agent_working: "ln-pill-blue",
-  waiting_external: "ln-pill-ghost", failed_stale: "ln-pill-red", done: "ln-pill-green",
+  waiting_external: "ln-pill-ghost", failed_stale: "ln-pill-red",
+  canceled: "ln-pill-ghost", done: "ln-pill-green",
 };
 const STATE_TEXT = {
   proposed: "◇ frshty proposed this",
   needs_ack: "✓ Agent reported done", needs_you: "● Needs you", agent_working: "● Working",
   waiting_external: "○ Waiting external", failed_stale: "● Failed or stale",
+  canceled: "⊘ Canceled",
 };
 frshtyApp({
   data() {
     return {
       features: {}, instanceName: "",
       view: new URLSearchParams(location.search).get("view") === "archive" ? "archive" : "board",
-      groups: { proposed: [], needs_ack: [], needs_you: [], agent_working: [], waiting_external: [], failed_stale: [], done: [] },
+      groups: { proposed: [], needs_ack: [], needs_you: [], agent_working: [], waiting_external: [], failed_stale: [], canceled: [], done: [] },
       personalLoaded: false, intakeText: "", intakeError: "", intakeBusy: false,
       projects: [], slackAvailable: false, intakeContexts: [], intakeSlack: false, moreOpen: false,
       intakeCritical: false,
@@ -275,13 +292,13 @@ frshtyApp({
       peers: [], peerMeta: {}, peerErrors: {}, peerLinkmaps: {}, target: "",
       sourceFilter: localStorage.getItem("workSourceFilter") || "",
       searchText: "", tagFilter: JSON.parse(localStorage.getItem("workTagFilter") || "[]"), allTags: [], donePage: 1, donePages: 1, counts: {},
-      groupOrder: ["proposed", "needs_ack", "agent_working", "needs_you", "waiting_external", "failed_stale", "done"],
-      labels: { proposed: "Proposed — needs your approval", needs_ack: "Needs acknowledgement", needs_you: "Needs you", agent_working: "Agent working", waiting_external: "Waiting external", failed_stale: "Failed or stale", done: "Completed" },
+      groupOrder: ["proposed", "needs_ack", "agent_working", "needs_you", "waiting_external", "failed_stale", "canceled", "done"],
+      labels: { proposed: "Proposed — needs your approval", needs_ack: "Needs acknowledgement", needs_you: "Needs you", agent_working: "Agent working", waiting_external: "Waiting external", failed_stale: "Failed or stale", canceled: "Canceled", done: "Completed" },
     };
   },
   computed: {
     visibleGroups() {
-      return this.view === "archive" ? ["done"] : this.groupOrder;
+      return this.view === "archive" ? ["canceled", "done"] : this.groupOrder;
     },
     railCounts() {
       return { tasks: this.count("proposed") + this.count("needs_ack") + this.count("needs_you") };
@@ -386,6 +403,19 @@ frshtyApp({
     note(text) {
       const line = (text || "").trim();
       return line.length > 200 ? line.slice(0, 200).trimEnd() + "…" : line;
+    },
+    progressNote(it) {
+      return this.note(it.latest_progress || it.current_checkpoint);
+    },
+    stopNote(it) {
+      const raw = it.stop_reason || "";
+      if (!this.progressNote(it)) return this.note(raw);
+      const kept = raw.split("\n")
+        .map(l => { const i = l.indexOf("PROGRESS:"); return i < 0 ? l : l.slice(0, i); })
+        .filter(l => l.trim())
+        .join("\n")
+        .trim();
+      return this.note(kept.endsWith(":") ? kept.slice(0, -1) : kept);
     },
     tagsOf(it) {
       const tags = (it.tags || "").split(",").filter(Boolean);
@@ -689,6 +719,10 @@ frshtyApp({
     snooze(it) {
       const until = new Date(Date.now() + 4 * 3600 * 1000).toISOString();
       this.act(it, "snooze", until);
+    },
+    cancel(it) {
+      if (!confirm("Cancel task #" + it.id + "? The agent's terminal is killed and the task is marked canceled.")) return;
+      this.act(it, "cancel");
     },
     openTerminal(it) {
       const base = it.peer ? this.peerBase(it.peer) : "";

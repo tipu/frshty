@@ -1,4 +1,5 @@
 import base64
+import json
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -593,7 +594,8 @@ class TestHookInstaller:
         added = mod.install_into(str(settings))
         expected = {e for e in mod.EVENTS if e != "PreToolUse"}
         expected |= {"PreToolUse[AskUserQuestion]", "PreToolUse[Bash]",
-                     f"PreToolUse[{mod.WRITE_GATE_MATCHER}]"}
+                     f"PreToolUse[{mod.WRITE_GATE_MATCHER}]",
+                     f"PreToolUse[{mod.CORRESPONDENCE_MATCHER}]"}
         assert set(added) == expected
         again = mod.install_into(str(settings))
         assert again == []
@@ -838,6 +840,18 @@ class TestStaleSweep:
         item = db.query_one("SELECT state, stop_reason FROM work_items WHERE id = ?", (item_id,))
         assert item["state"] == "needs_you"
         assert "staging bucket" in item["stop_reason"]
+
+    def test_a_synthesized_stop_records_the_progress_line(self, tmp_path, monkeypatch):
+        item_id, _, transcript = self._mkstale(
+            tmp_path, tail_text="PROGRESS: cut the release branch\nWORK_DONE")
+        self._age_transcript(transcript)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
+        work_store.sweep_stale_items()
+        item = db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "needs_ack"
+        events = db.query_all("SELECT payload FROM work_events WHERE work_item_id = ? "
+                              "AND kind = 'progress'", (item_id,))
+        assert [json.loads(e["payload"])["text"] for e in events] == ["cut the release branch"]
 
     def test_fresh_item_untouched(self):
         item_id = _mkitem("fresh item")

@@ -89,6 +89,9 @@
 			// "wide" → no max-width on .ln-page-wide, for table-dense pages.
 			width: { type: String, default: 'normal' },
 		},
+		data() {
+			return { railOpen: false };
+		},
 		computed: {
 			sections() {
 				const f = this.features || {};
@@ -110,18 +113,29 @@
 		// The topbar is sticky. Every other sticky panel on the page has to
 		// start below it, so publish the measured height as --ln-topbar-h and
 		// keep it correct when the actions row wraps on a narrow window.
+		//
+		// A narrow window also shows the drawer button bar above the topbar,
+		// and that bar is sticky too. Its height is published separately as
+		// --ln-mobilebar-h, which is where the topbar sticks, and it is added
+		// into --ln-topbar-h so every page panel keeps clearing both. The bar
+		// is display:none above the breakpoint, so its height is 0 there and
+		// the desktop value is unchanged.
 		mounted() {
 			this.$nextTick(() => {
 				const bar = this.$el.querySelector('.ln-topbar');
 				if (!bar) return;
+				const mobilebar = this.$el.querySelector('.ln-mobilebar');
 				const publish = () => {
-					const h = Math.round(bar.getBoundingClientRect().height);
+					const mobileH = mobilebar ? Math.round(mobilebar.getBoundingClientRect().height) : 0;
+					const h = Math.round(bar.getBoundingClientRect().height) + mobileH;
+					document.documentElement.style.setProperty('--ln-mobilebar-h', mobileH + 'px');
 					if (h > 0) document.documentElement.style.setProperty('--ln-topbar-h', h + 'px');
 				};
 				publish();
 				if (window.ResizeObserver) {
 					this._topbarObserver = new ResizeObserver(publish);
 					this._topbarObserver.observe(bar);
+					if (mobilebar) this._topbarObserver.observe(mobilebar);
 				}
 			});
 		},
@@ -130,7 +144,8 @@
 		},
 		template: `
 			<div class="ln-root">
-				<aside class="ln-rail">
+				<div class="ln-scrim" v-if="railOpen" @click="railOpen = false"></div>
+				<aside class="ln-rail" :class="{ on: railOpen }">
 					<div class="ln-brand">
 						<div class="ln-logo">f</div>
 						<div>
@@ -163,6 +178,13 @@
 					</div>
 				</aside>
 				<main class="ln-main">
+					<div class="ln-mobilebar">
+						<button class="ln-mobilebar-btn" type="button"
+										:aria-expanded="railOpen ? 'true' : 'false'"
+										aria-label="Navigation"
+										@click="railOpen = !railOpen">☰</button>
+						<div class="ln-mobilebar-title">{{ breadcrumbs[breadcrumbs.length - 1] }}</div>
+					</div>
 					<div :class="['ln-page', width === 'wide' ? 'ln-page-wide' : '']">
 						<div class="ln-topbar">
 							<div class="ln-breadcrumb">
