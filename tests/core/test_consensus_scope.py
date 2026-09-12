@@ -242,6 +242,29 @@ class TestReportSummary:
         assert out["votes"] == "agy=FAIL"
         assert out["findings"] == []
 
+    def test_a_long_space_run_does_not_stall_the_parser(self, tmp_path):
+        """A bullet marker followed by a long run of spaces made the old
+        pattern backtrack quadratically. A web request runs this parser, so a
+        report like that must not hold the worker."""
+        import time
+        report = self._report(tmp_path, "\n".join(
+            ["## agy", "", "- " + " " * 200_000, "", "SCOPE VERDICT: FAIL", ""]))
+        start = time.monotonic()
+        out = consensus_scope.report_summary(report)
+        assert time.monotonic() - start < 5
+        assert out["findings"] == []
+
+    def test_a_long_bracket_run_does_not_stall_the_parser(self, tmp_path):
+        """The link pattern rescans to the end of its input for every unmatched
+        "[". A bullet built out of them must not hold the worker."""
+        import time
+        report = self._report(tmp_path, "\n".join(
+            ["## agy", "", "- " + "[" * 200_000, "", "SCOPE VERDICT: FAIL", ""]))
+        start = time.monotonic()
+        out = consensus_scope.report_summary(report)
+        assert time.monotonic() - start < 5
+        assert out["findings"] == ["[" * consensus_scope.MAX_FINDING_CHARS]
+
     def test_findings_are_capped(self, tmp_path):
         bullets = [f"- finding {i}" for i in range(30)]
         report = self._report(tmp_path, "\n".join(
