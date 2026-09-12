@@ -23,7 +23,7 @@ from core.claude_runner import run_haiku, run_balanced, run_claude_code, extract
 from core.commit_message import COMMIT_SUBJECT_RULE, commit_subject
 from core.ticket_status import TicketStatus, can_transition, transition
 from features.platforms import make_platform
-from features.pr_ci import ci_summary, FAILED_STATES
+from features.pr_ci import ci_summary, FAILED_STATES, KEEP_GREEN_RULE
 from features.ticket_systems import make_ticket_system
 
 
@@ -2371,6 +2371,7 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                     f"Review comment: {comment['body']}\n\n"
                     + (f"Drafted reply that commits to this change: {suggested}\n\n" if suggested else "")
                     + "Fix this review comment.\n\n"
+                    + KEEP_GREEN_RULE + "\n\n"
                     + COMMIT_SUBJECT_RULE
                 )
                 fix_result = run_claude_code(context, cwd=wt)
