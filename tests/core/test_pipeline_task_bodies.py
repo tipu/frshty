@@ -387,6 +387,21 @@ class TestStartReviewing:
         assert result.status == "failed"
         assert result.reason == "docs/tri-review.md does not cover windows-rpa-client"
 
+    def test_a_repo_name_that_is_a_suffix_of_another_is_not_counted_covered(
+            self, fake_config, tmp_state):
+        root = fake_config["workspace"]["root"] / "tickets" / SLUG
+        repos = [("client", root / "client", "main"),
+                 ("rpa-client", root / "rpa-client", "main")]
+        _seed(status="reviewing")
+        d = _ticket_dir(fake_config)
+        (d / "docs" / "tri-review.md").write_text("## rpa-client\nAll good.\n")
+        with patch("core.tasks.tickets.repos_with_branch_diff", return_value=repos), \
+             patch("core.tasks.tickets.run_claude_code", MagicMock(return_value="done")), \
+             patch("core.tasks.tickets.log.emit"):
+            result = T.start_reviewing(_ctx(fake_config, "start_reviewing"))
+        assert result.status == "failed"
+        assert result.reason == "docs/tri-review.md does not cover client"
+
     def test_a_missing_report_fails_the_task(self, fake_config, tmp_state):
         result, _ = self._run(fake_config, None)
         assert result.status == "failed"

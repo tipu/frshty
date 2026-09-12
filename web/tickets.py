@@ -360,7 +360,7 @@ def _submit_pr_sync(ticket_key: str, data: dict):
         staged.append((r, wt, base_branch, push_branch))
 
     scope = _tickets_mod._scope_review_state(_config, ticket)
-    force = bool(data.get("force"))
+    force = data.get("force") is True
     if scope in ("pending", "fail") and not force:
         ws = _config["workspace"]
         report = Path(ws["root"]) / ws["tickets_dir"] / slug / "docs" / "scope-review.md"

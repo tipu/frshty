@@ -1461,7 +1461,7 @@ def start_reviewing(ctx: TaskContext) -> TaskResult:
     review = ticket_dir / "docs" / "tri-review.md"
     text = review.read_text(errors="replace") if review.is_file() else ""
     missing = [name for name, _, _ in repos
-               if not re.search(re.escape(name) + r"(?![\w.-])", text)]
+               if not re.search(r"(?<![\w.-])" + re.escape(name) + r"(?![\w.-])", text)]
     if missing:
         return TaskResult("failed",
                           "docs/tri-review.md does not cover " + ", ".join(missing))
