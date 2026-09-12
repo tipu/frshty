@@ -142,6 +142,73 @@ class TestTransitionTicket:
         assert state.load_ticket("T-1")["merged_external_status"] == "Released"
 
 
+class TestBlockedResume:
+    """A blocked ticket resumes at the stage that parked it, and only there.
+
+    The status column says a ticket is blocked. It does not say what it was
+    doing, and every stage between planning and proving can park one. Without
+    the stage on the row, an operator resuming a ticket blocked in planning
+    could send it to proving and reach pr_ready having never planned.
+    """
+
+    def test_the_parking_stage_is_recorded(self, tmp_state):
+        state.save_ticket("T-1", {"status": "new", "slug": "t-1"})
+        state.transition_ticket("T-1", "planning")
+        state.transition_ticket("T-1", "reviewing")
+        state.transition_ticket("T-1", "testing")
+        state.transition_ticket("T-1", "blocked")
+        assert state.load_ticket("T-1")["blocked_from"] == "testing"
+
+    def test_resume_returns_to_that_stage(self, tmp_state):
+        state.save_ticket("T-1", {"status": "testing", "slug": "t-1"})
+        state.transition_ticket("T-1", "blocked")
+        state.transition_ticket("T-1", "testing")
+        reloaded = state.load_ticket("T-1")
+        assert reloaded["status"] == "testing"
+        assert "blocked_from" not in reloaded
+
+    def test_resume_cannot_pick_another_stage(self, tmp_state):
+        state.save_ticket("T-1", {"status": "planning", "slug": "t-1"})
+        state.transition_ticket("T-1", "blocked")
+        with pytest.raises(TicketStateError, match="Illegal transition"):
+            state.transition_ticket("T-1", "proving")
+        assert state.load_ticket("T-1")["status"] == "blocked"
+
+    def test_a_row_blocked_without_a_stage_can_only_restart(self, tmp_state):
+        state.save_ticket("T-1", {"status": "blocked", "slug": "t-1"})
+        with pytest.raises(TicketStateError, match="Illegal transition"):
+            state.transition_ticket("T-1", "testing")
+        assert state.transition_ticket("T-1", "new")["status"] == "new"
+
+    def test_a_row_blocked_before_the_field_existed_reads_its_history(self, tmp_state):
+        """Tickets already sitting in blocked have no `blocked_from`. The
+        transition that parked them is recorded, so the resume reads the stage
+        from there instead of stranding them at a full restart."""
+        state.save_ticket("T-1", {"status": "testing", "slug": "t-1"})
+        state.transition_ticket("T-1", "blocked")
+        state.update_ticket(
+            "T-1", lambda t: {k: v for k, v in t.items() if k != "blocked_from"})
+        assert "blocked_from" not in state.load_ticket("T-1")
+        assert state.transition_ticket("T-1", "testing")["status"] == "testing"
+
+    def test_history_does_not_widen_a_row_that_was_never_parked(self, tmp_state):
+        state.save_ticket("T-1", {"status": "blocked", "slug": "t-1"})
+        with pytest.raises(TicketStateError, match="Illegal transition"):
+            state.transition_ticket("T-1", "proving")
+
+    def test_restarting_at_new_forgets_the_stage(self, tmp_state):
+        state.save_ticket("T-1", {"status": "reviewing", "slug": "t-1"})
+        state.transition_ticket("T-1", "blocked")
+        state.transition_ticket("T-1", "new")
+        assert "blocked_from" not in state.load_ticket("T-1")
+
+    def test_blocking_twice_keeps_the_first_stage(self, tmp_state):
+        state.save_ticket("T-1", {"status": "proving", "slug": "t-1"})
+        state.transition_ticket("T-1", "blocked")
+        state.transition_ticket("T-1", "blocked")
+        assert state.load_ticket("T-1")["blocked_from"] == "proving"
+
+
 class TestCorruptTicketRow:
     def test_corrupt_json_logs_and_returns_empty(self, tmp_state):
         state.save_ticket("T-1", {"status": "planning", "slug": "t-1"})

@@ -8,6 +8,8 @@ import pytest
 import core.db as db
 import core.state as state
 import core.log as log
+import features.tickets as tickets_mod
+from web.state import _config
 
 
 @pytest.fixture()
@@ -310,6 +312,106 @@ class TestTickets:
     def test_status_override_not_found(self, client):
         resp = client.post("/api/tickets/NOPE/status", json={"status": "in_review"})
         assert resp.status_code == 404
+
+
+class TestBlockedResumeEndpoint:
+    """Resuming a blocked ticket through the status endpoint.
+
+    The endpoint transitions the row directly and never takes the per-repo
+    gate. A resume into a gated stage while a sibling holds the gate leaves two
+    rows occupying it, and `_repo_gate_blocked` then names each ticket to the
+    other, so neither can enqueue its next stage again.
+    """
+
+    def test_resume_to_the_parking_stage_is_accepted(self, client):
+        state.save("tickets", {"T-1": {"status": "testing", "slug": "T-1-s"}})
+        state.transition_ticket("T-1", "blocked")
+        resp = client.post("/api/tickets/T-1/status", json={"status": "testing"})
+        assert resp.status_code == 200, resp.text
+        assert state.load("tickets")["T-1"]["status"] == "testing"
+
+    def test_resume_to_another_stage_is_refused(self, client):
+        state.save("tickets", {"T-1": {"status": "planning", "slug": "T-1-s"}})
+        state.transition_ticket("T-1", "blocked")
+        resp = client.post("/api/tickets/T-1/status", json={"status": "proving"})
+        assert resp.status_code == 400, resp.text
+        assert state.load("tickets")["T-1"]["status"] == "blocked"
+
+    def test_resume_waits_for_the_repo_gate(self, client, monkeypatch):
+        monkeypatch.setitem(_config["job"], "key", state._active_key())
+        state.save("tickets", {
+            "T-1": {"status": "testing", "slug": "T-1-s"},
+            "T-2": {"status": "reviewing", "slug": "T-2-s"},
+        })
+        state.transition_ticket("T-1", "blocked")
+        resp = client.post("/api/tickets/T-1/status", json={"status": "testing"})
+        assert resp.status_code == 409, resp.text
+        assert "T-2" in resp.json()["error"]
+        assert state.load("tickets")["T-1"]["status"] == "blocked"
+
+    def test_restarting_at_new_is_never_gate_checked(self, client, monkeypatch):
+        monkeypatch.setitem(_config["job"], "key", state._active_key())
+        state.save("tickets", {
+            "T-1": {"status": "testing", "slug": "T-1-s"},
+            "T-2": {"status": "reviewing", "slug": "T-2-s"},
+        })
+        state.transition_ticket("T-1", "blocked")
+        resp = client.post("/api/tickets/T-1/status", json={"status": "new"})
+        assert resp.status_code == 200, resp.text
+        assert state.load("tickets")["T-1"]["status"] == "new"
+
+    def test_the_gate_check_and_the_transition_share_one_lock(self, client, monkeypatch):
+        """Checking the gate and then transitioning outside the lock lets two
+        resumes both read a clear gate and both take it."""
+        monkeypatch.setitem(_config["job"], "key", state._active_key())
+        instance_key = state._active_key()
+        held: dict = {}
+        real_gate = tickets_mod._repo_gate_blocked
+        real_transition = state.transition_ticket
+
+        def spy_gate(key, ticket_key, config=None):
+            held["at_check"] = tickets_mod._gate_lock_for(instance_key).locked()
+            return real_gate(key, ticket_key, config)
+
+        def spy_transition(key, new_status, **kwargs):
+            held["at_transition"] = tickets_mod._gate_lock_for(instance_key).locked()
+            return real_transition(key, new_status, **kwargs)
+
+        monkeypatch.setattr(tickets_mod, "_repo_gate_blocked", spy_gate)
+        monkeypatch.setattr(state, "transition_ticket", spy_transition)
+
+        state.save("tickets", {"T-1": {"status": "testing", "slug": "T-1-s"}})
+        real_transition("T-1", "blocked")
+        resp = client.post("/api/tickets/T-1/status", json={"status": "testing"})
+        assert resp.status_code == 200, resp.text
+        assert held == {"at_check": True, "at_transition": True}
+
+    def test_an_ordinary_status_change_takes_no_gate_lock(self, client, monkeypatch):
+        monkeypatch.setitem(_config["job"], "key", state._active_key())
+        instance_key = state._active_key()
+        held: dict = {}
+        real_transition = state.transition_ticket
+
+        def spy_transition(key, new_status, **kwargs):
+            held["locked"] = tickets_mod._gate_lock_for(instance_key).locked()
+            return real_transition(key, new_status, **kwargs)
+
+        monkeypatch.setattr(state, "transition_ticket", spy_transition)
+        state.save("tickets", {"T-1": {"status": "in_review", "slug": "T-1-s"}})
+        resp = client.post("/api/tickets/T-1/status", json={"status": "pr_failed"})
+        assert resp.status_code == 200, resp.text
+        assert held == {"locked": False}
+
+    def test_a_clear_gate_lets_the_resume_through(self, client, monkeypatch):
+        monkeypatch.setitem(_config["job"], "key", state._active_key())
+        state.save("tickets", {
+            "T-1": {"status": "testing", "slug": "T-1-s"},
+            "T-2": {"status": "pr_ready", "slug": "T-2-s"},
+        })
+        state.transition_ticket("T-1", "blocked")
+        resp = client.post("/api/tickets/T-1/status", json={"status": "testing"})
+        assert resp.status_code == 200, resp.text
+        assert state.load("tickets")["T-1"]["status"] == "testing"
 
 
 class TestManualTransitionEnqueuesAdvance:

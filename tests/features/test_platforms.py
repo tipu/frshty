@@ -549,3 +549,45 @@ class TestSelfId:
                                "bitbucket": {"org": "x", "user_account_id": "acct-1"},
                                "workspace": {"root": "/tmp", "repos": []}})
         assert p.self_id() == "acct-1"
+
+
+class TestGitHubCommentAuthorIsBot:
+    def test_app_author_is_flagged_by_typename(self):
+        p = _gh_platform()
+        import copy
+        import json as _json
+        response = copy.deepcopy(_THREADS_RESPONSE)
+        response["data"]["repository"]["pullRequest"]["comments"] = {"nodes": [
+            {"databaseId": 77, "body": "## LLM eval judge report",
+             "url": "http://c/77", "createdAt": "2026-01-05T00:00:00Z",
+             "updatedAt": "2026-01-05T00:00:00Z",
+             "author": {"login": "github-actions", "__typename": "Bot"}},
+        ]}
+        with patch.object(p, "_run_gh", return_value=_gh_result(stdout=_json.dumps(response))):
+            comments = p.get_pr_comments("r", 1)
+        assert next(c for c in comments if c["id"] == 77)["author_is_bot"] is True
+
+    def test_app_author_is_flagged_by_login_suffix(self):
+        p = _gh_platform()
+        import copy
+        import json as _json
+        response = copy.deepcopy(_THREADS_RESPONSE)
+        response["data"]["repository"]["pullRequest"]["comments"] = {"nodes": [
+            {"databaseId": 78, "body": "## LLM eval judge report",
+             "url": "http://c/78", "createdAt": "2026-01-05T00:00:00Z",
+             "updatedAt": "2026-01-05T00:00:00Z",
+             "author": {"login": "github-actions[bot]"}},
+        ]}
+        with patch.object(p, "_run_gh", return_value=_gh_result(stdout=_json.dumps(response))):
+            comments = p.get_pr_comments("r", 1)
+        assert next(c for c in comments if c["id"] == 78)["author_is_bot"] is True
+
+    def test_person_is_not_flagged(self):
+        p = _gh_platform()
+        import json as _json
+        with patch.object(p, "_run_gh", return_value=_gh_result(stdout=_json.dumps(_THREADS_RESPONSE))):
+            comments = p.get_pr_comments("r", 1)
+        assert all(c["author_is_bot"] is False for c in comments)
+
+    def test_the_query_asks_for_the_author_type(self):
+        assert "author{login __typename}" in GitHubPlatform._REVIEW_COMMENTS_QUERY

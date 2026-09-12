@@ -1815,3 +1815,159 @@ class TestWorktreeLockIsShared:
         assert own_prs._worktree_lock("quill/4561") is pr_autofix._worktree_lock("quill/4561")
         assert own_prs._worktree_lock("quill/4561") is git_util.worktree_lock("quill/4561")
         assert own_prs._worktree_lock("quill/4561") is not own_prs._worktree_lock("quill/4562")
+
+
+class TestBotRewriteLoop:
+    """A CI reporter edits one comment on every run. Answering each rewrite
+    pushes a commit, the push starts the next run, and the run rewrites the
+    comment again, so the PR collects commits it never asked for."""
+
+    def _run(self, comment, answered, tmp_path):
+        platform = MagicMock()
+        platform.get_pr_comments.return_value = [comment]
+        config = {"_state_dir": tmp_path, "bitbucket": {"user_account_id": "me"},
+                  "workspace": {"repos": []}}
+        with patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.run_balanced",
+                   return_value='{"results": [{"id": 0, "actionable": true, "reason": "clear"}]}'), \
+             patch("features.own_prs.q.enqueue_job"), \
+             patch("features.own_prs.log"):
+            mock_comments.has_comment_state.return_value = True
+            mock_comments.settled_comment_ids.return_value = set()
+            mock_comments.answered_comment_ids.return_value = answered
+            mock_comments.fetch_and_detect_comments.return_value = {"new": [], "edited": [comment]}
+            mock_comments.get_unprocessed_comments.return_value = []
+            mock_comments.get_deferred_comments.return_value = []
+            own_prs._check_comments(config, "test", platform, make_pr(), "http://base", seen={})
+        return mock_comments
+
+    def _bot_report(self):
+        return make_comment(
+            id=90, author_id="github-actions[bot]", author_is_bot=True,
+            comment_kind="issue_comment", resolvable=False,
+            body="## LLM eval judge report\nbrief: FAIL",
+            created_at=datetime.now(timezone.utc).isoformat(),
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    def test_rewrite_of_an_answered_bot_comment_is_not_queued_again(self, tmp_path):
+        mock_comments = self._run(self._bot_report(), {"90"}, tmp_path)
+        mock_comments.mark_comment_deferred.assert_not_called()
+        assert mock_comments.mark_comment_seen.call_args.args[3] == "90"
+
+    def test_a_bot_comment_frshty_has_not_answered_is_still_queued(self, tmp_path):
+        mock_comments = self._run(self._bot_report(), set(), tmp_path)
+        assert mock_comments.mark_comment_deferred.call_args.args[3] == "90"
+
+    def test_a_bot_comment_settled_without_a_push_is_still_queued(self, tmp_path):
+        """A bot placeholder read as needing no change, then rewritten with a
+        real finding, is new feedback: nothing was ever written for it."""
+        mock_comments = self._run(self._bot_report(), set(), tmp_path)
+        assert mock_comments.answered_comment_ids.called
+        assert mock_comments.mark_comment_deferred.call_args.args[3] == "90"
+
+    def test_a_persons_edit_of_an_answered_comment_is_still_queued(self, tmp_path):
+        human = make_comment(
+            id=91, author_id="reviewer1", body="Actually, rename this too",
+            created_at=datetime.now(timezone.utc).isoformat(),
+            updated_at=datetime.now(timezone.utc).isoformat(),
+        )
+        mock_comments = self._run(human, {"91"}, tmp_path)
+        assert mock_comments.mark_comment_deferred.call_args.args[3] == "91"
+
+
+class TestCiFixBudget:
+    """Every fix push leaves the checks queued for minutes. Refunding the
+    budget on that window lets the fixer run forever against a check that
+    keeps failing."""
+
+    def _seen_after(self, checks, tmp_path):
+        platform = MagicMock()
+        platform.get_pr_checks.return_value = checks
+        seen = {"ci_fix_attempts": 2, "ci_cap_emitted": True, "ci_fix_sha": "abc"}
+        own_prs._check_ci({"_state_dir": tmp_path}, platform, make_pr(), seen, "http://base")
+        return seen
+
+    def test_pending_checks_do_not_refund_the_budget(self, tmp_path):
+        seen = self._seen_after([{"state": "SUCCESS", "name": "lint"},
+                                 {"state": "QUEUED", "name": "evals"}], tmp_path)
+        assert seen["ci_fix_attempts"] == 2
+        assert "ci_fix_sha" not in seen
+
+    def test_an_empty_check_list_does_not_refund_the_budget(self, tmp_path):
+        assert self._seen_after([], tmp_path)["ci_fix_attempts"] == 2
+
+    def test_a_green_pr_refunds_the_budget(self, tmp_path):
+        seen = self._seen_after([{"state": "SUCCESS", "name": "lint"}], tmp_path)
+        assert "ci_fix_attempts" not in seen
+        assert "ci_cap_emitted" not in seen
+
+
+class TestUnrelatedCheckRecord:
+    """A base sync gives the PR a new head every hour and a new head re-opens
+    triage, so a flaky check gets judged again and again until one roll says
+    the PR caused it."""
+
+    def _platform(self, checks):
+        platform = MagicMock()
+        platform.get_pr_checks.return_value = checks
+        return platform
+
+    def _triage(self, platform, seen, tmp_path, head="head1"):
+        worktree = tmp_path / "wt"
+        worktree.mkdir(exist_ok=True)
+        with patch("features.own_prs._ensure_worktree", return_value=worktree), \
+             patch("features.own_prs.subprocess.run") as mock_run, \
+             patch("features.pr_ci.triage_and_fix_pr",
+                   return_value={"result": "unrelated", "attempts": 0,
+                                 "failed_names": ["evals"], "reason": "flaky"}) as mock_triage, \
+             patch("features.own_prs.log.emit"):
+            mock_run.return_value = MagicMock(returncode=0, stdout=f"{head}\n")
+            own_prs._check_ci({"_state_dir": tmp_path}, platform, make_pr(), seen, "http://base")
+        return mock_triage
+
+    def test_a_check_already_read_as_unrelated_is_not_judged_again(self, tmp_path):
+        platform = self._platform([{"state": "FAILURE", "name": "evals"}])
+        seen = {"ci_unrelated_checks": ["evals"], "ci_unrelated_head": "head1"}
+        assert not self._triage(platform, seen, tmp_path).called
+
+    def test_a_base_merge_head_keeps_the_verdict(self, tmp_path):
+        platform = self._platform([{"state": "FAILURE", "name": "evals"}])
+        seen = {"ci_unrelated_checks": ["evals"], "ci_unrelated_head": "head0",
+                "base_merge_pending": True}
+        assert not self._triage(platform, seen, tmp_path).called
+        assert seen["ci_unrelated_head"] == "head1"
+
+    def test_any_other_new_head_earns_a_fresh_reading(self, tmp_path):
+        platform = self._platform([{"state": "FAILURE", "name": "evals"}])
+        seen = {"ci_unrelated_checks": ["evals"], "ci_unrelated_head": "head0"}
+        assert self._triage(platform, seen, tmp_path).called
+
+    def test_a_new_failing_check_still_reaches_triage(self, tmp_path):
+        platform = self._platform([{"state": "FAILURE", "name": "evals"},
+                                   {"state": "FAILURE", "name": "lint"}])
+        seen = {"ci_unrelated_checks": ["evals"], "ci_unrelated_head": "head1"}
+        assert self._triage(platform, seen, tmp_path).called
+
+    def test_an_unrelated_verdict_is_recorded(self, tmp_path):
+        platform = self._platform([{"state": "FAILURE", "name": "evals"}])
+        seen = {}
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        with patch("features.own_prs._ensure_worktree", return_value=worktree), \
+             patch("features.own_prs.subprocess.run") as mock_run, \
+             patch("features.pr_ci.triage_and_fix_pr",
+                   return_value={"result": "unrelated", "attempts": 0,
+                                 "failed_names": ["evals"], "reason": "flaky"}), \
+             patch("features.own_prs.log.emit"):
+            mock_run.return_value = MagicMock(returncode=0, stdout="head1\n")
+            own_prs._check_ci({"_state_dir": tmp_path}, platform, make_pr(), seen, "http://base")
+        assert seen["ci_unrelated_checks"] == ["evals"]
+
+    def test_a_recovered_check_is_forgotten(self, tmp_path):
+        platform = self._platform([{"state": "SUCCESS", "name": "evals"},
+                                   {"state": "FAILURE", "name": "lint"}])
+        seen = {"ci_unrelated_checks": ["evals"]}
+        with patch("features.own_prs._ensure_worktree", return_value=None):
+            own_prs._check_ci({"_state_dir": tmp_path}, platform, make_pr(), seen, "http://base")
+        assert seen["ci_unrelated_checks"] == []

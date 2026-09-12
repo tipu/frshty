@@ -58,7 +58,6 @@ MAX_DETAIL_CHARS = 600
 _STATE_MODULE = "watchdog"
 _LIVE_JOB_STATES = ("queued", "running")
 LIVE_JOB_MAX_AGE_HOURS = 6
-_FINISHED_ITEM_STATES = ("needs_ack", "done")
 _FENCE_BUCKET = "migration"
 _NON_COVERING_JOBS = frozenset({"advance_ticket"})
 
@@ -86,6 +85,10 @@ RULES = (
     Rule("pr_failed_tickets", 6, 48,
          "the ticket pipeline parked this ticket at pr_failed. It retries "
          "nothing further on its own."),
+    Rule("blocked_tickets", 6, 48,
+         "a pipeline task failed and parked this ticket at blocked to release "
+         "the repo gate. Nothing retries it, and the only exit is a manual "
+         "restart, so it sits at blocked until somebody notices."),
     Rule("in_review_no_ci", 48, 72,
          "this ticket has sat in review for two days and CI has still not "
          "gone green. A PR whose checks are simply running clears this bucket "
@@ -156,6 +159,13 @@ def _entries(bucket: str, instance_key: str, config: dict) -> list[Entry]:
                   f"pr_failed_reason={r.get('pr_failed_reason') or 'unrecorded'},"
                   f" ci_fix_attempts={r.get('ci_fix_attempts', 0)}")
             for r in staleness.pr_failed_tickets(instance_key)
+        ]
+    if bucket == "blocked_tickets":
+        return [
+            Entry(r["ticket_key"], r["ticket_key"], r["ticket_key"],
+                  f"blocked_at={r.get('blocked_at') or 'unrecorded'},"
+                  f" reason={r.get('blocked_reason') or 'unrecorded'}")
+            for r in staleness.blocked_tickets(instance_key)
         ]
     if bucket == "in_review_no_ci":
         return [
@@ -312,8 +322,10 @@ def covered_by_open_task(entry: Entry, instance_key: str) -> int | None:
     A task the operator typed himself counts. So does a doctor run he started
     from the ticket page: its objective carries the ticket key. A finished item
     does not: its answer has already been delivered, so a condition that
-    outlived it is a new question. Neither does an item whose latest run never
-    reached an agent, which is what work_store.run_reached_an_agent answers:
+    outlived it is a new question. Neither does a canceled one: the operator
+    stopped that work, so it answers nothing and must not silence a retry.
+    Neither does an item whose latest run never reached an agent, which is
+    what work_store.run_reached_an_agent answers:
     tmux that did not start, a kickoff that was never taken, or an agent that
     quit on its directory-trust question. No agent read that objective, so the
     item covers nothing and would otherwise block every retry forever. The
@@ -340,14 +352,14 @@ def covered_by_open_task(entry: Entry, instance_key: str) -> int | None:
     never covers a PR, because a bare api#12 repeats across every project with
     a repo of that name."""
     unscoped_covers = bool(entry.ticket_key) and _ticket_key_is_unique(entry.ticket_key)
-    placeholders = ", ".join("?" for _ in _FINISHED_ITEM_STATES)
+    placeholders = ", ".join("?" for _ in work_store.CLOSED_STATES)
     rows = db.query_all(
         "SELECT w.id, w.objective, w.contexts, w.state,"
         " (SELECT r.id FROM work_runs r WHERE r.work_item_id = w.id"
         "  ORDER BY r.id DESC LIMIT 1) AS last_run_id"
         " FROM work_items w"
         f" WHERE w.archived_at IS NULL AND w.state NOT IN ({placeholders})",
-        tuple(_FINISHED_ITEM_STATES),
+        tuple(work_store.CLOSED_STATES),
     )
     needles = _needles(entry)
     for r in rows:

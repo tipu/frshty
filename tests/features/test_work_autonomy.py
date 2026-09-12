@@ -3,14 +3,16 @@
 Each class covers one finding of the autonomy review: the delivery rule, the
 push gate baseline, the doctor's repair scope, the debrief retry budget,
 progress lines, the stop detector, duplicate questions, the commit gate
-rewrite, auto-archiving, and the proposals and follow-ups the board acts on by
-itself.
+rewrite, auto-archiving, the proposals the board opens by itself, and the
+follow-ups it puts in front of the operator.
 """
 import json
 import os
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 import core.db as db
 import core.llm as llm
@@ -24,6 +26,14 @@ def _mkrun(objective="autonomy item", provider="claude"):
     sid = f"sid-auto-{item_id}"
     work_store.add_run(item_id, sid, f"work-{item_id}", "/tmp", provider=provider)
     return item_id, sid
+
+
+def _board_row(item_id):
+    for rows in work_store.grouped_items().values():
+        for row in rows:
+            if row["id"] == item_id:
+                return row
+    raise AssertionError(f"work item {item_id} is on no board group")
 
 
 def _events(item_id, kind):
@@ -54,13 +64,13 @@ def _repo_with_origin(tmp_path):
 
 class TestDeliveryRule:
     def test_launch_and_continue_prompts_put_delivery_inside_the_objective(self):
-        for prompt in (work_store.DELIVERY_RULE, work_store.CONTINUE_PROMPT):
+        for prompt in (work_store.DELIVERY_RULE, work_store.continue_prompt()):
             assert "Delivery is part of the objective" in prompt
             assert "Do not end with an offer" in prompt
 
     def test_progress_rule_names_the_marker(self):
         assert work_store.PROGRESS_MARKER in work_store.PROGRESS_RULE
-        assert work_store.PROGRESS_MARKER in work_store.CONTINUE_PROMPT
+        assert work_store.PROGRESS_MARKER in work_store.continue_prompt()
 
 
 class TestPushGateBaseline:
@@ -429,6 +439,24 @@ class TestProgressLines:
         assert work_store.record_progress(sid, "", texts=["ordinary text"]) == ""
         assert _events(item_id, "progress") == []
 
+    def test_the_board_row_carries_the_newest_progress_line(self):
+        item_id, sid = _mkrun("board progress")
+        work_store.record_progress(sid, "", texts=["PROGRESS: first", "PROGRESS: second"])
+        assert _board_row(item_id)["latest_progress"] == "second"
+
+    def test_a_self_reported_finish_does_not_hide_the_progress_line(self):
+        item_id, sid = _mkrun("finished progress")
+        work_store.record_progress(sid, "", texts=["PROGRESS: shipped the fix"])
+        db.execute("UPDATE work_items SET current_checkpoint = ?, state = 'needs_ack' "
+                   "WHERE id = ?", ("the tail of the last message", item_id))
+        row = _board_row(item_id)
+        assert row["current_checkpoint"] == "the tail of the last message"
+        assert row["latest_progress"] == "shipped the fix"
+
+    def test_a_row_without_a_progress_line_reports_an_empty_string(self):
+        item_id, _ = _mkrun("silent item")
+        assert _board_row(item_id)["latest_progress"] == ""
+
 
 class TestStopDetector:
     def test_a_question_mark_alone_no_longer_parks_the_item(self):
@@ -759,57 +787,104 @@ class TestRequiredFollowups:
                 (item_id, kind, "push the branch", 1 if required else 0, now, now))
         return item_id
 
-    def test_a_required_work_item_followup_runs_by_itself(self, monkeypatch):
-        item_id = self._finished_with_followup("required delivery", True)
-        monkeypatch.setattr(work_debrief, "_deliver_work_item",
-                            lambda row, contexts, slack, agent: "launched work item #999")
-        sent = work_debrief.dispatch_required_followups()
-        assert [s["item_id"] for s in sent] == [item_id]
-        assert len(_events(item_id, "followup_auto_sent")) == 1
+    def _children(self, item_id):
+        return db.query_all(
+            "SELECT id, state, contexts, launch_cwd, critical, objective "
+            "FROM work_items WHERE source_item_id = ? ORDER BY id", (item_id,))
 
-    def test_an_automatic_followup_inherits_the_source_task_context(self, monkeypatch):
-        """launch_followup reads an omitted project, archive or agent as
-        "inherit". Naming them launches a codex task's follow-up as claude in
-        the default workspace."""
-        self._finished_with_followup("inherit context", True)
-        seen = {}
-        monkeypatch.setattr(
-            work_debrief, "_deliver_work_item",
-            lambda row, contexts, slack, agent: seen.update(
-                contexts=contexts, slack=slack, agent=agent) or "launched work item #999")
-        work_debrief.dispatch_required_followups()
-        assert seen == {"contexts": None, "slack": None, "agent": ""}
+    def test_a_required_work_item_followup_asks_the_operator_first(self, monkeypatch):
+        item_id = self._finished_with_followup("required delivery", True)
+        monkeypatch.setattr(work_launch, "project_entries", lambda: [])
+        opened = work_debrief.propose_required_followups()
+
+        assert [o["item_id"] for o in opened] == [item_id]
+        assert len(_events(item_id, "followup_proposed")) == 1
+        children = self._children(item_id)
+        assert len(children) == 1
+        assert children[0]["state"] == work_store.PROPOSED_STATE
+        assert children[0]["objective"] == "push the branch"
+        assert db.query_all("SELECT id FROM work_runs WHERE work_item_id = ?",
+                            (children[0]["id"],)) == [], "nothing runs until approval"
+        assert db.query_one("SELECT status FROM work_followups WHERE work_item_id = ?",
+                            (item_id,))["status"] == "proposed"
+        assert work_store.grouped_items()["proposed"], "the operator is asked on the board"
+
+    def test_the_proposal_inherits_the_source_task_context(self, monkeypatch):
+        """launch_proposed reads an omitted project, archive or directory off
+        the proposal row. A proposal that carried none would run a codex
+        task's follow-up as claude in the default workspace."""
+        item_id = self._finished_with_followup("inherit context", True)
+        with db.tx() as c:
+            c.execute("UPDATE work_items SET contexts = ?, critical = 1 WHERE id = ?",
+                      (f"aimyable,{work_launch.SLACK_LABEL}", item_id))
+        monkeypatch.setattr(work_launch, "project_entries", lambda: [])
+        work_debrief.propose_required_followups()
+
+        child = self._children(item_id)[0]
+        assert child["contexts"] == f"aimyable,{work_launch.SLACK_LABEL}"
+        assert child["launch_cwd"] == "/tmp"
+        assert child["critical"] == 1
 
     def test_an_optional_followup_waits_for_the_operator(self, monkeypatch):
         item_id = self._finished_with_followup("optional expansion", False)
-        monkeypatch.setattr(work_debrief, "_deliver_work_item",
-                            lambda row, contexts, slack, agent: "launched work item #999")
-        assert [s["item_id"] for s in work_debrief.dispatch_required_followups()] != [item_id]
+        monkeypatch.setattr(work_launch, "project_entries", lambda: [])
+        assert [o["item_id"] for o in work_debrief.propose_required_followups()] != [item_id]
+        assert self._children(item_id) == []
 
-    def test_a_slack_followup_is_never_sent_by_itself(self, monkeypatch):
+    def test_a_slack_followup_is_never_proposed_by_itself(self, monkeypatch):
         item_id = self._finished_with_followup("slack draft", True, kind="slack_message")
-        monkeypatch.setattr(work_debrief, "_deliver_slack", lambda row: "sent")
-        assert [s["item_id"] for s in work_debrief.dispatch_required_followups()] != [item_id]
+        monkeypatch.setattr(work_launch, "project_entries", lambda: [])
+        assert [o["item_id"] for o in work_debrief.propose_required_followups()] != [item_id]
+        assert self._children(item_id) == []
 
-    def test_the_automatic_chain_stops_at_its_depth(self, monkeypatch):
-        first = self._finished_with_followup("chain root", True)
-        monkeypatch.setattr(work_debrief, "_deliver_work_item",
-                            lambda row, contexts, slack, agent: "launched work item #999")
-        work_debrief.dispatch_required_followups()
-        chain = [first]
-        for step in range(work_debrief.AUTO_FOLLOWUP_DEPTH):
-            child = self._finished_with_followup(f"chain step {step}", True)
-            with db.tx() as c:
-                c.execute("UPDATE work_items SET source_item_id = ? WHERE id = ?",
-                          (chain[-1], child))
-            chain.append(child)
-            work_debrief.dispatch_required_followups()
-        assert _events(chain[-1], "followup_auto_sent") == []
+    def test_one_draft_opens_one_proposal(self, monkeypatch):
+        item_id = self._finished_with_followup("proposed once", True)
+        monkeypatch.setattr(work_launch, "project_entries", lambda: [])
+        work_debrief.propose_required_followups()
+        work_debrief.propose_required_followups()
+        assert len(self._children(item_id)) == 1
+
+    def test_no_followup_is_launched_without_the_operator(self, monkeypatch):
+        item_id = self._finished_with_followup("never launched", True)
+        monkeypatch.setattr(work_launch, "project_entries", lambda: [])
+        monkeypatch.setattr(work_launch, "launch",
+                            lambda *a, **k: pytest.fail("a follow-up launched itself"))
+        work_debrief.propose_required_followups()
+        assert _events(item_id, "followup_sent") == []
+
+    def test_a_string_false_does_not_mark_a_followup_required(self):
+        parsed = work_debrief._parse_debrief(json.dumps({"summary": "s", "followups": [
+            {"kind": "work_item", "required": "false", "unfinished": "push",
+             "draft": "push it"},
+        ]}))
+        assert parsed["followups"][0]["required"] is False
+
+    def test_a_draft_on_a_long_archived_task_is_not_proposed(self, monkeypatch):
+        """Item 9382 came from a task archived fourteen days earlier. The
+        operator had closed that task, so its draft must not reach the board
+        again."""
+        item_id = self._finished_with_followup("archived long ago", True)
+        stale = (datetime.now(timezone.utc)
+                 - timedelta(hours=work_debrief.ARCHIVE_WINDOW_HOURS + 1)).isoformat()
+        db.execute("UPDATE work_items SET archived_at = ? WHERE id = ?", (stale, item_id))
+        monkeypatch.setattr(work_launch, "project_entries", lambda: [])
+        assert [o["item_id"] for o in work_debrief.propose_required_followups()] != [item_id]
+        assert self._children(item_id) == []
+        assert _events(item_id, "followup_proposed") == []
+
+    def test_a_draft_on_a_freshly_archived_task_is_still_proposed(self, monkeypatch):
+        item_id = self._finished_with_followup("archived just now", True)
+        db.execute("UPDATE work_items SET archived_at = ? WHERE id = ?",
+                   (work_store._now(), item_id))
+        monkeypatch.setattr(work_launch, "project_entries", lambda: [])
+        assert [o["item_id"] for o in work_debrief.propose_required_followups()] == [item_id]
+        assert len(self._children(item_id)) == 1
 
     def test_the_parser_only_marks_a_work_item_required(self):
         parsed = work_debrief._parse_debrief(json.dumps({"summary": "s", "followups": [
-            {"kind": "work_item", "required": True, "draft": "push it"},
-            {"kind": "slack_message", "required": True, "recipient": "Sam", "draft": "ping"},
+            {"kind": "work_item", "required": True, "unfinished": "push", "draft": "push it"},
+            {"kind": "slack_message", "required": True, "unfinished": "push",
+             "recipient": "Sam", "draft": "ping"},
         ]}))
         assert parsed["followups"][0]["required"] is True
         assert parsed["followups"][1]["required"] is False
