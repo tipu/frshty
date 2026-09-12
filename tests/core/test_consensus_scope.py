@@ -230,6 +230,18 @@ class TestReportSummary:
         out = consensus_scope.report_summary(tmp_path / "nope.md")
         assert out == {"votes": "", "dropped": "", "findings": []}
 
+    def test_only_the_first_bytes_are_read(self, tmp_path):
+        """A web request reads this file, and it holds three reviewer
+        transcripts. A report past the cap must not be pulled into memory
+        whole."""
+        report = self._report(tmp_path, "\n".join(
+            ["Votes: agy=FAIL", "", "## agy", "", "x" * consensus_scope.MAX_REPORT_BYTES,
+             "", "- `repo`: out of scope", "", "SCOPE VERDICT: FAIL", ""]))
+        assert report.stat().st_size > consensus_scope.MAX_REPORT_BYTES
+        out = consensus_scope.report_summary(report)
+        assert out["votes"] == "agy=FAIL"
+        assert out["findings"] == []
+
     def test_findings_are_capped(self, tmp_path):
         bullets = [f"- finding {i}" for i in range(30)]
         report = self._report(tmp_path, "\n".join(

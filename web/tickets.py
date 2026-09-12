@@ -359,6 +359,11 @@ def _scope_blocked_response(ticket_key: str, ticket: dict, slug: str, scope: str
                          "override on the ticket.")
         return JSONResponse(body, status_code=409)
 
+    # The report on disk belongs to the verdict this fingerprint replaced, so it
+    # describes code that is no longer on the branch. Withhold it rather than
+    # send the operator to a review that does not apply.
+    body["report"] = ""
+    body["report_url"] = ""
     queue_state = _scope_review_queue_state(ticket_key)
     running = {"queued": "The review is on the queue now and takes up to 30 minutes.",
                "running": "The review is already queued and takes up to 30 minutes."}.get(
