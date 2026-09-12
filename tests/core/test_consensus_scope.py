@@ -129,3 +129,59 @@ class TestRunScopeReview:
     def test_no_verdicts_returns_none(self, tmp_path, scope_config):
         (result, _) = self._run(tmp_path, scope_config, _fanout_result())
         assert result[0] is None
+
+
+class TestReposWithBranchDiff:
+    """The shared repo enumeration that both the scope review and the
+    tri-review prompt build their repo list from."""
+
+    def test_empty_without_slug(self, scope_config):
+        assert consensus_scope.repos_with_branch_diff(scope_config, "") == []
+
+    def test_skips_a_missing_worktree(self, tmp_path, scope_config):
+        missing = tmp_path / "tickets" / "PROJ-1-x" / "gone"
+        with patch("core.consensus_scope.get_repos", return_value=[{"name": "gone"}]), \
+             patch("core.consensus_scope.ticket_worktree_path", return_value=missing):
+            assert consensus_scope.repos_with_branch_diff(scope_config, "PROJ-1-x") == []
+
+    def test_skips_a_worktree_with_no_branch_diff(self, tmp_path, scope_config):
+        wt = tmp_path / "tickets" / "PROJ-1-x" / "clean"
+        wt.mkdir(parents=True)
+        _git(wt, "init", "-q", "-b", "main")
+        _git(wt, "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "--allow-empty", "-q", "-m", "base")
+        sha = subprocess.run(["git", "-C", str(wt), "rev-parse", "HEAD"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        _git(wt, "update-ref", "refs/remotes/origin/main", sha)
+        with patch("core.consensus_scope.get_repos", return_value=[{"name": "clean"}]), \
+             patch("core.consensus_scope.ticket_worktree_path", return_value=wt):
+            assert consensus_scope.repos_with_branch_diff(scope_config, "PROJ-1-x") == []
+
+    def test_returns_every_repo_that_carries_a_branch_diff(self, tmp_path, scope_config):
+        slug = "PROJ-1-x"
+        a = _make_worktree(tmp_path / "tickets" / slug / "app")
+        b = _make_worktree(tmp_path / "tickets" / slug / "schema")
+        with patch("core.consensus_scope.get_repos",
+                   return_value=[{"name": "app"}, {"name": "schema"}]), \
+             patch("core.consensus_scope.ticket_worktree_path",
+                   side_effect=lambda c, s, name: tmp_path / "tickets" / s / name):
+            found = consensus_scope.repos_with_branch_diff(scope_config, slug)
+        assert found == [("app", a, "main"), ("schema", b, "main")]
+
+
+class TestScopeDirective:
+    """The directive must be able to report a dead-code finding. Running the
+    prior wording against windows-rpa-client-schema at e374679 returned
+    SCOPE VERDICT: PASS over an enum with no caller, because the prompt told
+    every voice that code quality must not affect the verdict."""
+
+    def test_asks_for_a_caller_or_a_reader(self):
+        d = consensus_scope.SCOPE_DIRECTIVE
+        assert "Reachability" in d
+        assert "name a caller or a reader" in d
+        assert "Answer three questions" in d
+
+    def test_does_not_exempt_reachability_from_the_verdict(self):
+        d = consensus_scope.SCOPE_DIRECTIVE
+        assert "Code quality, style, and correctness are reviewed elsewhere" not in d
+        assert "an addition with no caller and no reader must fail this review" in d
