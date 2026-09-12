@@ -183,7 +183,7 @@
                                 {{ submitting ? 'Submitting…' : 'Open the PR anyway' }}
                             </button>
                             <button @click="dismissBlock" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white text-sm px-4 py-2 rounded">Back to the PR</button>
-                            <button v-if="block.scope_review !== 'fail'" @click="submit(true)" :disabled="submitting"
+                            <button v-if="block.scope_review !== 'fail' && block.queue_state === ''" @click="submit(true)" :disabled="submitting"
                                     class="text-xs px-3 py-2 rounded border border-gray-600 text-gray-400 hover:text-gray-200 hover:border-gray-400"
                                     :class="{ 'opacity-50 cursor-not-allowed': submitting }"
                                     title="Open the PR without waiting for the review. frshty records the override on the ticket.">
