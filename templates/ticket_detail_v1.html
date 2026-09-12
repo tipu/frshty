@@ -446,7 +446,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
     <div ref="terminalContainer" id="terminal-container" style="height: 500px; padding: 4px;"></div>
 </div>
 
-<pr-submit-modal :open="prModalOpen" :repos="prRepos" :submitting="prSubmitting"
+<pr-submit-modal :open="prModalOpen" :repos="prRepos" :submitting="prSubmitting" :blocked="prBlocked"
                  @close="closePrModal" @submit="onPrSubmit" />
 
 </div><!-- /#app -->
@@ -500,6 +500,7 @@ frshtyApp({
         const loadError = ref(false);
         const prModalOpen = ref(false);
         const prRepos = ref([]);
+        const prBlocked = ref(null);
         const prSubmitting = ref(false);
         const sections = reactive({ notes: false, history: false });
         const docExpanded = reactive({});
@@ -1008,6 +1009,7 @@ frshtyApp({
             }
             const data = await r.json();
             prRepos.value = data.repos || [];
+            prBlocked.value = null;
             prModalOpen.value = true;
         }
 
@@ -1029,7 +1031,8 @@ frshtyApp({
                     closePrModal();
                     load();
                 } else {
-                    const err = await resp.json();
+                    const err = await resp.json().catch(() => ({}));
+                    if (err.scope_review) { prBlocked.value = err; return; }
                     alert('Error: ' + (err.error || 'Unknown error'));
                 }
             } catch (e) {
@@ -1227,7 +1230,7 @@ frshtyApp({
             noteText, pmFindings, releaseInput, releaseError, existingReleases,
             activeTab, maximized, resetting, eventFilter, setStateDdValue,
             loadError, sections, docExpanded, replyDrafts, jobOutput,
-            prModalOpen, prRepos, prSubmitting,
+            prModalOpen, prRepos, prSubmitting, prBlocked,
             jobOutputEl, terminalContainer,
             state, status, branch, terminalAlive, inProgress, stalled, hasPrs, hasCode, lockedAutoPr,
             prFailReasonLabel, prFailReasonTip,

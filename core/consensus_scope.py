@@ -185,3 +185,70 @@ def run_scope_review(config: dict, ticket_dir: Path, slug: str, *,
     if dropped:
         reason += "; dropped " + ", ".join(sorted(dropped))
     return verdict, reason
+
+
+# The inner classes exclude the delimiters they scan past, so no start
+# position rescans the rest of the line. A report built out of "[" or
+# out of unclosed links is then linear work, not quadratic.
+_REPORT_LINK_RE = re.compile(r"\[([^\[\]]*)\]\([^()\s]*\)")
+# Prefix only. A pattern that also captured the text would need two greedy
+# whitespace runs around it, and a reviewer that emitted a bullet marker
+# followed by a long run of spaces would then backtrack quadratically.
+_REPORT_BULLET_RE = re.compile(r"^ {0,3}[-*][ \t]")
+MAX_REPORT_FINDINGS = 12
+MAX_FINDING_CHARS = 400
+MAX_REPORT_BYTES = 512 * 1024
+
+
+def report_summary(report: Path) -> dict:
+    """Operator-facing summary of a docs/scope-review.md written by
+    _write_report: the per-voice votes, the voices that were dropped, and the
+    offending changes the failing voices named. The output contract asks every
+    FAIL voice to print a bullet list of the offending changes directly above
+    its verdict line, so those bullets are the findings. Markdown links are
+    flattened to their text because the summary renders as plain text. Empty
+    fields when the report is missing or carries none.
+
+    The report holds three reviewer transcripts and a web request reads it, so
+    only the first MAX_REPORT_BYTES are read and the scan stops at
+    MAX_REPORT_FINDINGS. A runaway reviewer cannot make one Submit PR click
+    allocate an unbounded string."""
+    try:
+        with report.open("rb") as fh:
+            raw = fh.read(MAX_REPORT_BYTES)
+    except OSError:
+        return {"votes": "", "dropped": "", "findings": []}
+    lines = raw.decode(errors="replace").splitlines()
+    votes = dropped = ""
+    findings: list[str] = []
+    for i, line in enumerate(lines):
+        if line.startswith("Votes: ") and not votes:
+            votes = line[len("Votes: "):].strip()
+            continue
+        if line.startswith("Dropped voices: ") and not dropped:
+            dropped = line[len("Dropped voices: "):].strip()
+            continue
+        verdict = _SCOPE_VERDICT_RE.match(line)
+        if not verdict or verdict.group(1).upper() != "FAIL":
+            continue
+        j = i - 1
+        while j >= 0 and not lines[j].strip():
+            j -= 1
+        block = []
+        while j >= 0:
+            bullet = _REPORT_BULLET_RE.match(lines[j])
+            if not bullet:
+                break
+            text = lines[j][bullet.end():].strip()
+            if not text:
+                break
+            block.append(_REPORT_LINK_RE.sub(r"\1", text)[:MAX_FINDING_CHARS])
+            j -= 1
+        for finding in reversed(block):
+            if finding not in findings:
+                findings.append(finding)
+            if len(findings) >= MAX_REPORT_FINDINGS:
+                break
+        if len(findings) >= MAX_REPORT_FINDINGS:
+            break
+    return {"votes": votes, "dropped": dropped, "findings": findings}

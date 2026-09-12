@@ -2483,6 +2483,7 @@ def scope_review(ctx: TaskContext) -> TaskResult:
         new["scope_review"] = {
             "fingerprint": fingerprint,
             "verdict": verdict,
+            "reason": reason,
             "at": datetime.now(timezone.utc).isoformat(),
         }
         return new
