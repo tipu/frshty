@@ -693,6 +693,15 @@ class TestSubmitPrScopeGate:
         assert getattr(resp, "status_code", 200) == 200, getattr(resp, "body", resp)
         platform.create_pr.assert_called_once()
 
+    def test_only_a_json_true_overrides_the_gate(self, client, tmp_path):
+        for i, value in enumerate(["false", "0", 1, {}, [], "true"]):
+            key = f"SCOPE-7-{i}"
+            resp, platform = self._submit(client, tmp_path, key, "fail",
+                                          force=value)
+            assert resp.status_code == 409, (value, getattr(resp, "body", resp))
+            platform.create_pr.assert_not_called()
+            assert state.load("tickets")[key]["status"] == "pr_ready"
+
 
 class TestDiscardTicket:
     def test_discard_removes_dir_and_state(self, client, tmp_path):
