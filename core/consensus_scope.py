@@ -185,3 +185,49 @@ def run_scope_review(config: dict, ticket_dir: Path, slug: str, *,
     if dropped:
         reason += "; dropped " + ", ".join(sorted(dropped))
     return verdict, reason
+
+
+_REPORT_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+_REPORT_BULLET_RE = re.compile(r"^\s{0,3}[-*]\s+(.*\S)\s*$")
+MAX_REPORT_FINDINGS = 12
+MAX_FINDING_CHARS = 400
+
+
+def report_summary(report: Path) -> dict:
+    """Operator-facing summary of a docs/scope-review.md written by
+    _write_report: the per-voice votes, the voices that were dropped, and the
+    offending changes the failing voices named. The output contract asks every
+    FAIL voice to print a bullet list of the offending changes directly above
+    its verdict line, so those bullets are the findings. Markdown links are
+    flattened to their text because the summary renders as plain text. Empty
+    fields when the report is missing or carries none."""
+    try:
+        lines = report.read_text(errors="replace").splitlines()
+    except OSError:
+        return {"votes": "", "dropped": "", "findings": []}
+    votes = dropped = ""
+    findings: list[str] = []
+    for i, line in enumerate(lines):
+        if line.startswith("Votes: ") and not votes:
+            votes = line[len("Votes: "):].strip()
+            continue
+        if line.startswith("Dropped voices: ") and not dropped:
+            dropped = line[len("Dropped voices: "):].strip()
+            continue
+        verdict = _SCOPE_VERDICT_RE.match(line)
+        if not verdict or verdict.group(1).upper() != "FAIL":
+            continue
+        j = i - 1
+        while j >= 0 and not lines[j].strip():
+            j -= 1
+        block = []
+        while j >= 0:
+            bullet = _REPORT_BULLET_RE.match(lines[j])
+            if not bullet:
+                break
+            block.append(_REPORT_LINK_RE.sub(r"\1", bullet.group(1))[:MAX_FINDING_CHARS])
+            j -= 1
+        findings.extend(reversed(block))
+    unique = list(dict.fromkeys(findings))
+    return {"votes": votes, "dropped": dropped,
+            "findings": unique[:MAX_REPORT_FINDINGS]}

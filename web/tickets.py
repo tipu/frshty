@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.websockets import WebSocket
 
 import core.config as cfg
+import core.consensus_scope as consensus_scope
 import core.db as db
 import core.git_util as git_util
 import core.log as log
@@ -309,6 +310,68 @@ async def api_submit_pr(ticket_key: str, request: Request):
     return await asyncio.to_thread(_submit_pr_sync, ticket_key, data)
 
 
+SCOPE_GATE_WHAT = ("Three reviewers (claude, codex and agy) read the branch diff and vote on "
+                   "one question: does every change on the branch serve this ticket? A FAIL vote "
+                   "holds the PR.")
+
+
+def _scope_review_queue_state(ticket_key: str) -> str:
+    """Make sure a scope review is on its way for a ticket whose verdict is
+    stale. Returns "running" when one was already queued or running, "queued"
+    when this call enqueued one, and "" when the queue refused it — the LLM
+    budget guard is on, or the stage failed too many times in the retry
+    window."""
+    instance_key = state.active_instance_key()
+    if not instance_key:
+        return ""
+    jobs = q.jobs_for_ticket(instance_key, ticket_key)
+    if any(j["task"] == "scope_review" and j["status"] in ("queued", "running")
+           for j in jobs):
+        return "running"
+    job_id = _tickets_mod._enqueue_stage(instance_key, ticket_key, "scope_review")
+    return "queued" if job_id is not None else ""
+
+
+def _scope_blocked_response(ticket_key: str, ticket: dict, slug: str, scope: str):
+    """409 for a PR that the consensus scope gate holds.
+
+    The body says what the gate is, what the reviewers found, and which two
+    exits the operator has, because the alternative the caller sees is a bare
+    error string. A stale verdict ("pending") needs no decision at all, so this
+    also puts a fresh review on the queue."""
+    ws = _config["workspace"]
+    report = Path(ws["root"]) / ws["tickets_dir"] / slug / "docs" / "scope-review.md"
+    rec = ticket.get("scope_review") or {}
+    body = {"scope_review": scope, "can_force": True,
+            "what": SCOPE_GATE_WHAT,
+            "report": str(report),
+            "report_url": (f"/api/tickets/{ticket_key}/docs/scope-review.md"
+                           if report.is_file() else ""),
+            "reason": rec.get("reason", ""), "reviewed_at": rec.get("at", ""),
+            "votes": "", "dropped": "", "findings": []}
+    if scope == "fail":
+        summary = consensus_scope.report_summary(report)
+        body.update(summary)
+        body["reason"] = body["reason"] or summary["votes"]
+        body["error"] = ("The consensus scope review voted FAIL on this branch, so the PR is "
+                         "held. Take the changes it names off the branch and the review runs "
+                         "again by itself, or open the PR anyway and frshty records the "
+                         "override on the ticket.")
+        return JSONResponse(body, status_code=409)
+
+    queue_state = _scope_review_queue_state(ticket_key)
+    running = {"queued": "The review is on the queue now and takes up to 30 minutes.",
+               "running": "The review is already queued and takes up to 30 minutes."}.get(
+        queue_state,
+        "frshty could not queue the review: the LLM budget guard is on, or the review "
+        "failed repeatedly. Check the ticket's jobs.")
+    body["queue_state"] = queue_state
+    body["error"] = ("No consensus scope review has voted on the code that is on the branch "
+                     f"now, so the PR is held. {running} Submit again once it passes, or open "
+                     "the PR anyway and frshty records the override on the ticket.")
+    return JSONResponse(body, status_code=409)
+
+
 def _submit_pr_sync(ticket_key: str, data: dict):
     repos_in = data.get("repos") or []
     if not isinstance(repos_in, list) or not repos_in:
@@ -362,15 +425,7 @@ def _submit_pr_sync(ticket_key: str, data: dict):
     scope = _tickets_mod._scope_review_state(_config, ticket)
     force = data.get("force") is True
     if scope in ("pending", "fail") and not force:
-        ws = _config["workspace"]
-        report = Path(ws["root"]) / ws["tickets_dir"] / slug / "docs" / "scope-review.md"
-        return JSONResponse(
-            {"error": f"consensus scope review is {scope}; PR creation is blocked. "
-                      f"Resubmit with force: true to open the PR anyway",
-             "scope_review": scope,
-             "reason": (ticket.get("scope_review") or {}).get("reason", ""),
-             "report": str(report)},
-            status_code=409)
+        return _scope_blocked_response(ticket_key, ticket, slug, scope)
 
     for r, wt, base_branch, push_branch in staged:
         repo_name = r["name"]
