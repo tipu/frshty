@@ -58,12 +58,23 @@ class TestCiFixPromptNamesTheGreenChecks:
 
 
 class TestGreenCheckNames:
-    def test_only_finished_and_unfailed_checks_count(self):
+    def test_only_a_reported_pass_counts(self):
         names = pr_ci.green_check_names(
             _checks(("build", "FAILURE"), ("unit-tests", "SUCCESS"),
                     ("lint", "NEUTRAL"), ("docs", "SKIPPED"),
                     ("review", "IN_PROGRESS"), ("e2e", "CANCELLED")))
         assert names == ["unit-tests", "lint", "docs"]
+
+    def test_a_state_outside_every_known_set_is_not_green(self):
+        """gh maps a check to ERROR, ACTION_REQUIRED, STALE or STARTUP_FAILURE
+        as well. None of those is a pass, and none is in FAILED_STATES or
+        PENDING_STATES, so reading green as 'not failed and not pending' would
+        tell the fixer to hold a red check green."""
+        names = pr_ci.green_check_names(
+            _checks(("build", "ERROR"), ("sign-off", "ACTION_REQUIRED"),
+                    ("docs", "STALE"), ("e2e", "STARTUP_FAILURE"),
+                    ("unit-tests", "SUCCESS")))
+        assert names == ["unit-tests"]
 
     def test_no_checks_is_no_names(self):
         assert pr_ci.green_check_names(None) == []

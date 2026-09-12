@@ -12,7 +12,7 @@ import core.log as log
 from core import external_log
 from core.config import resolve_env, get_repos, base_branch_for
 from core.claude_runner import run_claude_code
-from features.pr_ci import FAILED_STATES
+from features.pr_ci import FAILED_STATES, PASSED_STATES
 
 
 _CONFLICT_RESOLVE_MODEL = os.environ.get(
@@ -290,7 +290,7 @@ class _CIMonitorMixin:
         states = {c["state"].upper() for c in checks}
         if states & set(FAILED_STATES):
             return "failed"
-        if states <= {"SUCCESS", "NEUTRAL", "SKIPPED"}:
+        if states <= set(PASSED_STATES):
             return "passed"
         return "pending"
 
