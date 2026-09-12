@@ -12,6 +12,7 @@ import core.branch_sync as branch_sync
 from core.claude_runner import run_claude_code, run_haiku, run_balanced, extract_json
 from core.commit_message import COMMIT_SUBJECT_RULE, commit_subject
 from core.config import base_branch_for, get_repos
+from features.pr_ci import KEEP_GREEN_RULE
 from features.platforms import make_platform
 
 RECLAIM_STALE_SECONDS = 1200
@@ -518,6 +519,7 @@ def fix_comment(config, payload) -> tuple[bool, str | None]:
             context = (
                 f"File: {comment.get('path', 'unknown')}\nLine: {comment.get('line', 'unknown')}\n\n"
                 f"Review comment: {comment['body']}\n\nFix this review comment.\n\n"
+                + KEEP_GREEN_RULE + "\n\n"
                 + COMMIT_SUBJECT_RULE
             )
             head_before = git_util.head_sha(worktree)
@@ -638,6 +640,7 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
             context = (
                 f"The following {len(pending)} review comments were left on this PR. "
                 f"Address ALL of them.\n\n{comment_list}\n\nFix every review comment above.\n\n"
+                + KEEP_GREEN_RULE + "\n\n"
                 + COMMIT_SUBJECT_RULE
             )
             head_before = git_util.head_sha(worktree)
