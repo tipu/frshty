@@ -187,7 +187,10 @@ def run_scope_review(config: dict, ticket_dir: Path, slug: str, *,
     return verdict, reason
 
 
-_REPORT_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
+# The inner classes exclude the delimiters they scan past, so no start
+# position rescans the rest of the line. A report built out of "[" or
+# out of unclosed links is then linear work, not quadratic.
+_REPORT_LINK_RE = re.compile(r"\[([^\[\]]*)\]\([^()\s]*\)")
 # Prefix only. A pattern that also captured the text would need two greedy
 # whitespace runs around it, and a reviewer that emitted a bullet marker
 # followed by a long run of spaces would then backtrack quadratically.
@@ -239,12 +242,7 @@ def report_summary(report: Path) -> dict:
             text = lines[j][bullet.end():].strip()
             if not text:
                 break
-            # Flatten a bounded window, not the whole line: _REPORT_LINK_RE
-            # rescans to the end of its input for every unmatched "[", which is
-            # quadratic on a line built out of them. Flattening only shortens
-            # text, so a window this much wider than the cap still fills it.
-            block.append(_REPORT_LINK_RE.sub(
-                r"\1", text[:MAX_FINDING_CHARS * 4])[:MAX_FINDING_CHARS])
+            block.append(_REPORT_LINK_RE.sub(r"\1", text)[:MAX_FINDING_CHARS])
             j -= 1
         for finding in reversed(block):
             if finding not in findings:
