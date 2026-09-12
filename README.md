@@ -143,6 +143,7 @@ One FastAPI process serves every instance. Work is rows in a SQLite database at 
 - **Scheduler.** A beat thread fires cron ticks and recurring rows. Turning a feature off deletes its recurring rows on the next start.
 - **Models.** Claude, Codex, and `agy` are invoked headless as subprocesses. No tmux in the pipeline. Tmux is used only for the terminal you drive yourself.
 - **Platforms.** GitHub and Bitbucket sit behind one interface, as do Jira and Linear. Choice is per instance.
+- **Gates.** A ticket reaches done through a chain of gates. The write and commit gates keep an agent out of a shared checkout, the push gate lints and tests every repository a push targets, the proof gate decides whether a ticket enters proving, the scope review holds both the PR and the merge, and the sweep closes a ticket only when the ticket source says it is finished. `scripts/mutation_check.py` removes each gate from a throwaway copy of the tree and requires the named test to go red. `scripts/harness_check.sh` attacks that harness with a suite that cannot run, a patch that changes nothing, and a mutation no test kills, and requires it to refuse each one. Both run in CI.
 
 ```text
 core/       orchestration primitives: queue, worker, tasks, events, scheduler, model runners
@@ -151,6 +152,7 @@ manager/    daily digest and priority ranking
 services/   work items, runs, tags, debriefs, proposals
 prd/        requirements intake and ticket generation
 web/        pages and API
+scripts/    work hooks and the gate mutation harness
 templates/  static HTML, read fresh per request
 config/     one TOML per instance
 ```
