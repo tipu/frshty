@@ -185,3 +185,90 @@ class TestScopeDirective:
         d = consensus_scope.SCOPE_DIRECTIVE
         assert "Code quality, style, and correctness are reviewed elsewhere" not in d
         assert "an addition with no caller and no reader must fail this review" in d
+
+
+class TestReportSummary:
+    """report_summary feeds the Submit PR modal. The operator decides whether
+    to strip the branch or override the gate from what it returns, so it must
+    carry the offending changes the failing voices named."""
+
+    def _report(self, tmp_path, text):
+        report = tmp_path / "scope-review.md"
+        report.write_text(text)
+        return report
+
+    def test_reads_votes_dropped_and_the_offending_changes(self, tmp_path):
+        report = self._report(tmp_path, "\n".join([
+            "# Consensus scope review", "",
+            "Votes: agy=FAIL, codex=FAIL",
+            "Dropped voices: claude (no SCOPE VERDICT line)", "",
+            "## agy", "", "### Offending Changes", "",
+            "- `dash`: pacing fix at [src/a.ts:28](file:///x/src/a.ts#L28) is unrelated",
+            "- `api`: duplicate route at src/urls.py:36", "",
+            "SCOPE VERDICT: FAIL", "",
+            "## codex", "", "Offending changes:", "",
+            "- `api`: duplicate route at src/urls.py:36", "",
+            "SCOPE VERDICT: FAIL", "", "SCOPE VERDICT: FAIL", ""]))
+        out = consensus_scope.report_summary(report)
+        assert out["votes"] == "agy=FAIL, codex=FAIL"
+        assert out["dropped"] == "claude (no SCOPE VERDICT line)"
+        assert out["findings"] == [
+            "`dash`: pacing fix at src/a.ts:28 is unrelated",
+            "`api`: duplicate route at src/urls.py:36",
+        ]
+
+    def test_a_pass_report_has_no_findings(self, tmp_path):
+        report = self._report(tmp_path, "\n".join([
+            "Votes: agy=PASS, codex=PASS", "", "## agy", "",
+            "- every change serves the ticket", "",
+            "SCOPE VERDICT: PASS", ""]))
+        out = consensus_scope.report_summary(report)
+        assert out["findings"] == []
+        assert out["votes"] == "agy=PASS, codex=PASS"
+
+    def test_missing_report_is_empty(self, tmp_path):
+        out = consensus_scope.report_summary(tmp_path / "nope.md")
+        assert out == {"votes": "", "dropped": "", "findings": []}
+
+    def test_only_the_first_bytes_are_read(self, tmp_path):
+        """A web request reads this file, and it holds three reviewer
+        transcripts. A report past the cap must not be pulled into memory
+        whole."""
+        report = self._report(tmp_path, "\n".join(
+            ["Votes: agy=FAIL", "", "## agy", "", "x" * consensus_scope.MAX_REPORT_BYTES,
+             "", "- `repo`: out of scope", "", "SCOPE VERDICT: FAIL", ""]))
+        assert report.stat().st_size > consensus_scope.MAX_REPORT_BYTES
+        out = consensus_scope.report_summary(report)
+        assert out["votes"] == "agy=FAIL"
+        assert out["findings"] == []
+
+    def test_a_long_space_run_does_not_stall_the_parser(self, tmp_path):
+        """A bullet marker followed by a long run of spaces made the old
+        pattern backtrack quadratically. A web request runs this parser, so a
+        report like that must not hold the worker."""
+        import time
+        report = self._report(tmp_path, "\n".join(
+            ["## agy", "", "- " + " " * 200_000, "", "SCOPE VERDICT: FAIL", ""]))
+        start = time.monotonic()
+        out = consensus_scope.report_summary(report)
+        assert time.monotonic() - start < 5
+        assert out["findings"] == []
+
+    def test_a_long_bracket_run_does_not_stall_the_parser(self, tmp_path):
+        """The link pattern rescans to the end of its input for every unmatched
+        "[". A bullet built out of them must not hold the worker."""
+        import time
+        report = self._report(tmp_path, "\n".join(
+            ["## agy", "", "- " + "[" * 200_000, "", "SCOPE VERDICT: FAIL", ""]))
+        start = time.monotonic()
+        out = consensus_scope.report_summary(report)
+        assert time.monotonic() - start < 5
+        assert out["findings"] == ["[" * consensus_scope.MAX_FINDING_CHARS]
+
+    def test_findings_are_capped(self, tmp_path):
+        bullets = [f"- finding {i}" for i in range(30)]
+        report = self._report(tmp_path, "\n".join(
+            ["## agy", ""] + bullets + ["", "SCOPE VERDICT: FAIL", ""]))
+        out = consensus_scope.report_summary(report)
+        assert len(out["findings"]) == consensus_scope.MAX_REPORT_FINDINGS
+        assert out["findings"][0] == "finding 0"
