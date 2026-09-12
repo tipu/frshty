@@ -180,7 +180,7 @@
 			</div>
 		</div>
 	</div>
-<pr-submit-modal :open="prModalOpen" :repos="prRepos" :submitting="prSubmitting" :ticket-key="currentTicketKey"
+<pr-submit-modal :open="prModalOpen" :repos="prRepos" :submitting="prSubmitting" :ticket-key="currentTicketKey" :blocked="prBlocked"
 								 @close="closePrModal" @submit="onPrSubmit" />
 </frshty-shell>
 </div>
@@ -256,6 +256,7 @@ frshtyApp({
 		const instanceName = ref('');
 		const prModalOpen = ref(false);
 		const prRepos = ref([]);
+		const prBlocked = ref(null);
 		const prSubmitting = ref(false);
 		const currentTicketKey = ref(null);
 
@@ -464,6 +465,7 @@ frshtyApp({
 			}
 			const data = await r.json();
 			prRepos.value = data.repos || [];
+			prBlocked.value = null;
 			prModalOpen.value = true;
 		}
 
@@ -486,7 +488,8 @@ frshtyApp({
 					closePrModal();
 					load();
 				} else {
-					const err = await resp.json();
+					const err = await resp.json().catch(() => ({}));
+					if (err.scope_review) { prBlocked.value = err; return; }
 					alert('Error: ' + (err.error || 'Unknown error'));
 				}
 			} catch (e) {
@@ -508,7 +511,7 @@ frshtyApp({
 			view, prBoard, prBoardCount, tabStyle, selectView,
 			ciGlyph, mergeReadyGlyph, mergeReadyReason, conflictGlyph, approvedLabel, commentsLabel, courtLabel, pollWarn,
 			tickets, features, instanceName, HELP, COLUMN_LABELS,
-			prModalOpen, prRepos, prSubmitting, currentTicketKey,
+			prModalOpen, prRepos, prSubmitting, currentTicketKey, prBlocked,
 			visibleColumns, totalCount,
 			ticketsForColumn, prAuthors, fmtScheduled, initials, openTicket,
 			hasActions, canPresent, pillStatus, openDiscuss,
