@@ -733,6 +733,8 @@ class TestSubmitPrScopeGate:
         body = json.loads(resp.body)
         assert body["queue_state"] == "queued"
         assert body["findings"] == [], "a stale verdict must not show its old findings"
+        assert body["report"] == "" and body["report_url"] == "", \
+            "the report on disk belongs to the verdict this fingerprint replaced"
         assert "up to 30 minutes" in body["error"]
         tasks = [j["task"] for j in db.query_all(
             "SELECT task FROM jobs WHERE ticket_key=?", ("SCOPE-9",))]

@@ -191,6 +191,7 @@ _REPORT_LINK_RE = re.compile(r"\[([^\]]+)\]\([^)]*\)")
 _REPORT_BULLET_RE = re.compile(r"^\s{0,3}[-*]\s+(.*\S)\s*$")
 MAX_REPORT_FINDINGS = 12
 MAX_FINDING_CHARS = 400
+MAX_REPORT_BYTES = 512 * 1024
 
 
 def report_summary(report: Path) -> dict:
@@ -200,11 +201,18 @@ def report_summary(report: Path) -> dict:
     FAIL voice to print a bullet list of the offending changes directly above
     its verdict line, so those bullets are the findings. Markdown links are
     flattened to their text because the summary renders as plain text. Empty
-    fields when the report is missing or carries none."""
+    fields when the report is missing or carries none.
+
+    The report holds three reviewer transcripts and a web request reads it, so
+    only the first MAX_REPORT_BYTES are read and the scan stops at
+    MAX_REPORT_FINDINGS. A runaway reviewer cannot make one Submit PR click
+    allocate an unbounded string."""
     try:
-        lines = report.read_text(errors="replace").splitlines()
+        with report.open("rb") as fh:
+            raw = fh.read(MAX_REPORT_BYTES)
     except OSError:
         return {"votes": "", "dropped": "", "findings": []}
+    lines = raw.decode(errors="replace").splitlines()
     votes = dropped = ""
     findings: list[str] = []
     for i, line in enumerate(lines):
@@ -227,7 +235,11 @@ def report_summary(report: Path) -> dict:
                 break
             block.append(_REPORT_LINK_RE.sub(r"\1", bullet.group(1))[:MAX_FINDING_CHARS])
             j -= 1
-        findings.extend(reversed(block))
-    unique = list(dict.fromkeys(findings))
-    return {"votes": votes, "dropped": dropped,
-            "findings": unique[:MAX_REPORT_FINDINGS]}
+        for finding in reversed(block):
+            if finding not in findings:
+                findings.append(finding)
+            if len(findings) >= MAX_REPORT_FINDINGS:
+                break
+        if len(findings) >= MAX_REPORT_FINDINGS:
+            break
+    return {"votes": votes, "dropped": dropped, "findings": findings}
