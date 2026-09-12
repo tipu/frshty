@@ -8,6 +8,7 @@ import pytest
 import core.state as state
 import core.log as log
 import core.db as db
+from manager import watchdog
 
 
 @pytest.fixture()
@@ -118,6 +119,14 @@ class TestSnoozeCrud:
         loops = client.get("/api/today/loops").json()
         match = next(s for s in loops["snoozed"] if s["entity_id"] == "x/1")
         assert match["reason"] == "second"
+
+    def test_every_watched_bucket_can_be_snoozed(self, client):
+        """The watchdog reads today_snoozes by bucket name before it opens a
+        task, so a bucket the snooze route rejects cannot be suppressed."""
+        for rule in watchdog.RULES:
+            resp = client.post("/api/today/snoozes", json={
+                "loop_type": rule.bucket, "entity_id": f"{rule.bucket}/1"})
+            assert resp.status_code == 200, rule.bucket
 
     def test_invalid_loop_type_400(self, client):
         resp = client.post("/api/today/snoozes", json={

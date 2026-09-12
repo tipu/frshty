@@ -296,6 +296,47 @@ def pr_failed_tickets(instance_key: str) -> list[dict]:
     return out
 
 
+def blocked_tickets(instance_key: str) -> list[dict]:
+    """Tickets parked at status='blocked'. A pipeline task failed and the
+    ticket was moved out of its LLM-active status to release the per-repo gate
+    (core/tasks/registry.py:127). No automation retries a blocked ticket: the
+    only exit is the operator's manual restart (web/tickets.py). No age
+    threshold; like pr_failed, the state itself is the fault.
+
+    The reason for the block is not on the ticket. transition_ticket writes it
+    as _transition_reason and update_ticket pops that key before the row is
+    saved (core/state.py:486), so both the reason and the time the ticket
+    entered the state are read back from ticket_transitions."""
+    rows = db.query_all(
+        "SELECT t.ticket_key, t.slug, t.data,"
+        " (SELECT tr.ts FROM ticket_transitions tr"
+        "  WHERE tr.instance_key=t.instance_key AND tr.ticket_key=t.ticket_key"
+        "  AND tr.new_status='blocked' AND tr.rejected=0"
+        "  ORDER BY tr.ts DESC LIMIT 1) AS blocked_at,"
+        " (SELECT tr.reason FROM ticket_transitions tr"
+        "  WHERE tr.instance_key=t.instance_key AND tr.ticket_key=t.ticket_key"
+        "  AND tr.new_status='blocked' AND tr.rejected=0"
+        "  ORDER BY tr.ts DESC LIMIT 1) AS blocked_reason"
+        " FROM tickets t"
+        " WHERE t.instance_key=? AND t.status='blocked'"
+        " AND COALESCE(t.obsolete_at, '') = ''"
+        " ORDER BY json_extract(t.data, '$.discovered_at') ASC LIMIT ?",
+        (instance_key, _LIMIT),
+    )
+    out: list[dict] = []
+    for r in rows:
+        d = _load_ticket_data(r)
+        out.append({
+            "ticket_key": r["ticket_key"],
+            "summary": (d.get("summary") or "")[:140],
+            "blocked_at": r["blocked_at"] or "",
+            "blocked_reason": r["blocked_reason"] or "",
+            "discovered_at": d.get("discovered_at", ""),
+            "url": d.get("url", ""),
+        })
+    return out
+
+
 def stale_unattended_tickets(instance_key: str, threshold_hours: int = 72) -> list[dict]:
     """Tickets older than threshold in mid-pipeline states — work that hasn't
     advanced. Excludes pr_ready and in_review (those have dedicated buckets).
@@ -534,6 +575,7 @@ def aggregate_all(instance_key: str, config: dict | None = None,
         "pickup_new":             pickup_new_tickets(instance_key),
         "in_review_no_ci":        in_review_no_ci(instance_key),
         "pr_failed_tickets":      pr_failed_tickets(instance_key),
+        "blocked_tickets":        blocked_tickets(instance_key),
         "stale_own_prs":          stale_own_prs(instance_key, t.get("stale_pr_hours", 24)),
         "stale_unattended":       stale_unattended_tickets(instance_key, t.get("stale_ticket_hours", 72)),
         "pending_approvals_stuck": pending_approvals_stuck(instance_key, t.get("pending_approval_hours", 12)),

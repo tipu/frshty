@@ -85,6 +85,10 @@ RULES = (
     Rule("pr_failed_tickets", 6, 48,
          "the ticket pipeline parked this ticket at pr_failed. It retries "
          "nothing further on its own."),
+    Rule("blocked_tickets", 6, 48,
+         "a pipeline task failed and parked this ticket at blocked to release "
+         "the repo gate. Nothing retries it, and the only exit is a manual "
+         "restart, so it sits at blocked until somebody notices."),
     Rule("in_review_no_ci", 48, 72,
          "this ticket has sat in review for two days and CI has still not "
          "gone green. A PR whose checks are simply running clears this bucket "
@@ -155,6 +159,13 @@ def _entries(bucket: str, instance_key: str, config: dict) -> list[Entry]:
                   f"pr_failed_reason={r.get('pr_failed_reason') or 'unrecorded'},"
                   f" ci_fix_attempts={r.get('ci_fix_attempts', 0)}")
             for r in staleness.pr_failed_tickets(instance_key)
+        ]
+    if bucket == "blocked_tickets":
+        return [
+            Entry(r["ticket_key"], r["ticket_key"], r["ticket_key"],
+                  f"blocked_at={r.get('blocked_at') or 'unrecorded'},"
+                  f" reason={r.get('blocked_reason') or 'unrecorded'}")
+            for r in staleness.blocked_tickets(instance_key)
         ]
     if bucket == "in_review_no_ci":
         return [
