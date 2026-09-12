@@ -42,15 +42,16 @@ For each repository, re-derive the branch diff and history yourself:
     git -C <worktree> diff <merge-base>..HEAD
     git -C <worktree> log --oneline <merge-base>..HEAD
 
-Answer two questions:
+Answer three questions:
 1. Scope fidelity. Does every change in the diff serve the ticket's purpose? List each change that does not, with file:line evidence and why it is out of scope. Mechanical fallout of an in-scope change (imports, lockfiles, generated artifacts, tests and docs for the ticket's own code) is in scope.
-2. Git integrity. Does the branch show signs of a git problem: a large volume of changes unrelated to the ticket, commits that belong to a different ticket, files reverted or reintroduced against the base branch, or a diff shaped like the branch was cut from a wrong or stale base?
+2. Reachability. Unused code is an out-of-scope addition, even when it sits in the ticket's own subject area. For every symbol, field, enum member, constant and code branch the diff adds, name a caller or a reader on this branch in any of the repositories listed above. Run the search yourself across every listed worktree and quote the command you ran. An addition with no caller and no reader anywhere in those repositories is a finding: report it with file:line evidence. An addition counts as reached without a caller only when it is a public surface the ticket asks for; in that case quote the line of the ticket that asks for it.
+3. Git integrity. Does the branch show signs of a git problem: a large volume of changes unrelated to the ticket, commits that belong to a different ticket, files reverted or reintroduced against the base branch, or a diff shaped like the branch was cut from a wrong or stale base?
 
 OUTPUT CONTRACT (this overrides anything else):
 - Output your review to stdout as Markdown. Do NOT write, create, or edit any file. Do NOT modify the repositories.
 - Cite file:line evidence for every claim.
-- Code quality, style, and correctness are reviewed elsewhere; they must not affect your verdict.
-- End with exactly one line: `SCOPE VERDICT: PASS` if the branch contains only changes that serve the ticket and shows no git problem, or `SCOPE VERDICT: FAIL` preceded by a bullet list of the offending changes.
+- Style and correctness are reviewed elsewhere; they must not affect your verdict. Reachability is not reviewed elsewhere: an addition with no caller and no reader must fail this review.
+- End with exactly one line: `SCOPE VERDICT: PASS` if the branch contains only changes that serve the ticket, adds no unreachable code, and shows no git problem, or `SCOPE VERDICT: FAIL` preceded by a bullet list of the offending changes.
 """
 
 
@@ -70,6 +71,32 @@ def _branch_diff(wt: Path, base_branch: str) -> str | None:
                                 timeout=120).stdout
     except (git_util.GitCommandError, subprocess.TimeoutExpired, OSError):
         return None
+
+
+def repos_with_branch_diff(config: dict, slug: str, *,
+                           fetch: bool = False) -> list[tuple[str, Path, str]]:
+    """Every configured repo whose ticket worktree exists and carries a branch
+    diff against origin/<base>, as (repo_name, worktree, base_branch). With
+    fetch=True each origin/<base> is refreshed first, so the diff is derived
+    against the current base rather than whatever the worktree last saw."""
+    found: list[tuple[str, Path, str]] = []
+    if not slug:
+        return found
+    for repo in get_repos(config):
+        wt = ticket_worktree_path(config, slug, repo["name"])
+        if not wt.is_dir():
+            continue
+        base = base_branch_for(config, repo["name"])
+        if fetch:
+            try:
+                git_util.run_git(wt, ["fetch", "origin", base], timeout=120)
+            except (git_util.GitCommandError, subprocess.TimeoutExpired, OSError):
+                pass
+        diff = _branch_diff(wt, base)
+        if not diff or not diff.strip():
+            continue
+        found.append((repo["name"], wt, base))
+    return found
 
 
 def scope_fingerprint(config: dict, ts: dict) -> str:
@@ -122,22 +149,10 @@ def run_scope_review(config: dict, ticket_dir: Path, slug: str, *,
     run_dir.mkdir(parents=True, exist_ok=True)
     (ticket_dir / "docs").mkdir(parents=True, exist_ok=True)
 
-    repo_lines = []
-    include_dirs = []
-    for repo in get_repos(config):
-        wt = ticket_worktree_path(config, slug, repo["name"])
-        if not wt.is_dir():
-            continue
-        base = base_branch_for(config, repo["name"])
-        try:
-            git_util.run_git(wt, ["fetch", "origin", base], timeout=120)
-        except (git_util.GitCommandError, subprocess.TimeoutExpired, OSError):
-            pass
-        diff = _branch_diff(wt, base)
-        if not diff or not diff.strip():
-            continue
-        repo_lines.append(f"- {repo['name']}: worktree {wt}, base branch origin/{base}")
-        include_dirs.append(str(wt))
+    repos = repos_with_branch_diff(config, slug, fetch=True)
+    repo_lines = [f"- {name}: worktree {wt}, base branch origin/{base}"
+                  for name, wt, base in repos]
+    include_dirs = [str(wt) for _, wt, _ in repos]
     if not repo_lines:
         return None, "no repo worktree has a branch diff to review"
 
