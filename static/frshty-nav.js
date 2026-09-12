@@ -176,13 +176,19 @@
                             </div>
                         </template>
                         <div v-if="block" class="flex gap-2 mt-4 pt-4 border-t border-gray-700">
-                            <button @click="submit(true)" :disabled="submitting"
+                            <button v-if="block.scope_review === 'fail'" @click="submit(true)" :disabled="submitting"
                                     class="flex-1 bg-orange-800 hover:bg-orange-700 text-white text-sm px-4 py-2 rounded"
                                     :class="{ 'opacity-50 cursor-not-allowed': submitting }"
                                     title="Open the PR over the scope verdict. frshty records the override on the ticket.">
                                 {{ submitting ? 'Submitting…' : 'Open the PR anyway' }}
                             </button>
                             <button @click="dismissBlock" class="flex-1 bg-gray-700 hover:bg-gray-600 text-white text-sm px-4 py-2 rounded">Back to the PR</button>
+                            <button v-if="block.scope_review !== 'fail'" @click="submit(true)" :disabled="submitting"
+                                    class="text-xs px-3 py-2 rounded border border-gray-600 text-gray-400 hover:text-gray-200 hover:border-gray-400"
+                                    :class="{ 'opacity-50 cursor-not-allowed': submitting }"
+                                    title="Open the PR without waiting for the review. frshty records the override on the ticket.">
+                                Open the PR anyway
+                            </button>
                         </div>
                         <div v-else class="flex gap-2 mt-4 pt-4 border-t border-gray-700">
                             <button @click="submit" :disabled="submitting || !submittable.length"
