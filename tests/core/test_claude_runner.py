@@ -7,6 +7,7 @@ the tee'd log file and the return value.
 """
 import json
 import os
+import sqlite3
 import stat
 import sys
 from pathlib import Path
@@ -15,6 +16,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
+import core.db as db  # noqa: E402
 import core.job_logs as job_logs  # noqa: E402
 import core.llm as llm  # noqa: E402
 import core.state as state  # noqa: E402
@@ -310,6 +312,52 @@ def test_llm_guard_scoped_per_instance(tmp_path):
     finally:
         _state._default_instance_key = prev_default
         db.execute("DELETE FROM kv WHERE key='llm_guard'")
+
+
+def test_a_database_error_does_not_drop_the_claude_invocation(tmp_path, monkeypatch):
+    """A database fault must not kill the invocation before the model runs.
+
+    The guard is the only database touch on the invocation path that once
+    propagated. It dropped the claude voice out of the consensus fan-out while
+    codex and agy, whose bookkeeping already failed open, still voted."""
+    bin_dir = tmp_path / "bin"
+    events_file = tmp_path / "events.ndjson"
+    events_file.write_text(_text_delta("ok") + "\n")
+    _install_fake_claude(bin_dir, f'cat "{events_file}"')
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+
+    def _down(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    db.execute("DELETE FROM kv WHERE key='llm_guard'")
+    with patch.object(db, "query_one", _down), patch.object(db, "execute", _down):
+        out = run_claude_code("hi", cwd=tmp_path, timeout=5)
+
+    assert out == "ok"
+
+
+def test_a_database_error_still_reports_the_usage_limit(tmp_path, monkeypatch):
+    """The guard cannot be persisted when the database is down, but the caller
+    must still learn the run died on a usage limit so the job is retried
+    instead of being recorded as a real failure."""
+    bin_dir = tmp_path / "bin"
+    _install_fake_claude(
+        bin_dir,
+        'printf "%s\\n" "Key limit exceeded - please add credits"\n'
+        "exit 1",
+    )
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+
+    def _down(*args, **kwargs):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    db.execute("DELETE FROM kv WHERE key='llm_guard'")
+    llm.reset_guard_blocked()
+    with patch.object(db, "query_one", _down), patch.object(db, "execute", _down):
+        out = run_claude_code("hi", cwd=tmp_path, timeout=5)
+
+    assert out is None
+    assert llm.consume_guard_blocked() is True
 
 
 def test_the_fast_tier_never_gets_tools():
