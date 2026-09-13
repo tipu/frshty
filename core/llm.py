@@ -103,12 +103,42 @@ def _llm_limit_reason(output: str | None) -> str | None:
     return None
 
 
+def _clear_guard(key: str) -> None:
+    """Drop a stale or expired guard row. A database error is reported and
+    swallowed: the row stays, and the next _guard_status re-reads it."""
+    try:
+        _db.execute(
+            "DELETE FROM kv WHERE instance_key=? AND key='llm_guard'", (key,)
+        )
+    except Exception as e:
+        log.emit("llm_guard_clear_failed",
+                 f"[{_active_instance_key()}] could not clear the LLM guard: "
+                 f"{type(e).__name__}: {e}",
+                 meta={"instance_key": _active_instance_key(),
+                       "error": f"{type(e).__name__}: {e}"})
+
+
 def _guard_status() -> tuple[bool, str, int]:
+    """Whether a usage-limit cooldown currently blocks new LLM invocations.
+
+    Every database touch fails open, like the invocation bookkeeping around
+    it. The guard saves wasted invocations during a vendor cooldown; it is not
+    a correctness gate. A database error that propagated from here would kill
+    the invocation before the model ran, so one unreadable row would stop
+    every Claude call in the process while codex and agy kept running."""
     key = _guard_key()
-    row = _db.query_one(
-        "SELECT data FROM kv WHERE instance_key=? AND key='llm_guard'",
-        (key,),
-    )
+    try:
+        row = _db.query_one(
+            "SELECT data FROM kv WHERE instance_key=? AND key='llm_guard'",
+            (key,),
+        )
+    except Exception as e:
+        log.emit("llm_guard_read_failed",
+                 f"[{_active_instance_key()}] could not read the LLM guard: "
+                 f"{type(e).__name__}: {e}; proceeding without the cooldown",
+                 meta={"instance_key": _active_instance_key(),
+                       "error": f"{type(e).__name__}: {e}"})
+        return False, "", 0
     if not row or not row.get("data"):
         return False, "", 0
     try:
@@ -116,15 +146,11 @@ def _guard_status() -> tuple[bool, str, int]:
         blocked_until = datetime.fromisoformat(payload["blocked_until"])
         reason = payload.get("reason", "recent usage limit response")
     except (json.JSONDecodeError, KeyError, ValueError, TypeError):
-        _db.execute(
-            "DELETE FROM kv WHERE instance_key=? AND key='llm_guard'", (key,)
-        )
+        _clear_guard(key)
         return False, "", 0
     now = datetime.now(timezone.utc)
     if blocked_until <= now:
-        _db.execute(
-            "DELETE FROM kv WHERE instance_key=? AND key='llm_guard'", (key,)
-        )
+        _clear_guard(key)
         return False, "", 0
     remaining_s = max(1, int((blocked_until - now).total_seconds()))
     return True, reason, remaining_s
@@ -141,13 +167,20 @@ def _trip_llm_guard(output: str | None) -> str | None:
         "blocked_until": blocked_until.isoformat(),
         "reason": reason,
     })
-    _db.execute(
-        "INSERT INTO kv(instance_key, key, data, updated_at) "
-        "VALUES (?, 'llm_guard', ?, ?) "
-        "ON CONFLICT(instance_key, key) DO UPDATE SET "
-        "data=excluded.data, updated_at=excluded.updated_at",
-        (key, payload, now.isoformat()),
-    )
+    try:
+        _db.execute(
+            "INSERT INTO kv(instance_key, key, data, updated_at) "
+            "VALUES (?, 'llm_guard', ?, ?) "
+            "ON CONFLICT(instance_key, key) DO UPDATE SET "
+            "data=excluded.data, updated_at=excluded.updated_at",
+            (key, payload, now.isoformat()),
+        )
+    except Exception as e:
+        log.emit("llm_guard_write_failed",
+                 f"[{_active_instance_key()}] could not persist the LLM guard: "
+                 f"{type(e).__name__}: {e}; later invocations are not blocked",
+                 meta={"instance_key": _active_instance_key(),
+                       "error": f"{type(e).__name__}: {e}"})
     log.emit(
         "llm_guard_tripped",
         f"[{_active_instance_key()}] blocking new LLM invocations for "
