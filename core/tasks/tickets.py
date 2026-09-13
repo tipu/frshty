@@ -21,8 +21,9 @@ from core.config import base_branch_for, get_repos, ticket_worktree_path
 from core.deps import relink_shared_venv
 from core.consensus_plan import run_consensus_plan
 from core.consensus_scope import (
-    SCOPE_FANOUT_TIMEOUT, repos_with_branch_diff, run_scope_review,
-    scope_fingerprint,
+    MAX_SCOPE_FIX_ATTEMPTS, SCOPE_FANOUT_TIMEOUT, report_summary,
+    repos_with_branch_diff, run_scope_review, scope_fingerprint,
+    scope_fix_attempts,
 )
 from core.tasks.registry import TaskContext, TaskResult, task
 import features.defence as defence
@@ -31,6 +32,7 @@ from core.tasks.preconditions import (
     repo_gate_clear,
 )
 from features.platforms import make_platform
+from features.tickets import clear_scope_fix_open, mark_scope_fix_open
 
 
 PLAN_TIMEOUT = 3000
@@ -367,7 +369,7 @@ def _proof_change_scope(ticket_dir: Path, config: dict) -> str:
 
 _PROVE_FEEDBACK_BLOCK = """
 
-REVISION FEEDBACK — a human reviewed your previous proof and is asking you to redo it. Address this specifically:
+REVISION FEEDBACK — your previous proof was rejected and has to be redone. Address this specifically:
 {feedback}
 
 Your previous proof.md has been moved to docs/proof.prev.md for reference. Produce a fresh docs/proof.md and save any artifacts the feedback asks for under docs/ (relative paths referenced from proof.md).
@@ -1997,6 +1999,22 @@ def enter_proving(ctx: TaskContext) -> TaskResult:
     return TaskResult("ok", artifacts={"has_proof_md": True})
 
 
+def _record_proof_fingerprint(ctx: TaskContext) -> None:
+    """Record the branch state this proof stands for.
+
+    A proof is evidence about the code it was run against. When a later stage
+    changes the branch — the scope correction does exactly that — the recorded
+    proof no longer describes what the PR would carry, and the proving handler
+    reads this to decide whether to prove again or move on."""
+    ts = state.load_ticket(ctx.ticket_key or "") or {}
+    fingerprint = scope_fingerprint(ctx.config, ts)
+
+    def _set(t: dict) -> dict:
+        t["proof_fingerprint"] = fingerprint
+        return t
+    state.update_ticket(ctx.ticket_key, _set)
+
+
 @task("prove",
       preconditions=[status_is("proving")],
       postconditions=[file_exists("docs/proof.md")],
@@ -2018,7 +2036,19 @@ def prove(ctx: TaskContext) -> TaskResult:
             "PROOF: NOT_APPLICABLE\n\nPROOF.md disappeared between gate "
             "evaluation and the prove step.\n"
         )
+        _record_proof_fingerprint(ctx)
         return TaskResult("ok", artifacts={"skipped": True})
+    proof_out = ticket_dir / "docs" / "proof.md"
+    if proof_out.exists():
+        try:
+            proof_out.replace(ticket_dir / "docs" / "proof.prev.md")
+        except OSError:
+            try:
+                proof_out.unlink()
+            except OSError as e:
+                return TaskResult(
+                    "failed",
+                    f"could not move the previous proof aside: {type(e).__name__}: {e}")
     prompt = _PROVE_PROMPT_TEMPLATE.format(proof_md=proof_md)
     prompt += _PROVE_CHANGE_SCOPE_BLOCK.format(
         scope=_proof_change_scope(ticket_dir, ctx.config)
@@ -2049,6 +2079,7 @@ def prove(ctx: TaskContext) -> TaskResult:
             t.pop("proof_feedback", None)
             return t
         state.update_ticket(ctx.ticket_key, _clear_feedback)
+    _record_proof_fingerprint(ctx)
     return TaskResult("ok")
 
 
@@ -2065,11 +2096,19 @@ def mark_ready(ctx: TaskContext) -> TaskResult:
     Self-heals the worktree first so the gate reflects real work, not tool
     debris: strips ephemeral scratch (playwright artifacts, test output) and
     commits any real changes a prior stage left behind. Only genuinely
-    uncommitted source (after that) blocks."""
+    uncommitted source (after that) blocks.
+
+    Re-records the proof fingerprint when that self-heal committed nothing, so
+    a retry of this step does not read its own no-op as a branch change and
+    prove the ticket again. A finalize commit that does carry code leaves the
+    recorded fingerprint alone: that code is not what the proof established."""
     ticket_dir = _ticket_dir(ctx)
     _clean_workspace_scratch(ticket_dir)
-    _commit_workspace_changes(ticket_dir, ctx.ticket_key or "",
-                              message=f"chore: finalize {ctx.ticket_key} worktree for PR")
+    committed = _commit_workspace_changes(
+        ticket_dir, ctx.ticket_key or "",
+        message=f"chore: finalize {ctx.ticket_key} worktree for PR")
+    if not committed:
+        _record_proof_fingerprint(ctx)
     dirty = _dirty_workspace_repos(ticket_dir)
     if dirty:
         return TaskResult("failed",
@@ -2393,7 +2432,8 @@ def fix_reported_bug(ctx: TaskContext) -> TaskResult:
         _settle_bug_reports(ctx, reports, "no code change produced")
         return TaskResult("failed", "no code change produced")
 
-    pushed, push_failed = _push_bug_fix(ctx, changed)
+    pushed, push_failed = _push_to_open_prs(
+        ctx, changed, failure_event="ticket_bug_fix_push_failed")
     log.emit("ticket_bug_fix_committed",
              f"{ctx.ticket_key}: committed reported-issue fix in {', '.join(changed)}",
              links={"detail": f"{ctx.config.get('_base_url', '')}/tickets/{ctx.ticket_key}"},
@@ -2405,11 +2445,12 @@ def fix_reported_bug(ctx: TaskContext) -> TaskResult:
                                        "push_failed": push_failed})
 
 
-def _push_bug_fix(ctx: TaskContext, changed: list[str]) -> tuple[list[str], list[str]]:
-    """Push the fix to the branch of every open PR it touched.
+def _push_to_open_prs(ctx: TaskContext, changed: list[str], *,
+                      failure_event: str) -> tuple[list[str], list[str]]:
+    """Push a commit to the branch of every open PR it touched.
 
-    A commit that stays in the worktree is invisible to the reviewer who asked
-    for it, so the ticket reads as ignored even though the work is done."""
+    A commit that stays in the worktree is invisible to the reviewer reading
+    the PR, so the ticket reads as ignored even though the work is done."""
     ts = state.load_ticket(ctx.ticket_key or "") or {}
     prs = ts.get("prs") or []
     slug = ts.get("slug") or ""
@@ -2429,13 +2470,13 @@ def _push_bug_fix(ctx: TaskContext, changed: list[str]) -> tuple[list[str], list
         try:
             result = platform.push_branch(wt, branch)
         except Exception as e:
-            log.emit("ticket_bug_fix_push_failed",
+            log.emit(failure_event,
                      f"{ctx.ticket_key}: push of {name} failed: {type(e).__name__}: {e}",
                      meta={"ticket": ctx.ticket_key, "repo": name})
             failed.append(name)
             continue
         if isinstance(result, dict) and not result.get("ok", True):
-            log.emit("ticket_bug_fix_push_failed",
+            log.emit(failure_event,
                      f"{ctx.ticket_key}: push of {name} failed: "
                      f"{str(result.get('error', ''))[:200]}",
                      meta={"ticket": ctx.ticket_key, "repo": name})
@@ -2495,6 +2536,249 @@ def scope_review(ctx: TaskContext) -> TaskResult:
              links={"detail": f"{base_url}/tickets/{ctx.ticket_key}"},
              meta={"ticket": ctx.ticket_key, "verdict": verdict})
     return TaskResult("ok", reason)
+
+
+_SCOPE_FIX_PROMPT = """The consensus scope review voted FAIL on this ticket branch. Three reviewers read the branch diff and named the changes below as changes that do not serve this ticket. Your job is to take those changes off the branch.
+
+Changes the reviewers named:
+{findings}
+
+The full report is docs/scope-review.md. Read it first: it carries the file:line evidence behind each finding.
+
+For each named change:
+1. Confirm the finding against the branch diff: `git -C workspace/<repo> diff origin/<base>...HEAD -- <path>`.
+2. Remove that change. An addition the reviewers called unreachable is deleted. A line the branch changed for a reason the ticket does not ask for goes back to what the base branch has.
+3. Remove what the change leaves behind: an import with no remaining user, a test that only covered the removed code, a doc line that only described it.
+4. Leave every other change on the branch exactly as it is. The work the ticket asks for stays.
+
+Do not touch a change the reviewers did not name. Do not edit docs/scope-review.md. Do not rewrite history; the removal is a new commit.
+
+You may keep a named change only when the evidence shows the reviewers read it wrong. A change you keep holds the PR, so quote the line of docs/ticket.md that asks for it.
+
+Then run the tests that cover the files you touched, in every repository you touched. A removal that breaks the work the ticket asks for is worse than the finding it answers.
+
+Write docs/scope-fix.md: one line per named change, each saying removed or kept, the file it was in, and why.
+
+""" + COMMIT_SUBJECT_RULE
+
+
+SCOPE_FIX_TIMEOUT = FIX_TIMEOUT + COMMIT_PHASE_TIMEOUT
+
+
+def _requeue_proof(ctx: TaskContext, ticket_dir: Path, findings: list[str]) -> None:
+    """Set the ticket up to prove itself again on the corrected branch.
+
+    The recorded proof was produced against code that is no longer on the
+    branch, so it stands for work that has changed under it. Archiving it and
+    clearing the prove session is what the operator's redo-proof path does; the
+    status change back to `proving` is left to the framework so it happens
+    only after this task's postcondition holds."""
+    docs = ticket_dir / "docs"
+    proof = docs / "proof.md"
+    if proof.exists():
+        try:
+            proof.replace(docs / "proof.prev.md")
+        except OSError:
+            pass
+    feedback = ("The consensus scope review voted FAIL on this branch and frshty removed the "
+                "changes it named:\n"
+                + "\n".join(f"- {f}" for f in findings)
+                + "\n\nRead docs/scope-fix.md for what came off the branch. Prove the ticket "
+                  "again on the corrected branch: show that the work the ticket asks for still "
+                  "works with those changes gone.")
+
+    def _set(t: dict) -> dict:
+        t["proof_feedback"] = feedback
+        sessions = dict(t.get("llm_sessions") or {})
+        sessions.pop("prove", None)
+        t["llm_sessions"] = sessions
+        t.pop("pr_descriptions_generated_at", None)
+        return t
+    state.update_ticket(ctx.ticket_key, _set)
+
+
+def _mark_scope_fix_open(ctx: TaskContext, reason: str) -> None:
+    """Say why the correction pass did not finish.
+
+    features.tickets._scope_review_state reads this and answers 'fail' while it
+    stands, so every ship path holds the branch until a later pass finishes or
+    the operator overrides it."""
+    mark_scope_fix_open(ctx.ticket_key or "", {}, reason)
+
+
+def _scope_fix_target(ctx: TaskContext, result: TaskResult) -> str | None:
+    """Callable on_success_status for fix_scope_findings: back to `proving`
+    only while the ticket is still holding its PR.
+
+    The operator can open the PR over the verdict from the same modal that
+    queued this correction. Pulling a ticket with an open PR into proving
+    would strand that review, so the body pushes to the PR instead and this
+    leaves the status where it is. The status is read here rather than taken
+    from the body's artifacts because the override can land while the
+    postcondition runs, and because a restart recovers this task through the
+    postconditions alone, with no artifacts to read.
+
+    This is also where the pass stops being open, and only for a body that ran
+    to its end and passed every postcondition. A restart recovers an orphaned
+    job through the postconditions alone and hands this an empty result, and
+    those postconditions read local state: the push to an open PR is exactly
+    what such a job may never have reached."""
+    if result.artifacts.get("completed"):
+        clear_scope_fix_open(ctx.ticket_key or "")
+    current = (state.load_ticket(ctx.ticket_key or "") or {}).get("status")
+    return "proving" if current == "pr_ready" else None
+
+
+def _branch_moved_off_the_verdict(ctx: TaskContext) -> tuple[bool, str]:
+    """Postcondition for fix_scope_findings: the branch diff no longer matches
+    the one the review failed.
+
+    A restart recovers an orphaned job by re-running its postconditions alone,
+    so a record on disk is not enough: the file the fixer writes would certify
+    a pass that died before it committed anything."""
+    ts = state.load_ticket(ctx.ticket_key or "") or {}
+    reviewed = (ts.get("scope_review") or {}).get("fingerprint")
+    current = scope_fingerprint(ctx.config, ts)
+    ok = bool(current) and current != reviewed
+    return ok, ("branch diff moved off the failed verdict" if ok
+                else "branch still carries the diff the review failed")
+
+
+@task("fix_scope_findings",
+      preconditions=[feature_enabled("scope_review"),
+                     status_is("pr_ready")],
+      postconditions=[file_exists("docs/scope-fix.md"),
+                      _branch_moved_off_the_verdict],
+      on_success_status=_scope_fix_target,
+      timeout=SCOPE_FIX_TIMEOUT)
+def fix_scope_findings(ctx: TaskContext) -> TaskResult:
+    """Take the changes a failed consensus scope review named off the branch,
+    then send the ticket back through prove.
+
+    The gate used to stop at naming them, which left an operator to strip the
+    branch by hand before the PR could open. Correcting the branch changes the
+    code the proof was written against, so the proof is redone rather than
+    carried forward, and the scope review re-runs by itself because the
+    fingerprint moves with the removal commit.
+
+    The attempt is counted before the run rather than after it: a pass that
+    dies half way still spent a turn on this branch, and an uncounted one
+    loops. A pass that commits nothing fails rather than reporting ok, because
+    the branch still carries what the reviewers failed it for. The previous
+    docs/scope-fix.md is archived first so the postcondition cannot be
+    satisfied by the record of an earlier pass.
+
+    A pass with nothing to act on fails rather than skipping. The gate can ask
+    for a correction on a branch whose recorded verdict is a pass, because an
+    earlier pass that did not finish holds the branch by itself, and a skip
+    there would be re-queued on every poll for the life of the ticket. A
+    failure spends the budget and the queue stops asking."""
+    ticket_dir = _ticket_dir(ctx)
+    if not ticket_dir.is_dir():
+        return TaskResult("failed", f"ticket dir missing: {ticket_dir}")
+    report = ticket_dir / "docs" / "scope-review.md"
+    findings = report_summary(report)["findings"]
+    if not findings:
+        return TaskResult("failed",
+                          "the scope review report names no change to correct",
+                          hard_block=True)
+    ts = state.load_ticket(ctx.ticket_key or "") or {}
+    attempts = scope_fix_attempts(ts)
+    if attempts >= MAX_SCOPE_FIX_ATTEMPTS:
+        return TaskResult("skipped",
+                          f"scope correction already ran {attempts} times")
+    fingerprint = scope_fingerprint(ctx.config, ts)
+    rec = ts.get("scope_review") or {}
+    if not fingerprint or fingerprint != rec.get("fingerprint"):
+        return TaskResult("skipped",
+                          "the branch moved since the verdict; a fresh review runs first")
+    if rec.get("verdict") != "fail":
+        return TaskResult("failed",
+                          "the recorded verdict for this branch is not fail, so this "
+                          "pass has nothing to correct")
+
+    def _count(current: dict) -> dict:
+        new = dict(current or {})
+        new["scope_fix"] = {
+            "attempts": attempts + 1,
+            "at": datetime.now(timezone.utc).isoformat(),
+            "fingerprint": (new.get("scope_review") or {}).get("fingerprint", ""),
+            "findings": findings,
+            "incomplete": "a scope correction started and did not finish",
+        }
+        return new
+    state.update_ticket(ctx.ticket_key, _count)
+
+    base_url = ctx.config.get("_base_url", "")
+    log.emit("ticket_scope_fix_started",
+             f"{ctx.ticket_key}: removing {len(findings)} change(s) the scope review named",
+             links={"detail": f"{base_url}/tickets/{ctx.ticket_key}"},
+             meta={"ticket": ctx.ticket_key, "attempt": attempts + 1,
+                   "findings": findings})
+    prompt = _SCOPE_FIX_PROMPT.format(
+        findings="\n".join(f"- {f}" for f in findings))
+    record = ticket_dir / "docs" / "scope-fix.md"
+    if record.exists():
+        try:
+            record.replace(ticket_dir / "docs" / "scope-fix.prev.md")
+        except OSError:
+            pass
+    before = _capture_repo_heads(ticket_dir)
+    result = run_claude_code(prompt, cwd=ticket_dir, timeout=FIX_TIMEOUT)
+    if result is None:
+        return TaskResult("failed", "claude returned non-zero or empty")
+    try:
+        _commit_workspace_changes(
+            ticket_dir, ctx.ticket_key or "",
+            message=f"chore: {ctx.ticket_key} remove out-of-scope changes",
+            describe=True)
+    except CommitBlocked as e:
+        _mark_scope_fix_open(ctx, f"a commit was blocked part way: {str(e)[:200]}")
+        return TaskResult("failed", str(e), hard_block=True)
+    after = _capture_repo_heads(ticket_dir)
+    changed = sorted(name for name, sha in after.items() if before.get(name) != sha)
+    current = state.load_ticket(ctx.ticket_key or "") or {}
+    if scope_fingerprint(ctx.config, current) == fingerprint:
+        log.emit("ticket_scope_fix_no_change",
+                 f"{ctx.ticket_key}: scope correction left the branch diff unchanged",
+                 links={"detail": f"{base_url}/tickets/{ctx.ticket_key}"},
+                 meta={"ticket": ctx.ticket_key, "attempt": attempts + 1,
+                       "repos": changed})
+        return TaskResult("failed", "scope correction left the branch diff unchanged")
+    status_now = current.get("status")
+    artifacts = {"repos": changed, "findings": len(findings),
+                 "attempt": attempts + 1, "reproved": status_now == "pr_ready",
+                 "completed": True}
+    if status_now == "pr_ready":
+        _requeue_proof(ctx, ticket_dir, findings)
+        outcome = "proving again"
+    else:
+        pushed, push_failed = _push_to_open_prs(
+            ctx, changed, failure_event="ticket_scope_fix_push_failed")
+        artifacts["pushed"] = pushed
+        artifacts["push_failed"] = push_failed
+        if push_failed:
+            _mark_scope_fix_open(
+                ctx, f"the removal did not reach the PR branch of "
+                     f"{', '.join(push_failed)}")
+            log.emit("ticket_scope_fix_push_failed",
+                     f"{ctx.ticket_key}: the removal did not reach the PR branch of "
+                     f"{', '.join(push_failed)}",
+                     links={"detail": f"{base_url}/tickets/{ctx.ticket_key}"},
+                     meta={"ticket": ctx.ticket_key, "repos": push_failed})
+            return TaskResult("failed",
+                              f"the removal did not reach the PR branch of "
+                              f"{', '.join(push_failed)}",
+                              artifacts={**artifacts, "completed": False})
+        outcome = f"ticket is {status_now}, so the removal went to the open PR"
+    log.emit("ticket_scope_fix_committed",
+             f"{ctx.ticket_key}: removed the named changes in {', '.join(changed)}; "
+             f"{outcome}",
+             links={"detail": f"{base_url}/tickets/{ctx.ticket_key}"},
+             meta={"ticket": ctx.ticket_key, "repos": changed,
+                   "attempt": attempts + 1, "findings": findings,
+                   "status": status_now})
+    return TaskResult("ok", artifacts=artifacts)
 
 
 @task("create_pr",

@@ -49,6 +49,7 @@ _JOB_PHASES = {
     "create_pr": ("pr", "PRs opened", "In review", "⎇"),
     "sync_pr_base": ("sync", "Base sync", None, "↺"),
     "scope_review": ("scope", "Scope review", None, "⚖"),
+    "fix_scope_findings": ("scope_fix", "Scope fix", None, "✂"),
     "fix_ci_failures": ("ci_fix", "CI fix", None, "⚙"),
     "fix_reported_bug": ("bug", "Reported bug fix", None, "✱"),
     "resolve_conflicts": ("conflicts", "Resolve conflicts", None, "⑂"),
@@ -69,6 +70,7 @@ _PHASE_DOCS = {
     "prove": ["proof.md", "db-proof.txt", "proof.js", "screenshot_check.js"],
     "ready": ["pr-descriptions.json"],
     "scope": ["scope-review.md"],
+    "scope_fix": ["scope-fix.md"],
     "research": ["research.md"],
     "prd": ["prd.md"],
 }
@@ -115,10 +117,12 @@ _SCAN_EVENTS = frozenset({
 
 _CHECK_EVENTS = frozenset({"ticket_check_error", "ticket_checks_passed"})
 
-_MAINTENANCE_PHASES = frozenset({"sync", "scope", "defence", "ci_fix", "conflicts"})
+_MAINTENANCE_PHASES = frozenset({"sync", "scope", "scope_fix", "defence",
+                                 "ci_fix", "conflicts"})
 
 _PHASE_OWNED_EVENTS = frozenset({
     "ticket_scope_review_started", "ticket_scope_review_failed",
+    "ticket_scope_fix_started",
     "scope_review_fanout_complete", "ticket_base_synced",
     "ticket_base_sync_blocked", "sync_pr_base_error",
     "ticket_worktree_rebased", "ticket_worktree_preserved",
