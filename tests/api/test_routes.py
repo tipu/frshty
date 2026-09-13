@@ -598,14 +598,16 @@ class TestSubmitPrScopeGate:
     three dispatcher-side gates never run there and this endpoint was the only
     way a branch reached a PR."""
 
-    def _submit(self, client, tmp_path, key, scope, **data):
+    def _submit(self, client, tmp_path, key, scope, *, extra_state=None, **data):
         from web import tickets as web_tickets
         slug = f"{key}-s"
         (tmp_path / "tickets" / slug / "repo1").mkdir(parents=True, exist_ok=True)
-        state.save("tickets", {key: {"status": "pr_ready", "slug": slug,
-                                     "branch": "b", "summary": "s",
-                                     "scope_review": {"verdict": "fail",
-                                                      "reason": "votes codex=FAIL"}}})
+        ticket = {"status": "pr_ready", "slug": slug,
+                  "branch": "b", "summary": "s",
+                  "scope_review": {"verdict": "fail",
+                                   "reason": "votes codex=FAIL"}}
+        ticket.update(extra_state or {})
+        state.save("tickets", {key: ticket})
         platform = MagicMock()
         platform.push_branch.return_value = {"ok": True}
         platform.create_pr.return_value = {"url": "http://pr/1", "id": 1}
@@ -646,6 +648,16 @@ class TestSubmitPrScopeGate:
             "SELECT reason FROM ticket_transitions WHERE ticket_key=?"
             " ORDER BY id DESC LIMIT 1", ("SCOPE-3",))
         assert "scope review fail overridden" in rows[0]["reason"]
+
+    def test_the_pr_record_names_the_branch_it_was_opened_from(self, client, tmp_path):
+        """A later fix pushes to the branch this record names. A record with no
+        branch falls back to the ticket's own branch name, and a worktree on a
+        different branch then takes a push that reports success and never
+        reaches the PR."""
+        resp, platform = self._submit(client, tmp_path, "SCOPE-15", "pass")
+        assert getattr(resp, "status_code", 200) == 200, getattr(resp, "body", resp)
+        prs = state.load("tickets")["SCOPE-15"]["prs"]
+        assert prs[0]["branch"] == "b"
 
     def test_pass_verdict_opens_the_pr(self, client, tmp_path):
         resp, platform = self._submit(client, tmp_path, "SCOPE-4", "pass")
@@ -750,6 +762,81 @@ class TestSubmitPrScopeGate:
         tasks = [j["task"] for j in db.query_all(
             "SELECT task FROM jobs WHERE ticket_key=?", ("SCOPE-10",))]
         assert tasks.count("scope_review") == 1
+
+    def _fail_report(self, tmp_path, key):
+        docs = tmp_path / "tickets" / f"{key}-s" / "docs"
+        docs.mkdir(parents=True, exist_ok=True)
+        (docs / "scope-review.md").write_text("\n".join([
+            "Votes: agy=FAIL, codex=FAIL", "",
+            "## agy", "", "Offending changes:", "",
+            "- `repo1`: unrelated pacing fix at src/a.ts:28", "",
+            "SCOPE VERDICT: FAIL", ""]))
+
+    def test_a_fail_verdict_queues_the_correction_that_unblocks_the_pr(self, client, tmp_path):
+        """A FAIL names the changes to take off the branch. frshty takes them
+        off itself, so the body says that rather than handing the operator a
+        list to strip by hand."""
+        self._fail_report(tmp_path, "SCOPE-11")
+        with patch("features.tickets._repo_gate_blocked", return_value=None):
+            resp, platform = self._submit(client, tmp_path, "SCOPE-11", "fail")
+        assert resp.status_code == 409, getattr(resp, "body", resp)
+        body = json.loads(resp.body)
+        assert body["fix_state"] == "queued"
+        assert "taking the changes it names off the branch" in body["error"]
+        assert "prove the ticket again" in body["error"]
+        assert "open the PR anyway" in body["error"]
+        tasks = [j["task"] for j in db.query_all(
+            "SELECT task FROM jobs WHERE ticket_key=?", ("SCOPE-11",))]
+        assert "fix_scope_findings" in tasks
+        platform.create_pr.assert_not_called()
+        assert state.load("tickets")["SCOPE-11"]["status"] == "pr_ready"
+
+    def test_a_queued_correction_is_not_queued_twice(self, client, tmp_path):
+        self._fail_report(tmp_path, "SCOPE-12")
+        with patch("features.tickets._repo_gate_blocked", return_value=None):
+            self._submit(client, tmp_path, "SCOPE-12", "fail")
+            resp, _ = self._submit(client, tmp_path, "SCOPE-12", "fail")
+        assert json.loads(resp.body)["fix_state"] == "running"
+        tasks = [j["task"] for j in db.query_all(
+            "SELECT task FROM jobs WHERE ticket_key=?", ("SCOPE-12",))]
+        assert tasks.count("fix_scope_findings") == 1
+
+    def test_a_spent_correction_budget_hands_the_branch_back(self, client, tmp_path):
+        """Two corrections that did not move the verdict mean the reviewers and
+        the fixer disagree about the ticket. The operator settles that."""
+        from core.consensus_scope import MAX_SCOPE_FIX_ATTEMPTS
+        self._fail_report(tmp_path, "SCOPE-13")
+        with patch("features.tickets._repo_gate_blocked", return_value=None):
+            resp, platform = self._submit(
+                client, tmp_path, "SCOPE-13", "fail",
+                extra_state={"scope_fix": {"attempts": MAX_SCOPE_FIX_ATTEMPTS}})
+        body = json.loads(resp.body)
+        assert body["fix_state"] == "exhausted"
+        assert "by hand" in body["error"]
+        assert "open the PR anyway" in body["error"]
+        tasks = [j["task"] for j in db.query_all(
+            "SELECT task FROM jobs WHERE ticket_key=?", ("SCOPE-13",))]
+        assert "fix_scope_findings" not in tasks
+        platform.create_pr.assert_not_called()
+
+    def test_an_unfinished_correction_says_so_in_the_block(self, client, tmp_path):
+        """The operator decides from this body. A correction that stopped half
+        way is a different situation from a verdict the reviewers reached, and
+        the override is the only way past it."""
+        self._fail_report(tmp_path, "SCOPE-14")
+        with patch("features.tickets._repo_gate_blocked", return_value=None):
+            resp, platform = self._submit(
+                client, tmp_path, "SCOPE-14", "fail",
+                extra_state={"scope_fix": {
+                    "attempts": 1,
+                    "incomplete": "a commit was blocked part way: ruff E501"}})
+        assert resp.status_code == 409, getattr(resp, "body", resp)
+        body = json.loads(resp.body)
+        assert "did not finish" in body["error"]
+        assert "ruff E501" in body["error"]
+        assert "open the PR anyway" in body["error"]
+        assert body["can_force"] is True
+        platform.create_pr.assert_not_called()
 
     def test_only_a_json_true_overrides_the_gate(self, client, tmp_path):
         for i, value in enumerate(["false", "0", 1, {}, [], "true"]):

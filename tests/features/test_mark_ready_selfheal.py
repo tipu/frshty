@@ -102,7 +102,7 @@ class TestCleanScratch:
 
 
 class TestMarkReadySelfHeal:
-    def test_scratch_only_worktree_passes(self, tmp_path):
+    def test_scratch_only_worktree_passes(self, tmp_path, tmp_state):
         """A worktree dirtied only by playwright scratch must NOT block —
         mark_ready cleans it and reaches the success path."""
         ticket_dir = tmp_path / "tickets" / "PROJ-1-x"
@@ -116,7 +116,7 @@ class TestMarkReadySelfHeal:
         assert result.status == "ok", result.reason
         fire.assert_called_once()
 
-    def test_real_leftover_is_committed_not_blocked(self, tmp_path):
+    def test_real_leftover_is_committed_not_blocked(self, tmp_path, tmp_state):
         """Real uncommitted source left by a prior stage is committed, not
         blocked."""
         ticket_dir = tmp_path / "tickets" / "PROJ-1-x"
@@ -133,3 +133,39 @@ class TestMarkReadySelfHeal:
         log = subprocess.run(["git", "log", "--oneline"], cwd=repo,
                              capture_output=True, text=True).stdout
         assert "finalize" in log
+
+
+class TestMarkReadyRecordsWhatTheProofStandsFor:
+    """The self-heal commits work a prior stage left behind. That code is not
+    what the proof established, so it must not be labelled proved. A self-heal
+    that commits nothing changes nothing, and re-recording there keeps a retry
+    of this step from reading its own no-op as a branch change."""
+
+    def test_a_finalize_commit_is_not_labelled_proved(self, tmp_path, tmp_state):
+        import core.state as state
+        ticket_dir = tmp_path / "tickets" / "PROJ-1-x"
+        repo = _make_repo(ticket_dir, "saas-dashboard")
+        (repo / "leftover.py").write_text("z = 3\n")
+        state.save_ticket("PROJ-1", {"status": "proving", "slug": "PROJ-1-x",
+                                     "proof_fingerprint": "r:proved"})
+        ctx = _ctx(tmp_path)
+        with patch("core.tasks.tickets.scope_fingerprint", return_value="r:finalized"), \
+             patch("core.tasks.tickets._fire_ticket_dev_complete"), \
+             patch("core.git_util.commit_with_hooks",
+                   side_effect=lambda repo_dir, message, **kw: _commit_result(repo_dir, message)):
+            result = mark_ready(ctx)
+        assert result.status == "ok", result.reason
+        assert state.load_ticket("PROJ-1")["proof_fingerprint"] == "r:proved"
+
+    def test_a_clean_worktree_keeps_the_proof_current(self, tmp_path, tmp_state):
+        import core.state as state
+        ticket_dir = tmp_path / "tickets" / "PROJ-1-x"
+        _make_repo(ticket_dir, "saas-dashboard")
+        state.save_ticket("PROJ-1", {"status": "proving", "slug": "PROJ-1-x",
+                                     "proof_fingerprint": "r:stale"})
+        ctx = _ctx(tmp_path)
+        with patch("core.tasks.tickets.scope_fingerprint", return_value="r:current"), \
+             patch("core.tasks.tickets._fire_ticket_dev_complete"):
+            result = mark_ready(ctx)
+        assert result.status == "ok", result.reason
+        assert state.load_ticket("PROJ-1")["proof_fingerprint"] == "r:current"
