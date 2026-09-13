@@ -161,6 +161,56 @@ MUTATIONS = [
         "new": "        if False:",
     },
     {
+        "label": "scope_gate_only_flags",
+        "gate": "a failed scope review is corrected instead of held for the operator",
+        "target": "tests/features/test_scope_review.py::TestPrReadyScopeGate"
+                  "::test_fail_holds_the_pr_and_queues_the_correction",
+        "path": "features/ticket_states.py",
+        "old": "            else:\n"
+               "                _t._enqueue_scope_fix(instance_key, key, ts)",
+        "new": "            else:\n                pass",
+    },
+    {
+        "label": "scope_fix_empty_correction_passes",
+        "gate": "a correction that commits nothing fails instead of re-proving the same branch",
+        "target": "tests/features/test_scope_fix.py::TestTheCorrectionForcesAFreshProof"
+                  "::test_a_run_that_commits_nothing_fails_and_keeps_the_proof",
+        "path": "core/tasks/tickets.py",
+        "old": "    if scope_fingerprint(ctx.config, current) == fingerprint:\n"
+               '        log.emit("ticket_scope_fix_no_change",',
+        "new": "    if False:\n"
+               '        log.emit("ticket_scope_fix_no_change",',
+    },
+    {
+        "label": "scope_fix_proof_carried_forward",
+        "gate": "a corrected branch is proved again rather than shipping the proof of the branch it replaced",
+        "target": "tests/features/test_scope_fix.py::TestTheCorrectionForcesAFreshProof"
+                  "::test_a_run_that_commits_sends_the_ticket_back_to_prove",
+        "path": "core/tasks/tickets.py",
+        "old": "        _requeue_proof(ctx, ticket_dir, findings)\n"
+               '        outcome = "proving again"',
+        "new": '        outcome = "proving again"',
+    },
+    {
+        "label": "open_scope_correction_ships",
+        "gate": "a scope correction that did not finish holds every ship path",
+        "target": "tests/features/test_scope_review.py::TestAnUnfinishedCorrectionHoldsTheGate"
+                  "::test_an_open_correction_reads_as_fail_over_a_recorded_pass",
+        "path": "features/tickets.py",
+        "old": "    if incomplete:\n        return \"fail\"\n"
+               '    return "pass" if rec.get("verdict") == "pass" else "fail"',
+        "new": '    return "pass" if rec.get("verdict") == "pass" else "fail"',
+    },
+    {
+        "label": "stale_proof_shipped",
+        "gate": "a proof that predates the branch is redone instead of waved through",
+        "target": "tests/features/test_proving_state.py::TestHandlerRouting"
+                  "::test_a_proof_that_predates_the_branch_enqueues_prove",
+        "path": "features/ticket_states.py",
+        "old": "    if proof.exists() and not _t._proof_is_stale(config, ts):",
+        "new": "    if proof.exists():",
+    },
+    {
         "label": "scope_gate_merge_open",
         "gate": "a failed scope review blocks the auto-merge",
         "target": "tests/features/test_scope_review.py::TestInReviewScopeGate"

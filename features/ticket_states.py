@@ -366,7 +366,7 @@ def _handle_proving_ticket(
     ws = config["workspace"]
     slug = ts.get("slug", "")
     proof = ws["root"] / ws["tickets_dir"] / slug / "docs" / "proof.md"
-    if proof.exists():
+    if proof.exists() and not _t._proof_is_stale(config, ts):
         _t._enqueue_stage(instance_key, key, "mark_ready")
     else:
         _t._enqueue_stage(instance_key, key, "prove")
@@ -396,6 +396,8 @@ def _handle_pr_ready_ticket(
         if scope in ("pending", "fail"):
             if scope == "pending":
                 _t._enqueue_stage(instance_key, key, "scope_review")
+            else:
+                _t._enqueue_scope_fix(instance_key, key, ts)
             state.save_ticket(key, ts)
             return ts, True
     if config.get("pr", {}).get("auto_pr") and not ts.get("pr_scheduled_at"):
