@@ -49,6 +49,29 @@ class TestHandlerRouting:
                                            config["_base_url"], "aimyable", True)
         eq.assert_called_once_with("aimyable", "PROJ-1", "mark_ready")
 
+    def test_a_proof_that_predates_the_branch_enqueues_prove(self, tmp_path):
+        """The scope correction takes code off the branch after the proof ran.
+        The recorded proof then stands for a branch that no longer exists, so
+        the step runs again instead of waving the ticket through."""
+        config, ticket, state_dict, docs = _seed(tmp_path)
+        (docs / "proof.md").write_text("PROOF: DEMOED\n")
+        state_dict["proof_fingerprint"] = "r:before"
+        with patch("core.consensus_scope.scope_fingerprint", return_value="r:after"), \
+             patch("features.tickets._enqueue_stage") as eq:
+            ts_mod._handle_proving_ticket(config, ticket, state_dict,
+                                           config["_base_url"], "aimyable", True)
+        eq.assert_called_once_with("aimyable", "PROJ-1", "prove")
+
+    def test_a_proof_that_matches_the_branch_enqueues_mark_ready(self, tmp_path):
+        config, ticket, state_dict, docs = _seed(tmp_path)
+        (docs / "proof.md").write_text("PROOF: DEMOED\n")
+        state_dict["proof_fingerprint"] = "r:same"
+        with patch("core.consensus_scope.scope_fingerprint", return_value="r:same"), \
+             patch("features.tickets._enqueue_stage") as eq:
+            ts_mod._handle_proving_ticket(config, ticket, state_dict,
+                                           config["_base_url"], "aimyable", True)
+        eq.assert_called_once_with("aimyable", "PROJ-1", "mark_ready")
+
     def test_no_instance_key_short_circuits(self, tmp_path):
         config, ticket, state_dict, _ = _seed(tmp_path)
         with patch("features.tickets._enqueue_stage") as eq:
@@ -71,7 +94,7 @@ class TestProveTask:
             registry=None, now=None,
         )
 
-    def test_prove_runs_claude_with_proof_md_inlined(self, tmp_path):
+    def test_prove_runs_claude_with_proof_md_inlined(self, tmp_path, tmp_state):
         ctx = self._ctx(tmp_path)
         proof_content = "# How to prove\n\n1. Use playwright. 2. Record demo.webm.\n"
         (tmp_path / "PROOF.md").write_text(proof_content)
@@ -89,7 +112,7 @@ class TestProveTask:
         assert proof_content in prompt
         assert "follow it" in prompt.lower() or "follow the" in prompt.lower()
 
-    def test_prove_with_missing_proof_md_writes_not_applicable(self, tmp_path):
+    def test_prove_with_missing_proof_md_writes_not_applicable(self, tmp_path, tmp_state):
         """Defensive: if PROOF.md vanished between enter_proving and prove
         (race or operator deletion), write a NOT_APPLICABLE proof.md and
         exit ok rather than spinning."""
@@ -106,7 +129,57 @@ class TestProveTask:
         assert proof.exists()
         assert "NOT_APPLICABLE" in proof.read_text()
 
-    def test_prove_claude_failure_returns_failed(self, tmp_path):
+    def test_prove_moves_the_old_proof_aside_before_it_runs(self, tmp_path, tmp_state):
+        """The postcondition is that docs/proof.md exists. A proof left from an
+        earlier branch would satisfy it, and the run would be credited with a
+        proof it did not write."""
+        ctx = self._ctx(tmp_path)
+        docs = tmp_path / "tickets" / "PROJ-1-do-the-thing" / "docs"
+        (docs / "proof.md").write_text("PROOF: DEMOED\n\nan older branch\n")
+        (tmp_path / "PROOF.md").write_text("# proof guide\n\ncontent\n")
+        with patch("core.state.load_ticket",
+                   return_value={"slug": "PROJ-1-do-the-thing"}), \
+             patch("core.tasks.tickets._claim_session", return_value=(None, False)), \
+             patch("core.tasks.tickets.run_claude_code", return_value="proof-done"):
+            result = prove(ctx)
+        assert result.status == "ok"
+        assert not (docs / "proof.md").exists()
+        assert "an older branch" in (docs / "proof.prev.md").read_text()
+
+    def test_prove_fails_when_the_old_proof_cannot_be_moved_aside(self, tmp_path, tmp_state):
+        """Carrying on would let the old file satisfy the existence
+        postcondition and be recorded as proof of the current branch."""
+        ctx = self._ctx(tmp_path)
+        docs = tmp_path / "tickets" / "PROJ-1-do-the-thing" / "docs"
+        (docs / "proof.md").write_text("PROOF: DEMOED\n\nan older branch\n")
+        (tmp_path / "PROOF.md").write_text("# proof guide\n\ncontent\n")
+        with patch("core.state.load_ticket",
+                   return_value={"slug": "PROJ-1-do-the-thing"}), \
+             patch("pathlib.Path.replace", side_effect=OSError(13, "denied")), \
+             patch("pathlib.Path.unlink", side_effect=OSError(13, "denied")), \
+             patch("core.tasks.tickets.run_claude_code") as rc:
+            result = prove(ctx)
+        assert result.status == "failed"
+        assert "move the previous proof aside" in result.reason
+        rc.assert_not_called()
+
+    def test_prove_records_the_branch_its_proof_stands_for(self, tmp_path, tmp_state):
+        """Without this the proof carries no statement about which code it
+        proved, and nothing downstream can tell a stale proof from a fresh
+        one."""
+        import core.state as state
+        ctx = self._ctx(tmp_path)
+        (tmp_path / "PROOF.md").write_text("# proof guide\n\ncontent\n")
+        state.save_ticket("PROJ-1", {"status": "proving",
+                                     "slug": "PROJ-1-do-the-thing"})
+        with patch("core.tasks.tickets.scope_fingerprint", return_value="r:proved"), \
+             patch("core.tasks.tickets._claim_session", return_value=(None, False)), \
+             patch("core.tasks.tickets.run_claude_code", return_value="proof-done"):
+            result = prove(ctx)
+        assert result.status == "ok"
+        assert state.load_ticket("PROJ-1")["proof_fingerprint"] == "r:proved"
+
+    def test_prove_claude_failure_returns_failed(self, tmp_path, tmp_state):
         ctx = self._ctx(tmp_path)
         (tmp_path / "PROOF.md").write_text("# proof guide\n\ncontent\n")
         with patch("core.state.load_ticket",
@@ -153,7 +226,7 @@ class TestProofChangeScope:
         assert "diff unavailable" in scope
         assert "No committed repository changes were detected." in scope
 
-    def test_prompt_marks_omitted_repositories_out_of_scope(self, tmp_path):
+    def test_prompt_marks_omitted_repositories_out_of_scope(self, tmp_path, tmp_state):
         ctx = TestProveTask()._ctx(tmp_path)
         (tmp_path / "PROOF.md").write_text("# proof guide\n")
         with patch("core.state.load_ticket",

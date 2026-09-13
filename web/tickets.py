@@ -332,6 +332,26 @@ def _scope_review_queue_state(ticket_key: str) -> str:
     return "queued" if job_id is not None else ""
 
 
+def _scope_fix_queue_state(ticket_key: str, ticket: dict) -> str:
+    """Make sure the correction of a failed scope review is on its way.
+
+    Returns "running" when one was already queued or running, "queued" when
+    this call enqueued one, "exhausted" when the correction budget is spent,
+    and "" when the queue refused it — the LLM budget guard is on, another
+    ticket holds the repo, or the stage failed too many times."""
+    if consensus_scope.scope_fix_exhausted(ticket):
+        return "exhausted"
+    instance_key = state.active_instance_key()
+    if not instance_key:
+        return ""
+    jobs = q.jobs_for_ticket(instance_key, ticket_key)
+    if any(j["task"] == "fix_scope_findings" and j["status"] in ("queued", "running")
+           for j in jobs):
+        return "running"
+    job_id = _tickets_mod._enqueue_scope_fix(instance_key, ticket_key, ticket)
+    return "queued" if job_id is not None else ""
+
+
 def _scope_blocked_response(ticket_key: str, ticket: dict, slug: str, scope: str):
     """409 for a PR that the consensus scope gate holds.
 
@@ -353,10 +373,27 @@ def _scope_blocked_response(ticket_key: str, ticket: dict, slug: str, scope: str
         summary = consensus_scope.report_summary(report)
         body.update(summary)
         body["reason"] = body["reason"] or summary["votes"]
-        body["error"] = ("The consensus scope review voted FAIL on this branch, so the PR is "
-                         "held. Take the changes it names off the branch and the review runs "
-                         "again by itself, or open the PR anyway and frshty records the "
-                         "override on the ticket.")
+        fix_state = _scope_fix_queue_state(ticket_key, ticket)
+        body["fix_state"] = fix_state
+        next_step = {
+            "queued": "frshty is taking the changes it names off the branch and will prove the "
+                      "ticket again. Submit again once the review passes.",
+            "running": "frshty is already taking the changes it names off the branch and will "
+                       "prove the ticket again. Submit again once the review passes.",
+            "exhausted": "frshty took the named changes off the branch twice and the review "
+                         "still fails, so it stopped correcting. Take them off by hand and the "
+                         "review runs again by itself.",
+        }.get(fix_state,
+              "frshty could not queue the correction: the LLM budget guard is on, another "
+              "ticket holds the repo, or the correction failed repeatedly. Take the changes it "
+              "names off the branch and the review runs again by itself.")
+        incomplete = _tickets_mod._scope_fix_incomplete(ticket)
+        body["fix_incomplete"] = incomplete
+        opening = ("A scope correction did not finish on this branch, so the PR is held: "
+                   f"{incomplete}." if incomplete else
+                   "The consensus scope review voted FAIL on this branch, so the PR is held.")
+        body["error"] = (f"{opening} {next_step} Or open the PR anyway and frshty records "
+                         "the override on the ticket.")
         return JSONResponse(body, status_code=409)
 
     # The report on disk belongs to the verdict this fingerprint replaced, so it
@@ -448,7 +485,8 @@ def _submit_pr_sync(ticket_key: str, data: dict):
         pr_url = result.get("url", "")
         pr_id = result.get("id")
         if pr_id:
-            prs.append({"repo": repo_name, "id": pr_id, "url": pr_url})
+            prs.append({"repo": repo_name, "id": pr_id, "url": pr_url,
+                        "branch": push_branch})
 
     if not prs:
         return JSONResponse({"error": "No PRs were created"}, status_code=400)

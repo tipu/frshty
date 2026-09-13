@@ -79,7 +79,7 @@ Every capability is a flag in the instance config. A flag that is off costs noth
 | `tickets` | The ticket-to-PR pipeline |
 | `review_prs` | Review queue for PRs where you are a reviewer |
 | `auto_review` | On by default. Set it to false and a review only runs when you start one on `/reviews` |
-| `scope_review` | Consensus scope gate before the PR opens |
+| `scope_review` | Consensus scope gate before the PR opens. It takes the changes it names off the branch and proves the ticket again |
 | `pr_autofix` | Automatic review and fix cycle on every new PR (GitHub only) |
 | `defence` | Test-backed proof before a reply claims something works |
 | `presentations` | Slide walkthroughs of a branch |
@@ -143,7 +143,7 @@ One FastAPI process serves every instance. Work is rows in a SQLite database at 
 - **Scheduler.** A beat thread fires cron ticks and recurring rows. Turning a feature off deletes its recurring rows on the next start.
 - **Models.** Claude, Codex, and `agy` are invoked headless as subprocesses. No tmux in the pipeline. Tmux is used only for the terminal you drive yourself.
 - **Platforms.** GitHub and Bitbucket sit behind one interface, as do Jira and Linear. Choice is per instance.
-- **Gates.** A ticket reaches done through a chain of gates. The write and commit gates keep an agent out of a shared checkout, the push gate lints and tests every repository a push targets, the proof gate decides whether a ticket enters proving, the scope review holds both the PR and the merge, and the sweep closes a ticket only when the ticket source says it is finished. `scripts/mutation_check.py` removes each gate from a throwaway copy of the tree and requires the named test to go red. `scripts/harness_check.sh` attacks that harness with a suite that cannot run, a patch that changes nothing, and a mutation no test kills, and requires it to refuse each one. Both run in CI.
+- **Gates.** A ticket reaches done through a chain of gates. The write and commit gates keep an agent out of a shared checkout, the push gate lints and tests every repository a push targets, the proof gate decides whether a ticket enters proving, the scope review holds both the PR and the merge and corrects the branch it failed, and the sweep closes a ticket only when the ticket source says it is finished. `scripts/mutation_check.py` removes each gate from a throwaway copy of the tree and requires the named test to go red. `scripts/harness_check.sh` attacks that harness with a suite that cannot run, a patch that changes nothing, and a mutation no test kills, and requires it to refuse each one. Both run in CI.
 
 ```text
 core/       orchestration primitives: queue, worker, tasks, events, scheduler, model runners
