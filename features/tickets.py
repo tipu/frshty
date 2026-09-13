@@ -76,6 +76,7 @@ MAX_TICKET_COMMENT_RETRIES = 3
 _LLM_BACKED_TASKS = frozenset({
     "start_planning", "start_reviewing", "fix_review_findings",
     "fix_ci_failures", "setup_prd_ticket", "fix_reported_bug",
+    "fix_scope_findings",
     "address_pm_findings", "validate_merged_ticket", "resolve_conflicts",
     "plan_tests", "write_tests", "run_tests_and_fix",
     "prove",
@@ -88,7 +89,7 @@ _LLM_BACKED_TASKS = frozenset({
 _REPO_GATED_TASKS = frozenset({
     "setup_prd_ticket", "start_planning", "mark_ready", "create_pr",
     "plan_tests", "write_tests", "run_tests_and_fix",
-    "prove",
+    "prove", "fix_scope_findings",
 })
 
 _GATE_OCCUPYING_STATUSES = ("planning", "reviewing", "testing", "proving")
@@ -202,16 +203,122 @@ def _scope_review_state(config: dict, ts: dict) -> str:
     Returns 'disabled' (feature off, or no branch diff to review), 'pending'
     (no verdict recorded for the current branch diff), 'pass', or 'fail'.
     Keyed on consensus_scope.scope_fingerprint so any new code on the branch
-    invalidates the previous verdict and forces a fresh review."""
+    invalidates the previous verdict and forces a fresh review.
+
+    A correction pass that started and did not finish reads as 'fail' whatever
+    is recorded, and holds even when no branch diff can be derived. The branch
+    then still carries what the reviewers named, or carries work a blocked
+    commit left loose, and a later review of that state can pass. Every ship
+    path already consults this function, so one answer here holds the PR, the
+    scheduled PR and the auto-merge together.
+
+    A branch that moved off the recorded verdict still reads 'pending', mark or
+    no mark. The next step there is a fresh review, not another correction: a
+    correction pass has nothing to act on while the report describes code that
+    is no longer on the branch, and it would skip on every poll."""
     if not config.get("features", {}).get("scope_review"):
         return "disabled"
+    incomplete = bool(_scope_fix_incomplete(ts))
     fingerprint = consensus_scope.scope_fingerprint(config, ts)
     if not fingerprint:
-        return "disabled"
+        return "fail" if incomplete else "disabled"
     rec = ts.get("scope_review") or {}
     if rec.get("fingerprint") != fingerprint:
         return "pending"
+    if incomplete:
+        return "fail"
     return "pass" if rec.get("verdict") == "pass" else "fail"
+
+
+def _scope_fix_incomplete(ts: dict) -> str:
+    """Why the last scope correction did not finish, or "" when none is open.
+
+    Set when a pass starts and cleared when it completes, so a pass that dies,
+    that a blocked commit stops half way, or whose removal never reached the
+    open PR leaves a mark the ship paths can read."""
+    return str((ts.get("scope_fix") or {}).get("incomplete") or "")
+
+
+def _scope_fix_runs(instance_key: str, ticket_key: str) -> int:
+    """How many correction passes this ticket has already been given.
+
+    Counted from the job rows rather than from the ticket state. A poll cycle
+    holds the ticket it loaded and writes it back after it enqueues, so a
+    count kept on the ticket can be overwritten by that stale copy, and the
+    budget that bounds an LLM loop would then reset itself. A job that skipped
+    ran no model and spent nothing, so it does not count."""
+    jobs = q.jobs_for_ticket(instance_key, ticket_key, limit=200)
+    return sum(1 for j in jobs
+               if j["task"] == "fix_scope_findings" and j["status"] != "skipped")
+
+
+def _enqueue_scope_fix(instance_key: str, ticket_key: str, ts: dict) -> int | None:
+    """Put the scope correction on the queue for a ticket the scope gate failed.
+
+    The gate names the changes that do not serve the ticket. frshty takes them
+    off the branch itself and proves the ticket again, so a FAIL verdict is
+    work to do rather than a message to the operator. The budget in
+    consensus_scope bounds it: once it is spent the gate holds the branch and
+    the operator decides, which is the behaviour this replaced."""
+    if consensus_scope.scope_fix_exhausted(ts):
+        return None
+    if _scope_fix_runs(instance_key, ticket_key) >= consensus_scope.MAX_SCOPE_FIX_ATTEMPTS:
+        return None
+    job_id = _enqueue_stage(instance_key, ticket_key, "fix_scope_findings")
+    if job_id is None:
+        return None
+    mark_scope_fix_open(ticket_key, ts,
+                        "a scope correction was queued and has not finished",
+                        keep_existing=True)
+    return job_id
+
+
+def mark_scope_fix_open(ticket_key: str, ts: dict, reason: str, *,
+                        keep_existing: bool = False) -> None:
+    """Record that a correction pass is open, on the row and on the caller's
+    own copy of it.
+
+    The poll cycle writes the ticket it loaded back after it enqueues. A mark
+    written only to the row would be erased by that copy, and the mark is what
+    holds the branch when a pass dies.
+
+    `keep_existing` leaves a reason that already stands. A pass that queued
+    knows only that it queued; a pass that stopped on a blocked commit or on a
+    push that did not land names the branch's real problem, and that is the
+    sentence the operator has to read."""
+    def _set(t: dict) -> dict:
+        rec = dict(t.get("scope_fix") or {})
+        if keep_existing and rec.get("incomplete"):
+            return t
+        rec["incomplete"] = reason
+        t["scope_fix"] = rec
+        return t
+    state.update_ticket(ticket_key, _set)
+    _set(ts)
+
+
+def clear_scope_fix_open(ticket_key: str) -> None:
+    def _set(t: dict) -> dict:
+        rec = dict(t.get("scope_fix") or {})
+        rec.pop("incomplete", None)
+        t["scope_fix"] = rec
+        return t
+    state.update_ticket(ticket_key, _set)
+
+
+def _proof_is_stale(config: dict, ts: dict) -> bool:
+    """Whether the recorded proof describes a branch this one no longer is.
+
+    The proof records the branch diff it was run against. A stage that edits
+    the branch afterwards — the scope correction removes code — leaves that
+    proof standing for work that has changed under it. A proof written before
+    this record existed is redone rather than trusted. A branch diff that
+    cannot be derived is not stale: the old behaviour stands rather than
+    proving on a git error."""
+    current = consensus_scope.scope_fingerprint(config, ts)
+    if not current:
+        return False
+    return ts.get("proof_fingerprint") != current
 
 
 def _parse_iso(ts: str | None) -> datetime | None:
@@ -1865,7 +1972,8 @@ def _create_pr(config, ticket, ts, base_url) -> dict:
                 author = platform.get_pr_info(repo["name"], pr_id).get("author", "")
             except Exception as e:
                 log.emit("get_pr_info_failed", f"Failed to get PR info: {e}", meta={"repo": repo["name"], "pr_id": pr_id})
-            prs.append({"repo": repo["name"], "id": pr_id, "url": pr_url, "author": author})
+            prs.append({"repo": repo["name"], "id": pr_id, "url": pr_url,
+                        "branch": push_branch, "author": author})
 
     if not any_diff and diff_undetermined:
         log.emit("ticket_no_changes_undetermined",

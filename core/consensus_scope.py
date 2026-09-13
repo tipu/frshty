@@ -120,6 +120,26 @@ def scope_fingerprint(config: dict, ts: dict) -> str:
     return ";".join(sorted(parts))
 
 
+# A correction pass is one LLM run plus a fresh proof, so it is not free, and a
+# third pass would mean the reviewers and the fixer disagree about what the
+# ticket is. That disagreement is the operator's to settle, so the gate goes
+# back to holding the branch once the budget is spent.
+MAX_SCOPE_FIX_ATTEMPTS = 2
+
+
+def scope_fix_attempts(ts: dict) -> int:
+    """How many correction passes have already run for this ticket. Reset to
+    zero whenever a scope review records a pass."""
+    try:
+        return int((ts.get("scope_fix") or {}).get("attempts", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def scope_fix_exhausted(ts: dict) -> bool:
+    return scope_fix_attempts(ts) >= MAX_SCOPE_FIX_ATTEMPTS
+
+
 def _write_report(ticket_dir: Path, ticket_key: str, votes: dict[str, str],
                   dropped: dict[str, str], results: dict[str, dict],
                   verdict: str) -> None:
