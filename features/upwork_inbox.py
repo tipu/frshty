@@ -413,6 +413,12 @@ def _fetch_rooms(config: dict, instance_key: str, limit: int,
     backlog is worked through a budget at a time, and a room with a new message
     is on the first page either way.
 
+    Below the floor the walk stops asking whether a page is new. Everything
+    down there is ground no sweep has covered, and a page of it that looks
+    caught up only means another scan reached it first. Stopping on that would
+    hand back "the list is finished" for a list this sweep never saw the end
+    of, and the rooms after it would be stranded.
+
     The new floor is returned rather than written. It records that every room
     above it has been dealt with, and none of them has been until the caller
     has read their messages in, so the caller writes it and only when that
@@ -423,6 +429,7 @@ def _fetch_rooms(config: dict, instance_key: str, limit: int,
     collected: list[dict] = []
     cursor = ""
     reached = ""
+    below = False
     for _ in range(max(1, pages)):
         batch = upwork_client.rooms(config, limit=limit, cursor=cursor) or {}
         rooms = batch.get("rooms") or []
@@ -433,24 +440,43 @@ def _fetch_rooms(config: dict, instance_key: str, limit: int,
         reached = str(batch.get("cursor") or "")
         if not reached:
             break
-        if _page_has_news(instance_key, rooms):
+        if below or _page_has_news(instance_key, rooms):
             cursor = reached
             continue
         if floor and floor < reached:
             # Nothing new down to here, and no sweep has ever looked past the
             # floor. Everything between is already indexed, so the budget is
             # better spent below it than on stopping above it.
-            cursor, reached, floor = floor, floor, ""
+            cursor, reached, below = floor, floor, True
             continue
         reached = ""
         break
     return collected, reached
 
 
+def _deeper_floor(stored: str, reached: str) -> str:
+    """The further down the room list of two floors.
+
+    "" is the bottom: it says a sweep reached the end of the list, so it beats
+    every timestamp. Between two timestamps the older one is further down,
+    because the list runs newest activity first.
+
+    Two sweeps of one instance can overlap, and one of them finishes with a
+    floor the other has already passed. Taking the deeper of the two keeps the
+    backlog moving in one direction: the loser's shallower floor costs a
+    repeated walk at worst, where overwriting with it would send every later
+    sweep back up the list."""
+    if not stored or not reached:
+        return ""
+    return min(stored, reached)
+
+
 def _record_room_floor(instance_key: str, reached: str) -> None:
-    """Remember how far the last completed sweep of the room list walked."""
+    """Remember how far the sweeps of the room list have walked."""
     blob = state.load(STATE_MODULE)
     floors = dict(blob.get("rooms_floor") or {})
+    if instance_key in floors:
+        reached = _deeper_floor(str(floors[instance_key] or ""), reached)
     floors[instance_key] = reached
     blob["rooms_floor"] = floors
     state.save(STATE_MODULE, blob)
@@ -659,12 +685,20 @@ def _transcript(row_id: int, operator_id: str, window: int,
     can only cover the messages the re-read before it refreshed. A room with
     more history than the window would otherwise open on messages nothing
     re-reads, and an edit to one of them would pass the claim unseen. The
-    opening kept is therefore the opening of the window, not of the room."""
-    rows = list(reversed(_read(
+    opening kept is therefore the opening of the window, not of the room.
+
+    The window is counted in stories, not in the messages that survive the
+    filter, because that is what the re-read spends its budget on. A page of
+    the API that is half system stories still costs a page, and counting only
+    what a person wrote would put the boundary further back than the re-read
+    ever gets."""
+    rows = _read(
         conn,
         "SELECT ts, user_id, user_name, text FROM upwork_messages"
         " WHERE room_id = ? AND deleted = 0 AND is_system = 0"
-        " ORDER BY ts DESC LIMIT ?", (row_id, max(1, window)))))
+        " AND ts >= COALESCE((SELECT MIN(ts) FROM (SELECT ts FROM upwork_messages"
+        "                     WHERE room_id = ? ORDER BY ts DESC LIMIT ?)), '')"
+        " ORDER BY ts", (row_id, row_id, max(1, window)))
     gap: list[dict] = []
     if len(rows) > MAX_TRANSCRIPT_MESSAGES:
         head = TRANSCRIPT_HEAD_MESSAGES
