@@ -15,7 +15,6 @@ import sqlite3
 import sys
 import tempfile
 from datetime import datetime
-from urllib.parse import quote
 
 SCHEMA = 1
 RUN_COLUMNS = ("run_id", "created_by_run", "declared_by_run", "verified_by_run")
@@ -93,28 +92,52 @@ def charter(repo):
             "sha_ok": sha_ok}
 
 
-def connect(db_path):
-    """Open the controller database without writing to it.
+def stamp(db_path):
+    """The size and modification time of the database and its write-ahead log."""
+    marks = []
+    for suffix in ("", "-wal"):
+        try:
+            info = os.stat(db_path + suffix)
+            marks.append((suffix, info.st_size, info.st_mtime_ns))
+        except OSError:
+            marks.append((suffix, None, None))
+    return marks
 
-    A read-only open of a WAL database needs a usable -shm file. When the host
-    refuses that open the database is copied first, so the live file is never
-    recovered, locked or written by this probe."""
-    uri = "file:" + quote(db_path) + "?mode=ro"
-    try:
-        conn = sqlite3.connect(uri, uri=True, timeout=10)
-        conn.row_factory = sqlite3.Row
-        conn.execute("SELECT count(*) FROM sqlite_master").fetchone()
-        return conn, None
-    except sqlite3.Error:
-        tmp = tempfile.mkdtemp(prefix="loopwatch-")
-        copy = os.path.join(tmp, "controller.db")
-        for suffix in ("", "-wal", "-shm"):
-            source = db_path + suffix
-            if os.path.exists(source):
-                shutil.copy2(source, copy + suffix)
-        conn = sqlite3.connect(copy, timeout=10)
-        conn.row_factory = sqlite3.Row
-        return conn, tmp
+
+def copy_aside(db_path):
+    """Copy the database and its write-ahead log into this host's temp directory.
+
+    The -shm is left behind on purpose. It is a scratch index that sqlite
+    rebuilds for the copy, and a stale one copied from a live database would
+    describe a log that is no longer there."""
+    tmp = tempfile.mkdtemp(prefix="loopwatch-")
+    copy = os.path.join(tmp, "controller.db")
+    for suffix in ("", "-wal"):
+        source = db_path + suffix
+        if os.path.exists(source):
+            shutil.copy2(source, copy + suffix)
+    return tmp
+
+
+def connect(db_path, attempts=3):
+    """Read a copy of the controller database. The live file is never opened.
+
+    Opening the live file would add its -shm and -wal when the controller is
+    not holding them, and would take a lock a controller write has to wait on.
+    The copy is taken again when the database changed while it was being
+    copied, so a poll that races a controller write reads one whole database
+    rather than halves of two."""
+    tmp = None
+    for attempt in range(attempts):
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+        before = stamp(db_path)
+        tmp = copy_aside(db_path)
+        if stamp(db_path) == before:
+            break
+    conn = sqlite3.connect(os.path.join(tmp, "controller.db"), timeout=10)
+    conn.row_factory = sqlite3.Row
+    return conn, tmp
 
 
 def tables(conn):
