@@ -52,13 +52,15 @@ Nothing.
 
 
 def build_loop(path, runs=3, note=None, exits=("done", "done", "done"),
-               objectives=None, halt=False):
+               objectives=None, halt=False, wal=False, last_tick=None, turns=4):
     """A checkout shaped like the real loops, small enough to assert on."""
     path.mkdir(parents=True, exist_ok=True)
     (path / "CHARTER.md").write_text(CHARTER)
     var = path / "var"
     var.mkdir(exist_ok=True)
     conn = sqlite3.connect(var / "controller.db")
+    if wal:
+        conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
     version = 1
     if note:
@@ -97,15 +99,18 @@ def build_loop(path, runs=3, note=None, exits=("done", "done", "done"),
             json.dumps({"type": "assistant",
                         "message": {"content": [{"type": "text", "text": "thinking"},
                                                 {"type": "tool_use", "name": "Bash"}]}}),
-            json.dumps({"type": "result", "result": "did run %d" % run_id, "num_turns": 4}),
+            json.dumps({"type": "result", "result": "did run %d" % run_id,
+                        "num_turns": turns}),
         ]))
     if halt:
         conn.execute("INSERT INTO halts (reason, severity, opened_at) VALUES (?,?,?)",
                      ("something broke", "all", "2026-01-01 00:00:00"))
-    (var / "tick.log").write_text("\n".join(
-        json.dumps({"outcome": "started", "run_id": index + 1,
-                    "rejected": ["task rejected: already open"]})
-        for index in range(runs)))
+    lines = [json.dumps({"outcome": "started", "run_id": index + 1,
+                         "rejected": ["task rejected: already open"]})
+             for index in range(runs)]
+    if last_tick:
+        lines.append(json.dumps({"outcome": last_tick, "run_id": runs}))
+    (var / "tick.log").write_text("\n".join(lines))
     conn.commit()
     conn.close()
     return path
@@ -437,3 +442,71 @@ python = "%s"
     page = out.read_text()
     assert "did run 3" in page
     assert "no such directory" in page
+
+
+def test_probe_reads_a_wal_database_without_leaving_a_file(tmp_path):
+    """The read-only open cannot create the -shm a WAL read needs, so the probe
+    reads a copy instead. Nothing new may appear beside the live database."""
+    repo = build_loop(tmp_path / "loop", wal=True)
+    var = repo / "var"
+    assert not (var / "controller.db-shm").exists()
+    before = sorted(path.name for path in var.iterdir())
+    snapshot = probe(repo)
+    assert snapshot["ok"] is True
+    assert [run["id"] for run in snapshot["runs"]] == [3, 2, 1]
+    assert sorted(path.name for path in var.iterdir()) == before
+
+
+def test_probe_reads_a_live_wal_database_without_touching_it(tmp_path):
+    """A row that lives only in the write-ahead log must still be read, and the
+    directory must look the same afterwards."""
+    repo = build_loop(tmp_path / "loop", wal=True)
+    var = repo / "var"
+    holder = sqlite3.connect(var / "controller.db")
+    holder.execute(
+        "INSERT INTO runs (id, task_id, role, base_version, started_at, "
+        "heartbeat_at, ended_at, exit_reason, cost_cents) VALUES "
+        "(4, 3, 'operator', 4, '2026-01-04 10:00:00', '2026-01-04 10:01:00', "
+        "'2026-01-04 10:01:00', 'done', 0)")
+    holder.commit()
+    try:
+        assert (var / "controller.db-shm").exists()
+        before = sorted(path.name for path in var.iterdir())
+        snapshot = probe(repo)
+        assert snapshot["ok"] is True
+        assert [run["id"] for run in snapshot["runs"]] == [4, 3, 2, 1]
+        assert sorted(path.name for path in var.iterdir()) == before
+    finally:
+        holder.close()
+
+
+def test_collect_refuses_an_answer_that_is_not_an_object(tmp_path):
+    fake = tmp_path / "fake-python"
+    fake.write_text("#!/bin/sh\necho '[]'\n")
+    fake.chmod(0o755)
+    loop = local_loop(build_loop(tmp_path / "loop"))
+    loop["python"] = str(fake)
+    snapshot = loopwatch.collect(loop, 2, 5)
+    assert snapshot["ok"] is False
+    assert "not an object" in snapshot["error"]
+
+
+def test_steer_reports_a_note_script_it_cannot_run(tmp_path):
+    result = loopwatch.steer(local_loop(build_loop(tmp_path / "loop")), "turn left")
+    assert result["ok"] is False
+    assert "FileNotFoundError" in result["stderr"]
+
+
+def test_attention_names_a_tick_that_started_no_run(tmp_path):
+    snapshot = probe(build_loop(tmp_path / "loop", last_tick="worker_active"))
+    lines = [text for _, text in loopwatch.attention(snapshot)]
+    assert any("last tick started no run: worker_active" in line for line in lines)
+
+
+def test_render_escapes_the_turn_count_from_a_transcript(tmp_path):
+    repo = build_loop(tmp_path / "loop", turns="</span><img src=x onerror=alert(1)>")
+    snapshot = probe(repo)
+    snapshot.update({"key": "k", "label": "k", "where": "this host"})
+    page = loopwatch.render([snapshot])
+    assert "<img src=x onerror=alert(1)>" not in page
+    assert "&lt;img src=x onerror=alert(1)&gt;" in page
