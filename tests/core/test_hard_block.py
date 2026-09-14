@@ -38,6 +38,37 @@ class TestHardBlockEscapesTheRetryExemption:
         moved.assert_called_once()
         assert moved.call_args[0][1] == "blocked"
 
+    def test_a_failed_scope_review_leaves_the_ticket_in_proving(self):
+        """The scope gate runs while the ticket sits in proving, which is a
+        gate status. A fan-out that returned no verdict has not converged; the
+        dispatcher re-enqueues it. Blocking on the first such failure would
+        strand a ticket that still had passes left."""
+        with patch("core.state.load_ticket", return_value={"status": "proving"}), \
+             patch("core.state.transition_ticket") as moved, \
+             patch("core.log.emit"):
+            R._release_gate_on_failure(_ctx("scope_review"),
+                                       TaskResult("failed", "no voice returned a verdict"))
+        moved.assert_not_called()
+
+    def test_a_failed_scope_correction_leaves_the_ticket_in_proving(self):
+        with patch("core.state.load_ticket", return_value={"status": "proving"}), \
+             patch("core.state.transition_ticket") as moved, \
+             patch("core.log.emit"):
+            R._release_gate_on_failure(
+                _ctx("fix_scope_findings"),
+                TaskResult("failed", "scope correction left the branch diff unchanged"))
+        moved.assert_not_called()
+
+    def test_a_hard_blocked_scope_correction_still_blocks(self):
+        result = TaskResult("failed", "a commit was blocked part way")
+        result.hard_block = True
+        with patch("core.state.load_ticket", return_value={"status": "proving"}), \
+             patch("core.state.transition_ticket") as moved, \
+             patch("core.log.emit"):
+            R._release_gate_on_failure(_ctx("fix_scope_findings"), result)
+        moved.assert_called_once()
+        assert moved.call_args[0][1] == "blocked"
+
     def test_commit_blocked_is_marked_hard(self):
         import core.tasks.tickets as T
         from core import git_util as g
