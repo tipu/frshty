@@ -153,6 +153,63 @@ class TestIngest:
             assert stories_mock.call_count == first
         assert counts["messages"] == 0
 
+    def test_a_room_longer_than_one_page_is_paged_by_the_message_time(self):
+        """olderThan takes the `created` stamp of the oldest message on the
+        page. The `cursor` beside it is a story id, and Upwork answers that
+        404 whether or not older messages exist."""
+        page_one = [_story("story_d", 30, CLIENT, "four"),
+                    _story("story_c", 40, CLIENT, "three")]
+        page_two = [_story("story_b", 50, CLIENT, "two"),
+                    _story("story_a", 60, CLIENT, "one")]
+        asked = []
+
+        def _stories(room_id, config=None, limit=20, older_than=""):
+            asked.append(older_than)
+            if not older_than:
+                return {"stories": page_one, "cursor": "story_c"}
+            if older_than == str(_millis(40)):
+                return {"stories": page_two, "cursor": "story_a"}
+            raise upwork_client.UpworkApiError(404, '{"message":"HTTP 404 Not Found"}')
+
+        with patch.object(upwork_client, "rooms",
+                          return_value={"rooms": [_room()], "cursor": ""}), \
+                patch.object(upwork_client, "stories", side_effect=_stories):
+            counts = ui.ingest(_config(stories_limit=2, story_pages=3),
+                               instance_key="personal", now=NOW)
+        assert counts["complete"] is True
+        assert counts["messages"] == 4
+        # The third page is the one past the oldest message. Upwork answers it
+        # 404 rather than with an empty list, and that is the end of the room,
+        # not an unreachable inbox.
+        assert asked == ["", str(_millis(40)), str(_millis(60))]
+        assert _room_row()["message_count"] == 4
+
+    def test_the_first_page_answering_404_is_still_an_unreachable_room(self):
+        with patch.object(upwork_client, "rooms",
+                          return_value={"rooms": [_room()], "cursor": ""}), \
+                patch.object(upwork_client, "stories",
+                             side_effect=upwork_client.UpworkApiError(404, "gone")):
+            counts = ui.ingest(_config(), instance_key="personal", now=NOW)
+        assert counts["complete"] is False
+        assert counts["messages"] == 0
+        assert len(_events("upwork_inbox_unreachable")) == 1
+
+    def test_paging_stops_on_a_short_page_without_asking_for_another(self):
+        calls = []
+
+        def _stories(room_id, config=None, limit=20, older_than=""):
+            calls.append(older_than)
+            return {"stories": [_story("story_a", 30, CLIENT, "only one")],
+                    "cursor": "story_a"}
+
+        with patch.object(upwork_client, "rooms",
+                          return_value={"rooms": [_room()], "cursor": ""}), \
+                patch.object(upwork_client, "stories", side_effect=_stories):
+            counts = ui.ingest(_config(stories_limit=2, story_pages=3),
+                               instance_key="personal", now=NOW)
+        assert calls == [""]
+        assert counts["messages"] == 1
+
     def test_an_unreachable_inbox_is_reported_and_nothing_is_indexed(self):
         with patch.object(upwork_client, "rooms",
                           side_effect=upwork_client.UpworkAuthError("logged out")):

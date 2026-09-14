@@ -377,22 +377,42 @@ def _fetch_stories(config: dict, room_id: str, known: set[str],
     the boundary of what the last scan saw. The page budget bounds a room that
     has never been read: its whole history is not worth pulling to answer what
     was asked this week, and the oldest page reached is where the transcript
-    starts."""
+    starts.
+
+    `olderThan` is the `created` stamp of the oldest story on the page, in
+    epoch milliseconds. The `cursor` the same answer carries is a story id,
+    and passing that instead is answered 404 whether or not older stories
+    exist, which reads as an unreachable inbox and stops the whole scan.
+
+    A page shorter than the limit is the end of the room, so the walk stops on
+    it rather than asking for a page that cannot exist. A room whose history
+    is an exact multiple of the page size gives no such signal, and Upwork
+    answers the page past its oldest message 404 rather than with an empty
+    list. So a 404 on a continuation is read as the end of the room. On the
+    first page it is not: there the room itself could not be read, and a
+    transcript missing its newest messages must not be judged."""
     collected: list[dict] = []
     older_than = ""
     for _ in range(max(1, pages)):
-        batch = upwork_client.stories(room_id, config, limit=limit,
-                                      older_than=older_than) or {}
+        try:
+            batch = upwork_client.stories(room_id, config, limit=limit,
+                                          older_than=older_than) or {}
+        except upwork_client.UpworkApiError as e:
+            if older_than and e.status == 404:
+                break
+            raise
         stories = batch.get("stories") or []
         if not stories:
             break
         collected.extend(stories)
         if any(str(s.get("storyId") or "") in known for s in stories):
             break
-        cursor = str(batch.get("cursor") or "")
-        if not cursor or cursor == older_than:
+        if len(stories) < limit:
             break
-        older_than = cursor
+        oldest = min((int(s.get("created") or 0) for s in stories), default=0)
+        if not oldest:
+            break
+        older_than = str(oldest)
     return collected
 
 

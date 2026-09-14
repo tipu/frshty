@@ -28,8 +28,10 @@ class TestLoadConfig:
             '[workspace]\nroot = "' + str(tmp_path) + '"\n'
         )
         config = load_config(str(config_file))
-        assert config["features"] == {"auto_review": True, "correspondence": True}
+        assert config["features"] == {"auto_review": True, "correspondence": True,
+                                      "upwork": False}
         assert config["slack"] == {}
+        assert config["upwork"] == {}
         assert config["timesheet"] == {}
 
     def test_state_dir_derived(self, tmp_path):
