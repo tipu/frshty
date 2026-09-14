@@ -50,8 +50,15 @@ class TestParsePrMerge:
             "git status; gh pr merge 1",
             "gh pr --repo atroposhealth/text-to-tql-service merge 184",
             "env gh pr merge 184",
+            "env -u GH_TOKEN gh pr merge 184",
+            "sudo -u root gh pr merge 184",
+            "stdbuf -o L gh pr merge 184",
             "timeout 60 gh pr merge 184",
+            "timeout -k 5 60 gh pr merge 184",
             "if true; then gh pr merge 184; fi",
+            "http PUT https://api.github.com/repos/o/r/pulls/184/merge",
+            "xh post https://api.bitbucket.org/2.0/repositories/o/r/pullrequests/9/merge",
+            "wget --post-data='' https://api.bitbucket.org/2.0/repositories/o/r/pullrequests/9/merge",
         ):
             assert work_launch.parse_pr_merge(command) is True, command
 
@@ -67,7 +74,9 @@ class TestParsePrMerge:
             'grep -rn "/pulls/1/merge" web/',
             "gh search code pr merge --limit 1",
             "gh api repos/o/r/pulls/184/merge",
+            "gh api -X GET -f q=x repos/o/r/pulls/184/merge",
             "curl -s https://api.github.com/repos/o/r/pulls/184/merge",
+            "http https://api.github.com/repos/o/r/pulls/184/merge",
             "ls -la",
         ):
             assert work_launch.parse_pr_merge(command) is False, command
@@ -113,11 +122,16 @@ class TestMergePolicy:
         (tmp_path / "shut.toml").write_text('[job]\nkey = "shut"\n[pr]\nauto_merge = false\n')
         (tmp_path / "broken.toml").write_text("[pr\n")
         (tmp_path / "notatable.toml").write_text('[job]\nkey = "notatable"\npr = true\n')
+        # example.toml is one of the files the instance loader skips, so the
+        # board holds no config for the key it declares.
+        (tmp_path / "example.toml").write_text(
+            '[job]\nkey = "myproject"\n[pr]\nauto_merge = true\n')
         assert work_launch._auto_merge_on_disk("opener") is True
         assert work_launch._auto_merge_on_disk("local") is False
         assert work_launch._auto_merge_on_disk("shut") is False
         assert work_launch._auto_merge_on_disk("notatable") is False
         assert work_launch._auto_merge_on_disk("missing") is False
+        assert work_launch._auto_merge_on_disk("myproject") is False
         assert work_launch.merge_review_required(["opener"]) == []
 
     def test_a_config_directory_it_cannot_read_holds_every_merge(self, monkeypatch, tmp_path):
