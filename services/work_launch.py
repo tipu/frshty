@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import tomllib
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -379,6 +380,7 @@ def _cross_check_block(agent: str, config: dict) -> str:
 
 
 SLACK_LABEL = "slack_int"
+BOARD_PROJECT_KEY = "personal"
 
 
 def _resolve_launch(objective: str, cwd: str, contexts: list[str], agent: str,
@@ -534,6 +536,64 @@ def _materialize(item_id: int, plan: dict) -> tuple[str, dict]:
     return (row["path"], row) if row else (cwd, {})
 
 
+def _context_keys(contexts) -> list[str]:
+    """The project keys a task selected, in order and without repeats.
+
+    A caller hands either the list a launch resolved or the comma-joined
+    labels the item row stores, and the Slack archive is a label rather than a
+    project."""
+    if isinstance(contexts, str):
+        contexts = contexts.split(",")
+    keys = [str(c).strip() for c in (contexts or [])]
+    return [k for k in dict.fromkeys(keys) if k and k != SLACK_LABEL]
+
+
+_CONFIG_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config")
+
+
+def _auto_merge_on_disk(key: str) -> bool:
+    """Whether the named project allows a merge, read off its config file.
+
+    The tool hook and the autocontinue path run in a process of their own,
+    where no instance registry is loaded and _instance_config answers None for
+    every project. This reads the same file the server reads. Anything that
+    goes wrong answers no: holding a pull request the operator wanted merged
+    costs him one click, and a merge he did not want cannot be taken back."""
+    try:
+        with open(os.path.join(_CONFIG_DIR, f"{key}.toml"), "rb") as f:
+            raw = tomllib.load(f)
+    except Exception:
+        return False
+    return (raw.get("pr") or {}).get("auto_merge") is True
+
+
+def _project_allows_merge(key: str) -> bool:
+    """Whether one project lets a task merge its own pull request.
+
+    [pr] auto_merge is the switch the ticket pipeline already reads, so a
+    project states the rule once and both halves of frshty obey it. A project
+    the board holds no config for allows nothing: the board cannot read a
+    policy it does not have."""
+    config = _instance_config(key)
+    if config is not None:
+        return (config.get("pr") or {}).get("auto_merge") is True
+    return _auto_merge_on_disk(key)
+
+
+def merge_review_required(contexts) -> list[str]:
+    """The projects this task selected that hold a merge for operator review.
+
+    An empty list means the task may merge its own pull request. A task that
+    selects several projects is held by any one of them, because the merge it
+    is about to run lands in one repository and the board cannot tell which.
+    A task that selects no project is judged by the board's own project, which
+    is the safe reading: the launch prompt used to tell every such task to
+    merge, and no project had said it could."""
+    keys = _context_keys(contexts) or [BOARD_PROJECT_KEY]
+    return [k for k in keys if not _project_allows_merge(k)]
+
+
 def _correspondence_rule(config: dict) -> str:
     """The outward-communication paragraph for the launch prompt.
 
@@ -618,7 +678,7 @@ def _start(item_id: int, plan: dict, slack: bool, brief: str,
             "objective is a question, answer it and stop: do not build, install or "
             "change anything to answer it. If you see other work worth doing, name "
             "it in your checkpoint and leave it undone. "
-            + work_store.DELIVERY_RULE +
+            + work_store.delivery_rule(merge_review_required(contexts)) +
             "Do not wait for a process in a shell loop that sleeps and checks, because "
             "each pass of that loop costs a full turn. Run the long command in the "
             "background and use the notification your harness sends when it ends. If "
@@ -1136,6 +1196,132 @@ def parse_push(command: str) -> dict | None:
 def parse_commit(command: str) -> dict | None:
     """Detect a `git commit` invocation in a shell command line."""
     return _parse_git(command, "commit")
+
+
+_PR_MERGE_URL_RE = re.compile(
+    r"/(?:pulls|pullrequests|merge_requests)/\d+/merge\b"
+    r"|/api/tickets/[^/\s?'\"]+/merge\b")
+_PR_MERGE_CLIENTS = frozenset(("curl", "wget", "http", "https", "xh", "httpie"))
+_PR_MERGE_PAIRS = (("pr", "merge"), ("mr", "merge"))
+
+
+def _segment_pr_merge(tokens: list[str]) -> bool:
+    """Whether one pipeline segment merges a pull request.
+
+    `git merge` is not one of these. Merging a base branch into a working
+    branch is ordinary work and stays open; what is judged here is the command
+    that closes a pull request into its base. The forge clients say so in two
+    adjacent words, and the REST endpoints of both platforms, and the board's
+    own merge endpoint, say so in the path. A path is read only when the
+    program is an HTTP client or `gh api`, so a grep for one of these routes
+    is not a merge."""
+    i = 0
+    while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
+        i += 1
+    if i >= len(tokens):
+        return False
+    program = os.path.basename(tokens[i])
+    rest = tokens[i + 1:]
+    if program in ("gh", "glab"):
+        if any(pair in _PR_MERGE_PAIRS for pair in zip(rest, rest[1:])):
+            return True
+        return (bool(rest) and rest[0] == "api"
+                and any(_PR_MERGE_URL_RE.search(t) for t in rest))
+    if program in _PR_MERGE_CLIENTS:
+        return any(_PR_MERGE_URL_RE.search(t) for t in rest)
+    return False
+
+
+def parse_pr_merge(command: str) -> bool:
+    """Whether a shell command line merges a pull request.
+
+    Walks shell tokens segment by segment for the reason _parse_git_all does:
+    a quoted message or a grep pattern that reads like a merge is not one. A
+    command shlex cannot tokenize falls back to a pattern match, because a
+    command the gate cannot parse is the one case where guessing low would let
+    the merge through."""
+    command = _strip_heredocs(command)
+    tokens = _tokenize(command)
+    if tokens is None:
+        return bool(re.search(r"\b(?:gh|glab)\b[^|;&]*\b(?:pr|mr)\s+merge\b", command)
+                    or _PR_MERGE_URL_RE.search(command))
+    segment: list[str] = []
+    for tok in tokens + ["\n"]:
+        if tok in _SHELL_SEPARATORS:
+            if _segment_pr_merge(segment):
+                return True
+            segment = []
+        else:
+            segment.append(tok)
+    return False
+
+
+_MERGE_ASKED_RE = re.compile(r"\bmerg(?:e|es|ed|ing)\b", re.IGNORECASE)
+
+
+def _operator_asked_to_merge(item_id: int, objective: str) -> bool:
+    """Whether the operator, rather than the agent, put a merge on this task.
+
+    The operator does hand tasks a merge — "merge PR 20 into main" is an
+    ordinary objective — and a gate that refused those would refuse his own
+    instruction. His words reach the task in two places: the objective it was
+    launched with, and every reply he has sent it since. Either one mentioning
+    a merge opens the gate. The test is deliberately generous, because the
+    delivery rule no longer asks for a merge at all: a merge an agent runs
+    with nothing in the task behind it is the one this gate exists for."""
+    if _MERGE_ASKED_RE.search(objective or ""):
+        return True
+    for row in db.query_all(
+            "SELECT payload FROM work_events WHERE work_item_id = ? "
+            "AND kind = 'operator_reply'", (item_id,)):
+        try:
+            payload = json.loads(row["payload"])
+        except ValueError:
+            continue
+        text = payload.get("text") or "" if isinstance(payload, dict) else ""
+        if _MERGE_ASKED_RE.search(text):
+            return True
+    return False
+
+
+_MERGE_DENY = (
+    "Blocked by the work-layer merge gate: a merge on {projects} needs an "
+    "operator review, and nothing in this task asked for one.\n\n"
+    "Delivery here stops at the pull request. Push the branch, open or update "
+    "the pull request, get its checks green, and hand it to the operator in "
+    "your checkpoint. Do not turn on the platform's auto-merge, and do not "
+    "look for another route to the same merge.\n\n"
+    "A project lets its tasks merge by setting auto_merge = true in the [pr] "
+    "block of its frshty config."
+)
+
+
+def gate_merge(session_id: str, command: str) -> dict:
+    """Deny a work-session command that merges a pull request on a project
+    that requires an operator review.
+
+    The launch prompt told every agent on every project to merge its own pull
+    request, and one of them merged a company pull request on a project whose
+    config sets auto_merge = false. The prompt now carries the project's own
+    rule, and this enforces it: a prompt is a request, and a system reminder
+    or a stale plan later in a session can still put a merge back in front of
+    the agent. Returns {"decision": "allow"|"deny", "reason": str}."""
+    if not parse_pr_merge(command):
+        return {"decision": "allow", "reason": "not a pull request merge"}
+    item = work_worktree.session_item(session_id)
+    if item is None:
+        return {"decision": "allow", "reason": "not a work-board session"}
+    projects = merge_review_required(item["contexts"])
+    payload = {"command": command[:300], "projects": projects}
+    if not projects:
+        work_store.record_gate(session_id, "merge_gate", "pass", payload)
+        return {"decision": "allow", "reason": "every selected project allows a merge"}
+    if _operator_asked_to_merge(item["id"], item["objective"]):
+        work_store.record_gate(session_id, "merge_gate", "operator_asked", payload)
+        return {"decision": "allow", "reason": "the operator asked for this merge"}
+    work_store.record_gate(session_id, "merge_gate", "fail", payload)
+    return {"decision": "deny",
+            "reason": _MERGE_DENY.format(projects=", ".join(projects))}
 
 
 def _repo_root(start_dir: str) -> Path | None:
