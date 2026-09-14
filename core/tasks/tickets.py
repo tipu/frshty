@@ -2491,7 +2491,7 @@ SCOPE_REVIEW_TIMEOUT = SCOPE_FANOUT_TIMEOUT + 300
 
 @task("scope_review",
       preconditions=[feature_enabled("scope_review"),
-                     status_is("pr_ready", "in_review")],
+                     status_is("proving", "pr_ready", "in_review")],
       postconditions=[file_contains("docs/scope-review.md",
                                     r"SCOPE VERDICT:\s*(PASS|FAIL)")],
       timeout=SCOPE_REVIEW_TIMEOUT)
@@ -2501,8 +2501,9 @@ def scope_review(ctx: TaskContext) -> TaskResult:
     Captures the branch-diff fingerprint BEFORE the review so a commit that
     lands mid-review leaves the recorded fingerprint stale and the dispatcher
     re-enqueues a fresh review. The verdict is recorded on the ticket state;
-    the dispatcher holds PR creation (pr_ready) and auto-merge (in_review)
-    until the verdict for the current fingerprint is pass."""
+    the dispatcher holds the proof (proving), PR creation (pr_ready) and
+    auto-merge (in_review) until the verdict for the current fingerprint is
+    pass."""
     ticket_dir = _ticket_dir(ctx)
     if not ticket_dir.is_dir():
         return TaskResult("failed", f"ticket dir missing: {ticket_dir}")
@@ -2584,7 +2585,7 @@ def _requeue_proof(ctx: TaskContext, ticket_dir: Path, findings: list[str]) -> N
                 "changes it named:\n"
                 + "\n".join(f"- {f}" for f in findings)
                 + "\n\nRead docs/scope-fix.md for what came off the branch. Prove the ticket "
-                  "again on the corrected branch: show that the work the ticket asks for still "
+                  "on the corrected branch: show that the work the ticket asks for still "
                   "works with those changes gone.")
 
     def _set(t: dict) -> dict:
@@ -2609,6 +2610,10 @@ def _mark_scope_fix_open(ctx: TaskContext, reason: str) -> None:
 def _scope_fix_target(ctx: TaskContext, result: TaskResult) -> str | None:
     """Callable on_success_status for fix_scope_findings: back to `proving`
     only while the ticket is still holding its PR.
+
+    A ticket corrected before its proof is already in `proving` and stays
+    there: the gate re-runs against the corrected branch and the proof
+    follows the pass.
 
     The operator can open the PR over the verdict from the same modal that
     queued this correction. Pulling a ticket with an open PR into proving
@@ -2646,7 +2651,7 @@ def _branch_moved_off_the_verdict(ctx: TaskContext) -> tuple[bool, str]:
 
 @task("fix_scope_findings",
       preconditions=[feature_enabled("scope_review"),
-                     status_is("pr_ready")],
+                     status_is("proving", "pr_ready")],
       postconditions=[file_exists("docs/scope-fix.md"),
                       _branch_moved_off_the_verdict],
       on_success_status=_scope_fix_target,
@@ -2746,12 +2751,13 @@ def fix_scope_findings(ctx: TaskContext) -> TaskResult:
                        "repos": changed})
         return TaskResult("failed", "scope correction left the branch diff unchanged")
     status_now = current.get("status")
+    reproved = status_now in ("proving", "pr_ready")
     artifacts = {"repos": changed, "findings": len(findings),
-                 "attempt": attempts + 1, "reproved": status_now == "pr_ready",
+                 "attempt": attempts + 1, "reproved": reproved,
                  "completed": True}
-    if status_now == "pr_ready":
+    if reproved:
         _requeue_proof(ctx, ticket_dir, findings)
-        outcome = "proving again"
+        outcome = "proving the corrected branch"
     else:
         pushed, push_failed = _push_to_open_prs(
             ctx, changed, failure_event="ticket_scope_fix_push_failed")
