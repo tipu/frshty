@@ -21,6 +21,7 @@ RUN_COLUMNS = ("run_id", "created_by_run", "declared_by_run", "verified_by_run")
 LABEL_COLUMNS = ("title", "name", "objective", "hypothesis", "reason", "subject",
                  "metric", "rule", "slug", "note", "kind", "provider")
 SKIP_TABLES = ("state", "runs", "sqlite_sequence")
+JOURNALS = ("", "-wal", "-journal")
 MAX_LABEL = 200
 MAX_ROWS = 12
 MAX_NARRATIVE = 4000
@@ -93,9 +94,9 @@ def charter(repo):
 
 
 def stamp(db_path):
-    """The size and modification time of the database and its write-ahead log."""
+    """The size and modification time of the database and every journal beside it."""
     marks = []
-    for suffix in ("", "-wal"):
+    for suffix in JOURNALS:
         try:
             info = os.stat(db_path + suffix)
             marks.append((suffix, info.st_size, info.st_mtime_ns))
@@ -105,28 +106,32 @@ def stamp(db_path):
 
 
 def copy_aside(db_path):
-    """Copy the database and its write-ahead log into this host's temp directory.
+    """Copy the database and its journals into this host's temp directory.
 
-    The -shm is left behind on purpose. It is a scratch index that sqlite
-    rebuilds for the copy, and a stale one copied from a live database would
-    describe a log that is no longer there."""
+    The rollback journal has to travel with the database. Deleting it is what
+    commits a transaction in that mode, so a database copied without it can
+    hold pages no commit ever confirmed. sqlite rolls those back off the copy
+    once the journal is there. The -shm is left behind on purpose: it is a
+    scratch index sqlite rebuilds for the copy, and a stale one would describe
+    a log that is no longer there."""
     tmp = tempfile.mkdtemp(prefix="loopwatch-")
     copy = os.path.join(tmp, "controller.db")
-    for suffix in ("", "-wal"):
+    for suffix in JOURNALS:
         source = db_path + suffix
         if os.path.exists(source):
             shutil.copy2(source, copy + suffix)
     return tmp
 
 
-def connect(db_path, attempts=3):
+def connect(db_path, attempts=5):
     """Read a copy of the controller database. The live file is never opened.
 
     Opening the live file would add its -shm and -wal when the controller is
     not holding them, and would take a lock a controller write has to wait on.
-    The copy is taken again when the database changed while it was being
-    copied, so a poll that races a controller write reads one whole database
-    rather than halves of two."""
+    A copy taken while the controller writes can hold halves of two databases,
+    so the database is copied again whenever it changed during the copy. A
+    database that never settles is reported, never read: a snapshot that might
+    be half a database is worth less than nothing."""
     tmp = None
     for attempt in range(attempts):
         if tmp:
@@ -134,10 +139,12 @@ def connect(db_path, attempts=3):
         before = stamp(db_path)
         tmp = copy_aside(db_path)
         if stamp(db_path) == before:
-            break
-    conn = sqlite3.connect(os.path.join(tmp, "controller.db"), timeout=10)
-    conn.row_factory = sqlite3.Row
-    return conn, tmp
+            conn = sqlite3.connect(os.path.join(tmp, "controller.db"), timeout=10)
+            conn.row_factory = sqlite3.Row
+            return conn, tmp
+    shutil.rmtree(tmp, ignore_errors=True)
+    raise RuntimeError(
+        "the database changed during every one of %d copies" % attempts)
 
 
 def tables(conn):
