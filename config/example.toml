@@ -49,7 +49,7 @@ branch_prefix = ""                # empty = branch is {KEY}-{slug}. set to "your
 
 [pr]
 auto_pr = true
-auto_merge = false
+auto_merge = false                # governs both halves of frshty. the ticket pipeline merges a ticket's PR once CI passes, and a /tasks work item that selects this project may merge the PR it opened. false holds every such PR for the operator to review and merge; a task still merges one its objective or an operator reply explicitly asks it to merge.
 # merge_strategy = "squash"       # squash, merge, rebase
 # merge_flags = ["--admin"]       # extra flags for gh pr merge
 
