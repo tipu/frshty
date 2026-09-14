@@ -82,8 +82,7 @@ def test_approving_starts_the_agent_on_the_stored_objective(tmp_path):
          patch.object(work_launch, "project_entries", return_value=[]), \
          patch.object(work_launch.terminal, "launch_agent") as launch_agent, \
          patch.object(work_launch.terminal, "session_healthy", return_value={"alive": True}), \
-         patch.object(work_launch.threading, "Thread"), \
-         patch.object(work_launch.work_tags, "schedule_implicit_tags"):
+         patch.object(work_launch.threading, "Thread"):
         result = work_launch.launch_proposed(item_id)
 
     assert result["item_id"] == item_id
@@ -104,8 +103,7 @@ def test_a_second_approval_finds_nothing_to_approve(tmp_path):
          patch.object(work_launch, "project_entries", return_value=[]), \
          patch.object(work_launch.terminal, "launch_agent"), \
          patch.object(work_launch.terminal, "session_healthy", return_value={"alive": True}), \
-         patch.object(work_launch.threading, "Thread"), \
-         patch.object(work_launch.work_tags, "schedule_implicit_tags"):
+         patch.object(work_launch.threading, "Thread"):
         work_launch.launch_proposed(item_id)
         second = work_launch.launch_proposed(item_id)
 
@@ -177,10 +175,9 @@ def test_a_launch_that_raises_puts_the_proposal_back(tmp_path):
 
 
 def test_a_launch_that_raises_after_the_agent_started_keeps_the_task(tmp_path):
-    """_start can raise after the session is live, when the kickoff thread or
-    the tagging call fails. Releasing then would show a running agent as still
-    waiting for approval, and the operator could decline it or approve it
-    twice."""
+    """_start can raise after the session is live, when the kickoff thread
+    fails. Releasing then would show a running agent as still waiting for
+    approval, and the operator could decline it or approve it twice."""
     item_id = _proposal()
     config = _personal_config(tmp_path)
     with patch.object(work_launch, "personal_config", return_value=config), \
@@ -229,8 +226,7 @@ def test_approving_a_followup_proposal_runs_it_on_the_source_agent(tmp_path):
          patch.object(work_launch, "project_entries", return_value=[]), \
          patch.object(work_launch.terminal, "launch_agent"), \
          patch.object(work_launch.terminal, "session_healthy", return_value={"alive": True}), \
-         patch.object(work_launch.threading, "Thread"), \
-         patch.object(work_launch.work_tags, "schedule_implicit_tags"):
+         patch.object(work_launch.threading, "Thread"):
         result = work_launch.launch_proposed(item_id, agent="claude")
 
     assert result["item_id"] == item_id
@@ -245,8 +241,7 @@ def test_approving_a_proposal_with_no_source_uses_the_agent_the_operator_picked(
          patch.object(work_launch, "project_entries", return_value=[]), \
          patch.object(work_launch.terminal, "launch_agent"), \
          patch.object(work_launch.terminal, "session_healthy", return_value={"alive": True}), \
-         patch.object(work_launch.threading, "Thread"), \
-         patch.object(work_launch.work_tags, "schedule_implicit_tags"):
+         patch.object(work_launch.threading, "Thread"):
         work_launch.launch_proposed(item_id, agent="codex")
 
     assert db.query_one("SELECT provider FROM work_runs WHERE work_item_id = ?",
@@ -270,8 +265,7 @@ def test_approving_a_followup_proposal_survives_a_collected_worktree(tmp_path):
          patch.object(work_launch, "project_entries", return_value=[]), \
          patch.object(work_launch.terminal, "launch_agent"), \
          patch.object(work_launch.terminal, "session_healthy", return_value={"alive": True}), \
-         patch.object(work_launch.threading, "Thread"), \
-         patch.object(work_launch.work_tags, "schedule_implicit_tags"):
+         patch.object(work_launch.threading, "Thread"):
         result = work_launch.launch_proposed(item_id)
 
     assert "error" not in result, result
