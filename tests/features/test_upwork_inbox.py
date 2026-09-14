@@ -260,6 +260,78 @@ class TestIngest:
         assert asked == [""]
         assert stories_mock.call_count == 0
 
+    def test_a_sweep_that_runs_out_of_budget_resumes_where_it_stopped(self):
+        """Walking only while a page holds something new never finishes a
+        backlog: the first sweep spends its budget, and every sweep after it
+        finds the top of the list quiet and stops on page one."""
+        pages = {"": ([_room(room_id="room_a", recent=_millis(10))], str(_millis(10))),
+                 str(_millis(10)): ([_room(room_id="room_b", recent=_millis(20))],
+                                    str(_millis(20))),
+                 str(_millis(20)): ([_room(room_id="room_c", recent=_millis(30))],
+                                    str(_millis(30))),
+                 str(_millis(30)): ([], "")}
+        asked = []
+
+        def _rooms(config=None, limit=20, cursor=""):
+            asked.append(cursor)
+            rooms, nxt = pages.get(cursor, ([], ""))
+            return {"rooms": rooms, "cursor": nxt}
+
+        def _stories(room_id, config=None, limit=20, older_than=""):
+            return {"stories": [_story("s_" + room_id, 40, CLIENT, "hello")],
+                    "cursor": ""}
+
+        settings = _config(rooms_limit=1, rooms_pages=2)
+        with patch.object(upwork_client, "rooms", side_effect=_rooms), \
+                patch.object(upwork_client, "stories", side_effect=_stories):
+            ui.ingest(settings, instance_key="personal", now=NOW)
+            first = list(asked)
+            asked.clear()
+            ui.ingest(settings, instance_key="personal", now=NOW)
+        assert first == ["", str(_millis(10))]
+        # The second sweep finds page one quiet and carries on from the point
+        # the first one ran out of budget at, instead of stopping above it.
+        assert asked == ["", str(_millis(20))]
+        assert {r["room_id"] for r in db.query_all(
+            "SELECT room_id FROM upwork_rooms")} == {"room_a", "room_b", "room_c"}
+
+    def test_a_forced_room_is_read_past_the_messages_already_indexed(self):
+        """A story the index holds says the newest messages have been seen. It
+        says nothing about an older one edited since, which keeps its story id
+        and its timestamp and sits behind that boundary."""
+        newest = [_story("story_d", 30, CLIENT, "four"),
+                  _story("story_c", 40, CLIENT, "three")]
+        older = [_story("story_b", 50, CLIENT, "two"),
+                 _story("story_a", 60, CLIENT, "one")]
+
+        def _stories(room_id, config=None, limit=20, older_than=""):
+            if not older_than:
+                return {"stories": newest, "cursor": ""}
+            if older_than == str(_millis(40)):
+                return {"stories": older, "cursor": ""}
+            return {"stories": [], "cursor": ""}
+
+        with patch.object(upwork_client, "rooms",
+                          return_value={"rooms": [_room()], "cursor": ""}), \
+                patch.object(upwork_client, "stories", side_effect=_stories):
+            ui.ingest(_config(stories_limit=2, story_pages=3),
+                      instance_key="personal", now=NOW)
+            assert _room_row()["message_count"] == 4
+            older[1] = _story("story_a", 60, CLIENT, "one, edited")
+            # Without the force the walk stops on the first page, every story
+            # of which the index already holds, and the edit is never seen.
+            plain = ui.ingest(_config(stories_limit=2, story_pages=3),
+                              instance_key="personal", now=NOW)
+            assert plain["messages"] == 0
+            forced = ui.ingest(_config(stories_limit=2, story_pages=3),
+                               instance_key="personal", now=NOW,
+                               force_rooms={ROOM})
+        assert forced["messages"] == 1
+        held = db.query_one(
+            "SELECT m.text FROM upwork_messages m JOIN upwork_rooms r"
+            " ON r.id = m.room_id WHERE m.story_id = 'story_a'")
+        assert held["text"] == "one, edited"
+
     def test_an_unreachable_inbox_is_reported_and_nothing_is_indexed(self):
         with patch.object(upwork_client, "rooms",
                           side_effect=upwork_client.UpworkAuthError("logged out")):
