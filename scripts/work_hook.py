@@ -222,9 +222,10 @@ def _mentions(command: str, word: str) -> bool:
     """Whether a shell command names `word`, ignoring quoting.
 
     The gates below run only for a command that names commit, push or merge,
-    and that fast path used to read the raw text. `git c'ommit'` and
-    `git com\\mit` both run a commit and named none of the three, so they
-    walked past every gate."""
+    and that fast path used to read the raw text. `git c'ommit'`,
+    `git com\\mit` and a commit split over a continued line all run a commit
+    and named none of the three, so they walked past every gate."""
+    command = command.replace("\\\n", "")
     for char in ("'", '"', "\\"):
         command = command.replace(char, "")
     return word in command
