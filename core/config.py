@@ -43,6 +43,7 @@ def load_config(path: str) -> dict:
     raw.setdefault("pr", {})
     raw.setdefault("workspace", {})
     raw.setdefault("slack", {})
+    raw.setdefault("upwork", {})
     raw.setdefault("timesheet", {})
     raw.setdefault("billing", {})
     raw.setdefault("llm", {"provider": "claude"})
@@ -59,6 +60,7 @@ def load_config(path: str) -> dict:
 
     raw["features"].setdefault("auto_review", True)
     raw["features"].setdefault("correspondence", True)
+    raw["features"].setdefault("upwork", False)
 
     raw["pr"].setdefault("auto_pr", True)
     raw["pr"].setdefault("auto_merge", False)
