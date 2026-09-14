@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import tomllib
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +15,7 @@ from pathlib import Path
 import core.config as core_config
 import core.correspondence as correspondence
 import core.db as db
+import core.discovery as discovery
 import core.git_util as git_util
 import core.log as log
 import core.runtime as runtime
@@ -379,6 +381,7 @@ def _cross_check_block(agent: str, config: dict) -> str:
 
 
 SLACK_LABEL = "slack_int"
+BOARD_PROJECT_KEY = "personal"
 
 
 def _resolve_launch(objective: str, cwd: str, contexts: list[str], agent: str,
@@ -534,6 +537,93 @@ def _materialize(item_id: int, plan: dict) -> tuple[str, dict]:
     return (row["path"], row) if row else (cwd, {})
 
 
+def _context_keys(contexts) -> list[str]:
+    """The project keys a task selected, in order and without repeats.
+
+    A caller hands either the list a launch resolved or the comma-joined
+    labels the item row stores, and the Slack archive is a label rather than a
+    project."""
+    if isinstance(contexts, str):
+        contexts = contexts.split(",")
+    keys = [str(c).strip() for c in (contexts or [])]
+    return [k for k in dict.fromkeys(keys) if k and k != SLACK_LABEL]
+
+
+_CONFIG_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config")
+
+
+def _allows_merge(config: dict | None) -> bool:
+    """Whether one parsed config allows a task to merge its pull request.
+
+    Anything other than a real `true` under a real [pr] table answers no, so a
+    hand-edited `pr = true` or `auto_merge = "true"` does not read as
+    permission and does not raise inside a gate that would then fail open."""
+    pr = (config or {}).get("pr")
+    return isinstance(pr, dict) and pr.get("auto_merge") is True
+
+
+def _config_on_disk(key: str) -> dict | None:
+    """The config file whose [job] key is `key`, parsed, or None.
+
+    A file is found by the key it declares, not by its name: the atropos
+    instance is keyed "frshty" and lives in config/local.toml, so a lookup by
+    file name answers for the wrong project or for none."""
+    try:
+        names = sorted(os.listdir(_CONFIG_DIR))
+    except OSError:
+        return None
+    for name in names:
+        if not name.endswith(".toml") or name in discovery.SKIP_CONFIGS:
+            continue
+        try:
+            with open(os.path.join(_CONFIG_DIR, name), "rb") as f:
+                raw = tomllib.load(f)
+        except Exception:
+            continue
+        job = raw.get("job")
+        if isinstance(job, dict) and job.get("key") == key:
+            return raw
+    return None
+
+
+def _auto_merge_on_disk(key: str) -> bool:
+    """Whether the named project allows a merge, read off its config file.
+
+    The tool hook and the autocontinue path run in a process of their own,
+    where no instance registry is loaded and _instance_config answers None for
+    every project. This reads the same file the server reads. Anything that
+    goes wrong answers no: holding a pull request the operator wanted merged
+    costs him one click, and a merge he did not want cannot be taken back."""
+    return _allows_merge(_config_on_disk(key))
+
+
+def _project_allows_merge(key: str) -> bool:
+    """Whether one project lets a task merge its own pull request.
+
+    [pr] auto_merge is the switch the ticket pipeline already reads, so a
+    project states the rule once and both halves of frshty obey it. A project
+    the board holds no config for allows nothing: the board cannot read a
+    policy it does not have."""
+    config = _instance_config(key)
+    if config is not None:
+        return _allows_merge(config)
+    return _auto_merge_on_disk(key)
+
+
+def merge_review_required(contexts) -> list[str]:
+    """The projects this task selected that hold a merge for operator review.
+
+    An empty list means the task may merge its own pull request. A task that
+    selects several projects is held by any one of them, because the merge it
+    is about to run lands in one repository and the board cannot tell which.
+    A task that selects no project is judged by the board's own project, which
+    is the safe reading: the launch prompt used to tell every such task to
+    merge, and no project had said it could."""
+    keys = _context_keys(contexts) or [BOARD_PROJECT_KEY]
+    return [k for k in keys if not _project_allows_merge(k)]
+
+
 def _correspondence_rule(config: dict) -> str:
     """The outward-communication paragraph for the launch prompt.
 
@@ -618,7 +708,7 @@ def _start(item_id: int, plan: dict, slack: bool, brief: str,
             "objective is a question, answer it and stop: do not build, install or "
             "change anything to answer it. If you see other work worth doing, name "
             "it in your checkpoint and leave it undone. "
-            + work_store.DELIVERY_RULE +
+            + work_store.delivery_rule(merge_review_required(contexts)) +
             "Do not wait for a process in a shell loop that sleeps and checks, because "
             "each pass of that loop costs a full turn. Run the long command in the "
             "background and use the notification your harness sends when it ends. If "
@@ -982,12 +1072,96 @@ _SHELL_SEPARATORS = ("&&", "||", ";", "|", "&", "(", ")", "\n")
 _GIT_TWO_ARG_FLAGS = ("-c", "--exec-path", "--git-dir", "--work-tree", "--namespace")
 
 
+_SHELL_KEYWORDS = frozenset((
+    "then", "do", "else", "elif", "!", "{", "(", "time", "exec"))
+# Each wrapper with the flags of its own that take the next token as a value.
+# `sudo -u root git push` runs a push, and a walk that stepped over `-u` but
+# not over `root` stopped at `root` and saw no push at all.
+# `env -S` is not here on purpose: its value is the command line itself, and
+# stepping over it would lose the very command the gate is looking for.
+_WRAPPER_VALUE_FLAGS = {
+    "env": frozenset(("-u", "--unset", "-C", "--chdir", "-f", "--file",
+                      "-a", "--argv0")),
+    "command": frozenset(),
+    "nohup": frozenset(),
+    "sudo": frozenset(("-u", "--user", "-g", "--group", "-p", "--prompt",
+                       "-C", "--close-from", "-h", "--host", "-r", "--role",
+                       "-t", "--type", "-D", "--chdir", "-R", "--chroot")),
+    "doas": frozenset(("-u", "-C")),
+    "nice": frozenset(("-n", "--adjustment")),
+    "ionice": frozenset(("-c", "--class", "-n", "--classdata", "-p", "--pid",
+                         "-P", "--pgid", "-u", "--uid")),
+    "stdbuf": frozenset(("-i", "--input", "-o", "--output", "-e", "--error")),
+    "timeout": frozenset(("-s", "--signal", "-k", "--kill-after")),
+    "setsid": frozenset(),
+    "unbuffer": frozenset(),
+}
+_COMMAND_WRAPPERS = frozenset(_WRAPPER_VALUE_FLAGS)
+_OPERAND_RE = re.compile(r"\d+(?:\.\d+)?[smhd]?")
+
+
+def _segment_program(tokens: list[str]) -> int:
+    """The index of the program a pipeline segment runs, or len(tokens).
+
+    Leading assignments, shell keywords and wrapper commands are stepped over
+    with their own flags and operands, because `env git commit`,
+    `timeout 60 gh pr merge` and `if true; then git push; fi` run the same
+    command as the bare form and a gate keyed on the first token saw none of
+    them. Flags and operands are stepped over only after a wrapper, because
+    the first token of an unwrapped segment is the program itself."""
+    i = 0
+    wrapped = False
+    value_flags: frozenset = frozenset()
+    while i < len(tokens):
+        tok = tokens[i]
+        base = os.path.basename(tok)
+        if "=" in tok and not tok.startswith("-"):
+            i += 1
+        elif tok in _SHELL_KEYWORDS:
+            i += 1
+        elif base in _COMMAND_WRAPPERS:
+            wrapped, value_flags = True, _WRAPPER_VALUE_FLAGS[base]
+            i += 1
+        elif wrapped and tok.startswith("-"):
+            flag, sep, _ = tok.partition("=")
+            i += 2 if not sep and flag in value_flags else 1
+        elif wrapped and _OPERAND_RE.fullmatch(tok):
+            i += 1
+        else:
+            return i
+    return len(tokens)
+
+
+_SHELL_PROGRAMS = frozenset(("sh", "bash", "zsh", "dash", "ksh", "busybox"))
+_MAX_NESTING = 3
+
+
+def _nested_commands(tokens: list[str]) -> list[str]:
+    """The command strings one pipeline segment hands to a shell to run.
+
+    `bash -c "gh pr merge 1"` and `env -S 'git push'` run the command inside
+    the quotes, and shlex hands that whole string over as one token. A parser
+    that read it as the name of a program saw no merge and no push at all."""
+    i = _segment_program(tokens)
+    if i >= len(tokens):
+        return []
+    # The wrappers count as well as the program: `env -S "git push"` resolves
+    # to the command string itself, because -S carries the command rather
+    # than a value _segment_program could step over.
+    names = {os.path.basename(t) for t in tokens[:i + 1]}
+    flags = {"-S"} if "env" in names else set()
+    if names & _SHELL_PROGRAMS:
+        flags |= {"-c", "--command"}
+    if not flags:
+        return []
+    return [tokens[j + 1] for j, tok in enumerate(tokens)
+            if tok in flags and j + 1 < len(tokens)]
+
+
 def _segment_git(tokens: list[str], verb: str) -> str | None:
     """The -C directory of a `git <verb>` in one pipeline segment, "" when the
     command has no -C, or None when the segment does not run `git <verb>`."""
-    i = 0
-    while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
-        i += 1
+    i = _segment_program(tokens)
     if i >= len(tokens) or os.path.basename(tokens[i]) != "git":
         return None
     i += 1
@@ -1089,7 +1263,7 @@ def _compose_chdir(chdir: str, found: str) -> str:
     return os.path.normpath(os.path.join(chdir, found))
 
 
-def _parse_git_all(command: str, verb: str) -> list[dict]:
+def _parse_git_all(command: str, verb: str, depth: int = 0) -> list[dict]:
     """Every `git <verb>` invocation in a shell command line.
 
     Returns one {"chdir": dir-or-""} per segment that runs the verb, in order.
@@ -1116,6 +1290,11 @@ def _parse_git_all(command: str, verb: str) -> list[dict]:
                 found_all.append({"chdir": _compose_chdir(chdir, found)})
             elif len(segment) >= 2 and segment[0] == "cd":
                 chdir = _compose_chdir(chdir, segment[1])
+            elif depth < _MAX_NESTING:
+                for nested in _nested_commands(segment):
+                    found_all.extend(
+                        {"chdir": _compose_chdir(chdir, inner["chdir"])}
+                        for inner in _parse_git_all(nested, verb, depth + 1))
             segment = []
         else:
             segment.append(tok)
@@ -1136,6 +1315,220 @@ def parse_push(command: str) -> dict | None:
 def parse_commit(command: str) -> dict | None:
     """Detect a `git commit` invocation in a shell command line."""
     return _parse_git(command, "commit")
+
+
+_PR_MERGE_URL_RE = re.compile(
+    r"/(?:pulls|pullrequests|merge_requests)/[^/\s'\"]+/merge\b"
+    r"|/api/tickets/[^/\s?'\"]+/merge\b")
+_PR_MERGE_CLIENTS = frozenset(("curl", "wget", "http", "https", "xh", "xhs", "httpie"))
+_PR_MERGE_SUBCOMMANDS = (["pr", "merge"], ["mr", "merge"])
+# gh flags that take their value as the next token. Without them the value of
+# `gh pr --repo owner/name merge 184` reads as the subcommand, and gh accepts
+# that command line.
+_GH_VALUE_FLAGS = frozenset((
+    "-R", "--repo", "--hostname", "-q", "--jq", "-t", "--template", "-H",
+    "--header", "-X", "--method", "-F", "--field", "-f", "--raw-field",
+    "--input", "-b", "--body", "--body-file", "--title", "--json", "-L",
+    "--limit", "--owner"))
+_WRITE_METHODS = frozenset(("POST", "PUT", "PATCH"))
+_HTTP_METHODS = frozenset((
+    "GET", "HEAD", "OPTIONS", "DELETE", "POST", "PUT", "PATCH"))
+_METHOD_FLAGS = frozenset(("-X", "--request", "--method"))
+# Body flags are read per program: `-f` sends a field to `gh api` and means
+# --fail to curl, and reading it as a body turned a curl read into a write.
+_GH_BODY_FLAGS = frozenset(("-f", "--raw-field", "-F", "--field", "--input"))
+_HTTP_BODY_FLAGS = frozenset((
+    "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode",
+    "--json", "-F", "--form", "-T", "--upload-file", "--post-data",
+    "--post-file", "--body-data", "--body-file"))
+# Short flags whose value may be attached: `curl -d'{}'` carries a body.
+_ATTACHED_BODY_FLAGS = ("-d", "-F", "-T", "-f")
+# httpie and xh take the method as their first operand instead of a flag.
+_HTTPIE_CLIENTS = frozenset(("http", "https", "xh", "xhs", "httpie"))
+
+
+def _words_after(program_args: list[str], value_flags: frozenset) -> list[str]:
+    """The operands of a command line, with every flag and every flag value
+    removed."""
+    words = []
+    skip = False
+    for tok in program_args:
+        if skip:
+            skip = False
+            continue
+        if tok.startswith("-"):
+            skip = tok in value_flags
+            continue
+        words.append(tok)
+    return words
+
+
+def _named_method(program: str, args: list[str]) -> str:
+    """The HTTP method a command line names, "" when it names none.
+
+    The last method flag wins, because that is the one curl and gh send. An
+    httpie method is an operand rather than a flag, and it is taken from any
+    operand that spells a method: the operand before the URL can be the value
+    of a flag such as `--auth user:pass`, which spells none."""
+    method = ""
+    for i, tok in enumerate(args):
+        flag, _, inline = tok.partition("=")
+        if flag in _METHOD_FLAGS:
+            method = (inline or (args[i + 1] if i + 1 < len(args) else "")).upper()
+        elif tok.startswith("-X") and len(tok) > 2:
+            method = tok[2:].upper()
+    if method:
+        return method
+    if program in _HTTPIE_CLIENTS:
+        for tok in args:
+            if not tok.startswith("-") and tok.upper() in _HTTP_METHODS:
+                return tok.upper()
+    return ""
+
+
+def _carries_a_write(program: str, args: list[str]) -> bool:
+    """Whether an HTTP command line writes rather than reads.
+
+    A merge endpoint answers GET as well: `gh api repos/o/r/pulls/1/merge`
+    reports whether the pull request is merged and merges nothing. Only the
+    write is a merge. A named method decides on its own, so a read that
+    carries a query field stays a read; a command line that names no method
+    is a write when it carries a body, which is what curl, wget and gh api
+    each turn into a POST."""
+    method = _named_method(program, args)
+    if method:
+        return method in _WRITE_METHODS
+    body_flags = _GH_BODY_FLAGS if program in ("gh", "glab") else _HTTP_BODY_FLAGS
+    for tok in args:
+        if tok.partition("=")[0] in body_flags:
+            return True
+        if (len(tok) > 2 and tok[:2] in _ATTACHED_BODY_FLAGS
+                and tok[:2] in body_flags):
+            return True
+    return False
+
+
+def _segment_pr_merge(tokens: list[str]) -> bool:
+    """Whether one pipeline segment merges a pull request.
+
+    `git merge` is not one of these. Merging a base branch into a working
+    branch is ordinary work and stays open; what is judged here is the command
+    that closes a pull request into its base. A forge client says so in its
+    first two operands, and the REST endpoints of both platforms, and the
+    board's own merge endpoint, say so in the path plus a write method. A path
+    is read only when the program is an HTTP client or `gh api`, so a grep for
+    one of these routes is not a merge."""
+    i = _segment_program(tokens)
+    if i >= len(tokens):
+        return False
+    program = os.path.basename(tokens[i])
+    rest = tokens[i + 1:]
+    if program in ("gh", "glab"):
+        words = _words_after(rest, _GH_VALUE_FLAGS)
+        if words[:2] in _PR_MERGE_SUBCOMMANDS:
+            return True
+        return (words[:1] == ["api"] and _carries_a_write(program, rest)
+                and any(_PR_MERGE_URL_RE.search(t) for t in rest))
+    if program in _PR_MERGE_CLIENTS:
+        return (_carries_a_write(program, rest)
+                and any(_PR_MERGE_URL_RE.search(t) for t in rest))
+    return False
+
+
+def parse_pr_merge(command: str, depth: int = 0) -> bool:
+    """Whether a shell command line merges a pull request.
+
+    Walks shell tokens segment by segment for the reason _parse_git_all does:
+    a quoted message or a grep pattern that reads like a merge is not one. A
+    command shlex cannot tokenize falls back to a pattern match, because a
+    command the gate cannot parse is the one case where guessing low would let
+    the merge through."""
+    tokens = _tokenize(_strip_heredocs(command))
+    if tokens is None:
+        return bool(re.search(r"\b(?:gh|glab)\b[^|;&]*\b(?:pr|mr)\b[^|;&]*\bmerge\b",
+                              command)
+                    or _PR_MERGE_URL_RE.search(command))
+    segment: list[str] = []
+    for tok in tokens + ["\n"]:
+        if tok in _SHELL_SEPARATORS:
+            if _segment_pr_merge(segment):
+                return True
+            if depth < _MAX_NESTING and any(
+                    parse_pr_merge(nested, depth + 1)
+                    for nested in _nested_commands(segment)):
+                return True
+            segment = []
+        else:
+            segment.append(tok)
+    return False
+
+
+_MERGE_ASKED_RE = re.compile(r"\bmerg(?:e|es|ed|ing)\b", re.IGNORECASE)
+
+
+def _operator_asked_to_merge(item_id: int, objective: str) -> bool:
+    """Whether the operator, rather than the agent, put a merge on this task.
+
+    The operator does hand tasks a merge — "merge PR 20 into main" is an
+    ordinary objective — and a gate that refused those would refuse his own
+    instruction. His words reach the task in two places: the objective it was
+    launched with, and every reply he has sent it since. Either one mentioning
+    a merge opens the gate. The test is deliberately generous, because the
+    delivery rule no longer asks for a merge at all: a merge an agent runs
+    with nothing in the task behind it is the one this gate exists for."""
+    if _MERGE_ASKED_RE.search(objective or ""):
+        return True
+    for row in db.query_all(
+            "SELECT payload FROM work_events WHERE work_item_id = ? "
+            "AND kind = 'operator_reply'", (item_id,)):
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            continue
+        text = payload.get("text") if isinstance(payload, dict) else None
+        if isinstance(text, str) and _MERGE_ASKED_RE.search(text):
+            return True
+    return False
+
+
+_MERGE_DENY = (
+    "Blocked by the work-layer merge gate: a merge on {projects} needs an "
+    "operator review, and nothing in this task asked for one.\n\n"
+    "Delivery here stops at the pull request. Push the branch, open or update "
+    "the pull request, get its checks green, and hand it to the operator in "
+    "your checkpoint. Do not turn on the platform's auto-merge, and do not "
+    "look for another route to the same merge.\n\n"
+    "A project lets its tasks merge by setting auto_merge = true in the [pr] "
+    "block of its frshty config."
+)
+
+
+def gate_merge(session_id: str, command: str) -> dict:
+    """Deny a work-session command that merges a pull request on a project
+    that requires an operator review.
+
+    The launch prompt told every agent on every project to merge its own pull
+    request, and one of them merged a company pull request on a project whose
+    config sets auto_merge = false. The prompt now carries the project's own
+    rule, and this enforces it: a prompt is a request, and a system reminder
+    or a stale plan later in a session can still put a merge back in front of
+    the agent. Returns {"decision": "allow"|"deny", "reason": str}."""
+    if not parse_pr_merge(command):
+        return {"decision": "allow", "reason": "not a pull request merge"}
+    item = work_worktree.session_item(session_id)
+    if item is None:
+        return {"decision": "allow", "reason": "not a work-board session"}
+    projects = merge_review_required(item["contexts"])
+    payload = {"command": command[:300], "projects": projects}
+    if not projects:
+        work_store.record_gate(session_id, "merge_gate", "pass", payload)
+        return {"decision": "allow", "reason": "every selected project allows a merge"}
+    if _operator_asked_to_merge(item["id"], item["objective"]):
+        work_store.record_gate(session_id, "merge_gate", "operator_asked", payload)
+        return {"decision": "allow", "reason": "the operator asked for this merge"}
+    work_store.record_gate(session_id, "merge_gate", "fail", payload)
+    return {"decision": "deny",
+            "reason": _MERGE_DENY.format(projects=", ".join(projects))}
 
 
 def _repo_root(start_dir: str) -> Path | None:
