@@ -74,6 +74,10 @@ _ALWAYS = (
     # A task working on a client project reaches them with an ordinary curl.
     r"/api/(?:tickets|reviews)/[^|;&\s]*?/(?:pr-comments?|comments?)\b",
     r"/api/wizard/slack_ping\b",
+    # The Upwork reply route puts a message in front of a client. Only the
+    # operator reaches it, from the button on /upwork.
+    r"/api/upwork/rooms/[^|;&\s]*?/reply\b",
+    r"\bupwork_client\.send_message\b",
 )
 
 # Surfaces that serve reading and writing from the same address. These deny

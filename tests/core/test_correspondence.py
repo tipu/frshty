@@ -133,6 +133,8 @@ class TestCodexFindings:
         "gh \\\n  pr comment 12 --body hi",
         "gh api repos/org/repo/pulls/1/comments -f body=hi",
         "curl -X POST https://api.linear.app/graphql -d @/tmp/q.json",
+        "curl -X POST http://localhost:7100/api/upwork/rooms/room_18ee/reply -d '{\"text\":\"hi\"}'",
+        "python3 -c 'import core.upwork_client as u; u.send_message(\"room_18ee\", \"hi\")'",
     ])
     def test_every_reproduced_send_is_refused(self, command):
         assert correspondence.bash_reason(command) == correspondence.DENY_REASON
