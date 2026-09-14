@@ -39,24 +39,36 @@ PROGRESS_MARKER = "PROGRESS:"
 _IMAGE_ID_RE = re.compile(r"^(\d+)-(\d+)$")
 _IMAGE_MEDIA_RE = re.compile(r"^image/[a-z0-9.+-]+$")
 _MAX_IMAGE_BASE64 = 64 * 1024 * 1024
-DELIVERY_RULE = (
+_DELIVERY_TEMPLATE = (
     "Delivery is part of the objective, never other work. If the change is "
-    "correct and its tests pass, commit it, push it, open the pull request, "
-    "merge it when it is mergeable, and run whatever this repository does to "
-    "release it. A change you left uncommitted, unpushed or unreleased is not "
+    "correct and its tests pass, {ship} A change you left {left} is not "
     "done. Scope discipline applies to new features and to code you were not "
     "asked to touch. It never applies to shipping the thing you just built. "
     "Do not end with an offer. If the next step is inside the objective, do "
     "it. If it is outside, file it as a follow-up and say you filed it. "
     "\"Say the word and I will\" is not a checkpoint. "
 )
+_SHIP_AND_MERGE = (
+    "commit it, push it, open the pull request, merge it when it is "
+    "mergeable, and run whatever this repository does to release it."
+)
+_SHIP_TO_REVIEW = (
+    "commit it, push it and open the pull request. Stop at the pull request. "
+    "A merge on {projects} needs an operator review, so make the pull request "
+    "mergeable and hand it to the operator in your checkpoint: do not merge "
+    "it, do not turn on the platform's auto-merge, and do not release it, "
+    "however green and however mergeable it is. Merge it only when this task "
+    "itself asked you to merge it."
+)
+DELIVERY_RULE = _DELIVERY_TEMPLATE.format(
+    ship=_SHIP_AND_MERGE, left="uncommitted, unpushed or unreleased")
 PROGRESS_RULE = (
     "Every time you finish a phase, and at least every ten minutes of tool "
     f"work, print one line starting {PROGRESS_MARKER} that names what you "
     "just established and what you are doing next. "
 )
 CONTINUE_PROMPT_TEMPLATE = (
-    "Continue toward the objective. " + DELIVERY_RULE + PROGRESS_RULE +
+    "Continue toward the objective. {delivery}" + PROGRESS_RULE +
     "When you hit a decision point, decide "
     "yourself by default: pick the most correct, cleanest, simplest option and "
     "keep going. Ask the operator only when you truly cannot decide — the "
@@ -74,15 +86,37 @@ CONTINUE_PROMPT_TEMPLATE = (
 )
 
 
-def continue_prompt() -> str:
-    """The autocontinue message, carrying this instance's correspondence rule.
+def delivery_rule(review_projects: list[str] | None = None) -> str:
+    """The delivery paragraph, with or without the merge step.
 
-    The rule cannot be baked into the constant, because whether the instance
-    lets a task message a person is read off its config and a resumed run has
-    to hear the same rule its launch prompt gave it. work_launch is imported
-    here rather than at the top because work_launch imports this module."""
+    The board used to tell every agent on every project to merge its own pull
+    request. A project states whether it allows that with [pr] auto_merge, the
+    same switch the ticket pipeline reads, and the board read it from nobody:
+    a task merged a company pull request on a project whose config sets
+    auto_merge = false. `review_projects` names the selected projects that
+    hold a merge for the operator; an empty list means every selected project
+    allows one."""
+    if not review_projects:
+        return DELIVERY_RULE
+    return _DELIVERY_TEMPLATE.format(
+        ship=_SHIP_TO_REVIEW.format(projects=", ".join(review_projects)),
+        left="uncommitted or unpushed")
+
+
+def continue_prompt(contexts: str = "") -> str:
+    """The autocontinue message, carrying this task's correspondence and
+    delivery rules.
+
+    Neither rule can be baked into the constant. Whether the instance lets a
+    task message a person is read off its config, and whether the task's
+    projects let it merge its own pull request is read off theirs, and a
+    resumed run has to hear the same two rules its launch prompt gave it.
+    `contexts` is the item's project labels, so the merge rule follows the
+    task rather than the machine. work_launch is imported here rather than at
+    the top because work_launch imports this module."""
     from services import work_launch
     return CONTINUE_PROMPT_TEMPLATE.format(
+        delivery=delivery_rule(work_launch.merge_review_required(contexts)),
         correspondence=work_launch._correspondence_rule(
             work_launch.personal_config() or {}))
 
@@ -1408,11 +1442,12 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
         if not run:
             return "unknown_session"
         item = c.execute(
-            "SELECT state, autocontinue, continues_used, continue_cap, pending_question "
-            "FROM work_items WHERE id = ?", (run["work_item_id"],),
+            "SELECT state, autocontinue, continues_used, continue_cap, pending_question, "
+            "contexts FROM work_items WHERE id = ?", (run["work_item_id"],),
         ).fetchone()
         if not item or item["state"] != "needs_you":
             return "not_applicable"
+        contexts = item["contexts"] or ""
         excerpt = tail[:300]
         if item["pending_question"]:
             c.execute(
@@ -1468,7 +1503,7 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
                          f"the continuation budget of {item['continue_cap']} is spent; "
                          "an operator reply or a reopen gives a new one", now)
             return "capped"
-    sent = tmux_send(run["tmux_key"], continue_prompt())
+    sent = tmux_send(run["tmux_key"], continue_prompt(contexts))
     now = _now()
     with db.tx() as c:
         current = c.execute("SELECT state FROM work_items WHERE id = ?",
