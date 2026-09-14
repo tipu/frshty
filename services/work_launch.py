@@ -1077,16 +1077,21 @@ _SHELL_KEYWORDS = frozenset((
 # Each wrapper with the flags of its own that take the next token as a value.
 # `sudo -u root git push` runs a push, and a walk that stepped over `-u` but
 # not over `root` stopped at `root` and saw no push at all.
+# `env -S` is not here on purpose: its value is the command line itself, and
+# stepping over it would lose the very command the gate is looking for.
 _WRAPPER_VALUE_FLAGS = {
-    "env": frozenset(("-u", "-C", "-S")),
+    "env": frozenset(("-u", "--unset", "-C", "--chdir")),
     "command": frozenset(),
     "nohup": frozenset(),
-    "sudo": frozenset(("-u", "-g", "-p", "-C", "-h", "-r", "-t")),
+    "sudo": frozenset(("-u", "--user", "-g", "--group", "-p", "--prompt",
+                       "-C", "--close-from", "-h", "--host", "-r", "--role",
+                       "-t", "--type")),
     "doas": frozenset(("-u", "-C")),
-    "nice": frozenset(("-n",)),
-    "ionice": frozenset(("-c", "-n", "-p", "-P", "-u")),
-    "stdbuf": frozenset(("-i", "-o", "-e")),
-    "timeout": frozenset(("-s", "-k")),
+    "nice": frozenset(("-n", "--adjustment")),
+    "ionice": frozenset(("-c", "--class", "-n", "--classdata", "-p", "--pid",
+                         "-P", "--pgid", "-u", "--uid")),
+    "stdbuf": frozenset(("-i", "--input", "-o", "--output", "-e", "--error")),
+    "timeout": frozenset(("-s", "--signal", "-k", "--kill-after")),
     "setsid": frozenset(),
     "unbuffer": frozenset(),
 }
@@ -1300,7 +1305,8 @@ _METHOD_FLAGS = frozenset(("-X", "--request", "--method"))
 _BODY_FLAGS = frozenset((
     "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode",
     "--json", "-f", "--field", "--raw-field", "--input", "-F", "--form",
-    "--post-data", "--post-file", "--body-data", "--body-file"))
+    "--post-data", "--post-file", "--body-data", "--body-file",
+    "-T", "--upload-file"))
 # httpie and xh take the method as their first operand instead of a flag.
 _HTTPIE_CLIENTS = frozenset(("http", "https", "xh", "xhs", "httpie"))
 
@@ -1322,18 +1328,25 @@ def _words_after(program_args: list[str], value_flags: frozenset) -> list[str]:
 
 
 def _named_method(program: str, args: list[str]) -> str:
-    """The HTTP method a command line names, "" when it names none."""
+    """The HTTP method a command line names, "" when it names none.
+
+    The last method flag wins, because that is the one curl and gh send. An
+    httpie method is an operand rather than a flag, and it is taken from any
+    operand that spells a method: the operand before the URL can be the value
+    of a flag such as `--auth user:pass`, which spells none."""
+    method = ""
     for i, tok in enumerate(args):
         flag, _, inline = tok.partition("=")
         if flag in _METHOD_FLAGS:
-            return (inline or (args[i + 1] if i + 1 < len(args) else "")).upper()
-        if tok.startswith("-X") and len(tok) > 2:
-            return tok[2:].upper()
+            method = (inline or (args[i + 1] if i + 1 < len(args) else "")).upper()
+        elif tok.startswith("-X") and len(tok) > 2:
+            method = tok[2:].upper()
+    if method:
+        return method
     if program in _HTTPIE_CLIENTS:
         for tok in args:
-            if tok.startswith("-"):
-                continue
-            return tok.upper() if tok.upper() in _HTTP_METHODS else ""
+            if not tok.startswith("-") and tok.upper() in _HTTP_METHODS:
+                return tok.upper()
     return ""
 
 
