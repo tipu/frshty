@@ -80,6 +80,56 @@ class TestHandlerRouting:
         eq.assert_not_called()
 
 
+class TestTheScopeGateRunsBeforeTheProof:
+    """The scope gate reads the branch the ticket would ship, so it runs once
+    the implementation is complete and before the proof. It used to run only
+    at pr_ready, which proved the branch, corrected it, and proved it again."""
+
+    def _handle(self, tmp_path, scope, *, budget_spent=False):
+        config, ticket, state_dict, _ = _seed(tmp_path)
+        with patch("features.tickets._scope_review_state", return_value=scope), \
+             patch("features.tickets._scope_fix_budget_spent",
+                   return_value=budget_spent), \
+             patch("features.tickets._enqueue_scope_fix") as fx, \
+             patch("features.tickets._enqueue_stage") as eq, \
+             patch("features.ticket_states.state"):
+            _, stop = ts_mod._handle_proving_ticket(
+                config, ticket, state_dict, config["_base_url"], "aimyable", True)
+        return stop, eq, fx
+
+    def test_a_pending_review_holds_the_proof(self, tmp_path):
+        stop, eq, fx = self._handle(tmp_path, "pending")
+        assert stop is True
+        eq.assert_called_once_with("aimyable", "PROJ-1", "scope_review")
+        fx.assert_not_called()
+
+    def test_a_failed_review_holds_the_proof_and_queues_the_correction(self, tmp_path):
+        stop, eq, fx = self._handle(tmp_path, "fail")
+        assert stop is True
+        assert not any(c.args[2] in ("prove", "mark_ready")
+                       for c in eq.call_args_list)
+        fx.assert_called_once()
+
+    def test_a_spent_correction_budget_lets_the_proof_run(self, tmp_path):
+        """Two corrections that did not change the verdict mean the reviewers
+        and the fixer disagree. That is the operator's call, and the pr_ready
+        gate still holds the PR, so the ticket proves once and stops there."""
+        stop, eq, fx = self._handle(tmp_path, "fail", budget_spent=True)
+        assert stop is False
+        eq.assert_called_once_with("aimyable", "PROJ-1", "prove")
+        fx.assert_not_called()
+
+    def test_a_passed_review_lets_the_proof_run(self, tmp_path):
+        stop, eq, fx = self._handle(tmp_path, "pass")
+        assert stop is False
+        eq.assert_called_once_with("aimyable", "PROJ-1", "prove")
+
+    def test_a_disabled_gate_lets_the_proof_run(self, tmp_path):
+        stop, eq, fx = self._handle(tmp_path, "disabled")
+        assert stop is False
+        eq.assert_called_once_with("aimyable", "PROJ-1", "prove")
+
+
 class TestProveTask:
     def _ctx(self, tmp_path, slug="PROJ-1-do-the-thing"):
         ticket_dir = tmp_path / "tickets" / slug
