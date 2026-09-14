@@ -83,7 +83,7 @@ import core.slack_capture as slack_capture
 import core.state as state
 from core.claude_runner import extract_json, run_haiku
 from features import slack_monitor
-from services import work_launch, work_store, work_tags
+from services import work_launch, work_store
 
 SLACK_TAG = "slack"
 STATE_MODULE = "slack_conversations"
@@ -1952,8 +1952,6 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
                     _record_judgement(row["id"], row["last_ts"], tick, conn=c)
             continue
         contexts = [c for c in (instance_key, SLACK_TAG) if c]
-        tags = work_tags.derive_tags(objective, contexts,
-                                     [e["key"] for e in work_launch.project_entries()])
         note = f"Proposed from Slack {channel}: {reason}"[:MAX_NOTE_CHARS]
         # The working directory and the brief are built before the write lock
         # is taken. Both read the filesystem, and holding SQLite's write lock
@@ -2009,7 +2007,7 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
                 continue
             item_id = work_store.create_proposal(
                 objective, note=note, instance_key=instance_key,
-                contexts=",".join(contexts), tags=",".join(tags),
+                contexts=",".join(contexts),
                 cwd=cwd, brief=brief, conn=c, now=stamp)
             c.execute("UPDATE slack_conversations SET work_item_id = ? WHERE id = ?",
                       (item_id, row["id"]))

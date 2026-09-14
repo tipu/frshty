@@ -149,7 +149,7 @@ One FastAPI process serves every instance. Work is rows in a SQLite database at 
 core/       orchestration primitives: queue, worker, tasks, events, scheduler, model runners
 features/   domain logic: tickets, reviewer, own PRs, scope, defence, slack, timesheet, billing
 manager/    daily digest and priority ranking
-services/   work items, runs, tags, debriefs, proposals
+services/   work items, runs, debriefs, proposals
 prd/        requirements intake and ticket generation
 web/        pages and API
 scripts/    work hooks and the gate mutation harness

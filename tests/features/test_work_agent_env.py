@@ -35,8 +35,7 @@ def _launch(tmp_path, contexts, entries=None, agent="claude"):
          patch("services.work_launch.terminal.launch_agent", launcher), \
          patch("services.work_launch.terminal.session_healthy",
                return_value={"alive": True, "agent_running": True}), \
-         patch("services.work_launch.threading.Thread"), \
-         patch("services.work_launch.work_tags.schedule_implicit_tags"):
+         patch("services.work_launch.threading.Thread"):
         out = work_launch.launch("do the work", contexts=contexts, agent=agent)
     return out, launcher.call_args
 

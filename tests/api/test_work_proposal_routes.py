@@ -56,7 +56,6 @@ def _launch_patches(tmp_path):
         patch.object(work_launch.terminal, "launch_agent"),
         patch.object(work_launch.terminal, "session_healthy", return_value={"alive": True}),
         patch.object(work_launch.threading, "Thread"),
-        patch.object(work_launch.work_tags, "schedule_implicit_tags"),
     ]
 
 
