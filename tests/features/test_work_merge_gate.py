@@ -52,9 +52,16 @@ class TestParsePrMerge:
             "env gh pr merge 184",
             "env -u GH_TOKEN gh pr merge 184",
             "sudo -u root gh pr merge 184",
+            "sudo --user root gh pr merge 184",
+            "env -S gh pr merge 184",
             "stdbuf -o L gh pr merge 184",
+            "stdbuf --output L gh pr merge 184",
             "timeout 60 gh pr merge 184",
             "timeout -k 5 60 gh pr merge 184",
+            "timeout --signal KILL 60 gh pr merge 184",
+            "gh api -X GET -X PUT repos/o/r/pulls/184/merge",
+            "http --auth user:pass PUT https://api.github.com/repos/o/r/pulls/184/merge",
+            "curl -T body.json https://api.github.com/repos/o/r/pulls/184/merge",
             "if true; then gh pr merge 184; fi",
             "http PUT https://api.github.com/repos/o/r/pulls/184/merge",
             "xh post https://api.bitbucket.org/2.0/repositories/o/r/pullrequests/9/merge",
@@ -75,6 +82,7 @@ class TestParsePrMerge:
             "gh search code pr merge --limit 1",
             "gh api repos/o/r/pulls/184/merge",
             "gh api -X GET -f q=x repos/o/r/pulls/184/merge",
+            "gh api -X PUT -X GET repos/o/r/pulls/184/merge",
             "curl -s https://api.github.com/repos/o/r/pulls/184/merge",
             "http https://api.github.com/repos/o/r/pulls/184/merge",
             "ls -la",
@@ -84,6 +92,23 @@ class TestParsePrMerge:
     def test_a_command_it_cannot_tokenize_still_matches(self):
         assert work_launch.parse_pr_merge("gh pr merge 1 # don't") is True
         assert work_launch.parse_pr_merge("echo don't merge") is False
+
+
+class TestSegmentProgram:
+    def test_a_wrapper_option_value_does_not_hide_the_command(self):
+        for command in ("sudo -u root git push", "env --unset GH_TOKEN git push",
+                        "stdbuf -o L git push", "timeout --signal KILL 60 git push",
+                        "env -S git push", "nohup git push"):
+            assert work_launch.parse_push(command) == {"chdir": ""}, command
+
+    def test_a_wrapped_commit_still_reaches_the_commit_parser(self):
+        for command in ("env git commit -m fix", "sudo --user root git commit -m fix",
+                        "if true; then git commit -m fix; fi"):
+            assert work_launch.parse_commit(command) == {"chdir": ""}, command
+
+    def test_an_unwrapped_segment_keeps_its_first_token_as_the_program(self):
+        assert work_launch.parse_push("ls -la push") is None
+        assert work_launch.parse_push("git -C /x push") == {"chdir": "/x"}
 
 
 class TestMergePolicy:
