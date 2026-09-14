@@ -87,7 +87,7 @@ def _apply_status(ctx: TaskContext, target: str) -> TaskResult | None:
 # so the dispatcher retries on the next cycle.
 _RETRY_LOOP_TASKS = frozenset({
     "fix_review_findings", "run_tests_and_fix", "fix_ci_failures",
-    "resolve_conflicts",
+    "resolve_conflicts", "scope_review", "fix_scope_findings",
 })
 
 
@@ -112,7 +112,15 @@ def _release_gate_on_failure(ctx: TaskContext, result: TaskResult) -> TaskResult
 
     Exempts the iterative fix/retry tasks (_RETRY_LOOP_TASKS): those are
     re-enqueued by the dispatcher while the ticket holds its gate status, so
-    blocking them would break convergence of the review/test fix loops."""
+    blocking them would break convergence of the review/test fix loops.
+
+    The scope gate is one of those loops, and it runs while the ticket sits in
+    `proving`, which is a gate status. A review whose fan-out returned no
+    verdict, or a correction pass that produced no commit, is a step that has
+    not converged; the dispatcher re-enqueues it and the correction budget
+    bounds it. Blocking on the first such failure would strand a ticket that
+    still had passes left. A hard block is still a block: the check below
+    skips the exemption for one."""
     if result.status != "failed" or not ctx.ticket_key:
         return result
     # A hard block is not "not yet converged". Retrying it re-runs the whole
