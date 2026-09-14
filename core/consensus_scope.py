@@ -1,11 +1,11 @@
 """Consensus scope review — the automated /c gate for code-complete tickets.
 
-When a ticket reaches pr_ready, and again whenever the branch gains code while
-its PR is in review, three independent reviewers (claude, codex, agy) answer
-the same question from one byte-identical, path-only prompt: does every change
-on the branch serve the ticket, and does the branch carry unrelated changes
-that indicate a git problem (wrong or stale base, foreign commits, a polluted
-worktree)?
+When a ticket finishes its implementation and before it proves itself, and
+again whenever the branch gains code while its PR is in review, three
+independent reviewers (claude, codex, agy) answer the same question from one
+byte-identical, path-only prompt: does every change on the branch serve the
+ticket, and does the branch carry unrelated changes that indicate a git
+problem (wrong or stale base, foreign commits, a polluted worktree)?
 
 frshty owns the mechanics: the diff fingerprint that keys freshness, the
 prompt, the parallel fan-out, per-voice verdict parsing, and the deterministic

@@ -188,8 +188,37 @@ MUTATIONS = [
                   "::test_a_run_that_commits_sends_the_ticket_back_to_prove",
         "path": "core/tasks/tickets.py",
         "old": "        _requeue_proof(ctx, ticket_dir, findings)\n"
-               '        outcome = "proving again"',
-        "new": '        outcome = "proving again"',
+               '        outcome = "proving the corrected branch"',
+        "new": '        outcome = "proving the corrected branch"',
+    },
+    {
+        "label": "scope_gate_failure_blocks_the_ticket",
+        "gate": "a scope-gate step that has not converged leaves the ticket in proving",
+        "target": "tests/core/test_hard_block.py::TestHardBlockEscapesTheRetryExemption"
+                  "::test_a_failed_scope_review_leaves_the_ticket_in_proving",
+        "path": "core/tasks/registry.py",
+        "old": '    "resolve_conflicts", "scope_review", "fix_scope_findings",',
+        "new": '    "resolve_conflicts",',
+    },
+    {
+        "label": "scope_gate_runs_after_the_proof",
+        "gate": "the scope gate runs before the proof, not after it",
+        "target": "tests/features/test_proving_state.py::TestTheScopeGateRunsBeforeTheProof"
+                  "::test_a_pending_review_holds_the_proof",
+        "path": "features/ticket_states.py",
+        "old": '    if scope == "pending":\n'
+               '        _t._enqueue_stage(instance_key, key, "scope_review")',
+        "new": "    if False:\n"
+               '        _t._enqueue_stage(instance_key, key, "scope_review")',
+    },
+    {
+        "label": "scope_gate_proving_fail_proves_anyway",
+        "gate": "a failed scope review is corrected before the proof runs",
+        "target": "tests/features/test_proving_state.py::TestTheScopeGateRunsBeforeTheProof"
+                  "::test_a_failed_review_holds_the_proof_and_queues_the_correction",
+        "path": "features/ticket_states.py",
+        "old": '    if scope == "fail" and not _t._scope_fix_budget_spent(instance_key, key, ts):',
+        "new": "    if False:",
     },
     {
         "label": "open_scope_correction_ships",
