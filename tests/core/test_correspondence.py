@@ -140,6 +140,11 @@ class TestCodexFindings:
         "curl -X POST http://localhost:7100/api/upwork/rooms/room_18ee/%72eply --json '{\"text\":\"hi\"}'",
         "curl -X POST http://localhost:7100/api/wizard/%73lack_ping -d '{\"text\":\"hi\"}'",
         "curl -X POST http://localhost:7100/api/tickets/ABC-1/pr-%63omments/9/reply -d '{\"body\":\"hi\"}'",
+        # The shell puts a word back together, so a literal split by an empty
+        # quoted pair or by a backslash reaches the same route.
+        "curl -X POST http://localhost:7100/api/upwork/rooms/room_18ee/re''ply --json '{\"text\":\"hi\"}'",
+        "curl -X POST http://localhost:7100/api/wizard/slack_p\\ing -d '{\"text\":\"hi\"}'",
+        "gh pr com''ment 12 --body hi",
     ])
     def test_every_reproduced_send_is_refused(self, command):
         assert correspondence.bash_reason(command) == correspondence.DENY_REASON
