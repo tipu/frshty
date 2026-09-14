@@ -210,6 +210,12 @@ def rooms(config: dict | None = None, limit: int = 20,
 
 def stories(room_id: str, config: dict | None = None, limit: int = 20,
             older_than: str = "") -> dict:
+    """One page of a room's messages, newest first.
+
+    `older_than` is a `created` stamp in epoch milliseconds, and the page it
+    returns holds the messages strictly older than it. It is not the `cursor`
+    the answer carries, which is a story id: passing that is answered 404
+    whether or not older messages exist."""
     params: dict = {"limit": limit}
     if older_than:
         params["olderThan"] = older_than
