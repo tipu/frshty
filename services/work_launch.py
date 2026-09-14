@@ -552,6 +552,40 @@ _CONFIG_DIR = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "config")
 
 
+def _allows_merge(config: dict | None) -> bool:
+    """Whether one parsed config allows a task to merge its pull request.
+
+    Anything other than a real `true` under a real [pr] table answers no, so a
+    hand-edited `pr = true` or `auto_merge = "true"` does not read as
+    permission and does not raise inside a gate that would then fail open."""
+    pr = (config or {}).get("pr")
+    return isinstance(pr, dict) and pr.get("auto_merge") is True
+
+
+def _config_on_disk(key: str) -> dict | None:
+    """The config file whose [job] key is `key`, parsed, or None.
+
+    A file is found by the key it declares, not by its name: the atropos
+    instance is keyed "frshty" and lives in config/local.toml, so a lookup by
+    file name answers for the wrong project or for none."""
+    try:
+        names = sorted(os.listdir(_CONFIG_DIR))
+    except OSError:
+        return None
+    for name in names:
+        if not name.endswith(".toml") or name.endswith(".example.toml"):
+            continue
+        try:
+            with open(os.path.join(_CONFIG_DIR, name), "rb") as f:
+                raw = tomllib.load(f)
+        except Exception:
+            continue
+        job = raw.get("job")
+        if isinstance(job, dict) and job.get("key") == key:
+            return raw
+    return None
+
+
 def _auto_merge_on_disk(key: str) -> bool:
     """Whether the named project allows a merge, read off its config file.
 
@@ -560,12 +594,7 @@ def _auto_merge_on_disk(key: str) -> bool:
     every project. This reads the same file the server reads. Anything that
     goes wrong answers no: holding a pull request the operator wanted merged
     costs him one click, and a merge he did not want cannot be taken back."""
-    try:
-        with open(os.path.join(_CONFIG_DIR, f"{key}.toml"), "rb") as f:
-            raw = tomllib.load(f)
-    except Exception:
-        return False
-    return (raw.get("pr") or {}).get("auto_merge") is True
+    return _allows_merge(_config_on_disk(key))
 
 
 def _project_allows_merge(key: str) -> bool:
@@ -577,7 +606,7 @@ def _project_allows_merge(key: str) -> bool:
     policy it does not have."""
     config = _instance_config(key)
     if config is not None:
-        return (config.get("pr") or {}).get("auto_merge") is True
+        return _allows_merge(config)
     return _auto_merge_on_disk(key)
 
 
@@ -1042,12 +1071,40 @@ _SHELL_SEPARATORS = ("&&", "||", ";", "|", "&", "(", ")", "\n")
 _GIT_TWO_ARG_FLAGS = ("-c", "--exec-path", "--git-dir", "--work-tree", "--namespace")
 
 
+_SHELL_KEYWORDS = frozenset((
+    "then", "do", "else", "elif", "!", "{", "(", "time", "exec"))
+_COMMAND_WRAPPERS = frozenset((
+    "env", "command", "nohup", "sudo", "doas", "nice", "ionice", "stdbuf",
+    "timeout", "setsid", "unbuffer"))
+_OPERAND_RE = re.compile(r"\d+[smhd]?")
+
+
+def _segment_program(tokens: list[str]) -> int:
+    """The index of the program a pipeline segment runs, or len(tokens).
+
+    Leading assignments, shell keywords and wrapper commands are stepped over
+    with their own flags and numeric operands, because `env git commit`,
+    `timeout 60 gh pr merge` and `if true; then git push; fi` run the same
+    command as the bare form and a gate keyed on the first token saw none of
+    them."""
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if (("=" in tok and not tok.startswith("-"))
+                or tok in _SHELL_KEYWORDS
+                or os.path.basename(tok) in _COMMAND_WRAPPERS
+                or tok.startswith("-")
+                or _OPERAND_RE.fullmatch(tok)):
+            i += 1
+            continue
+        return i
+    return len(tokens)
+
+
 def _segment_git(tokens: list[str], verb: str) -> str | None:
     """The -C directory of a `git <verb>` in one pipeline segment, "" when the
     command has no -C, or None when the segment does not run `git <verb>`."""
-    i = 0
-    while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
-        i += 1
+    i = _segment_program(tokens)
     if i >= len(tokens) or os.path.basename(tokens[i]) != "git":
         return None
     i += 1
@@ -1199,10 +1256,58 @@ def parse_commit(command: str) -> dict | None:
 
 
 _PR_MERGE_URL_RE = re.compile(
-    r"/(?:pulls|pullrequests|merge_requests)/\d+/merge\b"
+    r"/(?:pulls|pullrequests|merge_requests)/[^/\s'\"]+/merge\b"
     r"|/api/tickets/[^/\s?'\"]+/merge\b")
 _PR_MERGE_CLIENTS = frozenset(("curl", "wget", "http", "https", "xh", "httpie"))
-_PR_MERGE_PAIRS = (("pr", "merge"), ("mr", "merge"))
+_PR_MERGE_SUBCOMMANDS = (["pr", "merge"], ["mr", "merge"])
+# gh flags that take their value as the next token. Without them the value of
+# `gh pr --repo owner/name merge 184` reads as the subcommand, and gh accepts
+# that command line.
+_GH_VALUE_FLAGS = frozenset((
+    "-R", "--repo", "--hostname", "-q", "--jq", "-t", "--template", "-H",
+    "--header", "-X", "--method", "-F", "--field", "-f", "--raw-field",
+    "--input", "-b", "--body", "--body-file", "--title", "--json", "-L",
+    "--limit", "--owner"))
+_WRITE_METHODS = frozenset(("POST", "PUT", "PATCH"))
+_METHOD_FLAGS = frozenset(("-X", "--request", "--method"))
+_BODY_FLAGS = frozenset((
+    "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode",
+    "--json", "-f", "--field", "--raw-field", "--input", "-F", "--form"))
+
+
+def _words_after(program_args: list[str], value_flags: frozenset) -> list[str]:
+    """The operands of a command line, with every flag and every flag value
+    removed."""
+    words = []
+    skip = False
+    for tok in program_args:
+        if skip:
+            skip = False
+            continue
+        if tok.startswith("-"):
+            skip = tok in value_flags
+            continue
+        words.append(tok)
+    return words
+
+
+def _carries_a_write(program_args: list[str]) -> bool:
+    """Whether an HTTP command line writes rather than reads.
+
+    A merge endpoint answers GET as well: `gh api repos/o/r/pulls/1/merge`
+    reports whether the pull request is merged and merges nothing. Only the
+    write is a merge."""
+    for i, tok in enumerate(program_args):
+        flag, _, inline = tok.partition("=")
+        if flag in _METHOD_FLAGS:
+            value = inline or (program_args[i + 1] if i + 1 < len(program_args) else "")
+            if value.upper() in _WRITE_METHODS:
+                return True
+        elif flag in _BODY_FLAGS:
+            return True
+        elif tok.startswith("-X") and tok[2:].upper() in _WRITE_METHODS:
+            return True
+    return False
 
 
 def _segment_pr_merge(tokens: list[str]) -> bool:
@@ -1210,25 +1315,25 @@ def _segment_pr_merge(tokens: list[str]) -> bool:
 
     `git merge` is not one of these. Merging a base branch into a working
     branch is ordinary work and stays open; what is judged here is the command
-    that closes a pull request into its base. The forge clients say so in two
-    adjacent words, and the REST endpoints of both platforms, and the board's
-    own merge endpoint, say so in the path. A path is read only when the
-    program is an HTTP client or `gh api`, so a grep for one of these routes
-    is not a merge."""
-    i = 0
-    while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
-        i += 1
+    that closes a pull request into its base. A forge client says so in its
+    first two operands, and the REST endpoints of both platforms, and the
+    board's own merge endpoint, say so in the path plus a write method. A path
+    is read only when the program is an HTTP client or `gh api`, so a grep for
+    one of these routes is not a merge."""
+    i = _segment_program(tokens)
     if i >= len(tokens):
         return False
     program = os.path.basename(tokens[i])
     rest = tokens[i + 1:]
     if program in ("gh", "glab"):
-        if any(pair in _PR_MERGE_PAIRS for pair in zip(rest, rest[1:])):
+        words = _words_after(rest, _GH_VALUE_FLAGS)
+        if words[:2] in _PR_MERGE_SUBCOMMANDS:
             return True
-        return (bool(rest) and rest[0] == "api"
+        return (words[:1] == ["api"] and _carries_a_write(rest)
                 and any(_PR_MERGE_URL_RE.search(t) for t in rest))
     if program in _PR_MERGE_CLIENTS:
-        return any(_PR_MERGE_URL_RE.search(t) for t in rest)
+        return (_carries_a_write(rest)
+                and any(_PR_MERGE_URL_RE.search(t) for t in rest))
     return False
 
 
@@ -1243,7 +1348,8 @@ def parse_pr_merge(command: str) -> bool:
     command = _strip_heredocs(command)
     tokens = _tokenize(command)
     if tokens is None:
-        return bool(re.search(r"\b(?:gh|glab)\b[^|;&]*\b(?:pr|mr)\s+merge\b", command)
+        return bool(re.search(r"\b(?:gh|glab)\b[^|;&]*\b(?:pr|mr)\b[^|;&]*\bmerge\b",
+                              command)
                     or _PR_MERGE_URL_RE.search(command))
     segment: list[str] = []
     for tok in tokens + ["\n"]:
@@ -1276,10 +1382,10 @@ def _operator_asked_to_merge(item_id: int, objective: str) -> bool:
             "AND kind = 'operator_reply'", (item_id,)):
         try:
             payload = json.loads(row["payload"])
-        except ValueError:
+        except (TypeError, ValueError):
             continue
-        text = payload.get("text") or "" if isinstance(payload, dict) else ""
-        if _MERGE_ASKED_RE.search(text):
+        text = payload.get("text") if isinstance(payload, dict) else None
+        if isinstance(text, str) and _MERGE_ASKED_RE.search(text):
             return True
     return False
 
