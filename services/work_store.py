@@ -232,22 +232,22 @@ def is_idle_stop(kind: str, payload: dict) -> bool:
 
 def create_item(objective: str, scope: str = "ad-hoc", scope_ref: str = "",
                 instance_key: str | None = None, contexts: str = "",
-                source_item_id: int | None = None, tags: str = "",
+                source_item_id: int | None = None,
                 worktree_opt_out: bool = False, critical: bool = False) -> int:
     now = _now()
     with db.tx() as c:
         cur = c.execute(
             "INSERT INTO work_items(objective, scope, scope_ref, instance_key, contexts, "
-            "source_item_id, tags, worktree_opt_out, critical, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (objective, scope, scope_ref, instance_key, contexts, source_item_id, tags,
+            "source_item_id, worktree_opt_out, critical, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (objective, scope, scope_ref, instance_key, contexts, source_item_id,
              1 if worktree_opt_out else 0, 1 if critical else 0, now, now),
         )
         return cur.lastrowid
 
 
 def create_proposal(objective: str, note: str = "", instance_key: str | None = None,
-                    contexts: str = "", tags: str = "", cwd: str = "",
+                    contexts: str = "", cwd: str = "",
                     brief: str = "", conn=None, now: str | None = None,
                     source_item_id: int | None = None, critical: bool = False) -> int:
     """Put a task on the board that no agent has started.
@@ -271,23 +271,23 @@ def create_proposal(objective: str, note: str = "", instance_key: str | None = N
     together. `critical` carries the source task's mark onto it."""
     if conn is not None:
         return _insert_proposal(conn, objective, note, instance_key, contexts,
-                                tags, cwd, brief, now, source_item_id, critical)
+                                cwd, brief, now, source_item_id, critical)
     with db.tx() as c:
         return _insert_proposal(c, objective, note, instance_key, contexts,
-                                tags, cwd, brief, now, source_item_id, critical)
+                                cwd, brief, now, source_item_id, critical)
 
 
 def _insert_proposal(c, objective: str, note: str, instance_key: str | None,
-                     contexts: str, tags: str, cwd: str, brief: str,
+                     contexts: str, cwd: str, brief: str,
                      now: str | None = None, source_item_id: int | None = None,
                      critical: bool = False) -> int:
     now = now or _now()
     cur = c.execute(
-        "INSERT INTO work_items(objective, scope, instance_key, contexts, tags, "
+        "INSERT INTO work_items(objective, scope, instance_key, contexts, "
         "state, current_checkpoint, launch_cwd, launch_brief, source_item_id, "
         "critical, created_at, updated_at) "
-        "VALUES (?, 'proposal', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (objective, instance_key, contexts, tags, PROPOSED_STATE, note, cwd,
+        "VALUES (?, 'proposal', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (objective, instance_key, contexts, PROPOSED_STATE, note, cwd,
          brief, source_item_id, 1 if critical else 0, now, now),
     )
     item_id = cur.lastrowid
@@ -1884,7 +1884,7 @@ def revive_resumed_runs() -> list[dict]:
 
 
 def grouped_items(now: datetime | None = None, q: str = "",
-                  tags: str = "", archived: bool = False) -> dict[str, list[dict]]:
+                  projects: str = "", archived: bool = False) -> dict[str, list[dict]]:
     """Group the work items for one board view.
 
     A task frshty opened by itself lands in proposed. No agent has read it
@@ -1911,6 +1911,10 @@ def grouped_items(now: datetime | None = None, q: str = "",
     returns the archived tasks. Without them a completed task becomes
     unfindable the moment it is archived.
 
+    `projects` filters on the projects a launch recorded in the item
+    contexts. A task matches when it carries any one of them, so picking two
+    projects widens the board rather than narrowing it to their overlap.
+
     Every row carries the newest PROGRESS line its agent printed. The line
     comes from the progress events, not from current_checkpoint, because a
     run that reports itself done overwrites current_checkpoint with the tail
@@ -1919,7 +1923,7 @@ def grouped_items(now: datetime | None = None, q: str = "",
     stale_cutoff = (now - timedelta(minutes=STALE_AFTER_MINUTES)).isoformat()
     now_iso = now.isoformat()
     q = (q or "").strip().lower()
-    wanted_tags = {t.strip().lower() for t in (tags or "").split(",") if t.strip()}
+    wanted_projects = {p.strip().lower() for p in (projects or "").split(",") if p.strip()}
     rows = db.query_all(
         "SELECT i.*, "
         "(SELECT session_id FROM work_runs r WHERE r.work_item_id = i.id ORDER BY r.id DESC LIMIT 1) AS last_session_id, "
@@ -1944,7 +1948,8 @@ def grouped_items(now: datetime | None = None, q: str = "",
     for row in rows:
         if q and q not in (row["objective"] or "").lower():
             continue
-        if wanted_tags and wanted_tags.isdisjoint((row["tags"] or "").split(",")):
+        if wanted_projects and wanted_projects.isdisjoint(
+                label.strip().lower() for label in (row["contexts"] or "").split(",")):
             continue
         if archived and not row["archived_at"]:
             continue
@@ -1970,7 +1975,7 @@ def grouped_items(now: datetime | None = None, q: str = "",
             groups["failed_stale"].append(row)
             continue
         groups[state].append(row)
-    # Tags and debriefs can update a completed item later, so use the actual
+    # A debrief can update a completed item later, so use the actual
     # completion event rather than the board-wide priority/creation ordering.
     # Legacy done rows without an event fall back to their last update.
     groups["done"].sort(

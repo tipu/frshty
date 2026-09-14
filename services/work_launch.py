@@ -23,7 +23,7 @@ import core.terminal as terminal
 from core.tasks.tickets import (
     TEST_RUN_TIMEOUT, _NO_LOCAL_PY_VENV_SENTINEL, _detect_runner, _run_repo_tests,
 )
-from services import work_artifacts, work_store, work_tags, work_worktree
+from services import work_artifacts, work_store, work_worktree
 
 
 def personal_config() -> dict | None:
@@ -443,14 +443,11 @@ def launch(objective: str, cwd: str = "", contexts: list[str] | None = None,
     if "error" in plan:
         return plan
     objective, contexts = plan["objective"], plan["contexts"]
-    label_list = contexts + ([SLACK_LABEL] if slack else [])
-    labels = ",".join(label_list)
-    tags = work_tags.derive_tags(objective, label_list,
-                                 [e["key"] for e in project_entries()])
+    labels = ",".join(contexts + ([SLACK_LABEL] if slack else []))
     item_id = work_store.create_item(objective, instance_key="personal", contexts=labels,
-                                     source_item_id=source_item_id, tags=",".join(tags),
+                                     source_item_id=source_item_id,
                                      worktree_opt_out=no_worktree, critical=critical)
-    return _start(item_id, plan, slack, brief, tags)
+    return _start(item_id, plan, slack, brief)
 
 
 def launch_proposed(item_id: int, agent: str = "claude") -> dict:
@@ -471,7 +468,7 @@ def launch_proposed(item_id: int, agent: str = "claude") -> dict:
     _followup_context drops an inherited directory that no longer exists, so
     approval resolves a new one instead of refusing every approval."""
     item = db.query_one(
-        "SELECT i.id, i.state, i.objective, i.contexts, i.tags, i.source_item_id, "
+        "SELECT i.id, i.state, i.objective, i.contexts, i.source_item_id, "
         "i.launch_cwd, i.launch_brief, i.worktree_opt_out, "
         "(SELECT r.provider FROM work_runs r WHERE r.work_item_id = i.source_item_id "
         "ORDER BY r.id DESC LIMIT 1) AS source_provider "
@@ -500,13 +497,12 @@ def launch_proposed(item_id: int, agent: str = "claude") -> dict:
     # goes back on the board for the operator to approve again. The test is
     # the run, not how _start ended: it can raise before add_run, on an
     # artifact or prompt failure, and it can also raise after the agent is
-    # already running, when the kickoff thread or the tagging call fails.
+    # already running, when the kickoff thread fails.
     # Releasing on the second would show a live agent as waiting for approval.
     # A launch that did create a run is already recorded as failed_stale by
     # mark_launch_failed, which is what every other launch leaves behind.
     try:
-        result = _start(item_id, plan, slack, item["launch_brief"] or "",
-                        work_tags.split_tags(item["tags"]))
+        result = _start(item_id, plan, slack, item["launch_brief"] or "")
     except Exception:
         if not work_store.has_run(item_id):
             work_store.release_proposal(item_id)
@@ -655,8 +651,7 @@ def _correspondence_rule(config: dict) -> str:
             "operator has to send it. ")
 
 
-def _start(item_id: int, plan: dict, slack: bool, brief: str,
-           tags: list[str]) -> dict:
+def _start(item_id: int, plan: dict, slack: bool, brief: str) -> dict:
     objective, contexts, agent = plan["objective"], plan["contexts"], plan["agent"]
     config, source_block = plan["config"], plan["source_block"]
     env_config = plan.get("env_config") or config
@@ -757,8 +752,6 @@ def _start(item_id: int, plan: dict, slack: bool, brief: str,
             log.emit("work_launch_failed", f"work item {item_id}: {type(e).__name__}: {e}")
             return {"error": f"launch failed: {e}", "item_id": item_id}
     start_kickoff(tmux_key, run_id, agent)
-    if len(tags) < work_tags.MAX_TAGS:
-        work_tags.schedule_implicit_tags(item_id, objective, config)
     return {"item_id": item_id, "run_id": run_id, "session_id": session_id,
             "tmux_key": tmux_key, "state": "agent_working", "agent": agent,
             "cwd": cwd, "worktree": worktree_row.get("path", "")}
@@ -1057,11 +1050,9 @@ def propose_followup(source_item_id: int, objective: str, note: str = "") -> dic
     if "error" in inherited:
         return inherited
     labels = inherited["contexts"] + ([SLACK_LABEL] if inherited["slack"] else [])
-    tags = work_tags.derive_tags(objective, labels,
-                                 [e["key"] for e in project_entries()])
     item_id = work_store.create_proposal(
         objective, note=note, instance_key="personal", contexts=",".join(labels),
-        tags=",".join(tags), cwd=inherited["cwd"], source_item_id=source_item_id,
+        cwd=inherited["cwd"], source_item_id=source_item_id,
         critical=inherited["critical"])
     return {"item_id": item_id}
 

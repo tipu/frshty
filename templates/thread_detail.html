@@ -120,7 +120,7 @@
                       title="this task is in the archive, not on the board">Archived</span>
                 <span v-if="t.last_provider">{{ t.last_provider }}</span>
                 <span v-if="t.artifact_count">· {{ t.artifact_count }} artifact{{ t.artifact_count === 1 ? '' : 's' }}</span>
-                <span class="ln-tag" v-for="tag in tags(t)" :key="tag">{{ tag }}</span>
+                <span class="ln-tag" v-for="p in projectsOf(t)" :key="p">{{ p }}</span>
                 <span class="ln-right">
                   <a class="ln-btn ln-btn-sm ln-btn-ghost" v-if="t.summary" :href="taskHref(t.id, '/summary')" target="_blank">Summary</a>
                   <a class="ln-btn ln-btn-sm ln-btn-ghost" v-if="t.last_tmux_key && t.state !== 'done' && t.state !== 'needs_ack' && t.state !== 'canceled'" :href="terminalHref(t.id)" :target="terminalWindow(t.id)">Terminal</a>
@@ -268,7 +268,10 @@ frshtyApp({
         : (t.stop_reason || t.current_checkpoint || t.summary || "");
       return text.length > 240 ? text.slice(0, 240).trimEnd() + "…" : text;
     },
-    tags(t) { return (t.tags || "").split(",").filter(Boolean); },
+    projectsOf(t) {
+      return (t.contexts || "").split(",").map(c => c.trim())
+        .filter(c => c && c !== "slack_int");
+    },
     base(path) { return (path || "").split("/").pop(); },
     ext(path) {
       const name = this.base(path);
