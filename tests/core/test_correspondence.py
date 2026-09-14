@@ -135,6 +135,11 @@ class TestCodexFindings:
         "curl -X POST https://api.linear.app/graphql -d @/tmp/q.json",
         "curl -X POST http://localhost:7100/api/upwork/rooms/room_18ee/reply -d '{\"text\":\"hi\"}'",
         "python3 -c 'import core.upwork_client as u; u.send_message(\"room_18ee\", \"hi\")'",
+        # A path is percent-decoded before any router sees it, so a rule tested
+        # against the literal text alone closes nothing.
+        "curl -X POST http://localhost:7100/api/upwork/rooms/room_18ee/%72eply --json '{\"text\":\"hi\"}'",
+        "curl -X POST http://localhost:7100/api/wizard/%73lack_ping -d '{\"text\":\"hi\"}'",
+        "curl -X POST http://localhost:7100/api/tickets/ABC-1/pr-%63omments/9/reply -d '{\"body\":\"hi\"}'",
     ])
     def test_every_reproduced_send_is_refused(self, command):
         assert correspondence.bash_reason(command) == correspondence.DENY_REASON
