@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Upwork — frshty</title>
+<script src="/static/tailwind.js"></script>
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+<script src="/static/frshty-time.js"></script>
+<script src="/static/frshty-nav.js"></script>
+<script src="/static/frshty-shell.js"></script>
+<link rel="stylesheet" href="/static/frshty.css">
+<link rel="stylesheet" href="/static/frshty-v2.css">
+<link rel="stylesheet" href="/static/frshty-mobile.css">
+<style>
+.msg { background: #151515; border-left: 2px solid #2a2a2a; }
+.msg.mine { border-left-color: #2563eb; }
+.reply-input { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; }
+.reply-input:focus { border-color: #3b82f6; outline: none; }
+.send-btn { background: #2563eb; color: white; padding: 6px 16px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+.send-btn:hover { background: #1d4ed8; }
+.send-btn.sent { background: #14532d; cursor: default; }
+.badge-blocked { background: #3a1010; color: #fca5a5; }
+.badge-task { background: #14532d; color: #86efac; }
+</style>
+<script src="/static/frshty-usage.js"></script>
+</head>
+<body>
+
+<div id="app" v-cloak>
+<frshty-shell :features="features" :instance="instanceName">
+
+<section class="mb-4 flex items-center justify-between">
+    <div>
+        <h2 class="text-sm font-bold text-blue-400">Upwork inbox</h2>
+        <div class="text-xs text-gray-600">
+            Read from the logged-in Chrome profile on this machine. frshty sends nothing until you press send.
+        </div>
+    </div>
+    <button class="send-btn text-sm" :disabled="refreshing" @click="refresh">
+        {{ refreshing ? 'Refreshing…' : 'Refresh' }}
+    </button>
+</section>
+
+<div v-if="error" class="card p-3 mb-4 text-sm" style="background:#2a1010;border:1px solid #b91c1c">{{ error }}</div>
+
+<div v-if="!rooms.length" class="text-gray-600 text-sm">No rooms indexed yet.</div>
+
+<div v-else class="space-y-4">
+    <div v-for="r in rooms" :key="r.room_id" class="card p-4">
+        <div class="flex items-center gap-2 mb-1 flex-wrap">
+            <span class="text-sm font-bold text-gray-200">{{ r.label }}</span>
+            <span v-if="r.injected" class="badge badge-blocked">prompt injection — held back</span>
+            <a v-if="r.work_item_id" class="badge badge-task" :href="'/tasks/' + r.work_item_id">task {{ r.work_item_id }} · {{ r.work_state }}</a>
+            <span class="text-gray-600 text-xs">{{ r.message_count }} msgs · {{ timeAgo(r.last_ts) }}</span>
+        </div>
+
+        <div v-if="r.injected" class="text-xs mb-3" style="color:#fca5a5">
+            {{ r.injected_reason }} — no task was opened and no reply was drafted for this room.
+        </div>
+
+        <div class="space-y-1 mb-3">
+            <div v-for="(m, i) in r.messages" :key="i" class="msg p-2 text-sm"
+                 :class="{ mine: m.mine }">
+                <div class="text-xs text-gray-600">{{ m.who }} · {{ fmtTime(m.ts) }}</div>
+                <div class="text-gray-200 whitespace-pre-wrap">{{ m.text }}</div>
+            </div>
+        </div>
+
+        <div v-if="!r.injected">
+            <label class="text-xs font-bold text-gray-500 block mb-1">
+                Reply<span v-if="r.reply_sent_at" class="text-green-500"> · sent {{ timeAgo(r.reply_sent_at) }}</span>
+            </label>
+            <div class="flex gap-2 items-start">
+                <textarea v-model="drafts[r.room_id]" rows="4"
+                          class="reply-input flex-1 p-2 rounded text-sm font-mono"
+                          placeholder="nothing drafted yet"></textarea>
+                <button class="send-btn text-sm" :class="{ sent: sent[r.room_id] }"
+                        :disabled="sending[r.room_id] || sent[r.room_id]"
+                        @click="send(r.room_id)">
+                    {{ sendLabel(r.room_id) }}
+                </button>
+            </div>
+            <div v-if="sendError[r.room_id]" class="text-xs text-red-400 mt-1">{{ sendError[r.room_id] }}</div>
+        </div>
+    </div>
+</div>
+
+</frshty-shell>
+</div>
+
+<script>
+const { ref, reactive, onMounted } = Vue;
+
+frshtyApp({
+    setup() {
+        const rooms = ref([]);
+        const features = ref({});
+        const instanceName = ref('');
+        const error = ref('');
+        const refreshing = ref(false);
+        const drafts = reactive({});
+        const sending = reactive({});
+        const sent = reactive({});
+        const sendError = reactive({});
+
+        function fmtTime(ts) {
+            try { return new Date(ts).toLocaleString(); } catch { return ''; }
+        }
+
+        function timeAgo(iso) {
+            if (!iso) return '';
+            const diff = (Date.now() - new Date(iso).getTime()) / 1000;
+            if (diff < 60) return 'just now';
+            if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+            if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+            return Math.floor(diff / 86400) + 'd ago';
+        }
+
+        function sendLabel(roomId) {
+            if (sent[roomId]) return 'sent';
+            if (sending[roomId]) return 'sending…';
+            return 'send';
+        }
+
+        // A draft the operator has started editing is never overwritten by a
+        // poll. The model rewrites reply_draft whenever the room is judged
+        // again, and dropping half a typed answer on top of that is worse than
+        // showing a draft one scan old.
+        function apply(list) {
+            rooms.value = list || [];
+            for (const r of rooms.value) {
+                if (drafts[r.room_id] === undefined) drafts[r.room_id] = r.reply_draft || '';
+            }
+        }
+
+        async function load() {
+            try {
+                const [dataResp, configResp] = await Promise.all([
+                    fetch('/api/upwork/data'),
+                    fetch('/api/config'),
+                ]);
+                apply((await dataResp.json()).rooms);
+                const cfg = await configResp.json();
+                features.value = cfg.features || {};
+                instanceName.value = cfg.job?.key || '';
+            } catch (e) { error.value = 'load failed: ' + e; }
+        }
+
+        async function refresh() {
+            refreshing.value = true;
+            error.value = '';
+            try {
+                const resp = await fetch('/api/upwork/refresh', { method: 'POST' });
+                const body = await resp.json();
+                if (!resp.ok) { error.value = body.error || 'refresh failed'; return; }
+                apply(body.rooms);
+            } catch (e) {
+                error.value = 'refresh failed: ' + e;
+            } finally {
+                refreshing.value = false;
+            }
+        }
+
+        async function send(roomId) {
+            const text = (drafts[roomId] || '').trim();
+            if (!text) return;
+            sending[roomId] = true;
+            sendError[roomId] = '';
+            try {
+                const resp = await fetch(`/api/upwork/rooms/${roomId}/reply`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({text}),
+                });
+                const body = await resp.json();
+                if (resp.ok && body.status === 'sent') {
+                    sent[roomId] = true;
+                } else {
+                    sendError[roomId] = body.error || 'send failed';
+                }
+            } catch (e) {
+                sendError[roomId] = 'send failed: ' + e;
+            } finally {
+                if (!sent[roomId]) sending[roomId] = false;
+            }
+        }
+
+        onMounted(() => {
+            load();
+            setInterval(load, 15000);
+        });
+
+        return {
+            rooms, features, instanceName, error, refreshing,
+            drafts, sending, sent, sendError,
+            fmtTime, timeAgo, sendLabel, refresh, send,
+        };
+    },
+}).mount('#app');
+</script>
+</body>
+</html>

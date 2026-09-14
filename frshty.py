@@ -22,6 +22,7 @@ from web.state import _config, _configs_by_host, set_primary_config as _set_prim
 import web.middleware as _middleware
 from web.pages import router as _pages_router
 from web.slack import router as _slack_router
+from web.upwork import router as _upwork_router
 from web.timesheet import router as _timesheet_router
 from web.billing import router as _billing_router
 from web.scheduling import router as _scheduling_router
@@ -58,6 +59,7 @@ _middleware.install(app)
 
 app.include_router(_pages_router)
 app.include_router(_slack_router)
+app.include_router(_upwork_router)
 app.include_router(_timesheet_router)
 app.include_router(_billing_router)
 app.include_router(_scheduling_router)

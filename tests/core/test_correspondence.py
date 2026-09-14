@@ -133,6 +133,21 @@ class TestCodexFindings:
         "gh \\\n  pr comment 12 --body hi",
         "gh api repos/org/repo/pulls/1/comments -f body=hi",
         "curl -X POST https://api.linear.app/graphql -d @/tmp/q.json",
+        "curl -X POST http://localhost:7100/api/upwork/rooms/room_18ee/reply -d '{\"text\":\"hi\"}'",
+        "python3 -c 'import core.upwork_client as u; u.send_message(\"room_18ee\", \"hi\")'",
+        # A path is percent-decoded before any router sees it, so a rule tested
+        # against the literal text alone closes nothing.
+        "curl -X POST http://localhost:7100/api/upwork/rooms/room_18ee/%72eply --json '{\"text\":\"hi\"}'",
+        "curl -X POST http://localhost:7100/api/wizard/%73lack_ping -d '{\"text\":\"hi\"}'",
+        "curl -X POST http://localhost:7100/api/tickets/ABC-1/pr-%63omments/9/reply -d '{\"body\":\"hi\"}'",
+        # The shell puts a word back together, so a literal split by an empty
+        # quoted pair or by a backslash reaches the same route.
+        "curl -X POST http://localhost:7100/api/upwork/rooms/room_18ee/re''ply --json '{\"text\":\"hi\"}'",
+        "curl -X POST http://localhost:7100/api/wizard/slack_p\\ing -d '{\"text\":\"hi\"}'",
+        "gh pr com''ment 12 --body hi",
+        # The two compose: this is %72eply to the shell and r''eply to the
+        # router, and neither of those alone is the word the pair produces.
+        "curl -X POST http://localhost:7100/api/upwork/rooms/room_18ee/%72''eply --json '{\"text\":\"hi\"}'",
     ])
     def test_every_reproduced_send_is_refused(self, command):
         assert correspondence.bash_reason(command) == correspondence.DENY_REASON
