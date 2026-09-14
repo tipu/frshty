@@ -24,6 +24,7 @@
 			{ href: '/prd', label: 'PRD', icon: '▤' },
 			{ href: '/scheduled', label: 'Scheduled', icon: '◔' },
 			{ href: '/slack', label: 'Slack', icon: '◕' },
+			{ href: '/upwork', label: 'Upwork', icon: '◌', feature: 'upwork' },
 		]},
 		{ title: 'Admin', links: [
 			{ href: '/timesheet', label: 'Timesheet', icon: '◒', feature: 'timesheet' },
@@ -61,6 +62,7 @@
 		'/prd': ['Work', 'PRD'],
 		'/scheduled': ['Work', 'Scheduled'],
 		'/slack': ['Work', 'Slack'],
+		'/upwork': ['Work', 'Upwork'],
 		'/timesheet': ['Admin', 'Timesheet'],
 		'/billing': ['Admin', 'Billing'],
 		'/claude': ['Admin', 'Claude'],
