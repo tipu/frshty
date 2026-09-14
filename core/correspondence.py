@@ -24,7 +24,9 @@ not do.
 """
 import os
 import re
+import shlex
 import tomllib
+import urllib.parse
 
 DENY_REASON = (
     "Blocked by the work-layer correspondence gate: this task may not send a "
@@ -74,6 +76,10 @@ _ALWAYS = (
     # A task working on a client project reaches them with an ordinary curl.
     r"/api/(?:tickets|reviews)/[^|;&\s]*?/(?:pr-comments?|comments?)\b",
     r"/api/wizard/slack_ping\b",
+    # The Upwork reply route puts a message in front of a client. Only the
+    # operator reaches it, from the button on /upwork.
+    r"/api/upwork/rooms/[^|;&\s]*?/reply\b",
+    r"\bupwork_client\.send_message\b",
 )
 
 # Surfaces that serve reading and writing from the same address. These deny
@@ -137,6 +143,56 @@ def _normalize(command: str) -> str:
     return re.sub(r"\s+", " ", (command or "").replace("\\\n", " "))
 
 
+def _readings(command: str) -> tuple[str, ...]:
+    """The command as written, and as the server on the other end reads it.
+
+    A rule written against a URL matches a path, and a path is percent-decoded
+    before any router sees it. `/api/upwork/rooms/r1/%72eply` reaches the same
+    route as `/reply`, so a rule tested against the literal text alone does not
+    close it. The same trick reaches every other path rule here.
+
+    The shell rewrites a command too. A word broken by an empty quoted pair or
+    by a backslash is whole again by the time curl sees it, and the same trick
+    splits any literal in any rule here. Splitting the command the way the
+    shell does and joining the words back puts that reading in front of the
+    rules as well.
+
+    Neither reading is a proof. Command substitution and a variable still build
+    a word this cannot see, which is what the module docstring already says
+    about the shell. These close the spellings a task reaches for.
+
+    Every reading can only make the gate stricter, and that is the direction
+    this module already chooses: blocking a message the operator wanted costs a
+    retry, and sending one he did not want cannot be taken back. One decode is
+    enough, because one decode is what a router does.
+
+    The two are applied together as well as apart. They compose: `%72''eply`
+    is `%72eply` to the shell and `r''eply` to the router, and neither reading
+    alone is the word `reply` that both of them together produce."""
+    raw = command or ""
+    unquoted = _unquoted(raw)
+    candidates = (raw, urllib.parse.unquote(raw), unquoted,
+                  _unquoted(urllib.parse.unquote(raw)),
+                  urllib.parse.unquote(unquoted))
+    readings: list[str] = []
+    for candidate in candidates:
+        reading = _normalize(candidate)
+        if reading and reading not in readings:
+            readings.append(reading)
+    return tuple(readings) or ("",)
+
+
+def _unquoted(command: str) -> str:
+    """The command as the shell splits it, words joined by single spaces.
+
+    An unparseable command gives nothing back rather than raising: it is one
+    reading of several, and the literal one is always tested."""
+    try:
+        return " ".join(shlex.split(command or "", comments=False))
+    except ValueError:
+        return ""
+
+
 def bash_reason(command: str) -> str:
     """The deny reason for a shell command that would send a message, "" to
     allow.
@@ -144,14 +200,17 @@ def bash_reason(command: str) -> str:
     A surface that serves reading and writing from one address is judged by
     the write, not by the address: `gh api repos/o/r/pulls/1/comments` reads
     the thread and stays open, and the same path with a field flag writes to
-    it and does not."""
-    text = _normalize(command)
-    for pattern in _ALWAYS_RE:
-        if pattern.search(text):
+    it and does not.
+
+    Every reading of the command is tested, not the literal text alone; see
+    _readings."""
+    for text in _readings(command):
+        for pattern in _ALWAYS_RE:
+            if pattern.search(text):
+                return DENY_REASON
+        if any(p.search(text) for p in _MESSAGE_API_RE) and \
+                any(p.search(text) for p in _CURL_WRITE_RE):
             return DENY_REASON
-    if any(p.search(text) for p in _MESSAGE_API_RE) and \
-            any(p.search(text) for p in _CURL_WRITE_RE):
-        return DENY_REASON
     return ""
 
 

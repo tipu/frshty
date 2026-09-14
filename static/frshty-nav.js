@@ -9,6 +9,7 @@
         { href: '/prd', label: 'PRD' },
         { href: '/scheduled', label: 'Scheduled' },
         { href: '/slack', label: 'Slack' },
+        { href: '/upwork', label: 'Upwork', feature: 'upwork' },
         { href: '/timesheet', label: 'Timesheet', feature: 'timesheet' },
         { href: '/billing', label: 'Billing', feature: 'billing' },
         { href: '/claude', label: 'Claude' },
