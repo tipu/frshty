@@ -125,7 +125,10 @@ pr_autofix = false                # github only: every newly created PR gets a c
 #                                     # catch up with, so a steady inbox costs one call and a
 #                                     # backlog of never-read rooms is worked through.
 # stories_limit = 20                  # how many messages one page of a room carries
-# story_pages = 5                     # how far back a room never read before is pulled
+# story_pages = 5                     # how far back a room never read before is pulled. It is also
+#                                     # the refresh window: stories_limit times this is how many of a
+#                                     # room's newest messages a re-read reaches, and the transcript
+#                                     # handed to the models never draws on anything older.
 # settle_minutes = 5                  # a room is read only once its last message is this old,
 #                                     # so a client still typing is left alone
 # max_age_hours = 72                  # never propose from a room older than this
