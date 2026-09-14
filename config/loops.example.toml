@@ -1,0 +1,40 @@
+# Autonomous loops this host watches with services/loopwatch.
+#
+# A loop is a checkout that keeps its own controller database at
+# var/controller.db, writes one directory per iteration under
+# var/controller-runs/, and takes a human note through bin/note.sh.
+#
+# Copy to config/loops.toml. That file is host-local: git ignores it, so a
+# checkout on another machine names its own loops.
+#
+# key             short name used by the CLI and the page anchor
+# label           display name; defaults to key
+# repo            absolute path to the checkout, on the loop's own host
+# host            ssh destination; omit it for a loop on this machine
+# run_as          the user the controller runs as on that host. Set it when the
+#                 ssh user is root and the loop is not: every read and every
+#                 note then runs as that user, so root never owns a file in the
+#                 loop's database directory. It needs an ssh user that may su.
+# python          interpreter on that host; defaults to python3
+# cadence_minutes how often the loop is meant to tick; only used to call a gap
+#                 out on the page
+#
+# Nothing is installed on the loop's host. The probe is fed to python3 on
+# stdin and the database is opened read-only.
+#
+# Poll it from cron or a systemd timer, for example:
+#   */15 * * * * cd /path/to/frshty && python -m services.loopwatch poll
+
+# [[loops]]
+# key = "games"
+# label = "games portfolio"
+# repo = "/home/tipu/Documents/dev/game_expirement"
+# cadence_minutes = 15
+
+# [[loops]]
+# key = "saas"
+# label = "saas idea"
+# host = "linode"
+# repo = "/home/tipu/Documents/dev/expirement"
+# run_as = "tipu"
+# cadence_minutes = 15
