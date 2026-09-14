@@ -137,6 +137,9 @@ def collect(loop, detail=DEFAULT_DETAIL, summary=DEFAULT_SUMMARY,
         return _failed(loop, "unreadable answer (exit %d): %s"
                        % (done.returncode, " / ".join(detail_text[-3:]) or "no output"),
                        argv, started)
+    if not isinstance(snapshot, dict):
+        return _failed(loop, "the probe answered with %s, not an object"
+                       % type(snapshot).__name__, argv, started)
     snapshot.update({"key": loop["key"], "label": loop["label"], "where": where(loop),
                      "cadence_minutes": loop["cadence_minutes"],
                      "took_seconds": round(time.time() - started, 1),
@@ -159,7 +162,11 @@ def steer(loop, text, timeout=DEFAULT_TIMEOUT):
     if not text.strip():
         raise ValueError("a note needs words")
     argv = steer_argv(loop, text)
-    done = _run(argv, timeout=timeout)
+    try:
+        done = _run(argv, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"ok": False, "returncode": None, "stdout": "",
+                "stderr": "%s: %s" % (type(exc).__name__, exc), "argv": argv}
     return {"ok": done.returncode == 0, "returncode": done.returncode,
             "stdout": done.stdout.strip(), "stderr": done.stderr.strip(),
             "argv": argv}
@@ -249,6 +256,10 @@ def attention(snapshot):
         cadence = snapshot.get("cadence_minutes")
         level = "bad" if cadence and gap is not None and gap > cadence * 60 * 3 else "mut"
         out.append((level, "idle %s since run %s" % (human_span(gap), runs[0].get("id"))))
+    ticks = snapshot.get("ticks") or []
+    if ticks and ticks[-1].get("outcome") not in (None, "started"):
+        out.append(("mut", "the controller's last tick started no run: %s"
+                    % ticks[-1]["outcome"]))
     streak = 0
     for run in runs:
         if run.get("exit_reason") in (None, "done"):
@@ -332,7 +343,8 @@ def _run_card(run, now):
     narrative = run.get("narrative") or {}
     if narrative.get("final"):
         tools = narrative.get("tools") or {}
-        meta = "%s turns, %s" % (narrative.get("turns") or "?", _counts_line(tools, 6) or "no tools")
+        meta = "%s turns, %s" % (esc(narrative.get("turns") or "?"),
+                                _counts_line(tools, 6) or "no tools")
         if narrative.get("truncated"):
             meta += ' <span class="pill bad">transcript ends mid-run</span>'
         parts.append('<details class="said"><summary>what the session said '
@@ -379,6 +391,10 @@ def _loop_section(snapshot):
         chips.append(_chip("tasks", ", ".join("%s %d" % (k, v) for k, v in
                                               sorted(snapshot["task_status"].items()))))
     parts.append('<div class="chips">%s</div>' % "".join(chips))
+    totals = {name: n for name, n in (snapshot.get("counts") or {}).items()
+              if name != "runs" and n}
+    if totals:
+        parts.append('<p class="mut small">database holds %s</p>' % _counts_line(totals, 10))
     objective = (charter.get("objective") or "").strip()
     if objective:
         head, _, rest = objective.partition("\n\n")
