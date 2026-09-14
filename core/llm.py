@@ -304,10 +304,6 @@ _SKIP_PERMISSIONS = "--dangerously-skip-permissions"
 # adds later, and it cannot name an MCP tool that a settings file introduces.
 # `--tools ""` says the opposite: nothing at all, whatever the settings hold.
 NO_TOOLS_FLAGS = ("--tools", "", "--strict-mcp-config")
-# Kept for the one caller that builds its own command line rather than going
-# through a provider (services/work_tags.py).
-NO_TOOLS = ("Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task,Agent,"
-            "NotebookEdit,MultiEdit,AskUserQuestion")
 # opencode reads its configuration from OPENCODE_CONFIG_CONTENT before any
 # file, so this denies every tool for one invocation without touching the
 # operator's opencode.json, which allows every tool to every agent.

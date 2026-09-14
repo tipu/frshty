@@ -7,7 +7,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
 import core.db as db
 import core.terminal as terminal
 from services import (work_artifacts, work_debrief, work_launch, work_peers,
-                      work_store, work_tags, work_worktree)
+                      work_store, work_worktree)
 from web.pages import _template
 from web.sandbox import policy_for
 
@@ -130,8 +130,8 @@ def api_work_thread_archive(root_id: int):
 
 
 @router.get("/api/work/items")
-def api_work_items(q: str = "", tags: str = "", done_page: int = 1, archive: int = 0):
-    groups = work_store.grouped_items(q=q, tags=tags, archived=bool(archive))
+def api_work_items(q: str = "", projects: str = "", done_page: int = 1, archive: int = 0):
+    groups = work_store.grouped_items(q=q, projects=projects, archived=bool(archive))
     threads = work_store.thread_map()
     for rows in groups.values():
         for row in rows:
@@ -142,7 +142,7 @@ def api_work_items(q: str = "", tags: str = "", done_page: int = 1, archive: int
     start = (done_page - 1) * DONE_PAGE_SIZE
     groups["done"] = groups["done"][start:start + DONE_PAGE_SIZE]
     return {"groups": groups, "counts": counts,
-            "all_tags": work_tags.known_tags(),
+            "filter": {"q": q, "projects": projects},
             "done_page": done_page, "done_pages": done_pages,
             "personal_loaded": work_launch.personal_config() is not None,
             "projects": work_launch.project_entries(),
