@@ -24,6 +24,7 @@ not do.
 """
 import os
 import re
+import shlex
 import tomllib
 import urllib.parse
 
@@ -150,13 +151,37 @@ def _readings(command: str) -> tuple[str, ...]:
     route as `/reply`, so a rule tested against the literal text alone does not
     close it. The same trick reaches every other path rule here.
 
-    Decoding can only make the gate stricter, and that is the direction this
-    module already chooses: blocking a message the operator wanted costs a
+    The shell rewrites a command too. A word broken by an empty quoted pair or
+    by a backslash is whole again by the time curl sees it, and the same trick
+    splits any literal in any rule here. Splitting the command the way the
+    shell does and joining the words back puts that reading in front of the
+    rules as well.
+
+    Neither reading is a proof. Command substitution and a variable still build
+    a word this cannot see, which is what the module docstring already says
+    about the shell. These close the spellings a task reaches for.
+
+    Every reading can only make the gate stricter, and that is the direction
+    this module already chooses: blocking a message the operator wanted costs a
     retry, and sending one he did not want cannot be taken back. One decode is
     enough, because one decode is what a router does."""
-    text = _normalize(command)
-    decoded = _normalize(urllib.parse.unquote(command or ""))
-    return (text,) if decoded == text else (text, decoded)
+    readings = [_normalize(command)]
+    for candidate in (urllib.parse.unquote(command or ""), _unquoted(command)):
+        reading = _normalize(candidate)
+        if reading and reading not in readings:
+            readings.append(reading)
+    return tuple(readings)
+
+
+def _unquoted(command: str) -> str:
+    """The command as the shell splits it, words joined by single spaces.
+
+    An unparseable command gives nothing back rather than raising: it is one
+    reading of several, and the literal one is always tested."""
+    try:
+        return " ".join(shlex.split(command or "", comments=False))
+    except ValueError:
+        return ""
 
 
 def bash_reason(command: str) -> str:
