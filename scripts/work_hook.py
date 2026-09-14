@@ -296,7 +296,8 @@ def main() -> int:
                 return 0
             if tool == "Bash":
                 command = (data.get("tool_input") or {}).get("command") or ""
-                if "commit" not in command and "push" not in command:
+                if ("commit" not in command and "push" not in command
+                        and "merge" not in command):
                     return 0
                 _bind_db()
                 from services import work_launch
@@ -317,6 +318,8 @@ def main() -> int:
                     command = rewritten or command
                 if gate["decision"] == "allow" and "push" in command:
                     gate = work_launch.gate_push(session_id, command, cwd)
+                if gate["decision"] == "allow" and "merge" in command:
+                    gate = work_launch.gate_merge(session_id, command)
                 if gate["decision"] == "deny":
                     print(json.dumps({
                         "hookSpecificOutput": {
