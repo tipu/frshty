@@ -252,6 +252,18 @@ def _scope_fix_runs(instance_key: str, ticket_key: str) -> int:
                if j["task"] == "fix_scope_findings" and j["status"] != "skipped")
 
 
+def _scope_fix_budget_spent(instance_key: str, ticket_key: str, ts: dict) -> bool:
+    """Whether this ticket has used every correction pass its budget allows.
+
+    Read from the ticket state and from the durable job history, because a
+    poll cycle can write back a stale copy of the count it holds. A spent
+    budget means the reviewers and the fixer disagree about what the ticket
+    is, so the gate stops correcting and the operator decides."""
+    if consensus_scope.scope_fix_exhausted(ts):
+        return True
+    return _scope_fix_runs(instance_key, ticket_key) >= consensus_scope.MAX_SCOPE_FIX_ATTEMPTS
+
+
 def _enqueue_scope_fix(instance_key: str, ticket_key: str, ts: dict) -> int | None:
     """Put the scope correction on the queue for a ticket the scope gate failed.
 
@@ -260,9 +272,7 @@ def _enqueue_scope_fix(instance_key: str, ticket_key: str, ts: dict) -> int | No
     work to do rather than a message to the operator. The budget in
     consensus_scope bounds it: once it is spent the gate holds the branch and
     the operator decides, which is the behaviour this replaced."""
-    if consensus_scope.scope_fix_exhausted(ts):
-        return None
-    if _scope_fix_runs(instance_key, ticket_key) >= consensus_scope.MAX_SCOPE_FIX_ATTEMPTS:
+    if _scope_fix_budget_spent(instance_key, ticket_key, ts):
         return None
     job_id = _enqueue_stage(instance_key, ticket_key, "fix_scope_findings")
     if job_id is None:

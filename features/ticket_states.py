@@ -360,9 +360,31 @@ def _handle_proving_ticket(
     instance_key: str,
     existing: bool,
 ) -> tuple[dict, bool]:
+    """Route a proving ticket, after the consensus scope gate clears it.
+
+    The gate reads the branch the ticket would ship, so it belongs after the
+    implementation is complete and before the proof. A branch that carries
+    changes the ticket does not ask for is then corrected once and proved
+    once. The gate used to run only at pr_ready, which proved the branch,
+    corrected it, and proved it again.
+
+    A FAIL whose correction budget is spent falls through to the proof. The
+    reviewers and the fixer disagree about what the ticket is, that is the
+    operator's call, and the pr_ready gate still holds the PR until the
+    operator makes it.
+    """
     if not instance_key:
         return ts, False
     key = ticket["key"]
+    scope = _t._scope_review_state(config, ts)
+    if scope == "pending":
+        _t._enqueue_stage(instance_key, key, "scope_review")
+        state.save_ticket(key, ts)
+        return ts, True
+    if scope == "fail" and not _t._scope_fix_budget_spent(instance_key, key, ts):
+        _t._enqueue_scope_fix(instance_key, key, ts)
+        state.save_ticket(key, ts)
+        return ts, True
     ws = config["workspace"]
     slug = ts.get("slug", "")
     proof = ws["root"] / ws["tickets_dir"] / slug / "docs" / "proof.md"

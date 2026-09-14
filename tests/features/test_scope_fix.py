@@ -244,6 +244,18 @@ class TestTheStatusMovesOnlyOnARecordedCorrection:
         assert result.status == "ok", result.reason
         assert state.load_ticket(KEY)["status"] == "proving"
 
+    def test_a_correction_before_the_proof_keeps_the_ticket_in_proving(
+            self, tmp_path, tmp_state):
+        """The gate runs before the proof. A ticket corrected there has no PR
+        to push the removal to; it stays in proving, the gate re-runs against
+        the corrected branch, and the proof follows the pass."""
+        _seed(tmp_path, tmp_state, status="proving")
+        result = self._run(tmp_path, write_record=True)
+        assert result.status == "ok", result.reason
+        assert state.load_ticket(KEY)["status"] == "proving"
+        assert result.artifacts["reproved"] is True
+        assert "push_failed" not in result.artifacts
+
     def test_a_correction_with_no_record_holds_the_ticket(self, tmp_path, tmp_state):
         _seed(tmp_path, tmp_state)
         result = self._run(tmp_path, write_record=False)
