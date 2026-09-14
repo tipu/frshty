@@ -164,13 +164,22 @@ def _readings(command: str) -> tuple[str, ...]:
     Every reading can only make the gate stricter, and that is the direction
     this module already chooses: blocking a message the operator wanted costs a
     retry, and sending one he did not want cannot be taken back. One decode is
-    enough, because one decode is what a router does."""
-    readings = [_normalize(command)]
-    for candidate in (urllib.parse.unquote(command or ""), _unquoted(command)):
+    enough, because one decode is what a router does.
+
+    The two are applied together as well as apart. They compose: `%72''eply`
+    is `%72eply` to the shell and `r''eply` to the router, and neither reading
+    alone is the word `reply` that both of them together produce."""
+    raw = command or ""
+    unquoted = _unquoted(raw)
+    candidates = (raw, urllib.parse.unquote(raw), unquoted,
+                  _unquoted(urllib.parse.unquote(raw)),
+                  urllib.parse.unquote(unquoted))
+    readings: list[str] = []
+    for candidate in candidates:
         reading = _normalize(candidate)
         if reading and reading not in readings:
             readings.append(reading)
-    return tuple(readings)
+    return tuple(readings) or ("",)
 
 
 def _unquoted(command: str) -> str:

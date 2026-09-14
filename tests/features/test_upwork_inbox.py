@@ -332,6 +332,29 @@ class TestIngest:
             " ON r.id = m.room_id WHERE m.story_id = 'story_a'")
         assert held["text"] == "one, edited"
 
+    def test_the_floor_is_not_moved_over_a_room_that_could_not_be_read(self):
+        """The floor records that every room above it has been dealt with. A
+        room whose messages could not be fetched has not been, so a floor
+        written anyway would step the next sweep over it forever."""
+        def _rooms(config=None, limit=20, cursor=""):
+            if not cursor:
+                return {"rooms": [_room(room_id="room_a", recent=_millis(10))],
+                        "cursor": str(_millis(10))}
+            return {"rooms": [_room(room_id="room_b", recent=_millis(20))],
+                    "cursor": str(_millis(20))}
+
+        def _stories(room_id, config=None, limit=20, older_than=""):
+            if room_id == "room_b":
+                raise upwork_client.UpworkApiError(500, "boom")
+            return {"stories": [_story("s_a", 40, CLIENT, "hello")], "cursor": ""}
+
+        with patch.object(upwork_client, "rooms", side_effect=_rooms), \
+                patch.object(upwork_client, "stories", side_effect=_stories):
+            counts = ui.ingest(_config(rooms_limit=1, rooms_pages=2),
+                               instance_key="personal", now=NOW)
+        assert counts["complete"] is False
+        assert (state.load(ui.STATE_MODULE).get("rooms_floor") or {}) == {}
+
     def test_an_unreachable_inbox_is_reported_and_nothing_is_indexed(self):
         with patch.object(upwork_client, "rooms",
                           side_effect=upwork_client.UpworkAuthError("logged out")):
@@ -559,6 +582,30 @@ class TestPropose:
         # operator is asked to decide, not what frshty is allowed to draft.
         assert haiku.call_count == 2
         assert _room_row()["reply_draft"] == "On it."
+
+
+class TestTranscript:
+    def test_it_never_opens_on_a_message_a_forced_re_read_cannot_reach(self):
+        """The claim that opens a proposal is that the room still reads as the
+        models read it, and it can only cover the messages the re-read before
+        it refreshed. A room with more history than that window would otherwise
+        open on messages nothing re-reads."""
+        stories = {ROOM: [_story(f"story_{i}", 100 - i * 10, CLIENT, f"message {i}")
+                          for i in range(6)]}
+        settings = _config(stories_limit=6, story_pages=1)
+        rooms_patch, stories_patch = _inbox([_room()], stories)
+        with rooms_patch, stories_patch:
+            ui.ingest(settings, instance_key="personal", now=NOW)
+        assert _room_row()["message_count"] == 6
+        assert ui.refresh_window(settings) == 6
+        row_id = _room_row()["id"]
+        # message 0 is the oldest and message 5 the newest.
+        whole, _ = ui._transcript(row_id, OPERATOR, 6)
+        assert "message 0" in whole and "message 5" in whole
+        narrow, _ = ui._transcript(row_id, OPERATOR, 2)
+        assert "message 0" not in narrow
+        assert "message 4" in narrow and "message 5" in narrow
+        assert narrow.count("\n") == 1
 
 
 class TestBoard:
