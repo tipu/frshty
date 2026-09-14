@@ -62,6 +62,14 @@ class TestParsePrMerge:
             "gh api -X GET -X PUT repos/o/r/pulls/184/merge",
             "http --auth user:pass PUT https://api.github.com/repos/o/r/pulls/184/merge",
             "curl -T body.json https://api.github.com/repos/o/r/pulls/184/merge",
+            "curl -Tbody.json https://api.github.com/repos/o/r/pulls/184/merge",
+            "curl -d'{}' https://api.bitbucket.org/2.0/repositories/o/r/pullrequests/9/merge",
+            "sudo --chdir /repo gh pr merge 184",
+            "env --file .env gh pr merge 184",
+            "bash -c 'gh pr merge 184'",
+            "env -S 'gh pr merge 184'",
+            'sh -c "cd /x && gh pr merge 184"',
+            "timeout 60 bash -c 'gh pr merge 184'",
             "if true; then gh pr merge 184; fi",
             "http PUT https://api.github.com/repos/o/r/pulls/184/merge",
             "xh post https://api.bitbucket.org/2.0/repositories/o/r/pullrequests/9/merge",
@@ -85,6 +93,9 @@ class TestParsePrMerge:
             "gh api -X PUT -X GET repos/o/r/pulls/184/merge",
             "curl -s https://api.github.com/repos/o/r/pulls/184/merge",
             "http https://api.github.com/repos/o/r/pulls/184/merge",
+            "curl -f https://api.github.com/repos/o/r/pulls/184/merge",
+            "bash -c 'git status'",
+            "echo bash -c",
             "ls -la",
         ):
             assert work_launch.parse_pr_merge(command) is False, command
@@ -105,6 +116,13 @@ class TestSegmentProgram:
         for command in ("env git commit -m fix", "sudo --user root git commit -m fix",
                         "if true; then git commit -m fix; fi"):
             assert work_launch.parse_commit(command) == {"chdir": ""}, command
+
+    def test_a_command_string_handed_to_a_shell_is_parsed_too(self):
+        assert work_launch.parse_push("bash -c 'git push'") == {"chdir": ""}
+        assert work_launch.parse_push("env -S 'git push'") == {"chdir": ""}
+        assert work_launch.parse_push('sh -c "cd /x && git push"') == {"chdir": "/x"}
+        assert work_launch.parse_commit("bash -c 'git commit -m fix'") == {"chdir": ""}
+        assert work_launch.parse_push("bash -c 'git status'") is None
 
     def test_an_unwrapped_segment_keeps_its_first_token_as_the_program(self):
         assert work_launch.parse_push("ls -la push") is None

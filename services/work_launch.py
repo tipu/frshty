@@ -1080,12 +1080,13 @@ _SHELL_KEYWORDS = frozenset((
 # `env -S` is not here on purpose: its value is the command line itself, and
 # stepping over it would lose the very command the gate is looking for.
 _WRAPPER_VALUE_FLAGS = {
-    "env": frozenset(("-u", "--unset", "-C", "--chdir")),
+    "env": frozenset(("-u", "--unset", "-C", "--chdir", "-f", "--file",
+                      "-a", "--argv0")),
     "command": frozenset(),
     "nohup": frozenset(),
     "sudo": frozenset(("-u", "--user", "-g", "--group", "-p", "--prompt",
                        "-C", "--close-from", "-h", "--host", "-r", "--role",
-                       "-t", "--type")),
+                       "-t", "--type", "-D", "--chdir", "-R", "--chroot")),
     "doas": frozenset(("-u", "-C")),
     "nice": frozenset(("-n", "--adjustment")),
     "ionice": frozenset(("-c", "--class", "-n", "--classdata", "-p", "--pid",
@@ -1129,6 +1130,32 @@ def _segment_program(tokens: list[str]) -> int:
         else:
             return i
     return len(tokens)
+
+
+_SHELL_PROGRAMS = frozenset(("sh", "bash", "zsh", "dash", "ksh", "busybox"))
+_MAX_NESTING = 3
+
+
+def _nested_commands(tokens: list[str]) -> list[str]:
+    """The command strings one pipeline segment hands to a shell to run.
+
+    `bash -c "gh pr merge 1"` and `env -S 'git push'` run the command inside
+    the quotes, and shlex hands that whole string over as one token. A parser
+    that read it as the name of a program saw no merge and no push at all."""
+    i = _segment_program(tokens)
+    if i >= len(tokens):
+        return []
+    # The wrappers count as well as the program: `env -S "git push"` resolves
+    # to the command string itself, because -S carries the command rather
+    # than a value _segment_program could step over.
+    names = {os.path.basename(t) for t in tokens[:i + 1]}
+    flags = {"-S"} if "env" in names else set()
+    if names & _SHELL_PROGRAMS:
+        flags |= {"-c", "--command"}
+    if not flags:
+        return []
+    return [tokens[j + 1] for j, tok in enumerate(tokens)
+            if tok in flags and j + 1 < len(tokens)]
 
 
 def _segment_git(tokens: list[str], verb: str) -> str | None:
@@ -1236,7 +1263,7 @@ def _compose_chdir(chdir: str, found: str) -> str:
     return os.path.normpath(os.path.join(chdir, found))
 
 
-def _parse_git_all(command: str, verb: str) -> list[dict]:
+def _parse_git_all(command: str, verb: str, depth: int = 0) -> list[dict]:
     """Every `git <verb>` invocation in a shell command line.
 
     Returns one {"chdir": dir-or-""} per segment that runs the verb, in order.
@@ -1263,6 +1290,11 @@ def _parse_git_all(command: str, verb: str) -> list[dict]:
                 found_all.append({"chdir": _compose_chdir(chdir, found)})
             elif len(segment) >= 2 and segment[0] == "cd":
                 chdir = _compose_chdir(chdir, segment[1])
+            elif depth < _MAX_NESTING:
+                for nested in _nested_commands(segment):
+                    found_all.extend(
+                        {"chdir": _compose_chdir(chdir, inner["chdir"])}
+                        for inner in _parse_git_all(nested, verb, depth + 1))
             segment = []
         else:
             segment.append(tok)
@@ -1302,11 +1334,15 @@ _WRITE_METHODS = frozenset(("POST", "PUT", "PATCH"))
 _HTTP_METHODS = frozenset((
     "GET", "HEAD", "OPTIONS", "DELETE", "POST", "PUT", "PATCH"))
 _METHOD_FLAGS = frozenset(("-X", "--request", "--method"))
-_BODY_FLAGS = frozenset((
+# Body flags are read per program: `-f` sends a field to `gh api` and means
+# --fail to curl, and reading it as a body turned a curl read into a write.
+_GH_BODY_FLAGS = frozenset(("-f", "--raw-field", "-F", "--field", "--input"))
+_HTTP_BODY_FLAGS = frozenset((
     "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode",
-    "--json", "-f", "--field", "--raw-field", "--input", "-F", "--form",
-    "--post-data", "--post-file", "--body-data", "--body-file",
-    "-T", "--upload-file"))
+    "--json", "-F", "--form", "-T", "--upload-file", "--post-data",
+    "--post-file", "--body-data", "--body-file"))
+# Short flags whose value may be attached: `curl -d'{}'` carries a body.
+_ATTACHED_BODY_FLAGS = ("-d", "-F", "-T", "-f")
 # httpie and xh take the method as their first operand instead of a flag.
 _HTTPIE_CLIENTS = frozenset(("http", "https", "xh", "xhs", "httpie"))
 
@@ -1362,7 +1398,14 @@ def _carries_a_write(program: str, args: list[str]) -> bool:
     method = _named_method(program, args)
     if method:
         return method in _WRITE_METHODS
-    return any(tok.partition("=")[0] in _BODY_FLAGS for tok in args)
+    body_flags = _GH_BODY_FLAGS if program in ("gh", "glab") else _HTTP_BODY_FLAGS
+    for tok in args:
+        if tok.partition("=")[0] in body_flags:
+            return True
+        if (len(tok) > 2 and tok[:2] in _ATTACHED_BODY_FLAGS
+                and tok[:2] in body_flags):
+            return True
+    return False
 
 
 def _segment_pr_merge(tokens: list[str]) -> bool:
@@ -1392,7 +1435,7 @@ def _segment_pr_merge(tokens: list[str]) -> bool:
     return False
 
 
-def parse_pr_merge(command: str) -> bool:
+def parse_pr_merge(command: str, depth: int = 0) -> bool:
     """Whether a shell command line merges a pull request.
 
     Walks shell tokens segment by segment for the reason _parse_git_all does:
@@ -1400,8 +1443,7 @@ def parse_pr_merge(command: str) -> bool:
     command shlex cannot tokenize falls back to a pattern match, because a
     command the gate cannot parse is the one case where guessing low would let
     the merge through."""
-    command = _strip_heredocs(command)
-    tokens = _tokenize(command)
+    tokens = _tokenize(_strip_heredocs(command))
     if tokens is None:
         return bool(re.search(r"\b(?:gh|glab)\b[^|;&]*\b(?:pr|mr)\b[^|;&]*\bmerge\b",
                               command)
@@ -1410,6 +1452,10 @@ def parse_pr_merge(command: str) -> bool:
     for tok in tokens + ["\n"]:
         if tok in _SHELL_SEPARATORS:
             if _segment_pr_merge(segment):
+                return True
+            if depth < _MAX_NESTING and any(
+                    parse_pr_merge(nested, depth + 1)
+                    for nested in _nested_commands(segment)):
                 return True
             segment = []
         else:
