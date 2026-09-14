@@ -411,10 +411,15 @@ def _fetch_rooms(config: dict, instance_key: str, limit: int,
     work, it is the part already done, so the walk jumps to the floor and
     carries on with the budget it has left. A steady inbox costs one call, a
     backlog is worked through a budget at a time, and a room with a new message
-    is on the first page either way."""
+    is on the first page either way.
+
+    The new floor is returned rather than written. It records that every room
+    above it has been dealt with, and none of them has been until the caller
+    has read their messages in, so the caller writes it and only when that
+    finished. Written here, a room whose stories could not be fetched would be
+    stepped over by the next sweep and never indexed at all."""
     blob = state.load(STATE_MODULE)
-    floors = dict(blob.get("rooms_floor") or {})
-    floor = str(floors.get(instance_key) or "")
+    floor = str((blob.get("rooms_floor") or {}).get(instance_key) or "")
     collected: list[dict] = []
     cursor = ""
     reached = ""
@@ -439,10 +444,16 @@ def _fetch_rooms(config: dict, instance_key: str, limit: int,
             continue
         reached = ""
         break
+    return collected, reached
+
+
+def _record_room_floor(instance_key: str, reached: str) -> None:
+    """Remember how far the last completed sweep of the room list walked."""
+    blob = state.load(STATE_MODULE)
+    floors = dict(blob.get("rooms_floor") or {})
     floors[instance_key] = reached
     blob["rooms_floor"] = floors
     state.save(STATE_MODULE, blob)
-    return collected
 
 
 def _fetch_stories(config: dict, room_id: str, known: set[str],
@@ -534,7 +545,7 @@ def ingest(config: dict, instance_key: str = "", now: datetime | None = None,
     pages = int(settings.get("story_pages", DEFAULT_STORY_PAGES))
     stamp = _iso(now)
     try:
-        listing = _fetch_rooms(config, instance_key, limit, room_pages)
+        listing, floor = _fetch_rooms(config, instance_key, limit, room_pages)
     except Exception as e:
         counts["complete"] = False
         log.emit("upwork_inbox_unreachable",
@@ -600,6 +611,11 @@ def ingest(config: dict, instance_key: str = "", now: datetime | None = None,
                      links={"detail": "/upwork"},
                      meta={"room_id": room_id, "story_id": story.get("storyId"),
                            "who": who, "text": text[:MAX_MESSAGE_CHARS]})
+    # Every room the walk listed has now been read in, so the point it reached
+    # is a fair record of what is done. A room whose stories could not be
+    # fetched returned above without writing it, and the next sweep walks the
+    # same ground again.
+    _record_room_floor(instance_key, floor)
     return counts
 
 
@@ -617,18 +633,38 @@ def _read(conn, sql: str, params: tuple) -> list[dict]:
     return [dict(row) for row in conn.execute(sql, params).fetchall()]
 
 
-def _transcript(row_id: int, operator_id: str, conn=None) -> tuple[str, list[str]]:
+def refresh_window(config: dict) -> int:
+    """How many of a room's newest messages a forced re-read can reach.
+
+    It is the page budget times the page size, which is exactly what
+    _fetch_stories walks when it is told to read a room whole."""
+    settings = _settings(config)
+    return (max(1, int(settings.get("story_pages", DEFAULT_STORY_PAGES)))
+            * max(1, int(settings.get("stories_limit", DEFAULT_STORIES_LIMIT))))
+
+
+def _transcript(row_id: int, operator_id: str, window: int,
+                conn=None) -> tuple[str, list[str]]:
     """Render one room for the screen, the judge and the brief.
 
     A room longer than MAX_TRANSCRIPT_MESSAGES keeps its opening and its most
     recent messages and says how many are missing between them. The opening is
     kept because the identifiers the later messages call "it" are named in the
     first exchange, and the count is stated because a judge told nothing would
-    read a trimmed thread as the whole of it."""
-    rows = _read(conn,
-                 "SELECT ts, user_id, user_name, text FROM upwork_messages"
-                 " WHERE room_id = ? AND deleted = 0 AND is_system = 0"
-                 " ORDER BY ts", (row_id,))
+    read a trimmed thread as the whole of it.
+
+    `window` is how far back a forced re-read of this room reaches, and the
+    render never draws on a message older than that. The claim that opens a
+    proposal is that the room still reads as the models read it, and that claim
+    can only cover the messages the re-read before it refreshed. A room with
+    more history than the window would otherwise open on messages nothing
+    re-reads, and an edit to one of them would pass the claim unseen. The
+    opening kept is therefore the opening of the window, not of the room."""
+    rows = list(reversed(_read(
+        conn,
+        "SELECT ts, user_id, user_name, text FROM upwork_messages"
+        " WHERE room_id = ? AND deleted = 0 AND is_system = 0"
+        " ORDER BY ts DESC LIMIT ?", (row_id, max(1, window)))))
     gap: list[dict] = []
     if len(rows) > MAX_TRANSCRIPT_MESSAGES:
         head = TRANSCRIPT_HEAD_MESSAGES
@@ -850,12 +886,13 @@ def _flag_injection(row: dict, verdict: dict, instance_key: str,
              meta={"room_id": row["room_id"], "reason": reason})
 
 
-def _reads_as_judged(row: dict, operator_id: str, transcript: str, conn) -> bool:
+def _reads_as_judged(row: dict, operator_id: str, window: int, transcript: str,
+                     conn) -> bool:
     """Whether the room still reads exactly as the screen and the judge read
     it. Between the render that produced a verdict and the write that acts on
     it sit two model calls, so a message can be added, edited or deleted. A no
     writes nothing at all and the next scan reads the whole room again."""
-    return _transcript(row["id"], operator_id, conn=conn)[0] == transcript
+    return _transcript(row["id"], operator_id, window, conn=conn)[0] == transcript
 
 
 def propose(config: dict, instance_key: str = "",
@@ -885,6 +922,7 @@ def propose(config: dict, instance_key: str = "",
         return [], counts
     operator_id = _operator_id(config)
     operator = str(settings.get("operator_name") or "").strip()
+    window = refresh_window(config)
     opened: list[dict] = []
     judged = 0
     for index, row in enumerate(_candidates(instance_key, config, now, operator_id)):
@@ -908,7 +946,7 @@ def propose(config: dict, instance_key: str = "",
             continue
         row = fresh
         judged += 1
-        transcript, participants = _transcript(row["id"], operator_id)
+        transcript, participants = _transcript(row["id"], operator_id, window)
         if not transcript:
             _record_judgement(row["id"], row["last_ts"], tick)
             continue
@@ -970,7 +1008,7 @@ def propose(config: dict, instance_key: str = "",
         # this room has asked past, so two scans cannot both open a task for
         # one request.
         with db.tx() as c:
-            if not _reads_as_judged(row, operator_id, transcript, c):
+            if not _reads_as_judged(row, operator_id, window, transcript, c):
                 continue
             claimed = c.execute(
                 _CLAIM_ROOM,

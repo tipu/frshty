@@ -145,6 +145,9 @@ class TestCodexFindings:
         "curl -X POST http://localhost:7100/api/upwork/rooms/room_18ee/re''ply --json '{\"text\":\"hi\"}'",
         "curl -X POST http://localhost:7100/api/wizard/slack_p\\ing -d '{\"text\":\"hi\"}'",
         "gh pr com''ment 12 --body hi",
+        # The two compose: this is %72eply to the shell and r''eply to the
+        # router, and neither of those alone is the word the pair produces.
+        "curl -X POST http://localhost:7100/api/upwork/rooms/room_18ee/%72''eply --json '{\"text\":\"hi\"}'",
     ])
     def test_every_reproduced_send_is_refused(self, command):
         assert correspondence.bash_reason(command) == correspondence.DENY_REASON
