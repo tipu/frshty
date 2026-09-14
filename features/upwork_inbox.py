@@ -46,6 +46,7 @@ from core.claude_runner import extract_json, run_haiku
 from services import work_launch, work_store, work_tags
 
 UPWORK_TAG = "upwork"
+STATE_MODULE = "upwork_inbox"
 DEFAULT_ROOMS_LIMIT = 20
 DEFAULT_ROOM_PAGES = 3
 DEFAULT_STORIES_LIMIT = 20
@@ -395,32 +396,57 @@ def _fetch_rooms(config: dict, instance_key: str, limit: int,
     Upwork orders the list by the time of each room's newest story and pages
     backwards through `cursor`, which is the oldest of those times on the page
     it came with. One page is almost always the whole answer, because a room
-    with a new message is by definition at the front of that order.
+    that gains a message moves to the front of that order by definition.
 
-    It is not always: an inbox with more rooms than one page has ever been
-    read holds rooms nobody has indexed sitting behind quiet ones, and they
-    would never be reached. So the walk goes on while a page holds a room the
-    index has not caught up with, and stops on the first page that holds none.
-    A steady inbox costs one call; a backlog is worked through over the page
-    budget."""
+    It is not always. An inbox with more rooms than one page has ever been read
+    holds rooms nobody has indexed sitting behind quiet ones. Walking only
+    while a page holds something new never reaches them: the first scan spends
+    its page budget and stops, and every scan after it finds the top of the
+    list quiet and stops on page one, so the rooms below the point the first
+    scan reached are never listed at all.
+
+    So the walk remembers where it stopped. `rooms_floor` is the cursor the
+    last sweep ran out of budget at, and "" once a sweep has reached the end of
+    the list. A page with nothing new above that floor is not the end of the
+    work, it is the part already done, so the walk jumps to the floor and
+    carries on with the budget it has left. A steady inbox costs one call, a
+    backlog is worked through a budget at a time, and a room with a new message
+    is on the first page either way."""
+    blob = state.load(STATE_MODULE)
+    floors = dict(blob.get("rooms_floor") or {})
+    floor = str(floors.get(instance_key) or "")
     collected: list[dict] = []
     cursor = ""
+    reached = ""
     for _ in range(max(1, pages)):
         batch = upwork_client.rooms(config, limit=limit, cursor=cursor) or {}
         rooms = batch.get("rooms") or []
         if not rooms:
+            reached = ""
             break
         collected.extend(rooms)
-        if not _page_has_news(instance_key, rooms):
+        reached = str(batch.get("cursor") or "")
+        if not reached:
             break
-        cursor = str(batch.get("cursor") or "")
-        if not cursor:
-            break
+        if _page_has_news(instance_key, rooms):
+            cursor = reached
+            continue
+        if floor and floor < reached:
+            # Nothing new down to here, and no sweep has ever looked past the
+            # floor. Everything between is already indexed, so the budget is
+            # better spent below it than on stopping above it.
+            cursor, reached, floor = floor, floor, ""
+            continue
+        reached = ""
+        break
+    floors[instance_key] = reached
+    blob["rooms_floor"] = floors
+    state.save(STATE_MODULE, blob)
     return collected
 
 
 def _fetch_stories(config: dict, room_id: str, known: set[str],
-                   limit: int, pages: int) -> list[dict]:
+                   limit: int, pages: int, whole: bool = False) -> list[dict]:
     """The stories of one room, back to the newest one already indexed.
 
     Upwork answers newest first and pages backwards through `olderThan`, so
@@ -441,7 +467,14 @@ def _fetch_stories(config: dict, room_id: str, known: set[str],
     answers the page past its oldest message 404 rather than with an empty
     list. So a 404 on a continuation is read as the end of the room. On the
     first page it is not: there the room itself could not be read, and a
-    transcript missing its newest messages must not be judged."""
+    transcript missing its newest messages must not be judged.
+
+    `whole` drops the boundary and walks the page budget out. A story the
+    index already holds says the newest messages have been seen; it says
+    nothing about an older one edited or deleted since, which keeps its story
+    id and its timestamp and would sit behind that boundary unread. The room a
+    proposal is about to be opened for is read this way, so the transcript the
+    claim compares against is the room as it stands and not as it stood."""
     collected: list[dict] = []
     older_than = ""
     for _ in range(max(1, pages)):
@@ -456,7 +489,7 @@ def _fetch_stories(config: dict, room_id: str, known: set[str],
         if not stories:
             break
         collected.extend(stories)
-        if any(str(s.get("storyId") or "") in known for s in stories):
+        if not whole and any(str(s.get("storyId") or "") in known for s in stories):
             break
         if len(stories) < limit:
             break
@@ -530,7 +563,8 @@ def ingest(config: dict, instance_key: str = "", now: datetime | None = None,
                 "SELECT story_id FROM upwork_messages WHERE room_id = ?",
                 (held["id"],))}
         try:
-            stories = _fetch_stories(config, room_id, known, story_limit, pages)
+            stories = _fetch_stories(config, room_id, known, story_limit, pages,
+                                     whole=room_id in forced)
         except Exception as e:
             counts["complete"] = False
             log.emit("upwork_inbox_unreachable",
