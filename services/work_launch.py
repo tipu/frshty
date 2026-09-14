@@ -15,6 +15,7 @@ from pathlib import Path
 import core.config as core_config
 import core.correspondence as correspondence
 import core.db as db
+import core.discovery as discovery
 import core.git_util as git_util
 import core.log as log
 import core.runtime as runtime
@@ -573,7 +574,7 @@ def _config_on_disk(key: str) -> dict | None:
     except OSError:
         return None
     for name in names:
-        if not name.endswith(".toml") or name.endswith(".example.toml"):
+        if not name.endswith(".toml") or name in discovery.SKIP_CONFIGS:
             continue
         try:
             with open(os.path.join(_CONFIG_DIR, name), "rb") as f:
@@ -1073,31 +1074,55 @@ _GIT_TWO_ARG_FLAGS = ("-c", "--exec-path", "--git-dir", "--work-tree", "--namesp
 
 _SHELL_KEYWORDS = frozenset((
     "then", "do", "else", "elif", "!", "{", "(", "time", "exec"))
-_COMMAND_WRAPPERS = frozenset((
-    "env", "command", "nohup", "sudo", "doas", "nice", "ionice", "stdbuf",
-    "timeout", "setsid", "unbuffer"))
-_OPERAND_RE = re.compile(r"\d+[smhd]?")
+# Each wrapper with the flags of its own that take the next token as a value.
+# `sudo -u root git push` runs a push, and a walk that stepped over `-u` but
+# not over `root` stopped at `root` and saw no push at all.
+_WRAPPER_VALUE_FLAGS = {
+    "env": frozenset(("-u", "-C", "-S")),
+    "command": frozenset(),
+    "nohup": frozenset(),
+    "sudo": frozenset(("-u", "-g", "-p", "-C", "-h", "-r", "-t")),
+    "doas": frozenset(("-u", "-C")),
+    "nice": frozenset(("-n",)),
+    "ionice": frozenset(("-c", "-n", "-p", "-P", "-u")),
+    "stdbuf": frozenset(("-i", "-o", "-e")),
+    "timeout": frozenset(("-s", "-k")),
+    "setsid": frozenset(),
+    "unbuffer": frozenset(),
+}
+_COMMAND_WRAPPERS = frozenset(_WRAPPER_VALUE_FLAGS)
+_OPERAND_RE = re.compile(r"\d+(?:\.\d+)?[smhd]?")
 
 
 def _segment_program(tokens: list[str]) -> int:
     """The index of the program a pipeline segment runs, or len(tokens).
 
     Leading assignments, shell keywords and wrapper commands are stepped over
-    with their own flags and numeric operands, because `env git commit`,
+    with their own flags and operands, because `env git commit`,
     `timeout 60 gh pr merge` and `if true; then git push; fi` run the same
     command as the bare form and a gate keyed on the first token saw none of
-    them."""
+    them. Flags and operands are stepped over only after a wrapper, because
+    the first token of an unwrapped segment is the program itself."""
     i = 0
+    wrapped = False
+    value_flags: frozenset = frozenset()
     while i < len(tokens):
         tok = tokens[i]
-        if (("=" in tok and not tok.startswith("-"))
-                or tok in _SHELL_KEYWORDS
-                or os.path.basename(tok) in _COMMAND_WRAPPERS
-                or tok.startswith("-")
-                or _OPERAND_RE.fullmatch(tok)):
+        base = os.path.basename(tok)
+        if "=" in tok and not tok.startswith("-"):
             i += 1
-            continue
-        return i
+        elif tok in _SHELL_KEYWORDS:
+            i += 1
+        elif base in _COMMAND_WRAPPERS:
+            wrapped, value_flags = True, _WRAPPER_VALUE_FLAGS[base]
+            i += 1
+        elif wrapped and tok.startswith("-"):
+            flag, sep, _ = tok.partition("=")
+            i += 2 if not sep and flag in value_flags else 1
+        elif wrapped and _OPERAND_RE.fullmatch(tok):
+            i += 1
+        else:
+            return i
     return len(tokens)
 
 
@@ -1258,7 +1283,7 @@ def parse_commit(command: str) -> dict | None:
 _PR_MERGE_URL_RE = re.compile(
     r"/(?:pulls|pullrequests|merge_requests)/[^/\s'\"]+/merge\b"
     r"|/api/tickets/[^/\s?'\"]+/merge\b")
-_PR_MERGE_CLIENTS = frozenset(("curl", "wget", "http", "https", "xh", "httpie"))
+_PR_MERGE_CLIENTS = frozenset(("curl", "wget", "http", "https", "xh", "xhs", "httpie"))
 _PR_MERGE_SUBCOMMANDS = (["pr", "merge"], ["mr", "merge"])
 # gh flags that take their value as the next token. Without them the value of
 # `gh pr --repo owner/name merge 184` reads as the subcommand, and gh accepts
@@ -1269,10 +1294,15 @@ _GH_VALUE_FLAGS = frozenset((
     "--input", "-b", "--body", "--body-file", "--title", "--json", "-L",
     "--limit", "--owner"))
 _WRITE_METHODS = frozenset(("POST", "PUT", "PATCH"))
+_HTTP_METHODS = frozenset((
+    "GET", "HEAD", "OPTIONS", "DELETE", "POST", "PUT", "PATCH"))
 _METHOD_FLAGS = frozenset(("-X", "--request", "--method"))
 _BODY_FLAGS = frozenset((
     "-d", "--data", "--data-raw", "--data-binary", "--data-urlencode",
-    "--json", "-f", "--field", "--raw-field", "--input", "-F", "--form"))
+    "--json", "-f", "--field", "--raw-field", "--input", "-F", "--form",
+    "--post-data", "--post-file", "--body-data", "--body-file"))
+# httpie and xh take the method as their first operand instead of a flag.
+_HTTPIE_CLIENTS = frozenset(("http", "https", "xh", "xhs", "httpie"))
 
 
 def _words_after(program_args: list[str], value_flags: frozenset) -> list[str]:
@@ -1291,23 +1321,35 @@ def _words_after(program_args: list[str], value_flags: frozenset) -> list[str]:
     return words
 
 
-def _carries_a_write(program_args: list[str]) -> bool:
+def _named_method(program: str, args: list[str]) -> str:
+    """The HTTP method a command line names, "" when it names none."""
+    for i, tok in enumerate(args):
+        flag, _, inline = tok.partition("=")
+        if flag in _METHOD_FLAGS:
+            return (inline or (args[i + 1] if i + 1 < len(args) else "")).upper()
+        if tok.startswith("-X") and len(tok) > 2:
+            return tok[2:].upper()
+    if program in _HTTPIE_CLIENTS:
+        for tok in args:
+            if tok.startswith("-"):
+                continue
+            return tok.upper() if tok.upper() in _HTTP_METHODS else ""
+    return ""
+
+
+def _carries_a_write(program: str, args: list[str]) -> bool:
     """Whether an HTTP command line writes rather than reads.
 
     A merge endpoint answers GET as well: `gh api repos/o/r/pulls/1/merge`
     reports whether the pull request is merged and merges nothing. Only the
-    write is a merge."""
-    for i, tok in enumerate(program_args):
-        flag, _, inline = tok.partition("=")
-        if flag in _METHOD_FLAGS:
-            value = inline or (program_args[i + 1] if i + 1 < len(program_args) else "")
-            if value.upper() in _WRITE_METHODS:
-                return True
-        elif flag in _BODY_FLAGS:
-            return True
-        elif tok.startswith("-X") and tok[2:].upper() in _WRITE_METHODS:
-            return True
-    return False
+    write is a merge. A named method decides on its own, so a read that
+    carries a query field stays a read; a command line that names no method
+    is a write when it carries a body, which is what curl, wget and gh api
+    each turn into a POST."""
+    method = _named_method(program, args)
+    if method:
+        return method in _WRITE_METHODS
+    return any(tok.partition("=")[0] in _BODY_FLAGS for tok in args)
 
 
 def _segment_pr_merge(tokens: list[str]) -> bool:
@@ -1329,10 +1371,10 @@ def _segment_pr_merge(tokens: list[str]) -> bool:
         words = _words_after(rest, _GH_VALUE_FLAGS)
         if words[:2] in _PR_MERGE_SUBCOMMANDS:
             return True
-        return (words[:1] == ["api"] and _carries_a_write(rest)
+        return (words[:1] == ["api"] and _carries_a_write(program, rest)
                 and any(_PR_MERGE_URL_RE.search(t) for t in rest))
     if program in _PR_MERGE_CLIENTS:
-        return (_carries_a_write(rest)
+        return (_carries_a_write(program, rest)
                 and any(_PR_MERGE_URL_RE.search(t) for t in rest))
     return False
 
