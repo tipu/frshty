@@ -58,6 +58,7 @@ review_prs = false
 auto_review = true                # default true. when false, frshty never starts a code review on its own. the PRs waiting on this user are still listed on /reviews and /today, and a review runs only when the operator starts one there. the rest of review_prs (own-PR comments, CI fixes, the peer-review list) is unaffected.
 tickets = true
 slack = false
+upwork = false                    # read the Upwork inbox on THIS machine, through the logged-in Chrome profile. Local only: it needs a browser with remote debugging open on cdp_url, and it does nothing on a box that has none.
 timesheet = false
 billing = false
 releases = false                  # tag tickets to a release; whole-release LLM inspection when all members reach merged/validation/done. optional release.md at <workspace.root>/releases/<release_key>/release.md guides the inspection prompt.
@@ -102,6 +103,40 @@ pr_autofix = false                # github only: every newly created PR gets a c
 # propose_judge_retry_minutes = 60    # a conversation the model answered nothing for is
 #                                     # held back this long, so it cannot spend the
 #                                     # allowance every scan and starve the ones behind it
+
+# --- Upwork inbox (requires features.upwork and a logged-in local Chrome) ---
+# [upwork]
+# cdp_url = "http://localhost:9222"   # the Chrome DevTools address of a browser logged into
+#                                     # Upwork on this machine. frshty opens one throwaway tab
+#                                     # there to lift the bearer token the inbox API needs, and
+#                                     # never touches the tab you are reading.
+# user_id = "718034110359347200"      # your own Upwork user id, the `user_uid` cookie of that
+#                                     # profile. It decides which lines in a room are yours.
+#                                     # Left unset, frshty reads it off the lifted session.
+# operator_name = "Your Name"         # how the judge refers to you when it drafts a reply
+# propose_tasks = false               # when true, a room that asks for concrete work opens a
+#                                     # task on /tasks. Every such task lands in the `proposed`
+#                                     # group and never runs until you approve it. A reply is
+#                                     # drafted either way, and frshty never sends one: you
+#                                     # press send on /upwork.
+# rooms_limit = 20                    # how many rooms one scan lists, newest activity first
+# rooms_pages = 3                     # how many pages of that list one scan will walk. The walk
+#                                     # stops on the first page holding no room the index has to
+#                                     # catch up with, so a steady inbox costs one call and a
+#                                     # backlog of never-read rooms is worked through.
+# stories_limit = 20                  # how many messages one page of a room carries
+# story_pages = 5                     # how far back a room never read before is pulled. It is also
+#                                     # the refresh window: stories_limit times this is how many of a
+#                                     # room's newest messages a re-read reaches, and the transcript
+#                                     # handed to the models never draws on anything older.
+# settle_minutes = 5                  # a room is read only once its last message is this old,
+#                                     # so a client still typing is left alone
+# max_age_hours = 72                  # never propose from a room older than this
+# max_pending = 3                     # ceiling on proposals waiting for your decision at once
+# max_judgements_per_scan = 3         # ceiling on rooms read per scan; each one costs two model
+#                                     # calls, the injection screen and the judge
+# judge_retry_minutes = 60            # a room the model answered nothing for is held back this
+#                                     # long, so it cannot spend the allowance every scan
 
 # [timesheet]
 # recurring = [
