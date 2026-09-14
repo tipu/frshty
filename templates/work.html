@@ -67,11 +67,11 @@
   </div>
   <div class="ln-small" style="color:var(--ln-red)" v-for="(msg, key) in peerErrors" :key="key">{{ key }}: {{ msg }}</div>
 
-  <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center" v-if="allTags.length">
-    <span class="ln-hint">tags</span>
-    <span v-for="t in allTags" :key="t" class="ln-chipsel" :class="{ on: tagFilter.includes(t) }"
-          @click="toggleTag(t)">{{ t }}</span>
-    <button class="ln-link ln-small" v-if="tagFilter.length" @click="clearTags">clear</button>
+  <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center" v-if="filterProjects.length">
+    <span class="ln-hint">project</span>
+    <span v-for="k in filterProjects" :key="k" class="ln-chipsel" :class="{ on: projectFilter.includes(k) }"
+          @click="toggleProjectFilter(k)">{{ k }}</span>
+    <button class="ln-link ln-small" v-if="projectFilter.length" @click="clearProjectFilter">clear</button>
   </div>
 
   <form @submit.prevent="intake" class="ln-task-compose" v-if="view === 'board'">
@@ -122,7 +122,7 @@
       <div class="ln-group" v-for="g in visibleGroups" :key="g" v-show="groups[g] && groups[g].length">
         <div class="ln-group-head">{{ label(g) }} <span class="ln-count-chip">{{ count(g) }}</span>
           <button class="ln-btn ln-btn-sm ln-btn-ghost" style="margin-left:auto"
-                  v-if="g === 'done' && view === 'board' && !searchText.trim() && !tagFilter.length"
+                  v-if="g === 'done' && view === 'board' && !searchText.trim() && !projectFilter.length"
                   title="move every completed task to the archive" @click="archiveCompleted">Archive all</button>
         </div>
         <article class="ln-task" :class="[g, { critical: it.critical }]" v-for="it in groups[g]" :key="rowKey(it)">
@@ -145,7 +145,7 @@
                :href="threadHref(it.thread.root_id, it.peer)" :title="'thread rooted at task #' + it.thread.root_id">⑂ {{ it.thread.title }}</a>
             <span>{{ ago(it.updated_at) }}</span>
             <span v-if="it.last_provider">· {{ it.last_provider }}</span>
-            <span class="ln-tag" v-for="t in tagsOf(it)" :key="t">{{ t }}</span>
+            <span class="ln-tag" v-for="p in projectsOf(it)" :key="p">{{ p }}</span>
             <span class="ln-right">
               <button class="ln-btn ln-btn-sm ln-btn-ghost" v-if="it.summary"
                       @click="sumOpen[rowKey(it)] = !sumOpen[rowKey(it)]">{{ sumOpen[rowKey(it)] ? 'Summary ▾' : 'Summary ▸' }}</button>
@@ -226,8 +226,8 @@
           <button class="ln-btn ln-btn-sm ln-btn-ghost" v-if="donePage < donePages" @click="setDonePage(donePage + 1)">next ›</button>
         </div>
       </div>
-      <div class="ln-small ln-muted" v-if="view === 'archive' && !(groups.done || []).length">{{ (searchText.trim() || tagFilter.length) ? "No matches." : "No archived tasks yet." }}</div>
-      <div class="ln-small ln-muted" v-else-if="view === 'board' && total === 0">{{ (searchText.trim() || tagFilter.length) ? "No matches." : "No tasks yet." }}</div>
+      <div class="ln-small ln-muted" v-if="view === 'archive' && !(groups.done || []).length">{{ (searchText.trim() || projectFilter.length) ? "No matches." : "No archived tasks yet." }}</div>
+      <div class="ln-small ln-muted" v-else-if="view === 'board' && total === 0">{{ (searchText.trim() || projectFilter.length) ? "No matches." : "No tasks yet." }}</div>
     </div>
 
     <aside style="display:flex;flex-direction:column;gap:12px">
@@ -264,6 +264,7 @@
 </frshty-shell>
 </div>
 <script>
+const DISPATCH_PROJECTS = ["aimyable", "quill", "clarivis", "algotrader2", "frshty"];
 const STATE_PILLS = {
   proposed: "ln-pill-violet",
   needs_ack: "ln-pill-green", needs_you: "ln-pill-amber", agent_working: "ln-pill-blue",
@@ -291,7 +292,8 @@ frshtyApp({
       fupOpen: {}, fupText: {}, fupBusy: {}, fupError: {},
       peers: [], peerMeta: {}, peerErrors: {}, peerLinkmaps: {}, target: "",
       sourceFilter: localStorage.getItem("workSourceFilter") || "",
-      searchText: "", tagFilter: JSON.parse(localStorage.getItem("workTagFilter") || "[]"), allTags: [], donePage: 1, donePages: 1, counts: {},
+      searchText: "", projectFilter: JSON.parse(localStorage.getItem("workProjectFilter") || "[]"),
+      donePage: 1, donePages: 1, counts: {},
       groupOrder: ["proposed", "needs_ack", "agent_working", "needs_you", "waiting_external", "failed_stale", "canceled", "done"],
       labels: { proposed: "Proposed — needs your approval", needs_ack: "Needs acknowledgement", needs_you: "Needs you", agent_working: "Agent working", waiting_external: "Waiting external", failed_stale: "Failed or stale", canceled: "Canceled", done: "Completed" },
     };
@@ -324,8 +326,14 @@ frshtyApp({
     },
     primaryProjects() {
       if (this.target) return this.targetMeta.projects;
-      const order = ["aimyable", "quill", "clarivis", "algotrader2", "frshty"];
-      return order.map(k => this.projects.find(p => p.key === k)).filter(Boolean);
+      return DISPATCH_PROJECTS.map(k => this.projects.find(p => p.key === k)).filter(Boolean);
+    },
+    filterProjects() {
+      const keys = new Set((this.projects || []).map(p => p.key));
+      for (const meta of Object.values(this.peerMeta)) {
+        for (const p of meta.projects || []) keys.add(p.key);
+      }
+      return DISPATCH_PROJECTS.filter(k => keys.has(k));
     },
     extraProjects() {
       const primary = new Set(this.primaryProjects.map(p => p.key));
@@ -417,32 +425,31 @@ frshtyApp({
         .trim();
       return this.note(kept.endsWith(":") ? kept.slice(0, -1) : kept);
     },
-    tagsOf(it) {
-      const tags = (it.tags || "").split(",").filter(Boolean);
-      if (it.instance_key && !tags.includes(it.instance_key)) tags.unshift(it.instance_key);
-      return tags;
+    projectsOf(it) {
+      return (it.contexts || "").split(",").map(c => c.trim().toLowerCase())
+        .filter(c => c && c !== "slack_int");
     },
     onSearch() {
       clearTimeout(this._searchT);
       this._searchT = setTimeout(() => { this.donePage = 1; this.refresh(); }, 300);
     },
-    onTagToggle() {
-      localStorage.setItem("workTagFilter", JSON.stringify(this.tagFilter));
+    onProjectFilter() {
+      localStorage.setItem("workProjectFilter", JSON.stringify(this.projectFilter));
       this.donePage = 1;
       this.refresh();
     },
-    toggleTag(t) {
-      const i = this.tagFilter.indexOf(t);
-      if (i >= 0) this.tagFilter.splice(i, 1); else this.tagFilter.push(t);
-      this.onTagToggle();
+    toggleProjectFilter(k) {
+      const i = this.projectFilter.indexOf(k);
+      if (i >= 0) this.projectFilter.splice(i, 1); else this.projectFilter.push(k);
+      this.onProjectFilter();
     },
     toggleContext(key) {
       const i = this.intakeContexts.indexOf(key);
       if (i >= 0) this.intakeContexts.splice(i, 1); else this.intakeContexts.push(key);
     },
-    clearTags() {
-      this.tagFilter = [];
-      this.onTagToggle();
+    clearProjectFilter() {
+      this.projectFilter = [];
+      this.onProjectFilter();
     },
     setDonePage(p) {
       this.donePage = p;
@@ -500,7 +507,7 @@ frshtyApp({
       const params = new URLSearchParams();
       const q = this.searchText.trim();
       if (q) params.set("q", q);
-      if (this.tagFilter.length) params.set("tags", this.tagFilter.join(","));
+      if (this.projectFilter.length) params.set("projects", this.projectFilter.join(","));
       if (this.donePage > 1) params.set("done_page", this.donePage);
       if (this.view === "archive") params.set("archive", "1");
       const qs = params.toString();
@@ -520,12 +527,12 @@ frshtyApp({
       const seq = ++this._refreshSeq;
       const qs = this.boardQuery();
       const wantPage = Math.max(1, this.donePage);
+      const wantProjects = this.projectFilter.join(",");
       const results = await Promise.all(this.activeSources().map(k => this.fetchSource(k, qs)));
       if (seq !== this._refreshSeq) return;
       const groups = {};
       for (const g of this.groupOrder) groups[g] = [];
       const counts = {};
-      const tags = new Set();
       const peerErrors = {};
       let donePages = 1, ok = 0;
       for (const r of results) {
@@ -536,16 +543,6 @@ frshtyApp({
         }
         ok += 1;
         const d = r.data;
-        for (const g of this.groupOrder) {
-          if (g === "done" && (d.done_page || 1) !== wantPage) continue;
-          for (const it of (d.groups || {})[g] || []) {
-            it.peer = r.peer;
-            groups[g].push(it);
-          }
-        }
-        for (const g of Object.keys(d.counts || {})) counts[g] = (counts[g] || 0) + d.counts[g];
-        for (const t of d.all_tags || []) tags.add(t);
-        donePages = Math.max(donePages, d.done_pages || 1);
         const meta = { projects: d.projects || [], agents: (d.agents || []).length ? d.agents : ["claude"],
                        slackAvailable: !!d.slack_available, personalLoaded: !!d.personal_loaded };
         if (r.peer) {
@@ -555,6 +552,20 @@ frshtyApp({
           this.slackAvailable = meta.slackAvailable; this.agents = meta.agents;
           this.connError = "";
         }
+        if (wantProjects && ((d.filter || {}).projects || "") !== wantProjects) {
+          peerErrors[r.peer || this.instanceName || "local"] =
+            "this host does not know the project filter; its tasks are hidden until it is updated";
+          continue;
+        }
+        for (const g of this.groupOrder) {
+          if (g === "done" && (d.done_page || 1) !== wantPage) continue;
+          for (const it of (d.groups || {})[g] || []) {
+            it.peer = r.peer;
+            groups[g].push(it);
+          }
+        }
+        for (const g of Object.keys(d.counts || {})) counts[g] = (counts[g] || 0) + d.counts[g];
+        donePages = Math.max(donePages, d.done_pages || 1);
       }
       this.peerErrors = peerErrors;
       if (!ok) return;
@@ -565,16 +576,15 @@ frshtyApp({
       }
       this.groups = groups;
       this.counts = counts;
-      this.allTags = [...tags].sort();
       this.donePages = donePages;
       this.donePage = Math.min(wantPage, donePages);
       const agents = this.targetMeta.agents || ["claude"];
       if (!agents.includes(this.intakeAgent)) this.intakeAgent = agents[0];
-      const known = new Set(this.allTags);
-      const kept = this.tagFilter.filter(t => known.has(t));
-      if (kept.length !== this.tagFilter.length) {
-        this.tagFilter = kept;
-        localStorage.setItem("workTagFilter", JSON.stringify(kept));
+      const known = new Set(this.filterProjects);
+      const kept = this.projectFilter.filter(k => known.has(k));
+      if (known.size && kept.length !== this.projectFilter.length) {
+        this.projectFilter = kept;
+        localStorage.setItem("workProjectFilter", JSON.stringify(kept));
         this.refresh();
       }
     },
