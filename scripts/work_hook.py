@@ -218,6 +218,19 @@ def _correspondence_deny(tool: str, tool_input: dict) -> str:
     return correspondence.tool_reason(tool)
 
 
+def _mentions(command: str, word: str) -> bool:
+    """Whether a shell command names `word`, ignoring quoting.
+
+    The gates below run only for a command that names commit, push or merge,
+    and that fast path used to read the raw text. `git c'ommit'`,
+    `git com\\mit` and a commit split over a continued line all run a commit
+    and named none of the three, so they walked past every gate."""
+    command = command.replace("\\\n", "")
+    for char in ("'", '"', "\\"):
+        command = command.replace(char, "")
+    return word in command
+
+
 def _bind_db():
     import core.db as db
     from services import work_store
@@ -296,14 +309,15 @@ def main() -> int:
                 return 0
             if tool == "Bash":
                 command = (data.get("tool_input") or {}).get("command") or ""
-                if "commit" not in command and "push" not in command:
+                if not any(_mentions(command, w)
+                           for w in ("commit", "push", "merge")):
                     return 0
                 _bind_db()
                 from services import work_launch
                 cwd = data.get("cwd") or ""
                 gate = {"decision": "allow", "reason": "not gated"}
                 rewritten = ""
-                if "commit" in command:
+                if _mentions(command, "commit"):
                     gate = work_launch.gate_commit(session_id, command, cwd)
                     if gate.get("need_worktree"):
                         gate["reason"] = _worktree_deny(
@@ -315,8 +329,10 @@ def main() -> int:
                     # will actually run.
                     rewritten = gate.get("command") or ""
                     command = rewritten or command
-                if gate["decision"] == "allow" and "push" in command:
+                if gate["decision"] == "allow" and _mentions(command, "push"):
                     gate = work_launch.gate_push(session_id, command, cwd)
+                if gate["decision"] == "allow" and _mentions(command, "merge"):
+                    gate = work_launch.gate_merge(session_id, command)
                 if gate["decision"] == "deny":
                     print(json.dumps({
                         "hookSpecificOutput": {
