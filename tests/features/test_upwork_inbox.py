@@ -332,6 +332,68 @@ class TestIngest:
             " ON r.id = m.room_id WHERE m.story_id = 'story_a'")
         assert held["text"] == "one, edited"
 
+    def test_below_the_floor_a_quiet_page_does_not_end_the_walk(self):
+        """Ground below the floor is ground no sweep has covered. A page of it
+        that looks caught up only means another sweep reached it first, and
+        stopping there hands back "the list is finished" for a list this sweep
+        never saw the end of."""
+        quiet = [_room(room_id="room_a", recent=_millis(10)),
+                 _room(room_id="room_c", recent=_millis(30))]
+        pages = {"": ([quiet[0]], str(_millis(10))),
+                 str(_millis(20)): ([quiet[1]], str(_millis(30))),
+                 str(_millis(30)): ([_room(room_id="room_d", recent=_millis(40))],
+                                    str(_millis(40)))}
+        asked = []
+
+        def _stories(room_id, config=None, limit=20, older_than=""):
+            return {"stories": [_story("s_" + room_id, 50, CLIENT, "hello")],
+                    "cursor": ""}
+
+        # room_a and room_c are already indexed and have not moved: the page at
+        # the top and the page just below the floor both look caught up.
+        with patch.object(upwork_client, "rooms",
+                          return_value={"rooms": quiet, "cursor": ""}), \
+                patch.object(upwork_client, "stories", side_effect=_stories):
+            ui.ingest(_config(rooms_limit=2, rooms_pages=1),
+                      instance_key="personal", now=NOW)
+        # That sweep saw the whole one-page list and recorded the bottom. Put
+        # the floor where a sweep that ran out of budget would have left it.
+        state.save(ui.STATE_MODULE, {"rooms_floor": {"personal": str(_millis(20))}})
+
+        def _rooms(config=None, limit=20, cursor=""):
+            asked.append(cursor)
+            rooms, nxt = pages.get(cursor, ([], ""))
+            return {"rooms": rooms, "cursor": nxt}
+
+        with patch.object(upwork_client, "rooms", side_effect=_rooms), \
+                patch.object(upwork_client, "stories", side_effect=_stories):
+            ui.ingest(_config(rooms_limit=1, rooms_pages=3),
+                      instance_key="personal", now=NOW)
+        # The quiet top page sends the walk to the floor; the page there is
+        # caught up too, and the walk carries on rather than calling that the
+        # end of the list.
+        assert asked == ["", str(_millis(20)), str(_millis(30))]
+        assert {r["room_id"] for r in db.query_all(
+            "SELECT room_id FROM upwork_rooms")} == {"room_a", "room_c", "room_d"}
+
+    def test_the_floor_only_ever_moves_further_down_the_list(self):
+        """Two sweeps overlap and one finishes with a floor the other has
+        already passed. Writing the shallower one would send every later sweep
+        back up the list."""
+        ui._record_room_floor("personal", str(_millis(20)))
+        ui._record_room_floor("personal", str(_millis(40)))
+        assert (state.load(ui.STATE_MODULE)["rooms_floor"]["personal"]
+                == str(_millis(40)))
+        ui._record_room_floor("personal", str(_millis(20)))
+        assert (state.load(ui.STATE_MODULE)["rooms_floor"]["personal"]
+                == str(_millis(40)))
+        # "" is the bottom of the list, so it wins over any timestamp and
+        # nothing puts a timestamp back over it.
+        ui._record_room_floor("personal", "")
+        assert state.load(ui.STATE_MODULE)["rooms_floor"]["personal"] == ""
+        ui._record_room_floor("personal", str(_millis(10)))
+        assert state.load(ui.STATE_MODULE)["rooms_floor"]["personal"] == ""
+
     def test_the_floor_is_not_moved_over_a_room_that_could_not_be_read(self):
         """The floor records that every room above it has been dealt with. A
         room whose messages could not be fetched has not been, so a floor
@@ -606,6 +668,23 @@ class TestTranscript:
         assert "message 0" not in narrow
         assert "message 4" in narrow and "message 5" in narrow
         assert narrow.count("\n") == 1
+
+    def test_the_window_counts_stories_not_the_messages_that_survive(self):
+        """The re-read spends its page budget on every story, so a page that
+        is half system stories still costs a page. Counting only what a person
+        wrote would put the boundary further back than the re-read reaches."""
+        stories = {ROOM: [
+            _story("story_5", 50, CLIENT, "kept"),
+            _story("story_4", 60, CLIENT, "system", system=1),
+            _story("story_3", 70, CLIENT, "system", system=1),
+            _story("story_2", 80, CLIENT, "too old"),
+        ]}
+        rooms_patch, stories_patch = _inbox([_room()], stories)
+        with rooms_patch, stories_patch:
+            ui.ingest(_config(), instance_key="personal", now=NOW)
+        rendered, _ = ui._transcript(_room_row()["id"], OPERATOR, 3)
+        assert "kept" in rendered
+        assert "too old" not in rendered
 
 
 class TestBoard:
