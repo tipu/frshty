@@ -43,7 +43,7 @@ import core.log as log
 import core.state as state
 import core.upwork_client as upwork_client
 from core.claude_runner import extract_json, run_haiku
-from services import work_launch, work_store, work_tags
+from services import work_launch, work_store
 
 UPWORK_TAG = "upwork"
 STATE_MODULE = "upwork_inbox"
@@ -1024,10 +1024,6 @@ def propose(config: dict, instance_key: str = "",
         cwd = _cwd_for(instance_key) if actionable else ""
         brief = _brief(row, participants, transcript, reason) if actionable else ""
         contexts = [c for c in (instance_key, UPWORK_TAG) if c]
-        tags = (work_tags.derive_tags(
-            objective, contexts,
-            [e["key"] for e in work_launch.project_entries()])
-            if actionable else [])
         note = f"Proposed from Upwork {_room_label(row)}: {reason}"[:MAX_NOTE_CHARS]
         stamp = _iso(tick)
         declined = row["work_item_id"] if row["proposed_at"] else None
@@ -1055,7 +1051,7 @@ def propose(config: dict, instance_key: str = "",
             if actionable:
                 item_id = work_store.create_proposal(
                     objective, note=note, instance_key=instance_key,
-                    contexts=",".join(contexts), tags=",".join(tags),
+                    contexts=",".join(contexts),
                     cwd=cwd, brief=brief, conn=c, now=stamp)
                 c.execute("UPDATE upwork_rooms SET work_item_id = ? WHERE id = ?",
                           (item_id, row["id"]))
