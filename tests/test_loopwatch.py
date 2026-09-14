@@ -6,10 +6,13 @@ test reads a real loop, and the only process a test starts is the probe itself.
 """
 import hashlib
 import json
+import os
 import shlex
+import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -17,7 +20,7 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from services import loopwatch  # noqa: E402
+from services import loopwatch, loopwatch_probe  # noqa: E402
 
 PROBE = ROOT / "services" / "loopwatch_probe.py"
 
@@ -510,3 +513,36 @@ def test_render_escapes_the_turn_count_from_a_transcript(tmp_path):
     page = loopwatch.render([snapshot])
     assert "<img src=x onerror=alert(1)>" not in page
     assert "&lt;img src=x onerror=alert(1)&gt;" in page
+
+
+def test_copy_aside_takes_every_journal(tmp_path):
+    """A database copied without its rollback journal can hold pages no commit
+    confirmed, so every journal travels with it. The -shm does not."""
+    db = tmp_path / "controller.db"
+    for suffix in ("", "-wal", "-journal", "-shm"):
+        (tmp_path / ("controller.db" + suffix)).write_bytes(b"x" + suffix.encode())
+    copied = loopwatch_probe.copy_aside(str(db))
+    try:
+        assert sorted(path.name for path in Path(copied).iterdir()) == [
+            "controller.db", "controller.db-journal", "controller.db-wal"]
+    finally:
+        shutil.rmtree(copied, ignore_errors=True)
+
+
+def test_probe_refuses_a_database_that_never_settles(tmp_path, monkeypatch, capsys):
+    """A copy taken while the controller writes can hold halves of two
+    databases. The probe reports that rather than reading it."""
+    repo = build_loop(tmp_path / "loop")
+    counter = {"n": 0}
+
+    def never_settles(db_path):
+        counter["n"] += 1
+        return [("", counter["n"], counter["n"])]
+
+    monkeypatch.setattr(loopwatch_probe, "stamp", never_settles)
+    before = set(os.listdir(tempfile.gettempdir()))
+    assert loopwatch_probe.main(["probe", str(repo)]) == 1
+    answer = json.loads(capsys.readouterr().out)
+    assert answer["ok"] is False
+    assert "changed during every one of 5 copies" in answer["error"]
+    assert set(os.listdir(tempfile.gettempdir())) - before == set()
