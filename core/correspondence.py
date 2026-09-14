@@ -25,6 +25,7 @@ not do.
 import os
 import re
 import tomllib
+import urllib.parse
 
 DENY_REASON = (
     "Blocked by the work-layer correspondence gate: this task may not send a "
@@ -141,6 +142,23 @@ def _normalize(command: str) -> str:
     return re.sub(r"\s+", " ", (command or "").replace("\\\n", " "))
 
 
+def _readings(command: str) -> tuple[str, ...]:
+    """The command as written, and as the server on the other end reads it.
+
+    A rule written against a URL matches a path, and a path is percent-decoded
+    before any router sees it. `/api/upwork/rooms/r1/%72eply` reaches the same
+    route as `/reply`, so a rule tested against the literal text alone does not
+    close it. The same trick reaches every other path rule here.
+
+    Decoding can only make the gate stricter, and that is the direction this
+    module already chooses: blocking a message the operator wanted costs a
+    retry, and sending one he did not want cannot be taken back. One decode is
+    enough, because one decode is what a router does."""
+    text = _normalize(command)
+    decoded = _normalize(urllib.parse.unquote(command or ""))
+    return (text,) if decoded == text else (text, decoded)
+
+
 def bash_reason(command: str) -> str:
     """The deny reason for a shell command that would send a message, "" to
     allow.
@@ -148,14 +166,17 @@ def bash_reason(command: str) -> str:
     A surface that serves reading and writing from one address is judged by
     the write, not by the address: `gh api repos/o/r/pulls/1/comments` reads
     the thread and stays open, and the same path with a field flag writes to
-    it and does not."""
-    text = _normalize(command)
-    for pattern in _ALWAYS_RE:
-        if pattern.search(text):
+    it and does not.
+
+    Every reading of the command is tested, not the literal text alone; see
+    _readings."""
+    for text in _readings(command):
+        for pattern in _ALWAYS_RE:
+            if pattern.search(text):
+                return DENY_REASON
+        if any(p.search(text) for p in _MESSAGE_API_RE) and \
+                any(p.search(text) for p in _CURL_WRITE_RE):
             return DENY_REASON
-    if any(p.search(text) for p in _MESSAGE_API_RE) and \
-            any(p.search(text) for p in _CURL_WRITE_RE):
-        return DENY_REASON
     return ""
 
 

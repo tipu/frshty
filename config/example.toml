@@ -119,7 +119,11 @@ pr_autofix = false                # github only: every newly created PR gets a c
 #                                     # group and never runs until you approve it. A reply is
 #                                     # drafted either way, and frshty never sends one: you
 #                                     # press send on /upwork.
-# rooms_limit = 20                    # how many rooms one scan lists, newest first
+# rooms_limit = 20                    # how many rooms one scan lists, newest activity first
+# rooms_pages = 3                     # how many pages of that list one scan will walk. The walk
+#                                     # stops on the first page holding no room the index has to
+#                                     # catch up with, so a steady inbox costs one call and a
+#                                     # backlog of never-read rooms is worked through.
 # stories_limit = 20                  # how many messages one page of a room carries
 # story_pages = 5                     # how far back a room never read before is pulled
 # settle_minutes = 5                  # a room is read only once its last message is this old,
