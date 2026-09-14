@@ -72,8 +72,12 @@ def _inbox(rooms, stories):
     """Patch the inbox API with a fixed room list and a fixed set of stories."""
     def _stories(room_id, config=None, limit=20, older_than=""):
         return {"stories": stories.get(room_id, []), "cursor": ""}
-    return (patch.object(upwork_client, "rooms",
-                         return_value={"rooms": rooms, "cursor": ""}),
+
+    # An empty cursor is the end of the room list, so the walk stops after one
+    # page whatever the page holds.
+    def _rooms(config=None, limit=20, cursor=""):
+        return {"rooms": rooms, "cursor": ""}
+    return (patch.object(upwork_client, "rooms", side_effect=_rooms),
             patch.object(upwork_client, "stories", side_effect=_stories))
 
 
@@ -209,6 +213,52 @@ class TestIngest:
                                instance_key="personal", now=NOW)
         assert calls == [""]
         assert counts["messages"] == 1
+
+    def test_the_room_list_is_paged_until_a_page_holds_nothing_new(self):
+        """A room the index has never seen can sit behind a page of quiet
+        rooms, so one page of the list is not the whole answer."""
+        page_one = [_room(recent=_millis(30))]
+        page_two = [_room(room_id=OTHER_ROOM, recent=_millis(600))]
+        asked = []
+
+        def _rooms(config=None, limit=20, cursor=""):
+            asked.append(cursor)
+            if not cursor:
+                return {"rooms": page_one, "cursor": str(_millis(30))}
+            if cursor == str(_millis(30)):
+                return {"rooms": page_two, "cursor": str(_millis(600))}
+            return {"rooms": [], "cursor": ""}
+
+        def _stories(room_id, config=None, limit=20, older_than=""):
+            return {"stories": [_story("s_" + room_id[-4:], 30, CLIENT, "hello")],
+                    "cursor": ""}
+
+        with patch.object(upwork_client, "rooms", side_effect=_rooms), \
+                patch.object(upwork_client, "stories", side_effect=_stories):
+            counts = ui.ingest(_config(rooms_limit=1, rooms_pages=3),
+                               instance_key="personal", now=NOW)
+        assert counts["rooms"] == 2
+        assert {r["room_id"] for r in db.query_all(
+            "SELECT room_id FROM upwork_rooms")} == {ROOM, OTHER_ROOM}
+        # Both rooms were new, so the walk went on; the third page held nothing.
+        assert asked == ["", str(_millis(30)), str(_millis(600))]
+
+    def test_a_page_of_rooms_the_index_has_caught_up_with_ends_the_walk(self):
+        stories = {ROOM: [_story("story_a", 30, CLIENT, "Can you add pagination?")]}
+        rooms_patch, stories_patch = _inbox([_room()], stories)
+        with rooms_patch, stories_patch:
+            ui.ingest(_config(), instance_key="personal", now=NOW)
+        asked = []
+
+        def _rooms(config=None, limit=20, cursor=""):
+            asked.append(cursor)
+            return {"rooms": [_room()], "cursor": str(_millis(30))}
+
+        with patch.object(upwork_client, "rooms", side_effect=_rooms), \
+                patch.object(upwork_client, "stories") as stories_mock:
+            ui.ingest(_config(rooms_pages=3), instance_key="personal", now=NOW)
+        assert asked == [""]
+        assert stories_mock.call_count == 0
 
     def test_an_unreachable_inbox_is_reported_and_nothing_is_indexed(self):
         with patch.object(upwork_client, "rooms",
@@ -389,6 +439,40 @@ class TestPropose:
                    "objective": "Add pagination to the scraper", "reply": "On it."})
         assert haiku.call_count == 2
         assert result["proposed"] == 1
+
+    def test_a_message_deleted_while_the_models_read_stops_the_proposal(self):
+        """A deletion keeps the story and its created stamp, so the room's own
+        freshness mark does not move. The room being judged is therefore
+        re-read whatever that mark says, and the claim then sees a transcript
+        that no longer reads as the judge read it."""
+        live = self._ask()
+        first, second = live[ROOM]
+        gone = {ROOM: [first, dict(second, message="", deleted=1)]}
+        state_box = {"calls": 0}
+
+        def _stories(room_id, config=None, limit=20, older_than=""):
+            state_box["calls"] += 1
+            # The first read is the scan's own ingest, before the screen. Every
+            # read after it happens while or after the models are reading.
+            table = live if state_box["calls"] <= 2 else gone
+            return {"stories": table[room_id], "cursor": ""}
+
+        def _rooms(config=None, limit=20, cursor=""):
+            return {"rooms": [_room()], "cursor": ""}
+
+        answers = [json.dumps({"injection": False, "reason": "ordinary"}),
+                   json.dumps({"actionable": True, "reason": "asks for pagination",
+                               "objective": "Add pagination", "reply": "On it."})]
+        with patch.object(upwork_client, "rooms", side_effect=_rooms), \
+                patch.object(upwork_client, "stories", side_effect=_stories), \
+                patch.object(ui, "run_haiku", side_effect=answers):
+            result = ui.check(_config(), instance_key="personal", now=NOW)
+        assert result["proposed"] == 0
+        row = _room_row()
+        assert row["work_item_id"] is None
+        assert row["reply_draft"] == ""
+        assert db.query_one("SELECT COUNT(*) AS n FROM work_items"
+                            " WHERE scope = 'proposal'")["n"] == 0
 
     def test_the_cap_counts_the_proposals_still_waiting(self):
         for _ in range(3):

@@ -40,7 +40,12 @@ GRAB_TIMEOUT = 60
 REQUEST_TIMEOUT = 30
 
 _lock = threading.Lock()
-_session: dict | None = None
+# One session per browser, never one per process. Two instances can be
+# configured against two Chrome profiles logged into two Upwork accounts, and
+# one shared slot would hand the second instance the first one's bearer,
+# cookies and organisation: it would index somebody else's inbox and its reply
+# route would write as somebody else.
+_sessions: dict[str, dict] = {}
 
 
 class UpworkAuthError(RuntimeError):
@@ -118,34 +123,50 @@ def _capture(cdp_url: str, timeout: int) -> dict:
     return found
 
 
+def _target(config: dict | None) -> tuple[str, int]:
+    settings = (config or {}).get("upwork") or {}
+    return (str(settings.get("cdp_url") or DEFAULT_CDP),
+            int(settings.get("grab_timeout") or GRAB_TIMEOUT))
+
+
 def session(config: dict | None = None, refresh: bool = False) -> dict:
-    """The lifted session, lifting one when there is none or it was rejected."""
-    global _session
-    cdp_url = str(((config or {}).get("upwork") or {}).get("cdp_url")
-                  or DEFAULT_CDP)
-    timeout = int(((config or {}).get("upwork") or {}).get("grab_timeout")
-                  or GRAB_TIMEOUT)
+    """The lifted session for this config's browser, lifting one when there is
+    none or the one held was rejected.
+
+    The lift runs outside the lock. It drives a browser and can take a minute,
+    and `held` is asked on every render of /upwork, which must not wait on it.
+    Two lifts racing for one browser cost one wasted tab and agree on the
+    result, which is cheaper than a page that hangs."""
+    cdp_url, timeout = _target(config)
+    if not refresh:
+        with _lock:
+            found = _sessions.get(cdp_url)
+        if found is not None:
+            return found
+    fresh = _capture(cdp_url, timeout)
     with _lock:
-        if _session is None or refresh:
-            _session = _capture(cdp_url, timeout)
-        return _session
+        _sessions[cdp_url] = fresh
+    return fresh
 
 
-def held() -> dict | None:
-    """The session this process already lifted, or None.
+def held(config: dict | None = None) -> dict | None:
+    """The session this process already lifted for this config's browser.
 
     Reading it never lifts one. A page render that asked `session` for the
     operator's own user id would open a browser tab every time somebody looked
     at /upwork."""
     with _lock:
-        return _session
+        return _sessions.get(_target(config)[0])
 
 
-def forget() -> None:
-    """Drop the held session. The next call lifts a new one."""
-    global _session
+def forget(config: dict | None = None) -> None:
+    """Drop the held session for this config's browser, or every one of them
+    when no config names one. The next call lifts a new one."""
     with _lock:
-        _session = None
+        if config is None:
+            _sessions.clear()
+        else:
+            _sessions.pop(_target(config)[0], None)
 
 
 def _headers(auth: dict) -> dict:

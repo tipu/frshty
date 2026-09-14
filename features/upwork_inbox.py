@@ -47,6 +47,7 @@ from services import work_launch, work_store, work_tags
 
 UPWORK_TAG = "upwork"
 DEFAULT_ROOMS_LIMIT = 20
+DEFAULT_ROOM_PAGES = 3
 DEFAULT_STORIES_LIMIT = 20
 DEFAULT_STORY_PAGES = 5
 DEFAULT_SETTLE_MINUTES = 5
@@ -233,7 +234,7 @@ def _operator_id(config: dict) -> str:
     configured_id = str(_settings(config).get("user_id") or "").strip()
     if configured_id:
         return configured_id
-    return str((upwork_client.held() or {}).get("user_id") or "")
+    return str((upwork_client.held(config) or {}).get("user_id") or "")
 
 
 def _names(room: dict) -> dict[str, str]:
@@ -368,6 +369,56 @@ def _resettle(c, row_id: int, stamp: str) -> None:
         (row_id, row_id, row_id, stamp, row_id))
 
 
+def _page_has_news(instance_key: str, rooms: list[dict]) -> bool:
+    """Whether any room on this page is one the index has not caught up with.
+
+    A room is news when it has never been indexed, or when Upwork's account of
+    its newest story is newer than the one recorded for it."""
+    ids = [str(r.get("roomId") or "") for r in rooms if r.get("roomId")]
+    if not ids:
+        return False
+    marks = ",".join("?" * len(ids))
+    held = {r["room_id"]: r["recent_ts"] for r in db.query_all(
+        "SELECT room_id, recent_ts FROM upwork_rooms WHERE instance_key = ?"
+        f" AND room_id IN ({marks})", (instance_key, *ids))}
+    for room in rooms:
+        mark = held.get(str(room.get("roomId") or ""))
+        if not mark or _stamp(room.get("recentTimestamp")) > mark:
+            return True
+    return False
+
+
+def _fetch_rooms(config: dict, instance_key: str, limit: int,
+                 pages: int) -> list[dict]:
+    """The rooms one scan looks at, newest activity first.
+
+    Upwork orders the list by the time of each room's newest story and pages
+    backwards through `cursor`, which is the oldest of those times on the page
+    it came with. One page is almost always the whole answer, because a room
+    with a new message is by definition at the front of that order.
+
+    It is not always: an inbox with more rooms than one page has ever been
+    read holds rooms nobody has indexed sitting behind quiet ones, and they
+    would never be reached. So the walk goes on while a page holds a room the
+    index has not caught up with, and stops on the first page that holds none.
+    A steady inbox costs one call; a backlog is worked through over the page
+    budget."""
+    collected: list[dict] = []
+    cursor = ""
+    for _ in range(max(1, pages)):
+        batch = upwork_client.rooms(config, limit=limit, cursor=cursor) or {}
+        rooms = batch.get("rooms") or []
+        if not rooms:
+            break
+        collected.extend(rooms)
+        if not _page_has_news(instance_key, rooms):
+            break
+        cursor = str(batch.get("cursor") or "")
+        if not cursor:
+            break
+    return collected
+
+
 def _fetch_stories(config: dict, room_id: str, known: set[str],
                    limit: int, pages: int) -> list[dict]:
     """The stories of one room, back to the newest one already indexed.
@@ -416,14 +467,22 @@ def _fetch_stories(config: dict, room_id: str, known: set[str],
     return collected
 
 
-def ingest(config: dict, instance_key: str = "",
-           now: datetime | None = None) -> dict:
+def ingest(config: dict, instance_key: str = "", now: datetime | None = None,
+           force_rooms: set[str] | None = None) -> dict:
     """Pull the inbox into the index and report every message it gained.
 
     A room is only read when it says it moved. `recentTimestamp` is the room's
-    own account of its newest message, so a room whose stamp is no newer than
-    the last message indexed for it has nothing to fetch, and a quiet inbox
-    costs one call instead of one per room.
+    own account of its newest story, so a room whose stamp is no newer than
+    the one recorded for it has nothing to fetch, and a quiet inbox costs one
+    call instead of one per room.
+
+    `force_rooms` names the rooms that are fetched whatever that stamp says.
+    The stamp answers "is there a newer story", and an edit and a deletion are
+    neither: both keep the story they change, so the stamp can stand still or
+    fall back while the text the judge is about to read has gone. That is
+    harmless for the sweep, which reads the room again on its next message,
+    and not harmless for the room a proposal is about to be opened for. See
+    propose, which names the room it is judging.
 
     A failure to reach Upwork is reported and ends the ingest rather than
     being skipped over. The index would otherwise look like a fair account of
@@ -431,16 +490,18 @@ def ingest(config: dict, instance_key: str = "",
     made from that reads a request as though nothing had answered it yet."""
     instance_key = instance_key or state.active_instance_key()
     now = now or _now()
+    forced = force_rooms or set()
     counts = {"messages": 0, "rooms": 0, "complete": True}
     if not configured(config):
         return counts
     settings = _settings(config)
     limit = int(settings.get("rooms_limit", DEFAULT_ROOMS_LIMIT))
+    room_pages = int(settings.get("rooms_pages", DEFAULT_ROOM_PAGES))
     story_limit = int(settings.get("stories_limit", DEFAULT_STORIES_LIMIT))
     pages = int(settings.get("story_pages", DEFAULT_STORY_PAGES))
     stamp = _iso(now)
     try:
-        listing = upwork_client.rooms(config, limit=limit) or {}
+        listing = _fetch_rooms(config, instance_key, limit, room_pages)
     except Exception as e:
         counts["complete"] = False
         log.emit("upwork_inbox_unreachable",
@@ -451,7 +512,7 @@ def ingest(config: dict, instance_key: str = "",
     # Read after the first call, which is what lifts the session the fallback
     # takes the operator's own user id from.
     operator_id = _operator_id(config)
-    for room in listing.get("rooms") or []:
+    for room in listing:
         room_id = str(room.get("roomId") or "")
         if not room_id:
             continue
@@ -460,7 +521,8 @@ def ingest(config: dict, instance_key: str = "",
                             " WHERE instance_key = ? AND room_id = ?",
                             (instance_key, room_id))
         recent = _stamp(room.get("recentTimestamp"))
-        if held and recent and held["recent_ts"] and recent <= held["recent_ts"]:
+        if (held and recent and held["recent_ts"] and room_id not in forced
+                and recent <= held["recent_ts"]):
             continue
         known = set()
         if held:
@@ -799,7 +861,8 @@ def propose(config: dict, instance_key: str = "",
         # again before the transcript is read is what lets the screen and the
         # judge see a message that landed since, and what makes the revision
         # the claim compares against the one the transcript was built from.
-        scan = ingest(config, instance_key=instance_key, now=tick)
+        scan = ingest(config, instance_key=instance_key, now=tick,
+                      force_rooms={row["room_id"]})
         counts["messages"] += scan["messages"]
         counts["rooms"] += scan["rooms"]
         if not scan["complete"]:
@@ -844,7 +907,8 @@ def propose(config: dict, instance_key: str = "",
         # Upwork did not stop while the model read either. The inbox is folded
         # in once more before anything is written about this room, so both
         # verdicts are decided against the index as it stands now.
-        scan = ingest(config, instance_key=instance_key, now=tick)
+        scan = ingest(config, instance_key=instance_key, now=tick,
+                      force_rooms={row["room_id"]})
         counts["messages"] += scan["messages"]
         counts["rooms"] += scan["rooms"]
         if not scan["complete"]:
