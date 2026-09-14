@@ -42,9 +42,16 @@ class TestParsePrMerge:
             "GH_TOKEN=x gh pr merge 1",
             "glab mr merge 7",
             "gh api -X PUT repos/o/r/pulls/184/merge",
+            "gh api --method PUT repos/o/r/pulls/184/merge",
             "curl -X POST https://api.bitbucket.org/2.0/repositories/o/r/pullrequests/9/merge",
+            "curl -XPUT https://api.github.com/repos/o/r/pulls/184/merge",
             "curl -s -X POST http://localhost:7100/api/tickets/LSC-78/merge",
+            'curl -X PUT "https://api.github.com/repos/o/r/pulls/$PR/merge"',
             "git status; gh pr merge 1",
+            "gh pr --repo atroposhealth/text-to-tql-service merge 184",
+            "env gh pr merge 184",
+            "timeout 60 gh pr merge 184",
+            "if true; then gh pr merge 184; fi",
         ):
             assert work_launch.parse_pr_merge(command) is True, command
 
@@ -58,6 +65,9 @@ class TestParsePrMerge:
             "gh pr comment 1 --body 'ready to merge'",
             'echo "gh pr merge 1"',
             'grep -rn "/pulls/1/merge" web/',
+            "gh search code pr merge --limit 1",
+            "gh api repos/o/r/pulls/184/merge",
+            "curl -s https://api.github.com/repos/o/r/pulls/184/merge",
             "ls -la",
         ):
             assert work_launch.parse_pr_merge(command) is False, command
@@ -97,13 +107,23 @@ class TestMergePolicy:
     def test_a_registry_that_is_not_loaded_reads_the_config_file(self, monkeypatch, tmp_path):
         monkeypatch.setattr(work_launch, "_instance_config", lambda key: None)
         monkeypatch.setattr(work_launch, "_CONFIG_DIR", str(tmp_path))
-        (tmp_path / "open.toml").write_text("[pr]\nauto_merge = true\n")
-        (tmp_path / "shut.toml").write_text("[pr]\nauto_merge = false\n")
+        # A file is found by the key it declares, not by its name: the atropos
+        # instance is keyed "frshty" and lives in config/local.toml.
+        (tmp_path / "local.toml").write_text('[job]\nkey = "opener"\n[pr]\nauto_merge = true\n')
+        (tmp_path / "shut.toml").write_text('[job]\nkey = "shut"\n[pr]\nauto_merge = false\n')
         (tmp_path / "broken.toml").write_text("[pr\n")
-        assert work_launch._auto_merge_on_disk("open") is True
+        (tmp_path / "notatable.toml").write_text('[job]\nkey = "notatable"\npr = true\n')
+        assert work_launch._auto_merge_on_disk("opener") is True
+        assert work_launch._auto_merge_on_disk("local") is False
         assert work_launch._auto_merge_on_disk("shut") is False
-        assert work_launch._auto_merge_on_disk("broken") is False
+        assert work_launch._auto_merge_on_disk("notatable") is False
         assert work_launch._auto_merge_on_disk("missing") is False
+        assert work_launch.merge_review_required(["opener"]) == []
+
+    def test_a_config_directory_it_cannot_read_holds_every_merge(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(work_launch, "_instance_config", lambda key: None)
+        monkeypatch.setattr(work_launch, "_CONFIG_DIR", str(tmp_path / "gone"))
+        assert work_launch.merge_review_required(["anything"]) == ["anything"]
 
     def test_a_string_that_is_not_true_is_not_permission(self, monkeypatch):
         monkeypatch.setattr(work_launch, "_instance_config",
@@ -174,6 +194,18 @@ class TestMergeGate:
         out = work_launch.gate_merge(sid, "git merge origin/main --no-edit")
         assert out["decision"] == "allow"
         assert _gate_events(item_id) == []
+
+    def test_an_operator_reply_payload_that_is_not_text_does_not_crash(self, monkeypatch):
+        _projects(monkeypatch, frshty=False)
+        item_id, sid = _mkrun("harden the scope gate", contexts="frshty")
+        run = db.query_one("SELECT id FROM work_runs WHERE session_id = ?", (sid,))
+        with db.tx() as c:
+            for payload in (db.dump_json({"text": 1}), db.dump_json(["merge"]), "not json"):
+                c.execute(
+                    "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, "
+                    "created_at) VALUES (?, ?, 'operator_reply', ?, ?)",
+                    (item_id, run["id"], payload, "2026-09-14T17:00:00+00:00"))
+        assert work_launch.gate_merge(sid, "gh pr merge 21")["decision"] == "deny"
 
     def test_a_session_with_no_work_item_is_not_gated(self):
         out = work_launch.gate_merge("sid-not-a-task", "gh pr merge 1")
