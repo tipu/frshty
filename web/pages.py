@@ -124,6 +124,11 @@ def slack_page():
     return _template("slack.html")
 
 
+@router.get("/upwork", response_class=HTMLResponse)
+def upwork_page():
+    return _template("upwork.html")
+
+
 @router.get("/scheduled", response_class=HTMLResponse)
 def scheduled_page():
     return _template("scheduled.html")
