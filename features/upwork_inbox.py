@@ -784,9 +784,17 @@ _CLIENT_SPOKE_LAST = (
     " AND deleted = 0 AND is_system = 0 ORDER BY ts DESC LIMIT 1"
 )
 
+# The two proposed_ marks are written only when a task opens, and the sent
+# stamp is never written here at all. All three are the record of what this
+# room last produced, which /upwork reports as the state of the pipeline; the
+# claim would otherwise erase that record every time it read a message asking
+# for nothing. Only the draft goes, because the task now being opened is what
+# replaces it.
 _CLAIM_ROOM = (
-    "UPDATE upwork_rooms SET judged_ts = ?, judged_at = ?, proposed_ts = ?,"
-    " proposed_at = ?, reply_draft = '', reply_sent_at = NULL, injected = 0,"
+    "UPDATE upwork_rooms SET judged_ts = ?, judged_at = ?,"
+    " proposed_ts = CASE WHEN ? THEN ? ELSE proposed_ts END,"
+    " proposed_at = CASE WHEN ? THEN ? ELSE proposed_at END,"
+    " reply_draft = '', injected = 0,"
     " injected_reason = '', updated_at = ? WHERE id = ? AND revision = ?"
     " AND NOT " + _TASK_OUTSTANDING
 )
@@ -1177,7 +1185,8 @@ def propose(config: dict, instance_key: str = "",
         #
         # The draft goes with it. Whatever stands in that box answers the
         # thread as it stood before these messages, and the task now being
-        # opened is what replaces it.
+        # opened is what replaces it. Nothing else the room records about what
+        # it produced is touched; see _CLAIM_ROOM.
         with db.tx() as c:
             if not _reads_as_judged(row, operator_id, window, transcript, c):
                 continue
@@ -1190,11 +1199,11 @@ def propose(config: dict, instance_key: str = "",
             if (needs_reply
                     and _proposals_awaiting_operator(instance_key, c) >= max_pending):
                 continue
+            opening = 1 if needs_reply else 0
             claimed = c.execute(
                 _CLAIM_ROOM,
-                (row["last_ts"], stamp, row["last_ts"] if needs_reply else "",
-                 stamp if needs_reply else None, stamp, row["id"],
-                 row["revision"]))
+                (row["last_ts"], stamp, opening, row["last_ts"], opening,
+                 stamp, stamp, row["id"], row["revision"]))
             if claimed.rowcount != 1:
                 continue
             if needs_reply:

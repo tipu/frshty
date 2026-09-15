@@ -709,6 +709,32 @@ class TestPropose:
         assert row["reply_draft"] == ""
         assert row["judged_ts"] == row["last_ts"]
 
+    def test_a_later_judgement_keeps_what_the_room_already_produced(self):
+        """/upwork reports the last task this inbox opened and the last reply
+        the operator sent, and both are read off the room. A judgement that
+        asks for nothing must not erase either one."""
+        _run([_room()], self._ask(),
+             screen={"injection": False, "reason": "ordinary"},
+             judge=self._verdict())
+        first = _room_row()["work_item_id"]
+        opened_at = _room_row()["proposed_at"]
+        work_store.apply_action(first, "decline")
+        ui.record_reply(ROOM, "Pushed it.", instance_key="personal", now=NOW)
+        sent_at = _room_row()["reply_sent_at"]
+        assert sent_at
+        _run([_room(recent=_millis(20))], self._chased(),
+             screen={"injection": False, "reason": "ordinary"},
+             judge={"needs_reply": False, "reason": "the client only says ok",
+                    "objective": ""})
+        row = _room_row()
+        assert row["reply_draft"] == ""
+        assert row["reply_sent_at"] == sent_at
+        assert row["proposed_at"] == opened_at
+        assert row["work_item_id"] == first
+        s = ui.status(_config(), instance_key="personal", now=NOW)
+        assert s["proposal"]["work_item_id"] == first
+        assert s["reply"]["at"] == sent_at
+
     def test_a_room_only_the_operator_wrote_in_opens_nothing(self):
         stories = {ROOM: [
             _story("story_a", 200, OPERATOR, "Sent my proposal over."),
