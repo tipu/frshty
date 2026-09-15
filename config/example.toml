@@ -141,6 +141,12 @@ pr_autofix = false                # github only: every newly created PR gets a c
 #                                     # calls, the injection screen and the judge
 # judge_retry_minutes = 60            # a room the model answered nothing for is held back this
 #                                     # long, so it cannot spend the allowance every scan
+# unreachable_scans = 2               # how many scans in a row may fail to read the inbox before
+#                                     # frshty opens a task on /tasks about it. A single failure is
+#                                     # a browser restarting or a blip and fixes itself; a run of
+#                                     # them is client messages nobody is reading. The task lands
+#                                     # in the `proposed` group and runs only when you approve it,
+#                                     # one per outage. Set it to 0 to open nothing.
 
 # [timesheet]
 # recurring = [
