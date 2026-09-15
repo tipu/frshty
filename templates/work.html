@@ -143,6 +143,9 @@
                   title="this task is in the archive, not on the board">Archived</span>
             <a class="ln-pill ln-pill-violet ln-thread-pill" v-if="it.thread" style="text-decoration:none"
                :href="threadHref(it.thread.root_id, it.peer)" :title="'thread rooted at task #' + it.thread.root_id">⑂ {{ it.thread.title }}</a>
+            <a class="ln-pill ln-pill-ticket" v-for="t in (it.tickets || [])" style="text-decoration:none"
+               :key="t.instance + '/' + t.key" :href="t.url" target="_blank"
+               :title="'ticket ' + t.key + ' on ' + t.instance + ' — status ' + (t.status || 'unknown')">◫ {{ t.key }}</a>
             <span>{{ ago(it.updated_at) }}</span>
             <span v-if="it.last_provider">· {{ it.last_provider }}</span>
             <span class="ln-tag" v-for="p in projectsOf(it)" :key="p">{{ p }}</span>
@@ -264,7 +267,7 @@
 </frshty-shell>
 </div>
 <script>
-const DISPATCH_PROJECTS = ["aimyable", "quill", "clarivis", "algotrader2", "frshty", "game_expirement", "upwork-api"];
+const DISPATCH_PROJECTS = ["aimyable", "quill", "clarivis", "algotrader2", "frshty", "game_expirement", "expirement", "upwork-api"];
 const STATE_PILLS = {
   proposed: "ln-pill-violet",
   needs_ack: "ln-pill-green", needs_you: "ln-pill-amber", agent_working: "ln-pill-blue",
