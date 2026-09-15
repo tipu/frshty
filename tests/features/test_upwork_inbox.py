@@ -96,6 +96,18 @@ def _run(rooms, stories, config=None, screen=None, judge=None, now=NOW):
     return result, haiku
 
 
+def _job(status="ok", finished=None, artifacts=None, reason="",
+         instance_key="personal", task=None):
+    """One row of the run history the worker writes for every scan."""
+    stamp = ui._iso(finished) if finished else None
+    db.execute(
+        "INSERT INTO jobs(instance_key, task, payload, status, enqueued_at,"
+        " started_at, finished_at, response) VALUES (?, ?, '{}', ?, ?, ?, ?, ?)",
+        (instance_key, task or ui.SCAN_TASK, status, stamp or ui._iso(NOW),
+         stamp or ui._iso(NOW), stamp,
+         json.dumps({"reason": reason, "artifacts": artifacts or {}})))
+
+
 def _events(name):
     return [e for e in log.get_events(limit=200) if e["event"] == name]
 
@@ -478,6 +490,9 @@ class TestScreen:
         assert row["judged_ts"] == ""
         assert row["judged_at"]
         assert len(_events("upwork_screen_failed")) == 1
+        # The task still ends ok, so the count is the only thing that tells
+        # /upwork the pipeline read nothing this run.
+        assert result["unanswered"] == 1
 
     def test_a_screen_verdict_that_is_not_a_clear_no_blocks_the_thread(self):
         """An unparsed or missing flag is read as an injection, never as a pass."""
@@ -710,3 +725,214 @@ class TestBoard:
         row = _room_row()
         assert row["reply_draft"] == "On it."
         assert row["reply_sent_at"]
+
+
+class TestStatus:
+    """The panel that says whether the scan is still running at all.
+
+    A page of rooms cannot answer that. An inbox nobody wrote to and a scan
+    that died a day ago render the same rooms, so the run history the worker
+    already writes is read back and shown beside them."""
+
+    def _ask(self):
+        return {ROOM: [
+            _story("story_a", 200, OPERATOR, "Happy to help, what do you need?"),
+            _story("story_b", 30, CLIENT, "Please add pagination to the scraper."),
+        ]}
+
+    def test_nothing_has_run_yet(self):
+        s = ui.status(_config(), instance_key="personal", now=NOW)
+        assert s["scan"] is None
+        assert s["scanning"] is False
+        assert s["runs_24h"] == 0
+        assert s["failures_24h"] == 0
+        assert s["rooms"] == 0
+        assert s["proposal"] is None
+        assert s["reply"] is None
+        assert s["configured"] is True
+        assert s["propose_tasks"] is True
+        assert s["max_pending"] == ui.DEFAULT_MAX_PENDING_PROPOSALS
+
+    def test_the_last_scan_is_read_back_from_the_run_that_did_it(self):
+        _job(finished=NOW - timedelta(minutes=40),
+             artifacts={"messages": 1, "rooms": 1, "screened": 0,
+                        "blocked": 0, "proposed": 0})
+        _job(finished=NOW - timedelta(minutes=4),
+             artifacts={"messages": 3, "rooms": 2, "screened": 1,
+                        "blocked": 1, "proposed": 1})
+        s = ui.status(_config(), instance_key="personal", now=NOW)
+        assert s["scan"]["at"] == ui._iso(NOW - timedelta(minutes=4))
+        assert s["scan"]["status"] == "ok"
+        assert s["scan"]["messages"] == 3
+        assert s["scan"]["rooms"] == 2
+        assert s["scan"]["screened"] == 1
+        assert s["scan"]["blocked"] == 1
+        assert s["scan"]["proposed"] == 1
+        assert s["runs_24h"] == 2
+        assert s["failures_24h"] == 0
+
+    def test_a_scan_that_could_not_read_the_inbox_is_not_a_clean_run(self):
+        """check() returns ok when Upwork is unreachable, so the count of
+        messages is zero either way. `skipped` is what tells the two apart."""
+        _job(finished=NOW, artifacts={"messages": 0, "rooms": 0, "proposed": 0,
+                                      "skipped": "the inbox could not be read"})
+        s = ui.status(_config(), instance_key="personal", now=NOW)
+        assert s["scan"]["status"] == "ok"
+        assert s["scan"]["skipped"] == "the inbox could not be read"
+
+    def test_a_failure_is_counted_and_a_run_older_than_a_day_is_not(self):
+        _job(finished=NOW - timedelta(hours=30))
+        _job(status="failed", reason="UpworkApiError: 401",
+             finished=NOW - timedelta(hours=2))
+        s = ui.status(_config(), instance_key="personal", now=NOW)
+        assert s["runs_24h"] == 1
+        assert s["failures_24h"] == 1
+        assert s["scan"]["status"] == "failed"
+        assert s["scan"]["reason"] == "UpworkApiError: 401"
+
+    def test_another_instances_runs_are_not_counted(self):
+        _job(finished=NOW, instance_key="aimyable")
+        _job(finished=NOW, task="slack_scan")
+        s = ui.status(_config(), instance_key="personal", now=NOW)
+        assert s["runs_24h"] == 0
+        assert s["scan"] is None
+
+    def test_a_scan_in_flight_is_reported_as_running(self):
+        _job(status="running", finished=None)
+        s = ui.status(_config(), instance_key="personal", now=NOW)
+        assert s["scanning"] is True
+        assert s["scan"] is None
+
+    def test_the_last_proposal_and_the_last_reply_are_reported(self):
+        _run([_room()], self._ask(),
+             screen={"injection": False, "reason": "ordinary"},
+             judge={"actionable": True, "reason": "asks for pagination",
+                    "objective": "Add pagination to the scraper",
+                    "reply": "On it."})
+        ui.record_reply(ROOM, "On it.", instance_key="personal", now=NOW)
+        s = ui.status(_config(), instance_key="personal", now=NOW)
+        assert s["proposal"]["work_item_id"] == _room_row()["work_item_id"]
+        assert s["proposal"]["work_state"] == work_store.PROPOSED_STATE
+        assert s["proposal"]["objective"] == "Add pagination to the scraper"
+        assert s["proposal"]["label"] == "Alex Hammer — Build a Shopify scraper"
+        assert s["proposal"]["at"] == _room_row()["proposed_at"]
+        assert s["reply"]["at"] == _room_row()["reply_sent_at"]
+        assert s["reply"]["label"] == "Alex Hammer — Build a Shopify scraper"
+        assert s["rooms"] == 1
+        assert s["blocked"] == 0
+        assert s["pending"] == 1
+        assert s["last_message_at"] == ui._iso(NOW - timedelta(minutes=30))
+
+    def test_a_room_the_screen_held_back_is_counted(self):
+        _run([_room()], self._ask(),
+             screen={"injection": True, "reason": "addressed to an assistant"})
+        s = ui.status(_config(), instance_key="personal", now=NOW)
+        assert s["rooms"] == 1
+        assert s["blocked"] == 1
+        assert s["proposal"] is None
+
+    def test_a_run_that_lost_the_inbox_while_judging_says_so(self):
+        """The first ingest reached Upwork, the re-read inside propose did
+        not. Without the mark the run reports ok over rooms it never read."""
+        stories = {ROOM: [_story("story_a", 30, CLIENT, "Can you add pagination?")]}
+        calls = []
+
+        def _stories(room_id, config=None, limit=20, older_than=""):
+            calls.append(room_id)
+            if len(calls) > 1:
+                raise upwork_client.UpworkApiError(500, "boom")
+            return {"stories": stories[ROOM], "cursor": ""}
+
+        with patch.object(upwork_client, "rooms",
+                          return_value={"rooms": [_room()], "cursor": ""}), \
+                patch.object(upwork_client, "stories", side_effect=_stories), \
+                patch.object(ui, "run_haiku") as haiku:
+            result = ui.check(_config(), instance_key="personal", now=NOW)
+        assert haiku.call_count == 0
+        assert result["skipped"] == "the inbox could not be read"
+        assert result["proposed"] == 0
+        s = ui.status(_config(), instance_key="personal", now=NOW)
+        assert s["scan"] is None
+
+    def test_a_scan_the_model_did_not_answer_is_read_back_as_unanswered(self):
+        _job(finished=NOW, artifacts={"messages": 1, "rooms": 1, "screened": 1,
+                                      "blocked": 0, "proposed": 0,
+                                      "unanswered": 1})
+        s = ui.status(_config(), instance_key="personal", now=NOW)
+        assert s["scan"]["status"] == "ok"
+        assert s["scan"]["unanswered"] == 1
+
+    def test_a_room_the_model_never_answered_outlives_the_run_that_failed(self):
+        """The failed pass holds the room back for the retry window, so the
+        next run reports a clean scan. The room itself is what stays wrong."""
+        stories = {ROOM: [_story("story_a", 30, CLIENT, "Can you add pagination?")]}
+        rooms_patch, stories_patch = _inbox([_room()], stories)
+        with rooms_patch, stories_patch, \
+                patch.object(ui, "run_haiku", return_value=None):
+            ui.check(_config(), instance_key="personal", now=NOW)
+        assert _room_row()["judged_ts"] == ""
+        assert _room_row()["judged_at"]
+        s = ui.status(_config(), instance_key="personal", now=NOW)
+        assert s["unanswered_rooms"] == 1
+        # A later scan that judged nothing at all still reads as clean.
+        _job(finished=NOW, artifacts={"messages": 0, "rooms": 0, "screened": 0,
+                                      "blocked": 0, "proposed": 0,
+                                      "unanswered": 0})
+        s = ui.status(_config(), instance_key="personal", now=NOW)
+        assert s["scan"]["unanswered"] == 0
+        assert s["unanswered_rooms"] == 1
+
+    def test_a_room_that_was_read_is_not_counted_as_unanswered(self):
+        stories = {ROOM: [
+            _story("story_a", 200, OPERATOR, "Happy to help, what do you need?"),
+            _story("story_b", 30, CLIENT, "Please add pagination to the scraper."),
+        ]}
+        _run([_room()], stories,
+             screen={"injection": False, "reason": "ordinary"},
+             judge={"actionable": True, "reason": "asks for pagination",
+                    "objective": "Add pagination", "reply": "On it."})
+        assert _room_row()["judged_ts"]
+        s = ui.status(_config(), instance_key="personal", now=NOW)
+        assert s["unanswered_rooms"] == 0
+
+    def test_a_room_that_asks_again_after_a_decline_is_counted_too(self):
+        """The room keeps the watermark of the declined proposal, so the
+        watermark alone cannot say the new request went unread. The attempt
+        stamp standing past the newest message is what says it."""
+        _run([_room()], self._ask(),
+             screen={"injection": False, "reason": "ordinary"},
+             judge={"actionable": True, "reason": "asks for pagination",
+                    "objective": "Add pagination", "reply": "On it."})
+        item = _room_row()["work_item_id"]
+        db.execute("UPDATE work_items SET state = 'done', stop_reason = ?"
+                   " WHERE id = ?", (work_store.DECLINED_REASON, item))
+        asked = dict(self._ask())
+        asked[ROOM] = asked[ROOM] + [
+            _story("story_c", 20, CLIENT, "Any movement on the pagination?")]
+        rooms_patch, stories_patch = _inbox([_room(recent=_millis(20))], asked)
+        with rooms_patch, stories_patch, \
+                patch.object(ui, "run_haiku", return_value=None) as haiku:
+            result = ui.check(_config(), instance_key="personal", now=NOW)
+        assert haiku.call_count == 1
+        assert result["unanswered"] == 1
+        row = _room_row()
+        assert row["judged_ts"]
+        assert row["judged_ts"] < row["last_ts"]
+        s = ui.status(_config(), instance_key="personal", now=NOW)
+        assert s["unanswered_rooms"] == 1
+
+    def test_a_room_waiting_for_its_next_pass_is_not_counted_as_unanswered(self):
+        """A message that arrived after the last pass is an ordinary wait.
+        Counting it would paint the panel red for every settling room."""
+        _run([_room()], self._ask(),
+             screen={"injection": False, "reason": "ordinary"},
+             judge={"actionable": False, "reason": "chatter", "objective": "",
+                    "reply": "Thanks."})
+        # The room was passed over two hours ago. The message that arrived
+        # thirty minutes ago is waiting for the next pass, not stuck.
+        db.execute("UPDATE upwork_rooms SET judged_ts = ?, judged_at = ?,"
+                   " last_ts = ?",
+                   ("%013d" % _millis(180), ui._iso(NOW - timedelta(hours=2)),
+                    "%013d" % _millis(30)))
+        s = ui.status(_config(), instance_key="personal", now=NOW)
+        assert s["unanswered_rooms"] == 0
