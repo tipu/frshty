@@ -59,6 +59,11 @@
     <a class="ln-pill ln-pill-violet ln-thread-pill" style="text-decoration:none"
        :href="threadHref(thread.root_id)" :title="'thread rooted at task #' + thread.root_id">⑂ {{ thread.title }}</a>
   </div>
+  <div class="mt-1" v-if="tickets.length">
+    <a class="ln-pill ln-pill-ticket" v-for="t in tickets" style="text-decoration:none;margin-right:6px"
+       :key="t.instance + '/' + t.key" :href="t.url" target="_blank"
+       :title="'ticket ' + t.key + ' on ' + t.instance + ' — status ' + (t.status || 'unknown')">◫ {{ t.key }}</a>
+  </div>
   <div class="mt-1">
     <span :class="['badge', badgeCls]">{{ stateLabel }}</span>
     <span class="ln-pill ml-2" style="cursor:pointer"
@@ -321,7 +326,7 @@ const app = frshtyApp({
                     systemPrompt: "", showPrompt: false,
                     btwText: "", btwError: "", btwBusy: false, debriefStatus: "",
                     followups: [], fuText: {}, fuCtx: {}, fuSlack: {}, fuAgent: {}, fuError: {},
-                    sourceItem: null, followupChildren: [], worktree: null,
+                    sourceItem: null, followupChildren: [], worktree: null, tickets: [],
                     fupText: "", fupCtx: [], fupSlack: false, fupError: "", fupBusy: false,
                     fupAgent: "claude", agents: ["claude"], runs: [],
                     projects: [], slackAvailable: false,
@@ -504,6 +509,7 @@ const app = frshtyApp({
         this.debriefStatus = d.debrief_status || "";
         this.sourceItem = d.source_item || null; this.followupChildren = d.followup_children || [];
         this.worktree = d.worktree || null;
+        this.tickets = d.tickets || [];
         this.projects = d.projects || []; this.slackAvailable = !!d.slack_available;
         this.runs = d.runs || [];
         this.agents = d.agents && d.agents.length ? d.agents : ["claude"];

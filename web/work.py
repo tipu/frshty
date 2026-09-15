@@ -7,7 +7,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
 import core.db as db
 import core.terminal as terminal
 from services import (work_artifacts, work_debrief, work_launch, work_peers,
-                      work_store, work_worktree)
+                      work_store, work_tickets, work_worktree)
 from web.pages import _template
 from web.sandbox import policy_for
 
@@ -141,6 +141,10 @@ def api_work_items(q: str = "", projects: str = "", done_page: int = 1, archive:
     done_page = min(max(1, done_page), done_pages)
     start = (done_page - 1) * DONE_PAGE_SIZE
     groups["done"] = groups["done"][start:start + DONE_PAGE_SIZE]
+    shown = [row for rows in groups.values() for row in rows]
+    tickets = work_tickets.for_items(shown)
+    for row in shown:
+        row["tickets"] = tickets.get(row["id"], [])
     return {"groups": groups, "counts": counts,
             "filter": {"q": q, "projects": projects},
             "done_page": done_page, "done_pages": done_pages,
@@ -289,6 +293,7 @@ def api_work_detail(item_id: int):
     result["thread"] = work_store.thread_map().get(item_id)
     result["attention"] = work_store.attention_count()
     result["worktree"] = work_worktree.for_item(item_id)
+    result["tickets"] = work_tickets.for_items([result["item"]])[item_id]
     return result
 
 
