@@ -77,6 +77,12 @@ when a conversation names nothing its own objective names, a neighbouring
 conversation behind it names all of it and has already opened a task, and that
 task asks for the same work. See _lifted_from_a_neighbour and
 _covers_the_same_work.
+
+Those two messages are usually typed one after the other, seconds apart, so
+both conversations settle before the same scan and the scan reads the second
+one first. The neighbour has opened no task at that point, so the second
+conversation is held until it has been judged rather than decided without it.
+See the hold in propose.
 """
 import hashlib
 import json
@@ -1243,10 +1249,11 @@ def _prior_context(conversation_id: int, conn=None) -> tuple[list[dict], tuple]:
 
     text_dt comes back because the block sits above the decline boundary, and
     _reads_as_it_was_proposed has to say these messages still read as they did
-    when the declined proposal was built from them. conversation_id and
-    work_item_id come back because _lifted_from_a_neighbour has to say which
-    conversation each of these messages belongs to and whether that
-    conversation already opened a task."""
+    when the declined proposal was built from them. conversation_id comes back
+    because _lifted_from_a_neighbour has to say which conversation each of
+    these messages belongs to; what that conversation has done about the
+    request is read from the conversation itself, in _neighbour_state, so a
+    task another scan opened since cannot be missed."""
     found = _read(conn,
                   "SELECT instance_key, workspace, channel_id, first_ts"
                   " FROM slack_conversations WHERE id = ?", (conversation_id,))
@@ -1258,7 +1265,7 @@ def _prior_context(conversation_id: int, conn=None) -> tuple[list[dict], tuple]:
     rows = list(reversed(_read(
         conn,
         "SELECT m.ts, m.user_id, m.user_name, m.text, m.text_dt,"
-        "       m.conversation_id, c.work_item_id"
+        "       m.conversation_id"
         " FROM slack_conversation_messages m"
         " JOIN slack_conversations c ON c.id = m.conversation_id"
         " WHERE c.instance_key = ? AND c.workspace = ? AND c.channel_id = ?"
@@ -1704,18 +1711,29 @@ def _named_in(rows: list[dict], identifiers: set) -> set:
     return {name for name in identifiers if name in body}
 
 
-def _lifted_from_a_neighbour(conversation_id: int, objective: str,
-                             conn=None) -> int | None:
-    """The task that already carries this request, when this conversation
-    says none of it.
+def _lifted_from_a_neighbour(conversation_id: int, objective: str, config: dict,
+                             now: datetime, operator_id: str,
+                             conn=None) -> tuple[int, int | None, bool] | None:
+    """The neighbouring conversation that carries this request, and the task it
+    opened, when this conversation says none of it.
 
-    One request is written as several top-level messages minutes apart, and
-    each of them is a conversation of its own; see _prior_context. So the
-    message that asks for the work opens a task, and the message after it —
-    "you can also use the Deploy workflow in that repo" — is judged with the
-    first one above it as context and opens a second task for the same
-    request. Both landed in front of the operator 44 seconds apart, naming the
-    same pull request, and he had to decide the same thing twice.
+    One request is written as several top-level messages, and each of them is
+    a conversation of its own; see _prior_context. So the message that asks
+    for the work opens a task, and the message after it — "you can also use
+    the Deploy workflow in that repo" — is judged with the first one above it
+    as context and opens a second task for the same request. The two messages
+    were 45 seconds apart, the two tasks landed in front of the operator 44
+    seconds apart naming the same pull request, and he had to decide the same
+    thing twice.
+
+    The gap between the two messages is not what makes this happen, and
+    nothing here may rest on it. Two messages typed one after the other are
+    the ordinary shape of it, and core.runtime looks at the capture every 15
+    seconds, so a pair written inside one of those steps opens one settle
+    window and both conversations reach the same scan. The scan reads them
+    newest first, which is the message that asks for nothing. That is why this
+    reports a neighbour that has not opened a task yet instead of hiding it:
+    see the hold in propose.
 
     CONTEXT_RULE tells the judge that nothing above the line covers anything,
     because a request that appears only in the block still has to be proposed
@@ -1728,23 +1746,36 @@ def _lifted_from_a_neighbour(conversation_id: int, objective: str,
     number, a repository path — is looked for in this conversation's own
     messages. Finding one means the conversation carries the request and the
     proposal is its own. Finding none, while one neighbouring conversation in
-    the block says all of them and has already opened a task, means the
-    request was read out of that neighbour and that task is what carries it.
+    the block says all of them, means the request was read out of that
+    neighbour and the neighbour is what carries it.
 
     Every identifier has to be found for the neighbour to count. A partial
     match is a different request that shares a ticket key with this one, and
     dropping that would hide work nobody has been shown.
 
     Identifiers name the thing worked on and never the work asked for, so this
-    answers only which task might already carry the request. Whether it does is
-    _covers_the_same_work's question, and the proposer asks it before it drops
-    anything.
+    answers only which conversation might already carry the request. Whether
+    its task does is _covers_the_same_work's question, and the proposer asks it
+    before it drops anything.
 
     An objective naming no identifier at all is left alone. There is nothing
     to match it on, and this module would rather show the operator a request
     twice than hide one nobody reads.
 
-    Whatever state the neighbour's task is in, it carries the request: the
+    The nearest matching neighbour that carries anything decides, and
+    _neighbour_state says what it carries. One that opened a task is reported
+    with it. One that has still to be judged is reported with a null task,
+    because it may yet open the task this request belongs to and deciding
+    without it is what let the second message open a task of its own. Only a
+    neighbour that was judged and opened nothing is passed over, and the
+    search goes on behind it.
+
+    A nearer neighbour is never passed over for a farther one that happens to
+    have a task. The two messages above a request can ask for two different
+    pieces of work about the same ticket, and answering with the farther task
+    would compare this request against work nobody asked it to do.
+
+    Whatever state a neighbour's task is in, it carries the request: the
     operator was shown it, so showing him the same request again is asking
     the same question twice."""
     wanted = _identifiers(_normalise_objective(objective))
@@ -1757,11 +1788,16 @@ def _lifted_from_a_neighbour(conversation_id: int, objective: str,
         return None
     neighbours: dict[int, list[dict]] = {}
     for row in _prior_context(conversation_id, conn)[0]:
-        if row["work_item_id"]:
-            neighbours.setdefault(row["conversation_id"], []).append(row)
-    for rows in reversed(list(neighbours.values())):
-        if _named_in(rows, wanted) == wanted:
-            return int(rows[0]["work_item_id"])
+        neighbours.setdefault(row["conversation_id"], []).append(row)
+    for neighbour_id, rows in reversed(list(neighbours.items())):
+        if _named_in(rows, wanted) != wanted:
+            continue
+        item_id, undecided, ready = _neighbour_state(neighbour_id, config, now,
+                                                     operator_id)
+        if item_id:
+            return neighbour_id, item_id, ready
+        if undecided:
+            return neighbour_id, None, ready
     return None
 
 
@@ -1793,6 +1829,115 @@ def _covers_the_same_work(item_id: int, objective: str) -> bool:
                                             second=objective))
     words = (raw or "").strip().upper().split()
     return bool(words) and words[0].strip(".,:;!") == "SAME"
+
+
+def _neighbour_state(conversation_id: int, config: dict, now: datetime,
+                     operator_id: str) -> tuple[int | None, bool, bool]:
+    """What a neighbouring conversation has done about the request it names:
+    the task it opened, whether it has still to be judged, and whether this
+    scan can judge it.
+
+    _lifted_from_a_neighbour found a conversation that says every identifier
+    this objective names while the conversation below it says none of them.
+    Three states matter and they want three different answers.
+
+    It opened a task. That task carries the request, and _covers_the_same_work
+    decides whether it asks for the same work.
+
+    It was judged and opened no task. Then it carries nothing, the
+    conversation below it is the first to ask for this work, and it opens the
+    only task there is.
+
+    It has not been judged. Then whether anything carries this request is not
+    known yet, and proposing now is what opened the second task: the scan
+    reads a channel newest first, so the message that asks for nothing is read
+    before the message that asks for the work. The request waits for it.
+
+    The three answers come from one read of the row, so a task opened by
+    another scan between two reads cannot be seen as no task at all.
+
+    Undecided is not the same question as _is_candidate, and asking that
+    instead is wrong in both directions this module cares about. A
+    conversation waiting out the judge back-off after a verdict that could not
+    be read is not a candidate, and one that has just gained a message and is
+    inside the settle window is not a candidate, and both of them are going to
+    be judged. Undecided is therefore asked of the conversation itself: it
+    holds messages, the operator is in its channel, it has not aged out of the
+    window, and its judgement mark does not yet reach its last message.
+
+    ready is the narrower question of whether THIS scan may spend a model call
+    on it, which is what tells a hold the scan can release itself from one
+    that has to wait for a later scan.
+
+    A conversation that has aged out of the window, that nobody but the
+    operator wrote in, or that has been judged to its last message is never
+    going to open a task for this request and holds nothing back."""
+    row = db.query_one("SELECT * FROM slack_conversations WHERE id = ?",
+                       (conversation_id,))
+    if not row:
+        return None, False, False
+    if row["work_item_id"]:
+        return int(row["work_item_id"]), False, False
+    if (row["involves_operator"] != 1 or not row["message_count"]
+            or not _somebody_else_spoke(conversation_id, operator_id)):
+        return None, False, False
+    max_age = int(_settings(config).get("propose_max_age_hours",
+                                        DEFAULT_MAX_AGE_HOURS))
+    last = _ts_value(row["last_ts"])
+    if last < (now - timedelta(hours=max_age)).timestamp():
+        return None, False, False
+    if row["judged_ts"] and _ts_value(row["judged_ts"]) >= last:
+        return None, False, False
+    return None, True, _is_candidate(row, config, now, operator_id)
+
+
+def _hold_lands_in_time(row: dict, config: dict, now: datetime) -> bool:
+    """Whether a conversation held now would still be young enough to judge
+    once the wait is over.
+
+    A hold delays a request. The neighbour it waits for ages on its own clock,
+    and a thread that keeps gaining replies never settles, so a hold renewed
+    on every scan can outlive the request that is waiting. Once the held
+    conversation crosses propose_max_age_hours nothing reads it again and the
+    request is gone, which is the one outcome this module will not take: it
+    would rather show the operator the same request twice than hide one nobody
+    reads.
+
+    So a hold is dropped once it would outlast the conversation it holds, on
+    the same test the judge back-off uses, and the request is proposed with
+    the scans it has left rather than none of them."""
+    settings = _settings(config)
+    retry = int(settings.get("propose_judge_retry_minutes",
+                             DEFAULT_JUDGE_RETRY_MINUTES))
+    max_age = int(settings.get("propose_max_age_hours", DEFAULT_MAX_AGE_HOURS))
+    return _retry_lands_in_time(_iso(now), retry, _ts_value(row["last_ts"]),
+                                max_age)
+
+
+def _bring_forward(queue: list, position: int, conversation_id: int) -> bool:
+    """Put the conversation a held request waits for next in line.
+
+    Candidates are ordered newest first, so the conversation a hold waits for
+    is always behind the held one. Without this the allowance would be spent
+    on the conversations in front of it and the scan would stop before the one
+    that releases the hold. The same run would then repeat on the next scan,
+    and the request would never be decided at all.
+
+    Moving it forward makes every hold cost one judgement that decides
+    something. The conversation is moved, never copied, so nothing is judged
+    twice, and a conversation the scan has already read is left where it is.
+
+    Answers whether it moved one. A neighbour that is not in what is left of
+    the list cannot be brought forward: it is one the scan has already read,
+    which is what a conversation held earlier in this scan looks like. No
+    judgement inside this scan is going to release a hold on it, so the hold
+    that named it spends the allowance instead of riding free on a move that
+    never happened."""
+    for at in range(position, len(queue)):
+        if queue[at]["id"] == conversation_id:
+            queue.insert(position, queue.pop(at))
+            return True
+    return False
 
 
 def _proposals_awaiting_operator(instance_key: str) -> int:
@@ -1988,6 +2133,46 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
     messages, and the boundary drawn between them. It runs only when a proposal
     is about to be opened, so it costs two queries a few times a day.
 
+    A conversation whose request was read out of a neighbour that has not been
+    judged yet is held rather than decided. Candidates are ordered newest
+    first, so a request written as two messages reaches the judge in the wrong
+    order: the second message, which asks for nothing of its own, is read
+    before the first, which asks for the work. _lifted_from_a_neighbour cannot
+    say whether anything already carries that request until the first message
+    has been judged, and deciding anyway is what put two tasks for one request
+    in front of the operator. The hold costs the model call already spent and
+    nothing else: no judgement mark is written, so the next scan reads the
+    conversation again, by which time the neighbour behind it in this same
+    scan has been judged.
+
+    No hold outlives the request it holds. A neighbour that keeps gaining
+    replies never settles, and a hold renewed on every scan would otherwise
+    keep the request back until it crossed propose_max_age_hours and nothing
+    read it again. _hold_lands_in_time drops the hold before that, on the same
+    test the judge back-off uses, and the request is proposed with the scans it
+    has left.
+
+    A hold whose neighbour this scan can read puts that neighbour next in line
+    and does not spend the scan's judgement allowance. It must not spend it:
+    the neighbour is behind the held conversation in the order, so an allowance
+    of one would hold the same conversation every scan and the neighbour it
+    waits for would never be read at all. Every such hold is paid for by the
+    judgement it brings forward, and that judgement decides something, so a
+    run of them walks a chain of conversations to its end and the scan after
+    this one finds that end decided. A conversation is moved, never copied, so
+    the chain cannot be longer than what is left of the candidate list, and a
+    conversation is judged with the messages before it as context, so the
+    chain runs one way and cannot close on itself.
+
+    Every other hold spends the allowance like any other judgement, because
+    nothing in this scan is going to release it. A neighbour still settling or
+    waiting out its own judge back-off is one of those, and the hold on it
+    also records an attempt against the held conversation, so it is not read
+    again on every scan of that wait for nothing. A neighbour the scan has
+    already read is the other, which is what a conversation held earlier in
+    the same scan is; that wait is over by the next scan, so no mark is
+    written and only the allowance is spent.
+
     Returns the proposals opened and what the capture reads inside this call
     added to the index, so the caller can report every message the scan
     indexed and not only the ones its first read found."""
@@ -2009,10 +2194,15 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
     opened: list[dict] = []
     counts = {"messages": 0, "conversations": 0, "reopened": 0}
     judged = 0
-    for index, row in enumerate(_candidates(instance_key, config, now)):
-        if judged >= max_judgements or len(opened) >= budget:
+    held = 0
+    queue = _candidates(instance_key, config, now)
+    position = 0
+    while position < len(queue):
+        if judged - held >= max_judgements or len(opened) >= budget:
             break
-        tick = now + timedelta(microseconds=index)
+        row = queue[position]
+        tick = now + timedelta(microseconds=position)
+        position += 1
         # Slack does not stop while the scan works. A message that landed
         # since the scan's own ingest is in the capture file and nowhere else,
         # so the conversation in the database still looks settled. Folding the
@@ -2094,7 +2284,23 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
                                     transcript, c):
                     _record_judgement(row["id"], row["last_ts"], tick, conn=c)
             continue
-        covered = _lifted_from_a_neighbour(row["id"], objective)
+        lifted = _lifted_from_a_neighbour(row["id"], objective, config, now,
+                                          operator_id)
+        if lifted and lifted[1] is None:
+            if _hold_lands_in_time(row, config, now):
+                if not lifted[2]:
+                    _record_attempt(row["id"], tick)
+                elif _bring_forward(queue, position, lifted[0]):
+                    held += 1
+                log.emit("slack_proposal_held_for_neighbour",
+                         f"[{instance_key}] {channel} says nothing this request"
+                         f" names; the conversation above it that does has not"
+                         f" been judged yet; this one waits for it",
+                         meta={"thread_ts": row["thread_ts"],
+                               "channel": channel, "waiting_for": lifted[0]})
+                continue
+            lifted = None
+        covered = lifted[1] if lifted else None
         if covered and _covers_the_same_work(covered, objective):
             log.emit("slack_proposal_duplicate_dropped",
                      f"[{instance_key}] {channel} says nothing this request"
