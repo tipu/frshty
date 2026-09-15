@@ -113,12 +113,14 @@ pr_autofix = false                # github only: every newly created PR gets a c
 # user_id = "718034110359347200"      # your own Upwork user id, the `user_uid` cookie of that
 #                                     # profile. It decides which lines in a room are yours.
 #                                     # Left unset, frshty reads it off the lifted session.
-# operator_name = "Your Name"         # how the judge refers to you when it drafts a reply
-# propose_tasks = false               # when true, a room that asks for concrete work opens a
-#                                     # task on /tasks. Every such task lands in the `proposed`
-#                                     # group and never runs until you approve it. A reply is
-#                                     # drafted either way, and frshty never sends one: you
-#                                     # press send on /upwork.
+# operator_name = "Your Name"         # how the judge refers to you when it names the task
+# propose_tasks = true                # a room waiting on an answer opens a task on /tasks, and
+#                                     # that task writes the reply. It lands in the `proposed`
+#                                     # group and never runs until you approve it. Once it runs
+#                                     # it can read the repository the thread names and build
+#                                     # what the client asked for, then it records the draft on
+#                                     # /upwork. Set it to false to index the inbox and draft
+#                                     # nothing. frshty never sends: you press send on /upwork.
 # rooms_limit = 20                    # how many rooms one scan lists, newest activity first
 # rooms_pages = 3                     # how many pages of that list one scan will walk. The walk
 #                                     # stops on the first page holding no room the index has to
@@ -131,8 +133,10 @@ pr_autofix = false                # github only: every newly created PR gets a c
 #                                     # handed to the models never draws on anything older.
 # settle_minutes = 5                  # a room is read only once its last message is this old,
 #                                     # so a client still typing is left alone
-# max_age_hours = 72                  # never propose from a room older than this
-# max_pending = 3                     # ceiling on proposals waiting for your decision at once
+# max_age_hours = 72                  # never open a task from a room older than this
+# max_pending = 3                     # ceiling on proposals waiting for your decision at once. A
+#                                     # scan with no slot left reads no room at all, so a room it
+#                                     # could not act on is not marked read either.
 # max_judgements_per_scan = 3         # ceiling on rooms read per scan; each one costs two model
 #                                     # calls, the injection screen and the judge
 # judge_retry_minutes = 60            # a room the model answered nothing for is held back this
