@@ -4,6 +4,12 @@ Reading is scheduled; these routes exist so the operator can look at what was
 read and answer it. The reply route is the only place in frshty that writes to
 Upwork, it is reached by a person pressing a button, and core/correspondence.py
 denies it to a task.
+
+The draft route is the other half of that split, and it is open to a task on
+purpose. The reply a room gets is written by a work-board task, and this is
+where that task puts it: the text lands in the box on this page and goes no
+further. Recording a draft is not sending one, so the gate that closes the
+send route to every task leaves this one alone.
 """
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -44,6 +50,38 @@ def api_upwork_refresh():
         return JSONResponse({"error": "the Upwork inbox could not be read"},
                             status_code=502)
     return _data()
+
+
+@router.post("/api/upwork/rooms/{room_id}/draft")
+def api_upwork_draft(room_id: str, body: dict, instance: str = ""):
+    """Record the reply a task drafted for one room. This never sends.
+
+    The task names its own instance, because it reaches this server on the
+    port rather than on the hostname that picks between instances, and an
+    unnamed instance falls back to the primary one. The room decides what the
+    request may touch: a room exists only for an instance whose inbox was
+    indexed, and a draft for a room that is not there is refused rather than
+    ignored. The task was told which room it is answering, so a miss means the
+    draft went nowhere, and the agent has to hear that instead of reporting
+    the reply as recorded."""
+    text = str(body.get("text") or "").strip()
+    if not text:
+        return JSONResponse({"error": "text required"}, status_code=400)
+    if len(text) > MAX_REPLY_CHARS:
+        return JSONResponse({"error": f"text over {MAX_REPLY_CHARS} characters"},
+                            status_code=400)
+    if not upwork_inbox.record_draft(room_id, text, instance_key=instance):
+        return JSONResponse({"error": f"unknown room {room_id}"}, status_code=404)
+    # The event is filed under the instance serving the request, which is the
+    # one the Host header picked and not necessarily the one named here. So
+    # the name is written into the line rather than left to the feed it lands
+    # in.
+    where = f" of {instance}" if instance else ""
+    log.emit("upwork_draft_recorded",
+             f"a task drafted the reply to room {room_id}{where}: {text[:120]}",
+             links={"detail": "/upwork"},
+             meta={"room_id": room_id, "instance": instance, "text": text})
+    return {"status": "recorded"}
 
 
 @router.post("/api/upwork/rooms/{room_id}/reply")
