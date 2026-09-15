@@ -163,6 +163,100 @@ class TestRepoGate:
         state.save_ticket("T-1", {"status": "planning", "slug": "x", "branch": "x"})
         assert tickets._repo_gate_blocked("inst", "T-1") is None
 
+    def test_two_occupying_tickets_elect_one_holder(self, fresh_db):
+        """Two tickets can reach an occupying status in one poll cycle. Asking
+        only whether some OTHER ticket occupies the gate answered yes for
+        both, each naming the other, and neither could queue the step that
+        would take it out of that status. One of them must hold the gate."""
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-1", {"status": "proving", "slug": "x", "branch": "x"})
+        state.save_ticket("T-2", {"status": "proving", "slug": "x", "branch": "x"})
+        answers = [tickets._repo_gate_blocked("inst", k) for k in ("T-1", "T-2")]
+        assert answers.count(None) == 1
+        assert set(answers) - {None} <= {"T-1", "T-2"}
+
+    def test_holder_is_the_ticket_that_entered_the_gate_first(self, fresh_db):
+        """The holder is elected from ticket_transitions, not from updated_at:
+        every poll cycle writes every ticket back, so updated_at records the
+        scan order rather than the order the tickets entered the pipeline."""
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-2", {"status": "pr_ready", "slug": "x", "branch": "x"})
+        state.transition_ticket("T-2", "proving")
+        state.save_ticket("T-1", {"status": "pr_ready", "slug": "x", "branch": "x"})
+        state.transition_ticket("T-1", "proving")
+        state.save_ticket("T-2", {"status": "proving", "slug": "x", "branch": "x"})
+        assert tickets._repo_gate_blocked("inst", "T-2") is None
+        assert tickets._repo_gate_blocked("inst", "T-1") == "T-2"
+
+    def test_holder_keeps_the_gate_as_it_advances(self, fresh_db):
+        """The lease is the entry into the occupying set, not the entry into
+        the current status. Keyed on the current status, every advance would
+        restart the holder's clock and hand the gate to a ticket that entered
+        later, so the two would take turns instead of serializing."""
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-2", {"status": "new", "slug": "x", "branch": "x"})
+        state.transition_ticket("T-2", "planning")
+        state.save_ticket("T-1", {"status": "new", "slug": "x", "branch": "x"})
+        state.transition_ticket("T-1", "planning")
+        state.transition_ticket("T-2", "reviewing")
+        assert tickets._repo_gate_blocked("inst", "T-2") is None
+        assert tickets._repo_gate_blocked("inst", "T-1") == "T-2"
+
+    def test_gate_passes_to_the_next_ticket_when_the_holder_leaves(self, fresh_db):
+        """A holder that leaves the occupying set gives up the lease, and a
+        holder that re-enters takes a new one, so the gate always drains."""
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-2", {"status": "pr_ready", "slug": "x", "branch": "x"})
+        state.transition_ticket("T-2", "proving")
+        state.save_ticket("T-1", {"status": "pr_ready", "slug": "x", "branch": "x"})
+        state.transition_ticket("T-1", "proving")
+        state.transition_ticket("T-2", "pr_ready")
+        assert tickets._repo_gate_blocked("inst", "T-1") is None
+        state.transition_ticket("T-2", "proving")
+        assert tickets._repo_gate_blocked("inst", "T-1") is None
+        assert tickets._repo_gate_blocked("inst", "T-2") == "T-1"
+
+    def test_gate_still_blocks_a_ticket_that_does_not_occupy(self, fresh_db):
+        """Electing a holder must not open the gate for a ticket that is not
+        in an occupying status at all."""
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-1", {"status": "pr_ready", "slug": "x", "branch": "x"})
+        state.save_ticket("T-2", {"status": "proving", "slug": "x", "branch": "x"})
+        assert tickets._repo_gate_blocked("inst", "T-1") == "T-2"
+
+    def test_auto_merge_elects_one_holder_across_the_wider_set(self, fresh_db):
+        """auto_merge widens the occupying set to pr_ready and in_review, so
+        the election widens with it and still names one holder."""
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-1", {"status": "pr_ready", "slug": "x", "branch": "x"})
+        state.save_ticket("T-2", {"status": "in_review", "slug": "x", "branch": "x"})
+        config = {"pr": {"auto_merge": True}}
+        answers = [tickets._repo_gate_blocked("inst", k, config)
+                   for k in ("T-1", "T-2")]
+        assert answers.count(None) == 1
+
+    def test_enqueue_stage_queues_scope_fix_for_the_holding_proving_ticket(self, fresh_db):
+        """The wedge this election removes: a proving ticket whose scope
+        review failed must be able to queue its correction while a sibling
+        ticket is also proving."""
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-2", {"status": "pr_ready", "slug": "x", "branch": "x"})
+        state.transition_ticket("T-2", "proving")
+        state.save_ticket("T-1", {"status": "pr_ready", "slug": "x", "branch": "x"})
+        state.transition_ticket("T-1", "proving")
+        with patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("core.queue.enqueue_job", return_value=7) as eq:
+            assert tickets._enqueue_stage("inst", "T-2", "fix_scope_findings") == 7
+            assert tickets._enqueue_stage("inst", "T-1", "fix_scope_findings") is None
+        assert eq.call_count == 1
+
     def test_gate_isolates_per_instance(self, fresh_db):
         """A ticket in a different instance does not block this one."""
         import core.state as state
