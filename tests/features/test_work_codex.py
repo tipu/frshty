@@ -290,6 +290,16 @@ class TestCodexLaunch:
         else:
             assert "algotrader2" not in entries
 
+    def test_game_and_upwork_projects_are_offered(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(work_launch.runtime, "instances", lambda: {})
+        monkeypatch.setenv("HOME", str(tmp_path))
+        dev = tmp_path / "Documents" / "dev"
+        (dev / "game_expirement").mkdir(parents=True)
+        (dev / "upwork_apply").mkdir(parents=True)
+        entries = {e["key"]: e["root"] for e in work_launch.project_entries()}
+        assert entries["game_expirement"] == str(dev / "game_expirement")
+        assert entries["upwork-api"] == str(dev / "upwork_apply")
+
 
 class TestCodexNotify:
     def _notify(self, sid, payload, codex_home=""):
