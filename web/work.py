@@ -230,7 +230,8 @@ def api_work_intake(body: dict):
                                 agent=body.get("agent") or "claude",
                                 repo=body.get("repo") or "",
                                 no_worktree=bool(body.get("no_worktree")),
-                                critical=bool(body.get("critical")))
+                                critical=bool(body.get("critical")),
+                                images=body.get("images"))
     if "error" in result:
         status = 503 if "personal instance" in result["error"] else (
             500 if "launch failed" in result["error"] else 400)
