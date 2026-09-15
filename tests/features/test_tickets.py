@@ -171,6 +171,95 @@ class TestRepoGate:
         state.init("inst-b")
         assert tickets._repo_gate_blocked("inst-b", "T-B1") is None
 
+    def test_gate_elects_a_holder_when_two_rows_occupy_it(self, fresh_db):
+        """Two occupying rows must not name each other, or neither can enqueue
+        a repo-gated stage again. One of them holds the gate and advances."""
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-2", {"status": "proving", "slug": "x", "branch": "x"})
+        state.save_ticket("T-3", {"status": "proving", "slug": "x", "branch": "x"})
+        assert tickets._repo_gate_blocked("inst", "T-2") is None
+        assert tickets._repo_gate_blocked("inst", "T-3") == "T-2"
+
+    def test_gate_holder_does_not_move_when_updated_at_moves(self, fresh_db):
+        """check() rewrites updated_at for every assigned ticket on every poll.
+        A holder chosen from it would alternate, and both tickets would do repo
+        work at once."""
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-2", {"status": "proving", "slug": "x", "branch": "x"})
+        state.save_ticket("T-3", {"status": "proving", "slug": "x", "branch": "x"})
+        assert tickets._repo_gate_blocked("inst", "T-3") == "T-2"
+        state.save_ticket("T-2", {"status": "proving", "slug": "x", "branch": "y"})
+        assert tickets._repo_gate_blocked("inst", "T-3") == "T-2"
+        assert tickets._repo_gate_blocked("inst", "T-2") is None
+
+    def test_gate_holder_is_the_occupant_already_running_a_gated_job(self, fresh_db):
+        """core.queue only serialises jobs per ticket, so electing a holder past
+        a sibling's running job would run two tickets in the same worktrees."""
+        import core.db as db
+        import core.queue as q
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-2", {"status": "proving", "slug": "x", "branch": "x"})
+        state.save_ticket("T-3", {"status": "proving", "slug": "x", "branch": "x"})
+        job_id = q.enqueue_job("inst", "prove", ticket_key="T-3")
+        db.execute("UPDATE jobs SET status='running' WHERE id=?", (job_id,))
+        assert tickets._repo_gate_blocked("inst", "T-2") == "T-3"
+        assert tickets._repo_gate_blocked("inst", "T-3") is None
+
+    def test_a_waiting_occupant_never_takes_the_gate_from_an_active_one(self, fresh_db):
+        """Under auto_merge, pr_ready and in_review occupy the gate while holding
+        a finished branch. Neither may take it from a ticket still editing."""
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-2", {"status": "pr_ready", "slug": "x", "branch": "x"})
+        state.save_ticket("T-3", {"status": "planning", "slug": "x", "branch": "x"})
+        config = {"pr": {"auto_merge": True}}
+        assert tickets._repo_gate_blocked("inst", "T-2", config) == "T-3"
+        assert tickets._repo_gate_blocked("inst", "T-3", config) is None
+
+    def test_a_running_job_outranks_a_queued_one(self, fresh_db):
+        import core.db as db
+        import core.queue as q
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-2", {"status": "proving", "slug": "x", "branch": "x"})
+        state.save_ticket("T-3", {"status": "proving", "slug": "x", "branch": "x"})
+        q.enqueue_job("inst", "prove", ticket_key="T-2")
+        later = q.enqueue_job("inst", "prove", ticket_key="T-3")
+        db.execute("UPDATE jobs SET status='running' WHERE id=?", (later,))
+        assert tickets._repo_gate_blocked("inst", "T-2") == "T-3"
+        assert tickets._repo_gate_blocked("inst", "T-3") is None
+
+    def test_gate_sees_a_running_job_behind_a_page_of_newer_ones(self, fresh_db):
+        """core.queue.jobs_for_ticket caps its newest-first rows, so a gated job
+        that has been running a long time can fall out of that window."""
+        import core.db as db
+        import core.queue as q
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-2", {"status": "proving", "slug": "x", "branch": "x"})
+        state.save_ticket("T-3", {"status": "proving", "slug": "x", "branch": "x"})
+        job_id = q.enqueue_job("inst", "prove", ticket_key="T-3")
+        db.execute("UPDATE jobs SET status='running' WHERE id=?", (job_id,))
+        for _ in range(120):
+            later = q.enqueue_job("inst", "advance_ticket", ticket_key="T-3")
+            q.mark_done(later, "ok", {})
+        assert tickets._repo_gate_blocked("inst", "T-2") == "T-3"
+        assert tickets._repo_gate_blocked("inst", "T-3") is None
+
+    def test_gate_ignores_a_finished_job_when_electing_a_holder(self, fresh_db):
+        import core.queue as q
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-2", {"status": "proving", "slug": "x", "branch": "x"})
+        state.save_ticket("T-3", {"status": "proving", "slug": "x", "branch": "x"})
+        job_id = q.enqueue_job("inst", "prove", ticket_key="T-3")
+        q.mark_done(job_id, "ok", {})
+        assert tickets._repo_gate_blocked("inst", "T-3") == "T-2"
+        assert tickets._repo_gate_blocked("inst", "T-2") is None
+
     def test_enqueue_stage_skips_setup_prd_ticket_when_blocked(self, fresh_db):
         import core.state as state
         state.init("inst")
