@@ -105,6 +105,8 @@ def project_entries() -> list[dict]:
         "frshty": os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "clarivis": os.path.expanduser("~/Documents/dev/clarivis"),
         "algotrader2": os.path.expanduser("~/Documents/dev/algotrader2/implementation"),
+        "game_expirement": os.path.expanduser("~/Documents/dev/game_expirement"),
+        "upwork-api": os.path.expanduser("~/Documents/dev/upwork_apply"),
     }
     for key, root in extras.items():
         if not any(e["key"] == key for e in entries) and os.path.isdir(root):
