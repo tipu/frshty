@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import pathlib
 import subprocess
 import sys
 from unittest.mock import MagicMock, patch
@@ -295,10 +296,19 @@ class TestCodexLaunch:
         monkeypatch.setenv("HOME", str(tmp_path))
         dev = tmp_path / "Documents" / "dev"
         (dev / "game_expirement").mkdir(parents=True)
+        (dev / "expirement").mkdir(parents=True)
         (dev / "upwork_apply").mkdir(parents=True)
         entries = {e["key"]: e["root"] for e in work_launch.project_entries()}
         assert entries["game_expirement"] == str(dev / "game_expirement")
+        assert entries["expirement"] == str(dev / "expirement")
         assert entries["upwork-api"] == str(dev / "upwork_apply")
+
+    def test_board_offers_every_extra_project_as_a_chip(self):
+        keys = ["game_expirement", "expirement", "upwork-api"]
+        for name in ("templates/work.html", "templates/thread_detail.html"):
+            text = pathlib.Path(name).read_text()
+            for key in keys:
+                assert f'"{key}"' in text, f"{name} omits {key}"
 
 
 class TestCodexNotify:
