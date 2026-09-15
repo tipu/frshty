@@ -21,6 +21,7 @@ GROUPS = ("proposed", "needs_ack", "needs_you", "agent_working", "waiting_extern
           "failed_stale", "canceled", "done")
 CANCELED_STATE = "canceled"
 CANCELED_REASON = "Canceled by the operator"
+SUPERSEDED_REASON = "Proposal superseded by a newer debrief"
 FINISHED_STATES = ("needs_ack", "done")
 FINISHED_STATES_SQL = "('needs_ack', 'done')"
 CLOSED_STATES = FINISHED_STATES + (CANCELED_STATE,)
@@ -331,6 +332,54 @@ def release_proposal(item_id: int) -> None:
         c.execute(
             "UPDATE work_items SET state = ?, updated_at = ? "
             "WHERE id = ? AND state = 'agent_working'", (PROPOSED_STATE, now, item_id))
+
+
+def supersede_proposals(source_item_id: int, conn=None,
+                        now: str | None = None) -> list[int]:
+    """Withdraw every open proposal one finished task put on the board.
+
+    A second debrief of a task writes the same follow-up a second time, and
+    proposing it again puts two copies of one piece of work in front of the
+    operator. Work item 9501 carried two, the operator approved both, and both
+    runs tried to merge the same pull request. The newest debrief owns the
+    follow-ups of its task, so the proposals an older one opened are withdrawn
+    here. A proposal the operator already approved or declined has left
+    PROPOSED_STATE, so it is not touched.
+
+    The proposal is canceled rather than declined: the operator declined
+    nothing, the board took its own proposal back. It is archived in the same
+    step, because a withdrawn proposal asks the operator for nothing.
+
+    `conn` lets a caller that writes the new debrief in one transaction
+    withdraw the old proposals in that same transaction, the way
+    create_proposal takes one."""
+    if conn is not None:
+        return _supersede_proposals(conn, source_item_id, now)
+    with db.tx() as c:
+        return _supersede_proposals(c, source_item_id, now)
+
+
+def _supersede_proposals(c, source_item_id: int, now: str | None = None) -> list[int]:
+    now = now or _now()
+    rows = c.execute(
+        "SELECT id FROM work_items WHERE source_item_id = ? AND state = ?",
+        (source_item_id, PROPOSED_STATE)).fetchall()
+    withdrawn = []
+    for row in rows:
+        item_id = int(row["id"])
+        changed = c.execute(
+            "UPDATE work_items SET state = ?, stop_reason = ?, pending_question = '', "
+            "snoozed_until = NULL, archived_at = ?, updated_at = ? "
+            "WHERE id = ? AND state = ?",
+            (CANCELED_STATE, SUPERSEDED_REASON, now, now, item_id, PROPOSED_STATE))
+        if changed.rowcount != 1:
+            continue
+        c.execute(
+            "INSERT INTO work_events(work_item_id, kind, payload, created_at) "
+            "VALUES (?, 'proposal_superseded', ?, ?)",
+            (item_id, db.dump_json({"source_item_id": source_item_id}), now))
+        withdrawn.append(item_id)
+    return withdrawn
 
 
 def add_run(item_id: int, session_id: str, tmux_key: str, cwd: str,
