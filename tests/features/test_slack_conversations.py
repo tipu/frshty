@@ -3200,6 +3200,195 @@ def test_a_message_after_the_request_does_not_reopen_it(tmp_path):
     assert not sc._is_candidate(row, config, NOW, OPERATOR)
 
 
+LIFT_FIRST = "can you move WB-412 to the PLT board and drop the old one"
+LIFT_SECOND = "you can also use the deploy workflow in that repo to try it out"
+
+
+def _lift_scan(tmp_path, *replies, now=None, **slack):
+    """One scan that judges exactly one conversation. The replies are handed to
+    the model in order: the verdict first, then the SAME or DIFFERENT answer
+    the proposer asks for when it has a task that may already carry the
+    request."""
+    config = _config(tmp_path, propose_tasks=True,
+                     propose_max_judgements_per_scan=1, **slack)
+    with patch.object(sc, "run_haiku", side_effect=list(replies)) as haiku, \
+         patch.object(sc.work_launch, "project_entries", return_value=[]):
+        return sc.check(config, instance_key="atropos", now=now or NOW), haiku
+
+
+def _lift_exchange(tmp_path, first_verdict=None):
+    """The reported failure, in the order it happened: the request settles and
+    opens a task, then the message after it settles and is judged with the
+    request above it as context."""
+    _capture(tmp_path, [_ws(DM_FIRST_TS, ERIK, LIFT_FIRST, channel=DM)])
+    _lift_scan(tmp_path, first_verdict or _verdict())
+    _capture(tmp_path, [_ws(DM_SECOND_TS, ERIK, LIFT_SECOND, channel=DM)])
+
+
+def _events(name):
+    """The feed rows this scan wrote. log.get_events answers for the running
+    job, and a test runs none, so the table is read directly."""
+    return [json.loads(row["meta"]) for row in db.query_all(
+        "SELECT meta FROM log_events WHERE event = ? ORDER BY ts", (name,))]
+
+
+def test_a_message_after_a_request_does_not_open_a_second_task_for_it(tmp_path):
+    """Ryan asked for one thing in two messages 45 seconds apart and frshty
+    put two proposals in front of the operator, both naming the same pull
+    request. The second message asks for nothing: its objective was read out
+    of the first message, which had already opened a task."""
+    _lift_exchange(tmp_path)
+    opened, haiku = _lift_scan(tmp_path, _verdict(), "SAME")
+
+    assert "The work already asked for" in haiku.call_args[0][0]
+    assert opened["proposed"] == 0
+    assert len(_item_ids()) == 1
+    dropped = _events("slack_proposal_duplicate_dropped")
+    assert len(dropped) == 1
+    assert dropped[0]["covered_by"] == _item_ids()[0]
+    second = db.query_one("SELECT * FROM slack_conversations WHERE thread_ts = ?",
+                          (DM_SECOND_TS,))
+    assert second["work_item_id"] is None
+    assert second["proposed_at"] is None
+    assert second["judged_ts"] == DM_SECOND_TS, "and it is not judged again"
+
+
+def test_a_message_after_a_request_that_asks_for_something_new_opens_a_task(tmp_path):
+    """The oracle for the test above. The drop is decided on what each
+    conversation says, not on where it sits, so a second message that asks for
+    a different board move still reaches the operator. Without this the
+    assertions above would pass on code that silenced every conversation
+    standing behind a proposal."""
+    _lift_exchange(tmp_path)
+    opened, _ = _lift_scan(tmp_path, _verdict(objective=SECOND_REQUEST))
+
+    assert opened["proposed"] == 1
+    assert len(_item_ids()) == 2
+    assert _events("slack_proposal_duplicate_dropped") == []
+
+
+def test_a_request_read_out_of_a_neighbour_nobody_proposed_still_opens(tmp_path):
+    """The task the neighbour opened is what carries the request. A neighbour
+    the judge called chatter carries nothing, so the message that does name
+    the work is the first to ask for it and it opens the only task there is."""
+    _lift_exchange(tmp_path, first_verdict=_verdict(actionable=False))
+    opened, _ = _lift_scan(tmp_path, _verdict())
+
+    assert opened["proposed"] == 1
+    assert len(_item_ids()) == 1
+    assert _events("slack_proposal_duplicate_dropped") == []
+
+
+def test_a_request_the_neighbour_only_half_names_still_opens(tmp_path):
+    """A neighbour that names some of what the objective names is a different
+    request that shares a ticket key with it. Dropping that would hide work
+    the operator has never been shown."""
+    _lift_exchange(tmp_path)
+    opened, _ = _lift_scan(tmp_path, _verdict(
+        objective="Move WB-412 to the PLT board and close WB-777 with it"))
+
+    assert opened["proposed"] == 1
+    assert len(_item_ids()) == 2
+    assert _events("slack_proposal_duplicate_dropped") == []
+
+
+def test_a_conversation_that_names_its_own_request_is_never_dropped(tmp_path):
+    """The whole test rests on which conversation says the identifiers the
+    objective names. A second message that names the ticket itself is asking
+    for it, whatever stands above it."""
+    _capture(tmp_path, [_ws(DM_FIRST_TS, ERIK, LIFT_FIRST, channel=DM)])
+    _lift_scan(tmp_path, _verdict())
+    _capture(tmp_path, [_ws(DM_SECOND_TS, ERIK,
+                            "and please do WB-412 before friday", channel=DM)])
+    opened, _ = _lift_scan(tmp_path, _verdict())
+
+    assert opened["proposed"] == 1
+    assert len(_item_ids()) == 2
+    assert _events("slack_proposal_duplicate_dropped") == []
+
+
+def test_an_objective_that_names_nothing_is_left_alone(tmp_path):
+    """There is nothing to match an objective naming no ticket, no pull
+    request and no repository on, so this module falls back to showing the
+    operator the same request twice rather than hiding one nobody reads."""
+    _lift_exchange(tmp_path)
+    opened, _ = _lift_scan(tmp_path, _verdict(
+        objective="Move the cohort export board over and drop the old one"))
+
+    assert opened["proposed"] == 1
+    assert len(_item_ids()) == 2
+    assert _events("slack_proposal_duplicate_dropped") == []
+
+
+def test_a_second_request_about_the_same_thing_still_opens_a_task(tmp_path):
+    """Identifiers name the thing worked on, never the work asked for. "can
+    you security review it too" names nothing and asks for a job the re-open
+    task does not do, so the identifier test alone would hide it."""
+    _capture(tmp_path, [_ws(DM_FIRST_TS, ERIK, LIFT_FIRST, channel=DM)])
+    _lift_scan(tmp_path, _verdict())
+    _capture(tmp_path, [_ws(DM_SECOND_TS, ERIK,
+                            "and can you security review it while you are there",
+                            channel=DM)])
+    opened, _ = _lift_scan(tmp_path, _verdict(
+        objective="Security review WB-412 before it moves to the PLT board"),
+        "DIFFERENT")
+
+    assert opened["proposed"] == 1
+    assert len(_item_ids()) == 2
+    assert _events("slack_proposal_duplicate_dropped") == []
+
+
+def test_an_answer_the_proposer_cannot_read_leaves_the_request_open(tmp_path):
+    """A model that answers nothing must not be able to hide a request. Every
+    answer but a plain SAME leaves the proposal open."""
+    _lift_exchange(tmp_path)
+    opened, _ = _lift_scan(tmp_path, _verdict(), "")
+
+    assert opened["proposed"] == 1
+    assert len(_item_ids()) == 2
+    assert _events("slack_proposal_duplicate_dropped") == []
+
+
+RYAN_FIRST = (
+    "Hi Danial, we are moving portal-api and portal-ui to the "
+    "<https://github.com/atroposhealth/portal|github.com/atroposhealth/portal>"
+    " repo. Do you mind re-opening your PR over there? "
+    "<https://github.com/atroposhealth/portal-api/pull/1293"
+    "|github.com/atroposhealth/portal-api/pull/1293>\n"
+    "atroposhealth/portal\n"
+    "#1293 LSC-96: Apply user-tier billing classification to all product types")
+RYAN_SECOND = (
+    'You can also use the "Deploy" workflow in that repo to deploy to the '
+    "life-sciences portal instance "
+    "(<https://portal.life-sciences.atroposhealth.com>) if you'd like to test "
+    "out your pod-specific environment")
+RYAN_FIRST_OBJECTIVE = (
+    "Re-open PR #1293 (LSC-96: Apply user-tier billing classification to all "
+    "product types) from atroposhealth/portal-api into atroposhealth/portal")
+RYAN_SECOND_OBJECTIVE = (
+    "Re-open PR #1293 (LSC-96: Apply user-tier billing classification to all "
+    "product types) from https://github.com/atroposhealth/portal-api/pull/1293"
+    " in the https://github.com/atroposhealth/portal repository. The Deploy "
+    "workflow in the new repo can be used to test on "
+    "https://portal.life-sciences.atroposhealth.com.")
+
+
+def test_the_two_messages_that_opened_two_tasks_open_one(tmp_path):
+    """The incident itself, with the text Slack carried and the objectives the
+    judge returned. The first message names the pull request three times, in
+    the link, in the unfurled title and as #1293; the second names none of
+    them."""
+    _capture(tmp_path, [_ws(DM_FIRST_TS, ERIK, RYAN_FIRST, channel=DM)])
+    _lift_scan(tmp_path, _verdict(objective=RYAN_FIRST_OBJECTIVE))
+    _capture(tmp_path, [_ws(DM_SECOND_TS, ERIK, RYAN_SECOND, channel=DM)])
+    opened, _ = _lift_scan(
+        tmp_path, _verdict(objective=RYAN_SECOND_OBJECTIVE), "SAME")
+
+    assert opened["proposed"] == 0
+    assert len(_item_ids()) == 1
+    assert _events("slack_proposal_duplicate_dropped")[0]["covered_by"] == _item_ids()[0]
+
+
 def test_a_context_deleted_after_the_decline_takes_the_boundary_away(tmp_path):
     """A message taken away above the line breaks the claim the line makes as
     surely as one edited above it. The transcript is simply shorter than the
