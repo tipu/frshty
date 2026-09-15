@@ -36,7 +36,8 @@
     <div>
         <h2 class="text-sm font-bold text-blue-400">Upwork inbox</h2>
         <div class="text-xs text-gray-600">
-            Read from the logged-in Chrome profile on this machine. frshty sends nothing until you press send.
+            Read from the logged-in Chrome profile on this machine. A room waiting on you opens a task,
+            the task writes the draft, and frshty sends nothing until you press send.
         </div>
     </div>
     <button class="send-btn text-sm" :disabled="refreshing" @click="refresh">
@@ -131,7 +132,7 @@
             <div class="flex gap-2 items-start">
                 <textarea v-model="drafts[r.room_id]" rows="4"
                           class="reply-input flex-1 p-2 rounded text-sm font-mono"
-                          placeholder="nothing drafted yet"></textarea>
+                          :placeholder="placeholder(r)"></textarea>
                 <button class="send-btn text-sm" :class="{ sent: sent[r.room_id] }"
                         :disabled="sending[r.room_id] || sent[r.room_id]"
                         @click="send(r.room_id)">
@@ -158,6 +159,7 @@ frshtyApp({
         const error = ref('');
         const refreshing = ref(false);
         const drafts = reactive({});
+        const served = reactive({});
         const sending = reactive({});
         const sent = reactive({});
         const sendError = reactive({});
@@ -243,15 +245,27 @@ frshtyApp({
             return 'send';
         }
 
+        function placeholder(r) {
+            if (r.work_item_id) return 'task ' + r.work_item_id + ' writes the draft here';
+            return 'nothing drafted yet';
+        }
+
         // A draft the operator has started editing is never overwritten by a
-        // poll. The model rewrites reply_draft whenever the room is judged
-        // again, and dropping half a typed answer on top of that is worse than
-        // showing a draft one scan old.
+        // poll. Dropping half a typed answer is worse than showing a draft one
+        // scan old. The box still has to pick up the draft its task records
+        // minutes after the room opened it, so the test is not "has this box
+        // ever been filled" but "does it still hold exactly what the server
+        // last sent", which is the box nobody has typed in.
         function apply(body) {
             status.value = body.status || null;
             rooms.value = body.rooms || [];
             for (const r of rooms.value) {
-                if (drafts[r.room_id] === undefined) drafts[r.room_id] = r.reply_draft || '';
+                const fresh = r.reply_draft || '';
+                if (drafts[r.room_id] === undefined
+                        || drafts[r.room_id] === served[r.room_id]) {
+                    drafts[r.room_id] = fresh;
+                }
+                served[r.room_id] = fresh;
             }
         }
 
@@ -317,7 +331,7 @@ frshtyApp({
             drafts, sending, sent, sendError,
             scanBad, scanStale, scanWhen, scanDetail,
             proposalDetail, proposingHeld, proposingDetail,
-            fmtTime, timeAgo, sendLabel, refresh, send,
+            fmtTime, timeAgo, sendLabel, placeholder, refresh, send,
         };
     },
 }).mount('#app');
