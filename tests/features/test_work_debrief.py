@@ -308,6 +308,103 @@ class TestRetryPolicy:
             lock.release()
 
 
+REQUIRED_OUT = json.dumps({
+    "summary": "Pushed the branch.\nThe pull request is not open yet.",
+    "followups": [{"kind": "work_item", "required": True, "unfinished": "pr",
+                   "draft": "open the pull request for the pushed branch"}],
+})
+
+
+def _debriefed_run(item_id, transcript_size=1, status="finished",
+                   done_at=None, read_at=None):
+    """Put an item where the scanner finds a debrief of its newest run.
+
+    The recorded transcript size is deliberately not the size on disk: that is
+    exactly the state a closed session reaches when its own shutdown writes
+    grow the file after the debrief read it. `read_at` is omitted by default,
+    which is the shape of every payload the board wrote before the field
+    existed."""
+    run = db.query_one("SELECT id FROM work_runs WHERE work_item_id = ? "
+                       "ORDER BY id DESC LIMIT 1", (item_id,))
+    db.execute("UPDATE work_runs SET status = ? WHERE id = ?", (status, run["id"]))
+    payload = {"followups": 0, "run_id": run["id"],
+               "transcript_size": transcript_size}
+    if read_at is not None:
+        payload["read_at"] = read_at
+    db.execute(
+        "INSERT INTO work_events(work_item_id, kind, payload, created_at) "
+        "VALUES (?, 'debrief_done', ?, ?)",
+        (item_id, json.dumps(payload), done_at or work_store._now()))
+    return run["id"]
+
+
+def _turn(item_id, run_id, when, kind="UserPromptSubmit"):
+    db.execute(
+        "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+        "VALUES (?, ?, ?, '{}', ?)", (item_id, run_id, kind, when))
+
+
+class TestPostCloseTranscriptGrowth:
+    """110 of the 136 repeat debriefs on the board came from a transcript that
+    grew after its session closed. The run did no more work; the harness wrote
+    to the file as it shut down. Each repeat wrote the same follow-ups again."""
+
+    def test_a_closed_run_is_not_debriefed_again_on_transcript_growth(self):
+        item_id = _done_item("closed and grown")
+        _debriefed_run(item_id)
+        assert item_id not in work_debrief._pending_done_items()
+
+    def test_an_agent_turn_after_the_debrief_reopens_it(self):
+        item_id = _done_item("resumed after the debrief")
+        run_id = _debriefed_run(item_id)
+        _turn(item_id, run_id, work_store._now())
+        assert item_id in work_debrief._pending_done_items()
+
+    def test_an_agent_turn_before_the_debrief_does_not_reopen_it(self):
+        item_id = _done_item("turn before the debrief")
+        run = db.query_one("SELECT id FROM work_runs WHERE work_item_id = ?", (item_id,))
+        earlier = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        _turn(item_id, run["id"], earlier, kind="Stop")
+        _debriefed_run(item_id)
+        assert item_id not in work_debrief._pending_done_items()
+
+    def test_a_turn_taken_while_the_summary_was_written_reopens_it(self):
+        """Writing the summary takes an LLM call. A run resumed during that
+        call records its turns before the summary lands, so the window opens
+        at the moment the debrief read the run, not at the moment it wrote."""
+        item_id = _done_item("resumed during the llm call")
+        base = datetime.now(timezone.utc) - timedelta(minutes=10)
+        read_at = base.isoformat()
+        turn_at = (base + timedelta(minutes=1)).isoformat()
+        done_at = (base + timedelta(minutes=2)).isoformat()
+        run_id = _debriefed_run(item_id, read_at=read_at, done_at=done_at)
+        _turn(item_id, run_id, turn_at)
+        assert item_id in work_debrief._pending_done_items()
+
+    def test_a_run_read_after_its_last_turn_stays_current(self):
+        item_id = _done_item("read after the last turn")
+        base = datetime.now(timezone.utc) - timedelta(minutes=10)
+        run = db.query_one("SELECT id FROM work_runs WHERE work_item_id = ?", (item_id,))
+        _turn(item_id, run["id"], base.isoformat(), kind="Stop")
+        _debriefed_run(item_id,
+                       read_at=(base + timedelta(minutes=1)).isoformat(),
+                       done_at=(base + timedelta(minutes=2)).isoformat())
+        assert item_id not in work_debrief._pending_done_items()
+
+    def test_an_open_run_is_still_debriefed_again(self):
+        """A run the board has not seen end keeps its summary rewritten. Only
+        a finished run is allowed to ignore the growth of its transcript."""
+        item_id = _done_item("still open")
+        _debriefed_run(item_id, status="running")
+        assert item_id in work_debrief._pending_done_items()
+
+    def test_a_newer_run_is_always_debriefed(self):
+        item_id = _done_item("relaunched")
+        _debriefed_run(item_id)
+        work_store.add_run(item_id, f"sid-db-{item_id}-2", f"work-{item_id}-2", "/tmp")
+        assert item_id in work_debrief._pending_done_items()
+
+
 class TestSupersede:
     def test_regenerate_dismisses_old_drafts(self, monkeypatch, tmp_path):
         t = tmp_path / "t.jsonl"
@@ -324,6 +421,109 @@ class TestSupersede:
         drafts = [f for f in fus if f["status"] == "draft"]
         dismissed = [f for f in fus if f["status"] == "dismissed"]
         assert len(drafts) == 1 and len(dismissed) == 1
+
+    def test_a_new_debrief_withdraws_the_proposal_the_old_one_opened(
+            self, monkeypatch, tmp_path):
+        """Work item 9501 carried two open proposals for one piece of work.
+        The operator approved both, and both runs tried to merge the same
+        pull request. The newest debrief owns the follow-ups of its task."""
+        t = tmp_path / "t.jsonl"
+        t.write_text(json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "x"}]}}) + "\n")
+        item_id = _done_item("withdraw the old proposal")
+        db.execute("UPDATE work_runs SET transcript_path = ? WHERE work_item_id = ?",
+                   (str(t), item_id))
+        monkeypatch.setattr(work_debrief, "_run_claude", lambda p: REQUIRED_OUT)
+        work_debrief.run_debrief(item_id)
+        opened = work_debrief.propose_required_followups()
+        assert len(opened) == 1
+        proposal = db.query_one(
+            "SELECT id, state FROM work_items WHERE source_item_id = ?", (item_id,))
+        assert proposal["state"] == work_store.PROPOSED_STATE
+
+        out = work_debrief.run_debrief(item_id)
+
+        assert out["superseded"] == [proposal["id"]]
+        withdrawn = db.query_one(
+            "SELECT state, stop_reason, archived_at FROM work_items WHERE id = ?",
+            (proposal["id"],))
+        assert withdrawn["state"] == work_store.CANCELED_STATE
+        assert withdrawn["stop_reason"] == work_store.SUPERSEDED_REASON
+        assert withdrawn["archived_at"]
+        statuses = [f["status"] for f in work_debrief.followups_for(item_id)]
+        assert statuses.count("proposed") == 0
+        assert statuses.count("dismissed") == 1
+        assert statuses.count("draft") == 1
+        kinds = [e["kind"] for e in db.query_all(
+            "SELECT kind FROM work_events WHERE work_item_id = ?", (proposal["id"],))]
+        assert "proposal_superseded" in kinds
+
+    def test_the_withdrawn_followup_keeps_the_proposal_it_opened(
+            self, monkeypatch, tmp_path):
+        t = tmp_path / "t.jsonl"
+        t.write_text(json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "x"}]}}) + "\n")
+        item_id = _done_item("keep the trail")
+        db.execute("UPDATE work_runs SET transcript_path = ? WHERE work_item_id = ?",
+                   (str(t), item_id))
+        monkeypatch.setattr(work_debrief, "_run_claude", lambda p: REQUIRED_OUT)
+        work_debrief.run_debrief(item_id)
+        work_debrief.propose_required_followups()
+        proposal = db.query_one(
+            "SELECT id FROM work_items WHERE source_item_id = ?", (item_id,))
+        work_debrief.run_debrief(item_id)
+        retired = [f for f in work_debrief.followups_for(item_id)
+                   if f["status"] == "dismissed"][0]
+        assert f"#{proposal['id']}" in retired["detail"]
+        assert "superseded by new debrief" in retired["detail"]
+
+    def test_a_proposal_is_not_opened_while_a_debrief_runs(self, monkeypatch, tmp_path):
+        """A debrief withdraws the proposals the item already has open, and it
+        can only withdraw what is already there. A proposal opened while the
+        debrief runs would survive it, and that is the second proposal for one
+        piece of work this change exists to stop."""
+        t = tmp_path / "t.jsonl"
+        t.write_text(json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "x"}]}}) + "\n")
+        item_id = _done_item("propose while debriefing")
+        db.execute("UPDATE work_runs SET transcript_path = ? WHERE work_item_id = ?",
+                   (str(t), item_id))
+        monkeypatch.setattr(work_debrief, "_run_claude", lambda p: REQUIRED_OUT)
+        work_debrief.run_debrief(item_id)
+        draft = work_debrief.followups_for(item_id)[0]
+        lock = work_debrief._item_lock(item_id)
+        lock.acquire()
+        try:
+            out = work_debrief.propose_followup(draft["id"])
+        finally:
+            lock.release()
+        assert "already running" in out["error"]
+        assert db.query_one("SELECT status FROM work_followups WHERE id = ?",
+                            (draft["id"],))["status"] == "draft"
+        assert db.query_one("SELECT id FROM work_items WHERE source_item_id = ?",
+                            (item_id,)) is None
+
+    def test_an_approved_proposal_is_left_alone(self, monkeypatch, tmp_path):
+        """A proposal the operator approved is running work, not an open
+        question. Withdrawing it would cancel a task the operator started."""
+        t = tmp_path / "t.jsonl"
+        t.write_text(json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "x"}]}}) + "\n")
+        item_id = _done_item("approved already")
+        db.execute("UPDATE work_runs SET transcript_path = ? WHERE work_item_id = ?",
+                   (str(t), item_id))
+        monkeypatch.setattr(work_debrief, "_run_claude", lambda p: REQUIRED_OUT)
+        work_debrief.run_debrief(item_id)
+        work_debrief.propose_required_followups()
+        proposal = db.query_one(
+            "SELECT id FROM work_items WHERE source_item_id = ?", (item_id,))
+        assert work_store.claim_proposal(proposal["id"]) is True
+
+        out = work_debrief.run_debrief(item_id)
+
+        assert out["superseded"] == []
+        assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                            (proposal["id"],))["state"] == "agent_working"
 
 
 class TestLaunchContexts:
