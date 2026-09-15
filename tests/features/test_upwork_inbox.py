@@ -1297,6 +1297,27 @@ class TestUnreachableTask:
         assert "alerted" not in again
         assert self._proposals() == []
 
+    def test_a_task_closed_after_the_inbox_recovered_does_not_silence_the_next(self):
+        """The outage the task named is over, and the operator has dealt with
+        the task. The next outage is a new fault and must report itself."""
+        self._failed_job()
+        first = self._down()["alerted"]
+        self._up()
+        work_store.apply_action(first, "decline")
+        self._failed_job()
+        second = self._down()["alerted"]
+        assert second and second != first
+
+    def test_a_threshold_past_the_history_read_is_still_reached(self):
+        """The run is counted out of the job history, and the read is bounded.
+        A bound below the threshold would hold every outage under it."""
+        for _ in range(29):
+            self._failed_job()
+        result = self._down(config=_config(unreachable_scans=30))
+        assert result["failed_scans"] == 30
+        assert result["alerted"]
+        assert len(self._proposals()) == 1
+
     def test_zero_turns_the_task_off(self):
         self._failed_job()
         self._failed_job()
