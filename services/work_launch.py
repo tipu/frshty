@@ -257,6 +257,20 @@ def _context_block(contexts: list[str], slack: bool) -> str:
     return block
 
 
+def _images_block(paths: list[str]) -> str:
+    """The images the operator pasted with the objective.
+
+    The launch carries no image of its own: the agent starts in a tmux pane
+    and reads an image from a path. The board writes each pasted image to
+    disk and names the file here, so the agent can open it."""
+    if not paths:
+        return ""
+    return ("\n\n## Attached images\n\n"
+            + "\n".join(f"- {p}" for p in paths)
+            + "\n\nThe operator pasted these images with the objective. Read every "
+              "one of them before you start.\n")
+
+
 def _source_block(source_item_id: int) -> str:
     item = db.query_one(
         "SELECT id, objective, summary, current_checkpoint FROM work_items WHERE id = ?",
@@ -440,16 +454,36 @@ def _resolve_launch(objective: str, cwd: str, contexts: list[str], agent: str,
 def launch(objective: str, cwd: str = "", contexts: list[str] | None = None,
            slack: bool = False, source_item_id: int | None = None,
            agent: str = "claude", brief: str = "", repo: str = "",
-           no_worktree: bool = False, critical: bool = False) -> dict:
+           no_worktree: bool = False, critical: bool = False,
+           images: list[dict] | None = None) -> dict:
+    """Start an agent on one objective, with the images the operator pasted.
+
+    An image is checked before the work item is created, so a paste the board
+    cannot read refuses the launch and leaves the board as it was. It can only
+    be written after the item exists, because its folder is named for the
+    item, so a write that fails cancels the item rather than leaving a task on
+    the board that no agent ever starts."""
     plan = _resolve_launch(objective, cwd, contexts or [], agent, source_item_id,
                            repo_pick=repo, no_worktree=no_worktree)
     if "error" in plan:
         return plan
+    decoded, image_error = work_artifacts.decode_intake_images(images)
+    if image_error:
+        return {"error": image_error}
     objective, contexts = plan["objective"], plan["contexts"]
     labels = ",".join(contexts + ([SLACK_LABEL] if slack else []))
     item_id = work_store.create_item(objective, instance_key="personal", contexts=labels,
                                      source_item_id=source_item_id,
                                      worktree_opt_out=no_worktree, critical=critical)
+    try:
+        plan["images"] = work_artifacts.save_intake_images(item_id, decoded)
+    except OSError as e:
+        work_store.apply_action(item_id, "cancel")
+        log.emit("work_launch_failed",
+                 f"work item {item_id}: pasted images could not be stored: "
+                 f"{type(e).__name__}: {e}")
+        return {"error": f"launch failed: pasted images could not be stored: {e}",
+                "item_id": item_id}
     return _start(item_id, plan, slack, brief)
 
 
@@ -699,7 +733,8 @@ def _start(item_id: int, plan: dict, slack: bool, brief: str) -> dict:
             board_url=core_config.board_url())
         context = (
             f"# Work item {item_id}\n\n## Objective\n\n{objective}\n"
-            + source_block + _context_block(contexts, slack)
+            + source_block + _images_block(plan.get("images") or [])
+            + _context_block(contexts, slack)
             + (work_worktree.context_block(worktree_row) if worktree_row else "")
             + (brief or "") + "\n"
             "Work toward the objective. Do only what the objective asks. If the "

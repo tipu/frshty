@@ -9,6 +9,8 @@ it deletes an item's folder once nothing inside it was written for
 MAX_AGE_DAYS, forgets the rows that pointed into that folder, and forgets the
 older rows that still point into /tmp at a file a reboot has wiped.
 """
+import base64
+import binascii
 import os
 import shutil
 import time
@@ -22,6 +24,11 @@ MAX_AGE_DAYS = 30
 GC_INTERVAL_S = 86400
 SCRATCH_PREFIX = "/tmp/"
 ROOT_ENV = "FRSHTY_ARTIFACT_ROOT"
+INTAKE_DIR = "intake"
+INTAKE_IMAGE_TYPES = {"image/png": ".png", "image/jpeg": ".jpg",
+                      "image/gif": ".gif", "image/webp": ".webp"}
+MAX_INTAKE_IMAGES = 8
+MAX_INTAKE_IMAGE_BYTES = 10 * 1024 * 1024
 
 
 def root() -> Path:
@@ -37,6 +44,60 @@ def item_dir(item_id: int) -> Path:
     folder = root() / f"work-{item_id}"
     folder.mkdir(parents=True, exist_ok=True)
     return folder
+
+
+def decode_intake_images(images) -> tuple[list[tuple[bytes, str]], str]:
+    """The images one launch carries, decoded, or an empty list and an error.
+
+    The board posts an image the operator pasted into the compose box as
+    base64 beside its media type. Every check runs before the work item is
+    created, so a paste the board cannot store refuses the launch instead of
+    leaving a task that names a file nothing wrote."""
+    if not images:
+        return [], ""
+    if not isinstance(images, list):
+        return [], "images must be a list"
+    if len(images) > MAX_INTAKE_IMAGES:
+        return [], (f"too many images: {len(images)}; "
+                    f"at most {MAX_INTAKE_IMAGES} per task")
+    decoded: list[tuple[bytes, str]] = []
+    for index, image in enumerate(images, 1):
+        if not isinstance(image, dict):
+            return [], f"image {index} is not an object"
+        media_type = str(image.get("type") or "").strip().lower()
+        suffix = INTAKE_IMAGE_TYPES.get(media_type)
+        if suffix is None:
+            return [], (f"image {index} has unsupported type "
+                        f"{media_type or '(none)'}; paste a png, jpeg, gif or webp")
+        try:
+            data = base64.b64decode(str(image.get("data") or ""), validate=True)
+        except (ValueError, binascii.Error):
+            return [], f"image {index} is not valid base64"
+        if not data:
+            return [], f"image {index} is empty"
+        if len(data) > MAX_INTAKE_IMAGE_BYTES:
+            return [], (f"image {index} is {len(data)} bytes, over the "
+                        f"{MAX_INTAKE_IMAGE_BYTES} byte limit")
+        decoded.append((data, suffix))
+    return decoded, ""
+
+
+def save_intake_images(item_id: int, decoded: list[tuple[bytes, str]]) -> list[str]:
+    """Write the decoded images of one launch into the item's folder.
+
+    The agent runs in a tmux pane and reads an image from a path, so a pasted
+    image has to outlive the request that carried it. It lands under the
+    item's own folder, where the same gc reclaims it."""
+    if not decoded:
+        return []
+    folder = item_dir(item_id) / INTAKE_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    paths = []
+    for index, (data, suffix) in enumerate(decoded, 1):
+        path = folder / f"pasted-{index}{suffix}"
+        path.write_bytes(data)
+        paths.append(str(path))
+    return paths
 
 
 def _newest_mtime(folder: Path) -> float:

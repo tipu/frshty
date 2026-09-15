@@ -17,6 +17,11 @@
 <style>
 .wintake { width: 100%; background: var(--ln-bg); border: 1px solid var(--ln-border-hi); border-radius: 6px; padding: 7px 10px; color: var(--ln-text); font-size: 12.5px; }
 .wsum { white-space: pre-wrap; font-size: 12.5px; color: var(--ln-text-2); background: var(--ln-bg); border: 1px solid var(--ln-border); border-radius: 6px; padding: 8px 12px; margin-top: 8px; }
+.ln-attach { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.ln-attach-item { position: relative; display: inline-block; }
+.ln-attach-item img { display: block; width: 56px; height: 56px; object-fit: cover; border: 1px solid var(--ln-border-hi); border-radius: 6px; background: var(--ln-bg); }
+.ln-attach-wait { display: flex; align-items: center; justify-content: center; width: 56px; height: 56px; border: 1px dashed var(--ln-border-hi); border-radius: 6px; background: var(--ln-bg); color: var(--ln-text-2); font-size: 10px; }
+.ln-attach-x { position: absolute; top: -6px; right: -6px; width: 17px; height: 17px; padding: 0; line-height: 15px; text-align: center; border-radius: 50%; border: 1px solid var(--ln-border-hi); background: var(--ln-bg); color: var(--ln-text); font-size: 11px; cursor: pointer; }
 </style>
 <script src="/static/frshty-usage.js"></script>
 </head>
@@ -78,8 +83,17 @@
     <div>
       <textarea class="ln-input ln-compose-text" rows="1" ref="intakeBox" v-model="intakeText"
                 :disabled="!targetMeta.personalLoaded || intakeBusy" @keydown.enter="onComposeEnter($event, intake)"
-                @input="grow($event.target)"
-                placeholder="Describe an outcome, not a report (say 'get PR #123 merged', not 'PR stats'). Enter launches a run, Shift+Enter adds a line."></textarea>
+                @input="grow($event.target)" @paste="onIntakePaste"
+                placeholder="Describe an outcome, not a report (say 'get PR #123 merged', not 'PR stats'). Paste an image to attach it. Enter launches a run, Shift+Enter adds a line."></textarea>
+      <div class="ln-attach" v-if="intakeImages.length">
+        <span class="ln-attach-item" v-for="(im, i) in intakeImages" :key="im.id">
+          <img v-if="im.url" :src="im.url" :alt="im.name"
+               :title="im.name + ' — this image goes up with the task'">
+          <span v-else class="ln-attach-wait" :title="'reading ' + im.name">reading…</span>
+          <button type="button" class="ln-attach-x" :title="'remove ' + im.name"
+                  @click="removeIntakeImage(i)">×</button>
+        </span>
+      </div>
       <div class="ln-task-compose-opts">
         <span class="ln-chipsel" v-if="peers.length"
               title="which host runs this task; it resets to this host on every page load">host:
@@ -113,7 +127,8 @@
         <span class="ln-hint" v-else>no thread — this task stands alone</span>
       </div>
     </div>
-    <button type="submit" class="ln-btn ln-btn-primary" :disabled="!targetMeta.personalLoaded || intakeBusy">↗ Launch task</button>
+    <button type="submit" class="ln-btn ln-btn-primary"
+            :disabled="!targetMeta.personalLoaded || intakeBusy || intakeImagesPending">↗ Launch task</button>
   </form>
   <div class="ln-small" style="color:var(--ln-red)" v-if="intakeError">{{ intakeError }}</div>
 
@@ -267,6 +282,9 @@
 </frshty-shell>
 </div>
 <script>
+const INTAKE_IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
+const MAX_INTAKE_IMAGES = 8;
+const MAX_INTAKE_IMAGE_BYTES = 10 * 1024 * 1024;
 const DISPATCH_PROJECTS = ["aimyable", "quill", "clarivis", "algotrader2", "frshty", "game_expirement", "expirement", "upwork-api"];
 const STATE_PILLS = {
   proposed: "ln-pill-violet",
@@ -290,6 +308,7 @@ frshtyApp({
       projects: [], slackAvailable: false, intakeContexts: [], intakeSlack: false, moreOpen: false,
       intakeCritical: false,
       intakeRepo: "",
+      intakeImages: [], intakeImageSeq: 0,
       agents: ["claude"], intakeAgent: localStorage.getItem("workAgent") || "claude",
       connError: "", replyText: {}, sumOpen: {}, approveBusy: {}, linkmap: null, threads: [],
       fupOpen: {}, fupText: {}, fupBusy: {}, fupError: {},
@@ -346,6 +365,9 @@ frshtyApp({
       if (this.moreOpen) return [...this.primaryProjects, ...this.extraProjects];
       return [...this.primaryProjects,
               ...this.extraProjects.filter(p => this.intakeContexts.includes(p.key))];
+    },
+    intakeImagesPending() {
+      return this.intakeImages.some(im => !im.data);
     },
     intakeRepos() {
       const names = [];
@@ -445,6 +467,56 @@ frshtyApp({
       const i = this.projectFilter.indexOf(k);
       if (i >= 0) this.projectFilter.splice(i, 1); else this.projectFilter.push(k);
       this.onProjectFilter();
+    },
+    onIntakePaste(e) {
+      const items = (e.clipboardData && e.clipboardData.items) || [];
+      const files = Array.from(items)
+        .filter(it => it.kind === "file" && (it.type || "").startsWith("image/"))
+        .map(it => it.getAsFile())
+        .filter(Boolean);
+      if (!files.length) return;
+      e.preventDefault();
+      files.forEach(f => this.addIntakeImage(f));
+    },
+    addIntakeImage(file) {
+      const name = file.name || "pasted image";
+      if (!INTAKE_IMAGE_TYPES.includes(file.type)) {
+        this.intakeError = "cannot attach " + (file.type || "that file") +
+                           " — paste a png, jpeg, gif or webp image";
+        return;
+      }
+      if (this.intakeImages.length >= MAX_INTAKE_IMAGES) {
+        this.intakeError = "at most " + MAX_INTAKE_IMAGES + " images per task";
+        return;
+      }
+      if (file.size > MAX_INTAKE_IMAGE_BYTES) {
+        this.intakeError = name + " is over the " +
+                           Math.round(MAX_INTAKE_IMAGE_BYTES / 1048576) + " MB limit";
+        return;
+      }
+      const id = ++this.intakeImageSeq;
+      this.intakeImages.push({ id, name, type: file.type, url: "", data: "" });
+      this.intakeError = "";
+      const drop = () => {
+        const at = this.intakeImages.findIndex(im => im.id === id);
+        if (at >= 0) this.intakeImages.splice(at, 1);
+        this.intakeError = name + " could not be read";
+      };
+      const reader = new FileReader();
+      reader.onload = () => {
+        const entry = this.intakeImages.find(im => im.id === id);
+        if (!entry) return;
+        const url = String(reader.result || "");
+        const data = url.slice(url.indexOf(",") + 1);
+        if (!data) { drop(); return; }
+        entry.url = url;
+        entry.data = data;
+      };
+      reader.onerror = drop;
+      reader.readAsDataURL(file);
+    },
+    removeIntakeImage(i) {
+      this.intakeImages.splice(i, 1);
     },
     toggleContext(key) {
       const i = this.intakeContexts.indexOf(key);
@@ -605,6 +677,10 @@ frshtyApp({
       el.style.height = el.scrollHeight + "px";
     },
     async intake() {
+      if (this.intakeImages.some(im => !im.data)) {
+        this.intakeError = "a pasted image is still being read; launch again in a moment";
+        return;
+      }
       this.intakeError = ""; this.intakeBusy = true;
       try {
         const r = await fetch(this.apiUrl(this.target, "/api/work/intake"), {
@@ -613,7 +689,9 @@ frshtyApp({
                                  contexts: this.intakeContexts, slack: this.intakeSlack,
                                  critical: this.intakeCritical,
                                  repo: this.intakeRepo === "__none__" ? "" : this.intakeRepo,
-                                 no_worktree: this.intakeRepo === "__none__" }),
+                                 no_worktree: this.intakeRepo === "__none__",
+                                 images: this.intakeImages.map(im => ({
+                                   name: im.name, type: im.type, data: im.data })) }),
         });
         const d = await r.json();
         if (!r.ok) { this.intakeError = d.error || "intake failed (HTTP " + r.status + ")"; return; }
@@ -621,6 +699,7 @@ frshtyApp({
         this.intakeText = ""; this.intakeContexts = []; this.intakeSlack = false;
         this.intakeCritical = false;
         this.intakeRepo = "";
+        this.intakeImages = [];
         this.$nextTick(() => this.grow(this.$refs.intakeBox));
         await this.refresh();
       } catch (e) {
