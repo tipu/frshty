@@ -55,6 +55,7 @@ from services import work_launch, work_store
 
 UPWORK_TAG = "upwork"
 STATE_MODULE = "upwork_inbox"
+OUTAGE_STATE_MODULE = "upwork_inbox_outage"
 SCAN_TASK = "upwork_scan"
 DEFAULT_ROOMS_LIMIT = 20
 DEFAULT_ROOM_PAGES = 3
@@ -1280,7 +1281,7 @@ def propose(config: dict, instance_key: str = "",
     return opened, counts
 
 
-def _unreachable_runs(instance_key: str) -> int:
+def _unreachable_runs(instance_key: str, limit: int) -> int:
     """How many finished scans before this one already failed to read the inbox.
 
     The run history is asked of `jobs` rather than kept in state, because the
@@ -1288,14 +1289,15 @@ def _unreachable_runs(instance_key: str) -> int:
     writes the row of the run now in progress only when that run ends, so what
     this reads stops at the scan before this one and the caller counts itself.
 
-    The walk stops at the first run that read the inbox, and it reads at most
-    a day of hourly scans, so an outage longer than that saturates rather than
-    growing without bound. The number is only ever used to decide whether an
-    outage has lasted long enough to be worth the operator's attention."""
+    The walk stops at the first run that read the inbox. `limit` bounds how
+    far back it reads, so a long outage saturates rather than reading the
+    whole run history every scan, and the caller sets it above the run length
+    it is testing for: a bound below that would hold the count under the
+    threshold for ever and report nothing."""
     rows = db.query_all(
         "SELECT response FROM jobs WHERE instance_key = ? AND task = ?"
         " AND finished_at IS NOT NULL ORDER BY id DESC LIMIT ?",
-        (instance_key, SCAN_TASK, UNREACHABLE_RUNS_READ))
+        (instance_key, SCAN_TASK, max(0, limit)))
     runs = 0
     for row in rows:
         artifacts = db.load_json(row, "response").get("artifacts")
@@ -1306,10 +1308,19 @@ def _unreachable_runs(instance_key: str) -> int:
     return runs
 
 
-def _alert_held(instance_key: str) -> int | None:
-    """The task this instance's current outage already opened, if there is one."""
-    blob = state.load(STATE_MODULE)
-    held = (blob.get("unreachable_task") or {}).get(instance_key)
+def _outage_task(instance_key: str, field: str) -> int | None:
+    """One of the two tasks this instance's outages are remembered by.
+
+    `open` is the task opened for the outage now in progress, and a scan that
+    reads the inbox drops it. `last` is the task opened for the outage before
+    this one, and nothing drops it, so the next outage can still see whether
+    the board carries it.
+
+    They live in a state key of their own rather than beside the room floor.
+    core.state rewrites a whole blob on every save, and the manual refresh on
+    /upwork writes the room floor from the web process while a scan is
+    running; sharing one blob would let either write lose the other."""
+    held = (state.load(OUTAGE_STATE_MODULE).get(field) or {}).get(instance_key)
     try:
         return int(held) if held is not None else None
     except (TypeError, ValueError):
@@ -1317,24 +1328,20 @@ def _alert_held(instance_key: str) -> int | None:
 
 
 def _forget_alert(instance_key: str) -> None:
-    """Drop the record of the task the last outage opened, once the inbox
-    reads again and that task is closed.
+    """Close the record of the outage that has just ended.
 
-    The record is what stops a second task being opened for an outage the
-    board already carries. Both halves of the test matter. A task still
-    waiting on the operator says the outage is already reported, so the next
-    one must not add a duplicate. A task the operator declined while the inbox
-    was still down must not be replaced by a new one on the very next scan,
-    which is why nothing is forgotten until a scan has actually read the
-    inbox."""
-    held = _alert_held(instance_key)
-    if held is None or _task_open(held):
+    A scan that read the inbox ends the outage, whatever became of the task it
+    opened: the next failure is a new fault and has to be able to report
+    itself. Only `open` is dropped. The task may still be sitting on the board
+    unanswered, and `last` is how the next outage sees that and stays quiet
+    instead of duplicating it."""
+    blob = state.load(OUTAGE_STATE_MODULE)
+    outstanding = dict(blob.get("open") or {})
+    if instance_key not in outstanding:
         return
-    blob = state.load(STATE_MODULE)
-    alerts = dict(blob.get("unreachable_task") or {})
-    alerts.pop(instance_key, None)
-    blob["unreachable_task"] = alerts
-    state.save(STATE_MODULE, blob)
+    outstanding.pop(instance_key)
+    blob["open"] = outstanding
+    state.save(OUTAGE_STATE_MODULE, blob)
 
 
 def _raise_alert(instance_key: str, runs: int, error: str,
@@ -1347,11 +1354,20 @@ def _raise_alert(instance_key: str, runs: int, error: str,
     hours. So the outage is put where the operator already looks: a proposal
     on /tasks, which nothing runs until they approve it.
 
-    It is opened once per outage. Two scans of one instance cannot run at the
-    same time -- core/queue.py refuses to claim a job whose instance and task
-    are already running -- so reading the record and writing it back is safe
-    without a lock of its own."""
-    if _alert_held(instance_key) is not None:
+    It is opened once per outage, and not at all while the task the last
+    outage opened is still waiting on the operator: the board already says the
+    reader is down, and a second task saying it again is noise. A task that
+    was declined, finished or canceled is one the operator is done with, so
+    the outage after it opens a new one.
+
+    Two scans of one instance cannot run at the same time -- core/queue.py
+    refuses to claim a job whose instance and task are already running -- so
+    reading the record and writing it back is safe without a lock of its
+    own."""
+    if _outage_task(instance_key, "open") is not None:
+        return None
+    last = _outage_task(instance_key, "last")
+    if last is not None and _task_open(last):
         return None
     objective = UNREACHABLE_OBJECTIVE.format(
         instance=instance_key or "this instance",
@@ -1366,11 +1382,10 @@ def _raise_alert(instance_key: str, runs: int, error: str,
         objective, note=note, instance_key=instance_key,
         contexts=",".join(contexts), cwd=_cwd_for(FRSHTY_PROJECT),
         brief=brief, now=_iso(now))
-    blob = state.load(STATE_MODULE)
-    alerts = dict(blob.get("unreachable_task") or {})
-    alerts[instance_key] = item_id
-    blob["unreachable_task"] = alerts
-    state.save(STATE_MODULE, blob)
+    blob = state.load(OUTAGE_STATE_MODULE)
+    blob["open"] = {**(blob.get("open") or {}), instance_key: item_id}
+    blob["last"] = {**(blob.get("last") or {}), instance_key: item_id}
+    state.save(OUTAGE_STATE_MODULE, blob)
     log.emit("upwork_inbox_task_opened",
              f"[{instance_key}] the Upwork inbox could not be read on {runs}"
              f" scans in a row; opened task {item_id} to restore it",
@@ -1390,7 +1405,8 @@ def _report_outage(config: dict, instance_key: str, error: str,
     every hour of it is an hour of client messages nobody has read."""
     threshold = int(_settings(config).get("unreachable_scans",
                                           DEFAULT_UNREACHABLE_SCANS))
-    runs = 1 + _unreachable_runs(instance_key)
+    runs = 1 + _unreachable_runs(instance_key,
+                                 max(UNREACHABLE_RUNS_READ, threshold))
     report["failed_scans"] = runs
     if threshold > 0 and runs >= threshold:
         item_id = _raise_alert(instance_key, runs, error, now)
