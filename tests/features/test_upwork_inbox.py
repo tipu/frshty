@@ -1186,3 +1186,182 @@ class TestStatus:
                     "%013d" % _millis(30)))
         s = ui.status(_config(), instance_key="personal", now=NOW)
         assert s["unanswered_rooms"] == 0
+
+
+class TestUnreachableTask:
+    """An inbox that cannot be read fails quietly: the scan still ends ok and
+    the only sign is a red line on /upwork. These assert that a run of failed
+    scans puts the outage on /tasks instead, once and only once."""
+
+    def _down(self, config=None, now=NOW):
+        with patch.object(upwork_client, "rooms",
+                          side_effect=upwork_client.UpworkAuthError(
+                              "connect ECONNREFUSED ::1:9222")), \
+                patch.object(ui, "run_haiku") as haiku:
+            result = ui.check(config if config is not None else _config(),
+                              instance_key="personal", now=now)
+        assert haiku.call_count == 0
+        return result
+
+    def _up(self, now=NOW):
+        rooms_patch, stories_patch = _inbox([], {})
+        with rooms_patch, stories_patch, patch.object(ui, "run_haiku") as haiku:
+            result = ui.check(_config(), instance_key="personal", now=now)
+        assert haiku.call_count == 0
+        return result
+
+    def _failed_job(self):
+        _job(finished=NOW, artifacts={"messages": 0, "rooms": 0, "proposed": 0,
+                                      "skipped": ui.UNREACHABLE_SKIP})
+
+    def _proposals(self):
+        return db.query_all(
+            "SELECT * FROM work_items WHERE state = 'proposed'"
+            " ORDER BY id")
+
+    def test_one_failed_scan_opens_nothing(self):
+        """A browser restarting costs one scan and fixes itself. A task for
+        every blip is noise on the board the operator stops reading."""
+        result = self._down()
+        assert result["skipped"] == ui.UNREACHABLE_SKIP
+        assert result["failed_scans"] == 1
+        assert "alerted" not in result
+        assert self._proposals() == []
+
+    def test_a_run_of_failed_scans_opens_one_task(self):
+        self._failed_job()
+        result = self._down()
+        assert result["failed_scans"] == 2
+        items = self._proposals()
+        assert len(items) == 1
+        assert items[0]["id"] == result["alerted"]
+        assert items[0]["objective"] == ui.UNREACHABLE_OBJECTIVE.format(
+            instance="personal", runs=2)
+        assert "ECONNREFUSED ::1:9222" in items[0]["current_checkpoint"]
+        assert "ECONNREFUSED ::1:9222" in items[0]["launch_brief"]
+        assert items[0]["contexts"] == "personal,upwork"
+        events = _events("upwork_inbox_task_opened")
+        assert len(events) == 1
+        assert events[0]["links"]["detail"] == f"/tasks/{items[0]['id']}"
+
+    def test_the_outage_opens_one_task_and_not_one_per_scan(self):
+        self._failed_job()
+        first = self._down()
+        self._failed_job()
+        self._failed_job()
+        second = self._down()
+        assert first["alerted"]
+        assert second["failed_scans"] == 4
+        assert "alerted" not in second
+        assert len(self._proposals()) == 1
+
+    def test_a_scan_that_reads_the_inbox_again_restarts_the_count(self):
+        """The run is asked of the job history, so a scan that succeeded
+        between two failures breaks it and the next failure is the first."""
+        self._failed_job()
+        _job(finished=NOW, artifacts={"messages": 0, "rooms": 0, "proposed": 0})
+        result = self._down()
+        assert result["failed_scans"] == 1
+        assert self._proposals() == []
+
+    def test_a_task_still_waiting_silences_the_next_outage(self):
+        """The board already carries the fault. A second task for it would be
+        a duplicate of the one the operator has not decided about."""
+        self._failed_job()
+        opened = self._down()["alerted"]
+        self._up()
+        self._failed_job()
+        again = self._down()
+        assert "alerted" not in again
+        assert [r["id"] for r in self._proposals()] == [opened]
+
+    def test_a_decided_task_lets_the_next_outage_open_a_new_one(self):
+        self._failed_job()
+        first = self._down()["alerted"]
+        work_store.apply_action(first, "decline")
+        self._up()
+        self._failed_job()
+        second = self._down()["alerted"]
+        assert second and second != first
+
+    def test_a_declined_task_is_not_reopened_while_the_inbox_is_still_down(self):
+        """Declining while the inbox is down is the operator saying they do
+        not want the task. The record is only forgotten once a scan has read
+        the inbox, so the next failed scan does not hand it straight back."""
+        self._failed_job()
+        first = self._down()["alerted"]
+        work_store.apply_action(first, "decline")
+        self._failed_job()
+        self._failed_job()
+        again = self._down()
+        assert "alerted" not in again
+        assert self._proposals() == []
+
+    def test_a_task_closed_after_the_inbox_recovered_does_not_silence_the_next(self):
+        """The outage the task named is over, and the operator has dealt with
+        the task. The next outage is a new fault and must report itself."""
+        self._failed_job()
+        first = self._down()["alerted"]
+        self._up()
+        work_store.apply_action(first, "decline")
+        self._failed_job()
+        second = self._down()["alerted"]
+        assert second and second != first
+
+    def test_a_threshold_past_the_history_read_is_still_reached(self):
+        """The run is counted out of the job history, and the read is bounded.
+        A bound below the threshold would hold every outage under it."""
+        for _ in range(29):
+            self._failed_job()
+        result = self._down(config=_config(unreachable_scans=30))
+        assert result["failed_scans"] == 30
+        assert result["alerted"]
+        assert len(self._proposals()) == 1
+
+    def test_zero_turns_the_task_off(self):
+        self._failed_job()
+        self._failed_job()
+        result = self._down(config=_config(unreachable_scans=0))
+        assert result["failed_scans"] == 3
+        assert "alerted" not in result
+        assert self._proposals() == []
+
+    def test_an_inbox_lost_while_judging_opens_the_task_too(self):
+        """The second half of the scan reaches Upwork as often as the first.
+        A failure there is the same outage and must not be reported less."""
+        self._failed_job()
+        stories = {ROOM: [_story("story_a", 30, CLIENT, "Can you add pagination?")]}
+        calls = []
+
+        def _stories(room_id, config=None, limit=20, older_than=""):
+            calls.append(room_id)
+            if len(calls) > 1:
+                raise upwork_client.UpworkApiError(500, "boom")
+            return {"stories": stories[ROOM], "cursor": ""}
+
+        with patch.object(upwork_client, "rooms",
+                          return_value={"rooms": [_room()], "cursor": ""}), \
+                patch.object(upwork_client, "stories", side_effect=_stories), \
+                patch.object(ui, "run_haiku"):
+            result = ui.check(_config(), instance_key="personal", now=NOW)
+        assert result["skipped"] == ui.UNREACHABLE_SKIP
+        assert result["alerted"]
+        items = self._proposals()
+        assert len(items) == 1
+        assert "HTTP 500" in items[0]["launch_brief"]
+
+    def test_another_instance_outage_opens_its_own_task(self):
+        """The record is kept per instance. One instance down must not hold
+        the other one silent."""
+        self._failed_job()
+        _job(finished=NOW, instance_key="nectar",
+             artifacts={"skipped": ui.UNREACHABLE_SKIP})
+        mine = self._down()["alerted"]
+        with patch.object(upwork_client, "rooms",
+                          side_effect=upwork_client.UpworkAuthError("logged out")), \
+                patch.object(ui, "run_haiku"):
+            theirs = ui.check(_config(), instance_key="nectar", now=NOW)["alerted"]
+        assert mine and theirs and mine != theirs
+        rows = db.query_all("SELECT instance_key FROM work_items"
+                            " WHERE state = 'proposed' ORDER BY id")
+        assert [r["instance_key"] for r in rows] == ["personal", "nectar"]
