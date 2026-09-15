@@ -25,9 +25,15 @@ router = APIRouter()
 MAX_REPLY_CHARS = 4000
 
 
+def _data() -> dict:
+    """The whole page: the rooms, and how the scan that fills them is doing."""
+    return {**upwork_inbox.board(_config),
+            "status": upwork_inbox.status(_config)}
+
+
 @router.get("/api/upwork/data")
 def api_upwork_data():
-    return upwork_inbox.board(_config)
+    return _data()
 
 
 @router.post("/api/upwork/refresh")
@@ -43,8 +49,7 @@ def api_upwork_refresh():
     if not counts.get("complete"):
         return JSONResponse({"error": "the Upwork inbox could not be read"},
                             status_code=502)
-    return {"status": "ok", "messages": counts["messages"],
-            "rooms": counts["rooms"], **upwork_inbox.board(_config)}
+    return _data()
 
 
 @router.post("/api/upwork/rooms/{room_id}/draft")

@@ -55,6 +55,7 @@ from services import work_launch, work_store
 
 UPWORK_TAG = "upwork"
 STATE_MODULE = "upwork_inbox"
+SCAN_TASK = "upwork_scan"
 DEFAULT_ROOMS_LIMIT = 20
 DEFAULT_ROOM_PAGES = 3
 DEFAULT_STORIES_LIMIT = 20
@@ -1066,7 +1067,8 @@ def propose(config: dict, instance_key: str = "",
     instance_key = instance_key or state.active_instance_key()
     now = now or _now()
     settings = _settings(config)
-    counts = {"messages": 0, "rooms": 0, "screened": 0, "blocked": 0}
+    counts = {"messages": 0, "rooms": 0, "screened": 0, "blocked": 0,
+              "unanswered": 0, "complete": True}
     max_pending = int(settings.get("max_pending", DEFAULT_MAX_PENDING_PROPOSALS))
     max_judgements = int(settings.get("max_judgements_per_scan",
                                       DEFAULT_MAX_JUDGEMENTS_PER_SCAN))
@@ -1097,6 +1099,7 @@ def propose(config: dict, instance_key: str = "",
         counts["messages"] += scan["messages"]
         counts["rooms"] += scan["rooms"]
         if not scan["complete"]:
+            counts["complete"] = False
             break
         fresh = db.query_one("SELECT * FROM upwork_rooms WHERE id = ?",
                              (row["id"],))
@@ -1111,6 +1114,7 @@ def propose(config: dict, instance_key: str = "",
         counts["screened"] += 1
         screen = _screen(row, transcript)
         if screen is None:
+            counts["unanswered"] += 1
             _record_attempt(row["id"], tick)
             log.emit("upwork_screen_failed",
                      f"[{instance_key}] the model returned nothing for the"
@@ -1124,6 +1128,7 @@ def propose(config: dict, instance_key: str = "",
             continue
         verdict = _judge(row, transcript, operator)
         if verdict is None:
+            counts["unanswered"] += 1
             _record_attempt(row["id"], tick)
             log.emit("upwork_judge_failed",
                      f"[{instance_key}] the model returned nothing for the"
@@ -1141,6 +1146,7 @@ def propose(config: dict, instance_key: str = "",
         counts["messages"] += scan["messages"]
         counts["rooms"] += scan["rooms"]
         if not scan["complete"]:
+            counts["complete"] = False
             break
         # The judge names what the answer has to achieve. A verdict that gives
         # only the reason still names the same request in a sentence, and one
@@ -1218,7 +1224,14 @@ def propose(config: dict, instance_key: str = "",
 
 def check(config: dict, instance_key: str = "",
           now: datetime | None = None) -> dict:
-    """The scheduled entry point: index the new messages, then read them."""
+    """The scheduled entry point: index the new messages, then read them.
+
+    The counts it returns are the run's own account of itself, and /upwork
+    reads them back off the job row the worker writes. `unanswered` is the
+    number of rooms the model returned nothing for, and it is reported rather
+    than swallowed: the task still ends `ok` when a screen or a judge call
+    comes back empty, and a page that showed only the status would say the
+    pipeline is working while no request is reaching a task."""
     now = now or _now()
     if not configured(config):
         return {"messages": 0, "rooms": 0, "proposed": 0,
@@ -1228,10 +1241,173 @@ def check(config: dict, instance_key: str = "",
     if not complete:
         return {**counts, "proposed": 0, "skipped": "the inbox could not be read"}
     opened, extra = propose(config, instance_key=instance_key, now=now)
-    return {"messages": counts["messages"] + extra["messages"],
-            "rooms": counts["rooms"] + extra["rooms"],
-            "screened": extra["screened"], "blocked": extra["blocked"],
-            "proposed": len(opened)}
+    report = {"messages": counts["messages"] + extra["messages"],
+              "rooms": counts["rooms"] + extra["rooms"],
+              "screened": extra["screened"], "blocked": extra["blocked"],
+              "unanswered": extra["unanswered"], "proposed": len(opened)}
+    if not extra["complete"]:
+        report["skipped"] = "the inbox could not be read"
+    return report
+
+
+def _count(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _stamp_seconds(stamp: str | None) -> float:
+    if not stamp:
+        return 0.0
+    try:
+        when = datetime.fromisoformat(stamp)
+    except ValueError:
+        return 0.0
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when.timestamp()
+
+
+def _unanswered_rooms(instance_key: str) -> int:
+    """The rooms whose last pass over them produced no verdict.
+
+    A pass that ends without one stamps `judged_at` and leaves the watermark
+    where it was, so the two stamps together say what happened. A room whose
+    attempt stamp is newer than its newest message, and whose watermark is
+    still behind that message, is a room something tried to read and could
+    not. A room whose attempt stamp is older than its newest message is one
+    nothing has passed over yet, which is an ordinary wait and not a failure.
+
+    It is asked of the room rather than of the run that failed, because the
+    run counts go quiet while the room stays wrong: a room the model returned
+    nothing for is held back for the retry window, and a room that already
+    carries a declined proposal keeps the watermark of that proposal. Either
+    way the next scan reports a clean run over a request still nobody has
+    read."""
+    rows = db.query_all(
+        "SELECT judged_ts, judged_at, last_ts FROM upwork_rooms"
+        " WHERE instance_key = ? AND judged_at IS NOT NULL", (instance_key,))
+    return sum(
+        1 for r in rows
+        if not (r["judged_ts"] and r["judged_ts"] >= r["last_ts"])
+        and _stamp_seconds(r["judged_at"]) > _seconds(r["last_ts"]))
+
+
+def _millis_iso(ts: str) -> str:
+    seconds = _seconds(ts)
+    if not seconds:
+        return ""
+    return _iso(datetime.fromtimestamp(seconds, tz=timezone.utc))
+
+
+def _last_scan(instance_key: str) -> dict | None:
+    """The last finished run of the scheduled scan, and what it did.
+
+    The worker writes every run to `jobs` with the status the task returned
+    and its artifacts, so the run history is already recorded and nothing here
+    has to be stamped a second time. `skipped` is the field that matters most:
+    a scan that could not reach Upwork still finishes `ok`, and without it a
+    run that read nothing reads as a quiet inbox."""
+    row = db.query_one(
+        "SELECT status, finished_at, response FROM jobs WHERE instance_key = ?"
+        " AND task = ? AND finished_at IS NOT NULL ORDER BY id DESC LIMIT 1",
+        (instance_key, SCAN_TASK))
+    if not row:
+        return None
+    body = db.load_json(row, "response")
+    artifacts = body.get("artifacts")
+    artifacts = artifacts if isinstance(artifacts, dict) else {}
+    return {
+        "at": row["finished_at"] or "",
+        "status": row["status"] or "",
+        "reason": str(body.get("reason") or "")[:MAX_REASON_CHARS],
+        "skipped": str(artifacts.get("skipped") or "")[:MAX_REASON_CHARS],
+        "unanswered": _count(artifacts.get("unanswered")),
+        "messages": _count(artifacts.get("messages")),
+        "rooms": _count(artifacts.get("rooms")),
+        "screened": _count(artifacts.get("screened")),
+        "blocked": _count(artifacts.get("blocked")),
+        "proposed": _count(artifacts.get("proposed")),
+    }
+
+
+def _last_proposal(instance_key: str) -> dict | None:
+    """The last task this inbox opened, and what became of it."""
+    row = db.query_one(
+        "SELECT r.proposed_at, r.room_id, r.client_name, r.job_title,"
+        " r.room_name, r.work_item_id, w.state, w.objective"
+        " FROM upwork_rooms r JOIN work_items w ON w.id = r.work_item_id"
+        " WHERE r.instance_key = ? AND r.proposed_at IS NOT NULL"
+        " ORDER BY r.proposed_at DESC LIMIT 1", (instance_key,))
+    if not row:
+        return None
+    return {"at": row["proposed_at"], "room_id": row["room_id"],
+            "label": _room_label(row), "work_item_id": row["work_item_id"],
+            "work_state": row["state"], "objective": row["objective"]}
+
+
+def _last_reply(instance_key: str) -> dict | None:
+    """The last reply the operator sent from this page."""
+    row = db.query_one(
+        "SELECT reply_sent_at, room_id, client_name, job_title, room_name"
+        " FROM upwork_rooms WHERE instance_key = ? AND reply_sent_at IS NOT NULL"
+        " ORDER BY reply_sent_at DESC LIMIT 1", (instance_key,))
+    if not row:
+        return None
+    return {"at": row["reply_sent_at"], "room_id": row["room_id"],
+            "label": _room_label(row)}
+
+
+def status(config: dict | None = None, instance_key: str = "",
+           now: datetime | None = None) -> dict:
+    """What /upwork renders about the scan itself, rather than about a room.
+
+    A page of rooms answers what a client said. It does not answer whether
+    anything is still reading them, because an inbox nobody wrote to and a
+    scan that stopped running render the same page. So this reports when the
+    scan last finished, what that run did, how many runs the last day holds,
+    and the last thing the pipeline produced at each end of it: the task it
+    opened and the reply the operator sent.
+
+    `pending` is counted the way the cap counts it, over every proposal this
+    instance is waiting on rather than only the ones this inbox opened, because
+    that is the number that stops the next one being opened.
+
+    `unanswered_rooms` is the standing version of the trouble the run counts
+    report once and then forget. See _unanswered_rooms."""
+    instance_key = instance_key or state.active_instance_key()
+    now = now or _now()
+    settings = _settings(config or {})
+    day = _iso(now - timedelta(hours=24))
+    runs = db.query_one(
+        "SELECT COUNT(*) AS n, SUM(status = 'failed') AS failed FROM jobs"
+        " WHERE instance_key = ? AND task = ? AND finished_at >= ?",
+        (instance_key, SCAN_TASK, day)) or {}
+    rooms = db.query_one(
+        "SELECT COUNT(*) AS n, SUM(injected) AS blocked,"
+        " MAX(last_ts) AS last_ts FROM upwork_rooms WHERE instance_key = ?",
+        (instance_key,)) or {}
+    running = db.query_one(
+        "SELECT id FROM jobs WHERE instance_key = ? AND task = ?"
+        " AND status IN ('queued', 'running') LIMIT 1", (instance_key, SCAN_TASK))
+    return {
+        "configured": configured(config or {}),
+        "propose_tasks": enabled(config or {}),
+        "scanning": bool(running),
+        "scan": _last_scan(instance_key),
+        "runs_24h": _count(runs.get("n")),
+        "failures_24h": _count(runs.get("failed")),
+        "rooms": _count(rooms.get("n")),
+        "blocked": _count(rooms.get("blocked")),
+        "unanswered_rooms": _unanswered_rooms(instance_key),
+        "last_message_at": _millis_iso(rooms.get("last_ts") or ""),
+        "pending": _proposals_awaiting_operator(instance_key),
+        "max_pending": int(settings.get("max_pending",
+                                        DEFAULT_MAX_PENDING_PROPOSALS)),
+        "proposal": _last_proposal(instance_key),
+        "reply": _last_reply(instance_key),
+    }
 
 
 def board(config: dict | None = None, instance_key: str = "") -> dict:
