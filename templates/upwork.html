@@ -23,6 +23,7 @@
 .send-btn.sent { background: #14532d; cursor: default; }
 .badge-blocked { background: #3a1010; color: #fca5a5; }
 .badge-task { background: #14532d; color: #86efac; }
+.stat-label { color: #6b7280; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; }
 </style>
 <script src="/static/frshty-usage.js"></script>
 </head>
@@ -42,6 +43,61 @@
     <button class="send-btn text-sm" :disabled="refreshing" @click="refresh">
         {{ refreshing ? 'Refreshing…' : 'Refresh' }}
     </button>
+</section>
+
+<section v-if="status" class="card p-3 mb-4"
+         :class="{ 'card-red': scanBad, 'card-yellow': !scanBad && scanStale }">
+    <div v-if="!status.configured" class="text-xs text-gray-400">
+        features.upwork is off on this instance. Nothing is scanned and nothing is proposed.
+    </div>
+    <div v-else class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
+        <div class="min-w-0">
+            <div class="stat-label">Last scan</div>
+            <div class="text-gray-200">{{ scanWhen }}</div>
+            <div class="truncate" :title="scanDetail"
+                 :class="scanBad ? 'text-red-400' : 'text-gray-600'">{{ scanDetail }}</div>
+        </div>
+        <div class="min-w-0">
+            <div class="stat-label">Scans in 24h</div>
+            <div class="text-gray-200">{{ status.runs_24h }}</div>
+            <div :class="status.failures_24h ? 'text-red-400' : 'text-gray-600'">
+                {{ status.failures_24h }} failed
+            </div>
+        </div>
+        <div class="min-w-0">
+            <div class="stat-label">Last proposal</div>
+            <div v-if="status.proposal" class="text-gray-200">
+                <a class="text-blue-400" :href="'/tasks/' + status.proposal.work_item_id">task {{ status.proposal.work_item_id }}</a>
+                · {{ status.proposal.work_state }} · {{ timeAgo(status.proposal.at) }}
+            </div>
+            <div v-else class="text-gray-400">none yet</div>
+            <div class="text-gray-600 truncate" :title="proposalDetail">{{ proposalDetail }}</div>
+        </div>
+        <div class="min-w-0">
+            <div class="stat-label">Last reply sent</div>
+            <div class="text-gray-200">{{ status.reply ? timeAgo(status.reply.at) : 'none sent' }}</div>
+            <div class="text-gray-600 truncate" :title="status.reply ? status.reply.label : ''">
+                {{ status.reply ? status.reply.label : '' }}
+            </div>
+        </div>
+        <div class="min-w-0">
+            <div class="stat-label">Rooms</div>
+            <div class="text-gray-200">{{ status.rooms }} indexed · {{ status.blocked }} held back</div>
+            <div class="text-gray-600">
+                newest message {{ status.last_message_at ? timeAgo(status.last_message_at) : 'none' }}
+            </div>
+        </div>
+        <div class="min-w-0">
+            <div class="stat-label">Proposals waiting</div>
+            <div class="text-gray-200">{{ status.pending }} of {{ status.max_pending }}</div>
+            <div class="truncate" :title="proposingDetail"
+                 :class="proposingHeld ? 'text-yellow-400' : 'text-gray-600'">{{ proposingDetail }}</div>
+        </div>
+    </div>
+    <div v-if="status.configured && status.unanswered_rooms" class="text-xs text-red-400 mt-3">
+        The model returned nothing for {{ status.unanswered_rooms }} room(s). They are held
+        back until the retry window passes, and nothing is proposed or drafted for them.
+    </div>
 </section>
 
 <div v-if="error" class="card p-3 mb-4 text-sm" style="background:#2a1010;border:1px solid #b91c1c">{{ error }}</div>
@@ -92,11 +148,12 @@
 </div>
 
 <script>
-const { ref, reactive, onMounted } = Vue;
+const { ref, reactive, computed, onMounted } = Vue;
 
 frshtyApp({
     setup() {
         const rooms = ref([]);
+        const status = ref(null);
         const features = ref({});
         const instanceName = ref('');
         const error = ref('');
@@ -120,6 +177,68 @@ frshtyApp({
             return Math.floor(diff / 86400) + 'd ago';
         }
 
+        function ageMinutes(iso) {
+            if (!iso) return Infinity;
+            return (Date.now() - new Date(iso).getTime()) / 60000;
+        }
+
+        const STALE_MINUTES = 30;
+
+        const scanBad = computed(() => {
+            const s = status.value;
+            if (!s || !s.configured) return false;
+            if (!s.scan) return true;
+            return s.scan.status !== 'ok' || !!s.scan.skipped
+                || s.scan.unanswered > 0 || s.unanswered_rooms > 0;
+        });
+
+        const scanStale = computed(() => {
+            const s = status.value;
+            if (!s || !s.configured || !s.scan) return false;
+            return ageMinutes(s.scan.at) > STALE_MINUTES;
+        });
+
+        const scanWhen = computed(() => {
+            const s = status.value;
+            if (!s) return '';
+            const last = s.scan ? timeAgo(s.scan.at) : 'never';
+            return s.scanning ? last + ' · running now' : last;
+        });
+
+        const scanDetail = computed(() => {
+            const s = status.value;
+            if (!s) return '';
+            if (!s.scan) return 'no scan has finished yet';
+            const c = s.scan;
+            if (c.skipped) return c.skipped;
+            if (c.status !== 'ok') return c.status + (c.reason ? ': ' + c.reason : '');
+            return `${c.messages} msgs · ${c.rooms} rooms · ${c.screened} screened`
+                 + ` · ${c.blocked} held back · ${c.proposed} proposed`
+                 + (c.unanswered ? ` · ${c.unanswered} the model did not answer` : '');
+        });
+
+        const proposalDetail = computed(() => {
+            const s = status.value;
+            if (!s) return '';
+            if (!s.proposal) return s.propose_tasks ? 'no task opened from a room yet'
+                                                    : 'opening tasks is off';
+            return s.proposal.objective || s.proposal.label;
+        });
+
+        const proposingHeld = computed(() => {
+            const s = status.value;
+            if (!s) return false;
+            return !s.propose_tasks || s.pending >= s.max_pending;
+        });
+
+        const proposingDetail = computed(() => {
+            const s = status.value;
+            if (!s) return '';
+            if (!s.propose_tasks) return 'opening tasks is off';
+            if (s.pending >= s.max_pending) return 'at the cap; no new task opens';
+            return `room for ${s.max_pending - s.pending} more`;
+        });
+
         function sendLabel(roomId) {
             if (sent[roomId]) return 'sent';
             if (sending[roomId]) return 'sending…';
@@ -137,8 +256,9 @@ frshtyApp({
         // minutes after the room opened it, so the test is not "has this box
         // ever been filled" but "does it still hold exactly what the server
         // last sent", which is the box nobody has typed in.
-        function apply(list) {
-            rooms.value = list || [];
+        function apply(body) {
+            status.value = body.status || null;
+            rooms.value = body.rooms || [];
             for (const r of rooms.value) {
                 const fresh = r.reply_draft || '';
                 if (drafts[r.room_id] === undefined
@@ -155,7 +275,7 @@ frshtyApp({
                     fetch('/api/upwork/data'),
                     fetch('/api/config'),
                 ]);
-                apply((await dataResp.json()).rooms);
+                apply(await dataResp.json());
                 const cfg = await configResp.json();
                 features.value = cfg.features || {};
                 instanceName.value = cfg.job?.key || '';
@@ -169,7 +289,7 @@ frshtyApp({
                 const resp = await fetch('/api/upwork/refresh', { method: 'POST' });
                 const body = await resp.json();
                 if (!resp.ok) { error.value = body.error || 'refresh failed'; return; }
-                apply(body.rooms);
+                apply(body);
             } catch (e) {
                 error.value = 'refresh failed: ' + e;
             } finally {
@@ -207,8 +327,10 @@ frshtyApp({
         });
 
         return {
-            rooms, features, instanceName, error, refreshing,
+            rooms, status, features, instanceName, error, refreshing,
             drafts, sending, sent, sendError,
+            scanBad, scanStale, scanWhen, scanDetail,
+            proposalDetail, proposingHeld, proposingDetail,
             fmtTime, timeAgo, sendLabel, placeholder, refresh, send,
         };
     },
