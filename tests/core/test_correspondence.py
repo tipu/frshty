@@ -163,6 +163,14 @@ class TestCodexFindings:
     def test_reading_the_same_surface_stays_open(self, command):
         assert correspondence.bash_reason(command) == ""
 
+    def test_recording_an_upwork_draft_stays_open(self):
+        """The reply a client gets is written by a task, and the task records
+        it on the room. That route only fills the box on /upwork; the send
+        beside it is the route this gate closes, above."""
+        command = ("curl -X POST http://localhost:7100/api/upwork/rooms/"
+                   "room_18ee/draft -d '{\"text\":\"hi\"}'")
+        assert correspondence.bash_reason(command) == ""
+
     @pytest.mark.parametrize("tool", [
         "mcp__slack__list_dms",
         "mcp__gmail__list_drafts",
