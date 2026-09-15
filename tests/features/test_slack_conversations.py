@@ -217,6 +217,28 @@ def _run(tmp_path, verdict, now=None, **slack):
     return opened, haiku
 
 
+def _run_held(tmp_path, verdict, now=None, **slack):
+    """The two scans a request whose identifiers stand above it now takes.
+
+    Candidates are read newest first, so the request is judged before the
+    message above it that names the ticket it asks about. Nothing can say yet
+    whether that message already carries the request, so the request is held
+    and the message above it is judged instead; it is a statement, so it is
+    not actionable. The scan after it judges the request again and proposes,
+    because the message above it opened no task. See propose.
+
+    Returns what the second scan opened, and the model with every call of both
+    scans on it: call one is the request, held."""
+    config = _config(tmp_path, propose_tasks=True, **slack)
+    replies = [verdict, _verdict(actionable=False), verdict]
+    with patch.object(sc, "run_haiku", side_effect=replies) as haiku, \
+         patch.object(sc.work_launch, "project_entries", return_value=[]):
+        first = sc.check(config, instance_key="atropos", now=now or NOW)
+        assert first["proposed"] == 0, "the request waits for the message above it"
+        opened = sc.check(config, instance_key="atropos", now=now or NOW)
+    return opened, haiku
+
+
 def test_a_settled_request_opens_a_proposal(tmp_path):
     _capture(tmp_path, _erik_thread())
     opened, _ = _run(tmp_path, _verdict())
@@ -3030,7 +3052,7 @@ def test_a_context_block_that_did_not_move_still_proposes(tmp_path):
             channel=DM),
         _ws(DM_THIRD_TS, ERIK, "can you fix this today", channel=DM),
     ])
-    opened, _ = _run(tmp_path, _verdict(), propose_max_judgements_per_scan=1)
+    opened, _ = _run_held(tmp_path, _verdict(), propose_max_judgements_per_scan=1)
 
     assert opened["proposed"] == 1
     row = db.query_one("SELECT * FROM slack_conversations WHERE thread_ts = ?",
@@ -3129,7 +3151,7 @@ def test_a_context_that_held_still_keeps_the_boundary(tmp_path):
         _ws(DM_FIRST_TS, ERIK, "the WB-412 export duplicates rows", channel=DM),
         _ws(DM_SECOND_TS, ERIK, "please move this ticket to PLT", channel=DM),
     ])
-    _run(tmp_path, _verdict(), propose_max_judgements_per_scan=1)
+    _run_held(tmp_path, _verdict(), propose_max_judgements_per_scan=1)
     item_id = _item_ids()[0]
     work_store.apply_action(item_id, "decline")
 
@@ -3387,6 +3409,494 @@ def test_the_two_messages_that_opened_two_tasks_open_one(tmp_path):
     assert opened["proposed"] == 0
     assert len(_item_ids()) == 1
     assert _events("slack_proposal_duplicate_dropped")[0]["covered_by"] == _item_ids()[0]
+
+
+def _both_at_once(tmp_path, *lines):
+    """Both messages of one request already in the capture when the scan runs.
+
+    The two messages were 45 seconds apart, and nothing rests on that. A pair
+    typed one after the other lands inside one 15 second step of the capture
+    watch in core.runtime, so they open one settle window and both
+    conversations settle before the same scan. That is the ordinary shape of
+    two messages, and it is the shape these tests use."""
+    _capture(tmp_path, list(lines))
+
+
+def _ryan_lines():
+    return [_ws(DM_FIRST_TS, ERIK, RYAN_FIRST, channel=DM),
+            _ws(DM_SECOND_TS, ERIK, RYAN_SECOND, channel=DM)]
+
+
+def _by_conversation(first, second, mark="Deploy", same="SAME"):
+    """Replies dispatched on the transcript rather than on call order.
+
+    Which conversation the scan reads first is what these tests are about, so
+    a list of replies in a fixed order would decide the answer they are
+    checking. mark is a word only the second message says."""
+    def reply(prompt, **kwargs):
+        if "## The work already asked for" in prompt:
+            return same
+        return second if mark in prompt.split(sc.CONTEXT_CLOSE_MARK)[-1] else first
+    return reply
+
+
+def _scan(tmp_path, reply, now=None, **slack):
+    config = _config(tmp_path, propose_tasks=True, **slack)
+    with patch.object(sc, "run_haiku", side_effect=reply) as haiku, \
+         patch.object(sc.work_launch, "project_entries", return_value=[]):
+        return sc.check(config, instance_key="atropos", now=now or NOW), haiku
+
+
+def test_two_messages_that_reach_one_scan_open_one_task(tmp_path):
+    """The incident, in the shape it actually has. Both messages settle before
+    the same scan, and the scan reads the newest first, so the message that
+    asks for nothing is judged before the message that asks for the work. The
+    first fix rested on the second message being judged a scan later, which is
+    only true when the two are further apart than the capture watch."""
+    _both_at_once(tmp_path, *_ryan_lines())
+    reply = _by_conversation(_verdict(objective=RYAN_FIRST_OBJECTIVE),
+                             _verdict(objective=RYAN_SECOND_OBJECTIVE))
+    first, _ = _scan(tmp_path, reply)
+    assert first["proposed"] == 1, "the message that asks for the work"
+    opened, _ = _scan(tmp_path, reply)
+
+    assert opened["proposed"] == 0
+    items = db.query_all("SELECT objective FROM work_items")
+    assert len(items) == 1
+    assert items[0]["objective"] == RYAN_FIRST_OBJECTIVE, (
+        "and the task that stands is the one the request was written in")
+    assert len(_events("slack_proposal_held_for_neighbour")) == 1
+    assert len(_events("slack_proposal_duplicate_dropped")) == 1
+
+
+def test_a_held_request_is_not_marked_judged(tmp_path):
+    """The hold writes nothing about the conversation. A judgement mark would
+    say the scan had decided it, and the next scan would never read it again,
+    so the request would be lost rather than delayed."""
+    _both_at_once(tmp_path, *_ryan_lines())
+    _scan(tmp_path, _by_conversation(
+        _verdict(objective=RYAN_FIRST_OBJECTIVE),
+        _verdict(objective=RYAN_SECOND_OBJECTIVE)),
+        propose_max_judgements_per_scan=1)
+
+    row = db.query_one("SELECT * FROM slack_conversations WHERE thread_ts = ?",
+                       (DM_SECOND_TS,))
+    assert row["judged_ts"] == ""
+    assert row["judged_at"] is None
+    assert row["work_item_id"] is None
+
+
+def test_a_hold_does_not_spend_the_scan_judgement_allowance(tmp_path):
+    """A held conversation has to cost the scan nothing. The conversation it
+    waits for is behind it in the order, so an allowance of one spent on the
+    hold would leave that conversation unread, and the same hold would repeat
+    on every scan for ever."""
+    _both_at_once(tmp_path, *_ryan_lines())
+    opened, haiku = _scan(tmp_path, _by_conversation(
+        _verdict(objective=RYAN_FIRST_OBJECTIVE),
+        _verdict(objective=RYAN_SECOND_OBJECTIVE)),
+        propose_max_judgements_per_scan=1)
+
+    judged = [c[0][0] for c in haiku.call_args_list
+              if "## The work already asked for" not in c[0][0]]
+    assert len(judged) == 2, "the held conversation and the one it waits for"
+    assert opened["proposed"] == 1
+
+
+def test_a_held_request_nobody_else_carries_opens_its_own_task(tmp_path):
+    """The oracle for the hold. The message above holds the request back only
+    until it has been judged. Judged as the statement it is, it carries
+    nothing, and the message below it is the first to ask for this work."""
+    _both_at_once(tmp_path,
+                  _ws(DM_FIRST_TS, ERIK, "the WB-412 export duplicates rows",
+                      channel=DM),
+                  _ws(DM_SECOND_TS, ERIK, "can you fix this today", channel=DM))
+    reply = _by_conversation(_verdict(actionable=False), _verdict(),
+                             mark="fix this today")
+    _scan(tmp_path, reply)
+    opened, _ = _scan(tmp_path, reply)
+
+    assert opened["proposed"] == 1
+    assert len(_item_ids()) == 1
+    assert _events("slack_proposal_duplicate_dropped") == []
+    row = db.query_one("SELECT * FROM slack_conversations WHERE thread_ts = ?",
+                       (DM_SECOND_TS,))
+    assert row["work_item_id"] == _item_ids()[0]
+
+
+def test_a_neighbour_that_has_been_judged_holds_nothing_back(tmp_path):
+    """A neighbour the scan has already decided is not waited for. It opened no
+    task, so nothing carries the request and it is proposed at once."""
+    _capture(tmp_path, [_ws(DM_FIRST_TS, ERIK, "the WB-412 export duplicates"
+                            " rows", channel=DM)])
+    _run(tmp_path, _verdict(actionable=False))
+    _capture(tmp_path, [_ws(DM_SECOND_TS, ERIK, "can you fix this today",
+                            channel=DM)])
+    opened, _ = _run(tmp_path, _verdict())
+
+    assert opened["proposed"] == 1
+    assert _events("slack_proposal_held_for_neighbour") == []
+
+
+def test_the_neighbour_that_opened_a_task_beats_a_nearer_one_that_did_not(tmp_path):
+    """Two messages above this one name the ticket. The nearer one was judged
+    and asks for nothing; the one behind it opened the task. The task is what
+    carries the request, so the nearer message must not be allowed to answer
+    for it and let a second task open."""
+    _capture(tmp_path, [_ws(DM_FIRST_TS, ERIK,
+                            "please move WB-412 to the PLT board", channel=DM)])
+    _lift_scan(tmp_path, _verdict())
+    _capture(tmp_path, [_ws(DM_SECOND_TS, ERIK,
+                            "WB-412 is the cohort export one", channel=DM)])
+    _lift_scan(tmp_path, _verdict(actionable=False))
+    _capture(tmp_path, [_ws(DM_THIRD_TS, ERIK,
+                            "you can also drop the old one when you do",
+                            channel=DM)])
+    opened, _ = _lift_scan(tmp_path, _verdict(), "SAME")
+
+    assert opened["proposed"] == 0
+    assert len(_item_ids()) == 1
+    assert _events("slack_proposal_duplicate_dropped")[0]["covered_by"] == _item_ids()[0]
+
+
+def test_a_neighbour_waiting_out_its_judge_backoff_still_holds(tmp_path):
+    """A judgement that produced no verdict decided nothing. _is_candidate
+    rejects the conversation while the retry back-off runs, so reading "not a
+    candidate" as "decided" would let the message below it propose now and the
+    retry open a second task for the same request later."""
+    _capture(tmp_path, [_ws(DM_FIRST_TS, ERIK,
+                            "please move WB-412 to the PLT board", channel=DM)])
+    _lift_scan(tmp_path, "")
+    row = db.query_one("SELECT * FROM slack_conversations WHERE thread_ts = ?",
+                       (DM_FIRST_TS,))
+    assert row["judged_at"] and row["judged_ts"] == "", "the back-off is running"
+    assert not sc._is_candidate(row, _config(tmp_path, propose_tasks=True),
+                                NOW, OPERATOR)
+
+    _capture(tmp_path, [_ws(DM_SECOND_TS, ERIK, "can you do this today",
+                            channel=DM)])
+    opened, _ = _lift_scan(tmp_path, _verdict())
+
+    assert opened["proposed"] == 0
+    assert _item_ids() == []
+    held = _events("slack_proposal_held_for_neighbour")
+    assert len(held) == 1
+    assert held[0]["waiting_for"] == row["id"]
+
+
+def test_a_hold_on_a_backoff_neighbour_is_not_read_again_every_scan(tmp_path):
+    """The wait is as long as the neighbour's back-off. Without a mark of its
+    own the held conversation would be judged again on every scan of that hour
+    and answer the same way every time."""
+    _capture(tmp_path, [_ws(DM_FIRST_TS, ERIK,
+                            "please move WB-412 to the PLT board", channel=DM)])
+    _lift_scan(tmp_path, "")
+    _capture(tmp_path, [_ws(DM_SECOND_TS, ERIK, "can you do this today",
+                            channel=DM)])
+    _lift_scan(tmp_path, _verdict())
+
+    row = db.query_one("SELECT * FROM slack_conversations WHERE thread_ts = ?",
+                       (DM_SECOND_TS,))
+    assert row["judged_at"], "the held conversation carries its own back-off"
+    assert row["judged_ts"] == "", "and the next scan still reads the whole of it"
+    config = _config(tmp_path, propose_tasks=True)
+    assert not sc._is_candidate(row, config, NOW, OPERATOR)
+    assert sc._is_candidate(
+        row, config, NOW + timedelta(minutes=sc.DEFAULT_JUDGE_RETRY_MINUTES + 1),
+        OPERATOR), "and it is read again once that back-off passes"
+
+
+REOPEN_REQUEST = "please re-open PR #1293 in the new repo"
+REVIEW_REQUEST = "can you security review PR #1293 as well"
+REOPEN_OBJECTIVE = "Re-open PR #1293 in the atroposhealth/portal repository"
+REVIEW_OBJECTIVE = "Security review PR #1293"
+
+
+def test_a_nearer_undecided_neighbour_beats_a_further_one_with_a_task(tmp_path):
+    """Two messages above this one name the same pull request and ask for two
+    different jobs. The nearer one has not been judged yet. Answering with the
+    further one's task compares this request against work nobody asked it to
+    do, the comparison says DIFFERENT, and a second review task opens."""
+    _capture(tmp_path, [_ws(DM_FIRST_TS, ERIK, REOPEN_REQUEST, channel=DM)])
+    _lift_scan(tmp_path, _verdict(objective=REOPEN_OBJECTIVE))
+    _both_at_once(tmp_path,
+                  _ws(DM_SECOND_TS, ERIK, REVIEW_REQUEST, channel=DM),
+                  _ws(DM_THIRD_TS, ERIK, "please do that today", channel=DM))
+    reply = _by_conversation(_verdict(objective=REVIEW_OBJECTIVE),
+                             _verdict(objective=REVIEW_OBJECTIVE),
+                             mark="do that today")
+    _scan(tmp_path, reply, propose_max_judgements_per_scan=2)
+    opened, _ = _scan(tmp_path, reply, propose_max_judgements_per_scan=2)
+
+    assert opened["proposed"] == 0
+    assert len(_item_ids()) == 2, "the re-open and the review, and nothing else"
+    held = _events("slack_proposal_held_for_neighbour")
+    second = db.query_one("SELECT id FROM slack_conversations WHERE thread_ts = ?",
+                          (DM_SECOND_TS,))
+    assert [h["waiting_for"] for h in held] == [second["id"]]
+
+
+def test_a_neighbour_that_gains_a_task_after_the_block_is_read_is_seen(tmp_path):
+    """What a neighbour has done about the request is read from the
+    conversation, not from the context block. Another scan can open the
+    neighbour's task between the two reads, and a block read before that would
+    say the neighbour carries nothing and let a second task open."""
+    _capture(tmp_path, [_ws(DM_FIRST_TS, ERIK,
+                            "please move WB-412 to the PLT board", channel=DM)])
+    _lift_scan(tmp_path, _verdict())
+    item_id = _item_ids()[0]
+    first = db.query_one("SELECT id FROM slack_conversations WHERE thread_ts = ?",
+                         (DM_FIRST_TS,))
+    db.execute("UPDATE slack_conversations SET work_item_id = NULL WHERE id = ?",
+               (first["id"],))
+    _capture(tmp_path, [_ws(DM_SECOND_TS, ERIK, "can you do this today",
+                            channel=DM)])
+    config = _config(tmp_path, propose_tasks=True)
+    sc.ingest(config, instance_key="atropos", now=NOW)
+    second = db.query_one("SELECT id FROM slack_conversations WHERE thread_ts = ?",
+                          (DM_SECOND_TS,))
+    real = sc._prior_context
+
+    def late(conversation_id, conn=None):
+        rows = real(conversation_id, conn)
+        db.execute("UPDATE slack_conversations SET work_item_id = ? WHERE id = ?",
+                   (item_id, first["id"]))
+        return rows
+
+    with patch.object(sc, "_prior_context", side_effect=late):
+        lifted = sc._lifted_from_a_neighbour(
+            second["id"], "Move WB-412 to the PLT board", config, NOW, OPERATOR)
+
+    assert lifted == (first["id"], item_id, False)
+
+
+def _backoff_carriers(tmp_path, channels):
+    """One carrier message per channel, each judged to no verdict, so each is
+    waiting out its judge back-off and no scan can read it for an hour."""
+    _capture(tmp_path, [
+        _ws(f"17884584{i:02d}.000100", ERIK,
+            f"<@{OPERATOR}> please move WB-412 to the PLT board", channel=ch)
+        for i, ch in enumerate(channels)])
+    _run(tmp_path, "", propose_max_judgements_per_scan=len(channels))
+    _capture(tmp_path, [
+        _ws(f"17884585{i:02d}.000100", ERIK, "can you do this today", channel=ch)
+        for i, ch in enumerate(channels)])
+
+
+def test_a_hold_this_scan_cannot_release_spends_the_allowance(tmp_path):
+    """A hold waiting on a neighbour this scan cannot read is paid for by no
+    judgement inside the scan. It therefore costs the allowance like any other
+    model call, or a run of them would spend the model without bound.
+
+    Three channels, each with a carrier waiting out its judge back-off and a
+    message below it that names nothing. All three would hold."""
+    _backoff_carriers(tmp_path, [DM, CHANNEL, OTHER_CHANNEL])
+    _, haiku = _run(tmp_path, _verdict(), propose_max_judgements_per_scan=1)
+
+    assert haiku.call_count == 1, "the allowance, and no more"
+    assert len(_events("slack_proposal_held_for_neighbour")) == 1
+
+
+def test_a_neighbour_still_settling_holds_the_request(tmp_path):
+    """A neighbour that has just gained a message is inside the settle window,
+    so it is not a candidate and yet it is going to be judged. Reading that as
+    decided lets the message below it propose now and the neighbour open a
+    second task for the same request once it settles."""
+    _capture(tmp_path, [
+        _ws(DM_FIRST_TS, ERIK, "please move WB-412 to the PLT board",
+            channel=DM),
+        _ws(DM_SECOND_TS, ERIK, "can you do this today", channel=DM),
+    ])
+    config = _config(tmp_path, propose_tasks=True,
+                     propose_max_judgements_per_scan=1)
+    sc.ingest(config, instance_key="atropos", now=NOW)
+    _capture(tmp_path, [_ws(str(NOW.timestamp() - 60) , ERIK, "still on this?",
+                            thread_ts=DM_FIRST_TS, channel=DM)])
+    sc.ingest(config, instance_key="atropos", now=NOW)
+    first = db.query_one("SELECT * FROM slack_conversations WHERE thread_ts = ?",
+                         (DM_FIRST_TS,))
+    assert not sc._is_candidate(first, config, NOW, OPERATOR), "still settling"
+
+    with patch.object(sc, "run_haiku", return_value=_verdict()), \
+         patch.object(sc.work_launch, "project_entries", return_value=[]):
+        opened = sc.check(config, instance_key="atropos", now=NOW)
+
+    assert opened["proposed"] == 0
+    assert _item_ids() == []
+    assert [h["waiting_for"] for h in
+            _events("slack_proposal_held_for_neighbour")] == [first["id"]]
+
+
+def test_a_hold_is_dropped_before_it_outlives_the_request(tmp_path):
+    """A neighbour that keeps gaining replies never settles, so the hold on the
+    request below it would be renewed on every scan. Once that request crosses
+    propose_max_age_hours nothing reads it again and it is lost. The hold is
+    dropped while the request still has scans left, and the request is
+    proposed."""
+    _capture(tmp_path, [
+        _ws(DM_FIRST_TS, ERIK, "please move WB-412 to the PLT board",
+            channel=DM),
+        _ws(DM_SECOND_TS, ERIK, "can you do this today", channel=DM),
+    ])
+    config = _config(tmp_path, propose_tasks=True,
+                     propose_max_judgements_per_scan=1)
+    sc.ingest(config, instance_key="atropos", now=NOW)
+    second = db.query_one("SELECT * FROM slack_conversations WHERE thread_ts = ?",
+                          (DM_SECOND_TS,))
+    # The request is half an hour from ageing out, and the back-off a hold
+    # would cost it is an hour.
+    late = (datetime.fromtimestamp(float(DM_SECOND_TS), tz=timezone.utc)
+            + timedelta(hours=sc.DEFAULT_MAX_AGE_HOURS) - timedelta(minutes=30))
+    assert sc._is_candidate(second, config, late, OPERATOR), "still readable"
+    assert not sc._hold_lands_in_time(second, config, late)
+
+    with patch.object(sc, "run_haiku", return_value=_verdict()), \
+         patch.object(sc.work_launch, "project_entries", return_value=[]):
+        opened = sc.check(config, instance_key="atropos", now=late)
+
+    assert opened["proposed"] == 1
+    assert _events("slack_proposal_held_for_neighbour") == []
+    row = db.query_one("SELECT * FROM slack_conversations WHERE thread_ts = ?",
+                       (DM_SECOND_TS,))
+    assert row["work_item_id"] == _item_ids()[0]
+
+
+def test_a_hold_with_time_left_still_holds(tmp_path):
+    """The oracle for the test above. The same pair read early in the window,
+    where a hold costs the request nothing it cannot spare."""
+    _capture(tmp_path, [
+        _ws(DM_FIRST_TS, ERIK, "please move WB-412 to the PLT board",
+            channel=DM),
+        _ws(DM_SECOND_TS, ERIK, "can you do this today", channel=DM),
+    ])
+    config = _config(tmp_path, propose_tasks=True,
+                     propose_max_judgements_per_scan=1)
+    sc.ingest(config, instance_key="atropos", now=NOW)
+    second = db.query_one("SELECT * FROM slack_conversations WHERE thread_ts = ?",
+                          (DM_SECOND_TS,))
+    assert sc._hold_lands_in_time(second, config, NOW)
+
+    opened, _ = _run(tmp_path, _verdict(), propose_max_judgements_per_scan=1)
+
+    assert len(_events("slack_proposal_held_for_neighbour")) == 1
+    assert opened["proposed"] == 1, "the message the hold waited for"
+
+
+def test_a_hold_on_a_conversation_already_read_spends_the_allowance(tmp_path):
+    """A conversation held earlier in the same scan carries no judgement mark,
+    so it still reads as one the scan could judge. It cannot be brought
+    forward, though: the scan is already past it. A hold on it is released by
+    nothing inside this scan, so it costs the allowance like any other
+    judgement, or the allowance would never be reached at all.
+
+    One carrier, one conversation that lifts from the carrier and carries the
+    sprint, and four that lift from that one."""
+    _capture(tmp_path, [
+        _ws("1788458400.000100", ERIK, "please move WB-412 to the PLT board",
+            channel=DM),
+        _ws("1788458500.000100", ERIK, "the sprint is TRIAGE-9", channel=DM),
+    ] + [
+        _ws(f"17884586{i:02d}.000100", ERIK, f"and number {i} as well",
+            channel=DM) for i in range(4)])
+
+    def reply(prompt, **kwargs):
+        judged = prompt.split(sc.CONTEXT_CLOSE_MARK)[-1]
+        if "number" in judged:
+            return _verdict(objective="Put the board move in sprint TRIAGE-9")
+        return _verdict(objective="Move WB-412 to the PLT board")
+
+    config = _config(tmp_path, propose_tasks=True,
+                     propose_max_judgements_per_scan=2)
+    with patch.object(sc, "run_haiku", side_effect=reply) as haiku, \
+         patch.object(sc.work_launch, "project_entries", return_value=[]):
+        sc.check(config, instance_key="atropos", now=NOW)
+
+    assert haiku.call_count == 4, (
+        "the first hold, the sprint message, the carrier, and one hold that"
+        " nothing in this scan can release")
+
+
+def test_a_chain_of_holds_is_walked_to_its_end_in_one_scan(tmp_path):
+    """Three messages, each reading its request out of the one above it. The
+    first hold brings the second forward, the second hold brings the third
+    forward, and the scan judges the third. A ceiling that stopped before it
+    would repeat the same two holds on every scan and the request at the end
+    of the chain would age out unread."""
+    _capture(tmp_path, [
+        _ws("1788458400.000100", ERIK, "please move WB-412 to the PLT board",
+            channel=DM),
+        _ws("1788458500.000100", ERIK, "the sprint is TRIAGE-9", channel=DM),
+        _ws("1788458600.000100", ERIK, "can you do this today", channel=DM),
+    ])
+
+    def reply(prompt, **kwargs):
+        judged = prompt.split(sc.CONTEXT_CLOSE_MARK)[-1]
+        if "do this today" in judged:
+            return _verdict(objective="Put the board move in sprint TRIAGE-9")
+        if "TRIAGE-9" in judged:
+            return _verdict(objective="Move WB-412 to the PLT board")
+        return _verdict(objective="Move WB-412 to the PLT board")
+
+    config = _config(tmp_path, propose_tasks=True,
+                     propose_max_judgements_per_scan=1)
+    with patch.object(sc, "run_haiku", side_effect=reply) as haiku, \
+         patch.object(sc.work_launch, "project_entries", return_value=[]):
+        sc.check(config, instance_key="atropos", now=NOW)
+
+    assert haiku.call_count == 3, "two holds and the judgement that ends them"
+    assert len(_events("slack_proposal_held_for_neighbour")) == 2
+    assert len(_item_ids()) == 1
+    oldest = db.query_one("SELECT * FROM slack_conversations WHERE thread_ts = ?",
+                          ("1788458400.000100",))
+    assert oldest["work_item_id"] == _item_ids()[0], (
+        "the message the chain reads its request out of is the one judged")
+
+
+def test_a_hold_brings_the_conversation_it_waits_for_forward(tmp_path):
+    """The allowance must not be spent on the conversations standing between a
+    held request and the one that releases it. Two channels interleaved, so
+    the conversation the hold waits for is not the next one in the order."""
+    _both_at_once(tmp_path,
+                  _ws("1788458400.000100", ERIK,
+                      "please move WB-412 to the PLT board", channel=DM),
+                  _ws("1788458500.000100", ERIK,
+                      f"<@{OPERATOR}> please move WB-777 to the PLT board"),
+                  _ws("1788458600.000100", ERIK, "can you do this today",
+                      channel=DM),
+                  _ws("1788458700.000100", ERIK, "can you do that one too"))
+
+    def reply(prompt, **kwargs):
+        judged = prompt.split(sc.CONTEXT_CLOSE_MARK)[-1]
+        if "that one too" in judged or "WB-777" in judged:
+            return _verdict(objective="Move WB-777 to the PLT board")
+        return _verdict(objective="Move WB-412 to the PLT board")
+
+    opened, haiku = _scan(tmp_path, reply, propose_max_judgements_per_scan=1)
+
+    assert haiku.call_count == 2, "the hold and the judgement that releases it"
+    assert len(_events("slack_proposal_held_for_neighbour")) == 1
+    assert opened["proposed"] == 1
+    carrier = db.query_one("SELECT * FROM slack_conversations WHERE thread_ts = ?",
+                           ("1788458500.000100",))
+    assert carrier["work_item_id"] == _item_ids()[0], (
+        "and it is the conversation the hold waited for that was judged")
+
+
+def test_the_hold_names_the_conversation_it_waits_for(tmp_path):
+    """A hold is a request the operator has not been shown yet, so the feed
+    says which conversation it is waiting on."""
+    _both_at_once(tmp_path, *_ryan_lines())
+    _scan(tmp_path, _by_conversation(
+        _verdict(objective=RYAN_FIRST_OBJECTIVE),
+        _verdict(objective=RYAN_SECOND_OBJECTIVE)),
+        propose_max_judgements_per_scan=1)
+
+    first = db.query_one("SELECT id FROM slack_conversations WHERE thread_ts = ?",
+                         (DM_FIRST_TS,))
+    held = _events("slack_proposal_held_for_neighbour")
+    assert len(held) == 1
+    assert held[0]["waiting_for"] == first["id"]
+    assert held[0]["thread_ts"] == DM_SECOND_TS
 
 
 def test_a_context_deleted_after_the_decline_takes_the_boundary_away(tmp_path):
@@ -3725,9 +4235,10 @@ def test_a_channel_request_without_a_thread_is_judged_with_what_came_before_it(t
     with nothing above them, none of them is actionable and frshty opens
     nothing."""
     _capture(tmp_path, _channel_run())
-    opened, haiku = _run(tmp_path, _verdict(), propose_max_judgements_per_scan=1)
+    opened, haiku = _run_held(tmp_path, _verdict(),
+                              propose_max_judgements_per_scan=1)
 
-    prompt = _judged_prompt(haiku)
+    prompt = haiku.call_args_list[0][0][0]
     rendered = prompt.split("## Conversation")[1].split("\n")
     assert CONTEXT_RULE_LINE in prompt, "the judge is told what the block is"
     body = rendered[rendered.index(sc.CONTEXT_OPEN_MARK):
