@@ -183,18 +183,75 @@ def _repo_gate_blocked(instance_key: str, ticket_key: str, config: dict | None =
     core.tasks.tickets.start_planning's gate-lock + status re-check (only one
     ticket can transition into "planning" inside the threading.Lock), so the
     enqueue-time gate only needs to block on already-active pipeline states.
+
+    The gate elects one holder out of every occupying row, itself included,
+    rather than answering "is any other row occupying". The two answers agree
+    while one row occupies the gate, which is the state the pipeline intends.
+    They differ once two rows occupy it, and that state is reachable: a status
+    change that enters an occupying stage does not all go through the gate —
+    fix_scope_findings returns a pr_ready ticket to proving from its
+    on_success_status, and both tickets can be corrected in the same cycle.
+    Asking for another occupant then names each ticket to the other and no
+    repo-gated stage can be enqueued for either one again. Electing a holder
+    lets that ticket finish and leave, and the next one takes the gate, so
+    two occupants cost an order rather than the pipeline.
+
+    Repo-gated work in flight decides the holder first. core.queue refuses to
+    run two jobs only when they carry the same ticket_key, so a holder elected
+    past a sibling's running job would put two tickets in the same worktrees
+    at the same time, which is what the gate exists to stop. A running job
+    outranks a queued one, and the oldest outranks the rest.
+
+    With nothing in flight, a status that always occupies the gate outranks
+    one that occupies it only under auto_merge. pr_ready and in_review are
+    waiting states holding a finished branch, so a ticket parked in one must
+    not take the gate from a ticket that is actively planning or proving.
+
+    The lowest ticket_key settles what is left. The order has to hold still
+    across polls, or two tickets take the gate on alternate cycles. updated_at
+    cannot do that: check() rewrites it for every assigned ticket on every
+    poll, in whatever order the ticket system returned them.
     """
-    import core.db as _db
     auto_merge = bool((config or {}).get("pr", {}).get("auto_merge"))
     statuses = _GATE_OCCUPYING_AUTO_MERGE if auto_merge else _GATE_OCCUPYING_STATUSES
-    rows = _db.query_all(
-        "SELECT ticket_key FROM tickets"
-        " WHERE instance_key=? AND ticket_key<>?"
-        f"      AND status IN ({','.join('?' for _ in statuses)})"
-        " ORDER BY updated_at ASC LIMIT 1",
-        (instance_key, ticket_key, *statuses),
+    rows = db.query_all(
+        "SELECT ticket_key, status FROM tickets"
+        " WHERE instance_key=?"
+        f"      AND status IN ({','.join('?' for _ in statuses)})",
+        (instance_key, *statuses),
     )
-    return rows[0]["ticket_key"] if rows else None
+    if not rows:
+        return None
+
+    def rank(row: dict) -> tuple:
+        in_flight = _gated_job_in_flight(instance_key, row["ticket_key"])
+        return (in_flight is None, in_flight or (0, 0),
+                row["status"] not in _GATE_OCCUPYING_STATUSES, row["ticket_key"])
+
+    holder = min(rows, key=rank)["ticket_key"]
+    return holder if holder != ticket_key else None
+
+
+def _gated_job_in_flight(instance_key: str, ticket_key: str) -> tuple[int, int] | None:
+    """How far along this ticket's repo-gated work is, as a sort key, or None
+    when it has none queued or running. Running sorts before queued, and the
+    oldest job of a kind sorts before the rest.
+
+    Read straight from the jobs table rather than through
+    core.queue.jobs_for_ticket, which returns the newest rows first and caps
+    them. A long-running gated job with enough newer ungated jobs behind it
+    falls out of that window, and the gate would elect another ticket over
+    repo work that is still going."""
+    tasks = sorted(_REPO_GATED_TASKS)
+    rows = db.query_all(
+        "SELECT id, status FROM jobs"
+        " WHERE instance_key=? AND ticket_key=? AND status IN ('queued','running')"
+        f"      AND task IN ({','.join('?' for _ in tasks)})",
+        (instance_key, ticket_key, *tasks),
+    )
+    if not rows:
+        return None
+    return min((0 if r["status"] == "running" else 1, r["id"]) for r in rows)
 
 
 def _scope_review_state(config: dict, ts: dict) -> str:
