@@ -106,6 +106,7 @@ def project_entries() -> list[dict]:
         "clarivis": os.path.expanduser("~/Documents/dev/clarivis"),
         "algotrader2": os.path.expanduser("~/Documents/dev/algotrader2/implementation"),
         "game_expirement": os.path.expanduser("~/Documents/dev/game_expirement"),
+        "expirement": os.path.expanduser("~/Documents/dev/expirement"),
         "upwork-api": os.path.expanduser("~/Documents/dev/upwork_apply"),
     }
     for key, root in extras.items():
