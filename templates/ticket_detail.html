@@ -158,6 +158,33 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
             <div v-else-if="r.outcome" class="text-gray-400 mt-0.5">{{ r.outcome }}</div>
         </div>
     </div>
+    <div v-if="ticketTasks.length" class="card p-3 mb-2 border-l-4"
+         :class="openTicketTasks.length ? 'border-blue-500 bg-blue-950/20' : 'border-gray-700'">
+        <div class="flex items-center gap-2">
+            <span class="text-sm font-semibold text-blue-300">&#9707; Tasks</span>
+            <span v-if="openTicketTasks.length" class="text-xs text-blue-300">{{ openTicketTasks.length }} open</span>
+            <span v-else class="text-xs text-gray-500">none open</span>
+            <span class="text-xs text-gray-600" title="a task on the /tasks board is coupled to this ticket when its objective names this ticket key">named this ticket</span>
+            <button @click="ticketTasksOpen = !ticketTasksOpen"
+                    class="ml-auto text-xs text-gray-400 hover:text-white">
+                {{ ticketTasksOpen ? '&#9662;' : '&#9656;' }} all ({{ ticketTasks.length }})
+            </button>
+        </div>
+        <div v-for="t in (ticketTasksOpen ? ticketTasks : openTicketTasks)" :key="t.id"
+             class="mt-2 pt-2 border-t border-gray-800 text-xs">
+            <div class="flex items-center gap-2 flex-wrap">
+                <span :class="taskStateClass(t.state)">{{ taskStateLabel(t.state) }}</span>
+                <a :href="t.url" target="_blank" class="link">task {{ t.id }} &nearr;</a>
+                <span v-if="t.critical" class="text-yellow-300" title="the operator marked this task critical">&#9733;</span>
+                <span v-if="t.archived" class="text-gray-600">archived</span>
+                <span v-if="t.provider" class="text-gray-600">{{ t.provider }}</span>
+                <span v-for="pkey in t.projects" :key="pkey" class="text-gray-600">{{ pkey }}</span>
+                <span class="text-gray-600 ml-auto">{{ $time.dayMinute(t.updated_at) }}</span>
+            </div>
+            <div class="text-gray-300 mt-0.5">{{ t.objective }}</div>
+            <div v-if="t.note" class="text-gray-500 mt-0.5">{{ t.note }}</div>
+        </div>
+    </div>
     <div class="card p-4 flex items-center gap-4 flex-wrap">
         <select :value="status" @change="setStatus($event.target.value)"
                 class="bg-transparent border border-gray-700 rounded px-2 py-1 text-sm cursor-pointer" style="font-size:13px;">
@@ -1401,7 +1428,8 @@ frshtyApp({
 
         const doctorRunning = computed(() => doctorRuns.value.filter(r => r.running));
 
-        const DOCTOR_STATE_LABELS = {
+        const TASK_STATE_LABELS = {
+            proposed: 'proposed',
             agent_working: 'running',
             needs_you: 'needs you',
             waiting_external: 'waiting',
@@ -1410,7 +1438,8 @@ frshtyApp({
             canceled: 'canceled',
             done: 'done',
         };
-        const DOCTOR_STATE_CLASSES = {
+        const TASK_STATE_CLASSES = {
+            proposed: 'text-violet-300',
             agent_working: 'text-amber-300',
             needs_you: 'text-yellow-300',
             waiting_external: 'text-blue-300',
@@ -1420,13 +1449,26 @@ frshtyApp({
             done: 'text-gray-400',
         };
 
+        function taskStateLabel(taskState) {
+            return TASK_STATE_LABELS[taskState] || (taskState || 'gone');
+        }
+
+        function taskStateClass(taskState) {
+            return TASK_STATE_CLASSES[taskState] || 'text-gray-500';
+        }
+
         function doctorStateLabel(r) {
-            return DOCTOR_STATE_LABELS[r.state] || (r.state || 'gone');
+            return taskStateLabel(r.state);
         }
 
         function doctorStateClass(r) {
-            return DOCTOR_STATE_CLASSES[r.state] || 'text-gray-500';
+            return taskStateClass(r.state);
         }
+
+        const ticketTasks = computed(() => (ticket.value && ticket.value.tasks) || []);
+        const ticketTasksOpen = ref(false);
+        const openTicketTasks = computed(
+            () => ticketTasks.value.filter(t => !['done', 'canceled'].includes(t.state)));
 
         async function loadDoctorRuns() {
             try {
@@ -2199,6 +2241,7 @@ frshtyApp({
             openDoctor, closeDoctor, submitDoctor,
             doctorRuns, doctorRunning, doctorHistoryOpen, loadDoctorRuns,
             doctorStateLabel, doctorStateClass,
+            ticketTasks, ticketTasksOpen, openTicketTasks, taskStateLabel, taskStateClass,
         };
     },
 }).mount('#app');
