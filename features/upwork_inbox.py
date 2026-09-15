@@ -65,6 +65,9 @@ DEFAULT_MAX_AGE_HOURS = 72
 DEFAULT_MAX_PENDING_PROPOSALS = 3
 DEFAULT_MAX_JUDGEMENTS_PER_SCAN = 3
 DEFAULT_JUDGE_RETRY_MINUTES = 60
+DEFAULT_UNREACHABLE_SCANS = 2
+UNREACHABLE_RUNS_READ = 24
+FRSHTY_PROJECT = "frshty"
 MAX_TRANSCRIPT_MESSAGES = 60
 TRANSCRIPT_HEAD_MESSAGES = 5
 MAX_MESSAGE_CHARS = 6000
@@ -76,6 +79,38 @@ OPERATOR_MARK = "(the operator)"
 REPLY_OBJECTIVE = "Reply to {client} on Upwork about {job}. {ask}"
 DEFAULT_ASK = ("Read the thread quoted in the brief and answer what it asks"
                " for.")
+UNREACHABLE_SKIP = "the inbox could not be read"
+UNREACHABLE_OBJECTIVE = (
+    "Restore the Upwork inbox reader on {instance}. The last {runs} scheduled"
+    " scans could not read the inbox, so no client message has been indexed"
+    " since. Find the cause and fix it.")
+UNREACHABLE_BRIEF = """
+
+## What happened
+
+- instance: {instance}
+- scheduled task: {task}
+- scans in a row that could not read the inbox: {runs}
+- last error: {error}
+
+frshty reads the Upwork inbox through core/upwork_client.py. It lifts a bearer
+token out of a Chrome on this machine that is logged into Upwork and has
+remote debugging open on the configured `upwork.cdp_url`, then calls the inbox
+REST API with it. While that lift or that call fails, no room is indexed and
+no client message is read. /upwork shows the failure and the event feed
+carries one `upwork_inbox_unreachable` line per failed scan.
+
+## What this task delivers
+
+1. Reproduce the failure and name its cause. The usual ones are a Chrome that
+   is not running with `--remote-debugging-port` on the configured cdp_url, a
+   profile that is logged out of Upwork, and a cdp_url that names the wrong
+   port.
+2. Fix the cause where it can be fixed on this machine, then prove the inbox
+   reads again rather than asserting it.
+3. When only the operator can clear it, say so plainly and say what they have
+   to do. Send nothing to anybody.
+"""
 RECORD_COMMAND = (
     """python3 -c 'import json,sys,urllib.request as u; t=open(sys.argv[1]).read();"""
     """ r=u.Request(sys.argv[2], data=json.dumps({{"text": t}}).encode(),"""
@@ -627,6 +662,7 @@ def ingest(config: dict, instance_key: str = "", now: datetime | None = None,
         listing, floor = _fetch_rooms(config, instance_key, limit, room_pages)
     except Exception as e:
         counts["complete"] = False
+        counts["error"] = f"{type(e).__name__}: {e}"[:MAX_REASON_CHARS]
         log.emit("upwork_inbox_unreachable",
                  f"[{instance_key}] the Upwork inbox could not be read:"
                  f" {type(e).__name__}: {e}",
@@ -657,6 +693,7 @@ def ingest(config: dict, instance_key: str = "", now: datetime | None = None,
                                      whole=room_id in forced)
         except Exception as e:
             counts["complete"] = False
+            counts["error"] = f"{type(e).__name__}: {e}"[:MAX_REASON_CHARS]
             log.emit("upwork_inbox_unreachable",
                      f"[{instance_key}] the messages of room {room_id} could"
                      f" not be read: {type(e).__name__}: {e}",
@@ -812,6 +849,16 @@ def _last_task_is_closed(row: dict) -> bool:
     if not row["work_item_id"]:
         return True
     return db.query_one(_TASK_CLOSED, (row["work_item_id"],)) is not None
+
+
+def _task_open(item_id: int) -> bool:
+    """Whether one task is still on the board with nobody finished with it.
+
+    A row that is gone reads as dealt with. Tasks are purged once they are old
+    enough, and a record pointing at one that no longer exists must not hold
+    the next report of the same fault silent for ever."""
+    row = db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))
+    return bool(row) and row["state"] not in work_store.CLOSED_STATES
 
 
 def _client_spoke_last(row_id: int, operator_id: str, conn=None) -> bool:
@@ -1108,6 +1155,7 @@ def propose(config: dict, instance_key: str = "",
         counts["rooms"] += scan["rooms"]
         if not scan["complete"]:
             counts["complete"] = False
+            counts["error"] = scan.get("error", "")
             break
         fresh = db.query_one("SELECT * FROM upwork_rooms WHERE id = ?",
                              (row["id"],))
@@ -1155,6 +1203,7 @@ def propose(config: dict, instance_key: str = "",
         counts["rooms"] += scan["rooms"]
         if not scan["complete"]:
             counts["complete"] = False
+            counts["error"] = scan.get("error", "")
             break
         # The judge names what the answer has to achieve. A verdict that gives
         # only the reason still names the same request in a sentence, and one
@@ -1231,6 +1280,125 @@ def propose(config: dict, instance_key: str = "",
     return opened, counts
 
 
+def _unreachable_runs(instance_key: str) -> int:
+    """How many finished scans before this one already failed to read the inbox.
+
+    The run history is asked of `jobs` rather than kept in state, because the
+    worker already writes every run there with what the task returned. It
+    writes the row of the run now in progress only when that run ends, so what
+    this reads stops at the scan before this one and the caller counts itself.
+
+    The walk stops at the first run that read the inbox, and it reads at most
+    a day of hourly scans, so an outage longer than that saturates rather than
+    growing without bound. The number is only ever used to decide whether an
+    outage has lasted long enough to be worth the operator's attention."""
+    rows = db.query_all(
+        "SELECT response FROM jobs WHERE instance_key = ? AND task = ?"
+        " AND finished_at IS NOT NULL ORDER BY id DESC LIMIT ?",
+        (instance_key, SCAN_TASK, UNREACHABLE_RUNS_READ))
+    runs = 0
+    for row in rows:
+        artifacts = db.load_json(row, "response").get("artifacts")
+        artifacts = artifacts if isinstance(artifacts, dict) else {}
+        if str(artifacts.get("skipped") or "") != UNREACHABLE_SKIP:
+            break
+        runs += 1
+    return runs
+
+
+def _alert_held(instance_key: str) -> int | None:
+    """The task this instance's current outage already opened, if there is one."""
+    blob = state.load(STATE_MODULE)
+    held = (blob.get("unreachable_task") or {}).get(instance_key)
+    try:
+        return int(held) if held is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _forget_alert(instance_key: str) -> None:
+    """Drop the record of the task the last outage opened, once the inbox
+    reads again and that task is closed.
+
+    The record is what stops a second task being opened for an outage the
+    board already carries. Both halves of the test matter. A task still
+    waiting on the operator says the outage is already reported, so the next
+    one must not add a duplicate. A task the operator declined while the inbox
+    was still down must not be replaced by a new one on the very next scan,
+    which is why nothing is forgotten until a scan has actually read the
+    inbox."""
+    held = _alert_held(instance_key)
+    if held is None or _task_open(held):
+        return
+    blob = state.load(STATE_MODULE)
+    alerts = dict(blob.get("unreachable_task") or {})
+    alerts.pop(instance_key, None)
+    blob["unreachable_task"] = alerts
+    state.save(STATE_MODULE, blob)
+
+
+def _raise_alert(instance_key: str, runs: int, error: str,
+                 now: datetime) -> int | None:
+    """Open the task that tells the operator this inbox is down.
+
+    An inbox that cannot be read fails quietly. The scan still ends `ok`, the
+    page still renders the rooms it read last time, and the only sign is a red
+    line on /upwork and one event per failed scan in a feed nobody reads for
+    hours. So the outage is put where the operator already looks: a proposal
+    on /tasks, which nothing runs until they approve it.
+
+    It is opened once per outage. Two scans of one instance cannot run at the
+    same time -- core/queue.py refuses to claim a job whose instance and task
+    are already running -- so reading the record and writing it back is safe
+    without a lock of its own."""
+    if _alert_held(instance_key) is not None:
+        return None
+    objective = UNREACHABLE_OBJECTIVE.format(
+        instance=instance_key or "this instance",
+        runs=runs)[:MAX_OBJECTIVE_CHARS]
+    note = (f"The Upwork inbox of {instance_key} could not be read on {runs}"
+            f" scans in a row: {error or 'no error was recorded'}")[:MAX_NOTE_CHARS]
+    brief = UNREACHABLE_BRIEF.format(
+        instance=instance_key or "(unknown)", task=SCAN_TASK, runs=runs,
+        error=error or "(none recorded)")
+    contexts = [c for c in (instance_key, UPWORK_TAG) if c]
+    item_id = work_store.create_proposal(
+        objective, note=note, instance_key=instance_key,
+        contexts=",".join(contexts), cwd=_cwd_for(FRSHTY_PROJECT),
+        brief=brief, now=_iso(now))
+    blob = state.load(STATE_MODULE)
+    alerts = dict(blob.get("unreachable_task") or {})
+    alerts[instance_key] = item_id
+    blob["unreachable_task"] = alerts
+    state.save(STATE_MODULE, blob)
+    log.emit("upwork_inbox_task_opened",
+             f"[{instance_key}] the Upwork inbox could not be read on {runs}"
+             f" scans in a row; opened task {item_id} to restore it",
+             links={"detail": f"/tasks/{item_id}"},
+             meta={"work_item_id": item_id, "runs": runs, "error": error})
+    return item_id
+
+
+def _report_outage(config: dict, instance_key: str, error: str,
+                   now: datetime, report: dict) -> dict:
+    """Count how long this outage has run, and open the task once it is long
+    enough to be worth the operator's attention.
+
+    One failed scan is not news. A browser that is restarting, a token lifted
+    while the page was still loading and a network blip all cost a scan and
+    fix themselves before the next one. A run of them does not fix itself, and
+    every hour of it is an hour of client messages nobody has read."""
+    threshold = int(_settings(config).get("unreachable_scans",
+                                          DEFAULT_UNREACHABLE_SCANS))
+    runs = 1 + _unreachable_runs(instance_key)
+    report["failed_scans"] = runs
+    if threshold > 0 and runs >= threshold:
+        item_id = _raise_alert(instance_key, runs, error, now)
+        if item_id is not None:
+            report["alerted"] = item_id
+    return report
+
+
 def check(config: dict, instance_key: str = "",
           now: datetime | None = None) -> dict:
     """The scheduled entry point: index the new messages, then read them.
@@ -1240,22 +1408,33 @@ def check(config: dict, instance_key: str = "",
     number of rooms the model returned nothing for, and it is reported rather
     than swallowed: the task still ends `ok` when a screen or a judge call
     comes back empty, and a page that showed only the status would say the
-    pipeline is working while no request is reaching a task."""
+    pipeline is working while no request is reaching a task.
+
+    An inbox that could not be read is reported the same way and then acted
+    on. The run still ends `ok`, because the task did what it could, and a run
+    of scans that all could not read the inbox opens a proposal on /tasks."""
     now = now or _now()
     if not configured(config):
         return {"messages": 0, "rooms": 0, "proposed": 0,
                 "skipped": "features.upwork is off"}
+    instance_key = instance_key or state.active_instance_key()
     counts = ingest(config, instance_key=instance_key, now=now)
     complete = counts.pop("complete", True)
+    error = counts.pop("error", "")
     if not complete:
-        return {**counts, "proposed": 0, "skipped": "the inbox could not be read"}
+        return _report_outage(config, instance_key, error, now,
+                              {**counts, "proposed": 0,
+                               "skipped": UNREACHABLE_SKIP})
     opened, extra = propose(config, instance_key=instance_key, now=now)
     report = {"messages": counts["messages"] + extra["messages"],
               "rooms": counts["rooms"] + extra["rooms"],
               "screened": extra["screened"], "blocked": extra["blocked"],
               "unanswered": extra["unanswered"], "proposed": len(opened)}
     if not extra["complete"]:
-        report["skipped"] = "the inbox could not be read"
+        report["skipped"] = UNREACHABLE_SKIP
+        return _report_outage(config, instance_key, extra.get("error", ""),
+                              now, report)
+    _forget_alert(instance_key)
     return report
 
 
