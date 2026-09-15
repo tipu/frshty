@@ -183,18 +183,52 @@ def _repo_gate_blocked(instance_key: str, ticket_key: str, config: dict | None =
     core.tasks.tickets.start_planning's gate-lock + status re-check (only one
     ticket can transition into "planning" inside the threading.Lock), so the
     enqueue-time gate only needs to block on already-active pipeline states.
+
+    Exactly one occupying ticket holds the gate, and the gate is clear for
+    that holder alone. Two tickets can reach an occupying status in one poll
+    cycle, because a status only moves when its job runs: one poll queued
+    fix_scope_findings for two pr_ready tickets, and both jobs sent their
+    ticket back into proving. Asking only whether some *other* ticket occupies
+    the gate then answered yes for both, each naming the other, and neither
+    could ever queue the step that would take it out of that status. Electing
+    a holder keeps the serialization the gate exists for and cannot form that
+    wait cycle, because the holder never waits and therefore always drains.
+
+    The holder is the occupying ticket that entered the occupying set first,
+    read from ticket_transitions as the ticket's last transition into that set
+    from outside it, and broken by ticket_key when two entered together or no
+    entry is recorded. The key is the entry into the set rather than into the
+    current status, so a holder that advances keeps the gate for its whole
+    run: keyed on the current status, every advance restarts the holder's
+    clock and hands the gate to a ticket that entered later, which lets the
+    two take turns rather than serializing. updated_at cannot order them
+    either, because every poll cycle writes every ticket back, so it records
+    the scan order rather than the order the tickets entered the pipeline.
     """
     import core.db as _db
     auto_merge = bool((config or {}).get("pr", {}).get("auto_merge"))
     statuses = _GATE_OCCUPYING_AUTO_MERGE if auto_merge else _GATE_OCCUPYING_STATUSES
+    marks = ",".join("?" for _ in statuses)
     rows = _db.query_all(
-        "SELECT ticket_key FROM tickets"
-        " WHERE instance_key=? AND ticket_key<>?"
-        f"      AND status IN ({','.join('?' for _ in statuses)})"
-        " ORDER BY updated_at ASC LIMIT 1",
-        (instance_key, ticket_key, *statuses),
+        "SELECT t.ticket_key AS ticket_key,"
+        "       (SELECT MAX(tr.ts) FROM ticket_transitions tr"
+        "         WHERE tr.instance_key=t.instance_key"
+        "           AND tr.ticket_key=t.ticket_key"
+        "           AND tr.rejected=0"
+        f"           AND tr.new_status IN ({marks})"
+        "           AND (tr.prior_status IS NULL"
+        f"                OR tr.prior_status NOT IN ({marks}))) AS held_since"
+        "  FROM tickets t"
+        " WHERE t.instance_key=?"
+        f"      AND t.status IN ({marks})"
+        " ORDER BY held_since IS NULL, held_since ASC, t.ticket_key ASC"
+        " LIMIT 1",
+        (*statuses, *statuses, instance_key, *statuses),
     )
-    return rows[0]["ticket_key"] if rows else None
+    if not rows:
+        return None
+    holder = rows[0]["ticket_key"]
+    return None if holder == ticket_key else holder
 
 
 def _scope_review_state(config: dict, ts: dict) -> str:
