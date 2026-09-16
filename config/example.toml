@@ -181,6 +181,16 @@ pr_autofix = false                # github only: every newly created PR gets a c
 # enabled = true                      # default; set false to disable advisory PM reviews
 # post_shipping_cadence = "weekly"
 
+# --- Verification ledger ---
+# [freshness]
+# enabled = true                      # default. records what each ticket has claimed — the branch
+#                                     # its proof stood on, the PR heads CI went green against, the
+#                                     # comment watermark it triaged to, the smoke criteria it
+#                                     # replayed — and the event that staled each claim. It is a
+#                                     # record only: no gate reads it, it never enqueues a task and
+#                                     # it never runs a model. The ticket detail page renders it.
+#                                     # Set false to stop writing it.
+
 # --- Post-merge validator ---
 # [validation]
 # live_url = "https://staging.example.com"   # base URL for playwright steps
