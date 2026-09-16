@@ -264,10 +264,13 @@ def api_work_btw(item_id: int, body: dict):
 def api_work_followup(item_id: int, body: dict):
     """Launch a task that continues one finished task.
 
-    The board offers this on a task the agent reported done, where the
-    operator has read the report and wants the next run without leaving the
-    board. A body that carries no projects and no agent inherits both from
-    the source task, so the follow-up runs where its source ran."""
+    The board offers this on a task the agent reported done and on a
+    completed task, where the operator has read the report and wants the next
+    run without leaving the board. Archiving a completed task only files it,
+    so the archive view offers it too and the operator never has to unarchive
+    finished work to continue it. A body that carries no projects and no agent
+    inherits both from the source task, so the follow-up runs where its source
+    ran."""
     result = work_launch.launch_followup(item_id, body.get("text") or "",
                                          cwd=body.get("cwd") or "",
                                          contexts=body.get("contexts"),
