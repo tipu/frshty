@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Standup — frshty</title>
+<script src="/static/vendor/vue.global.prod.js"></script>
+<script src="/static/frshty-time.js"></script>
+<script src="/static/frshty-nav.js"></script>
+<script src="/static/frshty-shell.js"></script>
+<link rel="stylesheet" href="/static/frshty.css">
+<link rel="stylesheet" href="/static/frshty-v2.css">
+<link rel="stylesheet" href="/static/frshty-mobile.css">
+<style>
+.su-item { border-top: 1px solid var(--ln-border); padding: 12px 14px; }
+.su-item:first-child { border-top: none; }
+.su-item.su-closed { opacity: 0.55; }
+.su-head { display: flex; align-items: flex-start; gap: 10px; }
+.su-text { flex: 1; font-size: 13.5px; color: var(--ln-text); line-height: 1.45; }
+.su-text[contenteditable="true"]:focus { outline: 1px solid var(--ln-border-hi); border-radius: 4px; padding: 1px 4px; }
+.su-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
+.su-box { border: 1px solid var(--ln-border-hi); border-radius: 6px; padding: 10px 12px; margin-top: 10px; background: var(--ln-bg); }
+.su-opts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.su-opt { text-align: left; }
+.su-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.su-yesterday { white-space: pre-wrap; font-size: 12.5px; color: var(--ln-text-2); }
+.su-input { width: 100%; background: var(--ln-bg); border: 1px solid var(--ln-border-hi); border-radius: 6px; padding: 7px 10px; color: var(--ln-text); font-size: 12.5px; }
+</style>
+<script src="/static/frshty-usage.js"></script>
+</head>
+<body>
+<div id="app" v-cloak>
+<frshty-shell :features="features" :instance="instanceName" :counts="railCounts">
+  <template #actions>
+    <button class="ln-btn ln-btn-ghost" @click="redraft" v-if="day.state === 'draft'">Redraft</button>
+    <button class="ln-btn ln-btn-primary" @click="openDay" v-if="day.state === 'draft'">Open the day</button>
+    <button class="ln-btn ln-btn-ghost" @click="closeDay" v-if="day.state === 'open'">Close the day</button>
+  </template>
+
+  <div class="ln-hero">
+    <div>
+      <h1 class="ln-title">Standup · {{ prettyDay }}</h1>
+      <p class="ln-subtitle" v-if="!day.exists">
+        No standup for this day yet. Draft one to write down what today is for.
+        Nothing is nudged until you open it.
+      </p>
+      <p class="ln-subtitle" v-else-if="day.state === 'draft'">
+        {{ open.length }} action items drafted from the board. Edit them, then open the day.
+        Nothing is nudged until you open it.
+      </p>
+      <p class="ln-subtitle" v-else-if="day.state === 'open'">
+        {{ doneCount }} of {{ day.items.length }} done · {{ runningCount }} running ·
+        {{ waitingCount }} waiting on you · {{ day.nudges_today }} of {{ day.budget }} nudges used today
+        <span v-if="day.shadow"> · shadow mode: nudges are logged, not shown</span>
+      </p>
+      <p class="ln-subtitle" v-else>
+        This day is closed. {{ doneCount }} of {{ day.items.length }} were checked off.
+      </p>
+    </div>
+    <input class="ln-input" style="min-width:160px" type="date" v-model="pickedDay" @change="refresh" />
+  </div>
+
+  <div class="ln-small" style="color:var(--ln-red)" v-if="error">{{ error }}</div>
+  <div class="ln-small ln-muted" v-if="day.exists && !day.enabled">
+    The standup is off in this instance's config. The page still works; the morning draft,
+    the nudge loop and the day close do not run until [standup] enabled = true.
+  </div>
+  <div class="ln-small ln-muted" v-if="!day.personal_loaded">
+    personal instance not loaded — an action item cannot start a task
+  </div>
+
+  <div class="ln-card" v-if="!day.exists">
+    <div class="ln-card-body">
+      <button class="ln-btn ln-btn-primary" @click="draft">Draft today's standup</button>
+    </div>
+  </div>
+
+  <template v-else>
+    <div class="ln-card" v-if="day.yesterday">
+      <div class="ln-card-head">Yesterday · built from events, not from a model</div>
+      <div class="ln-card-body su-yesterday">{{ day.yesterday }}</div>
+    </div>
+
+    <div class="ln-card" v-if="open.length">
+      <div class="ln-card-head">Open <span class="ln-count-chip">{{ open.length }}</span></div>
+      <div class="ln-card-body" style="padding:0">
+        <div class="su-item" v-for="it in open" :key="it.id">
+          <div class="su-head">
+            <button class="ln-icon-btn" :title="'check off: ' + it.text"
+                    @click="setState(it, 'done')">☐</button>
+            <div class="su-text" contenteditable="true" spellcheck="false"
+                 @blur="saveText(it, $event)">{{ it.text }}</div>
+            <span class="ln-task-id">a{{ it.id }}</span>
+          </div>
+          <div class="su-meta">
+            <span class="ln-pill ln-pill-ghost">{{ it.origin }}</span>
+            <span class="ln-pill ln-pill-amber" v-if="it.carry_count">carried · day {{ it.carry_count + 1 }}</span>
+            <span class="ln-pill ln-pill-blue" v-if="it.state === 'awaiting_check'">a task says this is done</span>
+            <span class="ln-pill ln-pill-ghost" v-if="it.state === 'parked'">parked</span>
+            <span class="ln-pill ln-pill-ghost" v-if="snoozedNow(it)">quiet until {{ $relTime(it.snoozed_until) }}</span>
+            <span class="ln-tag" v-for="p in labels(it)" :key="p">{{ p }}</span>
+            <span class="ln-small ln-muted" v-if="it.origin_ref">{{ it.origin_ref }}</span>
+            <span class="ln-small ln-muted" v-if="it.nudge_count">{{ it.nudge_count }} nudge{{ it.nudge_count === 1 ? '' : 's' }}</span>
+          </div>
+
+          <div class="su-box" v-if="it.question">
+            <div class="ln-small">{{ it.question.prompt }}</div>
+            <div class="su-opts">
+              <button class="ln-btn ln-btn-sm su-opt" v-for="o in it.question.options" :key="o.key"
+                      :title="o.detail" @click="answer(it, o.key)">{{ o.label }}</button>
+            </div>
+          </div>
+
+          <div class="su-meta" v-for="t in it.tasks" :key="t.id">
+            <a class="ln-link" :href="'/tasks#' + t.id">task #{{ t.id }}</a>
+            <span class="ln-pill" :class="pillFor(t.state)">{{ t.state }}</span>
+            <span class="ln-small ln-muted">{{ t.objective }}</span>
+          </div>
+
+          <div class="su-actions">
+            <input class="su-input" style="flex:1;min-width:220px"
+                   :placeholder="it.live_task ? 'btw → goes to the live run as a side question…' : 'ask for something on this line — it starts a task'"
+                   v-model="drafts[it.id]" @keydown.enter="compose(it)" />
+            <button class="ln-btn ln-btn-sm" @click="compose(it)" :disabled="busy">Send</button>
+            <button class="ln-btn ln-btn-sm ln-btn-ghost" @click="startTask(it)" :disabled="busy"
+                    v-if="!it.live_task">Start a task</button>
+            <button class="ln-btn ln-btn-sm ln-btn-ghost" @click="snooze(it, 2)">Snooze 2h</button>
+            <button class="ln-btn ln-btn-sm ln-btn-ghost" @click="setState(it, 'parked')"
+                    v-if="it.state !== 'parked'">Park</button>
+            <button class="ln-btn ln-btn-sm ln-btn-ghost" @click="setState(it, 'open')"
+                    v-else>Reopen</button>
+            <button class="ln-btn ln-btn-sm ln-btn-danger" @click="setState(it, 'dropped')">Drop</button>
+          </div>
+          <div class="ln-small" style="color:var(--ln-red)" v-if="notes[it.id]">{{ notes[it.id] }}</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="ln-card">
+      <div class="ln-card-body">
+        <input class="su-input" v-model="newText" @keydown.enter="addItem"
+               placeholder="＋ Add an action item…" />
+        <div class="su-actions">
+          <label class="ln-small ln-muted" v-for="p in day.projects" :key="p.key">
+            <input type="checkbox" :value="p.key" v-model="newContexts" /> {{ p.key }}
+          </label>
+          <button class="ln-btn ln-btn-sm" @click="addItem" :disabled="busy || !newText.trim()">Add</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="ln-card" v-if="closed.length">
+      <div class="ln-card-head">Closed <span class="ln-count-chip">{{ closed.length }}</span></div>
+      <div class="ln-card-body" style="padding:0">
+        <div class="su-item su-closed" v-for="it in closed" :key="it.id">
+          <div class="su-head">
+            <button class="ln-icon-btn" title="reopen" @click="setState(it, 'open')">
+              {{ it.state === 'done' ? '☑' : '✕' }}</button>
+            <div class="su-text">{{ it.text }}</div>
+            <span class="ln-task-id">a{{ it.id }}</span>
+          </div>
+          <div class="su-meta">
+            <span class="ln-pill ln-pill-ghost">{{ it.state }}</span>
+            <span class="ln-tag" v-for="p in labels(it)" :key="p">{{ p }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </template>
+</frshty-shell>
+</div>
+<script>
+const CLOSED_ITEM_STATES = ["done", "dropped"];
+frshtyApp({
+  data() {
+    return {
+      features: {}, instanceName: "", error: "", busy: false,
+      day: { exists: false, items: [], projects: [], state: "", nudges_today: 0, budget: 0 },
+      pickedDay: "", newText: "", newContexts: [], drafts: {}, notes: {},
+    };
+  },
+  computed: {
+    railCounts() { return { standup: this.waitingCount, tasks: this.day.rail_attention || 0 }; },
+    open() { return (this.day.items || []).filter(i => !CLOSED_ITEM_STATES.includes(i.state)); },
+    closed() { return (this.day.items || []).filter(i => CLOSED_ITEM_STATES.includes(i.state)); },
+    doneCount() { return (this.day.items || []).filter(i => i.state === "done").length; },
+    runningCount() {
+      return (this.day.items || []).filter(
+        i => i.live_task && i.live_task.state === "agent_working").length;
+    },
+    waitingCount() {
+      return (this.day.items || []).filter(i => i.question).length;
+    },
+    prettyDay() {
+      const d = this.day.day || this.pickedDay;
+      if (!d) return "";
+      const parsed = new Date(d + "T00:00:00");
+      return isNaN(parsed) ? d : parsed.toLocaleDateString(undefined,
+        { weekday: "short", day: "numeric", month: "short" });
+    },
+  },
+  methods: {
+    labels(it) { return (it.contexts || "").split(",").filter(Boolean); },
+    snoozedNow(it) { return it.snoozed_until && new Date(it.snoozed_until) > new Date(); },
+    pillFor(state) {
+      return { agent_working: "ln-pill-blue", needs_you: "ln-pill-amber",
+               proposed: "ln-pill-violet", needs_ack: "ln-pill-green",
+               done: "ln-pill-ghost" }[state] || "ln-pill-ghost";
+    },
+    apply(data) {
+      if (data && data.error) { this.error = data.error; return false; }
+      this.error = "";
+      this.day = data;
+      if (!this.pickedDay) this.pickedDay = data.day || "";
+      return true;
+    },
+    async post(path, body) {
+      this.busy = true;
+      try {
+        const r = await fetch(path, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(Object.assign({ day: this.pickedDay || undefined }, body || {})),
+        });
+        const data = await r.json();
+        if (!r.ok) { this.error = data.error || ("HTTP " + r.status); return null; }
+        this.apply(data);
+        return data;
+      } catch (e) {
+        this.error = String(e);
+        return null;
+      } finally {
+        this.busy = false;
+      }
+    },
+    async refresh() {
+      try {
+        const q = this.pickedDay ? "?day=" + encodeURIComponent(this.pickedDay) : "";
+        const r = await fetch("/api/standup" + q);
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        this.apply(await r.json());
+      } catch (e) { this.error = String(e); }
+    },
+    draft() { return this.post("/api/standup/draft"); },
+    redraft() { return this.post("/api/standup/redraft"); },
+    openDay() { return this.post("/api/standup/open"); },
+    closeDay() { return this.post("/api/standup/close"); },
+    async addItem() {
+      const text = this.newText.trim();
+      if (!text) return;
+      const out = await this.post("/api/standup/items",
+                                  { text, contexts: this.newContexts.join(",") });
+      if (out) { this.newText = ""; this.newContexts = []; }
+    },
+    saveText(it, ev) {
+      const text = (ev.target.innerText || "").trim();
+      if (!text || text === it.text) { ev.target.innerText = it.text; return; }
+      this.post("/api/standup/items/" + it.id, { text });
+    },
+    setState(it, state) { return this.post("/api/standup/items/" + it.id + "/state", { state }); },
+    snooze(it, hours) {
+      const until = new Date(Date.now() + hours * 3600000).toISOString();
+      return this.post("/api/standup/items/" + it.id + "/snooze", { until });
+    },
+    async answer(it, option) {
+      const out = await this.post("/api/standup/items/" + it.id + "/answer", { option });
+      if (out && out.launch_error) this.notes[it.id] = out.launch_error;
+    },
+    async compose(it) {
+      const text = (this.drafts[it.id] || "").trim();
+      if (!text) return;
+      const out = await this.post("/api/standup/items/" + it.id + "/compose", { text });
+      if (!out) return;
+      this.drafts[it.id] = "";
+      if (out.compose_error) {
+        this.notes[it.id] = out.compose_error;
+      } else {
+        const answer = (out.compose_result || {}).answer;
+        this.notes[it.id] = answer ? "answer: " + answer : "";
+      }
+    },
+    async startTask(it) {
+      const out = await this.post("/api/standup/items/" + it.id + "/compose",
+                                  { text: it.text });
+      if (out && out.compose_error) this.notes[it.id] = out.compose_error;
+    },
+    async loadConfig() {
+      try {
+        const cfg = await (await fetch("/api/config")).json();
+        this.features = cfg.features || {};
+        this.instanceName = (cfg.job && cfg.job.key) || "";
+      } catch (e) {}
+    },
+  },
+  mounted() {
+    this.loadConfig();
+    this.refresh();
+    setInterval(() => { if (!this.busy) this.refresh(); }, 20000);
+  },
+}).mount("#app");
+</script>
+</body>
+</html>

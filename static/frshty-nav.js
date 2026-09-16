@@ -4,6 +4,7 @@
         { href: '/global', label: 'Global' },
         { href: '/reviews', label: 'Reviews' },
         { href: '/today', label: 'Today' },
+        { href: '/standup', label: 'Standup' },
         { href: '/wizard', label: 'Wizard' },
         { href: '/tickets', label: 'Tickets' },
         { href: '/prd', label: 'PRD' },
