@@ -78,6 +78,7 @@
     <span v-if="peer" class="badge b-other" :title="'this task runs on the ' + peer + ' host'">⇄ {{ peer }}</span>
     <a v-if="sourceItem" :href="taskHref(sourceItem.id)" class="text-xs text-blue-400 underline ml-3" :title="sourceItem.objective">follows #{{ sourceItem.id }}</a>
     <a v-if="item.state !== 'canceled'" :href="terminalHref" :target="terminalWindow" class="text-xs text-blue-400 underline ml-3">open terminal</a>
+    <span v-if="sessionLabel" class="text-xs ml-2" :class="sessionCls" :title="sessionTitle">● {{ sessionLabel }}</span>
   </div>
   <div class="mt-1 text-xs text-gray-500" v-if="worktree"
        :title="'shared checkout: ' + worktree.repo_path">
@@ -334,6 +335,7 @@ const app = frshtyApp({
                     followups: [], fuText: {}, fuCtx: {}, fuSlack: {}, fuAgent: {}, fuError: {},
                     fuTray: {}, fupTray: PasteImages.tray(),
                     sourceItem: null, followupChildren: [], worktree: null, tickets: [],
+                    session: null,
                     fupText: "", fupCtx: [], fupSlack: false, fupError: "", fupBusy: false,
                     fupAgent: "claude", agents: ["claude"], runs: [],
                     projects: [], slackAvailable: false,
@@ -356,6 +358,21 @@ const app = frshtyApp({
     },
     provider() {
       return this.runs.length ? this.runs[this.runs.length - 1].provider : "";
+    },
+    sessionLabel() {
+      if (!this.session || !this.item || this.item.state === "canceled") return "";
+      if (!this.session.alive) return "no terminal session";
+      return this.session.agent_running ? "agent running" : "agent stopped";
+    },
+    sessionCls() {
+      return this.session && this.session.agent_running ? "text-green-400" : "text-gray-500";
+    },
+    sessionTitle() {
+      const agent = this.provider || "claude";
+      if (this.session && this.session.agent_running)
+        return "a " + agent + " process is running in this task's pane";
+      return "this task's pane holds no " + agent + " process, so ask and correct refuse; "
+             + "open the terminal to resume the session";
     },
     timelineView() {
       const rev = this.timeline.slice().reverse();
@@ -517,6 +534,7 @@ const app = frshtyApp({
         this.sourceItem = d.source_item || null; this.followupChildren = d.followup_children || [];
         this.worktree = d.worktree || null;
         this.tickets = d.tickets || [];
+        this.session = d.session || null;
         this.projects = d.projects || []; this.slackAvailable = !!d.slack_available;
         this.runs = d.runs || [];
         this.agents = d.agents && d.agents.length ? d.agents : ["claude"];
