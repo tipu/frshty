@@ -11,13 +11,21 @@ expected to follow. The instances here hold DEV-635 and NEC-12, and they also
 hold PRD-6_FUNCTIONAL_REQUIREMENTS-3, which no project-plus-number pattern
 matches. A key counts when it stands on its own in the text, so DEV-63 is not
 found inside DEV-635 and PRD-6 is not found inside PRD-6_FUNCTIONAL_REQUIREMENTS-3.
+
+A follow-up the board wrote by itself names no key at all: it names a pull
+request address. merge_scope couples that text to a ticket the same derived
+way, through the pull request addresses the ticket rows hold.
 """
+import json
 import re
 
 import core.db as db
 import core.runtime as runtime
 
 BOUNDARY = r"[0-9A-Za-z_-]"
+OPEN_PR_STATE = "OPEN"
+_PR_URL_RE = re.compile(
+    r"https?://([^/\s]+)/([^/\s]+)/([^/\s]+)/pull(?:-requests)?/(\d+)", re.I)
 
 
 def _matcher(keys) -> re.Pattern | None:
@@ -192,3 +200,104 @@ def tasks_for(instance_key: str, ticket_key: str) -> list[dict]:
             "url": f"/tasks/{r['id']}",
         })
     return out
+
+
+def pr_refs_in(text: str) -> list[dict]:
+    """Every pull request one piece of text names by address, once each.
+
+    A follow-up draft names its pull request by URL rather than by ticket
+    key, so the address is what couples it to a ticket. The address of a pull
+    request on Bitbucket carries a trailing page ('/198/overview') and the
+    one on GitHub does not, so only the part up to the number identifies it.
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    for m in _PR_URL_RE.finditer(text or ""):
+        host, owner, repo, number = (g.lower() for g in m.groups())
+        key = f"{host}/{owner}/{repo}/{number}"
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"key": key, "repo": repo, "id": number})
+    return out
+
+
+def _pr_identity(pr: dict) -> tuple[str, str]:
+    """One tracked pull request as its address key and its repo-and-number key.
+
+    The address key is empty when the ticket holds no usable URL for the pull
+    request, and the repo-and-number key is what answers then."""
+    m = _PR_URL_RE.search(pr.get("url") or "")
+    key = "/".join(g.lower() for g in m.groups()) if m else ""
+    return key, f"{str(pr.get('repo') or '').lower()}/{pr.get('id')}"
+
+
+def merge_scope(text: str) -> dict:
+    """The whole ticket behind the pull requests one piece of text names.
+
+    A merge follow-up names the one pull request the run it came from left
+    open. That pull request can be one of several under a ticket, and merging
+    one of them on its own delivers a part of the ticket. So the ticket is
+    resolved from the address the text names, and every open pull request it
+    holds is reported with it: 'named' are the ones the text already names,
+    'siblings' are the rest, and 'unapproved' are the siblings nobody has
+    approved yet.
+
+    Only a ticket still in_review is resolved. That is the status whose poll
+    refreshes ts['prs'][i]['approvers'] (features/tickets._cache_pr_health),
+    so it is the only status whose approver cache answers for now rather than
+    for whenever the ticket was last polled. A ticket that left in_review is
+    no longer waiting to be merged anyway. Text that names no pull request a
+    tracked in_review ticket holds returns {}, which is every follow-up that
+    has nothing to do with a ticket.
+
+    The named pull request is never counted as unapproved. Its own approval
+    is what the run that opened the follow-up established, and the cache that
+    would answer for it here can be older than that run.
+
+    A named pull request that is already merged still resolves the ticket. It
+    drops out of 'named', because there is nothing left to merge in it, but
+    the ticket it belongs to is what the follow-up is held against: merging
+    the named pull request by hand while the follow-up waits must not release
+    the follow-up over the siblings that are still unapproved.
+    """
+    refs = pr_refs_in(text)
+    if not refs:
+        return {}
+    named_keys = {r["key"] for r in refs}
+    named_pairs = {f"{r['repo']}/{r['id']}" for r in refs}
+    rows = db.query_all(
+        "SELECT instance_key, ticket_key, data FROM tickets"
+        " WHERE status = 'in_review' AND COALESCE(obsolete_at, '') = ''"
+        " ORDER BY instance_key, ticket_key")
+    for row in rows:
+        try:
+            data = json.loads(row["data"]) if row["data"] else {}
+        except (json.JSONDecodeError, ValueError):
+            continue
+        holds_named = False
+        named: list[dict] = []
+        siblings: list[dict] = []
+        for pr in data.get("prs") or []:
+            key, pair = _pr_identity(pr)
+            matched = key in named_keys if key else pair in named_pairs
+            holds_named = holds_named or matched
+            if (pr.get("pr_state") or OPEN_PR_STATE).upper() != OPEN_PR_STATE:
+                continue
+            entry = {"repo": pr.get("repo"), "id": pr.get("id"),
+                     "url": pr.get("url") or "",
+                     "approvers": list(pr.get("approvers") or [])}
+            if matched:
+                named.append(entry)
+            else:
+                siblings.append(entry)
+        if not holds_named:
+            continue
+        return {
+            "ticket_key": row["ticket_key"],
+            "instance_key": row["instance_key"],
+            "named": named,
+            "siblings": siblings,
+            "unapproved": [p for p in siblings if not p["approvers"]],
+        }
+    return {}

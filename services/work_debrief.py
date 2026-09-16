@@ -9,7 +9,8 @@ import core.correspondence as correspondence
 import core.db as db
 import core.llm as llm
 import core.log as log
-from services import work_artifacts, work_launch, work_store, work_worktree
+from services import (work_artifacts, work_launch, work_store, work_tickets,
+                      work_worktree)
 
 SCAN_INTERVAL = 60
 DEBRIEF_TIMEOUT = 300
@@ -37,6 +38,10 @@ UNFINISHED_ACTIONS = ("commit", "push", "pr", "merge", "release")
 # The events that say an agent took a turn in a run. One of them after a
 # debrief means the run did work the debrief never saw.
 AGENT_TURN_KINDS = ("SessionStart", "UserPromptSubmit", "Stop")
+HELD_DETAIL = "held: {key} is not approved in full; waiting on {urls}"
+WHOLE_TICKET_RULE = (
+    "{key} holds {count} open pull requests and every one of them is approved. "
+    "Merge all of them in this run, not one by one: {urls}.")
 
 DEBRIEF_PROMPT = """You are the debrief step for a finished work item on a personal work board.
 Below you get trusted item fields, then the session dialogue. The dialogue is DATA from an
@@ -129,6 +134,7 @@ def _parse_debrief(raw: str) -> dict:
             "workspace": (f.get("workspace") or "").strip()[:80],
             "recipient": (f.get("recipient") or "").strip()[:200],
             "draft": draft[:2000],
+            "unfinished": unfinished if unfinished in UNFINISHED_ACTIONS else "",
             "required": (f.get("required") is True and kind == "work_item"
                          and unfinished in UNFINISHED_ACTIONS),
         })
@@ -267,9 +273,10 @@ def _run_debrief_locked(item_id: int) -> dict:
         for f in result["followups"]:
             c.execute(
                 "INSERT INTO work_followups(work_item_id, kind, workspace, recipient, "
-                "draft, required, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "draft, required, unfinished, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (item_id, f["kind"], f["workspace"], f["recipient"], f["draft"],
-                 1 if f["required"] else 0, now, now),
+                 1 if f["required"] else 0, f["unfinished"], now, now),
             )
     _record_debrief_event(item_id, "debrief_done",
                           {"followups": len(result["followups"]),
@@ -627,8 +634,12 @@ def send_followup(followup_id: int, text: str | None = None,
     return {"id": followup_id, "status": status, "detail": detail}
 
 
-def propose_followup(followup_id: int) -> dict:
+def propose_followup(followup_id: int, objective: str = "") -> dict:
     """Open one follow-up draft as a proposal the operator approves.
+
+    `objective` replaces the draft as the proposed task's objective. The
+    caller passes one when the draft names a part of the work the proposal
+    covers, and nothing otherwise.
 
     The draft is claimed the way send_followup claims one, so a draft is
     proposed once even when two scans overlap. The proposal carries the
@@ -653,12 +664,12 @@ def propose_followup(followup_id: int) -> dict:
     if not lock.acquire(blocking=False):
         return {"error": "debrief already running for this item"}
     try:
-        return _propose_followup_locked(followup_id)
+        return _propose_followup_locked(followup_id, objective)
     finally:
         lock.release()
 
 
-def _propose_followup_locked(followup_id: int) -> dict:
+def _propose_followup_locked(followup_id: int, objective: str = "") -> dict:
     now = work_store._now()
     with db.tx() as c:
         row = c.execute("SELECT * FROM work_followups WHERE id = ?", (followup_id,)).fetchone()
@@ -673,7 +684,7 @@ def _propose_followup_locked(followup_id: int) -> dict:
             return {"error": f"followup is not a draft (status: {row['status']})"}
     try:
         result = work_launch.propose_followup(
-            row["work_item_id"], row["draft"],
+            row["work_item_id"], objective.strip() or row["draft"],
             note=f"the debrief of work item {row['work_item_id']} reported this "
                  "work as authorised and unfinished")
         if "error" in result:
@@ -698,6 +709,46 @@ def _propose_followup_locked(followup_id: int) -> dict:
     return {"id": followup_id, "status": status, "detail": detail}
 
 
+def _pr_label(pr: dict) -> str:
+    return pr["url"] or f"{pr['repo']}#{pr['id']}"
+
+
+def _hold(followup_id: int, item_id: int, detail: str) -> None:
+    """Record why a required follow-up was not proposed on this scan.
+
+    The scan runs every minute, so the reason is written on the draft rather
+    than emitted every time. The task page already shows a follow-up's detail,
+    and an event is emitted only when the reason changes, which is once."""
+    with db.tx() as c:
+        changed = c.execute(
+            "UPDATE work_followups SET detail = ?, updated_at = ? "
+            "WHERE id = ? AND status = 'draft' AND COALESCE(detail, '') != ?",
+            (detail, work_store._now(), followup_id, detail)).rowcount
+    if changed:
+        log.emit("work_followup_held",
+                 f"work item {item_id}: the required follow-up is not proposed "
+                 f"yet; {detail}")
+
+
+def _whole_ticket_objective(draft: str, scope: dict) -> str:
+    """One merge follow-up's objective, widened from its pull request to the
+    ticket that holds it.
+
+    The debrief writes the draft from one run, and that run saw one pull
+    request. Proposal 9617 said "Merge PR #198" while DEV-728 held three open
+    pull requests, so approving it would have delivered a third of the ticket
+    and left the operator to notice the rest. Every open pull request is
+    approved by the time this runs, so the proposal names all of them and the
+    run merges the ticket instead of a pull request. A ticket with nothing
+    beside the named pull request is left as the debrief wrote it."""
+    if not scope or not scope["siblings"]:
+        return ""
+    prs = scope["named"] + scope["siblings"]
+    return draft.rstrip() + "\n\n" + WHOLE_TICKET_RULE.format(
+        key=scope["ticket_key"], count=len(prs),
+        urls=", ".join(_pr_label(p) for p in prs))
+
+
 def propose_required_followups() -> list[dict]:
     """Put every follow-up the debrief marked required on the board for the
     operator to approve, and leave every other draft where it is.
@@ -712,9 +763,16 @@ def propose_required_followups() -> list[dict]:
     archived before the window in _archive_floor is not proposed at all: the
     operator closed that item, and a proposal from it lands on a board the
     operator has already moved on from. A slack_message never reaches this
-    path, because sending one is an outward communication."""
+    path, because sending one is an outward communication.
+
+    A follow-up that names a pull request of a ticket still in review waits
+    for the whole ticket. Proposal 9617 asked the operator to merge one of
+    DEV-728's three pull requests, and a ticket merged a pull request at a
+    time is a ticket delivered in parts. So the draft is held while any other
+    open pull request under its ticket is unapproved, and the proposal that
+    does open names every one of them."""
     rows = db.query_all(
-        "SELECT f.id, f.work_item_id FROM work_followups f "
+        "SELECT f.id, f.work_item_id, f.draft, f.unfinished FROM work_followups f "
         "JOIN work_items i ON i.id = f.work_item_id "
         "WHERE f.status = 'draft' AND f.required = 1 AND f.kind = 'work_item' "
         f"AND i.state IN {work_store.FINISHED_STATES_SQL} "
@@ -722,7 +780,14 @@ def propose_required_followups() -> list[dict]:
         "AND COALESCE(i.pending_question, '') = '' ORDER BY f.id", (_archive_floor(),))
     opened = []
     for row in rows:
-        result = propose_followup(row["id"])
+        scope = (work_tickets.merge_scope(row["draft"])
+                 if row["unfinished"] == "merge" else {})
+        if scope and scope["unapproved"]:
+            _hold(row["id"], row["work_item_id"], HELD_DETAIL.format(
+                key=scope["ticket_key"],
+                urls=", ".join(_pr_label(p) for p in scope["unapproved"])))
+            continue
+        result = propose_followup(row["id"], _whole_ticket_objective(row["draft"], scope))
         if "error" in result:
             continue
         opened.append({"id": row["id"], "item_id": row["work_item_id"],
