@@ -11,6 +11,7 @@
 <script src="/static/frshty-nav.js"></script>
 <script src="/static/frshty-shell.js"></script>
 <script src="/static/frshty-work-question.js"></script>
+<script src="/static/frshty-paste-images.js"></script>
 <script src="/static/frshty-linkify.js"></script>
 <link rel="stylesheet" href="/static/frshty.css">
 <link rel="stylesheet" href="/static/frshty-v2.css">
@@ -178,7 +179,10 @@
         <template v-else>{{ f.kind }} · {{ f.workspace }} · {{ f.recipient }} · {{ f.status }}</template>
       </div>
       <textarea v-if="f.status === 'draft'" v-model="fuText[f.id]" rows="3"
+                :placeholder="f.kind === 'work_item' ? 'Paste an image to attach it to the run…' : ''"
+                @paste="onDraftPaste(f, $event)"
                 style="width:100%;background:#0b0b10;border:1px solid #2a2a35;border-radius:6px;color:#e0e0e0;padding:6px 10px;margin-top:6px"></textarea>
+      <paste-tray v-if="f.status === 'draft' && fuTray[f.id]" :tray="fuTray[f.id]"></paste-tray>
       <div v-else class="text-sm mt-1" style="white-space:pre-wrap" v-html="lk(f.draft)"></div>
       <div class="mt-2 flex flex-wrap gap-3 text-xs text-gray-400 items-center"
            v-if="f.status === 'draft' && f.kind === 'work_item'">
@@ -210,8 +214,10 @@
   <div class="sec" v-if="finished">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Follow up</h2>
     <div class="text-xs text-gray-600 mb-2">Launch a new run that gets this item's objective, summary and artifacts as context.</div>
-    <textarea v-model="fupText" rows="3" placeholder="Objective for the follow-up run…"
+    <textarea v-model="fupText" rows="3" @paste="onPaste(fupTray, $event)"
+              placeholder="Objective for the follow-up run… Paste an image to attach it."
               style="width:100%;background:#101018;border:1px solid #2a2a35;border-radius:8px;color:#e0e0e0;padding:10px 14px"></textarea>
+    <paste-tray :tray="fupTray"></paste-tray>
     <div class="mt-2 flex flex-wrap gap-3 text-xs text-gray-400 items-center">
       <label class="cursor-pointer" title="which agent CLI runs the follow-up">
         agent
@@ -326,6 +332,7 @@ const app = frshtyApp({
                     systemPrompt: "", showPrompt: false,
                     btwText: "", btwError: "", btwBusy: false, debriefStatus: "",
                     followups: [], fuText: {}, fuCtx: {}, fuSlack: {}, fuAgent: {}, fuError: {},
+                    fuTray: {}, fupTray: PasteImages.tray(),
                     sourceItem: null, followupChildren: [], worktree: null, tickets: [],
                     fupText: "", fupCtx: [], fupSlack: false, fupError: "", fupBusy: false,
                     fupAgent: "claude", agents: ["claude"], runs: [],
@@ -527,6 +534,7 @@ const app = frshtyApp({
             this.fuCtx[f.id] = parent.filter(c => known.has(c));
             this.fuSlack[f.id] = parent.includes("slack_int");
             this.fuAgent[f.id] = this.fupAgent;
+            if (f.kind === "work_item") this.fuTray[f.id] = PasteImages.tray();
           }
         this.loadError = "";
       } catch (e) {
@@ -534,13 +542,27 @@ const app = frshtyApp({
           this.loadError = "Unable to load this work item: " + (e.message || String(e));
       }
     },
+    onPaste(tray, e) {
+      if (tray) PasteImages.onPaste(tray, e);
+    },
+    onDraftPaste(f, e) {
+      if (this.fuTray[f.id]) { PasteImages.onPaste(this.fuTray[f.id], e); return; }
+      if (!PasteImages.imageFiles(e).length) return;
+      e.preventDefault();
+      const kind = String(f.kind || "").replace("_", " ") || "draft";
+      this.fuError[f.id] = "a " + kind + " follow-up carries no image";
+    },
     async fuSend(f) {
       this.fuError[f.id] = "";
+      const tray = this.fuTray[f.id];
+      const block = tray ? PasteImages.submitBlock(tray) : "";
+      if (block) { this.fuError[f.id] = block; return; }
       const r = await fetch(this.api(`/api/work/followups/${f.id}/send`), {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: this.fuText[f.id] || "",
                                contexts: this.fuCtx[f.id] || [], slack: !!this.fuSlack[f.id],
-                               agent: this.fuAgent[f.id] || "claude" }),
+                               agent: this.fuAgent[f.id] || "claude",
+                               images: tray ? PasteImages.payload(tray) : [] }),
       });
       if (!r.ok) { const d = await r.json(); this.fuError[f.id] = d.error || ("send failed HTTP " + r.status); }
       await this.refresh();
@@ -548,12 +570,15 @@ const app = frshtyApp({
     async fupLaunch() {
       const text = this.fupText.trim();
       if (!text || this.fupBusy) return;
+      const block = PasteImages.submitBlock(this.fupTray);
+      if (block) { this.fupError = block; return; }
       this.fupBusy = true; this.fupError = "";
       try {
         const r = await fetch(this.api(`/api/work/items/${this.item.id}/followup`), {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text, contexts: this.fupCtx, slack: this.fupSlack,
-                                 agent: this.fupAgent }),
+                                 agent: this.fupAgent,
+                                 images: PasteImages.payload(this.fupTray) }),
         });
         const d = await r.json();
         if (!r.ok) { this.fupError = d.error || ("launch failed HTTP " + r.status); return; }
@@ -683,7 +708,8 @@ app.config.errorHandler = (error, instance, info) => {
   showWorkFatal(error);
   console.error("Work detail render error", info, error);
 };
-app.component("work-question", window.WorkQuestion).mount("#app");
+app.component("work-question", window.WorkQuestion)
+   .component("paste-tray", window.PasteTray).mount("#app");
 </script>
 </body>
 </html>
