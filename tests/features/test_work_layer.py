@@ -1159,6 +1159,28 @@ class TestDetail:
         runs = work_store.item_detail(item_id)["runs"]
         assert work_launch.read_system_prompt(runs) == ""
 
+    def test_read_launch_command_from_launch_file(self, tmp_path, monkeypatch):
+        import core.terminal as terminal
+        from services import work_launch
+        monkeypatch.setattr(terminal, "LAUNCH_CONTEXT_DIR", str(tmp_path))
+        item_id = _mkitem("launched item")
+        sid = f"sid-lc-{item_id}"
+        work_store.add_run(item_id, sid, f"work-{item_id}", "/tmp")
+        (tmp_path / f"{sid}.cmd").write_text(
+            f"claude --dangerously-skip-permissions --session-id {sid}")
+        runs = work_store.item_detail(item_id)["runs"]
+        assert work_launch.read_launch_command(runs) == (
+            f"claude --dangerously-skip-permissions --session-id {sid}")
+
+    def test_read_launch_command_missing_file_empty(self, tmp_path, monkeypatch):
+        import core.terminal as terminal
+        from services import work_launch
+        monkeypatch.setattr(terminal, "LAUNCH_CONTEXT_DIR", str(tmp_path))
+        item_id = _mkitem("unlaunched item")
+        work_store.add_run(item_id, f"sid-nolc-{item_id}", f"work-{item_id}", "/tmp")
+        runs = work_store.item_detail(item_id)["runs"]
+        assert work_launch.read_launch_command(runs) == ""
+
 
 class TestQuestions:
     QUESTIONS = {"questions": [{
