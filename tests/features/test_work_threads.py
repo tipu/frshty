@@ -521,7 +521,8 @@ class TestThreadDetailRoutes:
         seen = {}
 
         def fake_launch(objective, cwd="", contexts=None, slack=False,
-                        source_item_id=None, agent="claude", critical=False):
+                        source_item_id=None, agent="claude", critical=False,
+                        images=None):
             seen.update(objective=objective, source_item_id=source_item_id, agent=agent,
                         critical=critical)
             return {"item_id": 4242}

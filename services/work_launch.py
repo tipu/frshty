@@ -1061,16 +1061,20 @@ def _followup_context(source_item_id: int, cwd: str, contexts: list[str] | None,
 
 def launch_followup(source_item_id: int, objective: str, cwd: str = "",
                     contexts: list[str] | None = None, slack: bool | None = None,
-                    agent: str = "", critical: bool | None = None) -> dict:
+                    agent: str = "", critical: bool | None = None,
+                    images: list[dict] | None = None) -> dict:
     """Launch a task that continues a finished task.
 
-    _followup_context resolves what the follow-up takes from its source."""
+    _followup_context resolves what the follow-up takes from its source. The
+    images are the ones the operator pasted into the follow-up box, and they
+    are stored and named for the agent exactly as an intake paste is."""
     inherited = _followup_context(source_item_id, cwd, contexts, slack, agent, critical)
     if "error" in inherited:
         return inherited
     return launch(objective, cwd=inherited["cwd"], contexts=inherited["contexts"],
                   slack=inherited["slack"], source_item_id=source_item_id,
-                  agent=inherited["agent"], critical=inherited["critical"])
+                  agent=inherited["agent"], critical=inherited["critical"],
+                  images=images)
 
 
 def propose_followup(source_item_id: int, objective: str, note: str = "") -> dict:

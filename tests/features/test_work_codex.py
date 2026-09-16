@@ -798,7 +798,7 @@ class TestCodexFollowupAgent:
         seen = {}
 
         def fake_launch(source_item_id, objective, cwd="", contexts=None, slack=False,
-                        agent="claude"):
+                        agent="claude", images=None):
             seen["agent"] = agent
             return {"item_id": 1}
 
