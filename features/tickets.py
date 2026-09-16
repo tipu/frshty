@@ -13,6 +13,7 @@ import core.queue as q
 import core.state as state
 import core.comments as comments
 import core.branch_sync as branch_sync
+import core.freshness as freshness
 import core.consensus_scope as consensus_scope
 import core.git_util as git_util
 import features.defence as defence
@@ -2653,6 +2654,10 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
             ts.pop("ci_passed", None)
             ts.pop("checks_started_at", None)
             ts.pop("ci_unrelated_checks", None)
+            if freshness.enabled(config):
+                for claim in ("proof", "ci"):
+                    freshness.invalidate(ticket["key"], claim,
+                                         "ticket_pr_comment_fixed")
         for cid in to_resolve:
             if not resolvable_ids.get(cid, True):
                 continue
@@ -2897,6 +2902,9 @@ def _sync_pr_base(config, ticket, ts, base_url) -> dict:
             log.emit("ticket_base_synced",
                      f"Merged {base_branch} into {_label(key, ts)} PR #{pr['id']}",
                      links=links, meta=meta)
+            if freshness.enabled(config):
+                for claim in ("proof", "ci"):
+                    freshness.invalidate(key, claim, "ticket_base_synced")
         elif result == "dirty_worktree":
             log.emit("ticket_base_sync_blocked",
                      f"Cannot merge {base_branch} into {_label(key, ts)} PR #{pr['id']}: "
