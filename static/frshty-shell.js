@@ -16,6 +16,7 @@
 			{ href: '/global', label: 'Global', icon: '◎' },
 		]},
 		{ title: 'Work', links: [
+			{ href: '/standup', label: 'Standup', icon: '☀' },
 			{ href: '/tasks', label: 'Tasks', icon: '◈', match: ['/tasks', '/threads'] },
 			{ href: '/reviews', label: 'Reviews', icon: '◐' },
 			{ href: '/today', label: 'Today', icon: '☉' },
@@ -53,6 +54,7 @@
 	const CRUMBS = {
 		'/': ['Workspace', 'Inbox'],
 		'/global': ['Workspace', 'Global'],
+		'/standup': ['Work', 'Standup'],
 		'/tasks': ['Work', 'Tasks'],
 		'/threads': ['Work', 'Tasks', 'Threads'],
 		'/reviews': ['Work', 'Reviews'],

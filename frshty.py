@@ -29,6 +29,7 @@ from web.scheduling import router as _scheduling_router
 from web.prd import router as _prd_router
 from web.manager import router as _manager_router
 from web.today import router as _today_router
+from web.standup import router as _standup_router
 from web.wizard import router as _wizard_router
 from web.observability import router as _observability_router
 from web.reviews import router as _reviews_router
@@ -66,6 +67,7 @@ app.include_router(_scheduling_router)
 app.include_router(_prd_router)
 app.include_router(_manager_router)
 app.include_router(_today_router)
+app.include_router(_standup_router)
 app.include_router(_wizard_router)
 app.include_router(_observability_router)
 app.include_router(_reviews_router)

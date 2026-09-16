@@ -32,6 +32,8 @@ def _cron_routes(event: dict, registries: dict) -> list[dict]:
             jobs.append({"instance_key": instance_key, "task": "parse_prd"})
         if features.get("tickets") or features.get("review_prs"):
             jobs.append({"instance_key": instance_key, "task": "watchdog_scan"})
+        if (reg.config.get("standup") or {}).get("enabled"):
+            jobs.append({"instance_key": instance_key, "task": "standup_tick"})
         # billing_check and timesheet_check are deadline-driven; the beat
         # thread in core/beat.py owns their firing via the scheduler table.
         # scheduler_check handles legacy oneshot rows that aren't recurring.
