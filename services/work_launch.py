@@ -172,6 +172,19 @@ def read_system_prompt(runs: list[dict]) -> str:
     return ""
 
 
+def read_launch_command(runs: list[dict]) -> str:
+    """The command line the work item's agent was launched with, read back
+    from the file the launch wrote. Empty string when no run has one
+    (pre-feature items, or a cleaned launch directory)."""
+    for run in runs:
+        try:
+            with open(terminal.launch_command_path(run["session_id"])) as f:
+                return f.read()
+        except OSError:
+            continue
+    return ""
+
+
 GUIDANCE_FILE = "CLAUDE.md"
 
 

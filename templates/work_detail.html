@@ -257,6 +257,11 @@
            @error="$event.target.style.display='none'">
     </div>
   </div>
+  <div class="sec" v-if="launchCommand">
+    <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Launch command</h2>
+    <div class="text-xs text-gray-600 mb-2">The command line the agent pane runs. A secret environment override is masked.</div>
+    <pre class="text-xs" style="white-space:pre-wrap; word-break:break-all; color:#9ca3af; background:#101018; border:1px solid #2a2a35; border-radius:8px; padding:10px 14px">{{ launchCommand }}</pre>
+  </div>
   <div class="sec" v-if="systemPrompt">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1 cursor-pointer select-none" @click="showPrompt = !showPrompt">
       System prompt <span class="text-gray-600 normal-case font-normal">{{ showPrompt ? "▾ hide" : "▸ show" }}</span>
@@ -330,7 +335,7 @@ const app = frshtyApp({
                     item: null, loadError: "", timeline: [], events: [], artifacts: [], replyText: "", replyError: "",
                     timelineCap: 100, timelineFull: false,
                     timelineImagesOpen: {},
-                    systemPrompt: "", showPrompt: false,
+                    systemPrompt: "", showPrompt: false, launchCommand: "",
                     btwText: "", btwError: "", btwBusy: false, debriefStatus: "",
                     followups: [], fuText: {}, fuCtx: {}, fuSlack: {}, fuAgent: {}, fuError: {},
                     fuTray: {}, fupTray: PasteImages.tray(),
@@ -521,6 +526,7 @@ const app = frshtyApp({
         if (!d.item) throw new Error("response did not include the work item");
         this.item = d.item; this.timeline = d.timeline || []; this.events = d.events || [];
         this.artifacts = d.artifacts || []; this.systemPrompt = d.system_prompt || "";
+        this.launchCommand = d.launch_command || "";
         this.thread = d.thread || null;
         this.needsYou = d.attention || 0;
         const obj = (d.item.objective || "").trim();
