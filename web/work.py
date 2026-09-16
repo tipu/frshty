@@ -282,6 +282,23 @@ def api_work_followup(item_id: int, body: dict):
     return result
 
 
+def _session_state(runs: list[dict]) -> dict | None:
+    """Whether the newest run's pane still holds a live agent process.
+
+    The board offers Ask and Correct on an open task, and both refuse once the
+    agent process is gone. The pane is no help in telling that: it keeps the
+    agent's last screen after the process exits, so a dead session looks
+    exactly like a working one and the refusal reads as a lie about a terminal
+    that is plainly still there. A task that never ran has no pane to report
+    on."""
+    if not runs:
+        return None
+    run = runs[-1]
+    if not run["tmux_key"]:
+        return None
+    return terminal.session_healthy(run["tmux_key"], agent=run["provider"] or "claude")
+
+
 @router.get("/api/work/items/{item_id}/detail")
 def api_work_detail(item_id: int):
     result = work_store.item_detail(item_id)
@@ -297,6 +314,7 @@ def api_work_detail(item_id: int):
     result["attention"] = work_store.attention_count()
     result["worktree"] = work_worktree.for_item(item_id)
     result["tickets"] = work_tickets.for_items([result["item"]])[item_id]
+    result["session"] = _session_state(result["runs"])
     return result
 
 
