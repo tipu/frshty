@@ -10,6 +10,7 @@
 <script src="/static/frshty-nav.js"></script>
 <script src="/static/frshty-shell.js"></script>
 <script src="/static/frshty-work-question.js"></script>
+<script src="/static/frshty-paste-images.js"></script>
 <script src="/static/frshty-linkify.js"></script>
 <link rel="stylesheet" href="/static/frshty.css">
 <link rel="stylesheet" href="/static/frshty-v2.css">
@@ -17,11 +18,6 @@
 <style>
 .wintake { width: 100%; background: var(--ln-bg); border: 1px solid var(--ln-border-hi); border-radius: 6px; padding: 7px 10px; color: var(--ln-text); font-size: 12.5px; }
 .wsum { white-space: pre-wrap; font-size: 12.5px; color: var(--ln-text-2); background: var(--ln-bg); border: 1px solid var(--ln-border); border-radius: 6px; padding: 8px 12px; margin-top: 8px; }
-.ln-attach { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
-.ln-attach-item { position: relative; display: inline-block; }
-.ln-attach-item img { display: block; width: 56px; height: 56px; object-fit: cover; border: 1px solid var(--ln-border-hi); border-radius: 6px; background: var(--ln-bg); }
-.ln-attach-wait { display: flex; align-items: center; justify-content: center; width: 56px; height: 56px; border: 1px dashed var(--ln-border-hi); border-radius: 6px; background: var(--ln-bg); color: var(--ln-text-2); font-size: 10px; }
-.ln-attach-x { position: absolute; top: -6px; right: -6px; width: 17px; height: 17px; padding: 0; line-height: 15px; text-align: center; border-radius: 50%; border: 1px solid var(--ln-border-hi); background: var(--ln-bg); color: var(--ln-text); font-size: 11px; cursor: pointer; }
 </style>
 <script src="/static/frshty-usage.js"></script>
 </head>
@@ -83,17 +79,9 @@
     <div>
       <textarea class="ln-input ln-compose-text" rows="1" ref="intakeBox" v-model="intakeText"
                 :disabled="!targetMeta.personalLoaded || intakeBusy" @keydown.enter="onComposeEnter($event, intake)"
-                @input="grow($event.target)" @paste="onIntakePaste"
+                @input="grow($event.target)" @paste="onPaste(intakeTray, $event)"
                 placeholder="Describe an outcome, not a report (say 'get PR #123 merged', not 'PR stats'). Paste an image to attach it. Enter launches a run, Shift+Enter adds a line."></textarea>
-      <div class="ln-attach" v-if="intakeImages.length">
-        <span class="ln-attach-item" v-for="(im, i) in intakeImages" :key="im.id">
-          <img v-if="im.url" :src="im.url" :alt="im.name"
-               :title="im.name + ' — this image goes up with the task'">
-          <span v-else class="ln-attach-wait" :title="'reading ' + im.name">reading…</span>
-          <button type="button" class="ln-attach-x" :title="'remove ' + im.name"
-                  @click="removeIntakeImage(i)">×</button>
-        </span>
-      </div>
+      <paste-tray :tray="intakeTray"></paste-tray>
       <div class="ln-task-compose-opts">
         <span class="ln-chipsel" v-if="peers.length"
               title="which host runs this task; it resets to this host on every page load">host:
@@ -226,8 +214,9 @@
             <textarea class="wintake" rows="1" :ref="el => setFupBox(rowKey(it), el)"
                       v-model="fupText[rowKey(it)]" :disabled="fupBusy[rowKey(it)]"
                       @keydown.enter="onComposeEnter($event, () => launchFollowup(it))"
-                      @input="grow($event.target)"
-                      placeholder="Follow-up objective… Enter launches a run, Shift+Enter adds a line."></textarea>
+                      @input="grow($event.target)" @paste="onPaste(fupTray[rowKey(it)], $event)"
+                      placeholder="Follow-up objective… Paste an image to attach it. Enter launches a run, Shift+Enter adds a line."></textarea>
+            <paste-tray v-if="fupTray[rowKey(it)]" :tray="fupTray[rowKey(it)]"></paste-tray>
             <div class="ln-small ln-muted" v-if="fupBusy[rowKey(it)]">launching…</div>
             <div class="ln-small" style="color:var(--ln-red)" v-else-if="fupError[rowKey(it)]">{{ fupError[rowKey(it)] }}</div>
           </form>
@@ -282,9 +271,6 @@
 </frshty-shell>
 </div>
 <script>
-const INTAKE_IMAGE_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"];
-const MAX_INTAKE_IMAGES = 8;
-const MAX_INTAKE_IMAGE_BYTES = 10 * 1024 * 1024;
 const DISPATCH_PROJECTS = ["aimyable", "quill", "clarivis", "algotrader2", "frshty", "game_expirement", "expirement", "upwork-api"];
 const STATE_PILLS = {
   proposed: "ln-pill-violet",
@@ -308,7 +294,7 @@ frshtyApp({
       projects: [], slackAvailable: false, intakeContexts: [], intakeSlack: false, moreOpen: false,
       intakeCritical: false,
       intakeRepo: "",
-      intakeImages: [], intakeImageSeq: 0,
+      intakeTray: PasteImages.tray(), fupTray: {},
       agents: ["claude"], intakeAgent: localStorage.getItem("workAgent") || "claude",
       connError: "", replyText: {}, sumOpen: {}, approveBusy: {}, linkmap: null, threads: [],
       fupOpen: {}, fupText: {}, fupBusy: {}, fupError: {},
@@ -367,7 +353,7 @@ frshtyApp({
               ...this.extraProjects.filter(p => this.intakeContexts.includes(p.key))];
     },
     intakeImagesPending() {
-      return this.intakeImages.some(im => !im.data);
+      return PasteImages.pending(this.intakeTray);
     },
     intakeRepos() {
       const names = [];
@@ -468,55 +454,8 @@ frshtyApp({
       if (i >= 0) this.projectFilter.splice(i, 1); else this.projectFilter.push(k);
       this.onProjectFilter();
     },
-    onIntakePaste(e) {
-      const items = (e.clipboardData && e.clipboardData.items) || [];
-      const files = Array.from(items)
-        .filter(it => it.kind === "file" && (it.type || "").startsWith("image/"))
-        .map(it => it.getAsFile())
-        .filter(Boolean);
-      if (!files.length) return;
-      e.preventDefault();
-      files.forEach(f => this.addIntakeImage(f));
-    },
-    addIntakeImage(file) {
-      const name = file.name || "pasted image";
-      if (!INTAKE_IMAGE_TYPES.includes(file.type)) {
-        this.intakeError = "cannot attach " + (file.type || "that file") +
-                           " — paste a png, jpeg, gif or webp image";
-        return;
-      }
-      if (this.intakeImages.length >= MAX_INTAKE_IMAGES) {
-        this.intakeError = "at most " + MAX_INTAKE_IMAGES + " images per task";
-        return;
-      }
-      if (file.size > MAX_INTAKE_IMAGE_BYTES) {
-        this.intakeError = name + " is over the " +
-                           Math.round(MAX_INTAKE_IMAGE_BYTES / 1048576) + " MB limit";
-        return;
-      }
-      const id = ++this.intakeImageSeq;
-      this.intakeImages.push({ id, name, type: file.type, url: "", data: "" });
-      this.intakeError = "";
-      const drop = () => {
-        const at = this.intakeImages.findIndex(im => im.id === id);
-        if (at >= 0) this.intakeImages.splice(at, 1);
-        this.intakeError = name + " could not be read";
-      };
-      const reader = new FileReader();
-      reader.onload = () => {
-        const entry = this.intakeImages.find(im => im.id === id);
-        if (!entry) return;
-        const url = String(reader.result || "");
-        const data = url.slice(url.indexOf(",") + 1);
-        if (!data) { drop(); return; }
-        entry.url = url;
-        entry.data = data;
-      };
-      reader.onerror = drop;
-      reader.readAsDataURL(file);
-    },
-    removeIntakeImage(i) {
-      this.intakeImages.splice(i, 1);
+    onPaste(tray, e) {
+      if (tray) PasteImages.onPaste(tray, e);
     },
     toggleContext(key) {
       const i = this.intakeContexts.indexOf(key);
@@ -677,10 +616,8 @@ frshtyApp({
       el.style.height = el.scrollHeight + "px";
     },
     async intake() {
-      if (this.intakeImages.some(im => !im.data)) {
-        this.intakeError = "a pasted image is still being read; launch again in a moment";
-        return;
-      }
+      const block = PasteImages.submitBlock(this.intakeTray);
+      if (block) { this.intakeError = block; return; }
       this.intakeError = ""; this.intakeBusy = true;
       try {
         const r = await fetch(this.apiUrl(this.target, "/api/work/intake"), {
@@ -690,8 +627,7 @@ frshtyApp({
                                  critical: this.intakeCritical,
                                  repo: this.intakeRepo === "__none__" ? "" : this.intakeRepo,
                                  no_worktree: this.intakeRepo === "__none__",
-                                 images: this.intakeImages.map(im => ({
-                                   name: im.name, type: im.type, data: im.data })) }),
+                                 images: PasteImages.payload(this.intakeTray) }),
         });
         const d = await r.json();
         if (!r.ok) { this.intakeError = d.error || "intake failed (HTTP " + r.status + ")"; return; }
@@ -699,7 +635,7 @@ frshtyApp({
         this.intakeText = ""; this.intakeContexts = []; this.intakeSlack = false;
         this.intakeCritical = false;
         this.intakeRepo = "";
-        this.intakeImages = [];
+        PasteImages.clear(this.intakeTray);
         this.$nextTick(() => this.grow(this.$refs.intakeBox));
         await this.refresh();
       } catch (e) {
@@ -779,6 +715,7 @@ frshtyApp({
       if (this.fupOpen[key]) { delete this.fupOpen[key]; return; }
       this.fupOpen[key] = true;
       this.fupError[key] = "";
+      if (!this.fupTray[key]) this.fupTray[key] = PasteImages.tray();
       this.$nextTick(() => {
         const el = this._fupBoxes[key];
         if (el) { this.grow(el); el.focus(); }
@@ -788,16 +725,20 @@ frshtyApp({
       const key = this.rowKey(it);
       const text = (this.fupText[key] || "").trim();
       if (!text || this.fupBusy[key]) return;
+      const tray = this.fupTray[key];
+      const block = tray ? PasteImages.submitBlock(tray) : "";
+      if (block) { this.fupError[key] = block; return; }
       this.fupBusy[key] = true;
       this.fupError[key] = "";
       try {
         const r = await fetch(this.apiUrl(it.peer, `/api/work/items/${it.id}/followup`), {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text }),
+          body: JSON.stringify({ text, images: tray ? PasteImages.payload(tray) : [] }),
         });
         const d = await r.json().catch(() => ({}));
         if (!r.ok) { this.fupError[key] = d.error || ("follow-up failed HTTP " + r.status); return; }
         this.fupText[key] = "";
+        if (tray) PasteImages.clear(tray);
         delete this.fupOpen[key];
       } catch (e) {
         this.fupError[key] = "follow-up failed: " + e.message;
@@ -837,7 +778,8 @@ frshtyApp({
     this.loadPeers().then(() => { this.loadLinkmap(); this.refresh(); this.loadThreads(); });
     setInterval(() => { this.refresh(); this.loadThreads(); }, 15000);
   },
-}).component("work-question", window.WorkQuestion).mount("#app");
+}).component("work-question", window.WorkQuestion)
+  .component("paste-tray", window.PasteTray).mount("#app");
 </script>
 </body>
 </html>
