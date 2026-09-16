@@ -27,13 +27,25 @@ _terminals: dict[str, dict] = {}
 AGENTS = ("claude", "codex")
 
 
-def _env_prefix(env: dict) -> str:
-    return "".join(
-        f"{k}={shlex.quote(os.path.expanduser(v))} " for k, v in sorted(env.items())
-    )
-
-
 CONFIG_DIR_VARS = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}
+
+
+def _env_prefix(env: dict, redact: bool = False, keep: str = "") -> str:
+    """The `NAME=value ` assignments an agent command starts with.
+
+    A redacted prefix keeps the value of `keep`, the running agent's own
+    configuration directory variable, and replaces every other value with
+    ***. Every other override may hold a secret such as an API key, and the
+    redacted command is what the board shows. The variable name stays,
+    because which variables a launch sets is part of the command. The masking
+    happens here, where the values are still separate strings: masking a
+    built command line instead would have to search for a value inside it,
+    and a value that holds the text of another assignment defeats that
+    search."""
+    return "".join(
+        f"{k}={'***' if redact and k != keep else shlex.quote(os.path.expanduser(v))} "
+        for k, v in sorted(env.items())
+    )
 
 
 def agent_config_dir(config: dict | None, agent: str = "claude") -> str:
@@ -71,7 +83,7 @@ def with_config_dir(config: dict | None, agent: str, config_dir: str) -> dict:
     return base
 
 
-def claude_cmd(config: dict | None = None) -> str:
+def claude_cmd(config: dict | None = None, redact: bool = False) -> str:
     """Interactive claude command line for one instance's tmux pane.
 
     Mirrors core.llm.ClaudeProvider: same bin, same env overrides, same
@@ -84,10 +96,12 @@ def claude_cmd(config: dict | None = None) -> str:
     if config_dir and "CLAUDE_CONFIG_DIR" not in env:
         env["CLAUDE_CONFIG_DIR"] = str(config_dir)
     bin_name = claude_cfg.get("bin", "claude")
-    return f"{_env_prefix(env)}{bin_name} --dangerously-skip-permissions"
+    return (f"{_env_prefix(env, redact, CONFIG_DIR_VARS['claude'])}"
+            f"{bin_name} --dangerously-skip-permissions")
 
 
-def codex_cmd(config: dict | None = None, subcommand: str = "") -> str:
+def codex_cmd(config: dict | None = None, subcommand: str = "",
+              redact: bool = False) -> str:
     """Interactive codex command line for one instance's tmux pane.
 
     Same shape as claude_cmd: the instance's env overrides and CODEX_HOME are
@@ -101,7 +115,7 @@ def codex_cmd(config: dict | None = None, subcommand: str = "") -> str:
     if config_dir and "CODEX_HOME" not in env:
         env["CODEX_HOME"] = str(config_dir)
     bin_name = codex_cfg.get("bin", "codex")
-    head = f"{_env_prefix(env)}{bin_name}"
+    head = f"{_env_prefix(env, redact, CONFIG_DIR_VARS['codex'])}{bin_name}"
     if subcommand:
         head = f"{head} {subcommand}"
     return f"{head} --dangerously-bypass-approvals-and-sandbox"
@@ -329,6 +343,23 @@ def launch_context_path(session_uuid: str, context: str) -> str:
     return path
 
 
+def launch_command_path(session_uuid: str) -> str:
+    """The file holding the command line one run's pane was launched with."""
+    return os.path.join(LAUNCH_CONTEXT_DIR, f"{session_uuid}.cmd")
+
+
+def record_launch_command(session_uuid: str, cmd: str) -> None:
+    """Keep the command line a launch used, so the board can show it.
+
+    `cmd` is the redacted form built by claude_cmd or codex_cmd, not the one
+    handed to tmux. Written after tmux accepted the command, so a launch that
+    failed records no command. A resume overwrites the file, because the
+    recorded command has to be the one the pane is running now."""
+    os.makedirs(LAUNCH_CONTEXT_DIR, exist_ok=True)
+    with open(launch_command_path(session_uuid), "w") as f:
+        f.write(cmd)
+
+
 def launch_claude(key: str, cwd: str, session_uuid: str, context: str, first_run: bool,
                   config: dict | None = None):
     """Start (or resume) a Claude conversation in the `key` tmux session.
@@ -345,16 +376,17 @@ def launch_claude(key: str, cwd: str, session_uuid: str, context: str, first_run
         return
     if first_run:
         ctx_path = launch_context_path(session_uuid, context)
-        cmd = (
-            f"{claude_cmd(config)} --session-id {shlex.quote(session_uuid)} "
+        args = (
+            f" --session-id {shlex.quote(session_uuid)} "
             f"--append-system-prompt \"$(cat {shlex.quote(ctx_path)})\""
         )
     else:
         ctx_path = os.path.join(LAUNCH_CONTEXT_DIR, f"{session_uuid}.md")
-        cmd = f"{claude_cmd(config)} --resume {shlex.quote(session_uuid)}"
+        args = f" --resume {shlex.quote(session_uuid)}"
         if os.path.isfile(ctx_path) and os.path.getsize(ctx_path) > 0:
-            cmd += f" --append-system-prompt \"$(cat {shlex.quote(ctx_path)})\""
-    launch_pane_command(key, cwd, cmd)
+            args += f" --append-system-prompt \"$(cat {shlex.quote(ctx_path)})\""
+    launch_pane_command(key, cwd, claude_cmd(config) + args)
+    record_launch_command(session_uuid, claude_cmd(config, redact=True) + args)
 
 
 def launch_codex(key: str, cwd: str, session_uuid: str, context: str, first_run: bool,
@@ -373,11 +405,12 @@ def launch_codex(key: str, cwd: str, session_uuid: str, context: str, first_run:
     notify = _codex_notify_flag(session_uuid)
     if first_run:
         ctx_path = launch_context_path(session_uuid, context)
-        cmd = f"{codex_cmd(config)} {notify} \"$(cat {shlex.quote(ctx_path)})\""
+        sub, args = "", f" {notify} \"$(cat {shlex.quote(ctx_path)})\""
     else:
         target = shlex.quote(agent_session_id) if agent_session_id else "--last"
-        cmd = f"{codex_cmd(config, 'resume')} {notify} {target}"
-    launch_pane_command(key, cwd, cmd)
+        sub, args = "resume", f" {notify} {target}"
+    launch_pane_command(key, cwd, codex_cmd(config, sub) + args)
+    record_launch_command(session_uuid, codex_cmd(config, sub, redact=True) + args)
 
 
 def launch_agent(key: str, cwd: str, session_uuid: str, context: str, first_run: bool,

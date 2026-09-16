@@ -313,6 +313,7 @@ def api_work_detail(item_id: int):
     result["agents"] = list(terminal.AGENTS)
     result["slack_available"] = work_launch.slack_available()
     result["system_prompt"] = work_launch.read_system_prompt(result["runs"])
+    result["launch_command"] = work_launch.read_launch_command(result["runs"])
     result["thread"] = work_store.thread_map().get(item_id)
     result["attention"] = work_store.attention_count()
     result["worktree"] = work_worktree.for_item(item_id)

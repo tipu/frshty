@@ -57,23 +57,25 @@ class TestCodexCommand:
         assert f"$(cat {tmp_path}/sess-uuid-1.md)" in cmd
         assert (tmp_path / "sess-uuid-1.md").read_text() == "the context"
 
-    def test_resume_uses_recorded_codex_thread(self, monkeypatch):
+    def test_resume_uses_recorded_codex_thread(self, tmp_path, monkeypatch):
         sent = []
         monkeypatch.setattr(terminal, "session_healthy",
                             lambda k, agent="claude": {"alive": True, "agent_running": False})
         monkeypatch.setattr(terminal, "launch_pane_command",
                             lambda k, cwd, cmd: sent.append(cmd))
+        monkeypatch.setattr(terminal, "LAUNCH_CONTEXT_DIR", str(tmp_path))
         terminal.launch_codex("work-1", "/tmp", "sess-uuid-2", "", False,
                               agent_session_id="thread-abc")
         assert "codex resume --dangerously-bypass-approvals-and-sandbox" in sent[0]
         assert sent[0].endswith("thread-abc")
 
-    def test_resume_without_thread_falls_back_to_last(self, monkeypatch):
+    def test_resume_without_thread_falls_back_to_last(self, tmp_path, monkeypatch):
         sent = []
         monkeypatch.setattr(terminal, "session_healthy",
                             lambda k, agent="claude": {"alive": True, "agent_running": False})
         monkeypatch.setattr(terminal, "launch_pane_command",
                             lambda k, cwd, cmd: sent.append(cmd))
+        monkeypatch.setattr(terminal, "LAUNCH_CONTEXT_DIR", str(tmp_path))
         terminal.launch_codex("work-1", "/tmp", "sess-uuid-3", "", False)
         assert sent[0].endswith("--last")
 
