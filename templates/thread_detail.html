@@ -9,6 +9,7 @@
 <script src="/static/frshty-time.js"></script>
 <script src="/static/frshty-nav.js"></script>
 <script src="/static/frshty-shell.js"></script>
+<script src="/static/frshty-paste-images.js"></script>
 <link rel="stylesheet" href="/static/frshty.css">
 <link rel="stylesheet" href="/static/frshty-v2.css">
 <link rel="stylesheet" href="/static/frshty-mobile.css">
@@ -82,8 +83,9 @@
           <div>
             <textarea class="ln-input ln-compose-text" rows="1" ref="launchBox" v-model="launchText"
                       :disabled="!canLaunch || launchBusy" @keydown.enter="onComposeEnter($event, launch)"
-                      @input="grow($event.target)"
-                      placeholder="What should happen next in this thread? Enter launches a run, Shift+Enter adds a line."></textarea>
+                      @input="grow($event.target)" @paste="onPaste(launchTray, $event)"
+                      placeholder="What should happen next in this thread? Paste an image to attach it. Enter launches a run, Shift+Enter adds a line."></textarea>
+            <paste-tray :tray="launchTray"></paste-tray>
             <div class="ln-task-compose-opts">
               <span class="ln-chipsel">agent:
                 <select v-model="launchAgent" :disabled="!canLaunch || launchBusy">
@@ -190,6 +192,7 @@ frshtyApp({
       projects: [], agents: ["claude"], slackAvailable: false, personalLoaded: false,
       launchText: "", launchAgent: localStorage.getItem("workAgent") || "claude",
       launchContexts: [], launchSlack: false, launchBusy: false, launchError: "",
+      launchTray: PasteImages.tray(),
       moreOpen: false, archiveBusy: false, archiveError: "",
     };
   },
@@ -336,19 +339,26 @@ frshtyApp({
         this.archiveBusy = false;
       }
     },
+    onPaste(tray, e) {
+      if (tray) PasteImages.onPaste(tray, e);
+    },
     async launch() {
       if (!this.canLaunch) return;
+      const block = PasteImages.submitBlock(this.launchTray);
+      if (block) { this.launchError = block; return; }
       this.launchError = ""; this.launchBusy = true;
       try {
         const r = await fetch(this.api("/api/work/threads/" + this.rootId + "/tasks"), {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text: this.launchText, agent: this.launchAgent,
-                                 contexts: this.launchContexts, slack: this.launchSlack }),
+                                 contexts: this.launchContexts, slack: this.launchSlack,
+                                 images: PasteImages.payload(this.launchTray) }),
         });
         const d = await r.json();
         if (!r.ok) { this.launchError = d.error || "launch failed (HTTP " + r.status + ")"; return; }
         localStorage.setItem("workAgent", this.launchAgent);
         this.launchText = ""; this.launchContexts = []; this.launchSlack = false;
+        PasteImages.clear(this.launchTray);
         this.$nextTick(() => this.grow(this.$refs.launchBox));
         await this.refresh();
       } catch (e) {
@@ -363,7 +373,7 @@ frshtyApp({
     this.loadPeers().then(() => this.refresh());
     setInterval(() => this.refresh(), 15000);
   },
-}).mount("#app");
+}).component("paste-tray", window.PasteTray).mount("#app");
 </script>
 </body>
 </html>
