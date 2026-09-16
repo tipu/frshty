@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import core.comments as comments
+import core.freshness as freshness
 import core.git_util as git_util
 
 import core.log as log
@@ -2013,6 +2014,9 @@ def _record_proof_fingerprint(ctx: TaskContext) -> None:
         t["proof_fingerprint"] = fingerprint
         return t
     state.update_ticket(ctx.ticket_key, _set)
+    if freshness.enabled(ctx.config):
+        freshness.record(ctx.ticket_key or "", "proof", fingerprint,
+                         instance_key=ctx.instance_key)
 
 
 @task("prove",
@@ -2751,6 +2755,11 @@ def fix_scope_findings(ctx: TaskContext) -> TaskResult:
                        "repos": changed})
         return TaskResult("failed", "scope correction left the branch diff unchanged")
     status_now = current.get("status")
+    if freshness.enabled(ctx.config):
+        for claim in ("proof", "ci"):
+            freshness.invalidate(ctx.ticket_key or "", claim,
+                                 "ticket_scope_fix_committed",
+                                 instance_key=ctx.instance_key)
     reproved = status_now in ("proving", "pr_ready")
     artifacts = {"repos": changed, "findings": len(findings),
                  "attempt": attempts + 1, "reproved": reproved,
@@ -3041,6 +3050,21 @@ def do_research(ctx: TaskContext) -> TaskResult:
     return TaskResult("ok", artifacts={"revised": before is not None})
 
 
+def _smoke_subject(summary: dict) -> str:
+    """The criteria a smoke run stood on, as one short readable subject.
+
+    The pool grows without bound, so the identities are digested rather than
+    listed; the counts stay in front of the digest because they are what a
+    person reads first."""
+    primary = summary.get("primary") or []
+    regression = summary.get("regression") or []
+    ids = [str(r.get("criterion_id", "")) for r in primary]
+    ids += [f"{r.get('ticket_key', '')}/{r.get('criterion_id', '')}"
+            for r in regression]
+    return (f"primary={len(primary)} regression={len(regression)} "
+            f"{freshness.digest(ids)}")
+
+
 @task("validate_merged_ticket",
       preconditions=[status_is("merged", "validation")],
       on_entry_status="validation",
@@ -3066,6 +3090,10 @@ def validate_merged_ticket(ctx: TaskContext) -> TaskResult:
             ctx.instance_key, ctx.ticket_key, ts, base_url,
             persistent_context=persistent,
         )
+        if freshness.enabled(ctx.config):
+            freshness.record(
+                ctx.ticket_key, "smoke", _smoke_subject(summary),
+                instance_key=ctx.instance_key)
         return TaskResult("ok", artifacts=summary)
     except Exception as e:
         log.emit("validation_error",
