@@ -174,6 +174,9 @@
                         title="the work is not finished; send it back" @click="act(it, 'reopen')">Reopen</button>
               </template>
               <template v-else-if="g === 'done'">
+                <button class="ln-btn ln-btn-sm ln-btn-ghost"
+                        title="launch the next run from this one; it keeps this task's projects and agent"
+                        @click="toggleFollowup(it)">{{ fupOpen[rowKey(it)] ? 'Follow up ▾' : 'Follow up ▸' }}</button>
                 <button class="ln-btn ln-btn-sm ln-btn-ghost" v-if="view === 'archive' || it.archived_at"
                         @click="act(it, 'unarchive')">Unarchive</button>
                 <button class="ln-btn ln-btn-sm ln-btn-ghost" v-else
@@ -210,7 +213,7 @@
             </span>
           </div>
           <div class="wsum" v-if="it.summary && sumOpen[rowKey(it)]" v-html="lkFor(it, it.summary)"></div>
-          <form style="margin-top:8px" v-if="g === 'needs_ack' && fupOpen[rowKey(it)]" @submit.prevent="launchFollowup(it)">
+          <form style="margin-top:8px" v-if="canFollowUp(g) && fupOpen[rowKey(it)]" @submit.prevent="launchFollowup(it)">
             <textarea class="wintake" rows="1" :ref="el => setFupBox(rowKey(it), el)"
                       v-model="fupText[rowKey(it)]" :disabled="fupBusy[rowKey(it)]"
                       @keydown.enter="onComposeEnter($event, () => launchFollowup(it))"
@@ -220,6 +223,10 @@
             <div class="ln-small ln-muted" v-if="fupBusy[rowKey(it)]">launching…</div>
             <div class="ln-small" style="color:var(--ln-red)" v-else-if="fupError[rowKey(it)]">{{ fupError[rowKey(it)] }}</div>
           </form>
+          <div class="ln-small ln-muted" style="margin-top:8px" v-if="fupLaunched[rowKey(it)]">
+            Follow-up launched as
+            <a class="ln-link" :href="followupHref(it)">#{{ fupLaunched[rowKey(it)] }}</a>.
+          </div>
           <work-question v-if="g === 'needs_you' || it.pending_question" :item="it" @answer="answer(it, $event)"></work-question>
           <form style="margin-top:8px" v-if="g === 'needs_you' || it.pending_question" @submit.prevent="reply(it)">
             <input class="wintake" v-model="replyText[rowKey(it)]"
@@ -297,7 +304,7 @@ frshtyApp({
       intakeTray: PasteImages.tray(), fupTray: {},
       agents: ["claude"], intakeAgent: localStorage.getItem("workAgent") || "claude",
       connError: "", replyText: {}, sumOpen: {}, approveBusy: {}, linkmap: null, threads: [],
-      fupOpen: {}, fupText: {}, fupBusy: {}, fupError: {},
+      fupOpen: {}, fupText: {}, fupBusy: {}, fupError: {}, fupLaunched: {},
       peers: [], peerMeta: {}, peerErrors: {}, peerLinkmaps: {}, target: "",
       sourceFilter: localStorage.getItem("workSourceFilter") || "",
       searchText: "", projectFilter: JSON.parse(localStorage.getItem("workProjectFilter") || "[]"),
@@ -710,11 +717,19 @@ frshtyApp({
       if (el) this._fupBoxes[key] = el;
       else delete this._fupBoxes[key];
     },
+    canFollowUp(g) {
+      return g === "needs_ack" || g === "done";
+    },
+    followupHref(it) {
+      return "/tasks/" + this.fupLaunched[this.rowKey(it)] +
+             (it.peer ? "?peer=" + encodeURIComponent(it.peer) : "");
+    },
     toggleFollowup(it) {
       const key = this.rowKey(it);
       if (this.fupOpen[key]) { delete this.fupOpen[key]; return; }
       this.fupOpen[key] = true;
       this.fupError[key] = "";
+      delete this.fupLaunched[key];
       if (!this.fupTray[key]) this.fupTray[key] = PasteImages.tray();
       this.$nextTick(() => {
         const el = this._fupBoxes[key];
@@ -740,6 +755,7 @@ frshtyApp({
         this.fupText[key] = "";
         if (tray) PasteImages.clear(tray);
         delete this.fupOpen[key];
+        if (d.item_id) this.fupLaunched[key] = d.item_id;
       } catch (e) {
         this.fupError[key] = "follow-up failed: " + e.message;
         return;
