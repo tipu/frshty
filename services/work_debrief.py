@@ -562,9 +562,10 @@ def _deliver_slack(row) -> str:
 
 
 def _deliver_work_item(row, contexts: list[str] | None, slack: bool | None,
-                       agent: str) -> str:
+                       agent: str, images: list[dict] | None = None) -> str:
     result = work_launch.launch_followup(row["work_item_id"], row["draft"],
-                                         contexts=contexts, slack=slack, agent=agent)
+                                         contexts=contexts, slack=slack, agent=agent,
+                                         images=images)
     if "error" in result:
         raise RuntimeError(result["error"])
     return f"launched work item #{result['item_id']}"
@@ -572,12 +573,17 @@ def _deliver_work_item(row, contexts: list[str] | None, slack: bool | None,
 
 def send_followup(followup_id: int, text: str | None = None,
                   contexts: list[str] | None = None, slack: bool | None = False,
-                  agent: str = "claude") -> dict:
+                  agent: str = "claude", images: list[dict] | None = None) -> dict:
     """Act on one follow-up draft.
 
     `contexts` None, `slack` None and `agent` "" mean inherit from the source
     task rather than launch with nothing, which is what launch_followup reads
-    an omission as."""
+    an omission as. The images the operator pasted into the draft are checked
+    before the draft is claimed, so a paste the board cannot read leaves the
+    draft where the operator can send it again."""
+    image_error = work_artifacts.decode_intake_images(images)[1]
+    if image_error:
+        return {"error": image_error}
     now = work_store._now()
     with db.tx() as c:
         row = c.execute("SELECT * FROM work_followups WHERE id = ?", (followup_id,)).fetchone()
@@ -585,6 +591,8 @@ def send_followup(followup_id: int, text: str | None = None,
             return {"error": "unknown followup"}
         if row["kind"] not in ("slack_message", "work_item"):
             return {"error": f"cannot act on kind '{row['kind']}'"}
+        if images and row["kind"] != "work_item":
+            return {"error": f"kind '{row['kind']}' carries no images"}
         claimed = c.execute(
             "UPDATE work_followups SET status = 'sending', draft = COALESCE(NULLIF(?, ''), draft), "
             "updated_at = ? WHERE id = ? AND status = 'draft'",
@@ -597,7 +605,7 @@ def send_followup(followup_id: int, text: str | None = None,
             picked = (None if contexts is None
                       else [c for c in contexts if isinstance(c, str)])
             detail = _deliver_work_item(
-                row, picked, None if slack is None else bool(slack), agent)
+                row, picked, None if slack is None else bool(slack), agent, images)
         else:
             detail = _deliver_slack(row)
         status = "sent"

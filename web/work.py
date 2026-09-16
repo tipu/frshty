@@ -108,7 +108,8 @@ def api_work_thread_task(root_id: int, body: dict):
                                          contexts=body.get("contexts"),
                                          slack=body.get("slack"),
                                          agent=body.get("agent") or "",
-                                         critical=body.get("critical"))
+                                         critical=body.get("critical"),
+                                         images=body.get("images"))
     if "error" in result:
         status = 503 if "personal instance" in result["error"] else (
             500 if "launch failed" in result["error"] else 400)
@@ -272,7 +273,8 @@ def api_work_followup(item_id: int, body: dict):
                                          contexts=body.get("contexts"),
                                          slack=body.get("slack"),
                                          agent=body.get("agent") or "",
-                                         critical=body.get("critical"))
+                                         critical=body.get("critical"),
+                                         images=body.get("images"))
     if "error" in result:
         status = 503 if "personal instance" in result["error"] else (
             500 if "launch failed" in result["error"] else 400)
@@ -442,7 +444,8 @@ def api_followup_send(followup_id: int, body: dict):
     result = work_debrief.send_followup(followup_id, text=(body.get("text") or ""),
                                         contexts=body.get("contexts") or [],
                                         slack=bool(body.get("slack")),
-                                        agent=body.get("agent") or "claude")
+                                        agent=body.get("agent") or "claude",
+                                        images=body.get("images"))
     if "error" in result:
         return JSONResponse(result, status_code=409)
     return result
