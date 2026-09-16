@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Protocol, TypedDict
 
+import core.freshness as freshness
 import core.log as log
 import core.state as state
 from core.ticket_status import TicketStatus
@@ -484,6 +485,10 @@ def _handle_in_review_ticket(
             ts.pop("ci_passed", None)
         else:
             ts = result
+            if ts.get("ci_passed") and freshness.enabled(config):
+                freshness.record(key, "ci",
+                                 freshness.pr_heads(ts.get("prs", []), pr_info_map),
+                                 instance_key=instance_key)
 
     if (ts["status"] == "in_review" and ts.get("ci_passed")
             and config.get("pr", {}).get("auto_merge")
@@ -492,6 +497,9 @@ def _handle_in_review_ticket(
 
     if ts["status"] == "in_review":
         ts = _t._check_in_review(config, ticket, ts, base_url, pr_info_map=pr_info_map)
+        if ts.get("status") == "in_review" and freshness.enabled(config):
+            freshness.record(key, "comments", freshness.watermark(ts),
+                             instance_key=instance_key)
     return ts, False
 
 
