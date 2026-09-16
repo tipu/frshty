@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import core.db as db
+import core.state as state
 from services import work_debrief, work_store
 
 
@@ -606,3 +607,161 @@ class TestLaunchContexts:
         keys = [e["key"] for e in work_launch.project_entries()]
         assert "frshty" in keys and "aimyable" in keys and "personal" in keys
         assert keys == sorted(keys)
+
+
+def _merge_out(draft, unfinished="merge"):
+    return json.dumps({
+        "summary": "The pull request is open and approved.\nIt is not merged.",
+        "followups": [{"kind": "work_item", "required": True,
+                       "unfinished": unfinished, "draft": draft}],
+    })
+
+
+def _pr(repo, pr_id, approvers=(), pr_state="OPEN"):
+    return {"repo": repo, "id": pr_id, "pr_state": pr_state,
+            "url": f"https://bitbucket.org/acme/{repo}/pull-requests/{pr_id}",
+            "approvers": list(approvers)}
+
+
+class TestWholeTicketMerge:
+    """A merge the debrief marked required is proposed for the whole ticket.
+
+    Proposal 9617 asked the operator to merge one of DEV-728's three pull
+    requests. A ticket merged a pull request at a time is delivered in parts,
+    so the draft waits until every open pull request under its ticket is
+    approved, and the proposal that opens names all of them."""
+
+    @pytest.fixture(autouse=True)
+    def _fresh(self, fresh_db, tmp_path):
+        state.init(tmp_path)
+        state._default_instance_key = "personal"
+        state._instance_key_cv.set("personal")
+        yield
+
+    def _ticket(self, prs, key="DEV-728"):
+        token = state.use("aimyable")
+        try:
+            state.save_ticket(key, {"status": "in_review", "slug": key.lower(),
+                                    "prs": prs})
+        finally:
+            state.reset(token)
+
+    def _required_draft(self, monkeypatch, tmp_path, draft, unfinished="merge"):
+        t = tmp_path / "t.jsonl"
+        t.write_text(json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "x"}]}}) + "\n")
+        item_id = _done_item("merge the pull request")
+        db.execute("UPDATE work_runs SET transcript_path = ? WHERE work_item_id = ?",
+                   (str(t), item_id))
+        monkeypatch.setattr(work_debrief, "_run_claude",
+                            lambda p: _merge_out(draft, unfinished))
+        work_debrief.run_debrief(item_id)
+        return item_id
+
+    DRAFT = ("Merge PR #198 (https://bitbucket.org/acme/django-drf-app/"
+             "pull-requests/198/overview) into main.")
+
+    def test_a_merge_waits_for_the_ticket_s_other_pull_requests(
+            self, monkeypatch, tmp_path):
+        self._ticket([_pr("django-drf-app", 198, ["Jawad"]),
+                      _pr("websocket-server", 129)])
+        item_id = self._required_draft(monkeypatch, tmp_path, self.DRAFT)
+
+        assert work_debrief.propose_required_followups() == []
+
+        assert db.query_one("SELECT id FROM work_items WHERE source_item_id = ?",
+                            (item_id,)) is None
+        held = work_debrief.followups_for(item_id)[0]
+        assert held["status"] == "draft"
+        assert "DEV-728" in held["detail"]
+        assert "websocket-server/pull-requests/129" in held["detail"]
+
+    def test_the_hold_is_written_once_however_often_the_scan_runs(
+            self, monkeypatch, tmp_path):
+        """The scan runs every minute. A hold that wrote the row every time
+        would report the same reason for ever."""
+        self._ticket([_pr("django-drf-app", 198, ["Jawad"]),
+                      _pr("websocket-server", 129)])
+        item_id = self._required_draft(monkeypatch, tmp_path, self.DRAFT)
+        work_debrief.propose_required_followups()
+        first = db.query_one(
+            "SELECT status, detail, updated_at FROM work_followups "
+            "WHERE work_item_id = ?", (item_id,))
+
+        work_debrief.propose_required_followups()
+
+        assert db.query_one(
+            "SELECT status, detail, updated_at FROM work_followups "
+            "WHERE work_item_id = ?", (item_id,)) == first
+        assert first["status"] == "draft"
+
+    def test_the_proposal_names_every_pull_request_once_all_are_approved(
+            self, monkeypatch, tmp_path):
+        self._ticket([_pr("django-drf-app", 198, ["Jawad"]),
+                      _pr("websocket-server", 129, ["Jawad"]),
+                      _pr("windows-rpa-client", 60, ["Jawad"])])
+        item_id = self._required_draft(monkeypatch, tmp_path, self.DRAFT)
+
+        assert len(work_debrief.propose_required_followups()) == 1
+
+        proposal = db.query_one(
+            "SELECT objective FROM work_items WHERE source_item_id = ?", (item_id,))
+        assert "DEV-728 holds 3 open pull requests" in proposal["objective"]
+        for repo, pr_id in (("django-drf-app", 198), ("websocket-server", 129),
+                            ("windows-rpa-client", 60)):
+            assert f"{repo}/pull-requests/{pr_id}" in proposal["objective"]
+
+    def test_a_hold_that_clears_is_proposed_on_the_next_scan(
+            self, monkeypatch, tmp_path):
+        self._ticket([_pr("django-drf-app", 198, ["Jawad"]),
+                      _pr("websocket-server", 129)])
+        item_id = self._required_draft(monkeypatch, tmp_path, self.DRAFT)
+        assert work_debrief.propose_required_followups() == []
+
+        self._ticket([_pr("django-drf-app", 198, ["Jawad"]),
+                      _pr("websocket-server", 129, ["Jawad"])])
+
+        assert len(work_debrief.propose_required_followups()) == 1
+        assert db.query_one("SELECT id FROM work_items WHERE source_item_id = ?",
+                            (item_id,))
+
+    def test_merging_the_named_pull_request_by_hand_does_not_release_the_hold(
+            self, monkeypatch, tmp_path):
+        """The operator merged PR #198 himself while the follow-up waited. The
+        draft still names it, and the ticket still holds an unapproved sibling,
+        so the stale draft must not reach the board."""
+        self._ticket([_pr("django-drf-app", 198, ["Jawad"]),
+                      _pr("websocket-server", 129)])
+        item_id = self._required_draft(monkeypatch, tmp_path, self.DRAFT)
+        assert work_debrief.propose_required_followups() == []
+
+        self._ticket([_pr("django-drf-app", 198, ["Jawad"], pr_state="MERGED"),
+                      _pr("websocket-server", 129)])
+
+        assert work_debrief.propose_required_followups() == []
+        assert db.query_one("SELECT id FROM work_items WHERE source_item_id = ?",
+                            (item_id,)) is None
+
+    def test_a_ticket_with_one_pull_request_is_proposed_as_the_debrief_wrote_it(
+            self, monkeypatch, tmp_path):
+        self._ticket([_pr("django-drf-app", 198, ["Jawad"])])
+        item_id = self._required_draft(monkeypatch, tmp_path, self.DRAFT)
+
+        assert len(work_debrief.propose_required_followups()) == 1
+
+        proposal = db.query_one(
+            "SELECT objective FROM work_items WHERE source_item_id = ?", (item_id,))
+        assert proposal["objective"] == self.DRAFT
+
+    def test_a_step_that_is_not_a_merge_is_never_held(self, monkeypatch, tmp_path):
+        """A branch left unpushed is not waiting for anyone's approval."""
+        self._ticket([_pr("django-drf-app", 198, ["Jawad"]),
+                      _pr("websocket-server", 129)])
+        item_id = self._required_draft(
+            monkeypatch, tmp_path,
+            "Push the branch behind https://bitbucket.org/acme/django-drf-app/"
+            "pull-requests/198", unfinished="push")
+
+        assert len(work_debrief.propose_required_followups()) == 1
+        assert db.query_one("SELECT id FROM work_items WHERE source_item_id = ?",
+                            (item_id,))
