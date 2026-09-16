@@ -153,7 +153,7 @@ class TestSend:
         item_id = db.query_one("SELECT work_item_id FROM work_followups WHERE id = ?",
                                (fid,))["work_item_id"]
         launched.assert_called_once_with(item_id, "hi", contexts=None, slack=False,
-                                        agent="claude")
+                                        agent="claude", images=None)
 
     def test_work_item_kind_inherits_everything_when_nothing_is_named(self, monkeypatch):
         fid = self._draft(kind="work_item")
@@ -164,7 +164,7 @@ class TestSend:
         item_id = db.query_one("SELECT work_item_id FROM work_followups WHERE id = ?",
                                (fid,))["work_item_id"]
         launched.assert_called_once_with(item_id, "hi", contexts=None, slack=None,
-                                        agent="")
+                                        agent="", images=None)
 
     def test_work_item_kind_passes_contexts(self, monkeypatch):
         fid = self._draft(kind="work_item")
@@ -175,7 +175,7 @@ class TestSend:
         item_id = db.query_one("SELECT work_item_id FROM work_followups WHERE id = ?",
                                (fid,))["work_item_id"]
         launched.assert_called_once_with(item_id, "hi", contexts=["aimyable"], slack=True,
-                                        agent="claude")
+                                        agent="claude", images=None)
 
     def test_dismiss(self):
         fid = self._draft()

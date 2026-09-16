@@ -7,7 +7,7 @@ import pytest
 
 import core.db as db
 import core.state as state
-from services import work_artifacts
+from services import work_artifacts, work_debrief, work_store
 
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmM"
@@ -15,7 +15,11 @@ PNG = base64.b64decode(
 
 
 @pytest.fixture(autouse=True)
-def _clean(fresh_db, tmp_path):
+def _clean(fresh_db, tmp_path, monkeypatch):
+    """Each test gets its own artifact root. The session-wide root is shared,
+    and fresh_db restarts item ids, so one test would otherwise read the
+    folder an earlier test wrote for the same id."""
+    monkeypatch.setenv(work_artifacts.ROOT_ENV, str(tmp_path / "artifacts"))
     state.init(tmp_path)
     state._default_instance_key = "personal"
     state._instance_key_cv.set("personal")
@@ -49,6 +53,38 @@ def _payload(data=None, media_type="image/png", name="image.png"):
 
 def _item_count():
     return db.query_one("SELECT COUNT(*) AS n FROM work_items")["n"]
+
+
+def _done_item(objective="source task", source_item_id=None):
+    """A finished task a follow-up can continue."""
+    item_id = work_store.create_item(objective, instance_key="personal",
+                                     source_item_id=source_item_id)
+    work_store.add_run(item_id, f"sid-img-{item_id}", f"work-{item_id}", "/tmp")
+    db.execute("UPDATE work_items SET state = 'done', summary = 'the source shipped' "
+               "WHERE id = ?", (item_id,))
+    return item_id
+
+
+def _thread_root():
+    """A thread is a follow-up chain, so it needs two members to exist."""
+    root = _done_item("thread root")
+    _done_item("thread member", source_item_id=root)
+    return root
+
+
+def _draft(item_id, kind="work_item"):
+    now = work_store._now()
+    with db.tx() as c:
+        cur = c.execute(
+            "INSERT INTO work_followups(work_item_id, kind, workspace, recipient, draft, "
+            "created_at, updated_at) VALUES (?, ?, 'aimyable', 'Sam', 'carry on', ?, ?)",
+            (item_id, kind, now, now))
+        return cur.lastrowid
+
+
+def _attached(item_id):
+    folder = work_artifacts.item_dir(item_id) / work_artifacts.INTAKE_DIR
+    return sorted(p.name for p in folder.iterdir()) if folder.exists() else []
 
 
 class TestDecode:
@@ -193,22 +229,186 @@ class TestLaunch:
         assert row["objective"] == "no paste here"
 
 
-class TestBoardTemplate:
-    def test_the_compose_box_takes_a_paste(self):
-        page = pathlib.Path("templates/work.html").read_text()
-        assert '@paste="onIntakePaste"' in page
+class TestFollowupLaunch:
+    """A follow-up is a new task, so it takes a pasted image the same way."""
 
-    def test_the_thumbnail_carries_a_remove_button(self):
-        page = pathlib.Path("templates/work.html").read_text()
-        assert 'v-for="(im, i) in intakeImages"' in page
-        assert '@click="removeIntakeImage(i)"' in page
+    def test_a_pasted_image_reaches_the_followup_agent(self, tmp_path):
+        source = _done_item()
+        instances, launch, healthy = _launch_patches(tmp_path)
+        with instances, launch as launched, healthy:
+            r = _client().post(f"/api/work/items/{source}/followup",
+                               json={"text": "fix what this screenshot shows",
+                                     "images": [_payload()]})
+        assert r.status_code == 200, r.text
+        child = r.json()["item_id"]
+        stored = work_artifacts.item_dir(child) / work_artifacts.INTAKE_DIR / "pasted-1.png"
+        assert stored.read_bytes() == PNG
+        context = launched.call_args.args[3]
+        assert "## Attached images" in context
+        assert str(stored) in context
 
-    def test_the_launch_request_carries_the_images(self):
-        page = pathlib.Path("templates/work.html").read_text()
-        assert "images: this.intakeImages.map(im => ({" in page
-        assert "this.intakeImages = [];" in page
+    def test_the_image_lands_under_the_followup_not_its_source(self, tmp_path):
+        source = _done_item()
+        instances, launch, healthy = _launch_patches(tmp_path)
+        with instances, launch, healthy:
+            r = _client().post(f"/api/work/items/{source}/followup",
+                               json={"text": "carry on", "images": [_payload()]})
+        assert r.status_code == 200, r.text
+        assert _attached(r.json()["item_id"]) == ["pasted-1.png"]
+        assert _attached(source) == []
 
-    def test_the_launch_waits_for_an_image_still_being_read(self):
-        page = pathlib.Path("templates/work.html").read_text()
-        assert "intakeImagesPending" in page
-        assert "a pasted image is still being read" in page
+    def test_a_bad_image_refuses_the_followup_and_files_no_task(self, tmp_path):
+        source = _done_item()
+        before = _item_count()
+        instances, launch, healthy = _launch_patches(tmp_path)
+        with instances, launch as launched, healthy:
+            r = _client().post(f"/api/work/items/{source}/followup",
+                               json={"text": "carry on",
+                                     "images": [_payload(media_type="text/html")]})
+        assert r.status_code == 400, r.text
+        assert "unsupported type" in r.json()["error"]
+        assert _item_count() == before
+        assert launched.call_count == 0
+
+    def test_a_followup_without_images_names_no_attachment(self, tmp_path):
+        source = _done_item()
+        instances, launch, healthy = _launch_patches(tmp_path)
+        with instances, launch as launched, healthy:
+            r = _client().post(f"/api/work/items/{source}/followup",
+                               json={"text": "carry on"})
+        assert r.status_code == 200, r.text
+        assert "## Attached images" not in launched.call_args.args[3]
+
+
+class TestThreadLaunch:
+    """The thread page launches a new member of a thread."""
+
+    def test_a_pasted_image_reaches_the_thread_task(self, tmp_path):
+        source = _thread_root()
+        instances, launch, healthy = _launch_patches(tmp_path)
+        with instances, launch as launched, healthy:
+            r = _client().post(f"/api/work/threads/{source}/tasks",
+                               json={"text": "next step in this thread",
+                                     "images": [_payload()]})
+        assert r.status_code == 200, r.text
+        stored = (work_artifacts.item_dir(r.json()["item_id"])
+                  / work_artifacts.INTAKE_DIR / "pasted-1.png")
+        assert stored.read_bytes() == PNG
+        assert str(stored) in launched.call_args.args[3]
+
+    def test_a_bad_image_refuses_the_thread_task(self, tmp_path):
+        source = _thread_root()
+        before = _item_count()
+        instances, launch, healthy = _launch_patches(tmp_path)
+        with instances, launch as launched, healthy:
+            r = _client().post(f"/api/work/threads/{source}/tasks",
+                               json={"text": "next step",
+                                     "images": [_payload(media_type="text/html")]})
+        assert r.status_code == 400, r.text
+        assert "unsupported type" in r.json()["error"]
+        assert _item_count() == before
+        assert launched.call_count == 0
+
+
+class TestDraftFollowupSend:
+    """The board drafts a follow-up; the operator can paste into the draft."""
+
+    def test_a_pasted_image_reaches_the_drafted_followup(self, tmp_path):
+        source = _done_item()
+        followup_id = _draft(source)
+        instances, launch, healthy = _launch_patches(tmp_path)
+        with instances, launch as launched, healthy:
+            r = _client().post(f"/api/work/followups/{followup_id}/send",
+                               json={"text": "carry on", "images": [_payload()]})
+        assert r.status_code == 200, r.text
+        child = db.query_one(
+            "SELECT id FROM work_items WHERE source_item_id = ?", (source,))["id"]
+        stored = (work_artifacts.item_dir(child)
+                  / work_artifacts.INTAKE_DIR / "pasted-1.png")
+        assert stored.read_bytes() == PNG
+        assert str(stored) in launched.call_args.args[3]
+
+    def test_a_bad_image_leaves_the_draft_a_draft(self, tmp_path):
+        source = _done_item()
+        followup_id = _draft(source)
+        instances, launch, healthy = _launch_patches(tmp_path)
+        with instances, launch as launched, healthy:
+            r = _client().post(f"/api/work/followups/{followup_id}/send",
+                               json={"text": "carry on",
+                                     "images": [_payload(media_type="text/html")]})
+        assert r.status_code == 409, r.text
+        assert "unsupported type" in r.json()["error"]
+        assert launched.call_count == 0
+        row = db.query_one("SELECT status FROM work_followups WHERE id = ?",
+                           (followup_id,))
+        assert row["status"] == "draft"
+
+    def test_a_slack_draft_carries_no_image(self):
+        source = _done_item()
+        followup_id = _draft(source, kind="slack_message")
+        out = work_debrief.send_followup(followup_id, images=[_payload()])
+        assert "carries no images" in out["error"]
+        row = db.query_one("SELECT status FROM work_followups WHERE id = ?",
+                           (followup_id,))
+        assert row["status"] == "draft"
+
+
+class TestTemplates:
+    """Every page that makes a new task loads the shared paste module and
+    wires its compose box to a tray."""
+
+    PAGES = {
+        "templates/work.html": {
+            "trays": ["intakeTray", "fupTray[rowKey(it)]"],
+            "pastes": ["onPaste(intakeTray, $event)",
+                       "onPaste(fupTray[rowKey(it)], $event)"],
+        },
+        "templates/work_detail.html": {
+            "trays": ["fupTray", "fuTray[f.id]"],
+            "pastes": ["onPaste(fupTray, $event)", "onDraftPaste(f, $event)"],
+        },
+        "templates/thread_detail.html": {
+            "trays": ["launchTray"],
+            "pastes": ["onPaste(launchTray, $event)"],
+        },
+    }
+
+    @pytest.mark.parametrize("page", sorted(PAGES))
+    def test_the_page_loads_the_paste_module(self, page):
+        text = pathlib.Path(page).read_text()
+        assert '<script src="/static/frshty-paste-images.js"></script>' in text
+        assert '.component("paste-tray", window.PasteTray)' in text
+
+    @pytest.mark.parametrize("page", sorted(PAGES))
+    def test_every_compose_box_takes_a_paste(self, page):
+        text = pathlib.Path(page).read_text()
+        for handler in self.PAGES[page]["pastes"]:
+            assert f'@paste="{handler}"' in text
+
+    @pytest.mark.parametrize("page", sorted(PAGES))
+    def test_every_tray_is_shown_to_the_operator(self, page):
+        text = pathlib.Path(page).read_text()
+        for tray in self.PAGES[page]["trays"]:
+            assert f':tray="{tray}"' in text
+
+    @pytest.mark.parametrize("page", sorted(PAGES))
+    def test_every_launch_asks_the_tray_whether_it_may_go(self, page):
+        """submitBlock holds a launch while an image is still being read and
+        holds the first launch after the board refused one."""
+        assert "PasteImages.submitBlock(" in pathlib.Path(page).read_text()
+
+    def test_a_draft_that_carries_no_image_says_so(self):
+        page = pathlib.Path("templates/work_detail.html").read_text()
+        assert '@paste="onDraftPaste(f, $event)"' in page
+        assert "follow-up carries no image" in page
+
+    def test_the_module_removes_a_thumbnail_and_caps_the_count(self):
+        module = pathlib.Path("static/frshty-paste-images.js").read_text()
+        assert 'class="ln-attach-x"' in module
+        assert "@click=\"drop(i)\"" in module
+        assert "at most " in module
+
+    def test_the_module_holds_a_launch_after_a_refused_paste(self):
+        module = pathlib.Path("static/frshty-paste-images.js").read_text()
+        assert "function submitBlock(tray) {" in module
+        assert "press again to launch without it" in module
