@@ -618,6 +618,22 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
         </div>
 
         <div class="space-y-2">
+            <div v-if="ticket && (ticket.verification || []).length" class="card p-4 mb-4">
+                <div class="text-xs font-bold text-gray-500 uppercase mb-1">Verification claims</div>
+                <div class="text-xs text-gray-600 mb-2">What this ticket established, and what has changed since. Recorded only — nothing here holds a merge.</div>
+                <div v-for="c in (ticket.verification || [])" :key="c.claim"
+                     class="flex items-baseline gap-2 text-xs mb-1 last:mb-0">
+                    <span class="px-2 py-0.5 rounded shrink-0"
+                          :class="c.invalidated_at ? 'bg-amber-900 text-amber-200' : 'bg-green-900 text-green-200'">
+                        {{ c.claim }} {{ c.invalidated_at ? 'stale' : 'holds' }}
+                    </span>
+                    <span class="text-gray-500 font-mono break-all">{{ c.established_against || '(nothing recorded)' }}</span>
+                    <span v-if="c.invalidated_at" class="text-amber-400 shrink-0 ml-auto"
+                          :title="$time.stamp(c.invalidated_at)">staled by {{ c.invalidated_by }} ({{ $relTime(c.invalidated_at) }})</span>
+                    <span v-else class="text-gray-600 shrink-0 ml-auto"
+                          :title="$time.stamp(c.established_at)">established {{ $relTime(c.established_at) }}</span>
+                </div>
+            </div>
             <div v-if="ticket && (proofMdContent || (ticket.proof_videos || []).length)" class="card p-4 mb-4">
                 <div class="text-xs font-bold text-gray-500 uppercase mb-2">Proof</div>
                 <div v-if="proofMdContent" class="mb-3 last:mb-0">

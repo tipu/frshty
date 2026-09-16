@@ -13,6 +13,7 @@ from starlette.websockets import WebSocket
 import core.config as cfg
 import core.consensus_scope as consensus_scope
 import core.db as db
+import core.freshness as freshness
 import core.git_util as git_util
 import core.log as log
 import core.queue as q
@@ -708,7 +709,8 @@ def api_ticket_detail(key: str):
     transitions = _load_ticket_transitions(active_key, key)
     scheduled_rows = scheduler.list_for_ticket(active_key, key)
     tasks = work_tickets.tasks_for(active_key, key)
-    return {"key": key, "state": ts, "docs": docs, "history": history, "summary": summary, "terminal_alive": terminal_alive, "all_statuses": all_statuses, "proof_videos": proof_videos, "docs_dir": str(docs_dir), "has_explainer": has_explainer, "release": release_block, "llm_invocations": llm_invocations, "transitions": transitions, "scheduled_rows": scheduled_rows, "tasks": tasks}
+    verification = freshness.claims(active_key, key)
+    return {"key": key, "state": ts, "docs": docs, "history": history, "summary": summary, "terminal_alive": terminal_alive, "all_statuses": all_statuses, "proof_videos": proof_videos, "docs_dir": str(docs_dir), "has_explainer": has_explainer, "release": release_block, "llm_invocations": llm_invocations, "transitions": transitions, "scheduled_rows": scheduled_rows, "tasks": tasks, "verification": verification}
 
 
 PROOF_VIDEO_EXTS = {".webm", ".mp4", ".mov", ".mkv"}
