@@ -316,8 +316,15 @@ def _ticket_key_is_unique(ticket_key: str) -> bool:
     return bool(row) and int(row["n"]) <= 1
 
 
-def covered_by_open_task(entry: Entry, instance_key: str) -> int | None:
+def covered_by_open_task(entry: Entry, instance_key: str,
+                         exclude: frozenset[int] = frozenset()) -> int | None:
     """The id of an open work item that already names this entity, if any.
+
+    `exclude` drops items the caller opened itself, so a source that asks
+    whether anything *else* covers an entity does not read its own card back.
+    The scan continues past an excluded item rather than stopping on it, which
+    is what makes the answer "nobody else has this" rather than "the first
+    match was mine".
 
     A task the operator typed himself counts. So does a doctor run he started
     from the ticket page: its objective carries the ticket key. A finished item
@@ -369,6 +376,8 @@ def covered_by_open_task(entry: Entry, instance_key: str) -> int | None:
             if instance_key not in projects:
                 continue
         elif not unscoped_covers:
+            continue
+        if int(r["id"]) in exclude:
             continue
         objective = r["objective"] or ""
         if not any(n.search(objective) for n in needles):
