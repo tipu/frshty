@@ -31,13 +31,16 @@ def standup_open(ctx: TaskContext) -> TaskResult:
 def standup_tick(ctx: TaskContext) -> TaskResult:
     """Run the gates over the day's action items and fire at most one nudge.
 
-    The cron fan-out routes this on every tick. standup.tick claims the run
-    against the standup row, so the configured interval is what paces the loop
-    and two instances routing the same tick cannot both nudge."""
+    The cron fan-out routes this on every tick, which is what makes it the one
+    beat that is always current: it also opens or closes the day when the
+    restart that skipped those two schedules rolled them to tomorrow.
+    standup.tick paces itself against the standup row, and the budget it
+    reserves is what bounds the day when two instances both route the tick."""
     from services import standup
     if not standup.enabled(ctx.config):
         return TaskResult("ok", artifacts={"skipped": "standup disabled"})
     try:
+        caught_up = standup.catch_up(ctx.config)
         moved = standup.sweep_completed_tasks()
         out = standup.tick(ctx.config)
     except Exception as e:
@@ -45,7 +48,8 @@ def standup_tick(ctx: TaskContext) -> TaskResult:
                  f"[{ctx.instance_key}] the standup tick failed: "
                  f"{type(e).__name__}: {e}")
         return TaskResult("failed", f"{type(e).__name__}: {e}")
-    return TaskResult("ok", artifacts={"awaiting_check": moved, **out})
+    return TaskResult("ok", artifacts={"awaiting_check": moved,
+                                       "catch_up": caught_up, **out})
 
 
 @task("standup_close", timeout=120)
