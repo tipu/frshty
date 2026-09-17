@@ -252,6 +252,26 @@ pr_autofix = false                # github only: every newly created PR gets a c
 # cadence = "daily_8_local"            # daily_<hour>_local; supports any hour 0-23
 # use_llm = true                       # false ranks the staleness buckets deterministically
 
+# --- Standup (the day's declared intent, and the loop that keeps asking) ---
+# The standup belongs to the person, not to a client, so enable it on the
+# personal instance. One row per working day holds the action items the
+# operator committed to. While an item is open, nothing is running against it
+# and it is not snoozed, frshty comes back to it: first with a proposal on the
+# board, then with a question, then with carry, park or drop at the close.
+# [standup]
+# enabled = true                       # off unless set; seeds standup_open and
+#                                      # standup_close, and routes standup_tick
+# open_at = "09:00"                    # the draft is ready and the day opens here
+# close_at = "18:30"                   # the close fires on the next whole hour
+# days = ["mon", "tue", "wed", "thu", "fri"]
+# nudge_after_hours = 3.0              # idle time on one item before the first nudge
+# nudge_backoff = 2.0                  # each further nudge waits this much times longer
+# max_nudges_per_day = 6               # across every action item
+# quiet_hours = [19, 8]                # local hours the loop stays silent; wraps midnight
+# carry_limit = 3                      # the close says so once an item has carried this often
+# tick_interval_minutes = 30           # how often the gates run; the cron tick is faster
+# shadow = false                       # true computes every nudge and logs it, shows nothing
+
 # --- Wizard (one-card PR-unblock surface) ---
 # Maps github logins to Slack targets so /wizard can draft and send pings.
 # slack_int's HTTP bridge (127.0.0.1:8900) does the actual sending.
