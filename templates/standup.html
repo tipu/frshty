@@ -264,7 +264,8 @@ frshtyApp({
     },
     async answer(it, option) {
       const out = await this.post("/api/standup/items/" + it.id + "/answer", { option });
-      if (out && out.launch_error) this.notes[it.id] = out.launch_error;
+      if (!out) return;
+      this.notes[it.id] = out.launch_error || out.answer_stale || "";
     },
     async compose(it) {
       const text = (this.drafts[it.id] || "").trim();
