@@ -114,8 +114,9 @@
     </div>
   </div>
   <div class="sec" v-if="item.state === 'canceled'">
-    <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Canceled</h2>
-    <div class="text-xs text-gray-600 mb-2">You canceled this task and its terminal was killed. Reopen it to put it back on the board; no agent starts again by itself.</div>
+    <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">{{ declined ? 'Declined' : 'Canceled' }}</h2>
+    <div class="text-xs text-gray-600 mb-2" v-if="declined">You declined this proposal and no agent ever read it. Reopen it to put it back on the board; no agent starts by itself.</div>
+    <div class="text-xs text-gray-600 mb-2" v-else>You canceled this task and its terminal was killed. Reopen it to put it back on the board; no agent starts again by itself.</div>
     <div class="flex flex-wrap gap-2 items-center">
       <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#3f1d1d;color:#fca5a5"
             @click="act('reopen')">reopen</span>
@@ -328,6 +329,8 @@ function showWorkFatal(error) {
 window.addEventListener("error", event => showWorkFatal(event.error || event.message));
 window.addEventListener("unhandledrejection", event => showWorkFatal(event.reason));
 
+const DECLINED_REASON = "Proposal declined";
+
 const app = frshtyApp({
   data() { return { features: {}, instanceName: "", thread: null, needsYou: 0,
                     peer: new URLSearchParams(location.search).get("peer") || "",
@@ -410,6 +413,10 @@ const app = frshtyApp({
     finished() {
       return !!this.item && (this.item.state === "done" || this.item.state === "needs_ack");
     },
+    declined() {
+      return !!this.item && this.item.state === "canceled"
+             && this.item.stop_reason === DECLINED_REASON;
+    },
     cancelable() {
       return !!this.item && !this.finished
              && this.item.state !== "proposed" && this.item.state !== "canceled";
@@ -418,7 +425,9 @@ const app = frshtyApp({
       if (!this.item) return "";
       if (this.item.state === "proposed") return "proposed by frshty — approve it to start";
       if (this.item.state === "needs_ack") return "agent reported done — acknowledge it";
-      if (this.item.state === "canceled") return "canceled — the terminal was killed";
+      if (this.item.state === "canceled")
+        return this.declined ? "declined — no agent ever read it"
+             : "canceled — the terminal was killed";
       if (this.item.state === "done")
         return this.item.done_source === "operator" ? "done — you confirmed"
              : this.item.done_source === "agent" ? "done — agent-reported, not verified by you"
