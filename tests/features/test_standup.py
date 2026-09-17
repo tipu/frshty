@@ -6,6 +6,7 @@ The second half of the file holds the day itself: a draft is written once, a
 carry never loses a line, and an action item is never a work item.
 """
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 import pytest
 
@@ -383,3 +384,122 @@ class TestCompletedTasks:
         work_store.apply_action(work_id, "decline")
         assert standup.sweep_completed_tasks() == []
         assert standup.item(item["id"])["state"] == "open"
+
+
+class TestRacesAndFailures:
+    def test_a_failed_start_keeps_the_question_and_links_the_card(self, clean):
+        standup_id = _open_day()
+        item = _item(standup_id)
+        row = db.query_one("SELECT * FROM standup_items WHERE id = ?", (item["id"],))
+        standup._ask(item["id"], standup._idle_question(row), "ask", _iso(
+            datetime.now(timezone.utc)))
+        orphan = work_store.create_item("Unblock the thing")
+        db.execute("UPDATE work_items SET state = 'failed_stale' WHERE id = ?", (orphan,))
+        with patch.object(standup.work_launch, "launch",
+                          return_value={"error": "launch failed: tmux did not start",
+                                        "item_id": orphan}):
+            out = standup.answer(item["id"], "start", _cfg())
+        assert "error" in out["launch"]
+        assert standup.item(item["id"])["question"] is not None
+        assert db.query_one("SELECT standup_item_id FROM work_items WHERE id = ?",
+                            (orphan,))["standup_item_id"] == item["id"]
+
+    def test_another_sources_task_is_found_behind_the_loops_own_card(self, clean):
+        standup_id = _open_day()
+        item = _item(standup_id, "Unblock DEV-5150")
+        _age(item["id"], 4)
+        stale = _iso(datetime.now(timezone.utc) - timedelta(hours=48))
+        own = work_store.create_proposal("Unblock DEV-5150", instance_key="personal")
+        db.execute("UPDATE work_items SET standup_item_id = ?, created_at = ?,"
+                   " updated_at = ? WHERE id = ?", (item["id"], stale, stale, own))
+        other = work_store.create_proposal("Doctor DEV-5150 for the watchdog",
+                                           instance_key="personal")
+        row = db.query_one("SELECT * FROM standup_items WHERE id = ?", (item["id"],))
+        day = db.query_one("SELECT * FROM standups WHERE id = ?", (standup_id,))
+        assert standup.gate(row, day, _cfg()) == f"task #{other} already covers it"
+
+    def test_a_nudge_that_lands_after_the_close_is_dropped(self, clean):
+        standup_id = _open_day()
+        item = _item(standup_id)
+        _age(item["id"], 4)
+        standup.tick(_cfg())
+        proposal = db.query_one("SELECT id FROM work_items WHERE standup_item_id = ?",
+                                (item["id"],))
+        work_store.apply_action(int(proposal["id"]), "decline")
+        _age(item["id"], 40)
+        db.execute("UPDATE standup_items SET last_nudge_at = ? WHERE id = ?",
+                   (_iso(datetime.now(timezone.utc) - timedelta(hours=40)), item["id"]))
+        row = db.query_one("SELECT * FROM standup_items WHERE id = ?", (item["id"],))
+        standup.close_day(standup_id, _cfg())
+        close_question = standup.item(item["id"])["question"]
+        out = standup._nudge(row, _cfg(), datetime.now(timezone.utc), 6)
+        assert out["error"] == "the day closed before the question was asked"
+        assert standup.item(item["id"])["question"] == close_question
+
+    def test_a_proposal_that_lands_after_the_close_is_dropped(self, clean):
+        standup_id = _open_day()
+        item = _item(standup_id)
+        _age(item["id"], 4)
+        row = db.query_one("SELECT * FROM standup_items WHERE id = ?", (item["id"],))
+        standup.close_day(standup_id, _cfg())
+        out = standup._nudge(row, _cfg(), datetime.now(timezone.utc), 6)
+        assert out["error"] == "the day closed before the task was proposed"
+        assert db.query_all("SELECT id FROM work_items WHERE standup_item_id = ?",
+                            (item["id"],)) == []
+
+    def test_two_ticks_cannot_both_take_the_last_budget_slot(self, clean):
+        standup_id = _open_day()
+        first = _item(standup_id, "The first line")
+        second = _item(standup_id, "The second line")
+        _age(first["id"], 4)
+        _age(second["id"], 4)
+        now = datetime.now(timezone.utc)
+        assert standup._reserve(first["id"], standup_id, 1, now, {}) is not None
+        assert standup._reserve(second["id"], standup_id, 1, now, {}) is None
+        assert db.query_one("SELECT COUNT(*) AS n FROM standup_events"
+                            " WHERE kind = 'nudged'")["n"] == 1
+
+    def test_the_tick_reports_the_budget_when_the_reservation_loses(self, clean):
+        standup_id = _open_day()
+        item = _item(standup_id)
+        _age(item["id"], 4)
+        with patch.object(standup, "_reserve", return_value=None):
+            out = standup.tick(_cfg(max_nudges_per_day=4))
+        assert out["fired"] is None
+        assert out["skipped"] == "the daily budget of 4 nudges is spent"
+
+
+class TestCatchUp:
+    def test_a_day_whose_open_beat_never_fired_is_opened(self, clean):
+        now = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+        out = standup.catch_up(_cfg(open_at="09:00", close_at="23:59"), now)
+        assert out["opened"] == "2026-09-16"
+        assert standup.day_view("2026-09-16")["state"] == standup.OPEN
+
+    def test_nothing_opens_before_the_open_hour(self, clean):
+        now = datetime(2026, 9, 16, 7, tzinfo=timezone.utc)
+        assert standup.catch_up(_cfg(open_at="09:00"), now) == {}
+        assert standup.day_view("2026-09-16")["exists"] is False
+
+    def test_nothing_opens_on_a_day_off(self, clean):
+        now = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+        assert standup.catch_up(_cfg(days=["sun"], open_at="09:00"), now) == {}
+        assert standup.day_view("2026-09-16")["exists"] is False
+
+    def test_a_day_left_open_from_an_earlier_date_is_closed(self, clean):
+        yesterday = _open_day("2026-09-15")
+        item = _item(yesterday, "Left open overnight")
+        now = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+        out = standup.catch_up(_cfg(open_at="09:00", close_at="23:59"), now)
+        assert "2026-09-15" in out["closed"]
+        assert standup.day_view("2026-09-15")["state"] == standup.CLOSED
+        assert standup.item(item["id"])["question"]["grade"] == "close"
+        assert "Left open overnight" in [
+            i["text"] for i in standup.day_view("2026-09-16")["items"]]
+
+    def test_a_day_past_its_close_hour_is_closed(self, clean):
+        _open_day("2026-09-16")
+        now = datetime(2026, 9, 16, 20, tzinfo=timezone.utc)
+        out = standup.catch_up(_cfg(open_at="09:00", close_at="18:30"), now)
+        assert out["closed"] == ["2026-09-16"]
+        assert standup.day_view("2026-09-16")["state"] == standup.CLOSED
