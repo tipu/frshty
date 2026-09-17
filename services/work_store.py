@@ -234,15 +234,22 @@ def is_idle_stop(kind: str, payload: dict) -> bool:
 def create_item(objective: str, scope: str = "ad-hoc", scope_ref: str = "",
                 instance_key: str | None = None, contexts: str = "",
                 source_item_id: int | None = None,
-                worktree_opt_out: bool = False, critical: bool = False) -> int:
+                worktree_opt_out: bool = False, critical: bool = False,
+                standup_item_id: int | None = None) -> int:
+    """Put one task on the board.
+
+    `standup_item_id` is the action item this task was started for. It is
+    written with the row rather than after it, because a launch that raises
+    between the two would otherwise leave a task on the board that the standup
+    cannot see and would start a second one for."""
     now = _now()
     with db.tx() as c:
         cur = c.execute(
             "INSERT INTO work_items(objective, scope, scope_ref, instance_key, contexts, "
-            "source_item_id, worktree_opt_out, critical, created_at, updated_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "source_item_id, worktree_opt_out, critical, standup_item_id, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (objective, scope, scope_ref, instance_key, contexts, source_item_id,
-             1 if worktree_opt_out else 0, 1 if critical else 0, now, now),
+             1 if worktree_opt_out else 0, 1 if critical else 0, standup_item_id, now, now),
         )
         return cur.lastrowid
 

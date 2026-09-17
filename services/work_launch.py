@@ -468,7 +468,8 @@ def launch(objective: str, cwd: str = "", contexts: list[str] | None = None,
            slack: bool = False, source_item_id: int | None = None,
            agent: str = "claude", brief: str = "", repo: str = "",
            no_worktree: bool = False, critical: bool = False,
-           images: list[dict] | None = None) -> dict:
+           images: list[dict] | None = None,
+           standup_item_id: int | None = None) -> dict:
     """Start an agent on one objective, with the images the operator pasted.
 
     An image is checked before the work item is created, so a paste the board
@@ -487,7 +488,8 @@ def launch(objective: str, cwd: str = "", contexts: list[str] | None = None,
     labels = ",".join(contexts + ([SLACK_LABEL] if slack else []))
     item_id = work_store.create_item(objective, instance_key="personal", contexts=labels,
                                      source_item_id=source_item_id,
-                                     worktree_opt_out=no_worktree, critical=critical)
+                                     worktree_opt_out=no_worktree, critical=critical,
+                                     standup_item_id=standup_item_id)
     try:
         plan["images"] = work_artifacts.save_intake_images(item_id, decoded)
     except OSError as e:

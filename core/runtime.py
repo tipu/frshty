@@ -544,6 +544,40 @@ def _seed_recurring_schedules(instance_configs: list[dict]) -> None:
                                         cadence=cadence, next_run_at=candidate)
         else:
             scheduler.delete(key, "today_agent_tick")
+        standup_cfg = c.get("standup") or {}
+        if standup_cfg.get("enabled"):
+            for name, setting, default, roll_up in (
+                    ("standup_open", "open_at", "09:00", False),
+                    ("standup_close", "close_at", "18:30", True)):
+                hour, minute = _clock(standup_cfg.get(setting, default), default)
+                if roll_up and minute:
+                    hour = (hour + 1) % 24
+                candidate = now_pst.replace(hour=hour, minute=0, second=0, microsecond=0)
+                if candidate <= now_pst:
+                    from datetime import timedelta as _td
+                    candidate = candidate + _td(days=1)
+                scheduler.upsert_recurring(key, name, name,
+                                           cadence=f"daily_{hour}_local",
+                                           next_run_at=candidate)
+        else:
+            scheduler.delete(key, "standup_open")
+            scheduler.delete(key, "standup_close")
+
+
+def _clock(value: str, fallback: str) -> tuple[int, int]:
+    """An "HH:MM" setting as whole hours and minutes.
+
+    A schedule fires on the hour, so a close set at 18:30 registers at 19:00:
+    the day must not close before the time the operator named."""
+    for candidate in (value, fallback):
+        hour, _, minute = str(candidate or "").partition(":")
+        try:
+            h, m = int(hour), int(minute or 0)
+        except ValueError:
+            continue
+        if 0 <= h <= 23 and 0 <= m <= 59:
+            return h, m
+    return 0, 0
 
 
 def stop_events() -> None:
