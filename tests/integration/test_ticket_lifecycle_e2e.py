@@ -358,7 +358,7 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
             (cwd / "docs" / "FLOW.html").write_text("<html><body>flow</body></html>")
             return "flow-doc-written"
 
-        if "Run /tri-review" in prompt and "Fix all blocking findings" not in prompt:
+        if "Run three independent reviewers" in prompt and "Fix all blocking findings" not in prompt:
             (cwd / "docs" / "tri-review.md").write_text(
                 "# Tri Review\n\nBlocking issue: generated_feature needs review_fix.\n\nVERDICT: FAIL\n"
             )
