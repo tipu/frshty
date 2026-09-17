@@ -4,6 +4,8 @@ A proposal is a task frshty opened by itself. It sits on the board with no
 run behind it until the operator approves it. These tests cover what the
 board shows, what approval starts and what declining does. The tmux launch is
 patched; nothing here starts an agent."""
+import pathlib
+import sqlite3
 from unittest.mock import patch
 
 import pytest
@@ -60,13 +62,49 @@ def test_declining_files_the_proposal_without_running_it():
     assert result == {"id": item_id, "action": "decline"}
     row = db.query_one("SELECT state, archived_at, stop_reason FROM work_items WHERE id = ?",
                        (item_id,))
-    assert row["state"] == "done"
+    assert row["state"] == work_store.CANCELED_STATE, (
+        "a proposal nobody ran is not completed work")
     assert row["archived_at"], "a declined proposal leaves the board"
     assert row["stop_reason"] == "Proposal declined"
     assert work_store.grouped_items()["proposed"] == []
     assert work_store.attention_count() == 0
     assert db.query_all("SELECT id FROM work_runs WHERE work_item_id = ?",
                         (item_id,)) == [], "declining never starts an agent"
+
+
+def test_a_declined_proposal_is_archived_as_canceled_not_as_done():
+    """The board reads a decline off the group the item lands in. Filing it in
+    done put a task the operator turned down under Completed with a green
+    tick, which is the state the work would have reached had an agent
+    delivered it."""
+    declined = _proposal()
+    work_store.apply_action(declined, "decline")
+    finished = work_store.create_item("a task that actually ran")
+    work_store.apply_action(finished, "done")
+    work_store.apply_action(finished, "archive")
+
+    board = work_store.grouped_items(archived=True)
+    assert [row["id"] for row in board[work_store.CANCELED_STATE]] == [declined]
+    assert [row["id"] for row in board["done"]] == [finished]
+
+
+def test_the_migration_files_an_old_declined_proposal_as_canceled(tmp_path):
+    """Every proposal declined before this change is still filed as done."""
+    migration = (pathlib.Path(__file__).resolve().parents[2]
+                 / "migrations" / "049_declined_proposal_is_canceled.sql")
+    conn = sqlite3.connect(tmp_path / "migration-049.db")
+    conn.execute("CREATE TABLE work_items (id INTEGER PRIMARY KEY, "
+                 "state TEXT NOT NULL, stop_reason TEXT NOT NULL)")
+    conn.executemany("INSERT INTO work_items(id, state, stop_reason) VALUES (?, ?, ?)",
+                     [(1, "done", work_store.DECLINED_REASON),
+                      (2, "done", ""),
+                      (3, "needs_ack", work_store.DECLINED_REASON),
+                      (4, "proposed", "")])
+    conn.executescript(migration.read_text())
+
+    assert dict(conn.execute("SELECT id, state FROM work_items").fetchall()) == {
+        1: work_store.CANCELED_STATE, 2: "done", 3: "needs_ack", 4: "proposed"}
+    conn.close()
 
 
 def test_only_a_proposal_can_be_declined():
