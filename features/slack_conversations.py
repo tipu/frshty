@@ -906,7 +906,7 @@ def _tombstone(c, conversation_id: int, message: dict, stamp: str) -> bool:
 _UNDECIDED = (
     "proposed_at IS NOT NULL AND NOT EXISTS ("
     "  SELECT 1 FROM work_items w WHERE w.id = slack_conversations.work_item_id"
-    f"  AND w.state IN {work_store.FINISHED_STATES_SQL}"
+    f"  AND w.state = '{work_store.CANCELED_STATE}'"
     "   AND w.stop_reason = ?)"
 )
 
@@ -1467,7 +1467,7 @@ def _retry_lands_in_time(judged_at: str | None, retry: int, last: float,
 
 _DECLINED_PROPOSAL = (
     "SELECT 1 AS found FROM work_items WHERE id = ?"
-    f" AND state IN {work_store.FINISHED_STATES_SQL} AND stop_reason = ?"
+    f" AND state = '{work_store.CANCELED_STATE}' AND stop_reason = ?"
 )
 
 _CLAIM_CONVERSATION = (
