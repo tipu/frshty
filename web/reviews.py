@@ -191,6 +191,30 @@ def api_rerun_review(repo: str, pr_id: int):
     return {"status": "started", "repo": repo, "pr_id": pr_id, "ticket": ticket_key, "pr_count": len(prs)}
 
 
+@router.post("/api/reviews/{repo}/{pr_id}/task-review")
+def api_task_review(repo: str, pr_id: int, body: dict, token: str = ""):
+    """Take the findings of the /tasks review this PR's review kicked off.
+
+    The token is the one that review's launch put in the objective, so only the
+    task frshty started can store findings, and only while it is the review the
+    page is waiting for."""
+    if not isinstance(body.get("issues", []), list):
+        return JSONResponse({"error": "issues must be a list"}, status_code=400)
+    merged = reviewer.store_task_review(active_config(), repo, pr_id, body, token)
+    if merged is None:
+        return JSONResponse(
+            {"error": f"no /tasks review is open for {repo}#{pr_id}"}, status_code=404)
+    log.emit("review_task_complete",
+             f"/tasks review done: {repo}#{pr_id} {merged['verdict']}, "
+             f"{len(merged['issues'])} issues",
+             links={"detail": f"{active_config()['_base_url']}/reviews/{repo}/{pr_id}"
+                              f"?provider={reviewer.TASK_REVIEW_PROVIDER}"},
+             meta={"repo": repo, "pr_id": pr_id, "provider": reviewer.TASK_REVIEW_PROVIDER,
+                   "verdict": merged["verdict"], "issue_count": len(merged["issues"])})
+    return {"status": "stored", "verdict": merged["verdict"],
+            "issues": len(merged["issues"])}
+
+
 @router.put("/api/settings")
 def api_settings(body: dict):
     for feature, enabled in body.get("features", {}).items():

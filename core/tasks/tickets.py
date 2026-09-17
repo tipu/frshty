@@ -1429,6 +1429,47 @@ def start_planning(ctx: TaskContext) -> TaskResult:
     return TaskResult("ok")
 
 
+_TRI_REVIEW_PROMPT = """Review this ticket's branch changes and save the review to docs/tri-review.md. {repo_block}Read docs/ticket.md for what the ticket asked for, and docs/technical-plan.md and docs/change-manifest.md when they are present.
+
+Run three independent reviewers in parallel as sub-agents. Every reviewer reviews the ENTIRE diff and answers all three questions. There is no persona split and no lane:
+- Does the diff do what the ticket asked, and does it do anything the ticket did not ask for?
+- Will it break in production: edge cases, races, error handling, backward compatibility, data integrity, state transitions?
+- Will it be regretted in three months: clarity, naming, consistency with the surrounding code, unnecessary complexity, missing tests?
+
+Give every sub-agent the same instruction and the same scope, and ask each for a confidence score (0-100) per finding. Then consolidate: merge findings more than one reviewer raised, drop findings below 70 confidence, and state any disagreement explicitly.
+
+File each finding at the severity its worst consequence warrants. A clarity problem that also produces a wrong result is filed for the wrong result. There are no lanes, so no finding is graded down because it belongs to somebody else's question.
+
+Provenance. Before you file a finding, establish whether the code it is about belongs to this branch:
+    git -C <worktree> log -1 --format='%h %an %cI %s' -- <path>
+    git -C <worktree> merge-base --is-ancestor <that commit> origin/<base branch> && echo ALREADY-ON-BASE
+The base branch is origin/{base_branch} unless the repository list above names another base branch for that repository. Code whose last commit is already on the base branch lives in peer code that is already merged, so it is not this ticket's change. Demote that finding. Never drop it. Keep the finding and its evidence, move it out of Findings into Pre-existing, record the commit and the author the check named, and lower its severity to [suggestion] so it cannot block this ticket. A real defect is still reported when another branch introduced it.
+
+Clearances. Something you opened and decided was fine is an output, not a discard. For every non-trivial part of the diff you examined and cleared, write one line naming what you opened, what you concluded, and the evidence that decided it (file:line, a test, a caller). An empty findings list with no clearances cannot be told apart from never having looked.
+
+Write docs/tri-review.md with exactly these sections:
+
+## Tri-Review: <short description>
+
+### Verdict
+A line reading exactly 'VERDICT: PASS' if no blocking findings remain unresolved, or 'VERDICT: FAIL' otherwise.
+
+### Findings
+Each finding tagged [blocking], [suggestion] or [question], citing file:line evidence.
+
+### Cleared
+One line per thing you opened and cleared, with the evidence that cleared it.
+
+### Pre-existing
+Every demoted finding in full, each with the commit and the author the provenance check named, or 'None'. A demoted finding is never tagged [blocking].
+
+### Reviewer Disagreements
+Any point where the reviewers contradicted each other, or 'None'.
+
+Cite file:line evidence for every claim. Do not modify any source file.
+"""
+
+
 @task("start_reviewing",
       preconditions=[status_is("reviewing"), file_exists("docs/change-manifest.md")],
       postconditions=[file_contains("docs/tri-review.md", r"VERDICT:\s*(PASS|FAIL)")],
@@ -1449,13 +1490,9 @@ def start_reviewing(ctx: TaskContext) -> TaskResult:
                         for name, wt, base in repos)
             + "\n"
         )
-    prompt = (
-        "Run /tri-review and save the full output to docs/tri-review.md. "
-        + repo_block +
-        "In the Verdict section, include a line reading exactly 'VERDICT: PASS' "
-        "if no blocking findings remain unresolved, or 'VERDICT: FAIL' otherwise."
-    )
-    log.emit("ticket_review_started", f"Headless /tri-review for {ctx.ticket_key}",
+    base_branch = ctx.config["workspace"].get("base_branch", "main")
+    prompt = _TRI_REVIEW_PROMPT.format(repo_block=repo_block, base_branch=base_branch)
+    log.emit("ticket_review_started", f"Headless tri-review for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key,
                    "repos": [name for name, _, _ in repos]})
     result = run_claude_code(prompt, cwd=ticket_dir, timeout=REVIEW_TIMEOUT)
@@ -1577,8 +1614,9 @@ def fix_review_findings(ctx: TaskContext) -> TaskResult:
         "  VERDICT: PASS    — every blocking finding is genuinely addressed by the diff\n"
         "  VERDICT: FAIL    — one or more blocking findings remain; list each unfixed finding as a "
         "bullet citing file:line and what's missing\n\n"
-        "Do NOT re-run /tri-review and do NOT spawn persona sub-agents. Do NOT make any code edits. "
-        "This is verification only."
+        "Leave the Findings, Cleared, Pre-existing and Reviewer Disagreements sections as they "
+        "are. Do NOT re-run the tri-review and do NOT spawn reviewer sub-agents. Do NOT make any "
+        "code edits. This is verification only."
     )
     log.emit("ticket_review_verifying", f"Fresh verify for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key})

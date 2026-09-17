@@ -285,7 +285,7 @@ def test_ten_concurrent_prd_tickets_serialize_and_complete(tmp_path):
             (cwd / "docs" / "FLOW.html").write_text("<html><body>flow</body></html>")
             return "flow-doc-written"
 
-        if "Run /tri-review" in prompt:
+        if "Run three independent reviewers" in prompt:
             named = re.findall(r"^- (\S+): worktree ", prompt, re.MULTILINE)
             body = "".join(f"## {name}\n\nAll good.\n\n" for name in named)
             (cwd / "docs" / "tri-review.md").write_text(
