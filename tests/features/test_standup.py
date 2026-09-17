@@ -409,16 +409,20 @@ class TestRacesAndFailures:
         row = db.query_one("SELECT * FROM standup_items WHERE id = ?", (item["id"],))
         standup._ask(item["id"], standup._idle_question(row), "ask", _iso(
             datetime.now(timezone.utc)))
-        orphan = work_store.create_item("Unblock the thing")
-        db.execute("UPDATE work_items SET state = 'failed_stale' WHERE id = ?", (orphan,))
+        def fails_after_the_item_exists(objective, **kw):
+            work_id = work_store.create_item(
+                objective, standup_item_id=kw.get("standup_item_id"))
+            db.execute("UPDATE work_items SET state = 'failed_stale' WHERE id = ?",
+                       (work_id,))
+            return {"error": "launch failed: tmux did not start", "item_id": work_id}
+
         with patch.object(standup.work_launch, "launch",
-                          return_value={"error": "launch failed: tmux did not start",
-                                        "item_id": orphan}):
+                          side_effect=fails_after_the_item_exists):
             out = standup.answer(item["id"], "start", _cfg())
         assert "error" in out["launch"]
         assert standup.item(item["id"])["question"] is not None
         assert db.query_one("SELECT standup_item_id FROM work_items WHERE id = ?",
-                            (orphan,))["standup_item_id"] == item["id"]
+                            (out["launch"]["item_id"],))["standup_item_id"] == item["id"]
 
     def test_another_sources_task_is_found_behind_the_loops_own_card(self, clean):
         standup_id = _open_day()
@@ -519,3 +523,83 @@ class TestCatchUp:
         out = standup.catch_up(_cfg(open_at="09:00", close_at="18:30"), now)
         assert out["closed"] == [_day()]
         assert standup.day_view(_day())["state"] == standup.CLOSED
+
+
+class TestSecondPass:
+    def test_a_launched_task_is_linked_by_the_row_that_created_it(self, clean):
+        standup_id = _open_day()
+        item = _item(standup_id)
+        seen = {}
+
+        def fake_launch(objective, **kw):
+            seen["standup_item_id"] = kw.get("standup_item_id")
+            work_id = work_store.create_item(
+                objective, standup_item_id=kw.get("standup_item_id"))
+            raise RuntimeError("the kickoff thread died")
+
+        with patch.object(standup.work_launch, "launch", side_effect=fake_launch):
+            with pytest.raises(RuntimeError):
+                standup.compose(item["id"], "Do the thing")
+        assert seen["standup_item_id"] == item["id"]
+        linked = db.query_one("SELECT id FROM work_items WHERE standup_item_id = ?",
+                              (item["id"],))
+        assert linked is not None
+
+    def test_a_reservation_whose_nudge_died_still_owes_the_cheap_grade(self, clean):
+        standup_id = _open_day()
+        item = _item(standup_id)
+        _age(item["id"], 4)
+        standup._reserve(item["id"], standup_id, 6, datetime.now(timezone.utc), {})
+        db.execute("UPDATE standup_items SET last_nudge_at = NULL WHERE id = ?",
+                   (item["id"],))
+        _age(item["id"], 4)
+        out = standup.tick(_cfg())
+        assert out["fired"]["grade"] == 1
+        assert out["fired"]["action"] == "proposed"
+
+    def test_a_second_card_is_never_proposed_for_one_action_item(self, clean):
+        standup_id = _open_day()
+        item = _item(standup_id)
+        _age(item["id"], 4)
+        row = db.query_one("SELECT * FROM standup_items WHERE id = ?", (item["id"],))
+        now = datetime.now(timezone.utc)
+        first = standup._propose(row, now)
+        assert first["action"] == "proposed"
+        second = standup._propose(row, now)
+        assert "already proposed" in second["error"]
+        assert db.query_one("SELECT COUNT(*) AS n FROM work_items"
+                            " WHERE standup_item_id = ?", (item["id"],))["n"] == 1
+
+    def test_an_answer_that_cannot_transition_keeps_its_question(self, clean):
+        standup_id = _open_day()
+        item = _item(standup_id)
+        standup.close_day(standup_id, _cfg())
+        question = standup.item(item["id"])["question"]
+        with patch.object(standup.db, "dump_json",
+                          side_effect=RuntimeError("the event could not be written")):
+            with pytest.raises(RuntimeError):
+                standup.answer(item["id"], "park", _cfg())
+        after = standup.item(item["id"])
+        assert after["question"] == question
+        assert after["state"] == "open"
+
+    def test_park_moves_the_item_and_clears_the_question_together(self, clean):
+        standup_id = _open_day()
+        item = _item(standup_id)
+        standup.close_day(standup_id, _cfg())
+        standup.answer(item["id"], "park", _cfg())
+        after = standup.item(item["id"])
+        assert after["state"] == "parked"
+        assert after["question"] is None
+
+    def test_mine_holds_the_item_until_the_close_hour(self, clean):
+        standup_id = _open_day()
+        item = _item(standup_id)
+        row = db.query_one("SELECT * FROM standup_items WHERE id = ?", (item["id"],))
+        standup._ask(item["id"], standup._idle_question(row), "ask",
+                     _iso(datetime.now(timezone.utc)))
+        standup.answer(item["id"], "mine", _cfg(close_at="18:30"))
+        after = standup.item(item["id"])
+        assert after["state"] == "open"
+        assert after["question"] is None
+        assert after["snoozed_until"] == standup._close_stamp(_cfg(close_at="18:30"))

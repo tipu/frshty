@@ -592,9 +592,8 @@ def compose(item_id: int, text: str, agent: str = "claude") -> dict:
                                             "question": text})
         return out
     contexts = [c for c in (row["contexts"] or "").split(",") if c]
-    out = work_launch.launch(text, contexts=contexts, agent=agent)
-    if out.get("item_id"):
-        link_task(item_id, int(out["item_id"]))
+    out = work_launch.launch(text, contexts=contexts, agent=agent,
+                             standup_item_id=item_id)
     if "error" in out:
         record_event(item_id, "launch_failed",
                      {"work_item_id": out.get("item_id"), "error": out["error"]})
@@ -608,11 +607,6 @@ def start_task(item_id: int, agent: str = "claude") -> dict:
     """Start a task whose objective is the action item itself."""
     row = _require_open_day(item_id)
     return compose(item_id, row["text"], agent=agent)
-
-
-def link_task(item_id: int, work_item_id: int) -> None:
-    db.execute("UPDATE work_items SET standup_item_id = ? WHERE id = ?",
-               (item_id, work_item_id))
 
 
 def _running_task(item_id: int) -> dict | None:
@@ -857,7 +851,7 @@ def _nudge(item: dict, config: dict | None, now: datetime,
     fails from being retried on every tick for the rest of the day."""
     item_id = int(item["id"])
     shadow = bool(settings(config)["shadow"])
-    grade = 1 if int(item["nudge_count"]) == 0 else 2
+    grade = 2 if _already_proposed(item_id) else 1
     payload = {"grade": grade, "shadow": shadow, "text": item["text"]}
     event_id = _reserve(item_id, int(item["standup_id"]), budget, now, payload)
     if event_id is None:
@@ -872,6 +866,17 @@ def _nudge(item: dict, config: dict | None, now: datetime,
     db.execute("UPDATE standup_events SET payload = ? WHERE id = ?",
                (db.dump_json({**payload, **out}), event_id))
     return {"item_id": item_id, "grade": grade, **out}
+
+
+def _already_proposed(item_id: int) -> bool:
+    """Whether a grade-1 card for this action item ever reached the board.
+
+    The grade is what the operator was shown, not how many slots the loop has
+    spent. A reservation whose nudge then died would otherwise make the first
+    thing he ever sees a question, and the cheap grade would be skipped."""
+    return bool(db.query_one(
+        "SELECT 1 AS present FROM work_items"
+        " WHERE standup_item_id = ? AND scope = 'proposal' LIMIT 1", (item_id,)))
 
 
 def _reserve(item_id: int, standup_id: int, budget: int, now: datetime,
@@ -916,6 +921,13 @@ def _propose(item: dict, now: datetime) -> dict:
                 (item_id,)).fetchone()
             if not still_open:
                 return {"error": "the day closed before the task was proposed"}
+            standing = c.execute(
+                "SELECT id FROM work_items WHERE standup_item_id = ?"
+                " AND scope = 'proposal' AND state = ? LIMIT 1",
+                (item_id, work_store.PROPOSED_STATE)).fetchone()
+            if standing:
+                return {"error": f"task #{int(standing['id'])} is already "
+                                 f"proposed for this action item"}
             work_item_id = work_store.create_proposal(
                 objective, note=note, instance_key="personal",
                 contexts=item["contexts"] or "", conn=c, now=_iso(now))
@@ -999,35 +1011,44 @@ def answer(item_id: int, option: str, config: dict | None = None) -> dict:
             return {"item": item(item_id), "launch": launch}
         _answered(item_id, option, question)
         return {"item": item(item_id), "launch": launch}
-    _answered(item_id, option, question)
     if option == "mine":
-        return {"item": _hold_until_close(item_id, config)}
-    if option == "park":
-        db.execute("UPDATE standup_items SET state = 'parked', updated_at = ?"
-                   " WHERE id = ?", (_now(), item_id))
-    elif option == "drop":
-        db.execute("UPDATE standup_items SET state = 'dropped', updated_at = ?"
-                   " WHERE id = ?", (_now(), item_id))
-    elif option == "carry":
-        db.execute("UPDATE standup_items SET state = 'open', updated_at = ?"
-                   " WHERE id = ?", (_now(), item_id))
+        stamp = _close_stamp(config)
+        _answered(item_id, option, question, snoozed_until=stamp)
+        record_event(item_id, "snoozed", {"until": stamp, "by": "mine"})
+        return {"item": item(item_id)}
+    _answered(item_id, option, question,
+              state={"park": "parked", "drop": "dropped", "carry": "open"}[option])
     return {"item": item(item_id)}
 
 
-def _answered(item_id: int, option: str, question: dict) -> None:
-    """Take the question off the item and record what the operator chose.
+def _answered(item_id: int, option: str, question: dict, state: str = "",
+              snoozed_until: str | None = None) -> None:
+    """Apply the answer and take the question off the item, in one write.
 
-    It runs after the option's transition, not before it. A launch that fails
-    must leave the question where it was: clearing it first would take the
-    nudge away and leave the action item with neither a question nor a task."""
-    db.execute("UPDATE standup_items SET pending_question = '', updated_at = ?"
-               " WHERE id = ?", (_now(), item_id))
-    record_event(item_id, "answered", {"option": option,
-                                       "grade": question.get("grade", "")})
+    The transition and the clear are one transaction, so an item can never end
+    up with the question gone and the transition not made. A start is the one
+    option whose transition cannot join this write, because it launches an
+    agent; it calls this only once that launch has succeeded."""
+    now = _now()
+    sets, params = ["pending_question = ''", "updated_at = ?"], [now]
+    if state:
+        sets.append("state = ?")
+        params.append(state)
+    if snoozed_until is not None:
+        sets.append("snoozed_until = ?")
+        params.append(snoozed_until)
+    with db.tx() as c:
+        c.execute(f"UPDATE standup_items SET {', '.join(sets)} WHERE id = ?",
+                  (*params, item_id))
+        c.execute(
+            "INSERT INTO standup_events(standup_item_id, kind, payload, created_at)"
+            " VALUES (?, 'answered', ?, ?)",
+            (item_id, db.dump_json({"option": option,
+                                    "grade": question.get("grade", "")}), now))
 
 
-def _hold_until_close(item_id: int, config: dict | None) -> dict:
-    """Stop nudging an item today without closing it.
+def _close_stamp(config: dict | None) -> str:
+    """The next close_at, as the moment a "not now" holds until.
 
     "I am doing this myself" is not "done". The item stays open, so it is still
     on the list and still carries, and the loop stops asking until tomorrow."""
@@ -1036,11 +1057,7 @@ def _hold_until_close(item_id: int, config: dict | None) -> dict:
     until = datetime.combine(local.date(), close_at, tz.local_tz())
     if until <= local:
         until = until + timedelta(days=1)
-    stamp = _iso(until.astimezone(timezone.utc))
-    db.execute("UPDATE standup_items SET snoozed_until = ?, updated_at = ?"
-               " WHERE id = ?", (stamp, _now(), item_id))
-    record_event(item_id, "snoozed", {"until": stamp, "by": "mine"})
-    return item(item_id)
+    return _iso(until.astimezone(timezone.utc))
 
 
 def sweep_completed_tasks() -> list[int]:
