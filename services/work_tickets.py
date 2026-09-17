@@ -170,7 +170,8 @@ def tasks_for(instance_key: str, ticket_key: str) -> list[dict]:
     if ticket_key not in idx["by_key"]:
         return []
     rows = db.query_all(
-        "SELECT i.id, i.objective, i.state, i.contexts, i.scope, i.scope_ref,"
+        "SELECT i.id, i.objective, i.state, i.stop_reason, i.contexts, i.scope,"
+        " i.scope_ref,"
         " i.critical, i.created_at, i.updated_at, i.archived_at, i.summary,"
         " i.current_checkpoint,"
         " (SELECT provider FROM work_runs r WHERE r.work_item_id = i.id"
@@ -189,6 +190,7 @@ def tasks_for(instance_key: str, ticket_key: str) -> list[dict]:
             "id": r["id"],
             "objective": r["objective"],
             "state": r["state"],
+            "stop_reason": r["stop_reason"] or "",
             "critical": bool(r["critical"]),
             "archived": bool(r["archived_at"]),
             "projects": [c.strip() for c in (r["contexts"] or "").split(",")
