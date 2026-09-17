@@ -2,7 +2,9 @@ import json
 import re
 import subprocess
 import tempfile
+import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -14,6 +16,7 @@ from core.llm import READ_ONLY_TOOLS, WRITE_TOOLS, run_external_model
 from core.config import base_branch_for, get_repos
 import features.presentation as presentation
 from features.platforms import make_platform
+from services import review_store, work_launch
 
 PERSONA_SPEC = (
     "You are a spec reviewer. Your single concern: does this diff solve what the ticket or PR description asks for?\n\n"
@@ -249,6 +252,155 @@ TICKET_TOOL_USE_RULES = (
 )
 
 
+TASK_REVIEW_PROVIDER = "tasks"
+
+# Checking the token and consuming it is one step. Two posts that arrive
+# together would otherwise both read the review as pending, both be accepted,
+# and the one that wrote last would decide the verdict, so an empty review
+# could erase a blocking finding the other one carried.
+_TASK_REVIEW_LOCK = threading.Lock()
+
+TASK_REVIEW_RULES = (
+    "Run three independent reviewers in parallel as sub-agents. Every reviewer reviews the ENTIRE "
+    "diff and answers all three questions. There is no persona split and no lane:\n"
+    "- Does the diff do what the pull request asked for, and does it do anything it did not ask for?\n"
+    "- Will it break in production: edge cases, races, error handling, backward compatibility, "
+    "data integrity, state transitions?\n"
+    "- Will it be regretted in three months: clarity, naming, consistency with the surrounding "
+    "code, unnecessary complexity, missing tests?\n\n"
+    "Give every sub-agent the same instruction and the same scope, and ask each for a confidence "
+    "score (0-100) per finding. Then consolidate: merge findings more than one reviewer raised, "
+    "drop findings below 70 confidence, and state any disagreement explicitly in the summary.\n\n"
+    "File each finding at the severity its worst consequence warrants. A clarity problem that also "
+    "produces a wrong result is filed for the wrong result. There are no lanes, so no finding is "
+    "graded down because it belongs to somebody else's question.\n\n"
+    "PROVENANCE: before you file a finding, establish whether the code it is about belongs to this "
+    "pull request:\n"
+    "    git -C <worktree> log -1 --format='%h %an %cI %s' -- <path>\n"
+    "    git -C <worktree> merge-base --is-ancestor <that commit> origin/<base branch> "
+    "&& echo ALREADY-ON-BASE\n"
+    "Code whose last commit is already on the base branch lives in peer code that is already "
+    "merged, so it is not this pull request's change. Demote that finding. Never drop it. Keep the "
+    "finding and its evidence, set its severity to \"suggestion\", and open its body with "
+    "\"Pre-existing (<commit>, <author>):\" so it cannot block this pull request. A real defect is "
+    "still reported when another branch introduced it.\n\n"
+    "CLEARANCES: something you opened and decided was fine is an output, not a discard. For every "
+    "non-trivial part of the diff you examined and cleared, add one line to \"summary\" naming what "
+    "you opened, what you concluded, and the evidence that decided it (file:line, a test, a "
+    "caller). An empty issues list with no clearances cannot be told apart from never having "
+    "looked.\n"
+)
+
+
+def _task_review_objective(config: dict, pr: dict, review_dir: Path, worktree,
+                           token: str) -> str:
+    endpoint = (f"{config.get('_base_url', '')}/api/reviews/"
+                f"{pr['repo']}/{pr['id']}/task-review?token={token}")
+    checkout = (f"The branch is checked out read-only at {worktree}." if worktree
+                else "There is no checkout of this branch, so review from the diff alone.")
+    return (
+        f"Review pull request #{pr['id']} in repository '{pr['repo']}' "
+        f"(branch: {pr.get('branch', '')}).\n"
+        f"The diff is staged at {review_dir / 'diff.txt'}. Read it from there. {checkout}\n\n"
+        + TASK_REVIEW_RULES
+        + "\nPost the consolidated review to frshty as one JSON object. Write it to a file first, "
+          "then send that file:\n"
+        f"    curl -sS -X POST {endpoint} -H 'Content-Type: application/json' -d @review.json\n"
+        "The POST is the deliverable. A review that is not posted did not happen. Do not modify "
+        "any source file, do not commit, and do not open a pull request.\n\n"
+        + JSON_OUTPUT_SCHEMA + SEVERITY_RULES + LINE_NUMBER_RULES + BODY_RULES
+    )
+
+
+def launch_task_review(config: dict, pr: dict, review_dir: Path, worktree) -> int | None:
+    """Start a /tasks board task that reviews this pull request.
+
+    Every review the /reviews pipeline starts also gets a board task, so the
+    same diff is reviewed by the pipeline and by an agent with the ticket
+    pipeline's lenses. The task posts its findings back under the `tasks`
+    provider and the review page shows either review.
+
+    The pending placeholder is written once the board has the task, so a launch
+    that fails leaves the store exactly as it found it and a launch that fails
+    after a later one succeeded cannot take the later one's placeholder with it.
+    The task has to boot, read the diff and run three reviewers before it can
+    post, so the placeholder is always there long before the findings are.
+
+    It carries a one-time token that only this launch's objective knows, so the
+    findings of a task started for an earlier revision of the same pull request
+    cannot land on this one. A board that cannot start a task must not fail the
+    review the pipeline is already running, so a failed launch logs and returns
+    None."""
+    suffix = review_store.provider_suffix(TASK_REVIEW_PROVIDER)
+    token = uuid.uuid4().hex
+    placeholder = {"pr_id": pr["id"], "repo": pr["repo"], "pr_url": pr.get("url", ""),
+                   "provider": TASK_REVIEW_PROVIDER, "verdict": "", "status": "reviewing",
+                   "token": token, "summary": "", "issues": []}
+    result: dict = {}
+    error = ""
+    try:
+        result = work_launch.launch(
+            _task_review_objective(config, pr, review_dir, worktree, token),
+            cwd=str(worktree or review_dir), no_worktree=True,
+            brief=f"review {pr['repo']}#{pr['id']}")
+        error = result.get("error") or ""
+        if not error:
+            with _TASK_REVIEW_LOCK:
+                (review_dir / f"review{suffix}.json").write_text(
+                    json.dumps(placeholder, indent=2))
+                (review_dir / f"queued_comments{suffix}.json").write_text("[]")
+    except Exception as e:
+        error = f"{type(e).__name__}: {e}"
+    if error:
+        log.emit("review_task_launch_failed",
+                 f"{pr['repo']}#{pr['id']}: /tasks review not started: {error}",
+                 meta={"repo": pr["repo"], "pr_id": pr["id"], "error": error})
+        return None
+    item_id = result.get("item_id")
+    log.emit("review_task_launched",
+             f"{pr['repo']}#{pr['id']}: /tasks review started as work item {item_id}",
+             links={"task": f"{config.get('_base_url', '')}/tasks/{item_id}"},
+             meta={"repo": pr["repo"], "pr_id": pr["id"], "item_id": item_id})
+    return item_id
+
+
+def store_task_review(config: dict, repo: str, pr_id: int, review: dict,
+                      token: str) -> dict | None:
+    """Store a review a /tasks agent produced, or None when none is open.
+
+    The token is the one `launch_task_review` gave this task, and the review it
+    opened is still pending, so the findings of a task started for an earlier
+    revision cannot replace the review of the one running now, and a review that
+    is already stored cannot be replaced at all.
+
+    The verdict is recomputed from the findings that are stored, so the verdict
+    the page shows can never disagree with the comment list beside it."""
+    merged = dict(review)
+    issues = [dict(i) for i in (review.get("issues") or [])
+              if isinstance(i, dict) and i.get("body")]
+    for issue in issues:
+        if issue.get("severity") not in ("blocking", "suggestion", "question"):
+            issue["severity"] = "suggestion"
+        issue["found_by"] = [TASK_REVIEW_PROVIDER]
+    merged["issues"] = issues
+    merged["status"] = "done"
+    merged["verdict"] = ("changes_requested"
+                         if any(i["severity"] == "blocking" for i in issues) else "approved")
+    suffix = review_store.provider_suffix(TASK_REVIEW_PROVIDER)
+    with _TASK_REVIEW_LOCK:
+        found = review_store.find_review(config["_state_dir"], repo, pr_id,
+                                         provider=TASK_REVIEW_PROVIDER)
+        if not found:
+            return None
+        branch_dir = found[0]
+        opened = json.loads((branch_dir / f"review{suffix}.json").read_text())
+        if opened.get("status") != "reviewing" or not token or opened.get("token") != token:
+            return None
+        pr = {"id": pr_id, "repo": repo, "url": opened.get("pr_url", "")}
+        _write_review_files(branch_dir, pr, merged, None, provider=TASK_REVIEW_PROVIDER)
+    return merged
+
+
 def check(config: dict):
     platform = make_platform(config)
     review_prs = platform.list_pending_reviews_for_me()
@@ -275,6 +427,7 @@ def review_pr(config: dict, platform, pr: dict, ticket_context: str = "",
     worktree = _ensure_review_worktree(config, pr)
     review_dir = _review_dir(config, pr)
     diff_path = _stage_diff(review_dir, diff_text)
+    launch_task_review(config, pr, review_dir, worktree)
     conventions = _load_conventions(config, pr["repo"])
 
     prompts = {name: _build_persona_prompt(text, pr, diff_path,
@@ -341,14 +494,23 @@ def _stage_diff(review_dir: Path, diff_text: str) -> Path:
 
 def _write_review_artifacts(config, pr, merged: dict, diff_text: str,
                             provider: str = "claude") -> None:
-    review_dir = _review_dir(config, pr)
+    _write_review_files(_review_dir(config, pr), pr, merged, diff_text, provider=provider)
+
+
+def _write_review_files(review_dir: Path, pr: dict, merged: dict, diff_text: str | None,
+                        provider: str = "claude") -> None:
+    """Write one provider's review beside the diff it reviewed.
+
+    `diff_text` is None when the diff is already staged, which is the case for a
+    review that arrives after the pipeline staged it."""
     merged["pr_id"] = pr["id"]
     merged["pr_url"] = pr.get("url", "")
     merged["repo"] = pr["repo"]
     merged["provider"] = provider
     suffix = "" if provider == "claude" else f".{provider}"
     (review_dir / f"review{suffix}.json").write_text(json.dumps(merged, indent=2))
-    (review_dir / "diff.txt").write_text(diff_text)
+    if diff_text is not None:
+        (review_dir / "diff.txt").write_text(diff_text)
 
     queued = [
         {
@@ -1171,7 +1333,9 @@ def review_ticket(config: dict, ticket_key: str, prs: list[dict],
         wt = _ensure_review_worktree(config, pr)
         worktrees[key] = wt
         conv = _load_conventions(config, pr["repo"])
-        diff_path = _stage_diff(_review_dir(config, pr), diffs[key])
+        review_dir = _review_dir(config, pr)
+        diff_path = _stage_diff(review_dir, diffs[key])
+        launch_task_review(config, pr, review_dir, wt)
         sec = [f"=== PR #{pr['id']} in repository '{pr['repo']}' (branch: {pr.get('branch', '')}) ==="]
         if wt:
             sec.append(f"worktree (read-only checkout): {wt}")
