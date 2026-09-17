@@ -793,9 +793,9 @@ def apply_action(item_id: int, action: str, until: str | None = None) -> dict:
             if item["state"] != PROPOSED_STATE:
                 return {"error": "only a proposed task can be declined"}
             c.execute(
-                "UPDATE work_items SET state = 'done', archived_at = ?, "
+                "UPDATE work_items SET state = ?, archived_at = ?, "
                 "stop_reason = ?, updated_at = ? WHERE id = ?",
-                (now, DECLINED_REASON, now, item_id),
+                (CANCELED_STATE, now, DECLINED_REASON, now, item_id),
             )
         elif action == "cancel":
             if item["state"] in CLOSED_STATES:
@@ -1947,6 +1947,10 @@ def grouped_items(now: datetime | None = None, q: str = "",
     yet: the operator approves it to start one, or declines it, which files
     it in the archive without ever running.
 
+    A declined proposal lands in canceled, not in done. Nothing was
+    delivered: no agent ever read it, so filing it with the completed work
+    made a task the operator turned down read as a task frshty finished.
+
     A task the agent reported done lands in needs_ack, not in done. The
     operator acknowledges it to complete it, or archives it, which
     acknowledges and files it in one step. An unacknowledged task is never
@@ -1955,7 +1959,8 @@ def grouped_items(now: datetime | None = None, q: str = "",
     A task the operator canceled lands in its own canceled group, not in
     done. It was stopped, not finished, so mixing it into the completed work
     would overstate what the board delivered. It follows the same archive
-    rule as a completed task, and the archive view lists both groups.
+    rule as a completed task, and the archive view lists both groups. A
+    declined proposal and a withdrawn one are canceled for the same reason.
 
     A completed task stays in the done group until the operator archives it.
     Archiving is the only way it leaves, so the board and the archive split

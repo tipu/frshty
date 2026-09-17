@@ -173,7 +173,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
         <div v-for="t in (ticketTasksOpen ? ticketTasks : openTicketTasks)" :key="t.id"
              class="mt-2 pt-2 border-t border-gray-800 text-xs">
             <div class="flex items-center gap-2 flex-wrap">
-                <span :class="taskStateClass(t.state)">{{ taskStateLabel(t.state) }}</span>
+                <span :class="taskStateClass(t.state)">{{ taskStateLabel(t.state, t.stop_reason) }}</span>
                 <a :href="t.url" target="_blank" class="link">task {{ t.id }} &nearr;</a>
                 <span v-if="t.critical" class="text-yellow-300" title="the operator marked this task critical">&#9733;</span>
                 <span v-if="t.archived" class="text-gray-600">archived</span>
@@ -1465,7 +1465,10 @@ frshtyApp({
             done: 'text-gray-400',
         };
 
-        function taskStateLabel(taskState) {
+        const DECLINED_REASON = 'Proposal declined';
+
+        function taskStateLabel(taskState, stopReason) {
+            if (taskState === 'canceled' && stopReason === DECLINED_REASON) return 'declined';
             return TASK_STATE_LABELS[taskState] || (taskState || 'gone');
         }
 
