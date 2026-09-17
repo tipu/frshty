@@ -88,12 +88,12 @@ textarea { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; }
     <span v-else-if="info.ticket_key" class="text-gray-500">{{ info.ticket_key }}</span>
     <span v-if="info.pr_title" class="text-gray-200 font-medium">{{ info.pr_title }}</span>
     <span class="ml-auto flex items-center gap-3 text-xs">
-        <span class="flex items-center gap-1 border border-gray-700 rounded px-2 py-0.5" title="which review provider's comments are shown; actions are logged per provider for the A/B experiment">
+        <span class="flex items-center gap-1 border border-gray-700 rounded px-2 py-0.5" title="which review is shown: the one the /reviews pipeline ran, or the one the /tasks board agent ran on the same diff">
             <label class="flex items-center gap-1 cursor-pointer" :class="provider === 'claude' ? 'text-green-400' : 'text-gray-500'">
-                <input type="radio" value="claude" v-model="provider" class="accent-green-500"> claude
+                <input type="radio" value="claude" v-model="provider" class="accent-green-500"> pipeline
             </label>
-            <label class="flex items-center gap-1 cursor-pointer" :class="provider === 'codex' ? 'text-blue-400' : 'text-gray-500'">
-                <input type="radio" value="codex" v-model="provider" class="accent-blue-500"> codex
+            <label class="flex items-center gap-1 cursor-pointer" :class="provider === 'tasks' ? 'text-blue-400' : 'text-gray-500'">
+                <input type="radio" value="tasks" v-model="provider" class="accent-blue-500"> task
             </label>
         </span>
         <span v-if="presentationBuilding" class="badge badge-question animate-pulse" title="the slide deck is being rebuilt in the background">⏳ presentation building…</span>
