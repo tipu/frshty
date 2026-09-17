@@ -74,6 +74,8 @@
     <span class="ln-pill ln-pill-ghost ml-2" style="cursor:pointer" v-if="cancelable"
           title="stop this task and kill the terminal its agent runs in"
           @click="cancel()">⊘ Cancel</span>
+    <span class="ln-pill ln-pill-ghost ml-2" v-if="item.archived_at"
+          title="this task is in the archive, not on the board">Archived</span>
     <span class="text-xs text-gray-500 ml-2">#{{ item.id }} · {{ item.scope }} · {{ item.instance_key || 'no instance' }} · continues {{ item.continues_used }}/{{ item.continue_cap }}<span v-if="provider"> · {{ provider }}</span><span v-if="item.contexts"> · {{ item.contexts }}</span></span>
     <span v-if="peer" class="badge b-other" :title="'this task runs on the ' + peer + ' host'">⇄ {{ peer }}</span>
     <a v-if="sourceItem" :href="taskHref(sourceItem.id)" class="text-xs text-blue-400 underline ml-3" :title="sourceItem.objective">follows #{{ sourceItem.id }}</a>
@@ -113,6 +115,19 @@
       <span class="text-xs text-red-400" v-if="actError">{{ actError }}</span>
     </div>
   </div>
+  <div class="sec" v-if="item.state === 'done'">
+    <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Completed</h2>
+    <div class="text-xs text-gray-600 mb-2">This task is complete. Archive it to take it off the board. The archive view still lists it, and Unarchive brings it back.</div>
+    <div class="flex flex-wrap gap-2 items-center">
+      <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#1e293b;color:#cbd5e1"
+            v-if="item.archived_at" title="put this completed task back on the board"
+            @click="act('unarchive')">unarchive</span>
+      <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#1e293b;color:#cbd5e1"
+            v-else title="take this completed task off the board"
+            @click="act('archive')">archive</span>
+      <span class="text-xs text-red-400" v-if="actError">{{ actError }}</span>
+    </div>
+  </div>
   <div class="sec" v-if="item.state === 'canceled'">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">{{ declined ? 'Declined' : 'Canceled' }}</h2>
     <div class="text-xs text-gray-600 mb-2" v-if="declined">You declined this proposal and no agent ever read it. Reopen it to put it back on the board; no agent starts by itself.</div>
@@ -121,6 +136,10 @@
       <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#3f1d1d;color:#fca5a5"
             @click="act('reopen')">reopen</span>
       <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#1e293b;color:#cbd5e1"
+            v-if="item.archived_at" title="put this canceled task back on the board"
+            @click="act('unarchive')">unarchive</span>
+      <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#1e293b;color:#cbd5e1"
+            v-else title="take this canceled task off the board"
             @click="act('archive')">archive</span>
       <span class="text-xs text-red-400" v-if="actError">{{ actError }}</span>
     </div>
