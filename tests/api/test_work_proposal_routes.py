@@ -130,7 +130,10 @@ def test_declining_never_starts_a_run(client):
     body = c.get("/api/work/items").json()
     assert body["counts"]["proposed"] == 0
     assert body["counts"]["done"] == 0, "a declined proposal goes straight to the archive"
-    assert c.get("/api/work/items?archive=1").json()["counts"]["done"] == 1
+    assert body["counts"]["canceled"] == 0, "a declined proposal goes straight to the archive"
+    archive = c.get("/api/work/items?archive=1").json()["counts"]
+    assert archive["done"] == 0, "a proposal nobody ran is not completed work"
+    assert archive["canceled"] == 1
 
 
 def test_approving_an_ordinary_task_is_refused(client):
