@@ -953,9 +953,9 @@ def _write_proposal(c, item: dict, now: datetime) -> dict:
 
 def _idle_question(item: dict) -> dict:
     declined = db.query_one(
-        "SELECT id FROM work_items WHERE standup_item_id = ? AND state = 'done'"
+        "SELECT id FROM work_items WHERE standup_item_id = ? AND state = ?"
         " AND stop_reason = ? ORDER BY id DESC LIMIT 1",
-        (int(item["id"]), work_store.DECLINED_REASON))
+        (int(item["id"]), work_store.CANCELED_STATE, work_store.DECLINED_REASON))
     if declined:
         prompt = (f"You declined task #{int(declined['id'])} for this and nothing has "
                   f"happened since. What is the real state?")
@@ -1102,11 +1102,10 @@ def sweep_completed_tasks() -> list[int]:
     rows = db.query_all(
         "SELECT DISTINCT i.id FROM standup_items i"
         " JOIN work_items w ON w.standup_item_id = i.id"
-        " WHERE i.state = 'open' AND w.state IN ('needs_ack', 'done')"
-        "   AND w.stop_reason != ?"
+        f" WHERE i.state = 'open' AND w.state IN {work_store.FINISHED_STATES_SQL}"
         "   AND NOT EXISTS (SELECT 1 FROM work_items o WHERE o.standup_item_id = i.id"
         f"                  AND o.state IN ({', '.join('?' for _ in LIVE_TASK_STATES)}))",
-        (work_store.DECLINED_REASON, *LIVE_TASK_STATES))
+        tuple(LIVE_TASK_STATES))
     moved = []
     for r in rows:
         item_id = int(r["id"])
