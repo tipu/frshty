@@ -5,12 +5,13 @@ when all eight gates pass, and every gate can be shown to block on its own.
 The second half of the file holds the day itself: a draft is written once, a
 carry never loses a line, and an action item is never a work item.
 """
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from unittest.mock import patch
 
 import pytest
 
 import core.db as db
+from core import tz
 from services import standup, work_store
 
 
@@ -48,8 +49,23 @@ def clean():
     _wipe()
 
 
-def _open_day(day="2026-09-16", config=None):
-    standup_id = standup.ensure_day(config or _cfg(), day)
+def _day(offset: int = 0) -> str:
+    """A local calendar day, relative to today.
+
+    The loop reads the day off the local clock, so a test that hard-codes a
+    date passes only while that date happens to be today in the machine's
+    timezone. It went red the first time UTC rolled past midnight."""
+    return (date.fromisoformat(standup.today_key()) + timedelta(days=offset)).isoformat()
+
+
+def _at(day: str, hour: int, minute: int = 0) -> datetime:
+    """A moment on a local calendar day, as the tick reads the clock."""
+    return datetime.combine(date.fromisoformat(day), time(hour, minute),
+                            tz.local_tz()).astimezone(timezone.utc)
+
+
+def _open_day(day=None, config=None):
+    standup_id = standup.ensure_day(config or _cfg(), day or _day())
     standup.open_day(standup_id)
     return standup_id
 
@@ -74,18 +90,18 @@ def _age(item_id: int, hours: float) -> None:
 
 class TestTheDay:
     def test_a_day_is_drafted_once(self, clean):
-        first = standup.ensure_day(_cfg(), "2026-09-16")
-        assert standup.ensure_day(_cfg(), "2026-09-16") == first
+        first = standup.ensure_day(_cfg(), _day())
+        assert standup.ensure_day(_cfg(), _day()) == first
 
     def test_a_drafted_day_starts_as_a_draft_and_nudges_nothing(self, clean):
-        standup.ensure_day(_cfg(), "2026-09-16")
-        assert standup.day_view("2026-09-16")["state"] == standup.DRAFT
-        out = standup.tick(_cfg(), datetime(2026, 9, 16, 12, tzinfo=timezone.utc))
+        standup.ensure_day(_cfg(), _day())
+        assert standup.day_view(_day())["state"] == standup.DRAFT
+        out = standup.tick(_cfg(), _at(_day(), 12))
         assert out["fired"] is None
         assert "no open standup" in out["skipped"]
 
     def test_opening_freezes_yesterday(self, clean):
-        standup_id = standup.ensure_day(_cfg(), "2026-09-16")
+        standup_id = standup.ensure_day(_cfg(), _day())
         standup.open_day(standup_id)
         row = db.query_one("SELECT state, opened_at FROM standups WHERE id = ?", (standup_id,))
         assert row["state"] == standup.OPEN
@@ -99,12 +115,12 @@ class TestTheDay:
         assert standup.item(item["id"])["text"] == "Unblock DEV-9001"
 
     def test_an_unfinished_line_carries_and_a_finished_one_does_not(self, clean):
-        first = _open_day("2026-09-16")
+        first = _open_day(_day())
         kept = _item(first, "Carry me")
         gone = _item(first, "Finish me")
         standup.set_item_state(gone["id"], "done")
-        second = standup.ensure_day(_cfg(), "2026-09-17")
-        texts = [i["text"] for i in standup.day_view("2026-09-17")["items"]]
+        second = standup.ensure_day(_cfg(), _day(1))
+        texts = [i["text"] for i in standup.day_view(_day(1))["items"]]
         assert "Carry me" in texts
         assert "Finish me" not in texts
         carried = db.query_one(
@@ -114,14 +130,14 @@ class TestTheDay:
         assert carried["carry_count"] == 1
 
     def test_a_parked_line_carries_parked_so_no_nudge_fires_on_it(self, clean):
-        first = _open_day("2026-09-16")
+        first = _open_day(_day())
         item = _item(first, "Waiting on Erik")
         standup.set_item_state(item["id"], "parked")
-        standup.ensure_day(_cfg(), "2026-09-17")
-        carried = next(i for i in standup.day_view("2026-09-17")["items"]
+        standup.ensure_day(_cfg(), _day(1))
+        carried = next(i for i in standup.day_view(_day(1))["items"]
                        if i["text"] == "Waiting on Erik")
         assert carried["state"] == "parked"
-        day = db.query_one("SELECT * FROM standups WHERE day = '2026-09-17'")
+        day = db.query_one("SELECT * FROM standups WHERE day = ?", (_day(1),))
         row = db.query_one("SELECT * FROM standup_items WHERE id = ?", (carried["id"],))
         assert standup.gate(row, day, _cfg()) == "the item is parked"
 
@@ -130,7 +146,7 @@ class TestTheDay:
         mine = _item(standup_id, "My own line")
         drafted = standup._insert_item(standup_id, "Drafted line", "", "board", "", 9)
         standup.redraft(standup_id, _cfg())
-        texts = [i["text"] for i in standup.day_view("2026-09-16")["items"]]
+        texts = [i["text"] for i in standup.day_view(_day())["items"]]
         assert "My own line" in texts
         assert db.query_one("SELECT id FROM standup_items WHERE id = ?", (drafted,)) is None
         assert db.query_one("SELECT id FROM standup_items WHERE id = ?", (mine["id"],))
@@ -471,35 +487,35 @@ class TestRacesAndFailures:
 
 class TestCatchUp:
     def test_a_day_whose_open_beat_never_fired_is_opened(self, clean):
-        now = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+        now = _at(_day(), 12)
         out = standup.catch_up(_cfg(open_at="09:00", close_at="23:59"), now)
-        assert out["opened"] == "2026-09-16"
-        assert standup.day_view("2026-09-16")["state"] == standup.OPEN
+        assert out["opened"] == _day()
+        assert standup.day_view(_day())["state"] == standup.OPEN
 
     def test_nothing_opens_before_the_open_hour(self, clean):
-        now = datetime(2026, 9, 16, 7, tzinfo=timezone.utc)
+        now = _at(_day(), 7)
         assert standup.catch_up(_cfg(open_at="09:00"), now) == {}
-        assert standup.day_view("2026-09-16")["exists"] is False
+        assert standup.day_view(_day())["exists"] is False
 
     def test_nothing_opens_on_a_day_off(self, clean):
-        now = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+        now = _at(_day(), 12)
         assert standup.catch_up(_cfg(days=["sun"], open_at="09:00"), now) == {}
-        assert standup.day_view("2026-09-16")["exists"] is False
+        assert standup.day_view(_day())["exists"] is False
 
     def test_a_day_left_open_from_an_earlier_date_is_closed(self, clean):
-        yesterday = _open_day("2026-09-15")
+        yesterday = _open_day(_day(-1))
         item = _item(yesterday, "Left open overnight")
-        now = datetime(2026, 9, 16, 12, tzinfo=timezone.utc)
+        now = _at(_day(), 12)
         out = standup.catch_up(_cfg(open_at="09:00", close_at="23:59"), now)
-        assert "2026-09-15" in out["closed"]
-        assert standup.day_view("2026-09-15")["state"] == standup.CLOSED
+        assert _day(-1) in out["closed"]
+        assert standup.day_view(_day(-1))["state"] == standup.CLOSED
         assert standup.item(item["id"])["question"]["grade"] == "close"
         assert "Left open overnight" in [
-            i["text"] for i in standup.day_view("2026-09-16")["items"]]
+            i["text"] for i in standup.day_view(_day())["items"]]
 
     def test_a_day_past_its_close_hour_is_closed(self, clean):
-        _open_day("2026-09-16")
-        now = datetime(2026, 9, 16, 20, tzinfo=timezone.utc)
+        _open_day(_day())
+        now = _at(_day(), 20)
         out = standup.catch_up(_cfg(open_at="09:00", close_at="18:30"), now)
-        assert out["closed"] == ["2026-09-16"]
-        assert standup.day_view("2026-09-16")["state"] == standup.CLOSED
+        assert out["closed"] == [_day()]
+        assert standup.day_view(_day())["state"] == standup.CLOSED
