@@ -291,6 +291,7 @@ const STATE_TEXT = {
   waiting_external: "○ Waiting external", failed_stale: "● Failed or stale",
   canceled: "⊘ Canceled",
 };
+const DECLINED_REASON = "Proposal declined";
 frshtyApp({
   data() {
     return {
@@ -424,6 +425,7 @@ frshtyApp({
     },
     stateText(g, it) {
       if (g === "done") return it.operator_confirmed ? "✓ You confirmed" : "✓ Agent-reported";
+      if (g === "canceled" && it.stop_reason === DECLINED_REASON) return "⊘ Declined";
       return STATE_TEXT[g] || g;
     },
     note(text) {
