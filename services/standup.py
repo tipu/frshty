@@ -593,8 +593,12 @@ def compose(item_id: int, text: str, agent: str = "claude") -> dict:
         return out
     contexts = [c for c in (row["contexts"] or "").split(",") if c]
     out = work_launch.launch(text, contexts=contexts, agent=agent)
-    if "error" not in out and out.get("item_id"):
+    if out.get("item_id"):
         link_task(item_id, int(out["item_id"]))
+    if "error" in out:
+        record_event(item_id, "launch_failed",
+                     {"work_item_id": out.get("item_id"), "error": out["error"]})
+    else:
         record_event(item_id, "launched", {"work_item_id": int(out["item_id"]),
                                            "objective": text})
     return out
@@ -701,15 +705,12 @@ def _covering_task(item: dict) -> int | None:
         return None
     key = match.group(1)
     entry = watchdog.Entry(key, key, key, "")
+    mine = frozenset(int(r["id"]) for r in db.query_all(
+        "SELECT id FROM work_items WHERE standup_item_id = ?", (int(item["id"]),)))
     for instance_key in [c for c in (item["contexts"] or "").split(",") if c] or [""]:
-        covered = watchdog.covered_by_open_task(entry, instance_key)
-        if covered is None:
-            continue
-        own = db.query_one("SELECT standup_item_id FROM work_items WHERE id = ?",
-                           (covered,))
-        if own and own["standup_item_id"] == int(item["id"]):
-            continue
-        return covered
+        covered = watchdog.covered_by_open_task(entry, instance_key, exclude=mine)
+        if covered is not None:
+            return covered
     return None
 
 
@@ -750,6 +751,43 @@ def gate(item: dict, standup: dict, config: dict | None,
     return ""
 
 
+def catch_up(config: dict | None = None, now: datetime | None = None) -> dict:
+    """Open or close a day whose beat did not fire.
+
+    A recurring schedule that comes due while the process is down is rolled
+    forward rather than run late, so a restart after the open hour would leave
+    the operator with no standup at all that day, and a restart after the close
+    hour would leave a day open forever. The tick runs from the cron fan-out,
+    which is always current, so it is where the day is made to match the clock.
+
+    A day still open from an earlier date is closed first, so its lines carry
+    into today with the state the close left them in rather than the state they
+    had when the process stopped."""
+    now = now or datetime.now(timezone.utc)
+    local = now.astimezone(tz.local_tz())
+    day = local.date().isoformat()
+    out: dict = {}
+    for row in db.query_all(
+            "SELECT id, day FROM standups WHERE state = ? AND day < ? ORDER BY day",
+            (OPEN, day)):
+        close_day(int(row["id"]), config)
+        out.setdefault("closed", []).append(row["day"])
+    if not working_day(day, config):
+        return out
+    cfg = settings(config)
+    opens_at = _hhmm(cfg["open_at"], time(9, 0))
+    closes_at = _hhmm(cfg["close_at"], time(18, 30))
+    row = _standup_row(day)
+    if local.time() >= opens_at and (not row or row["state"] == DRAFT):
+        open_day(ensure_day(config, day))
+        out["opened"] = day
+        row = _standup_row(day)
+    if row and row["state"] == OPEN and local.time() >= closes_at:
+        close_day(int(row["id"]), config)
+        out.setdefault("closed", []).append(day)
+    return out
+
+
 def tick(config: dict | None = None, now: datetime | None = None) -> dict:
     """Run the gates over today's action items and fire at most one nudge.
 
@@ -769,8 +807,7 @@ def tick(config: dict | None = None, now: datetime | None = None) -> dict:
     if not _claim_tick(int(standup["id"]), now, float(cfg["tick_interval_minutes"])):
         return {"fired": None, "skipped": "ticked too recently"}
     budget = int(cfg["max_nudges_per_day"])
-    spent = _nudges_today(int(standup["id"]))
-    if spent >= budget:
+    if _nudges_today(int(standup["id"])) >= budget:
         return {"fired": None, "skipped": f"the daily budget of {budget} nudges is spent"}
     items = db.query_all(
         "SELECT * FROM standup_items WHERE standup_id = ? ORDER BY position, id",
@@ -781,17 +818,22 @@ def tick(config: dict | None = None, now: datetime | None = None) -> dict:
         if reason:
             held[int(item_row["id"])] = reason
             continue
-        fired = _nudge(item_row, config, now)
+        fired = _nudge(item_row, config, now, budget)
+        if fired is None:
+            return {"fired": None, "held": held,
+                    "skipped": f"the daily budget of {budget} nudges is spent"}
         return {"fired": fired, "held": held, "shadow": bool(cfg["shadow"])}
     return {"fired": None, "held": held, "skipped": "every item is gated"}
 
 
 def _claim_tick(standup_id: int, now: datetime, interval_minutes: float) -> bool:
-    """Take this tick, or report that another one already has it.
+    """Take this tick, or report that the interval has not elapsed.
 
-    Two instances can both route the tick. The claim is the write: it succeeds
-    for one of them, which is also what rate-limits the loop to the configured
-    interval without a second clock."""
+    Two instances can both route the tick, so this paces the loop to the
+    configured interval without a second clock. It is a pace, not a lock: with
+    the interval set to zero it lets every caller through, which is what a test
+    wants. What bounds the day under any number of callers is _reserve, which
+    counts the budget and writes the nudge in one transaction."""
     cutoff = _iso(now - timedelta(minutes=interval_minutes))
     with db.tx() as c:
         changed = c.execute(
@@ -801,34 +843,59 @@ def _claim_tick(standup_id: int, now: datetime, interval_minutes: float) -> bool
         return changed.rowcount == 1
 
 
-def _nudge(item: dict, config: dict | None, now: datetime) -> dict:
+def _nudge(item: dict, config: dict | None, now: datetime,
+           budget: int) -> dict | None:
     """Act on one idle action item, at the cheapest grade that is left.
 
     Grade 1 puts a proposal on the board. It costs no attention: it is a card
     with an Approve button, and declining it is one click. Grade 2 asks a
     question, and it only happens because grade 1 was declined or ignored and
-    the item is still idle."""
+    the item is still idle.
+
+    The budget slot is taken before the nudge acts, and None says the day's
+    budget was already spent. Taking it first is also what stops a nudge that
+    fails from being retried on every tick for the rest of the day."""
     item_id = int(item["id"])
     shadow = bool(settings(config)["shadow"])
     grade = 1 if int(item["nudge_count"]) == 0 else 2
     payload = {"grade": grade, "shadow": shadow, "text": item["text"]}
+    event_id = _reserve(item_id, int(item["standup_id"]), budget, now, payload)
+    if event_id is None:
+        return None
     if shadow:
-        _count_nudge(item_id, now, payload)
         return {"item_id": item_id, "grade": grade, "shadow": True}
     if grade == 1:
         out = _propose(item, now)
     else:
-        out = _ask(item_id, _idle_question(item), "ask", _iso(now))
-    payload.update(out)
-    _count_nudge(item_id, now, payload)
+        out = _ask(item_id, _idle_question(item), "ask", _iso(now),
+                   require_open=True)
+    db.execute("UPDATE standup_events SET payload = ? WHERE id = ?",
+               (db.dump_json({**payload, **out}), event_id))
     return {"item_id": item_id, "grade": grade, **out}
 
 
-def _count_nudge(item_id: int, now: datetime, payload: dict) -> None:
-    db.execute(
-        "UPDATE standup_items SET nudge_count = nudge_count + 1, last_nudge_at = ?,"
-        " updated_at = ? WHERE id = ?", (_iso(now), _iso(now), item_id))
-    record_event(item_id, "nudged", payload)
+def _reserve(item_id: int, standup_id: int, budget: int, now: datetime,
+             payload: dict) -> int | None:
+    """Take one slot out of the day's nudge budget, or report it is spent.
+
+    The count and the event it writes are one transaction. Two ticks that both
+    read the same spent count cannot then both take the last slot: the second
+    transaction reads the first one's event and stops. Returns the id of the
+    nudge event, so the outcome of the nudge can be written onto it."""
+    with db.tx() as c:
+        spent = c.execute(
+            "SELECT COUNT(*) AS n FROM standup_events e"
+            " JOIN standup_items i ON i.id = e.standup_item_id"
+            " WHERE i.standup_id = ? AND e.kind = 'nudged'", (standup_id,)).fetchone()
+        if int(spent["n"]) >= budget:
+            return None
+        c.execute(
+            "UPDATE standup_items SET nudge_count = nudge_count + 1, last_nudge_at = ?,"
+            " updated_at = ? WHERE id = ?", (_iso(now), _iso(now), item_id))
+        cur = c.execute(
+            "INSERT INTO standup_events(standup_item_id, kind, payload, created_at)"
+            " VALUES (?, 'nudged', ?, ?)", (item_id, db.dump_json(payload), _iso(now)))
+        return int(cur.lastrowid)
 
 
 def _propose(item: dict, now: datetime) -> dict:
@@ -843,6 +910,12 @@ def _propose(item: dict, now: datetime) -> dict:
             "frshty put this task up rather than ask a question.")
     try:
         with db.tx() as c:
+            still_open = c.execute(
+                "SELECT 1 AS present FROM standup_items i JOIN standups s"
+                " ON s.id = i.standup_id WHERE i.id = ? AND s.state = 'open'",
+                (item_id,)).fetchone()
+            if not still_open:
+                return {"error": "the day closed before the task was proposed"}
             work_item_id = work_store.create_proposal(
                 objective, note=note, instance_key="personal",
                 contexts=item["contexts"] or "", conn=c, now=_iso(now))
@@ -880,10 +953,28 @@ def _idle_question(item: dict) -> dict:
     ]}
 
 
-def _ask(item_id: int, question: dict, kind: str, now: str) -> dict:
-    db.execute("UPDATE standup_items SET pending_question = ?, updated_at = ?"
-               " WHERE id = ?", (db.dump_json(question), now, item_id))
-    record_event(item_id, "asked", {"grade": question.get("grade", kind)})
+def _ask(item_id: int, question: dict, kind: str, now: str,
+         require_open: bool = False) -> dict:
+    """Write a question onto an action item.
+
+    `require_open` is what the nudge loop passes. The gates ran outside any
+    transaction, so the day can close between the last gate and this write.
+    The guard makes the write lose that race instead of overwriting the close
+    question with an idle one, or asking about a day that is already frozen."""
+    guard, params = "", [db.dump_json(question), now, item_id]
+    if require_open:
+        guard = (" AND pending_question = ''"
+                 " AND standup_id IN (SELECT id FROM standups WHERE state = 'open')")
+    with db.tx() as c:
+        changed = c.execute(
+            "UPDATE standup_items SET pending_question = ?, updated_at = ?"
+            f" WHERE id = ?{guard}", tuple(params))
+        if changed.rowcount != 1:
+            return {"error": "the day closed before the question was asked"}
+        c.execute(
+            "INSERT INTO standup_events(standup_item_id, kind, payload, created_at)"
+            " VALUES (?, 'asked', ?, ?)",
+            (item_id, db.dump_json({"grade": question.get("grade", kind)}), _now()))
     return {"action": "asked"}
 
 
@@ -902,12 +993,13 @@ def answer(item_id: int, option: str, config: dict | None = None) -> dict:
     keys = {o["key"] for o in question.get("options", [])}
     if option not in keys:
         raise StandupError(f"unknown option: {option}")
-    db.execute("UPDATE standup_items SET pending_question = '', updated_at = ?"
-               " WHERE id = ?", (_now(), item_id))
-    record_event(item_id, "answered", {"option": option,
-                                       "grade": question.get("grade", "")})
     if option == "start":
-        return {"item": item(item_id), "launch": start_task(item_id)}
+        launch = start_task(item_id)
+        if "error" in launch:
+            return {"item": item(item_id), "launch": launch}
+        _answered(item_id, option, question)
+        return {"item": item(item_id), "launch": launch}
+    _answered(item_id, option, question)
     if option == "mine":
         return {"item": _hold_until_close(item_id, config)}
     if option == "park":
@@ -920,6 +1012,18 @@ def answer(item_id: int, option: str, config: dict | None = None) -> dict:
         db.execute("UPDATE standup_items SET state = 'open', updated_at = ?"
                    " WHERE id = ?", (_now(), item_id))
     return {"item": item(item_id)}
+
+
+def _answered(item_id: int, option: str, question: dict) -> None:
+    """Take the question off the item and record what the operator chose.
+
+    It runs after the option's transition, not before it. A launch that fails
+    must leave the question where it was: clearing it first would take the
+    nudge away and leave the action item with neither a question nor a task."""
+    db.execute("UPDATE standup_items SET pending_question = '', updated_at = ?"
+               " WHERE id = ?", (_now(), item_id))
+    record_event(item_id, "answered", {"option": option,
+                                       "grade": question.get("grade", "")})
 
 
 def _hold_until_close(item_id: int, config: dict | None) -> dict:
