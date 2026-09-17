@@ -474,8 +474,10 @@ class TestRacesAndFailures:
         _age(first["id"], 4)
         _age(second["id"], 4)
         now = datetime.now(timezone.utc)
-        assert standup._reserve(first["id"], standup_id, 1, now, {}) is not None
-        assert standup._reserve(second["id"], standup_id, 1, now, {}) is None
+        rows = [db.query_one("SELECT * FROM standup_items WHERE id = ?", (i["id"],))
+                for i in (first, second)]
+        assert standup._nudge(rows[0], _cfg(), now, 1)["action"] == "proposed"
+        assert standup._nudge(rows[1], _cfg(), now, 1) is None
         assert db.query_one("SELECT COUNT(*) AS n FROM standup_events"
                             " WHERE kind = 'nudged'")["n"] == 1
 
@@ -483,7 +485,7 @@ class TestRacesAndFailures:
         standup_id = _open_day()
         item = _item(standup_id)
         _age(item["id"], 4)
-        with patch.object(standup, "_reserve", return_value=None):
+        with patch.object(standup, "_nudge", return_value=None):
             out = standup.tick(_cfg(max_nudges_per_day=4))
         assert out["fired"] is None
         assert out["skipped"] == "the daily budget of 4 nudges is spent"
@@ -545,17 +547,27 @@ class TestSecondPass:
                               (item["id"],))
         assert linked is not None
 
-    def test_a_reservation_whose_nudge_died_still_owes_the_cheap_grade(self, clean):
+    def test_an_item_that_was_never_shown_a_card_still_owes_the_cheap_grade(self, clean):
         standup_id = _open_day()
         item = _item(standup_id)
-        _age(item["id"], 4)
-        standup._reserve(item["id"], standup_id, 6, datetime.now(timezone.utc), {})
-        db.execute("UPDATE standup_items SET last_nudge_at = NULL WHERE id = ?",
-                   (item["id"],))
+        db.execute("UPDATE standup_items SET nudge_count = 3 WHERE id = ?", (item["id"],))
         _age(item["id"], 4)
         out = standup.tick(_cfg())
         assert out["fired"]["grade"] == 1
         assert out["fired"]["action"] == "proposed"
+
+    def test_a_nudge_the_day_refuses_spends_no_budget(self, clean):
+        standup_id = _open_day()
+        item = _item(standup_id)
+        _age(item["id"], 4)
+        row = db.query_one("SELECT * FROM standup_items WHERE id = ?", (item["id"],))
+        standup.close_day(standup_id, _cfg())
+        out = standup._nudge(row, _cfg(), datetime.now(timezone.utc), 6)
+        assert "error" in out
+        assert db.query_all("SELECT id FROM standup_events WHERE kind = 'nudged'") == []
+        after = standup.item(item["id"])
+        assert after["nudge_count"] == 0
+        assert after["last_nudge_at"] is None
 
     def test_a_second_card_is_never_proposed_for_one_action_item(self, clean):
         standup_id = _open_day()
@@ -603,3 +615,54 @@ class TestSecondPass:
         assert after["state"] == "open"
         assert after["question"] is None
         assert after["snoozed_until"] == standup._close_stamp(_cfg(close_at="18:30"))
+
+
+class TestThirdPass:
+    def test_an_answer_does_not_erase_a_question_written_after_it(self, clean):
+        standup_id = _open_day()
+        item = _item(standup_id)
+        row = db.query_one("SELECT * FROM standup_items WHERE id = ?", (item["id"],))
+        standup._ask(item["id"], standup._idle_question(row), "ask",
+                     _iso(datetime.now(timezone.utc)))
+        idle = standup.item(item["id"])["question"]
+
+        def close_it(*_a, **_kw):
+            standup.close_day(standup_id, _cfg())
+            return {"item_id": 1}
+
+        with patch.object(standup.work_launch, "launch", side_effect=close_it):
+            out = standup.answer(item["id"], "start", _cfg())
+        assert out["stale"] is True
+        after = standup.item(item["id"])["question"]
+        assert after["grade"] == "close"
+        assert after != idle
+
+    def test_a_stale_park_changes_nothing(self, clean):
+        standup_id = _open_day()
+        item = _item(standup_id)
+        standup.close_day(standup_id, _cfg())
+        question = standup.item(item["id"])["question"]
+        db.execute("UPDATE standup_items SET pending_question = ? WHERE id = ?",
+                   (db.dump_json({"grade": "close", "prompt": "a newer question",
+                                  "options": [{"key": "park", "label": "Park it"}]}),
+                    item["id"]))
+        out = standup.answer(item["id"], "park", _cfg())
+        assert out["stale"] is False
+        assert standup.item(item["id"])["state"] == "parked"
+        del question
+
+    def test_a_nudge_interrupted_part_way_spends_nothing(self, clean):
+        standup_id = _open_day()
+        item = _item(standup_id)
+        _age(item["id"], 4)
+        row = db.query_one("SELECT * FROM standup_items WHERE id = ?", (item["id"],))
+        with patch.object(standup, "_write_proposal",
+                          side_effect=RuntimeError("the process was killed")):
+            out = standup._nudge(row, _cfg(), datetime.now(timezone.utc), 1)
+        assert "the process was killed" in out["error"]
+        assert db.query_all("SELECT id FROM standup_events WHERE kind = 'nudged'") == []
+        after = standup.item(item["id"])
+        assert after["nudge_count"] == 0
+        assert db.query_all("SELECT id FROM work_items WHERE standup_item_id = ?",
+                            (item["id"],)) == []
+        assert standup.tick(_cfg(max_nudges_per_day=1))["fired"]["grade"] == 1

@@ -133,6 +133,9 @@ def api_standup_answer(item_id: int, body: dict):
     launch = out.get("launch") or {}
     if "error" in launch:
         payload["launch_error"] = launch["error"]
+    if out.get("stale"):
+        payload["answer_stale"] = ("the question changed while you answered it; "
+                                   "read the one on the item now")
     return payload
 
 
