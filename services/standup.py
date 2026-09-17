@@ -826,8 +826,8 @@ def _claim_tick(standup_id: int, now: datetime, interval_minutes: float) -> bool
     Two instances can both route the tick, so this paces the loop to the
     configured interval without a second clock. It is a pace, not a lock: with
     the interval set to zero it lets every caller through, which is what a test
-    wants. What bounds the day under any number of callers is _reserve, which
-    counts the budget and writes the nudge in one transaction."""
+    wants. What bounds the day under any number of callers is _nudge, which
+    counts the budget, nudges and records it in one transaction."""
     cutoff = _iso(now - timedelta(minutes=interval_minutes))
     with db.tx() as c:
         changed = c.execute(
@@ -846,26 +846,61 @@ def _nudge(item: dict, config: dict | None, now: datetime,
     question, and it only happens because grade 1 was declined or ignored and
     the item is still idle.
 
-    The budget slot is taken before the nudge acts, and None says the day's
-    budget was already spent. Taking it first is also what stops a nudge that
-    fails from being retried on every tick for the rest of the day."""
+    The budget count, the nudge itself and the event that records it are one
+    transaction. Two ticks that read the same spent count cannot both take the
+    last slot, and a nudge interrupted part-way spends nothing: it rolls back
+    whole rather than leaving a slot gone with nothing shown to the operator.
+
+    None says the day's budget was already spent."""
     item_id = int(item["id"])
     shadow = bool(settings(config)["shadow"])
     grade = 2 if _already_proposed(item_id) else 1
     payload = {"grade": grade, "shadow": shadow, "text": item["text"]}
-    event_id = _reserve(item_id, int(item["standup_id"]), budget, now, payload)
-    if event_id is None:
-        return None
-    if shadow:
-        return {"item_id": item_id, "grade": grade, "shadow": True}
-    if grade == 1:
-        out = _propose(item, now)
-    else:
-        out = _ask(item_id, _idle_question(item), "ask", _iso(now),
-                   require_open=True)
-    db.execute("UPDATE standup_events SET payload = ? WHERE id = ?",
-               (db.dump_json({**payload, **out}), event_id))
+    try:
+        with db.tx() as c:
+            spent = c.execute(
+                "SELECT COUNT(*) AS n FROM standup_events e"
+                " JOIN standup_items i ON i.id = e.standup_item_id"
+                " WHERE i.standup_id = ? AND e.kind = 'nudged'",
+                (int(item["standup_id"]),)).fetchone()
+            if int(spent["n"]) >= budget:
+                return None
+            if shadow:
+                out = {"shadow": True}
+            elif grade == 1:
+                out = _propose(item, now, conn=c)
+            else:
+                out = _ask(item_id, _idle_question(item), "ask", _iso(now),
+                           require_open=True, conn=c)
+            if "error" in out:
+                raise _NudgeRefused(out["error"])
+            c.execute(
+                "UPDATE standup_items SET nudge_count = nudge_count + 1,"
+                " last_nudge_at = ?, updated_at = ? WHERE id = ?",
+                (_iso(now), _iso(now), item_id))
+            c.execute(
+                "INSERT INTO standup_events(standup_item_id, kind, payload, created_at)"
+                " VALUES (?, 'nudged', ?, ?)",
+                (item_id, db.dump_json({**payload, **out}), _iso(now)))
+    except _NudgeRefused as e:
+        return {"item_id": item_id, "grade": grade, "error": str(e)}
+    except Exception as e:
+        log.emit("standup_nudge_failed",
+                 f"action item {item_id}: the nudge could not be written: "
+                 f"{type(e).__name__}: {e}",
+                 meta={"standup_item_id": item_id,
+                       "error": f"{type(e).__name__}: {e}"})
+        return {"item_id": item_id, "grade": grade,
+                "error": f"{type(e).__name__}: {e}"}
     return {"item_id": item_id, "grade": grade, **out}
+
+
+class _NudgeRefused(Exception):
+    """A nudge the loop declined to write, so its transaction rolls back.
+
+    Nothing reached the operator, so nothing is spent: the slot, the counter
+    and the event all go back. The gates re-read the state that refused it on
+    the next tick."""
 
 
 def _already_proposed(item_id: int) -> bool:
@@ -879,67 +914,40 @@ def _already_proposed(item_id: int) -> bool:
         " WHERE standup_item_id = ? AND scope = 'proposal' LIMIT 1", (item_id,)))
 
 
-def _reserve(item_id: int, standup_id: int, budget: int, now: datetime,
-             payload: dict) -> int | None:
-    """Take one slot out of the day's nudge budget, or report it is spent.
-
-    The count and the event it writes are one transaction. Two ticks that both
-    read the same spent count cannot then both take the last slot: the second
-    transaction reads the first one's event and stops. Returns the id of the
-    nudge event, so the outcome of the nudge can be written onto it."""
-    with db.tx() as c:
-        spent = c.execute(
-            "SELECT COUNT(*) AS n FROM standup_events e"
-            " JOIN standup_items i ON i.id = e.standup_item_id"
-            " WHERE i.standup_id = ? AND e.kind = 'nudged'", (standup_id,)).fetchone()
-        if int(spent["n"]) >= budget:
-            return None
-        c.execute(
-            "UPDATE standup_items SET nudge_count = nudge_count + 1, last_nudge_at = ?,"
-            " updated_at = ? WHERE id = ?", (_iso(now), _iso(now), item_id))
-        cur = c.execute(
-            "INSERT INTO standup_events(standup_item_id, kind, payload, created_at)"
-            " VALUES (?, 'nudged', ?, ?)", (item_id, db.dump_json(payload), _iso(now)))
-        return int(cur.lastrowid)
-
-
-def _propose(item: dict, now: datetime) -> dict:
+def _propose(item: dict, now: datetime, conn=None) -> dict:
     """Put a task for this action item on the board, waiting for approval.
 
-    The proposal and the link are written in one transaction. A proposal the
-    board could not link would be a card the loop cannot see, and the next tick
-    would propose it again."""
+    The proposal, its link and the nudge that opened it are written in one
+    transaction. A proposal the board could not link would be a card the loop
+    cannot see, and the next tick would propose it again."""
+    if conn is not None:
+        return _write_proposal(conn, item, now)
+    with db.tx() as c:
+        return _write_proposal(c, item, now)
+
+
+def _write_proposal(c, item: dict, now: datetime) -> dict:
     item_id = int(item["id"])
-    objective = item["text"]
     note = ("Nothing has run against this action item since the standup opened. "
             "frshty put this task up rather than ask a question.")
-    try:
-        with db.tx() as c:
-            still_open = c.execute(
-                "SELECT 1 AS present FROM standup_items i JOIN standups s"
-                " ON s.id = i.standup_id WHERE i.id = ? AND s.state = 'open'",
-                (item_id,)).fetchone()
-            if not still_open:
-                return {"error": "the day closed before the task was proposed"}
-            standing = c.execute(
-                "SELECT id FROM work_items WHERE standup_item_id = ?"
-                " AND scope = 'proposal' AND state = ? LIMIT 1",
-                (item_id, work_store.PROPOSED_STATE)).fetchone()
-            if standing:
-                return {"error": f"task #{int(standing['id'])} is already "
-                                 f"proposed for this action item"}
-            work_item_id = work_store.create_proposal(
-                objective, note=note, instance_key="personal",
-                contexts=item["contexts"] or "", conn=c, now=_iso(now))
-            c.execute("UPDATE work_items SET standup_item_id = ? WHERE id = ?",
-                      (item_id, work_item_id))
-    except Exception as e:
-        log.emit("standup_nudge_failed",
-                 f"action item {item_id}: could not propose a task: "
-                 f"{type(e).__name__}: {e}",
-                 meta={"standup_item_id": item_id,
-                       "error": f"{type(e).__name__}: {e}"})
-        return {"error": f"{type(e).__name__}: {e}"}
+    still_open = c.execute(
+        "SELECT 1 AS present FROM standup_items i JOIN standups s"
+        " ON s.id = i.standup_id WHERE i.id = ? AND s.state = 'open'",
+        (item_id,)).fetchone()
+    if not still_open:
+        return {"error": "the day closed before the task was proposed"}
+    standing = c.execute(
+        "SELECT id FROM work_items WHERE standup_item_id = ?"
+        " AND scope = 'proposal' AND state = ? LIMIT 1",
+        (item_id, work_store.PROPOSED_STATE)).fetchone()
+    if standing:
+        return {"error": f"task #{int(standing['id'])} is already "
+                         f"proposed for this action item"}
+    work_item_id = work_store.create_proposal(
+        item["text"], note=note, instance_key="personal",
+        contexts=item["contexts"] or "", conn=c, now=_iso(now))
+    c.execute("UPDATE work_items SET standup_item_id = ? WHERE id = ?",
+              (item_id, work_item_id))
     return {"work_item_id": int(work_item_id), "action": "proposed"}
 
 
@@ -966,27 +974,37 @@ def _idle_question(item: dict) -> dict:
 
 
 def _ask(item_id: int, question: dict, kind: str, now: str,
-         require_open: bool = False) -> dict:
+         require_open: bool = False, conn=None) -> dict:
     """Write a question onto an action item.
 
     `require_open` is what the nudge loop passes. The gates ran outside any
     transaction, so the day can close between the last gate and this write.
     The guard makes the write lose that race instead of overwriting the close
-    question with an idle one, or asking about a day that is already frozen."""
-    guard, params = "", [db.dump_json(question), now, item_id]
+    question with an idle one, or asking about a day that is already frozen.
+
+    `conn` lets the nudge loop write the question in the same transaction that
+    takes its budget slot, so a nudge that is interrupted spends nothing."""
+    if conn is not None:
+        return _write_question(conn, item_id, question, kind, now, require_open)
+    with db.tx() as c:
+        return _write_question(c, item_id, question, kind, now, require_open)
+
+
+def _write_question(c, item_id: int, question: dict, kind: str, now: str,
+                    require_open: bool) -> dict:
+    guard = ""
     if require_open:
         guard = (" AND pending_question = ''"
                  " AND standup_id IN (SELECT id FROM standups WHERE state = 'open')")
-    with db.tx() as c:
-        changed = c.execute(
-            "UPDATE standup_items SET pending_question = ?, updated_at = ?"
-            f" WHERE id = ?{guard}", tuple(params))
-        if changed.rowcount != 1:
-            return {"error": "the day closed before the question was asked"}
-        c.execute(
-            "INSERT INTO standup_events(standup_item_id, kind, payload, created_at)"
-            " VALUES (?, 'asked', ?, ?)",
-            (item_id, db.dump_json({"grade": question.get("grade", kind)}), _now()))
+    changed = c.execute(
+        "UPDATE standup_items SET pending_question = ?, updated_at = ?"
+        f" WHERE id = ?{guard}", (db.dump_json(question), now, item_id))
+    if changed.rowcount != 1:
+        return {"error": "the day closed before the question was asked"}
+    c.execute(
+        "INSERT INTO standup_events(standup_item_id, kind, payload, created_at)"
+        " VALUES (?, 'asked', ?, ?)",
+        (item_id, db.dump_json({"grade": question.get("grade", kind)}), _now()))
     return {"action": "asked"}
 
 
@@ -1005,30 +1023,39 @@ def answer(item_id: int, option: str, config: dict | None = None) -> dict:
     keys = {o["key"] for o in question.get("options", [])}
     if option not in keys:
         raise StandupError(f"unknown option: {option}")
+    asked = row["pending_question"]
     if option == "start":
         launch = start_task(item_id)
         if "error" in launch:
             return {"item": item(item_id), "launch": launch}
-        _answered(item_id, option, question)
-        return {"item": item(item_id), "launch": launch}
+        stale = not _answered(item_id, option, question, asked)
+        return {"item": item(item_id), "launch": launch, "stale": stale}
     if option == "mine":
         stamp = _close_stamp(config)
-        _answered(item_id, option, question, snoozed_until=stamp)
+        if not _answered(item_id, option, question, asked, snoozed_until=stamp):
+            return {"item": item(item_id), "stale": True}
         record_event(item_id, "snoozed", {"until": stamp, "by": "mine"})
-        return {"item": item(item_id)}
-    _answered(item_id, option, question,
-              state={"park": "parked", "drop": "dropped", "carry": "open"}[option])
-    return {"item": item(item_id)}
+        return {"item": item(item_id), "stale": False}
+    stale = not _answered(
+        item_id, option, question, asked,
+        state={"park": "parked", "drop": "dropped", "carry": "open"}[option])
+    return {"item": item(item_id), "stale": stale}
 
 
-def _answered(item_id: int, option: str, question: dict, state: str = "",
-              snoozed_until: str | None = None) -> None:
+def _answered(item_id: int, option: str, question: dict, asked: str,
+              state: str = "", snoozed_until: str | None = None) -> bool:
     """Apply the answer and take the question off the item, in one write.
 
     The transition and the clear are one transaction, so an item can never end
     up with the question gone and the transition not made. A start is the one
     option whose transition cannot join this write, because it launches an
-    agent; it calls this only once that launch has succeeded."""
+    agent; it calls this only once that launch has succeeded.
+
+    `asked` is the question the answer was given to, and the write only lands
+    while it is still the one on the item. The day can close while an answer is
+    in flight, and clearing whatever question is there by then would delete the
+    close question and freeze the day without ever asking it. False says the
+    question changed and nothing was written."""
     now = _now()
     sets, params = ["pending_question = ''", "updated_at = ?"], [now]
     if state:
@@ -1038,13 +1065,18 @@ def _answered(item_id: int, option: str, question: dict, state: str = "",
         sets.append("snoozed_until = ?")
         params.append(snoozed_until)
     with db.tx() as c:
-        c.execute(f"UPDATE standup_items SET {', '.join(sets)} WHERE id = ?",
-                  (*params, item_id))
+        changed = c.execute(
+            f"UPDATE standup_items SET {', '.join(sets)}"
+            " WHERE id = ? AND pending_question = ?",
+            (*params, item_id, asked))
+        if changed.rowcount != 1:
+            return False
         c.execute(
             "INSERT INTO standup_events(standup_item_id, kind, payload, created_at)"
             " VALUES (?, 'answered', ?, ?)",
             (item_id, db.dump_json({"option": option,
                                     "grade": question.get("grade", "")}), now))
+    return True
 
 
 def _close_stamp(config: dict | None) -> str:
