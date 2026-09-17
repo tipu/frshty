@@ -184,6 +184,7 @@ const STATE_PILLS = {
   needs_ack: "ln-pill-green", needs_you: "ln-pill-amber", agent_working: "ln-pill-blue",
   waiting_external: "ln-pill-ghost", failed_stale: "ln-pill-red", canceled: "ln-pill-ghost", done: "ln-pill-green",
 };
+const DECLINED_REASON = "Proposal declined";
 frshtyApp({
   data() {
     return {
@@ -235,6 +236,7 @@ frshtyApp({
   methods: {
     stateLabel(t) {
       if (t.state === "done") return t.operator_confirmed ? "✓ Confirmed" : "✓ Done";
+      if (t.state === "canceled" && t.stop_reason === DECLINED_REASON) return "⊘ Declined";
       return STATE_LABELS[t.state] || t.state;
     },
     statePill(state) { return STATE_PILLS[state] || "ln-pill-ghost"; },
