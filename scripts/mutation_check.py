@@ -304,6 +304,15 @@ MUTATIONS = [
                "if n.strip() and not is_test_path(n.strip())]",
         "new": "    sources = [n for n in listed.stdout.splitlines() if n.strip()]",
     },
+    {
+        "label": "comment_cursor_advances_past_a_failed_push",
+        "gate": "the review-comment cursor advances only when the fix push lands",
+        "target": "tests/features/test_tickets.py::TestCheckInReviewPushFailure"
+                  "::test_cursor_holds_when_push_is_rejected",
+        "path": "features/tickets.py",
+        "old": '                    pushed_entry["status"] = "fix_failed"',
+        "new": '                    pushed_entry["status"] = "addressed"',
+    },
 ]
 
 
