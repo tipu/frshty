@@ -154,11 +154,57 @@ class TestMergeGateInsideMerge:
         platform.merge_pr.assert_called_once_with("repo", 99)
 
 
+class TestReconcileCommentsNow:
+    """The operator route reads the comments again. A reviewer can write a
+    comment between the last poll and the click, and the keys the poll left
+    on the ticket state would still say nothing is owed."""
+
+    def _ts(self):
+        return make_ticket_state(
+            status="in_review", slug="PROJ-1-do-the-thing",
+            prs=[{"repo": "repo", "id": 99, "branch": "b", "url": "http://u/99"}],
+        )
+
+    def _platform(self, comments):
+        platform = MagicMock()
+        platform.self_id.return_value = "bot-self"
+        platform.get_pr_comments.return_value = comments
+        return platform
+
+    def _run(self, fake_config, comments, entries=()):
+        with patch("features.tickets.make_platform",
+                   return_value=self._platform(comments)), \
+             patch("features.tickets._load_pr_comments", return_value=list(entries)), \
+             patch("features.tickets.pr_comments_readable", return_value=True):
+            return tickets.reconcile_comments_now(fake_config, self._ts())
+
+    def test_a_comment_written_since_the_last_poll_is_owed(self, fake_config):
+        hold, owed = self._run(fake_config, [_comment()])
+        assert hold == "1 comment(s) owed an answer"
+        assert owed[0]["snippet"] == "This needs a guard clause"
+
+    def test_nothing_unresolved_releases_the_merge(self, fake_config):
+        hold, owed = self._run(fake_config, [_comment(resolved=True)])
+        assert hold == ""
+        assert owed == []
+
+    def test_a_failed_read_holds_the_merge(self, fake_config):
+        hold, owed = self._run(fake_config, None)
+        assert hold == "comment read failed"
+
+    def test_an_error_holds_the_merge(self, fake_config):
+        with patch("features.tickets.make_platform", side_effect=RuntimeError("boom")):
+            hold, owed = tickets.reconcile_comments_now(fake_config, self._ts())
+        assert hold.startswith("comment read failed")
+
+
 class TestOperatorMergeRoute:
     """web/tickets.py calls _merge directly. Without its own check the
     operator route merges a ticket with comments owed and no confirmation."""
 
-    def _call(self, ts, body):
+    def _call(self, ts, body, hold="", owed_comments=()):
+        owed_comments = list(owed_comments)
+
         class _Request:
             async def json(self):
                 if body is None:
@@ -172,6 +218,8 @@ class TestOperatorMergeRoute:
         try:
             with patch("web.tickets.state.load_ticket", return_value=ts), \
                  patch("web.tickets.state.save_ticket"), \
+                 patch("features.tickets.reconcile_comments_now",
+                       return_value=(hold, owed_comments)), \
                  patch("features.tickets.make_platform", return_value=platform), \
                  patch("features.tickets._mark_ticket_merged", side_effect=lambda c, t, s: s), \
                  patch("features.tickets.log"), \
@@ -191,63 +239,86 @@ class TestOperatorMergeRoute:
         ts.update(overrides)
         return ts
 
-    def test_owed_comments_answer_409_and_do_not_merge(self):
-        ts = self._ts(**{tickets.RECONCILE_READ_KEY: True,
-                         tickets.RECONCILE_OWED_KEY: 1})
+    OWED = ("1 comment(s) owed an answer",
+            [{"author": "Reviewer", "loc": "app.py:3", "snippet": "needs a guard"}])
 
-        result, platform = self._call(ts, {})
+    def test_owed_comments_answer_409_and_do_not_merge(self):
+        result, platform = self._call(self._ts(), {}, *self.OWED)
 
         assert result.status_code == 409
+        assert result.body.decode().count("needs a guard") == 1
         platform.merge_pr.assert_not_called()
 
     def test_a_request_with_no_body_is_not_a_confirmation(self):
-        ts = self._ts(**{tickets.RECONCILE_READ_KEY: True,
-                         tickets.RECONCILE_OWED_KEY: 1})
-
-        result, platform = self._call(ts, None)
+        result, platform = self._call(self._ts(), None, *self.OWED)
 
         assert result.status_code == 409
         platform.merge_pr.assert_not_called()
 
-    def test_an_explicit_force_merges(self):
-        ts = self._ts(**{tickets.RECONCILE_READ_KEY: True,
-                         tickets.RECONCILE_OWED_KEY: 1})
+    def test_a_truthy_value_that_is_not_true_is_not_a_confirmation(self):
+        """Only Boolean true confirms. A JSON string "false" is truthy in
+        Python and would otherwise merge a ticket with comments owed."""
+        for value in ("false", 1, "yes", [1]):
+            result, platform = self._call(self._ts(), {"force": value}, *self.OWED)
+            assert result.status_code == 409, value
+            platform.merge_pr.assert_not_called()
 
-        result, platform = self._call(ts, {"force": True})
+    def test_an_explicit_force_merges(self):
+        result, platform = self._call(self._ts(), {"force": True}, *self.OWED)
 
         assert result["status"] == "ok"
         platform.merge_pr.assert_called_once_with("repo", 99)
 
     def test_a_clean_reconciliation_merges_without_a_confirmation(self):
-        ts = self._ts(**{tickets.RECONCILE_READ_KEY: True,
-                         tickets.RECONCILE_OWED_KEY: 0})
-
-        result, platform = self._call(ts, {})
+        result, platform = self._call(self._ts(), {})
 
         assert result["status"] == "ok"
         platform.merge_pr.assert_called_once_with("repo", 99)
 
+    def test_a_failed_read_holds_the_operator_merge(self):
+        result, platform = self._call(self._ts(), {}, "comment read failed", [])
+
+        assert result.status_code == 409
+        platform.merge_pr.assert_not_called()
+
+
+def _key(comment_id, repo="repo", pr_id=99):
+    return tickets.comment_key(repo, pr_id, comment_id)
+
+
+def _entry(comment_id, status, repo="repo", pr_id=99):
+    return {"id": comment_id, "status": status, "pr_repo": repo, "pr_id": pr_id}
+
 
 class TestCommentsOwed:
     def test_a_detected_unresolved_comment_is_owed(self):
-        assert tickets._comments_owed([], {"1"}, {"1"}) == 1
+        assert tickets._comments_owed([], {_key(1)}, {_key(1)}) == 1
 
     def test_an_addressed_entry_cancels_an_earlier_open_entry(self):
-        entries = [{"id": 1, "status": "fix_failed"}, {"id": 1, "status": "addressed"}]
-        assert tickets._comments_owed(entries, set(), {"1"}) == 0
+        entries = [_entry(1, "fix_failed"), _entry(1, "addressed")]
+        assert tickets._comments_owed(entries, set(), {_key(1)}) == 0
 
     def test_a_needs_reply_entry_stays_owed(self):
-        entries = [{"id": 1, "status": "needs_reply"}]
-        assert tickets._comments_owed(entries, set(), {"1"}) == 1
+        assert tickets._comments_owed([_entry(1, "needs_reply")], set(), {_key(1)}) == 1
 
     def test_a_resolved_comment_is_not_owed(self):
         """A non-resolvable comment frshty addressed reads as unresolved on
         the platform forever. Only an entry can settle it, and once it has
         one the merge is free."""
-        entries = [{"id": 1, "status": "addressed"}]
-        assert tickets._comments_owed(entries, {"1"}, {"1"}) == 0
+        assert tickets._comments_owed([_entry(1, "addressed")], {_key(1)}, {_key(1)}) == 0
 
     def test_baselined_history_is_not_owed(self):
         """A comment the engine never opened an entry for was baselined. It
         must not hold every merge on the PR for the life of the branch."""
-        assert tickets._comments_owed([], set(), {"7"}) == 0
+        assert tickets._comments_owed([], set(), {_key(7)}) == 0
+
+    def test_the_same_number_on_two_pull_requests_is_two_comments(self):
+        """A ticket can carry several pull requests, and two of them number
+        their comments from the same sequence. Keyed by the number alone the
+        answered one cancels the owed one and the merge is released."""
+        entries = [_entry(7, "addressed", pr_id=99)]
+        owed = {_key(7, pr_id=100)}
+        assert tickets._comments_owed(entries, owed, owed) == 1
+
+    def test_a_non_dict_row_in_the_history_is_ignored(self):
+        assert tickets._comments_owed(["junk", None], {_key(1)}, {_key(1)}) == 1
