@@ -53,6 +53,7 @@ class TestCheckCi:
         worktree.mkdir()
 
         with patch("features.own_prs._ensure_worktree", return_value=worktree), \
+             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.subprocess.run") as mock_run, \
              patch("features.own_prs.run_claude_code") as mock_cc:
             mock_run.return_value = MagicMock(returncode=0, stdout="deadbeef\n")
@@ -69,6 +70,7 @@ class TestCheckCi:
         worktree.mkdir()
 
         with patch("features.own_prs._ensure_worktree", return_value=worktree), \
+             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.subprocess.run") as mock_run, \
              patch("features.own_prs.run_claude_code", return_value=None):
             mock_run.return_value = MagicMock(returncode=0, stdout=b"abc123\n")
@@ -510,7 +512,7 @@ class TestCheckComments:
              patch("features.own_prs.run_balanced") as mock_sonnet, \
              patch("features.own_prs.q.enqueue_job") as mock_enqueue, \
              patch("features.own_prs.log"):
-            mock_comments.settled_comment_ids.return_value = set()
+            mock_comments.unowed_comment_ids.return_value = set()
             mock_comments.fetch_and_detect_comments.return_value = {"new": [comment], "edited": []}
             mock_comments.get_unprocessed_comments.return_value = []
             mock_comments.get_deferred_comments.return_value = []
@@ -530,7 +532,7 @@ class TestCheckComments:
         with patch("features.own_prs.comments") as mock_comments, \
              patch("features.own_prs.q.enqueue_job") as mock_enqueue, \
              patch("features.own_prs.log"):
-            mock_comments.settled_comment_ids.return_value = set()
+            mock_comments.unowed_comment_ids.return_value = set()
             mock_comments.fetch_and_detect_comments.return_value = {"new": [], "edited": []}
             mock_comments.get_unprocessed_comments.return_value = [
                 {"comment_id": "10", "state": "processing", "error_count": 0, "last_checked_at": stale},
@@ -598,13 +600,13 @@ class TestCheckComments:
                    return_value='{"results": [{"id": 0, "actionable": true, "reason": "clear"}]}'), \
              patch("features.own_prs.q.enqueue_job"), \
              patch("features.own_prs.log"):
-            mock_comments.settled_comment_ids.return_value = {"10"}
+            mock_comments.unowed_comment_ids.return_value = {"10"}
             mock_comments.fetch_and_detect_comments.return_value = {"new": [], "edited": [reply]}
             mock_comments.get_unprocessed_comments.return_value = []
             mock_comments.get_deferred_comments.return_value = []
             own_prs._check_comments(config, "test", platform, pr, "http://base", seen={})
 
-        assert mock_comments.settled_comment_ids.call_args[0][3] == {"10", "11"}
+        assert mock_comments.unowed_comment_ids.call_args[0][3] == {"10", "11"}
         mock_comments.mark_comment_processing.assert_called_once()
         assert mock_comments.mark_comment_processing.call_args[0][3] == "11"
 
@@ -804,7 +806,7 @@ class TestReopenedThreadEndToEnd:
                    return_value='{"results": [{"id": 0, "actionable": true, "reason": "clear"}]}'), \
              patch("features.own_prs.q.enqueue_job"), \
              patch("features.own_prs.log"):
-            mock_comments.settled_comment_ids.return_value = {"10"}
+            mock_comments.unowed_comment_ids.return_value = {"10"}
             mock_comments.fetch_and_detect_comments.return_value = {"new": [reply], "edited": []}
             mock_comments.get_unprocessed_comments.return_value = []
             mock_comments.get_deferred_comments.return_value = []
@@ -825,7 +827,7 @@ class TestReopenedThreadEndToEnd:
                    return_value='{"results": [{"id": 0, "actionable": true, "reason": "clear"}]}'), \
              patch("features.own_prs.q.enqueue_job"), \
              patch("features.own_prs.log.emit") as mock_emit:
-            mock_comments.settled_comment_ids.return_value = {"10"}
+            mock_comments.unowed_comment_ids.return_value = {"10"}
             mock_comments.fetch_and_detect_comments.return_value = {"new": [reply], "edited": []}
             mock_comments.get_unprocessed_comments.return_value = []
             mock_comments.get_deferred_comments.return_value = []
@@ -846,7 +848,7 @@ class TestReopenedThreadEndToEnd:
              patch("features.own_prs.run_balanced") as mock_classify, \
              patch("features.own_prs.q.enqueue_job") as mock_enqueue, \
              patch("features.own_prs.log"):
-            mock_comments.settled_comment_ids.return_value = {"10"}
+            mock_comments.unowed_comment_ids.return_value = {"10"}
             mock_comments.fetch_and_detect_comments.return_value = {"new": [reply], "edited": []}
             mock_comments.get_unprocessed_comments.return_value = []
             mock_comments.get_deferred_comments.return_value = []
@@ -866,7 +868,7 @@ class TestReopenedThreadEndToEnd:
         with patch("features.own_prs.comments") as mock_comments, \
              patch("features.own_prs.q.enqueue_job"), \
              patch("features.own_prs.log"):
-            mock_comments.settled_comment_ids.return_value = {"10"}
+            mock_comments.unowed_comment_ids.return_value = {"10"}
             mock_comments.fetch_and_detect_comments.return_value = {"new": [], "edited": []}
             mock_comments.get_unprocessed_comments.return_value = [
                 {"comment_id": "11", "state": "new", "error_count": 1, "last_checked_at": None},
@@ -894,6 +896,7 @@ class TestFixComment:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value="done"), \
              patch("features.own_prs._commit_fix", return_value=(True, "")), \
              patch("features.own_prs.comments.mark_comment_processed"), \
@@ -913,6 +916,7 @@ class TestFixComment:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value="done") as fixer, \
              patch("features.own_prs._commit_fix", return_value=(True, "")) as mock_commit, \
              patch("features.own_prs.comments.mark_comment_processed"), \
@@ -933,6 +937,7 @@ class TestFixComment:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value="done"), \
              patch("features.own_prs._commit_fix", return_value=(True, "")), \
              patch("features.own_prs.comments.mark_comment_error") as mock_err, \
@@ -953,6 +958,7 @@ class TestFixComment:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value="done"), \
              patch("features.own_prs._commit_fix", return_value=(True, "")), \
              patch("features.own_prs.comments.mark_comment_processed") as mock_proc, \
@@ -969,6 +975,7 @@ class TestFixComment:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value=None), \
              patch("features.own_prs.comments.mark_comment_error") as mock_err, \
              patch("features.own_prs.comments.mark_comment_deferred") as mock_defer, \
@@ -1002,6 +1009,7 @@ class TestFixComment:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value="done"), \
              patch("features.own_prs._commit_fix", return_value=(True, "")), \
              patch("features.own_prs.comments.mark_comment_error") as mock_err, \
@@ -1019,6 +1027,7 @@ class TestFixComment:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value="done"), \
              patch("features.own_prs._commit_fix", return_value=(False, "no changes produced")), \
              patch("features.own_prs.comments.mark_comment_error") as mock_err, \
@@ -1039,6 +1048,7 @@ class TestFixComment:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value="done"), \
              patch("features.own_prs._commit_fix", return_value=(False, "commit failed: hook rejected")), \
              patch("features.own_prs.comments.mark_comment_error") as mock_err, \
@@ -1057,6 +1067,7 @@ class TestFixComment:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", side_effect=RuntimeError("boom")), \
+             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.comments.mark_comment_error") as mock_err, \
              patch("features.own_prs.log.emit"):
             ok, reason = own_prs.fix_comment(config, self._payload())
@@ -1084,6 +1095,7 @@ class TestFixCommentsBatch:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value="done") as mock_claude, \
              patch("features.own_prs._commit_fix", return_value=(True, "")) as mock_commit, \
              patch("features.own_prs.comments") as mock_comments, \
@@ -1110,6 +1122,7 @@ class TestFixCommentsBatch:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path) as mock_wt, \
+             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code") as mock_claude, \
              patch("features.own_prs.comments") as mock_comments, \
              patch("features.own_prs.log.emit") as mock_emit:
@@ -1134,6 +1147,7 @@ class TestFixCommentsBatch:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value="done"), \
              patch("features.own_prs._commit_fix", return_value=(True, "")), \
              patch("features.own_prs.comments") as mock_comments, \
@@ -1161,6 +1175,7 @@ class TestFixCommentsBatch:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value=None), \
              patch("features.own_prs.comments") as mock_comments, \
              patch("features.own_prs.log.emit") as mock_emit:
@@ -1180,6 +1195,7 @@ class TestFixCommentsBatch:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value="done"), \
              patch("features.own_prs._commit_fix", return_value=(False, "no changes produced")), \
              patch("features.own_prs.comments") as mock_comments, \
@@ -1200,10 +1216,11 @@ class TestFixCommentsBatch:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code") as mock_claude, \
              patch("features.own_prs.comments") as mock_comments, \
              patch("features.own_prs.log.emit"):
-            mock_comments.settled_comment_ids.return_value = set()
+            mock_comments.unowed_comment_ids.return_value = set()
             ok, reason = own_prs.fix_comments_batch(self._config(tmp_path), self._payload(ids=("10", "99")))
 
         assert ok is True
@@ -1227,6 +1244,7 @@ class TestFixCommentsBatch:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value="done"), \
              patch("features.own_prs._commit_fix", return_value=(True, "")), \
              patch("features.own_prs.comments") as mock_comments, \
@@ -1251,18 +1269,62 @@ class TestCommitFix:
         subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=str(path), check=True)
         return path
 
-    def test_commits_dirty_worktree(self, tmp_path):
+    def test_a_dirty_worktree_refuses_the_run(self, tmp_path):
+        """_commit_fix stages the whole tree, so a file that was already in
+        the worktree is committed as the answer to the comment. On
+        django-drf-app 203 a stray Pipfile landed that way. The run refuses
+        to start instead."""
         import subprocess
         repo = self._init_repo(tmp_path / "repo")
         (repo / "a.txt").write_text("two\n")
+        config = {"_state_dir": tmp_path, "_base_url": "http://base", "job": {"key": "test"}}
+        ran = []
 
-        ok, reason = own_prs._commit_fix(repo, "fix: address review comment on a.txt")
+        with patch("features.own_prs.make_platform", return_value=MagicMock()), \
+             patch("features.own_prs._ensure_worktree", return_value=repo), \
+             patch("features.own_prs.run_claude_code", side_effect=lambda *a, **k: ran.append(a)), \
+             patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.log"):
+            ok, reason = own_prs.fix_comment(config, {
+                "pr": {"repo": "r", "id": 1, "url": "http://pr/1", "branch": "b"},
+                "comment": {"id": 9, "body": "rename this", "path": "a.txt", "line": 1},
+            })
 
-        assert ok is True
-        assert reason == ""
-        status = subprocess.run(["git", "status", "--porcelain"], cwd=str(repo), capture_output=True, text=True)
-        assert status.stdout.strip() == ""
-        msg = subprocess.run(["git", "log", "-1", "--format=%s"], cwd=str(repo), capture_output=True, text=True).stdout
+        assert ok is False
+        assert reason == "worktree is dirty before the fix run"
+        assert ran == []
+        mock_comments.mark_comment_error.assert_called_once()
+        status = subprocess.run(["git", "status", "--porcelain"], cwd=str(repo),
+                                capture_output=True, text=True)
+        assert "a.txt" in status.stdout, "the pre-existing change must be left alone"
+
+    def test_a_clean_worktree_runs_and_commits(self, tmp_path):
+        """The control: the same call on a clean worktree reaches the agent
+        and commits what the agent wrote."""
+        import subprocess
+        repo = self._init_repo(tmp_path / "repo")
+        config = {"_state_dir": tmp_path, "_base_url": "http://base", "job": {"key": "test"}}
+        platform = MagicMock()
+        platform.push_branch.return_value = {"ok": True}
+        platform.resolve_comment.return_value = {"status": "resolved"}
+
+        def claude(*args, **kwargs):
+            (repo / "a.txt").write_text("two\n")
+            return "done"
+
+        with patch("features.own_prs.make_platform", return_value=platform), \
+             patch("features.own_prs._ensure_worktree", return_value=repo), \
+             patch("features.own_prs.run_claude_code", side_effect=claude), \
+             patch("features.own_prs.comments"), \
+             patch("features.own_prs.log"):
+            ok, reason = own_prs.fix_comment(config, {
+                "pr": {"repo": "r", "id": 1, "url": "http://pr/1", "branch": "b"},
+                "comment": {"id": 9, "body": "rename this", "path": "a.txt", "line": 1},
+            })
+
+        assert ok is True, reason
+        msg = subprocess.run(["git", "log", "-1", "--format=%s"], cwd=str(repo),
+                             capture_output=True, text=True).stdout
         assert "a.txt" in msg
 
     def test_clean_worktree_reports_no_changes(self, tmp_path):
@@ -1700,10 +1762,11 @@ class TestCommitFixAgentCommittedItself:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=repo), \
+             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", side_effect=fake_run_claude_code), \
              patch("features.own_prs.comments") as mock_comments, \
              patch("features.own_prs.log.emit"):
-            mock_comments.settled_comment_ids.return_value = set()
+            mock_comments.unowed_comment_ids.return_value = set()
             ok, reason = own_prs.fix_comments_batch(config, payload)
 
         assert ok is True
@@ -1833,7 +1896,7 @@ class TestBotRewriteLoop:
              patch("features.own_prs.q.enqueue_job"), \
              patch("features.own_prs.log"):
             mock_comments.has_comment_state.return_value = True
-            mock_comments.settled_comment_ids.return_value = set()
+            mock_comments.unowed_comment_ids.return_value = set()
             mock_comments.answered_comment_ids.return_value = answered
             mock_comments.fetch_and_detect_comments.return_value = {"new": [], "edited": [comment]}
             mock_comments.get_unprocessed_comments.return_value = []
@@ -1917,6 +1980,7 @@ class TestUnrelatedCheckRecord:
         worktree = tmp_path / "wt"
         worktree.mkdir(exist_ok=True)
         with patch("features.own_prs._ensure_worktree", return_value=worktree), \
+             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.subprocess.run") as mock_run, \
              patch("features.pr_ci.triage_and_fix_pr",
                    return_value={"result": "unrelated", "attempts": 0,
@@ -1955,6 +2019,7 @@ class TestUnrelatedCheckRecord:
         worktree = tmp_path / "wt"
         worktree.mkdir()
         with patch("features.own_prs._ensure_worktree", return_value=worktree), \
+             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.subprocess.run") as mock_run, \
              patch("features.pr_ci.triage_and_fix_pr",
                    return_value={"result": "unrelated", "attempts": 0,
