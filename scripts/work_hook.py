@@ -2,6 +2,7 @@ import json
 import os
 import sqlite3
 import sys
+import traceback
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -242,7 +243,25 @@ def _bind_db():
     return work_store
 
 
+def _report_hook_error(session_id: str, exc: BaseException) -> None:
+    """Put a crash in this hook on the event feed.
+
+    The handler used to return 0 and write nothing. A crash in the idle-stop
+    path then left the item parked in needs_you with no decision, and nothing
+    anywhere said why, so the board showed a task waiting on the operator for
+    a reason that never happened."""
+    try:
+        _bind_db().record_hook_error(session_id, "work hook", exc)
+    except Exception as nested:
+        print(f"work hook: {type(exc).__name__}: {exc} (and it could not be "
+              f"recorded: {type(nested).__name__}: {nested})",
+              file=sys.stderr, flush=True)
+    if os.environ.get("WORK_HOOK_DEBUG"):
+        traceback.print_exception(type(exc), exc, exc.__traceback__)
+
+
 def main() -> int:
+    session_id = ""
     try:
         raw = sys.stdin.read()
         data = json.loads(raw) if raw.strip() else {}
@@ -371,10 +390,8 @@ def main() -> int:
             work_store.record_artifacts(session_id, transcript_path)
             work_store.record_progress(session_id, transcript_path)
             work_store.maybe_autocontinue(session_id, transcript_path)
-    except Exception:
-        if os.environ.get("WORK_HOOK_DEBUG"):
-            import traceback
-            traceback.print_exc()
+    except Exception as e:
+        _report_hook_error(session_id, e)
         return 0
     return 0
 
