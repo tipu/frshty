@@ -282,73 +282,65 @@ class TestOperatorMergeRoute:
         platform.merge_pr.assert_not_called()
 
 
-WRITTEN_AT = "2026-09-20T10:00:00Z"
-
-
-def _key(comment_id, repo="repo", pr_id=99, created_at=WRITTEN_AT):
-    return tickets.comment_key(repo, pr_id, comment_id, created_at)
-
-
-def _entry(comment_id, status, repo="repo", pr_id=99, created_at=WRITTEN_AT):
+def _entry(comment_id, status, repo="repo", pr_id=99, kind="review"):
     return {"id": comment_id, "status": status, "pr_repo": repo, "pr_id": pr_id,
-            "created_at": created_at}
+            "comment_kind": kind}
+
+
+def _platform_comment(comment_id, kind="review", **overrides):
+    c = _comment(id=comment_id, **overrides)
+    c["comment_kind"] = kind
+    return c
+
+
+def _owed(entries, unresolved, detected=()):
+    """_owed_on_pr against the registry the poll would have built."""
+    live = tickets._live_comment_index(unresolved)
+    latest = tickets._latest_comment_entries(entries, "repo", 99, live)
+    return tickets._owed_on_pr(list(unresolved), list(detected), [], latest)
 
 
 class TestCommentsOwed:
     def test_a_detected_unresolved_comment_is_owed(self):
-        assert tickets._comments_owed([], {_key(1)}, {_key(1)}) == 1
+        c = _platform_comment(1)
+        assert _owed([], [c], [c]) == 1
 
     def test_an_addressed_entry_cancels_an_earlier_open_entry(self):
+        c = _platform_comment(1)
         entries = [_entry(1, "fix_failed"), _entry(1, "addressed")]
-        assert tickets._comments_owed(entries, set(), {_key(1)}) == 0
+        assert _owed(entries, [c]) == 0
 
     def test_a_needs_reply_entry_stays_owed(self):
-        assert tickets._comments_owed([_entry(1, "needs_reply")], set(), {_key(1)}) == 1
+        """needs_reply settles the cursor — the loop will not touch the
+        comment again — but a human still owes the reply, so the merge
+        waits."""
+        c = _platform_comment(1)
+        assert _owed([_entry(1, "needs_reply")], [c]) == 1
 
-    def test_a_resolved_comment_is_not_owed(self):
-        """A non-resolvable comment frshty addressed reads as unresolved on
-        the platform forever. Only an entry can settle it, and once it has
-        one the merge is free."""
-        assert tickets._comments_owed([_entry(1, "addressed")], {_key(1)}, {_key(1)}) == 0
+    def test_a_fix_that_was_never_pushed_stays_owed(self):
+        c = _platform_comment(1)
+        assert _owed([_entry(1, "fix_unpushed")], [c]) == 1
+
+    def test_a_non_resolvable_comment_frshty_addressed_is_not_owed(self):
+        """An issue comment reads as unresolved on the platform forever.
+        Only its entry can settle it."""
+        c = _platform_comment(1, kind="issue_comment")
+        assert _owed([_entry(1, "addressed", kind="issue_comment")], [c]) == 0
 
     def test_baselined_history_is_not_owed(self):
-        """A comment the engine never opened an entry for was baselined. It
-        must not hold every merge on the PR for the life of the branch."""
-        assert tickets._comments_owed([], set(), {_key(7)}) == 0
-
-    def test_the_same_number_on_two_pull_requests_is_two_comments(self):
-        """A ticket can carry several pull requests, and two of them number
-        their comments from the same sequence. Keyed by the number alone the
-        answered one cancels the owed one and the merge is released."""
-        entries = [_entry(7, "addressed", pr_id=99)]
-        owed = {_key(7, pr_id=100)}
-        assert tickets._comments_owed(entries, owed, owed) == 1
-
-    def test_a_non_dict_row_in_the_history_is_ignored(self):
-        assert tickets._comments_owed(["junk", None], {_key(1)}, {_key(1)}) == 1
-
-    def test_an_open_entry_with_no_creation_time_still_holds_its_comment(self):
-        """Rows written before the creation time was recorded carry none, so
-        they name a comment by number alone. An open one holds whichever
-        comment the platform reports under that number: over-holding costs a
-        merge, and reading it as settled costs the comment."""
-        owed = {_key(7)}
-        assert tickets._comments_owed(
-            [_entry(7, "needs_reply", created_at=None)], set(), owed) == 1
-
-    def test_an_answered_entry_with_no_creation_time_cancels_nothing(self):
-        """The other half must not be widened. A later comment that reuses
-        the number would be cancelled by it and merged unanswered."""
-        owed = {_key(7)}
-        assert tickets._comments_owed(
-            [_entry(7, "addressed", created_at=None)], owed, owed) == 1
-        assert tickets._comments_owed(
-            [_entry(7, "addressed")], owed, owed) == 0
+        """A comment the engine never registered was baselined. It must not
+        hold every merge on the pull request for the life of the branch."""
+        assert _owed([], [_platform_comment(7)]) == 0
 
     def test_one_number_from_two_comment_sources_is_two_comments(self):
-        """On one pull request a review comment, a review body and an issue
-        comment come from three id sequences that overlap. The creation time
-        separates them; without it the addressed one releases the owed one."""
-        entries = [_entry(7, "addressed", created_at="2026-09-01T00:00:00Z")]
-        owed = {_key(7, created_at="2026-09-20T10:00:00Z")}
-        assert tickets._comments_owed(entries, owed, owed) == 1
+        """A review comment and an issue comment on one pull request come
+        from id sequences that overlap. The kind separates them; without it
+        the addressed one releases the owed one."""
+        issue = _platform_comment(7, kind="issue_comment")
+        review = _platform_comment(7, kind="review", body="still wrong")
+        entries = [_entry(7, "addressed", kind="issue_comment")]
+        assert _owed(entries, [issue, review], [review]) == 1
+
+    def test_a_reply_is_owed_even_though_the_page_lists_roots(self):
+        reply = _platform_comment(2, parent_id=1)
+        assert _owed([], [reply], [reply]) == 1
