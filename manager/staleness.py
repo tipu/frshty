@@ -10,6 +10,7 @@ from pathlib import Path
 
 import core.db as db
 import core.state as state
+from features.tickets import latest_pr_comments
 
 
 _LIMIT = 50
@@ -426,6 +427,7 @@ def pr_comments_needing_reply(instance_key: str, config: dict) -> list[dict]:
             continue
         if not isinstance(entries, list):
             continue
+        entries = latest_pr_comments(entries)
         needs_reply = [e for e in entries if isinstance(e, dict) and e.get("status") == "needs_reply"]
         if not needs_reply:
             continue
