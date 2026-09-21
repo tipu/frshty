@@ -170,7 +170,6 @@ class TestCommentFixersCarryTheRule:
              patch("features.tickets.get_repos",
                    return_value=[{"name": "repo", "path": wt.parent}]), \
              patch("features.tickets.ticket_worktree_path", return_value=wt), \
-             patch("features.tickets._worktree_is_dirty", return_value=False), \
              patch("features.tickets.run_balanced",
                    return_value='{"results": [{"i": 0, "actionable": true}]}'), \
              patch("features.tickets.run_claude_code", return_value=None) as fixer, \

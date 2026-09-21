@@ -77,6 +77,37 @@ def run_git_status(cwd, args: list[str],
                                            f"{type(e).__name__}: {e}")
 
 
+def stage_all(cwd, exclude=(), check: bool = False) -> subprocess.CompletedProcess:
+    """Stage every change except the paths in `exclude`.
+
+    `exclude` holds the paths that were already dirty when the caller started
+    its work. They are not that work, and a commit that carries them puts
+    files nobody asked for on the pull request.
+
+    An exclude pathspec only keeps a path out of this `add`. A path an earlier
+    run already staged stays in the index and would still be committed, so the
+    excluded paths are reset out of the index afterwards."""
+    paths = sorted(exclude)
+    result = subprocess.run(
+        ["git", "add", "-A", "--", "."]
+        + [f":(exclude,literal){path}" for path in paths],
+        cwd=str(cwd), capture_output=True, text=True, check=check, timeout=60)
+    if paths:
+        unstage = run_git_status(
+            cwd, ["reset", "--quiet", "--",
+                  *(f":(literal){path}" for path in paths)], timeout=60)
+        if unstage.returncode != 0:
+            log.emit("git_unstage_excluded_failed",
+                     f"{cwd}: could not reset the excluded paths out of the index; "
+                     f"the commit would carry them: {(unstage.stderr or '').strip()[:200]}",
+                     meta={"cwd": str(cwd), "paths": paths,
+                           "error": (unstage.stderr or "").strip()[:200]})
+            if check:
+                raise subprocess.CalledProcessError(
+                    unstage.returncode, unstage.args, unstage.stdout, unstage.stderr)
+    return result
+
+
 def worktree_holding_branch(repo_path: Path, branch: str) -> Path | None:
     """Return the path of the existing worktree that currently has `branch`
     checked out, or None. Parses `git worktree list --porcelain`."""
@@ -289,8 +320,12 @@ def triage_commit_failure(status: str, output: str) -> str:
 
 def commit_outcome(repo_dir: Path, message: str | None = None,
                    extra_commit_args: list[str] | None = None,
-                   timeout: int = 120) -> CommitOutcome:
-    """Stage and commit, reporting which phase failed and keeping its output."""
+                   timeout: int = 120, exclude=()) -> CommitOutcome:
+    """Stage and commit, reporting which phase failed and keeping its output.
+
+    `exclude` is forwarded to `stage_all` for the re-stage that follows each
+    hook pass. Without it that re-stage pulls back in everything the caller
+    deliberately left out of the index."""
     repo = repo_dir.name
 
     def _head() -> str:
@@ -314,8 +349,7 @@ def commit_outcome(repo_dir: Path, message: str | None = None,
             run = subprocess.run([str(pc), "run"], cwd=str(repo_dir),
                                  capture_output=True, text=True, env=env,
                                  timeout=PRE_COMMIT_TIMEOUT)
-            subprocess.run(["git", "add", "-A"], cwd=str(repo_dir),
-                           capture_output=True, timeout=30)
+            stage_all(repo_dir, exclude)
             if run.returncode == 0:
                 break
             if attempt == 2:
@@ -343,7 +377,8 @@ def commit_with_hooks(repo_dir: Path,
                       message: str | None = None,
                       extra_commit_args: list[str] | None = None,
                       check: bool = False,
-                      timeout: int = 120) -> subprocess.CompletedProcess:
+                      timeout: int = 120,
+                      exclude=()) -> subprocess.CompletedProcess:
     """Stage all changes and commit `repo_dir`, running pre-commit hooks
     manually first when possible.
 
@@ -362,7 +397,8 @@ def commit_with_hooks(repo_dir: Path,
     `git commit` regardless of what they said, so a repo whose hooks fail but
     which installs no native git hook committed and reported success."""
     outcome = commit_outcome(repo_dir, message=message,
-                             extra_commit_args=extra_commit_args, timeout=timeout)
+                             extra_commit_args=extra_commit_args, timeout=timeout,
+                             exclude=exclude)
     args = ["git", "commit", *(extra_commit_args or [])]
     if message is not None:
         args.extend(["-m", message])
