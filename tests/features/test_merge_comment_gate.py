@@ -327,16 +327,23 @@ class TestCommentsOwed:
     def test_a_non_dict_row_in_the_history_is_ignored(self):
         assert tickets._comments_owed(["junk", None], {_key(1)}, {_key(1)}) == 1
 
-    def test_an_entry_with_no_creation_time_still_matches_its_comment(self):
-        """Rows written before the creation time was recorded carry none.
-        Such a row names its comment by number, and must still cancel or
-        hold the comment the platform reports under that number."""
-        addressed = [_entry(7, "addressed", created_at=None)]
+    def test_an_open_entry_with_no_creation_time_still_holds_its_comment(self):
+        """Rows written before the creation time was recorded carry none, so
+        they name a comment by number alone. An open one holds whichever
+        comment the platform reports under that number: over-holding costs a
+        merge, and reading it as settled costs the comment."""
         owed = {_key(7)}
-        assert tickets._comments_owed(addressed, owed, owed) == 0
+        assert tickets._comments_owed(
+            [_entry(7, "needs_reply", created_at=None)], set(), owed) == 1
 
-        still_owed = [_entry(7, "needs_reply", created_at=None)]
-        assert tickets._comments_owed(still_owed, set(), owed) == 1
+    def test_an_answered_entry_with_no_creation_time_cancels_nothing(self):
+        """The other half must not be widened. A later comment that reuses
+        the number would be cancelled by it and merged unanswered."""
+        owed = {_key(7)}
+        assert tickets._comments_owed(
+            [_entry(7, "addressed", created_at=None)], owed, owed) == 1
+        assert tickets._comments_owed(
+            [_entry(7, "addressed")], owed, owed) == 0
 
     def test_one_number_from_two_comment_sources_is_two_comments(self):
         """On one pull request a review comment, a review body and an issue
