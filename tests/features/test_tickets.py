@@ -2369,6 +2369,231 @@ class TestCheckInReviewFixFailedRetry:
             )
 
 
+class TestLoadPrCommentsDedupe:
+    """Live on aimyable DEV-728: pr_comments.json holds rows
+    ['fix_failed', 'addressed'] for django-drf-app#198 comment 861363220,
+    because every scan appends a fresh row. _pr_comment_breakdown counts every
+    row it is handed, so the stale fix_failed row kept not_done at 1 and
+    _pr_court answered your_court long after the comment was fixed. Only the
+    last row for a comment describes it now."""
+
+    def _write(self, fake_config, slug, rows):
+        import json as js
+        d = fake_config["workspace"]["root"] / "tickets" / slug
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "pr_comments.json").write_text(js.dumps(rows))
+
+    def test_only_the_last_row_for_a_comment_survives(self, fake_config):
+        slug = "DEV-728-persist"
+        self._write(fake_config, slug, [
+            {"id": 861363220, "pr_repo": "django-drf-app", "pr_id": 198,
+             "status": "fix_failed", "body": "sanitize this"},
+            {"id": 861363206, "pr_repo": "django-drf-app", "pr_id": 198,
+             "status": "addressed", "body": "rename that"},
+            {"id": 861363220, "pr_repo": "django-drf-app", "pr_id": 198,
+             "status": "addressed", "body": "sanitize this"},
+        ])
+
+        rows = tickets._load_pr_comments(fake_config, slug)
+
+        assert [r["status"] for r in rows if r["id"] == 861363220] == ["addressed"], (
+            "the retry succeeded, so the stale fix_failed row must not survive; "
+            f"got {[r['status'] for r in rows if r['id'] == 861363220]}"
+        )
+        assert len(rows) == 2, f"expected one row per comment, got {len(rows)}"
+
+    def test_same_comment_id_on_two_prs_is_kept_apart(self, fake_config):
+        slug = "DEV-900-two-repos"
+        self._write(fake_config, slug, [
+            {"id": 7, "pr_repo": "repo-a", "pr_id": 1, "status": "fix_failed"},
+            {"id": 7, "pr_repo": "repo-b", "pr_id": 2, "status": "addressed"},
+        ])
+
+        rows = tickets._load_pr_comments(fake_config, slug)
+
+        assert len(rows) == 2, (
+            "an id collision across two pull requests is two comments, not one; "
+            f"got {rows}"
+        )
+
+    def test_two_comments_sharing_an_id_are_kept_apart(self, fake_config):
+        """GitHub numbers review comments and issue comments from two
+        sequences, which is why _check_in_review keeps two cursors. The same
+        number on one pull request can be two comments, so collapsing them
+        would drop a live one. They were not created at the same instant."""
+        slug = "DEV-901-two-kinds"
+        self._write(fake_config, slug, [
+            {"id": 7, "pr_repo": "repo-a", "pr_id": 1, "status": "needs_reply",
+             "created_at": "2026-01-01T12:00:00Z"},
+            {"id": 7, "pr_repo": "repo-a", "pr_id": 1, "status": "addressed",
+             "created_at": "2026-02-09T08:31:00Z"},
+        ])
+
+        rows = tickets._load_pr_comments(fake_config, slug)
+
+        assert sorted(r["status"] for r in rows) == ["addressed", "needs_reply"], (
+            "two comments that only share an id are two comments; "
+            f"got {rows}"
+        )
+
+    def test_an_edited_comment_still_collapses(self, fake_config):
+        """A reviewer can edit a comment between scans. The body changes, the
+        creation time does not, so the rows are still one comment."""
+        slug = "DEV-903-edited"
+        self._write(fake_config, slug, [
+            {"id": 9, "pr_repo": "repo-a", "pr_id": 1, "status": "fix_failed",
+             "created_at": "2026-01-01T12:00:00Z", "body": "sanitize"},
+            {"id": 9, "pr_repo": "repo-a", "pr_id": 1, "status": "addressed",
+             "created_at": "2026-01-01T12:00:00Z", "body": "sanitize this input"},
+        ])
+
+        rows = tickets._load_pr_comments(fake_config, slug)
+
+        assert [r["status"] for r in rows] == ["addressed"], (
+            f"an edited comment is still one comment; got {rows}"
+        )
+
+    def test_a_file_that_is_not_a_list_is_handed_back_untouched(self, fake_config):
+        """_check_in_review saves whatever this returns. Turning an
+        unrecognised file into [] would overwrite it on the next poll."""
+        slug = "DEV-902-corrupt"
+        import json as js
+        d = fake_config["workspace"]["root"] / "tickets" / slug
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "pr_comments.json").write_text(js.dumps({"comments": [{"id": 1}]}))
+
+        assert tickets._load_pr_comments(fake_config, slug) == {"comments": [{"id": 1}]}
+
+class TestCheckInReviewPushFailure:
+    """Observed live on aimyable/saas-dashboard#286: three Arslan review
+    comments were fixed as local commits, then push_branch was rejected with
+    non-fast-forward because a squash rewrote the branch history. The push
+    failure emptied to_resolve, but the cursor block below it still ran,
+    because a pushed fix is not a retryable failure. last_comment_ids parked at
+    866548380, so every later scan filtered all three comments out and dropped
+    the fixes on the floor. The cursor must only advance when the push lands."""
+
+    def _make_pr_comment(self, **overrides):
+        base = {"id": 100, "body": "Please rename this variable",
+                "author_id": "reviewer1", "author_name": "Bob",
+                "path": "src/main.py", "line": 42, "parent_id": None,
+                "created_on": "2026-01-01T12:00:00Z",
+                "created_at": "2026-01-01T12:00:00Z",
+                "updated_at": "2026-01-01T12:00:00Z"}
+        base.update(overrides)
+        return base
+
+    def _run(self, fake_config, push_result, ts=None):
+        slug = "PROJ-1-do-the-thing"
+        wt = fake_config["workspace"]["root"] / "tickets" / slug / "repo"
+        wt.mkdir(parents=True, exist_ok=True)
+        (wt / ".git").mkdir(exist_ok=True)
+        ts = ts or make_ticket_state(
+            status="in_review", slug=slug, branch=slug,
+            prs=[{"repo": "repo", "id": 99, "branch": slug, "url": "http://u"}],
+        )
+        ticket = {"key": "PROJ-1", "summary": "Do thing", "url": "http://j/PROJ-1"}
+        comment = self._make_pr_comment(id=866548380, body="rename this helper")
+
+        mock_platform = MagicMock()
+        mock_platform.get_pr_state.return_value = "OPEN"
+        mock_platform.get_pr_comments.return_value = [comment]
+        mock_platform.self_id.return_value = "bot-self"
+        mock_platform.push_branch.return_value = push_result
+        bb_config = {
+            **fake_config,
+            "job": {**fake_config["job"], "platform": "bitbucket"},
+            "bitbucket": {"org": "x", "user_account_id": "bot-self"},
+        }
+
+        heads = iter(["aaaaaaa", "bbbbbbb"])
+
+        def fake_run_git(_wt, args, **kwargs):
+            if args[0] == "rev-parse":
+                return MagicMock(returncode=0, stdout=next(heads), stderr="")
+            if args[0] == "rev-list":
+                return MagicMock(returncode=0, stdout="1", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "repo", "path": wt.parent}]), \
+             patch("features.tickets.ticket_worktree_path", return_value=wt), \
+             patch("features.tickets.run_balanced",
+                   return_value='{"results": [{"i": 0, "actionable": true}]}'), \
+             patch("features.tickets.run_claude_code", return_value="fixed it"), \
+             patch("features.tickets.git_util.run_git", side_effect=fake_run_git), \
+             patch("features.tickets.subprocess.run",
+                   return_value=MagicMock(returncode=0, stdout="bbbbbbb", stderr="")):
+            ts = tickets._check_in_review(bb_config, ticket, ts, "http://base")
+        return ts, mock_platform, comment
+
+    def test_cursor_holds_when_push_is_rejected(
+        self, fresh_db, fake_config, tmp_state
+    ):
+        ts, mock_platform, comment = self._run(
+            fake_config, {"ok": False, "error": "non-fast-forward"})
+
+        assert mock_platform.push_branch.called, (
+            "the fix must reach push_branch, or this test proves nothing"
+        )
+        cursor = ts.get("last_comment_ids", {}).get("repo/99", 0)
+        assert cursor < comment["id"], (
+            "push was rejected, so the fix never reached the PR. The cursor must "
+            "stay behind the comment id so the next scan reprocesses it. "
+            f"got cursor={cursor}, comment_id={comment['id']}"
+        )
+        assert not mock_platform.resolve_comment.called, (
+            "a comment whose fix was never pushed must not be resolved"
+        )
+
+    def test_cursor_advances_when_push_succeeds(
+        self, fresh_db, fake_config, tmp_state
+    ):
+        ts, mock_platform, comment = self._run(fake_config, {"ok": True})
+
+        cursor = ts.get("last_comment_ids", {}).get("repo/99", 0)
+        assert cursor >= comment["id"], (
+            "push landed, so the comment is done and the cursor must advance "
+            f"past it. got cursor={cursor}, comment_id={comment['id']}"
+        )
+
+    def test_repeated_push_failure_never_caps_the_comment(
+        self, fresh_db, fake_config, tmp_state
+    ):
+        """A rejected push is not a failed fix. Spending the fix budget on it
+        caps the comment and advances the cursor past a fix the pull request
+        never received, which is the drop this class exists to stop. The
+        comment stays open and the scan keeps trying to deliver it."""
+        ts = None
+        with patch("features.tickets.log.emit") as emit:
+            for _ in range(tickets.MAX_PR_COMMENT_FIX_ATTEMPTS + 1):
+                ts, mock_platform, comment = self._run(
+                    fake_config, {"ok": False, "error": "non-fast-forward"},
+                    ts=ts)
+
+            cap_events = [
+                call for call in emit.call_args_list
+                if call.args and call.args[0] == "ticket_pr_comment_fix_capped"
+            ]
+            push_failures = [
+                call for call in emit.call_args_list
+                if call.args and call.args[0] == "ticket_pr_comment_push_failed"
+            ]
+        assert cap_events == [], (
+            "a rejected push must not spend the fix budget; capping here "
+            f"drops a comment whose fix is committed. got {len(cap_events)}"
+        )
+        assert push_failures, "the rejected push must reach the event feed"
+
+        cursor = ts.get("last_comment_ids", {}).get("repo/99", 0)
+        assert cursor < comment["id"], (
+            "the fix is still missing from the pull request, so the cursor "
+            f"must stay behind the comment. got cursor={cursor}"
+        )
+        assert not mock_platform.resolve_comment.called
+
+
 class TestCheckInReviewReviewerReply:
     """Observed live on quillmeetings/quill#4561: Adam Walz answered the
     notifier.ts:71 thread twice after it was resolved, and neither reply was
