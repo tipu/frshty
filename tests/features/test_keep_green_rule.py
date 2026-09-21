@@ -9,7 +9,10 @@ oscillations spent MAX_CI_FIX_ATTEMPTS and parked the ticket in pr_failed.
 Each agent verified only the check it was told about, so each fix landed with
 a check it never ran now red.
 """
+import subprocess
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from features import own_prs, pr_autofix, pr_ci, tickets
 from tests.conftest import make_comment, make_pr, make_ticket_state
@@ -82,6 +85,12 @@ class TestGreenCheckNames:
 
 
 class TestCommentFixersCarryTheRule:
+    @pytest.fixture(autouse=True)
+    def _worktree_is_a_repo(self, tmp_path):
+        """The own-PR fixers read the worktree with git before they run the
+        agent, so tmp_path has to be a real repo for the agent to be reached."""
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), check=True)
+
     def _config(self, tmp_path):
         return {"_state_dir": tmp_path, "_base_url": "http://base", "job": {"key": "test"}}
 
