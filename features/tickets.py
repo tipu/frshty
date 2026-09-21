@@ -2406,14 +2406,19 @@ def _entry_key(entry: dict) -> tuple:
                        entry.get("id"), entry.get("created_at") or "")
 
 
-def _match_entry_keys(entry_keys: set, reported: set) -> set:
-    """Resolve entry keys against the comments the platform reported.
+def _match_open_entry_keys(entry_keys: set, reported: set) -> set:
+    """Resolve open entry keys against the comments the platform reported.
 
     An entry written before the creation time was recorded carries an empty
-    one. Such a row names its comment by number alone, so it matches
-    whichever reported comment shares that number — the answer the code gave
-    before the time joined the key. A row that carries a time is matched
-    exactly, so two comments sharing a number stay apart."""
+    one, so it names its comment by number alone and cannot be told from a
+    later comment that reuses the number. Only open rows are widened to
+    every reported comment with that number: the worst that costs is a
+    merge held for a comment that was already answered. Widening an
+    answered row the same way would cancel a comment nobody has read, so
+    answered rows are matched exactly and a legacy one cancels nothing.
+
+    Of the 473 entries on disk on 2026-09-21, two carry no time and both are
+    needs_reply, so no answered row loses a match to this rule today."""
     exact = {k for k in entry_keys if k[3]}
     numbers = {k[:3] for k in entry_keys if not k[3]}
     if not numbers:
@@ -2434,10 +2439,9 @@ def _owed_comment_keys(pr_comments: list[dict], detected_now: set,
     not owed: the engine already decided not to act on them, and counting
     them would hold every merge for history the loop will never touch."""
     rows = [e for e in pr_comments if isinstance(e, dict)]
-    answered = _match_entry_keys(
-        {_entry_key(e) for e in rows
-         if e.get("status") in ANSWERED_ENTRY_STATUSES}, unresolved_now)
-    open_entries = _match_entry_keys(
+    answered = {_entry_key(e) for e in rows
+                if e.get("status") in ANSWERED_ENTRY_STATUSES and e.get("created_at")}
+    open_entries = _match_open_entry_keys(
         {_entry_key(e) for e in rows
          if e.get("status") in OPEN_ENTRY_STATUSES}, unresolved_now)
     return ((detected_now | open_entries) & unresolved_now) - answered
