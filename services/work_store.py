@@ -848,8 +848,8 @@ def apply_action(item_id: int, action: str, until: str | None = None) -> dict:
                 return {"error": "only an open task can be canceled"}
             c.execute(
                 "UPDATE work_items SET state = ?, stop_reason = ?, pending_question = '', "
-                "snoozed_until = NULL, updated_at = ? WHERE id = ?",
-                (CANCELED_STATE, CANCELED_REASON, now, item_id),
+                "snoozed_until = NULL, archived_at = ?, updated_at = ? WHERE id = ?",
+                (CANCELED_STATE, CANCELED_REASON, now, now, item_id),
             )
             c.execute(
                 "UPDATE work_runs SET status = 'stopped', finished_at = ? "
@@ -866,6 +866,8 @@ def apply_action(item_id: int, action: str, until: str | None = None) -> dict:
                     "VALUES (?, 'operator_ack', '{}', ?)", (item_id, now))
             c.execute("UPDATE work_items SET archived_at = ? WHERE id = ?", (now, item_id))
         elif action == "unarchive":
+            if item["state"] == CANCELED_STATE:
+                return {"error": "a canceled task is reopened, not unarchived"}
             c.execute("UPDATE work_items SET archived_at = NULL WHERE id = ?", (item_id,))
         else:
             return {"error": f"unknown action: {action}"}
@@ -2015,9 +2017,14 @@ def grouped_items(now: datetime | None = None, q: str = "",
 
     A task the operator canceled lands in its own canceled group, not in
     done. It was stopped, not finished, so mixing it into the completed work
-    would overstate what the board delivered. It follows the same archive
-    rule as a completed task, and the archive view lists both groups. A
-    declined proposal and a withdrawn one are canceled for the same reason.
+    would overstate what the board delivered. A cancel archives the task in
+    the same step, so the canceled group is empty on the board and the
+    archive view holds it. A canceled task needs no second decision from the
+    operator: the cancel already said the work must not continue. Unarchive
+    is refused on it for the same reason, so the one way back is reopen,
+    which makes the task live again rather than parking a stopped task on
+    the board. A declined proposal and a withdrawn one are canceled for the
+    same reason.
 
     A completed task stays in the done group until the operator archives it.
     Archiving is the only way it leaves, so the board and the archive split
