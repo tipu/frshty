@@ -1,3 +1,5 @@
+import pathlib
+import sqlite3
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -85,29 +87,76 @@ class TestAction:
         work_store.apply_action(item_id, "reopen")
         assert _item(item_id)["state"] == "needs_you"
 
-    def test_a_canceled_task_archives(self):
+    def test_a_cancel_archives_the_task_in_the_same_step(self):
         item_id, _ = _with_run()
         work_store.apply_action(item_id, "cancel")
-        assert "error" not in work_store.apply_action(item_id, "archive")
         item = _item(item_id)
-        assert item["archived_at"] and item["state"] == "canceled"
+        assert item["archived_at"], "a cancel files the task in the archive"
+        assert item["state"] == "canceled"
 
 
 class TestBoard:
-    def test_the_board_files_it_in_its_own_group(self):
+    def test_a_canceled_task_leaves_the_board_at_once(self):
         item_id, _ = _with_run(objective="group me")
         work_store.apply_action(item_id, "cancel")
-        groups = work_store.grouped_items()
-        assert item_id in {r["id"] for r in groups["canceled"]}
-        assert item_id not in {r["id"] for r in groups["done"]}
+        assert work_store.grouped_items()["canceled"] == [], (
+            "a cancel takes the task off the board without a second action")
 
-    def test_an_archived_canceled_task_leaves_the_board(self):
+    def test_the_archive_files_it_under_canceled_not_under_done(self):
         item_id, _ = _with_run(objective="archive me")
         work_store.apply_action(item_id, "cancel")
-        work_store.apply_action(item_id, "archive")
+        archive = work_store.grouped_items(archived=True)
+        assert item_id in {r["id"] for r in archive["canceled"]}
+        assert item_id not in {r["id"] for r in archive["done"]}
+
+    def test_unarchive_is_refused_on_a_canceled_task(self):
+        """A cancel archives the task, so unarchiving it would park stopped work
+        on the board. The board hides the control, and the store refuses the
+        action, so a direct API call cannot put the row back either."""
+        item_id, _ = _with_run(objective="unarchive me")
+        work_store.apply_action(item_id, "cancel")
+        assert work_store.apply_action(item_id, "unarchive") == {
+            "error": "a canceled task is reopened, not unarchived"}
+        assert _item(item_id)["archived_at"]
         assert work_store.grouped_items()["canceled"] == []
-        assert item_id in {r["id"] for r in
-                           work_store.grouped_items(archived=True)["canceled"]}
+
+    def test_the_route_refuses_to_unarchive_a_canceled_task(self):
+        item_id, _ = _with_run(objective="unarchive me over http")
+        work_store.apply_action(item_id, "cancel")
+        r = _client().post(f"/api/work/items/{item_id}/action",
+                           json={"action": "unarchive"})
+        assert r.status_code == 400, r.text
+        assert _item(item_id)["archived_at"]
+
+    def test_reopen_puts_a_canceled_task_back_on_the_board(self):
+        item_id, _ = _with_run(objective="reopen me")
+        work_store.apply_action(item_id, "cancel")
+        work_store.apply_action(item_id, "reopen")
+        row = _item(item_id)
+        assert row["state"] == "needs_you" and not row["archived_at"]
+        assert item_id in {r["id"] for r in work_store.grouped_items()["needs_you"]}
+
+    def test_the_migration_archives_a_canceled_task_from_before(self):
+        """Every task canceled before this change is still on the board."""
+        migration = (pathlib.Path(__file__).resolve().parents[2]
+                     / "migrations" / "050_canceled_task_is_archived.sql")
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE work_items (id INTEGER PRIMARY KEY, "
+                     "state TEXT NOT NULL, updated_at TEXT NOT NULL, archived_at TEXT)")
+        conn.executemany(
+            "INSERT INTO work_items(id, state, updated_at, archived_at) VALUES (?, ?, ?, ?)",
+            [(1, "canceled", "2026-01-01T00:00:00+00:00", None),
+             (2, "canceled", "2026-01-02T00:00:00+00:00", "2026-01-03T00:00:00+00:00"),
+             (3, "done", "2026-01-04T00:00:00+00:00", None),
+             (4, "needs_you", "2026-01-05T00:00:00+00:00", None)])
+        conn.executescript(migration.read_text())
+
+        assert dict(conn.execute("SELECT id, archived_at FROM work_items").fetchall()) == {
+            1: "2026-01-01T00:00:00+00:00",
+            2: "2026-01-03T00:00:00+00:00",
+            3: None,
+            4: None}
+        conn.close()
 
     def test_it_does_not_count_towards_the_attention_badge(self):
         item_id, _ = _with_run()
@@ -115,6 +164,37 @@ class TestBoard:
         assert work_store.attention_count() == 1
         work_store.apply_action(item_id, "cancel")
         assert work_store.attention_count() == 0
+
+
+class TestArchiveTemplate:
+    """The archive view hides the canceled tasks behind a checkbox. A cancel
+    files the task at once, so the archive would otherwise read as a list of
+    work that was stopped rather than a list of work that was delivered."""
+
+    def _page(self):
+        return pathlib.Path("templates/work.html").read_text()
+
+    def test_the_archive_lists_the_done_group_only_until_the_box_is_ticked(self):
+        assert ('return this.showCanceled ? ["canceled", "done"] : ["done"];'
+                in self._page())
+
+    def test_the_archive_offers_a_checkbox_for_the_canceled_tasks(self):
+        page = self._page()
+        assert '<input type="checkbox" v-model="showCanceled" @change="onShowCanceled" />' in page
+        assert "Show canceled ({{ count('canceled') }})" in page
+
+    def test_a_canceled_card_offers_reopen_and_nothing_else(self):
+        card = self._page().split("""<template v-else-if="g === 'canceled'">""")[1]
+        card = card.split("</template>")[0]
+        assert "act(it, 'reopen')" in card
+        assert "act(it, 'unarchive')" not in card
+        assert "act(it, 'archive')" not in card
+
+    def test_the_checkbox_keeps_its_setting(self):
+        page = self._page()
+        assert 'showCanceled: localStorage.getItem("archiveShowCanceled") === "1"' in page
+        assert ('localStorage.setItem("archiveShowCanceled", this.showCanceled ? "1" : "0");'
+                in page)
 
 
 class TestClosedGuards:

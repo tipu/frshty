@@ -43,8 +43,14 @@
     <div>
       <h1 class="ln-title">{{ view === 'archive' ? 'Archive' : 'Tasks' }}</h1>
       <p class="ln-subtitle" v-if="view === 'archive'">
-        Only the completed tasks you archived. Archive a task to take it off the board.
+        Only the tasks that left the board. A completed task lands here when you archive it. A canceled task lands here the moment you cancel it.
       </p>
+      <label class="ln-small ln-muted" style="display:flex;align-items:center;gap:6px;cursor:pointer"
+             v-if="view === 'archive'"
+             title="the archive hides the canceled tasks until you ask for them">
+        <input type="checkbox" v-model="showCanceled" @change="onShowCanceled" />
+        Show canceled ({{ count('canceled') }})
+      </label>
       <p class="ln-subtitle" v-else>
         Launch a standalone task. Group it into a thread only when the work grows past one run.
       </p>
@@ -184,10 +190,6 @@
                 <button class="ln-btn ln-btn-sm ln-btn-ghost" @click="act(it, 'reopen')">Reopen</button>
               </template>
               <template v-else-if="g === 'canceled'">
-                <button class="ln-btn ln-btn-sm ln-btn-ghost" v-if="view === 'archive' || it.archived_at"
-                        @click="act(it, 'unarchive')">Unarchive</button>
-                <button class="ln-btn ln-btn-sm ln-btn-ghost" v-else
-                        title="take this canceled task off the board" @click="act(it, 'archive')">Archive</button>
                 <button class="ln-btn ln-btn-sm ln-btn-ghost"
                         title="put it back on the board; the agent does not start again by itself"
                         @click="act(it, 'reopen')">Reopen</button>
@@ -240,7 +242,7 @@
           <button class="ln-btn ln-btn-sm ln-btn-ghost" v-if="donePage < donePages" @click="setDonePage(donePage + 1)">next ›</button>
         </div>
       </div>
-      <div class="ln-small ln-muted" v-if="view === 'archive' && !(groups.done || []).length">{{ (searchText.trim() || projectFilter.length) ? "No matches." : "No archived tasks yet." }}</div>
+      <div class="ln-small ln-muted" v-if="view === 'archive' && archiveEmpty">{{ (searchText.trim() || projectFilter.length) ? "No matches." : "No archived tasks yet." }}</div>
       <div class="ln-small ln-muted" v-else-if="view === 'board' && total === 0">{{ (searchText.trim() || projectFilter.length) ? "No matches." : "No tasks yet." }}</div>
     </div>
 
@@ -309,6 +311,7 @@ frshtyApp({
       peers: [], peerMeta: {}, peerErrors: {}, peerLinkmaps: {}, target: "",
       sourceFilter: localStorage.getItem("workSourceFilter") || "",
       searchText: "", projectFilter: JSON.parse(localStorage.getItem("workProjectFilter") || "[]"),
+      showCanceled: localStorage.getItem("archiveShowCanceled") === "1",
       donePage: 1, donePages: 1, counts: {},
       groupOrder: ["proposed", "needs_ack", "agent_working", "needs_you", "waiting_external", "failed_stale", "canceled", "done"],
       labels: { proposed: "Proposed — needs your approval", needs_ack: "Needs acknowledgement", needs_you: "Needs you", agent_working: "Agent working", waiting_external: "Waiting external", failed_stale: "Failed or stale", canceled: "Canceled", done: "Completed" },
@@ -316,7 +319,11 @@ frshtyApp({
   },
   computed: {
     visibleGroups() {
-      return this.view === "archive" ? ["canceled", "done"] : this.groupOrder;
+      if (this.view !== "archive") return this.groupOrder;
+      return this.showCanceled ? ["canceled", "done"] : ["done"];
+    },
+    archiveEmpty() {
+      return !this.visibleGroups.some(g => (this.groups[g] || []).length);
     },
     railCounts() {
       return { tasks: this.count("proposed") + this.count("needs_ack") + this.count("needs_you") };
@@ -452,6 +459,9 @@ frshtyApp({
     onSearch() {
       clearTimeout(this._searchT);
       this._searchT = setTimeout(() => { this.donePage = 1; this.refresh(); }, 300);
+    },
+    onShowCanceled() {
+      localStorage.setItem("archiveShowCanceled", this.showCanceled ? "1" : "0");
     },
     onProjectFilter() {
       localStorage.setItem("workProjectFilter", JSON.stringify(this.projectFilter));
@@ -772,7 +782,7 @@ frshtyApp({
       this.act(it, "snooze", until);
     },
     cancel(it) {
-      if (!confirm("Cancel task #" + it.id + "? The agent's terminal is killed and the task is marked canceled.")) return;
+      if (!confirm("Cancel task #" + it.id + "? The agent's terminal is killed. The task is marked canceled and goes straight to the archive.")) return;
       this.act(it, "cancel");
     },
     openTerminal(it) {
