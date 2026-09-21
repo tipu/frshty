@@ -282,12 +282,16 @@ class TestOperatorMergeRoute:
         platform.merge_pr.assert_not_called()
 
 
-def _key(comment_id, repo="repo", pr_id=99):
-    return tickets.comment_key(repo, pr_id, comment_id)
+WRITTEN_AT = "2026-09-20T10:00:00Z"
 
 
-def _entry(comment_id, status, repo="repo", pr_id=99):
-    return {"id": comment_id, "status": status, "pr_repo": repo, "pr_id": pr_id}
+def _key(comment_id, repo="repo", pr_id=99, created_at=WRITTEN_AT):
+    return tickets.comment_key(repo, pr_id, comment_id, created_at)
+
+
+def _entry(comment_id, status, repo="repo", pr_id=99, created_at=WRITTEN_AT):
+    return {"id": comment_id, "status": status, "pr_repo": repo, "pr_id": pr_id,
+            "created_at": created_at}
 
 
 class TestCommentsOwed:
@@ -322,3 +326,11 @@ class TestCommentsOwed:
 
     def test_a_non_dict_row_in_the_history_is_ignored(self):
         assert tickets._comments_owed(["junk", None], {_key(1)}, {_key(1)}) == 1
+
+    def test_one_number_from_two_comment_sources_is_two_comments(self):
+        """On one pull request a review comment, a review body and an issue
+        comment come from three id sequences that overlap. The creation time
+        separates them; without it the addressed one releases the owed one."""
+        entries = [_entry(7, "addressed", created_at="2026-09-01T00:00:00Z")]
+        owed = {_key(7, created_at="2026-09-20T10:00:00Z")}
+        assert tickets._comments_owed(entries, owed, owed) == 1

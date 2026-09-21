@@ -2384,19 +2384,26 @@ def _unresolved_comment_row(c: dict) -> dict:
     }
 
 
-def comment_key(repo: str, pr_id, comment_id) -> tuple:
+def comment_created_at(comment: dict) -> str:
+    return comment.get("created_at") or comment.get("created_on") or ""
+
+
+def comment_key(repo: str, pr_id, comment_id, created_at: str) -> tuple:
     """The identity a comment is tracked by inside one ticket.
 
-    The number alone does not name a comment: a ticket can carry several
-    pull requests, and two of them number their comments from the same
-    sequence. A review comment and an issue comment on one pull request can
-    still share a number — migration 050 puts the source kind in the key and
-    closes that half."""
-    return (repo, pr_id, str(comment_id))
+    The number alone does not name a comment. A ticket can carry several
+    pull requests that number their comments from the same sequence, and on
+    one pull request a review comment, a review body and an issue comment
+    come from three sequences that overlap. The creation time completes the
+    identity, which is the same answer latest_pr_comments already gives: the
+    platform reports the same one for a comment on every scan, and two
+    comments that share a number were not written at the same instant."""
+    return (repo, pr_id, str(comment_id), created_at or "")
 
 
 def _entry_key(entry: dict) -> tuple:
-    return comment_key(entry.get("pr_repo"), entry.get("pr_id"), entry.get("id"))
+    return comment_key(entry.get("pr_repo"), entry.get("pr_id"),
+                       entry.get("id"), entry.get("created_at") or "")
 
 
 def _owed_comment_keys(pr_comments: list[dict], detected_now: set,
@@ -2424,27 +2431,48 @@ def _comments_owed(pr_comments: list[dict], detected_now: set,
     return len(_owed_comment_keys(pr_comments, detected_now, unresolved_now))
 
 
-def pr_comments_readable(config, slug: str) -> bool:
-    """False when pr_comments.json exists but does not parse as a list.
+def pr_comments_readable(config, ts: dict) -> bool:
+    """Whether the registered-comment history can be believed.
 
     _load_pr_comments answers an unreadable file with an empty list so it
-    never raises into a caller. An empty list of entries reads as "nothing
-    was ever owed", so the reconciliation has to ask this separately or a
-    truncated file would release the merge gate."""
-    path = _pr_comments_path(config, slug)
+    never raises into a caller. An empty history reads as "nothing was ever
+    owed", so the reconciliation has to ask this separately or a truncated
+    file would release the merge gate. A file that is not there yet is not a
+    loss: no comment has been registered, and holding on it would deadlock
+    every ticket whose file is absent with no way to write one."""
+    path = _pr_comments_path(config, ts.get("slug") or "")
     if not path.exists():
         return True
     try:
-        return isinstance(json.loads(path.read_text()), list)
+        entries = json.loads(path.read_text())
     except (OSError, ValueError):
         return False
+    return isinstance(entries, list) and all(isinstance(e, dict) for e in entries)
+
+
+def _attempt_key(entry: dict) -> str:
+    return "/".join(str(part) for part in _entry_key(entry))
 
 
 def _count_fix_failure(entry: dict, comment_fix_attempts: dict, pr_key: str) -> int:
     """Record one failed attempt against a comment and return the new count."""
-    attempt_key = f"{pr_key}/{entry['id']}"
+    attempt_key = _attempt_key(entry)
     attempts = comment_fix_attempts.get(attempt_key, 0) + 1
     comment_fix_attempts[attempt_key] = attempts
+    entry["status"] = "fix_failed"
+    entry["attempts"] = attempts
+    return attempts
+
+
+def _hold_fix_attempt(entry: dict, comment_fix_attempts: dict, pr_key: str) -> int:
+    """Record a failure the comment did not cause, without spending its budget.
+
+    A worktree that is missing or dirty says nothing about the comment. The
+    fix budget is two, so charging it would cap the comment after two polls
+    in that state, advance the cursor past it, and strand it below the
+    cursor even after the worktree came back. The entry is still a failure,
+    so the cursor holds and the comment is read again."""
+    attempts = comment_fix_attempts.get(_attempt_key(entry), 0)
     entry["status"] = "fix_failed"
     entry["attempts"] = attempts
     return attempts
@@ -2501,7 +2529,16 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
     ts["status"] = transition(ts["status"], "in_review")
     user_id = platform.self_id()
     slug = ts["slug"]
-    read_ok = pr_comments_readable(config, slug)
+    if not pr_comments_readable(config, ts):
+        log.emit("ticket_pr_comments_history_unreadable",
+            f"{_label(ticket['key'], ts)}: pr_comments.json cannot be read; holding the comment pass",
+            links={"detail": f"{base_url}/tickets/{ticket['key']}"},
+            meta={"ticket": ticket["key"],
+                  "path": str(_pr_comments_path(config, slug))})
+        ts[RECONCILE_READ_KEY] = False
+        ts[RECONCILE_OWED_KEY] = 0
+        return ts
+    read_ok = True
     unresolved_now: set = set()
     detected_now: set = set()
     last_comment_ids = ts.get("last_comment_ids", {})
@@ -2529,7 +2566,8 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
             if not c.get("parent_id")
         ]
         unresolved_now.update(
-            comment_key(pr["repo"], pr["id"], c["id"]) for c in unresolved)
+            comment_key(pr["repo"], pr["id"], c["id"], comment_created_at(c))
+            for c in unresolved)
         issue_comments = [c for c in comments if c.get("comment_kind") == "issue_comment"]
         if issue_comments and pr_key not in last_issue_comment_ids:
             last_issue_comment_ids[pr_key] = _issue_comment_floor(issue_comments)
@@ -2541,7 +2579,8 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
         ]
 
         detected_now.update(
-            comment_key(pr["repo"], pr["id"], c["id"]) for c in new_comments)
+            comment_key(pr["repo"], pr["id"], c["id"], comment_created_at(c))
+            for c in new_comments)
 
         if not new_comments:
             continue
@@ -2592,9 +2631,7 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
         repos = get_repos(config)
         repo_match = next((r for r in repos if r["name"] == pr["repo"]), None)
         wt = ticket_worktree_path(config, slug, pr["repo"]) if repo_match else None
-        to_resolve = []
-        resolvable_ids = {c["id"]: c.get("resolvable", True) for c in new_comments}
-        batch_entry_by_id: dict = {}
+        to_resolve: list[tuple[dict, dict]] = []
         made_commit = False
 
         for idx, comment in enumerate(new_comments):
@@ -2608,11 +2645,10 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                 "path": comment.get("path"),
                 "line": comment.get("line"),
                 "diff_hunk": comment.get("diff_hunk", ""),
-                "created_at": comment.get("created_at") or comment.get("created_on") or "",
+                "created_at": comment_created_at(comment),
                 "status": "new",
                 "suggested_reply": "",
             }
-            batch_entry_by_id[comment["id"]] = entry
 
             log.emit("ticket_pr_comment_registered",
                 f"{_label(ticket['key'], ts)} · {pr['repo']}: Comment registered — {comment['body'][:80]}",
@@ -2630,7 +2666,7 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                         meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"], "draft_reply": suggested[:200]})
 
             if actionable and (wt is None or not wt.is_dir()):
-                attempts = _count_fix_failure(entry, comment_fix_attempts, pr_key)
+                attempts = _hold_fix_attempt(entry, comment_fix_attempts, pr_key)
                 log.emit("ticket_pr_comment_worktree_missing",
                     f"{_label(ticket['key'], ts)} · {pr['repo']}: No ticket worktree to fix this review comment in — {comment['body'][:60]}",
                     links={"detail": f"{base_url}/tickets/{ticket['key']}", "comment": comment.get("html_url", "")},
@@ -2640,7 +2676,7 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                 continue
 
             if actionable and _worktree_is_dirty(wt):
-                attempts = _count_fix_failure(entry, comment_fix_attempts, pr_key)
+                attempts = _hold_fix_attempt(entry, comment_fix_attempts, pr_key)
                 log.emit("ticket_pr_comment_worktree_dirty",
                     f"{_label(ticket['key'], ts)} · {pr['repo']}: Refusing to fix a review comment in a dirty worktree — {comment['body'][:60]}",
                     links={"detail": f"{base_url}/tickets/{ticket['key']}", "comment": comment.get("html_url", "")},
@@ -2701,7 +2737,7 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                                    or (agent_committed and not staged)):
                     fix_ok = True
                     made_commit = True
-                    to_resolve.append(comment["id"])
+                    to_resolve.append((comment, entry))
                     entry["status"] = "addressed"
                     sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(wt), capture_output=True, text=True, timeout=30).stdout.strip()
                     stat = subprocess.run(["git", "show", "--stat", "--format=", "HEAD"], cwd=str(wt), capture_output=True, text=True, timeout=30).stdout.strip()
@@ -2792,19 +2828,17 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                 for claim in ("proof", "ci"):
                     freshness.invalidate(ticket["key"], claim,
                                          "ticket_pr_comment_fixed")
-        for cid in to_resolve:
-            if not resolvable_ids.get(cid, True):
+        for comment, resolved_entry in to_resolve:
+            if not comment.get("resolvable", True):
                 continue
-            resolution = platform.resolve_comment(pr["repo"], pr["id"], cid)
+            resolution = platform.resolve_comment(pr["repo"], pr["id"], comment["id"])
             if isinstance(resolution, dict) and resolution.get("status") != "resolved":
-                resolved_entry = batch_entry_by_id.get(cid)
-                attempts = (_count_fix_failure(resolved_entry, comment_fix_attempts, pr_key)
-                            if resolved_entry is not None else 0)
+                attempts = _count_fix_failure(resolved_entry, comment_fix_attempts, pr_key)
                 log.emit("ticket_pr_comment_resolve_failed",
                     f"{_label(ticket['key'], ts)} · {pr['repo']}: Fix pushed but the thread would not resolve; comment stays owed — {resolution.get('detail', '')[:100]}",
                     links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
                     meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"],
-                          "comment_id": cid, "attempts": attempts,
+                          "comment_id": comment["id"], "attempts": attempts,
                           "detail": (resolution.get("detail") or "")[:500]})
 
         batch_entries = pr_comments[-len(new_comments):]
@@ -3100,7 +3134,7 @@ def reconcile_comments_now(config, ts: dict) -> tuple[str, list[dict]]:
     try:
         platform = make_platform(config)
         user_id = platform.self_id()
-        read_ok = pr_comments_readable(config, slug)
+        read_ok = pr_comments_readable(config, ts)
         pr_comments = _load_pr_comments(config, slug) if slug else []
         unresolved_now: set = set()
         detected: set = set()
@@ -3116,7 +3150,8 @@ def reconcile_comments_now(config, ts: dict) -> tuple[str, list[dict]]:
             for c in fetched:
                 if c.get("resolved") or c["author_id"] == user_id:
                     continue
-                key = comment_key(pr["repo"], pr["id"], c["id"])
+                key = comment_key(pr["repo"], pr["id"], c["id"],
+                                  comment_created_at(c))
                 unresolved_now.add(key)
                 rows[key] = _unresolved_comment_row(c)
                 floor = (issue_floors.get(pr_key, 0)
