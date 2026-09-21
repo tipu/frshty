@@ -113,6 +113,8 @@ _SCAN_EVENTS = frozenset({
     "ticket_pr_comments_detected", "ticket_pr_comment_registered",
     "ticket_pr_comment_needs_reply", "ticket_pr_comment_classify_failed",
     "ticket_pr_comment_already_addressed", "ticket_pr_comment_fix_failed",
+    "ticket_pr_comments_read_failed", "ticket_pr_comment_worktree_dirty",
+    "ticket_pr_comment_resolve_failed",
 })
 
 _CHECK_EVENTS = frozenset({"ticket_check_error", "ticket_checks_passed"})
