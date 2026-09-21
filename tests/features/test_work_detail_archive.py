@@ -51,11 +51,14 @@ class TestDetailTemplate:
         assert 'v-if="item.archived_at"' in section
         assert "act('unarchive')" in section
 
-    def test_a_canceled_task_offers_unarchive_once_archived(self):
+    def test_a_canceled_task_offers_reopen_and_nothing_else(self):
+        """A cancel already filed the task in the archive. Unarchive would put a
+        stopped task back on the board, which is the clutter the archive removes.
+        Reopen is the one way back, and it makes the task live again."""
         section = _section("canceled")
-        assert 'v-if="item.archived_at"' in section
-        assert "act('unarchive')" in section
-        assert "act('archive')" in section
+        assert "act('reopen')" in section
+        assert "act('unarchive')" not in section
+        assert "act('archive')" not in section
 
     def test_the_header_marks_an_archived_task(self):
         assert 'v-if="item.archived_at"\n          title="this task is in the archive, not on the board"' in _page()
