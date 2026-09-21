@@ -2085,16 +2085,44 @@ def _pr_comments_path(config, slug):
 def _load_pr_comments(config, slug) -> list[dict]:
     """The registered PR comments, or an empty list when the file cannot be
     read. A truncated or half-written file is reported to the event feed
-    instead of raising into every caller."""
+    instead of raising into every caller.
+
+    A rescanned comment is appended again, so the file holds one row per scan.
+    Only the last row for a comment describes it now, and the PR board counts
+    every row it is given, so a comment that failed once and was fixed on the
+    retry kept the pull request in your_court for ever. Older rows for the same
+    comment are dropped here, where every reader sees the same answer."""
     path = _pr_comments_path(config, slug)
     if not path.exists():
         return []
     try:
-        return json.loads(path.read_text())
+        entries = json.loads(path.read_text())
     except (OSError, ValueError) as e:
         log.emit("pr_comments_unreadable", f"{path} could not be read: {e}",
                  meta={"slug": slug, "path": str(path), "error": str(e)})
         return []
+    return latest_pr_comments(entries)
+
+
+def latest_pr_comments(entries):
+    """The last row per comment, in first-appearance order.
+
+    A review comment and an issue comment on the same pull request come from
+    two id sequences, so the number alone does not name a comment. The creation
+    time completes the identity: the platform reports the same one for a
+    comment on every scan, and two comments that share a number were not
+    written at the same instant. Anything that is not a list of rows is handed
+    back untouched, so a file this function cannot read is never rewritten as
+    an empty one."""
+    if not isinstance(entries, list):
+        return entries
+    latest: dict = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        latest[(entry.get("pr_repo"), entry.get("pr_id"), entry.get("id"),
+                entry.get("created_at"))] = entry
+    return list(latest.values())
 
 
 def _save_pr_comments(config, slug, comments: list[dict]):
@@ -2651,6 +2679,21 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                     links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
                     meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"], "error": pushed.get("error", "")})
                 to_resolve = []
+                for pushed_entry in pr_comments[-len(new_comments):]:
+                    if pushed_entry["status"] != "addressed":
+                        continue
+                    attempt_key = f"{pr_key}/{pushed_entry['id']}"
+                    attempts = comment_fix_attempts.get(attempt_key, 0) + 1
+                    comment_fix_attempts[attempt_key] = attempts
+                    pushed_entry["status"] = "fix_failed"
+                    pushed_entry["attempts"] = attempts
+                    if attempts >= MAX_PR_COMMENT_FIX_ATTEMPTS:
+                        log.emit("ticket_pr_comment_fix_capped",
+                            f"{_label(ticket['key'], ts)}: Giving up on review comment after {attempts} attempts: {pushed_entry['body'][:80]}",
+                            links={"detail": f"{base_url}/tickets/{ticket['key']}"},
+                            meta={"ticket": ticket["key"],
+                                  "comment_id": pushed_entry["id"],
+                                  "attempts": attempts})
             ts.pop("ci_passed", None)
             ts.pop("checks_started_at", None)
             ts.pop("ci_unrelated_checks", None)
