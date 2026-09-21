@@ -3613,3 +3613,473 @@ class TestCheckInReviewIssueComments:
         del c["comment_kind"]
         _, platform = self._run_addressed(fake_config, tmp_path, c)
         platform.resolve_comment.assert_called_once_with("repo", 99, 501)
+
+
+class TestCheckInReviewCommentQueueProgress:
+    """Observed live on aimyable django-drf-app PR #203 (DEV-743, 2026-09-21):
+    Arslan Syed's comment 867755302 sat at position 15 of a 16-comment queue
+    and was never read. The cursor only moved when a whole batch settled, so
+    one retryable fix failure made the next scan re-read the whole list and
+    re-run the fix agent on every comment it had already handled. Three scans
+    in a row ran out of time before the tail of the queue.
+
+    The same run also put an unrelated Pipfile on the pull request: the fix
+    agent committed its own change and left a file behind, `git add -A` swept
+    it up, and the sweep commit was recorded as the fix for a comment about
+    attachment ids. And the push only ran after the whole batch, so a scan cut
+    short stranded every commit it had made."""
+
+    def _init_git_pair(self, tmp_path, branch):
+        origin = tmp_path / "origin.git"
+        wt = tmp_path / "wt"
+        subprocess.run(["git", "init", "--bare", str(origin)], check=True, capture_output=True)
+        subprocess.run(["git", "clone", str(origin), str(wt)], check=True, capture_output=True)
+        for k, v in (("user.email", "t@example.com"), ("user.name", "t"), ("commit.gpgsign", "false")):
+            subprocess.run(["git", "config", k, v], cwd=str(wt), check=True, capture_output=True)
+        (wt / "app.py").write_text("original\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(wt), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=str(wt), check=True, capture_output=True)
+        subprocess.run(["git", "checkout", "-b", branch], cwd=str(wt), check=True, capture_output=True)
+        subprocess.run(["git", "push", "-u", "origin", branch], cwd=str(wt), check=True, capture_output=True)
+        return wt
+
+    def _git(self, wt, *args):
+        return subprocess.run(["git", *args], cwd=str(wt), capture_output=True,
+                              text=True, check=True).stdout.strip()
+
+    def _comment(self, cid, body):
+        return {"id": cid, "body": body, "author_id": "reviewer1",
+                "author_name": "Arslan", "path": "app.py", "line": 1,
+                "parent_id": None, "created_on": "2026-09-21T18:46:47Z",
+                "created_at": "2026-09-21T18:46:47Z",
+                "updated_at": "2026-09-21T18:46:47Z"}
+
+    def _setup(self, fake_config, slug, comments):
+        ts = make_ticket_state(
+            status="in_review", slug=slug, branch=slug,
+            prs=[{"repo": "repo", "id": 99, "branch": slug, "url": "http://u"}],
+        )
+        ticket = {"key": "PROJ-1", "summary": "Do thing", "url": "http://j/PROJ-1"}
+        platform = MagicMock()
+        platform.get_pr_state.return_value = "OPEN"
+        platform.get_pr_comments.return_value = comments
+        platform.push_branch.return_value = {"ok": True}
+        platform.get_pr_checks.return_value = [{"name": "Pipeline", "state": "SUCCESS", "url": ""}]
+        bb_config = {
+            **fake_config,
+            "job": {**fake_config["job"], "platform": "bitbucket"},
+            "bitbucket": {"org": "x", "user_account_id": "bot-self"},
+        }
+        return ts, ticket, platform, bb_config
+
+    def _real_push(self, wt):
+        def push(repo_path, branch, force=False):
+            subprocess.run(["git", "push", "-u", "origin", f"HEAD:refs/heads/{branch}"],
+                           cwd=str(wt), check=True, capture_output=True)
+            return {"ok": True}
+        return push
+
+    def _classify(self, prompt, **kwargs):
+        n = prompt.count("COMMENT:")
+        return json.dumps({"results": [{"i": i, "actionable": True} for i in range(n)]})
+
+    def _run(self, bb_config, ticket, ts, wt, platform, claude):
+        with patch("features.tickets.make_platform", return_value=platform), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "repo", "path": wt.parent}]), \
+             patch("features.tickets.ticket_worktree_path", return_value=wt), \
+             patch("features.tickets.run_balanced", side_effect=self._classify), \
+             patch("features.tickets.commit_subject", return_value="fix: address review comment"), \
+             patch("features.tickets.run_claude_code", side_effect=claude):
+            return tickets._check_in_review(bb_config, ticket, ts, "http://base")
+
+    def test_settled_comment_is_not_refixed_when_a_sibling_stays_open(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        """The starvation mechanism: one comment fails and stays retryable, so
+        the next scan must still leave the comment it already fixed alone."""
+        slug = "PROJ-1-do-the-thing"
+        wt = self._init_git_pair(tmp_path, slug)
+        ts, ticket, platform, bb_config = self._setup(fake_config, slug, [
+            self._comment(100, "rename the helper"),
+            self._comment(200, "sanitize the input"),
+        ])
+        prompts = []
+
+        def claude(prompt, cwd=None, **kwargs):
+            prompts.append(prompt)
+            if "rename the helper" in prompt:
+                (wt / "app.py").write_text("renamed\n")
+                return "fixed"
+            return None
+
+        ts = self._run(bb_config, ticket, ts, wt, platform, claude)
+        assert any("rename the helper" in p for p in prompts), (
+            "the first scan must run the fix agent on the fixable comment"
+        )
+
+        prompts.clear()
+        ts = self._run(bb_config, ticket, ts, wt, platform, claude)
+
+        assert not any("rename the helper" in p for p in prompts), (
+            "comment 100 was already fixed; re-running its fix agent because "
+            "comment 200 is still retryable is what starved the tail of the "
+            f"DEV-743 queue. Prompts on the second scan: {prompts!r}"
+        )
+        assert any("sanitize the input" in p for p in prompts), (
+            "the still-open comment must be retried"
+        )
+
+    def test_cursor_advances_over_settled_comments_below_the_open_one(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        """The cursor stops below the lowest comment that still owes work, not
+        at its old value."""
+        slug = "PROJ-1-do-the-thing"
+        wt = self._init_git_pair(tmp_path, slug)
+        ts, ticket, platform, bb_config = self._setup(fake_config, slug, [
+            self._comment(100, "fix the first thing"),
+            self._comment(200, "fix the second thing"),
+            self._comment(300, "fix the third thing"),
+        ])
+
+        def claude(prompt, cwd=None, **kwargs):
+            if "the second thing" in prompt:
+                return None
+            name = "first.py" if "the first thing" in prompt else "third.py"
+            (wt / name).write_text("fixed\n")
+            return "fixed"
+
+        ts = self._run(bb_config, ticket, ts, wt, platform, claude)
+
+        assert ts["last_comment_ids"]["repo/99"] == 100, (
+            "the cursor must advance to the last settled id below the open "
+            f"comment 200, got {ts['last_comment_ids'].get('repo/99')!r}"
+        )
+
+    def test_agent_self_commit_does_not_sweep_a_leftover_file(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        """The Pipfile mechanism: the agent committed its own fix and left a
+        file behind. That file is a side effect of the run, not the fix."""
+        slug = "PROJ-1-do-the-thing"
+        wt = self._init_git_pair(tmp_path, slug)
+        ts, ticket, platform, bb_config = self._setup(
+            fake_config, slug, [self._comment(100, "use the attachment id")])
+
+        def claude(prompt, cwd=None, **kwargs):
+            (wt / "app.py").write_text("fixed\n")
+            subprocess.run(["git", "add", "app.py"], cwd=str(wt), check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "use the attachment id"],
+                           cwd=str(wt), check=True, capture_output=True)
+            (wt / "Pipfile").write_text('[requires]\npython_version = "3.12"\n')
+            return "committed the fix"
+
+        ts = self._run(bb_config, ticket, ts, wt, platform, claude)
+
+        assert self._git(wt, "log", "-1", "--format=%s") == "use the attachment id", (
+            "the agent's own commit must stay at HEAD; a sweep commit on top "
+            "of it puts unrelated files on the PR and is then recorded as the "
+            f"fix. HEAD subject: {self._git(wt, 'log', '-1', '--format=%s')!r}"
+        )
+        assert "?? Pipfile" in self._git(wt, "status", "--porcelain"), (
+            "the leftover file must stay out of the commit"
+        )
+        entry = next(e for e in tickets._load_pr_comments(bb_config, slug) if e["id"] == 100)
+        assert entry["fix_commit"] == self._git(wt, "rev-parse", "HEAD")
+        assert entry["fix_files"] == ["app.py"], (
+            f"the recorded fix must be the agent's change, got {entry['fix_files']!r}"
+        )
+
+    def test_file_left_dirty_before_the_run_stays_out_of_the_fix_commit(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        """A file an earlier run abandoned in the worktree is not this fix."""
+        slug = "PROJ-1-do-the-thing"
+        wt = self._init_git_pair(tmp_path, slug)
+        (wt / "Pipfile").write_text('[requires]\npython_version = "3.12"\n')
+        ts, ticket, platform, bb_config = self._setup(
+            fake_config, slug, [self._comment(100, "use the attachment id")])
+
+        def claude(prompt, cwd=None, **kwargs):
+            (wt / "app.py").write_text("fixed\n")
+            return "fixed it"
+
+        ts = self._run(bb_config, ticket, ts, wt, platform, claude)
+
+        files = self._git(wt, "show", "--name-only", "--format=", "HEAD").split()
+        assert files == ["app.py"], f"the fix commit must hold only this run's work, got {files!r}"
+        assert "?? Pipfile" in self._git(wt, "status", "--porcelain")
+
+    def test_each_fix_is_pushed_before_the_next_comment_runs(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        """A scan cut short must not strand the fixes it already made."""
+        slug = "PROJ-1-do-the-thing"
+        wt = self._init_git_pair(tmp_path, slug)
+        ts, ticket, platform, bb_config = self._setup(fake_config, slug, [
+            self._comment(100, "fix the first thing"),
+            self._comment(200, "fix the second thing"),
+        ])
+        pushes_seen = []
+
+        def claude(prompt, cwd=None, **kwargs):
+            pushes_seen.append(platform.push_branch.call_count)
+            name = "first.py" if "the first thing" in prompt else "second.py"
+            (wt / name).write_text("fixed\n")
+            return "fixed"
+
+        ts = self._run(bb_config, ticket, ts, wt, platform, claude)
+
+        assert len(pushes_seen) == 2, f"expected two fix runs, got {pushes_seen!r}"
+        assert pushes_seen[1] >= 1, (
+            "the first comment's commit must reach the remote before the "
+            "second fix run starts; a scan that dies in the middle otherwise "
+            "leaves every commit it made local"
+        )
+
+    def test_a_fix_whose_push_failed_is_read_again_next_scan(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        """A commit that never reached the remote has not addressed anything.
+        Settling the comment would advance the cursor past it and leave the
+        commit local forever."""
+        slug = "PROJ-1-do-the-thing"
+        wt = self._init_git_pair(tmp_path, slug)
+        ts, ticket, platform, bb_config = self._setup(
+            fake_config, slug, [self._comment(100, "rename the helper")])
+        platform.push_branch.return_value = {"ok": False, "error": "rejected"}
+        prompts = []
+
+        def claude(prompt, cwd=None, **kwargs):
+            prompts.append(prompt)
+            (wt / "app.py").write_text("renamed\n")
+            return "fixed"
+
+        ts = self._run(bb_config, ticket, ts, wt, platform, claude)
+
+        entry = next(e for e in tickets._load_pr_comments(bb_config, slug) if e["id"] == 100)
+        assert entry["status"] == "fix_unpushed", (
+            f"a fix the remote never received is not addressed, got {entry['status']!r}"
+        )
+        platform.resolve_comment.assert_not_called()
+
+        prompts.clear()
+        platform.push_branch.side_effect = self._real_push(wt)
+        ts = self._run(bb_config, ticket, ts, wt, platform, claude)
+
+        assert prompts == [], (
+            "the fix is already committed; the scan must push it, not run the "
+            f"fix agent again. Prompts: {prompts!r}"
+        )
+        entry = next(e for e in tickets._load_pr_comments(bb_config, slug)
+                     if e["id"] == 100 and e["status"] != "fix_unpushed")
+        assert entry["status"] == "addressed", (
+            f"the delivered fix must settle the comment, got {entry['status']!r}"
+        )
+        platform.resolve_comment.assert_called_once_with("repo", 99, 100)
+
+    def test_an_issue_comment_is_not_settled_by_a_review_comment_of_the_same_id(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        """A pull request carries two id sequences. The two can hold the same
+        number, so a settled review comment must not hide an issue comment."""
+        slug = "PROJ-1-do-the-thing"
+        wt = self._init_git_pair(tmp_path, slug)
+        review = self._comment(42, "rename the helper")
+        ts, ticket, platform, bb_config = self._setup(fake_config, slug, [review])
+        recent = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        issue = {**self._comment(42, "the lint job will fail"),
+                 "comment_kind": "issue_comment", "path": None, "line": None,
+                 "resolvable": False, "created_at": recent, "updated_at": recent,
+                 "created_on": recent}
+        prompts = []
+
+        def claude(prompt, cwd=None, **kwargs):
+            prompts.append(prompt)
+            (wt / "app.py").write_text("renamed\n")
+            return "fixed"
+
+        ts = self._run(bb_config, ticket, ts, wt, platform, claude)
+        assert any("rename the helper" in p for p in prompts)
+
+        prompts.clear()
+        platform.get_pr_comments.return_value = [review, issue]
+        ts = self._run(bb_config, ticket, ts, wt, platform, claude)
+
+        assert any("the lint job will fail" in p for p in prompts), (
+            "the issue comment shares its number with a settled review comment "
+            f"and was dropped. Prompts: {prompts!r}"
+        )
+
+    def test_a_file_already_staged_before_the_run_stays_out_of_the_fix_commit(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        """An exclude pathspec only governs the add. A path an earlier run
+        already put in the index has to be reset back out of it."""
+        slug = "PROJ-1-do-the-thing"
+        wt = self._init_git_pair(tmp_path, slug)
+        (wt / "Pipfile").write_text('[requires]\npython_version = "3.12"\n')
+        subprocess.run(["git", "add", "Pipfile"], cwd=str(wt), check=True, capture_output=True)
+        ts, ticket, platform, bb_config = self._setup(
+            fake_config, slug, [self._comment(100, "use the attachment id")])
+
+        def claude(prompt, cwd=None, **kwargs):
+            (wt / "app.py").write_text("fixed\n")
+            return "fixed it"
+
+        ts = self._run(bb_config, ticket, ts, wt, platform, claude)
+
+        files = self._git(wt, "show", "--name-only", "--format=", "HEAD").split()
+        assert files == ["app.py"], (
+            f"the staged leftover rode into the fix commit, got {files!r}"
+        )
+        assert "?? Pipfile" in self._git(wt, "status", "--porcelain")
+
+    def test_a_stranded_commit_is_pushed_when_the_fix_run_produces_nothing(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        """An earlier run died between its commit and its push, so no entry
+        records the fix. The branch is still ahead of origin, so this scan must
+        deliver the commit even though its own fix run produced nothing."""
+        slug = "PROJ-1-do-the-thing"
+        wt = self._init_git_pair(tmp_path, slug)
+        (wt / "app.py").write_text("fixed by a run that never pushed\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(wt), check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "stranded"], cwd=str(wt),
+                       check=True, capture_output=True)
+        ts, ticket, platform, bb_config = self._setup(
+            fake_config, slug, [self._comment(100, "rename the helper")])
+
+        ts = self._run(bb_config, ticket, ts, wt, platform,
+                       lambda prompt, cwd=None, **kwargs: None)
+
+        assert platform.push_branch.call_count == 1, (
+            "the local commit is missing from the remote, so the scan must "
+            "push it even though its fix run produced nothing"
+        )
+
+    def test_a_legacy_entry_without_a_kind_does_not_hide_a_live_comment(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        """Entries written before the kind was recorded carry no kind. Reading
+        one as a review comment would hide a live review comment that shares
+        its number with a settled issue comment."""
+        slug = "PROJ-1-do-the-thing"
+        wt = self._init_git_pair(tmp_path, slug)
+        recent = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        review = self._comment(42, "rename the helper")
+        issue = {**self._comment(42, "the lint job will fail"),
+                 "comment_kind": "issue_comment", "path": None, "line": None,
+                 "resolvable": False, "created_at": recent, "updated_at": recent,
+                 "created_on": recent}
+        ts, ticket, platform, bb_config = self._setup(
+            fake_config, slug, [review, issue])
+        tickets._save_pr_comments(bb_config, slug, [{
+            "id": 42, "pr_repo": "repo", "pr_id": 99,
+            "body": "the lint job will fail", "path": None, "line": None,
+            "status": "addressed",
+        }])
+        prompts = []
+
+        def claude(prompt, cwd=None, **kwargs):
+            prompts.append(prompt)
+            (wt / "app.py").write_text("renamed\n")
+            return "fixed"
+
+        ts = self._run(bb_config, ticket, ts, wt, platform, claude)
+
+        assert any("rename the helper" in p for p in prompts), (
+            "a legacy entry with no kind must not settle a live review comment "
+            f"that shares its number. Prompts: {prompts!r}"
+        )
+
+    def test_a_legacy_entry_whose_comment_is_gone_settles_nothing(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        """Reading the kind off whatever live comment shares the number is not
+        enough. The original comment can be deleted, and a comment of the other
+        kind can then take the same number."""
+        slug = "PROJ-1-do-the-thing"
+        wt = self._init_git_pair(tmp_path, slug)
+        review = self._comment(42, "rename the helper")
+        ts, ticket, platform, bb_config = self._setup(fake_config, slug, [review])
+        tickets._save_pr_comments(bb_config, slug, [{
+            "id": 42, "pr_repo": "repo", "pr_id": 99,
+            "body": "the lint job will fail", "path": None, "line": None,
+            "status": "addressed",
+        }])
+        prompts = []
+
+        def claude(prompt, cwd=None, **kwargs):
+            prompts.append(prompt)
+            (wt / "app.py").write_text("renamed\n")
+            return "fixed"
+
+        ts = self._run(bb_config, ticket, ts, wt, platform, claude)
+
+        assert any("rename the helper" in p for p in prompts), (
+            "the settled entry is a different comment that happens to share "
+            f"the number, so it must not hide this one. Prompts: {prompts!r}"
+        )
+
+    def test_a_push_that_sends_nothing_does_not_settle_a_lost_fix(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        """A push reports success when it has nothing to send. A worktree
+        rebuilt from origin has lost the held commit, so the comment must go
+        back to the fix agent instead of being called delivered."""
+        slug = "PROJ-1-do-the-thing"
+        wt = self._init_git_pair(tmp_path, slug)
+        ts, ticket, platform, bb_config = self._setup(
+            fake_config, slug, [self._comment(100, "rename the helper")])
+        platform.push_branch.return_value = {"ok": False, "error": "rejected"}
+        prompts = []
+
+        def claude(prompt, cwd=None, **kwargs):
+            prompts.append(prompt)
+            (wt / "app.py").write_text("renamed\n")
+            return "fixed"
+
+        ts = self._run(bb_config, ticket, ts, wt, platform, claude)
+        held = next(e for e in tickets._load_pr_comments(bb_config, slug) if e["id"] == 100)
+        assert held["status"] == "fix_unpushed"
+
+        subprocess.run(["git", "reset", "--hard", f"origin/{slug}"], cwd=str(wt),
+                       check=True, capture_output=True)
+        prompts.clear()
+        platform.push_branch.side_effect = self._real_push(wt)
+        ts = self._run(bb_config, ticket, ts, wt, platform, claude)
+
+        assert any("rename the helper" in p for p in prompts), (
+            "the held commit is gone from the branch, so the comment must be "
+            f"fixed again rather than resolved. Prompts: {prompts!r}"
+        )
+
+    def test_a_legacy_entry_with_another_timestamp_settles_nothing(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        """Body text repeats across reviews. The time the comment was written
+        is what tells two comments that share a number apart."""
+        slug = "PROJ-1-do-the-thing"
+        wt = self._init_git_pair(tmp_path, slug)
+        review = self._comment(42, "please add a test")
+        ts, ticket, platform, bb_config = self._setup(fake_config, slug, [review])
+        tickets._save_pr_comments(bb_config, slug, [{
+            "id": 42, "pr_repo": "repo", "pr_id": 99,
+            "body": "please add a test", "path": None, "line": None,
+            "created_at": "2026-01-01T00:00:00Z", "status": "addressed",
+        }])
+        prompts = []
+
+        def claude(prompt, cwd=None, **kwargs):
+            prompts.append(prompt)
+            (wt / "app.py").write_text("renamed\n")
+            return "fixed"
+
+        ts = self._run(bb_config, ticket, ts, wt, platform, claude)
+
+        assert any("please add a test" in p for p in prompts), (
+            "the settled entry was written at another time, so it is another "
+            f"comment and must not hide this one. Prompts: {prompts!r}"
+        )
