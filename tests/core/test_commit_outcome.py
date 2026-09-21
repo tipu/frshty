@@ -151,3 +151,47 @@ class TestTicketCommitRepairBridge:
         assert outcome is failed
         assert selected == "block_dependency"
         assert commit.call_count == 1
+
+
+class TestStagingExclusions:
+    """A caller that stages only its own work must keep that scope. The
+    re-stage after each hook pass used to be a blanket `git add -A`, so a file
+    an earlier run had abandoned in the worktree was pulled back into the
+    index and rode onto the pull request as part of the fix."""
+
+    def test_hook_restage_keeps_the_exclusion(self, tmp_path):
+        r = _repo(tmp_path)
+        (r / "leftover.txt").write_text("from an earlier run\n")
+        (r / "a.py").write_text("x = 2\n")
+        g.stage_all(r, {"leftover.txt"})
+        fake = tmp_path / "pc"
+        fake.write_text("#!/bin/sh\nexit 0\n")
+        fake.chmod(0o755)
+        with patch.object(g, "_find_pre_commit", return_value=fake):
+            out = g.commit_outcome(r, message="m", exclude={"leftover.txt"})
+        assert out.status == "committed", out.output
+        files = subprocess.run(["git", "-C", str(r), "show", "--name-only",
+                                "--format=", "HEAD"],
+                               capture_output=True, text=True).stdout.split()
+        assert "leftover.txt" not in files, (
+            f"the hook re-stage pulled the excluded file back in: {files!r}"
+        )
+
+    def test_without_the_exclusion_the_file_is_committed(self, tmp_path):
+        r = _repo(tmp_path)
+        (r / "leftover.txt").write_text("from an earlier run\n")
+        (r / "a.py").write_text("x = 2\n")
+        g.stage_all(r)
+        fake = tmp_path / "pc"
+        fake.write_text("#!/bin/sh\nexit 0\n")
+        fake.chmod(0o755)
+        with patch.object(g, "_find_pre_commit", return_value=fake):
+            out = g.commit_outcome(r, message="m")
+        assert out.status == "committed", out.output
+        files = subprocess.run(["git", "-C", str(r), "show", "--name-only",
+                                "--format=", "HEAD"],
+                               capture_output=True, text=True).stdout.split()
+        assert "leftover.txt" in files, (
+            "the default must stay a full stage; only an explicit exclusion "
+            f"drops a path. got {files!r}"
+        )
