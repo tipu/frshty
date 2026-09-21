@@ -131,16 +131,10 @@
   <div class="sec" v-if="item.state === 'canceled'">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">{{ declined ? 'Declined' : 'Canceled' }}</h2>
     <div class="text-xs text-gray-600 mb-2" v-if="declined">You declined this proposal and no agent ever read it. Reopen it to put it back on the board; no agent starts by itself.</div>
-    <div class="text-xs text-gray-600 mb-2" v-else>You canceled this task and its terminal was killed. Reopen it to put it back on the board; no agent starts again by itself.</div>
+    <div class="text-xs text-gray-600 mb-2" v-else>You canceled this task and its terminal was killed. The cancel filed it in the archive. Reopen it to put it back on the board; no agent starts again by itself.</div>
     <div class="flex flex-wrap gap-2 items-center">
       <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#3f1d1d;color:#fca5a5"
             @click="act('reopen')">reopen</span>
-      <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#1e293b;color:#cbd5e1"
-            v-if="item.archived_at" title="put this canceled task back on the board"
-            @click="act('unarchive')">unarchive</span>
-      <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#1e293b;color:#cbd5e1"
-            v-else title="take this canceled task off the board"
-            @click="act('archive')">archive</span>
       <span class="text-xs text-red-400" v-if="actError">{{ actError }}</span>
     </div>
   </div>
@@ -664,7 +658,7 @@ const app = frshtyApp({
       await this.refresh();
     },
     cancel() {
-      if (!confirm("Cancel task #" + this.item.id + "? The agent's terminal is killed and the task is marked canceled.")) return;
+      if (!confirm("Cancel task #" + this.item.id + "? The agent's terminal is killed. The task is marked canceled and goes straight to the archive.")) return;
       this.act("cancel");
     },
     async act(action) {
