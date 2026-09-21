@@ -175,13 +175,32 @@ class TestRunDepCommand:
         ensure.assert_called_once_with(fake_config, "repo", wt,
                                        dep_cmd="pipenv install --dev")
 
-    def test_pipenv_without_pipfile_runs_unchanged(self, fake_config, tmp_path):
+    def test_pipenv_without_pipfile_is_refused(self, fake_config, tmp_path):
+        """aimyable's django-drf-app migrated to uv and deleted its Pipfile
+        while dep_commands still said `pipenv install --dev`. pipenv had
+        nothing to install, so it wrote a skeleton Pipfile, and the comment
+        fix loop committed that file onto the DEV-743 branch twice."""
         wt = tmp_path / "wt"
         wt.mkdir()
         with patch("core.deps.subprocess.run") as run:
-            run.return_value.returncode = 0
-            deps.run_dep_command(fake_config, "repo", wt, "pipenv install")
-        assert run.call_args.args[0] == ["pipenv", "install"]
+            assert deps.run_dep_command(fake_config, "repo", wt, "pipenv install") is False
+        assert not run.called, (
+            "pipenv must not run in a worktree with no Pipfile; it would only "
+            f"write a skeleton one. got: {run.call_args}"
+        )
+        assert not (wt / "Pipfile").exists()
+
+    def test_pipenv_with_only_a_lockfile_is_refused(self, fake_config, tmp_path):
+        """shared_venv_name falls back to Pipfile.lock, so it is not a test
+        for "this worktree has a Pipfile". pipenv would write one here."""
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        (wt / "Pipfile.lock").write_text('{"default": {}}')
+        with patch("core.deps.ensure_shared_venv") as ensure, \
+             patch("core.deps.subprocess.run") as run:
+            assert deps.run_dep_command(fake_config, "repo", wt, "pipenv install --dev") is False
+        assert not ensure.called and not run.called, (
+            f"pipenv must not run without a Pipfile; ensure={ensure.call_args} run={run.call_args}")
 
     def test_non_pipenv_passthrough(self, fake_config, tmp_path):
         wt = _make_worktree(tmp_path, "a")
