@@ -582,8 +582,8 @@ def _commit_workspace_changes(ticket_dir: Path, ticket_key: str,
     return committed
 
 
-def commit_repo_changes(repo_dir: Path, ticket_key: str,
-                        message: str) -> tuple[git_util.CommitOutcome, str]:
+def commit_repo_changes(repo_dir: Path, ticket_key: str, message: str,
+                        exclude=()) -> tuple[git_util.CommitOutcome, str]:
     """Commit one repo and give a repairable hook failure one bounded repair.
 
     Ticket pipeline stages and in-review comment fixes must take the same path.
@@ -598,16 +598,17 @@ def commit_repo_changes(repo_dir: Path, ticket_key: str,
     bounded diagnostic repair was attempted, or one of ``block_*`` when editing
     this repository cannot safely address the failure.
     """
-    subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
+    git_util.stage_all(repo_dir, exclude, check=True)
     outcome = git_util.commit_outcome(repo_dir, message=message,
-                                      timeout=HOOK_RUN_TIMEOUT)
+                                      timeout=HOOK_RUN_TIMEOUT, exclude=exclude)
     route = "committed"
     if not outcome.ok:
         route = _route_hook_failure(repo_dir, outcome, ticket_key)
         if route == "repair":
-            subprocess.run(["git", "add", "-A"], cwd=repo_dir, check=True)
+            git_util.stage_all(repo_dir, exclude, check=True)
             outcome = git_util.commit_outcome(repo_dir, message=message,
-                                              timeout=HOOK_RUN_TIMEOUT)
+                                              timeout=HOOK_RUN_TIMEOUT,
+                                              exclude=exclude)
     return outcome, route
 
 
