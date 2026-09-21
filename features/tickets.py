@@ -2233,9 +2233,269 @@ def _substantiate_reply(config, slug, ticket, comment, pr, suggested: str) -> di
 
 MAX_PR_COMMENT_FIX_ATTEMPTS = 2
 
+COMMENT_SETTLED_STATUSES = ("addressed", "replied", "needs_reply")
+COMMENT_ANSWERED_STATUSES = ("addressed", "replied")
+RECONCILE_READ_KEY = "_comments_read_ok"
+RECONCILE_OWED_KEY = "_comments_owed"
 
-def _commit_pr_comment_changes(worktree: Path, ticket_key: str,
-                               message: str) -> tuple[git_util.CommitOutcome, str]:
+
+def _comment_answered(entry: dict) -> bool:
+    """Whether frshty has answered this comment.
+
+    Narrower than _comment_settled, which also counts a drafted reply and a
+    spent fix budget. Those stop the loop working on a comment; they do not
+    answer it, and the merge gate asks whether it was answered."""
+    return entry.get("status") in COMMENT_ANSWERED_STATUSES
+
+
+def _unresolved_comment_row(c: dict) -> dict:
+    return {
+        "url": c.get("html_url", ""),
+        "loc": f"{c.get('path', '')}:{c.get('line', '')}".strip(":"),
+        "author": c.get("author_name") or c.get("author_id", ""),
+        "snippet": (c.get("body", "") or "")[:280],
+    }
+
+
+def merge_hold_reason(ts: dict) -> str:
+    """Why the merge must wait for the comment reconciliation, or "".
+
+    _check_in_review writes both keys on every in_review poll, before the
+    merge is considered. Absent keys mean the reconciliation did not run for
+    this ticket state, which is not evidence that nothing is owed, so the
+    merge is held. A comment read that failed is held for the same reason:
+    an empty comment list and an unreachable platform are not the same fact.
+    """
+    if RECONCILE_READ_KEY not in ts or RECONCILE_OWED_KEY not in ts:
+        return "comments not reconciled"
+    if not ts.get(RECONCILE_READ_KEY):
+        return "comment read failed"
+    owed = ts.get(RECONCILE_OWED_KEY) or 0
+    if owed:
+        return f"{owed} comment(s) owed an answer"
+    return ""
+
+
+def pr_comments_readable(config, ts: dict) -> bool:
+    """Whether the registered-comment history can be believed.
+
+    _load_pr_comments answers an unreadable file with an empty list so it
+    never raises into a caller. An empty history reads as "nothing was ever
+    owed", so the reconciliation has to ask this separately or a truncated
+    file would release the merge gate. A file that is not there yet is not a
+    loss: no comment has been registered, and holding on it would deadlock
+    every ticket whose file is absent with no way to write one."""
+    path = _pr_comments_path(config, ts.get("slug") or "")
+    if not path.exists():
+        return True
+    try:
+        entries = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return False
+    return isinstance(entries, list) and all(isinstance(e, dict) for e in entries)
+
+
+def _comment_settled(entry: dict) -> bool:
+    """Whether a registered comment needs no further work: it was fixed, a
+    reply is drafted or sent, or the fix budget is spent."""
+    status = entry.get("status")
+    if status in COMMENT_SETTLED_STATUSES:
+        return True
+    return (status == "fix_failed"
+            and entry.get("attempts", 0) >= MAX_PR_COMMENT_FIX_ATTEMPTS)
+
+
+def _comment_kind(value) -> str:
+    """The id sequence a comment belongs to.
+
+    A PR carries two of them. An issue comment and a review comment can hold
+    the same number, and each has its own cursor, so every lookup keyed by a
+    bare id has to carry the kind with it."""
+    return "issue_comment" if value == "issue_comment" else "review"
+
+
+def _comment_key(comment: dict) -> tuple:
+    return (_comment_kind(comment.get("comment_kind")), comment.get("id"))
+
+
+def _live_comment_index(comments: list[dict]) -> dict:
+    """(kind, id) -> the comment the PR currently holds under it."""
+    return {_comment_key(c): c for c in comments}
+
+
+def _entry_key(entry: dict, live_index: dict):
+    """The (kind, id) of a registered comment, or None when it cannot be known.
+
+    Entries written before the kind was recorded carry no kind. The live list
+    is authoritative, so the entry is matched back to the comment it was
+    written from by id, body and write time. No single match means the entry
+    settles nothing, which is the safe answer: a live comment is read again,
+    and a comment that is gone settles nothing anyway."""
+    if entry.get("comment_kind") is not None:
+        return _comment_key(entry)
+    body = entry.get("body") or ""
+    created = entry.get("created_at") or ""
+    matches = [
+        key for key, c in live_index.items()
+        if key[1] == entry.get("id")
+        and (c.get("body") or "") == body
+        and (not created
+             or (c.get("created_at") or c.get("created_on") or "") == created)
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _latest_comment_entries(pr_comments: list[dict], repo: str, pr_id,
+                            live_index: dict) -> dict:
+    """The newest registered entry per (kind, id) for this PR.
+
+    The cursor only moves when a whole batch settles, so one retryable failure
+    used to replay every other comment in the batch on the next scan. Each
+    replay re-ran the fix agent on a comment that was already handled, and a
+    long review queue never reached its tail."""
+    latest: dict = {}
+    for e in pr_comments:
+        if e.get("pr_repo") != repo or e.get("pr_id") != pr_id:
+            continue
+        key = _entry_key(e, live_index)
+        if key is not None:
+            latest[key] = e
+    return latest
+
+
+def _advance_comment_cursors(pending: list[dict], open_keys: set, pr_key: str,
+                             review_cursors: dict, issue_cursors: dict) -> None:
+    """Move each cursor to the highest handled id below the lowest open id.
+
+    A comment is open when it still owes work, so the cursor stops below it and
+    it is read again on the next scan. Everything under that point is settled
+    and never re-read. The two kinds are counted apart because they number
+    themselves apart."""
+    for kind, cursors in (("issue_comment", issue_cursors), ("review", review_cursors)):
+        ids = [c["id"] for c in pending if _comment_kind(c.get("comment_kind")) == kind]
+        blockers = [i for i in ids if (kind, i) in open_keys]
+        limit = min(blockers) if blockers else None
+        eligible = [i for i in ids if limit is None or i < limit]
+        if eligible:
+            cursors[pr_key] = max(eligible)
+
+
+def _owed_on_pr(unresolved: list[dict], detected: list[dict],
+                batch_entries: list[dict], latest_entries: dict) -> int:
+    """How many comments on this pull request are still owed an answer.
+
+    A comment counts when the platform still reports it unresolved, frshty
+    is not its author, and frshty has not answered it: either this poll
+    detected it, or a registered entry for it is not 'addressed' or
+    'replied'. A comment the engine baselined and never registered is not
+    owed — the engine already decided not to act on it, and counting it
+    would hold every merge on the pull request for the life of the branch.
+    A reply carries a parent id and still counts: the page lists thread
+    roots, but a reply nobody answered is owed."""
+    answered_now = {_comment_key(e) for e in batch_entries if _comment_answered(e)}
+    detected_keys = {_comment_key(c) for c in detected}
+    owed = 0
+    for comment in unresolved:
+        key = _comment_key(comment)
+        if key in answered_now:
+            continue
+        entry = latest_entries.get(key)
+        if entry is not None and _comment_answered(entry):
+            continue
+        if key in detected_keys or entry is not None:
+            owed += 1
+    return owed
+
+
+def _worktree_dirty_paths(wt: Path) -> set:
+    """The paths already modified or untracked before a fix run starts.
+
+    They are not that run's work, so they must stay out of its commit."""
+    try:
+        out = git_util.run_git(wt, ["status", "--porcelain", "-z"],
+                               timeout=30).stdout
+    except git_util.GitCommandError:
+        return set()
+    fields = out.split("\0")
+    paths = set()
+    i = 0
+    while i < len(fields):
+        record = fields[i]
+        i += 1
+        if len(record) < 4:
+            continue
+        status, path = record[:2], record[3:]
+        paths.add(path)
+        if "R" in status or "C" in status:
+            if i < len(fields):
+                paths.add(fields[i])
+                i += 1
+    return paths
+
+
+def _drop_unrelated_leftovers(wt: Path, ticket: dict, ts: dict, pr: dict,
+                              comment: dict, base_url: str) -> None:
+    """Unstage what a fix run left behind after it made its own commit.
+
+    The agent decides what belongs in its fix. Anything still in the tree
+    afterwards is a side effect of the run. Sweeping it into a second commit
+    puts unrelated files on the pull request and records that commit as the fix
+    for the review comment."""
+    try:
+        names = git_util.run_git(wt, ["diff", "--cached", "--name-only"],
+                                 timeout=30).stdout.splitlines()
+    except git_util.GitCommandError:
+        names = []
+    subprocess.run(["git", "reset", "--quiet"], cwd=str(wt),
+                   capture_output=True, timeout=60)
+    log.emit("ticket_pr_comment_leftover_not_committed",
+        f"{_label(ticket['key'], ts)} \u00b7 {pr['repo']}: the fix run made its own commit and left "
+        f"{', '.join(names[:5]) or 'files'} behind; not adding them to the PR",
+        links={"detail": f"{base_url}/tickets/{ticket['key']}", "comment": comment.get("html_url", "")},
+        meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"],
+              "files": names})
+
+
+def _commit_on_branch(wt: Path, sha: str) -> bool:
+    """Whether `sha` is still reachable from the worktree's HEAD."""
+    return bool(sha) and git_util.run_git_status(
+        wt, ["merge-base", "--is-ancestor", sha, "HEAD"], timeout=30).returncode == 0
+
+
+def _fix_reached_remote(wt: Path, branch: str, sha: str) -> bool:
+    """Whether the fix this comment is waiting on is now on the remote.
+
+    A push reporting success proves only that git had nothing to reject. A
+    worktree rebuilt from origin loses a local-only commit, and the push then
+    succeeds with nothing to send."""
+    if sha:
+        return git_util.run_git_status(
+            wt, ["merge-base", "--is-ancestor", sha, f"origin/{branch}"],
+            timeout=30).returncode == 0
+    counted = git_util.run_git_status(
+        wt, ["rev-list", "--count", f"origin/{branch}..HEAD"], timeout=30)
+    return counted.returncode == 0 and counted.stdout.strip() == "0"
+
+
+def _push_comment_branch(platform, wt, branch: str, ticket: dict, ts: dict,
+                         pr: dict, base_url: str) -> bool:
+    """Push the comment fixes now. A commit that stays local is invisible to
+    the reviewer, and a scan that is cut short before its final push strands
+    every fix it made."""
+    pushed = platform.push_branch(wt, branch)
+    if pushed.get("ok"):
+        return True
+    log.emit("ticket_pr_comment_push_failed",
+        f"{_label(ticket['key'], ts)} \u00b7 {pr['repo']}: Comment fixes committed but push failed; "
+        f"leaving comments unresolved: {pushed.get('error', '')[:100]}",
+        links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+        meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"],
+              "error": pushed.get("error", "")})
+    return False
+
+
+def _commit_pr_comment_changes(worktree: Path, ticket_key: str, message: str,
+                               exclude=()) -> tuple[git_util.CommitOutcome, str]:
     """Use the ticket pipeline's diagnostic-preserving commit/repair path.
 
     Kept as a small seam here so the comment workflow does not duplicate the
@@ -2245,7 +2505,7 @@ def _commit_pr_comment_changes(worktree: Path, ticket_key: str,
     """
     from core.tasks.tickets import commit_repo_changes
 
-    return commit_repo_changes(worktree, ticket_key, message)
+    return commit_repo_changes(worktree, ticket_key, message, exclude=exclude)
 
 
 def _recheck_pr_failed(config, ticket, ts, base_url) -> dict:
@@ -2369,180 +2629,6 @@ def _issue_comment_floor(issue_comments: list[dict]) -> int:
     return max(old_ids) if old_ids else 0
 
 
-ANSWERED_ENTRY_STATUSES = ("addressed", "replied")
-OPEN_ENTRY_STATUSES = ("new", "fix_failed", "needs_reply")
-RECONCILE_READ_KEY = "_comments_read_ok"
-RECONCILE_OWED_KEY = "_comments_owed"
-
-
-def _unresolved_comment_row(c: dict) -> dict:
-    return {
-        "url": c.get("html_url", ""),
-        "loc": f"{c.get('path', '')}:{c.get('line', '')}".strip(":"),
-        "author": c.get("author_name") or c.get("author_id", ""),
-        "snippet": (c.get("body", "") or "")[:280],
-    }
-
-
-def comment_created_at(comment: dict) -> str:
-    return comment.get("created_at") or comment.get("created_on") or ""
-
-
-def comment_key(repo: str, pr_id, comment_id, created_at: str) -> tuple:
-    """The identity a comment is tracked by inside one ticket.
-
-    The number alone does not name a comment. A ticket can carry several
-    pull requests that number their comments from the same sequence, and on
-    one pull request a review comment, a review body and an issue comment
-    come from three sequences that overlap. The creation time completes the
-    identity, which is the same answer latest_pr_comments already gives: the
-    platform reports the same one for a comment on every scan, and two
-    comments that share a number were not written at the same instant."""
-    return (repo, pr_id, str(comment_id), created_at or "")
-
-
-def _entry_key(entry: dict) -> tuple:
-    return comment_key(entry.get("pr_repo"), entry.get("pr_id"),
-                       entry.get("id"), entry.get("created_at") or "")
-
-
-def _match_open_entry_keys(entry_keys: set, reported: set) -> set:
-    """Resolve open entry keys against the comments the platform reported.
-
-    An entry written before the creation time was recorded carries an empty
-    one, so it names its comment by number alone and cannot be told from a
-    later comment that reuses the number. Only open rows are widened to
-    every reported comment with that number: the worst that costs is a
-    merge held for a comment that was already answered. Widening an
-    answered row the same way would cancel a comment nobody has read, so
-    answered rows are matched exactly and a legacy one cancels nothing.
-
-    Of the 473 entries on disk on 2026-09-21, two carry no time and both are
-    needs_reply, so no answered row loses a match to this rule today."""
-    exact = {k for k in entry_keys if k[3]}
-    numbers = {k[:3] for k in entry_keys if not k[3]}
-    if not numbers:
-        return exact
-    return exact | {k for k in reported if k[:3] in numbers}
-
-
-def _owed_comment_keys(pr_comments: list[dict], detected_now: set,
-                       unresolved_now: set) -> set:
-    """The comments still owed an answer after this poll.
-
-    A comment counts when the platform still reports it unresolved and
-    frshty has not finished with it: either this poll detected it, or an
-    earlier poll left its entry open. An entry that reached 'addressed' or
-    'replied' cancels every earlier open entry for the same comment, because
-    pr_comments.json appends one entry per poll rather than updating in
-    place. Comments the engine baselined and never opened an entry for are
-    not owed: the engine already decided not to act on them, and counting
-    them would hold every merge for history the loop will never touch."""
-    rows = [e for e in pr_comments if isinstance(e, dict)]
-    answered = {_entry_key(e) for e in rows
-                if e.get("status") in ANSWERED_ENTRY_STATUSES and e.get("created_at")}
-    open_entries = _match_open_entry_keys(
-        {_entry_key(e) for e in rows
-         if e.get("status") in OPEN_ENTRY_STATUSES}, unresolved_now)
-    return ((detected_now | open_entries) & unresolved_now) - answered
-
-
-def _comments_owed(pr_comments: list[dict], detected_now: set,
-                   unresolved_now: set) -> int:
-    return len(_owed_comment_keys(pr_comments, detected_now, unresolved_now))
-
-
-def pr_comments_readable(config, ts: dict) -> bool:
-    """Whether the registered-comment history can be believed.
-
-    _load_pr_comments answers an unreadable file with an empty list so it
-    never raises into a caller. An empty history reads as "nothing was ever
-    owed", so the reconciliation has to ask this separately or a truncated
-    file would release the merge gate. A file that is not there yet is not a
-    loss: no comment has been registered, and holding on it would deadlock
-    every ticket whose file is absent with no way to write one."""
-    path = _pr_comments_path(config, ts.get("slug") or "")
-    if not path.exists():
-        return True
-    try:
-        entries = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return False
-    return isinstance(entries, list) and all(isinstance(e, dict) for e in entries)
-
-
-def _attempt_key(entry: dict) -> str:
-    return "/".join(str(part) for part in _entry_key(entry))
-
-
-def _count_fix_failure(entry: dict, comment_fix_attempts: dict, pr_key: str) -> int:
-    """Record one failed attempt against a comment and return the new count."""
-    attempt_key = _attempt_key(entry)
-    attempts = comment_fix_attempts.get(attempt_key, 0) + 1
-    comment_fix_attempts[attempt_key] = attempts
-    entry["status"] = "fix_failed"
-    entry["attempts"] = attempts
-    return attempts
-
-
-def _hold_fix_attempt(entry: dict, comment_fix_attempts: dict, pr_key: str) -> int:
-    """Record a failure the comment did not cause, without spending its budget.
-
-    A worktree that is missing or dirty says nothing about the comment. The
-    fix budget is two, so charging it would cap the comment after two polls
-    in that state, advance the cursor past it, and strand it below the
-    cursor even after the worktree came back. The entry is still a failure,
-    so the cursor holds and the comment is read again."""
-    attempts = comment_fix_attempts.get(_attempt_key(entry), 0)
-    entry["status"] = "fix_failed"
-    entry["attempts"] = attempts
-    return attempts
-
-
-def _comment_entry(comment: dict, pr: dict) -> dict:
-    return {
-        "id": comment["id"],
-        "pr_repo": pr["repo"],
-        "pr_id": pr["id"],
-        "body": comment["body"],
-        "path": comment.get("path"),
-        "line": comment.get("line"),
-        "diff_hunk": comment.get("diff_hunk", ""),
-        "created_at": comment_created_at(comment),
-        "status": "new",
-        "suggested_reply": "",
-    }
-
-
-def _hold_batch(pr_comments: list[dict], new_comments: list[dict], pr: dict,
-                comment_fix_attempts: dict, pr_key: str) -> None:
-    """Record every comment in this batch as owed, without touching it.
-
-    The worktree is what the whole path needs: the fix runs in it, and the
-    drafted reply reads it. When it is unusable nothing here can be done, so
-    the batch is held before the classifier runs rather than after. Holding
-    after it would pay for a model call on every poll for as long as the
-    worktree stayed unusable, and the cursor never advances during a hold."""
-    for comment in new_comments:
-        entry = _comment_entry(comment, pr)
-        _hold_fix_attempt(entry, comment_fix_attempts, pr_key)
-        pr_comments.append(entry)
-
-
-def _worktree_is_dirty(worktree) -> bool:
-    """Whether a comment fix must refuse to start here.
-
-    git add -A stages whatever was already in the worktree and credits it to
-    the comment. On django-drf-app 203 a stray Pipfile landed in a commit
-    that answered a comment about an attachment id. A ticket worktree holds
-    uncommitted ticket work, so the only safe start is a clean one. A status
-    read that fails is treated as dirty: an unknown tree is not a clean one."""
-    try:
-        return git_util.is_dirty(worktree)
-    except git_util.GitCommandError:
-        return True
-
-
 def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
     platform = make_platform(config)
     prs = ts.get("prs", [])
@@ -2584,14 +2670,12 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
         log.emit("ticket_pr_comments_history_unreadable",
             f"{_label(ticket['key'], ts)}: pr_comments.json cannot be read; holding the comment pass",
             links={"detail": f"{base_url}/tickets/{ticket['key']}"},
-            meta={"ticket": ticket["key"],
-                  "path": str(_pr_comments_path(config, slug))})
+            meta={"ticket": ticket["key"], "path": str(_pr_comments_path(config, slug))})
         ts[RECONCILE_READ_KEY] = False
         ts[RECONCILE_OWED_KEY] = 0
         return ts
     read_ok = True
-    unresolved_now: set = set()
-    detected_now: set = set()
+    owed_now = 0
     last_comment_ids = ts.get("last_comment_ids", {})
     last_issue_comment_ids = ts.get("last_issue_comment_ids", {})
     comment_fix_attempts = ts.setdefault("comment_fix_attempts", {})
@@ -2613,33 +2697,36 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
         unresolved = [c for c in comments
                       if not c.get("resolved") and c["author_id"] != user_id]
         pr["unresolved_comments"] = [
-            _unresolved_comment_row(c) for c in unresolved
-            if not c.get("parent_id")
+            _unresolved_comment_row(c) for c in unresolved if not c.get("parent_id")
         ]
-        unresolved_now.update(
-            comment_key(pr["repo"], pr["id"], c["id"], comment_created_at(c))
-            for c in unresolved)
         issue_comments = [c for c in comments if c.get("comment_kind") == "issue_comment"]
         if issue_comments and pr_key not in last_issue_comment_ids:
             last_issue_comment_ids[pr_key] = _issue_comment_floor(issue_comments)
         issue_floor = last_issue_comment_ids.get(pr_key, 0)
-        new_comments = [
+        pending = [
             c for c in comments
             if c["author_id"] != user_id
             and c["id"] > (issue_floor if c.get("comment_kind") == "issue_comment" else last_seen)
         ]
-
-        detected_now.update(
-            comment_key(pr["repo"], pr["id"], c["id"], comment_created_at(c))
-            for c in new_comments)
+        latest_entries = _latest_comment_entries(pr_comments, pr["repo"], pr["id"],
+                                                 _live_comment_index(comments))
+        settled_keys = {k for k, e in latest_entries.items() if _comment_settled(e)}
+        unpushed_keys = {k for k, e in latest_entries.items()
+                         if e.get("status") == "fix_unpushed"}
+        new_comments = [c for c in pending if _comment_key(c) not in settled_keys]
 
         if not new_comments:
+            if pending:
+                _advance_comment_cursors(pending, set(), pr_key,
+                                         last_comment_ids, last_issue_comment_ids)
+            owed_now += _owed_on_pr(unresolved, [], [], latest_entries)
             continue
 
         log.emit("ticket_pr_comments_detected",
             f"{_label(ticket['key'], ts)} · {pr['repo']}: {len(new_comments)} new comment(s)",
             links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
             meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"], "count": len(new_comments),
+                  "settled_skipped": len(pending) - len(new_comments),
                   "comments": [
                       {"comment_id": c["id"],
                        "author": c.get("author_id", ""),
@@ -2647,26 +2734,6 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                        "snippet": c["body"][:120]}
                       for c in new_comments
                   ]})
-
-        repos = get_repos(config)
-        repo_match = next((r for r in repos if r["name"] == pr["repo"]), None)
-        wt = ticket_worktree_path(config, slug, pr["repo"]) if repo_match else None
-        if wt is None or not wt.is_dir():
-            _hold_batch(pr_comments, new_comments, pr, comment_fix_attempts, pr_key)
-            log.emit("ticket_pr_comment_worktree_missing",
-                f"{_label(ticket['key'], ts)} · {pr['repo']}: No ticket worktree; holding {len(new_comments)} comment(s)",
-                links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
-                meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"],
-                      "count": len(new_comments)})
-            continue
-        if _worktree_is_dirty(wt):
-            _hold_batch(pr_comments, new_comments, pr, comment_fix_attempts, pr_key)
-            log.emit("ticket_pr_comment_worktree_dirty",
-                f"{_label(ticket['key'], ts)} · {pr['repo']}: Ticket worktree is dirty; holding {len(new_comments)} comment(s)",
-                links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
-                meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"],
-                      "count": len(new_comments)})
-            continue
 
         batch_prompt = (
             "Triage each PR review comment using the CODE it is anchored to. "
@@ -2697,20 +2764,76 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                 f"{_label(ticket['key'], ts)}: Could not classify {len(new_comments)} review comment(s) (LLM empty/unparseable), will retry",
                 links={"detail": f"{base_url}/tickets/{ticket['key']}"},
                 meta={"ticket": ticket["key"], "pr_id": pr["id"], "count": len(new_comments)})
+            owed_now += _owed_on_pr(unresolved, new_comments, [], latest_entries)
             continue
 
-        to_resolve: list[tuple[dict, dict]] = []
+        unclassified = [c for i, c in enumerate(new_comments) if i not in classifications]
+        if unclassified:
+            log.emit("ticket_pr_comment_classify_partial",
+                f"{_label(ticket['key'], ts)}: {len(unclassified)} comment(s) missing from the "
+                f"classifier reply; leaving them for the next scan",
+                links={"detail": f"{base_url}/tickets/{ticket['key']}"},
+                meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"],
+                      "comment_ids": [c["id"] for c in unclassified]})
+
+        repos = get_repos(config)
+        repo_match = next((r for r in repos if r["name"] == pr["repo"]), None)
+        wt = ticket_worktree_path(config, slug, pr["repo"]) if repo_match else None
+        to_resolve = []
+        resolvable_ids = {c["id"]: c.get("resolvable", True) for c in new_comments}
         made_commit = False
+        batch_entries: list[dict] = []
+        pushed_any = False
+        push_failed = False
 
         for idx, comment in enumerate(new_comments):
-            actionable = classifications.get(idx, False)
+            if idx not in classifications:
+                continue
+            actionable = classifications[idx]
 
-            entry = _comment_entry(comment, pr)
+            entry = {
+                "id": comment["id"],
+                "comment_kind": _comment_kind(comment.get("comment_kind")),
+                "pr_repo": pr["repo"],
+                "pr_id": pr["id"],
+                "body": comment["body"],
+                "path": comment.get("path"),
+                "line": comment.get("line"),
+                "diff_hunk": comment.get("diff_hunk", ""),
+                "created_at": comment.get("created_at") or comment.get("created_on") or "",
+                "status": "new",
+                "suggested_reply": "",
+            }
 
             log.emit("ticket_pr_comment_registered",
                 f"{_label(ticket['key'], ts)} · {pr['repo']}: Comment registered — {comment['body'][:80]}",
                 links={"detail": f"{base_url}/tickets/{ticket['key']}", "comment": comment.get("html_url", "")},
                 meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"]})
+
+            held = latest_entries.get(_comment_key(comment)) or {}
+            held_sha = held.get("fix_commit") or ""
+            if (_comment_key(comment) in unpushed_keys
+                    and wt is not None and wt.is_dir()
+                    and (not held_sha or _commit_on_branch(wt, held_sha))):
+                held_branch = pr.get("branch") or ts["branch"]
+                entry["status"] = "fix_unpushed"
+                if held_sha:
+                    entry["fix_commit"] = held_sha
+                made_commit = True
+                if (_push_comment_branch(platform, wt, held_branch, ticket, ts, pr, base_url)
+                        and _fix_reached_remote(wt, held_branch, held_sha)):
+                    pushed_any = True
+                    entry["status"] = "addressed"
+                    to_resolve.append(comment["id"])
+                    log.emit("ticket_pr_comment_fix_delivered",
+                        f"{_label(ticket['key'], ts)} \u00b7 {pr['repo']}: the held fix reached the remote \u2014 {comment['body'][:60]}",
+                        links={"detail": f"{base_url}/tickets/{ticket['key']}", "comment": comment.get("html_url", "")},
+                        meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"]})
+                else:
+                    push_failed = True
+                pr_comments.append(entry)
+                batch_entries.append(entry)
+                continue
 
             suggested = ""
             if not actionable:
@@ -2722,7 +2845,7 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                         links={"detail": f"{base_url}/tickets/{ticket['key']}", "comment": comment.get("html_url", "")},
                         meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"], "draft_reply": suggested[:200]})
 
-            if actionable:
+            if actionable and wt is not None and wt.is_dir():
                 branch_name = pr.get("branch") or ts["branch"]
                 subprocess.run(["git", "pull", "--rebase", "origin", branch_name], cwd=str(wt), capture_output=True, timeout=60)
                 try:
@@ -2740,8 +2863,16 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                     + KEEP_GREEN_RULE + "\n\n"
                     + COMMIT_SUBJECT_RULE
                 )
+                pre_dirty = _worktree_dirty_paths(wt)
                 fix_result = run_claude_code(context, cwd=wt)
-                subprocess.run(["git", "add", "-A"], cwd=str(wt), capture_output=True, timeout=60)
+                staging = git_util.stage_all(wt, pre_dirty)
+                if staging.returncode != 0:
+                    log.emit("ticket_pr_comment_stage_failed",
+                        f"{_label(ticket['key'], ts)} \u00b7 {pr['repo']}: could not stage the fix run's changes; "
+                        f"a produced fix reads as no change: {(staging.stderr or '').strip()[:200]}",
+                        links={"detail": f"{base_url}/tickets/{ticket['key']}"},
+                        meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"],
+                              "returncode": staging.returncode})
                 staged = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=str(wt)).returncode != 0
                 try:
                     head_after = git_util.run_git(wt, ["rev-parse", "HEAD"], timeout=30).stdout.strip()
@@ -2753,11 +2884,24 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                 agent_committed = bool(head_before) and bool(head_after) and head_after != head_before
                 if agent_committed:
                     made_commit = True
+                ahead = ""
+                if not staged:
+                    try:
+                        ahead = git_util.run_git(wt, ["rev-list", "--count", f"origin/{branch_name}..HEAD"], timeout=30).stdout.strip()
+                    except git_util.GitCommandError as e:
+                        ahead = ""
+                        log.emit("ticket_pr_comment_git_read_failed",
+                            f"{_label(ticket['key'], ts)} · {pr['repo']}: rev-list --count failed, unpushed commits unknown: {e}",
+                            meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"]})
+                    if ahead.isdigit() and int(ahead) > 0:
+                        made_commit = True
                 commit_rc = None
                 commit_outcome = None
                 commit_route = None
                 fix_ok = False
-                if fix_result and staged:
+                if fix_result and staged and agent_committed:
+                    _drop_unrelated_leftovers(wt, ticket, ts, pr, comment, base_url)
+                elif fix_result and staged:
                     commit_outcome, commit_route = _commit_pr_comment_changes(
                         wt,
                         ticket["key"],
@@ -2768,13 +2912,14 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                             comment["body"],
                             ticket_key=ticket["key"],
                         ),
+                        exclude=pre_dirty,
                     )
                     commit_rc = commit_outcome.exit_code
                 if fix_result and ((commit_outcome is not None and commit_outcome.ok)
-                                   or (agent_committed and not staged)):
+                                   or agent_committed):
                     fix_ok = True
                     made_commit = True
-                    to_resolve.append((comment, entry))
+                    to_resolve.append(comment["id"])
                     entry["status"] = "addressed"
                     sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(wt), capture_output=True, text=True, timeout=30).stdout.strip()
                     stat = subprocess.run(["git", "show", "--stat", "--format=", "HEAD"], cwd=str(wt), capture_output=True, text=True, timeout=30).stdout.strip()
@@ -2788,19 +2933,18 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                         links={"detail": f"{base_url}/tickets/{ticket['key']}", "commit": commit_url, "comment": comment.get("html_url", "")},
                         meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"], "commit": sha, "files": changed_files,
                               "agent_committed": bool(agent_committed and commit_rc is None)})
-                elif fix_result and not staged:
-                    try:
-                        ahead = git_util.run_git(wt, ["rev-list", "--count", f"origin/{branch_name}..HEAD"], timeout=30).stdout.strip()
-                    except git_util.GitCommandError as e:
-                        ahead = ""
-                        log.emit("ticket_pr_comment_git_read_failed",
-                            f"{_label(ticket['key'], ts)} · {pr['repo']}: rev-list --count failed, unpushed commits unknown: {e}",
-                            meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"]})
-                    if ahead.isdigit() and int(ahead) > 0:
-                        made_commit = True
+                    if _push_comment_branch(platform, wt, branch_name, ticket, ts, pr, base_url):
+                        pushed_any = True
+                    else:
+                        push_failed = True
+                        entry["status"] = "fix_unpushed"
 
                 if not fix_ok:
-                    attempts = _count_fix_failure(entry, comment_fix_attempts, pr_key)
+                    entry["status"] = "fix_failed"
+                    attempt_key = f"{pr_key}/{comment['id']}"
+                    attempts = comment_fix_attempts.get(attempt_key, 0) + 1
+                    comment_fix_attempts[attempt_key] = attempts
+                    entry["attempts"] = attempts
                     if commit_outcome is not None:
                         failure = (
                             f"Commit blocked during {commit_outcome.phase} "
@@ -2838,26 +2982,20 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                     meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"]})
 
             pr_comments.append(entry)
+            batch_entries.append(entry)
 
         if made_commit:
-            pushed = platform.push_branch(wt, pr.get("branch") or ts["branch"])
-            if not pushed.get("ok"):
-                log.emit("ticket_pr_comment_push_failed",
-                    f"{_label(ticket['key'], ts)} · {pr['repo']}: Comment fixes committed but push failed; leaving comments unresolved: {pushed.get('error', '')[:100]}",
-                    links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
-                    meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"], "error": pushed.get("error", "")})
-                to_resolve = []
-                for pushed_entry in pr_comments[-len(new_comments):]:
-                    if pushed_entry["status"] != "addressed":
-                        continue
-                    attempts = _count_fix_failure(pushed_entry, comment_fix_attempts, pr_key)
-                    if attempts >= MAX_PR_COMMENT_FIX_ATTEMPTS:
-                        log.emit("ticket_pr_comment_fix_capped",
-                            f"{_label(ticket['key'], ts)}: Giving up on review comment after {attempts} attempts: {pushed_entry['body'][:80]}",
-                            links={"detail": f"{base_url}/tickets/{ticket['key']}"},
-                            meta={"ticket": ticket["key"],
-                                  "comment_id": pushed_entry["id"],
-                                  "attempts": attempts})
+            if not pushed_any and not push_failed:
+                if not _push_comment_branch(platform, wt, pr.get("branch") or ts["branch"],
+                                            ticket, ts, pr, base_url):
+                    push_failed = True
+                    for e in batch_entries:
+                        if e["status"] == "addressed":
+                            e["status"] = "fix_unpushed"
+            if push_failed:
+                undelivered = {e["id"] for e in batch_entries
+                               if e["status"] == "fix_unpushed"}
+                to_resolve = [cid for cid in to_resolve if cid not in undelivered]
             ts.pop("ci_passed", None)
             ts.pop("checks_started_at", None)
             ts.pop("ci_unrelated_checks", None)
@@ -2865,37 +3003,32 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                 for claim in ("proof", "ci"):
                     freshness.invalidate(ticket["key"], claim,
                                          "ticket_pr_comment_fixed")
-        for comment, resolved_entry in to_resolve:
-            if not comment.get("resolvable", True):
+        entry_by_id = {e["id"]: e for e in batch_entries}
+        for cid in to_resolve:
+            if not resolvable_ids.get(cid, True):
                 continue
-            resolution = platform.resolve_comment(pr["repo"], pr["id"], comment["id"])
+            resolution = platform.resolve_comment(pr["repo"], pr["id"], cid)
             if isinstance(resolution, dict) and resolution.get("status") != "resolved":
-                attempts = _count_fix_failure(resolved_entry, comment_fix_attempts, pr_key)
+                resolved_entry = entry_by_id.get(cid)
+                if resolved_entry is not None:
+                    resolved_entry["status"] = "fix_unresolved"
                 log.emit("ticket_pr_comment_resolve_failed",
-                    f"{_label(ticket['key'], ts)} · {pr['repo']}: Fix pushed but the thread would not resolve; comment stays owed — {resolution.get('detail', '')[:100]}",
+                    f"{_label(ticket['key'], ts)} · {pr['repo']}: Fix pushed but the thread would not resolve; comment stays owed — {(resolution.get('detail') or '')[:100]}",
                     links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
                     meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"],
-                          "comment_id": comment["id"], "attempts": attempts,
+                          "comment_id": cid,
                           "detail": (resolution.get("detail") or "")[:500]})
 
-        batch_entries = pr_comments[-len(new_comments):]
-        retryable_failures = [
-            e for e in batch_entries
-            if e["status"] == "fix_failed" and e.get("attempts", 0) < MAX_PR_COMMENT_FIX_ATTEMPTS
-        ]
-        all_classified = all(i in classifications for i in range(len(new_comments)))
-        if not retryable_failures and all_classified:
-            new_issue = [c["id"] for c in new_comments if c.get("comment_kind") == "issue_comment"]
-            new_review = [c["id"] for c in new_comments if c.get("comment_kind") != "issue_comment"]
-            if new_review:
-                last_comment_ids[pr_key] = max(new_review)
-            if new_issue:
-                last_issue_comment_ids[pr_key] = max(new_issue)
+        open_keys = {_comment_key(c) for c in unclassified}
+        open_keys |= {_comment_key(e) for e in batch_entries if not _comment_settled(e)}
+        _advance_comment_cursors(pending, open_keys, pr_key,
+                                 last_comment_ids, last_issue_comment_ids)
+        owed_now += _owed_on_pr(unresolved, new_comments, batch_entries, latest_entries)
 
     ts["last_comment_ids"] = last_comment_ids
     ts["last_issue_comment_ids"] = last_issue_comment_ids
     ts[RECONCILE_READ_KEY] = read_ok
-    ts[RECONCILE_OWED_KEY] = _comments_owed(pr_comments, detected_now, unresolved_now)
+    ts[RECONCILE_OWED_KEY] = owed_now
     _save_pr_comments(config, slug, pr_comments)
     for entry, comment, pr in to_substantiate:
         entry["defence"] = _substantiate_reply(config, slug, ticket, comment, pr, entry["suggested_reply"])
@@ -3140,25 +3273,6 @@ def _sync_pr_base(config, ticket, ts, base_url) -> dict:
     return ts
 
 
-def merge_hold_reason(ts: dict) -> str:
-    """Why the merge must wait for the comment reconciliation, or "".
-
-    _check_in_review writes both keys on every in_review poll, before the
-    merge is considered. Absent keys mean the reconciliation did not run for
-    this ticket state, which is not evidence that nothing is owed, so the
-    merge is held. A comment read that failed is held for the same reason:
-    an empty comment list and an unreachable platform are not the same fact.
-    """
-    if RECONCILE_READ_KEY not in ts or RECONCILE_OWED_KEY not in ts:
-        return "comments not reconciled"
-    if not ts.get(RECONCILE_READ_KEY):
-        return "comment read failed"
-    owed = ts.get(RECONCILE_OWED_KEY) or 0
-    if owed:
-        return f"{owed} comment(s) owed an answer"
-    return ""
-
-
 def reconcile_comments_now(config, ts: dict) -> tuple[str, list[dict]]:
     """Read the comments again and say what is owed, changing nothing.
 
@@ -3171,40 +3285,36 @@ def reconcile_comments_now(config, ts: dict) -> tuple[str, list[dict]]:
     try:
         platform = make_platform(config)
         user_id = platform.self_id()
-        read_ok = pr_comments_readable(config, ts)
+        if not pr_comments_readable(config, ts):
+            return "comment history unreadable", []
         pr_comments = _load_pr_comments(config, slug) if slug else []
-        unresolved_now: set = set()
-        detected: set = set()
-        rows: dict = {}
-        review_floors = ts.get("last_comment_ids") or {}
-        issue_floors = ts.get("last_issue_comment_ids") or {}
+        owed, rows = 0, []
         for pr in ts.get("prs", []):
             fetched = platform.get_pr_comments(pr["repo"], pr["id"])
             if fetched is None:
-                read_ok = False
-                continue
+                return "comment read failed", []
             pr_key = f"{pr['repo']}/{pr['id']}"
-            for c in fetched:
-                if c.get("resolved") or c["author_id"] == user_id:
-                    continue
-                key = comment_key(pr["repo"], pr["id"], c["id"],
-                                  comment_created_at(c))
-                unresolved_now.add(key)
-                rows[key] = _unresolved_comment_row(c)
-                floor = (issue_floors.get(pr_key, 0)
-                         if c.get("comment_kind") == "issue_comment"
-                         else review_floors.get(pr_key, 0))
-                if c["id"] > floor:
-                    detected.add(key)
+            last_seen = (ts.get("last_comment_ids") or {}).get(pr_key, 0)
+            issue_floor = (ts.get("last_issue_comment_ids") or {}).get(pr_key, 0)
+            unresolved = [c for c in fetched
+                          if not c.get("resolved") and c["author_id"] != user_id]
+            detected = [
+                c for c in unresolved
+                if c["id"] > (issue_floor
+                              if _comment_kind(c.get("comment_kind")) == "issue_comment"
+                              else last_seen)
+            ]
+            latest_entries = _latest_comment_entries(
+                pr_comments, pr["repo"], pr["id"], _live_comment_index(fetched))
+            before = owed
+            owed += _owed_on_pr(unresolved, detected, [], latest_entries)
+            if owed > before:
+                rows += [_unresolved_comment_row(c) for c in unresolved]
     except Exception as e:
         return f"comment read failed: {type(e).__name__}", []
-    if not read_ok:
-        return "comment read failed", []
-    owed = _owed_comment_keys(pr_comments, detected, unresolved_now)
     if not owed:
         return "", []
-    return (f"{len(owed)} comment(s) owed an answer",
-            [rows[k] for k in owed if k in rows])
+    return f"{owed} comment(s) owed an answer", rows
 
 
 def _merge(config, ticket, ts, base_url, force: bool = False) -> dict:

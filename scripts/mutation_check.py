@@ -310,9 +310,8 @@ MUTATIONS = [
         "target": "tests/features/test_tickets.py::TestCheckInReviewPushFailure"
                   "::test_cursor_holds_when_push_is_rejected",
         "path": "features/tickets.py",
-        "old": "                    attempts = _count_fix_failure("
-               "pushed_entry, comment_fix_attempts, pr_key)",
-        "new": "                    attempts = 0",
+        "old": '                        entry["status"] = "fix_unpushed"',
+        "new": '                        entry["status"] = "addressed"',
     },
     {
         "label": "no_change_resolves_thread",
@@ -320,13 +319,13 @@ MUTATIONS = [
         "target": "tests/features/test_tickets.py::TestCheckInReviewSelfCommittedFix"
                   "::test_clean_no_change_run_does_not_resolve",
         "path": "features/tickets.py",
-        "old": "                    if ahead.isdigit() and int(ahead) > 0:\n"
-               "                        made_commit = True",
-        "new": "                    if ahead.isdigit() and int(ahead) > 0:\n"
-               "                        made_commit = True\n"
-               "                    fix_ok = True\n"
-               "                    to_resolve.append((comment, entry))\n"
-               '                    entry["status"] = "addressed"',
+        "old": "                commit_rc = None\n"
+               "                commit_outcome = None",
+        "new": "                if fix_result and not staged:\n"
+               "                    to_resolve.append(comment[\"id\"])\n"
+               '                    entry["status"] = "addressed"\n'
+               "                commit_rc = None\n"
+               "                commit_outcome = None",
     },
     {
         "label": "failed_read_reads_as_empty",
@@ -336,11 +335,9 @@ MUTATIONS = [
                   "::test_the_pull_request_is_skipped_and_nothing_advances",
         "path": "features/tickets.py",
         "old": "        fetched = platform.get_pr_comments(pr[\"repo\"], pr[\"id\"])\n"
-               "        if fetched is None:\n"
-               "            read_ok = False",
+               "        if fetched is None:",
         "new": "        fetched = platform.get_pr_comments(pr[\"repo\"], pr[\"id\"]) or []\n"
-               "        if fetched is None:\n"
-               "            read_ok = False",
+               "        if fetched is None:",
     },
     {
         "label": "resolve_failure_ignored",
@@ -350,18 +347,22 @@ MUTATIONS = [
                   "::test_the_entry_is_fix_failed_and_the_cursor_holds",
         "path": "features/tickets.py",
         "old": '            if isinstance(resolution, dict) and resolution.get("status") != "resolved":\n'
-               "                attempts = _count_fix_failure(resolved_entry, comment_fix_attempts, pr_key)",
+               "                resolved_entry = entry_by_id.get(cid)",
         "new": "            if False:\n"
-               "                attempts = _count_fix_failure(resolved_entry, comment_fix_attempts, pr_key)",
+               "                resolved_entry = entry_by_id.get(cid)",
     },
     {
         "label": "dirty_worktree_fix_runs_anyway",
-        "gate": "a comment fix refuses to start in a dirty worktree",
-        "target": "tests/features/test_ticket_comment_fail_closed.py"
-                  "::TestADirtyWorktreeRefusesTheFix::test_the_run_never_starts",
-        "path": "features/tickets.py",
-        "old": "        if _worktree_is_dirty(wt):",
-        "new": "        if False:",
+        "gate": "an own-PR comment fix refuses to start in a dirty worktree",
+        "target": "tests/features/test_own_prs.py::TestCommitFix"
+                  "::test_a_dirty_worktree_refuses_the_run",
+        "path": "features/own_prs.py",
+        "old": "            if _worktree_is_dirty(worktree):\n"
+               '                reason = "worktree is dirty before the fix run"\n'
+               "                log.emit(\"pr_comment_worktree_dirty\", f\"{pr_ref}: {reason} — {comment['body'][:80]}\", links=links, meta={**meta, \"reason\": reason})",
+        "new": "            if False:\n"
+               '                reason = "worktree is dirty before the fix run"\n'
+               "                log.emit(\"pr_comment_worktree_dirty\", f\"{pr_ref}: {reason} — {comment['body'][:80]}\", links=links, meta={**meta, \"reason\": reason})",
     },
     {
         "label": "manual_comment_marked_terminal",

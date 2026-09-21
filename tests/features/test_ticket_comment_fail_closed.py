@@ -65,16 +65,14 @@ class TicketCommentHarness:
         }
         return ts, ticket, platform, bb_config
 
-    def _run(self, bb_config, ticket, ts, wt, platform, claude, classifier=None):
+    def _run(self, bb_config, ticket, ts, wt, platform, claude):
         with patch("features.tickets.make_platform", return_value=platform), \
              patch("features.tickets.get_repos",
                    return_value=[{"name": "repo", "path": wt.parent}]), \
              patch("features.tickets.ticket_worktree_path", return_value=wt), \
              patch("features.tickets.run_balanced",
-                   return_value='{"results": [{"i": 0, "actionable": true}]}') as batch, \
+                   return_value='{"results": [{"i": 0, "actionable": true}]}'), \
              patch("features.tickets.run_claude_code", side_effect=claude):
-            if classifier is not None:
-                classifier.append(batch)
             return tickets._check_in_review(bb_config, ticket, ts, "http://base")
 
     def _fixes_app_py(self, wt):
@@ -138,10 +136,11 @@ class TestAFailedResolveLeavesTheCommentOwed(TicketCommentHarness):
         platform.resolve_comment.assert_called_once_with("repo", 99, 100)
         saved = tickets._load_pr_comments(bb_config, slug)
         entry = next(e for e in saved if e["id"] == 100)
-        assert entry["status"] == "fix_failed"
+        assert entry["status"] == "fix_unresolved"
         assert out.get("last_comment_ids", {}).get("repo/99") is None, (
             "a comment whose thread would not resolve must stay eligible"
         )
+        assert out[tickets.RECONCILE_OWED_KEY] == 1
 
     def test_a_successful_resolve_still_settles_the_comment(
         self, fresh_db, fake_config, tmp_state, tmp_path
@@ -256,9 +255,8 @@ class TestNoWorktreeHoldsTheComment(TicketCommentHarness):
     def test_an_actionable_comment_with_no_worktree_holds_the_cursor(
         self, fresh_db, fake_config, tmp_state, tmp_path
     ):
-        """Without a worktree the fix cannot run. The entry used to stay
-        'new', which is not a retryable failure, so the cursor advanced past
-        the comment and nothing ever read it again."""
+        """Without a worktree the fix cannot run. The comment must stay
+        eligible and keep the merge held."""
         slug = "PROJ-1-do-the-thing"
         self._init_git_pair(tmp_path, slug)
         ts, ticket, platform, bb_config = self._setup(fake_config, slug)
@@ -272,93 +270,34 @@ class TestNoWorktreeHoldsTheComment(TicketCommentHarness):
 
         claude.assert_not_called()
         assert out.get("last_comment_ids", {}).get("repo/99") is None
-        saved = tickets._load_pr_comments(bb_config, slug)
-        entry = next(e for e in saved if e["id"] == 100)
-        assert entry["status"] == "fix_failed"
-        assert out.get("comment_fix_attempts", {}) == {}, (
-            "a missing worktree says nothing about the comment; charging it "
-            "caps the comment after two polls and strands it below the cursor"
-        )
-
-    def test_a_missing_worktree_never_spends_the_retry_budget(
-        self, fresh_db, fake_config, tmp_state, tmp_path
-    ):
-        """MAX_PR_COMMENT_FIX_ATTEMPTS is two. Two polls with no worktree
-        used to cap the comment and advance the cursor past it, so restoring
-        the worktree could not bring it back."""
-        slug = "PROJ-1-do-the-thing"
-        self._init_git_pair(tmp_path, slug)
-        ts, ticket, platform, bb_config = self._setup(fake_config, slug)
-
-        for _ in range(tickets.MAX_PR_COMMENT_FIX_ATTEMPTS + 1):
-            with patch("features.tickets.make_platform", return_value=platform), \
-                 patch("features.tickets.get_repos", return_value=[]), \
-                 patch("features.tickets.run_balanced",
-                       return_value='{"results": [{"i": 0, "actionable": true}]}'), \
-                 patch("features.tickets.run_claude_code", return_value=""):
-                ts = tickets._check_in_review(bb_config, ticket, ts, "http://base")
-
-        assert ts.get("last_comment_ids", {}).get("repo/99") is None
-        assert ts.get("comment_fix_attempts", {}) == {}
+        assert out[tickets.RECONCILE_OWED_KEY] == 1
 
 
-class TestADirtyWorktreeRefusesTheFix(TicketCommentHarness):
-    def test_the_run_never_starts(
+class TestADirtyWorktreeIsNotCreditedToTheComment(TicketCommentHarness):
+    def test_a_stray_file_stays_out_of_the_fix_commit(
         self, fresh_db, fake_config, tmp_state, tmp_path
     ):
         """A stray Pipfile was committed as the answer to a comment about an
-        attachment id on django-drf-app 203. git add -A stages whatever was
-        already there, so the run must refuse to start."""
+        attachment id on django-drf-app 203. Only what the run produced may
+        reach the commit; the stray file stays in the worktree."""
         slug = "PROJ-1-do-the-thing"
         wt = self._init_git_pair(tmp_path, slug)
         (wt / "Pipfile").write_text("left over from other work\n")
         ts, ticket, platform, bb_config = self._setup(fake_config, slug)
-        ran = []
 
         def claude(prompt, cwd=None, **kwargs):
-            ran.append(prompt)
+            (wt / "app.py").write_text("fixed\n")
             return "wrote the fix"
 
-        classifier: list = []
-        self._run(bb_config, ticket, ts, wt, platform, claude, classifier)
+        self._run(bb_config, ticket, ts, wt, platform, claude)
 
-        assert ran == [], "the fix must not run against a dirty worktree"
-        assert classifier[0].call_count == 0, (
-            "a worktree that stays dirty would otherwise pay for one model "
-            "call per poll for as long as it stayed dirty"
+        committed = subprocess.run(
+            ["git", "show", "--stat", "--format=", "HEAD"], cwd=str(wt),
+            capture_output=True, text=True).stdout
+        assert "app.py" in committed
+        assert "Pipfile" not in committed, (
+            "the stray file must not be credited to the comment"
         )
-        platform.push_branch.assert_not_called()
-        platform.resolve_comment.assert_not_called()
-        saved = tickets._load_pr_comments(bb_config, slug)
-        entry = next(e for e in saved if e["id"] == 100)
-        assert entry["status"] == "fix_failed"
         status = subprocess.run(["git", "status", "--porcelain"], cwd=str(wt),
                                 capture_output=True, text=True).stdout
         assert "Pipfile" in status, "the stray file must be left where it was"
-
-    def test_a_clean_worktree_runs_the_fix(
-        self, fresh_db, fake_config, tmp_state, tmp_path
-    ):
-        """The control: the same setup without the stray file runs and pushes."""
-        slug = "PROJ-1-do-the-thing"
-        wt = self._init_git_pair(tmp_path, slug)
-        ts, ticket, platform, bb_config = self._setup(fake_config, slug)
-        ran = []
-
-        def claude(prompt, cwd=None, **kwargs):
-            ran.append(prompt)
-            (wt / "app.py").write_text("fixed\n")
-            subprocess.run(["git", "add", "-A"], cwd=str(wt), check=True, capture_output=True)
-            subprocess.run(["git", "commit", "-m", "fix the override"], cwd=str(wt),
-                           check=True, capture_output=True)
-            return "wrote the fix"
-
-        classifier: list = []
-        self._run(bb_config, ticket, ts, wt, platform, claude, classifier)
-
-        assert len(ran) == 1
-        assert platform.push_branch.call_count == 1
-        assert classifier[0].call_count == 1, (
-            "the control: a clean worktree does reach the classifier, so the "
-            "assertion above measures the hold and not the harness"
-        )
