@@ -2357,7 +2357,10 @@ class TestCheckInReviewFixFailedRetry:
                 f"next scan filters it out. got cursor={cursor}, comment_id={c['id']}"
             )
 
-            attempts = ts.get("comment_fix_attempts", {}).get(f"repo/99/{c['id']}", 0)
+            attempt_key = tickets._attempt_key(
+                {"pr_repo": "repo", "pr_id": 99, "id": c["id"],
+                 "created_at": c["created_at"]})
+            attempts = ts.get("comment_fix_attempts", {}).get(attempt_key, 0)
             assert attempts == tickets.MAX_PR_COMMENT_FIX_ATTEMPTS, (
                 f"expected attempts={tickets.MAX_PR_COMMENT_FIX_ATTEMPTS}, "
                 f"got {attempts}"
