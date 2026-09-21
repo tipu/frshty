@@ -310,8 +310,8 @@ MUTATIONS = [
         "target": "tests/features/test_tickets.py::TestCheckInReviewPushFailure"
                   "::test_cursor_holds_when_push_is_rejected",
         "path": "features/tickets.py",
-        "old": '                    pushed_entry["status"] = "fix_failed"',
-        "new": '                    pushed_entry["status"] = "addressed"',
+        "old": '                        entry["status"] = "fix_unpushed"',
+        "new": '                        entry["status"] = "addressed"',
     },
 ]
 
