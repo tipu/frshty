@@ -325,7 +325,7 @@ MUTATIONS = [
         "new": "                    if ahead.isdigit() and int(ahead) > 0:\n"
                "                        made_commit = True\n"
                "                    fix_ok = True\n"
-               '                    to_resolve.append(comment["id"])\n'
+               "                    to_resolve.append((comment, entry))\n"
                '                    entry["status"] = "addressed"',
     },
     {
@@ -350,9 +350,9 @@ MUTATIONS = [
                   "::test_the_entry_is_fix_failed_and_the_cursor_holds",
         "path": "features/tickets.py",
         "old": '            if isinstance(resolution, dict) and resolution.get("status") != "resolved":\n'
-               "                resolved_entry = batch_entry_by_id.get(cid)",
+               "                attempts = _count_fix_failure(resolved_entry, comment_fix_attempts, pr_key)",
         "new": "            if False:\n"
-               "                resolved_entry = batch_entry_by_id.get(cid)",
+               "                attempts = _count_fix_failure(resolved_entry, comment_fix_attempts, pr_key)",
     },
     {
         "label": "dirty_worktree_fix_runs_anyway",

@@ -199,6 +199,41 @@ class TestTheOwedSetCannotBeEmptiedByAccident(TicketCommentHarness):
 
         assert out[tickets.RECONCILE_READ_KEY] is False
 
+    def test_an_unreadable_history_is_not_overwritten(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        """The poll used to load the broken file as [] and save that back, so
+        the second poll saw a readable empty history, found nothing owed and
+        merged. The file has to survive the hold."""
+        slug = "PROJ-1-do-the-thing"
+        wt = self._init_git_pair(tmp_path, slug)
+        ts, ticket, platform, bb_config = self._setup(fake_config, slug, comments=[])
+        path = tickets._pr_comments_path(bb_config, slug)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        broken = '[{"id": 1, "status": "needs_re'
+        path.write_text(broken)
+
+        ts = self._run(bb_config, ticket, ts, wt, platform, lambda *a, **k: None)
+        out = self._run(bb_config, ticket, ts, wt, platform, lambda *a, **k: None)
+
+        assert path.read_text() == broken
+        assert out[tickets.RECONCILE_READ_KEY] is False
+        platform.get_pr_comments.assert_not_called()
+
+    def test_a_history_row_that_is_not_a_record_holds_the_merge(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        slug = "PROJ-1-do-the-thing"
+        wt = self._init_git_pair(tmp_path, slug)
+        ts, ticket, platform, bb_config = self._setup(fake_config, slug, comments=[])
+        path = tickets._pr_comments_path(bb_config, slug)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('["not a record"]')
+
+        out = self._run(bb_config, ticket, ts, wt, platform, lambda *a, **k: None)
+
+        assert out[tickets.RECONCILE_READ_KEY] is False
+
     def test_a_readable_history_does_not_hold_the_merge(
         self, fresh_db, fake_config, tmp_state, tmp_path
     ):
@@ -238,6 +273,31 @@ class TestNoWorktreeHoldsTheComment(TicketCommentHarness):
         saved = tickets._load_pr_comments(bb_config, slug)
         entry = next(e for e in saved if e["id"] == 100)
         assert entry["status"] == "fix_failed"
+        assert out.get("comment_fix_attempts", {}) == {}, (
+            "a missing worktree says nothing about the comment; charging it "
+            "caps the comment after two polls and strands it below the cursor"
+        )
+
+    def test_a_missing_worktree_never_spends_the_retry_budget(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        """MAX_PR_COMMENT_FIX_ATTEMPTS is two. Two polls with no worktree
+        used to cap the comment and advance the cursor past it, so restoring
+        the worktree could not bring it back."""
+        slug = "PROJ-1-do-the-thing"
+        self._init_git_pair(tmp_path, slug)
+        ts, ticket, platform, bb_config = self._setup(fake_config, slug)
+
+        for _ in range(tickets.MAX_PR_COMMENT_FIX_ATTEMPTS + 1):
+            with patch("features.tickets.make_platform", return_value=platform), \
+                 patch("features.tickets.get_repos", return_value=[]), \
+                 patch("features.tickets.run_balanced",
+                       return_value='{"results": [{"i": 0, "actionable": true}]}'), \
+                 patch("features.tickets.run_claude_code", return_value=""):
+                ts = tickets._check_in_review(bb_config, ticket, ts, "http://base")
+
+        assert ts.get("last_comment_ids", {}).get("repo/99") is None
+        assert ts.get("comment_fix_attempts", {}) == {}
 
 
 class TestADirtyWorktreeRefusesTheFix(TicketCommentHarness):

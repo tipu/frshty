@@ -1315,6 +1315,7 @@ class TestCommitFix:
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=repo), \
              patch("features.own_prs.run_claude_code", side_effect=claude), \
+             patch("core.commit_message.run_haiku", return_value="rename the field"), \
              patch("features.own_prs.comments"), \
              patch("features.own_prs.log"):
             ok, reason = own_prs.fix_comment(config, {
@@ -1325,7 +1326,7 @@ class TestCommitFix:
         assert ok is True, reason
         msg = subprocess.run(["git", "log", "-1", "--format=%s"], cwd=str(repo),
                              capture_output=True, text=True).stdout
-        assert "a.txt" in msg
+        assert msg.strip() == "fix: rename the field"
 
     def test_clean_worktree_reports_no_changes(self, tmp_path):
         repo = self._init_repo(tmp_path / "repo")
