@@ -91,6 +91,7 @@ class TestCommentFixersCarryTheRule:
         payload = {"pr": make_pr(), "comment": make_comment(id=10, author_id="reviewer1")}
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value="done") as fixer, \
              patch("features.own_prs._commit_fix", return_value=(True, "")), \
              patch("features.own_prs.comments.mark_comment_processed"), \
@@ -105,11 +106,12 @@ class TestCommentFixersCarryTheRule:
         payload = {"pr": make_pr(), "comment_ids": ["10"]}
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
+             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value="done") as fixer, \
              patch("features.own_prs._commit_fix", return_value=(True, "")), \
              patch("features.own_prs.comments") as mock_comments, \
              patch("features.own_prs.log.emit"):
-            mock_comments.settled_comment_ids.return_value = set()
+            mock_comments.unowed_comment_ids.return_value = set()
             own_prs.fix_comments_batch(self._config(tmp_path), payload)
         assert pr_ci.KEEP_GREEN_RULE in fixer.call_args[0][0]
 
@@ -168,6 +170,7 @@ class TestCommentFixersCarryTheRule:
              patch("features.tickets.get_repos",
                    return_value=[{"name": "repo", "path": wt.parent}]), \
              patch("features.tickets.ticket_worktree_path", return_value=wt), \
+             patch("features.tickets._worktree_is_dirty", return_value=False), \
              patch("features.tickets.run_balanced",
                    return_value='{"results": [{"i": 0, "actionable": true}]}'), \
              patch("features.tickets.run_claude_code", return_value=None) as fixer, \
