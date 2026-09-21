@@ -1180,7 +1180,18 @@ def api_ticket_reply(key: str, comment_id: int, body: dict):
 
 
 @router.post("/api/tickets/{key}/merge")
-def api_merge_ticket(key: str):
+async def api_merge_ticket(key: str, request: Request):
+    """Merge a ticket's PRs from the operator page.
+
+    This route calls _merge directly, so the comment gate has to hold here
+    too. A merge with comments owed is refused with 409 and the reason, and
+    the operator confirms it by posting force=true, which is the explicit
+    confirmation the gate allows to pass."""
+    try:
+        data = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        data = {}
+    force = bool((data or {}).get("force"))
     ts = state.load_ticket(key)
     if not ts:
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -1188,9 +1199,26 @@ def api_merge_ticket(key: str):
         return JSONResponse({"error": f"ticket is {ts.get('status')}, not in_review"}, status_code=400)
     if not ts.get("prs"):
         return JSONResponse({"error": "no PRs to merge"}, status_code=400)
+    hold = _tickets_mod.merge_hold_reason(ts)
+    if hold and not force:
+        return JSONResponse(
+            {"error": f"merge held: {hold}",
+             "reason": hold,
+             "comments_owed": ts.get(_tickets_mod.RECONCILE_OWED_KEY),
+             "comments_read_ok": ts.get(_tickets_mod.RECONCILE_READ_KEY),
+             "unresolved_comments": [
+                 c for pr in ts.get("prs", []) for c in pr.get("unresolved_comments", [])
+             ]},
+            status_code=409)
     base_url = _config.get("_base_url", "")
     ticket_payload = {"key": key, "summary": ts.get("summary", "")}
-    updated = _tickets_mod._merge(_config, ticket_payload, ts, base_url)
+    if hold:
+        log.emit("ticket_merge_forced_with_comments_owed",
+                 f"Operator merged {key} with {hold}",
+                 links={"detail": f"{base_url}/tickets/{key}"},
+                 meta={"ticket": key, "reason": hold,
+                       "comments_owed": ts.get(_tickets_mod.RECONCILE_OWED_KEY)})
+    updated = _tickets_mod._merge(_config, ticket_payload, ts, base_url, force=True)
     state.save_ticket(key, updated)
     return {"status": "ok", "new_status": updated.get("status", ts.get("status"))}
 

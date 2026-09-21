@@ -91,6 +91,17 @@ class TestMonitorCI:
         assert result["ci_passed"] is True
 
 
+def _reconciled(config, ticket, ts, base_url, **kwargs):
+    """Stand in for _check_in_review with nothing owed.
+
+    The merge gate refuses to merge when the reconciliation keys are absent,
+    so a no-op patch here would assert that the merge is blocked by the gate
+    rather than by the condition under test."""
+    ts[tickets.RECONCILE_READ_KEY] = True
+    ts[tickets.RECONCILE_OWED_KEY] = 0
+    return ts
+
+
 class TestAutoMergeIsNotFedStaleGreen:
     def _handle(self, fake_config, ts, ci_result):
         platform = MagicMock()
@@ -102,8 +113,7 @@ class TestAutoMergeIsNotFedStaleGreen:
              patch("features.tickets._pr_base_moved", return_value=False), \
              patch("features.tickets.make_platform", return_value=platform), \
              patch("features.tickets._merge") as merge, \
-             patch("features.tickets._check_in_review",
-                   side_effect=lambda c, t, s, b, **kw: s), \
+             patch("features.tickets._check_in_review", side_effect=_reconciled), \
              patch("features.tickets._enqueue_stage"), \
              patch("features.ticket_states.log"), \
              patch("features.tickets.log"), \

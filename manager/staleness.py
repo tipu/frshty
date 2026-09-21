@@ -46,23 +46,43 @@ def needs_classification(instance_key: str) -> list[dict]:
     return out
 
 
+TERMINAL_COMMENT_STATES = ("processed", "deleted")
+
+
+def _owed_reason_kind(state_value: str, error_count: int) -> str:
+    """Why this comment is still owed an answer.
+
+    'manual' means frshty handed it to a human. 'failing' means the fixer
+    tried and could not finish. 'stalled' means neither happened: the row
+    was recorded and nothing moved it."""
+    if state_value == "manual":
+        return "manual"
+    if error_count >= 1:
+        return "failing"
+    return "stalled"
+
+
 def blocked_pr_comments(instance_key: str) -> list[dict]:
-    """PR review comments frshty tried to auto-fix but couldn't (worktree,
-    Claude, or push failure). Surfaced from comment_state rows still owed an
-    answer with repeated errors. Self-clears once the comment is settled —
-    processed, or gone from the platform. A deleted comment keeps the
-    error_count of its last live attempt and can never reach 'processed', so
-    reading only 'processed' as finished pins it in this bucket for good.
-    Serves: catastrophic blockers that would otherwise sit silent in the
+    """PR review comments still owed an answer.
+
+    Every non-terminal comment_state row, with the reason it is owed: manual,
+    failing or stalled. The selector used to require error_count >= 2 and a
+    recorded error, which hid every comment that had not failed twice — 16 of
+    the 18 owed an answer on 2026-09-21, including 13 on saas-dashboard/149
+    that had sat untouched since June with error_count=1. Self-clears once the
+    comment is settled — processed, or gone from the platform. A deleted
+    comment keeps the error_count of its last live attempt and can never reach
+    'processed', so reading only 'processed' as finished pins it in this
+    bucket for good. Serves: comments that would otherwise sit silent in the
     event log."""
+    marks = ",".join("?" * len(TERMINAL_COMMENT_STATES))
     rows = db.query_all(
-        "SELECT resource_id, comment_id, error_count, last_error, last_checked_at"
+        "SELECT resource_id, comment_id, state, error_count, last_error, last_checked_at"
         " FROM comment_state"
         " WHERE instance_key=? AND resource_type='pr'"
-        " AND state NOT IN ('processed', 'deleted') AND error_count >= 2"
-        " AND COALESCE(last_error, '') != ''"
-        " ORDER BY error_count DESC LIMIT ?",
-        (instance_key, _LIMIT),
+        f" AND state NOT IN ({marks})"
+        " ORDER BY error_count DESC, last_checked_at ASC LIMIT ?",
+        (instance_key, *TERMINAL_COMMENT_STATES, _LIMIT),
     )
     if not rows:
         return []
@@ -73,12 +93,20 @@ def blocked_pr_comments(instance_key: str) -> list[dict]:
         repo, _, pr_id = resource_id.partition("/")
         seen = pr_state.get(resource_id)
         seen = seen if isinstance(seen, dict) else {}
+        error_count = r["error_count"] or 0
+        reason_kind = _owed_reason_kind(r["state"], error_count)
         out.append({
             "repo": repo,
             "pr_id": pr_id,
             "comment_id": r["comment_id"],
-            "attempts": r["error_count"],
-            "reason": r["last_error"],
+            "state": r["state"],
+            "reason_kind": reason_kind,
+            "attempts": error_count,
+            "reason": r["last_error"] or {
+                "manual": "needs a human reply",
+                "failing": "no reason recorded",
+                "stalled": "no attempt recorded",
+            }[reason_kind],
             "title": seen.get("title", ""),
             "url": seen.get("url", ""),
             "last_checked_at": r["last_checked_at"],
