@@ -65,14 +65,16 @@ class TicketCommentHarness:
         }
         return ts, ticket, platform, bb_config
 
-    def _run(self, bb_config, ticket, ts, wt, platform, claude):
+    def _run(self, bb_config, ticket, ts, wt, platform, claude, classifier=None):
         with patch("features.tickets.make_platform", return_value=platform), \
              patch("features.tickets.get_repos",
                    return_value=[{"name": "repo", "path": wt.parent}]), \
              patch("features.tickets.ticket_worktree_path", return_value=wt), \
              patch("features.tickets.run_balanced",
-                   return_value='{"results": [{"i": 0, "actionable": true}]}'), \
+                   return_value='{"results": [{"i": 0, "actionable": true}]}') as batch, \
              patch("features.tickets.run_claude_code", side_effect=claude):
+            if classifier is not None:
+                classifier.append(batch)
             return tickets._check_in_review(bb_config, ticket, ts, "http://base")
 
     def _fixes_app_py(self, wt):
@@ -317,9 +319,14 @@ class TestADirtyWorktreeRefusesTheFix(TicketCommentHarness):
             ran.append(prompt)
             return "wrote the fix"
 
-        self._run(bb_config, ticket, ts, wt, platform, claude)
+        classifier: list = []
+        self._run(bb_config, ticket, ts, wt, platform, claude, classifier)
 
         assert ran == [], "the fix must not run against a dirty worktree"
+        assert classifier[0].call_count == 0, (
+            "a worktree that stays dirty would otherwise pay for one model "
+            "call per poll for as long as it stayed dirty"
+        )
         platform.push_branch.assert_not_called()
         platform.resolve_comment.assert_not_called()
         saved = tickets._load_pr_comments(bb_config, slug)
@@ -346,7 +353,12 @@ class TestADirtyWorktreeRefusesTheFix(TicketCommentHarness):
                            check=True, capture_output=True)
             return "wrote the fix"
 
-        self._run(bb_config, ticket, ts, wt, platform, claude)
+        classifier: list = []
+        self._run(bb_config, ticket, ts, wt, platform, claude, classifier)
 
         assert len(ran) == 1
         assert platform.push_branch.call_count == 1
+        assert classifier[0].call_count == 1, (
+            "the control: a clean worktree does reach the classifier, so the "
+            "assertion above measures the hold and not the harness"
+        )

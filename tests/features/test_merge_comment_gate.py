@@ -327,6 +327,17 @@ class TestCommentsOwed:
     def test_a_non_dict_row_in_the_history_is_ignored(self):
         assert tickets._comments_owed(["junk", None], {_key(1)}, {_key(1)}) == 1
 
+    def test_an_entry_with_no_creation_time_still_matches_its_comment(self):
+        """Rows written before the creation time was recorded carry none.
+        Such a row names its comment by number, and must still cancel or
+        hold the comment the platform reports under that number."""
+        addressed = [_entry(7, "addressed", created_at=None)]
+        owed = {_key(7)}
+        assert tickets._comments_owed(addressed, owed, owed) == 0
+
+        still_owed = [_entry(7, "needs_reply", created_at=None)]
+        assert tickets._comments_owed(still_owed, set(), owed) == 1
+
     def test_one_number_from_two_comment_sources_is_two_comments(self):
         """On one pull request a review comment, a review body and an issue
         comment come from three id sequences that overlap. The creation time
