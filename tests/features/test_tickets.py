@@ -2839,6 +2839,8 @@ class TestSubstantiateReplyEnqueueOrdering:
         self, fresh_db, fake_config, tmp_state
     ):
         slug = "PROJ-1-do-the-thing"
+        wt = fake_config["workspace"]["root"] / "tickets" / slug / "repo"
+        wt.mkdir(parents=True, exist_ok=True)
         ts = make_ticket_state(
             status="in_review", slug=slug, branch=slug,
             prs=[{"repo": "repo", "id": 99, "branch": slug, "url": "http://u"}],
@@ -2862,7 +2864,10 @@ class TestSubstantiateReplyEnqueueOrdering:
             )
 
         with patch("features.tickets.make_platform", return_value=mock_platform), \
-             patch("features.tickets.get_repos", return_value=[]), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "repo", "path": wt.parent}]), \
+             patch("features.tickets.ticket_worktree_path", return_value=wt), \
+             patch("features.tickets._worktree_is_dirty", return_value=False), \
              patch("features.tickets.run_balanced",
                    return_value='{"results": [{"i": 0, "actionable": false}]}'), \
              patch("features.tickets._draft_comment_reply", return_value="a claim"), \
