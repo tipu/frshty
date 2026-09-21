@@ -48,10 +48,17 @@ def _active_instance_key() -> str:
         return ""
 
 
-def emit(event: str, summary: str, links: dict | None = None, meta: dict | None = None):
+def emit(event: str, summary: str, links: dict | None = None, meta: dict | None = None,
+         job: str = "", instance_key: str = ""):
+    """Write one event to the feed.
+
+    `job` and `instance_key` name the feed the event belongs to. They default
+    to the ones this process was started with. A process that holds none, such
+    as an agent hook, states them instead, because an event filed under an
+    empty key is read by no feed."""
     clean_links = {k: v for k, v in (links or {}).items() if v}
-    job = _active_job_key()
-    instance_key = _active_instance_key()
+    job = job or _active_job_key()
+    instance_key = instance_key or _active_instance_key()
     ts = datetime.now(timezone.utc).isoformat()
     record_id = uuid4().hex[:12]
     record = {
