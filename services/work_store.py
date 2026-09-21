@@ -1,19 +1,25 @@
 import base64
 import binascii
+import contextlib
 import json
 import os
 import re
 import subprocess
+import sys
 import threading
 import time
+import traceback
 from datetime import datetime, timedelta, timezone
 
 import core.codex_session as codex_session
 import core.db as db
+import core.log as log
 import core.tmux as tmux_target
 
 STALE_AFTER_MINUTES = 30
 STUCK_AFTER_MINUTES = 90
+MISSED_DECISION_AFTER_MINUTES = 3
+BOARD_INSTANCE_KEY = "personal"
 BG_WAIT_RECHECK_HOURS = 2
 PROPOSED_STATE = "proposed"
 DECLINED_REASON = "Proposal declined"
@@ -637,6 +643,46 @@ def record_event(session_id: str, kind: str, payload: dict) -> bool:
                     (item_state, reason, snooze, now, run["work_item_id"]),
                 )
     return True
+
+
+def record_hook_error(session_id: str, where: str, exc: BaseException) -> bool:
+    """Put a crash inside an agent hook on the event feed.
+
+    A hook runs in its own short-lived process. Nothing in that process holds
+    the instance the run belongs to, so core.log would file the event under an
+    empty key, and both the per-instance feed and the global feed read events
+    by key, so nobody would ever see it. The item row carries the instance.
+    An item that names none, and a lookup that could not run at all, fall back
+    to the instance the board creates its own items under, because an event on
+    the wrong feed is still read and an event on no feed is not.
+
+    The console line core.log prints goes to stderr, because the hook answers
+    the agent on stdout and a second line there destroys the decision already
+    written.
+
+    Returns whether the session was matched to a work item.
+    """
+    row = None
+    try:
+        row = db.query_one(
+            "SELECT i.id AS item_id, COALESCE(i.instance_key, '') AS instance_key "
+            "FROM work_runs r JOIN work_items i ON i.id = r.work_item_id "
+            "WHERE r.session_id = ?", (session_id,))
+    except Exception as lookup_error:
+        print(f"{where}: could not read the item for session {session_id}: "
+              f"{type(lookup_error).__name__}: {lookup_error}",
+              file=sys.stderr, flush=True)
+    item_id = row["item_id"] if row else 0
+    instance_key = (row["instance_key"] if row else "") or BOARD_INSTANCE_KEY
+    error = f"{type(exc).__name__}: {exc}"
+    subject = f"work item {item_id}" if item_id else f"session {session_id}"
+    detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    with contextlib.redirect_stdout(sys.stderr):
+        log.emit("work_hook_error", f"{subject}: {where} failed: {error}",
+                 meta={"session_id": session_id, "work_item_id": item_id,
+                       "where": where, "error": error, "traceback": detail[-2000:]},
+                 job=instance_key, instance_key=instance_key)
+    return bool(item_id)
 
 
 def record_agent_session(session_id: str, agent_session_id: str) -> bool:
@@ -1711,6 +1757,14 @@ def retry_missed_autocontinues(cutoff: str) -> list[dict]:
     so it holds an unused continue budget and nothing moves it. This finds
     those items and runs the decision late. An item whose decision already
     ran carries an event newer than its last idle stop, so it is skipped.
+
+    `cutoff` is how long a missed decision may sit before it is run late.
+    The caller passes MISSED_DECISION_AFTER_MINUTES, not the staleness
+    window: the hook writes the idle stop and the decision in one process,
+    within a second of each other, so an item that carries the stop and no
+    decision minutes later already lost the decision. Waiting the full
+    staleness window instead parked an item for half an hour, and an item
+    whose agent stopped inside that window was never picked up at all.
     """
     rows = db.query_all(
         "SELECT i.id AS item_id, r.id, r.session_id, r.tmux_key, r.transcript_path, "
@@ -1753,7 +1807,9 @@ def sweep_stale_items(now: datetime | None = None) -> list[dict]:
     manager/watchdog.py has to stay free to open the task again. A codex
     rollout is written only between tool calls, so pane activity counts as
     freshness too. A second pass runs the autocontinue decision for a
-    needs_you item whose idle-stop hook was dropped before it made one. A
+    needs_you item whose idle-stop hook was dropped before it made one; that
+    pass runs on its own shorter window, because a dropped decision is not a
+    stale agent and must not wait the staleness window out. A
     third pass fails an agent_working item that has no run at all: the launch
     path writes the item before the run, so a process that dies in that window
     leaves a row the join below can never reach.
@@ -1761,6 +1817,7 @@ def sweep_stale_items(now: datetime | None = None) -> list[dict]:
     now_dt = now or datetime.now(timezone.utc)
     cutoff = (now_dt - timedelta(minutes=STALE_AFTER_MINUTES)).isoformat()
     stuck_cutoff = (now_dt - timedelta(minutes=STUCK_AFTER_MINUTES)).isoformat()
+    missed_cutoff = (now_dt - timedelta(minutes=MISSED_DECISION_AFTER_MINUTES)).isoformat()
     rows = db.query_all(
         "SELECT i.id AS item_id, r.id AS run_id, r.session_id, r.tmux_key, "
         "r.transcript_path, r.provider, r.cwd, r.started_at, r.agent_session_id "
@@ -1856,7 +1913,7 @@ def sweep_stale_items(now: datetime | None = None) -> list[dict]:
         actions.append({"id": row["item_id"], "action": f"stop_synthesized:{outcome}"})
     actions.extend(fail_runless_items(cutoff))
     actions.extend(revive_resumed_runs())
-    actions.extend(retry_missed_autocontinues(cutoff))
+    actions.extend(retry_missed_autocontinues(missed_cutoff))
     return actions
 
 

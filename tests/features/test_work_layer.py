@@ -2506,3 +2506,151 @@ class TestMissedAutocontinueSweep:
         item_id, _, _ = self._stuck(tmp_path)
         db.execute("UPDATE work_items SET continues_used = continue_cap WHERE id = ?", (item_id,))
         self._assert_skipped(item_id, monkeypatch)
+
+    def test_sweep_catches_a_gap_under_the_staleness_window(self, tmp_path, monkeypatch):
+        """A missed decision is run late long before the staleness window.
+
+        The sweep used to hand this pass the thirty-minute staleness cutoff,
+        so an item whose decision was dropped sat in needs_you for half an
+        hour, and one whose agent stopped inside that window was never picked
+        up at all."""
+        from unittest.mock import MagicMock
+        item_id, _, _ = self._stuck(
+            tmp_path, minutes=work_store.STALE_AFTER_MINUTES - 5)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
+        monkeypatch.setattr(work_store, "tmux_send", MagicMock(return_value=True))
+        actions = work_store.sweep_stale_items()
+        assert {"id": item_id, "action": "autocontinue_retry:continued"} in actions
+
+    def test_sweep_leaves_a_decision_the_hook_may_still_be_making(
+            self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+        item_id, _, _ = self._stuck(
+            tmp_path, minutes=work_store.MISSED_DECISION_AFTER_MINUTES - 1)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
+        monkeypatch.setattr(work_store, "tmux_send", MagicMock(return_value=True))
+        actions = work_store.sweep_stale_items()
+        assert [a for a in actions if a["id"] == item_id] == []
+        item = db.query_one("SELECT state, continues_used FROM work_items WHERE id = ?",
+                            (item_id,))
+        assert item["state"] == "needs_you"
+        assert item["continues_used"] == 0
+
+
+class TestHookCrashIsReported:
+    """A crash inside an agent hook must reach the event feed.
+
+    The handler used to return 0 and write nothing. A crash in the idle-stop
+    path then left the item parked in needs_you with no decision, and nothing
+    anywhere said why."""
+
+    def _module(self, name, path):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def _run(self, objective, session_id, instance_key="aimyable"):
+        item_id = _mkitem(objective, instance_key=instance_key)
+        _mkrun(item_id, session_id, f"work-crash-{item_id}", "/tmp")
+        return item_id
+
+    def _events(self, item_id):
+        return db.query_all(
+            "SELECT event, summary, meta, instance_key, job FROM log_events "
+            "WHERE event = 'work_hook_error' AND summary LIKE ?",
+            (f"work item {item_id}:%",))
+
+    def _transcript(self, tmp_path, name):
+        path = tmp_path / f"{name}.jsonl"
+        path.write_text(json.dumps(
+            {"type": "assistant",
+             "message": {"content": [{"type": "text", "text": "Still working."}]}}) + "\n")
+        return path
+
+    def _explode(self, monkeypatch, message):
+        def boom(*args, **kwargs):
+            raise RuntimeError(message)
+        monkeypatch.setattr(work_store, "maybe_autocontinue", boom)
+
+    def test_the_event_is_filed_under_the_instance_of_the_item(self):
+        item_id = self._run("hook crash direct", "sid-crash-direct")
+        assert work_store.record_hook_error(
+            "sid-crash-direct", "work hook", ValueError("boom")) is True
+        rows = self._events(item_id)
+        assert len(rows) == 1
+        assert rows[0]["instance_key"] == "aimyable"
+        assert rows[0]["job"] == "aimyable"
+        assert "ValueError: boom" in rows[0]["summary"]
+        meta = json.loads(rows[0]["meta"])
+        assert meta["where"] == "work hook"
+        assert meta["work_item_id"] == item_id
+        assert "ValueError: boom" in meta["traceback"]
+
+    def test_an_item_that_names_no_instance_still_reaches_a_feed(self):
+        """An event filed under an empty key is read by no feed.
+
+        Both the per-instance feed and the global feed select events by
+        instance key, so an unattributable crash goes to the instance the
+        board creates its own items under."""
+        item_id = self._run("hook crash no instance", "sid-crash-noinst",
+                            instance_key=None)
+        assert work_store.record_hook_error(
+            "sid-crash-noinst", "work hook", ValueError("boom")) is True
+        rows = self._events(item_id)
+        assert len(rows) == 1
+        assert rows[0]["instance_key"] == work_store.BOARD_INSTANCE_KEY
+        assert rows[0]["job"] == work_store.BOARD_INSTANCE_KEY
+
+    def test_a_lookup_that_cannot_run_still_reaches_a_feed(self, monkeypatch):
+        def boom(*args, **kwargs):
+            raise RuntimeError("database is locked")
+        monkeypatch.setattr(work_store.db, "query_one", boom)
+        assert work_store.record_hook_error(
+            "sid-crash-nolookup", "work hook", ValueError("boom")) is False
+        monkeypatch.undo()
+        rows = db.query_all(
+            "SELECT instance_key, job, summary FROM log_events "
+            "WHERE event = 'work_hook_error' AND summary LIKE ?",
+            ("session sid-crash-nolookup:%",))
+        assert len(rows) == 1
+        assert rows[0]["instance_key"] == work_store.BOARD_INSTANCE_KEY
+        assert rows[0]["job"] == work_store.BOARD_INSTANCE_KEY
+        assert "ValueError: boom" in rows[0]["summary"]
+
+    def test_the_work_hook_reports_a_crash_in_the_idle_stop_path(
+            self, tmp_path, monkeypatch):
+        import io
+        item_id = self._run("hook crash stop", "sid-crash-hook")
+        hook = self._module("work_hook_crash_under_test", "scripts/work_hook.py")
+        monkeypatch.setattr(hook, "DB_PATH", str(db._DB_PATH))
+        self._explode(monkeypatch, "autocontinue exploded")
+        payload = json.dumps({
+            "session_id": "sid-crash-hook", "hook_event_name": "Stop",
+            "transcript_path": str(self._transcript(tmp_path, "crash-hook")),
+        })
+        monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
+        out = io.StringIO()
+        monkeypatch.setattr(sys, "stdout", out)
+        assert hook.main() == 0
+        assert out.getvalue() == ""
+        rows = self._events(item_id)
+        assert len(rows) == 1
+        assert "work hook failed" in rows[0]["summary"]
+        assert "RuntimeError: autocontinue exploded" in rows[0]["summary"]
+
+    def test_the_codex_notify_program_reports_the_same_crash(self, monkeypatch):
+        item_id = self._run("notify crash stop", "sid-crash-notify")
+        notify = self._module("codex_notify_crash_under_test", "scripts/codex_notify.py")
+        monkeypatch.setattr(notify, "DB_PATH", str(db._DB_PATH))
+        self._explode(monkeypatch, "notify exploded")
+        argv = ["codex_notify.py", "sid-crash-notify", json.dumps({
+            "type": "agent-turn-complete",
+            "last-assistant-message": "Still working.",
+            "thread-id": "thr-crash-notify"})]
+        assert notify.main(argv) == 0
+        rows = self._events(item_id)
+        assert len(rows) == 1
+        assert "codex notify failed" in rows[0]["summary"]
+        assert "RuntimeError: notify exploded" in rows[0]["summary"]

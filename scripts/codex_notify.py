@@ -2,6 +2,7 @@ import json
 import os
 import sqlite3
 import sys
+import traceback
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -22,6 +23,23 @@ def _bind_db():
     return work_store
 
 
+def _report_hook_error(session_id: str, exc: BaseException) -> None:
+    """Put a crash in this notify program on the event feed.
+
+    The handler used to return 0 and write nothing. A crash in the idle-stop
+    path then left the item parked in needs_you with no decision, and nothing
+    anywhere said why, so the board showed a task waiting on the operator for
+    a reason that never happened."""
+    try:
+        _bind_db().record_hook_error(session_id, "codex notify", exc)
+    except Exception as nested:
+        print(f"codex notify: {type(exc).__name__}: {exc} (and it could not be "
+              f"recorded: {type(nested).__name__}: {nested})",
+              file=sys.stderr, flush=True)
+    if os.environ.get("WORK_HOOK_DEBUG"):
+        traceback.print_exception(type(exc), exc, exc.__traceback__)
+
+
 def main(argv: list[str]) -> int:
     """Codex notify program for a work-layer session.
 
@@ -35,6 +53,7 @@ def main(argv: list[str]) -> int:
     which only the rollout holds, and a rollout can lag this notification,
     which leaves the final message as the only copy of the newest line.
     """
+    session_id = ""
     try:
         session_id = argv[1] if len(argv) > 1 else ""
         data = json.loads(argv[2]) if len(argv) > 2 else {}
@@ -64,10 +83,8 @@ def main(argv: list[str]) -> int:
         work_store.record_progress(session_id, transcript)
         work_store.record_progress(session_id, transcript, texts=[message])
         work_store.maybe_autocontinue(session_id, transcript, tail=message)
-    except Exception:
-        if os.environ.get("WORK_HOOK_DEBUG"):
-            import traceback
-            traceback.print_exc()
+    except Exception as e:
+        _report_hook_error(session_id, e)
         return 0
     return 0
 
