@@ -486,7 +486,7 @@ def launch(objective: str, cwd: str = "", contexts: list[str] | None = None,
         return {"error": image_error}
     objective, contexts = plan["objective"], plan["contexts"]
     labels = ",".join(contexts + ([SLACK_LABEL] if slack else []))
-    item_id = work_store.create_item(objective, instance_key="personal", contexts=labels,
+    item_id = work_store.create_item(objective, instance_key=work_store.BOARD_INSTANCE_KEY, contexts=labels,
                                      source_item_id=source_item_id,
                                      worktree_opt_out=no_worktree, critical=critical,
                                      standup_item_id=standup_item_id)
@@ -1108,7 +1108,7 @@ def propose_followup(source_item_id: int, objective: str, note: str = "") -> dic
         return inherited
     labels = inherited["contexts"] + ([SLACK_LABEL] if inherited["slack"] else [])
     item_id = work_store.create_proposal(
-        objective, note=note, instance_key="personal", contexts=",".join(labels),
+        objective, note=note, instance_key=work_store.BOARD_INSTANCE_KEY, contexts=",".join(labels),
         cwd=inherited["cwd"], source_item_id=source_item_id,
         critical=inherited["critical"])
     return {"item_id": item_id}
