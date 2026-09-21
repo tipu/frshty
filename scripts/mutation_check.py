@@ -360,7 +360,7 @@ MUTATIONS = [
         "target": "tests/features/test_ticket_comment_fail_closed.py"
                   "::TestADirtyWorktreeRefusesTheFix::test_the_run_never_starts",
         "path": "features/tickets.py",
-        "old": "            if actionable and wt is not None and wt.is_dir() and _worktree_is_dirty(wt):",
+        "old": "            if actionable and _worktree_is_dirty(wt):",
         "new": "            if False:",
     },
     {
