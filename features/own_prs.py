@@ -922,7 +922,13 @@ def _ensure_worktree(config, pr) -> Path | None:
         if not worktree_path.resolve().is_relative_to(state_dir.resolve()):
             return None
         subprocess.run(["git", "fetch", "origin", pr["branch"]], cwd=str(worktree_path), capture_output=True, timeout=60)
-        subprocess.run(["git", "reset", "--hard", f"origin/{pr['branch']}"], cwd=str(worktree_path), capture_output=True, timeout=60)
+        reset = subprocess.run(["git", "reset", "--hard", f"origin/{pr['branch']}"], cwd=str(worktree_path), capture_output=True, timeout=60)
+        if reset.returncode != 0:
+            log.emit("pr_worktree_reset_failed",
+                     f"{pr['repo']}#{pr['id']}: could not reset the PR worktree to origin/{pr['branch']}",
+                     meta={"repo": pr["repo"], "pr_id": pr["id"],
+                           "error": (reset.stderr or b"").decode(errors="replace")[:300]})
+            return None
         return worktree_path
 
     base_branch = base_branch_for(config, pr["repo"])

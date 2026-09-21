@@ -159,6 +159,87 @@ class TestAFailedResolveLeavesTheCommentOwed(TicketCommentHarness):
         assert out["last_comment_ids"]["repo/99"] == 100
 
 
+class TestTheOwedSetCannotBeEmptiedByAccident(TicketCommentHarness):
+    def test_a_reply_in_an_unresolved_thread_is_owed(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        """A reviewer's reply carries parent_id. The unresolved list on the
+        page shows thread roots only, but the owed set must hold the reply
+        as well, or the poll that detects it also releases the merge."""
+        slug = "PROJ-1-do-the-thing"
+        wt = self._init_git_pair(tmp_path, slug)
+        reply = {**COMMENT, "id": 101, "parent_id": 100,
+                 "body": "still not right"}
+        ts, ticket, platform, bb_config = self._setup(
+            fake_config, slug, comments=[COMMENT, reply])
+        ts["last_comment_ids"] = {"repo/99": 100}
+        platform.get_pr_comments.return_value = [
+            {**COMMENT, "resolved": True}, reply]
+
+        out = self._run(bb_config, ticket, ts, wt, platform, lambda *a, **k: None)
+
+        assert out[tickets.RECONCILE_OWED_KEY] == 1
+        assert out["prs"][0]["unresolved_comments"] == [], (
+            "the page list still shows thread roots only"
+        )
+
+    def test_an_unreadable_history_holds_the_merge(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        """_load_pr_comments answers a truncated pr_comments.json with an
+        empty list, which reads as 'nothing was ever owed'."""
+        slug = "PROJ-1-do-the-thing"
+        wt = self._init_git_pair(tmp_path, slug)
+        ts, ticket, platform, bb_config = self._setup(fake_config, slug, comments=[])
+        path = tickets._pr_comments_path(bb_config, slug)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('[{"id": 1, "status": "needs_re')
+
+        out = self._run(bb_config, ticket, ts, wt, platform, lambda *a, **k: None)
+
+        assert out[tickets.RECONCILE_READ_KEY] is False
+
+    def test_a_readable_history_does_not_hold_the_merge(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        """The control."""
+        slug = "PROJ-1-do-the-thing"
+        wt = self._init_git_pair(tmp_path, slug)
+        ts, ticket, platform, bb_config = self._setup(fake_config, slug, comments=[])
+        path = tickets._pr_comments_path(bb_config, slug)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("[]")
+
+        out = self._run(bb_config, ticket, ts, wt, platform, lambda *a, **k: None)
+
+        assert out[tickets.RECONCILE_READ_KEY] is True
+
+
+class TestNoWorktreeHoldsTheComment(TicketCommentHarness):
+    def test_an_actionable_comment_with_no_worktree_holds_the_cursor(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        """Without a worktree the fix cannot run. The entry used to stay
+        'new', which is not a retryable failure, so the cursor advanced past
+        the comment and nothing ever read it again."""
+        slug = "PROJ-1-do-the-thing"
+        self._init_git_pair(tmp_path, slug)
+        ts, ticket, platform, bb_config = self._setup(fake_config, slug)
+
+        with patch("features.tickets.make_platform", return_value=platform), \
+             patch("features.tickets.get_repos", return_value=[]), \
+             patch("features.tickets.run_balanced",
+                   return_value='{"results": [{"i": 0, "actionable": true}]}'), \
+             patch("features.tickets.run_claude_code", return_value="") as claude:
+            out = tickets._check_in_review(bb_config, ticket, ts, "http://base")
+
+        claude.assert_not_called()
+        assert out.get("last_comment_ids", {}).get("repo/99") is None
+        saved = tickets._load_pr_comments(bb_config, slug)
+        entry = next(e for e in saved if e["id"] == 100)
+        assert entry["status"] == "fix_failed"
+
+
 class TestADirtyWorktreeRefusesTheFix(TicketCommentHarness):
     def test_the_run_never_starts(
         self, fresh_db, fake_config, tmp_state, tmp_path
