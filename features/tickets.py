@@ -2406,6 +2406,21 @@ def _entry_key(entry: dict) -> tuple:
                        entry.get("id"), entry.get("created_at") or "")
 
 
+def _match_entry_keys(entry_keys: set, reported: set) -> set:
+    """Resolve entry keys against the comments the platform reported.
+
+    An entry written before the creation time was recorded carries an empty
+    one. Such a row names its comment by number alone, so it matches
+    whichever reported comment shares that number — the answer the code gave
+    before the time joined the key. A row that carries a time is matched
+    exactly, so two comments sharing a number stay apart."""
+    exact = {k for k in entry_keys if k[3]}
+    numbers = {k[:3] for k in entry_keys if not k[3]}
+    if not numbers:
+        return exact
+    return exact | {k for k in reported if k[:3] in numbers}
+
+
 def _owed_comment_keys(pr_comments: list[dict], detected_now: set,
                        unresolved_now: set) -> set:
     """The comments still owed an answer after this poll.
@@ -2419,10 +2434,12 @@ def _owed_comment_keys(pr_comments: list[dict], detected_now: set,
     not owed: the engine already decided not to act on them, and counting
     them would hold every merge for history the loop will never touch."""
     rows = [e for e in pr_comments if isinstance(e, dict)]
-    answered = {_entry_key(e) for e in rows
-                if e.get("status") in ANSWERED_ENTRY_STATUSES}
-    open_entries = {_entry_key(e) for e in rows
-                    if e.get("status") in OPEN_ENTRY_STATUSES}
+    answered = _match_entry_keys(
+        {_entry_key(e) for e in rows
+         if e.get("status") in ANSWERED_ENTRY_STATUSES}, unresolved_now)
+    open_entries = _match_entry_keys(
+        {_entry_key(e) for e in rows
+         if e.get("status") in OPEN_ENTRY_STATUSES}, unresolved_now)
     return ((detected_now | open_entries) & unresolved_now) - answered
 
 
@@ -2476,6 +2493,36 @@ def _hold_fix_attempt(entry: dict, comment_fix_attempts: dict, pr_key: str) -> i
     entry["status"] = "fix_failed"
     entry["attempts"] = attempts
     return attempts
+
+
+def _comment_entry(comment: dict, pr: dict) -> dict:
+    return {
+        "id": comment["id"],
+        "pr_repo": pr["repo"],
+        "pr_id": pr["id"],
+        "body": comment["body"],
+        "path": comment.get("path"),
+        "line": comment.get("line"),
+        "diff_hunk": comment.get("diff_hunk", ""),
+        "created_at": comment_created_at(comment),
+        "status": "new",
+        "suggested_reply": "",
+    }
+
+
+def _hold_batch(pr_comments: list[dict], new_comments: list[dict], pr: dict,
+                comment_fix_attempts: dict, pr_key: str) -> None:
+    """Record every comment in this batch as owed, without touching it.
+
+    The worktree is what the whole path needs: the fix runs in it, and the
+    drafted reply reads it. When it is unusable nothing here can be done, so
+    the batch is held before the classifier runs rather than after. Holding
+    after it would pay for a model call on every poll for as long as the
+    worktree stayed unusable, and the cursor never advances during a hold."""
+    for comment in new_comments:
+        entry = _comment_entry(comment, pr)
+        _hold_fix_attempt(entry, comment_fix_attempts, pr_key)
+        pr_comments.append(entry)
 
 
 def _worktree_is_dirty(worktree) -> bool:
@@ -2597,6 +2644,26 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                       for c in new_comments
                   ]})
 
+        repos = get_repos(config)
+        repo_match = next((r for r in repos if r["name"] == pr["repo"]), None)
+        wt = ticket_worktree_path(config, slug, pr["repo"]) if repo_match else None
+        if wt is None or not wt.is_dir():
+            _hold_batch(pr_comments, new_comments, pr, comment_fix_attempts, pr_key)
+            log.emit("ticket_pr_comment_worktree_missing",
+                f"{_label(ticket['key'], ts)} · {pr['repo']}: No ticket worktree; holding {len(new_comments)} comment(s)",
+                links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+                meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"],
+                      "count": len(new_comments)})
+            continue
+        if _worktree_is_dirty(wt):
+            _hold_batch(pr_comments, new_comments, pr, comment_fix_attempts, pr_key)
+            log.emit("ticket_pr_comment_worktree_dirty",
+                f"{_label(ticket['key'], ts)} · {pr['repo']}: Ticket worktree is dirty; holding {len(new_comments)} comment(s)",
+                links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+                meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"],
+                      "count": len(new_comments)})
+            continue
+
         batch_prompt = (
             "Triage each PR review comment using the CODE it is anchored to. "
             "actionable=true when it requests a concrete code change — including terse "
@@ -2628,27 +2695,13 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                 meta={"ticket": ticket["key"], "pr_id": pr["id"], "count": len(new_comments)})
             continue
 
-        repos = get_repos(config)
-        repo_match = next((r for r in repos if r["name"] == pr["repo"]), None)
-        wt = ticket_worktree_path(config, slug, pr["repo"]) if repo_match else None
         to_resolve: list[tuple[dict, dict]] = []
         made_commit = False
 
         for idx, comment in enumerate(new_comments):
             actionable = classifications.get(idx, False)
 
-            entry = {
-                "id": comment["id"],
-                "pr_repo": pr["repo"],
-                "pr_id": pr["id"],
-                "body": comment["body"],
-                "path": comment.get("path"),
-                "line": comment.get("line"),
-                "diff_hunk": comment.get("diff_hunk", ""),
-                "created_at": comment_created_at(comment),
-                "status": "new",
-                "suggested_reply": "",
-            }
+            entry = _comment_entry(comment, pr)
 
             log.emit("ticket_pr_comment_registered",
                 f"{_label(ticket['key'], ts)} · {pr['repo']}: Comment registered — {comment['body'][:80]}",
@@ -2664,26 +2717,6 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                         f"{_label(ticket['key'], ts)} · {pr['repo']}: Draft reply commits to a code change, routing to fix — {comment['body'][:80]}",
                         links={"detail": f"{base_url}/tickets/{ticket['key']}", "comment": comment.get("html_url", "")},
                         meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"], "draft_reply": suggested[:200]})
-
-            if actionable and (wt is None or not wt.is_dir()):
-                attempts = _hold_fix_attempt(entry, comment_fix_attempts, pr_key)
-                log.emit("ticket_pr_comment_worktree_missing",
-                    f"{_label(ticket['key'], ts)} · {pr['repo']}: No ticket worktree to fix this review comment in — {comment['body'][:60]}",
-                    links={"detail": f"{base_url}/tickets/{ticket['key']}", "comment": comment.get("html_url", "")},
-                    meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"],
-                          "attempts": attempts, "max_attempts": MAX_PR_COMMENT_FIX_ATTEMPTS})
-                pr_comments.append(entry)
-                continue
-
-            if actionable and _worktree_is_dirty(wt):
-                attempts = _hold_fix_attempt(entry, comment_fix_attempts, pr_key)
-                log.emit("ticket_pr_comment_worktree_dirty",
-                    f"{_label(ticket['key'], ts)} · {pr['repo']}: Refusing to fix a review comment in a dirty worktree — {comment['body'][:60]}",
-                    links={"detail": f"{base_url}/tickets/{ticket['key']}", "comment": comment.get("html_url", "")},
-                    meta={"ticket": ticket["key"], "repo": pr["repo"], "comment_id": comment["id"],
-                          "attempts": attempts, "max_attempts": MAX_PR_COMMENT_FIX_ATTEMPTS})
-                pr_comments.append(entry)
-                continue
 
             if actionable:
                 branch_name = pr.get("branch") or ts["branch"]
