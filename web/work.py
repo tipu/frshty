@@ -285,6 +285,21 @@ def api_work_followup(item_id: int, body: dict):
     return result
 
 
+@router.post("/api/work/items/{item_id}/resume")
+def api_work_resume(item_id: int):
+    """Restart the agent session of one task when its pane holds no agent.
+
+    Opening the terminal page does the same thing, but the operator who
+    continues a finished task from the board wants to type into Correct, not
+    to open a terminal first. A task whose session cannot be brought back
+    reports that, so Correct does not fail later with no reason."""
+    if not work_launch.resume_session(item_id):
+        return JSONResponse(
+            {"error": "the agent session could not be restarted; "
+                      "open the terminal to see why"}, status_code=409)
+    return {"resumed": True}
+
+
 def _session_state(runs: list[dict]) -> dict | None:
     """Whether the newest run's pane still holds a live agent process.
 
