@@ -398,8 +398,8 @@ def _message_records(record: dict) -> list[dict]:
     newer. The writers use it to refuse to apply older evidence over newer.
 
     They compare it as a string, which is an order only while every value has
-    the same width and the same offset. Measured over the atropos, aimyable
-    and quillmeetings captures — 60,000 records — every dt is
+    the same width and the same offset. Measured over three live workspace
+    captures — 60,000 records — every dt is
     `YYYY-MM-DDTHH:MM:SS.ffffff+00:00`, none was missing, and none went
     backwards. A record whose dt is missing or shaped differently sorts as the
     empty string, which never overwrites anything.
@@ -1011,7 +1011,7 @@ def _spread_involvement_across_the_channel(c, instance_key: str) -> None:
     what they say, and both of those already have the operator's name.
 
     The cost is model calls on conversations that turn out to hold no request.
-    Measured over the aimyable and quill captures, across their last 30 and
+    Measured over two live workspace captures, across their last 30 and
     last 90 days, it is between 3.5 and 4.6 conversations a day that no scan
     would have read before. propose_max_judgements_per_scan is what bounds it
     should a busier channel ever arrive."""

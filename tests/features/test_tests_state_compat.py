@@ -20,7 +20,7 @@ def _make_ctx(tmp_path, ticket_key="PROJ-1", slug="PROJ-1-do-the-thing"):
         "_base_url": "http://localhost:8000",
     }
     return TaskContext(
-        instance_key="aimyable",
+        instance_key="acme",
         ticket_key=ticket_key,
         task="enter_testing",
         payload={},

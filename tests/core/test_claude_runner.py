@@ -200,20 +200,20 @@ def test_run_claude_code_honors_instance_claude_config_dir(tmp_path, monkeypatch
     monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
 
     prev_default = state._default_instance_key
-    llm._providers.pop("aimyable", None)
-    state._default_instance_key = "aimyable"
+    llm._providers.pop("acme", None)
+    state._default_instance_key = "acme"
     llm.configure({
-        "job": {"key": "aimyable"},
-        "llm": {"provider": "claude", "claude": {"config_dir": "~/.aimyable-claude"}},
+        "job": {"key": "acme"},
+        "llm": {"provider": "claude", "claude": {"config_dir": "~/.acme-claude"}},
     })
     try:
         out = run_claude_code("hi", cwd=tmp_path, timeout=5)
     finally:
         state._default_instance_key = prev_default
-        llm._providers.pop("aimyable", None)
+        llm._providers.pop("acme", None)
 
     assert out == "ok"
-    assert env_capture.read_text() == str(Path("~/.aimyable-claude").expanduser())
+    assert env_capture.read_text() == str(Path("~/.acme-claude").expanduser())
 
 
 def test_run_claude_code_blocks_followup_after_usage_limit(tmp_path, monkeypatch):

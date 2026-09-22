@@ -27,16 +27,16 @@ class TestHandlerRouting:
         config, ticket, state_dict, docs = _seed(tmp_path)
         with patch("features.tickets._enqueue_stage") as eq:
             ts_mod._handle_proving_ticket(config, ticket, state_dict,
-                                           config["_base_url"], "aimyable", True)
-        eq.assert_called_once_with("aimyable", "PROJ-1", "prove")
+                                           config["_base_url"], "acme", True)
+        eq.assert_called_once_with("acme", "PROJ-1", "prove")
 
     def test_proof_exists_enqueues_mark_ready(self, tmp_path):
         config, ticket, state_dict, docs = _seed(tmp_path)
         (docs / "proof.md").write_text("PROOF: DEMOED\n\nRecorded docs/demo.webm\n")
         with patch("features.tickets._enqueue_stage") as eq:
             ts_mod._handle_proving_ticket(config, ticket, state_dict,
-                                           config["_base_url"], "aimyable", True)
-        eq.assert_called_once_with("aimyable", "PROJ-1", "mark_ready")
+                                           config["_base_url"], "acme", True)
+        eq.assert_called_once_with("acme", "PROJ-1", "mark_ready")
 
     def test_not_applicable_proof_also_enqueues_mark_ready(self, tmp_path):
         """A 'NOT_APPLICABLE' verdict still completes the proving step —
@@ -46,8 +46,8 @@ class TestHandlerRouting:
         (docs / "proof.md").write_text("PROOF: NOT_APPLICABLE\n\nPure refactor.\n")
         with patch("features.tickets._enqueue_stage") as eq:
             ts_mod._handle_proving_ticket(config, ticket, state_dict,
-                                           config["_base_url"], "aimyable", True)
-        eq.assert_called_once_with("aimyable", "PROJ-1", "mark_ready")
+                                           config["_base_url"], "acme", True)
+        eq.assert_called_once_with("acme", "PROJ-1", "mark_ready")
 
     def test_a_proof_that_predates_the_branch_enqueues_prove(self, tmp_path):
         """The scope correction takes code off the branch after the proof ran.
@@ -59,8 +59,8 @@ class TestHandlerRouting:
         with patch("core.consensus_scope.scope_fingerprint", return_value="r:after"), \
              patch("features.tickets._enqueue_stage") as eq:
             ts_mod._handle_proving_ticket(config, ticket, state_dict,
-                                           config["_base_url"], "aimyable", True)
-        eq.assert_called_once_with("aimyable", "PROJ-1", "prove")
+                                           config["_base_url"], "acme", True)
+        eq.assert_called_once_with("acme", "PROJ-1", "prove")
 
     def test_a_proof_that_matches_the_branch_enqueues_mark_ready(self, tmp_path):
         config, ticket, state_dict, docs = _seed(tmp_path)
@@ -69,8 +69,8 @@ class TestHandlerRouting:
         with patch("core.consensus_scope.scope_fingerprint", return_value="r:same"), \
              patch("features.tickets._enqueue_stage") as eq:
             ts_mod._handle_proving_ticket(config, ticket, state_dict,
-                                           config["_base_url"], "aimyable", True)
-        eq.assert_called_once_with("aimyable", "PROJ-1", "mark_ready")
+                                           config["_base_url"], "acme", True)
+        eq.assert_called_once_with("acme", "PROJ-1", "mark_ready")
 
     def test_no_instance_key_short_circuits(self, tmp_path):
         config, ticket, state_dict, _ = _seed(tmp_path)
@@ -94,13 +94,13 @@ class TestTheScopeGateRunsBeforeTheProof:
              patch("features.tickets._enqueue_stage") as eq, \
              patch("features.ticket_states.state"):
             _, stop = ts_mod._handle_proving_ticket(
-                config, ticket, state_dict, config["_base_url"], "aimyable", True)
+                config, ticket, state_dict, config["_base_url"], "acme", True)
         return stop, eq, fx
 
     def test_a_pending_review_holds_the_proof(self, tmp_path):
         stop, eq, fx = self._handle(tmp_path, "pending")
         assert stop is True
-        eq.assert_called_once_with("aimyable", "PROJ-1", "scope_review")
+        eq.assert_called_once_with("acme", "PROJ-1", "scope_review")
         fx.assert_not_called()
 
     def test_a_failed_review_holds_the_proof_and_queues_the_correction(self, tmp_path):
@@ -116,18 +116,18 @@ class TestTheScopeGateRunsBeforeTheProof:
         gate still holds the PR, so the ticket proves once and stops there."""
         stop, eq, fx = self._handle(tmp_path, "fail", budget_spent=True)
         assert stop is False
-        eq.assert_called_once_with("aimyable", "PROJ-1", "prove")
+        eq.assert_called_once_with("acme", "PROJ-1", "prove")
         fx.assert_not_called()
 
     def test_a_passed_review_lets_the_proof_run(self, tmp_path):
         stop, eq, fx = self._handle(tmp_path, "pass")
         assert stop is False
-        eq.assert_called_once_with("aimyable", "PROJ-1", "prove")
+        eq.assert_called_once_with("acme", "PROJ-1", "prove")
 
     def test_a_disabled_gate_lets_the_proof_run(self, tmp_path):
         stop, eq, fx = self._handle(tmp_path, "disabled")
         assert stop is False
-        eq.assert_called_once_with("aimyable", "PROJ-1", "prove")
+        eq.assert_called_once_with("acme", "PROJ-1", "prove")
 
 
 class TestProveTask:
@@ -139,7 +139,7 @@ class TestProveTask:
             "_base_url": "http://localhost:8000",
         }
         return TaskContext(
-            instance_key="aimyable", ticket_key="PROJ-1", task="prove",
+            instance_key="acme", ticket_key="PROJ-1", task="prove",
             payload={}, job_id=0, triggering_event_id=None, config=config,
             registry=None, now=None,
         )

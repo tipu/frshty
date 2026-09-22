@@ -135,8 +135,8 @@ class TestMergePolicy:
         assert work_launch.merge_review_required(["bh"]) == []
 
     def test_a_project_that_forbids_a_merge_holds_it(self, monkeypatch):
-        _projects(monkeypatch, aimyable=False)
-        assert work_launch.merge_review_required(["aimyable"]) == ["aimyable"]
+        _projects(monkeypatch, acme=False)
+        assert work_launch.merge_review_required(["acme"]) == ["acme"]
 
     def test_a_project_with_no_config_holds_it(self, monkeypatch):
         _projects(monkeypatch)
@@ -211,11 +211,11 @@ class TestDeliveryRule:
 
 class TestMergeGate:
     def test_a_holding_project_denies_the_merge(self, monkeypatch):
-        _projects(monkeypatch, aimyable=False)
-        item_id, sid = _mkrun("fix the filter endpoint", contexts="aimyable")
+        _projects(monkeypatch, acme=False)
+        item_id, sid = _mkrun("fix the filter endpoint", contexts="acme")
         out = work_launch.gate_merge(sid, "gh pr merge 60 --squash")
         assert out["decision"] == "deny"
-        assert "aimyable" in out["reason"]
+        assert "acme" in out["reason"]
         assert _gate_events(item_id)[0]["verdict"] == "fail"
 
     def test_an_allowing_project_permits_the_merge(self, monkeypatch):
@@ -246,8 +246,8 @@ class TestMergeGate:
         assert work_launch.gate_merge(sid, "gh pr merge 21")["decision"] == "allow"
 
     def test_a_git_merge_is_not_gated(self, monkeypatch):
-        _projects(monkeypatch, aimyable=False)
-        item_id, sid = _mkrun("rebase onto main", contexts="aimyable")
+        _projects(monkeypatch, acme=False)
+        item_id, sid = _mkrun("rebase onto main", contexts="acme")
         out = work_launch.gate_merge(sid, "git merge origin/main --no-edit")
         assert out["decision"] == "allow"
         assert _gate_events(item_id) == []

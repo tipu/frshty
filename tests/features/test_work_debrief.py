@@ -18,7 +18,7 @@ def _done_item(objective="debrief target"):
 
 CLAUDE_OUT = json.dumps({
     "summary": "Bumped normalize_ace to 4.0.8.\nPR: https://github.com/x/y/pull/9\nAwaiting review from Sam.",
-    "followups": [{"kind": "slack_message", "workspace": "aimyable",
+    "followups": [{"kind": "slack_message", "workspace": "acme",
                    "recipient": "Sam", "draft": "PR ready: https://github.com/x/y/pull/9"}],
 })
 
@@ -112,7 +112,7 @@ class TestSend:
         with db.tx() as c:
             cur = c.execute(
                 "INSERT INTO work_followups(work_item_id, kind, workspace, recipient, draft, "
-                "created_at, updated_at) VALUES (?, ?, 'aimyable', 'Sam', 'hi', ?, ?)",
+                "created_at, updated_at) VALUES (?, ?, 'acme', 'Sam', 'hi', ?, ?)",
                 (item_id, kind, now, now))
             return cur.lastrowid
 
@@ -171,11 +171,11 @@ class TestSend:
         fid = self._draft(kind="work_item")
         launched = MagicMock(return_value={"item_id": 43})
         monkeypatch.setattr(work_debrief.work_launch, "launch_followup", launched)
-        out = work_debrief.send_followup(fid, contexts=["aimyable", 7], slack=True)
+        out = work_debrief.send_followup(fid, contexts=["acme", 7], slack=True)
         assert out["status"] == "sent"
         item_id = db.query_one("SELECT work_item_id FROM work_followups WHERE id = ?",
                                (fid,))["work_item_id"]
-        launched.assert_called_once_with(item_id, "hi", contexts=["aimyable"], slack=True,
+        launched.assert_called_once_with(item_id, "hi", contexts=["acme"], slack=True,
                                         agent="claude", images=None)
 
     def test_dismiss(self):
@@ -186,7 +186,7 @@ class TestSend:
 
 class TestDeliverSlack:
     def _row(self, **kw):
-        base = {"kind": "slack_message", "workspace": "aimyable",
+        base = {"kind": "slack_message", "workspace": "acme",
                 "recipient": "Sam", "draft": "PR ready: https://x/pr/1"}
         base.update(kw)
         return base
@@ -197,7 +197,7 @@ class TestDeliverSlack:
         monkeypatch.setattr(work_debrief.work_launch, "personal_config",
                             lambda: {"features": {"correspondence": True}})
         monkeypatch.setattr(work_debrief.os.path, "isdir", lambda p: True)
-        monkeypatch.setattr(work_debrief, "_known_workspaces", lambda: ["aimyable"])
+        monkeypatch.setattr(work_debrief, "_known_workspaces", lambda: ["acme"])
         monkeypatch.setattr(work_debrief, "_resolve_recipient",
                             lambda w, r: {"id": "U123", "name": "Sam", "email": "s@x.com"})
         monkeypatch.setattr(work_debrief, "_slack_send",
@@ -235,7 +235,7 @@ class TestDeliverSlackIsGated:
                             lambda *a: pytest.fail("a closed instance sent a message"))
         with pytest.raises(RuntimeError, match="correspondence gate"):
             work_debrief._deliver_slack(
-                {"kind": "slack_message", "workspace": "aimyable",
+                {"kind": "slack_message", "workspace": "acme",
                  "recipient": "Sam", "draft": "hi"})
 
 
@@ -534,14 +534,14 @@ class TestLaunchContexts:
         root.mkdir()
         entry = MagicMock()
         entry.config = {"workspace": {"root": root, "repos": ["apipe", "portal"]}}
-        return {"aimyable": entry}, str(root)
+        return {"acme": entry}, str(root)
 
     def test_context_block_lists_project_and_slack(self, monkeypatch, tmp_path):
         from services import work_launch
         instances, root = self._instances(tmp_path)
         monkeypatch.setattr(work_launch.runtime, "instances", lambda: instances)
-        block = work_launch._context_block(["aimyable"], slack=True)
-        assert "Project aimyable" in block and root in block
+        block = work_launch._context_block(["acme"], slack=True)
+        assert "Project acme" in block and root in block
         assert "apipe, portal" in block
         assert "filtered.jsonl" in block
 
@@ -552,7 +552,7 @@ class TestLaunchContexts:
         (tmp_path / "aim-root" / "CLAUDE.md").write_text("root rules")
         (tmp_path / "aim-root" / "apipe").mkdir()
         (tmp_path / "aim-root" / "apipe" / "CLAUDE.md").write_text("repo rules")
-        block = work_launch._context_block(["aimyable"], slack=False)
+        block = work_launch._context_block(["acme"], slack=False)
         assert f"rules: {root}/CLAUDE.md, {root}/apipe/CLAUDE.md" in block
         assert "Read every file listed as rules above before you do anything else" in block
 
@@ -560,7 +560,7 @@ class TestLaunchContexts:
         from services import work_launch
         instances, _ = self._instances(tmp_path)
         monkeypatch.setattr(work_launch.runtime, "instances", lambda: instances)
-        block = work_launch._context_block(["aimyable"], slack=False)
+        block = work_launch._context_block(["acme"], slack=False)
         assert "rules:" not in block
         assert "Read every file listed as rules" not in block
 
@@ -588,13 +588,13 @@ class TestLaunchContexts:
              patch.object(work_launch.terminal, "session_healthy",
                           return_value={"alive": True, "agent_running": True}), \
              patch.object(work_launch.threading, "Thread", MagicMock()):
-            out = work_launch.launch("do a thing", contexts=["aimyable"], slack=True)
+            out = work_launch.launch("do a thing", contexts=["acme"], slack=True)
         assert "error" not in out
         assert captured["cwd"] == root
-        assert "Project aimyable" in captured["ctx"]
+        assert "Project acme" in captured["ctx"]
         assert "Context sources" in captured["ctx"]
         item = db.query_one("SELECT contexts FROM work_items WHERE id = ?", (out["item_id"],))
-        assert item["contexts"] == "aimyable,slack_int"
+        assert item["contexts"] == "acme,slack_int"
 
     def test_frshty_repo_always_listed(self, monkeypatch, tmp_path):
         from unittest.mock import MagicMock
@@ -605,7 +605,7 @@ class TestLaunchContexts:
         instances["personal"] = personal
         monkeypatch.setattr(work_launch.runtime, "instances", lambda: instances)
         keys = [e["key"] for e in work_launch.project_entries()]
-        assert "frshty" in keys and "aimyable" in keys and "personal" in keys
+        assert "frshty" in keys and "acme" in keys and "personal" in keys
         assert keys == sorted(keys)
 
 
@@ -639,7 +639,7 @@ class TestWholeTicketMerge:
         yield
 
     def _ticket(self, prs, key="DEV-728"):
-        token = state.use("aimyable")
+        token = state.use("acme")
         try:
             state.save_ticket(key, {"status": "in_review", "slug": key.lower(),
                                     "prs": prs})

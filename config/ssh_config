@@ -1,13 +1,11 @@
+# Per-account host aliases belong to the host, not to this repository. Put
+# them in ~/.ssh/config.d/, which docker-compose mounts at /tmp/.ssh-host.
+Include /tmp/.ssh-host/config.d/*
+
 Host github-personal
     HostName github.com
     User git
     IdentityFile /tmp/.ssh-host/id_ed25519
-    IdentitiesOnly yes
-
-Host github-quill
-    HostName github.com
-    User git
-    IdentityFile /tmp/.ssh-host/id_ed25519_quill
     IdentitiesOnly yes
 
 Host bitbucket.org

@@ -154,7 +154,7 @@
 						<div class="ln-logo">f</div>
 						<div>
 							<div class="ln-brand-title">frshty</div>
-							<div class="ln-brand-sub">{{ instance || 'aimyable' }}</div>
+							<div class="ln-brand-sub">{{ instance }}</div>
 						</div>
 					</div>
 					<a class="ln-cmdk" href="/">

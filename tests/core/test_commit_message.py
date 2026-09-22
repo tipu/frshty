@@ -316,7 +316,7 @@ class TestPromptRule:
         from core.tasks import tickets as T
         from core.tasks.registry import TaskContext
         ctx = TaskContext(
-            instance_key="aimyable", ticket_key="PROJ-1", task="fix_review_findings",
+            instance_key="acme", ticket_key="PROJ-1", task="fix_review_findings",
             payload={}, job_id=0, triggering_event_id=None,
             config={"workspace": {"root": tmp_path, "tickets_dir": "tickets"},
                     "_base_url": "http://localhost:8000"},

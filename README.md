@@ -114,6 +114,16 @@ docker compose up
 
 The image ships Claude Code, Codex, Gemini CLI, Playwright with Chromium, `gh`, `git`, and Python 3.12. The repo is bind-mounted, so a code change does not need a rebuild.
 
+The container reads `config/ssh_config` for every git operation. It carries no per-account host alias, because an alias names your accounts and this repository is shared. If a remote addresses an account through an alias such as `git@github-work:owner/repo.git`, write that alias into `~/.ssh/config.d/` on the host. docker-compose mounts `~/.ssh` at `/tmp/.ssh-host`, and `config/ssh_config` includes `/tmp/.ssh-host/config.d/*`:
+
+```
+Host github-work
+    HostName github.com
+    User git
+    IdentityFile /tmp/.ssh-host/id_ed25519_work
+    IdentitiesOnly yes
+```
+
 ## Setup details
 
 **Timezone.** Set `FRSHTY_TIMEZONE` to any IANA zone. It controls what the server calls "today", when the timesheet fills, and when billing fires. Default is `UTC`. Web pages ignore it and render every timestamp in the viewer's own zone, so two people in two zones each read their own clock on the same page.
@@ -125,7 +135,7 @@ The image ships Claude Code, Codex, Gemini CLI, Playwright with Chromium, `gh`, 
 provider = "claude"
 
 [llm.claude]
-config_dir = "~/.aimyable-claude"
+config_dir = "~/.myproject-claude"
 args = ["--dangerously-skip-permissions"]
 ```
 

@@ -915,10 +915,10 @@ class TestAutoReviewRouting:
         from core.registry import Instances
         from core.tasks.routes import _cron_routes
         instances = Instances()
-        reg = instances.add({"job": {"key": "quill"}, "features": features,
+        reg = instances.add({"job": {"key": "raven"}, "features": features,
                              "workspace": {"root": "/tmp/ws"}})
-        return [j["task"] for j in _cron_routes({"instance_key": "quill"},
-                                                {"quill": reg})]
+        return [j["task"] for j in _cron_routes({"instance_key": "raven"},
+                                                {"raven": reg})]
 
     def test_auto_review_on_enqueues_the_poll(self):
         assert "poll_reviewer" in self._tasks({"review_prs": True, "auto_review": True})
@@ -938,7 +938,7 @@ class TestAutoReviewRouting:
             config = {"features": {"review_prs": True, "auto_review": False}}
             ticket_key = None
             payload: dict = {}
-            instance_key = "quill"
+            instance_key = "raven"
 
         checks = [c(Ctx())[0] for c in get_task("poll_reviewer")["preconditions"]]
         assert False in checks
