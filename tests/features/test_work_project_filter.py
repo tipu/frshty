@@ -103,3 +103,34 @@ class TestBoardRoute:
     def test_the_route_echoes_the_filter_it_applied(self):
         body = work_routes.api_work_items(q="sync", projects="raven,frshty")
         assert body["filter"] == {"q": "sync", "projects": "raven,frshty"}
+
+
+class TestEditProjects:
+    def _contexts(self, item_id):
+        return db.query_one("SELECT contexts FROM work_items WHERE id = ?", (item_id,))["contexts"]
+
+    def test_the_route_replaces_the_projects(self):
+        a = _mkitem("raven sync", contexts="raven")
+        body = work_routes.api_work_projects(a, {"projects": ["frshty", " acme ", "frshty", ""]})
+        assert body == {"contexts": "frshty,acme"}
+        assert self._contexts(a) == "frshty,acme"
+        groups = work_store.grouped_items(projects="acme")
+        assert a in {r["id"] for g in groups.values() for r in g}
+
+    def test_an_edit_keeps_the_slack_label(self):
+        a = _mkitem("raven sync", contexts="raven,slack_int")
+        work_routes.api_work_projects(a, {"projects": ["frshty", "slack_int"]})
+        assert self._contexts(a) == "frshty,slack_int"
+        work_routes.api_work_projects(a, {"projects": []})
+        assert self._contexts(a) == "slack_int"
+
+    def test_an_edit_does_not_add_the_slack_label(self):
+        a = _mkitem("raven sync", contexts="raven")
+        work_routes.api_work_projects(a, {"projects": ["slack_int"]})
+        assert self._contexts(a) == ""
+
+    def test_the_route_rejects_a_bad_body_and_an_unknown_item(self):
+        a = _mkitem("raven sync", contexts="raven")
+        assert work_routes.api_work_projects(a, {"projects": "frshty"}).status_code == 400
+        assert work_routes.api_work_projects(999999, {"projects": []}).status_code == 404
+        assert self._contexts(a) == "raven"

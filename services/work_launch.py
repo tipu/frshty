@@ -705,6 +705,25 @@ def merge_review_required(contexts) -> list[str]:
     return [k for k in project_keys(contexts) if not _project_allows_merge(k)]
 
 
+def set_projects(item_id: int, projects) -> dict:
+    """Replace the project tags of one task and keep its Slack label.
+
+    The tags are the labels the board filters on and the merge rule reads, so
+    an edit changes both for every later continue of the task."""
+    if not isinstance(projects, list):
+        return {"error": "projects must be a list"}
+    keys = _context_keys(",".join(str(p) for p in projects))
+    with db.tx() as c:
+        row = c.execute("SELECT contexts FROM work_items WHERE id = ?",
+                        (item_id,)).fetchone()
+        if not row:
+            return {"error": "unknown work item"}
+        slack = SLACK_LABEL in (row["contexts"] or "").split(",")
+        contexts = ",".join(keys + ([SLACK_LABEL] if slack else []))
+        c.execute("UPDATE work_items SET contexts = ? WHERE id = ?", (contexts, item_id))
+    return {"contexts": contexts}
+
+
 def _correspondence_rule(config: dict) -> str:
     """The outward-communication paragraph for the launch prompt.
 
