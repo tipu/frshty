@@ -130,8 +130,8 @@ class TestWatchdogLaunchLedger:
         PR-only instance has no ticket rows at all — the watchdog runs for it
         on review_prs alone (core/tasks/routes.py)."""
         def seed(conn):
-            self._ticket(conn, "nectar", "NEC-1")
-            self._ticket(conn, "nectar", "NEC-2")
+            self._ticket(conn, "someclient", "SC-1")
+            self._ticket(conn, "someclient", "SC-2")
             conn.execute(
                 "INSERT INTO comment_state(instance_key, resource_type, resource_id,"
                 " comment_id, last_checked_at) VALUES ('proxy', 'pr', 'api/1', 'c1', 't0')")
@@ -147,13 +147,13 @@ class TestWatchdogLaunchLedger:
         rows = conn.execute(
             "SELECT instance_key, bucket, entity_id FROM watchdog_launches"
             " ORDER BY instance_key").fetchall()
-        assert rows == [("nectar", "migration", "upgrade-fence"),
-                        ("proxy", "migration", "upgrade-fence"),
-                        ("quill", "migration", "upgrade-fence")]
+        assert rows == [("proxy", "migration", "upgrade-fence"),
+                        ("quill", "migration", "upgrade-fence"),
+                        ("someclient", "migration", "upgrade-fence")]
 
     def test_running_the_fence_twice_leaves_one_row_per_instance(self, tmp_path):
         conn = self._apply(tmp_path, stop_before="029_watchdog_launch_fence.sql",
-                           seed=lambda c: self._ticket(c, "nectar", "NEC-1"))
+                           seed=lambda c: self._ticket(c, "someclient", "SC-1"))
         self._run(conn, "029_watchdog_launch_fence.sql")
         self._run(conn, "029_watchdog_launch_fence.sql")
 
@@ -172,12 +172,12 @@ class TestWatchdogLaunchLedger:
             conn.execute(
                 "INSERT INTO watchdog_observations(instance_key, bucket, entity_id,"
                 " first_seen_at, last_seen_at, opened_at, work_item_id)"
-                " VALUES ('nectar', 'pr_failed_tickets', 'NEC-1', 't0', 't1',"
+                " VALUES ('someclient', 'pr_failed_tickets', 'SC-1', 't0', 't1',"
                 " '2026-09-03T10:00:00Z', 7)")
             conn.execute(
                 "INSERT INTO watchdog_observations(instance_key, bucket, entity_id,"
                 " first_seen_at, last_seen_at)"
-                " VALUES ('nectar', 'pr_failed_tickets', 'NEC-2', 't0', 't1')")
+                " VALUES ('someclient', 'pr_failed_tickets', 'SC-2', 't0', 't1')")
         conn = self._apply(tmp_path, stop_before="028_watchdog_launches.sql",
                            seed=seed)
 
@@ -185,7 +185,7 @@ class TestWatchdogLaunchLedger:
 
         rows = conn.execute("SELECT entity_id, work_item_id, created_at"
                             " FROM watchdog_launches").fetchall()
-        assert rows == [("NEC-1", 7, "2026-09-03T10:00:00Z")]
+        assert rows == [("SC-1", 7, "2026-09-03T10:00:00Z")]
 
 
 class TestCommentFixCountBackfill:

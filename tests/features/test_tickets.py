@@ -1380,7 +1380,7 @@ class TestHasHumanReopenAfter:
     def test_no_reopen_when_human_moved_to_post_pr_state(self):
         h = [{"created_at": "2026-05-12T16:00:00Z", "to_state": "QA", "actor_email": "danial@x.com"}]
         assert tickets._has_human_reopen_after(h, self.MERGED) is None, (
-            "human moved to QA (post-PR wait state); not a reopen — this is the NEC-3100 case"
+            "human moved to QA (post-PR wait state); not a reopen — this is the SC-3100 case"
         )
 
     def test_detects_reopen_when_human_moves_to_active_work(self):
@@ -1412,7 +1412,7 @@ class TestFindPreMergedPr:
              patch("features.tickets.make_ticket_system", return_value=self._make_ticket_system(history)):
             result = tickets._find_pre_merged_pr({}, self._ticket())
         assert result == pr, (
-            "guard must return PR when human only moved to post-PR states (NEC-3100 scenario)"
+            "guard must return PR when human only moved to post-PR states (SC-3100 scenario)"
         )
 
     def test_returns_none_when_no_merged_pr_found(self):
@@ -3037,9 +3037,9 @@ class TestCheckInReviewSelfCommittedFix:
 
 class TestRecheckPrFailed:
     """A pr_failed ticket must not be terminal in scan_tickets — observed on
-    nectar 2026-05-12: 13 pr_failed tickets in DB included NEC-3039 (PR #691
-    MERGED ~1h before the page load), NEC-3098 (PR #697 MERGED May 4, 8 days
-    stale), and NEC-3064 (PR #692 still OPEN). The check() loop short-circuits
+    someclient 2026-05-12: 13 pr_failed tickets in DB included SC-3039 (PR #691
+    MERGED ~1h before the page load), SC-3098 (PR #697 MERGED May 4, 8 days
+    stale), and SC-3064 (PR #692 still OPEN). The check() loop short-circuits
     at `if ts['status'] == TicketStatus.pr_failed: continue`, so a previously
     closed PR that gets reopened or merged is never re-examined and the ticket
     stays in pr_failed forever. _recheck_pr_failed re-fetches PR state on each
