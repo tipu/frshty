@@ -74,6 +74,18 @@ PROGRESS_RULE = (
     f"work, print one line starting {PROGRESS_MARKER} that names what you "
     "just established and what you are doing next. "
 )
+TLDR_LONG_WORDS = 1200
+TLDR_RULE = (
+    "Open every such document with a TL;DR section: put it first on the page, "
+    "head it TL;DR, and hold it to at most five short lines that name the "
+    "outcome, the cause, and what the operator has to decide or do. An "
+    "operator who reads that section and stops has to come away with the "
+    f"answer. When the document runs past {TLDR_LONG_WORDS} words, write a "
+    "short version beside it, named <stem>-tldr.html, that carries the TL;DR "
+    "and the few facts that support it, keep it to one screen, link it to the "
+    "full document, and print an ARTIFACT line for it too, so the board lists "
+    "the short version next to the long one. "
+)
 CONTINUE_PROMPT_TEMPLATE = (
     "Continue toward the objective. {delivery}" + PROGRESS_RULE +
     "When you hit a decision point, decide "
@@ -88,8 +100,8 @@ CONTINUE_PROMPT_TEMPLATE = (
     "request written in prose does not reach the operator. "
     "{correspondence}"
     "Write any report, summary or other prose document for the operator as a "
-    "self-contained .html file, never as Markdown or plain text. If the objective "
-    f"is fully met, end your message with the single line {DONE_MARKER}."
+    "self-contained .html file, never as Markdown or plain text. " + TLDR_RULE +
+    f"If the objective is fully met, end your message with the single line {DONE_MARKER}."
 )
 
 
