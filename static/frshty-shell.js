@@ -227,8 +227,16 @@
 		return d.toLocaleDateString();
 	}
 
+	function questionWarning(text) {
+		if (!/\?\s*$/.test(text || '')) return '';
+		return 'This objective ends with a question mark. The agent reads it as a question: '
+			+ 'it answers and stops without making changes. State the outcome you want '
+			+ 'if you want the agent to change something.';
+	}
+
 	window.FrshtyShell = FrshtyShell;
 	window.relTime = relTime;
+	window.frshtyQuestionWarning = questionWarning;
 
 	// Compatibility wrapper around the existing frshtyApp helper from
 	// frshty-nav.js: register <frshty-shell> globally and forward the
@@ -242,6 +250,7 @@
 				// Also expose $relTime globally
 				if (app.config && app.config.globalProperties) {
 					app.config.globalProperties.$relTime = relTime;
+					app.config.globalProperties.$questionWarning = questionWarning;
 				}
 			}
 		} catch (e) {}
