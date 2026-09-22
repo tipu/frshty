@@ -280,3 +280,29 @@ class TestMergeGate:
             sid, "gh pr merge 184 --repo atroposhealth/text-to-tql-service --merge")
         assert out["decision"] == "deny"
         assert _gate_events(item_id)[0]["projects"] == ["frshty"]
+
+
+class TestOperatorMergeApproval:
+    """Whether the operator himself can merge a task's pull request now.
+
+    merge_review_required asks whether the agent may merge. This asks whether
+    the operator may, and the answer is no until a reviewer approves on every
+    project he does not review himself."""
+
+    def test_a_project_the_operator_reviews_himself_waits_for_nobody(self):
+        for key in work_launch.SELF_MERGE_PROJECTS:
+            assert work_launch.merge_approval_required([key]) is False
+
+    def test_a_client_project_waits_for_an_approval(self):
+        assert work_launch.merge_approval_required(["aimyable"]) is True
+
+    def test_one_waiting_project_holds_the_whole_task(self):
+        assert work_launch.merge_approval_required(["frshty", "aimyable"]) is True
+
+    def test_a_task_that_selects_no_project_waits(self):
+        assert work_launch.merge_approval_required("") is True
+        assert work_launch.merge_approval_required([]) is True
+
+    def test_the_slack_archive_is_not_a_project(self):
+        assert work_launch.merge_approval_required(
+            f"frshty,{work_launch.SLACK_LABEL}") is False
