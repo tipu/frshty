@@ -7,7 +7,7 @@ before its ticket existed couples the moment the ticket lands, and a ticket
 that is deleted stops claiming tasks it no longer has.
 
 Recognition reads the ticket keys that exist rather than a pattern a key is
-expected to follow. The instances here hold DEV-635 and NEC-12, and they also
+expected to follow. The instances here hold DEV-635 and SC-12, and they also
 hold PRD-6_FUNCTIONAL_REQUIREMENTS-3, which no project-plus-number pattern
 matches. A key counts when it stands on its own in the text, so DEV-63 is not
 found inside DEV-635 and PRD-6 is not found inside PRD-6_FUNCTIONAL_REQUIREMENTS-3.

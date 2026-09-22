@@ -808,7 +808,7 @@ class TestOperatorMergeApproval:
             state.reset(token)
 
     def _ticket(self, approvers, pr_state="OPEN", extra=()):
-        token = state.use("aimyable")
+        token = state.use("acme")
         try:
             state.save_ticket("DEV-900", {
                 "status": "in_review", "slug": "dev-900",
@@ -831,7 +831,7 @@ class TestOperatorMergeApproval:
                 "approvers": list(approvers)}
 
     def _save_ticket(self, key, prs):
-        token = state.use("aimyable")
+        token = state.use("acme")
         try:
             state.save_ticket(key, {"status": "in_review",
                                     "slug": key.lower(), "prs": prs})
@@ -839,7 +839,7 @@ class TestOperatorMergeApproval:
             state.reset(token)
 
     def test_an_unapproved_client_merge_is_held(self, monkeypatch, tmp_path):
-        item_id = self._required_draft(monkeypatch, tmp_path, "aimyable")
+        item_id = self._required_draft(monkeypatch, tmp_path, "acme")
 
         assert work_debrief.propose_required_followups() == []
 
@@ -847,15 +847,15 @@ class TestOperatorMergeApproval:
                             (item_id,)) is None
         held = work_debrief.followups_for(item_id)[0]
         assert held["status"] == "draft"
-        assert "aimyable" in held["detail"]
+        assert "acme" in held["detail"]
         assert "api#7" in held["detail"]
 
     def test_the_merge_is_proposed_once_the_poll_saw_an_approver(
             self, monkeypatch, tmp_path):
-        item_id = self._required_draft(monkeypatch, tmp_path, "aimyable")
+        item_id = self._required_draft(monkeypatch, tmp_path, "acme")
         assert work_debrief.propose_required_followups() == []
 
-        self._polled("aimyable", {"api/7": {"approvers": ["Jawad"]}})
+        self._polled("acme", {"api/7": {"approvers": ["Jawad"]}})
 
         assert len(work_debrief.propose_required_followups()) == 1
         assert db.query_one("SELECT id FROM work_items WHERE source_item_id = ?",
@@ -863,10 +863,10 @@ class TestOperatorMergeApproval:
 
     def test_another_project_s_poll_does_not_answer_for_this_one(
             self, monkeypatch, tmp_path):
-        """The blob belongs to the project that polled it. A task on aimyable
-        is not released by an approval quill's poll recorded."""
-        self._required_draft(monkeypatch, tmp_path, "aimyable")
-        self._polled("quill", {"api/7": {"approvers": ["Jawad"]}})
+        """The blob belongs to the project that polled it. A task on acme
+        is not released by an approval someclient's poll recorded."""
+        self._required_draft(monkeypatch, tmp_path, "acme")
+        self._polled("someclient", {"api/7": {"approvers": ["Jawad"]}})
 
         assert work_debrief.propose_required_followups() == []
 
@@ -880,7 +880,7 @@ class TestOperatorMergeApproval:
 
     def test_one_client_project_holds_a_task_that_also_selects_frshty(
             self, monkeypatch, tmp_path):
-        self._required_draft(monkeypatch, tmp_path, "frshty,aimyable")
+        self._required_draft(monkeypatch, tmp_path, "frshty,acme")
 
         assert work_debrief.propose_required_followups() == []
 
@@ -889,14 +889,14 @@ class TestOperatorMergeApproval:
         """merge_scopes never counts the pull request the draft names, so the
         ticket path used to propose a merge nobody had approved."""
         self._ticket([])
-        self._required_draft(monkeypatch, tmp_path, "aimyable")
+        self._required_draft(monkeypatch, tmp_path, "acme")
 
         assert work_debrief.propose_required_followups() == []
 
     def test_an_approved_ticket_pull_request_is_proposed(
             self, monkeypatch, tmp_path):
         self._ticket(["Jawad"])
-        item_id = self._required_draft(monkeypatch, tmp_path, "aimyable")
+        item_id = self._required_draft(monkeypatch, tmp_path, "acme")
 
         assert len(work_debrief.propose_required_followups()) == 1
         assert db.query_one("SELECT id FROM work_items WHERE source_item_id = ?",
@@ -905,7 +905,7 @@ class TestOperatorMergeApproval:
     def test_a_step_that_is_not_a_merge_is_never_held(
             self, monkeypatch, tmp_path):
         """A branch left unpushed is not waiting for anyone's approval."""
-        item_id = self._required_draft(monkeypatch, tmp_path, "aimyable",
+        item_id = self._required_draft(monkeypatch, tmp_path, "acme",
                                        unfinished="push")
 
         assert len(work_debrief.propose_required_followups()) == 1
@@ -917,7 +917,7 @@ class TestOperatorMergeApproval:
         """The debrief writes prose. A draft that names its pull request by
         number alone carries no approval evidence, so it cannot be proposed
         on a project that waits for one."""
-        item_id = self._required_draft(monkeypatch, tmp_path, "aimyable",
+        item_id = self._required_draft(monkeypatch, tmp_path, "acme",
                                        draft="Merge PR #7 into main.")
 
         assert work_debrief.propose_required_followups() == []
@@ -940,7 +940,7 @@ class TestOperatorMergeApproval:
         """merge_scopes resolves one ticket per address. A second address in the same
         draft is nobody's sibling, and it used to escape the check."""
         self._ticket(["Jawad"])
-        self._required_draft(monkeypatch, tmp_path, "aimyable",
+        self._required_draft(monkeypatch, tmp_path, "acme",
                              draft=self.TWO_PR_DRAFT)
 
         assert work_debrief.propose_required_followups() == []
@@ -948,11 +948,11 @@ class TestOperatorMergeApproval:
     def test_that_pull_request_releases_the_hold_once_it_is_approved(
             self, monkeypatch, tmp_path):
         self._ticket(["Jawad"])
-        self._required_draft(monkeypatch, tmp_path, "aimyable",
+        self._required_draft(monkeypatch, tmp_path, "acme",
                              draft=self.TWO_PR_DRAFT)
         assert work_debrief.propose_required_followups() == []
 
-        self._polled("aimyable", {"web/3": {"approvers": ["Jawad"]}})
+        self._polled("acme", {"web/3": {"approvers": ["Jawad"]}})
 
         assert len(work_debrief.propose_required_followups()) == 1
 
@@ -962,8 +962,8 @@ class TestOperatorMergeApproval:
         holds for one can predate the adoption. The ticket's own cache is the
         fact that is kept current."""
         self._ticket([])
-        self._polled("aimyable", {"api/7": {"approvers": ["Jawad"]}})
-        self._required_draft(monkeypatch, tmp_path, "aimyable")
+        self._polled("acme", {"api/7": {"approvers": ["Jawad"]}})
+        self._required_draft(monkeypatch, tmp_path, "acme")
 
         assert work_debrief.propose_required_followups() == []
 
@@ -973,7 +973,7 @@ class TestOperatorMergeApproval:
         it back out of the draft would hold the follow-up for ever."""
         self._ticket(["Jawad"], pr_state="MERGED",
                      extra=[self._other_pr(["Jawad"])])
-        item_id = self._required_draft(monkeypatch, tmp_path, "aimyable")
+        item_id = self._required_draft(monkeypatch, tmp_path, "acme")
 
         assert len(work_debrief.propose_required_followups()) == 1
         assert db.query_one("SELECT id FROM work_items WHERE source_item_id = ?",
@@ -986,7 +986,7 @@ class TestOperatorMergeApproval:
         poll held a fully approved draft for ever."""
         self._save_ticket("DEV-900", [self._prd("api", 7, ["Jawad"])])
         self._save_ticket("DEV-901", [self._prd("web", 3, ["Jawad"])])
-        item_id = self._required_draft(monkeypatch, tmp_path, "aimyable",
+        item_id = self._required_draft(monkeypatch, tmp_path, "acme",
                                        draft=self.TWO_PR_DRAFT)
 
         assert len(work_debrief.propose_required_followups()) == 1
@@ -998,7 +998,7 @@ class TestOperatorMergeApproval:
         self._save_ticket("DEV-900", [self._prd("api", 7, ["Jawad"])])
         self._save_ticket("DEV-901", [self._prd("web", 3, ["Jawad"]),
                                       self._prd("svc", 9)])
-        item_id = self._required_draft(monkeypatch, tmp_path, "aimyable",
+        item_id = self._required_draft(monkeypatch, tmp_path, "acme",
                                        draft=self.TWO_PR_DRAFT)
 
         assert work_debrief.propose_required_followups() == []
@@ -1013,7 +1013,7 @@ class TestOperatorMergeApproval:
                                       self._prd("cli", 4, ["Jawad"])])
         self._save_ticket("DEV-901", [self._prd("web", 3, ["Jawad"]),
                                       self._prd("svc", 9, ["Jawad"])])
-        item_id = self._required_draft(monkeypatch, tmp_path, "aimyable",
+        item_id = self._required_draft(monkeypatch, tmp_path, "acme",
                                        draft=self.TWO_PR_DRAFT)
 
         assert len(work_debrief.propose_required_followups()) == 1
@@ -1031,7 +1031,7 @@ class TestOperatorMergeApproval:
         pull request by repository and number would drop the second one."""
         self._save_ticket("DEV-900", [self._prd("api", 7, ["Jawad"])])
         item_id = self._required_draft(
-            monkeypatch, tmp_path, "aimyable",
+            monkeypatch, tmp_path, "acme",
             draft=("Merge https://github.com/acme/api/pull/7 and "
                    "https://github.com/other/api/pull/7 into main."))
 
@@ -1049,10 +1049,10 @@ class TestOperatorMergeApproval:
         carries acme's address, so it answers for acme's pull request and not
         for other's."""
         self._save_ticket("DEV-900", [self._prd("api", 7, ["Jawad"])])
-        self._polled("aimyable", {"api/7": {
+        self._polled("acme", {"api/7": {
             "approvers": ["Jawad"],
             "url": "https://github.com/acme/api/pull/7"}})
-        self._required_draft(monkeypatch, tmp_path, "aimyable",
+        self._required_draft(monkeypatch, tmp_path, "acme",
                              draft=self.OWNER_DRAFT)
 
         assert work_debrief.propose_required_followups() == []
@@ -1060,10 +1060,10 @@ class TestOperatorMergeApproval:
     def test_the_cached_approval_of_that_pull_request_releases_it(
             self, monkeypatch, tmp_path):
         self._save_ticket("DEV-900", [self._prd("api", 7, ["Jawad"])])
-        self._polled("aimyable", {"api/7": {
+        self._polled("acme", {"api/7": {
             "approvers": ["Jawad"],
             "url": "https://github.com/other/api/pull/7"}})
-        item_id = self._required_draft(monkeypatch, tmp_path, "aimyable",
+        item_id = self._required_draft(monkeypatch, tmp_path, "acme",
                                        draft=self.OWNER_DRAFT)
 
         assert len(work_debrief.propose_required_followups()) == 1
