@@ -3,7 +3,7 @@ sys.path.insert(0, "/app")
 import core.config as cfg
 from features.ticket_systems import make_ticket_system
 
-for inst, keys in [("apexco", ["DEV-437", "DEV-450"]), ("nimbus", ["NEC-3039"])]:
+for inst, keys in [("apexco", ["DEV-437", "DEV-450"])]:
     c = cfg.load_config(f"config/{inst}.toml")
     ts = make_ticket_system(c)
     if not ts:
