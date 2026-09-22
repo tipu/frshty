@@ -118,7 +118,7 @@ class TestCommentFixersCarryTheRule:
              patch("features.own_prs._commit_fix", return_value=(True, "")), \
              patch("features.own_prs.comments") as mock_comments, \
              patch("features.own_prs.log.emit"):
-            mock_comments.settled_comment_ids.return_value = set()
+            mock_comments.unowed_comment_ids.return_value = set()
             own_prs.fix_comments_batch(self._config(tmp_path), payload)
         assert pr_ci.KEEP_GREEN_RULE in fixer.call_args[0][0]
 
