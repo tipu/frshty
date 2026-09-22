@@ -7,19 +7,19 @@ from core import terminal
 from services import work_launch
 
 
-QUILL_DIR = "~/.quill-claude"
+RAVEN_DIR = "~/.raven-claude"
 DEFAULT_CMD = "claude --dangerously-skip-permissions"
 
 
 def _instances(tmp_path, extra=None):
     entries = {
         "personal": SimpleNamespace(config={"workspace": {"root": str(tmp_path)}}),
-        "quill": SimpleNamespace(config={
-            "workspace": {"root": str(tmp_path / "quill")},
-            "llm": {"provider": "claude", "claude": {"config_dir": QUILL_DIR}},
+        "raven": SimpleNamespace(config={
+            "workspace": {"root": str(tmp_path / "raven")},
+            "llm": {"provider": "claude", "claude": {"config_dir": RAVEN_DIR}},
         }),
-        "aimyable": SimpleNamespace(config={
-            "workspace": {"root": str(tmp_path / "aimyable")},
+        "acme": SimpleNamespace(config={
+            "workspace": {"root": str(tmp_path / "acme")},
             "llm": {"provider": "claude"},
         }),
     }
@@ -53,12 +53,12 @@ def _resume(tmp_path, item_id, entries=None):
 
 class TestLaunchEnvironment:
     def test_a_project_with_its_own_config_dir_supplies_the_pane_environment(self, tmp_path):
-        _, call = _launch(tmp_path, ["quill"])
+        _, call = _launch(tmp_path, ["raven"])
         cmd = terminal.claude_cmd(call.kwargs["config"])
-        assert cmd.startswith(f"CLAUDE_CONFIG_DIR={os.path.expanduser(QUILL_DIR)} ")
+        assert cmd.startswith(f"CLAUDE_CONFIG_DIR={os.path.expanduser(RAVEN_DIR)} ")
 
     def test_a_project_without_its_own_environment_keeps_the_default_account(self, tmp_path):
-        _, call = _launch(tmp_path, ["aimyable"])
+        _, call = _launch(tmp_path, ["acme"])
         assert terminal.claude_cmd(call.kwargs["config"]) == DEFAULT_CMD
 
     def test_a_launch_with_no_project_keeps_the_default_account(self, tmp_path):
@@ -66,14 +66,14 @@ class TestLaunchEnvironment:
         assert terminal.claude_cmd(call.kwargs["config"]) == DEFAULT_CMD
 
     def test_a_second_project_does_not_drop_the_selected_environment(self, tmp_path):
-        _, call = _launch(tmp_path, ["aimyable", "quill"])
+        _, call = _launch(tmp_path, ["acme", "raven"])
         cmd = terminal.claude_cmd(call.kwargs["config"])
-        assert cmd.startswith(f"CLAUDE_CONFIG_DIR={os.path.expanduser(QUILL_DIR)} ")
+        assert cmd.startswith(f"CLAUDE_CONFIG_DIR={os.path.expanduser(RAVEN_DIR)} ")
 
     def test_the_same_project_twice_still_supplies_its_environment(self, tmp_path):
-        _, call = _launch(tmp_path, ["quill", "quill"])
+        _, call = _launch(tmp_path, ["raven", "raven"])
         cmd = terminal.claude_cmd(call.kwargs["config"])
-        assert cmd.startswith(f"CLAUDE_CONFIG_DIR={os.path.expanduser(QUILL_DIR)} ")
+        assert cmd.startswith(f"CLAUDE_CONFIG_DIR={os.path.expanduser(RAVEN_DIR)} ")
 
     def test_two_environments_refuse_the_launch(self, tmp_path):
         entries = _instances(tmp_path, {
@@ -83,7 +83,7 @@ class TestLaunchEnvironment:
             }),
         })
         before = db.query_one("SELECT COUNT(*) AS n FROM work_items")["n"]
-        out, call = _launch(tmp_path, ["quill", "other"], entries=entries)
+        out, call = _launch(tmp_path, ["raven", "other"], entries=entries)
         assert "each pin their own claude environment" in out["error"]
         assert call is None
         assert db.query_one("SELECT COUNT(*) AS n FROM work_items")["n"] == before
@@ -95,37 +95,37 @@ class TestLaunchEnvironment:
                 "llm": {"codex": {"config_dir": "~/.other-codex"}},
             }),
         })
-        _, call = _launch(tmp_path, ["quill", "other"], entries=entries)
+        _, call = _launch(tmp_path, ["raven", "other"], entries=entries)
         cmd = terminal.claude_cmd(call.kwargs["config"])
-        assert cmd.startswith(f"CLAUDE_CONFIG_DIR={os.path.expanduser(QUILL_DIR)} ")
+        assert cmd.startswith(f"CLAUDE_CONFIG_DIR={os.path.expanduser(RAVEN_DIR)} ")
 
     def test_a_claude_only_project_does_not_supply_a_codex_pane(self, tmp_path):
-        _, call = _launch(tmp_path, ["quill"], agent="codex")
+        _, call = _launch(tmp_path, ["raven"], agent="codex")
         assert terminal.codex_cmd(call.kwargs["config"]) == \
             "codex --dangerously-bypass-approvals-and-sandbox"
 
     def test_the_cross_check_reviewer_runs_in_the_project_environment(self, tmp_path):
         entries = _instances(tmp_path, {
-            "quill": SimpleNamespace(config={
-                "workspace": {"root": str(tmp_path / "quill")},
-                "llm": {"claude": {"config_dir": QUILL_DIR},
-                        "codex": {"config_dir": "~/.quill-codex"}},
+            "raven": SimpleNamespace(config={
+                "workspace": {"root": str(tmp_path / "raven")},
+                "llm": {"claude": {"config_dir": RAVEN_DIR},
+                        "codex": {"config_dir": "~/.raven-codex"}},
             }),
         })
-        _, call = _launch(tmp_path, ["quill"], entries=entries)
-        assert f"CODEX_HOME={os.path.expanduser('~/.quill-codex')} codex exec" in call.args[3]
+        _, call = _launch(tmp_path, ["raven"], entries=entries)
+        assert f"CODEX_HOME={os.path.expanduser('~/.raven-codex')} codex exec" in call.args[3]
 
 
 class TestRecordedEnvironment:
     def test_the_run_records_the_project_and_the_config_dir(self, tmp_path):
-        out, _ = _launch(tmp_path, ["quill"])
+        out, _ = _launch(tmp_path, ["raven"])
         run = db.query_one("SELECT env_key, env_config_dir FROM work_runs WHERE id = ?",
                            (out["run_id"],))
-        assert run["env_key"] == "quill"
-        assert run["env_config_dir"] == QUILL_DIR
+        assert run["env_key"] == "raven"
+        assert run["env_config_dir"] == RAVEN_DIR
 
     def test_a_default_run_records_no_environment(self, tmp_path):
-        out, _ = _launch(tmp_path, ["aimyable"])
+        out, _ = _launch(tmp_path, ["acme"])
         run = db.query_one("SELECT env_key, env_config_dir FROM work_runs WHERE id = ?",
                            (out["run_id"],))
         assert run["env_key"] == ""
@@ -134,30 +134,30 @@ class TestRecordedEnvironment:
 
 class TestResumeEnvironment:
     def test_a_resume_keeps_the_environment_of_the_launch(self, tmp_path):
-        out, _ = _launch(tmp_path, ["quill"])
+        out, _ = _launch(tmp_path, ["raven"])
         call = _resume(tmp_path, out["item_id"])
         cmd = terminal.claude_cmd(call.kwargs["config"])
-        assert cmd.startswith(f"CLAUDE_CONFIG_DIR={os.path.expanduser(QUILL_DIR)} ")
+        assert cmd.startswith(f"CLAUDE_CONFIG_DIR={os.path.expanduser(RAVEN_DIR)} ")
 
     def test_a_resume_of_a_default_task_keeps_the_default_account(self, tmp_path):
-        out, _ = _launch(tmp_path, ["aimyable"])
+        out, _ = _launch(tmp_path, ["acme"])
         call = _resume(tmp_path, out["item_id"])
         assert terminal.claude_cmd(call.kwargs["config"]) == DEFAULT_CMD
 
     def test_a_resume_survives_the_project_dropping_its_environment(self, tmp_path):
-        out, _ = _launch(tmp_path, ["quill"])
+        out, _ = _launch(tmp_path, ["raven"])
         stripped = _instances(tmp_path, {
-            "quill": SimpleNamespace(config={
-                "workspace": {"root": str(tmp_path / "quill")},
+            "raven": SimpleNamespace(config={
+                "workspace": {"root": str(tmp_path / "raven")},
                 "llm": {"provider": "claude"},
             }),
         })
         call = _resume(tmp_path, out["item_id"], entries=stripped)
         cmd = terminal.claude_cmd(call.kwargs["config"])
-        assert cmd.startswith(f"CLAUDE_CONFIG_DIR={os.path.expanduser(QUILL_DIR)} ")
+        assert cmd.startswith(f"CLAUDE_CONFIG_DIR={os.path.expanduser(RAVEN_DIR)} ")
 
     def test_a_resume_is_refused_when_the_project_no_longer_loads(self, tmp_path):
-        out, _ = _launch(tmp_path, ["quill"])
+        out, _ = _launch(tmp_path, ["raven"])
         gone = {"personal": SimpleNamespace(config={
             "workspace": {"root": str(tmp_path)},
             "llm": {"claude": {"env": {"ANTHROPIC_API_KEY": "sk-personal"}}},
@@ -174,28 +174,28 @@ class TestResumeEnvironment:
 
     def test_a_project_that_pins_only_a_key_keeps_the_default_directory(self, tmp_path):
         entries = _instances(tmp_path, {
-            "quill": SimpleNamespace(config={
-                "workspace": {"root": str(tmp_path / "quill")},
-                "llm": {"claude": {"env": {"ANTHROPIC_API_KEY": "sk-quill"}}},
+            "raven": SimpleNamespace(config={
+                "workspace": {"root": str(tmp_path / "raven")},
+                "llm": {"claude": {"env": {"ANTHROPIC_API_KEY": "sk-raven"}}},
             }),
         })
-        out, call = _launch(tmp_path, ["quill"], entries=entries)
-        assert "sk-quill" in terminal.claude_cmd(call.kwargs["config"])
+        out, call = _launch(tmp_path, ["raven"], entries=entries)
+        assert "sk-raven" in terminal.claude_cmd(call.kwargs["config"])
         run = db.query_one("SELECT env_key, env_config_dir FROM work_runs WHERE id = ?",
                            (out["run_id"],))
-        assert run["env_key"] == "quill"
+        assert run["env_key"] == "raven"
         assert run["env_config_dir"] == ""
         later = _instances(tmp_path, {
-            "quill": SimpleNamespace(config={
-                "workspace": {"root": str(tmp_path / "quill")},
-                "llm": {"claude": {"config_dir": QUILL_DIR,
-                                   "env": {"ANTHROPIC_API_KEY": "sk-quill"}}},
+            "raven": SimpleNamespace(config={
+                "workspace": {"root": str(tmp_path / "raven")},
+                "llm": {"claude": {"config_dir": RAVEN_DIR,
+                                   "env": {"ANTHROPIC_API_KEY": "sk-raven"}}},
             }),
         })
         call = _resume(tmp_path, out["item_id"], entries=later)
         cmd = terminal.claude_cmd(call.kwargs["config"])
         assert "CLAUDE_CONFIG_DIR" not in cmd
-        assert "sk-quill" in cmd
+        assert "sk-raven" in cmd
 
     def test_a_run_with_no_recorded_environment_keeps_the_live_default(self, tmp_path):
         out, _ = _launch(tmp_path, [])
@@ -222,11 +222,11 @@ class TestResumeEnvironment:
         assert terminal.claude_cmd(call.kwargs["config"]) == DEFAULT_CMD
 
     def test_a_resume_of_a_default_task_ignores_a_new_project_environment(self, tmp_path):
-        out, _ = _launch(tmp_path, ["aimyable"])
+        out, _ = _launch(tmp_path, ["acme"])
         pinned = _instances(tmp_path, {
-            "aimyable": SimpleNamespace(config={
-                "workspace": {"root": str(tmp_path / "aimyable")},
-                "llm": {"claude": {"config_dir": "~/.aimyable-claude"}},
+            "acme": SimpleNamespace(config={
+                "workspace": {"root": str(tmp_path / "acme")},
+                "llm": {"claude": {"config_dir": "~/.acme-claude"}},
             }),
         })
         call = _resume(tmp_path, out["item_id"], entries=pinned)

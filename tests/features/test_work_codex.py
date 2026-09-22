@@ -166,12 +166,12 @@ class TestCodexLaunch:
         assert "pick a fresh uuid with `uuidgen` and pass it as the id" in claude_checks
 
     def test_the_resume_command_carries_the_config_dir(self):
-        config = {"llm": {"claude": {"config_dir": "~/.quill-claude"},
+        config = {"llm": {"claude": {"config_dir": "~/.raven-claude"},
                           "codex": {"config_dir": "~/.alt-codex"}}}
         claude = work_launch._reviewer_cmd("codex", config)
         codex = work_launch._reviewer_cmd("claude", config)
         assert claude["resume"].startswith(
-            f"CLAUDE_CONFIG_DIR={os.path.expanduser('~/.quill-claude')} ")
+            f"CLAUDE_CONFIG_DIR={os.path.expanduser('~/.raven-claude')} ")
         assert codex["resume"].startswith(
             f"CODEX_HOME={os.path.expanduser('~/.alt-codex')} ")
 
@@ -247,14 +247,14 @@ class TestCodexLaunch:
         assert codex_cmd.startswith("'/opt/Codex CLI/codex' ")
 
     def test_the_reviewer_command_carries_only_the_config_dir(self):
-        config = {"llm": {"claude": {"config_dir": "~/.quill-claude",
+        config = {"llm": {"claude": {"config_dir": "~/.raven-claude",
                                      "env": {"ANTHROPIC_API_KEY": "sk-secret"}},
                           "codex": {"config_dir": "~/.alt-codex",
                                     "env": {"OPENAI_API_KEY": "sk-secret"}}}}
         claude_cmd = work_launch._reviewer_cmd("codex", config)["first"]
         codex_cmd = work_launch._reviewer_cmd("claude", config)["first"]
         assert "sk-secret" not in claude_cmd and "sk-secret" not in codex_cmd
-        assert claude_cmd.startswith(f"CLAUDE_CONFIG_DIR={os.path.expanduser('~/.quill-claude')} ")
+        assert claude_cmd.startswith(f"CLAUDE_CONFIG_DIR={os.path.expanduser('~/.raven-claude')} ")
         assert codex_cmd.startswith(f"CODEX_HOME={os.path.expanduser('~/.alt-codex')} ")
 
     def test_a_secret_env_override_stays_out_of_the_launch_prompt(self, tmp_path, monkeypatch):
@@ -305,12 +305,32 @@ class TestCodexLaunch:
         assert entries["expirement"] == str(dev / "expirement")
         assert entries["upwork-api"] == str(dev / "upwork_apply")
 
-    def test_board_offers_every_extra_project_as_a_chip(self):
-        keys = ["game_expirement", "expirement", "upwork-api"]
+    def test_an_instance_is_primary_unless_it_opts_out(self, monkeypatch, tmp_path):
+        def _inst(config):
+            entry = MagicMock()
+            entry.config = config
+            return entry
+        instances = {
+            "shown": _inst({"workspace": {"root": str(tmp_path), "repos": []}}),
+            "hidden": _inst({"workspace": {"root": str(tmp_path), "repos": []},
+                             "work": {"dispatch": False}}),
+        }
+        monkeypatch.setattr(work_launch.runtime, "instances", lambda: instances)
+        primary = {e["key"]: e["primary"] for e in work_launch.project_entries()}
+        assert primary["shown"] is True
+        assert primary["hidden"] is False
+
+    def test_board_offers_every_project_the_server_lists(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(work_launch.runtime, "instances", lambda: {})
+        monkeypatch.setenv("HOME", str(tmp_path))
+        dev = tmp_path / "Documents" / "dev"
+        (dev / "game_expirement").mkdir(parents=True)
+        assert all(e["primary"] for e in work_launch.project_entries())
         for name in ("templates/work.html", "templates/thread_detail.html"):
             text = pathlib.Path(name).read_text()
-            for key in keys:
-                assert f'"{key}"' in text, f"{name} omits {key}"
+            assert 'v-for="p in visibleProjects"' in text, f"{name} omits the chip loop"
+            assert "DISPATCH_PROJECTS" not in text, f"{name} carries its own project list"
+            assert "p.primary" in text, f"{name} ignores the server's primary flag"
 
 
 class TestCodexNotify:

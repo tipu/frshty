@@ -10,9 +10,9 @@ class TestClaudeCmd:
         assert claude_cmd({}) == "claude --dangerously-skip-permissions"
 
     def test_config_dir_becomes_an_env_prefix(self):
-        cmd = claude_cmd({"llm": {"claude": {"config_dir": "~/.quill-claude"}}})
+        cmd = claude_cmd({"llm": {"claude": {"config_dir": "~/.raven-claude"}}})
         assert cmd.startswith("CLAUDE_CONFIG_DIR=/")
-        assert "/.quill-claude" in cmd
+        assert "/.raven-claude" in cmd
         assert cmd.endswith("claude --dangerously-skip-permissions")
 
     def test_env_overrides_win_over_config_dir(self):
@@ -33,7 +33,7 @@ class TestClaudeCmd:
 
     def test_matches_the_headless_provider(self):
         from core.llm import ClaudeProvider
-        config = {"llm": {"claude": {"config_dir": "~/.quill-claude"}}}
+        config = {"llm": {"claude": {"config_dir": "~/.raven-claude"}}}
         provider_dir = ClaudeProvider(config)._env()["CLAUDE_CONFIG_DIR"]
         assert f"CLAUDE_CONFIG_DIR={provider_dir} " in claude_cmd(config)
 

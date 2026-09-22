@@ -29,16 +29,16 @@ class TestHandlerRouting:
         config, ticket, state_dict, docs = _seed(tmp_path)
         with patch("features.tickets._enqueue_stage") as eq:
             ts_mod._handle_testing_ticket(config, ticket, state_dict,
-                                          config["_base_url"], "aimyable", True)
-        eq.assert_called_once_with("aimyable", "PROJ-1", "plan_tests")
+                                          config["_base_url"], "acme", True)
+        eq.assert_called_once_with("acme", "PROJ-1", "plan_tests")
 
     def test_plan_exists_no_files_written_enqueues_write_tests(self, tmp_path):
         config, ticket, state_dict, docs = _seed(tmp_path)
         (docs / "test-plan.md").write_text("plan")
         with patch("features.tickets._enqueue_stage") as eq:
             ts_mod._handle_testing_ticket(config, ticket, state_dict,
-                                          config["_base_url"], "aimyable", True)
-        eq.assert_called_once_with("aimyable", "PROJ-1", "write_tests")
+                                          config["_base_url"], "acme", True)
+        eq.assert_called_once_with("acme", "PROJ-1", "write_tests")
 
     def test_files_written_no_runs_enqueues_run_tests_and_fix(self, tmp_path):
         config, ticket, state_dict, docs = _seed(tmp_path)
@@ -46,8 +46,8 @@ class TestHandlerRouting:
         (docs / "test-files-written.txt").write_text("repo/tests/foo.test.ts\n")
         with patch("features.tickets._enqueue_stage") as eq:
             ts_mod._handle_testing_ticket(config, ticket, state_dict,
-                                          config["_base_url"], "aimyable", True)
-        eq.assert_called_once_with("aimyable", "PROJ-1", "run_tests_and_fix")
+                                          config["_base_url"], "acme", True)
+        eq.assert_called_once_with("acme", "PROJ-1", "run_tests_and_fix")
 
     def test_verdict_pass_enqueues_enter_proving(self, tmp_path):
         """PASS now hops through enter_proving, which gates on PROOF.md. If
@@ -60,8 +60,8 @@ class TestHandlerRouting:
         (docs / "test-runs.md").write_text("# attempt 1\nVERDICT: PASS\n")
         with patch("features.tickets._enqueue_stage") as eq:
             ts_mod._handle_testing_ticket(config, ticket, state_dict,
-                                          config["_base_url"], "aimyable", True)
-        eq.assert_called_once_with("aimyable", "PROJ-1", "enter_proving")
+                                          config["_base_url"], "acme", True)
+        eq.assert_called_once_with("acme", "PROJ-1", "enter_proving")
 
     def test_verdict_fail_under_cap_enqueues_run_tests_and_fix(self, tmp_path):
         config, ticket, state_dict, docs = _seed(tmp_path)
@@ -71,8 +71,8 @@ class TestHandlerRouting:
         state_dict["test_fix_attempts"] = 2  # < cap of 3
         with patch("features.tickets._enqueue_stage") as eq:
             ts_mod._handle_testing_ticket(config, ticket, state_dict,
-                                          config["_base_url"], "aimyable", True)
-        eq.assert_called_once_with("aimyable", "PROJ-1", "run_tests_and_fix")
+                                          config["_base_url"], "acme", True)
+        eq.assert_called_once_with("acme", "PROJ-1", "run_tests_and_fix")
 
     def test_no_instance_key_short_circuits(self, tmp_path):
         config, ticket, state_dict, _ = _seed(tmp_path)
@@ -97,7 +97,7 @@ class TestCapBoundary:
              patch("core.state.transition_ticket") as trans, \
              patch("core.log.emit") as emit:
             ts_mod._handle_testing_ticket(config, ticket, state_dict,
-                                          config["_base_url"], "aimyable", True)
+                                          config["_base_url"], "acme", True)
 
         trans.assert_called_once_with("PROJ-1", "tests_failed")
         # No further run_tests_and_fix invocations once we've hit the cap
@@ -116,9 +116,9 @@ class TestCapBoundary:
         with patch("features.tickets._enqueue_stage") as eq, \
              patch("core.state.transition_ticket") as trans:
             ts_mod._handle_testing_ticket(config, ticket, state_dict,
-                                          config["_base_url"], "aimyable", True)
+                                          config["_base_url"], "acme", True)
         trans.assert_not_called()
-        eq.assert_called_once_with("aimyable", "PROJ-1", "run_tests_and_fix")
+        eq.assert_called_once_with("acme", "PROJ-1", "run_tests_and_fix")
 
 
 class TestUnparseableVerdict:
@@ -131,5 +131,5 @@ class TestUnparseableVerdict:
         (docs / "test-runs.md").write_text("# attempt 1\n(no verdict line here)\n")
         with patch("features.tickets._enqueue_stage") as eq:
             ts_mod._handle_testing_ticket(config, ticket, state_dict,
-                                          config["_base_url"], "aimyable", True)
-        eq.assert_called_once_with("aimyable", "PROJ-1", "run_tests_and_fix")
+                                          config["_base_url"], "acme", True)
+        eq.assert_called_once_with("acme", "PROJ-1", "run_tests_and_fix")

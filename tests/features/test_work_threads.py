@@ -66,12 +66,12 @@ class TestThreadDerivation:
         assert sorted(thread["providers"]) == ["claude", "codex"]
 
     def test_thread_reports_the_projects_of_its_members(self):
-        root = work_store.create_item("root in quill", contexts="quill")
-        work_store.create_item("follow up in quill and clarivis",
-                               contexts="quill,clarivis,slack_int",
+        root = work_store.create_item("root in raven", contexts="raven")
+        work_store.create_item("follow up in raven and clarivis",
+                               contexts="raven,clarivis,slack_int",
                                source_item_id=root)
         thread = next(t for t in work_store.threads() if t["root_id"] == root)
-        assert thread["projects"] == ["quill", "clarivis"]
+        assert thread["projects"] == ["raven", "clarivis"]
 
     def test_thread_without_a_project_context_reports_none(self):
         ids = _chain(["root with no project", "follow up with no project"])
@@ -329,12 +329,12 @@ class TestRoutes:
         assert d["attention"] >= 1
 
     def test_threads_endpoint_carries_the_project_context(self):
-        root = work_store.create_item("root for project endpoint", contexts="aimyable")
-        work_store.create_item("follow up for project endpoint", contexts="aimyable",
+        root = work_store.create_item("root for project endpoint", contexts="acme")
+        work_store.create_item("follow up for project endpoint", contexts="acme",
                                source_item_id=root)
         d = _client().get("/api/work/threads").json()
         thread = next(t for t in d["threads"] if t["root_id"] == root)
-        assert thread["projects"] == ["aimyable"]
+        assert thread["projects"] == ["acme"]
 
     def test_threads_page_shows_the_project_context(self):
         assert 'v-for="p in t.projects"' in _client().get("/threads").text

@@ -112,7 +112,7 @@ So the second incident was not a separate root cause. It was the same reviewer s
 The evidence pointed to frshty's automated reviewer, not manual terminal usage:
 
 - root Claude sessions were launched by `sdk-cli` from the frshty repo
-- review artifact directories under `~/.frshty/aimyable/reviews/...` were created immediately before the burst
+- review artifact directories under `~/.frshty/<instance>/reviews/...` were created immediately before the burst
 - affected branches/PRs matched frshty's review state and worktree layout
 - the burst was dominated by repeated PR review prompts with persona-specific wording
 - there was only minimal subagent activity relative to the number of root sessions

@@ -2,7 +2,7 @@
 
 Question: did frshty run the final ticket step that checks for unnecessary code and
 branch state against main, for
-https://bitbucket.org/aimyable/windows-rpa-client-schema/pull-requests/19 ?
+https://bitbucket.org/<org>/windows-rpa-client-schema/pull-requests/19 ?
 
 Answer: no. The step did not run before the PR was opened. The step also cannot
 report the defect that was found. Both facts are bugs. They are separate bugs.
@@ -13,7 +13,7 @@ scope review. It asks two questions: scope fidelity and git integrity
 
 ## What was PR'd
 
-PR #19 belongs to ticket DEV-635 (`aimyable`, slug `DEV-635-file-explorer-tool`).
+PR #19 belongs to ticket DEV-635 (`<instance>`, slug `DEV-635-file-explorer-tool`).
 Commit `93d4c17` added `FileExplorerOperation`, an enum with no caller, and
 `FileExplorerAction.recursive`, a field with no reader. The operator removed both by
 hand on 2026-08-26 in commit `3967da2` ("remove unused FileExplorerOperation enum and
@@ -52,8 +52,8 @@ The gate has three enforcement sites and none of them cover this path:
 - `features/ticket_states.py:388` guards the dispatcher PR. The `_create_pr` call below it is behind `config["pr"]["auto_pr"]`.
 - `features/ticket_states.py:457` guards auto-merge. Behind `config["pr"]["auto_merge"]`.
 
-`config/aimyable.toml` sets `auto_pr = false` and `auto_merge = false`. For the
-aimyable instance the scope-review gate therefore blocks nothing at all. It is
+`config/<instance>.toml` sets `auto_pr = false` and `auto_merge = false`. For that
+instance the scope-review gate therefore blocks nothing at all. It is
 advisory output only.
 
 The UI has no scope-review state either. `grep scope_review templates/*.html` returns
@@ -186,7 +186,7 @@ a verdict is only valid for the state it was computed against, which is the rule
 
 ## What I checked
 
-- `~/.frshty/frshty.db`: `tickets`, `jobs`, `ticket_transitions`, `log_events` for `instance_key='aimyable'`, `ticket_key='DEV-635'`.
+- `~/.frshty/frshty.db`: `tickets`, `jobs`, `ticket_transitions`, `log_events` for `instance_key='<instance>'`, `ticket_key='DEV-635'`.
 - `git log` and `git diff` in the DEV-635 schema worktree and in the frshty repo.
 - `core/consensus_scope.py`, `core/tasks/tickets.py`, `core/scheduler.py`, `features/tickets.py`, `features/ticket_states.py`, `features/reviewer.py`, `web/tickets.py`, `templates/*.html`.
 - One live `codex exec` run of the real `SCOPE_DIRECTIVE` against the known-bad commit `e374679`.
