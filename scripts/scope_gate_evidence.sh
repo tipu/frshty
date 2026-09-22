@@ -4,7 +4,9 @@ set -euo pipefail
 
 DB="${FRSHTY_DB:-$HOME/.frshty/frshty.db}"
 REPO="${FRSHTY_REPO:-$HOME/Documents/dev/frshty/frshty}"
-WT="${DEV635_SCHEMA_WT:-$HOME/Documents/dev/aimyable/tickets/DEV-635-file-explorer-tool/workspace/windows-rpa-client-schema}"
+WT="${DEV635_SCHEMA_WT:-}"
+INSTANCE="${DEV635_INSTANCE:-}"
+TICKET="${DEV635_TICKET:-DEV-635}"
 
 echo "== 1. consensus quorum: how many scope verdicts ran on fewer than three voices"
 python3 - "$DB" <<'PY'
@@ -39,17 +41,23 @@ for r in c.execute("SELECT event, COUNT(*) n FROM log_events "
 PY
 
 echo
-echo "== 3. scope_review runs for DEV-635"
-python3 - "$DB" <<'PY'
+echo "== 3. scope_review runs for $TICKET"
+if [ -n "$INSTANCE" ]; then
+python3 - "$DB" "$INSTANCE" "$TICKET" <<'PY'
 import sqlite3, sys
 c = sqlite3.connect(sys.argv[1]); c.row_factory = sqlite3.Row
 rows = c.execute("SELECT id, status, enqueued_at, finished_at FROM jobs "
-                 "WHERE instance_key='aimyable' AND ticket_key='DEV-635' "
-                 "AND task='scope_review' ORDER BY id").fetchall()
+                 "WHERE instance_key=? AND ticket_key=? "
+                 "AND task='scope_review' ORDER BY id",
+                 (sys.argv[2], sys.argv[3])).fetchall()
 print(f"   runs: {len(rows)}  statuses: {sorted({r['status'] for r in rows})}")
-print(f"   first: {rows[0]['enqueued_at']}")
-print(f"   last:  {rows[-1]['enqueued_at']}")
+if rows:
+    print(f"   first: {rows[0]['enqueued_at']}")
+    print(f"   last:  {rows[-1]['enqueued_at']}")
 PY
+else
+  echo "   instance not set, skipped: set DEV635_INSTANCE"
+fi
 
 echo
 echo "== 4. ship paths that do not consult the scope verdict"

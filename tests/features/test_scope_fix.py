@@ -27,12 +27,12 @@ REPORT = "\n".join([
     "Votes: agy=FAIL, codex=FAIL", "",
     "## agy", "", "Offending changes:", "",
     "- `saas-dashboard`: paced-stream catch-up fix at src/MessageLog.tsx:120",
-    "- `django-drf-app`: root admin route at src/aimyable/urls.py:36", "",
+    "- `django-drf-app`: root admin route at src/acme/urls.py:36", "",
     "SCOPE VERDICT: FAIL", ""])
 
 FINDINGS = [
     "`saas-dashboard`: paced-stream catch-up fix at src/MessageLog.tsx:120",
-    "`django-drf-app`: root admin route at src/aimyable/urls.py:36",
+    "`django-drf-app`: root admin route at src/acme/urls.py:36",
 ]
 
 
@@ -225,7 +225,7 @@ class TestTheStatusMovesOnlyOnARecordedCorrection:
         def _fix(prompt, **kwargs):
             if write_record:
                 (ticket_dir / "docs" / "scope-fix.md").write_text(
-                    "- removed src/MessageLog.tsx:120\n- removed src/aimyable/urls.py:36\n")
+                    "- removed src/MessageLog.tsx:120\n- removed src/acme/urls.py:36\n")
             return "done"
 
         with patch("core.tasks.tickets.scope_fingerprint",

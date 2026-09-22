@@ -1,8 +1,15 @@
 import asyncio
+import os
+import sys
 from pathlib import Path
 from playwright.async_api import async_playwright
 
-SCREENSHOTS_DIR = Path("/tmp/aimyable_screenshots")
+BASE = (sys.argv[1] if len(sys.argv) > 1
+        else os.environ.get("FRSHTY_BASE_URL", "")).rstrip("/")
+if not BASE:
+    raise SystemExit("usage: explore_remaining.py <frshty base url>")
+SCREENSHOTS_DIR = Path(os.environ.get("FRSHTY_SCREENSHOTS_DIR",
+                                      "/tmp/frshty_screenshots"))
 
 async def take_screenshot(page, name):
     path = SCREENSHOTS_DIR / f"{name}.png"
@@ -16,9 +23,9 @@ async def main():
         page = await context.new_page()
         
         pages = [
-            ("https://aimyable.localhost/timesheet", "09_timesheet"),
-            ("https://aimyable.localhost/billing", "10_billing"),
-            ("https://aimyable.localhost/config", "11_config"),
+            (f"{BASE}/timesheet", "09_timesheet"),
+            (f"{BASE}/billing", "10_billing"),
+            (f"{BASE}/config", "11_config"),
         ]
         
         for url, name in pages:

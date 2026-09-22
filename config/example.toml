@@ -53,6 +53,13 @@ auto_merge = false                # governs both halves of frshty. the ticket pi
 # merge_strategy = "squash"       # squash, merge, rebase
 # merge_flags = ["--admin"]       # extra flags for gh pr merge
 
+# [work]
+# dispatch = true                 # default true. the task board's project picker shows
+#                                 # this instance in its first row. false moves it behind
+#                                 # the picker's "+ context" control; the project is still
+#                                 # selectable and every task that already names it is
+#                                 # unaffected.
+
 [features]
 review_prs = false
 auto_review = true                # default true. when false, frshty never starts a code review on its own. the PRs waiting on this user are still listed on /reviews and /today, and a review runs only when the operator starts one there. the rest of review_prs (own-PR comments, CI fixes, the peer-review list) is unaffected.
@@ -208,7 +215,7 @@ pr_autofix = false                # github only: every newly created PR gets a c
 # Claude provider config (used when provider = "claude"):
 # [llm.claude]
 # bin = "claude"                      # executable name or absolute path
-# config_dir = "~/.aimyable-claude"   # sets CLAUDE_CONFIG_DIR for this instance
+# config_dir = "~/.myproject-claude"  # sets CLAUDE_CONFIG_DIR for this instance
 #                                     # a work board task that selects this project
 #                                     # also runs its agent with this environment
 # args = ["--dangerously-skip-permissions"]  # optional extra args prepended to every Claude invocation

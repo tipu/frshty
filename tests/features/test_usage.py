@@ -54,8 +54,8 @@ class TestMigration:
 class TestRecord:
     def test_upsert_increments(self):
         _clear()
-        usage.record("route", "GET /x", instance="aimyable")
-        usage.record("route", "GET /x", instance="aimyable")
+        usage.record("route", "GET /x", instance="acme")
+        usage.record("route", "GET /x", instance="acme")
         row = db.query_one(
             "SELECT count FROM usage_counters WHERE kind='route' AND name='GET /x'")
         assert row["count"] == 2
@@ -69,11 +69,11 @@ class TestRecord:
 
     def test_instances_kept_separate(self):
         _clear()
-        usage.record("route", "GET /x", instance="aimyable")
+        usage.record("route", "GET /x", instance="acme")
         usage.record("route", "GET /x", instance="nectar")
         rows = db.query_all(
             "SELECT instance FROM usage_counters WHERE name='GET /x'")
-        assert {r["instance"] for r in rows} == {"aimyable", "nectar"}
+        assert {r["instance"] for r in rows} == {"acme", "nectar"}
 
     def test_empty_name_is_noop(self):
         _clear()

@@ -58,9 +58,9 @@ def test_draft_then_open_then_add_and_check_off(client):
     assert client.post("/api/standup/open", json={"day": "2026-09-16"}).json()["state"] == "open"
     added = client.post("/api/standup/items",
                         json={"day": "2026-09-16", "text": "Log the week's hours",
-                              "contexts": "aimyable"}).json()
+                              "contexts": "acme"}).json()
     item = next(i for i in added["items"] if i["text"] == "Log the week's hours")
-    assert item["contexts"] == "aimyable"
+    assert item["contexts"] == "acme"
     after = client.post(f"/api/standup/items/{item['id']}/state",
                         json={"day": "2026-09-16", "state": "done"}).json()
     assert next(i for i in after["items"] if i["id"] == item["id"])["state"] == "done"

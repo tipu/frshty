@@ -24,12 +24,12 @@ def _cfg(tmp_path):
 
 
 def _pr():
-    return {"repo": "quill", "id": 4536, "branch": "claude/team-checkout-redirect",
+    return {"repo": "raven", "id": 4536, "branch": "claude/team-checkout-redirect",
             "url": "https://example/pr/4536"}
 
 
 def _review_dir(tmp_path):
-    d = Path(tmp_path) / "reviews" / "quill" / "claude-team-checkout-redirect"
+    d = Path(tmp_path) / "reviews" / "raven" / "claude-team-checkout-redirect"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -69,7 +69,7 @@ class TestEveryPipelineReviewAlsoStartsATaskReview:
              patch.object(reviewer, "launch_task_review") as launch, \
              patch.object(reviewer, "log"):
             reviewer.review_ticket(cfg, "JIRA-1", [_pr()],
-                                   diffs={"quill/4536": "diff --git a/a.ts b/a.ts\n"})
+                                   diffs={"raven/4536": "diff --git a/a.ts b/a.ts\n"})
         return launch
 
     def test_a_ticket_grouped_review_launches_one_too(self, tmp_path):
@@ -128,7 +128,7 @@ class TestTheLaunchIsBestEffort:
         failing. Taking back a placeholder it no longer owns would 404 the task
         that is on its way."""
         review_dir = _review_dir(tmp_path)
-        live = {"pr_id": 4536, "repo": "quill", "status": "reviewing", "token": "live"}
+        live = {"pr_id": 4536, "repo": "raven", "status": "reviewing", "token": "live"}
 
         def fail_after_a_rerun(*_args, **_kwargs):
             (review_dir / "review.tasks.json").write_text(json.dumps(live))
@@ -175,7 +175,7 @@ class TestAPendingTaskReviewIsFindable:
     def test_the_store_can_find_it_before_the_findings_arrive(self, tmp_path, launched):
         """store_task_review resolves the branch directory through this lookup,
         so a POST that beats the pipeline's own review still lands."""
-        found = review_store.find_review(Path(tmp_path), "quill", 4536, provider="tasks")
+        found = review_store.find_review(Path(tmp_path), "raven", 4536, provider="tasks")
         assert found is not None
         assert found[0] == _review_dir(tmp_path)
 
@@ -218,7 +218,7 @@ class TestTheObjectiveCarriesTheArm:
     def test_it_names_the_staged_diff_and_the_post_it_owes(self, tmp_path):
         text = self._objective(tmp_path)
         assert str(_review_dir(tmp_path) / "diff.txt") in text
-        assert "http://board/api/reviews/quill/4536/task-review?token=tok" in text
+        assert "http://board/api/reviews/raven/4536/task-review?token=tok" in text
         assert "The POST is the deliverable." in text
 
     def test_it_forbids_editing_the_code_it_reviews(self, tmp_path):
@@ -245,11 +245,11 @@ class TestStoringWhatTheTaskFound:
     def _store(self, tmp_path, review, token=None):
         if token is None:
             token = _token(tmp_path)
-        return reviewer.store_task_review(_cfg(tmp_path), "quill", 4536, review, token)
+        return reviewer.store_task_review(_cfg(tmp_path), "raven", 4536, review, token)
 
     def test_no_open_task_review_is_reported_not_invented(self, tmp_path):
         _review_dir(tmp_path)
-        assert reviewer.store_task_review(_cfg(tmp_path), "quill", 4536,
+        assert reviewer.store_task_review(_cfg(tmp_path), "raven", 4536,
                                           {"issues": []}, "tok") is None
 
     def test_the_objective_and_the_placeholder_carry_the_same_token(
@@ -302,7 +302,7 @@ class TestStoringWhatTheTaskFound:
 
         def post(review):
             gate.wait()
-            stored.append(reviewer.store_task_review(cfg, "quill", 4536, review, token))
+            stored.append(reviewer.store_task_review(cfg, "raven", 4536, review, token))
 
         with patch.object(reviewer, "_write_review_files", slow):
             threads = [threading.Thread(target=post, args=(r,))

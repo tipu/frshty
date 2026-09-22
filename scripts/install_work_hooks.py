@@ -9,7 +9,7 @@ import core.config as cfg
 import core.terminal as terminal
 
 EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd", "Notification", "PreToolUse")
-DEFAULT_DIRS = ("~/.claude", "~/.quill-claude", "~/.aimyable-claude")
+DEFAULT_DIRS = ("~/.claude",)
 PUSH_GATE_TIMEOUT = 2700
 WRITE_GATE_TIMEOUT = 300
 WRITE_GATE_MATCHER = "Edit|Write|NotebookEdit|MultiEdit"
@@ -35,7 +35,8 @@ def claude_config_dirs() -> list[str]:
     installer never visits has no hooks and therefore no gates.
     `agent_config_dir` returns "" for an instance that runs the operator's
     default account, and that means ~/.claude, so the empty string is mapped
-    rather than dropped."""
+    rather than dropped. ~/.claude is therefore always visited, and every
+    other directory is read from an instance config."""
     dirs = [os.path.expanduser(d) for d in DEFAULT_DIRS]
     for path in sorted(CONFIG_DIR.glob("*.toml")):
         if path.name in SKIP_CONFIGS:

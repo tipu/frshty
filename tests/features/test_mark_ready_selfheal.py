@@ -38,7 +38,7 @@ def _make_repo(root, name):
 
 def _ctx(tmp_path, slug="PROJ-1-x"):
     return TaskContext(
-        instance_key="aimyable", ticket_key="PROJ-1", task="mark_ready",
+        instance_key="acme", ticket_key="PROJ-1", task="mark_ready",
         payload={}, job_id=0, triggering_event_id=None,
         config={"workspace": {"root": tmp_path, "tickets_dir": "tickets"},
                 "_base_url": "http://localhost:8000"},

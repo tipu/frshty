@@ -1,8 +1,15 @@
 import asyncio
+import os
+import sys
 from pathlib import Path
 from playwright.async_api import async_playwright
 
-SCREENSHOTS_DIR = Path("/tmp/aimyable_screenshots")
+BASE = (sys.argv[1] if len(sys.argv) > 1
+        else os.environ.get("FRSHTY_BASE_URL", "")).rstrip("/")
+if not BASE:
+    raise SystemExit("usage: explore_detail_pages.py <frshty base url>")
+SCREENSHOTS_DIR = Path(os.environ.get("FRSHTY_SCREENSHOTS_DIR",
+                                      "/tmp/frshty_screenshots"))
 SCREENSHOTS_DIR.mkdir(exist_ok=True)
 
 async def take_screenshot(page, name, description=""):
@@ -31,13 +38,13 @@ async def main():
         page = await context.new_page()
         
         # Explore main pages
-        await page.goto("https://aimyable.localhost/", wait_until="networkidle")
+        await page.goto(f"{BASE}/", wait_until="networkidle")
         await take_screenshot(page, "01_home", "Home page - main feed")
         
-        await page.goto("https://aimyable.localhost/global", wait_until="networkidle")
+        await page.goto(f"{BASE}/global", wait_until="networkidle")
         await take_screenshot(page, "02_global", "Global feed - events from all instances")
         
-        await page.goto("https://aimyable.localhost/reviews", wait_until="networkidle")
+        await page.goto(f"{BASE}/reviews", wait_until="networkidle")
         await take_screenshot(page, "03_reviews_list", "Reviews list view")
         
         # Try to click on a review
@@ -50,7 +57,7 @@ async def main():
         except Exception as e:
             print(f"Could not explore review detail: {e}")
         
-        await page.goto("https://aimyable.localhost/tickets", wait_until="networkidle")
+        await page.goto(f"{BASE}/tickets", wait_until="networkidle")
         await take_screenshot(page, "05_tickets_list", "Tickets list view")
         
         # Try to click on a ticket
@@ -63,19 +70,19 @@ async def main():
         except Exception as e:
             print(f"Could not explore ticket detail: {e}")
         
-        await page.goto("https://aimyable.localhost/scheduled", wait_until="networkidle")
+        await page.goto(f"{BASE}/scheduled", wait_until="networkidle")
         await take_screenshot(page, "07_scheduled", "Scheduled jobs view")
         
-        await page.goto("https://aimyable.localhost/slack", wait_until="networkidle")
+        await page.goto(f"{BASE}/slack", wait_until="networkidle")
         await take_screenshot(page, "08_slack", "Slack messages view")
         
-        await page.goto("https://aimyable.localhost/timesheet", wait_until="networkidle")
+        await page.goto(f"{BASE}/timesheet", wait_until="networkidle")
         await take_screenshot(page, "09_timesheet", "Timesheet view")
         
-        await page.goto("https://aimyable.localhost/billing", wait_until="networkidle")
+        await page.goto(f"{BASE}/billing", wait_until="networkidle")
         await take_screenshot(page, "10_billing", "Billing view")
         
-        await page.goto("https://aimyable.localhost/config", wait_until="networkidle")
+        await page.goto(f"{BASE}/config", wait_until="networkidle")
         await take_screenshot(page, "11_config", "Configuration page")
         
         await browser.close()

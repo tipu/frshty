@@ -220,12 +220,10 @@ frshtyApp({
       return new Set(this.thread.artifacts.map(a => a.work_item_id)).size;
     },
     primaryProjects() {
-      const order = ["aimyable", "quill", "clarivis", "algotrader2", "frshty", "game_expirement", "expirement", "upwork-api"];
-      return order.map(k => this.projects.find(p => p.key === k)).filter(Boolean);
+      return this.projects.filter(p => p.primary !== false);
     },
     extraProjects() {
-      const primary = new Set(this.primaryProjects.map(p => p.key));
-      return this.projects.filter(p => !primary.has(p.key));
+      return this.projects.filter(p => p.primary === false);
     },
     visibleProjects() {
       if (this.moreOpen) return [...this.primaryProjects, ...this.extraProjects];

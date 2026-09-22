@@ -1092,7 +1092,7 @@ class TestTodayProducer:
     def test_launch_links_work_item(self):
         from web.today import _ensure_work_item
         m = {"sid": "sid-today-1", "ticket_key": "DEV-999", "title": "Fix DEV-999 CI"}
-        _ensure_work_item("aimyable", m, "loop-key-1", "/tmp")
+        _ensure_work_item("acme", m, "loop-key-1", "/tmp")
         run = db.query_one("SELECT work_item_id FROM work_runs WHERE session_id = 'sid-today-1'")
         assert run is not None
         item = db.query_one("SELECT objective, scope, scope_ref, instance_key FROM work_items WHERE id = ?",
@@ -1100,8 +1100,8 @@ class TestTodayProducer:
         assert item["objective"] == "Fix DEV-999 CI"
         assert item["scope"] == "ticket"
         assert item["scope_ref"] == "DEV-999"
-        assert item["instance_key"] == "aimyable"
-        _ensure_work_item("aimyable", m, "loop-key-1", "/tmp")
+        assert item["instance_key"] == "acme"
+        _ensure_work_item("acme", m, "loop-key-1", "/tmp")
         n = db.query_one("SELECT COUNT(*) AS n FROM work_runs WHERE session_id = 'sid-today-1'")["n"]
         assert n == 1
 
@@ -1493,7 +1493,7 @@ class TestFollowup:
     def test_followup_inherits_projects_and_agent(self, tmp_path):
         from unittest.mock import patch
         from services import work_launch
-        parent = self._done_parent_with("aimyable,slack_int", provider="codex")
+        parent = self._done_parent_with("acme,slack_int", provider="codex")
         p_inst, p_launch, p_health = self._patched(tmp_path)
         with p_inst, p_launch, p_health, \
              patch("services.work_launch.terminal.launch_agent") as mock_agent:
@@ -1501,12 +1501,12 @@ class TestFollowup:
         assert "error" not in out, out
         assert mock_agent.call_args.kwargs["agent"] == "codex"
         child = db.query_one("SELECT contexts FROM work_items WHERE id = ?", (out["item_id"],))
-        assert child["contexts"] == "aimyable,slack_int"
+        assert child["contexts"] == "acme,slack_int"
 
     def test_followup_keeps_an_explicit_empty_context(self, tmp_path):
         from unittest.mock import patch
         from services import work_launch
-        parent = self._done_parent_with("aimyable,slack_int", provider="codex")
+        parent = self._done_parent_with("acme,slack_int", provider="codex")
         p_inst, p_launch, p_health = self._patched(tmp_path)
         with p_inst, p_launch, p_health, \
              patch("services.work_launch.terminal.launch_agent") as mock_agent:
@@ -1518,7 +1518,7 @@ class TestFollowup:
         assert child["contexts"] == ""
 
     def test_followup_endpoint_inherits_projects(self, tmp_path):
-        parent = self._done_parent_with("aimyable")
+        parent = self._done_parent_with("acme")
         p_inst, p_launch, p_health = self._patched(tmp_path)
         with p_inst, p_launch, p_health:
             client = self._client()
@@ -1527,7 +1527,7 @@ class TestFollowup:
         assert r.status_code == 200, r.text
         child = db.query_one("SELECT contexts FROM work_items WHERE id = ?",
                              (r.json()["item_id"],))
-        assert child["contexts"] == "aimyable"
+        assert child["contexts"] == "acme"
 
     def test_followup_requires_done_parent(self, tmp_path):
         from services import work_launch
@@ -2551,7 +2551,7 @@ class TestHookCrashIsReported:
         spec.loader.exec_module(module)
         return module
 
-    def _run(self, objective, session_id, instance_key="aimyable"):
+    def _run(self, objective, session_id, instance_key="acme"):
         item_id = _mkitem(objective, instance_key=instance_key)
         _mkrun(item_id, session_id, f"work-crash-{item_id}", "/tmp")
         return item_id
@@ -2580,8 +2580,8 @@ class TestHookCrashIsReported:
             "sid-crash-direct", "work hook", ValueError("boom")) is True
         rows = self._events(item_id)
         assert len(rows) == 1
-        assert rows[0]["instance_key"] == "aimyable"
-        assert rows[0]["job"] == "aimyable"
+        assert rows[0]["instance_key"] == "acme"
+        assert rows[0]["job"] == "acme"
         assert "ValueError: boom" in rows[0]["summary"]
         meta = json.loads(rows[0]["meta"])
         assert meta["where"] == "work hook"
