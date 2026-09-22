@@ -152,6 +152,7 @@ def _entries(bucket: str, instance_key: str, config: dict) -> list[Entry]:
                   f"comment {r['comment_id']} failed {r['attempts']} times: {r['reason']}")
             for r in staleness.blocked_pr_comments(instance_key)
             if r.get("repo") and r.get("pr_id") and r.get("url")
+            and r.get("reason_kind") == "failing" and (r.get("attempts") or 0) >= 2
         ]
     if bucket == "pr_failed_tickets":
         return [

@@ -731,11 +731,18 @@ class TestReconcilePrs:
         assert result["status"] == "pr_ready"
 
 
+def _reconciled_clean() -> dict:
+    """Ticket-state keys saying the comment reconciliation ran and found
+    nothing owed. _merge refuses to merge without them."""
+    return {tickets.RECONCILE_READ_KEY: True, tickets.RECONCILE_OWED_KEY: 0}
+
+
 class TestMerge:
     def test_all_merged(self, fake_config):
         mock_platform = MagicMock()
         mock_platform.merge_pr.return_value = {"status": "merged"}
-        ts = make_ticket_state(status="in_review", prs=[{"repo": "r", "id": 1, "url": "u"}])
+        ts = make_ticket_state(status="in_review", prs=[{"repo": "r", "id": 1, "url": "u"}],
+                               **_reconciled_clean())
 
         with patch("features.tickets.make_platform", return_value=mock_platform), \
              patch("features.tickets.log"):
@@ -745,7 +752,8 @@ class TestMerge:
     def test_merge_error_stays(self, fake_config):
         mock_platform = MagicMock()
         mock_platform.merge_pr.return_value = {"error": "conflict"}
-        ts = make_ticket_state(status="in_review", prs=[{"repo": "r", "id": 1, "url": "u"}])
+        ts = make_ticket_state(status="in_review", prs=[{"repo": "r", "id": 1, "url": "u"}],
+                               **_reconciled_clean())
 
         with patch("features.tickets.make_platform", return_value=mock_platform), \
              patch("features.tickets.log"):
@@ -2829,6 +2837,8 @@ class TestSubstantiateReplyEnqueueOrdering:
         self, fresh_db, fake_config, tmp_state
     ):
         slug = "PROJ-1-do-the-thing"
+        wt = fake_config["workspace"]["root"] / "tickets" / slug / "repo"
+        wt.mkdir(parents=True, exist_ok=True)
         ts = make_ticket_state(
             status="in_review", slug=slug, branch=slug,
             prs=[{"repo": "repo", "id": 99, "branch": slug, "url": "http://u"}],
@@ -2852,7 +2862,9 @@ class TestSubstantiateReplyEnqueueOrdering:
             )
 
         with patch("features.tickets.make_platform", return_value=mock_platform), \
-             patch("features.tickets.get_repos", return_value=[]), \
+             patch("features.tickets.get_repos",
+                   return_value=[{"name": "repo", "path": wt.parent}]), \
+             patch("features.tickets.ticket_worktree_path", return_value=wt), \
              patch("features.tickets.run_balanced",
                    return_value='{"results": [{"i": 0, "actionable": false}]}'), \
              patch("features.tickets._draft_comment_reply", return_value="a claim"), \
@@ -3005,20 +3017,26 @@ class TestCheckInReviewSelfCommittedFix:
         ts = self._run_check(bb_config, ticket, ts, wt, mock_platform, claude)
 
         assert mock_platform.push_branch.call_count == 1, (
-            "local branch is ahead of origin; resolving 'already addressed' "
-            "without pushing strands the fix commit locally"
+            "local branch is ahead of origin; the stranded fix commit must "
+            "still reach the remote"
         )
-        mock_platform.resolve_comment.assert_called_once_with("repo", 99, 100)
-        names = [c[0] for c in mock_platform.mock_calls]
-        assert names.index("push_branch") < names.index("resolve_comment")
+        mock_platform.resolve_comment.assert_not_called()
+        saved = tickets._load_pr_comments(bb_config, slug)
+        entry = next(e for e in saved if e["id"] == 100)
+        assert entry["status"] == "fix_failed", (
+            "this run produced no change of its own, so it is not evidence "
+            "that the comment was answered"
+        )
 
-    def test_clean_no_change_run_resolves_without_push(
+    def test_clean_no_change_run_does_not_resolve(
         self, fresh_db, fake_config, tmp_state, tmp_path
     ):
-        """Control case: branch in sync with origin and the agent changes
-        nothing — the comment is genuinely already addressed. No push must
-        happen, and the thread still resolves. Proves the unpushed-commit
-        guard can report zero and does not fire a push on every pass."""
+        """A run that produces no diff is a failure, not a resolution.
+
+        The path used to read "the agent changed nothing" as "the comment was
+        already addressed" and resolve the thread on the model's word. 63
+        threads closed that way, and work items 15, 22 and 46 are the same
+        complaint: resolved without a fix. The comment stays owed."""
         slug = "PROJ-1-do-the-thing"
         wt = self._init_git_pair(tmp_path, slug)
         ts, ticket, mock_platform, bb_config = self._setup(fake_config, slug)
@@ -3032,7 +3050,13 @@ class TestCheckInReviewSelfCommittedFix:
             "nothing to deliver — a push here would mean the guard fires "
             "unconditionally instead of measuring ahead-of-origin"
         )
-        mock_platform.resolve_comment.assert_called_once_with("repo", 99, 100)
+        mock_platform.resolve_comment.assert_not_called()
+        saved = tickets._load_pr_comments(bb_config, slug)
+        entry = next(e for e in saved if e["id"] == 100)
+        assert entry["status"] == "fix_failed"
+        assert ts.get("last_comment_ids", {}).get("repo/99") is None, (
+            "the comment must stay eligible for another attempt"
+        )
 
 
 class TestRecheckPrFailed:
@@ -3459,9 +3483,9 @@ class TestCheckInReviewPipelineCommentHold:
     """Observed on aimyable windows-rpa-client #56 and websocket-server #118
     (DEV-635, 2026-08-21): pipeline-failure comments ("N of M checks failed")
     were resolved via the "already addressed (no change needed)" branch while
-    the PR's pipeline was still red. A no-change verdict on a comment that
-    reports a CI failure is unverifiable until the checks are green, so the
-    resolve must be held while any check is failing."""
+    the PR's pipeline was still red. That branch is gone. A no-change verdict
+    is unverifiable whatever the checks say, so the resolve is held whether
+    CI is red or green, and the comment stays owed."""
 
     PIPELINE_COMMENT = "## ❌ 2 of 5 checks failed — `9e2f021`\n\n- Swagger Schema\n- Django Migrations"
 
@@ -3547,7 +3571,11 @@ class TestCheckInReviewPipelineCommentHold:
         )
         mock_platform.resolve_comment.assert_not_called()
 
-    def test_resolves_once_checks_green(self, fresh_db, fake_config, tmp_state, tmp_path):
+    def test_green_checks_do_not_resolve_a_no_change_run(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        """Green CI is not evidence that the comment was answered. The run
+        still produced no change, so the thread stays open."""
         slug = "PROJ-1-do-the-thing"
         wt = self._init_git_pair(tmp_path, slug)
         red = [{"name": "Pipeline", "state": "FAILED", "url": ""}]
@@ -3559,30 +3587,10 @@ class TestCheckInReviewPipelineCommentHold:
         mock_platform.get_pr_checks.return_value = [{"name": "Pipeline", "state": "SUCCESS", "url": ""}]
         ts = self._run_check(bb_config, ticket, ts, wt, mock_platform)
 
-        mock_platform.resolve_comment.assert_called_once_with("repo", 99, 100)
+        mock_platform.resolve_comment.assert_not_called()
         saved = tickets._load_pr_comments(bb_config, slug)
         entry = [e for e in saved if e["id"] == 100][-1]
-        assert entry["status"] == "addressed"
-
-
-class TestCiFailureCommentHeld:
-    def _pf(self, checks):
-        pf = MagicMock()
-        pf.get_pr_checks.return_value = checks
-        return pf
-
-    def test_non_ci_comment_never_held(self):
-        pf = self._pf([{"name": "Pipeline", "state": "FAILED", "url": ""}])
-        assert tickets._ci_failure_comment_held(pf, {"repo": "r", "id": 1}, "rename this variable") is False
-        pf.get_pr_checks.assert_not_called()
-
-    def test_ci_comment_green_checks_not_held(self):
-        pf = self._pf([{"name": "Pipeline", "state": "SUCCESS", "url": ""}])
-        assert tickets._ci_failure_comment_held(pf, {"repo": "r", "id": 1}, "ESLint failed") is False
-
-    def test_ci_comment_fetch_failure_held(self):
-        pf = self._pf(None)
-        assert tickets._ci_failure_comment_held(pf, {"repo": "r", "id": 1}, "1 of 3 checks failed") is True
+        assert entry["status"] == "fix_failed"
 
 
 class TestClipText:
@@ -3681,6 +3689,23 @@ class TestIssueDetectedEvent:
     def test_without_a_reason_the_summary_falls_back_to_the_comment(self, fake_config):
         events = self._run(fake_config, dict(self.COMMENT), reason="")
         assert events[0][0][1].endswith(self.COMMENT["body"])
+
+
+def _agent_commits_its_own_fix():
+    """git_util.run_git stand-in where HEAD moves during the agent run.
+
+    A run that leaves nothing staged and does not move HEAD produces no
+    change, and a comment fix is never resolved on a run that produced no
+    change. To reach the resolve step the run has to deliver something, so
+    the two rev-parse reads return different shas."""
+    heads = iter(["aaa111\n", "bbb222\n"])
+
+    def run_git(worktree, args, **kwargs):
+        if args[:1] == ["rev-parse"]:
+            return MagicMock(returncode=0, stdout=next(heads, "bbb222\n"))
+        return MagicMock(returncode=0, stdout="0")
+
+    return run_git
 
 
 class TestCheckInReviewIssueComments:
@@ -3816,7 +3841,7 @@ class TestCheckInReviewIssueComments:
                    return_value='{"results": [{"i": 0, "actionable": true}]}'), \
              patch("features.tickets.run_claude_code", return_value="done"), \
              patch("features.tickets.git_util.run_git",
-                   return_value=MagicMock(returncode=0, stdout="0")), \
+                   side_effect=_agent_commits_its_own_fix()), \
              patch("features.tickets.subprocess.run",
                    return_value=MagicMock(returncode=0, stdout="")):
             out = tickets._check_in_review(config, ticket, ts, "http://base")
