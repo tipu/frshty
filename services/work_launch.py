@@ -668,6 +668,31 @@ def _project_allows_merge(key: str) -> bool:
     return _auto_merge_on_disk(key)
 
 
+SELF_MERGE_PROJECTS = ("frshty", "expirement", "upwork-api", "game_expirement")
+
+
+def project_keys(contexts) -> list[str]:
+    """The project keys one task is judged by, never empty.
+
+    A task that selects no project is judged by the board's own project."""
+    return _context_keys(contexts) or [BOARD_PROJECT_KEY]
+
+
+def merge_approval_required(contexts) -> bool:
+    """Whether a merge this task left open waits for someone else's approval.
+
+    SELF_MERGE_PROJECTS names the projects whose pull requests nobody but the
+    operator reviews. He merges one of those the moment it is green. A merge
+    on every other project waits for an approval he does not give himself.
+
+    A task that selects several projects waits if any one of them waits,
+    because the merge lands in one repository and the board cannot tell
+    which. This is not the same question as merge_review_required, which asks
+    whether the agent may merge. Here the operator is the one merging, and
+    the answer says whether he can merge now or has to wait for a reviewer."""
+    return any(k not in SELF_MERGE_PROJECTS for k in project_keys(contexts))
+
+
 def merge_review_required(contexts) -> list[str]:
     """The projects this task selected that hold a merge for operator review.
 
@@ -677,8 +702,7 @@ def merge_review_required(contexts) -> list[str]:
     A task that selects no project is judged by the board's own project, which
     is the safe reading: the launch prompt used to tell every such task to
     merge, and no project had said it could."""
-    keys = _context_keys(contexts) or [BOARD_PROJECT_KEY]
-    return [k for k in keys if not _project_allows_merge(k)]
+    return [k for k in project_keys(contexts) if not _project_allows_merge(k)]
 
 
 def _correspondence_rule(config: dict) -> str:
