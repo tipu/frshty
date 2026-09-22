@@ -104,12 +104,15 @@
   </div>
   <div class="sec" v-if="item.state === 'needs_ack'">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Acknowledge</h2>
-    <div class="text-xs text-gray-600 mb-2">The agent reported this task done. Read the summary below, then acknowledge it to complete it, archive it to acknowledge and file it in one step, or reopen it if the work is not finished.</div>
+    <div class="text-xs text-gray-600 mb-2">The agent reported this task done. Read the summary below, then acknowledge it to complete it, archive it to acknowledge and file it in one step, or reopen it if the work is not finished. Continue reopens it, restarts its agent if the session is gone, and puts the cursor in the Correct box, so the same agent picks up where it stopped.</div>
     <div class="flex flex-wrap gap-2 items-center">
       <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#14532d;color:#86efac"
             @click="act('ack')">acknowledge</span>
       <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#1e293b;color:#cbd5e1"
             @click="act('archive')">acknowledge and archive</span>
+      <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#3b2f14;color:#fbbf24"
+            v-if="provider === 'claude'" title="reopen this task, restart its agent if the session is gone, and put the cursor in the Correct box"
+            @click="continueTask">{{ continueBusy ? "continuing…" : "continue" }}</span>
       <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#3f1d1d;color:#fca5a5"
             @click="act('reopen')">reopen</span>
       <span class="text-xs text-red-400" v-if="actError">{{ actError }}</span>
@@ -117,7 +120,7 @@
   </div>
   <div class="sec" v-if="item.state === 'done'">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Completed</h2>
-    <div class="text-xs text-gray-600 mb-2">This task is complete. Archive it to take it off the board. The archive view still lists it, and Unarchive brings it back.</div>
+    <div class="text-xs text-gray-600 mb-2">This task is complete. Archive it to take it off the board. The archive view still lists it, and Unarchive brings it back. Continue reopens it, restarts its agent if the session is gone, and puts the cursor in the Correct box.</div>
     <div class="flex flex-wrap gap-2 items-center">
       <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#1e293b;color:#cbd5e1"
             v-if="item.archived_at" title="put this completed task back on the board"
@@ -125,6 +128,9 @@
       <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#1e293b;color:#cbd5e1"
             v-else title="take this completed task off the board"
             @click="act('archive')">archive</span>
+      <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#3b2f14;color:#fbbf24"
+            v-if="provider === 'claude'" title="reopen this task, restart its agent if the session is gone, and put the cursor in the Correct box"
+            @click="continueTask">{{ continueBusy ? "continuing…" : "continue" }}</span>
       <span class="text-xs text-red-400" v-if="actError">{{ actError }}</span>
     </div>
   </div>
@@ -155,7 +161,7 @@
     <div class="text-xs text-gray-600 mb-2">Ask reads the session without interrupting it: the question is typed as /btw, it never enters the conversation, and the answer comes from a fork with no tools. Correct sends the text into the conversation itself, so the working agent reads it and acts on it. Use Correct for anything the agent has to change.</div>
     <form @submit.prevent="askBtw">
       <input class="wintake" style="width:100%; background:#101018; border:1px solid #2a2a35; border-radius:8px; padding:10px 14px; color:#e0e0e0"
-             v-model="btwText" :disabled="btwBusy"
+             ref="correctBox" v-model="btwText" :disabled="btwBusy"
              :placeholder="btwBusy ? 'waiting for the answer…' : 'Ask the session a quick question…'" />
       <div class="mt-2 flex gap-2">
         <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#1e293b;color:#93c5fd"
@@ -198,6 +204,7 @@
                 @paste="onDraftPaste(f, $event)"
                 style="width:100%;background:#0b0b10;border:1px solid #2a2a35;border-radius:6px;color:#e0e0e0;padding:6px 10px;margin-top:6px"></textarea>
       <paste-tray v-if="f.status === 'draft' && fuTray[f.id]" :tray="fuTray[f.id]"></paste-tray>
+      <div class="text-xs mt-1" style="color:#fbbf24" v-if="f.status === 'draft' && f.kind === 'work_item' && $questionWarning(fuText[f.id])">{{ $questionWarning(fuText[f.id]) }}</div>
       <div v-else class="text-sm mt-1" style="white-space:pre-wrap" v-html="lk(f.draft)"></div>
       <div class="mt-2 flex flex-wrap gap-3 text-xs text-gray-400 items-center"
            v-if="f.status === 'draft' && f.kind === 'work_item'">
@@ -233,6 +240,7 @@
               placeholder="Objective for the follow-up run… Paste an image to attach it."
               style="width:100%;background:#101018;border:1px solid #2a2a35;border-radius:8px;color:#e0e0e0;padding:10px 14px"></textarea>
     <paste-tray :tray="fupTray"></paste-tray>
+    <div class="text-xs mt-1" style="color:#fbbf24" v-if="$questionWarning(fupText)">{{ $questionWarning(fupText) }}</div>
     <div class="mt-2 flex flex-wrap gap-3 text-xs text-gray-400 items-center">
       <label class="cursor-pointer" title="which agent CLI runs the follow-up">
         agent
@@ -360,7 +368,7 @@ const app = frshtyApp({
                     fupText: "", fupCtx: [], fupSlack: false, fupError: "", fupBusy: false,
                     fupAgent: "claude", agents: ["claude"], runs: [],
                     projects: [], slackAvailable: false,
-                    debriefBusy: false, debriefError: "", actError: "", approveBusy: false, linkmap: null }; },
+                    debriefBusy: false, debriefError: "", actError: "", approveBusy: false, continueBusy: false, linkmap: null }; },
   computed: {
     railCounts() {
       return { tasks: this.needsYou };
@@ -674,6 +682,39 @@ const app = frshtyApp({
         this.actError = "action failed: " + e.message;
       }
       await this.refresh();
+    },
+    async continueTask() {
+      if (this.continueBusy) return;
+      this.continueBusy = true; this.actError = ""; this.btwError = "";
+      try {
+        const r = await fetch(this.api(`/api/work/items/${this.item.id}/action`), {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "reopen" }),
+        });
+        if (!r.ok) {
+          const d = await r.json().catch(() => ({}));
+          this.actError = d.error || ("reopen failed HTTP " + r.status);
+          return;
+        }
+        if (!(this.session && this.session.agent_running)) {
+          const s = await fetch(this.api(`/api/work/items/${this.item.id}/resume`), { method: "POST" });
+          if (!s.ok) {
+            const d = await s.json().catch(() => ({}));
+            this.btwError = d.error || ("restart failed HTTP " + s.status);
+          }
+        }
+      } catch (e) {
+        this.actError = "continue failed: " + e.message;
+        return;
+      } finally {
+        this.continueBusy = false;
+      }
+      await this.refresh();
+      await this.$nextTick();
+      const box = this.$refs.correctBox;
+      if (!box) return;
+      box.scrollIntoView({ behavior: "smooth", block: "center" });
+      box.focus({ preventScroll: true });
     },
     async debrief() {
       if (this.debriefBusy) return;
