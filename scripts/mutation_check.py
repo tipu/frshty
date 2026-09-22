@@ -352,19 +352,6 @@ MUTATIONS = [
                "                resolved_entry = entry_by_id.get(cid)",
     },
     {
-        "label": "dirty_worktree_fix_runs_anyway",
-        "gate": "an own-PR comment fix refuses to start in a dirty worktree",
-        "target": "tests/features/test_own_prs.py::TestCommitFix"
-                  "::test_a_dirty_worktree_refuses_the_run",
-        "path": "features/own_prs.py",
-        "old": "            if _worktree_is_dirty(worktree):\n"
-               '                reason = "worktree is dirty before the fix run"\n'
-               "                log.emit(\"pr_comment_worktree_dirty\", f\"{pr_ref}: {reason} — {comment['body'][:80]}\", links=links, meta={**meta, \"reason\": reason})",
-        "new": "            if False:\n"
-               '                reason = "worktree is dirty before the fix run"\n'
-               "                log.emit(\"pr_comment_worktree_dirty\", f\"{pr_ref}: {reason} — {comment['body'][:80]}\", links=links, meta={**meta, \"reason\": reason})",
-    },
-    {
         "label": "manual_comment_marked_terminal",
         "gate": "a comment handed to a human stays owed instead of being closed",
         "target": "tests/features/test_manual_comment_state.py"
@@ -390,6 +377,24 @@ MUTATIONS = [
         "path": "features/tickets.py",
         "old": '    hold = "" if force else merge_hold_reason(ts)',
         "new": '    hold = ""',
+    },
+    {
+        "label": "own_pr_comment_fix_sweeps_the_worktree",
+        "gate": "an own-PR comment fix commits only what its own run produced",
+        "target": "tests/features/test_own_prs.py::TestFixCommentWorktreeDirt"
+                  "::test_inherited_untracked_file_is_not_committed_as_the_fix",
+        "path": "features/own_prs.py",
+        "old": "        git_util.stage_all(worktree, pre_dirty, check=True)",
+        "new": "        git_util.stage_all(worktree, (), check=True)",
+    },
+    {
+        "label": "pipenv_scaffolds_a_pipfile",
+        "gate": "a pipenv dep command is refused in a worktree with no Pipfile",
+        "target": "tests/core/test_deps.py::TestRunDepCommand"
+                  "::test_pipenv_with_only_a_lockfile_is_refused",
+        "path": "core/deps.py",
+        "old": '        if not (wt_path / "Pipfile").is_file():',
+        "new": "        if False:",
     },
 ]
 
