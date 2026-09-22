@@ -342,11 +342,11 @@ def test_done_ticket_with_prs_preserves_state_on_rediscovery(tmp_path):
 
     state.init(tmp_path)
     state.save("tickets", {
-        "NEC-100": {
+        "SC-100": {
             "status": "done",
             "done_at": "2026-04-15T00:00:00+00:00",
-            "slug": "NEC-100-fix-the-thing",
-            "branch": "NEC-100-fix-the-thing",
+            "slug": "SC-100-fix-the-thing",
+            "branch": "SC-100-fix-the-thing",
             "prs": [{"repo": "backend", "id": 42, "url": "http://pr/42"}],
             "last_comment_ids": {"backend/42": 0},
         }
@@ -362,9 +362,9 @@ def test_done_ticket_with_prs_preserves_state_on_rediscovery(tmp_path):
         "features": {},
     }
 
-    (tmp_path / "tickets" / "NEC-100-fix-the-thing").mkdir(parents=True)
+    (tmp_path / "tickets" / "SC-100-fix-the-thing").mkdir(parents=True)
 
-    assigned = [{"key": "NEC-100", "summary": "Fix the thing", "status": "In Review", "url": "",
+    assigned = [{"key": "SC-100", "summary": "Fix the thing", "status": "In Review", "url": "",
                  "description": "", "attachments": [], "related": [], "subtasks": []}]
 
     with patch("features.tickets._fetch_tickets", return_value=assigned), \
@@ -384,7 +384,7 @@ def test_done_ticket_with_prs_preserves_state_on_rediscovery(tmp_path):
 
         tickets.check(config)
 
-    result = state.load("tickets")["NEC-100"]
+    result = state.load("tickets")["SC-100"]
     assert result["status"] == "in_review", \
         f"Expected in_review, got {result['status']}"
     assert result.get("prs"), "PRs should be preserved"
@@ -398,11 +398,11 @@ def test_done_ticket_without_prs_restarts_fresh(tmp_path):
 
     state.init(tmp_path)
     state.save("tickets", {
-        "NEC-200": {
+        "SC-200": {
             "status": "done",
             "done_at": "2026-04-15T00:00:00+00:00",
-            "slug": "NEC-200-add-feature",
-            "branch": "NEC-200-add-feature",
+            "slug": "SC-200-add-feature",
+            "branch": "SC-200-add-feature",
         }
     })
 
@@ -416,7 +416,7 @@ def test_done_ticket_without_prs_restarts_fresh(tmp_path):
         "features": {},
     }
 
-    assigned = [{"key": "NEC-200", "summary": "Add feature", "status": "In Progress", "url": "",
+    assigned = [{"key": "SC-200", "summary": "Add feature", "status": "In Progress", "url": "",
                  "description": "", "attachments": [], "related": [], "subtasks": []}]
 
     with patch("features.tickets._fetch_tickets", return_value=assigned), \
@@ -431,7 +431,7 @@ def test_done_ticket_without_prs_restarts_fresh(tmp_path):
         mock_run.return_value = MagicMock(returncode=0, stdout="main\n", stderr="")
         tickets.check(config)
 
-    result = state.load("tickets")["NEC-200"]
+    result = state.load("tickets")["SC-200"]
     assert result["status"] == "pr_ready", f"Expected pr_ready, got {result['status']}"
 
 
