@@ -178,6 +178,15 @@ def api_work_action(item_id: int, body: dict):
     return result
 
 
+@router.post("/api/work/items/{item_id}/projects")
+def api_work_projects(item_id: int, body: dict):
+    result = work_launch.set_projects(item_id, body.get("projects"))
+    if "error" in result:
+        status = 404 if result["error"] == "unknown work item" else 400
+        return JSONResponse(result, status_code=status)
+    return result
+
+
 @router.post("/api/work/items/{item_id}/approve")
 def api_work_approve(item_id: int, body: dict | None = Body(default=None)):
     """Approve a proposal frshty opened by itself and start the agent on it.
