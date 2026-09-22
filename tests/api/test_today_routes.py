@@ -206,15 +206,57 @@ class TestMergeEndpoint:
         state.save_ticket("T-3", {"status": "in_review", "slug": "T-3-s",
                                    "prs": [{"repo": "r", "id": 1, "url": "u"}]})
 
-        def fake_merge(config, ticket, ts, base_url):
+        def fake_merge(config, ticket, ts, base_url, force=False):
             return {**ts, "status": "merged", "merged_external_status": "Done"}
 
-        with patch("features.tickets._merge", side_effect=fake_merge):
+        with patch("features.tickets.reconcile_comments_now", return_value=("", [])), \
+             patch("features.tickets._merge", side_effect=fake_merge):
             resp = client.post("/api/tickets/T-3/merge")
         assert resp.status_code == 200
         assert resp.json()["new_status"] == "merged"
         saved = state.load_ticket("T-3")
         assert saved["status"] == "merged"
+
+    def test_owed_comments_409(self, client):
+        """The operator route calls _merge directly, so it carries the
+        comment gate too. Work item 9475 is a merge that should not have
+        happened."""
+        state.save_ticket("T-4", {"status": "in_review", "slug": "T-4-s",
+                                   "prs": [{"repo": "r", "id": 1, "url": "u"}]})
+        owed = ("2 comment(s) owed an answer", [{"snippet": "needs a guard"}])
+
+        with patch("features.tickets.reconcile_comments_now", return_value=owed), \
+             patch("features.tickets._merge") as merge:
+            resp = client.post("/api/tickets/T-4/merge")
+        assert resp.status_code == 409
+        assert resp.json()["reason"] == "2 comment(s) owed an answer"
+        merge.assert_not_called()
+
+    def test_a_failed_comment_read_409(self, client):
+        state.save_ticket("T-5", {"status": "in_review", "slug": "T-5-s",
+                                   "prs": [{"repo": "r", "id": 1, "url": "u"}]})
+
+        with patch("features.tickets.reconcile_comments_now",
+                   return_value=("comment read failed", [])), \
+             patch("features.tickets._merge") as merge:
+            resp = client.post("/api/tickets/T-5/merge")
+        assert resp.status_code == 409
+        merge.assert_not_called()
+
+    def test_force_merges_owed_comments(self, client):
+        state.save_ticket("T-6", {"status": "in_review", "slug": "T-6-s",
+                                   "prs": [{"repo": "r", "id": 1, "url": "u"}]})
+
+        def fake_merge(config, ticket, ts, base_url, force=False):
+            assert force is True
+            return {**ts, "status": "merged", "merged_external_status": "Done"}
+
+        owed = ("2 comment(s) owed an answer", [])
+        with patch("features.tickets.reconcile_comments_now", return_value=owed), \
+             patch("features.tickets._merge", side_effect=fake_merge):
+            resp = client.post("/api/tickets/T-6/merge", json={"force": True})
+        assert resp.status_code == 200
+        assert resp.json()["new_status"] == "merged"
 
 
 class TestPrCommentBucketIncludesId:

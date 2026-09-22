@@ -314,6 +314,71 @@ MUTATIONS = [
         "new": '                        entry["status"] = "addressed"',
     },
     {
+        "label": "no_change_resolves_thread",
+        "gate": "a run that produced no change does not resolve the thread",
+        "target": "tests/features/test_tickets.py::TestCheckInReviewSelfCommittedFix"
+                  "::test_clean_no_change_run_does_not_resolve",
+        "path": "features/tickets.py",
+        "old": "                commit_rc = None\n"
+               "                commit_outcome = None",
+        "new": "                if fix_result and not staged:\n"
+               "                    to_resolve.append(comment[\"id\"])\n"
+               '                    entry["status"] = "addressed"\n'
+               "                commit_rc = None\n"
+               "                commit_outcome = None",
+    },
+    {
+        "label": "failed_read_reads_as_empty",
+        "gate": "a comment read that failed skips the pull request instead of reading as empty",
+        "target": "tests/features/test_ticket_comment_fail_closed.py"
+                  "::TestAFailedReadIsNotAnEmptyPr"
+                  "::test_the_pull_request_is_skipped_and_nothing_advances",
+        "path": "features/tickets.py",
+        "old": "        fetched = platform.get_pr_comments(pr[\"repo\"], pr[\"id\"])\n"
+               "        if fetched is None:",
+        "new": "        fetched = platform.get_pr_comments(pr[\"repo\"], pr[\"id\"]) or []\n"
+               "        if fetched is None:",
+    },
+    {
+        "label": "resolve_failure_ignored",
+        "gate": "a thread that would not resolve leaves its comment owed",
+        "target": "tests/features/test_ticket_comment_fail_closed.py"
+                  "::TestAFailedResolveLeavesTheCommentOwed"
+                  "::test_the_entry_is_fix_failed_and_the_cursor_holds",
+        "path": "features/tickets.py",
+        "old": '            if isinstance(resolution, dict) and resolution.get("status") != "resolved":\n'
+               "                resolved_entry = entry_by_id.get(cid)",
+        "new": "            if False:\n"
+               "                resolved_entry = entry_by_id.get(cid)",
+    },
+    {
+        "label": "manual_comment_marked_terminal",
+        "gate": "a comment handed to a human stays owed instead of being closed",
+        "target": "tests/features/test_manual_comment_state.py"
+                  "::TestNonActionableCommentStaysOpen::test_it_is_not_terminal",
+        "path": "features/own_prs.py",
+        "old": '            comments.mark_comment_manual(instance_key, "pr", pr_key, comment_id,\n'
+               '                                         reason or "needs a human reply")',
+        "new": '            comments.mark_comment_processed(instance_key, "pr", pr_key, comment_id)',
+    },
+    {
+        "label": "owed_comment_floor_hides_it",
+        "gate": "the owed-comments bucket shows a comment that failed only once",
+        "target": "tests/core/test_staleness_blocked.py::test_a_single_failure_is_still_owed",
+        "path": "manager/staleness.py",
+        "old": '        " ORDER BY error_count DESC, last_checked_at ASC LIMIT ?",',
+        "new": '        " AND error_count >= 2 ORDER BY error_count DESC, last_checked_at ASC LIMIT ?",',
+    },
+    {
+        "label": "merge_before_reconcile",
+        "gate": "a ticket does not merge before its comments are reconciled",
+        "target": "tests/features/test_merge_comment_gate.py::TestMergeWaitsForComments"
+                  "::test_a_comment_posted_in_the_same_poll_blocks_the_merge",
+        "path": "features/tickets.py",
+        "old": '    hold = "" if force else merge_hold_reason(ts)',
+        "new": '    hold = ""',
+    },
+    {
         "label": "own_pr_comment_fix_sweeps_the_worktree",
         "gate": "an own-PR comment fix commits only what its own run produced",
         "target": "tests/features/test_own_prs.py::TestFixCommentWorktreeDirt"
