@@ -168,9 +168,26 @@ def relink_shared_venv(config: dict, repo_name: str, wt_path: Path) -> None:
 def run_dep_command(config: dict, repo_name: str, wt_path: Path, cmd: str) -> bool:
     """Run one configured dep_commands entry. pipenv commands for repos with
     a Pipfile route through the shared venv store; everything else runs
-    unchanged with the historical fire-and-forget semantics."""
+    unchanged with the historical fire-and-forget semantics.
+
+    A pipenv command in a worktree with no Pipfile is refused. pipenv has
+    nothing to install there, so all it does is write a skeleton Pipfile, and
+    that file then sits untracked in the worktree for a later commit to pick
+    up. aimyable's django-drf-app migrated to uv and deleted its Pipfile while
+    `dep_commands` still said `pipenv install --dev`; the skeleton reached the
+    DEV-743 branch twice, as 2ad039d and eacb51e.
+
+    `shared_venv_name` is not the test for this, because it falls back to
+    Pipfile.lock and answers for a worktree that has only the lockfile.
+    """
     argv = shlex.split(cmd)
-    if argv and argv[0] == "pipenv" and shared_venv_name(repo_name, wt_path):
+    if argv and argv[0] == "pipenv":
+        if not (wt_path / "Pipfile").is_file():
+            log.emit("dep_command_skipped",
+                     f"{repo_name}: skipped `{cmd}` — the worktree has no Pipfile, "
+                     f"so pipenv would only write a skeleton one",
+                     meta={"repo": repo_name, "cmd": cmd, "worktree": str(wt_path)})
+            return False
         return ensure_shared_venv(config, repo_name, wt_path, dep_cmd=cmd)
     try:
         result = subprocess.run(argv, cwd=str(wt_path), capture_output=True,
