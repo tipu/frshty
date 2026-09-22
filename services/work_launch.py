@@ -795,6 +795,7 @@ def _start(item_id: int, plan: dict, slack: bool, brief: str) -> dict:
             "keeps that repository's own format. Never publish an HTML page to the hosted "
             "Claude artifact service; write the .html file into that folder, with every "
             "image it needs beside it. "
+            + work_store.TLDR_RULE +
             "Write git commit messages and pull request descriptions about the change only. "
             "Never name the model, the vendor, the agent or the tool that produced the work. "
             "Never add a session link, a Co-Authored-By trailer, or a line saying the work "
