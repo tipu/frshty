@@ -183,6 +183,17 @@ class TestTheCorrectionBudgetIsDurable:
             assert tickets._enqueue_scope_fix("inst", "BUDGET-LEFT", ts) is not None
 
 
+def _reconciled(config, ticket, ts, base_url, **kwargs):
+    """Stand in for _check_in_review with nothing owed.
+
+    The merge gate refuses to merge when the reconciliation keys are absent,
+    so a no-op patch here would assert that the merge is blocked by the gate
+    rather than by the condition under test."""
+    ts[tickets.RECONCILE_READ_KEY] = True
+    ts[tickets.RECONCILE_OWED_KEY] = 0
+    return ts
+
+
 class TestInReviewScopeGate:
     def _handle(self, fake_config, ts, scope):
         platform = MagicMock()
@@ -194,7 +205,7 @@ class TestInReviewScopeGate:
              patch("features.tickets._pr_base_moved", return_value=False), \
              patch("features.tickets.make_platform", return_value=platform), \
              patch("features.tickets._merge") as merge, \
-             patch("features.tickets._check_in_review", side_effect=lambda c, t, s, b, **kw: s), \
+             patch("features.tickets._check_in_review", side_effect=_reconciled), \
              patch("features.tickets._enqueue_stage") as eq, \
              patch("features.ticket_states.state"):
             ticket_states._handle_in_review_ticket(
