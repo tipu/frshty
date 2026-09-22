@@ -668,12 +668,24 @@ class TestHookScript:
         assert after == before
 
     def test_hook_garbage_input_exits_zero(self):
+        """Garbage on stdin exits zero and reports the crash to the test
+        database.
+
+        The hook reads its database path from FRSHTY_DB and falls back to
+        ~/.frshty/frshty.db. This test passed no environment, so every run of
+        the suite filed a work_hook_error event on the operator's live event
+        feed. Counting the rows in the test database proves the report went
+        there instead."""
         import subprocess
+        counter = ("SELECT COUNT(*) AS n FROM log_events "
+                   "WHERE event = 'work_hook_error'")
+        before = db.query_one(counter)["n"]
         r = subprocess.run(
             [sys.executable, "scripts/work_hook.py"],
             input="not json at all", capture_output=True, text=True, timeout=15,
         )
         assert r.returncode == 0
+        assert db.query_one(counter)["n"] == before + 1
 
 
 class TestAutocontinue:
