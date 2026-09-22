@@ -76,11 +76,20 @@
           @click="cancel()">⊘ Cancel</span>
     <span class="ln-pill ln-pill-ghost ml-2" v-if="item.archived_at"
           title="this task is in the archive, not on the board">Archived</span>
-    <span class="text-xs text-gray-500 ml-2">#{{ item.id }} · {{ item.scope }} · {{ item.instance_key || 'no instance' }} · continues {{ item.continues_used }}/{{ item.continue_cap }}<span v-if="provider"> · {{ provider }}</span><span v-if="item.contexts"> · {{ item.contexts }}</span></span>
+    <span class="text-xs text-gray-500 ml-2">#{{ item.id }} · {{ item.scope }} · {{ item.instance_key || 'no instance' }} · continues {{ item.continues_used }}/{{ item.continue_cap }}<span v-if="provider"> · {{ provider }}</span></span>
     <span v-if="peer" class="badge b-other" :title="'this task runs on the ' + peer + ' host'">⇄ {{ peer }}</span>
     <a v-if="sourceItem" :href="taskHref(sourceItem.id)" class="text-xs text-blue-400 underline ml-3" :title="sourceItem.objective">follows #{{ sourceItem.id }}</a>
     <a v-if="item.state !== 'canceled'" :href="terminalHref" :target="terminalWindow" class="text-xs text-blue-400 underline ml-3">open terminal</a>
     <span v-if="sessionLabel" class="text-xs ml-2" :class="sessionCls" :title="sessionTitle">● {{ sessionLabel }}</span>
+  </div>
+  <div class="mt-1 flex flex-wrap gap-1 items-center">
+    <span class="ln-tag" v-for="p in itemProjects" :key="p">{{ p }}
+      <span style="cursor:pointer" title="remove this tag" @click="saveProjects(itemProjects.filter(x => x !== p))">×</span></span>
+    <input v-model="tagText" list="work-project-keys" placeholder="+ tag" title="add a project tag; Enter saves it"
+           style="width:110px; background:#101018; border:1px solid #2a2a35; border-radius:4px; padding:0 6px; font-size:11px; color:#e0e0e0"
+           @keydown.enter.prevent="addTag()" />
+    <datalist id="work-project-keys"><option v-for="p in projects" :key="p.key" :value="p.key"></option></datalist>
+    <span class="text-xs text-red-400" v-if="tagError">{{ tagError }}</span>
   </div>
   <div class="mt-1 text-xs text-gray-500" v-if="worktree"
        :title="'shared checkout: ' + worktree.repo_path">
@@ -368,6 +377,7 @@ const app = frshtyApp({
                     fupText: "", fupCtx: [], fupSlack: false, fupError: "", fupBusy: false,
                     fupAgent: "claude", agents: ["claude"], runs: [],
                     projects: [], slackAvailable: false,
+                    tagText: "", tagError: "", tagBusy: false,
                     debriefBusy: false, debriefError: "", actError: "", approveBusy: false, continueBusy: false, linkmap: null }; },
   computed: {
     railCounts() {
@@ -384,6 +394,9 @@ const app = frshtyApp({
     terminalWindow() {
       if (!this.item) return "_blank";
       return window.frshtyTerminalWindow(this.item.id, this.peer);
+    },
+    itemProjects() {
+      return (this.item.contexts || "").split(",").filter(c => c && c !== "slack_int");
     },
     provider() {
       return this.runs.length ? this.runs[this.runs.length - 1].provider : "";
@@ -668,6 +681,30 @@ const app = frshtyApp({
     cancel() {
       if (!confirm("Cancel task #" + this.item.id + "? The agent's terminal is killed. The task is marked canceled and goes straight to the archive.")) return;
       this.act("cancel");
+    },
+    async addTag() {
+      const tag = this.tagText.trim();
+      if (!tag) return;
+      if (await this.saveProjects([...this.itemProjects, tag])) this.tagText = "";
+    },
+    async saveProjects(projects) {
+      if (this.tagBusy) return false;
+      this.tagBusy = true; this.tagError = "";
+      try {
+        const r = await fetch(this.api(`/api/work/items/${this.item.id}/projects`), {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ projects }),
+        });
+        const d = await r.json();
+        if (!r.ok) { this.tagError = d.error || ("tag update failed HTTP " + r.status); return false; }
+        this.item.contexts = d.contexts;
+        return true;
+      } catch (e) {
+        this.tagError = "tag update failed: " + (e.message || String(e));
+        return false;
+      } finally {
+        this.tagBusy = false;
+      }
     },
     async act(action) {
       this.actError = "";
