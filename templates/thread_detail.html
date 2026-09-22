@@ -104,6 +104,7 @@
           </div>
           <button type="submit" class="ln-btn ln-btn-primary" :disabled="!canLaunch || launchBusy">↗ Launch in thread</button>
         </form>
+        <div class="ln-small" style="color:var(--ln-amber)" v-if="$questionWarning(launchText)">{{ $questionWarning(launchText) }}</div>
         <div class="ln-small" style="color:var(--ln-red)" v-if="launchError">{{ launchError }}</div>
 
         <div class="ln-tl">
