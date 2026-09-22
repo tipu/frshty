@@ -229,7 +229,6 @@ select option, select optgroup { background-color: #0b0c10; color: #e7e8ec; }
 .ln-pill-status-selectedfordevelopment { background: rgb(178 118 255 / 0.15); color: var(--ln-violet); }
 .ln-pill-inst-aimyable { background: rgb(79 140 255 / 0.15); color: var(--ln-blue); }
 .ln-pill-inst-atropos { background: rgb(178 118 255 / 0.15); color: var(--ln-violet); }
-.ln-pill-inst-nectar { background: rgb(56 197 138 / 0.15); color: var(--ln-green); }
 .ln-pill-inst-tipu-test { background: rgb(239 91 91 / 0.15); color: var(--ln-red); }
 
 .ln-count-chip { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 99px; background: var(--ln-surface-3); color: var(--ln-text-3); margin-left: 6px; font-weight: 500; vertical-align: middle; }

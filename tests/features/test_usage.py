@@ -70,10 +70,10 @@ class TestRecord:
     def test_instances_kept_separate(self):
         _clear()
         usage.record("route", "GET /x", instance="aimyable")
-        usage.record("route", "GET /x", instance="nectar")
+        usage.record("route", "GET /x", instance="someclient")
         rows = db.query_all(
             "SELECT instance FROM usage_counters WHERE name='GET /x'")
-        assert {r["instance"] for r in rows} == {"aimyable", "nectar"}
+        assert {r["instance"] for r in rows} == {"aimyable", "someclient"}
 
     def test_empty_name_is_noop(self):
         _clear()

@@ -1354,14 +1354,14 @@ class TestUnreachableTask:
         """The record is kept per instance. One instance down must not hold
         the other one silent."""
         self._failed_job()
-        _job(finished=NOW, instance_key="nectar",
+        _job(finished=NOW, instance_key="someclient",
              artifacts={"skipped": ui.UNREACHABLE_SKIP})
         mine = self._down()["alerted"]
         with patch.object(upwork_client, "rooms",
                           side_effect=upwork_client.UpworkAuthError("logged out")), \
                 patch.object(ui, "run_haiku"):
-            theirs = ui.check(_config(), instance_key="nectar", now=NOW)["alerted"]
+            theirs = ui.check(_config(), instance_key="someclient", now=NOW)["alerted"]
         assert mine and theirs and mine != theirs
         rows = db.query_all("SELECT instance_key FROM work_items"
                             " WHERE state = 'proposed' ORDER BY id")
-        assert [r["instance_key"] for r in rows] == ["personal", "nectar"]
+        assert [r["instance_key"] for r in rows] == ["personal", "someclient"]
