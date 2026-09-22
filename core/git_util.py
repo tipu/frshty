@@ -108,6 +108,45 @@ def stage_all(cwd, exclude=(), check: bool = False) -> subprocess.CompletedProce
     return result
 
 
+def dirty_paths(worktree) -> set:
+    """The paths git reports as modified or untracked right now.
+
+    A long-lived worktree is often dirty before an agent ever runs in it: a
+    `pipenv install` in the dependency step writes a Pipfile the branch
+    deleted, a test run drops a cache file. Those paths are not the agent's
+    work, so a caller snapshots them before the run and hands them to
+    `stage_all` as the exclude set.
+
+    `-z` rather than the quoted default, because a quoted path is not the path
+    `stage_all` has to exclude. A rename record carries its origin in the next
+    field and both sides are the caller's inherited dirt.
+
+    `--untracked-files=all` because the default collapses an untracked
+    directory into one entry. Excluding `newpkg/` would also exclude the
+    `newpkg/fix.py` the agent then writes, and the run's own work would never
+    reach the commit.
+
+    Raises when git cannot report. A caller that must keep going catches that
+    and decides for itself what an unreadable worktree means.
+    """
+    fields = run_git(worktree, ["status", "--porcelain", "-z",
+                                "--untracked-files=all"],
+                     timeout=30).stdout.split("\0")
+    paths = set()
+    i = 0
+    while i < len(fields):
+        record = fields[i]
+        i += 1
+        if len(record) < 4:
+            continue
+        status, path = record[:2], record[3:]
+        paths.add(path)
+        if ("R" in status or "C" in status) and i < len(fields):
+            paths.add(fields[i])
+            i += 1
+    return paths
+
+
 def worktree_holding_branch(repo_path: Path, branch: str) -> Path | None:
     """Return the path of the existing worktree that currently has `branch`
     checked out, or None. Parses `git worktree list --porcelain`."""

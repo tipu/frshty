@@ -313,6 +313,24 @@ MUTATIONS = [
         "old": '                        entry["status"] = "fix_unpushed"',
         "new": '                        entry["status"] = "addressed"',
     },
+    {
+        "label": "own_pr_comment_fix_sweeps_the_worktree",
+        "gate": "an own-PR comment fix commits only what its own run produced",
+        "target": "tests/features/test_own_prs.py::TestFixCommentWorktreeDirt"
+                  "::test_inherited_untracked_file_is_not_committed_as_the_fix",
+        "path": "features/own_prs.py",
+        "old": "        git_util.stage_all(worktree, pre_dirty, check=True)",
+        "new": "        git_util.stage_all(worktree, (), check=True)",
+    },
+    {
+        "label": "pipenv_scaffolds_a_pipfile",
+        "gate": "a pipenv dep command is refused in a worktree with no Pipfile",
+        "target": "tests/core/test_deps.py::TestRunDepCommand"
+                  "::test_pipenv_with_only_a_lockfile_is_refused",
+        "path": "core/deps.py",
+        "old": '        if not (wt_path / "Pipfile").is_file():',
+        "new": "        if False:",
+    },
 ]
 
 
