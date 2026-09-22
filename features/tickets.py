@@ -2410,27 +2410,13 @@ def _owed_on_pr(unresolved: list[dict], detected: list[dict],
 def _worktree_dirty_paths(wt: Path) -> set:
     """The paths already modified or untracked before a fix run starts.
 
-    They are not that run's work, so they must stay out of its commit."""
+    They are not that run's work, so they must stay out of its commit. An
+    unreadable worktree reads as clean here: this scan holds several comments
+    and must reach the rest of them."""
     try:
-        out = git_util.run_git(wt, ["status", "--porcelain", "-z"],
-                               timeout=30).stdout
+        return git_util.dirty_paths(wt)
     except git_util.GitCommandError:
         return set()
-    fields = out.split("\0")
-    paths = set()
-    i = 0
-    while i < len(fields):
-        record = fields[i]
-        i += 1
-        if len(record) < 4:
-            continue
-        status, path = record[:2], record[3:]
-        paths.add(path)
-        if "R" in status or "C" in status:
-            if i < len(fields):
-                paths.add(fields[i])
-                i += 1
-    return paths
 
 
 def _drop_unrelated_leftovers(wt: Path, ticket: dict, ts: dict, pr: dict,
