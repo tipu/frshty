@@ -490,16 +490,16 @@ def _handle_in_review_ticket(
                                  freshness.pr_heads(ts.get("prs", []), pr_info_map),
                                  instance_key=instance_key)
 
-    if (ts["status"] == "in_review" and ts.get("ci_passed")
-            and config.get("pr", {}).get("auto_merge")
-            and scope in ("disabled", "pass")):
-        ts = _t._merge(config, ticket, ts, base_url)
-
     if ts["status"] == "in_review":
         ts = _t._check_in_review(config, ticket, ts, base_url, pr_info_map=pr_info_map)
         if ts.get("status") == "in_review" and freshness.enabled(config):
             freshness.record(key, "comments", freshness.watermark(ts),
                              instance_key=instance_key)
+
+    if (ts["status"] == "in_review" and ts.get("ci_passed")
+            and config.get("pr", {}).get("auto_merge")
+            and scope in ("disabled", "pass")):
+        ts = _t._merge(config, ticket, ts, base_url)
     return ts, False
 
 

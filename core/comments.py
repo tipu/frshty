@@ -234,6 +234,51 @@ def mark_comment_retryable(
     )
 
 
+def mark_comment_manual(
+    instance_key: str,
+    resource_type: str,
+    resource_id: str,
+    comment_id: str,
+    reason: str = "",
+) -> None:
+    """Hand a comment to the operator without closing it.
+
+    A comment the classifier reads as non-actionable used to be written
+    'processed', which is terminal: frshty stopped tracking it while the
+    thread stayed open on the pull request and nobody had answered it. 239
+    rows reached that state. 'manual' is the honest record — the fixer will
+    not retry it, nothing counts it as answered, and the owed-comments
+    selector always shows it. It clears when the platform says the comment
+    is gone or the reviewer resolves the thread."""
+    now = datetime.now(timezone.utc).isoformat()
+
+    db.execute(
+        """
+        UPDATE comment_state
+        SET state = 'manual', last_checked_at = ?, last_error = ?, processed_at = NULL
+        WHERE instance_key = ? AND resource_type = ? AND resource_id = ? AND comment_id = ?
+        """,
+        (now, reason, instance_key, resource_type, resource_id, comment_id),
+    )
+
+
+def get_manual_comments(
+    instance_key: str,
+    resource_type: str,
+    resource_id: str,
+) -> list[dict]:
+    """Comments handed to the operator and still open."""
+    return db.query_all(
+        """
+        SELECT comment_id, comment_edited_at, state, error_count, last_checked_at
+        FROM comment_state
+        WHERE instance_key = ? AND resource_type = ? AND resource_id = ?
+        AND state = 'manual'
+        """,
+        (instance_key, resource_type, resource_id),
+    )
+
+
 def mark_comment_deleted(
     instance_key: str,
     resource_type: str,
@@ -358,6 +403,32 @@ def settled_comment_ids(
         str(row["comment_id"]) for row in rows
         if not (row["state"] == "deleted" and str(row["comment_id"]) in present)
     }
+
+
+def unowed_comment_ids(
+    instance_key: str,
+    resource_type: str,
+    resource_id: str,
+    present_ids: set | None = None,
+) -> set[str]:
+    """Ids frshty does not owe a reading.
+
+    Settled, plus the ones handed to the operator. _reopen_answered_threads
+    asks this question rather than whether a comment is finished: a 'manual'
+    comment is finished as far as the loop goes, because a human owes the
+    reply. Counting it as owed would reopen the thread the reviewer resolved
+    after that reply, on every poll, forever."""
+    rows = db.query_all(
+        """
+        SELECT comment_id FROM comment_state
+        WHERE instance_key = ? AND resource_type = ? AND resource_id = ?
+        AND state = 'manual'
+        """,
+        (instance_key, resource_type, resource_id),
+    )
+    manual = {str(row["comment_id"]) for row in rows}
+    return settled_comment_ids(instance_key, resource_type, resource_id,
+                               present_ids) | manual
 
 
 def get_unprocessed_comments(
