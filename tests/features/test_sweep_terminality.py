@@ -37,7 +37,7 @@ def _sweep(local_status: str, upstream: str | None, prs=None):
          patch("features.ticket_states._STATUS_HANDLERS", ()):
         st.load.return_value = state
         st.save_ticket.side_effect = lambda k, v: saved.__setitem__(k, dict(v))
-        tickets.check(cfg, "aimyable")
+        tickets.check(cfg, "acme")
     return saved.get("DEV-1", state["DEV-1"])
 
 
@@ -195,7 +195,7 @@ class TestSweepSeesTheMerge:
              patch("features.ticket_states._STATUS_HANDLERS", ()):
             st.load.return_value = state
             st.save_ticket.side_effect = lambda k, v: saved.__setitem__(k, dict(v))
-            tickets.check(cfg, "aimyable")
+            tickets.check(cfg, "acme")
         return saved.get("DEV-1", state["DEV-1"])
 
     def test_all_prs_merged_moves_the_ticket_to_merged(self):
@@ -398,7 +398,7 @@ class TestSweptTicketOnlyMovesOnAdvance:
     """
 
     def _cfg(self, tmp_path):
-        return {"job": {"key": "aimyable"},
+        return {"job": {"key": "acme"},
                 "workspace": {"root": tmp_path, "tickets_dir": "tickets",
                               "ticket_layout": "flat", "base_branch": "main"},
                 "pr": {}, "features": {},
@@ -428,10 +428,10 @@ class TestSweptTicketOnlyMovesOnAdvance:
              patch("core.queue.jobs_for_ticket", return_value=[]), \
              patch("features.ticket_states._PRE_DISPATCH_HANDLERS", ()), \
              patch.object(tickets, "_enqueue_stage") as eq:
-            tickets.check(self._cfg(tmp_path), "aimyable")
+            tickets.check(self._cfg(tmp_path), "acme")
 
         staged = [c.args[:3] for c in eq.call_args_list]
-        assert ("aimyable", "DEV-QUERIED", "prove") in staged
+        assert ("acme", "DEV-QUERIED", "prove") in staged
         assert not [c for c in staged if c[1] == "DEV-SWEPT"], (
             "the poll must not be relied on to move a swept ticket")
 
@@ -444,10 +444,10 @@ class TestSweptTicketOnlyMovesOnAdvance:
 
         with patch("core.queue.jobs_for_ticket", return_value=[]), \
              patch.object(tickets, "_enqueue_stage") as eq:
-            tickets.advance_ticket(self._cfg(tmp_path), "aimyable", "DEV-SWEPT")
+            tickets.advance_ticket(self._cfg(tmp_path), "acme", "DEV-SWEPT")
 
         assert [c.args[:3] for c in eq.call_args_list] == [
-            ("aimyable", "DEV-SWEPT", "prove")]
+            ("acme", "DEV-SWEPT", "prove")]
 
     def test_advance_ticket_marks_ready_once_the_proof_exists(
             self, tmp_state, tmp_path):
@@ -463,7 +463,7 @@ class TestSweptTicketOnlyMovesOnAdvance:
 
         with patch("core.queue.jobs_for_ticket", return_value=[]), \
              patch.object(tickets, "_enqueue_stage") as eq:
-            tickets.advance_ticket(self._cfg(tmp_path), "aimyable", "DEV-SWEPT")
+            tickets.advance_ticket(self._cfg(tmp_path), "acme", "DEV-SWEPT")
 
         assert [c.args[:3] for c in eq.call_args_list] == [
-            ("aimyable", "DEV-SWEPT", "mark_ready")]
+            ("acme", "DEV-SWEPT", "mark_ready")]

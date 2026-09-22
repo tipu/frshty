@@ -249,7 +249,7 @@ class TestSubstantiationIsQueuedNotInline:
     poll: comments are processed one after another, so one slow repo would stall
     every later comment on every later ticket."""
 
-    def _draft(self, features_on=True, instance_key="aimyable"):
+    def _draft(self, features_on=True, instance_key="acme"):
         import features.tickets as ft
         cfg = {"features": {"defence": True} if features_on else {},
                "job": {"key": instance_key}}
@@ -269,7 +269,7 @@ class TestSubstantiationIsQueuedNotInline:
 
     def test_the_poll_never_runs_the_evidence_itself(self):
         import features.tickets as ft
-        cfg = {"features": {"defence": True}, "job": {"key": "aimyable"}}
+        cfg = {"features": {"defence": True}, "job": {"key": "acme"}}
         with patch.object(ft, "q"), patch.object(ft, "log"), \
              patch.object(defence, "substantiate") as ran:
             ft._substantiate_reply(cfg, "DEV-1-x", {"key": "DEV-1"},

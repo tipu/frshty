@@ -816,12 +816,12 @@ class TestRequiredFollowups:
         item_id = self._finished_with_followup("inherit context", True)
         with db.tx() as c:
             c.execute("UPDATE work_items SET contexts = ?, critical = 1 WHERE id = ?",
-                      (f"aimyable,{work_launch.SLACK_LABEL}", item_id))
+                      (f"acme,{work_launch.SLACK_LABEL}", item_id))
         monkeypatch.setattr(work_launch, "project_entries", lambda: [])
         work_debrief.propose_required_followups()
 
         child = self._children(item_id)[0]
-        assert child["contexts"] == f"aimyable,{work_launch.SLACK_LABEL}"
+        assert child["contexts"] == f"acme,{work_launch.SLACK_LABEL}"
         assert child["launch_cwd"] == "/tmp"
         assert child["critical"] == 1
 

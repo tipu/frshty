@@ -1043,7 +1043,7 @@ class TestStatus:
         assert s["scan"]["reason"] == "UpworkApiError: 401"
 
     def test_another_instances_runs_are_not_counted(self):
-        _job(finished=NOW, instance_key="aimyable")
+        _job(finished=NOW, instance_key="acme")
         _job(finished=NOW, task="slack_scan")
         s = ui.status(_config(), instance_key="personal", now=NOW)
         assert s["runs_24h"] == 0

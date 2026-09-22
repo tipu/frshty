@@ -137,7 +137,7 @@ class TestWatchdogLaunchLedger:
                 " comment_id, last_checked_at) VALUES ('proxy', 'pr', 'api/1', 'c1', 't0')")
             conn.execute(
                 "INSERT INTO kv(instance_key, key, data, updated_at)"
-                " VALUES ('quill', 'own_prs', '{}', 't0')")
+                " VALUES ('raven', 'own_prs', '{}', 't0')")
         conn = self._apply(tmp_path, stop_before="029_watchdog_launch_fence.sql",
                            seed=seed)
         assert conn.execute("SELECT COUNT(*) FROM watchdog_launches").fetchone()[0] == 0
@@ -148,7 +148,7 @@ class TestWatchdogLaunchLedger:
             "SELECT instance_key, bucket, entity_id FROM watchdog_launches"
             " ORDER BY instance_key").fetchall()
         assert rows == [("proxy", "migration", "upgrade-fence"),
-                        ("quill", "migration", "upgrade-fence"),
+                        ("raven", "migration", "upgrade-fence"),
                         ("someclient", "migration", "upgrade-fence")]
 
     def test_running_the_fence_twice_leaves_one_row_per_instance(self, tmp_path):

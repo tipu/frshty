@@ -1080,8 +1080,8 @@ class TestFixComment:
 class TestFixCommentWorktreeDirt:
     """`_ensure_worktree` resets the tracked files but never runs `git clean`,
     so an untracked file an earlier run left in the PR worktree survives into
-    the next one. `add -A` committed it as part of the fix. On aimyable's
-    DEV-743 the same shape put a Pipfile on django-drf-app PR 203 twice."""
+    the next one. `add -A` committed it as part of the fix. On a live
+    ticket the same shape put a Pipfile on django-drf-app PR 203 twice."""
 
     def _payload(self):
         return {"pr": make_pr(),
@@ -1456,7 +1456,7 @@ class TestCommitFix:
 
 
 class TestCommitFixAgentCommittedItself:
-    """Observed live on quill#4561 (2026-09-08): review comments 5577340566
+    """Observed live on a pull request (2026-09-08): review comments 5577340566
     and 5577373733 were fixed four times and abandoned four times. Each
     fix run committed its own work inside the worktree (db8e2df8, b6692376,
     57188856, 52bb95d0), so `add -A` plus `diff --cached --quiet` found a
@@ -1731,7 +1731,7 @@ class TestCommitFixAgentCommittedItself:
         assert reason == "no changes produced"
 
     def test_a_committed_submodule_bump_counts_even_when_diffs_ignore_it(self, tmp_path):
-        """quill and quill-ios both carry .gitmodules. A repo that sets
+        """A repository with submodules carries .gitmodules. A repo that sets
         submodule.<name>.ignore hides a committed gitlink change from
         `git diff`, so a fix that moves a dependency to a fixed revision would
         read as no change and be reset away."""
@@ -1766,7 +1766,7 @@ class TestCommitFixAgentCommittedItself:
         assert reason == ""
 
     def test_a_changed_path_is_not_read_as_a_pathspec_pattern(self, tmp_path):
-        """quill's webAppNext is built out of names like app/[id]/page.tsx.
+        """A Next.js app router is built out of names like app/[id]/page.tsx.
         Git reads that `[id]` as a character class and `--` does not make it
         literal, so a change to app/i/page.tsx would answer for a file the
         run never touched."""
@@ -1964,9 +1964,9 @@ class TestWorktreeLockIsShared:
         from features import pr_autofix
         import core.git_util as git_util
 
-        assert own_prs._worktree_lock("quill/4561") is pr_autofix._worktree_lock("quill/4561")
-        assert own_prs._worktree_lock("quill/4561") is git_util.worktree_lock("quill/4561")
-        assert own_prs._worktree_lock("quill/4561") is not own_prs._worktree_lock("quill/4562")
+        assert own_prs._worktree_lock("raven/4561") is pr_autofix._worktree_lock("raven/4561")
+        assert own_prs._worktree_lock("raven/4561") is git_util.worktree_lock("raven/4561")
+        assert own_prs._worktree_lock("raven/4561") is not own_prs._worktree_lock("raven/4562")
 
 
 class TestBotRewriteLoop:

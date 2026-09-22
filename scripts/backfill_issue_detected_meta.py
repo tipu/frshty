@@ -8,8 +8,8 @@ the event meta. It changes nothing that is already filled.
 Run a dry run first. Narrow the run with --instance and --ticket; without
 them every instance and every ticket is fetched, which is slow.
 
-    python3 scripts/backfill_issue_detected_meta.py --instance aimyable
-    python3 scripts/backfill_issue_detected_meta.py --instance aimyable --apply
+    python3 scripts/backfill_issue_detected_meta.py --instance myproject
+    python3 scripts/backfill_issue_detected_meta.py --instance myproject --apply
 """
 
 import json
