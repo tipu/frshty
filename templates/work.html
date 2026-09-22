@@ -280,7 +280,6 @@
 </frshty-shell>
 </div>
 <script>
-const DISPATCH_PROJECTS = ["aimyable", "quill", "clarivis", "algotrader2", "frshty", "game_expirement", "expirement", "upwork-api"];
 const STATE_PILLS = {
   proposed: "ln-pill-violet",
   needs_ack: "ln-pill-green", needs_you: "ln-pill-amber", agent_working: "ln-pill-blue",
@@ -348,19 +347,20 @@ frshtyApp({
       return Object.values(this.groups).reduce((n, g) => n + (g ? g.length : 0), 0);
     },
     primaryProjects() {
-      if (this.target) return this.targetMeta.projects;
-      return DISPATCH_PROJECTS.map(k => this.projects.find(p => p.key === k)).filter(Boolean);
+      return this.targetMeta.projects.filter(p => p.primary !== false);
     },
     filterProjects() {
-      const keys = new Set((this.projects || []).map(p => p.key));
+      const keys = [];
+      for (const p of this.projects || []) keys.push(p.key);
       for (const meta of Object.values(this.peerMeta)) {
-        for (const p of meta.projects || []) keys.add(p.key);
+        for (const p of meta.projects || []) {
+          if (!keys.includes(p.key)) keys.push(p.key);
+        }
       }
-      return DISPATCH_PROJECTS.filter(k => keys.has(k));
+      return keys;
     },
     extraProjects() {
-      const primary = new Set(this.primaryProjects.map(p => p.key));
-      return this.targetMeta.projects.filter(p => !primary.has(p.key));
+      return this.targetMeta.projects.filter(p => p.primary === false);
     },
     visibleProjects() {
       if (this.moreOpen) return [...this.primaryProjects, ...this.extraProjects];

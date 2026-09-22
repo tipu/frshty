@@ -19,7 +19,7 @@ def _cfg(tmp_path, providers=("claude", "codex")):
 
 
 def _pr():
-    return {"repo": "quill", "id": 4536, "branch": "claude/team-checkout-redirect",
+    return {"repo": "raven", "id": 4536, "branch": "claude/team-checkout-redirect",
             "url": "https://example/pr/4536"}
 
 
@@ -29,7 +29,7 @@ def _review(body):
 
 
 def _artifacts(tmp_path):
-    d = Path(tmp_path) / "reviews" / "quill" / "claude-team-checkout-redirect"
+    d = Path(tmp_path) / "reviews" / "raven" / "claude-team-checkout-redirect"
     return sorted(p.name for p in d.iterdir()) if d.is_dir() else []
 
 
@@ -64,7 +64,7 @@ class TestReviewPrRunsEveryConfiguredProvider:
 
     def test_each_provider_keeps_its_own_findings(self, tmp_path):
         self._run(tmp_path, ("claude", "codex"))
-        d = Path(tmp_path) / "reviews" / "quill" / "claude-team-checkout-redirect"
+        d = Path(tmp_path) / "reviews" / "raven" / "claude-team-checkout-redirect"
         assert json.loads((d / "review.json").read_text())["provider"] == "claude"
         assert json.loads((d / "review.codex.json").read_text())["provider"] == "codex"
         codex_body = json.loads((d / "queued_comments.codex.json").read_text())[0]["body"]
@@ -85,7 +85,7 @@ class TestReviewPrRunsEveryConfiguredProvider:
         assert "review.codex.json" in names
         assert "queued_comments.codex.json" in names
         assert "review.json" in names
-        d = Path(tmp_path) / "reviews" / "quill" / "claude-team-checkout-redirect"
+        d = Path(tmp_path) / "reviews" / "raven" / "claude-team-checkout-redirect"
         assert json.loads((d / "queued_comments.json").read_text())[0]["body"] == "from codex"
 
     def test_the_fan_out_asks_no_model_of_its_own(self, tmp_path):
@@ -124,7 +124,7 @@ class TestCodexPersonaWithoutAWorktree:
         has to land somewhere regardless."""
         with patch.object(reviewer, "run_external_model", return_value=("{}", 0)), \
              patch.object(reviewer, "log"):
-            name, _data = reviewer._run_codex_persona(("spec", "prompt", None, "quill-4536"))
+            name, _data = reviewer._run_codex_persona(("spec", "prompt", None, "raven-4536"))
         assert name == "spec"
 
 
@@ -152,7 +152,7 @@ class TestEveryProvidersBlockersReachThePrimaryReview:
                           side_effect=lambda t: (t[0], codex_review)), \
              patch.object(reviewer, "log"):
             result = reviewer.review_pr(cfg, None, _pr(), prefetched_diff="diff --git a/a.ts b/a.ts\n")
-        d = Path(tmp_path) / "reviews" / "quill" / "claude-team-checkout-redirect"
+        d = Path(tmp_path) / "reviews" / "raven" / "claude-team-checkout-redirect"
         return result, json.loads((d / "queued_comments.json").read_text())
 
     def test_a_blocker_only_codex_found_flips_the_verdict(self, tmp_path):
@@ -227,7 +227,7 @@ class TestCodexRunsOneSessionPerReview:
              patch.object(reviewer, "_run_codex_persona",
                           side_effect=lambda t: (t[0], None)) as codex:
             reviewer._run_personas_for_providers(prompts, list(providers), worktree=None,
-                                                 model=None, run_key="quill-4536")
+                                                 model=None, run_key="raven-4536")
         return claude, codex
 
     def _names(self, mock):

@@ -14,7 +14,7 @@ from core.tasks.registry import TaskContext
 
 def _ctx(tmp_path):
 	(tmp_path / "workspace" / "repo" / ".git").mkdir(parents=True, exist_ok=True)
-	return TaskContext(instance_key="aimyable", ticket_key="DEV-1",
+	return TaskContext(instance_key="acme", ticket_key="DEV-1",
 	                   task="run_tests_and_fix", payload={}, job_id=1,
 	                   triggering_event_id=None, config={}, registry=None,
 	                   now=datetime.now(timezone.utc))

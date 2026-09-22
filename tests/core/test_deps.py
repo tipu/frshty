@@ -176,7 +176,7 @@ class TestRunDepCommand:
                                        dep_cmd="pipenv install --dev")
 
     def test_pipenv_without_pipfile_is_refused(self, fake_config, tmp_path):
-        """aimyable's django-drf-app migrated to uv and deleted its Pipfile
+        """acme's django-drf-app migrated to uv and deleted its Pipfile
         while dep_commands still said `pipenv install --dev`. pipenv had
         nothing to install, so it wrote a skeleton Pipfile, and the comment
         fix loop committed that file onto the DEV-743 branch twice."""

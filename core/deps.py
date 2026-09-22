@@ -173,7 +173,7 @@ def run_dep_command(config: dict, repo_name: str, wt_path: Path, cmd: str) -> bo
     A pipenv command in a worktree with no Pipfile is refused. pipenv has
     nothing to install there, so all it does is write a skeleton Pipfile, and
     that file then sits untracked in the worktree for a later commit to pick
-    up. aimyable's django-drf-app migrated to uv and deleted its Pipfile while
+    up. A live django-drf-app migrated to uv and deleted its Pipfile while
     `dep_commands` still said `pipenv install --dev`; the skeleton reached the
     DEV-743 branch twice, as 2ad039d and eacb51e.
 

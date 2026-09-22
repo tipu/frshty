@@ -2,7 +2,7 @@
 
 These don't depend on a real config — they synthesize minimal tmp configs at
 free ports so the test never collides with anything running locally
-(aimyable/nectar/lumeninv via systemd, etc.). The test value is "frshty starts
+(the instances this host runs under systemd, etc.). The test value is "frshty starts
 without crashing under each invocation pattern", not "real configs work".
 """
 import os

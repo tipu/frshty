@@ -2146,7 +2146,7 @@ class TestRenderPrdTicketMd:
 
 
 class TestCheckInReviewFixFailedRetry:
-    """Observed live on aimyable/root-cdk#23 (DEV-467 'update Lambda runtime
+    """Observed live on acme/root-cdk#23 (DEV-467 'update Lambda runtime
     to Node.js 24'): 3 reviewer review comments from Trevin Avery were processed
     in one scan after the run_thinking() positional-arg TypeError was fixed; 2
     landed in fix_failed (Claude produced no code change for inline comments on
@@ -2378,7 +2378,7 @@ class TestCheckInReviewFixFailedRetry:
 
 
 class TestLoadPrCommentsDedupe:
-    """Live on aimyable DEV-728: pr_comments.json holds rows
+    """Live on acme DEV-728: pr_comments.json holds rows
     ['fix_failed', 'addressed'] for django-drf-app#198 comment 861363220,
     because every scan appends a fresh row. _pr_comment_breakdown counts every
     row it is handed, so the stale fix_failed row kept not_done at 1 and
@@ -2473,7 +2473,7 @@ class TestLoadPrCommentsDedupe:
         assert tickets._load_pr_comments(fake_config, slug) == {"comments": [{"id": 1}]}
 
 class TestCheckInReviewPushFailure:
-    """Observed live on aimyable/saas-dashboard#286: three Arslan review
+    """Observed live on acme/saas-dashboard#286: three Arslan review
     comments were fixed as local commits, then push_branch was rejected with
     non-fast-forward because a squash rewrote the branch history. The push
     failure emptied to_resolve, but the cursor block below it still ran,
@@ -2603,7 +2603,7 @@ class TestCheckInReviewPushFailure:
 
 
 class TestCheckInReviewReviewerReply:
-    """Observed live on quillmeetings/quill#4561: Adam Walz answered the
+    """Observed live on ravenmeetings/raven#4561: Adam Walz answered the
     notifier.ts:71 thread twice after it was resolved, and neither reply was
     ever registered. A reply is how a reviewer says the fix did not land, so it
     has to reach the classifier like any other comment."""
@@ -2675,7 +2675,7 @@ class TestCheckInReviewReviewerReply:
 
 
 class TestReplyCommitsToChangeReroute:
-    """Observed live on aimyable/saas-dashboard#249 (DEV-644): the triage batch
+    """Observed live on acme/saas-dashboard#249 (DEV-644): the triage batch
     classified the 'file count removed, seems odd' comment as not actionable,
     the drafted reply admitted a regression and promised 'I will restore the
     count', and the comment parked at needs_reply. The promise was never kept.
@@ -2892,7 +2892,7 @@ class TestSubstantiateReplyEnqueueOrdering:
 
 
 class TestCheckInReviewSelfCommittedFix:
-    """Observed live on aimyable django-drf-app PR #174 (DEV-644, 2026-08-20):
+    """Observed live on acme django-drf-app PR #174 (DEV-644, 2026-08-20):
     Trevin Avery's review comment 845507041 was resolved on Bitbucket at
     23:46:00Z with no commit delivered to the remote. The inline fix path
     judged "did the agent produce a fix" solely from `git add -A` +
@@ -3480,7 +3480,7 @@ class TestResolveStatusInvalidEntry:
 
 
 class TestCheckInReviewPipelineCommentHold:
-    """Observed on aimyable windows-rpa-client #56 and websocket-server #118
+    """Observed on acme windows-rpa-client #56 and websocket-server #118
     (DEV-635, 2026-08-21): pipeline-failure comments ("N of M checks failed")
     were resolved via the "already addressed (no change needed)" branch while
     the PR's pipeline was still red. That branch is gone. A no-change verdict
@@ -3866,7 +3866,7 @@ class TestCheckInReviewIssueComments:
 
 
 class TestCheckInReviewCommentQueueProgress:
-    """Observed live on aimyable django-drf-app PR #203 (DEV-743, 2026-09-21):
+    """Observed live on acme django-drf-app PR #203 (DEV-743, 2026-09-21):
     Arslan Syed's comment 867755302 sat at position 15 of a 16-comment queue
     and was never read. The cursor only moved when a whole batch settled, so
     one retryable fix failure made the next scan re-read the whole list and

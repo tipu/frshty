@@ -38,61 +38,61 @@ class TestMigration:
             conn.executescript(pathlib.Path("migrations", name).read_text())
         conn.execute(
             "INSERT INTO work_items(objective, contexts, tags, created_at, updated_at) "
-            "VALUES ('a', '', 'quill', 't', 't'), ('b', 'frshty', 'frshty,codex', 't', 't'), "
+            "VALUES ('a', '', 'raven', 't', 't'), ('b', 'frshty', 'frshty,codex', 't', 't'), "
             "('c', '', '', 't', 't')")
         conn.executescript(pathlib.Path("migrations/043_drop_work_tags.sql").read_text())
         rows = dict(conn.execute("SELECT objective, contexts FROM work_items").fetchall())
-        assert rows == {"a": "quill", "b": "frshty", "c": ""}
+        assert rows == {"a": "raven", "b": "frshty", "c": ""}
         cols = {r[1] for r in conn.execute("PRAGMA table_info(work_items)")}
         assert "tags" not in cols
 
 
 class TestGroupedItemsProjectFilter:
     def test_filters_by_project(self):
-        a = _mkitem("quill sync", contexts="quill")
+        a = _mkitem("raven sync", contexts="raven")
         b = _mkitem("frshty report", contexts="frshty")
-        groups = work_store.grouped_items(projects="quill")
+        groups = work_store.grouped_items(projects="raven")
         ids = {r["id"] for g in groups.values() for r in g}
         assert a in ids
         assert b not in ids
 
     def test_matches_one_project_of_several(self):
-        a = _mkitem("two projects", contexts="aimyable,frshty")
+        a = _mkitem("two projects", contexts="acme,frshty")
         groups = work_store.grouped_items(projects="frshty")
         assert a in {r["id"] for g in groups.values() for r in g}
 
     def test_or_semantics_across_projects(self):
-        a = _mkitem("quill sync", contexts="quill")
+        a = _mkitem("raven sync", contexts="raven")
         b = _mkitem("frshty report", contexts="frshty")
         c = _mkitem("no project")
-        groups = work_store.grouped_items(projects="quill,frshty")
+        groups = work_store.grouped_items(projects="raven,frshty")
         ids = {r["id"] for g in groups.values() for r in g}
         assert {a, b} <= ids
         assert c not in ids
 
     def test_no_filter_keeps_every_task(self):
-        a = _mkitem("quill sync", contexts="quill")
+        a = _mkitem("raven sync", contexts="raven")
         b = _mkitem("no project")
         ids = {r["id"] for g in work_store.grouped_items().values() for r in g}
         assert {a, b} <= ids
 
     def test_the_project_filter_applies_to_the_archive(self):
-        kept = _mkitem("ancient quill job", contexts="quill")
+        kept = _mkitem("ancient raven job", contexts="raven")
         other = _mkitem("ancient frshty job", contexts="frshty")
         with db.tx() as c:
             c.execute("UPDATE work_items SET state = 'done' WHERE id IN (?, ?)", (kept, other))
         work_store.apply_action(kept, "archive")
         work_store.apply_action(other, "archive")
-        archive = work_store.grouped_items(projects="quill", archived=True)
+        archive = work_store.grouped_items(projects="raven", archived=True)
         assert kept in {r["id"] for r in archive["done"]}
         assert other not in {r["id"] for r in archive["done"]}
 
 
 class TestBoardRoute:
     def test_the_route_filters_on_the_projects_parameter(self):
-        a = _mkitem("quill sync", contexts="quill")
+        a = _mkitem("raven sync", contexts="raven")
         b = _mkitem("frshty report", contexts="frshty")
-        body = work_routes.api_work_items(projects="quill")
+        body = work_routes.api_work_items(projects="raven")
         ids = {r["id"] for g in body["groups"].values() for r in g}
         assert a in ids
         assert b not in ids
@@ -101,5 +101,5 @@ class TestBoardRoute:
         assert "all_tags" not in work_routes.api_work_items()
 
     def test_the_route_echoes_the_filter_it_applied(self):
-        body = work_routes.api_work_items(q="sync", projects="quill,frshty")
-        assert body["filter"] == {"q": "sync", "projects": "quill,frshty"}
+        body = work_routes.api_work_items(q="sync", projects="raven,frshty")
+        assert body["filter"] == {"q": "sync", "projects": "raven,frshty"}

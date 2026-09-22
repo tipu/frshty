@@ -227,7 +227,7 @@ fingerprint. When the base branch moved during the review, the two disagree,
 `_scope_review_state` returns `pending`, and the dispatcher enqueues a fresh review of a
 branch that did not change. Each rerun costs three model invocations and about seven
 minutes. DEV-635 recorded 19 runs in six days, and several pairs are ten to thirty
-minutes apart. The aimyable base branches took merges throughout those days.
+minutes apart. The instance base branches took merges throughout those days.
 
 Change: fetch first, then compute the fingerprint, then review. Move the fetch out of
 `run_scope_review` into a small helper that both `scope_fingerprint` and

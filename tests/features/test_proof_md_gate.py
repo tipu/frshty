@@ -21,7 +21,7 @@ def _make_ctx(tmp_path, ticket_key="PROJ-1", slug="PROJ-1-do-the-thing"):
         "_base_url": "http://localhost:8000",
     }
     return TaskContext(
-        instance_key="aimyable",
+        instance_key="acme",
         ticket_key=ticket_key,
         task="enter_proving",
         payload={},
@@ -112,7 +112,7 @@ class TestWorktreeGuard:
 class TestEnterProvingTarget:
     def _ctx(self):
         return TaskContext(
-            instance_key="aimyable", ticket_key="PROJ-1", task="enter_proving",
+            instance_key="acme", ticket_key="PROJ-1", task="enter_proving",
             payload={}, job_id=0, triggering_event_id=None, config={},
             registry=None, now=None,
         )

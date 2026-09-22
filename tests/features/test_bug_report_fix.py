@@ -59,7 +59,7 @@ def _ctx(tmp_path, payload=None, slug="DEV-635-file-explorer-tool"):
         "_base_url": "http://localhost:8000",
     }
     return TaskContext(
-        instance_key="aimyable", ticket_key="DEV-635", task="fix_reported_bug",
+        instance_key="acme", ticket_key="DEV-635", task="fix_reported_bug",
         payload=payload if payload is not None else {}, job_id=0,
         triggering_event_id=None, config=config, registry=None, now=None,
     )
@@ -214,7 +214,7 @@ def _run_poll(fake_config, comment, ts, detection=None, unsettled=None,
          patch("features.tickets._enqueue_stage", return_value=enqueue_returns) as eq, \
          patch("features.tickets.log.emit"):
         tickets._process_ticket_comments(fake_config, "DEV-635", ts, ticket,
-                                         "http://localhost:8000", "aimyable")
+                                         "http://localhost:8000", "acme")
     return eq, processed, retryable
 
 
@@ -262,7 +262,7 @@ class TestTheReportReachesTheJob:
              patch("features.tickets.log.emit"):
             tickets._process_ticket_comments(fake_config, "DEV-635",
                                              {"slug": "s", "status": "in_review"},
-                                             ticket, "http://localhost:8000", "aimyable")
+                                             ticket, "http://localhost:8000", "acme")
         eq.assert_called_once()
         ids = [r["comment_id"] for r in eq.call_args.kwargs["payload"]["reports"]]
         assert ids == ["17285", "17286"]
@@ -302,7 +302,7 @@ class TestEditedAndUnsettledComments:
              patch("features.tickets.comments.get_unprocessed_comments", return_value=[]), \
              patch("features.tickets._fetch_ticket_comments") as fetch:
             tickets._process_ticket_comments(fake_config, "DEV-635", ts, ticket,
-                                             "http://localhost:8000", "aimyable")
+                                             "http://localhost:8000", "acme")
         fetch.assert_not_called()
 
 

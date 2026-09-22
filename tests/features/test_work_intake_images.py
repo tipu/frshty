@@ -77,7 +77,7 @@ def _draft(item_id, kind="work_item"):
     with db.tx() as c:
         cur = c.execute(
             "INSERT INTO work_followups(work_item_id, kind, workspace, recipient, draft, "
-            "created_at, updated_at) VALUES (?, ?, 'aimyable', 'Sam', 'carry on', ?, ?)",
+            "created_at, updated_at) VALUES (?, ?, 'acme', 'Sam', 'carry on', ?, ?)",
             (item_id, kind, now, now))
         return cur.lastrowid
 
