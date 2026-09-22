@@ -66,6 +66,15 @@ class TestResumeRoute:
         assert r.status_code == 409
         assert "could not be restarted" in r.json()["error"]
 
+    def test_resume_reports_a_launch_that_raises(self):
+        with patch.object(work_routes.work_launch, "resume_session",
+                          side_effect=RuntimeError("tmux gone")), \
+             patch.object(work_routes.log, "emit") as emit:
+            r = _client().post("/api/work/items/42/resume")
+        assert r.status_code == 500
+        assert "RuntimeError: tmux gone" in r.json()["error"]
+        emit.assert_called_once()
+
 
 class TestQuestionWarning:
     def test_the_shell_defines_the_warning(self):
