@@ -371,6 +371,26 @@ class TestIntake:
         assert ("other prose document for the operator as a self-contained .html file, "
                 "never as Markdown or plain text") in context
 
+    def test_intake_asks_every_report_for_a_tldr(self, tmp_path, monkeypatch):
+        from unittest.mock import patch, MagicMock
+        from services import work_artifacts
+        monkeypatch.setattr(work_artifacts, "root", lambda: tmp_path / "artifact-store")
+        reg = MagicMock()
+        reg.config = {"workspace": {"root": tmp_path}}
+        instances = MagicMock()
+        instances.get.return_value = reg
+        with patch("services.work_launch.runtime.instances", return_value=instances), \
+             patch("services.work_launch.terminal.launch_claude") as mock_launch, \
+             patch("services.work_launch.terminal.session_healthy", return_value={"alive": True, "agent_running": True}):
+            client = self._client()
+            r = client.post("/api/work/intake", json={"text": "write me a report"})
+        assert r.status_code == 200, r.text
+        context = mock_launch.call_args.args[3]
+        assert work_store.TLDR_RULE in context
+        assert "Open every such document with a TL;DR section" in context
+        assert f"runs past {work_store.TLDR_LONG_WORDS} words" in context
+        assert "<stem>-tldr.html" in context
+
     def test_intake_launch_failure_marks_item(self, tmp_path):
         from unittest.mock import patch, MagicMock
         reg = MagicMock()
@@ -698,6 +718,14 @@ class TestAutocontinue:
         prompt = sender.call_args.args[1]
         assert ("Write any report, summary or other prose document for the operator as "
                 "a self-contained .html file, never as Markdown or plain text.") in prompt
+
+    def test_continue_prompt_repeats_the_tldr_rule(self, monkeypatch):
+        item_id, _, sender = self._setup(monkeypatch)
+        assert work_store.maybe_autocontinue(f"sid-auto-{item_id}", "/tmp/t.jsonl") == "continued"
+        prompt = sender.call_args.args[1]
+        assert work_store.TLDR_RULE in prompt
+        assert "Open every such document with a TL;DR section" in prompt
+        assert f"runs past {work_store.TLDR_LONG_WORDS} words" in prompt
 
     def test_question_blocks_continue(self, monkeypatch):
         item_id, _, sender = self._setup(monkeypatch, tail="Should I use the staging bucket or prod?")
