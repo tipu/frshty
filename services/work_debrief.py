@@ -39,6 +39,11 @@ UNFINISHED_ACTIONS = ("commit", "push", "pr", "merge", "release")
 # debrief means the run did work the debrief never saw.
 AGENT_TURN_KINDS = ("SessionStart", "UserPromptSubmit", "Stop")
 HELD_DETAIL = "held: {key} is not approved in full; waiting on {urls}"
+UNAPPROVED_DETAIL = ("held: a merge on {projects} waits for an approval the "
+                     "operator does not give himself; nobody has approved {urls}")
+NO_PR_DETAIL = ("held: a merge on {projects} waits for an approval the operator "
+                "does not give himself, and this draft names no open pull "
+                "request whose approval can be read")
 WHOLE_TICKET_RULE = (
     "{key} holds {count} open pull requests and every one of them is approved. "
     "Merge all of them in this run, not one by one: {urls}.")
@@ -710,7 +715,7 @@ def _propose_followup_locked(followup_id: int, objective: str = "") -> dict:
 
 
 def _pr_label(pr: dict) -> str:
-    return pr["url"] or f"{pr['repo']}#{pr['id']}"
+    return pr.get("url") or f"{pr['repo']}#{pr['id']}"
 
 
 def _hold(followup_id: int, item_id: int, detail: str) -> None:
@@ -730,7 +735,96 @@ def _hold(followup_id: int, item_id: int, detail: str) -> None:
                  f"yet; {detail}")
 
 
-def _whole_ticket_objective(draft: str, scope: dict) -> str:
+def _polled_approvers(keys: list[str], pr: dict) -> list[str]:
+    """The approvers the own-PR poll last saw on one pull request.
+
+    A pull request no ticket tracks has no ticket cache to read. The own-PR
+    poll writes the same fact for every open pull request of the account it
+    polls (features/own_prs._cache_pr_metadata), so its blob answers for that
+    pull request instead. The blob belongs to the project that polled it, and
+    a scan asks about a project other than the one it runs under, so the row
+    is read by instance key rather than through the active state context. A
+    project whose poll never ran holds no row and reads as unapproved.
+
+    The blob is keyed by repository and number, and two owners can hold a
+    repository of the same name. So an entry that carries the address of a
+    different pull request answers for that one, not for this one, and is
+    passed over."""
+    pr_key = f"{pr.get('repo')}/{pr.get('id')}"
+    for key in keys:
+        row = db.query_one("SELECT data FROM kv WHERE instance_key = ? AND key = ?",
+                           (key, "own_prs"))
+        if not row or not row.get("data"):
+            continue
+        try:
+            blob = json.loads(row["data"])
+        except (json.JSONDecodeError, ValueError):
+            continue
+        entry = blob.get(pr_key) if isinstance(blob, dict) else None
+        if not isinstance(entry, dict) or not entry.get("approvers"):
+            continue
+        address = work_tickets.pr_address(entry.get("url") or "")
+        if address and address != pr.get("key"):
+            continue
+        return list(entry["approvers"])
+    return []
+
+
+def _loose_pr_refs(draft: str, scopes: list[dict]) -> list[dict]:
+    """The pull requests the draft names that no resolved ticket accounts for.
+
+    A draft can name a pull request no ticket tracks at all, and that one is
+    checked on its own. An address a resolved ticket holds is dropped here
+    whatever its state, because the ticket already reported it: a named pull
+    request the operator merged by hand is finished work, not a merge still
+    waiting on an approver."""
+    covered: set[str] = set()
+    for scope in scopes:
+        covered |= scope["covered"]
+    return [r for r in work_tickets.pr_refs_in(draft)
+            if r["key"] not in covered and f"{r['repo']}/{r['id']}" not in covered]
+
+
+def _merge_hold_reason(contexts, draft: str, scopes: list[dict]) -> str:
+    """Why this merge follow-up is not proposed yet, or "" to propose it.
+
+    The operator cannot merge a client pull request until a reviewer approves
+    it, so a proposal that asks him to merge one is a question he cannot
+    answer. Every pull request the follow-up would merge has to carry an
+    approver before the proposal opens: the one the draft names, every open
+    sibling under its ticket, and every further pull request the draft names
+    outside that ticket. A project the operator reviews himself
+    (work_launch.SELF_MERGE_PROJECTS) waits for nobody, so nothing is held
+    there.
+
+    A ticket's own pull requests are judged on the approvers its poll cached,
+    which is the fact the ticket keeps current, and every ticket the draft
+    reaches is judged that way. A pull request no ticket holds is judged on
+    the own-PR poll instead. Neither cache overrules the other: the own-PR
+    poll skips a pull request a ticket owns (features/own_prs.check), so what
+    it holds for one can predate the adoption.
+
+    A draft that names no pull request the approval of which can be read is
+    held rather than proposed. The debrief writes the draft in prose, and a
+    draft that names its pull request by number alone carries no approval
+    evidence at all."""
+    if not work_launch.merge_approval_required(contexts):
+        return ""
+    projects = ", ".join(work_launch.project_keys(contexts))
+    tracked = [p for scope in scopes for p in scope["named"] + scope["siblings"]]
+    loose = _loose_pr_refs(draft, scopes)
+    if not tracked and not loose:
+        return NO_PR_DETAIL.format(projects=projects)
+    keys = work_launch.project_keys(contexts)
+    waiting = [p for p in tracked if not p.get("approvers")]
+    waiting += [p for p in loose if not _polled_approvers(keys, p)]
+    if not waiting:
+        return ""
+    return UNAPPROVED_DETAIL.format(
+        projects=projects, urls=", ".join(_pr_label(p) for p in waiting))
+
+
+def _whole_ticket_objective(draft: str, scopes: list[dict]) -> str:
     """One merge follow-up's objective, widened from its pull request to the
     ticket that holds it.
 
@@ -740,13 +834,19 @@ def _whole_ticket_objective(draft: str, scope: dict) -> str:
     and left the operator to notice the rest. Every open pull request is
     approved by the time this runs, so the proposal names all of them and the
     run merges the ticket instead of a pull request. A ticket with nothing
-    beside the named pull request is left as the debrief wrote it."""
-    if not scope or not scope["siblings"]:
+    beside the named pull request is left as the debrief wrote it, and a
+    draft that reaches two tickets carries one rule for each of them."""
+    rules = []
+    for scope in scopes:
+        if not scope["siblings"]:
+            continue
+        prs = scope["named"] + scope["siblings"]
+        rules.append(WHOLE_TICKET_RULE.format(
+            key=scope["ticket_key"], count=len(prs),
+            urls=", ".join(_pr_label(p) for p in prs)))
+    if not rules:
         return ""
-    prs = scope["named"] + scope["siblings"]
-    return draft.rstrip() + "\n\n" + WHOLE_TICKET_RULE.format(
-        key=scope["ticket_key"], count=len(prs),
-        urls=", ".join(_pr_label(p) for p in prs))
+    return draft.rstrip() + "\n\n" + "\n".join(rules)
 
 
 def propose_required_followups() -> list[dict]:
@@ -770,9 +870,16 @@ def propose_required_followups() -> list[dict]:
     DEV-728's three pull requests, and a ticket merged a pull request at a
     time is a ticket delivered in parts. So the draft is held while any other
     open pull request under its ticket is unapproved, and the proposal that
-    does open names every one of them."""
+    does open names every one of them.
+
+    A merge follow-up on a project the operator does not review himself waits
+    for the approval as well. He cannot merge a client pull request before a
+    reviewer approves it, so a proposal that asks him to is a question he
+    cannot answer; it is held until every pull request it would merge carries
+    an approver."""
     rows = db.query_all(
-        "SELECT f.id, f.work_item_id, f.draft, f.unfinished FROM work_followups f "
+        "SELECT f.id, f.work_item_id, f.draft, f.unfinished, i.contexts "
+        "FROM work_followups f "
         "JOIN work_items i ON i.id = f.work_item_id "
         "WHERE f.status = 'draft' AND f.required = 1 AND f.kind = 'work_item' "
         f"AND i.state IN {work_store.FINISHED_STATES_SQL} "
@@ -780,14 +887,21 @@ def propose_required_followups() -> list[dict]:
         "AND COALESCE(i.pending_question, '') = '' ORDER BY f.id", (_archive_floor(),))
     opened = []
     for row in rows:
-        scope = (work_tickets.merge_scope(row["draft"])
-                 if row["unfinished"] == "merge" else {})
-        if scope and scope["unapproved"]:
-            _hold(row["id"], row["work_item_id"], HELD_DETAIL.format(
-                key=scope["ticket_key"],
-                urls=", ".join(_pr_label(p) for p in scope["unapproved"])))
+        scopes = (work_tickets.merge_scopes(row["draft"])
+                  if row["unfinished"] == "merge" else [])
+        blocked = [s for s in scopes if s["unapproved"]]
+        if blocked:
+            _hold(row["id"], row["work_item_id"], "; ".join(
+                HELD_DETAIL.format(key=s["ticket_key"],
+                                   urls=", ".join(_pr_label(p) for p in s["unapproved"]))
+                for s in blocked))
             continue
-        result = propose_followup(row["id"], _whole_ticket_objective(row["draft"], scope))
+        if row["unfinished"] == "merge":
+            reason = _merge_hold_reason(row["contexts"], row["draft"], scopes)
+            if reason:
+                _hold(row["id"], row["work_item_id"], reason)
+                continue
+        result = propose_followup(row["id"], _whole_ticket_objective(row["draft"], scopes))
         if "error" in result:
             continue
         opened.append({"id": row["id"], "item_id": row["work_item_id"],
