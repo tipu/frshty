@@ -1794,24 +1794,24 @@ def test_a_proposal_carries_the_objective_the_model_returned(tmp_path):
 
 def test_two_instances_never_see_each_other_conversations(tmp_path):
     """The database is shared across instances and keyed by instance_key. An
-    atropos thread must not be a candidate for aimyable."""
+    atropos thread must not be a candidate for acme."""
     _capture(tmp_path, _erik_thread())
     config = _config(tmp_path)
     sc.ingest(config, instance_key="atropos", now=NOW)
-    token = state.use("aimyable")
+    token = state.use("acme")
     try:
-        sc.ingest(config, instance_key="aimyable", now=NOW)
+        sc.ingest(config, instance_key="acme", now=NOW)
     finally:
         state.reset(token)
 
     keys = sorted(r["instance_key"] for r in _conversations())
-    assert keys == ["aimyable", "atropos"]
+    assert keys == ["acme", "atropos"]
     assert len(sc._candidates("atropos", config, NOW)) == 1
     sc._record_judgement(
         [r for r in _conversations() if r["instance_key"] == "atropos"][0]["id"],
         "1788458500.000200", NOW)
     assert sc._candidates("atropos", config, NOW) == []
-    assert len(sc._candidates("aimyable", config, NOW)) == 1, (
+    assert len(sc._candidates("acme", config, NOW)) == 1, (
         "the other instance is untouched")
 
 

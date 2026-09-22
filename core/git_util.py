@@ -642,14 +642,14 @@ def _commit_survives(worktree, commit: str, head_before: str,
     the caller actually has.
 
     `--ignore-submodules=none` on both reads is required, not tidiness. A repo
-    that sets `submodule.<name>.ignore` — quill and quill-ios both carry
+    that sets `submodule.<name>.ignore` — a repository with submodules carries
     `.gitmodules` — otherwise hides a committed gitlink change, and a fix that
     moves a dependency to a fixed revision reads as no change at all.
 
     `--literal-pathspecs` is required for the same kind of reason. A changed
     path is a name, not a pattern, and `--` does not make it one: git reads the
     `[id]` in `app/[id]/page.tsx` as a character class, so a change to
-    `app/i/page.tsx` answers for a file nobody touched. quill's webAppNext is
+    `app/i/page.tsx` answers for a file nobody touched. A Next.js app router is
     built out of such names.
 
     `--diff-merges=first-parent` reports what a merge commit changed against

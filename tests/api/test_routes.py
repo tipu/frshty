@@ -594,7 +594,7 @@ class TestManualTransitionEnqueuesAdvance:
 class TestSubmitPrScopeGate:
     """The manual Submit PR path must honour the consensus scope verdict.
 
-    Both auto_pr and auto_merge are false on the aimyable instance, so the
+    Both auto_pr and auto_merge are false on the instance this models, so the
     three dispatcher-side gates never run there and this endpoint was the only
     way a branch reached a PR."""
 

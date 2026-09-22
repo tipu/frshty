@@ -93,14 +93,23 @@ def project_entries() -> list[dict]:
 
     The repository list comes from core.config.get_repos, not from
     workspace.repos, because a project configured with projects_dir names no
-    repositories there and would report none."""
+    repositories there and would report none.
+
+    `primary` says whether the project picker shows the project in its first
+    row. An instance that sets [work].dispatch = false sits behind the
+    picker's more control instead. Every other project is primary, so a host
+    that configures nothing is offered all of them. The board reads this flag
+    rather than carrying its own list of project keys, because a list in the
+    board names the operator's own projects in a repository that is not
+    theirs."""
     instances = runtime.instances()
     entries = []
     for key in sorted(instances.keys() if instances else []):
         cfg = instances.get(key).config
         ws = cfg.get("workspace") or {}
         repos = [r["name"] for r in work_worktree._repos_of(cfg)]
-        entries.append({"key": key, "root": str(ws.get("root", "")), "repos": repos})
+        entries.append({"key": key, "root": str(ws.get("root", "")), "repos": repos,
+                        "primary": bool((cfg.get("work") or {}).get("dispatch", True))})
     extras = {
         "frshty": os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "clarivis": os.path.expanduser("~/Documents/dev/clarivis"),
@@ -111,7 +120,7 @@ def project_entries() -> list[dict]:
     }
     for key, root in extras.items():
         if not any(e["key"] == key for e in entries) and os.path.isdir(root):
-            entries.append({"key": key, "root": root, "repos": []})
+            entries.append({"key": key, "root": root, "repos": [], "primary": True})
     return sorted(entries, key=lambda e: e["key"])
 
 
