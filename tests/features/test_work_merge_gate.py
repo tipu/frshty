@@ -294,10 +294,10 @@ class TestOperatorMergeApproval:
             assert work_launch.merge_approval_required([key]) is False
 
     def test_a_client_project_waits_for_an_approval(self):
-        assert work_launch.merge_approval_required(["aimyable"]) is True
+        assert work_launch.merge_approval_required(["acme"]) is True
 
     def test_one_waiting_project_holds_the_whole_task(self):
-        assert work_launch.merge_approval_required(["frshty", "aimyable"]) is True
+        assert work_launch.merge_approval_required(["frshty", "acme"]) is True
 
     def test_a_task_that_selects_no_project_waits(self):
         assert work_launch.merge_approval_required("") is True

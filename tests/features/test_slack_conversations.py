@@ -1943,13 +1943,13 @@ def test_the_task_files_the_conversations_under_the_context_instance(tmp_path):
     from core.tasks.slack import slack_conversation_scan
 
     _capture(tmp_path, _erik_thread())
-    ctx = TaskContext(instance_key="nectar", ticket_key=None,
+    ctx = TaskContext(instance_key="someclient", ticket_key=None,
                       task="slack_conversation_scan", payload={}, job_id=0,
                       triggering_event_id=None, config=_config(tmp_path),
                       registry=None, now=NOW)
     result = slack_conversation_scan(ctx)
 
-    assert [r["instance_key"] for r in _conversations()] == ["nectar"]
+    assert [r["instance_key"] for r in _conversations()] == ["someclient"]
 
     assert result.status == "ok"
     assert result.artifacts["messages"] == 2
