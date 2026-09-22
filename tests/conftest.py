@@ -80,6 +80,18 @@ def _isolated_artifact_root(tmp_path_factory):
 
 @pytest.fixture(scope="session", autouse=True)
 def _isolated_db(tmp_path_factory):
+    """Point the test session, and every program it runs, at a temporary
+    database.
+
+    `db.init` binds this process only. A script under scripts/ runs in its own
+    process and reads its database path from FRSHTY_DB, falling back to the
+    operator's live ~/.frshty/frshty.db. A test that starts such a program
+    without that variable therefore writes into the running board: the
+    work_hook garbage-input test filed a work_hook_error event on the live
+    event feed on every run. The environment carries the path so a test gets
+    the isolation whether or not it remembers to pass it. FRSHTY_BOARD_FILE
+    goes with it, because the same programs read the live board address from
+    that file and would otherwise post to the running server."""
     global _SESSION_DB_PATH, _SESSION_MIGRATIONS_DIR
     db_dir = tmp_path_factory.mktemp("frshty-db")
     db_path = db_dir / "frshty.db"
@@ -96,7 +108,18 @@ def _isolated_db(tmp_path_factory):
     _SESSION_DB_PATH = db_path
     _SESSION_MIGRATIONS_DIR = migrations
 
+    previous = {name: os.environ.get(name)
+                for name in ("FRSHTY_DB", "FRSHTY_BOARD_FILE")}
+    os.environ["FRSHTY_DB"] = str(db_path)
+    os.environ["FRSHTY_BOARD_FILE"] = str(db_dir / "board.json")
+
     yield db_path
+
+    for name, value in previous.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
 
     db._DB_PATH = None
     db._MIGRATIONS_DIR = None
