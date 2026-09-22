@@ -202,7 +202,7 @@ def _check_comments(config, instance_key, platform, pr, base_url, seen=None, tic
     present_ids = {str(c["id"]) for c in platform_comments}
     for thread_key in _reopen_answered_threads(
             platform_comments,
-            comments.settled_comment_ids(instance_key, "pr", pr_key, present_ids), user_id):
+            comments.unowed_comment_ids(instance_key, "pr", pr_key, present_ids), user_id):
         log.emit("pr_thread_reopened",
                  f"{pr_ref}: reviewer replied after the thread was resolved",
                  links={"pr": pr["url"], "detail": f"{base_url}/"},
@@ -242,6 +242,8 @@ def _check_comments(config, instance_key, platform, pr, base_url, seen=None, tic
         _process_detected_comments(config, instance_key, platform, pr, pr_ref, base_url, all_to_process, handled, seen, ticket_key)
 
     _reclaim_stuck_comments(instance_key, pr, pr_key, pr_ref, base_url, by_id, user_id, handled, seen, ticket_key)
+
+    _settle_manual_comments(instance_key, pr_key, by_id)
 
     _flush_deferred_comments(config, instance_key, pr, pr_key, pr_ref, base_url, by_id, seen, ticket_key)
 
@@ -365,7 +367,8 @@ def _process_detected_comments(config, instance_key, platform, pr, pr_ref, base_
             log.emit("pr_comment_deferred", f"{pr_ref}: Deferred for batch fix (window pushed to {seen['fix_deadline']}) — {comment['body'][:80]}", links=links, meta=meta)
         else:
             log.emit("pr_comment_flagged_manual", f"{pr_ref}: Ambiguous ({reason}) — {comment['body'][:80]}", links=links, meta=meta)
-            comments.mark_comment_processed(instance_key, "pr", pr_key, comment_id)
+            comments.mark_comment_manual(instance_key, "pr", pr_key, comment_id,
+                                         reason or "needs a human reply")
 
 
 def _is_stale(ts, now, seconds) -> bool:
@@ -422,6 +425,20 @@ def _reclaim_stuck_comments(instance_key, pr, pr_key, pr_ref, base_url, by_id, u
         # instead of restarting the debounce clock.
         seen.setdefault("fix_deadline", datetime.now(timezone.utc).isoformat())
         log.emit("pr_comment_reclaimed", f"{pr_ref}: Deferred for batch retry ({note}) — {comment['body'][:80]}", links=links, meta=meta)
+
+
+def _settle_manual_comments(instance_key, pr_key, by_id):
+    """Take a comment out of the operator's bucket once the platform settles it.
+
+    The fixer never reads a manual row, so the reclaim pass cannot clear it.
+    Without this the bucket keeps a comment the reviewer already resolved."""
+    for row in comments.get_manual_comments(instance_key, "pr", pr_key):
+        comment_id = str(row["comment_id"])
+        comment = by_id.get(comment_id)
+        if comment is None:
+            comments.mark_comment_deleted(instance_key, "pr", pr_key, comment_id)
+        elif comment.get("resolved"):
+            comments.mark_comment_processed(instance_key, "pr", pr_key, comment_id)
 
 
 def _flush_deferred_comments(config, instance_key, pr, pr_key, pr_ref, base_url, by_id, seen, ticket_key=None):
@@ -646,8 +663,8 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
                 return False, "could not read comments"
             _reopen_answered_threads(
                 fetched,
-                comments.settled_comment_ids(instance_key, "pr", pr_key,
-                                             {str(c["id"]) for c in fetched}),
+                comments.unowed_comment_ids(instance_key, "pr", pr_key,
+                                            {str(c["id"]) for c in fetched}),
                 _self_id(config, platform))
             by_id = {str(c["id"]): c for c in fetched}
             pending = []
@@ -916,7 +933,13 @@ def _ensure_worktree(config, pr) -> Path | None:
         if not worktree_path.resolve().is_relative_to(state_dir.resolve()):
             return None
         subprocess.run(["git", "fetch", "origin", pr["branch"]], cwd=str(worktree_path), capture_output=True, timeout=60)
-        subprocess.run(["git", "reset", "--hard", f"origin/{pr['branch']}"], cwd=str(worktree_path), capture_output=True, timeout=60)
+        reset = subprocess.run(["git", "reset", "--hard", f"origin/{pr['branch']}"], cwd=str(worktree_path), capture_output=True, timeout=60)
+        if reset.returncode != 0:
+            log.emit("pr_worktree_reset_failed",
+                     f"{pr['repo']}#{pr['id']}: could not reset the PR worktree to origin/{pr['branch']}",
+                     meta={"repo": pr["repo"], "pr_id": pr["id"],
+                           "error": (reset.stderr or b"").decode(errors="replace")[:300]})
+            return None
         return worktree_path
 
     base_branch = base_branch_for(config, pr["repo"])

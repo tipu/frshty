@@ -513,7 +513,7 @@ class TestCheckComments:
              patch("features.own_prs.run_balanced") as mock_sonnet, \
              patch("features.own_prs.q.enqueue_job") as mock_enqueue, \
              patch("features.own_prs.log"):
-            mock_comments.settled_comment_ids.return_value = set()
+            mock_comments.unowed_comment_ids.return_value = set()
             mock_comments.fetch_and_detect_comments.return_value = {"new": [comment], "edited": []}
             mock_comments.get_unprocessed_comments.return_value = []
             mock_comments.get_deferred_comments.return_value = []
@@ -533,7 +533,7 @@ class TestCheckComments:
         with patch("features.own_prs.comments") as mock_comments, \
              patch("features.own_prs.q.enqueue_job") as mock_enqueue, \
              patch("features.own_prs.log"):
-            mock_comments.settled_comment_ids.return_value = set()
+            mock_comments.unowed_comment_ids.return_value = set()
             mock_comments.fetch_and_detect_comments.return_value = {"new": [], "edited": []}
             mock_comments.get_unprocessed_comments.return_value = [
                 {"comment_id": "10", "state": "processing", "error_count": 0, "last_checked_at": stale},
@@ -601,13 +601,13 @@ class TestCheckComments:
                    return_value='{"results": [{"id": 0, "actionable": true, "reason": "clear"}]}'), \
              patch("features.own_prs.q.enqueue_job"), \
              patch("features.own_prs.log"):
-            mock_comments.settled_comment_ids.return_value = {"10"}
+            mock_comments.unowed_comment_ids.return_value = {"10"}
             mock_comments.fetch_and_detect_comments.return_value = {"new": [], "edited": [reply]}
             mock_comments.get_unprocessed_comments.return_value = []
             mock_comments.get_deferred_comments.return_value = []
             own_prs._check_comments(config, "test", platform, pr, "http://base", seen={})
 
-        assert mock_comments.settled_comment_ids.call_args[0][3] == {"10", "11"}
+        assert mock_comments.unowed_comment_ids.call_args[0][3] == {"10", "11"}
         mock_comments.mark_comment_processing.assert_called_once()
         assert mock_comments.mark_comment_processing.call_args[0][3] == "11"
 
@@ -807,7 +807,7 @@ class TestReopenedThreadEndToEnd:
                    return_value='{"results": [{"id": 0, "actionable": true, "reason": "clear"}]}'), \
              patch("features.own_prs.q.enqueue_job"), \
              patch("features.own_prs.log"):
-            mock_comments.settled_comment_ids.return_value = {"10"}
+            mock_comments.unowed_comment_ids.return_value = {"10"}
             mock_comments.fetch_and_detect_comments.return_value = {"new": [reply], "edited": []}
             mock_comments.get_unprocessed_comments.return_value = []
             mock_comments.get_deferred_comments.return_value = []
@@ -828,7 +828,7 @@ class TestReopenedThreadEndToEnd:
                    return_value='{"results": [{"id": 0, "actionable": true, "reason": "clear"}]}'), \
              patch("features.own_prs.q.enqueue_job"), \
              patch("features.own_prs.log.emit") as mock_emit:
-            mock_comments.settled_comment_ids.return_value = {"10"}
+            mock_comments.unowed_comment_ids.return_value = {"10"}
             mock_comments.fetch_and_detect_comments.return_value = {"new": [reply], "edited": []}
             mock_comments.get_unprocessed_comments.return_value = []
             mock_comments.get_deferred_comments.return_value = []
@@ -849,7 +849,7 @@ class TestReopenedThreadEndToEnd:
              patch("features.own_prs.run_balanced") as mock_classify, \
              patch("features.own_prs.q.enqueue_job") as mock_enqueue, \
              patch("features.own_prs.log"):
-            mock_comments.settled_comment_ids.return_value = {"10"}
+            mock_comments.unowed_comment_ids.return_value = {"10"}
             mock_comments.fetch_and_detect_comments.return_value = {"new": [reply], "edited": []}
             mock_comments.get_unprocessed_comments.return_value = []
             mock_comments.get_deferred_comments.return_value = []
@@ -869,7 +869,7 @@ class TestReopenedThreadEndToEnd:
         with patch("features.own_prs.comments") as mock_comments, \
              patch("features.own_prs.q.enqueue_job"), \
              patch("features.own_prs.log"):
-            mock_comments.settled_comment_ids.return_value = {"10"}
+            mock_comments.unowed_comment_ids.return_value = {"10"}
             mock_comments.fetch_and_detect_comments.return_value = {"new": [], "edited": []}
             mock_comments.get_unprocessed_comments.return_value = [
                 {"comment_id": "11", "state": "new", "error_count": 1, "last_checked_at": None},
@@ -1339,7 +1339,7 @@ class TestFixCommentsBatch:
              patch("features.own_prs.run_claude_code") as mock_claude, \
              patch("features.own_prs.comments") as mock_comments, \
              patch("features.own_prs.log.emit"):
-            mock_comments.settled_comment_ids.return_value = set()
+            mock_comments.unowed_comment_ids.return_value = set()
             ok, reason = own_prs.fix_comments_batch(self._config(tmp_path), self._payload(ids=("10", "99")))
 
         assert ok is True
@@ -1387,19 +1387,35 @@ class TestCommitFix:
         subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=str(path), check=True)
         return path
 
-    def test_commits_dirty_worktree(self, tmp_path):
+    def test_a_clean_worktree_runs_and_commits(self, tmp_path):
+        """The control: the same call on a clean worktree reaches the agent
+        and commits what the agent wrote."""
         import subprocess
         repo = self._init_repo(tmp_path / "repo")
-        (repo / "a.txt").write_text("two\n")
+        config = {"_state_dir": tmp_path, "_base_url": "http://base", "job": {"key": "test"}}
+        platform = MagicMock()
+        platform.push_branch.return_value = {"ok": True}
+        platform.resolve_comment.return_value = {"status": "resolved"}
 
-        ok, reason = own_prs._commit_fix(repo, "fix: address review comment on a.txt")
+        def claude(*args, **kwargs):
+            (repo / "a.txt").write_text("two\n")
+            return "done"
 
-        assert ok is True
-        assert reason == ""
-        status = subprocess.run(["git", "status", "--porcelain"], cwd=str(repo), capture_output=True, text=True)
-        assert status.stdout.strip() == ""
-        msg = subprocess.run(["git", "log", "-1", "--format=%s"], cwd=str(repo), capture_output=True, text=True).stdout
-        assert "a.txt" in msg
+        with patch("features.own_prs.make_platform", return_value=platform), \
+             patch("features.own_prs._ensure_worktree", return_value=repo), \
+             patch("features.own_prs.run_claude_code", side_effect=claude), \
+             patch("core.commit_message.run_haiku", return_value="rename the field"), \
+             patch("features.own_prs.comments"), \
+             patch("features.own_prs.log"):
+            ok, reason = own_prs.fix_comment(config, {
+                "pr": {"repo": "r", "id": 1, "url": "http://pr/1", "branch": "b"},
+                "comment": {"id": 9, "body": "rename this", "path": "a.txt", "line": 1},
+            })
+
+        assert ok is True, reason
+        msg = subprocess.run(["git", "log", "-1", "--format=%s"], cwd=str(repo),
+                             capture_output=True, text=True).stdout
+        assert msg.strip() == "fix: rename the field"
 
     def test_clean_worktree_reports_no_changes(self, tmp_path):
         repo = self._init_repo(tmp_path / "repo")
@@ -1839,7 +1855,7 @@ class TestCommitFixAgentCommittedItself:
              patch("features.own_prs.run_claude_code", side_effect=fake_run_claude_code), \
              patch("features.own_prs.comments") as mock_comments, \
              patch("features.own_prs.log.emit"):
-            mock_comments.settled_comment_ids.return_value = set()
+            mock_comments.unowed_comment_ids.return_value = set()
             ok, reason = own_prs.fix_comments_batch(config, payload)
 
         assert ok is True
@@ -1969,7 +1985,7 @@ class TestBotRewriteLoop:
              patch("features.own_prs.q.enqueue_job"), \
              patch("features.own_prs.log"):
             mock_comments.has_comment_state.return_value = True
-            mock_comments.settled_comment_ids.return_value = set()
+            mock_comments.unowed_comment_ids.return_value = set()
             mock_comments.answered_comment_ids.return_value = answered
             mock_comments.fetch_and_detect_comments.return_value = {"new": [], "edited": [comment]}
             mock_comments.get_unprocessed_comments.return_value = []
