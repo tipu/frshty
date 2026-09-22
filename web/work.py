@@ -5,6 +5,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                RedirectResponse, Response)
 
 import core.db as db
+import core.log as log
 import core.terminal as terminal
 from services import (work_artifacts, work_debrief, work_launch, work_peers,
                       work_store, work_tickets, work_worktree)
@@ -293,7 +294,15 @@ def api_work_resume(item_id: int):
     continues a finished task from the board wants to type into Correct, not
     to open a terminal first. A task whose session cannot be brought back
     reports that, so Correct does not fail later with no reason."""
-    if not work_launch.resume_session(item_id):
+    try:
+        resumed = work_launch.resume_session(item_id)
+    except Exception as e:
+        log.emit("work_resume_failed",
+                 f"work item {item_id}: restart failed: {type(e).__name__}: {e}")
+        return JSONResponse(
+            {"error": f"the agent session could not be restarted: {type(e).__name__}: {e}"},
+            status_code=500)
+    if not resumed:
         return JSONResponse(
             {"error": "the agent session could not be restarted; "
                       "open the terminal to see why"}, status_code=409)
