@@ -124,6 +124,7 @@
     <button type="submit" class="ln-btn ln-btn-primary"
             :disabled="!targetMeta.personalLoaded || intakeBusy || intakeImagesPending">↗ Launch task</button>
   </form>
+  <div class="ln-small" style="color:var(--ln-amber)" v-if="$questionWarning(intakeText)">{{ $questionWarning(intakeText) }}</div>
   <div class="ln-small" style="color:var(--ln-red)" v-if="intakeError">{{ intakeError }}</div>
 
   <div class="ln-board">
@@ -222,6 +223,7 @@
                       @input="grow($event.target)" @paste="onPaste(fupTray[rowKey(it)], $event)"
                       placeholder="Follow-up objective… Paste an image to attach it. Enter launches a run, Shift+Enter adds a line."></textarea>
             <paste-tray v-if="fupTray[rowKey(it)]" :tray="fupTray[rowKey(it)]"></paste-tray>
+            <div class="ln-small" style="color:var(--ln-amber)" v-if="$questionWarning(fupText[rowKey(it)])">{{ $questionWarning(fupText[rowKey(it)]) }}</div>
             <div class="ln-small ln-muted" v-if="fupBusy[rowKey(it)]">launching…</div>
             <div class="ln-small" style="color:var(--ln-red)" v-else-if="fupError[rowKey(it)]">{{ fupError[rowKey(it)] }}</div>
           </form>
