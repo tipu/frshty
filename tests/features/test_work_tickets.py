@@ -292,20 +292,26 @@ def _pr(repo, pr_id, approvers=(), pr_state="OPEN", host="bitbucket.org", owner=
             "approvers": list(approvers)}
 
 
+def _one_scope(text: str) -> dict:
+    scopes = work_tickets.merge_scopes(text)
+    assert len(scopes) == 1
+    return scopes[0]
+
+
 class TestMergeScope:
     """A follow-up the board wrote names a pull request by address. The ticket
     behind that address decides whether the whole ticket can be merged."""
 
     def test_text_that_names_no_pull_request_has_no_scope(self):
         _mkticket_prs("acme", "DEV-728", [_pr("django-drf-app", 198, ["Jawad"])])
-        assert work_tickets.merge_scope("push the branch and open a pull request") == {}
+        assert work_tickets.merge_scopes("push the branch and open a pull request") == []
 
     def test_the_ticket_behind_the_named_address_is_resolved(self):
         _mkticket_prs("acme", "DEV-728", [
             _pr("django-drf-app", 198, ["Jawad"]),
             _pr("websocket-server", 129, ["Jawad"]),
         ])
-        scope = work_tickets.merge_scope(
+        scope = _one_scope(
             "Merge PR #198 (https://bitbucket.org/acme/django-drf-app/"
             "pull-requests/198/overview) into main.")
         assert scope["ticket_key"] == "DEV-728"
@@ -320,7 +326,7 @@ class TestMergeScope:
             _pr("websocket-server", 129),
             _pr("windows-rpa-client", 60, ["Jawad"]),
         ])
-        scope = work_tickets.merge_scope(
+        scope = _one_scope(
             "Merge https://bitbucket.org/acme/django-drf-app/pull-requests/198")
         assert [p["id"] for p in scope["unapproved"]] == [129]
 
@@ -329,7 +335,7 @@ class TestMergeScope:
             _pr("django-drf-app", 198, ["Jawad"]),
             _pr("websocket-server", 129, pr_state="MERGED"),
         ])
-        scope = work_tickets.merge_scope(
+        scope = _one_scope(
             "Merge https://bitbucket.org/acme/django-drf-app/pull-requests/198")
         assert scope["siblings"] == [] and scope["unapproved"] == []
 
@@ -337,7 +343,7 @@ class TestMergeScope:
         """Its own approval is what the run that wrote the follow-up
         established. The cache here can be older than that run."""
         _mkticket_prs("acme", "DEV-728", [_pr("django-drf-app", 198)])
-        scope = work_tickets.merge_scope(
+        scope = _one_scope(
             "Merge https://bitbucket.org/acme/django-drf-app/pull-requests/198")
         assert [p["id"] for p in scope["named"]] == [198]
         assert scope["unapproved"] == []
@@ -349,7 +355,7 @@ class TestMergeScope:
             _pr("django-drf-app", 198, ["Jawad"], pr_state="MERGED"),
             _pr("websocket-server", 129),
         ])
-        scope = work_tickets.merge_scope(
+        scope = _one_scope(
             "Merge https://bitbucket.org/acme/django-drf-app/pull-requests/198")
         assert scope["ticket_key"] == "DEV-728"
         assert scope["named"] == []
@@ -362,8 +368,8 @@ class TestMergeScope:
             _pr("django-drf-app", 198, ["Jawad"]),
             _pr("websocket-server", 129),
         ], status="done")
-        assert work_tickets.merge_scope(
-            "Merge https://bitbucket.org/acme/django-drf-app/pull-requests/198") == {}
+        assert work_tickets.merge_scopes(
+            "Merge https://bitbucket.org/acme/django-drf-app/pull-requests/198") == []
 
     def test_a_github_address_resolves_the_same_way(self):
         _mkticket_prs("nectar", "NEC-3064", [
@@ -371,12 +377,12 @@ class TestMergeScope:
                 owner="JubileeLabs"),
             _pr("nectar-app-web", 12, host="github.com", owner="JubileeLabs"),
         ])
-        scope = work_tickets.merge_scope(
+        scope = _one_scope(
             "Merge https://github.com/JubileeLabs/nectar-app-backend/pull/692 first.")
         assert scope["ticket_key"] == "NEC-3064"
         assert [p["id"] for p in scope["unapproved"]] == [12]
 
     def test_a_pull_request_no_ticket_holds_has_no_scope(self):
         _mkticket_prs("acme", "DEV-728", [_pr("django-drf-app", 198, ["Jawad"])])
-        assert work_tickets.merge_scope(
-            "Merge https://bitbucket.org/acme/other-repo/pull-requests/5") == {}
+        assert work_tickets.merge_scopes(
+            "Merge https://bitbucket.org/acme/other-repo/pull-requests/5") == []

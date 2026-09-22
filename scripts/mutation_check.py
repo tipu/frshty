@@ -396,6 +396,15 @@ MUTATIONS = [
         "old": '        if not (wt_path / "Pipfile").is_file():',
         "new": "        if False:",
     },
+    {
+        "label": "merge_proposed_without_an_approval",
+        "gate": "a merge the operator cannot run yet is not proposed to him",
+        "target": "tests/features/test_work_debrief.py::TestOperatorMergeApproval"
+                  "::test_an_unapproved_client_merge_is_held",
+        "path": "services/work_launch.py",
+        "old": "    return any(k not in SELF_MERGE_PROJECTS for k in project_keys(contexts))",
+        "new": "    return False",
+    },
 ]
 
 
