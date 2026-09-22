@@ -1,5 +1,8 @@
+import subprocess
 from datetime import datetime, timezone, timedelta
 from unittest.mock import patch, MagicMock
+
+import pytest
 
 import core.comments as comments
 import core.db as db
@@ -53,7 +56,6 @@ class TestCheckCi:
         worktree.mkdir()
 
         with patch("features.own_prs._ensure_worktree", return_value=worktree), \
-             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.subprocess.run") as mock_run, \
              patch("features.own_prs.run_claude_code") as mock_cc:
             mock_run.return_value = MagicMock(returncode=0, stdout="deadbeef\n")
@@ -70,7 +72,6 @@ class TestCheckCi:
         worktree.mkdir()
 
         with patch("features.own_prs._ensure_worktree", return_value=worktree), \
-             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.subprocess.run") as mock_run, \
              patch("features.own_prs.run_claude_code", return_value=None):
             mock_run.return_value = MagicMock(returncode=0, stdout=b"abc123\n")
@@ -883,6 +884,14 @@ class TestReopenedThreadEndToEnd:
 
 
 class TestFixComment:
+    @pytest.fixture(autouse=True)
+    def _worktree_is_a_repo(self, tmp_path):
+        """_ensure_worktree is stubbed with tmp_path, and the fix path reads
+        the worktree with git before it runs the agent so it can tell the
+        agent's output from dirt it inherited. Make tmp_path a real repo so
+        that read succeeds and these tests keep measuring what follows it."""
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), check=True)
+
     def _payload(self, **comment_kw):
         return {
             "pr": make_pr(),
@@ -896,7 +905,6 @@ class TestFixComment:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
-             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value="done"), \
              patch("features.own_prs._commit_fix", return_value=(True, "")), \
              patch("features.own_prs.comments.mark_comment_processed"), \
@@ -916,7 +924,6 @@ class TestFixComment:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
-             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value="done") as fixer, \
              patch("features.own_prs._commit_fix", return_value=(True, "")) as mock_commit, \
              patch("features.own_prs.comments.mark_comment_processed"), \
@@ -937,7 +944,6 @@ class TestFixComment:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
-             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value="done"), \
              patch("features.own_prs._commit_fix", return_value=(True, "")), \
              patch("features.own_prs.comments.mark_comment_error") as mock_err, \
@@ -958,7 +964,6 @@ class TestFixComment:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
-             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value="done"), \
              patch("features.own_prs._commit_fix", return_value=(True, "")), \
              patch("features.own_prs.comments.mark_comment_processed") as mock_proc, \
@@ -975,7 +980,6 @@ class TestFixComment:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
-             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value=None), \
              patch("features.own_prs.comments.mark_comment_error") as mock_err, \
              patch("features.own_prs.comments.mark_comment_deferred") as mock_defer, \
@@ -1009,7 +1013,6 @@ class TestFixComment:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
-             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value="done"), \
              patch("features.own_prs._commit_fix", return_value=(True, "")), \
              patch("features.own_prs.comments.mark_comment_error") as mock_err, \
@@ -1027,7 +1030,6 @@ class TestFixComment:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
-             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value="done"), \
              patch("features.own_prs._commit_fix", return_value=(False, "no changes produced")), \
              patch("features.own_prs.comments.mark_comment_error") as mock_err, \
@@ -1048,7 +1050,6 @@ class TestFixComment:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
-             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value="done"), \
              patch("features.own_prs._commit_fix", return_value=(False, "commit failed: hook rejected")), \
              patch("features.own_prs.comments.mark_comment_error") as mock_err, \
@@ -1067,7 +1068,6 @@ class TestFixComment:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", side_effect=RuntimeError("boom")), \
-             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.comments.mark_comment_error") as mock_err, \
              patch("features.own_prs.log.emit"):
             ok, reason = own_prs.fix_comment(config, self._payload())
@@ -1077,7 +1077,132 @@ class TestFixComment:
         mock_err.assert_called_once()
 
 
+class TestFixCommentWorktreeDirt:
+    """`_ensure_worktree` resets the tracked files but never runs `git clean`,
+    so an untracked file an earlier run left in the PR worktree survives into
+    the next one. `add -A` committed it as part of the fix. On aimyable's
+    DEV-743 the same shape put a Pipfile on django-drf-app PR 203 twice."""
+
+    def _payload(self):
+        return {"pr": make_pr(),
+                "comment": make_comment(id=10, author_id="reviewer1", body="Fix this function")}
+
+    def _repo(self, path):
+        path.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q"], cwd=str(path), check=True)
+        subprocess.run(["git", "config", "user.email", "t@t"], cwd=str(path), check=True)
+        subprocess.run(["git", "config", "user.name", "t"], cwd=str(path), check=True)
+        (path / "app.py").write_text("x = 1\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(path), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=str(path), check=True)
+        return path
+
+    def _committed(self, wt):
+        return subprocess.run(["git", "show", "--name-only", "--format=", "HEAD"],
+                              cwd=str(wt), capture_output=True, text=True).stdout.split()
+
+    def _run(self, tmp_path, wt):
+        platform = MagicMock()
+        platform.push_branch.return_value = {"ok": True}
+        platform.resolve_comment.return_value = {"status": "resolved"}
+        config = {"_state_dir": tmp_path, "_base_url": "http://base", "job": {"key": "test"}}
+
+        def fake_fix(_prompt, cwd=None, **kwargs):
+            (cwd / "app.py").write_text("x = 2\n")
+            return "done"
+
+        with patch("features.own_prs.make_platform", return_value=platform), \
+             patch("features.own_prs._ensure_worktree", return_value=wt), \
+             patch("features.own_prs.run_claude_code", side_effect=fake_fix), \
+             patch("features.own_prs.comments"), \
+             patch("core.commit_message.run_haiku", return_value="tighten the guard"), \
+             patch("features.own_prs.log.emit"):
+            return own_prs.fix_comment(config, self._payload())
+
+    def test_inherited_untracked_file_is_not_committed_as_the_fix(self, tmp_path):
+        wt = self._repo(tmp_path / "wt")
+        (wt / "Pipfile").write_text("[packages]\n")
+
+        ok, reason = self._run(tmp_path, wt)
+
+        assert ok is True, f"the fix must land; got {reason!r}"
+        assert self._committed(wt) == ["app.py"], (
+            f"only the file the fix run changed belongs in the commit; got {self._committed(wt)}")
+        assert (wt / "Pipfile").exists(), (
+            "the inherited file stays where it was, it is not deleted behind the operator")
+
+    def test_an_inherited_file_already_in_the_index_is_not_committed(self, tmp_path):
+        """An exclude pathspec keeps a path out of the new `add`. A path an
+        earlier run already staged is still in the index."""
+        wt = self._repo(tmp_path / "wt")
+        (wt / "Pipfile").write_text("[packages]\n")
+        subprocess.run(["git", "add", "Pipfile"], cwd=str(wt), check=True)
+
+        ok, reason = self._run(tmp_path, wt)
+
+        assert ok is True, f"the fix must land; got {reason!r}"
+        assert self._committed(wt) == ["app.py"], (
+            f"a pre-staged inherited file must be unstaged, not committed; got {self._committed(wt)}")
+
+    def test_a_file_the_run_writes_under_inherited_dirt_is_committed(self, tmp_path):
+        """`git status` collapses an untracked directory into one entry.
+        Excluding `newpkg/` would exclude the file the agent then writes into
+        it, and the fix would never reach the commit."""
+        wt = self._repo(tmp_path / "wt")
+        (wt / "newpkg").mkdir()
+        (wt / "newpkg" / "left_over.py").write_text("stale = 1\n")
+        platform = MagicMock()
+        platform.push_branch.return_value = {"ok": True}
+        platform.resolve_comment.return_value = {"status": "resolved"}
+        config = {"_state_dir": tmp_path, "_base_url": "http://base", "job": {"key": "test"}}
+
+        def fake_fix(_prompt, cwd=None, **kwargs):
+            (cwd / "newpkg" / "fix.py").write_text("fixed = 1\n")
+            return "done"
+
+        with patch("features.own_prs.make_platform", return_value=platform), \
+             patch("features.own_prs._ensure_worktree", return_value=wt), \
+             patch("features.own_prs.run_claude_code", side_effect=fake_fix), \
+             patch("features.own_prs.comments"), \
+             patch("core.commit_message.run_haiku", return_value="add the fix"), \
+             patch("features.own_prs.log.emit"):
+            ok, reason = own_prs.fix_comment(config, self._payload())
+
+        assert ok is True, f"the fix must land; got {reason!r}"
+        assert self._committed(wt) == ["newpkg/fix.py"], (
+            "the run's own file belongs in the commit and the inherited one does "
+            f"not; got {self._committed(wt)}")
+
+    def test_an_unreadable_worktree_refuses_the_fix(self, tmp_path):
+        """Reading a failed `git status` as "nothing was dirty" is what put an
+        unrelated file into a fix commit, so the fix is refused instead."""
+        not_a_repo = tmp_path / "plain"
+        not_a_repo.mkdir()
+        platform = MagicMock()
+        config = {"_state_dir": tmp_path, "_base_url": "http://base", "job": {"key": "test"}}
+
+        with patch("features.own_prs.make_platform", return_value=platform), \
+             patch("features.own_prs._ensure_worktree", return_value=not_a_repo), \
+             patch("features.own_prs.run_claude_code") as fixer, \
+             patch("features.own_prs.comments") as mock_comments, \
+             patch("features.own_prs.log.emit"):
+            ok, reason = own_prs.fix_comment(config, self._payload())
+
+        assert ok is False
+        assert reason == own_prs.DIRT_UNREADABLE
+        assert not fixer.called, "the agent must not run when its output cannot be told apart"
+        assert mock_comments.mark_comment_error.called
+
+
 class TestFixCommentsBatch:
+    @pytest.fixture(autouse=True)
+    def _worktree_is_a_repo(self, tmp_path):
+        """_ensure_worktree is stubbed with tmp_path, and the fix path reads
+        the worktree with git before it runs the agent so it can tell the
+        agent's output from dirt it inherited. Make tmp_path a real repo so
+        that read succeeds and these tests keep measuring what follows it."""
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), check=True)
+
     def _payload(self, ids=("10", "11")):
         return {"pr": make_pr(), "comment_ids": list(ids)}
 
@@ -1095,7 +1220,6 @@ class TestFixCommentsBatch:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
-             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value="done") as mock_claude, \
              patch("features.own_prs._commit_fix", return_value=(True, "")) as mock_commit, \
              patch("features.own_prs.comments") as mock_comments, \
@@ -1122,7 +1246,6 @@ class TestFixCommentsBatch:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path) as mock_wt, \
-             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code") as mock_claude, \
              patch("features.own_prs.comments") as mock_comments, \
              patch("features.own_prs.log.emit") as mock_emit:
@@ -1147,7 +1270,6 @@ class TestFixCommentsBatch:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
-             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value="done"), \
              patch("features.own_prs._commit_fix", return_value=(True, "")), \
              patch("features.own_prs.comments") as mock_comments, \
@@ -1175,7 +1297,6 @@ class TestFixCommentsBatch:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
-             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value=None), \
              patch("features.own_prs.comments") as mock_comments, \
              patch("features.own_prs.log.emit") as mock_emit:
@@ -1195,7 +1316,6 @@ class TestFixCommentsBatch:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
-             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value="done"), \
              patch("features.own_prs._commit_fix", return_value=(False, "no changes produced")), \
              patch("features.own_prs.comments") as mock_comments, \
@@ -1216,7 +1336,6 @@ class TestFixCommentsBatch:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
-             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code") as mock_claude, \
              patch("features.own_prs.comments") as mock_comments, \
              patch("features.own_prs.log.emit"):
@@ -1244,7 +1363,6 @@ class TestFixCommentsBatch:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=tmp_path), \
-             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", return_value="done"), \
              patch("features.own_prs._commit_fix", return_value=(True, "")), \
              patch("features.own_prs.comments") as mock_comments, \
@@ -1268,35 +1386,6 @@ class TestCommitFix:
         subprocess.run(["git", "add", "-A"], cwd=str(path), check=True)
         subprocess.run(["git", "commit", "-q", "-m", "base"], cwd=str(path), check=True)
         return path
-
-    def test_a_dirty_worktree_refuses_the_run(self, tmp_path):
-        """_commit_fix stages the whole tree, so a file that was already in
-        the worktree is committed as the answer to the comment. On
-        django-drf-app 203 a stray Pipfile landed that way. The run refuses
-        to start instead."""
-        import subprocess
-        repo = self._init_repo(tmp_path / "repo")
-        (repo / "a.txt").write_text("two\n")
-        config = {"_state_dir": tmp_path, "_base_url": "http://base", "job": {"key": "test"}}
-        ran = []
-
-        with patch("features.own_prs.make_platform", return_value=MagicMock()), \
-             patch("features.own_prs._ensure_worktree", return_value=repo), \
-             patch("features.own_prs.run_claude_code", side_effect=lambda *a, **k: ran.append(a)), \
-             patch("features.own_prs.comments") as mock_comments, \
-             patch("features.own_prs.log"):
-            ok, reason = own_prs.fix_comment(config, {
-                "pr": {"repo": "r", "id": 1, "url": "http://pr/1", "branch": "b"},
-                "comment": {"id": 9, "body": "rename this", "path": "a.txt", "line": 1},
-            })
-
-        assert ok is False
-        assert reason == "worktree is dirty before the fix run"
-        assert ran == []
-        mock_comments.mark_comment_error.assert_called_once()
-        status = subprocess.run(["git", "status", "--porcelain"], cwd=str(repo),
-                                capture_output=True, text=True)
-        assert "a.txt" in status.stdout, "the pre-existing change must be left alone"
 
     def test_a_clean_worktree_runs_and_commits(self, tmp_path):
         """The control: the same call on a clean worktree reaches the agent
@@ -1763,7 +1852,6 @@ class TestCommitFixAgentCommittedItself:
 
         with patch("features.own_prs.make_platform", return_value=platform), \
              patch("features.own_prs._ensure_worktree", return_value=repo), \
-             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.run_claude_code", side_effect=fake_run_claude_code), \
              patch("features.own_prs.comments") as mock_comments, \
              patch("features.own_prs.log.emit"):
@@ -1981,7 +2069,6 @@ class TestUnrelatedCheckRecord:
         worktree = tmp_path / "wt"
         worktree.mkdir(exist_ok=True)
         with patch("features.own_prs._ensure_worktree", return_value=worktree), \
-             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.subprocess.run") as mock_run, \
              patch("features.pr_ci.triage_and_fix_pr",
                    return_value={"result": "unrelated", "attempts": 0,
@@ -2020,7 +2107,6 @@ class TestUnrelatedCheckRecord:
         worktree = tmp_path / "wt"
         worktree.mkdir()
         with patch("features.own_prs._ensure_worktree", return_value=worktree), \
-             patch("features.own_prs._worktree_is_dirty", return_value=False), \
              patch("features.own_prs.subprocess.run") as mock_run, \
              patch("features.pr_ci.triage_and_fix_pr",
                    return_value={"result": "unrelated", "attempts": 0,

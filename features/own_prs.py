@@ -480,6 +480,25 @@ def _flush_deferred_comments(config, instance_key, pr, pr_key, pr_ref, base_url,
              meta={"repo": pr["repo"], "pr_id": pr["id"], "comment_ids": comment_ids})
 
 
+DIRT_UNREADABLE = "could not read the worktree before the fix run"
+
+
+def _pre_dirty(worktree) -> set | None:
+    """The paths already dirty before a fix run, or None when git cannot say.
+
+    Reading the failure as "nothing was dirty" would put every dirty path into
+    the fix commit, which is what this snapshot exists to stop, so the caller
+    refuses the fix instead. This runs before the agent does, so refusing costs
+    nothing but one bounded retry."""
+    try:
+        return git_util.dirty_paths(worktree)
+    except (git_util.GitCommandError, subprocess.SubprocessError, OSError, ValueError) as e:
+        log.emit("pr_comment_dirt_unreadable",
+                 f"{worktree}: {DIRT_UNREADABLE}: {e}",
+                 meta={"worktree": str(worktree), "error": str(e)[:200]})
+        return None
+
+
 def _comment_fix_tools(worktree: Path) -> list[str]:
     scope = str(worktree.resolve())
     return [
@@ -493,28 +512,22 @@ def _comment_fix_tools(worktree: Path) -> list[str]:
     ]
 
 
-def _worktree_is_dirty(worktree) -> bool:
-    """Whether a comment fix must refuse to start here.
-
-    _commit_fix stages the whole tree, so anything already in the worktree
-    is committed as the answer to the comment. _ensure_worktree resets the
-    shared PR worktree to origin first, but it ignores the exit code of that
-    reset, so a failed reset leaves the run staging someone else's work. A
-    status read that fails is treated as dirty: an unknown tree is not a
-    clean one."""
-    try:
-        return git_util.is_dirty(worktree)
-    except git_util.GitCommandError:
-        return True
-
-
 def _commit_fix(worktree, message, context: str = "",
-                head_before: str = "") -> tuple[bool, str]:
+                head_before: str = "", pre_dirty=()) -> tuple[bool, str]:
+    """Commit what the fix run produced.
+
+    `pre_dirty` is a `git_util.dirty_paths` snapshot taken before the run.
+    `_ensure_worktree` resets the tracked files but never runs `git clean`, so
+    an untracked file an earlier run left behind survives into this one, and
+    `add -A` committed it as part of this fix and reported it as the fix. An
+    empty snapshot means the worktree was clean, so everything dirty is this
+    run's work; a caller that could not read the worktree refuses the fix
+    rather than passing that."""
     try:
-        git_util.run_git(worktree, ["add", "-A"], timeout=60)
+        git_util.stage_all(worktree, pre_dirty, check=True)
         staged = git_util.run_git(worktree, ["diff", "--cached", "--quiet"],
                                   allowed_codes=(0, 1), timeout=60).returncode != 0
-    except git_util.GitCommandError as e:
+    except (git_util.GitCommandError, subprocess.SubprocessError, OSError) as e:
         return False, f"could not stage the fix: {e}"[:200]
     if not staged:
         if git_util.agent_committed(worktree, head_before):
@@ -522,7 +535,8 @@ def _commit_fix(worktree, message, context: str = "",
         return False, "no changes produced"
     if context:
         message = commit_subject(worktree, message, context)
-    commit = git_util.commit_with_hooks(worktree, message=message, timeout=900)
+    commit = git_util.commit_with_hooks(worktree, message=message, timeout=900,
+                                        exclude=pre_dirty)
     if commit.returncode != 0:
         detail = (commit.stderr or commit.stdout or "").strip()[:200]
         return False, f"commit failed: {detail}"
@@ -548,12 +562,6 @@ def fix_comment(config, payload) -> tuple[bool, str | None]:
                 comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, "Could not create worktree")
                 return False, "Could not create worktree"
 
-            if _worktree_is_dirty(worktree):
-                reason = "worktree is dirty before the fix run"
-                log.emit("pr_comment_worktree_dirty", f"{pr_ref}: {reason} — {comment['body'][:80]}", links=links, meta={**meta, "reason": reason})
-                comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, reason)
-                return False, reason
-
             context = (
                 f"File: {comment.get('path', 'unknown')}\nLine: {comment.get('line', 'unknown')}\n\n"
                 f"Review comment: {comment['body']}\n\nFix this review comment.\n\n"
@@ -561,6 +569,11 @@ def fix_comment(config, payload) -> tuple[bool, str | None]:
                 + COMMIT_SUBJECT_RULE
             )
             head_before = git_util.head_sha(worktree)
+            pre_dirty = _pre_dirty(worktree)
+            if pre_dirty is None:
+                log.emit("pr_comment_blocked", f"{pr_ref}: {DIRT_UNREADABLE} — {comment['body'][:80]}", links=links, meta={**meta, "reason": DIRT_UNREADABLE})
+                comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, DIRT_UNREADABLE)
+                return False, DIRT_UNREADABLE
             result = run_claude_code(context, cwd=worktree, timeout=600,
                                      allowed_tools=_comment_fix_tools(worktree))
             if result is None:
@@ -572,7 +585,7 @@ def fix_comment(config, payload) -> tuple[bool, str | None]:
 
             committed, commit_reason = _commit_fix(
                 worktree, f"fix: address review comment on {comment.get('path', 'unknown')}",
-                context=comment["body"], head_before=head_before)
+                context=comment["body"], head_before=head_before, pre_dirty=pre_dirty)
             if not committed:
                 log.emit("pr_comment_blocked", f"{pr_ref}: {commit_reason} — {comment['body'][:80]}", links=links, meta={**meta, "reason": commit_reason})
                 comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, commit_reason)
@@ -671,11 +684,6 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
             if not worktree:
                 return _fail_all(pending_ids, "Could not create worktree")
 
-            if _worktree_is_dirty(worktree):
-                reason = "worktree is dirty before the fix run"
-                log.emit("pr_comment_worktree_dirty", f"{pr_ref}: {reason}", links=links, meta={**meta, "reason": reason})
-                return _fail_all(pending_ids, reason)
-
             comment_list = "\n\n".join(
                 f"[{i + 1}] File: {c.get('path', 'unknown')}\nLine: {c.get('line', 'unknown')}\nReview comment: {c['body']}"
                 for i, c in enumerate(pending)
@@ -687,6 +695,9 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
                 + COMMIT_SUBJECT_RULE
             )
             head_before = git_util.head_sha(worktree)
+            pre_dirty = _pre_dirty(worktree)
+            if pre_dirty is None:
+                return _fail_all(pending_ids, DIRT_UNREADABLE)
             result = run_claude_code(context, cwd=worktree, timeout=900,
                                      allowed_tools=_comment_fix_tools(worktree))
             if result is None:
@@ -694,7 +705,7 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
 
             committed, commit_reason = _commit_fix(
                 worktree, f"fix: address {len(pending)} review comments",
-                context=comment_list, head_before=head_before)
+                context=comment_list, head_before=head_before, pre_dirty=pre_dirty)
             if not committed:
                 return _fail_all(pending_ids, commit_reason)
 
