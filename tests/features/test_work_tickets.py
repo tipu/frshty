@@ -98,16 +98,16 @@ class TestUnloadedInstances:
 
     def test_a_selected_project_that_is_not_loaded_never_becomes_another_instance(self, monkeypatch):
         _mkticket("acme", "DEV-635")
-        _mkticket("nimbus", "DEV-635")
+        _mkticket("someclient", "DEV-635")
         _loaded(monkeypatch, "acme")
-        links = work_tickets.links_for(_row(1, "fix DEV-635", "nimbus"), work_tickets.index())
+        links = work_tickets.links_for(_row(1, "fix DEV-635", "someclient"), work_tickets.index())
         assert [link["instance"] for link in links] == []
 
     def test_every_reported_ticket_has_an_absolute_link(self, monkeypatch):
         _mkticket("acme", "DEV-635")
-        _mkticket("nimbus", "DEV-635")
+        _mkticket("someclient", "DEV-635")
         _loaded(monkeypatch, "acme", base_url="http://acme.local")
-        for contexts in ("", "nimbus", "acme"):
+        for contexts in ("", "someclient", "acme"):
             for link in work_tickets.links_for(
                     _row(1, "fix DEV-635", contexts), work_tickets.index()):
                 assert link["url"] == "http://acme.local/tickets/DEV-635"
@@ -141,15 +141,15 @@ class TestLinksForATask:
 
     def test_the_selected_project_wins_a_key_two_instances_hold(self):
         _mkticket("acme", "DEV-635")
-        _mkticket("nimbus", "DEV-635")
-        links = work_tickets.links_for(_row(1, "fix DEV-635", "nimbus"), work_tickets.index())
-        assert [link["instance"] for link in links] == ["nimbus"]
+        _mkticket("someclient", "DEV-635")
+        links = work_tickets.links_for(_row(1, "fix DEV-635", "someclient"), work_tickets.index())
+        assert [link["instance"] for link in links] == ["someclient"]
 
     def test_a_key_two_instances_hold_and_no_project_reports_both(self):
         _mkticket("acme", "DEV-635")
-        _mkticket("nimbus", "DEV-635")
+        _mkticket("someclient", "DEV-635")
         links = work_tickets.links_for(_row(1, "fix DEV-635"), work_tickets.index())
-        assert [link["instance"] for link in links] == ["acme", "nimbus"]
+        assert [link["instance"] for link in links] == ["acme", "someclient"]
 
     def test_a_today_task_links_through_scope_ref(self):
         _mkticket("acme", "DEV-700")
@@ -196,10 +196,10 @@ class TestTasksForATicket:
 
     def test_another_instances_ticket_does_not_claim_the_task(self):
         _mkticket("acme", "DEV-635")
-        _mkticket("nimbus", "DEV-635")
-        _mkitem("fix DEV-635", contexts="nimbus")
+        _mkticket("someclient", "DEV-635")
+        _mkitem("fix DEV-635", contexts="someclient")
         assert work_tickets.tasks_for("acme", "DEV-635") == []
-        assert len(work_tickets.tasks_for("nimbus", "DEV-635")) == 1
+        assert len(work_tickets.tasks_for("someclient", "DEV-635")) == 1
 
     def test_newest_first(self):
         _mkticket("acme", "DEV-635")
@@ -372,14 +372,14 @@ class TestMergeScope:
             "Merge https://bitbucket.org/acme/django-api/pull-requests/198") == []
 
     def test_a_github_address_resolves_the_same_way(self):
-        _mkticket_prs("nimbus", "NEC-3064", [
-            _pr("nimbus-app-backend", 692, ["Glion"], host="github.com",
-                owner="BrightLabs"),
-            _pr("nimbus-app-web", 12, host="github.com", owner="BrightLabs"),
+        _mkticket_prs("someclient", "SC-3064", [
+            _pr("someclient-app-backend", 692, ["Glion"], host="github.com",
+                owner="SomeClientLabs"),
+            _pr("someclient-app-web", 12, host="github.com", owner="SomeClientLabs"),
         ])
         scope = _one_scope(
-            "Merge https://github.com/BrightLabs/nimbus-app-backend/pull/692 first.")
-        assert scope["ticket_key"] == "NEC-3064"
+            "Merge https://github.com/SomeClientLabs/someclient-app-backend/pull/692 first.")
+        assert scope["ticket_key"] == "SC-3064"
         assert [p["id"] for p in scope["unapproved"]] == [12]
 
     def test_a_pull_request_no_ticket_holds_has_no_scope(self):
