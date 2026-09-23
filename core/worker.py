@@ -277,6 +277,7 @@ class WorkerPool:
                 job_id=ctx.job_id,
                 job_response={"reason": "orphan recovered: postconditions met after restart"},
                 advance=ctx.task != "advance_ticket",
+                **registry.status_fields(target if has_target else None),
             )
         except state.TicketStateError as e:
             q.mark_done(ctx.job_id, "failed",
@@ -338,7 +339,7 @@ class WorkerPool:
             log.emit("job_started", f"{job['task']} ticket={job['ticket_key']} job_id={job['id']}",
                      meta={"category": "noise"})
             llm.reset_guard_blocked()
-            result = registry.run_task(ctx)
+            result = registry.run_task(ctx, defer_success_status=True)
             if result.status == "failed" and llm.consume_guard_blocked():
                 result = registry.TaskResult(
                     "skipped",
@@ -353,12 +354,26 @@ class WorkerPool:
                     next_events.append(ev)
                 else:
                     log.emit("worker_next_event_error", f"malformed next event: {ev!r}")
-            transition_ticket_and_emit(
-                job["ticket_key"], instance_key,
-                job_id=job["id"], job_status=result.status, job_response=response,
-                next_events=next_events,
-                advance=result.status == "ok" and job["task"] != "advance_ticket",
-            )
+            target = result.success_status
+            try:
+                transition_ticket_and_emit(
+                    job["ticket_key"], instance_key,
+                    target=target,
+                    job_id=job["id"], job_status=result.status, job_response=response,
+                    next_events=next_events,
+                    advance=result.status == "ok" and job["task"] != "advance_ticket",
+                    **registry.status_fields(target),
+                )
+            except state.TicketStateError as e:
+                result = registry._release_gate_on_failure(ctx, registry.TaskResult(
+                    "failed", f"transition to {target}: {e}",
+                    artifacts=result.artifacts, next_events=result.next_events))
+                response = {"reason": result.reason, "artifacts": result.artifacts}
+                transition_ticket_and_emit(
+                    job["ticket_key"], instance_key,
+                    job_id=job["id"], job_status=result.status, job_response=response,
+                    next_events=next_events, advance=False,
+                )
             log.emit("job_finished",
                      f"{job['task']} ticket={job['ticket_key']} "
                      f"job_id={job['id']} status={result.status}"
