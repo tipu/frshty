@@ -14,7 +14,8 @@ sys.path.insert(0, str(ROOT))
 import core.db as db  # noqa: E402
 import core.queue as q  # noqa: E402
 import core.state as state  # noqa: E402
-from core.worker import transition_ticket_and_emit  # noqa: E402
+from core.tasks.registry import _REGISTRY, TaskContext, TaskResult, task  # noqa: E402
+from core.worker import WorkerPool, transition_ticket_and_emit  # noqa: E402
 
 
 def _running_job(instance_key: str, ticket_key: str) -> int:
@@ -120,3 +121,60 @@ def test_no_instance_key_writes_ticket_without_event(inst):
 
     assert state.load_ticket("T-6")["status"] == "reviewing"
     assert _advance_events("T-6") == []
+
+
+class _Reg:
+    def __init__(self):
+        self.config = {}
+        self.base_url = ""
+
+
+@pytest.fixture()
+def stage_task():
+    @task("tx_stage", on_success_status="reviewing")
+    def tx_stage(ctx: TaskContext) -> TaskResult:
+        return TaskResult("ok")
+    yield "tx_stage"
+    _REGISTRY.pop("tx_stage", None)
+
+
+def test_worker_commits_success_status_with_job_and_advance(inst, stage_task):
+    state.save_ticket("T-7", {"status": "planning", "slug": "t7"})
+    q.enqueue_job(inst, stage_task, ticket_key="T-7")
+
+    WorkerPool({inst: _Reg()})._run_one(q.claim_next())
+
+    assert state.load_ticket("T-7")["status"] == "reviewing"
+    job = db.query_one("SELECT status FROM jobs WHERE ticket_key='T-7'", ())
+    assert job["status"] == "ok"
+    assert len(_advance_events("T-7")) == 1
+
+
+def test_worker_event_failure_leaves_ticket_and_job_untouched(inst, stage_task, monkeypatch):
+    state.save_ticket("T-8", {"status": "planning", "slug": "t8"})
+    q.enqueue_job(inst, stage_task, ticket_key="T-8")
+    job = q.claim_next()
+
+    def boom(*a, **kw):
+        raise RuntimeError("disk full")
+    monkeypatch.setattr(q, "insert_event", boom)
+
+    with pytest.raises(RuntimeError):
+        WorkerPool({inst: _Reg()})._run_one(job)
+
+    assert state.load_ticket("T-8")["status"] == "planning"
+    assert _job_status(job["id"]) == "running"
+
+
+def test_worker_illegal_success_status_fails_job_without_advance(inst, stage_task):
+    state.save_ticket("T-9", {"status": "new", "slug": "t9"})
+    q.enqueue_job(inst, stage_task, ticket_key="T-9")
+    job = q.claim_next()
+
+    WorkerPool({inst: _Reg()})._run_one(job)
+
+    assert state.load_ticket("T-9")["status"] == "new"
+    row = db.query_one("SELECT status, response FROM jobs WHERE id=?", (job["id"],))
+    assert row["status"] == "failed"
+    assert "transition to reviewing" in row["response"]
+    assert _advance_events("T-9") == []
