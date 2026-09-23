@@ -4,14 +4,72 @@ import signal
 import threading
 import time
 from datetime import datetime, timezone
+from typing import Callable
 
+import core.db as db
 import core.llm as llm
 import core.log as log
 import core.queue as q
+import core.state as state
 import core.tasks.registry as registry
 from core.job_logs import job_pid_path
 
 ORPHAN_POLL_INTERVAL = 60
+
+
+def transition_ticket_and_emit(ticket_key: str | None, instance_key: str | None, *,
+                               target: str | None = None,
+                               mutate: Callable[[dict], dict] | None = None,
+                               reason: str = "",
+                               job_id: int | None = None,
+                               job_status: str = "ok",
+                               job_response: dict | None = None,
+                               next_events: list[dict] | None = None,
+                               advance: bool = True,
+                               source: str = "task",
+                               **fields) -> dict | None:
+    """Move a ticket forward and schedule its next stage in one SQLite
+    transaction.
+
+    The ticket write, the job completion and the successor events commit
+    together or not at all. A crash between them can no longer leave a
+    finished job or a moved ticket with nothing queued to act on it.
+
+    target runs the checked transition of state.transition_ticket with fields
+    as co-field updates. mutate runs an unchecked state.update_ticket. With
+    neither, no ticket row is written. job_id marks that job finished with
+    job_status and job_response. next_events are extra events to insert; each
+    needs a "kind" and takes this instance_key unless it names its own.
+    advance inserts a ticket_advance event for ticket_key when an
+    instance_key is known. Returns the saved ticket, or None when no ticket
+    row was written.
+    """
+    if target is not None and mutate is not None:
+        raise ValueError("pass target or mutate, not both")
+
+    def _commit(c) -> None:
+        if job_id is not None:
+            q.finish_job(c, job_id, job_status, job_response or {})
+        for ev in next_events or []:
+            q.insert_event(c, source, ev["kind"], ev.get("payload", {}),
+                           ev.get("instance_key", instance_key))
+        if advance and ticket_key and instance_key:
+            q.insert_event(c, source, "ticket_advance", {"ticket_key": ticket_key},
+                           instance_key)
+
+    if target is not None:
+        return state.transition_ticket(ticket_key, target, reason=reason,
+                                       in_tx=_commit, **fields)
+    if mutate is not None:
+        def _apply(cur: dict) -> dict:
+            new = mutate(cur)
+            if reason:
+                new["_transition_reason"] = reason
+            return new
+        return state.update_ticket(ticket_key, _apply, in_tx=_commit)
+    with db.tx() as c:
+        _commit(c)
+    return None
 
 
 def _pid_alive(pid: int) -> bool:
@@ -211,19 +269,22 @@ class WorkerPool:
 
         on_success = task_def.get("on_success_status")
         target = on_success(ctx, registry.TaskResult("ok")) if callable(on_success) else on_success
-        if isinstance(target, str) and target and ctx.ticket_key:
-            try:
-                state.transition_ticket(ctx.ticket_key, target)
-            except state.TicketStateError as e:
-                q.mark_done(ctx.job_id, "failed",
-                            {"reason": f"orphan recovery: transition to {target}: {e}"})
-                log.emit("orphan_transition_failed",
-                         f"job_id={ctx.job_id} task={ctx.task} target={target}: {e}",
-                         meta={"ticket": ctx.ticket_key})
-                return
-
-        q.mark_done(ctx.job_id, "ok",
-                    {"reason": "orphan recovered: postconditions met after restart"})
+        has_target = isinstance(target, str) and bool(target) and bool(ctx.ticket_key)
+        try:
+            transition_ticket_and_emit(
+                ctx.ticket_key, ctx.instance_key,
+                target=target if has_target else None,
+                job_id=ctx.job_id,
+                job_response={"reason": "orphan recovered: postconditions met after restart"},
+                advance=ctx.task != "advance_ticket",
+            )
+        except state.TicketStateError as e:
+            q.mark_done(ctx.job_id, "failed",
+                        {"reason": f"orphan recovery: transition to {target}: {e}"})
+            log.emit("orphan_transition_failed",
+                     f"job_id={ctx.job_id} task={ctx.task} target={target}: {e}",
+                     meta={"ticket": ctx.ticket_key})
+            return
         log.emit("orphan_recovered",
                  f"job_id={ctx.job_id} task={ctx.task} status=ok",
                  meta={"ticket": ctx.ticket_key})
@@ -286,25 +347,23 @@ class WorkerPool:
                     next_events=result.next_events,
                 )
             response = {"reason": result.reason, "artifacts": result.artifacts}
-            q.mark_done(job["id"], result.status, response)
+            next_events = []
+            for ev in result.next_events or []:
+                if isinstance(ev, dict) and isinstance(ev.get("kind"), str):
+                    next_events.append(ev)
+                else:
+                    log.emit("worker_next_event_error", f"malformed next event: {ev!r}")
+            transition_ticket_and_emit(
+                job["ticket_key"], instance_key,
+                job_id=job["id"], job_status=result.status, job_response=response,
+                next_events=next_events,
+                advance=result.status == "ok" and job["task"] != "advance_ticket",
+            )
             log.emit("job_finished",
                      f"{job['task']} ticket={job['ticket_key']} "
                      f"job_id={job['id']} status={result.status}"
                      f"{(' reason='+result.reason) if result.reason else ''}",
                      meta={"category": "noise"} if result.status == "ok" else None)
-            for ev in result.next_events or []:
-                try:
-                    q.emit_event(source="task", kind=ev["kind"], payload=ev.get("payload", {}),
-                                 instance_key=ev.get("instance_key", instance_key))
-                except Exception as e:
-                    log.emit("worker_next_event_error", f"{type(e).__name__}: {e}")
-            if result.status == "ok" and job["ticket_key"] and job["task"] != "advance_ticket":
-                try:
-                    q.emit_event(source="task", kind="ticket_advance",
-                                 payload={"ticket_key": job["ticket_key"]},
-                                 instance_key=instance_key)
-                except Exception as e:
-                    log.emit("ticket_advance_emit_error", f"{type(e).__name__}: {e}")
         finally:
             log_path = job_logs.job_log_path(instance_key, job["id"])
             if log_path.exists() and log_path.stat().st_size == 0:
