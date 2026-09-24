@@ -24,10 +24,12 @@ import tomllib
 from datetime import datetime, timezone
 from pathlib import Path
 
+from core.paths import frshty_root
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_PATH = REPO_ROOT / "config" / "loops.toml"
 PROBE_PATH = Path(__file__).resolve().parent / "loopwatch_probe.py"
-DEFAULT_OUT = Path.home() / ".frshty" / "artifacts" / "loopwatch" / "index.html"
+DEFAULT_OUT = frshty_root() / "artifacts" / "loopwatch" / "index.html"
 DEFAULT_DETAIL = 5
 DEFAULT_SUMMARY = 15
 DEFAULT_TIMEOUT = 180

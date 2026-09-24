@@ -396,10 +396,12 @@ class TestEnsure:
         dead = tmp_path / "dead"
         _git(repo, "worktree", "add", "-b", branch, str(dead))
         shutil.rmtree(dead)
+        monkeypatch.setattr(work_worktree.git_util, "_owned_roots", {os.path.realpath(tmp_path)})
         row = work_worktree.ensure(item_id, _spec(repo), "stale")
         assert row["origin"] == "created"
         assert os.path.isdir(row["path"])
         assert row["path"] != str(dead)
+        assert row["branch"] == branch
 
     def test_never_returns_the_canonical_checkout_as_a_holder(self, tmp_path, wt_root,
                                                              monkeypatch):

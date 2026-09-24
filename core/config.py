@@ -4,6 +4,8 @@ import re
 import tomllib
 from pathlib import Path
 
+from core.paths import frshty_root
+
 import core.slack_capture as slack_capture
 
 
@@ -70,7 +72,7 @@ def load_config(path: str) -> dict:
     _resolve_slack_paths(raw["slack"])
 
     raw["_config_path"] = Path(path)
-    raw["_state_dir"] = Path.home() / ".frshty" / raw["job"]["key"]
+    raw["_state_dir"] = frshty_root() / raw["job"]["key"]
     raw["_base_url"] = raw["job"].get("host") or f"http://localhost:{raw['job']['port']}"
 
     return raw
@@ -122,8 +124,9 @@ def ticket_worktree_path(config: dict, ticket_slug: str, repo_name: str) -> Path
     return tickets_dir / ticket_slug / repo_name
 
 
-TASK_WORKTREE_ROOT = Path.home() / ".frshty" / "worktrees"
-BOARD_FILE = Path.home() / ".frshty" / "board.json"
+TASK_WORKTREE_ROOT = frshty_root() / "worktrees"
+BOARD_INSTANCE_KEY = os.environ.get("FRSHTY_BOARD_INSTANCE") or "personal"
+BOARD_FILE = frshty_root() / "board.json"
 _BOARD_URL = ""
 
 

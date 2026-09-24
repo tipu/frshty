@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from starlette.websockets import WebSocket
 
 import core.config as cfg
+import core.git_util as git_util
 import core.log as log
 import core.state as state
 import core.terminal as terminal
@@ -467,7 +468,7 @@ def api_start_discuss(repo: str, pr_id: int, body: dict):
                 wt = matched_dir / "worktree"
                 wt.parent.mkdir(parents=True, exist_ok=True)
                 subprocess.run(["git", "fetch", "origin", branch], cwd=str(repo_path), capture_output=True, timeout=60)
-                subprocess.run(["git", "worktree", "prune"], cwd=str(repo_path), capture_output=True, timeout=60)
+                git_util.prune_worktrees(repo_path)
                 subprocess.run(["git", "worktree", "add", str(wt), branch], cwd=str(repo_path), capture_output=True, timeout=60)
                 if (wt / ".git").exists():
                     cwd = str(wt)
