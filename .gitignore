@@ -18,6 +18,7 @@ config/*.toml
 !config/discovery.example.toml
 !config/peers.example.toml
 !config/loops.example.toml
+!config/frshty.example.toml
 
 # Scratch scripts (may contain hardcoded credentials)
 /_fetch_*.py
@@ -34,9 +35,6 @@ config/*.toml
 /*.mp4
 .python-version
 .codex
-
-# Local docker-compose (use docker-compose.example.yml)
-/docker-compose.yml
 
 # Internal docs
 /docs/

@@ -944,7 +944,7 @@ def _write_proposal(c, item: dict, now: datetime) -> dict:
         return {"error": f"task #{int(standing['id'])} is already "
                          f"proposed for this action item"}
     work_item_id = work_store.create_proposal(
-        item["text"], note=note, instance_key="personal",
+        item["text"], note=note, instance_key=work_store.BOARD_INSTANCE_KEY,
         contexts=item["contexts"] or "", conn=c, now=_iso(now))
     c.execute("UPDATE work_items SET standup_item_id = ? WHERE id = ?",
               (item_id, work_item_id))
