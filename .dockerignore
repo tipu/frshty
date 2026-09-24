@@ -1,0 +1,16 @@
+.git
+.env
+.venv
+.tmp
+.claude
+.codex
+.playwright-cli
+**/__pycache__
+*.py[oc]
+config/*.toml
+!config/example.toml
+!config/*.example.toml
+/*.png
+/*.mp4
+/docs/
+htmlcov/

@@ -14,10 +14,11 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 import core.state as state
 import core.tmux as tmux_target
+from core.paths import frshty_root
 
 MAX_SCROLLBACK = 1024 * 1024
 TMUX_SOCKET = os.path.expanduser("~/.frshty-tmux")
-LAUNCH_CONTEXT_DIR = os.path.expanduser("~/.frshty/launch")
+LAUNCH_CONTEXT_DIR = str(frshty_root() / "launch")
 def _tmux_bin():
     return shutil.which("tmux") or "tmux"
 
@@ -205,8 +206,11 @@ def _resolve_cwd(config: dict, ticket_key: str) -> str | None:
     return None
 
 
+STATE_ENV = ("FRSHTY_ROOT", "FRSHTY_DB", "FRSHTY_BOARD_FILE", "FRSHTY_BOARD_INSTANCE")
+
+
 def _child_env():
-    return {
+    env = {
         "HOME": os.path.expanduser("~"),
         "USER": os.environ.get("USER", "claude"),
         "TERM": "xterm-256color",
@@ -214,6 +218,8 @@ def _child_env():
         "LANG": os.environ.get("LANG", "C.UTF-8"),
         "TMUX": "",
     }
+    env.update({k: os.environ[k] for k in STATE_ENV if os.environ.get(k)})
+    return env
 
 
 def launch_pane_command(ticket_key: str, cwd: str, command: str):

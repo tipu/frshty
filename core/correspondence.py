@@ -28,6 +28,8 @@ import shlex
 import tomllib
 import urllib.parse
 
+import core.config as core_config
+
 DENY_REASON = (
     "Blocked by the work-layer correspondence gate: this task may not send a "
     "message to anybody. Slack and other chat messages, email, and pull "
@@ -120,7 +122,7 @@ def allowed(config: dict | None) -> bool:
     return features["correspondence"] is True
 
 
-def allowed_on_disk(instance_key: str = "personal") -> bool:
+def allowed_on_disk(instance_key: str = core_config.BOARD_INSTANCE_KEY) -> bool:
     """Whether the named instance lets a task send a message, read off its
     config file.
 

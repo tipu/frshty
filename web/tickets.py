@@ -1405,7 +1405,7 @@ def api_discard_ticket(key: str):
                               "sudo_rc": sudo_res.returncode,
                               "sudo_stderr": sudo_res.stderr.decode("utf-8", "replace")[:500]})
         for repo in repos:
-            subprocess.run(["git", "worktree", "prune"], cwd=str(repo["path"]), capture_output=True, timeout=60)
+            git_util.prune_worktrees(repo["path"])
     instance_key = _config.get("job", {}).get("key", "")
     if instance_key:
         scheduler.delete(instance_key, key)

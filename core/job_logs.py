@@ -8,16 +8,18 @@ context.
 from contextvars import ContextVar, Token
 from pathlib import Path
 
+from core.paths import frshty_root
+
 _active_live_log: ContextVar[Path | None] = ContextVar("active_live_log", default=None)
 _active_live_pid: ContextVar[Path | None] = ContextVar("active_live_pid", default=None)
 
 
 def job_log_path(instance_key: str, job_id: int) -> Path:
-    return Path.home() / ".frshty" / instance_key / "jobs" / f"{job_id}.log"
+    return frshty_root() / instance_key / "jobs" / f"{job_id}.log"
 
 
 def job_pid_path(instance_key: str, job_id: int) -> Path:
-    return Path.home() / ".frshty" / instance_key / "jobs" / f"{job_id}.pid"
+    return frshty_root() / instance_key / "jobs" / f"{job_id}.pid"
 
 
 def use_live_job(instance_key: str, job_id: int) -> tuple[Token, Token]:

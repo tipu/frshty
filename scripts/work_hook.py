@@ -11,8 +11,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import core.correspondence as correspondence  # noqa: E402  (needs the path above)
 
-DB_PATH = os.environ.get("FRSHTY_DB") or os.path.expanduser("~/.frshty/frshty.db")
-BOARD_FILE = os.environ.get("FRSHTY_BOARD_FILE") or os.path.expanduser("~/.frshty/board.json")
+DB_PATH = os.environ.get("FRSHTY_DB") or os.path.join(os.environ.get("FRSHTY_ROOT") or os.path.expanduser("~/.frshty"), "frshty.db")
+BOARD_FILE = os.environ.get("FRSHTY_BOARD_FILE") or os.path.join(os.environ.get("FRSHTY_ROOT") or os.path.expanduser("~/.frshty"), "board.json")
 
 QUESTION_DENY_REASON = (
     "Question recorded on the work board. The operator will answer it in a "

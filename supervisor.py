@@ -10,8 +10,9 @@ from pathlib import Path
 from core.discovery import discover_instances, fan_out, call_instance
 from core.claude_runner import run_claude_code
 import core.db as _db
+from core.paths import frshty_root
 
-STATE_DIR = Path.home() / ".frshty"
+STATE_DIR = frshty_root()
 STATE_FILE = STATE_DIR / "supervisor.json"
 LOG_FILE = STATE_DIR / "supervisor.log"
 PROJECT_DIR = Path(__file__).parent
