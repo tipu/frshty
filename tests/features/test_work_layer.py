@@ -2171,6 +2171,75 @@ class TestSuspendResume:
         assert work_launch.resume_session(item_id) is True
         launcher.assert_not_called()
 
+    def _restore(self, monkeypatch, tmp_path, alive_keys=()):
+        import core.terminal as terminal
+        from services import work_launch
+        monkeypatch.setattr(work_launch, "personal_config",
+                            lambda: {"workspace": {"root": tmp_path}})
+        monkeypatch.setattr(terminal, "session_healthy",
+                            lambda k, agent="claude": {"alive": k in alive_keys,
+                                                       "agent_running": k in alive_keys})
+        resumed = []
+        monkeypatch.setattr(work_launch, "resume_session",
+                            lambda item_id: resumed.append(item_id) or True)
+        return work_launch.restore_open_sessions(), resumed
+
+    def test_restore_resumes_an_open_task_whose_session_is_gone(self, tmp_path, monkeypatch):
+        item_id = _mkitem("restore waiting item")
+        _mkrun(item_id, f"sid-restore-{item_id}", f"work-{item_id}", str(tmp_path))
+        db.execute("UPDATE work_items SET state = 'needs_you' WHERE id = ?", (item_id,))
+        out, resumed = self._restore(monkeypatch, tmp_path)
+        assert item_id in out
+        assert item_id in resumed
+
+    def test_restore_leaves_a_live_session_alone(self, tmp_path, monkeypatch):
+        item_id = _mkitem("restore live item")
+        _mkrun(item_id, f"sid-restore-live-{item_id}", f"work-{item_id}", str(tmp_path))
+        out, resumed = self._restore(monkeypatch, tmp_path, alive_keys=(f"work-{item_id}",))
+        assert item_id not in out
+        assert item_id not in resumed
+
+    def test_restore_skips_closed_archived_proposed_and_never_started(self, tmp_path, monkeypatch):
+        done = _mkitem("restore done item")
+        _mkrun(done, f"sid-restore-done-{done}", f"work-{done}", str(tmp_path))
+        work_store.apply_action(done, "done")
+        archived = _mkitem("restore archived item")
+        _mkrun(archived, f"sid-restore-arch-{archived}", f"work-{archived}", str(tmp_path))
+        db.execute("UPDATE work_items SET archived_at = ? WHERE id = ?",
+                   (datetime.now(timezone.utc).isoformat(), archived))
+        proposed = _mkitem("restore proposed item")
+        _mkrun(proposed, f"sid-restore-prop-{proposed}", f"work-{proposed}", str(tmp_path))
+        db.execute("UPDATE work_items SET state = ? WHERE id = ?",
+                   (work_store.PROPOSED_STATE, proposed))
+        codex = _mkitem("restore codex item")
+        _mkrun(codex, f"sid-restore-codex-{codex}", f"work-{codex}", str(tmp_path),
+               provider="codex")
+        never = _mkitem("restore never started item")
+        _mkrun(never, f"sid-restore-never-{never}", f"work-{never}", str(tmp_path),
+               agent_started=False)
+        out, resumed = self._restore(monkeypatch, tmp_path)
+        for item_id in (done, archived, proposed, codex, never):
+            assert item_id not in resumed
+        assert set(out) == set(resumed)
+
+    def test_restore_waits_for_the_personal_instance(self, monkeypatch):
+        from services import work_launch
+        monkeypatch.setattr(work_launch, "personal_config", lambda: None)
+        assert work_launch.restore_open_sessions() is None
+
+    def test_resumed_session_start_keeps_the_waiting_state(self):
+        item_id = _mkitem("resumed start item")
+        sid = f"sid-resumed-start-{item_id}"
+        work_store.add_run(item_id, sid, f"work-{item_id}", "/tmp")
+        work_store.record_event(sid, "Stop", {"message": "Claude is waiting for your input"})
+        work_store.record_event(sid, "SessionStart", {"source": "resume"})
+        row = db.query_one("SELECT i.state, r.status FROM work_items i JOIN work_runs r "
+                           "ON r.work_item_id = i.id WHERE i.id = ?", (item_id,))
+        assert (row["state"], row["status"]) == ("needs_you", "stopped")
+        work_store.record_event(sid, "SessionStart", {"source": "startup"})
+        assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                            (item_id,))["state"] == "agent_working"
+
 
 def _panel(question, body_lines, done=True):
     hints = "  ←/→ to switch · c to copy · f to fork · Esc to close" if done \

@@ -464,8 +464,14 @@ def _scan_loop():
                 _record_debrief_event(item_id, "debrief_skipped", {"reason": "pre-feature"})
     except Exception as e:
         log.emit("work_debrief_error", f"boot marking failed: {type(e).__name__}: {e}")
+    restored = False
     while True:
         time.sleep(SCAN_INTERVAL)
+        if not restored:
+            try:
+                restored = work_launch.restore_open_sessions() is not None
+            except Exception as e:
+                log.emit("work_restore_error", f"{type(e).__name__}: {e}")
         try:
             work_launch.suspend_idle_done_sessions()
         except Exception as e:
