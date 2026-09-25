@@ -256,7 +256,13 @@ def api_work_reply(item_id: int, body: dict):
     text = (body.get("text") or "").strip()
     if not text:
         return JSONResponse({"error": "empty reply"}, status_code=400)
-    result = work_store.reply(item_id, text)
+    try:
+        result = work_launch.reply(item_id, text)
+    except Exception as e:
+        log.emit("work_reply_failed",
+                 f"work item {item_id}: reply failed: {type(e).__name__}: {e}")
+        return JSONResponse(
+            {"error": f"the reply failed: {type(e).__name__}: {e}"}, status_code=500)
     if "error" in result:
         return JSONResponse(result, status_code=409)
     return result
