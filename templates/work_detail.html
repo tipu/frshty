@@ -157,11 +157,11 @@
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Needs you</h2>
     <div class="text-sm" style="color:#fbbf24; white-space:pre-wrap"
          v-if="item.stop_reason && !item.pending_question" v-html="lk(item.stop_reason)"></div>
-    <work-question :item="item" @answer="answer($event)"></work-question>
+    <work-question :item="item" @answer="(text, done) => answer(text).then(done)"></work-question>
     <form class="mt-2" @submit.prevent="answer(replyText.trim())">
       <input class="wintake" style="width:100%; background:#101018; border:1px solid #2a2a35; border-radius:8px; padding:10px 14px; color:#e0e0e0"
-             v-model="replyText"
-             :placeholder="item.pending_question ? 'Other — type your own answer…' : 'Answer and resume…'" />
+             v-model="replyText" :disabled="replyBusy"
+             :placeholder="replyBusy ? 'sending…' : item.pending_question ? 'Other — type your own answer…' : 'Answer and resume…'" />
     </form>
     <div class="text-xs text-red-400 mt-1" v-if="replyError">{{ replyError }}</div>
   </div>
@@ -283,7 +283,7 @@
   <div class="sec" v-if="artifacts.length">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Artifacts</h2>
     <div v-for="a in artifacts" class="art">
-      <a :href="artifactUrl(a)" target="_blank" class="underline">{{ a.path }}</a> <span class="text-gray-500">— {{ a.note }}</span>
+      <a :href="viewerUrl(a)" target="_blank" class="underline">{{ a.path }}</a> <span class="text-gray-500">— {{ a.note }}</span>
       <img v-if="isImg(a.path)" :src="artifactUrl(a)" :alt="a.note || a.path"
            @error="$event.target.style.display='none'">
     </div>
@@ -365,7 +365,7 @@ const app = frshtyApp({
   data() { return { features: {}, instanceName: "", thread: null, needsYou: 0,
                     peer: new URLSearchParams(location.search).get("peer") || "",
                     peerBase: "",
-                    item: null, loadError: "", timeline: [], events: [], artifacts: [], replyText: "", replyError: "",
+                    item: null, loadError: "", timeline: [], events: [], artifacts: [], replyText: "", replyError: "", replyBusy: false,
                     timelineCap: 100, timelineFull: false,
                     timelineImagesOpen: {},
                     systemPrompt: "", showPrompt: false, launchCommand: "",
@@ -489,6 +489,9 @@ const app = frshtyApp({
     },
     artifactUrl(a) {
       return (this.peerBase || "") + "/api/work/artifact_file/" + a.id;
+    },
+    viewerUrl(a) {
+      return (this.peerBase || "") + "/artifacts/" + a.id;
     },
     ts(at) {
       return window.frshtyTime.stamp(at);
@@ -804,19 +807,27 @@ const app = frshtyApp({
       }
     },
     async answer(text) {
-      if (!text) return;
-      this.replyError = "";
+      if (!text || this.replyBusy) return false;
+      this.replyBusy = true; this.replyError = "";
       try {
         const r = await fetch(this.api(`/api/work/items/${this.item.id}/reply`), {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text }),
         });
-        if (!r.ok) { const d = await r.json(); this.replyError = d.error || ("reply failed HTTP " + r.status); return; }
+        if (!r.ok) {
+          const d = await r.json().catch(() => ({}));
+          this.replyError = d.error || ("reply failed HTTP " + r.status);
+          return false;
+        }
         this.replyText = "";
-        await this.refresh();
       } catch (e) {
         this.replyError = "reply failed: " + e.message;
+        return false;
+      } finally {
+        this.replyBusy = false;
       }
+      await this.refresh();
+      return true;
     },
   },
   mounted() {
