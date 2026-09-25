@@ -283,7 +283,7 @@
   <div class="sec" v-if="artifacts.length">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Artifacts</h2>
     <div v-for="a in artifacts" class="art">
-      <a :href="artifactUrl(a)" target="_blank" class="underline">{{ a.path }}</a> <span class="text-gray-500">— {{ a.note }}</span>
+      <a :href="viewerUrl(a)" target="_blank" class="underline">{{ a.path }}</a> <span class="text-gray-500">— {{ a.note }}</span>
       <img v-if="isImg(a.path)" :src="artifactUrl(a)" :alt="a.note || a.path"
            @error="$event.target.style.display='none'">
     </div>
@@ -489,6 +489,9 @@ const app = frshtyApp({
     },
     artifactUrl(a) {
       return (this.peerBase || "") + "/api/work/artifact_file/" + a.id;
+    },
+    viewerUrl(a) {
+      return (this.peerBase || "") + "/artifacts/" + a.id;
     },
     ts(at) {
       return window.frshtyTime.stamp(at);
