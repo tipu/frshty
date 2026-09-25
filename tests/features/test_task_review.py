@@ -273,7 +273,7 @@ class TestARerunOfTheSameDiffKeepsTheOpenTask:
                 t.join()
         assert launch.call_count == 1
 
-    def test_a_stored_review_is_not_reused(self, tmp_path):
+    def _rerun_after_post(self, tmp_path, second_diff="d\n", **kwargs):
         review_dir = _review_dir(tmp_path)
         (review_dir / "diff.txt").write_text("d\n")
         with patch.object(reviewer.work_launch, "launch", return_value={"item_id": 1}), \
@@ -281,10 +281,31 @@ class TestARerunOfTheSameDiffKeepsTheOpenTask:
             reviewer.launch_task_review(_cfg(tmp_path), _pr(), review_dir, None)
         reviewer.store_task_review(_cfg(tmp_path), "raven", 4536,
                                    {"issues": [_finding()]}, _token(tmp_path))
-        with patch.object(reviewer.work_launch, "launch", return_value={"item_id": 2}), \
-             patch.object(reviewer.work_store, "is_running", return_value=True), \
+        (review_dir / "diff.txt").write_text(second_diff)
+        with patch.object(reviewer.work_launch, "launch", return_value={"item_id": 2}) as launch, \
+             patch.object(reviewer.work_store, "is_running", return_value=False), \
              patch.object(reviewer, "log"):
-            assert reviewer.launch_task_review(_cfg(tmp_path), _pr(), review_dir, None) == 2
+            item_id = reviewer.launch_task_review(_cfg(tmp_path), _pr(), review_dir, None,
+                                                  **kwargs)
+        stored = json.loads((review_dir / "review.tasks.json").read_text())
+        return item_id, launch, stored
+
+    def test_a_posted_review_of_the_same_diff_is_reused(self, tmp_path):
+        item_id, launch, stored = self._rerun_after_post(tmp_path)
+        assert item_id == 1
+        assert launch.call_count == 0
+        assert stored["status"] == "done"
+        assert len(stored["issues"]) == 1
+
+    def test_a_posted_review_of_another_diff_gets_a_new_task(self, tmp_path):
+        item_id, launch, stored = self._rerun_after_post(tmp_path, second_diff="e\n")
+        assert item_id == 2
+        assert stored["status"] == "reviewing"
+
+    def test_a_rerun_the_operator_asks_for_gets_a_new_task(self, tmp_path):
+        item_id, launch, stored = self._rerun_after_post(tmp_path, reuse_posted=False)
+        assert item_id == 2
+        assert stored["status"] == "reviewing"
 
 
 class TestTheObjectiveCarriesTheArm:
