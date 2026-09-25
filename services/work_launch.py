@@ -620,8 +620,9 @@ def _allows_merge(config: dict | None) -> bool:
     return isinstance(pr, dict) and pr.get("auto_merge") is True
 
 
-def _config_on_disk(key: str) -> dict | None:
-    """The config file whose [job] key is `key`, parsed, or None.
+def _scan_config_dir(key: str) -> tuple[dict | None, bool]:
+    """The config file whose [job] key is `key`, parsed or None, and whether
+    every config file in the directory was read.
 
     A file is found by the key it declares, not by its name: the atropos
     instance is keyed "frshty" and lives in config/local.toml, so a lookup by
@@ -629,7 +630,8 @@ def _config_on_disk(key: str) -> dict | None:
     try:
         names = sorted(os.listdir(_CONFIG_DIR))
     except OSError:
-        return None
+        return None, False
+    complete = True
     for name in names:
         if not name.endswith(".toml") or name in discovery.SKIP_CONFIGS:
             continue
@@ -637,11 +639,17 @@ def _config_on_disk(key: str) -> dict | None:
             with open(os.path.join(_CONFIG_DIR, name), "rb") as f:
                 raw = tomllib.load(f)
         except Exception:
+            complete = False
             continue
         job = raw.get("job")
         if isinstance(job, dict) and job.get("key") == key:
-            return raw
-    return None
+            return raw, True
+    return None, complete
+
+
+def _config_on_disk(key: str) -> dict | None:
+    """The config file whose [job] key is `key`, parsed, or None."""
+    return _scan_config_dir(key)[0]
 
 
 def _auto_merge_on_disk(key: str) -> bool:
@@ -655,17 +663,28 @@ def _auto_merge_on_disk(key: str) -> bool:
     return _allows_merge(_config_on_disk(key))
 
 
+UNCONFIGURED_MERGE_PROJECTS = ("frshty",)
+
+
 def _project_allows_merge(key: str) -> bool:
     """Whether one project lets a task merge its own pull request.
 
     [pr] auto_merge is the switch the ticket pipeline already reads, so a
     project states the rule once and both halves of frshty obey it. A project
-    the board holds no config for allows nothing: the board cannot read a
-    policy it does not have."""
+    the board holds no config for allows nothing, because the board cannot
+    read a policy it does not have. UNCONFIGURED_MERGE_PROJECTS is the one
+    exception: those projects have no config file on this host, and the
+    operator asked that their tasks merge to main and release every time. A
+    config file that declares the same key still decides, so a host whose
+    instance is keyed "frshty" keeps its own [pr] auto_merge. A config file
+    that cannot be read might declare the key, so it holds the merge."""
     config = _instance_config(key)
     if config is not None:
         return _allows_merge(config)
-    return _auto_merge_on_disk(key)
+    config, complete = _scan_config_dir(key)
+    if config is not None:
+        return _allows_merge(config)
+    return complete and key in UNCONFIGURED_MERGE_PROJECTS
 
 
 SELF_MERGE_PROJECTS = ("frshty", "expirement", "upwork-api", "game_expirement")
