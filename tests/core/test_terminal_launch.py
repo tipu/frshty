@@ -21,6 +21,17 @@ class TestLaunchPaneCommand:
         assert "send-keys" not in args
         assert run.call_args.kwargs["env"] == terminal._child_env()
 
+    def test_the_state_root_reaches_the_agent_pane(self, monkeypatch):
+        monkeypatch.setenv("FRSHTY_ROOT", "/boxes/frshty/state")
+        monkeypatch.setenv("FRSHTY_BOARD_FILE", "/boxes/frshty/state/board.json")
+        monkeypatch.delenv("FRSHTY_DB", raising=False)
+        monkeypatch.setenv("GH_TOKEN", "secret")
+        env = terminal._child_env()
+        assert env["FRSHTY_ROOT"] == "/boxes/frshty/state"
+        assert env["FRSHTY_BOARD_FILE"] == "/boxes/frshty/state/board.json"
+        assert "FRSHTY_DB" not in env
+        assert "GH_TOKEN" not in env
+
     def test_existing_agentless_pane_is_respawned(self, monkeypatch, tmp_path):
         monkeypatch.setenv("SHELL", "/test/shell")
         monkeypatch.setattr(terminal, "_tmux_session_exists", lambda name: True)

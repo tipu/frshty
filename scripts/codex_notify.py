@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import core.codex_session as codex_session  # noqa: E402
 
-DB_PATH = os.environ.get("FRSHTY_DB") or os.path.expanduser("~/.frshty/frshty.db")
+DB_PATH = os.environ.get("FRSHTY_DB") or os.path.join(os.environ.get("FRSHTY_ROOT") or os.path.expanduser("~/.frshty"), "frshty.db")
 
 
 def _bind_db():

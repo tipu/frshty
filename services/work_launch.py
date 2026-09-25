@@ -30,7 +30,7 @@ def personal_config() -> dict | None:
     instances = runtime.instances()
     if not instances:
         return None
-    entry = instances.get("personal")
+    entry = instances.get(core_config.BOARD_INSTANCE_KEY)
     if not entry:
         return None
     return entry.config
@@ -2039,12 +2039,10 @@ def _run_baseline(repo: Path, base_sha: str, head_cmd: str) -> dict:
         # out, and removing only the directory would leave the registration
         # behind for every later `git worktree list` to report.
         if holder:
-            for args in (["worktree", "remove", "--force", str(tree)],
-                         ["worktree", "prune"]):
-                try:
-                    git_util.run_git(repo, args, timeout=120)
-                except (git_util.GitCommandError, subprocess.TimeoutExpired, OSError):
-                    pass
+            try:
+                git_util.run_git(repo, ["worktree", "remove", "--force", str(tree)], timeout=120)
+            except (git_util.GitCommandError, subprocess.TimeoutExpired, OSError):
+                pass
             shutil.rmtree(holder, ignore_errors=True)
 
 

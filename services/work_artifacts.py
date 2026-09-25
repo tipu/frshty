@@ -19,6 +19,7 @@ from pathlib import Path
 
 import core.db as db
 import core.log as log
+from core.paths import frshty_root
 
 MAX_AGE_DAYS = 30
 GC_INTERVAL_S = 86400
@@ -36,7 +37,7 @@ def root() -> Path:
     keeps a launch out of the operator's real store even after a test reloads
     this module."""
     override = os.environ.get(ROOT_ENV)
-    return Path(override) if override else Path.home() / ".frshty" / "artifacts"
+    return Path(override) if override else frshty_root() / "artifacts"
 
 
 def item_dir(item_id: int) -> Path:

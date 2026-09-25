@@ -33,7 +33,9 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+import core.config as core_config
 import core.log as log
+from core.paths import frshty_root
 
 
 PRE_COMMIT_TIMEOUT = 600
@@ -168,6 +170,44 @@ def worktree_holding_branch(repo_path: Path, branch: str) -> Path | None:
 _worktree_holding_branch = worktree_holding_branch
 
 
+_owned_roots: set[str] = set()
+
+
+def own_worktree_root(path) -> None:
+    """Let prune_worktrees drop missing worktrees under `path`."""
+    _owned_roots.add(os.path.realpath(path))
+
+
+def prune_worktrees(repo_path, timeout: int = 60) -> list[str]:
+    """`git worktree prune`, limited to worktrees under a root this process owns.
+
+    A repository can be mounted into several instance containers and the host
+    at once. Each one registers worktrees under its own state directory, which
+    the others cannot see, and plain `git worktree prune` reads every
+    registration it cannot see as a deleted worktree and drops it. This drops
+    only a missing worktree under frshty_root(), the task worktree root or a
+    root handed to own_worktree_root, and leaves every other registration alone. Returns the
+    paths it dropped."""
+    roots = [os.path.realpath(frshty_root()), os.path.realpath(core_config.TASK_WORKTREE_ROOT),
+             *sorted(_owned_roots)]
+    listed = run_git_status(repo_path, ["worktree", "list", "--porcelain"], timeout=timeout)
+    if listed.returncode != 0:
+        return []
+    dropped = []
+    current = ""
+    for line in listed.stdout.splitlines() + [""]:
+        if line.startswith("worktree "):
+            current = line[len("worktree "):].strip()
+        elif line.startswith("prunable") and current:
+            real = os.path.realpath(current)
+            if any(real == r or real.startswith(r + os.sep) for r in roots):
+                if run_git_status(repo_path, ["worktree", "remove", "--force", current],
+                                  timeout=timeout).returncode == 0:
+                    dropped.append(current)
+            current = ""
+    return dropped
+
+
 def git_dirs(directory) -> tuple[str, str]:
     """The absolute (--git-dir, --git-common-dir) of `directory`, ("", "") when
     it is not inside a git checkout.
@@ -206,7 +246,7 @@ def add_or_reuse_worktree(repo_path: Path, worktree_path: Path, branch: str,
     path, or None if it could not be resolved."""
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "fetch", "origin", branch], cwd=str(repo_path), capture_output=True, timeout=timeout)
-    subprocess.run(["git", "worktree", "prune"], cwd=str(repo_path), capture_output=True, timeout=timeout)
+    prune_worktrees(repo_path, timeout=timeout)
     result = subprocess.run(
         ["git", "worktree", "add", str(worktree_path), branch],
         cwd=str(repo_path), capture_output=True, text=True, timeout=timeout,
@@ -224,7 +264,7 @@ def add_or_reuse_worktree(repo_path: Path, worktree_path: Path, branch: str,
         )
         if freed.returncode != 0:
             return None
-        subprocess.run(["git", "worktree", "prune"], cwd=str(repo_path), capture_output=True, timeout=timeout)
+        prune_worktrees(repo_path, timeout=timeout)
         retry = subprocess.run(
             ["git", "worktree", "add", str(worktree_path), branch],
             cwd=str(repo_path), capture_output=True, text=True, timeout=timeout,

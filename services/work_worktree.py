@@ -334,7 +334,7 @@ def _pick_branch(repo_path: str, base: str) -> tuple[str, str, Path | None]:
         branch = base if n == 1 else f"{base}-{n}"
         state, holder = _classify_holder(repo_path, branch)
         if state == "prunable":
-            _git(repo_path, ["worktree", "prune"])
+            git_util.prune_worktrees(repo_path)
             state, holder = _classify_holder(repo_path, branch)
         if state in ("free", "worktree"):
             return branch, state, holder
@@ -386,7 +386,7 @@ def ensure(item_id: int, spec: dict, objective: str = "") -> dict:
             return _record(item_id, spec, str(holder), branch, "reused_holder")
         base_branch = spec["base_branch"]
         _git(repo_path, ["fetch", "origin", base_branch])
-        _git(repo_path, ["worktree", "prune"])
+        git_util.prune_worktrees(repo_path)
         for start in (f"origin/{base_branch}", base_branch, "HEAD"):
             made = _git(repo_path, ["branch", branch, start])
             if made.returncode == 0:
@@ -638,7 +638,7 @@ def _remove(row: dict) -> bool:
         log.emit("work_worktree_remove_failed",
                  f"work item {row['work_item_id']}: {(removed.stderr or '').strip()[:200]}")
         return False
-    _git(row["repo_path"], ["worktree", "prune"])
+    git_util.prune_worktrees(row["repo_path"])
     _git(row["repo_path"], ["branch", "-d", row["branch"]])
     _mark_removed(row)
     return True
@@ -660,7 +660,7 @@ def gc(now: datetime | None = None) -> list[dict]:
         row = dict(raw)
         if not os.path.isdir(row["path"]):
             with work_store.launch_lock:
-                _git(row["repo_path"], ["worktree", "prune"])
+                git_util.prune_worktrees(row["repo_path"])
                 _mark_removed(row)
             removed.append({"id": row["id"], "path": row["path"],
                             "result": "already gone"})

@@ -12,6 +12,7 @@ import traceback
 from datetime import datetime, timedelta, timezone
 
 import core.codex_session as codex_session
+import core.config as core_config
 import core.db as db
 import core.log as log
 import core.tmux as tmux_target
@@ -19,7 +20,7 @@ import core.tmux as tmux_target
 STALE_AFTER_MINUTES = 30
 STUCK_AFTER_MINUTES = 90
 MISSED_DECISION_AFTER_MINUTES = 3
-BOARD_INSTANCE_KEY = "personal"
+BOARD_INSTANCE_KEY = core_config.BOARD_INSTANCE_KEY
 BG_WAIT_RECHECK_HOURS = 2
 PROPOSED_STATE = "proposed"
 DECLINED_REASON = "Proposal declined"

@@ -3,6 +3,7 @@ from pathlib import Path
 
 import core.db as db
 import core.log as log
+from core.paths import frshty_root
 
 SKIP_EXACT = frozenset({
     "/api/tickets/list",
@@ -27,7 +28,7 @@ def is_tracked(path: str) -> bool:
 def ensure_db() -> None:
     if getattr(db, "_DB_PATH", None) is None:
         migrations = Path(__file__).resolve().parent.parent / "migrations"
-        db.init(Path.home() / ".frshty" / "frshty.db", migrations)
+        db.init(frshty_root() / "frshty.db", migrations)
 
 
 def record(kind: str, name: str, instance: str = "", n: int = 1) -> None:

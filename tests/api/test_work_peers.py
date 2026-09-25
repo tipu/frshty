@@ -75,6 +75,12 @@ class TestPeerList:
         assert work_peers.peers() == [
             {"key": "atropos", "base_url": "http://10.0.0.2:7100", "label": "Atropos"}]
 
+    def test_own_entry_is_skipped(self, peers_file, monkeypatch):
+        monkeypatch.setenv("FRSHTY_PEER_SELF", "frshty")
+        peers_file.write_text('[[peers]]\nkey = "frshty"\nbase_url = "http://x:1"\n'
+                              '[[peers]]\nkey = "quill"\nbase_url = "http://x:2"\n')
+        assert [p["key"] for p in work_peers.peers()] == ["quill"]
+
     def test_label_defaults_to_key(self, peers_file):
         peers_file.write_text('[[peers]]\nkey = "atropos"\nbase_url = "http://x:1"\n')
         assert work_peers.peers()[0]["label"] == "atropos"

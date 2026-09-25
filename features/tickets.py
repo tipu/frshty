@@ -992,7 +992,7 @@ def _ensure_worktree(config: dict, ticket_key: str, slug: str) -> dict | None:
                 synced = True
             else:
                 wt_path.parent.mkdir(parents=True, exist_ok=True)
-                subprocess.run(["git", "worktree", "prune"], cwd=str(repo["path"]), capture_output=True, timeout=60)
+                git_util.prune_worktrees(repo["path"])
                 subprocess.run(["git", "fetch", "origin"], cwd=str(repo["path"]), capture_output=True, timeout=60)
 
                 ts = state.load_ticket(ticket_key) or {}
@@ -1674,7 +1674,7 @@ def _setup_ticket(config, ticket, base_url, comments=None) -> dict:
             relink_shared_venv(config, repo["name"], wt_path)
             continue
         wt_path.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["git", "worktree", "prune"], cwd=str(repo["path"]), capture_output=True, timeout=60)
+        git_util.prune_worktrees(repo["path"])
         subprocess.run(["git", "fetch", "origin"], cwd=str(repo["path"]), capture_output=True, timeout=60)
         branches = subprocess.run(["git", "branch", "--list"], cwd=str(repo["path"]), capture_output=True, text=True, timeout=60).stdout
         if branch not in branches.replace("* ", "").replace("  ", " ").split():
@@ -1858,7 +1858,7 @@ def materialize_prd_ticket(config: dict, ticket_key: str, ts: dict, base_url: st
             relink_shared_venv(config, repo["name"], wt_path)
             continue
         wt_path.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.run(["git", "worktree", "prune"], cwd=str(repo["path"]), capture_output=True, timeout=60)
+        git_util.prune_worktrees(repo["path"])
         subprocess.run(["git", "fetch", "origin"], cwd=str(repo["path"]), capture_output=True, timeout=60)
         existing_branches = subprocess.run(["git", "branch", "--list"], cwd=str(repo["path"]),
                                             capture_output=True, text=True, timeout=60).stdout

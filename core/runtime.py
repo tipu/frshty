@@ -15,6 +15,8 @@ from pathlib import Path
 
 import core.db as db
 import core.log as log
+from core.git_util import own_worktree_root
+from core.paths import frshty_root
 import core.queue as q
 import core.scheduler as scheduler
 import core.slack_capture as slack_capture
@@ -25,7 +27,7 @@ from core.event_bus import Dispatcher
 from core.registry import Instances
 from core.worker import WorkerPool
 
-DEFAULT_DB_PATH = Path.home() / ".frshty" / "frshty.db"
+DEFAULT_DB_PATH = frshty_root() / "frshty.db"
 DEFAULT_MIGRATIONS = Path(__file__).resolve().parent.parent / "migrations"
 
 _started_lock = threading.Lock()
@@ -436,6 +438,7 @@ def start_events(
         _instances = Instances()
         for c in instance_configs:
             _instances.add(c)
+            own_worktree_root(c["workspace"]["root"])
 
         try:
             from core.preflight import run_preflight
