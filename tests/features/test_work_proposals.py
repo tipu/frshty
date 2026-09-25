@@ -310,3 +310,17 @@ def test_approving_a_followup_proposal_survives_a_collected_worktree(tmp_path):
     assert result["state"] == "agent_working"
     assert db.query_one("SELECT cwd FROM work_runs WHERE work_item_id = ?",
                         (item_id,))["cwd"] == str(config["workspace"]["root"])
+
+
+@pytest.mark.parametrize("item_state, running", [
+    ("agent_working", True), ("needs_you", True), ("waiting_external", True),
+    ("failed_stale", False), ("needs_ack", False), ("done", False),
+    (work_store.CANCELED_STATE, False)])
+def test_is_running_tells_a_live_task_from_a_finished_one(item_state, running):
+    item_id = work_store.create_item("Review pull request #1.", instance_key="personal")
+    db.execute("UPDATE work_items SET state = ? WHERE id = ?", (item_state, item_id))
+    assert work_store.is_running(item_id) is running
+
+
+def test_an_unknown_task_is_not_running():
+    assert work_store.is_running(987654) is False
