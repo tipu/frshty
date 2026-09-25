@@ -35,7 +35,7 @@ h1 { font-size: 16px; margin: 0 0 4px; color: #fff; }
   <div v-if="artifacts.length">
     <div class="sec">Artifacts</div>
     <div class="art" v-for="a in artifacts">
-      <a :href="artifactUrl(a)" target="_blank">{{ a.path }}</a>
+      <a :href="viewerUrl(a)" target="_blank">{{ a.path }}</a>
       <span v-if="a.note"> — {{ a.note }}</span>
       <img v-if="isImg(a.path)" :src="artifactUrl(a)" :alt="a.note || a.path"
            @error="$event.target.style.display='none'">
@@ -64,6 +64,7 @@ createApp({
       return this.peer ? "/api/work/peers/" + encodeURIComponent(this.peer) + path : path;
     },
     artifactUrl(a) { return (this.peerBase || "") + "/api/work/artifact_file/" + a.id; },
+    viewerUrl(a) { return (this.peerBase || "") + "/artifacts/" + a.id; },
   },
   async mounted() {
     if (this.peer) {

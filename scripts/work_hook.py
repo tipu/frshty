@@ -382,6 +382,7 @@ def main() -> int:
             "message": (data.get("message") or "")[:500],
             "reason": (data.get("reason") or "")[:200],
             "prompt": (data.get("prompt") or "")[:2000],
+            "source": (data.get("source") or "")[:50],
         }
         work_store = _bind_db()
         payload["last_assistant_message"] = work_store.last_assistant_text(transcript_path)[:300]
