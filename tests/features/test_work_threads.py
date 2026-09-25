@@ -601,7 +601,7 @@ class TestPeerAwareThreads:
     def test_the_thread_page_sends_terminal_and_artifact_to_the_peer_host(self):
         text = self._read("templates/thread_detail.html")
         assert '(this.peerBase || "") + "/tasks/" + id + "/terminal"' in text
-        assert '(this.peerBase || "") + "/api/work/artifact_file/" + a.id' in text
+        assert '(this.peerBase || "") + "/artifacts/" + a.id' in text
 
     def test_the_thread_page_reports_an_unknown_peer(self):
         text = self._read("templates/thread_detail.html")
