@@ -19,12 +19,14 @@ body { display: flex; flex-direction: column; font: 12px/1 system-ui, sans-serif
 .bar a { color: #93c5fd; text-decoration: none; white-space: nowrap; }
 .bar a:hover { text-decoration: underline; }
 #path { color: #d5d5dc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-#frame { flex: 1; min-height: 0; width: 100%; border: 0; background: #fff; }
+#main { flex: 1; min-height: 0; display: flex; flex-direction: row; }
+#frame { flex: 1; min-width: 0; height: 100%; border: 0; background: #fff; }
 #toggle { background: #1e1e2e; color: #d5d5dc; border: 1px solid #3a3a48; border-radius: 4px;
           padding: 5px 10px; font: inherit; cursor: pointer; }
 #toggle:hover { background: #2a2a3c; }
 #status { white-space: nowrap; }
-#panel { flex: none; height: 45vh; display: none; padding: 6px; box-sizing: border-box; background: #0a0a0f; }
+#panel { flex: none; width: 50%; display: none; padding: 6px; box-sizing: border-box; background: #0a0a0f;
+         border-left: 1px solid #2a2a35; }
 #panel.open { display: block; }
 #term { height: 100%; }
 </style>
@@ -36,12 +38,14 @@ body { display: flex; flex-direction: column; font: 12px/1 system-ui, sans-serif
   <a id="raw" target="_blank">open raw</a>
   <span id="path"></span>
 </div>
-<iframe id="frame"></iframe>
+<div id="main">
+  <iframe id="frame"></iframe>
+  <div id="panel"><div id="term"></div></div>
+</div>
 <div id="bottom" class="bar">
   <button id="toggle" type="button">Ask Claude about this artifact</button>
   <span id="status"></span>
 </div>
-<div id="panel"><div id="term"></div></div>
 <script>
 const id = location.pathname.split("/")[2];
 const fileUrl = "/api/work/artifact_file/" + id;
