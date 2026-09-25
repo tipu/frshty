@@ -123,6 +123,8 @@ On first boot the container generates an ed25519 key in `ssh/` and adds it to th
 
 The container uses the host network. An optional `[container]` block sets its port, worker and model limits, extra mounts, and extra files to copy into its home directory; `scripts/instance.py` documents each key. The work board of a container belongs to its own instance, through `FRSHTY_BOARD_INSTANCE`. List every container in `config/peers.toml` to see all of them on one board; each container skips its own entry.
 
+`scripts/instance.py gateway-up --port 7130` starts one more container, the gateway. It runs no instance. It reads the instances from `config/peers.toml`, adds an instance picker to the top left of every page, and forwards each page, action and terminal to the container of the picked instance. The choice lives in a browser cookie.
+
 ## Setup details
 
 **Timezone.** Set `FRSHTY_TIMEZONE` to any IANA zone. It controls what the server calls "today", when the timesheet fills, and when billing fires. Default is `UTC`. Web pages ignore it and render every timestamp in the viewer's own zone, so two people in two zones each read their own clock on the same page.

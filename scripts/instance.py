@@ -6,6 +6,8 @@
     scripts/instance.py up    config/frshty.toml
     scripts/instance.py down  config/frshty.toml
     scripts/instance.py logs  config/frshty.toml
+    scripts/instance.py gateway-up --port 7130
+    scripts/instance.py gateway-down
 
 Every instance runs the same image. The container sees its own workspace at
 the host path the config names, the model CLI logins, and one directory of its
@@ -35,6 +37,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 IMAGE = "frshty-instance:latest"
+GATEWAY = "frshty-gateway"
 HOME = Path.home()
 CONTAINERS_ROOT = Path(os.environ.get("FRSHTY_CONTAINERS") or HOME / ".frshty-containers")
 SEED_DIR = "/run/frshty/seed"
@@ -173,13 +176,32 @@ def build() -> int:
     return subprocess.run(cmd).returncode
 
 
+def gateway_args(port: int) -> list[str]:
+    """The gateway container: no workspace, no credentials, no key. It sees
+    only the peers file that names the instances it forwards to."""
+    peers = REPO / "config" / "peers.toml"
+    if not peers.is_file():
+        raise SystemExit(f"{peers} does not exist; list the instance containers in it first")
+    return ["docker", "run", "-d", "--restart", "unless-stopped", "--name", GATEWAY,
+            "--network", "host", "--init", "--entrypoint", "python",
+            "-v", f"{peers}:/app/config/peers.toml:ro",
+            IMAGE, "/app/gateway.py", "--port", str(port)]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="instance.py")
-    parser.add_argument("action", choices=["build", "check", "up", "down", "logs"])
+    parser.add_argument("action", choices=["build", "check", "up", "down", "logs",
+                                           "gateway-up", "gateway-down"])
     parser.add_argument("config", nargs="?")
+    parser.add_argument("--port", type=int, default=7130, help="gateway listen port")
     args = parser.parse_args(argv)
     if args.action == "build":
         return build()
+    if args.action == "gateway-up":
+        subprocess.run(["docker", "rm", "-f", GATEWAY], capture_output=True)
+        return subprocess.run(gateway_args(args.port)).returncode
+    if args.action == "gateway-down":
+        return subprocess.run(["docker", "rm", "-f", GATEWAY]).returncode
     if not args.config:
         parser.error(f"{args.action} needs a config path")
     config_path = Path(args.config).resolve()
