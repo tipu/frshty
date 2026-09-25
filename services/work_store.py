@@ -588,6 +588,8 @@ def record_event(session_id: str, kind: str, payload: dict) -> bool:
     if transition is None:
         return False
     run_status, item_state, default_reason = transition
+    if kind == "SessionStart" and payload.get("source") == "resume":
+        run_status, item_state = None, None
     bg_pending = False
     if item_state == "needs_you" and is_idle_stop(kind, payload):
         transcript_path = payload.get("transcript_path") or ""
