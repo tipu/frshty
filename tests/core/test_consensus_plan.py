@@ -119,6 +119,53 @@ def test_explainer_failure_does_not_fail_run(tmp_path, monkeypatch):
     assert ok
 
 
+def _stub_through_diff(tmp_path, monkeypatch):
+    monkeypatch.setattr(cp.log, "emit", lambda *a, **k: None)
+    monkeypatch.setattr(cp, "_capture_baselines",
+                        lambda config, slug: {"repo": (tmp_path, "abc123")})
+    monkeypatch.setattr(cp, "_fan_out", lambda *a, **k: {
+        "claude": {"text": REAL_PLAN, "valid": True, "reason": "ok"},
+        "codex": {"text": REAL_PLAN, "valid": True, "reason": "ok"},
+        "agy": {"text": REAL_PLAN, "valid": True, "reason": "ok"},
+    })
+    monkeypatch.setattr(cp, "_synthesize_and_implement", lambda *a, **k: True)
+    monkeypatch.setattr(cp, "_assemble_diff", lambda *a, **k: (tmp_path / "p.patch", ["repo"]))
+    monkeypatch.setattr(cp, "_write_explainer", lambda *a, **k: True)
+    (tmp_path / "p.patch").write_text("diff")
+
+
+def test_manifest_timeout_is_retried_once(tmp_path, monkeypatch):
+    _stub_through_diff(tmp_path, monkeypatch)
+    results = iter([False, True])
+    calls = []
+
+    def fake_manifest(*a, **k):
+        calls.append(a)
+        return next(results)
+
+    monkeypatch.setattr(cp, "_write_manifest", fake_manifest)
+
+    ok, reason = cp.run_consensus_plan({}, tmp_path, "slug", ticket_key="T-1")
+    assert ok, reason
+    assert len(calls) == 2
+
+
+def test_manifest_fails_run_after_retry(tmp_path, monkeypatch):
+    _stub_through_diff(tmp_path, monkeypatch)
+    calls = []
+
+    def fake_manifest(*a, **k):
+        calls.append(a)
+        return False
+
+    monkeypatch.setattr(cp, "_write_manifest", fake_manifest)
+
+    ok, reason = cp.run_consensus_plan({}, tmp_path, "slug", ticket_key="T-1")
+    assert not ok
+    assert reason == "manifest step did not produce docs/change-manifest.md"
+    assert len(calls) == 2
+
+
 def test_quorum_fails_when_claude_plan_invalid(tmp_path, monkeypatch):
     # If claude itself is invalid, there's nothing to fall back to -> fail.
     monkeypatch.setattr(cp.log, "emit", lambda *a, **k: None)
