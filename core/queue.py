@@ -8,13 +8,17 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def insert_event(c, source: str, kind: str, payload: dict, instance_key: str | None = None) -> int:
+    cur = c.execute(
+        "INSERT INTO events(instance_key, source, kind, payload, created_at) VALUES (?, ?, ?, ?, ?)",
+        (instance_key, source, kind, _db.dump_json(payload or {}), _now()),
+    )
+    return cur.lastrowid or 0
+
+
 def emit_event(source: str, kind: str, payload: dict, instance_key: str | None = None) -> int:
     with _db.tx() as c:
-        cur = c.execute(
-            "INSERT INTO events(instance_key, source, kind, payload, created_at) VALUES (?, ?, ?, ?, ?)",
-            (instance_key, source, kind, _db.dump_json(payload or {}), _now()),
-        )
-        return cur.lastrowid or 0
+        return insert_event(c, source, kind, payload, instance_key)
 
 
 def enqueue_job(instance_key: str, task: str, payload: dict | None = None,
@@ -74,12 +78,16 @@ def claim_next() -> dict | None:
         }
 
 
+def finish_job(c, job_id: int, status: str, response: dict) -> None:
+    c.execute(
+        "UPDATE jobs SET status=?, finished_at=?, response=? WHERE id=?",
+        (status, _now(), _db.dump_json(response), job_id),
+    )
+
+
 def mark_done(job_id: int, status: str, response: dict) -> None:
     with _db.tx() as c:
-        c.execute(
-            "UPDATE jobs SET status=?, finished_at=?, response=? WHERE id=?",
-            (status, _now(), _db.dump_json(response), job_id),
-        )
+        finish_job(c, job_id, status, response)
 
 
 def running_jobs() -> list[dict]:

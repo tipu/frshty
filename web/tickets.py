@@ -20,6 +20,7 @@ import core.queue as q
 import core.scheduler as scheduler
 import core.state as state
 import core.terminal as terminal
+import core.worker as worker
 import features.presentation as presentation
 import features.releases as releases
 import features.ticket_timeline as ticket_timeline
@@ -499,7 +500,7 @@ def _submit_pr_sync(ticket_key: str, data: dict):
                  f"{ticket_key}: PR opened over a {scope} consensus scope review",
                  meta={"ticket": ticket_key, "scope_review": scope})
     try:
-        state.transition_ticket(ticket_key, "in_review", reason=reason, prs=prs)
+        _transition_and_advance(ticket_key, target="in_review", reason=reason, prs=prs)
     except state.TicketStateError as e:
         log.emit("ticket_pr_transition_failed",
                  f"PRs created for {ticket_key} but transition to in_review failed: {e}",
@@ -507,7 +508,6 @@ def _submit_pr_sync(ticket_key: str, data: dict):
         return JSONResponse({"error": f"PRs created but state transition failed: {e}", "prs": prs}, status_code=500)
     log.emit("ticket_pr_created", f"PR submitted for {ticket_key}: {len(prs)} repo(s)",
              meta={"ticket": ticket_key, "repos": [p["repo"] for p in prs]})
-    _enqueue_manual_advance(ticket_key)
     return {"status": "ok", "prs": prs}
 
 
@@ -1242,9 +1242,10 @@ def api_restart_ticket(key: str):
     if ts.get("status") == TicketStatus.pr_failed.value:
         target = "in_review" if ts.get("prs") else "pr_ready"
         try:
-            ts = state.transition_ticket(key, target, reason="manual restart")
+            _transition_and_advance(key, target=target, reason="manual restart")
         except state.TicketStateError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
+        return {"status": "restarted"}
     if ts.get("status") == TicketStatus.blocked.value:
         try:
             ts = state.transition_ticket(key, "new", reason="manual restart")
@@ -1257,12 +1258,18 @@ def api_restart_ticket(key: str):
     elif instance_key and status == "reviewing":
         q.enqueue_job(instance_key, "start_reviewing", ticket_key=key)
     else:
-        _enqueue_manual_advance(key)
+        _transition_and_advance(key)
     return {"status": "restarted"}
 
 
-def _enqueue_manual_advance(key: str) -> int | None:
+def _transition_and_advance(key: str, **kwargs) -> dict | None:
     """Chain a manual ticket transition into its status handler.
+
+    The ticket write and its ticket_advance event commit in one transaction
+    through worker.transition_ticket_and_emit, so a crash cannot leave the
+    ticket moved with nothing queued to act on it. kwargs pass through to
+    that function: target and fields for a checked transition, mutate for an
+    unchecked write, neither for the event alone.
 
     A ticket only moves when a finished job emits ticket_advance
     (core/worker.py) or when the poll dispatches it (features.tickets.check).
@@ -1275,13 +1282,11 @@ def _enqueue_manual_advance(key: str) -> int | None:
 
     advance_ticket reads stored state only, so it does not care whether the
     ticket is still in the query. It guards its own terminal statuses and its
-    own already-running case, which is why this enqueues unconditionally
+    own already-running case, which is why this emits unconditionally
     rather than repeating those rules here.
     """
-    instance_key = _config.get("job", {}).get("key", "")
-    if not instance_key:
-        return None
-    return q.enqueue_job(instance_key, "advance_ticket", ticket_key=key)
+    instance_key = _config.get("job", {}).get("key", "") or None
+    return worker.transition_ticket_and_emit(key, instance_key, source="ui", **kwargs)
 
 
 @router.post("/api/tickets/{key}/redo-proof")
@@ -1310,10 +1315,9 @@ def api_redo_proof(key: str, body: dict):
 
     state.update_ticket(key, _set)
     try:
-        state.transition_ticket(key, "proving", reason="manual redo proof")
+        _transition_and_advance(key, target="proving", reason="manual redo proof")
     except state.TicketStateError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
-    _enqueue_manual_advance(key)
     return {"status": "redoing", "feedback": bool(feedback)}
 
 
@@ -1363,13 +1367,12 @@ def api_set_ticket_status(key: str, body: dict):
                     {"error": f"cannot resume to {target}: repo busy with {blocker}"},
                     status_code=409)
         try:
-            state.transition_ticket(key, target, reason="manual status override", **fields)
+            _transition_and_advance(key, target=target, reason="manual status override", **fields)
         except state.TicketStateError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
     log.emit("ticket_status_override", f"Manual override {old_status} → {target} for {key}",
         links={"detail": f"{_config['_base_url']}/tickets/{key}"},
         meta={"ticket": key, "old_status": old_status, "new_status": target})
-    _enqueue_manual_advance(key)
     return {"status": target, "old_status": old_status}
 
 
@@ -1441,13 +1444,13 @@ def api_unignore_ticket(key: str):
         return JSONResponse({"error": "not found"}, status_code=404)
     if ts.get("status") != "ignored":
         return JSONResponse({"error": "ticket is not ignored"}, status_code=400)
-    ts["status"] = "new"
-    ts.pop("ignored_at", None)
-    state.save_ticket(key, ts)
+    try:
+        _transition_and_advance(key, target="new", reason="manual unignore", ignored_at=None)
+    except state.TicketStateError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
     log.emit("ticket_unignored", f"Un-ignored {key}",
         links={"detail": f"{_config['_base_url']}/tickets/{key}"},
         meta={"ticket": key})
-    _enqueue_manual_advance(key)
     return {"status": "new"}
 
 
@@ -1458,27 +1461,31 @@ def api_approve_ticket(key: str):
         return JSONResponse({"error": "not found"}, status_code=404)
     if ts.get("status") != "pending_approval":
         return JSONResponse({"error": f"cannot approve from status {ts.get('status')}"}, status_code=400)
+    instance_key = _config.get("job", {}).get("key", "")
+    prd_setup = ts.get("source") == "prd" and bool(instance_key)
     try:
-        state.transition_ticket(key, "new", reason="manual approve", approval_status="approved")
+        if prd_setup:
+            state.transition_ticket(key, "new", reason="manual approve", approval_status="approved")
+        else:
+            _transition_and_advance(key, target="new", reason="manual approve",
+                                    approval_status="approved")
     except state.TicketStateError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     log.emit("ticket_approved", f"Approved {key}",
              links={"detail": f"{_config['_base_url']}/tickets/{key}"},
              meta={"ticket": key})
     setup_enqueued = False
-    if ts.get("source") == "prd":
-        instance_key = _config.get("job", {}).get("key", "")
-        if instance_key:
-            try:
-                from features.tickets import _enqueue_stage
-                _enqueue_stage(instance_key, key, "setup_prd_ticket")
-                setup_enqueued = True
-            except Exception as e:
-                log.emit("prd_setup_enqueue_failed",
-                         f"failed to enqueue setup_prd_ticket for {key}: {type(e).__name__}: {e}",
-                         meta={"ticket": key})
-    if not setup_enqueued:
-        _enqueue_manual_advance(key)
+    if prd_setup:
+        try:
+            from features.tickets import _enqueue_stage
+            _enqueue_stage(instance_key, key, "setup_prd_ticket")
+            setup_enqueued = True
+        except Exception as e:
+            log.emit("prd_setup_enqueue_failed",
+                     f"failed to enqueue setup_prd_ticket for {key}: {type(e).__name__}: {e}",
+                     meta={"ticket": key})
+        if not setup_enqueued:
+            _transition_and_advance(key)
     return {"status": "new", "approval_status": "approved", "setup_enqueued": setup_enqueued}
 
 
@@ -1644,9 +1651,8 @@ def api_start_dev(key: str):
     ticket = next((t for t in assigned if t["key"] == key), None)
     if not ticket:
         return JSONResponse({"error": "ticket not found in ticket system"}, status_code=404)
-    ts = _tickets_mod._setup_ticket(_config, ticket, _config["_base_url"])
-    state.save_ticket(key, ts)
-    _enqueue_manual_advance(key)
+    setup = _tickets_mod._setup_ticket(_config, ticket, _config["_base_url"])
+    ts = _transition_and_advance(key, mutate=lambda _current: setup)
     return {"status": "started", "new_status": ts.get("status")}
 
 
