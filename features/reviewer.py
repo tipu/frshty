@@ -1,3 +1,5 @@
+import fcntl
+import hashlib
 import json
 import re
 import subprocess
@@ -16,7 +18,7 @@ from core.llm import READ_ONLY_TOOLS, WRITE_TOOLS, run_external_model
 from core.config import base_branch_for, get_repos
 import features.presentation as presentation
 from features.platforms import make_platform
-from services import review_store, work_launch
+from services import review_store, work_launch, work_store
 
 PERSONA_SPEC = (
     "You are a spec reviewer. Your single concern: does this diff solve what the ticket or PR description asks for?\n\n"
@@ -312,6 +314,29 @@ def _task_review_objective(config: dict, pr: dict, review_dir: Path, worktree,
     )
 
 
+def _open_task_review(placeholder_path: Path, pr: dict, diff_sha: str) -> int | None:
+    """The work item of the task review still open on this same diff, or None.
+
+    A pipeline review that dies before it stores its result runs again from
+    the start, and a service restart kills every review in flight. Launching a
+    second task for a diff a live task is still reviewing takes the first
+    task's token, so the first task's POST is refused and it asks the operator
+    what to do. That task is reused instead, and a new diff or a task that is
+    no longer running still gets a fresh one."""
+    if not diff_sha or not placeholder_path.exists():
+        return None
+    try:
+        opened = json.loads(placeholder_path.read_text())
+    except (OSError, ValueError):
+        return None
+    item_id = opened.get("item_id")
+    if (opened.get("status") != "reviewing" or opened.get("diff_sha") != diff_sha
+            or opened.get("repo") != pr["repo"] or opened.get("pr_id") != pr["id"]
+            or not isinstance(item_id, int)):
+        return None
+    return item_id if work_store.is_running(item_id) else None
+
+
 def launch_task_review(config: dict, pr: dict, review_dir: Path, worktree) -> int | None:
     """Start a /tasks board task that reviews this pull request.
 
@@ -331,11 +356,26 @@ def launch_task_review(config: dict, pr: dict, review_dir: Path, worktree) -> in
     cannot land on this one. A board that cannot start a task must not fail the
     review the pipeline is already running, so a failed launch logs and returns
     None."""
+    with open(Path(config["_state_dir"]) / "reviews" / ".task_launch.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _launch_task_review(config, pr, review_dir, worktree)
+
+
+def _launch_task_review(config: dict, pr: dict, review_dir: Path, worktree) -> int | None:
     suffix = review_store.provider_suffix(TASK_REVIEW_PROVIDER)
+    diff_path = review_dir / "diff.txt"
+    diff_sha = hashlib.sha256(diff_path.read_bytes()).hexdigest() if diff_path.exists() else ""
+    kept = _open_task_review(review_dir / f"review{suffix}.json", pr, diff_sha)
+    if kept is not None:
+        log.emit("review_task_kept",
+                 f"{pr['repo']}#{pr['id']}: /tasks review already open as work item {kept}",
+                 links={"task": f"{config.get('_base_url', '')}/tasks/{kept}"},
+                 meta={"repo": pr["repo"], "pr_id": pr["id"], "item_id": kept})
+        return kept
     token = uuid.uuid4().hex
     placeholder = {"pr_id": pr["id"], "repo": pr["repo"], "pr_url": pr.get("url", ""),
                    "provider": TASK_REVIEW_PROVIDER, "verdict": "", "status": "reviewing",
-                   "token": token, "summary": "", "issues": []}
+                   "token": token, "diff_sha": diff_sha, "summary": "", "issues": []}
     result: dict = {}
     error = ""
     try:
@@ -345,6 +385,7 @@ def launch_task_review(config: dict, pr: dict, review_dir: Path, worktree) -> in
             brief=f"review {pr['repo']}#{pr['id']}")
         error = result.get("error") or ""
         if not error:
+            placeholder["item_id"] = result.get("item_id")
             with _TASK_REVIEW_LOCK:
                 (review_dir / f"review{suffix}.json").write_text(
                     json.dumps(placeholder, indent=2))

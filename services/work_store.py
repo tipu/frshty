@@ -1433,6 +1433,12 @@ def resolve_transcript_path(run: dict) -> str:
     return path
 
 
+def is_running(item_id: int) -> bool:
+    """Whether this task still exists and is neither closed nor failed."""
+    row = db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))
+    return bool(row) and row["state"] not in CLOSED_STATES + ("failed_stale",)
+
+
 def item_detail(item_id: int) -> dict:
     item = db.query_one("SELECT * FROM work_items WHERE id = ?", (item_id,))
     if not item:
