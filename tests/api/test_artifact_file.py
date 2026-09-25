@@ -171,3 +171,74 @@ class TestArtifactSandboxPolicy:
         with TestClient(self._app()) as client:
             resp = client.get(f"/api/work/artifact_file/{artifact_id}")
         assert resp.headers["content-security-policy"] == "sandbox"
+
+
+class TestArtifactClaudeRoute:
+    def _stub(self, tmp_path, monkeypatch, running=False):
+        launched = []
+        scheduled = []
+        monkeypatch.setattr(work_routes.terminal, "LAUNCH_CONTEXT_DIR", str(tmp_path / "launch"))
+        monkeypatch.setattr(work_routes.terminal, "session_healthy",
+                            lambda key, agent="claude": {"alive": running,
+                                                         "agent_running": running})
+        monkeypatch.setattr(work_routes.terminal, "launch_pane_command",
+                            lambda key, cwd, cmd: launched.append((key, cwd, cmd)))
+        monkeypatch.setattr(work_routes.terminal, "claude_cmd", lambda config: "claude")
+        monkeypatch.setattr(work_routes.work_launch, "personal_config", lambda: {})
+        monkeypatch.setattr(work_routes, "schedule_discuss_kill", scheduled.append)
+        return launched, scheduled
+
+    def test_launches_claude_in_the_artifact_folder(self, tmp_path, monkeypatch):
+        artifact_id = _seed_report(tmp_path, monkeypatch)
+        launched, scheduled = self._stub(tmp_path, monkeypatch)
+        resp = work_routes.api_artifact_claude_start(artifact_id)
+        key = f"artifact-{artifact_id}"
+        assert resp["key"] == key
+        assert len(launched) == 1
+        assert launched[0][0] == key
+        assert launched[0][1] == str(tmp_path / "run-workspace" / "docs")
+        assert "--append-system-prompt" in launched[0][2]
+        seed = (tmp_path / "launch" / f"{key}.md").read_text()
+        assert str(tmp_path / "run-workspace" / "docs" / "report.html") in seed
+        assert "artifact report test" in seed
+        assert scheduled == [key]
+
+    def test_keeps_a_running_session(self, tmp_path, monkeypatch):
+        artifact_id = _seed_report(tmp_path, monkeypatch)
+        launched, scheduled = self._stub(tmp_path, monkeypatch, running=True)
+        resp = work_routes.api_artifact_claude_start(artifact_id)
+        assert resp["status"] == "ok"
+        assert launched == []
+        assert scheduled == [f"artifact-{artifact_id}"]
+
+    def test_refuses_an_artifact_outside_every_root(self, tmp_path, monkeypatch):
+        artifact_id = _seed(tmp_path, monkeypatch, "elsewhere")
+        launched, _ = self._stub(tmp_path, monkeypatch)
+        resp = work_routes.api_artifact_claude_start(artifact_id)
+        assert resp.status_code == 403
+        assert launched == []
+
+    def test_refuses_an_unknown_artifact(self, tmp_path, monkeypatch):
+        launched, _ = self._stub(tmp_path, monkeypatch)
+        resp = work_routes.api_artifact_claude_start(999999999)
+        assert resp.status_code == 404
+        assert launched == []
+
+
+class TestArtifactViewerRoutes:
+    def _app(self):
+        app = FastAPI()
+        app.include_router(work_routes.router)
+        return app
+
+    def test_viewer_page_and_metadata_route(self, tmp_path, monkeypatch):
+        artifact_id = _seed_report(tmp_path, monkeypatch)
+        with TestClient(self._app()) as client:
+            page = client.get(f"/artifacts/{artifact_id}")
+            meta = client.get(f"/api/work/artifacts/{artifact_id}")
+            search = client.get("/api/work/artifacts?q=report")
+        assert page.status_code == 200
+        assert "Ask Claude about this artifact" in page.text
+        assert meta.json()["path"].endswith("report.html")
+        assert search.status_code == 200
+        assert "artifacts" in search.json()
