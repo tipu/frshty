@@ -655,17 +655,26 @@ def _auto_merge_on_disk(key: str) -> bool:
     return _allows_merge(_config_on_disk(key))
 
 
+UNCONFIGURED_MERGE_PROJECTS = ("frshty",)
+
+
 def _project_allows_merge(key: str) -> bool:
     """Whether one project lets a task merge its own pull request.
 
     [pr] auto_merge is the switch the ticket pipeline already reads, so a
     project states the rule once and both halves of frshty obey it. A project
-    the board holds no config for allows nothing: the board cannot read a
-    policy it does not have."""
+    the board holds no config for allows nothing, because the board cannot
+    read a policy it does not have. UNCONFIGURED_MERGE_PROJECTS is the one
+    exception: those projects have no config file on this host, and the
+    operator asked that their tasks merge to main and release every time. A
+    config file that declares the same key still decides, so a host whose
+    instance is keyed "frshty" keeps its own [pr] auto_merge."""
     config = _instance_config(key)
-    if config is not None:
-        return _allows_merge(config)
-    return _auto_merge_on_disk(key)
+    if config is None:
+        config = _config_on_disk(key)
+    if config is None:
+        return key in UNCONFIGURED_MERGE_PROJECTS
+    return _allows_merge(config)
 
 
 SELF_MERGE_PROJECTS = ("frshty", "expirement", "upwork-api", "game_expirement")
