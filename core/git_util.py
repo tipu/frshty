@@ -57,8 +57,8 @@ def worktree_lock(key: str) -> threading.Lock:
         return _worktree_locks.setdefault(key, threading.Lock())
 
 
-def run_git_status(cwd, args: list[str],
-                   timeout: int = 60) -> subprocess.CompletedProcess:
+def run_git_status(cwd, args: list[str], timeout: int = 60,
+                   env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     """Run a git command whose exit status is the answer the caller reads.
 
     `run_git` is the default, and it raises on a status the caller did not
@@ -71,7 +71,7 @@ def run_git_status(cwd, args: list[str],
     reason in .stderr, so a caller never has to tell the two apart."""
     try:
         return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True,
-                              text=True, timeout=timeout)
+                              text=True, timeout=timeout, env=env)
     except (OSError, subprocess.SubprocessError) as e:
         return subprocess.CompletedProcess(["git", *args], 1, "",
                                            f"{type(e).__name__}: {e}")
@@ -293,7 +293,7 @@ class CommitOutcome:
     deciding what to do next was reading the wrong thing.
     """
     status: str          # committed | hook_failed | tooling_failed | git_failed
-    phase: str           # locate_runner | hook_pass_1 | hook_pass_2 | git_commit
+    phase: str           # locate_runner | hook_pass_1 | hook_pass_2 | native_hook | git_commit
     repo: str
     exit_code: int
     output: str
@@ -357,6 +357,32 @@ def triage_commit_failure(status: str, output: str) -> str:
     return "ambiguous"
 
 
+def _worktree_state(repo_dir: Path) -> tuple[str, ...]:
+    """The index tree, the unstaged diff and the untracked paths, for comparison."""
+    return tuple(
+        run_git(repo_dir, args).stdout
+        for args in (["write-tree"], ["diff", "--binary"],
+                     ["ls-files", "--others", "--exclude-standard", "-z"]))
+
+
+def _native_pre_commit_fails(repo_dir: Path, env: dict[str, str], timeout: int,
+                             state_before_commit: tuple[str, ...]) -> bool:
+    """Whether the repository's own git pre-commit hook rejects the index.
+
+    A repository without a pre-commit config can still check every commit with a
+    native hook, as husky does. `git commit` reports that rejection with the same
+    exit code as a lock file or a missing identity, so the hook is run once more
+    by itself to tell the two apart. Only a failed commit pays for the second run.
+    A hook that fixed files during the commit can pass the second run, so a
+    worktree that changed since before the commit also counts as the rejection.
+    """
+    if _worktree_state(repo_dir) != state_before_commit:
+        return True
+    probe = run_git_status(repo_dir, ["hook", "run", "--ignore-missing", "pre-commit"],
+                           timeout=timeout, env=env)
+    return probe.returncode != 0
+
+
 def commit_outcome(repo_dir: Path, message: str | None = None,
                    extra_commit_args: list[str] | None = None,
                    timeout: int = 120, exclude=()) -> CommitOutcome:
@@ -402,12 +428,17 @@ def commit_outcome(repo_dir: Path, message: str | None = None,
     args = ["git", "commit", *(extra_commit_args or [])]
     if message is not None:
         args.extend(["-m", message])
+    state_before_commit = _worktree_state(repo_dir) if pc is None else ()
     done = subprocess.run(args, cwd=str(repo_dir), capture_output=True,
                           text=True, timeout=timeout, env=env)
     if done.returncode != 0:
+        output = ((done.stdout or "") + (done.stderr or "")).strip()
+        if pc is None and _native_pre_commit_fails(repo_dir, env, timeout,
+                                                   state_before_commit):
+            return CommitOutcome("hook_failed", "native_hook", repo, done.returncode,
+                                 output, before, before)
         return CommitOutcome("git_failed", "git_commit", repo, done.returncode,
-                             ((done.stdout or "") + (done.stderr or "")).strip(),
-                             before, before)
+                             output, before, before)
     return CommitOutcome("committed", "git_commit", repo, 0,
                          (done.stdout or "").strip(), before, _head())
 
