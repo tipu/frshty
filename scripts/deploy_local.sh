@@ -22,7 +22,7 @@ if ! git -C "$CHECKOUT" merge-tree --write-tree HEAD origin/main >/dev/null; the
   echo "deploy: origin/main does not merge cleanly into $CHECKOUT; resolve it in a throwaway worktree" >&2
   exit 1
 fi
-clobbered="$(awk '
+clobbered="$(awk -v RS='\0' '
   FNR == NR { changed[$0] = 1; next }
   {
     p = $0
@@ -34,8 +34,8 @@ clobbered="$(awk '
     }
     for (c in changed) if (index(c, $0 "/") == 1) { print $0; next }
   }' \
-  <(git -C "$CHECKOUT" diff --name-only HEAD origin/main) \
-  <(git -C "$CHECKOUT" ls-files --others --ignored --exclude-standard))"
+  <(git -C "$CHECKOUT" diff -z --name-only HEAD origin/main) \
+  <(git -C "$CHECKOUT" ls-files -z --others --ignored --exclude-standard))"
 if [ -n "$clobbered" ]; then
   echo "deploy: origin/main would overwrite untracked files in $CHECKOUT:" >&2
   echo "$clobbered" >&2
