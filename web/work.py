@@ -256,7 +256,7 @@ def api_work_reply(item_id: int, body: dict):
     text = (body.get("text") or "").strip()
     if not text:
         return JSONResponse({"error": "empty reply"}, status_code=400)
-    result = work_store.reply(item_id, text)
+    result = work_launch.reply(item_id, text)
     if "error" in result:
         return JSONResponse(result, status_code=409)
     return result
