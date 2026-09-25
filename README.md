@@ -105,24 +105,25 @@ Open `http://localhost:<port>`.
 
 Credentials come from environment variables named in your config (`BB_TOKEN`, `JIRA_TOKEN`, `LINEAR_TOKEN`, and so on). See `config/example.toml` for the full list. The model CLIs (Claude Code, Codex, and the third consensus voice `agy`) each manage their own auth. Log in once on the host, then mount those auth directories into the container.
 
-Docker:
+Containers:
+
+Every instance can run in a container of its own, built from one image.
 
 ```
-cp docker-compose.example.yml docker-compose.yml    # edit volume paths
-docker compose up
+scripts/instance.py build                     # one image for every instance
+scripts/instance.py check config/frshty.toml  # prove key and git access, then exit
+scripts/instance.py up config/frshty.toml     # run it; restarts with docker
+scripts/instance.py logs config/frshty.toml
+scripts/instance.py down config/frshty.toml
 ```
 
-The image ships Claude Code, Codex, Gemini CLI, Playwright with Chromium, `gh`, `git`, and Python 3.12. The repo is bind-mounted, so a code change does not need a rebuild.
+A container sees its own workspace at the host path the config names, the model CLI logins (`~/.claude`, `~/.codex`, `~/.gemini`, and a copy of `~/.claude.json` and `~/.gitconfig`), and one host directory of its own, `~/.frshty-containers/<key>/`. `state/` there is its frshty state, mounted at the same path and named by `FRSHTY_ROOT`, so every worktree it registers in a shared repository names a path the host can see. `ssh/` is mounted at `~/.ssh`. The host's `~/.ssh` and `~/.frshty` never enter a container.
 
-The container reads `config/ssh_config` for every git operation. It carries no per-account host alias, because an alias names your accounts and this repository is shared. If a remote addresses an account through an alias such as `git@github-work:owner/repo.git`, write that alias into `~/.ssh/config.d/` on the host. docker-compose mounts `~/.ssh` at `/tmp/.ssh-host`, and `config/ssh_config` includes `/tmp/.ssh-host/config.d/*`:
+On first boot the container generates an ed25519 key in `ssh/` and adds it to the account the instance works as: the GitHub account in `[github].account`, through a `GH_TOKEN` the launcher reads with `gh auth token --user`, or the Bitbucket user in `[bitbucket]`. A restart reuses the key and adds nothing. The GitHub token needs the `admin:public_key` scope and the Bitbucket API token needs `read:ssh-key:bitbucket` and `write:ssh-key:bitbucket`. Without them the container refuses to start and says which scope is missing.
 
-```
-Host github-work
-    HostName github.com
-    User git
-    IdentityFile /tmp/.ssh-host/id_ed25519_work
-    IdentitiesOnly yes
-```
+The container uses the host network. An optional `[container]` block sets its port, worker and model limits, extra mounts, and extra files to copy into its home directory; `scripts/instance.py` documents each key. The work board of a container belongs to its own instance, through `FRSHTY_BOARD_INSTANCE`. List every container in `config/peers.toml` to see all of them on one board; each container skips its own entry.
+
+`scripts/instance.py gateway-up --port 7130` starts one more container, the gateway. It runs no instance. It reads the instances from `config/peers.toml`, adds an instance picker to the top left of every page, and forwards each page, action and terminal to the container of the picked instance. The choice lives in a browser cookie.
 
 ## Setup details
 

@@ -1,3 +1,4 @@
+import os
 import threading
 import tomllib
 from pathlib import Path
@@ -45,7 +46,7 @@ def peers() -> list[dict]:
             continue
         key = str(entry.get("key") or "").strip()
         base_url = str(entry.get("base_url") or "").strip().rstrip("/")
-        if not key or not base_url or key in seen:
+        if not key or not base_url or key in seen or key == os.environ.get("FRSHTY_PEER_SELF"):
             continue
         seen.add(key)
         entries.append({"key": key, "base_url": base_url,
