@@ -620,8 +620,9 @@ def _allows_merge(config: dict | None) -> bool:
     return isinstance(pr, dict) and pr.get("auto_merge") is True
 
 
-def _config_on_disk(key: str) -> dict | None:
-    """The config file whose [job] key is `key`, parsed, or None.
+def _scan_config_dir(key: str) -> tuple[dict | None, bool]:
+    """The config file whose [job] key is `key`, parsed or None, and whether
+    every config file in the directory was read.
 
     A file is found by the key it declares, not by its name: the atropos
     instance is keyed "frshty" and lives in config/local.toml, so a lookup by
@@ -629,7 +630,8 @@ def _config_on_disk(key: str) -> dict | None:
     try:
         names = sorted(os.listdir(_CONFIG_DIR))
     except OSError:
-        return None
+        return None, False
+    complete = True
     for name in names:
         if not name.endswith(".toml") or name in discovery.SKIP_CONFIGS:
             continue
@@ -637,11 +639,17 @@ def _config_on_disk(key: str) -> dict | None:
             with open(os.path.join(_CONFIG_DIR, name), "rb") as f:
                 raw = tomllib.load(f)
         except Exception:
+            complete = False
             continue
         job = raw.get("job")
         if isinstance(job, dict) and job.get("key") == key:
-            return raw
-    return None
+            return raw, True
+    return None, complete
+
+
+def _config_on_disk(key: str) -> dict | None:
+    """The config file whose [job] key is `key`, parsed, or None."""
+    return _scan_config_dir(key)[0]
 
 
 def _auto_merge_on_disk(key: str) -> bool:
@@ -655,17 +663,28 @@ def _auto_merge_on_disk(key: str) -> bool:
     return _allows_merge(_config_on_disk(key))
 
 
+UNCONFIGURED_MERGE_PROJECTS = ("frshty",)
+
+
 def _project_allows_merge(key: str) -> bool:
     """Whether one project lets a task merge its own pull request.
 
     [pr] auto_merge is the switch the ticket pipeline already reads, so a
     project states the rule once and both halves of frshty obey it. A project
-    the board holds no config for allows nothing: the board cannot read a
-    policy it does not have."""
+    the board holds no config for allows nothing, because the board cannot
+    read a policy it does not have. UNCONFIGURED_MERGE_PROJECTS is the one
+    exception: those projects have no config file on this host, and the
+    operator asked that their tasks merge to main and release every time. A
+    config file that declares the same key still decides, so a host whose
+    instance is keyed "frshty" keeps its own [pr] auto_merge. A config file
+    that cannot be read might declare the key, so it holds the merge."""
     config = _instance_config(key)
     if config is not None:
         return _allows_merge(config)
-    return _auto_merge_on_disk(key)
+    config, complete = _scan_config_dir(key)
+    if config is not None:
+        return _allows_merge(config)
+    return complete and key in UNCONFIGURED_MERGE_PROJECTS
 
 
 SELF_MERGE_PROJECTS = ("frshty", "expirement", "upwork-api", "game_expirement")
@@ -1122,6 +1141,43 @@ def resume_session(item_id: int) -> bool:
     if never_started:
         start_kickoff(key, int(run["id"]), run["provider"])
     return True
+
+
+REPLY_READY_POLLS = 20
+REPLY_READY_POLL_SECONDS = 1.5
+REPLY_SETTLE_SECONDS = 4
+
+
+def reply(item_id: int, text: str) -> dict:
+    """Send the operator's answer, restarting the agent first when it is gone.
+
+    A task can hold a question while its agent process is gone: the idle sweep
+    or a host restart killed the pane after the agent asked. The answer box
+    stays on the page, so a refusal there leaves the operator with a question
+    they cannot answer from the board. The session is resumed the way opening
+    the terminal resumes it, and the answer is sent once the agent is up and
+    has settled, as the kickoff does before its first prompt. Only a run in
+    the task's own pane is resumed, because resume_session relaunches that
+    pane; a run another launcher opened keeps the refusal."""
+    result = work_store.reply(item_id, text)
+    if not result.get("agent_down"):
+        return result
+    run = db.query_one("SELECT tmux_key, provider FROM work_runs WHERE work_item_id = ? "
+                       "ORDER BY id DESC LIMIT 1", (item_id,))
+    key = f"work-{item_id}"
+    if not run or run["tmux_key"] != key:
+        return result
+    if not resume_session(item_id):
+        return {"error": "the agent session is gone and could not be restarted; "
+                         "open the terminal to see why"}
+    agent = run["provider"] or "claude"
+    for _ in range(REPLY_READY_POLLS):
+        if terminal.session_healthy(key, agent=agent).get("agent_running"):
+            time.sleep(REPLY_SETTLE_SECONDS)
+            return work_store.reply(item_id, text)
+        time.sleep(REPLY_READY_POLL_SECONDS)
+    return {"error": f"the agent session was restarted but {agent} did not come up; "
+                     "open the terminal to see why"}
 
 
 def _followup_context(source_item_id: int, cwd: str, contexts: list[str] | None,
