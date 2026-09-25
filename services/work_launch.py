@@ -1072,6 +1072,43 @@ def resume_session(item_id: int) -> bool:
     return True
 
 
+REPLY_READY_POLLS = 20
+REPLY_READY_POLL_SECONDS = 1.5
+REPLY_SETTLE_SECONDS = 4
+
+
+def reply(item_id: int, text: str) -> dict:
+    """Send the operator's answer, restarting the agent first when it is gone.
+
+    A task can hold a question while its agent process is gone: the idle sweep
+    or a host restart killed the pane after the agent asked. The answer box
+    stays on the page, so a refusal there leaves the operator with a question
+    they cannot answer from the board. The session is resumed the way opening
+    the terminal resumes it, and the answer is sent once the agent is up and
+    has settled, as the kickoff does before its first prompt. Only a run in
+    the task's own pane is resumed, because resume_session relaunches that
+    pane; a run another launcher opened keeps the refusal."""
+    result = work_store.reply(item_id, text)
+    if not result.get("agent_down"):
+        return result
+    run = db.query_one("SELECT tmux_key, provider FROM work_runs WHERE work_item_id = ? "
+                       "ORDER BY id DESC LIMIT 1", (item_id,))
+    key = f"work-{item_id}"
+    if not run or run["tmux_key"] != key:
+        return result
+    if not resume_session(item_id):
+        return {"error": "the agent session is gone and could not be restarted; "
+                         "open the terminal to see why"}
+    agent = run["provider"] or "claude"
+    for _ in range(REPLY_READY_POLLS):
+        if terminal.session_healthy(key, agent=agent).get("agent_running"):
+            time.sleep(REPLY_SETTLE_SECONDS)
+            return work_store.reply(item_id, text)
+        time.sleep(REPLY_READY_POLL_SECONDS)
+    return {"error": f"the agent session was restarted but {agent} did not come up; "
+                     "open the terminal to see why"}
+
+
 def _followup_context(source_item_id: int, cwd: str, contexts: list[str] | None,
                       slack: bool | None, agent: str, critical: bool | None) -> dict:
     """What a task that continues a finished task inherits from it.

@@ -1666,7 +1666,8 @@ def reply(item_id: int, text: str) -> dict:
         if not run:
             return {"error": "no run for this item"}
     if not agent_running(run["tmux_key"], run["provider"]):
-        return {"error": f"no live {run['provider'].capitalize()} in the session; open the terminal"}
+        return {"error": f"no live {run['provider'].capitalize()} in the session; open the terminal",
+                "agent_down": True}
     if not tmux_send(run["tmux_key"], text):
         return {"error": "tmux session gone"}
     with db.tx() as c:
