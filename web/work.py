@@ -1,4 +1,5 @@
 import os
+import shlex
 
 from fastapi import APIRouter, Body, Request
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
@@ -11,6 +12,7 @@ from services import (work_artifacts, work_debrief, work_launch, work_peers,
                       work_store, work_tickets, work_worktree)
 from web.pages import _template
 from web.sandbox import policy_for
+from web.tickets import schedule_discuss_kill
 
 
 router = APIRouter()
@@ -256,7 +258,13 @@ def api_work_reply(item_id: int, body: dict):
     text = (body.get("text") or "").strip()
     if not text:
         return JSONResponse({"error": "empty reply"}, status_code=400)
-    result = work_store.reply(item_id, text)
+    try:
+        result = work_launch.reply(item_id, text)
+    except Exception as e:
+        log.emit("work_reply_failed",
+                 f"work item {item_id}: reply failed: {type(e).__name__}: {e}")
+        return JSONResponse(
+            {"error": f"the reply failed: {type(e).__name__}: {e}"}, status_code=500)
     if "error" in result:
         return JSONResponse(result, status_code=409)
     return result
@@ -484,6 +492,61 @@ def api_work_artifact_asset(artifact_id: int, name: str):
             {"error": f"asset path outside the artifact folder: {name}"},
             status_code=403)
     return _serve_artifact(artifact_id, asset, name)
+
+
+@router.get("/artifacts/{artifact_id}", response_class=HTMLResponse)
+def artifact_viewer_page(artifact_id: int):
+    return _fresh(_template("work_artifact.html"))
+
+
+@router.get("/api/work/artifacts/{artifact_id}")
+def api_work_artifact(artifact_id: int):
+    row = db.query_one(
+        "SELECT id, work_item_id, path, note FROM work_artifacts WHERE id = ?",
+        (artifact_id,))
+    if not row:
+        return JSONResponse({"error": "unknown artifact"}, status_code=404)
+    return row
+
+
+@router.post("/api/work/artifacts/{artifact_id}/claude/start")
+def api_artifact_claude_start(artifact_id: int):
+    row = db.query_one(
+        "SELECT a.path, a.note, a.work_item_id, i.objective FROM work_artifacts a "
+        "LEFT JOIN work_items i ON i.id = a.work_item_id WHERE a.id = ?",
+        (artifact_id,))
+    if not row:
+        return JSONResponse({"error": "unknown artifact"}, status_code=404)
+    real = os.path.realpath(row["path"])
+    if not os.path.isfile(real):
+        return JSONResponse({"error": f"file missing: {row['path']}"}, status_code=404)
+    if not any(real.startswith(root) for root in _artifact_roots(artifact_id)):
+        return JSONResponse(
+            {"error": f"artifact path outside the run's workspace: {row['path']}"},
+            status_code=403)
+    config = work_launch.personal_config()
+    if config is None:
+        return JSONResponse({"error": "personal instance not loaded"}, status_code=409)
+    key = f"artifact-{artifact_id}"
+    if not terminal.session_healthy(key)["agent_running"]:
+        context = (
+            f"The operator opened this session from the board to ask about one "
+            f"artifact of work item {row['work_item_id']}.\n\n"
+            f"Artifact: {real}\nNote: {row['note'] or ''}\n"
+            f"Objective of the work item: {row['objective'] or ''}\n\n"
+            "Read the artifact before you answer a question about it.")
+        ctx_path = terminal.launch_context_path(key, context)
+        try:
+            terminal.launch_pane_command(
+                key, os.path.dirname(real),
+                f"{terminal.claude_cmd(config)} --append-system-prompt "
+                f"\"$(cat {shlex.quote(ctx_path)})\"")
+        except RuntimeError as e:
+            log.emit("work_artifact_claude_failed",
+                     f"artifact {artifact_id}: {e}")
+            return JSONResponse({"error": str(e)}, status_code=500)
+    schedule_discuss_kill(key)
+    return {"status": "ok", "key": key, "path": real}
 
 
 @router.post("/api/work/items/{item_id}/debrief")

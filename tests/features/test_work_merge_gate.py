@@ -138,8 +138,31 @@ class TestMergePolicy:
         _projects(monkeypatch, acme=False)
         assert work_launch.merge_review_required(["acme"]) == ["acme"]
 
-    def test_a_project_with_no_config_holds_it(self, monkeypatch):
+    def test_a_project_with_no_config_holds_it(self, monkeypatch, tmp_path):
         _projects(monkeypatch)
+        monkeypatch.setattr(work_launch, "_CONFIG_DIR", str(tmp_path))
+        assert work_launch.merge_review_required(["clarivis"]) == ["clarivis"]
+
+    def test_frshty_with_no_config_merges(self, monkeypatch, tmp_path):
+        _projects(monkeypatch)
+        monkeypatch.setattr(work_launch, "_CONFIG_DIR", str(tmp_path))
+        assert work_launch.merge_review_required(["frshty"]) == []
+        assert work_launch.merge_review_required(["frshty", "clarivis"]) == ["clarivis"]
+
+    def test_a_config_keyed_frshty_still_decides(self, monkeypatch, tmp_path):
+        _projects(monkeypatch, frshty=False)
+        assert work_launch.merge_review_required(["frshty"]) == ["frshty"]
+        _projects(monkeypatch)
+        monkeypatch.setattr(work_launch, "_CONFIG_DIR", str(tmp_path))
+        (tmp_path / "local.toml").write_text('[job]\nkey = "frshty"\n[pr]\nauto_merge = false\n')
+        assert work_launch.merge_review_required(["frshty"]) == ["frshty"]
+
+    def test_an_unreadable_config_holds_frshty(self, monkeypatch, tmp_path):
+        _projects(monkeypatch)
+        monkeypatch.setattr(work_launch, "_CONFIG_DIR", str(tmp_path))
+        (tmp_path / "local.toml").write_text('[job\nkey = "frshty"\n')
+        assert work_launch.merge_review_required(["frshty"]) == ["frshty"]
+        monkeypatch.setattr(work_launch, "_CONFIG_DIR", str(tmp_path / "gone"))
         assert work_launch.merge_review_required(["frshty"]) == ["frshty"]
 
     def test_one_holding_project_holds_the_whole_task(self, monkeypatch):
