@@ -1012,7 +1012,7 @@ _discuss_timers: dict[str, threading.Timer] = {}
 _discuss_timers_lock = threading.Lock()
 
 
-def _schedule_discuss_kill(discuss_key: str) -> None:
+def schedule_discuss_kill(discuss_key: str) -> None:
     """Kill the discuss tmux session after DISCUSS_LIFETIME_SECONDS. Timer
     is started once per session lifetime — repeat starts don't reset the
     clock. Frshty restarts drop the timer (the session would then live
@@ -1059,13 +1059,13 @@ def api_start_discuss(key: str, cont: bool = False):
     discuss_key = f"{key}{DISCUSS_KEY_SUFFIX}"
     health = terminal.session_healthy(discuss_key)
     if health.get("alive") and health.get("agent_running"):
-        _schedule_discuss_kill(discuss_key)
+        schedule_discuss_kill(discuss_key)
         return {"status": "running", "discuss_key": discuss_key}
     if not health.get("agent_running"):
         base = terminal.claude_cmd(_config)
         terminal.launch_pane_command(
             discuss_key, str(ticket_dir), f"{base} --continue" if cont else base)
-    _schedule_discuss_kill(discuss_key)
+    schedule_discuss_kill(discuss_key)
     return {"status": "ok", "discuss_key": discuss_key}
 
 
