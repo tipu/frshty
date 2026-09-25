@@ -18,7 +18,8 @@ if [ -n "$(git -C "$CHECKOUT" diff --name-only --diff-filter=U)" ]; then
 fi
 
 git -C "$CHECKOUT" fetch origin main
-if ! git -C "$CHECKOUT" merge-tree --write-tree HEAD origin/main >/dev/null; then
+target="$(git -C "$CHECKOUT" rev-parse --verify origin/main^{commit})"
+if ! git -C "$CHECKOUT" merge-tree --write-tree HEAD "$target" >/dev/null; then
   echo "deploy: origin/main does not merge cleanly into $CHECKOUT; resolve it in a throwaway worktree" >&2
   exit 1
 fi
@@ -34,17 +35,17 @@ clobbered="$(awk -v RS='\0' '
     }
     for (c in changed) if (index(c, $0 "/") == 1) { print $0; next }
   }' \
-  <(git -C "$CHECKOUT" diff -z --name-only HEAD origin/main) \
+  <(git -C "$CHECKOUT" diff -z --name-only HEAD "$target") \
   <(git -C "$CHECKOUT" ls-files -z --others --ignored --exclude-standard))"
 if [ -n "$clobbered" ]; then
   echo "deploy: origin/main would overwrite untracked files in $CHECKOUT:" >&2
   echo "$clobbered" >&2
   exit 1
 fi
-if ! git -C "$CHECKOUT" merge-base --is-ancestor origin/main HEAD; then
-  git -C "$CHECKOUT" merge --no-edit origin/main
+if ! git -C "$CHECKOUT" merge-base --is-ancestor "$target" HEAD; then
+  git -C "$CHECKOUT" merge --no-edit "$target"
 fi
-git -C "$CHECKOUT" merge-base --is-ancestor origin/main HEAD
+git -C "$CHECKOUT" merge-base --is-ancestor "$target" HEAD
 
 before="$(systemctl --user show "$UNIT" -p ExecMainStartTimestampMonotonic --value)"
 systemctl --user restart "$UNIT"
