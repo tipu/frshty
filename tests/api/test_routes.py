@@ -415,7 +415,7 @@ class TestBlockedResumeEndpoint:
 
 
 class TestManualTransitionEnqueuesAdvance:
-    """A manual transition must enqueue advance_ticket.
+    """A manual transition must emit ticket_advance.
 
     Work chains forward in two ways only: a finished job emits ticket_advance
     (core/worker.py), or the poll dispatches the ticket (features.tickets.check).
@@ -424,14 +424,16 @@ class TestManualTransitionEnqueuesAdvance:
     that enqueues nothing therefore parks such a ticket for good. DEV-678 sat at
     proving for five days after a redo-proof for exactly this reason.
 
-    Each test uses its own ticket key because the jobs table is shared for the
+    Each test uses its own ticket key because the events table is shared for the
     whole test session.
     """
 
-    def _advance_jobs(self, key):
-        import core.queue as q
-        return [j for j in q.jobs_for_ticket("test", key)
-                if j["task"] == "advance_ticket"]
+    def _advance_events(self, key):
+        import core.db as db
+        rows = db.query_all(
+            "SELECT id, source, payload, dispatched_at FROM events"
+            " WHERE kind='ticket_advance' AND instance_key='test'", ())
+        return [r for r in rows if json.loads(r["payload"]).get("ticket_key") == key]
 
     def test_redo_proof_enqueues_advance(self, client, tmp_path):
         key, slug = "ADV-1", "ADV-1-s"
@@ -446,9 +448,9 @@ class TestManualTransitionEnqueuesAdvance:
         assert state.load("tickets")[key]["status"] == "proving"
         assert not (docs / "proof.md").exists()
         assert (docs / "proof.prev.md").exists()
-        jobs = self._advance_jobs(key)
-        assert len(jobs) == 1, "redo-proof must enqueue advance_ticket"
-        assert jobs[0]["status"] == "queued"
+        events = self._advance_events(key)
+        assert len(events) == 1, "redo-proof must emit ticket_advance"
+        assert events[0]["dispatched_at"] is None
 
     def test_status_override_enqueues_advance(self, client):
         key = "ADV-2"
@@ -457,9 +459,9 @@ class TestManualTransitionEnqueuesAdvance:
         resp = client.post(f"/api/tickets/{key}/status", json={"status": "pr_failed"})
 
         assert resp.status_code == 200, resp.text
-        jobs = self._advance_jobs(key)
-        assert len(jobs) == 1, "status override must enqueue advance_ticket"
-        assert jobs[0]["status"] == "queued"
+        events = self._advance_events(key)
+        assert len(events) == 1, "status override must emit ticket_advance"
+        assert events[0]["dispatched_at"] is None
 
     def test_rejected_redo_proof_enqueues_nothing(self, client, tmp_path):
         key, slug = "ADV-3", "ADV-3-s"
@@ -470,7 +472,7 @@ class TestManualTransitionEnqueuesAdvance:
 
         assert resp.status_code == 400, resp.text
         assert state.load("tickets")[key]["status"] == "new"
-        assert self._advance_jobs(key) == []
+        assert self._advance_events(key) == []
 
     def test_rejected_status_override_enqueues_nothing(self, client):
         key = "ADV-4"
@@ -479,7 +481,7 @@ class TestManualTransitionEnqueuesAdvance:
         resp = client.post(f"/api/tickets/{key}/status", json={"status": "in_review"})
 
         assert resp.status_code == 400, resp.text
-        assert self._advance_jobs(key) == []
+        assert self._advance_events(key) == []
 
     def test_submit_pr_enqueues_advance(self, client, tmp_path):
         from web import tickets as web_tickets
@@ -501,9 +503,9 @@ class TestManualTransitionEnqueuesAdvance:
 
         assert getattr(resp, "status_code", 200) == 200, getattr(resp, "body", resp)
         assert state.load("tickets")[key]["status"] == "in_review"
-        jobs = self._advance_jobs(key)
-        assert len(jobs) == 1, "submit-pr must enqueue advance_ticket"
-        assert jobs[0]["status"] == "queued"
+        events = self._advance_events(key)
+        assert len(events) == 1, "submit-pr must emit ticket_advance"
+        assert events[0]["dispatched_at"] is None
 
     def test_restart_from_pr_failed_enqueues_advance(self, client):
         key = "ADV-6"
@@ -514,8 +516,8 @@ class TestManualTransitionEnqueuesAdvance:
 
         assert resp.status_code == 200, resp.text
         assert state.load("tickets")[key]["status"] == "in_review"
-        jobs = self._advance_jobs(key)
-        assert len(jobs) == 1, "restart out of pr_failed must enqueue advance_ticket"
+        events = self._advance_events(key)
+        assert len(events) == 1, "restart out of pr_failed must emit ticket_advance"
 
     def test_restart_from_pr_failed_without_prs_enqueues_advance(self, client):
         key = "ADV-7"
@@ -525,7 +527,7 @@ class TestManualTransitionEnqueuesAdvance:
 
         assert resp.status_code == 200, resp.text
         assert state.load("tickets")[key]["status"] == "pr_ready"
-        assert len(self._advance_jobs(key)) == 1
+        assert len(self._advance_events(key)) == 1
 
     def test_restart_into_planning_enqueues_its_own_stage_only(self, client):
         import core.queue as q
@@ -547,8 +549,8 @@ class TestManualTransitionEnqueuesAdvance:
 
         assert resp.status_code == 200, resp.text
         assert state.load("tickets")[key]["status"] == "new"
-        jobs = self._advance_jobs(key)
-        assert len(jobs) == 1, "unignore must enqueue advance_ticket"
+        events = self._advance_events(key)
+        assert len(events) == 1, "unignore must emit ticket_advance"
 
     def test_approve_enqueues_advance(self, client):
         key = "ADV-10"
@@ -559,8 +561,8 @@ class TestManualTransitionEnqueuesAdvance:
 
         assert resp.status_code == 200, resp.text
         assert state.load("tickets")[key]["status"] == "new"
-        jobs = self._advance_jobs(key)
-        assert len(jobs) == 1, "approve must enqueue advance_ticket"
+        events = self._advance_events(key)
+        assert len(events) == 1, "approve must emit ticket_advance"
 
     def test_approve_prd_enqueues_setup_not_advance(self, client):
         import core.queue as q
@@ -587,8 +589,8 @@ class TestManualTransitionEnqueuesAdvance:
             resp = client.post(f"/api/tickets/{key}/start-dev")
 
         assert resp.status_code == 200, resp.text
-        jobs = self._advance_jobs(key)
-        assert len(jobs) == 1, "start-dev must enqueue advance_ticket"
+        events = self._advance_events(key)
+        assert len(events) == 1, "start-dev must emit ticket_advance"
 
 
 class TestSubmitPrScopeGate:

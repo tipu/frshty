@@ -986,6 +986,58 @@ def suspend_idle_done_sessions(now: float | None = None) -> list[int]:
     return killed
 
 
+def restore_open_sessions() -> list[int] | None:
+    """Resume the session of every open task whose tmux session is gone.
+
+    tmux holds its sessions in memory, so a reboot loses every pane. The
+    conversation lives on in the agent transcript, but until now only a
+    terminal connect resumed it, and a task waiting on the operator had no
+    live agent to take a board reply. A task still proposed, finished,
+    canceled or archived keeps no session on purpose and is skipped, and so is
+    a run whose agent never started, because relaunching that one is the
+    operator's call. A codex run that recorded no thread id is skipped too,
+    because its resume falls back to the latest thread in the directory,
+    which can belong to another task. A task whose session still exists is
+    left alone.
+
+    Returns None while the personal instance is not loaded yet, so the caller
+    can try again, and the ids of the resumed tasks otherwise."""
+    if personal_config() is None:
+        return None
+    rows = db.query_all(
+        "SELECT i.id AS item_id, r.id AS run_id, r.provider, r.agent_session_id "
+        "FROM work_items i "
+        "JOIN work_runs r ON r.id = (SELECT MAX(id) FROM work_runs WHERE work_item_id = i.id) "
+        f"WHERE i.archived_at IS NULL AND i.state NOT IN ({','.join('?' * len(work_store.CLOSED_STATES))}) "
+        "AND i.state != ? ORDER BY i.id",
+        (*work_store.CLOSED_STATES, work_store.PROPOSED_STATE))
+    restored: list[int] = []
+    for row in rows:
+        item_id = int(row["item_id"])
+        if terminal.session_healthy(f"work-{item_id}", agent=row["provider"])["alive"]:
+            continue
+        if not work_store.run_reached_an_agent(int(row["run_id"])):
+            continue
+        if row["provider"] != "claude" and not row["agent_session_id"]:
+            continue
+        try:
+            if resume_session(item_id):
+                restored.append(item_id)
+            else:
+                log.emit("work_resume_failed",
+                         f"work item {item_id}: its session was gone after a restart "
+                         "and could not be resumed")
+        except Exception as e:
+            log.emit("work_resume_failed",
+                     f"work item {item_id}: restoring its session failed: "
+                     f"{type(e).__name__}: {e}")
+    if restored:
+        log.emit("work_sessions_restored",
+                 f"resumed {len(restored)} open work session(s) whose tmux session "
+                 f"was gone: {restored}")
+    return restored
+
+
 def resume_session(item_id: int) -> bool:
     """Bring a suspended work session back to its old state: recreate the tmux
     session in the run's cwd and relaunch Claude with --resume on the item's
