@@ -55,7 +55,7 @@ def _run_review(config_path: str, full_repo: str, pr_id: int, url: str):
         links={"pr": url, "detail": f"{base_url}/reviews/{pr['repo']}/{pr_id}"},
         meta={"repo": pr["repo"], "pr_id": pr_id})
     pending_dir = review_config["_state_dir"] / "reviews" / pr["repo"] / f"pending-{pr_id}"
-    result = reviewer.review_pr(review_config, platform, pr)
+    result = reviewer.review_pr(review_config, platform, pr, reuse_posted=False)
     import shutil
     shutil.rmtree(pending_dir, ignore_errors=True)
     if result:

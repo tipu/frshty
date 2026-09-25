@@ -2,11 +2,12 @@ import base64
 import json
 import sys
 from datetime import datetime, timedelta, timezone
+from unittest.mock import MagicMock
 
 import pytest
 
 import core.db as db
-from services import work_store
+from services import work_launch, work_store
 
 
 def _mkitem(objective="do the thing", **kw):
@@ -1001,6 +1002,80 @@ class TestReply:
         work_store.apply_action(item_id, "done")
         out = work_store.reply(item_id, "hello")
         assert "reopen" in out["error"]
+
+
+class TestReplyRestartsAgent:
+    def _dead_item(self, monkeypatch, objective):
+        item_id = _mkitem(objective)
+        work_store.add_run(item_id, f"sid-rr-{item_id}", f"work-{item_id}", "/tmp")
+        db.execute("UPDATE work_items SET pending_question = ? WHERE id = ?",
+                   (json.dumps({"questions": [{"question": "which?"}]}), item_id))
+        monkeypatch.setattr(work_launch, "REPLY_SETTLE_SECONDS", 0)
+        monkeypatch.setattr(work_launch, "REPLY_READY_POLL_SECONDS", 0)
+        return item_id
+
+    def test_dead_session_is_resumed_then_answered(self, monkeypatch):
+        item_id = self._dead_item(monkeypatch, "reply restart")
+        live = {"up": False}
+
+        def resume(i):
+            live["up"] = True
+            return True
+
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": live["up"])
+        monkeypatch.setattr(work_launch, "resume_session", resume)
+        monkeypatch.setattr(work_launch.terminal, "session_healthy",
+                            lambda k, agent="claude": {"agent_running": live["up"]})
+        sender = MagicMock(return_value=True)
+        monkeypatch.setattr(work_store, "tmux_send", sender)
+        out = work_launch.reply(item_id, "Key scopes: Leave them blocked")
+        assert out == {"id": item_id, "action": "reply"}
+        sender.assert_called_once_with(f"work-{item_id}", "Key scopes: Leave them blocked")
+        item = db.query_one("SELECT state, pending_question FROM work_items WHERE id = ?",
+                            (item_id,))
+        assert item["state"] == "agent_working"
+        assert item["pending_question"] == ""
+
+    def test_failed_resume_reports_and_sends_nothing(self, monkeypatch):
+        item_id = self._dead_item(monkeypatch, "reply restart fails")
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": False)
+        monkeypatch.setattr(work_launch, "resume_session", lambda i: False)
+        sender = MagicMock(return_value=True)
+        monkeypatch.setattr(work_store, "tmux_send", sender)
+        out = work_launch.reply(item_id, "hello")
+        assert "could not be restarted" in out["error"]
+        sender.assert_not_called()
+
+    def test_agent_that_never_comes_up_reports(self, monkeypatch):
+        item_id = self._dead_item(monkeypatch, "reply restart no agent")
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": False)
+        monkeypatch.setattr(work_launch, "resume_session", lambda i: True)
+        monkeypatch.setattr(work_launch.terminal, "session_healthy",
+                            lambda k, agent="claude": {"agent_running": False})
+        sender = MagicMock(return_value=True)
+        monkeypatch.setattr(work_store, "tmux_send", sender)
+        out = work_launch.reply(item_id, "hello")
+        assert "did not come up" in out["error"]
+        sender.assert_not_called()
+
+    def test_run_in_a_foreign_pane_is_not_resumed(self, monkeypatch):
+        item_id = _mkitem("reply restart foreign pane")
+        work_store.add_run(item_id, f"sid-rf-{item_id}", f"today-fix-{item_id}", "/tmp")
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": False)
+        resume = MagicMock(return_value=True)
+        monkeypatch.setattr(work_launch, "resume_session", resume)
+        out = work_launch.reply(item_id, "hello")
+        assert "no live Claude" in out["error"]
+        resume.assert_not_called()
+
+    def test_finished_item_is_not_resumed(self, monkeypatch):
+        item_id = self._dead_item(monkeypatch, "reply restart done")
+        work_store.apply_action(item_id, "done")
+        resume = MagicMock(return_value=True)
+        monkeypatch.setattr(work_launch, "resume_session", resume)
+        out = work_launch.reply(item_id, "hello")
+        assert "reopen" in out["error"]
+        resume.assert_not_called()
 
 
 class TestSnoozedQuestion:
@@ -2170,6 +2245,75 @@ class TestSuspendResume:
         monkeypatch.setattr(terminal, "launch_agent", launcher)
         assert work_launch.resume_session(item_id) is True
         launcher.assert_not_called()
+
+    def _restore(self, monkeypatch, tmp_path, alive_keys=()):
+        import core.terminal as terminal
+        from services import work_launch
+        monkeypatch.setattr(work_launch, "personal_config",
+                            lambda: {"workspace": {"root": tmp_path}})
+        monkeypatch.setattr(terminal, "session_healthy",
+                            lambda k, agent="claude": {"alive": k in alive_keys,
+                                                       "agent_running": k in alive_keys})
+        resumed = []
+        monkeypatch.setattr(work_launch, "resume_session",
+                            lambda item_id: resumed.append(item_id) or True)
+        return work_launch.restore_open_sessions(), resumed
+
+    def test_restore_resumes_an_open_task_whose_session_is_gone(self, tmp_path, monkeypatch):
+        item_id = _mkitem("restore waiting item")
+        _mkrun(item_id, f"sid-restore-{item_id}", f"work-{item_id}", str(tmp_path))
+        db.execute("UPDATE work_items SET state = 'needs_you' WHERE id = ?", (item_id,))
+        out, resumed = self._restore(monkeypatch, tmp_path)
+        assert item_id in out
+        assert item_id in resumed
+
+    def test_restore_leaves_a_live_session_alone(self, tmp_path, monkeypatch):
+        item_id = _mkitem("restore live item")
+        _mkrun(item_id, f"sid-restore-live-{item_id}", f"work-{item_id}", str(tmp_path))
+        out, resumed = self._restore(monkeypatch, tmp_path, alive_keys=(f"work-{item_id}",))
+        assert item_id not in out
+        assert item_id not in resumed
+
+    def test_restore_skips_closed_archived_proposed_and_never_started(self, tmp_path, monkeypatch):
+        done = _mkitem("restore done item")
+        _mkrun(done, f"sid-restore-done-{done}", f"work-{done}", str(tmp_path))
+        work_store.apply_action(done, "done")
+        archived = _mkitem("restore archived item")
+        _mkrun(archived, f"sid-restore-arch-{archived}", f"work-{archived}", str(tmp_path))
+        db.execute("UPDATE work_items SET archived_at = ? WHERE id = ?",
+                   (datetime.now(timezone.utc).isoformat(), archived))
+        proposed = _mkitem("restore proposed item")
+        _mkrun(proposed, f"sid-restore-prop-{proposed}", f"work-{proposed}", str(tmp_path))
+        db.execute("UPDATE work_items SET state = ? WHERE id = ?",
+                   (work_store.PROPOSED_STATE, proposed))
+        codex = _mkitem("restore codex item")
+        _mkrun(codex, f"sid-restore-codex-{codex}", f"work-{codex}", str(tmp_path),
+               provider="codex")
+        never = _mkitem("restore never started item")
+        _mkrun(never, f"sid-restore-never-{never}", f"work-{never}", str(tmp_path),
+               agent_started=False)
+        out, resumed = self._restore(monkeypatch, tmp_path)
+        for item_id in (done, archived, proposed, codex, never):
+            assert item_id not in resumed
+        assert set(out) == set(resumed)
+
+    def test_restore_waits_for_the_personal_instance(self, monkeypatch):
+        from services import work_launch
+        monkeypatch.setattr(work_launch, "personal_config", lambda: None)
+        assert work_launch.restore_open_sessions() is None
+
+    def test_resumed_session_start_keeps_the_waiting_state(self):
+        item_id = _mkitem("resumed start item")
+        sid = f"sid-resumed-start-{item_id}"
+        work_store.add_run(item_id, sid, f"work-{item_id}", "/tmp")
+        work_store.record_event(sid, "Stop", {"message": "Claude is waiting for your input"})
+        work_store.record_event(sid, "SessionStart", {"source": "resume"})
+        row = db.query_one("SELECT i.state, r.status FROM work_items i JOIN work_runs r "
+                           "ON r.work_item_id = i.id WHERE i.id = ?", (item_id,))
+        assert (row["state"], row["status"]) == ("needs_you", "stopped")
+        work_store.record_event(sid, "SessionStart", {"source": "startup"})
+        assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                            (item_id,))["state"] == "agent_working"
 
 
 def _panel(question, body_lines, done=True):

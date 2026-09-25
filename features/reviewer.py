@@ -1,3 +1,5 @@
+import fcntl
+import hashlib
 import json
 import re
 import subprocess
@@ -16,7 +18,7 @@ from core.llm import READ_ONLY_TOOLS, WRITE_TOOLS, run_external_model
 from core.config import base_branch_for, get_repos
 import features.presentation as presentation
 from features.platforms import make_platform
-from services import review_store, work_launch
+from services import review_store, work_launch, work_store
 
 PERSONA_SPEC = (
     "You are a spec reviewer. Your single concern: does this diff solve what the ticket or PR description asks for?\n\n"
@@ -312,7 +314,40 @@ def _task_review_objective(config: dict, pr: dict, review_dir: Path, worktree,
     )
 
 
-def launch_task_review(config: dict, pr: dict, review_dir: Path, worktree) -> int | None:
+def _open_task_review(placeholder_path: Path, pr: dict, diff_sha: str,
+                      reuse_posted: bool) -> int | None:
+    """The work item of the task review still open on this same diff, or None.
+
+    A pipeline review that dies before it stores its result runs again from
+    the start, and a service restart kills every review in flight. Launching a
+    second task for a diff a live task is still reviewing takes the first
+    task's token, so the first task's POST is refused and it asks the operator
+    what to do. That task is reused instead, and a new diff or a task that is
+    no longer running still gets a fresh one.
+
+    With `reuse_posted`, a task that already posted its review of this same
+    diff is reused too, so an automatic rerun does not review the diff again.
+    A rerun the operator asks for passes False and gets a fresh task."""
+    if not diff_sha or not placeholder_path.exists():
+        return None
+    try:
+        opened = json.loads(placeholder_path.read_text())
+    except (OSError, ValueError):
+        return None
+    item_id = opened.get("item_id")
+    if (opened.get("diff_sha") != diff_sha
+            or opened.get("repo") != pr["repo"] or opened.get("pr_id") != pr["id"]
+            or not isinstance(item_id, int)):
+        return None
+    if opened.get("status") == "done":
+        return item_id if reuse_posted else None
+    if opened.get("status") != "reviewing":
+        return None
+    return item_id if work_store.is_running(item_id) else None
+
+
+def launch_task_review(config: dict, pr: dict, review_dir: Path, worktree,
+                       reuse_posted: bool = True) -> int | None:
     """Start a /tasks board task that reviews this pull request.
 
     Every review the /reviews pipeline starts also gets a board task, so the
@@ -331,11 +366,27 @@ def launch_task_review(config: dict, pr: dict, review_dir: Path, worktree) -> in
     cannot land on this one. A board that cannot start a task must not fail the
     review the pipeline is already running, so a failed launch logs and returns
     None."""
+    with open(Path(config["_state_dir"]) / "reviews" / ".task_launch.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _launch_task_review(config, pr, review_dir, worktree, reuse_posted)
+
+
+def _launch_task_review(config: dict, pr: dict, review_dir: Path, worktree,
+                        reuse_posted: bool) -> int | None:
     suffix = review_store.provider_suffix(TASK_REVIEW_PROVIDER)
+    diff_path = review_dir / "diff.txt"
+    diff_sha = hashlib.sha256(diff_path.read_bytes()).hexdigest() if diff_path.exists() else ""
+    kept = _open_task_review(review_dir / f"review{suffix}.json", pr, diff_sha, reuse_posted)
+    if kept is not None:
+        log.emit("review_task_kept",
+                 f"{pr['repo']}#{pr['id']}: /tasks review of this diff is already work item {kept}",
+                 links={"task": f"{config.get('_base_url', '')}/tasks/{kept}"},
+                 meta={"repo": pr["repo"], "pr_id": pr["id"], "item_id": kept})
+        return kept
     token = uuid.uuid4().hex
     placeholder = {"pr_id": pr["id"], "repo": pr["repo"], "pr_url": pr.get("url", ""),
                    "provider": TASK_REVIEW_PROVIDER, "verdict": "", "status": "reviewing",
-                   "token": token, "summary": "", "issues": []}
+                   "token": token, "diff_sha": diff_sha, "summary": "", "issues": []}
     result: dict = {}
     error = ""
     try:
@@ -345,6 +396,7 @@ def launch_task_review(config: dict, pr: dict, review_dir: Path, worktree) -> in
             brief=f"review {pr['repo']}#{pr['id']}")
         error = result.get("error") or ""
         if not error:
+            placeholder["item_id"] = result.get("item_id")
             with _TASK_REVIEW_LOCK:
                 (review_dir / f"review{suffix}.json").write_text(
                     json.dumps(placeholder, indent=2))
@@ -397,6 +449,8 @@ def store_task_review(config: dict, repo: str, pr_id: int, review: dict,
         if opened.get("status") != "reviewing" or not token or opened.get("token") != token:
             return None
         pr = {"id": pr_id, "repo": repo, "url": opened.get("pr_url", "")}
+        merged["diff_sha"] = opened.get("diff_sha", "")
+        merged["item_id"] = opened.get("item_id")
         _write_review_files(branch_dir, pr, merged, None, provider=TASK_REVIEW_PROVIDER)
     return merged
 
@@ -419,7 +473,7 @@ def check(config: dict):
 
 
 def review_pr(config: dict, platform, pr: dict, ticket_context: str = "",
-              prefetched_diff: str | None = None) -> dict | None:
+              prefetched_diff: str | None = None, reuse_posted: bool = True) -> dict | None:
     diff_text = prefetched_diff if prefetched_diff is not None else platform.get_pr_diff(pr["repo"], pr["id"])
     if not diff_text:
         return None
@@ -427,7 +481,7 @@ def review_pr(config: dict, platform, pr: dict, ticket_context: str = "",
     worktree = _ensure_review_worktree(config, pr)
     review_dir = _review_dir(config, pr)
     diff_path = _stage_diff(review_dir, diff_text)
-    launch_task_review(config, pr, review_dir, worktree)
+    launch_task_review(config, pr, review_dir, worktree, reuse_posted)
     conventions = _load_conventions(config, pr["repo"])
 
     prompts = {name: _build_persona_prompt(text, pr, diff_path,
@@ -1313,7 +1367,8 @@ def _reviewed_sibling_sections(config: dict, platform, ticket_key: str,
 
 
 def review_ticket(config: dict, ticket_key: str, prs: list[dict],
-                  diffs: dict[str, str] | None = None) -> dict[str, dict | None]:
+                  diffs: dict[str, str] | None = None,
+                  reuse_posted: bool = True) -> dict[str, dict | None]:
     """Single persona pass over the combined diffs of all the ticket's PRs.
     Returns {repo/id: per-PR merged review or None} and writes each PR's
     review artifacts, so the per-PR pages and comment queues work unchanged."""
@@ -1335,7 +1390,7 @@ def review_ticket(config: dict, ticket_key: str, prs: list[dict],
         conv = _load_conventions(config, pr["repo"])
         review_dir = _review_dir(config, pr)
         diff_path = _stage_diff(review_dir, diffs[key])
-        launch_task_review(config, pr, review_dir, wt)
+        launch_task_review(config, pr, review_dir, wt, reuse_posted)
         sec = [f"=== PR #{pr['id']} in repository '{pr['repo']}' (branch: {pr.get('branch', '')}) ==="]
         if wt:
             sec.append(f"worktree (read-only checkout): {wt}")
@@ -1444,13 +1499,14 @@ def review_ticket_prs(config: dict, ticket_key: str, prs: list[dict],
                 meta={"repo": pr["repo"], "pr_id": pr["id"], "ticket": ticket_key, "re_review": re_review})
             ticket_context = _ticket_context_for(config, pr, ticket_key, prs, diffs)
             results[pr_key] = review_pr(config, platform, pr, ticket_context=ticket_context,
-                                        prefetched_diff=diffs.get(pr_key, ""))
+                                        prefetched_diff=diffs.get(pr_key, ""),
+                                        reuse_posted=auto)
     else:
         log.emit("review_started",
             f"Reviewing ticket {ticket_key}: {len(prs)} PR(s) as one change",
             links={"detail": f"{base_url}/reviews/{prs[0]['repo']}/{prs[0]['id']}"},
             meta={"ticket": ticket_key, "prs": [f"{p['repo']}/{p['id']}" for p in prs]})
-        results = review_ticket(config, ticket_key, prs, diffs=diffs)
+        results = review_ticket(config, ticket_key, prs, diffs=diffs, reuse_posted=auto)
 
     for pr in prs:
         pr_key = f"{pr['repo']}/{pr['id']}"
