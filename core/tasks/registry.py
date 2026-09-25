@@ -28,6 +28,7 @@ class TaskResult:
     reason: str = ""
     artifacts: dict = field(default_factory=dict)
     next_events: list[dict] = field(default_factory=list)
+    success_status: str | None = field(default=None, kw_only=True)
 
 
 Precondition = Callable[[TaskContext], tuple[bool, str]]
@@ -62,18 +63,22 @@ def all_tasks() -> list[str]:
     return sorted(_REGISTRY.keys())
 
 
+def status_fields(target: str | None) -> dict:
+    """Co-fields a transition into target writes with the status."""
+    if target == "done":
+        from datetime import datetime, timezone
+        return {"done_at": datetime.now(timezone.utc).isoformat()}
+    return {}
+
+
 def _apply_status(ctx: TaskContext, target: str) -> TaskResult | None:
     """Apply target status via state.transition_ticket. Returns a failed
     TaskResult on invariant violation, None on success or if no-op."""
     if not ctx.ticket_key or not target:
         return None
     import core.state as state
-    fields: dict = {}
-    if target == "done":
-        from datetime import datetime, timezone
-        fields["done_at"] = datetime.now(timezone.utc).isoformat()
     try:
-        state.transition_ticket(ctx.ticket_key, target, **fields)
+        state.transition_ticket(ctx.ticket_key, target, **status_fields(target))
     except state.TicketStateError as e:
         return TaskResult("failed", f"transition to {target}: {e}")
     return None
@@ -139,7 +144,13 @@ def _release_gate_on_failure(ctx: TaskContext, result: TaskResult) -> TaskResult
     return result
 
 
-def run_task(ctx: TaskContext) -> TaskResult:
+def run_task(ctx: TaskContext, *, defer_success_status: bool = False) -> TaskResult:
+    """Run a task with its preconditions, postconditions and status hooks.
+
+    defer_success_status leaves the on_success_status transition unapplied
+    and returns it in result.success_status, so the caller can commit it
+    together with the job completion (worker.transition_ticket_and_emit).
+    """
     entry = _REGISTRY.get(ctx.task)
     if not entry:
         return TaskResult("failed", f"unknown task: {ctx.task}")
@@ -180,7 +191,10 @@ def run_task(ctx: TaskContext) -> TaskResult:
                               artifacts=result.artifacts, next_events=result.next_events))
     if on_success is not None:
         target = on_success(ctx, result) if callable(on_success) else on_success
-        if target:
+        if target and defer_success_status:
+            if ctx.ticket_key:
+                result.success_status = target
+        elif target:
             err = _apply_status(ctx, target)
             if err is not None:
                 return _release_gate_on_failure(ctx, TaskResult("failed", err.reason,

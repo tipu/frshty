@@ -3,6 +3,7 @@ frshty restart, and on the next start the worker pool reconciles 'running'
 jobs without blindly resetting them to 'queued' (which used to corrupt
 worktrees by replaying claude over partial commits).
 """
+import json
 import sys
 import types
 from datetime import datetime, timezone
@@ -78,6 +79,11 @@ def test_orphan_with_passing_postconditions_marks_done(fresh_db, tmp_path):
     state.use(instance)
     t = state.load_ticket(ticket_key)
     assert t and t["status"] == "reviewing"
+
+    advance = db.query_all(
+        "SELECT payload FROM events WHERE kind='ticket_advance' AND instance_key=?",
+        (instance,))
+    assert [json.loads(r["payload"]) for r in advance] == [{"ticket_key": ticket_key}]
 
 
 def test_orphan_with_failing_postconditions_marks_failed_not_requeued(fresh_db, tmp_path):
