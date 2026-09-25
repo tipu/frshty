@@ -588,6 +588,8 @@ def record_event(session_id: str, kind: str, payload: dict) -> bool:
     if transition is None:
         return False
     run_status, item_state, default_reason = transition
+    if kind == "SessionStart" and payload.get("source") == "resume":
+        run_status, item_state = None, None
     bg_pending = False
     if item_state == "needs_you" and is_idle_stop(kind, payload):
         transcript_path = payload.get("transcript_path") or ""
@@ -1433,6 +1435,12 @@ def resolve_transcript_path(run: dict) -> str:
     return path
 
 
+def is_running(item_id: int) -> bool:
+    """Whether this task still exists and is neither closed nor failed."""
+    row = db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))
+    return bool(row) and row["state"] not in CLOSED_STATES + ("failed_stale",)
+
+
 def item_detail(item_id: int) -> dict:
     item = db.query_one("SELECT * FROM work_items WHERE id = ?", (item_id,))
     if not item:
@@ -1666,7 +1674,8 @@ def reply(item_id: int, text: str) -> dict:
         if not run:
             return {"error": "no run for this item"}
     if not agent_running(run["tmux_key"], run["provider"]):
-        return {"error": f"no live {run['provider'].capitalize()} in the session; open the terminal"}
+        return {"error": f"no live {run['provider'].capitalize()} in the session; open the terminal",
+                "agent_down": True}
     if not tmux_send(run["tmux_key"], text):
         return {"error": "tmux session gone"}
     with db.tx() as c:
