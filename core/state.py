@@ -22,7 +22,7 @@ import json
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import core.db as db
 from core.ticket_status import TicketStatus as _TicketStatus
@@ -424,7 +424,8 @@ def _blocked_origin(key: str, current: dict) -> str | None:
     return row["prior_status"] if row else None
 
 
-def transition_ticket(key: str, new_status: str, *, reason: str = "", **fields) -> dict:
+def transition_ticket(key: str, new_status: str, *, reason: str = "",
+                      in_tx: Callable[[Any], None] | None = None, **fields) -> dict:
     """Atomically transition a ticket to new_status with optional co-field updates.
 
     Enforces the legal-transition graph via core.ticket_status.transition() and
@@ -467,7 +468,7 @@ def transition_ticket(key: str, new_status: str, *, reason: str = "", **fields) 
         if reason:
             merged["_transition_reason"] = reason
         return merged
-    result = update_ticket(key, _mutate)
+    result = update_ticket(key, _mutate, in_tx=in_tx)
     if result is None:
         raise TicketStateError(f"ticket {key}: vanished during transition")
     return result
@@ -505,11 +506,14 @@ def reset_ticket(key: str, *, target: str = "new", reason: str = "", **fields) -
     return result
 
 
-def update_ticket(key: str, mutate: Callable[[dict], dict | None]) -> dict | None:
+def update_ticket(key: str, mutate: Callable[[dict], dict | None], *,
+                  in_tx: Callable[[Any], None] | None = None) -> dict | None:
     """Transactional read-modify-write on a single ticket. Atomic against
     other update_ticket / save_ticket calls. Pass a mutator that takes the
     current dict (or {} if missing) and returns the new dict, or None to
-    delete. Returns the saved dict, or None if deleted/no-op."""
+    delete. Returns the saved dict, or None if deleted/no-op. in_tx, when
+    given, runs on the same connection after the ticket row is written, so
+    its writes commit or roll back together with the ticket."""
     _ensure_db()
     instance = _active_key()
     _migrate_kv_to_rows(instance)
@@ -553,6 +557,8 @@ def update_ticket(key: str, mutate: Callable[[dict], dict | None]) -> dict | Non
             instance, key, prior_status, new.get("status", "new"),
             current, new, reason=transition_reason, conn=c,
         )
+        if in_tx is not None:
+            in_tx(c)
         _maybe_fire_release_trigger(instance, key, new.get("status"), prior_status)
         return new
 
