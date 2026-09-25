@@ -159,7 +159,7 @@
             <div class="ln-artifact" v-for="a in thread.artifacts" :key="a.id">
               <div class="ln-artifact-icon">{{ ext(a.path) }}</div>
               <div style="min-width:0">
-                <a class="ln-artifact-name" :href="artifactUrl(a)" target="_blank" :title="a.path">{{ base(a.path) }}</a>
+                <a class="ln-artifact-name" :href="viewerUrl(a)" target="_blank" :title="a.path">{{ base(a.path) }}</a>
                 <div class="ln-artifact-meta">#{{ a.work_item_id }}<span v-if="a.note"> · {{ a.note }}</span></div>
               </div>
             </div>
@@ -252,8 +252,8 @@ frshtyApp({
     terminalWindow(id) {
       return window.frshtyTerminalWindow(id, this.peer);
     },
-    artifactUrl(a) {
-      return (this.peerBase || "") + "/api/work/artifact_file/" + a.id;
+    viewerUrl(a) {
+      return (this.peerBase || "") + "/artifacts/" + a.id;
     },
     async loadPeers() {
       if (!this.peer) return;
