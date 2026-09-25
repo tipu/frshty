@@ -195,3 +195,52 @@ class TestHookCommitGate:
                             "tool_input": {"command": command}})
         assert r.returncode == 0
         assert r.stdout.strip() == ""
+
+
+class TestTaskIdGate:
+    def _run(self, contexts):
+        item_id = work_store.create_item("task id commit", contexts=contexts)
+        sid = f"sid-taskid-{item_id}"
+        work_store.add_run(item_id, sid, f"work-{item_id}", "/tmp")
+        return item_id, sid
+
+    def test_denies_the_id_in_a_message_on_another_project(self):
+        item_id, sid = self._run("clarivis")
+        out = work_launch.gate_commit(sid, f'git commit -m "work item {item_id}: fix"', "/tmp")
+        assert out["decision"] == "deny"
+        assert str(item_id) in out["reason"]
+
+    def test_denies_the_id_in_a_heredoc_message(self):
+        item_id, sid = self._run("clarivis")
+        out = work_launch.gate_commit(
+            sid, _heredoc_commit(f"fix the loader\n\nRefs work-{item_id}"), "/tmp")
+        assert out["decision"] == "deny"
+
+    def test_denies_the_id_in_a_message_file(self, tmp_path):
+        item_id, sid = self._run("clarivis")
+        (tmp_path / "msg.txt").write_text(f"fix: thing for #{item_id}\n")
+        out = work_launch.gate_commit(sid, "git commit -F msg.txt", str(tmp_path))
+        assert out["decision"] == "deny"
+
+    def test_allows_the_id_on_frshty(self):
+        item_id, sid = self._run("frshty")
+        out = work_launch.gate_commit(sid, f'git commit -m "work item {item_id}: fix"', "/tmp")
+        assert out["decision"] == "allow"
+
+    def test_a_path_or_branch_beside_the_commit_is_not_message(self):
+        item_id, sid = self._run("clarivis")
+        out = work_launch.gate_commit(
+            sid, f'cd /tmp/work-{item_id}/app && git commit -am "fix the loader" '
+                 f'&& git push origin work-{item_id}-fix', "/tmp")
+        assert out["decision"] == "allow"
+
+    def test_denies_the_id_in_a_bundled_message(self):
+        item_id, sid = self._run("clarivis")
+        out = work_launch.gate_commit(sid, f'git commit -am"work-{item_id} fix"', "/tmp")
+        assert out["decision"] == "deny"
+
+    def test_denies_the_id_inside_a_shell_wrapper(self):
+        item_id, sid = self._run("clarivis")
+        out = work_launch.gate_commit(
+            sid, f"bash -c 'git commit -m \"work item {item_id}: fix\"'", "/tmp")
+        assert out["decision"] == "deny"
