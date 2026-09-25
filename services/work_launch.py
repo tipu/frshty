@@ -1,3 +1,4 @@
+import contextvars
 import json
 import os
 import re
@@ -1070,6 +1071,61 @@ def resume_session(item_id: int) -> bool:
     if never_started:
         start_kickoff(key, int(run["id"]), run["provider"])
     return True
+
+
+def reply(item_id: int, text: str) -> dict:
+    """Send the operator's answer, restarting the agent session when it is gone.
+
+    A task can wait on a question after its pane went away, and the answer is
+    the operator's way back into it. The restart and the wait for the agent to
+    come up take longer than a request to a peer may, so the answer is
+    delivered in the background once the agent is up, and a delivery that
+    fails is reported to the event feed."""
+    result = work_store.reply(item_id, text)
+    if result.get("code") != work_store.AGENT_GONE:
+        return result
+    try:
+        resumed = resume_session(item_id)
+    except Exception as e:
+        log.emit("work_resume_failed",
+                 f"work item {item_id}: restart failed: {type(e).__name__}: {e}")
+        return {"error": f"the agent session could not be restarted: {type(e).__name__}: {e}"}
+    if not resumed:
+        return {"error": "the agent session is gone and could not be restarted; "
+                         "open the terminal to see why"}
+    run = db.query_one(
+        "SELECT provider FROM work_runs WHERE work_item_id = ? ORDER BY id DESC LIMIT 1",
+        (item_id,))
+    threading.Thread(target=contextvars.copy_context().run,
+                     args=(_deliver_reply, item_id, f"work-{item_id}", run["provider"], text),
+                     daemon=True).start()
+    return {"id": item_id, "action": "reply", "resumed": True}
+
+
+def _deliver_reply(item_id: int, tmux_key: str, agent: str, text: str) -> None:
+    """Wait for a restarted agent to come up, then send it the operator's answer."""
+    try:
+        answered = _answer_codex_trust_prompt(tmux_key) if agent == "codex" else False
+        result = {"error": f"{agent} did not start in the pane"}
+        for _ in range(30):
+            time.sleep(3)
+            if not answered and terminal.answer_trust(tmux_key, agent):
+                answered = True
+                time.sleep(3)
+            if not terminal.session_healthy(tmux_key, agent=agent).get("agent_running"):
+                continue
+            time.sleep(4)
+            if not answered and terminal.answer_trust(tmux_key, agent):
+                answered = True
+                time.sleep(4)
+            result = work_store.reply(item_id, text)
+            break
+    except Exception as e:
+        result = {"error": f"{type(e).__name__}: {e}"}
+    if "error" in result:
+        log.emit("work_reply_failed",
+                 f"work item {item_id}: the answer was not delivered after the "
+                 f"session restart: {result['error']}")
 
 
 def _followup_context(source_item_id: int, cwd: str, contexts: list[str] | None,
