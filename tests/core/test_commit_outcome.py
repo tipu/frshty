@@ -73,6 +73,53 @@ class TestOutcomeShape:
         assert log.strip() == ""
         assert out.after_head == out.before_head
 
+    def test_a_native_hook_rejection_is_a_hook_failure(self, tmp_path):
+        """A husky hook runs inside git commit. DEV-755 blocked as a git failure
+        on type errors in a test the agent had just written."""
+        r = _repo(tmp_path, config=False)
+        hook = r / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\necho \"a.test.ts(3,4): error TS2322: Type 'x' is not "
+                        "assignable to type 'y'.\" >&2\nexit 2\n")
+        hook.chmod(0o755)
+        out = g.commit_outcome(r, message="m")
+        assert out.status == "hook_failed"
+        assert out.phase == "native_hook"
+        assert "TS2322" in out.output
+        assert out.after_head == out.before_head
+        assert g.triage_commit_failure(out.status, out.output) == "ambiguous"
+        assert ticket_tasks._is_repairable(out.output)
+
+    def test_a_native_hook_that_fixes_files_is_a_hook_failure(self, tmp_path):
+        """Such a hook passes the second run, because the first one fixed the file."""
+        r = _repo(tmp_path, config=False)
+        hook = r / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\ngrep -q 'x = 1 ' a.py && exit 0\n"
+                        "printf 'x = 1 \\n' > a.py\necho 'files were modified' >&2\nexit 1\n")
+        hook.chmod(0o755)
+        out = g.commit_outcome(r, message="m")
+        assert out.status == "hook_failed"
+        assert out.phase == "native_hook"
+
+    def test_a_native_hook_that_stages_its_fix_is_a_hook_failure(self, tmp_path):
+        r = _repo(tmp_path, config=False)
+        hook = r / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\ngrep -q 'x = 1 ' a.py && exit 0\n"
+                        "printf 'x = 1 \\n' > a.py\ngit add a.py\nexit 1\n")
+        hook.chmod(0o755)
+        out = g.commit_outcome(r, message="m")
+        assert out.status == "hook_failed"
+        assert out.phase == "native_hook"
+
+    def test_a_git_failure_with_a_passing_native_hook_stays_git(self, tmp_path):
+        r = _repo(tmp_path, config=False)
+        subprocess.run(["git", "-C", str(r), "commit", "-qm", "first"], check=True)
+        hook = r / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 0\n")
+        hook.chmod(0o755)
+        out = g.commit_outcome(r, message="m")
+        assert out.status == "git_failed"
+        assert out.phase == "git_commit"
+
 
 class TestDeterministicTriage:
     def test_missing_runner_is_environment(self):
