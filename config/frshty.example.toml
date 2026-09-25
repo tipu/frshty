@@ -1,0 +1,42 @@
+# The frshty instance: tasks on the frshty repository run here, in a
+# container of their own. Copy to config/frshty.toml and run
+#   scripts/instance.py build
+#   scripts/instance.py up config/frshty.toml
+
+[job]
+key = "frshty"
+platform = "github"
+ticket_system = "linear"
+port = 7131
+
+[github]
+repo = "you/frshty"
+account = "you"
+
+[workspace]
+root = "/path/to/frshty-parent"
+repos = ["frshty"]
+
+[pr]
+auto_pr = false
+auto_merge = false
+
+[features]
+tickets = false
+review_prs = false
+slack = false
+timesheet = false
+billing = false
+presentations = false
+correspondence = false
+
+[prd]
+enabled = false
+
+[pm_agent]
+enabled = false
+
+[container]
+port = 7131
+workers = 3
+llm = 9

@@ -9,6 +9,7 @@ dependencies = [
     "watchfiles>=1.1.1",
     "mcp",
     "playwright",
+    "websockets",
 ]
 
 [tool.pytest.ini_options]

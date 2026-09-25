@@ -37,6 +37,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from core.state import active_instance_key
+from core.paths import frshty_root
 
 _REQUEST_START_TIMES: dict[int, float] = {}
 
@@ -77,7 +78,7 @@ def _log_path(today: str | None = None) -> Path | None:
 	instance = active_instance_key()
 	if not instance:
 		return None
-	logs_dir = Path.home() / ".frshty" / instance / "logs"
+	logs_dir = frshty_root() / instance / "logs"
 	logs_dir.mkdir(parents=True, exist_ok=True)
 	return logs_dir / f"external_calls.{today or _today_str()}.jsonl"
 
@@ -122,7 +123,7 @@ def _append(record: dict[str, Any]) -> None:
 	if not instance:
 		return
 	today = _today_str()
-	logs_dir = Path.home() / ".frshty" / instance / "logs"
+	logs_dir = frshty_root() / instance / "logs"
 	try:
 		logs_dir.mkdir(parents=True, exist_ok=True)
 		_maybe_prune(instance, logs_dir, today)
