@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Artifact — frshty</title>
+<script src="/static/vendor/xterm.js"></script>
+<link rel="stylesheet" href="/static/vendor/xterm.css">
+<script src="/static/vendor/xterm-addon-fit.js"></script>
+<script src="/static/vendor/xterm-addon-web-links.js"></script>
+<style>
+html, body { margin: 0; height: 100%; background: #0a0a0f; }
+body { display: flex; flex-direction: column; font: 12px/1 system-ui, sans-serif; color: #777; }
+.bar { flex: none; box-sizing: border-box; height: 34px; display: flex; align-items: center; gap: 12px;
+       padding: 0 14px; background: #0d0d13; }
+#top { border-bottom: 1px solid #2a2a35; }
+#bottom { border-top: 1px solid #2a2a35; }
+.bar a { color: #93c5fd; text-decoration: none; white-space: nowrap; }
+.bar a:hover { text-decoration: underline; }
+#path { color: #d5d5dc; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#main { flex: 1; min-height: 0; display: flex; flex-direction: row; }
+#frame { flex: 1; min-width: 0; height: 100%; border: 0; background: #fff; }
+#toggle { background: #1e1e2e; color: #d5d5dc; border: 1px solid #3a3a48; border-radius: 4px;
+          padding: 5px 10px; font: inherit; cursor: pointer; }
+#toggle:hover { background: #2a2a3c; }
+#status { white-space: nowrap; }
+#panel { flex: none; width: 50%; display: none; padding: 6px; box-sizing: border-box; background: #0a0a0f;
+         border-left: 1px solid #2a2a35; }
+#panel.open { display: block; }
+#term { height: 100%; }
+</style>
+<script src="/static/frshty-usage.js"></script>
+</head>
+<body>
+<div id="top" class="bar">
+  <a id="back" href="/tasks">← tasks</a>
+  <a id="raw" target="_blank">open raw</a>
+  <span id="path"></span>
+</div>
+<div id="main">
+  <iframe id="frame"></iframe>
+  <div id="panel"><div id="term"></div></div>
+</div>
+<div id="bottom" class="bar">
+  <button id="toggle" type="button">Ask Claude about this artifact</button>
+  <span id="status"></span>
+</div>
+<script>
+const id = location.pathname.split("/")[2];
+const fileUrl = "/api/work/artifact_file/" + id;
+document.getElementById("frame").src = fileUrl;
+document.getElementById("raw").href = fileUrl;
+document.title = document.title + " #" + id;
+const statusEl = document.getElementById("status");
+const panel = document.getElementById("panel");
+const toggle = document.getElementById("toggle");
+let term = null, fit = null, ws = null, delay = 0;
+
+function sendSize() {
+  if (ws && ws.readyState === WebSocket.OPEN && term) {
+    ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+  }
+}
+
+function connect() {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  ws = new WebSocket(`${proto}//${location.host}/ws/terminal/artifact-${id}`);
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => { delay = 0; statusEl.textContent = "connected"; fit.fit(); sendSize(); };
+  ws.onmessage = (e) => term.write(e.data instanceof ArrayBuffer ? new Uint8Array(e.data) : e.data);
+  ws.onclose = (e) => {
+    if (e.code === 1008) {
+      term.write("\r\n\x1b[31m[terminal unavailable]\x1b[0m\r\n");
+      statusEl.textContent = "unavailable";
+      return;
+    }
+    delay = Math.min(delay ? delay * 2 : 500, 8000);
+    statusEl.textContent = `reconnecting in ${delay}ms…`;
+    setTimeout(() => { term.reset(); connect(); }, delay);
+  };
+}
+
+async function start() {
+  statusEl.textContent = "starting claude…";
+  try {
+    const resp = await fetch(`/api/work/artifacts/${id}/claude/start`, { method: "POST" });
+    const body = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      statusEl.textContent = "error: " + (body.error || resp.statusText);
+      return false;
+    }
+  } catch (e) {
+    statusEl.textContent = "error: " + (e.message || String(e));
+    return false;
+  }
+  term = new Terminal({
+    cursorBlink: true, fontSize: 14,
+    fontFamily: "'JetBrains Mono', 'Fira Code', Menlo, monospace",
+    theme: { background: "#0a0a0f", foreground: "#e2e8f0", cursor: "#e2e8f0", selectionBackground: "#334155" },
+  });
+  fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.loadAddon(new WebLinksAddon.WebLinksAddon());
+  term.open(document.getElementById("term"));
+  fit.fit();
+  term.onData((d) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(d); });
+  new ResizeObserver(() => { if (panel.classList.contains("open")) { fit.fit(); sendSize(); } })
+    .observe(document.getElementById("term"));
+  connect();
+  return true;
+}
+
+toggle.addEventListener("click", async () => {
+  if (panel.classList.contains("open")) {
+    panel.classList.remove("open");
+    toggle.textContent = "Ask Claude about this artifact";
+    return;
+  }
+  if (!term && !(await start())) return;
+  panel.classList.add("open");
+  toggle.textContent = "Hide Claude";
+  fit.fit();
+  sendSize();
+  term.focus();
+});
+
+fetch("/api/work/artifacts/" + id)
+  .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+  .then((a) => {
+    document.getElementById("path").textContent = a.path + (a.note ? " — " + a.note : "");
+    const back = document.getElementById("back");
+    back.href = "/tasks/" + a.work_item_id;
+    back.textContent = "← task #" + a.work_item_id;
+  })
+  .catch((e) => {
+    document.getElementById("path").textContent = "could not read artifact #" + id + ": " + (e.message || String(e));
+  });
+</script>
+</body>
+</html>
