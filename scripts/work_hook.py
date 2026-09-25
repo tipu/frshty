@@ -351,7 +351,7 @@ def main() -> int:
                 if gate["decision"] == "allow" and _mentions(command, "push"):
                     gate = work_launch.gate_push(session_id, command, cwd)
                 if gate["decision"] == "allow" and _mentions(command, "merge"):
-                    gate = work_launch.gate_merge(session_id, command)
+                    gate = work_launch.gate_merge(session_id, command, cwd)
                 if gate["decision"] == "deny":
                     print(json.dumps({
                         "hookSpecificOutput": {

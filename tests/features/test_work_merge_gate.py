@@ -271,7 +271,7 @@ class TestMergeGate:
     def test_a_git_merge_is_not_gated(self, monkeypatch):
         _projects(monkeypatch, acme=False)
         item_id, sid = _mkrun("rebase onto main", contexts="acme")
-        out = work_launch.gate_merge(sid, "git merge origin/main --no-edit")
+        out = work_launch.gate_merge(sid, 'git merge origin/main -m "Merge main"')
         assert out["decision"] == "allow"
         assert _gate_events(item_id) == []
 
@@ -329,3 +329,73 @@ class TestOperatorMergeApproval:
     def test_the_slack_archive_is_not_a_project(self):
         assert work_launch.merge_approval_required(
             f"frshty,{work_launch.SLACK_LABEL}") is False
+
+
+class TestTaskIdRule:
+    def test_a_frshty_task_may_name_its_id(self):
+        assert work_launch._task_id_rule(9993, ["frshty"]) == ""
+
+    def test_any_other_project_keeps_the_id_out(self):
+        rule = work_launch._task_id_rule(9993, ["clarivis"])
+        assert "Never write the work item id 9993" in rule
+        assert "work-9993" in rule
+
+    def test_one_other_project_brings_the_rule_back(self):
+        assert work_launch._task_id_rule(9993, "frshty,clarivis") != ""
+
+    def test_a_task_with_no_project_keeps_the_id_out(self):
+        assert work_launch._task_id_rule(9993, "") != ""
+
+    def test_the_slack_label_is_not_a_project(self):
+        assert work_launch._task_id_rule(9993, f"frshty,{work_launch.SLACK_LABEL}") == ""
+
+
+class TestLocalMergeTaskId:
+    def test_a_merge_with_the_default_message_is_denied(self):
+        item_id, sid = _mkrun("merge main in", contexts="clarivis")
+        out = work_launch.gate_merge(sid, "git merge origin/main --no-edit")
+        assert out["decision"] == "deny"
+        assert str(item_id) in out["reason"]
+
+    def test_a_merge_message_with_the_id_is_denied(self):
+        item_id, sid = _mkrun("merge main in", contexts="clarivis")
+        out = work_launch.gate_merge(sid, f'git merge origin/main -m "Merge main into work-{item_id}-x"')
+        assert out["decision"] == "deny"
+
+    def test_a_merge_with_its_own_message_is_allowed(self):
+        item_id, sid = _mkrun("merge main in", contexts="clarivis")
+        out = work_launch.gate_merge(sid, 'git merge origin/main -m "Merge main"')
+        assert out["decision"] == "allow"
+
+    def test_a_merge_that_makes_no_commit_is_allowed(self):
+        item_id, sid = _mkrun("merge main in", contexts="clarivis")
+        assert work_launch.gate_merge(sid, "git merge --abort")["decision"] == "allow"
+        assert work_launch.gate_merge(sid, "git merge --ff-only origin/main")["decision"] == "allow"
+
+    def test_a_frshty_merge_keeps_its_default_message(self):
+        item_id, sid = _mkrun("merge main in", contexts="frshty")
+        out = work_launch.gate_merge(sid, "git merge origin/main --no-edit")
+        assert out["decision"] == "allow"
+
+
+class TestPrMergeTaskId:
+    def test_a_merge_commit_with_the_default_subject_is_denied(self, monkeypatch):
+        _projects(monkeypatch, acme=True)
+        item_id, sid = _mkrun("ship it", contexts="acme")
+        out = work_launch.gate_merge(sid, "gh pr merge 42 --merge")
+        assert out["decision"] == "deny"
+        assert str(item_id) in out["reason"]
+        assert work_launch.gate_merge(sid, "gh pr merge 42 -m")["decision"] == "deny"
+
+    def test_a_subject_with_the_id_is_denied(self, monkeypatch):
+        _projects(monkeypatch, acme=True)
+        item_id, sid = _mkrun("ship it", contexts="acme")
+        out = work_launch.gate_merge(sid, f'gh pr merge 42 --merge --subject "Merge work-{item_id}"')
+        assert out["decision"] == "deny"
+
+    def test_a_clean_subject_or_a_squash_is_allowed(self, monkeypatch):
+        _projects(monkeypatch, acme=True)
+        item_id, sid = _mkrun("ship it", contexts="acme")
+        assert work_launch.gate_merge(
+            sid, 'gh pr merge 42 --merge --subject "Fix the loader"')["decision"] == "allow"
+        assert work_launch.gate_merge(sid, "gh pr merge 42 --squash")["decision"] == "allow"

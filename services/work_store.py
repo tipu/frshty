@@ -123,7 +123,7 @@ def delivery_rule(review_projects: list[str] | None = None) -> str:
         left="uncommitted or unpushed")
 
 
-def continue_prompt(contexts: str = "") -> str:
+def continue_prompt(contexts: str = "", item_id: int = 0) -> str:
     """The autocontinue message, carrying this task's correspondence and
     delivery rules.
 
@@ -138,7 +138,8 @@ def continue_prompt(contexts: str = "") -> str:
     return CONTINUE_PROMPT_TEMPLATE.format(
         delivery=delivery_rule(work_launch.merge_review_required(contexts)),
         correspondence=work_launch._correspondence_rule(
-            work_launch.personal_config() or {}))
+            work_launch.personal_config() or {})
+        + (work_launch._task_id_rule(item_id, contexts) if item_id else ""))
 
 
 _OPERATOR_ASK_RE = re.compile(
@@ -1628,7 +1629,7 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
                          f"the continuation budget of {item['continue_cap']} is spent; "
                          "an operator reply or a reopen gives a new one", now)
             return "capped"
-    sent = tmux_send(run["tmux_key"], continue_prompt(contexts))
+    sent = tmux_send(run["tmux_key"], continue_prompt(contexts, run["work_item_id"]))
     now = _now()
     with db.tx() as c:
         current = c.execute("SELECT state FROM work_items WHERE id = ?",
