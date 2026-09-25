@@ -57,7 +57,7 @@
         if (this.busy) return;
         if (!this.manual) {
           this.busy = true;
-          this.$emit("answer", this.compose({ 0: [label] }));
+          this.$emit("answer", this.compose({ 0: [label] }), ok => { if (!ok) this.busy = false; });
           return;
         }
         const sel = (this.sel[qi] || []).slice();
@@ -78,8 +78,10 @@
       send() {
         if (!this.ready || this.busy) return;
         this.busy = true;
-        this.$emit("answer", this.compose(this.sel));
-        this.sel = {};
+        this.$emit("answer", this.compose(this.sel), ok => {
+          if (ok) this.sel = {};
+          else this.busy = false;
+        });
       },
     },
     template: `

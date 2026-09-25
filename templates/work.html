@@ -231,7 +231,7 @@
             Follow-up launched as
             <a class="ln-link" :href="followupHref(it)">#{{ fupLaunched[rowKey(it)] }}</a>.
           </div>
-          <work-question v-if="g === 'needs_you' || it.pending_question" :item="it" @answer="answer(it, $event)"></work-question>
+          <work-question v-if="g === 'needs_you' || it.pending_question" :item="it" @answer="(text, done) => answer(it, text).then(done)"></work-question>
           <form style="margin-top:8px" v-if="g === 'needs_you' || it.pending_question" @submit.prevent="reply(it)">
             <input class="wintake" v-model="replyText[rowKey(it)]"
                    :placeholder="it.pending_question ? 'Other — type your own answer…' : 'Answer and resume…'" />
@@ -715,17 +715,24 @@ frshtyApp({
       await this.answer(it, (this.replyText[this.rowKey(it)] || "").trim());
     },
     async answer(it, text) {
-      if (!text) return;
+      if (!text) return false;
       try {
         const r = await fetch(this.apiUrl(it.peer, `/api/work/items/${it.id}/reply`), {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text }),
         });
-        if (!r.ok) { const d = await r.json(); this.connError = d.error || ("reply failed HTTP " + r.status); return; }
-        this.replyText[this.rowKey(it)] = ""; await this.refresh();
+        if (!r.ok) {
+          const d = await r.json().catch(() => ({}));
+          this.connError = d.error || ("reply failed HTTP " + r.status);
+          return false;
+        }
+        this.replyText[this.rowKey(it)] = "";
       } catch (e) {
         this.connError = "reply failed: " + e.message;
+        return false;
       }
+      await this.refresh();
+      return true;
     },
     setFupBox(key, el) {
       if (el) this._fupBoxes[key] = el;
