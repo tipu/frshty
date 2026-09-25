@@ -196,6 +196,97 @@ class TestAPendingTaskReviewIsFindable:
         assert launch.call_args.kwargs["no_worktree"] is True
 
 
+class TestARerunOfTheSameDiffKeepsTheOpenTask:
+    """A service restart kills every pipeline review in flight, and the next
+    poll runs it again from the start. Each run used to launch another board
+    task and take the token of the task before it, so every earlier task had
+    its POST refused and asked the operator what to do."""
+
+    def _launch_twice(self, tmp_path, running=True, second_diff="d\n"):
+        review_dir = _review_dir(tmp_path)
+        ids = iter([1, 2])
+        with patch.object(reviewer.work_launch, "launch",
+                          side_effect=lambda *a, **k: {"item_id": next(ids)}) as launch, \
+             patch.object(reviewer.work_store, "is_running", return_value=running), \
+             patch.object(reviewer, "log"):
+            (review_dir / "diff.txt").write_text("d\n")
+            first = reviewer.launch_task_review(_cfg(tmp_path), _pr(), review_dir, None)
+            token = _token(tmp_path)
+            (review_dir / "diff.txt").write_text(second_diff)
+            second = reviewer.launch_task_review(_cfg(tmp_path), _pr(), review_dir, None)
+        return first, second, token, launch
+
+    def test_the_running_task_is_reused(self, tmp_path):
+        first, second, token, launch = self._launch_twice(tmp_path)
+        assert (first, second) == (1, 1)
+        assert launch.call_count == 1
+        assert _token(tmp_path) == token
+
+    def test_the_running_task_can_still_post(self, tmp_path):
+        _first, _second, token, _launch = self._launch_twice(tmp_path)
+        assert reviewer.store_task_review(_cfg(tmp_path), "raven", 4536,
+                                          {"issues": [_finding()]}, token) is not None
+
+    def test_a_task_that_is_no_longer_running_is_replaced(self, tmp_path):
+        first, second, token, launch = self._launch_twice(tmp_path, running=False)
+        assert (first, second) == (1, 2)
+        assert _token(tmp_path) != token
+
+    def test_a_new_diff_gets_a_new_task(self, tmp_path):
+        first, second, token, launch = self._launch_twice(tmp_path, second_diff="e\n")
+        assert (first, second) == (1, 2)
+        assert _token(tmp_path) != token
+
+    def test_another_pull_request_with_the_same_diff_gets_its_own_task(self, tmp_path):
+        """Branch slugs collide, so two pull requests can share a directory."""
+        review_dir = _review_dir(tmp_path)
+        (review_dir / "diff.txt").write_text("d\n")
+        with patch.object(reviewer.work_launch, "launch",
+                          side_effect=[{"item_id": 1}, {"item_id": 2}]), \
+             patch.object(reviewer.work_store, "is_running", return_value=True), \
+             patch.object(reviewer, "log"):
+            reviewer.launch_task_review(_cfg(tmp_path), _pr(), review_dir, None)
+            other = {**_pr(), "id": 4537}
+            assert reviewer.launch_task_review(_cfg(tmp_path), other, review_dir, None) == 2
+
+    def test_two_reruns_at_once_launch_one_task(self, tmp_path):
+        review_dir = _review_dir(tmp_path)
+        (review_dir / "diff.txt").write_text("d\n")
+        gate = threading.Barrier(2)
+        ids = iter([1, 2])
+
+        def slow_launch(*_args, **_kwargs):
+            time.sleep(0.05)
+            return {"item_id": next(ids)}
+
+        def run():
+            gate.wait()
+            reviewer.launch_task_review(_cfg(tmp_path), _pr(), review_dir, None)
+
+        with patch.object(reviewer.work_launch, "launch", side_effect=slow_launch) as launch, \
+             patch.object(reviewer.work_store, "is_running", return_value=True), \
+             patch.object(reviewer, "log"):
+            threads = [threading.Thread(target=run) for _ in range(2)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        assert launch.call_count == 1
+
+    def test_a_stored_review_is_not_reused(self, tmp_path):
+        review_dir = _review_dir(tmp_path)
+        (review_dir / "diff.txt").write_text("d\n")
+        with patch.object(reviewer.work_launch, "launch", return_value={"item_id": 1}), \
+             patch.object(reviewer, "log"):
+            reviewer.launch_task_review(_cfg(tmp_path), _pr(), review_dir, None)
+        reviewer.store_task_review(_cfg(tmp_path), "raven", 4536,
+                                   {"issues": [_finding()]}, _token(tmp_path))
+        with patch.object(reviewer.work_launch, "launch", return_value={"item_id": 2}), \
+             patch.object(reviewer.work_store, "is_running", return_value=True), \
+             patch.object(reviewer, "log"):
+            assert reviewer.launch_task_review(_cfg(tmp_path), _pr(), review_dir, None) == 2
+
+
 class TestTheObjectiveCarriesTheArm:
     def _objective(self, tmp_path, worktree=None):
         return reviewer._task_review_objective(_cfg(tmp_path), _pr(),
@@ -277,11 +368,16 @@ class TestStoringWhatTheTaskFound:
     def test_a_rerun_shuts_out_the_task_the_previous_run_started(self, tmp_path):
         """The stale task would otherwise file findings it made against the
         previous revision's diff against the one on the page now."""
+        review_dir = _review_dir(tmp_path)
         with patch.object(reviewer.work_launch, "launch",
-                          return_value={"item_id": 1}), patch.object(reviewer, "log"):
-            reviewer.launch_task_review(_cfg(tmp_path), _pr(), _review_dir(tmp_path), None)
+                          return_value={"item_id": 1}), \
+             patch.object(reviewer.work_store, "is_running", return_value=True), \
+             patch.object(reviewer, "log"):
+            (review_dir / "diff.txt").write_text("the previous revision\n")
+            reviewer.launch_task_review(_cfg(tmp_path), _pr(), review_dir, None)
             stale = _token(tmp_path)
-            reviewer.launch_task_review(_cfg(tmp_path), _pr(), _review_dir(tmp_path), None)
+            (review_dir / "diff.txt").write_text("the revision on the page now\n")
+            reviewer.launch_task_review(_cfg(tmp_path), _pr(), review_dir, None)
         assert _token(tmp_path) != stale
         assert self._store(tmp_path, {"issues": [_finding()]}, token=stale) is None
         assert self._store(tmp_path, {"issues": [_finding()]}) is not None
