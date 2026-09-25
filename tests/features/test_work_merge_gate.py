@@ -157,6 +157,14 @@ class TestMergePolicy:
         (tmp_path / "local.toml").write_text('[job]\nkey = "frshty"\n[pr]\nauto_merge = false\n')
         assert work_launch.merge_review_required(["frshty"]) == ["frshty"]
 
+    def test_an_unreadable_config_holds_frshty(self, monkeypatch, tmp_path):
+        _projects(monkeypatch)
+        monkeypatch.setattr(work_launch, "_CONFIG_DIR", str(tmp_path))
+        (tmp_path / "local.toml").write_text('[job\nkey = "frshty"\n')
+        assert work_launch.merge_review_required(["frshty"]) == ["frshty"]
+        monkeypatch.setattr(work_launch, "_CONFIG_DIR", str(tmp_path / "gone"))
+        assert work_launch.merge_review_required(["frshty"]) == ["frshty"]
+
     def test_one_holding_project_holds_the_whole_task(self, monkeypatch):
         _projects(monkeypatch, bh=True, clarivis=False)
         assert work_launch.merge_review_required(["bh", "clarivis"]) == ["clarivis"]
