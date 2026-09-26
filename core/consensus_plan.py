@@ -297,6 +297,12 @@ def run_consensus_plan(config: dict, ticket_dir: Path, slug: str, *,
         explainer_fut = pool.submit(_write_explainer, ticket_dir, patch,
                                     EXPLAINER_TIMEOUT)
         manifest_ok = manifest_fut.result()
+        if not manifest_ok:
+            log.emit("ctp_manifest_retry",
+                     f"[{ticket_key}] manifest step did not produce "
+                     f"docs/change-manifest.md; retrying once",
+                     meta={"ticket": ticket_key})
+            manifest_ok = _write_manifest(ticket_dir, patch, MANIFEST_TIMEOUT)
         try:
             explainer_ok = explainer_fut.result()
         except Exception as e:
