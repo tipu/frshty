@@ -458,12 +458,14 @@ def store_task_review(config: dict, repo: str, pr_id: int, review: dict,
 def check(config: dict):
     platform = make_platform(config)
     review_prs = platform.list_pending_reviews_for_me()
+    pending = state.load("reviews_pending")
+    _drop_unrequested_prs(pending, review_prs)
     if not review_prs:
+        state.save("reviews_pending", pending)
         return
 
     ticket_state = state.load("tickets")
     review_state = state.load("reviews")
-    pending = state.load("reviews_pending")
 
     _track_pending_prs(pending, review_prs, ticket_state, review_state)
     _process_ready_tickets(config, pending)
@@ -1138,6 +1140,21 @@ def _pr_needs_tracking(review_state: dict, pr: dict) -> bool:
         return True
 
     return False
+
+
+def _drop_unrequested_prs(pending: dict, prs: list[dict]) -> dict:
+    """Remove the PRs that no longer request a review from me. A PR waits in
+    pending through the quiet period, and the request can be withdrawn in that
+    time. The review must not fire on it after that."""
+    requested = {(p.get("repo"), p.get("id")) for p in prs}
+    for ticket_key in list(pending.keys()):
+        kept = [p for p in pending[ticket_key].get("prs", [])
+                if (p.get("repo"), p.get("id")) in requested]
+        if kept:
+            pending[ticket_key]["prs"] = kept
+        else:
+            del pending[ticket_key]
+    return pending
 
 
 def _track_pending_prs(pending: dict, prs: list[dict], ticket_state: dict, review_state: dict) -> dict:
