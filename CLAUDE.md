@@ -4,4 +4,4 @@ Plan a browser task before you run the first command. Collapse first, then count
 
 If a tool call inside a subagent returns "requires approval" or any permission denial, return that error to the parent immediately. Do NOT invoke `fewer-permission-prompts` or any other skill to "fix" permissions from inside a subagent — scanning transcripts and rewriting settings is way out of scope and produces large retry-heavy logs.
 
-Release: when a frshty pull request merges to main, run `scripts/deploy_local.sh` from the worktree. It merges origin/main into the shared checkout and restarts the local instance, and it fails when either step does not happen.
+Release: when a frshty pull request merges to main, run `scripts/deploy_local.sh` from the worktree. It merges origin/main into the shared checkout and reloads every instance container, and it fails when either step does not happen.
