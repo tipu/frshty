@@ -47,6 +47,22 @@ def item_dir(item_id: int) -> Path:
     return folder
 
 
+def item_files(item_id: int) -> list[str]:
+    """The files at the top level of one item's folder, sorted by name.
+
+    A session that writes a file without an ARTIFACT: line still leaves the
+    file here, so this list is how `record_artifacts` finds it. Hidden files
+    and subfolders are left out: a subfolder holds the frames, probes and
+    intake images behind a deliverable, not a deliverable."""
+    folder = root() / f"work-{item_id}"
+    try:
+        entries = sorted(os.scandir(folder), key=lambda e: e.name)
+    except OSError:
+        return []
+    return [e.path for e in entries
+            if not e.name.startswith(".") and e.is_file(follow_symlinks=False)]
+
+
 def decode_intake_images(images) -> tuple[list[tuple[bytes, str]], str]:
     """The images one launch carries, decoded, or an empty list and an error.
 
