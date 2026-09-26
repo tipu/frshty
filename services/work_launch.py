@@ -111,7 +111,7 @@ def project_entries() -> list[dict]:
         entries.append({"key": key, "root": str(ws.get("root", "")), "repos": repos,
                         "primary": bool((cfg.get("work") or {}).get("dispatch", True))})
     extras = {
-        "frshty": os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "frshty": os.environ.get("FRSHTY_CODE_DIR") or os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
         "clarivis": os.path.expanduser("~/Documents/dev/clarivis"),
         "algotrader2": os.path.expanduser("~/Documents/dev/algotrader2/implementation"),
         "game_expirement": os.path.expanduser("~/Documents/dev/game_expirement"),

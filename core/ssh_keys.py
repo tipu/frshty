@@ -21,7 +21,9 @@ KEY_NAME = "id_ed25519"
 GITHUB_API = "https://api.github.com"
 BITBUCKET_API = "https://api.bitbucket.org/2.0"
 
-SSH_CONFIG = """Host github.com github-*
+SSH_CONFIG = """Include ~/.ssh/hosts.conf
+
+Host github.com github-*
     HostName github.com
     User git
     IdentityFile ~/.ssh/{key}

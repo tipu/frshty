@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import signal
 import stat
 import subprocess
 import sys
@@ -205,8 +206,29 @@ class TestContainerBoot:
                           '[workspace]\nroot = "%s"\nrepos = []\n' % tmp_path)
         monkeypatch.setattr(boot.Path, "home", lambda: tmp_path)
         monkeypatch.delenv("GH_TOKEN", raising=False)
-        monkeypatch.setattr(boot.os, "execv", lambda *a: pytest.fail("app must not start"))
+        monkeypatch.setattr(boot, "supervise", lambda *a: pytest.fail("app must not start"))
         assert boot.main([str(config)]) == 1
+
+
+class TestSupervise:
+    def test_sighup_restarts_the_child_and_its_exit_ends_the_loop(self, tmp_path):
+        boot = _load_script("container_boot")
+        runs = tmp_path / "runs"
+        script = ("import os, pathlib, sys, time\n"
+                  f"p = pathlib.Path({str(runs)!r})\n"
+                  "n = len(p.read_text()) if p.exists() else 0\n"
+                  "p.write_text('x' * (n + 1))\n"
+                  "if n == 0:\n"
+                  "    os.kill(os.getppid(), 1)\n"
+                  "    time.sleep(30)\n"
+                  "sys.exit(7)\n")
+        saved = {sig: signal.getsignal(sig) for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)}
+        try:
+            assert boot.supervise([sys.executable, "-c", script]) == 7
+        finally:
+            for sig, handler in saved.items():
+                signal.signal(sig, handler)
+        assert runs.read_text() == "xx"
 
 
 class TestInstanceLauncher:
@@ -294,6 +316,45 @@ class TestInstanceLauncher:
         (tmp_path / "boxes").mkdir()
         (tmp_path / "boxes" / "peers.toml").write_text("")
         assert f"{tmp_path / 'boxes' / 'peers.toml'}:/app/config/peers.toml:ro" in mod.gateway_args(7130)
+
+    def test_code_mounts_read_only_with_secrets_hidden(self, tmp_path, monkeypatch):
+        mod, _ = self._launcher(tmp_path, monkeypatch)
+        code = tmp_path / "checkout"
+        code.mkdir()
+        (code / ".env").write_text("SECRET=1\n")
+        monkeypatch.setattr(mod, "code_dir", lambda: code)
+        path = self._config(tmp_path)
+        args = mod.run_args(mod.load(str(path)), path, check=False)
+        assert f"{code}:/app:ro" in args
+        assert "type=tmpfs,destination=/app/config" in args
+        assert "/dev/null:/app/.env:ro" in args
+        assert f"FRSHTY_CODE_DIR={code}" in args
+        assert "frshty.instance=aimyable" in args
+
+    def test_code_dir_is_the_main_checkout_not_a_worktree(self, tmp_path, monkeypatch):
+        mod = _load_script("instance")
+        repo = tmp_path / "main"
+        repo.mkdir()
+        _git("init", "-q", cwd=repo)
+        _git("-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "x", cwd=repo)
+        _git("worktree", "add", "-q", "-b", "w", str(tmp_path / "wt"), cwd=repo)
+        monkeypatch.setattr(mod, "REPO", tmp_path / "wt")
+        assert mod.code_dir() == repo
+
+    def test_docker_socket_and_devices_pass_through(self, tmp_path, monkeypatch):
+        mod, _ = self._launcher(tmp_path, monkeypatch)
+        sock = tmp_path / "docker.sock"
+        sock.write_text("")
+        monkeypatch.setattr(mod, "DOCKER_SOCKET", sock)
+        path = self._config(tmp_path, f'[container]\ndevices = ["{sock}"]\n')
+        args = mod.run_args(mod.load(str(path)), path, check=False)
+        assert f"{sock}:{sock}" in args
+        assert args[args.index("--group-add") + 1] == str(sock.stat().st_gid)
+        assert args[args.index("--device") + 1] == str(sock)
+        (tmp_path / "boxes" / "aimyable" / "config" / "aimyable.toml").unlink()
+        path = self._config(tmp_path, '[container]\ndevices = ["/definitely/not/a/device"]\n')
+        with pytest.raises(SystemExit, match="device /definitely/not/a/device does not exist"):
+            mod.run_args(mod.load(str(path)), path, check=False)
 
     def test_missing_mount_source_is_refused(self, tmp_path, monkeypatch):
         mod, _ = self._launcher(tmp_path, monkeypatch)
