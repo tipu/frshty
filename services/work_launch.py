@@ -633,7 +633,7 @@ def _scan_config_dir(key: str) -> tuple[dict | None, bool]:
         return None, False
     complete = True
     for name in names:
-        if not name.endswith(".toml") or name in discovery.SKIP_CONFIGS:
+        if not name.endswith(".toml") or discovery.skip_config(name):
             continue
         try:
             with open(os.path.join(_CONFIG_DIR, name), "rb") as f:
