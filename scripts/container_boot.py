@@ -2,14 +2,17 @@
 
 Logs gh in with the instance's GH_TOKEN, makes sure the instance's own SSH key
 exists and is on its GitHub or Bitbucket account, proves git can reach every
-repository, and then replaces itself with frshty.py. With --check it stops
-after the proof and exits 0, so a container can be tested next to a live
-instance without running a second copy of its pipeline.
+repository, and then runs frshty.py as its child. SIGHUP restarts the child
+and keeps the container, so a deploy loads new code while the tmux sessions
+of running agents live on. With --check it stops after the proof and exits 0,
+so a container can be tested next to a live instance without running a
+second copy of its pipeline.
 """
 import argparse
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -49,6 +52,34 @@ def gh_login(token: str) -> None:
         raise ssh_keys.KeyBootstrapError(f"gh auth login failed: {r.stderr.strip()[:300]}")
 
 
+def supervise(cmd: list[str]) -> int:
+    """Run `cmd` until it exits on its own. SIGHUP stops it and starts it
+    again. SIGTERM and SIGINT stop it and end the container."""
+    restart = False
+    child: subprocess.Popen | None = None
+
+    def on_hup(signum, frame):
+        nonlocal restart
+        restart = True
+        if child is not None:
+            child.terminate()
+
+    def on_stop(signum, frame):
+        if child is not None:
+            child.terminate()
+
+    signal.signal(signal.SIGHUP, on_hup)
+    signal.signal(signal.SIGTERM, on_stop)
+    signal.signal(signal.SIGINT, on_stop)
+    while True:
+        restart = False
+        child = subprocess.Popen(cmd)
+        code = child.wait()
+        if not restart:
+            return code
+        print(json.dumps({"restart": "SIGHUP", "exit": code}), flush=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="container_boot.py")
     parser.add_argument("config")
@@ -70,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         return 0
     os.chdir(APP.parent)
-    os.execv(sys.executable, [sys.executable, str(APP), args.config, *app_args])
+    return supervise([sys.executable, str(APP), args.config, *app_args])
 
 
 if __name__ == "__main__":

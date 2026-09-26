@@ -8,18 +8,21 @@ ARG HOOK_DIR=
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ENV NODE_PATH=/usr/lib/node_modules
 
-RUN apt-get update && apt-get install -y curl git openssh-client tmux libsecret-1-0 tree procps sqlite3 && \
+RUN apt-get update && apt-get install -y curl git openssh-client tmux libsecret-1-0 tree procps sqlite3 \
+        build-essential gnupg jq ripgrep rsync ffmpeg xvfb postgresql-client && \
     curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y nodejs && \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list && \
-    apt-get update && apt-get install -y gh && \
-    npm install -g @anthropic-ai/claude-code @openai/codex pnpm playwright && \
+    curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker.gpg && \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker.gpg] https://download.docker.com/linux/debian $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list && \
+    apt-get update && apt-get install -y gh docker-ce-cli docker-compose-plugin && \
+    npm install -g @anthropic-ai/claude-code @openai/codex pnpm playwright @playwright/cli && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir httpx fastapi 'uvicorn[standard]' watchfiles mcp playwright pytest uv && \
+RUN pip install --no-cache-dir httpx fastapi 'uvicorn[standard]' watchfiles mcp playwright pytest uv pipenv && \
     python -m playwright install --with-deps chromium && \
     chmod -R a+rX /ms-playwright
 

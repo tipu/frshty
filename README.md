@@ -115,9 +115,12 @@ scripts/instance.py check config/frshty.toml  # prove key and git access, then e
 scripts/instance.py up config/frshty.toml     # run it; restarts with docker
 scripts/instance.py logs config/frshty.toml
 scripts/instance.py down config/frshty.toml
+scripts/instance.py reload                    # restart frshty.py in every instance on new code
 ```
 
-A container sees its own workspace at the host path the config names, the model CLI logins (`~/.claude`, `~/.codex`, `~/.gemini`, and a copy of `~/.claude.json` and `~/.gitconfig`), and one host directory of its own, `~/.frshty-containers/<key>/`. `state/` there is its frshty state, mounted at the same path and named by `FRSHTY_ROOT`, so every worktree it registers in a shared repository names a path the host can see. `ssh/` is mounted at `~/.ssh`. The host's `~/.ssh` and `~/.frshty` never enter a container.
+The image holds the tools: git, gh, docker, psql, uv, pipenv, node, pnpm, Playwright with Chromium, Xvfb, ffmpeg and the model CLIs. The code comes from the main checkout of this repository, mounted read-only at `/app`; the checkout's `config/` and `.env` stay hidden. `reload` sends SIGHUP to each instance container, which restarts frshty.py on the new code and keeps the tmux sessions of running agents. `scripts/deploy_local.sh` merges main into the checkout and runs `reload`. Rebuild the image and run `up` again only when the Dockerfile changes.
+
+A container sees its own workspace at the host path the config names, the model CLI logins (`~/.claude`, `~/.codex`, `~/.gemini`, and a copy of `~/.claude.json` and `~/.gitconfig`), and one host directory of its own, `~/.frshty-containers/<key>/`. `state/` there is its frshty state, mounted at the same path and named by `FRSHTY_ROOT`, so every worktree it registers in a shared repository names a path the host can see. `ssh/` is mounted at `~/.ssh`; an `ssh/hosts.conf` there adds hosts such as a Mac or Windows box that a proof reaches over ssh. The host's `~/.ssh` and `~/.frshty` never enter a container. Every instance container gets the host's Docker socket for the `docker exec`, `docker logs` and `docker compose` steps of a proof. The socket gives root on the host.
 
 On first boot the container generates an ed25519 key in `ssh/` and adds it to the account the instance works as: the GitHub account in `[github].account`, through a `GH_TOKEN` the launcher reads with `gh auth token --user`, or the Bitbucket user in `[bitbucket]`. A restart reuses the key and adds nothing. The GitHub token needs the `admin:public_key` scope and the Bitbucket API token needs `read:ssh-key:bitbucket` and `write:ssh-key:bitbucket`. Without them the container refuses to start and says which scope is missing.
 

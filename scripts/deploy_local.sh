@@ -1,12 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-UNIT="${FRSHTY_UNIT:-frshty.service}"
 common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
 CHECKOUT="${FRSHTY_CHECKOUT:-$(dirname "$common_dir")}"
-
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
 
 if [ "$(git -C "$CHECKOUT" rev-parse --abbrev-ref HEAD)" != "main" ]; then
   echo "deploy: $CHECKOUT is not on main" >&2
@@ -42,17 +38,15 @@ if [ -n "$clobbered" ]; then
   echo "$clobbered" >&2
   exit 1
 fi
+previous="$(git -C "$CHECKOUT" rev-parse HEAD)"
 if ! git -C "$CHECKOUT" merge-base --is-ancestor "$target" HEAD; then
   git -C "$CHECKOUT" merge --no-edit "$target"
 fi
 git -C "$CHECKOUT" merge-base --is-ancestor "$target" HEAD
 
-before="$(systemctl --user show "$UNIT" -p ExecMainStartTimestampMonotonic --value)"
-systemctl --user restart "$UNIT"
-after="$(systemctl --user show "$UNIT" -p ExecMainStartTimestampMonotonic --value)"
-if [ -z "$after" ] || [ "$after" = "0" ] || [ "$after" = "$before" ]; then
-  echo "deploy: $UNIT did not restart (start stamp $before -> $after)" >&2
-  exit 1
+if ! git -C "$CHECKOUT" diff --quiet "$previous" HEAD -- Dockerfile; then
+  python3 "$CHECKOUT/scripts/instance.py" build
+  echo "deploy: the Dockerfile changed; the image is rebuilt, and each container runs it after scripts/instance.py up" >&2
 fi
-systemctl --user is-active --quiet "$UNIT"
-echo "deploy: $CHECKOUT at $(git -C "$CHECKOUT" rev-parse --short HEAD), $UNIT restarted"
+python3 "$CHECKOUT/scripts/instance.py" reload
+echo "deploy: $CHECKOUT at $(git -C "$CHECKOUT" rev-parse --short HEAD), instance containers reloaded"
