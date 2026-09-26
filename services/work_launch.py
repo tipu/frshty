@@ -88,6 +88,16 @@ def agent_config(contexts: list[str], default_config: dict,
     return {"key": picked[0][0], "config": picked[0][1]}
 
 
+def _frshty_checkout() -> str:
+    """The frshty checkout a task works in. A container runs the code from a
+    read-only mount at /app and names the host checkout in FRSHTY_CODE_DIR;
+    that path counts only where the container mounts it too."""
+    code = os.environ.get("FRSHTY_CODE_DIR", "")
+    if code and os.path.isdir(code):
+        return code
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
 def project_entries() -> list[dict]:
     """Every project a task can select, with the repositories it holds.
 
@@ -111,7 +121,7 @@ def project_entries() -> list[dict]:
         entries.append({"key": key, "root": str(ws.get("root", "")), "repos": repos,
                         "primary": bool((cfg.get("work") or {}).get("dispatch", True))})
     extras = {
-        "frshty": os.environ.get("FRSHTY_CODE_DIR") or os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "frshty": _frshty_checkout(),
         "clarivis": os.path.expanduser("~/Documents/dev/clarivis"),
         "algotrader2": os.path.expanduser("~/Documents/dev/algotrader2/implementation"),
         "game_expirement": os.path.expanduser("~/Documents/dev/game_expirement"),

@@ -55,7 +55,7 @@ def gh_login(token: str) -> None:
 def supervise(cmd: list[str]) -> int:
     """Run `cmd` until it exits on its own. SIGHUP stops it and starts it
     again. SIGTERM and SIGINT stop it and end the container."""
-    restart = False
+    restart = stopping = False
     child: subprocess.Popen | None = None
 
     def on_hup(signum, frame):
@@ -65,6 +65,8 @@ def supervise(cmd: list[str]) -> int:
             child.terminate()
 
     def on_stop(signum, frame):
+        nonlocal stopping
+        stopping = True
         if child is not None:
             child.terminate()
 
@@ -75,7 +77,7 @@ def supervise(cmd: list[str]) -> int:
         restart = False
         child = subprocess.Popen(cmd)
         code = child.wait()
-        if not restart:
+        if stopping or not restart:
             return code
         print(json.dumps({"restart": "SIGHUP", "exit": code}), flush=True)
 

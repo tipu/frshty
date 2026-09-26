@@ -50,11 +50,15 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+
+import core.git_util as git_util  # noqa: E402  (needs the path above)
 IMAGE = "frshty-instance:latest"
 GATEWAY = "frshty-gateway"
 HOME = Path.home()
@@ -73,8 +77,7 @@ def _expand(path: str) -> Path:
 def code_dir() -> Path:
     """The main checkout of this repository. A worktree is purged when its
     task ages out, so a container never runs code from one."""
-    r = subprocess.run(["git", "-C", str(REPO), "rev-parse", "--path-format=absolute",
-                        "--git-common-dir"], capture_output=True, text=True)
+    r = git_util.run_git_status(REPO, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
     if r.returncode != 0:
         return REPO
     return Path(r.stdout.strip()).parent
@@ -242,17 +245,17 @@ def build() -> int:
     """Build the image from the committed HEAD of this checkout. The shared
     checkout holds other agents' uncommitted edits, and none of them may
     reach the image."""
-    archive = subprocess.Popen(["git", "-C", str(REPO), "archive", "--format=tar", "HEAD"],
-                               stdout=subprocess.PIPE)
     cmd = ["docker", "build", "-t", IMAGE,
            "--build-arg", f"HOST_UID={os.getuid()}",
            "--build-arg", f"HOST_GID={os.getgid()}",
            "--build-arg", f"HOST_HOME={HOME}",
            "--build-arg", f"HOOK_DIR={hook_dir()}",
            "-"]
-    code = subprocess.run(cmd, stdin=archive.stdout).returncode
-    archive.stdout.close()
-    return code or archive.wait()
+    with tempfile.TemporaryDirectory() as tmp:
+        tar = Path(tmp) / "context.tar"
+        git_util.run_git(REPO, ["archive", "--format=tar", "-o", str(tar), "HEAD"], timeout=600)
+        with open(tar, "rb") as context:
+            return subprocess.run(cmd, stdin=context).returncode
 
 
 def gateway_args(port: int) -> list[str]:
@@ -332,8 +335,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.action == "check":
         return subprocess.run(run_args(config, config_path, check=True)).returncode
     if args.action == "up":
+        cmd = run_args(config, config_path, check=False)
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
-        return subprocess.run(run_args(config, config_path, check=False)).returncode
+        return subprocess.run(cmd).returncode
     if args.action == "down":
         return subprocess.run(["docker", "rm", "-f", name]).returncode
     return subprocess.run(["docker", "logs", "--tail", "200", name]).returncode
