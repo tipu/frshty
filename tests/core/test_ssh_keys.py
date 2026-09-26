@@ -176,6 +176,9 @@ class TestVerifyGit:
         with pytest.raises(ssh_keys.KeyBootstrapError, match="not a git repository"):
             ssh_keys.verify_git(self._config(tmp_path, ["a"]))
 
+    def test_no_configured_repository_verifies_nothing(self, tmp_path):
+        assert ssh_keys.verify_git(self._config(tmp_path, [])) == []
+
     def test_no_origin_anywhere_is_fatal(self, tmp_path):
         (tmp_path / "a").mkdir()
         _git("init", cwd=tmp_path / "a")
