@@ -121,9 +121,9 @@ A container sees its own workspace at the host path the config names, the model 
 
 On first boot the container generates an ed25519 key in `ssh/` and adds it to the account the instance works as: the GitHub account in `[github].account`, through a `GH_TOKEN` the launcher reads with `gh auth token --user`, or the Bitbucket user in `[bitbucket]`. A restart reuses the key and adds nothing. The GitHub token needs the `admin:public_key` scope and the Bitbucket API token needs `read:ssh-key:bitbucket` and `write:ssh-key:bitbucket`. Without them the container refuses to start and says which scope is missing.
 
-The container uses the host network. An optional `[container]` block sets its port, worker and model limits, extra mounts, and extra files to copy into its home directory; `scripts/instance.py` documents each key. The work board of a container belongs to its own instance, through `FRSHTY_BOARD_INSTANCE`. List every container in `config/peers.toml` to see all of them on one board; each container skips its own entry.
+The container uses the host network. An optional `[container]` block sets its port, worker and model limits, extra mounts, and extra files to copy into its home directory; `scripts/instance.py` documents each key. The work board of a container belongs to its own instance, through `FRSHTY_BOARD_INSTANCE`. The container reads its config from `~/.frshty-containers/<key>/config/<key>.toml`: `up` copies the config it is given there, and refuses when a different file is already there. List every container in `~/.frshty-containers/peers.toml` to see all of them on one board; each container skips its own entry.
 
-`scripts/instance.py gateway-up --port 7130` starts one more container, the gateway. It runs no instance. It reads the instances from `config/peers.toml`, adds an instance picker to the top left of every page, and forwards each page, action and terminal to the container of the picked instance. The choice lives in a browser cookie.
+`scripts/instance.py gateway-up --port 7130` starts one more container, the gateway. It runs no instance. It reads the instances from `~/.frshty-containers/peers.toml`, adds an instance picker to the top left of every page, and forwards each page, action and terminal to the container of the picked instance. The choice lives in a browser cookie.
 
 ## Setup details
 

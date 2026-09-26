@@ -226,6 +226,7 @@ class TestInstanceLauncher:
         (home / ".claude.json").write_text("{}")
         monkeypatch.setattr(mod, "HOME", home)
         monkeypatch.setattr(mod, "CONTAINERS_ROOT", tmp_path / "boxes")
+        monkeypatch.setattr(mod, "PEERS", tmp_path / "boxes" / "peers.toml")
         return mod, home
 
     def test_host_ssh_is_never_mounted(self, tmp_path, monkeypatch):
@@ -258,6 +259,41 @@ class TestInstanceLauncher:
         args = mod.run_args(mod.load(str(path)), path, check=True)
         assert args[-1] == "--check"
         assert "--rm" in args and "--restart" not in args
+
+    def test_config_and_peers_mount_from_the_stable_root(self, tmp_path, monkeypatch):
+        mod, _ = self._launcher(tmp_path, monkeypatch)
+        path = self._config(tmp_path)
+        (tmp_path / "boxes").mkdir()
+        (tmp_path / "boxes" / "peers.toml").write_text("")
+        args = mod.run_args(mod.load(str(path)), path, check=False)
+        volumes = [args[i + 1] for i, a in enumerate(args) if a == "-v"]
+        stable = tmp_path / "boxes" / "aimyable" / "config" / "aimyable.toml"
+        assert f"{stable}:/app/config/aimyable.toml" in volumes
+        assert f"{tmp_path / 'boxes' / 'peers.toml'}:/app/config/peers.toml:ro" in volumes
+        assert not any(v.startswith(f"{path}:") for v in volumes)
+        assert stable.read_text() == path.read_text()
+        assert stat.S_IMODE(stable.stat().st_mode) == 0o600
+        path.unlink()
+        args = mod.run_args(mod.load(str(stable)), stable, check=False)
+        assert f"{stable}:/app/config/aimyable.toml" in [args[i + 1] for i, a in enumerate(args) if a == "-v"]
+
+    def test_an_edited_stable_config_is_never_overwritten(self, tmp_path, monkeypatch):
+        mod, _ = self._launcher(tmp_path, monkeypatch)
+        path = self._config(tmp_path)
+        mod.run_args(mod.load(str(path)), path, check=False)
+        stable = tmp_path / "boxes" / "aimyable" / "config" / "aimyable.toml"
+        stable.write_text(stable.read_text() + "# edited in the web UI\n")
+        with pytest.raises(SystemExit, match="differs"):
+            mod.run_args(mod.load(str(path)), path, check=False)
+        assert stable.read_text().endswith("# edited in the web UI\n")
+
+    def test_gateway_reads_the_stable_peers_file(self, tmp_path, monkeypatch):
+        mod, _ = self._launcher(tmp_path, monkeypatch)
+        with pytest.raises(SystemExit, match="does not exist"):
+            mod.gateway_args(7130)
+        (tmp_path / "boxes").mkdir()
+        (tmp_path / "boxes" / "peers.toml").write_text("")
+        assert f"{tmp_path / 'boxes' / 'peers.toml'}:/app/config/peers.toml:ro" in mod.gateway_args(7130)
 
     def test_missing_mount_source_is_refused(self, tmp_path, monkeypatch):
         mod, _ = self._launcher(tmp_path, monkeypatch)

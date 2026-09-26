@@ -17,6 +17,11 @@ in a shared repository names a path the host sees too. Its ssh/ is mounted at
 ~/.ssh. The container never sees the host's ~/.ssh, ~/.frshty, or another
 instance's workspace or state.
 
+The container reads its config from ~/.frshty-containers/<key>/config/<key>.toml
+and the instance list from ~/.frshty-containers/peers.toml. Both paths outlive
+every checkout and worktree. `up` and `check` copy the config they are given to
+that path, and refuse when a different file is already there.
+
 An optional [container] block in the instance config tunes the container:
 
     [container]
@@ -43,6 +48,7 @@ CONTAINERS_ROOT = Path(os.environ.get("FRSHTY_CONTAINERS") or HOME / ".frshty-co
 SEED_DIR = "/run/frshty/seed"
 MODEL_DIRS = [".claude", ".codex", ".gemini"]
 SEED_FILES = [".claude.json", ".gitconfig"]
+PEERS = CONTAINERS_ROOT / "peers.toml"
 
 
 def _expand(path: str) -> Path:
@@ -97,6 +103,26 @@ def write_env_file(root: Path, config: dict) -> Path:
     return path
 
 
+def install_config(config_path: Path, root: Path, key: str) -> Path:
+    """Copy the config to its stable path and return that path. The
+    instance edits its own config from the web UI, so a copy that already
+    differs from `config_path` is never overwritten."""
+    target = root / "config" / f"{key}.toml"
+    if config_path.resolve() == target.resolve():
+        return target
+    data = config_path.read_bytes()
+    if target.exists():
+        if target.read_bytes() != data:
+            raise SystemExit(f"{key}: {target} differs from {config_path}; "
+                             f"pass {target} or remove it first")
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+    return target
+
+
 def mounts(config: dict, config_path: Path, root: Path) -> list[tuple[str, str, bool]]:
     """(host path, container path, read only) for every bind mount."""
     key = config["job"]["key"]
@@ -112,9 +138,8 @@ def mounts(config: dict, config_path: Path, root: Path) -> list[tuple[str, str, 
     agy = HOME / ".local" / "bin" / "agy"
     if agy.is_file():
         out.append((str(agy), "/usr/local/bin/agy", True))
-    peers = REPO / "config" / "peers.toml"
-    if peers.is_file():
-        out.append((str(peers), "/app/config/peers.toml", True))
+    if PEERS.is_file():
+        out.append((str(PEERS), "/app/config/peers.toml", True))
     claude_dir = ((config.get("llm") or {}).get("claude") or {}).get("config_dir")
     if claude_dir:
         out.append((str(_expand(claude_dir)), str(_expand(claude_dir)), False))
@@ -140,6 +165,7 @@ def run_args(config: dict, config_path: Path, check: bool) -> list[str]:
     for sub in ("state", "ssh"):
         (root / sub).mkdir(parents=True, exist_ok=True)
     (root / "ssh").chmod(0o700)
+    config_path = install_config(config_path, root, key)
     env_file = write_env_file(root, config)
     port = int(box.get("port") or config["job"]["port"])
     args = ["docker", "run", "--network", "host", "--init",
@@ -179,12 +205,11 @@ def build() -> int:
 def gateway_args(port: int) -> list[str]:
     """The gateway container: no workspace, no credentials, no key. It sees
     only the peers file that names the instances it forwards to."""
-    peers = REPO / "config" / "peers.toml"
-    if not peers.is_file():
-        raise SystemExit(f"{peers} does not exist; list the instance containers in it first")
+    if not PEERS.is_file():
+        raise SystemExit(f"{PEERS} does not exist; list the instance containers in it first")
     return ["docker", "run", "-d", "--restart", "unless-stopped", "--name", GATEWAY,
             "--network", "host", "--init", "--entrypoint", "python",
-            "-v", f"{peers}:/app/config/peers.toml:ro",
+            "-v", f"{PEERS}:/app/config/peers.toml:ro",
             IMAGE, "/app/gateway.py", "--port", str(port)]
 
 
