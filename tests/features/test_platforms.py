@@ -591,3 +591,13 @@ class TestGitHubCommentAuthorIsBot:
 
     def test_the_query_asks_for_the_author_type(self):
         assert "author{login __typename}" in GitHubPlatform._REVIEW_COMMENTS_QUERY
+
+
+class TestGitHubListReviewPrs:
+    def test_searches_only_direct_review_requests(self):
+        p = _gh_platform()
+        with patch.object(p, "_run_gh", return_value=_gh_result(stdout="[]")) as run:
+            assert p.list_review_prs() == []
+        args = run.call_args_list[0].args[0]
+        assert "user-review-requested:@me" in args
+        assert not any(a.startswith("--review-requested") for a in args)
