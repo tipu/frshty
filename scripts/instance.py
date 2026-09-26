@@ -6,6 +6,7 @@
     scripts/instance.py up    config/frshty.toml
     scripts/instance.py down  config/frshty.toml
     scripts/instance.py logs  config/frshty.toml
+    scripts/instance.py reload
     scripts/instance.py gateway-up --port 7130
     scripts/instance.py gateway-down
 
@@ -17,6 +18,22 @@ in a shared repository names a path the host sees too. Its ssh/ is mounted at
 ~/.ssh. The container never sees the host's ~/.ssh, ~/.frshty, or another
 instance's workspace or state.
 
+Every instance container gets the host's Docker socket, because the proof
+steps run `docker exec`, `docker logs` and `docker compose`. The socket gives
+root on the host. ~/.frshty-containers/<key>/ssh/hosts.conf, when present,
+adds ssh hosts such as a Mac or Windows box the proof reaches over ssh.
+
+The container runs the code of the main checkout of this repository, mounted
+read-only at /app, not the copy baked into the image. `reload` sends SIGHUP
+to every instance container, and each restarts frshty.py on the new code while
+the tmux sessions of its running agents live on. Rebuild the image only when
+the Dockerfile changes.
+
+The container reads its config from ~/.frshty-containers/<key>/config/<key>.toml
+and the instance list from ~/.frshty-containers/peers.toml. Both paths outlive
+every checkout and worktree. `up` and `check` copy the config they are given to
+that path, and refuse when a different file is already there.
+
 An optional [container] block in the instance config tunes the container:
 
     [container]
@@ -25,6 +42,7 @@ An optional [container] block in the instance config tunes the container:
     llm = 9              # FRSHTY_MAX_CONCURRENT_LLM
     mounts = ["~/Documents/dev/slack_int"]   # extra host paths, same path inside
     seed = ["~/.gitconfig-quill"]            # extra host files copied into ~
+    devices = ["/dev/kvm"]                   # host devices passed through
     env_file = "~/.frshty-containers/aimyable.env"  # extra variables, e.g. BILLCOM_*
 """
 import argparse
@@ -32,10 +50,15 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+import time
 import tomllib
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+
+import core.git_util as git_util  # noqa: E402  (needs the path above)
 IMAGE = "frshty-instance:latest"
 GATEWAY = "frshty-gateway"
 HOME = Path.home()
@@ -43,10 +66,33 @@ CONTAINERS_ROOT = Path(os.environ.get("FRSHTY_CONTAINERS") or HOME / ".frshty-co
 SEED_DIR = "/run/frshty/seed"
 MODEL_DIRS = [".claude", ".codex", ".gemini"]
 SEED_FILES = [".claude.json", ".gitconfig"]
+DOCKER_SOCKET = Path("/var/run/docker.sock")
+PEERS = CONTAINERS_ROOT / "peers.toml"
 
 
 def _expand(path: str) -> Path:
     return Path(os.path.abspath(os.path.expanduser(str(path))))
+
+
+def code_dir() -> Path:
+    """The main checkout of this repository. A worktree is purged when its
+    task ages out, so a container never runs code from one."""
+    r = git_util.run_git_status(REPO, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
+    if r.returncode != 0:
+        return REPO
+    return Path(r.stdout.strip()).parent
+
+
+def code_args() -> list[str]:
+    """Mount the code read-only at /app. The checkout's own config/ and .env
+    hold every instance's secrets, so a tmpfs hides the first and /dev/null
+    the second."""
+    code = code_dir()
+    args = ["-v", f"{code}:/app:ro", "--mount", "type=tmpfs,destination=/app/config",
+            "-e", f"FRSHTY_CODE_DIR={code}"]
+    if (code / ".env").exists():
+        args += ["-v", "/dev/null:/app/.env:ro"]
+    return args
 
 
 def hook_dir() -> str:
@@ -97,6 +143,26 @@ def write_env_file(root: Path, config: dict) -> Path:
     return path
 
 
+def install_config(config_path: Path, root: Path, key: str) -> Path:
+    """Copy the config to its stable path and return that path. The
+    instance edits its own config from the web UI, so a copy that already
+    differs from `config_path` is never overwritten."""
+    target = root / "config" / f"{key}.toml"
+    if config_path.resolve() == target.resolve():
+        return target
+    data = config_path.read_bytes()
+    if target.exists():
+        if target.read_bytes() != data:
+            raise SystemExit(f"{key}: {target} differs from {config_path}; "
+                             f"pass {target} or remove it first")
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as f:
+        f.write(data)
+    return target
+
+
 def mounts(config: dict, config_path: Path, root: Path) -> list[tuple[str, str, bool]]:
     """(host path, container path, read only) for every bind mount."""
     key = config["job"]["key"]
@@ -112,9 +178,8 @@ def mounts(config: dict, config_path: Path, root: Path) -> list[tuple[str, str, 
     agy = HOME / ".local" / "bin" / "agy"
     if agy.is_file():
         out.append((str(agy), "/usr/local/bin/agy", True))
-    peers = REPO / "config" / "peers.toml"
-    if peers.is_file():
-        out.append((str(peers), "/app/config/peers.toml", True))
+    if PEERS.is_file():
+        out.append((str(PEERS), "/app/config/peers.toml", True))
     claude_dir = ((config.get("llm") or {}).get("claude") or {}).get("config_dir")
     if claude_dir:
         out.append((str(_expand(claude_dir)), str(_expand(claude_dir)), False))
@@ -140,9 +205,11 @@ def run_args(config: dict, config_path: Path, check: bool) -> list[str]:
     for sub in ("state", "ssh"):
         (root / sub).mkdir(parents=True, exist_ok=True)
     (root / "ssh").chmod(0o700)
+    config_path = install_config(config_path, root, key)
     env_file = write_env_file(root, config)
     port = int(box.get("port") or config["job"]["port"])
     args = ["docker", "run", "--network", "host", "--init",
+            "--label", f"frshty.instance={key}",
             "--env-file", str(env_file),
             "-e", f"HOME={HOME}",
             "-e", f"FRSHTY_ROOT={root / 'state'}",
@@ -155,6 +222,14 @@ def run_args(config: dict, config_path: Path, check: bool) -> list[str]:
             "-e", f"FRSHTY_MAX_CONCURRENT_LLM={int(box.get('llm') or 9)}"]
     if box.get("env_file"):
         args += ["--env-file", str(_expand(box["env_file"]))]
+    if DOCKER_SOCKET.exists():
+        args += ["-v", f"{DOCKER_SOCKET}:{DOCKER_SOCKET}",
+                 "--group-add", str(DOCKER_SOCKET.stat().st_gid)]
+    for device in box.get("devices") or []:
+        if not Path(device).exists():
+            raise SystemExit(f"{key}: device {device} does not exist")
+        args += ["--device", device]
+    args += code_args()
     for host, inside, ro in mounts(config, config_path, root):
         args += ["-v", f"{host}:{inside}" + (":ro" if ro else "")]
     if check:
@@ -167,36 +242,86 @@ def run_args(config: dict, config_path: Path, check: bool) -> list[str]:
 
 
 def build() -> int:
+    """Build the image from the committed HEAD of this checkout. The shared
+    checkout holds other agents' uncommitted edits, and none of them may
+    reach the image."""
     cmd = ["docker", "build", "-t", IMAGE,
            "--build-arg", f"HOST_UID={os.getuid()}",
            "--build-arg", f"HOST_GID={os.getgid()}",
            "--build-arg", f"HOST_HOME={HOME}",
            "--build-arg", f"HOOK_DIR={hook_dir()}",
-           str(REPO)]
-    return subprocess.run(cmd).returncode
+           "-"]
+    with tempfile.TemporaryDirectory() as tmp:
+        tar = Path(tmp) / "context.tar"
+        git_util.run_git(REPO, ["archive", "--format=tar", "-o", str(tar), "HEAD"], timeout=600)
+        with open(tar, "rb") as context:
+            return subprocess.run(cmd, stdin=context).returncode
 
 
 def gateway_args(port: int) -> list[str]:
     """The gateway container: no workspace, no credentials, no key. It sees
     only the peers file that names the instances it forwards to."""
-    peers = REPO / "config" / "peers.toml"
-    if not peers.is_file():
-        raise SystemExit(f"{peers} does not exist; list the instance containers in it first")
+    if not PEERS.is_file():
+        raise SystemExit(f"{PEERS} does not exist; list the instance containers in it first")
     return ["docker", "run", "-d", "--restart", "unless-stopped", "--name", GATEWAY,
-            "--network", "host", "--init", "--entrypoint", "python",
-            "-v", f"{peers}:/app/config/peers.toml:ro",
+            "--network", "host", "--init", "--entrypoint", "python", *code_args(),
+            "-v", f"{PEERS}:/app/config/peers.toml:ro",
             IMAGE, "/app/gateway.py", "--port", str(port)]
+
+
+def instance_containers() -> list[str]:
+    r = subprocess.run(["docker", "ps", "--filter", "label=frshty.instance",
+                        "--format", "{{.Names}}"], capture_output=True, text=True, check=True)
+    return sorted(r.stdout.split())
+
+
+def app_pid(name: str) -> str:
+    r = subprocess.run(["docker", "exec", name, "pgrep", "-o", "-f", "/app/frshty.py"],
+                       capture_output=True, text=True)
+    return r.stdout.strip()
+
+
+def reload(timeout: float = 120) -> int:
+    """SIGHUP every instance container and restart the gateway. Fails unless
+    each instance runs a new frshty.py process afterwards."""
+    names = instance_containers()
+    if not names:
+        print("reload: no instance container is running", file=sys.stderr)
+        return 1
+    before = {name: app_pid(name) for name in names}
+    for name in names:
+        subprocess.run(["docker", "kill", "--signal", "HUP", name], check=True, capture_output=True)
+    failed = []
+    for name in names:
+        deadline = time.monotonic() + timeout
+        while True:
+            pid = app_pid(name)
+            if pid and pid != before[name]:
+                print(f"reload: {name} frshty.py {before[name] or '-'} -> {pid}")
+                break
+            if time.monotonic() > deadline:
+                failed.append(name)
+                break
+            time.sleep(1)
+    if subprocess.run(["docker", "restart", GATEWAY], capture_output=True).returncode != 0:
+        failed.append(GATEWAY)
+    if failed:
+        print(f"reload: {', '.join(failed)} did not restart", file=sys.stderr)
+        return 1
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="instance.py")
-    parser.add_argument("action", choices=["build", "check", "up", "down", "logs",
+    parser.add_argument("action", choices=["build", "check", "up", "down", "logs", "reload",
                                            "gateway-up", "gateway-down"])
     parser.add_argument("config", nargs="?")
     parser.add_argument("--port", type=int, default=7130, help="gateway listen port")
     args = parser.parse_args(argv)
     if args.action == "build":
         return build()
+    if args.action == "reload":
+        return reload()
     if args.action == "gateway-up":
         subprocess.run(["docker", "rm", "-f", GATEWAY], capture_output=True)
         return subprocess.run(gateway_args(args.port)).returncode
@@ -210,8 +335,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.action == "check":
         return subprocess.run(run_args(config, config_path, check=True)).returncode
     if args.action == "up":
+        cmd = run_args(config, config_path, check=False)
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
-        return subprocess.run(run_args(config, config_path, check=False)).returncode
+        return subprocess.run(cmd).returncode
     if args.action == "down":
         return subprocess.run(["docker", "rm", "-f", name]).returncode
     return subprocess.run(["docker", "logs", "--tail", "200", name]).returncode
