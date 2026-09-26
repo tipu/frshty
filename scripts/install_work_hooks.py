@@ -39,7 +39,7 @@ def claude_config_dirs() -> list[str]:
     other directory is read from an instance config."""
     dirs = [os.path.expanduser(d) for d in DEFAULT_DIRS]
     for path in sorted(CONFIG_DIR.glob("*.toml")):
-        if path.name in SKIP_CONFIGS:
+        if path.name in SKIP_CONFIGS or path.name.endswith(".example.toml"):
             continue
         try:
             config = cfg.load_config(str(path))
