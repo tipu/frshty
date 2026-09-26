@@ -793,7 +793,7 @@ class GitHubPlatform(_CIMonitorMixin):
 
     def list_review_prs(self) -> list[dict]:
         result = self._run_gh([
-            "search", "prs", "--review-requested=@me", "--state=open",
+            "search", "prs", "user-review-requested:@me", "--state=open",
             "--json", "number,title,author,createdAt,updatedAt,url,repository",
             "--limit", "50",
         ])

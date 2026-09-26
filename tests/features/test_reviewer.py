@@ -446,6 +446,18 @@ class TestTrackPendingPrs:
         assert pending == {}
 
 
+class TestDropUnrequestedPrs:
+    def test_keeps_prs_that_still_request_me(self):
+        pending = {"JIRA-1": {"last_pr_at": 1.0, "prs": [{"repo": "r", "id": 1}, {"repo": "r", "id": 2}]}}
+        reviewer._drop_unrequested_prs(pending, [{"repo": "r", "id": 2}])
+        assert pending == {"JIRA-1": {"last_pr_at": 1.0, "prs": [{"repo": "r", "id": 2}]}}
+
+    def test_drops_ticket_when_no_pr_requests_me(self):
+        pending = {"JIRA-1": {"last_pr_at": 1.0, "prs": [{"repo": "r", "id": 1}]}}
+        reviewer._drop_unrequested_prs(pending, [{"repo": "other", "id": 1}])
+        assert pending == {}
+
+
 class TestProcessReadyTickets:
     def test_processes_ticket_after_quiet_period(self, tmp_path):
         pending = {
@@ -533,6 +545,44 @@ class TestCheckPersistsReviews:
         saved = state.load("reviews")
         assert "myrepo/7" in saved
         assert saved["myrepo/7"]["reviewed"] is True
+
+    def test_check_does_not_review_a_pr_whose_request_was_withdrawn(self, tmp_state, tmp_log):
+        state.save("tickets", {})
+        state.save("reviews", {})
+        state.save("reviews_pending", {
+            "__no_ticket__": {
+                "tracked_at": 0.0,
+                "last_pr_at": 0.0,
+                "prs": [{"repo": "myrepo", "id": 7, "url": "u", "branch": "b"}],
+            }
+        })
+        still_requested = make_pr(repo="myrepo", id=8, branch="b8", url="u8", head_sha="abc")
+        fake_platform = MagicMock()
+        fake_platform.list_pending_reviews_for_me.return_value = [still_requested]
+        config = {"_state_dir": tmp_state, "_base_url": "http://localhost"}
+
+        with patch("features.reviewer.make_platform", return_value=fake_platform), \
+             patch("features.reviewer.review_ticket_prs", return_value=[]) as mock_review, \
+             patch("features.reviewer.time.time", return_value=10_000.0):
+            reviewer.check(config)
+
+        assert not mock_review.called
+        pending = state.load("reviews_pending")
+        assert [p["id"] for p in pending["__no_ticket__"]["prs"]] == [8]
+
+    def test_check_empties_the_queue_when_no_pr_requests_me(self, tmp_state, tmp_log):
+        state.save("reviews_pending", {
+            "__no_ticket__": {"tracked_at": 0.0, "last_pr_at": 0.0,
+                              "prs": [{"repo": "myrepo", "id": 7}]},
+        })
+        fake_platform = MagicMock()
+        fake_platform.list_pending_reviews_for_me.return_value = []
+        config = {"_state_dir": tmp_state, "_base_url": "http://localhost"}
+
+        with patch("features.reviewer.make_platform", return_value=fake_platform):
+            reviewer.check(config)
+
+        assert state.load("reviews_pending") == {}
 
 class TestReviewTicketPrsPersistence:
     def test_persists_reviewed_prs_and_fails_unreviewed(self, tmp_state, tmp_log):
