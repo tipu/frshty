@@ -165,9 +165,11 @@ def register_bitbucket(user: str, token: str, account_id: str, label: str,
 
 def verify_git(config: dict) -> list[str]:
     """Run git ls-remote against the origin of every configured repository.
-    Returns the repository names checked."""
+    Returns the repository names checked. An instance that configures no
+    repository, such as the personal board, has nothing to verify."""
+    repos = get_repos(config)
     checked = []
-    for repo in get_repos(config):
+    for repo in repos:
         path = Path(repo["path"])
         if not (path / ".git").exists():
             raise KeyBootstrapError(f"{path} is not a git repository; is the workspace mounted?")
@@ -178,7 +180,7 @@ def verify_git(config: dict) -> list[str]:
             raise KeyBootstrapError(
                 f"git ls-remote origin failed in {path}: {r.stderr.strip()[:300]}")
         checked.append(repo["name"])
-    if not checked:
+    if repos and not checked:
         raise KeyBootstrapError("no configured repository has an origin remote to verify")
     return checked
 
