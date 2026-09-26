@@ -8,6 +8,10 @@ CONFIG_DIR = Path(__file__).parent.parent / "config"
 SKIP_CONFIGS = {"example.toml", "test.toml", "discovery.toml", "discovery.example.toml", "tipu-test.toml"}
 
 
+def skip_config(name: str) -> bool:
+    return name in SKIP_CONFIGS or name.endswith(".example.toml")
+
+
 def discover_instances() -> list[dict]:
     instances = []
     seen_keys = set()
@@ -41,7 +45,7 @@ def discover_instances() -> list[dict]:
                 pass
 
     for path in sorted(CONFIG_DIR.glob("*.toml")):
-        if path.name in SKIP_CONFIGS:
+        if skip_config(path.name):
             continue
         try:
             with open(path, "rb") as f:
