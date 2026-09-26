@@ -234,6 +234,29 @@ class TestSupervise:
         assert runs.read_text() == "xx"
 
 
+class TestSuperviseStop:
+    def test_sigterm_after_a_pending_sighup_ends_the_container(self, tmp_path):
+        boot = _load_script("container_boot")
+        runs = tmp_path / "runs"
+        script = ("import os, pathlib, time\n"
+                  f"p = pathlib.Path({str(runs)!r})\n"
+                  "p.write_text((p.read_text() if p.exists() else '') + 'x')\n"
+                  "import signal\n"
+                  "signal.pthread_sigmask(signal.SIG_BLOCK, [signal.SIGTERM])\n"
+                  "os.kill(os.getppid(), 1)\n"
+                  "os.kill(os.getppid(), 15)\n"
+                  "time.sleep(0.5)\n"
+                  "signal.pthread_sigmask(signal.SIG_UNBLOCK, [signal.SIGTERM])\n"
+                  "time.sleep(30)\n")
+        saved = {sig: signal.getsignal(sig) for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)}
+        try:
+            assert boot.supervise([sys.executable, "-c", script]) == -signal.SIGTERM
+        finally:
+            for sig, handler in saved.items():
+                signal.signal(sig, handler)
+        assert runs.read_text() == "x"
+
+
 class TestInstanceLauncher:
     def _config(self, tmp_path, extra=""):
         ws = tmp_path / "ws"
