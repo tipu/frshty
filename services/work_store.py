@@ -16,6 +16,7 @@ import core.config as core_config
 import core.db as db
 import core.log as log
 import core.tmux as tmux_target
+from services import work_artifacts
 
 STALE_AFTER_MINUTES = 30
 STUCK_AFTER_MINUTES = 90
@@ -891,6 +892,8 @@ def apply_action(item_id: int, action: str, until: str | None = None) -> dict:
             "INSERT INTO work_events(work_item_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
             (item_id, f"operator_{action}", db.dump_json({"until": until}), now),
         )
+    if action in ("done", "cancel"):
+        record_item_folder_artifacts(item_id)
     return {"id": item_id, "action": action}
 
 
@@ -1175,8 +1178,6 @@ def record_artifacts(session_id: str, transcript_path: str,
         path = path.strip()
         if path.startswith("/") and len(path) < 500:
             found.append((path, note.strip()[:200]))
-    if not found:
-        return 0
     now = _now()
     added = 0
     with db.tx() as c:
@@ -1186,13 +1187,66 @@ def record_artifacts(session_id: str, transcript_path: str,
         if not run:
             return 0
         for path, note in found:
+            if note and c.execute(
+                "UPDATE work_artifacts SET note = ? WHERE work_item_id = ? AND path = ? "
+                "AND note = ''", (note, run["work_item_id"], path)).rowcount:
+                continue
             cur = c.execute(
                 "INSERT OR IGNORE INTO work_artifacts(work_item_id, work_run_id, path, note, created_at) "
                 "VALUES (?, ?, ?, ?, ?)",
                 (run["work_item_id"], run["id"], path, note, now),
             )
             added += cur.rowcount
+        added += _record_folder_artifacts(c, run["work_item_id"], run["id"], now)
     return added
+
+
+def _record_folder_artifacts(c, item_id: int, run_id: int, now: str) -> int:
+    """Insert a row for every file in the item's folder that has none.
+
+    The board lists only work_artifacts rows. 17 tasks wrote a report or a
+    video into their folder and printed no ARTIFACT: line, so the board showed
+    them with nothing. The idle stop that closes a task runs this, after every
+    file of the task is written."""
+    known = {r["path"] for r in c.execute(
+        "SELECT path FROM work_artifacts WHERE work_item_id = ?", (item_id,))}
+    added = 0
+    for path in work_artifacts.item_files(item_id):
+        if path in known:
+            continue
+        added += c.execute(
+            "INSERT OR IGNORE INTO work_artifacts(work_item_id, work_run_id, path, note, created_at) "
+            "VALUES (?, ?, ?, '', ?)", (item_id, run_id, path, now)).rowcount
+    return added
+
+
+def record_item_folder_artifacts(item_id: int) -> int:
+    """Record the unlisted files of one item under its newest run.
+
+    A cancel, an operator done, or a dead agent closes a task without the idle
+    stop that runs `record_artifacts`, so those paths call this instead."""
+    with db.tx() as c:
+        run = c.execute("SELECT MAX(id) AS id FROM work_runs WHERE work_item_id = ?",
+                        (item_id,)).fetchone()
+        if not run or run["id"] is None:
+            return 0
+        return _record_folder_artifacts(c, item_id, run["id"], _now())
+
+
+def backfill_folder_artifacts() -> list[dict]:
+    """Record the unlisted files of every closed item that has a run.
+
+    `record_artifacts` scans the folder only when a task closes, so an item
+    that closed before the scan existed needs this once."""
+    rows = db.query_all(
+        "SELECT DISTINCT i.id FROM work_items i JOIN work_runs r ON r.work_item_id = i.id "
+        "WHERE i.state IN (?, ?, ?, 'failed_stale') ORDER BY i.id", CLOSED_STATES)
+    report = []
+    for row in rows:
+        added = record_item_folder_artifacts(row["id"])
+        if added:
+            report.append({"id": row["id"], "added": added})
+    return report
 
 
 def record_progress(session_id: str, transcript_path: str,
@@ -1810,7 +1864,9 @@ def retry_missed_autocontinues(cutoff: str) -> list[dict]:
     for row in rows:
         if not agent_running(row["tmux_key"], row["provider"]):
             continue
-        outcome = maybe_autocontinue(row["session_id"], resolve_transcript_path(row))
+        transcript_path = resolve_transcript_path(row)
+        record_artifacts(row["session_id"], transcript_path)
+        outcome = maybe_autocontinue(row["session_id"], transcript_path)
         actions.append({"id": row["item_id"], "action": f"autocontinue_retry:{outcome}"})
     return actions
 
@@ -1896,6 +1952,7 @@ def sweep_stale_items(now: datetime | None = None) -> list[dict]:
                         (row["item_id"], row["run_id"], _now()),
                     )
             if flipped:
+                record_artifacts(row["session_id"], transcript_path)
                 actions.append({"id": row["item_id"], "action": "failed"})
             continue
         if pending_tool_calls(transcript_path):
