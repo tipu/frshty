@@ -505,7 +505,8 @@ class TestCatchUp:
 
     def test_nothing_opens_on_a_day_off(self, clean):
         now = _at(_day(), 12)
-        assert standup.catch_up(_cfg(days=["sun"], open_at="09:00"), now) == {}
+        tomorrow = date.fromisoformat(_day(1)).strftime("%a").lower()
+        assert standup.catch_up(_cfg(days=[tomorrow], open_at="09:00"), now) == {}
         assert standup.day_view(_day())["exists"] is False
 
     def test_a_day_left_open_from_an_earlier_date_is_closed(self, clean):
