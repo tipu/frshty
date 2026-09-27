@@ -377,6 +377,7 @@ class TestInstanceLauncher:
         assert f"{sock}:{sock}" in args
         assert args[args.index("--group-add") + 1] == str(sock.stat().st_gid)
         assert args[args.index("--device") + 1] == str(sock)
+        assert args[args.index("--device") + 2:args.index("--device") + 4] == ["--group-add", str(sock.stat().st_gid)]
         (tmp_path / "boxes" / "aimyable" / "config" / "aimyable.toml").unlink()
         path = self._config(tmp_path, '[container]\ndevices = ["/definitely/not/a/device"]\n')
         with pytest.raises(SystemExit, match="device /definitely/not/a/device does not exist"):

@@ -228,7 +228,7 @@ def run_args(config: dict, config_path: Path, check: bool) -> list[str]:
     for device in box.get("devices") or []:
         if not Path(device).exists():
             raise SystemExit(f"{key}: device {device} does not exist")
-        args += ["--device", device]
+        args += ["--device", device, "--group-add", str(Path(device).stat().st_gid)]
     args += code_args()
     for host, inside, ro in mounts(config, config_path, root):
         args += ["-v", f"{host}:{inside}" + (":ro" if ro else "")]
