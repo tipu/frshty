@@ -9,6 +9,7 @@
 .wq-label { font-size: 13px; color: #93c5fd; }
 .wq-desc { font-size: 11px; color: #8a8a97; margin-top: 2px; }
 .wq-q + .wq-q { margin-top: 12px; border-top: 1px solid #2a2a35; padding-top: 10px; }
+.wq-own { width: 100%; box-sizing: border-box; margin-top: 4px; background: #0b0b12; border: 1px solid #2a2a35; border-radius: 6px; padding: 6px 10px; font-size: 13px; color: #e0e0e0; }
 .wq-send { margin-top: 8px; }
 .wq-btn { font-size: 12px; padding: 3px 12px; border-radius: 4px; background: #1e3a5f; color: #93c5fd; cursor: pointer; }
 .wq-btn-off { opacity: 0.4; cursor: default; }
@@ -24,9 +25,9 @@
   window.WorkQuestion = {
     props: { item: { type: Object, required: true } },
     emits: ["answer"],
-    data() { return { sel: {}, busy: false }; },
+    data() { return { sel: {}, own: {}, busy: false }; },
     watch: {
-      "item.pending_question"() { this.sel = {}; this.busy = false; },
+      "item.pending_question"() { this.sel = {}; this.own = {}; this.busy = false; },
     },
     computed: {
       questions() {
@@ -41,14 +42,20 @@
         return this.questions.length > 1 || this.questions.some(q => q.multiSelect);
       },
       ready() {
-        return this.questions.every((q, i) => (this.sel[i] || []).length > 0);
+        return this.questions.every((q, i) => (this.sel[i] || []).length > 0 || this.ownText(i));
       },
       hint() {
         return this.questions.some(q => q.multiSelect)
-          ? "select every option that applies, then send" : "pick one option per question, then send";
+          ? "select every option that applies or type an answer, then send" : "pick one option or type an answer per question, then send";
       },
     },
     methods: {
+      ownText(qi) {
+        return (this.own[qi] || "").trim();
+      },
+      typed(qi) {
+        if (this.ownText(qi) && !this.questions[qi].multiSelect) this.sel[qi] = [];
+      },
       selected(qi, label) {
         return (this.sel[qi] || []).includes(label);
       },
@@ -66,10 +73,11 @@
         else if (q.multiSelect) sel.push(label);
         else sel.splice(0, sel.length, label);
         this.sel[qi] = sel;
+        if (!q.multiSelect) this.own[qi] = "";
       },
-      compose(picks) {
+      compose(picks, own) {
         return this.questions.map((q, i) => {
-          const a = (picks[i] || []).join(", ");
+          const a = (picks[i] || []).concat((own || {})[i] ? [own[i].trim()] : []).filter(Boolean).join(", ");
           if (!a) return "";
           const tag = (q.header || q.question || "answer").trim().slice(0, 80);
           return `${tag}: ${a}`;
@@ -78,8 +86,8 @@
       send() {
         if (!this.ready || this.busy) return;
         this.busy = true;
-        this.$emit("answer", this.compose(this.sel), ok => {
-          if (ok) this.sel = {};
+        this.$emit("answer", this.compose(this.sel, this.own), ok => {
+          if (ok) { this.sel = {}; this.own = {}; }
           else this.busy = false;
         });
       },
@@ -94,6 +102,9 @@
       <div class="wq-label">{{ o.label }}</div>
       <div class="wq-desc" v-if="o.description">{{ o.description }}</div>
     </div>
+    <input class="wq-own" v-if="questions.length > 1" v-model="own[qi]" :disabled="busy"
+           @input="typed(qi)" @keydown.enter.prevent="send"
+           placeholder="Other — type your own answer to this question…" />
   </div>
   <div class="wq-send" v-if="manual">
     <span :class="['wq-btn', ready ? '' : 'wq-btn-off']" @click="send">answer &amp; resume</span>
