@@ -439,7 +439,8 @@ _SCRATCH_ROOT = "/tmp/"
 
 
 def _artifact_roots(artifact_id: int) -> list[str]:
-    roots = [str(work_artifacts.root()) + os.sep, _SCRATCH_ROOT]
+    roots = [str(work_artifacts.root()) + os.sep, _SCRATCH_ROOT,
+             os.path.realpath(work_artifacts.legacy_root()) + os.sep]
     rows = db.query_all(
         "SELECT r.cwd FROM work_artifacts a "
         "JOIN work_runs r ON r.work_item_id = a.work_item_id "
