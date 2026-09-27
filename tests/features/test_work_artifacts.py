@@ -28,6 +28,8 @@ def _root(tmp_path, monkeypatch):
     root = tmp_path / "artifacts"
     root.mkdir()
     monkeypatch.setattr(work_artifacts, "root", lambda: root)
+    monkeypatch.setattr(work_artifacts, "legacy_root",
+                        lambda: tmp_path / "legacy")
     monkeypatch.setattr(work_artifacts, "SCRATCH_PREFIX",
                         str(tmp_path / "scratch") + os.sep)
     return root
@@ -51,7 +53,7 @@ class TestGc:
         fresh = work_artifacts.item_dir(2)
         (fresh / "report.html").write_text("fresh")
         result = work_artifacts.gc_artifacts()
-        assert result["removed"] == ["work-1"]
+        assert result["removed"] == [str(old)]
         assert not old.exists()
         assert fresh.is_dir()
         assert (root / ".gc-stamp").exists()
@@ -75,10 +77,41 @@ class TestGc:
         gone = _row(str(folder / "report.html"))
         kept = _row(str(tmp_path / "elsewhere" / "report.html"))
         result = work_artifacts.gc_artifacts()
-        assert result["removed"] == ["work-5"]
+        assert result["removed"] == [str(folder)]
         assert result["forgotten"] == 1
         assert db.query_one("SELECT id FROM work_artifacts WHERE id = ?", (gone,)) is None
         assert db.query_one("SELECT id FROM work_artifacts WHERE id = ?", (kept,))
+
+    def test_sweeps_the_legacy_store(self, tmp_path, monkeypatch):
+        _root(tmp_path, monkeypatch)
+        legacy = tmp_path / "legacy"
+        old = legacy / "work-7"
+        old.mkdir(parents=True)
+        (old / "report.html").write_text("old")
+        _age(old, 40)
+        fresh = legacy / "work-8"
+        fresh.mkdir()
+        (fresh / "report.html").write_text("fresh")
+        (legacy / "stray.toml").write_text("x")
+        _age(legacy / "stray.toml", 40)
+        gone = _row(str(old / "report.html"))
+        kept = _row(str(fresh / "report.html"))
+        result = work_artifacts.gc_artifacts()
+        assert result["removed"] == [str(old)]
+        assert result["forgotten"] == 1
+        assert not old.exists()
+        assert fresh.is_dir()
+        assert (legacy / "stray.toml").exists()
+        assert db.query_one("SELECT id FROM work_artifacts WHERE id = ?", (gone,)) is None
+        assert db.query_one("SELECT id FROM work_artifacts WHERE id = ?", (kept,))
+
+    def test_store_that_is_the_legacy_store_is_swept_once(self, tmp_path, monkeypatch):
+        root = _root(tmp_path, monkeypatch)
+        monkeypatch.setattr(work_artifacts, "legacy_root", lambda: root)
+        old = work_artifacts.item_dir(9)
+        (old / "report.html").write_text("old")
+        _age(old, 40)
+        assert work_artifacts.gc_artifacts()["removed"] == [str(old)]
 
     def test_throttled_within_the_interval(self, tmp_path, monkeypatch):
         _root(tmp_path, monkeypatch)
@@ -89,7 +122,7 @@ class TestGc:
         assert work_artifacts.gc_artifacts()["throttled"] is True
         assert folder.is_dir()
         later = time.time() + work_artifacts.GC_INTERVAL_S + 1
-        assert work_artifacts.gc_artifacts(now=later)["removed"] == ["work-6"]
+        assert work_artifacts.gc_artifacts(now=later)["removed"] == [str(folder)]
 
     def test_forgets_an_old_row_whose_scratch_file_is_gone(self, tmp_path, monkeypatch):
         _root(tmp_path, monkeypatch)
@@ -111,6 +144,8 @@ class TestGc:
     def test_creates_the_store_when_absent(self, tmp_path, monkeypatch):
         store = tmp_path / "absent"
         monkeypatch.setattr(work_artifacts, "root", lambda: store)
+        monkeypatch.setattr(work_artifacts, "legacy_root",
+                            lambda: tmp_path / "legacy")
         monkeypatch.setattr(work_artifacts, "SCRATCH_PREFIX",
                             str(tmp_path / "scratch") + os.sep)
         assert work_artifacts.gc_artifacts() == {"removed": [], "forgotten": 0}
