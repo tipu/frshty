@@ -305,6 +305,16 @@ class TestCodexLaunch:
         assert entries["expirement"] == str(dev / "expirement")
         assert entries["upwork-api"] == str(dev / "upwork_apply")
 
+    def test_comencorp_project_is_offered(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(work_launch.runtime, "instances", lambda: {})
+        monkeypatch.setenv("HOME", str(tmp_path))
+        dev = tmp_path / "Documents" / "dev"
+        assert "comencorp" not in {e["key"] for e in work_launch.project_entries()}
+        (dev / "comencorp").mkdir(parents=True)
+        entries = {e["key"]: e for e in work_launch.project_entries()}
+        assert entries["comencorp"]["root"] == str(dev / "comencorp")
+        assert entries["comencorp"]["primary"] is True
+
     def test_an_instance_is_primary_unless_it_opts_out(self, monkeypatch, tmp_path):
         def _inst(config):
             entry = MagicMock()
