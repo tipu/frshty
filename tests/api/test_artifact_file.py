@@ -84,6 +84,24 @@ class TestArtifactStoreRoute:
         assert isinstance(resp, FileResponse)
         assert resp.path.endswith("report.html")
 
+    def test_serves_a_file_in_the_legacy_artifact_store(self, tmp_path, monkeypatch):
+        legacy = tmp_path / "legacy-store"
+        os.makedirs(legacy / "work-1", exist_ok=True)
+        page = legacy / "work-1" / "next-steps.html"
+        page.write_text("<p>hi</p>")
+        item_id = work_store.create_item("legacy artifact store route test")
+        work_store.add_run(item_id, f"sid-legacy-{item_id}", "work-artifact",
+                           str(tmp_path / "run-workspace"))
+        monkeypatch.setattr(work_routes.work_launch, "project_entries", lambda: [])
+        monkeypatch.setattr(work_routes, "_SCRATCH_ROOT", str(tmp_path / "scratch") + os.sep)
+        monkeypatch.setattr(work_routes.work_artifacts, "root",
+                            lambda: tmp_path / "artifact-store")
+        monkeypatch.setattr(work_routes.work_artifacts, "legacy_root", lambda: legacy)
+        artifact_id = _artifact(item_id, str(page))
+        resp = work_routes.api_work_artifact_asset(artifact_id, "")
+        assert isinstance(resp, FileResponse)
+        assert resp.path.endswith("next-steps.html")
+
 
 class TestArtifactAssetRoute:
     def test_html_artifact_redirects_to_a_folder_url(self, tmp_path, monkeypatch):

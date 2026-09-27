@@ -40,6 +40,14 @@ def root() -> Path:
     return Path(override) if override else frshty_root() / "artifacts"
 
 
+def legacy_root() -> Path:
+    """The store under ~/.frshty that every artifact row written before the
+    instance containers names. A container mounts it at the same path and
+    FRSHTY_ROOT moved `root` away from it, so the board still has to serve
+    from here."""
+    return Path.home() / ".frshty" / "artifacts"
+
+
 def item_dir(item_id: int) -> Path:
     """The artifact folder of one work item, created if it does not exist."""
     folder = root() / f"work-{item_id}"
