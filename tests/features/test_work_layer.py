@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import core.db as db
-from services import work_launch, work_store
+from services import work_artifacts, work_launch, work_store
 
 
 def _mkitem(objective="do the thing", **kw):
@@ -1201,6 +1201,70 @@ class TestArtifacts:
         d = work_store.item_detail(item_id)
         assert d["artifacts"][0]["path"] == "/tmp/shot.png"
         assert isinstance(d["artifacts"][0]["id"], int)
+
+    def test_records_unlisted_folder_files(self, tmp_path):
+        item_id = _mkitem("proof video")
+        work_store.add_run(item_id, f"sid-artf-{item_id}", f"work-{item_id}", "/tmp")
+        folder = work_artifacts.item_dir(item_id)
+        (folder / "proof.html").write_text("<p>proof</p>")
+        (folder / "demo.mp4").write_bytes(b"mp4")
+        (folder / ".hidden").write_text("x")
+        (folder / "frames").mkdir()
+        (folder / "frames" / "f1.png").write_bytes(b"png")
+        t = tmp_path / "t.jsonl"
+        t.write_text(json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": f"ARTIFACT: {folder / 'proof.html'} - proof page"}]}}))
+        assert work_store.record_artifacts(f"sid-artf-{item_id}", str(t)) == 2
+        rows = db.query_all("SELECT path, note FROM work_artifacts WHERE work_item_id = ? "
+                            "ORDER BY path", (item_id,))
+        assert [(r["path"], r["note"]) for r in rows] == [
+            (str(folder / "demo.mp4"), ""), (str(folder / "proof.html"), "proof page")]
+        assert work_store.record_artifacts(f"sid-artf-{item_id}", str(t)) == 0
+
+    def test_folder_file_listed_by_an_earlier_run_is_not_duplicated(self, tmp_path):
+        item_id = _mkitem("two runs")
+        work_store.add_run(item_id, f"sid-artr1-{item_id}", f"work-{item_id}", "/tmp")
+        work_store.add_run(item_id, f"sid-artr2-{item_id}", f"work-{item_id}-2", "/tmp")
+        folder = work_artifacts.item_dir(item_id)
+        (folder / "report.html").write_text("r")
+        assert work_store.record_artifacts(f"sid-artr1-{item_id}", str(tmp_path / "none")) == 1
+        assert work_store.record_artifacts(f"sid-artr2-{item_id}", str(tmp_path / "none")) == 0
+
+    def test_later_artifact_line_fills_the_note_of_a_folder_row(self, tmp_path):
+        item_id = _mkitem("note later")
+        sid = f"sid-artn-{item_id}"
+        work_store.add_run(item_id, sid, f"work-{item_id}", "/tmp")
+        folder = work_artifacts.item_dir(item_id)
+        (folder / "report.html").write_text("r")
+        assert work_store.record_artifacts(sid, str(tmp_path / "none")) == 1
+        t = tmp_path / "t.jsonl"
+        t.write_text(json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": f"ARTIFACT: {folder / 'report.html'} - final report"}]}}))
+        work_store.record_artifacts(sid, str(t))
+        rows = db.query_all("SELECT note FROM work_artifacts WHERE work_item_id = ?", (item_id,))
+        assert [r["note"] for r in rows] == ["final report"]
+
+    def test_cancel_records_folder_files(self):
+        item_id = _mkitem("canceled mid run")
+        work_store.add_run(item_id, f"sid-artc-{item_id}", f"work-{item_id}", "/tmp")
+        (work_artifacts.item_dir(item_id) / "partial.html").write_text("p")
+        work_store.apply_action(item_id, "cancel")
+        rows = db.query_all("SELECT path FROM work_artifacts WHERE work_item_id = ?", (item_id,))
+        assert [r["path"] for r in rows] == [str(work_artifacts.item_dir(item_id) / "partial.html")]
+
+    def test_backfill_records_closed_items_only(self):
+        closed = _mkitem("closed task")
+        open_item = _mkitem("open task")
+        work_store.add_run(closed, f"sid-bfc-{closed}", f"work-{closed}", "/tmp")
+        work_store.add_run(open_item, f"sid-bfo-{open_item}", f"work-{open_item}", "/tmp")
+        with db.tx() as c:
+            c.execute("UPDATE work_items SET state = 'needs_ack' WHERE id = ?", (closed,))
+        (work_artifacts.item_dir(closed) / "proof.html").write_text("p")
+        (work_artifacts.item_dir(open_item) / "draft.html").write_text("d")
+        report = work_store.backfill_folder_artifacts()
+        assert {"id": closed, "added": 1} in report
+        assert all(r["id"] != open_item for r in report)
+        assert all(r["id"] != closed for r in work_store.backfill_folder_artifacts())
 
 
 class TestTodayProducer:
