@@ -15,7 +15,9 @@ the host path the config names, the model CLI logins, and one directory of its
 own on the host, ~/.frshty-containers/<key>/. Its state/ is mounted at the
 same path and named by FRSHTY_ROOT, so every worktree the container registers
 in a shared repository names a path the host sees too. Its ssh/ is mounted at
-~/.ssh. The container never sees the host's ~/.ssh, ~/.frshty, or another
+~/.ssh. Its totp/, when present, is mounted read-only at ~/.totp for the
+totp command; it holds only the TOTP secrets of that instance's accounts.
+The container never sees the host's ~/.ssh, ~/.frshty, or another
 instance's workspace or state.
 
 Every instance container gets the host's Docker socket, because the proof
@@ -170,6 +172,8 @@ def mounts(config: dict, config_path: Path, root: Path) -> list[tuple[str, str, 
     out = [(str(root / "state"), str(root / "state"), False),
            (str(root / "ssh"), str(HOME / ".ssh"), False),
            (str(config_path), f"/app/config/{key}.toml", False)]
+    if (root / "totp").is_dir():
+        out.append((str(root / "totp"), str(HOME / ".totp"), True))
     workspace = _expand(config["workspace"]["root"])
     out.append((str(workspace), str(workspace), False))
     for name in MODEL_DIRS:

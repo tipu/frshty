@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y curl git openssh-client tmux libsecret-
     npm install -g @anthropic-ai/claude-code @openai/codex pnpm playwright @playwright/cli && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
-RUN apt-get update && apt-get install -y unzip && \
+RUN apt-get update && apt-get install -y unzip oathtool && \
     curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$(uname -m).zip" -o /tmp/awscliv2.zip && \
     unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install && \
     curl -fsSL "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_$(dpkg --print-architecture | sed 's/amd64/64bit/')/session-manager-plugin.deb" -o /tmp/ssm.deb && \
@@ -36,6 +36,7 @@ RUN pip install --no-cache-dir httpx fastapi 'uvicorn[standard]' watchfiles mcp 
 RUN groupadd -o -g "${HOST_GID}" frshty && \
     useradd -o -m -d "${HOST_HOME}" -s /bin/bash -u "${HOST_UID}" -g "${HOST_GID}" frshty && \
     mkdir -p /run/frshty/seed && \
+    ln -s /app/scripts/totp /usr/local/bin/totp && \
     if [ -n "${HOOK_DIR}" ]; then mkdir -p "$(dirname "${HOOK_DIR}")" && ln -s /app "${HOOK_DIR}"; fi
 
 COPY . .
