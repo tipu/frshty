@@ -5,8 +5,8 @@ A session writes its reports, pages, images and videos into
 /tmp, or the hosted Claude artifact publisher. The board serves an artifact
 from disk long after the session's tmux pane is gone, so the file has to
 survive a reboot and stay on this machine. `gc_artifacts` bounds the growth:
-it deletes an item's folder once nothing inside it was written for
-MAX_AGE_DAYS, forgets the rows that pointed into that folder, and forgets the
+it deletes an item's folder, in the store or in the legacy store, once
+nothing inside it was written for MAX_AGE_DAYS, forgets the rows that pointed into that folder, and forgets the
 older rows that still point into /tmp at a file a reboot has wiped.
 """
 import base64
@@ -25,6 +25,7 @@ MAX_AGE_DAYS = 30
 GC_INTERVAL_S = 86400
 SCRATCH_PREFIX = "/tmp/"
 ROOT_ENV = "FRSHTY_ARTIFACT_ROOT"
+LEGACY_ROOT_ENV = "FRSHTY_LEGACY_ARTIFACT_ROOT"
 INTAKE_DIR = "intake"
 INTAKE_IMAGE_TYPES = {"image/png": ".png", "image/jpeg": ".jpg",
                       "image/gif": ".gif", "image/webp": ".webp"}
@@ -44,8 +45,11 @@ def legacy_root() -> Path:
     """The store under ~/.frshty that every artifact row written before the
     instance containers names. A container mounts it at the same path and
     FRSHTY_ROOT moved `root` away from it, so the board still has to serve
-    from here."""
-    return Path.home() / ".frshty" / "artifacts"
+    from here, and `gc_artifacts` still has to sweep it. LEGACY_ROOT_ENV
+    relocates it, which keeps the test suite out of the operator's real
+    legacy store."""
+    override = os.environ.get(LEGACY_ROOT_ENV)
+    return Path(override) if override else Path.home() / ".frshty" / "artifacts"
 
 
 def item_dir(item_id: int) -> Path:
@@ -171,6 +175,26 @@ def _forget_lost_scratch_rows(cutoff: float) -> int:
     return len(stale)
 
 
+def _store_folders(base: Path) -> list[Path]:
+    """The item folders in the store and in the legacy store. The legacy store
+    holds the folders written before the instance containers, and nothing else
+    ever deletes them. A store that is the legacy store is listed once."""
+    stores = [base]
+    legacy = legacy_root()
+    if os.path.realpath(legacy) != os.path.realpath(base):
+        stores.append(legacy)
+    folders = []
+    for store in stores:
+        try:
+            entries = sorted(store.iterdir())
+        except OSError:
+            continue
+        folders += [e for e in entries
+                    if not e.name.startswith(".") and e.is_dir()
+                    and not e.is_symlink()]
+    return folders
+
+
 def gc_artifacts(max_age_days: int = MAX_AGE_DAYS, now: float | None = None,
                  force: bool = False) -> dict:
     """Delete artifact folders untouched for `max_age_days`. Self-throttled to
@@ -189,16 +213,14 @@ def gc_artifacts(max_age_days: int = MAX_AGE_DAYS, now: float | None = None,
         return {"removed": removed, "forgotten": forgotten, "throttled": True}
     stamp.touch()
     cutoff = now - max_age_days * 86400
-    for entry in sorted(base.iterdir()):
-        if entry.name.startswith(".") or not entry.is_dir():
-            continue
+    for entry in _store_folders(base):
         try:
             if _newest_mtime(entry) >= cutoff:
                 continue
             shutil.rmtree(entry)
         except OSError:
             continue
-        removed.append(entry.name)
+        removed.append(str(entry))
         forgotten += _forget_rows(entry)
     forgotten += _forget_lost_scratch_rows(cutoff)
     if removed or forgotten:

@@ -69,13 +69,17 @@ def _isolated_artifact_root(tmp_path_factory):
     ~/.frshty/artifacts store. The environment carries the override because
     some tests re-import services.*, which would drop a patched attribute."""
     root = tmp_path_factory.mktemp("frshty-artifacts")
-    previous = os.environ.get(work_artifacts.ROOT_ENV)
-    os.environ[work_artifacts.ROOT_ENV] = str(root)
+    legacy = tmp_path_factory.mktemp("frshty-legacy-artifacts")
+    overrides = {work_artifacts.ROOT_ENV: str(root),
+                 work_artifacts.LEGACY_ROOT_ENV: str(legacy)}
+    previous = {name: os.environ.get(name) for name in overrides}
+    os.environ.update(overrides)
     yield root
-    if previous is None:
-        del os.environ[work_artifacts.ROOT_ENV]
-    else:
-        os.environ[work_artifacts.ROOT_ENV] = previous
+    for name, value in previous.items():
+        if value is None:
+            del os.environ[name]
+        else:
+            os.environ[name] = value
 
 
 @pytest.fixture(scope="session", autouse=True)
