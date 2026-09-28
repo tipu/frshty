@@ -331,6 +331,30 @@ class TestInstanceLauncher:
         assert args[-1] == "--check"
         assert "--rm" in args and "--restart" not in args
 
+    def test_tmp_is_a_capped_executable_tmpfs(self, tmp_path, monkeypatch):
+        mod, _ = self._launcher(tmp_path, monkeypatch)
+        path = self._config(tmp_path)
+        for check in (False, True):
+            args = mod.run_args(mod.load(str(path)), path, check=check)
+            mounts = [args[i + 1] for i, a in enumerate(args) if a == "--tmpfs"]
+            assert mounts == ["/tmp:rw,exec,nosuid,nodev,size=8g,mode=1777"]
+
+    def test_reload_never_uses_docker_kill(self, tmp_path, monkeypatch):
+        mod, _ = self._launcher(tmp_path, monkeypatch)
+        calls = []
+        pids = iter(["10", "20"])
+        monkeypatch.setattr(mod, "instance_containers", lambda: ["frshty-aimyable"])
+        monkeypatch.setattr(mod, "app_pid", lambda name: next(pids))
+
+        def run(cmd, **kwargs):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(mod.subprocess, "run", run)
+        assert mod.reload(timeout=1) == 0
+        assert ["docker", "exec", "frshty-aimyable", "kill", "-HUP", "1"] in calls
+        assert not any(cmd[:2] == ["docker", "kill"] for cmd in calls)
+
     def test_config_and_peers_mount_from_the_stable_root(self, tmp_path, monkeypatch):
         mod, _ = self._launcher(tmp_path, monkeypatch)
         path = self._config(tmp_path)

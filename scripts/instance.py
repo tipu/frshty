@@ -70,6 +70,7 @@ MODEL_DIRS = [".claude", ".codex", ".gemini"]
 SEED_FILES = [".claude.json", ".gitconfig"]
 DOCKER_SOCKET = Path("/var/run/docker.sock")
 PEERS = CONTAINERS_ROOT / "peers.toml"
+TMP_MOUNT = "/tmp:rw,exec,nosuid,nodev,size=8g,mode=1777"
 
 
 def _expand(path: str) -> Path:
@@ -223,7 +224,8 @@ def run_args(config: dict, config_path: Path, check: bool) -> list[str]:
             "-e", f"FRSHTY_PEER_SELF={key}",
             "-e", f"FRSHTY_TIMEZONE={os.environ.get('FRSHTY_TIMEZONE', 'America/Los_Angeles')}",
             "-e", f"FRSHTY_WORKER_COUNT={int(box.get('workers') or 3)}",
-            "-e", f"FRSHTY_MAX_CONCURRENT_LLM={int(box.get('llm') or 9)}"]
+            "-e", f"FRSHTY_MAX_CONCURRENT_LLM={int(box.get('llm') or 9)}",
+            "--tmpfs", TMP_MOUNT]
     if box.get("env_file"):
         args += ["--env-file", str(_expand(box["env_file"]))]
     if DOCKER_SOCKET.exists():
@@ -287,14 +289,16 @@ def app_pid(name: str) -> str:
 
 def reload(timeout: float = 120) -> int:
     """SIGHUP every instance container and restart the gateway. Fails unless
-    each instance runs a new frshty.py process afterwards."""
+    each instance runs a new frshty.py process afterwards. The signal goes
+    through `docker exec kill`, because `docker kill` marks the container as
+    manually stopped and Docker then skips it at the next daemon start."""
     names = instance_containers()
     if not names:
         print("reload: no instance container is running", file=sys.stderr)
         return 1
     before = {name: app_pid(name) for name in names}
     for name in names:
-        subprocess.run(["docker", "kill", "--signal", "HUP", name], check=True, capture_output=True)
+        subprocess.run(["docker", "exec", name, "kill", "-HUP", "1"], check=True, capture_output=True)
     failed = []
     for name in names:
         deadline = time.monotonic() + timeout
