@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+SECRETS="$HOME/.totp/secrets"
+if [ $# -eq 0 ]; then
+  awk '{print $1}' "$SECRETS"
+  exit 0
+fi
+secret=$(awk -v n="$1" '$1==n {print $2}' "$SECRETS")
+if [ -z "$secret" ]; then
+  echo "no account named '$1'. available:" >&2
+  awk '{print "  "$1}' "$SECRETS" >&2
+  exit 1
+fi
+oathtool --totp -b "$secret"
