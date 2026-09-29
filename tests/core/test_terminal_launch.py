@@ -15,11 +15,12 @@ class TestLaunchPaneCommand:
 
         terminal.launch_pane_command("work-7", str(tmp_path), "claude --resume abc")
 
-        args = run.call_args.args[0]
+        args = run.call_args_list[0].args[0]
         assert args[3:8] == ["new-session", "-d", "-s", "term-work-7", "-c"]
         assert args[-1] == "claude --resume abc; exec /test/shell -l"
         assert "send-keys" not in args
-        assert run.call_args.kwargs["env"] == terminal._child_env()
+        assert run.call_args_list[0].kwargs["env"] == terminal._child_env()
+        assert run.call_args_list[1].args[0][3:] == ["set-option", "-g", "mouse", "on"]
 
     def test_the_state_root_reaches_the_agent_pane(self, monkeypatch):
         monkeypatch.setenv("FRSHTY_ROOT", "/boxes/frshty/state")
@@ -40,7 +41,7 @@ class TestLaunchPaneCommand:
 
         terminal.launch_pane_command("work-8", str(tmp_path), "codex resume --last")
 
-        args = run.call_args.args[0]
+        args = run.call_args_list[0].args[0]
         assert args[3:9] == ["respawn-pane", "-k", "-t", "=term-work-8:", "-c", str(tmp_path)]
         assert args[-1] == "codex resume --last; exec /test/shell -l"
         assert "send-keys" not in args
