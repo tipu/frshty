@@ -6,6 +6,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Work terminal — frshty</title>
 <script src="/static/vendor/xterm.js"></script>
+<script src="/static/frshty-terminal-select.js"></script>
 <link rel="stylesheet" href="/static/vendor/xterm.css">
 <script src="/static/vendor/xterm-addon-fit.js"></script>
 <style>
@@ -56,6 +57,7 @@ const term = new Terminal({
 const fit = new FitAddon.FitAddon();
 term.loadAddon(fit);
 term.open(document.getElementById("term"));
+frshtyTerminalSelect(term);
 fit.fit();
 let ws = null;
 let delay = 0;
