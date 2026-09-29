@@ -91,6 +91,7 @@ def main(argv: list[str] | None = None) -> int:
     config = cfg.load_config(args.config)
     copy_seed_files(SEED_DIR, Path.home())
     git_util.run_git(Path.home(), ["config", "--global", "gc.worktreePruneExpire", "never"])
+    git_util.run_git(Path.home(), ["config", "--global", "--replace-all", "safe.directory", "*"])
     token = os.environ.pop("GH_TOKEN", "")
     try:
         if token:
