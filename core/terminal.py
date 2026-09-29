@@ -135,6 +135,15 @@ def _tmux_session_name(ticket_key: str) -> str:
     return f"term-{ticket_key}"
 
 
+def _enable_mouse():
+    """Turn tmux mouse mode on for every session on the socket, so a mouse
+    wheel scrolls the pane history instead of sending arrow keys."""
+    subprocess.run(
+        [_tmux_bin(), "-S", TMUX_SOCKET, "set-option", "-g", "mouse", "on"],
+        env=_child_env(), capture_output=True,
+    )
+
+
 def _tmux_session_exists(session_name: str) -> bool:
     result = subprocess.run(
         [_tmux_bin(), "-S", TMUX_SOCKET, "has-session", "-t", tmux_target.session(session_name)],
@@ -249,6 +258,7 @@ def launch_pane_command(ticket_key: str, cwd: str, command: str):
     if result.returncode != 0:
         detail = result.stderr.strip() or f"tmux exited {result.returncode}"
         raise RuntimeError(f"could not launch agent pane: {detail}")
+    _enable_mouse()
 
 
 def pane_text(ticket_key: str) -> str:
@@ -446,6 +456,7 @@ def _get_or_spawn(ticket_key: str, cwd: str):
             ],
             env=env, capture_output=True,
         )
+    _enable_mouse()
 
     pid, fd = pty.fork()
     if pid == 0:
