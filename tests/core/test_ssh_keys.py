@@ -208,9 +208,31 @@ class TestContainerBoot:
         config.write_text('[job]\nkey = "x"\nplatform = "github"\nport = 1\n'
                           '[workspace]\nroot = "%s"\nrepos = []\n' % tmp_path)
         monkeypatch.setattr(boot.Path, "home", lambda: tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.delenv("GH_TOKEN", raising=False)
         monkeypatch.setattr(boot, "supervise", lambda *a: pytest.fail("app must not start"))
         assert boot.main([str(config)]) == 1
+
+    def test_mounted_repos_owned_by_another_uid_are_trusted(self, tmp_path, monkeypatch):
+        boot = _load_script("container_boot")
+        home, seed, repo = tmp_path / "home", tmp_path / "seed", tmp_path / "repo"
+        home.mkdir()
+        seed.mkdir()
+        (seed / ".gitconfig").write_text("[safe]\n\tdirectory = /a\n\tdirectory = /b\n")
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        config = tmp_path / "c.toml"
+        config.write_text('[job]\nkey = "x"\nplatform = "github"\nport = 1\n'
+                          '[workspace]\nroot = "%s"\nrepos = []\n' % tmp_path)
+        monkeypatch.setattr(boot, "SEED_DIR", seed)
+        monkeypatch.setattr(boot.Path, "home", lambda: home)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+        monkeypatch.delenv("GH_TOKEN", raising=False)
+        monkeypatch.setattr(boot, "supervise", lambda *a: pytest.fail("app must not start"))
+        boot.main([str(config)])
+        env = {**os.environ, "GIT_TEST_ASSUME_DIFFERENT_OWNER": "1"}
+        r = subprocess.run(["git", "-C", str(repo), "status"], capture_output=True, text=True, env=env)
+        assert r.returncode == 0, r.stderr
 
 
 class TestSupervise:
