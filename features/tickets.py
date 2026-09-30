@@ -1648,6 +1648,18 @@ def _fetch_tickets(config: dict) -> list[dict]:
     return ts.fetch_tickets()
 
 
+def _merge_setup(ts: dict, setup: dict) -> dict:
+    """Apply a _setup_ticket result onto the stored ticket dict.
+
+    _setup_ticket returns only status, slug, branch and one of discovered_at or
+    setup_failed_at. Writing that dict in place of the ticket drops summary,
+    description and work_type, and the next advance_ticket classifies an empty
+    text as 'unknown', which holds the ticket with no pipeline task."""
+    merged = {k: v for k, v in ts.items() if k not in ("discovered_at", "setup_failed_at")}
+    merged.update(setup)
+    return merged
+
+
 def _setup_ticket(config, ticket, base_url, comments=None) -> dict:
     from datetime import datetime, timezone
     ws = config["workspace"]
