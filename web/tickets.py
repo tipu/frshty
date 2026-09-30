@@ -1652,7 +1652,7 @@ def api_start_dev(key: str):
     if not ticket:
         return JSONResponse({"error": "ticket not found in ticket system"}, status_code=404)
     setup = _tickets_mod._setup_ticket(_config, ticket, _config["_base_url"])
-    ts = _transition_and_advance(key, mutate=lambda _current: setup)
+    ts = _transition_and_advance(key, mutate=lambda current: _tickets_mod._merge_setup(current, setup))
     return {"status": "started", "new_status": ts.get("status")}
 
 
