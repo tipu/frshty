@@ -800,7 +800,7 @@ def _merge_hold_reason(contexts, draft: str, scopes: list[dict]) -> str:
     approver before the proposal opens: the one the draft names, every open
     sibling under its ticket, and every further pull request the draft names
     outside that ticket. A project the operator reviews himself
-    (work_launch.SELF_MERGE_PROJECTS) waits for nobody, so nothing is held
+    (work_launch.self_merge_projects) waits for nobody, so nothing is held
     there.
 
     A ticket's own pull requests are judged on the approvers its poll cached,
