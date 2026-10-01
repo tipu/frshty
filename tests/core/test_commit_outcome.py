@@ -183,6 +183,65 @@ class TestTicketCommitRepairBridge:
         assert commit.call_count == 2
         route.assert_called_once_with(r, failed, "DEV-635")
 
+    def test_a_failure_left_by_a_repair_gets_a_second_repair(self, tmp_path):
+        """LSC-144: the repair fixed a return type, and the next commit failed
+        on unsorted imports in the same file. One round blocked the ticket."""
+        r = _repo(tmp_path, config=False)
+        first = g.CommitOutcome(
+            "hook_failed", "hook_pass_2", "r", 1,
+            "error[invalid-return-type]: Return type does not match", "aaa", "aaa",
+        )
+        second = g.CommitOutcome(
+            "hook_failed", "hook_pass_2", "r", 1,
+            "I001 [*] Import block is un-sorted or un-formatted", "aaa", "aaa",
+        )
+        committed = g.CommitOutcome(
+            "committed", "git_commit", "r", 0, "committed", "aaa", "bbb",
+        )
+
+        with patch.object(g, "commit_outcome", side_effect=[first, second, committed]) as commit, \
+             patch.object(ticket_tasks, "_route_hook_failure", return_value="repair") as route:
+            outcome, selected = ticket_tasks.commit_repo_changes(r, "LSC-144", "test: add tests")
+
+        assert outcome is committed
+        assert selected == "repair"
+        assert commit.call_count == 3
+        assert [c.args[1] for c in route.call_args_list] == [first, second]
+
+    def test_repair_rounds_are_bounded(self, tmp_path):
+        r = _repo(tmp_path, config=False)
+        failed = g.CommitOutcome(
+            "hook_failed", "hook_pass_2", "r", 1, "E501 Line too long", "aaa", "aaa",
+        )
+
+        with patch.object(g, "commit_outcome", return_value=failed) as commit, \
+             patch.object(ticket_tasks, "_route_hook_failure", return_value="repair") as route:
+            outcome, selected = ticket_tasks.commit_repo_changes(r, "LSC-144", "test: add tests")
+
+        assert outcome is failed
+        assert selected == "repair"
+        assert route.call_count == ticket_tasks.HOOK_REPAIR_ROUNDS
+        assert commit.call_count == ticket_tasks.HOOK_REPAIR_ROUNDS + 1
+
+    def test_a_second_failure_that_is_not_repairable_blocks(self, tmp_path):
+        r = _repo(tmp_path, config=False)
+        first = g.CommitOutcome(
+            "hook_failed", "hook_pass_2", "r", 1, "E501 Line too long", "aaa", "aaa",
+        )
+        second = g.CommitOutcome(
+            "hook_failed", "hook_pass_2", "r", 1,
+            "ModuleNotFoundError: No module named 'rpa_schema'", "aaa", "aaa",
+        )
+
+        with patch.object(g, "commit_outcome", side_effect=[first, second]) as commit, \
+             patch.object(ticket_tasks, "_route_hook_failure",
+                          side_effect=["repair", "block_dependency"]):
+            outcome, selected = ticket_tasks.commit_repo_changes(r, "LSC-144", "test: add tests")
+
+        assert outcome is second
+        assert selected == "repair"
+        assert commit.call_count == 2
+
     def test_nonrepairable_hook_failure_is_not_blindly_retried(self, tmp_path):
         r = _repo(tmp_path, config=False)
         failed = g.CommitOutcome(
