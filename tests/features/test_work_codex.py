@@ -284,36 +284,34 @@ class TestCodexLaunch:
         work_launch._kickoff("work-1", 1, "codex")
         sender.assert_not_called()
 
-    def test_algotrader2_project_is_offered(self, monkeypatch):
-        monkeypatch.setattr(work_launch.runtime, "instances", lambda: {})
-        root = os.path.expanduser("~/Documents/dev/algotrader2/implementation")
-        entries = {e["key"]: e["root"] for e in work_launch.project_entries()}
-        if os.path.isdir(root):
-            assert entries["algotrader2"] == root
-        else:
-            assert "algotrader2" not in entries
-
-    def test_game_and_upwork_projects_are_offered(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(work_launch.runtime, "instances", lambda: {})
+    def test_configured_projects_are_offered(self, monkeypatch, tmp_path):
+        board = MagicMock()
+        board.config = {"workspace": {"root": str(tmp_path / "board"), "repos": []},
+                        "work": {"projects": {"tool-a": str(tmp_path / "a"),
+                                              "tool-b": "~/b"}}}
+        monkeypatch.setattr(work_launch.runtime, "instances",
+                            lambda: {work_launch.core_config.BOARD_INSTANCE_KEY: board})
         monkeypatch.setenv("HOME", str(tmp_path))
-        dev = tmp_path / "Documents" / "dev"
-        (dev / "game_expirement").mkdir(parents=True)
-        (dev / "expirement").mkdir(parents=True)
-        (dev / "upwork_apply").mkdir(parents=True)
-        entries = {e["key"]: e["root"] for e in work_launch.project_entries()}
-        assert entries["game_expirement"] == str(dev / "game_expirement")
-        assert entries["expirement"] == str(dev / "expirement")
-        assert entries["upwork-api"] == str(dev / "upwork_apply")
-
-    def test_mercor_project_is_offered(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(work_launch.runtime, "instances", lambda: {})
-        monkeypatch.setenv("HOME", str(tmp_path))
-        dev = tmp_path / "Documents" / "dev"
-        assert "mercor" not in {e["key"] for e in work_launch.project_entries()}
-        (dev / "mercor").mkdir(parents=True)
+        keys = {e["key"] for e in work_launch.project_entries()}
+        assert "tool-a" not in keys and "tool-b" not in keys
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
         entries = {e["key"]: e for e in work_launch.project_entries()}
-        assert entries["mercor"]["root"] == str(dev / "mercor")
-        assert entries["mercor"]["primary"] is True
+        assert entries["tool-a"]["root"] == str(tmp_path / "a")
+        assert entries["tool-b"]["root"] == str(tmp_path / "b")
+        assert entries["tool-b"]["primary"] is True
+
+    def test_no_project_is_offered_without_config(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(work_launch.runtime, "instances", lambda: {})
+        monkeypatch.setattr(work_launch, "_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / "Documents" / "dev" / "mercor").mkdir(parents=True)
+        assert {e["key"] for e in work_launch.project_entries()} <= {"frshty"}
+
+    def test_project_entries_name_no_operator_project(self):
+        source = pathlib.Path("services/work_launch.py").read_text()
+        for name in ("clarivis", "algotrader2", "expirement", "upwork", "mercor", "lawphem"):
+            assert name not in source, f"work_launch.py names {name}"
 
     def test_an_instance_is_primary_unless_it_opts_out(self, monkeypatch, tmp_path):
         def _inst(config):
@@ -331,10 +329,12 @@ class TestCodexLaunch:
         assert primary["hidden"] is False
 
     def test_board_offers_every_project_the_server_lists(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(work_launch.runtime, "instances", lambda: {})
-        monkeypatch.setenv("HOME", str(tmp_path))
-        dev = tmp_path / "Documents" / "dev"
-        (dev / "game_expirement").mkdir(parents=True)
+        board = MagicMock()
+        board.config = {"workspace": {"root": str(tmp_path), "repos": []},
+                        "work": {"projects": {"tool": str(tmp_path / "tool")}}}
+        monkeypatch.setattr(work_launch.runtime, "instances",
+                            lambda: {work_launch.core_config.BOARD_INSTANCE_KEY: board})
+        (tmp_path / "tool").mkdir()
         assert all(e["primary"] for e in work_launch.project_entries())
         for name in ("templates/work.html", "templates/thread_detail.html"):
             text = pathlib.Path(name).read_text()

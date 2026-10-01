@@ -59,6 +59,12 @@ auto_merge = false                # governs both halves of frshty. the ticket pi
 #                                 # the picker's "+ context" control; the project is still
 #                                 # selectable and every task that already names it is
 #                                 # unaffected.
+# self_merge = ["my-tool"]        # board instance only. projects whose pull requests
+#                                 # nobody but the operator reviews; a merge there waits
+#                                 # for no approval. frshty is always one of them.
+# [work.projects]                 # board instance only. projects with no instance of
+# my-tool = "~/dev/my-tool"       # their own, key = root directory. the task board
+#                                 # offers each one whose directory exists.
 
 [features]
 review_prs = false
