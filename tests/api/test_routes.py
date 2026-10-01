@@ -593,6 +593,29 @@ class TestManualTransitionEnqueuesAdvance:
         assert len(events) == 1, "start-dev must emit ticket_advance"
 
 
+    def test_start_dev_keeps_stored_ticket_fields(self, client):
+        key = "ADV-13"
+        state.save("tickets", {key: {"status": "new", "slug": f"{key}-s",
+                                     "summary": "Add SDK", "description": "d",
+                                     "source": "jira",
+                                     "setup_failed_at": "2026-01-01T00:00:00+00:00"}})
+        setup = {"status": "new", "slug": f"{key}-s", "branch": "b",
+                 "discovered_at": "2026-01-02T00:00:00+00:00"}
+
+        with patch("web.tickets._tickets_mod._fetch_tickets",
+                   return_value=[{"key": key, "summary": "Add SDK"}]), \
+             patch("web.tickets._tickets_mod._setup_ticket", return_value=setup):
+            resp = client.post(f"/api/tickets/{key}/start-dev")
+
+        assert resp.status_code == 200, resp.text
+        stored = state.load_ticket(key)
+        assert stored["summary"] == "Add SDK"
+        assert stored["description"] == "d"
+        assert stored["source"] == "jira"
+        assert stored["discovered_at"] == "2026-01-02T00:00:00+00:00"
+        assert "setup_failed_at" not in stored
+
+
 class TestSubmitPrScopeGate:
     """The manual Submit PR path must honour the consensus scope verdict.
 
