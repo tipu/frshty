@@ -35,6 +35,15 @@ COMMIT_SUBJECT_RULE = (
     "report. Do not name any tool or model. Do not add a co-author trailer."
 )
 
+HOOKS_RULE = (
+    "Commit check rule: before you finish, run the repository's own commit checks "
+    "on every file you changed. In each repository that has a "
+    ".pre-commit-config.yaml, run `pre-commit run --files <the files you changed>` "
+    "there. Fix every diagnostic it reports in those files, and run it again until "
+    "it passes. Do not disable, skip or reconfigure a check, and do not add a "
+    "suppression comment."
+)
+
 _TYPE_PREFIX = re.compile(
     r"^(fix|feat|chore|refactor|docs|test|style|perf|build|ci)(\([^)]*\))?:\s*",
     re.IGNORECASE,
