@@ -402,7 +402,7 @@ MUTATIONS = [
         "target": "tests/features/test_work_debrief.py::TestOperatorMergeApproval"
                   "::test_an_unapproved_client_merge_is_held",
         "path": "services/work_launch.py",
-        "old": "    return any(k not in SELF_MERGE_PROJECTS for k in project_keys(contexts))",
+        "old": "    return any(k not in own for k in project_keys(contexts))",
         "new": "    return False",
     },
 ]
