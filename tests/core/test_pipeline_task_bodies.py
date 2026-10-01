@@ -413,6 +413,21 @@ class TestStartReviewing:
             "## windows-rpa-client\n## windows-rpa-client-schema\nVERDICT: PASS\n")
         assert result.status == "ok"
 
+    def test_a_single_repo_review_need_not_name_the_repo(self, fake_config, tmp_state):
+        """LSC-107 and LSC-117 changed one repo each. The review cited that
+        repo's files by path and never wrote its name, so the name check
+        blocked a review that covered the whole diff."""
+        _seed(status="reviewing")
+        d = _ticket_dir(fake_config)
+        (d / "docs" / "tri-review.md").write_text(
+            "workbench/web_app/views.py:12 is fine\nVERDICT: PASS\n")
+        with patch("core.tasks.tickets.repos_with_branch_diff",
+                   return_value=self._repos(fake_config)[:1]), \
+             patch("core.tasks.tickets.run_claude_code", MagicMock(return_value="done")), \
+             patch("core.tasks.tickets.log.emit"):
+            result = T.start_reviewing(_ctx(fake_config, "start_reviewing"))
+        assert result.status == "ok"
+
     def test_no_branch_diff_leaves_the_original_prompt(self, fake_config, tmp_state):
         _seed(status="reviewing")
         _ticket_dir(fake_config)

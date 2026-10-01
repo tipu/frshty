@@ -95,6 +95,8 @@ _RETRY_LOOP_TASKS = frozenset({
     "resolve_conflicts", "scope_review", "fix_scope_findings",
 })
 
+_BEST_EFFORT_TASKS = frozenset({"generate_flow_doc"})
+
 
 def _result_from_exception(e: Exception) -> TaskResult:
     """Turn a raised exception into a result, preserving a hard block.
@@ -125,8 +127,14 @@ def _release_gate_on_failure(ctx: TaskContext, result: TaskResult) -> TaskResult
     not converged; the dispatcher re-enqueues it and the correction budget
     bounds it. Blocking on the first such failure would strand a ticket that
     still had passes left. A hard block is still a block: the check below
-    skips the exemption for one."""
+    skips the exemption for one.
+
+    Exempts the best-effort tasks (_BEST_EFFORT_TASKS) too. Their output is a
+    document for a reader, and the stage handler moves on without it, so a
+    failure there must not strand the ticket in `blocked`."""
     if result.status != "failed" or not ctx.ticket_key:
+        return result
+    if ctx.task in _BEST_EFFORT_TASKS:
         return result
     # A hard block is not "not yet converged". Retrying it re-runs the whole
     # fixer, with permissions bypassed, against a cause no edit can fix.
