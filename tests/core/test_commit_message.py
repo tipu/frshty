@@ -331,6 +331,49 @@ class TestPromptRule:
         assert commit_message.COMMIT_SUBJECT_RULE in fixer.call_args[0][0]
 
 
+class TestHooksRule:
+    """write_tests on LSC-127 and LSC-144 left lint and type errors in the
+    files it wrote. The commit then reached a short repair that never read the
+    ticket, and both tickets blocked. Every prompt whose work frshty commits
+    asks the agent to pass the repository's own checks first."""
+
+    def test_the_rule_names_pre_commit_and_forbids_suppression(self):
+        rule = commit_message.HOOKS_RULE
+        assert "pre-commit run --files" in rule
+        assert "suppression" in rule
+
+    def test_every_committed_ticket_prompt_carries_the_rule(self):
+        from core.tasks import tickets as T
+        prompts = {
+            "write_tests": T._WRITE_TESTS_PROMPT,
+            "run_tests_and_fix": T._build_fix_prompt([]),
+            "generic bug report": T.GENERIC_BUG_REPORT_PROMPT,
+            "bug report": T._bug_report_prompt("PROJ-1", "a summary",
+                                               [{"author": "r", "body": "it broke"}]),
+            "scope fix": T._SCOPE_FIX_PROMPT.format(findings="- x"),
+        }
+        for name, prompt in prompts.items():
+            assert commit_message.HOOKS_RULE in prompt, name
+
+    def test_the_review_fix_prompt_carries_the_rule(self, tmp_path):
+        from core.tasks import tickets as T
+        from core.tasks.registry import TaskContext
+        ctx = TaskContext(
+            instance_key="acme", ticket_key="PROJ-1", task="fix_review_findings",
+            payload={}, job_id=0, triggering_event_id=None,
+            config={"workspace": {"root": tmp_path, "tickets_dir": "tickets"},
+                    "_base_url": "http://localhost:8000"},
+            registry=None, now=None,
+        )
+        (tmp_path / "tickets" / "PROJ-1-x").mkdir(parents=True)
+        with patch("core.state.load_ticket", return_value={"slug": "PROJ-1-x"}), \
+             patch("core.tasks.tickets._claim_session", return_value=("s", False)), \
+             patch("core.tasks.tickets._capture_repo_heads", return_value={}), \
+             patch("core.tasks.tickets.run_claude_code", return_value=None) as fixer:
+            T.fix_review_findings(ctx)
+        assert commit_message.HOOKS_RULE in fixer.call_args[0][0]
+
+
 class TestUntrustedTextCannotSteerTheBuild:
     """A fallback carries a path the review platform supplied, so it is
     untrusted. A directive inside it must never reach the commit."""
