@@ -195,6 +195,7 @@ class TestContainerBoot:
         (seed / ".claude.json").write_text("{}")
         os.chmod(seed / ".claude.json", 0o444)
         assert boot.copy_seed_files(seed, home) == [".claude.json"]
+        assert stat.S_IMODE((home / ".claude.json").stat().st_mode) == 0o600
         (home / ".claude.json").write_text('{"a": 1}')
         assert (seed / ".claude.json").read_text() == "{}"
 
