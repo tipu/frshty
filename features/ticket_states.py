@@ -222,7 +222,7 @@ def _handle_new_ticket(
             ts = _t._short_circuit_to_merged(config, ticket, ts, pre_merged, base_url)
             state.save_ticket(key, ts)
             return ts, True
-        ts = _t._setup_ticket(config, ticket, base_url)
+        ts = _t._merge_setup(ts, _t._setup_ticket(config, ticket, base_url))
     if "source" not in ts:
         ts["source"] = source
     if ts.get("discovered_at") and instance_key:
