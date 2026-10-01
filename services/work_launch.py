@@ -128,6 +128,7 @@ def project_entries() -> list[dict]:
         "expirement": os.path.expanduser("~/Documents/dev/expirement"),
         "upwork-api": os.path.expanduser("~/Documents/dev/upwork_apply"),
         "mercor": os.path.expanduser("~/Documents/dev/mercor"),
+        "lawphem": os.path.expanduser("~/Documents/dev/lawphem"),
     }
     for key, root in extras.items():
         if not any(e["key"] == key for e in entries) and os.path.isdir(root):

@@ -315,6 +315,16 @@ class TestCodexLaunch:
         assert entries["mercor"]["root"] == str(dev / "mercor")
         assert entries["mercor"]["primary"] is True
 
+    def test_lawphem_project_is_offered(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(work_launch.runtime, "instances", lambda: {})
+        monkeypatch.setenv("HOME", str(tmp_path))
+        dev = tmp_path / "Documents" / "dev"
+        assert "lawphem" not in {e["key"] for e in work_launch.project_entries()}
+        (dev / "lawphem").mkdir(parents=True)
+        entries = {e["key"]: e for e in work_launch.project_entries()}
+        assert entries["lawphem"]["root"] == str(dev / "lawphem")
+        assert entries["lawphem"]["primary"] is True
+
     def test_an_instance_is_primary_unless_it_opts_out(self, monkeypatch, tmp_path):
         def _inst(config):
             entry = MagicMock()
