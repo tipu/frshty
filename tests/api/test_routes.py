@@ -297,6 +297,20 @@ class TestTickets:
         assert "ci_passed" not in ts
         assert "checks_started_at" not in ts
 
+    def test_status_override_out_of_tests_failed_resets_the_test_budget(self, client):
+        state.save("tickets", {"T-1": {
+            "status": "tests_failed",
+            "slug": "T-1-s",
+            "test_fix_attempts": 3,
+            "tests_failed_at": "2026-10-01T03:11:14+00:00",
+        }})
+        resp = client.post("/api/tickets/T-1/status", json={"status": "testing"})
+        assert resp.status_code == 200, resp.text
+        ts = state.load("tickets")["T-1"]
+        assert ts["status"] == "testing"
+        assert ts["test_fix_attempts"] == 0
+        assert "tests_failed_at" not in ts
+
     def test_status_override_illegal_transition(self, client):
         state.save("tickets", {"T-1": {"status": "new", "slug": "T-1-s"}})
         resp = client.post("/api/tickets/T-1/status", json={"status": "in_review"})
@@ -527,6 +541,21 @@ class TestManualTransitionEnqueuesAdvance:
 
         assert resp.status_code == 200, resp.text
         assert state.load("tickets")[key]["status"] == "pr_ready"
+        assert len(self._advance_events(key)) == 1
+
+    def test_restart_from_tests_failed_resumes_testing_with_a_fresh_budget(self, client):
+        key = "ADV-7T"
+        state.save("tickets", {key: {"status": "tests_failed", "slug": f"{key}-s",
+                                     "test_fix_attempts": 3,
+                                     "tests_failed_at": "2026-10-01T03:11:14+00:00"}})
+
+        resp = client.post(f"/api/tickets/{key}/restart")
+
+        assert resp.status_code == 200, resp.text
+        ts = state.load("tickets")[key]
+        assert ts["status"] == "testing"
+        assert "test_fix_attempts" not in ts
+        assert "tests_failed_at" not in ts
         assert len(self._advance_events(key)) == 1
 
     def test_restart_into_planning_enqueues_its_own_stage_only(self, client):
