@@ -45,6 +45,7 @@ TEST_WRITE_TIMEOUT = 3600
 # It must not inherit FIX_TIMEOUT, which is sized for implementing review
 # findings.
 HOOK_REPAIR_TIMEOUT = 300
+HOOK_REPAIR_ROUNDS = 2
 HOOK_RUN_TIMEOUT = 900
 # What _commit_workspace_changes can spend in the worst case: hooks, one repair,
 # hooks again. Every task that commits has to carry this on top of its own work,
@@ -584,7 +585,7 @@ def _commit_workspace_changes(ticket_dir: Path, ticket_key: str,
 
 def commit_repo_changes(repo_dir: Path, ticket_key: str, message: str,
                         exclude=()) -> tuple[git_util.CommitOutcome, str]:
-    """Commit one repo and give a repairable hook failure one bounded repair.
+    """Commit one repo and give a repairable hook failure a bounded repair.
 
     Ticket pipeline stages and in-review comment fixes must take the same path.
     The latter used to call ``commit_with_hooks`` directly, reduce every failure
@@ -592,6 +593,12 @@ def commit_repo_changes(repo_dir: Path, ticket_key: str, message: str,
     diagnostics.  A valid fix that introduced a type error consequently stayed
     staged, contaminated the next comment fix, and was capped without ever being
     pushed.
+
+    A repair can clear one diagnostic and leave another, as on LSC-144: the
+    repair fixed a return type and the next commit failed on unsorted imports
+    in the same test file. A failure after a repair therefore gets its own
+    repair, up to HOOK_REPAIR_ROUNDS in all, and each round is routed again,
+    so a failure that is no longer repairable still blocks.
 
     Returns the final outcome and the route selected for the first failure.
     ``route`` is ``committed`` when the first commit succeeds, ``repair`` when a
@@ -602,13 +609,18 @@ def commit_repo_changes(repo_dir: Path, ticket_key: str, message: str,
     outcome = git_util.commit_outcome(repo_dir, message=message,
                                       timeout=HOOK_RUN_TIMEOUT, exclude=exclude)
     route = "committed"
-    if not outcome.ok:
-        route = _route_hook_failure(repo_dir, outcome, ticket_key)
-        if route == "repair":
-            git_util.stage_all(repo_dir, exclude, check=True)
-            outcome = git_util.commit_outcome(repo_dir, message=message,
-                                              timeout=HOOK_RUN_TIMEOUT,
-                                              exclude=exclude)
+    for repair_round in range(HOOK_REPAIR_ROUNDS):
+        if outcome.ok:
+            break
+        step = _route_hook_failure(repo_dir, outcome, ticket_key)
+        if repair_round == 0:
+            route = step
+        if step != "repair":
+            break
+        git_util.stage_all(repo_dir, exclude, check=True)
+        outcome = git_util.commit_outcome(repo_dir, message=message,
+                                          timeout=HOOK_RUN_TIMEOUT,
+                                          exclude=exclude)
     return outcome, route
 
 
@@ -652,7 +664,7 @@ class CommitBlocked(RuntimeError):
 # turns a missing dependency green. This asks the answerable question instead,
 # and anything unrecognised blocks rather than reaching a privileged agent.
 _REPAIRABLE_DIAGNOSTICS = (
-    re.compile(r"\b[EWFCNBAS]\d{3}\b"),                 # ruff / flake8 codes
+    re.compile(r"\b[EWFCNBASI]\d{3}\b"),                # ruff / flake8 codes
     re.compile(r"would reformat", re.I),
     re.compile(r"\bfiles? (were|would be) (re)?formatted", re.I),
     re.compile(r"trailing whitespace", re.I),
@@ -1169,7 +1181,7 @@ def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
                 "git": "block_git"}[kind]
 
     log.emit("commit_hook_failed",
-             f"{ticket_key}: pre-commit rejected {repo_dir.name}; attempting one repair",
+             f"{ticket_key}: pre-commit rejected {repo_dir.name}; attempting a repair",
              meta={"ticket": ticket_key, "repo": repo_dir.name,
                    "output": (outcome.output or "")[-600:]})
     try:

@@ -38,6 +38,11 @@ class TestOnlyKnownDiagnosticsAreRepaired:
     def test_a_recognised_lint_code_is_repairable(self):
         assert T._is_repairable("tests/x.py:53:27: E741 Ambiguous variable name: `l`")
 
+    def test_a_ruff_import_order_code_is_repairable(self):
+        assert T._is_repairable(
+            "I001 [*] Import block is un-sorted or un-formatted\n"
+            "  --> workbench/web_app/tests/test_dataset_catalog.py:3:1")
+
     def test_a_recognised_formatting_failure_is_repairable(self):
         assert T._is_repairable("would reformat src/a.py\n1 file would be reformatted")
 
