@@ -9,7 +9,7 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ENV NODE_PATH=/usr/lib/node_modules
 
 RUN apt-get update && apt-get install -y curl git openssh-client tmux libsecret-1-0 tree procps sqlite3 \
-        build-essential gnupg jq ripgrep rsync ffmpeg xvfb postgresql-client && \
+        build-essential gnupg jq ripgrep rsync ffmpeg xvfb postgresql-client default-libmysqlclient-dev pkg-config && \
     curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
     apt-get install -y nodejs && \
     curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
