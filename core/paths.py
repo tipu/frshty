@@ -11,3 +11,10 @@ from pathlib import Path
 
 def frshty_root() -> Path:
     return Path(os.environ.get("FRSHTY_ROOT") or Path.home() / ".frshty")
+
+
+def db_path() -> Path:
+    """FRSHTY_DB moves the database out of the state tree. An instance
+    container on a macOS host sets it to a Docker volume, because file locks
+    do not hold across processes on a macOS bind mount and SQLite needs them."""
+    return Path(os.environ.get("FRSHTY_DB") or frshty_root() / "frshty.db")
