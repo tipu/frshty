@@ -50,6 +50,18 @@ class TestHardBlockEscapesTheRetryExemption:
                                        TaskResult("failed", "no voice returned a verdict"))
         moved.assert_not_called()
 
+    def test_a_failed_flow_doc_leaves_the_ticket_in_reviewing(self):
+        """LSC-144 sat in blocked because FLOW.html timed out, although the
+        reviewing handler moves on without that document."""
+        with patch("core.state.load_ticket", return_value={"status": "reviewing"}), \
+             patch("core.state.transition_ticket") as moved, \
+             patch("core.log.emit"):
+            out = R._release_gate_on_failure(
+                _ctx("generate_flow_doc"),
+                TaskResult("failed", "claude returned non-zero or empty"))
+        assert out.status == "failed"
+        moved.assert_not_called()
+
     def test_a_failed_scope_correction_leaves_the_ticket_in_proving(self):
         with patch("core.state.load_ticket", return_value={"status": "proving"}), \
              patch("core.state.transition_ticket") as moved, \
