@@ -323,6 +323,12 @@ class TestOperatorMergeApproval:
         for key in work_launch.SELF_MERGE_PROJECTS:
             assert work_launch.merge_approval_required([key]) is False
 
+    def test_the_board_config_names_more_self_merge_projects(self, monkeypatch):
+        monkeypatch.setattr(work_launch, "personal_config",
+                            lambda: {"work": {"self_merge": ["tool"]}})
+        assert work_launch.merge_approval_required(["tool"]) is False
+        assert work_launch.merge_approval_required(["tool", "acme"]) is True
+
     def test_a_client_project_waits_for_an_approval(self):
         assert work_launch.merge_approval_required(["acme"]) is True
 
