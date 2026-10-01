@@ -17,7 +17,7 @@ import core.git_util as git_util
 import core.log as log
 import core.state as state
 from core.claude_runner import run_claude_code, run_haiku, extract_json
-from core.commit_message import COMMIT_SUBJECT_RULE, commit_subject
+from core.commit_message import COMMIT_SUBJECT_RULE, HOOKS_RULE, commit_subject
 from core.config import base_branch_for, get_repos, ticket_worktree_path
 from core.deps import relink_shared_venv
 from core.consensus_plan import run_consensus_plan
@@ -215,7 +215,8 @@ def _build_fix_prompt(per_repo: list[dict]) -> str:
         "Constraint: do NOT introduce mocks, skip markers, or conditional "
         "early returns to make failing tests pass. If a test reveals a real "
         "product bug, fix the bug.\n\n"
-        f"{failures}"
+        f"{failures}\n\n"
+        + HOOKS_RULE
     )
 
 
@@ -391,7 +392,8 @@ After writing, append one line per file written to docs/test-files-written.txt:
     <repo>/<rel-path>
 
 That file is the postcondition gate.
-"""
+
+""" + HOOKS_RULE
 
 
 def _claim_session(ctx: TaskContext, task_name: str) -> tuple[str | None, bool]:
@@ -1582,6 +1584,7 @@ def fix_review_findings(ctx: TaskContext) -> TaskResult:
         "blocking, not suggestions). Fix each one in the workspace. Run any tests directly "
         "relevant to the changed files. Do NOT modify docs/tri-review.md — leave the verdict "
         "section untouched; a separate verifier will assess your work.\n\n"
+        + HOOKS_RULE + "\n\n"
         + COMMIT_SUBJECT_RULE
     )
     log.emit("ticket_review_fixing", f"Apply fix for {ctx.ticket_key}",
@@ -2395,6 +2398,7 @@ GENERIC_BUG_REPORT_PROMPT = (
     "A user reported that this ticket's fix is not working or has regressed. "
     "Re-investigate the issue in the current worktree state, identify why it's failing, "
     "and fix it. Then run relevant tests to verify the fix works. Commit your changes.\n\n"
+    + HOOKS_RULE + "\n\n"
     + COMMIT_SUBJECT_RULE
 )
 
@@ -2427,6 +2431,8 @@ def _bug_report_prompt(ticket_key: str, summary: str, reports: list[dict]) -> st
         "you changed. If a reported point needs no code change, say so in your final "
         "message and name the file and line that already handles it."
     )
+    parts.append("")
+    parts.append(HOOKS_RULE)
     parts.append("")
     parts.append(COMMIT_SUBJECT_RULE)
     return "\n".join(parts)
@@ -2616,7 +2622,7 @@ Then run the tests that cover the files you touched, in every repository you tou
 
 Write docs/scope-fix.md: one line per named change, each saying removed or kept, the file it was in, and why.
 
-""" + COMMIT_SUBJECT_RULE
+""" + HOOKS_RULE + "\n\n" + COMMIT_SUBJECT_RULE
 
 
 SCOPE_FIX_TIMEOUT = FIX_TIMEOUT + COMMIT_PHASE_TIMEOUT
