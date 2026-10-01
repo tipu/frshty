@@ -216,7 +216,7 @@ def _project_repos(key: str, entries: list[dict]) -> list[tuple[dict | None, str
     """(config, path, name) of every repository one selected project holds.
 
     A project with a loaded config lists its repositories there. A project
-    that has none — frshty and algotrader2 are configured on the board only —
+    that has none — frshty and the board's [work.projects] —
     is one repository when its root is itself a checkout."""
     config = instance_config(key)
     if config is not None:

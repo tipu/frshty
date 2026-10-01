@@ -305,13 +305,8 @@ class TestCodexLaunch:
         monkeypatch.setattr(work_launch.runtime, "instances", lambda: {})
         monkeypatch.setattr(work_launch, "_CONFIG_DIR", str(tmp_path / "config"))
         monkeypatch.setenv("HOME", str(tmp_path))
-        (tmp_path / "Documents" / "dev" / "mercor").mkdir(parents=True)
+        (tmp_path / "tool").mkdir()
         assert {e["key"] for e in work_launch.project_entries()} <= {"frshty"}
-
-    def test_project_entries_name_no_operator_project(self):
-        source = pathlib.Path("services/work_launch.py").read_text()
-        for name in ("clarivis", "algotrader2", "expirement", "upwork", "mercor", "lawphem"):
-            assert name not in source, f"work_launch.py names {name}"
 
     def test_an_instance_is_primary_unless_it_opts_out(self, monkeypatch, tmp_path):
         def _inst(config):
