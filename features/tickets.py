@@ -1016,7 +1016,6 @@ def _ensure_worktree(config: dict, ticket_key: str, slug: str) -> dict | None:
                         meta={"ticket": ticket_key, "repo": repo["name"]})
                     continue
                 created = True
-                subprocess.run(["chown", "-R", "1000:1000", str(wt_path)], capture_output=True, timeout=60)
 
             head = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
@@ -1699,10 +1698,6 @@ def _setup_ticket(config, ticket, base_url, comments=None) -> dict:
                 meta={"ticket": key, "repo": repo["name"]})
             continue
         any_worktree = True
-        subprocess.run(["chown", "-R", "1000:1000", str(wt_path)], capture_output=True, timeout=60)
-        git_dir = repo["path"] / ".git"
-        if git_dir.is_dir():
-            subprocess.run(["chown", "-R", "1000:1000", str(git_dir)], capture_output=True, timeout=60)
 
         for dep in ws.get("dep_commands", []):
             if dep["match"] == repo["name"]:
@@ -1750,7 +1745,6 @@ def _setup_ticket(config, ticket, base_url, comments=None) -> dict:
     if comments is None:
         comments = _fetch_ticket_comments(config, key)
     _write_comments_md(docs_path, comments)
-    subprocess.run(["chown", "-R", "1000:1000", str(docs_path.parent)], capture_output=True, timeout=60)
 
     log.emit("ticket_worktree_created", f"Workspace ready for {slug}",
         links={"ticket": ticket.get("url", ""), "detail": f"{base_url}/tickets/{key}"},
@@ -1888,7 +1882,6 @@ def materialize_prd_ticket(config: dict, ticket_key: str, ts: dict, base_url: st
                      meta={"ticket": ticket_key, "repo": repo["name"]})
             continue
         any_worktree = True
-        subprocess.run(["chown", "-R", "1000:1000", str(wt_path)], capture_output=True, timeout=60)
         for dep in ws.get("dep_commands", []):
             if dep["match"] == repo["name"]:
                 run_dep_command(config, repo["name"], wt_path, dep["cmd"])
@@ -1901,7 +1894,6 @@ def materialize_prd_ticket(config: dict, ticket_key: str, ts: dict, base_url: st
     (docs_path / "ticket.md").write_text(
         render_prd_ticket_md(ts, instance_key=instance_key, ticket_key=ticket_key)
     )
-    subprocess.run(["chown", "-R", "1000:1000", str(docs_path.parent)], capture_output=True, timeout=60)
 
     out = dict(ts)
     out["slug"] = slug
