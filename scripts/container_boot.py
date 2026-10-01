@@ -31,11 +31,14 @@ def copy_seed_files(seed_dir: Path, home: Path) -> list[str]:
     """Copy the host files mounted read-only in `seed_dir` into the home
     directory. A single-file bind mount cannot be replaced by rename, and the
     CLIs rewrite files such as ~/.claude.json by writing a temporary file and
-    renaming it over the old one, so each container works on its own copy."""
+    renaming it over the old one, so each container works on its own copy.
+    A seed can hold a secret such as ~/.netrc, so each copy is readable by
+    the owner only, whatever mode the umask would give it."""
     copied = []
     for path in sorted(seed_dir.iterdir()) if seed_dir.is_dir() else []:
         if path.is_file():
             shutil.copyfile(path, home / path.name)
+            os.chmod(home / path.name, 0o600)
             copied.append(path.name)
     return copied
 
