@@ -315,6 +315,52 @@ class TestRepoGate:
             tickets.advance_ticket({"_base_url": "http://b", "workspace": {}}, "inst", "T-1")
         assert "start_planning" in calls
 
+    def test_advance_after_start_dev_setup_classifies_stored_text(self, fresh_db):
+        """Observed on atropos 2026-09-30: start-dev wrote the bare _setup_ticket
+        result over LSC-124, the next advance classified an empty text as
+        'unknown' without calling the model, and the ticket never planned."""
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-1", {"status": "new", "slug": "t-1", "summary": "Add SDK",
+                                  "description": "Wire the SDK into the UI."})
+        setup = {"status": "new", "slug": "t-1", "branch": "t-1",
+                 "discovered_at": "2026-01-01T00:00:00+00:00"}
+        state.update_ticket("T-1", lambda cur: tickets._merge_setup(cur, setup))
+        calls = []
+        with patch("core.queue.jobs_for_ticket", return_value=[]), \
+             patch("features.tickets.run_haiku", return_value="code") as haiku, \
+             patch.object(tickets, "_enqueue_stage",
+                          side_effect=lambda i, k, t: calls.append(t)):
+            tickets.advance_ticket({"_base_url": "http://b", "workspace": {}}, "inst", "T-1")
+        assert haiku.call_count == 1
+        assert "Add SDK" in haiku.call_args.args[0]
+        stored = state.load_ticket("T-1")
+        assert stored["work_type"] == "code"
+        assert stored["summary"] == "Add SDK"
+        assert "start_planning" in calls
+
+    def test_new_ticket_setup_keeps_stored_fields(self, fresh_db):
+        import core.state as state
+        from features import ticket_states
+        state.init("inst")
+        ts = {"status": "new", "summary": "Add SDK", "description": "d",
+              "source": "jira", "blocked_by": []}
+        setup = {"status": "new", "slug": "t-1", "branch": "t-1",
+                 "discovered_at": "2026-01-01T00:00:00+00:00"}
+        with patch.object(tickets, "_find_pre_merged_pr", return_value=None), \
+             patch.object(tickets, "_setup_ticket", return_value=setup), \
+             patch.object(tickets, "_approval_required", return_value=False), \
+             patch.object(tickets, "_enqueue_stage"), \
+             patch("features.ticket_states._pm_pre_approval_needed", return_value=False):
+            out, _ = ticket_states._handle_new_ticket(
+                {"_base_url": "http://b", "workspace": {}},
+                {"key": "T-1", "summary": "Add SDK", "description": "d"},
+                ts, "http://b", "inst", True)
+        assert out["summary"] == "Add SDK"
+        assert out["description"] == "d"
+        assert out["blocked_by"] == []
+        assert out["discovered_at"] == "2026-01-01T00:00:00+00:00"
+
     def test_enqueue_stage_does_not_gate_non_pipeline_tasks(self, fresh_db):
         """resolve_conflicts, fix_ci_failures etc. happen DURING in_review for
         the active ticket — they must not be gated."""
