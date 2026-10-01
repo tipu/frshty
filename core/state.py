@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import core.db as db
-from core.paths import frshty_root
+from core.paths import db_path
 from core.ticket_status import TicketStatus as _TicketStatus
 from core.ticket_status import transition as _transition
 
@@ -43,7 +43,7 @@ def _ensure_db():
         return
     if getattr(db, "_DB_PATH", None) is None:
         migrations = Path(__file__).resolve().parent.parent / "migrations"
-        db.init(frshty_root() / "frshty.db", migrations)
+        db.init(db_path(), migrations)
     _DB_INITIALIZED = True
 
 
