@@ -39,6 +39,23 @@ def personal_config() -> dict | None:
 SLACK_INT_DIR = os.path.expanduser("~/Documents/dev/slack_int")
 
 
+def _board_work() -> dict:
+    """The [work] table of the board's own config, {} when it has none.
+
+    The board's config names the projects that have no instance of their own
+    ([work.projects], key to root directory) and the projects the operator
+    reviews himself ([work] self_merge). A process with no instance registry
+    reads the same file off disk."""
+    config = personal_config() or _config_on_disk(core_config.BOARD_INSTANCE_KEY)
+    work = (config or {}).get("work")
+    if not isinstance(work, dict):
+        return {}
+    projects = work.get("projects")
+    self_merge = work.get("self_merge")
+    return {"projects": projects if isinstance(projects, dict) else {},
+            "self_merge": [str(k) for k in self_merge] if isinstance(self_merge, list) else []}
+
+
 def _instance_config(key: str) -> dict | None:
     """The config of one project, None when that project is not loaded."""
     instances = runtime.instances()
@@ -120,16 +137,9 @@ def project_entries() -> list[dict]:
         repos = [r["name"] for r in work_worktree._repos_of(cfg)]
         entries.append({"key": key, "root": str(ws.get("root", "")), "repos": repos,
                         "primary": bool((cfg.get("work") or {}).get("dispatch", True))})
-    extras = {
-        "frshty": _frshty_checkout(),
-        "clarivis": os.path.expanduser("~/Documents/dev/clarivis"),
-        "algotrader2": os.path.expanduser("~/Documents/dev/algotrader2/implementation"),
-        "game_expirement": os.path.expanduser("~/Documents/dev/game_expirement"),
-        "expirement": os.path.expanduser("~/Documents/dev/expirement"),
-        "upwork-api": os.path.expanduser("~/Documents/dev/upwork_apply"),
-        "mercor": os.path.expanduser("~/Documents/dev/mercor"),
-        "lawphem": os.path.expanduser("~/Documents/dev/lawphem"),
-    }
+    extras = {"frshty": _frshty_checkout()}
+    for key, root in _board_work().get("projects", {}).items():
+        extras.setdefault(str(key), os.path.expanduser(str(root)))
     for key, root in extras.items():
         if not any(e["key"] == key for e in entries) and os.path.isdir(root):
             entries.append({"key": key, "root": root, "repos": [], "primary": True})
@@ -699,7 +709,13 @@ def _project_allows_merge(key: str) -> bool:
     return complete and key in UNCONFIGURED_MERGE_PROJECTS
 
 
-SELF_MERGE_PROJECTS = ("frshty", "expirement", "upwork-api", "game_expirement")
+SELF_MERGE_PROJECTS = ("frshty",)
+
+
+def self_merge_projects() -> list[str]:
+    """SELF_MERGE_PROJECTS and every project the board's [work] self_merge
+    names."""
+    return list(dict.fromkeys(list(SELF_MERGE_PROJECTS) + _board_work().get("self_merge", [])))
 
 
 def project_keys(contexts) -> list[str]:
@@ -712,7 +728,7 @@ def project_keys(contexts) -> list[str]:
 def merge_approval_required(contexts) -> bool:
     """Whether a merge this task left open waits for someone else's approval.
 
-    SELF_MERGE_PROJECTS names the projects whose pull requests nobody but the
+    self_merge_projects names the projects whose pull requests nobody but the
     operator reviews. He merges one of those the moment it is green. A merge
     on every other project waits for an approval he does not give himself.
 
@@ -721,7 +737,8 @@ def merge_approval_required(contexts) -> bool:
     which. This is not the same question as merge_review_required, which asks
     whether the agent may merge. Here the operator is the one merging, and
     the answer says whether he can merge now or has to wait for a reviewer."""
-    return any(k not in SELF_MERGE_PROJECTS for k in project_keys(contexts))
+    own = self_merge_projects()
+    return any(k not in own for k in project_keys(contexts))
 
 
 def merge_review_required(contexts) -> list[str]:
