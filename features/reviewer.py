@@ -14,7 +14,7 @@ import core.log as log
 import core.state as state
 import core.git_util as git_util
 from core.claude_runner import run_agentic, run_balanced, run_haiku, extract_json
-from core.llm import READ_ONLY_TOOLS, WRITE_TOOLS, run_external_model
+from core.llm import CODEX_EXEC, READ_ONLY_TOOLS, WRITE_TOOLS, run_external_model
 from core.config import base_branch_for, get_repos
 import features.presentation as presentation
 from features.platforms import make_platform
@@ -675,7 +675,7 @@ def _run_codex_persona(args):
     last = run_dir / f"{name}-last.md"
     try:
         text, exit_code = run_external_model(
-            ["codex", "exec", "--skip-git-repo-check",
+            [*CODEX_EXEC,
              "-c", 'model_reasoning_effort="medium"',
              "-o", str(last), "-"],
             fn_name="review_codex", model="codex", prompt=prompt,
