@@ -1,3 +1,4 @@
+import mimetypes
 import os
 import shlex
 
@@ -436,6 +437,19 @@ def api_work_summary(item_id: int):
 
 
 _SCRATCH_ROOT = "/tmp/"
+_INLINE_TYPES = ("text/", "image/", "audio/", "video/",
+                 "application/json", "application/pdf")
+
+
+def _media_type(path: str) -> str:
+    guessed = mimetypes.guess_type(path)[0]
+    if guessed and guessed.startswith(_INLINE_TYPES):
+        return guessed
+    with open(path, "rb") as f:
+        head = f.read(8192)
+    if b"\x00" not in head:
+        return "text/plain"
+    return guessed or "application/octet-stream"
 
 
 def _artifact_roots(artifact_id: int) -> list[str]:
@@ -461,7 +475,7 @@ def _serve_artifact(artifact_id: int, real: str, shown: str):
         return JSONResponse(
             {"error": f"artifact path outside the run's workspace: {shown}"},
             status_code=403)
-    resp = FileResponse(real)
+    resp = FileResponse(real, media_type=_media_type(real))
     resp.headers["Content-Security-Policy"] = policy_for(real)
     return resp
 
