@@ -48,6 +48,7 @@ An optional [container] block in the instance config tunes the container:
     port = 7131          # listen port on the host network; default job.port
     workers = 3          # FRSHTY_WORKER_COUNT
     llm = 9              # FRSHTY_MAX_CONCURRENT_LLM
+    memory = "32g"       # RAM cap for the whole container, swap included
     mounts = ["~/Documents/dev/slack_int"]   # extra host paths, same path inside
     seed = ["~/.gitconfig-quill"]            # extra host files copied into ~
     devices = ["/dev/kvm"]                   # host devices passed through
@@ -78,6 +79,7 @@ SEED_FILES = [".claude.json", ".gitconfig"]
 DOCKER_SOCKET = Path("/var/run/docker.sock")
 PEERS = CONTAINERS_ROOT / "peers.toml"
 DB_DIR = "/var/lib/frshty"
+MEMORY = "32g"
 DB_COPY = """
 import os, sqlite3, sys
 src, dst = sys.argv[1], sys.argv[2]
@@ -275,6 +277,7 @@ def run_args(config: dict, config_path: Path, check: bool) -> list[str]:
     config_path = install_config(config_path, root, key)
     env_file = write_env_file(root, config)
     port = int(box.get("port") or config["job"]["port"])
+    memory = str(box.get("memory") or MEMORY)
     volume = db_volume(config)
     if check and (root / "state" / "frshty.db").exists():
         volume = None
@@ -291,6 +294,7 @@ def run_args(config: dict, config_path: Path, check: bool) -> list[str]:
             "-e", f"FRSHTY_TIMEZONE={os.environ.get('FRSHTY_TIMEZONE', 'America/Los_Angeles')}",
             "-e", f"FRSHTY_WORKER_COUNT={int(box.get('workers') or 3)}",
             "-e", f"FRSHTY_MAX_CONCURRENT_LLM={int(box.get('llm') or 9)}",
+            "--memory", memory, "--memory-swap", memory,
             "--tmpfs", TMP_MOUNT]
     if box.get("env_file"):
         args += ["--env-file", str(_expand(box["env_file"]))]
