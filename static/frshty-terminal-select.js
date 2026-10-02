@@ -18,4 +18,7 @@ function frshtyTerminalSelect(term) {
     ev.stopImmediatePropagation();
     document.dispatchEvent(copy(ev, false));
   }, true);
+  term.attachCustomKeyEventHandler((ev) =>
+    !(ev.type === "keydown" && (ev.ctrlKey || ev.metaKey) && !ev.altKey
+      && ev.key.toLowerCase() === "c" && term.hasSelection()));
 }
