@@ -36,6 +36,12 @@ and the instance list from ~/.frshty-containers/peers.toml. Both paths outlive
 every checkout and worktree. `up` and `check` copy the config they are given to
 that path, and refuse when a different file is already there.
 
+On a macOS host the SQLite database lives on the Docker volume frshty-<key>-db,
+not in state/. File locks do not hold across processes on a macOS bind mount,
+so a hook process could truncate the WAL index under frshty.py and kill it with
+SIGBUS. `up` copies an existing state/frshty.db into the volume once and
+renames the original to frshty.db.pre-volume.
+
 An optional [container] block in the instance config tunes the container:
 
     [container]
@@ -50,6 +56,7 @@ An optional [container] block in the instance config tunes the container:
 import argparse
 import json
 import os
+import platform
 import subprocess
 import sys
 import tempfile
@@ -70,6 +77,27 @@ MODEL_DIRS = [".claude", ".codex", ".gemini"]
 SEED_FILES = [".claude.json", ".gitconfig"]
 DOCKER_SOCKET = Path("/var/run/docker.sock")
 PEERS = CONTAINERS_ROOT / "peers.toml"
+DB_DIR = "/var/lib/frshty"
+DB_COPY = """
+import os, sqlite3, sys
+src, dst = sys.argv[1], sys.argv[2]
+if os.path.exists(dst):
+    sys.exit(f"{dst} already exists in the volume")
+part = dst + ".part"
+for name in (part, part + "-journal", part + "-wal", part + "-shm"):
+    if os.path.exists(name):
+        os.remove(name)
+s = sqlite3.connect(src)
+d = sqlite3.connect(part)
+s.backup(d)
+check = d.execute("PRAGMA quick_check").fetchone()[0]
+d.close()
+s.close()
+if check != "ok":
+    sys.exit(f"quick_check failed: {check}")
+os.replace(part, dst)
+"""
+TMP_MOUNT = "/tmp:rw,exec,nosuid,nodev,size=8g,mode=1777"
 
 
 def _expand(path: str) -> Path:
@@ -202,6 +230,41 @@ def mounts(config: dict, config_path: Path, root: Path) -> list[tuple[str, str, 
     return out
 
 
+def db_volume(config: dict) -> str | None:
+    """The Docker volume that holds the database, or None when the database
+    stays in state/. Only a macOS host needs one."""
+    if platform.system() != "Darwin":
+        return None
+    return f"{container_name(config)}-db"
+
+
+def prepare_db_volume(config: dict, root: Path, move: bool) -> None:
+    """Create the volume and give it to the container user. With `move`, also
+    move an existing state/frshty.db into it. Move only while no container of
+    this instance runs, because the copy needs the database at rest."""
+    volume = db_volume(config)
+    if not volume:
+        return
+    subprocess.run(["docker", "volume", "create", volume], check=True, capture_output=True)
+    subprocess.run(["docker", "run", "--rm", "--user", "0", "--entrypoint", "chown",
+                    "-v", f"{volume}:{DB_DIR}", IMAGE,
+                    f"{os.getuid()}:{os.getgid()}", DB_DIR], check=True, capture_output=True)
+    legacy = root / "state" / "frshty.db"
+    if not move or not legacy.exists():
+        return
+    r = subprocess.run(["docker", "run", "--rm", "--entrypoint", "python",
+                        "-v", f"{volume}:{DB_DIR}", "-v", f"{root / 'state'}:/src",
+                        IMAGE, "-c", DB_COPY, "/src/frshty.db", f"{DB_DIR}/frshty.db"],
+                       capture_output=True, text=True, check=False)
+    if r.returncode != 0:
+        raise SystemExit(f"{config['job']['key']}: copy of {legacy} into volume {volume} "
+                         f"failed: {r.stderr.strip()}")
+    for suffix in ("", "-wal", "-shm"):
+        old = root / "state" / f"frshty.db{suffix}"
+        if old.exists():
+            old.rename(root / "state" / f"frshty.db.pre-volume{suffix}")
+
+
 def run_args(config: dict, config_path: Path, check: bool) -> list[str]:
     key = config["job"]["key"]
     box = config.get("container") or {}
@@ -212,18 +275,23 @@ def run_args(config: dict, config_path: Path, check: bool) -> list[str]:
     config_path = install_config(config_path, root, key)
     env_file = write_env_file(root, config)
     port = int(box.get("port") or config["job"]["port"])
+    volume = db_volume(config)
+    if check and (root / "state" / "frshty.db").exists():
+        volume = None
+    db_file = f"{DB_DIR}/frshty.db" if volume else str(root / "state" / "frshty.db")
     args = ["docker", "run", "--network", "host", "--init",
             "--label", f"frshty.instance={key}",
             "--env-file", str(env_file),
             "-e", f"HOME={HOME}",
             "-e", f"FRSHTY_ROOT={root / 'state'}",
-            "-e", f"FRSHTY_DB={root / 'state' / 'frshty.db'}",
+            "-e", f"FRSHTY_DB={db_file}",
             "-e", f"FRSHTY_BOARD_FILE={root / 'state' / 'board.json'}",
             "-e", f"FRSHTY_BOARD_INSTANCE={key}",
             "-e", f"FRSHTY_PEER_SELF={key}",
             "-e", f"FRSHTY_TIMEZONE={os.environ.get('FRSHTY_TIMEZONE', 'America/Los_Angeles')}",
             "-e", f"FRSHTY_WORKER_COUNT={int(box.get('workers') or 3)}",
-            "-e", f"FRSHTY_MAX_CONCURRENT_LLM={int(box.get('llm') or 9)}"]
+            "-e", f"FRSHTY_MAX_CONCURRENT_LLM={int(box.get('llm') or 9)}",
+            "--tmpfs", TMP_MOUNT]
     if box.get("env_file"):
         args += ["--env-file", str(_expand(box["env_file"]))]
     if DOCKER_SOCKET.exists():
@@ -233,6 +301,8 @@ def run_args(config: dict, config_path: Path, check: bool) -> list[str]:
         if not Path(device).exists():
             raise SystemExit(f"{key}: device {device} does not exist")
         args += ["--device", device, "--group-add", str(Path(device).stat().st_gid)]
+    if volume:
+        args += ["-v", f"{volume}:{DB_DIR}"]
     args += code_args()
     for host, inside, ro in mounts(config, config_path, root):
         args += ["-v", f"{host}:{inside}" + (":ro" if ro else "")]
@@ -287,14 +357,16 @@ def app_pid(name: str) -> str:
 
 def reload(timeout: float = 120) -> int:
     """SIGHUP every instance container and restart the gateway. Fails unless
-    each instance runs a new frshty.py process afterwards."""
+    each instance runs a new frshty.py process afterwards. The signal goes
+    through `docker exec kill`, because `docker kill` marks the container as
+    manually stopped and Docker then skips it at the next daemon start."""
     names = instance_containers()
     if not names:
         print("reload: no instance container is running", file=sys.stderr)
         return 1
     before = {name: app_pid(name) for name in names}
     for name in names:
-        subprocess.run(["docker", "kill", "--signal", "HUP", name], check=True, capture_output=True)
+        subprocess.run(["docker", "exec", name, "kill", "-HUP", "1"], check=True, capture_output=True)
     failed = []
     for name in names:
         deadline = time.monotonic() + timeout
@@ -337,10 +409,14 @@ def main(argv: list[str] | None = None) -> int:
     config = load(str(config_path))
     name = container_name(config)
     if args.action == "check":
-        return subprocess.run(run_args(config, config_path, check=True)).returncode
+        cmd = run_args(config, config_path, check=True)
+        if f"{db_volume(config)}:{DB_DIR}" in cmd:
+            prepare_db_volume(config, CONTAINERS_ROOT / config["job"]["key"], move=False)
+        return subprocess.run(cmd).returncode
     if args.action == "up":
         cmd = run_args(config, config_path, check=False)
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+        prepare_db_volume(config, CONTAINERS_ROOT / config["job"]["key"], move=True)
         return subprocess.run(cmd).returncode
     if args.action == "down":
         return subprocess.run(["docker", "rm", "-f", name]).returncode
