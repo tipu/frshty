@@ -27,6 +27,7 @@ from pathlib import Path
 import core.log as log
 from core.config import get_repos, ticket_worktree_path
 from core.llm import (
+    CODEX_EXEC,
     run_thinking,
     run_external_model,
     validate_model_output,
@@ -92,7 +93,7 @@ def _fan_out(prompt: str, ticket_dir: Path, run_dir: Path,
     def _codex() -> tuple[str | None, int | None]:
         last = run_dir / "codex-plan.md"
         return run_external_model(
-            ["codex", "exec", "--skip-git-repo-check", "-o", str(last), "-"],
+            [*CODEX_EXEC, "-o", str(last), "-"],
             fn_name="ctp_codex", model="codex", prompt=prompt,
             cwd=ticket_dir, timeout=timeout, last_message_file=last,
             transcript_file=run_dir / "codex-transcript.txt",
