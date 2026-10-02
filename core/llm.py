@@ -780,6 +780,10 @@ def validate_model_output(text: str | None, *, exit_code: int | None = 0,
     return True, "ok"
 
 
+CODEX_EXEC = ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox",
+              "--skip-git-repo-check"]
+
+
 def run_external_model(cmd: list[str], *, fn_name: str, model: str, prompt: str,
                        cwd: Path | None = None, timeout: int = 600,
                        env_extra: dict[str, str] | None = None,

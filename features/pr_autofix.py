@@ -19,7 +19,7 @@ import core.state as state
 from core.claude_runner import run_agentic, run_balanced, run_claude_code, extract_json
 from core.commit_message import COMMIT_SUBJECT_RULE, commit_subject
 from core.config import base_branch_for, get_repos
-from core.llm import READ_ONLY_TOOLS, WRITE_TOOLS, run_external_model
+from core.llm import CODEX_EXEC, READ_ONLY_TOOLS, WRITE_TOOLS, run_external_model
 from features.pr_ci import KEEP_GREEN_RULE
 from features.platforms import make_platform
 
@@ -152,7 +152,7 @@ def _codex_review(config: dict, prompt: str, worktree: Path, pr_key: str) -> dic
     last = run_dir / "autofix-last.md"
     try:
         text, exit_code = run_external_model(
-            ["codex", "exec", "--skip-git-repo-check",
+            [*CODEX_EXEC,
              "-c", 'model_reasoning_effort="medium"',
              "-o", str(last), "-"],
             fn_name="pr_autofix_codex", model="codex", prompt=prompt,
