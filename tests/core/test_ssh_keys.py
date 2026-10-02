@@ -2,6 +2,7 @@ import importlib.util
 import json
 import os
 import signal
+import sqlite3
 import stat
 import subprocess
 import sys
@@ -330,6 +331,117 @@ class TestInstanceLauncher:
         args = mod.run_args(mod.load(str(path)), path, check=True)
         assert args[-1] == "--check"
         assert "--rm" in args and "--restart" not in args
+
+    def test_tmp_is_a_capped_executable_tmpfs(self, tmp_path, monkeypatch):
+        mod, _ = self._launcher(tmp_path, monkeypatch)
+        path = self._config(tmp_path)
+        for check in (False, True):
+            args = mod.run_args(mod.load(str(path)), path, check=check)
+            mounts = [args[i + 1] for i, a in enumerate(args) if a == "--tmpfs"]
+            assert mounts == ["/tmp:rw,exec,nosuid,nodev,size=8g,mode=1777"]
+
+    def test_reload_never_uses_docker_kill(self, tmp_path, monkeypatch):
+        mod, _ = self._launcher(tmp_path, monkeypatch)
+        calls = []
+        pids = iter(["10", "20"])
+        monkeypatch.setattr(mod, "instance_containers", lambda: ["frshty-aimyable"])
+        monkeypatch.setattr(mod, "app_pid", lambda name: next(pids))
+
+        def run(cmd, **kwargs):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(mod.subprocess, "run", run)
+        assert mod.reload(timeout=1) == 0
+        assert ["docker", "exec", "frshty-aimyable", "kill", "-HUP", "1"] in calls
+        assert not any(cmd[:2] == ["docker", "kill"] for cmd in calls)
+
+    def test_macos_puts_the_database_on_a_volume(self, tmp_path, monkeypatch):
+        mod, _ = self._launcher(tmp_path, monkeypatch)
+        monkeypatch.setattr(mod.platform, "system", lambda: "Darwin")
+        path = self._config(tmp_path)
+        args = mod.run_args(mod.load(str(path)), path, check=False)
+        volumes = [args[i + 1] for i, a in enumerate(args) if a == "-v"]
+        assert "frshty-aimyable-db:/var/lib/frshty" in volumes
+        assert "FRSHTY_DB=/var/lib/frshty/frshty.db" in args
+
+    def test_linux_keeps_the_database_in_state(self, tmp_path, monkeypatch):
+        mod, _ = self._launcher(tmp_path, monkeypatch)
+        monkeypatch.setattr(mod.platform, "system", lambda: "Linux")
+        path = self._config(tmp_path)
+        args = mod.run_args(mod.load(str(path)), path, check=False)
+        state = tmp_path / "boxes" / "aimyable" / "state"
+        assert f"FRSHTY_DB={state / 'frshty.db'}" in args
+        assert not any(a.endswith(":/var/lib/frshty") for a in args)
+
+    def test_check_before_the_move_reads_the_state_database(self, tmp_path, monkeypatch):
+        mod, _ = self._launcher(tmp_path, monkeypatch)
+        monkeypatch.setattr(mod.platform, "system", lambda: "Darwin")
+        state = tmp_path / "boxes" / "aimyable" / "state"
+        state.mkdir(parents=True)
+        (state / "frshty.db").write_bytes(b"")
+        path = self._config(tmp_path)
+        args = mod.run_args(mod.load(str(path)), path, check=True)
+        assert f"FRSHTY_DB={state / 'frshty.db'}" in args
+        assert not any(a.endswith(":/var/lib/frshty") for a in args)
+
+    def _fake_docker(self, mod, monkeypatch, volume_dir, state):
+        calls = []
+        real_run = subprocess.run
+
+        def run(cmd, **kwargs):
+            calls.append(cmd)
+            if "-c" in cmd:
+                i = cmd.index("-c")
+                src = cmd[i + 2].replace("/src", str(state))
+                dst = cmd[i + 3].replace(mod.DB_DIR, str(volume_dir))
+                return real_run([sys.executable, "-c", cmd[i + 1], src, dst],
+                                capture_output=True, text=True)
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        monkeypatch.setattr(mod.subprocess, "run", run)
+        return calls
+
+    def test_up_moves_the_state_database_into_the_volume(self, tmp_path, monkeypatch):
+        mod, _ = self._launcher(tmp_path, monkeypatch)
+        monkeypatch.setattr(mod.platform, "system", lambda: "Darwin")
+        root = tmp_path / "boxes" / "aimyable"
+        (root / "state").mkdir(parents=True)
+        conn = sqlite3.connect(root / "state" / "frshty.db")
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE t (v TEXT)")
+        conn.execute("INSERT INTO t VALUES ('kept')")
+        conn.commit()
+        volume_dir = tmp_path / "volume"
+        volume_dir.mkdir()
+        calls = self._fake_docker(mod, monkeypatch, volume_dir, root / "state")
+        config = mod.load(str(self._config(tmp_path)))
+        try:
+            mod.prepare_db_volume(config, root, move=True)
+        finally:
+            conn.close()
+        assert ["docker", "volume", "create", "frshty-aimyable-db"] in calls
+        moved = sqlite3.connect(volume_dir / "frshty.db")
+        assert moved.execute("SELECT v FROM t").fetchall() == [("kept",)]
+        moved.close()
+        assert not (root / "state" / "frshty.db").exists()
+        assert (root / "state" / "frshty.db.pre-volume").exists()
+
+    def test_up_refuses_when_the_volume_already_holds_a_database(self, tmp_path, monkeypatch):
+        mod, _ = self._launcher(tmp_path, monkeypatch)
+        monkeypatch.setattr(mod.platform, "system", lambda: "Darwin")
+        root = tmp_path / "boxes" / "aimyable"
+        (root / "state").mkdir(parents=True)
+        sqlite3.connect(root / "state" / "frshty.db").close()
+        volume_dir = tmp_path / "volume"
+        volume_dir.mkdir()
+        (volume_dir / "frshty.db").write_bytes(b"other")
+        self._fake_docker(mod, monkeypatch, volume_dir, root / "state")
+        config = mod.load(str(self._config(tmp_path)))
+        with pytest.raises(SystemExit, match="already exists"):
+            mod.prepare_db_volume(config, root, move=True)
+        assert (root / "state" / "frshty.db").exists()
+        assert (volume_dir / "frshty.db").read_bytes() == b"other"
 
     def test_config_and_peers_mount_from_the_stable_root(self, tmp_path, monkeypatch):
         mod, _ = self._launcher(tmp_path, monkeypatch)
