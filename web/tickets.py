@@ -1234,6 +1234,8 @@ def api_restart_ticket(key: str):
         ts.pop("conflict_resolution_attempts", None)
         ts.pop("last_conflict_error", None)
         ts.pop("pr_failed_reason", None)
+        ts.pop("test_fix_attempts", None)
+        ts.pop("tests_failed_at", None)
         return ts
 
     ts = state.update_ticket(key, _reset)
@@ -1243,6 +1245,12 @@ def api_restart_ticket(key: str):
         target = "in_review" if ts.get("prs") else "pr_ready"
         try:
             _transition_and_advance(key, target=target, reason="manual restart")
+        except state.TicketStateError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        return {"status": "restarted"}
+    if ts.get("status") == TicketStatus.tests_failed.value:
+        try:
+            _transition_and_advance(key, target="testing", reason="manual restart")
         except state.TicketStateError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
         return {"status": "restarted"}
@@ -1350,6 +1358,8 @@ def api_set_ticket_status(key: str, body: dict):
     fields: dict = {
         "ci_fix_attempts": 0,
         "conflict_resolution_attempts": 0,
+        "test_fix_attempts": 0,
+        "tests_failed_at": None,
         "ci_passed": None,
         "checks_started_at": None,
     }
