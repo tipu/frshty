@@ -126,6 +126,26 @@ CODEX_NOTIFY_SCRIPT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts", "codex_notify.py")
 
 
+PANE_BASHRC = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts", "pane_bashrc")
+
+
+def _pane_shell() -> str:
+    """The interactive shell a pane runs after its agent exits, or starts
+    with when it runs no agent.
+
+    A bash pane reads scripts/pane_bashrc. That file runs the startup files
+    a login shell reads and then defines the cl and clc aliases, so the
+    operator can start claude by hand in any pane. Bash ignores --rcfile in
+    a login shell, so the pane shell is interactive and not a login shell,
+    and the rcfile reads the login files itself. Another shell keeps its
+    own login startup files."""
+    login_shell = os.environ.get("SHELL") or "/bin/sh"
+    if os.path.basename(login_shell) == "bash":
+        return f"{shlex.quote(login_shell)} --rcfile {shlex.quote(PANE_BASHRC)} -i"
+    return f"{shlex.quote(login_shell)} -l"
+
+
 def _codex_notify_flag(session_uuid: str) -> str:
     argv = json.dumps(["python3", CODEX_NOTIFY_SCRIPT, session_uuid])
     return f"-c {shlex.quote('notify=' + argv)}"
@@ -242,8 +262,7 @@ def launch_pane_command(ticket_key: str, cwd: str, command: str):
     whose shell startup is stuck.
     """
     session_name = _tmux_session_name(ticket_key)
-    login_shell = os.environ.get("SHELL") or "/bin/sh"
-    pane_command = f"{command}; exec {shlex.quote(login_shell)} -l"
+    pane_command = f"{command}; exec {_pane_shell()}"
     if _tmux_session_exists(session_name):
         args = [
             _tmux_bin(), "-S", TMUX_SOCKET, "respawn-pane", "-k", "-t", tmux_target.pane(session_name),
@@ -452,7 +471,7 @@ def _get_or_spawn(ticket_key: str, cwd: str):
         subprocess.run(
             [
                 _tmux_bin(), "-S", TMUX_SOCKET, "new-session", "-d", "-s", session_name,
-                "-c", cwd, "-x", "80", "-y", "24",
+                "-c", cwd, "-x", "80", "-y", "24", f"exec {_pane_shell()}",
             ],
             env=env, capture_output=True,
         )
