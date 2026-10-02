@@ -191,6 +191,36 @@ class TestArtifactSandboxPolicy:
         assert resp.headers["content-security-policy"] == "sandbox"
 
 
+
+class TestArtifactContentType:
+    def _get(self, tmp_path, monkeypatch, name: str, data: bytes):
+        artifact_id = _seed(tmp_path, monkeypatch, "run-workspace")
+        target = tmp_path / "run-workspace" / name
+        target.write_bytes(data)
+        with db.tx() as c:
+            c.execute("UPDATE work_artifacts SET path = ? WHERE id = ?",
+                      (str(target), artifact_id))
+        app = FastAPI()
+        app.include_router(work_routes.router)
+        with TestClient(app) as client:
+            return client.get(f"/api/work/artifact_file/{artifact_id}")
+
+    def test_log_file_shows_as_text(self, tmp_path, monkeypatch):
+        resp = self._get(tmp_path, monkeypatch, "deploy.log", b"merged main\n")
+        assert resp.headers["content-type"] == "text/plain; charset=utf-8"
+
+    def test_yaml_file_shows_as_text(self, tmp_path, monkeypatch):
+        resp = self._get(tmp_path, monkeypatch, "config.yaml", b"a: 1\n")
+        assert resp.headers["content-type"] == "text/plain; charset=utf-8"
+
+    def test_unknown_binary_file_downloads(self, tmp_path, monkeypatch):
+        resp = self._get(tmp_path, monkeypatch, "dump.bin", b"\x00\x01\x02")
+        assert resp.headers["content-type"] == "application/octet-stream"
+
+    def test_image_keeps_its_type(self, tmp_path, monkeypatch):
+        resp = self._get(tmp_path, monkeypatch, "shot.png", b"\x89PNG\x00")
+        assert resp.headers["content-type"] == "image/png"
+
 class TestArtifactClaudeRoute:
     def _stub(self, tmp_path, monkeypatch, running=False):
         launched = []
