@@ -142,6 +142,15 @@ class TestRunScopeReview:
             agy="SCOPE VERDICT: PASS"))
         assert result[0] == "fail"
 
+    def test_underscore_wrapped_verdict_counts(self, tmp_path, scope_config):
+        (result, _) = self._run(tmp_path, scope_config, _fanout_result(
+            claude="SCOPE VERDICT: PASS\n_SCOPE VERDICT: FAIL_",
+            codex="__SCOPE VERDICT: FAIL__",
+            agy="SCOPE VERDICT: PASS"))
+        verdict, reason = result
+        assert verdict == "fail"
+        assert "dropped" not in reason
+
     def test_no_verdicts_returns_none(self, tmp_path, scope_config):
         (result, _) = self._run(tmp_path, scope_config, _fanout_result())
         assert result[0] is None
