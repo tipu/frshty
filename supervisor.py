@@ -10,7 +10,7 @@ from pathlib import Path
 from core.discovery import discover_instances, fan_out, call_instance
 from core.claude_runner import run_claude_code
 import core.db as _db
-from core.paths import frshty_root
+from core.paths import db_path, frshty_root
 
 STATE_DIR = frshty_root()
 STATE_FILE = STATE_DIR / "supervisor.json"
@@ -218,7 +218,7 @@ async def run_once(state: dict):
 async def main():
     _setup_logging()
     log.info("Supervisor starting")
-    _db.init(STATE_DIR / "frshty.db", PROJECT_DIR / "migrations")
+    _db.init(db_path(), PROJECT_DIR / "migrations")
     state = _load_state()
 
     loop = asyncio.get_event_loop()
