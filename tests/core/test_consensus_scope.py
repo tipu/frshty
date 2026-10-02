@@ -126,6 +126,22 @@ class TestRunScopeReview:
         assert verdict == "pass"
         assert "claude" in reason
 
+    def test_verdict_wrapped_in_markdown_counts(self, tmp_path, scope_config):
+        (result, _) = self._run(tmp_path, scope_config, _fanout_result(
+            claude="review\n\n`SCOPE VERDICT: PASS`",
+            codex="review\n**SCOPE VERDICT:** PASS",
+            agy="review\nSCOPE VERDICT: FAIL"))
+        verdict, reason = result
+        assert verdict == "pass"
+        assert "dropped" not in reason
+
+    def test_last_verdict_line_wins(self, tmp_path, scope_config):
+        (result, _) = self._run(tmp_path, scope_config, _fanout_result(
+            claude="`SCOPE VERDICT: PASS` means clean\n- `a.py:3` unused\nSCOPE VERDICT: FAIL",
+            codex="SCOPE VERDICT: FAIL",
+            agy="SCOPE VERDICT: PASS"))
+        assert result[0] == "fail"
+
     def test_no_verdicts_returns_none(self, tmp_path, scope_config):
         (result, _) = self._run(tmp_path, scope_config, _fanout_result())
         assert result[0] is None

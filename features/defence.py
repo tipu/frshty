@@ -31,7 +31,7 @@ from pathlib import Path
 import core.log as log
 from core.claude_runner import run_balanced, extract_json
 from core.deps import relink_shared_venv
-from core.llm import run_external_model
+from core.llm import CODEX_EXEC, run_external_model
 
 
 SUBSTANTIATED = "SUBSTANTIATED"
@@ -262,7 +262,7 @@ def _judge_blind(config: dict, claim: str, diff: str, result: DefenceResult,
         without_exit=result.without_change_exit, without_output=result.without_change_output,
     )
     text, _ = run_external_model(
-        ["codex", "exec", "--skip-git-repo-check", "-"],
+        [*CODEX_EXEC, "-"],
         fn_name="defence_judge", model="codex", prompt=prompt,
         cwd=worktree, timeout=JUDGE_TIMEOUT,
         stdin_text=prompt,

@@ -71,6 +71,7 @@ def test_fanout_builds_expected_commands(tmp_path, monkeypatch):
 
     cdx = recorded["codex"]
     assert "--skip-git-repo-check" in cdx["cmd"] and "-o" in cdx["cmd"]
+    assert "--dangerously-bypass-approvals-and-sandbox" in cdx["cmd"]
 
 
 def test_quorum_degrades_to_claude_only_when_others_unavailable(tmp_path, monkeypatch):
