@@ -8,6 +8,7 @@
 <script src="/static/vendor/xterm.js"></script>
 <link rel="stylesheet" href="/static/vendor/xterm.css">
 <script src="/static/vendor/xterm-addon-fit.js"></script>
+<script src="/static/frshty-terminal-select.js"></script>
 <script src="/static/vendor/xterm-addon-web-links.js"></script>
 <style>
 html, body { margin: 0; height: 100%; background: #0a0a0f; }
@@ -103,6 +104,7 @@ async function start() {
   term.loadAddon(fit);
   term.loadAddon(new WebLinksAddon.WebLinksAddon());
   term.open(document.getElementById("term"));
+  frshtyTerminalSelect(term);
   fit.fit();
   term.onData((d) => { if (ws && ws.readyState === WebSocket.OPEN) ws.send(d); });
   new ResizeObserver(() => { if (panel.classList.contains("open")) { fit.fit(); sendSize(); } })

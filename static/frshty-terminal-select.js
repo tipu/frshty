@@ -9,13 +9,18 @@ function frshtyTerminalSelect(term) {
   });
   term.element.addEventListener("mousedown", (ev) => {
     if (!ev.isTrusted || (ev.button !== 0 && ev.button !== 2)) return;
+    if (term.modes.mouseTrackingMode === "none") return;
     ev.stopImmediatePropagation();
     ev.preventDefault();
     ev.target.dispatchEvent(copy(ev, true));
   }, true);
   term.element.addEventListener("mouseup", (ev) => {
     if (!ev.isTrusted || (ev.button !== 0 && ev.button !== 2)) return;
+    if (term.modes.mouseTrackingMode === "none") return;
     ev.stopImmediatePropagation();
     document.dispatchEvent(copy(ev, false));
   }, true);
+  term.attachCustomKeyEventHandler((ev) =>
+    !(ev.type === "keydown" && (ev.ctrlKey || ev.metaKey) && !ev.altKey
+      && ev.key.toLowerCase() === "c" && term.hasSelection()));
 }
