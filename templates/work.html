@@ -60,18 +60,9 @@
   </div>
 
   <div class="ln-small ln-muted" v-if="!targetMeta.personalLoaded">
-    {{ target ? ("the " + target + " host reports no personal instance — it cannot launch a task") : "personal instance not loaded — read-only" }}
+    {{ intakeContexts.length ? "the selected project cannot launch a task right now" : "personal instance not loaded — read-only" }}
   </div>
 
-  <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center" v-if="peers.length">
-    <span class="ln-hint">source</span>
-    <span class="ln-chipsel" :class="{ on: sourceFilter === '' }"
-          title="every host on this board" @click="setSource('')">all</span>
-    <span class="ln-chipsel" :class="{ on: sourceFilter === 'local' }"
-          title="tasks that run on this host" @click="setSource('local')">{{ instanceName || 'local' }}</span>
-    <span class="ln-chipsel" v-for="p in peers" :key="p.key" :title="p.base_url"
-          :class="{ on: sourceFilter === p.key }" @click="setSource(p.key)">{{ p.label }}</span>
-  </div>
   <div class="ln-small" style="color:var(--ln-red)" v-for="(msg, key) in peerErrors" :key="key">{{ key }}: {{ msg }}</div>
 
   <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center" v-if="filterProjects.length">
@@ -89,13 +80,6 @@
                 placeholder="Describe an outcome, not a report (say 'get PR #123 merged', not 'PR stats'). Paste an image to attach it. Enter launches a run, Shift+Enter adds a line."></textarea>
       <paste-tray :tray="intakeTray"></paste-tray>
       <div class="ln-task-compose-opts">
-        <span class="ln-chipsel" v-if="peers.length"
-              title="which host runs this task; it resets to this host on every page load">host:
-          <select v-model="target" :disabled="intakeBusy" @change="onTargetChange">
-            <option value="">{{ instanceName || 'local' }}</option>
-            <option v-for="p in peers" :key="p.key" :value="p.key">{{ p.label }}</option>
-          </select>
-        </span>
         <span class="ln-chipsel" title="which agent CLI runs this task">agent:
           <select v-model="intakeAgent" :disabled="!targetMeta.personalLoaded || intakeBusy">
             <option v-for="a in targetMeta.agents" :key="a" :value="a">{{ a }}</option>
@@ -148,7 +132,6 @@
           <div class="ln-task-foot">
             <span class="ln-pill" :class="statePill(g, it)">{{ stateText(g, it) }}</span>
             <span class="ln-pill ln-pill-gold" v-if="it.critical" title="you marked this task critical">★ Critical</span>
-            <span class="ln-pill ln-pill-ghost" v-if="it.peer" :title="'this task runs on the ' + it.peer + ' host'">⇄ {{ it.peer }}</span>
             <span class="ln-pill ln-pill-ghost" v-if="view === 'board' && it.archived_at"
                   title="this task is in the archive, not on the board">Archived</span>
             <a class="ln-pill ln-pill-violet ln-thread-pill" v-if="it.thread" style="text-decoration:none"
@@ -261,7 +244,6 @@
             <span style="color:var(--ln-amber)" v-else-if="t.counts.needs_you">{{ t.counts.needs_you }} needs you</span>
             <span style="color:var(--ln-blue)" v-else-if="t.counts.agent_working">{{ t.counts.agent_working }} working</span>
             <span v-else>{{ t.counts.done === t.task_count ? 'complete' : 'idle' }}</span>
-            <span v-if="t.peer" :title="'this thread runs on the ' + t.peer + ' host'">⇄ {{ t.peer }}</span>
             <span>{{ t.task_count }} task{{ t.task_count === 1 ? '' : 's' }}</span>
           </div>
           <div class="ln-progress" :title="(t.counts.done || 0) + ' of ' + t.task_count + ' complete'">
@@ -295,22 +277,22 @@ const STATE_TEXT = {
   canceled: "⊘ Canceled",
 };
 const DECLINED_REASON = "Proposal declined";
+const DEFAULT_HOST = "personal";
 frshtyApp({
   data() {
     return {
       features: {}, instanceName: "",
       view: new URLSearchParams(location.search).get("view") === "archive" ? "archive" : "board",
       groups: { proposed: [], needs_ack: [], needs_you: [], agent_working: [], waiting_external: [], failed_stale: [], canceled: [], done: [] },
-      personalLoaded: false, intakeText: "", intakeError: "", intakeBusy: false,
-      projects: [], slackAvailable: false, intakeContexts: [], intakeSlack: false, moreOpen: false,
+      localMeta: null, intakeText: "", intakeError: "", intakeBusy: false,
+      intakeContexts: [], intakeSlack: false, moreOpen: false,
       intakeCritical: false,
       intakeRepo: "",
       intakeTray: PasteImages.tray(), fupTray: {},
-      agents: ["claude"], intakeAgent: localStorage.getItem("workAgent") || "claude",
+      intakeAgent: localStorage.getItem("workAgent") || "claude",
       connError: "", replyText: {}, sumOpen: {}, approveBusy: {}, linkmap: null, threads: [],
       fupOpen: {}, fupText: {}, fupBusy: {}, fupError: {}, fupLaunched: {},
-      peers: [], peerMeta: {}, peerErrors: {}, peerLinkmaps: {}, target: "",
-      sourceFilter: localStorage.getItem("workSourceFilter") || "",
+      peers: [], peerMeta: {}, peerErrors: {}, peerLinkmaps: {},
       searchText: "", projectFilter: JSON.parse(localStorage.getItem("workProjectFilter") || "[]"),
       showCanceled: localStorage.getItem("archiveShowCanceled") === "1",
       donePage: 1, donePages: 1, counts: {},
@@ -335,12 +317,49 @@ frshtyApp({
     activeThreads() {
       return this.threads.slice(0, 6);
     },
-    targetMeta() {
-      if (!this.target) {
-        return { projects: this.projects, agents: this.agents,
-                 slackAvailable: this.slackAvailable, personalLoaded: this.personalLoaded };
+    projectMaps() {
+      const maps = {};
+      for (const h of this.hosts()) {
+        const meta = this.hostMeta(h);
+        if (!meta) continue;
+        const name = this.hostName(h);
+        const projects = meta.projects || [];
+        const alias = !!name && projects.length === 1 && projects[0].key !== name;
+        const toDisplay = {}, toLocal = {};
+        for (const p of projects) {
+          const key = alias ? name : p.key;
+          toDisplay[p.key] = key;
+          toLocal[key] = p;
+        }
+        maps[h] = { toDisplay, toLocal };
       }
-      return this.peerMeta[this.target] ||
+      return maps;
+    },
+    projectKeys() {
+      const keys = new Set();
+      for (const m of Object.values(this.projectMaps)) {
+        for (const k of Object.keys(m.toLocal)) keys.add(k);
+      }
+      return [...keys].sort();
+    },
+    catalog() {
+      const entries = [];
+      for (const key of this.projectKeys) {
+        const host = this.projectHost(key);
+        if (host === null) continue;
+        const p = this.projectMaps[host].toLocal[key];
+        entries.push({ key, host, local: p.key, root: p.root, repos: p.repos || [], primary: p.primary });
+      }
+      return entries;
+    },
+    target() {
+      const first = this.catalog.find(e => e.key === this.intakeContexts[0]);
+      if (first) return first.host;
+      const home = this.hosts().find(h => this.hostName(h) === DEFAULT_HOST);
+      return home === undefined ? "" : home;
+    },
+    targetMeta() {
+      return this.hostMeta(this.target) ||
              { projects: [], agents: ["claude"], slackAvailable: false, personalLoaded: false };
     },
     total() {
@@ -349,20 +368,13 @@ frshtyApp({
       return Object.values(this.groups).reduce((n, g) => n + (g ? g.length : 0), 0);
     },
     primaryProjects() {
-      return this.targetMeta.projects.filter(p => p.primary !== false);
+      return this.catalog.filter(p => p.primary !== false);
     },
     filterProjects() {
-      const keys = [];
-      for (const p of this.projects || []) keys.push(p.key);
-      for (const meta of Object.values(this.peerMeta)) {
-        for (const p of meta.projects || []) {
-          if (!keys.includes(p.key)) keys.push(p.key);
-        }
-      }
-      return keys;
+      return this.projectKeys;
     },
     extraProjects() {
-      return this.targetMeta.projects.filter(p => p.primary === false);
+      return this.catalog.filter(p => p.primary === false);
     },
     visibleProjects() {
       if (this.moreOpen) return [...this.primaryProjects, ...this.extraProjects];
@@ -374,8 +386,7 @@ frshtyApp({
     },
     intakeRepos() {
       const names = [];
-      for (const p of this.targetMeta.projects || []) {
-        if (!this.intakeContexts.includes(p.key)) continue;
+      for (const p of this.intakeProjects()) {
         for (const r of p.repos || []) if (!names.includes(r)) names.push(r);
       }
       return names;
@@ -388,13 +399,28 @@ frshtyApp({
       return window.frshtyLinkify(text, this.peerLinkmaps[it.peer], this.peerBase(it.peer));
     },
     rowKey(it) { return (it.peer || "local") + "#" + it.id; },
-    activeSources() {
-      const keys = [];
-      if (!this.sourceFilter || this.sourceFilter === "local") keys.push("");
-      for (const p of this.peers) {
-        if (!this.sourceFilter || this.sourceFilter === p.key) keys.push(p.key);
-      }
-      return keys;
+    hosts() {
+      return ["", ...this.peers.map(p => p.key)];
+    },
+    hostName(h) {
+      return h || this.instanceName;
+    },
+    hostMeta(h) {
+      return h ? this.peerMeta[h] : this.localMeta;
+    },
+    projectHost(key) {
+      const knows = h => h !== undefined && !!(this.projectMaps[h] && this.projectMaps[h].toLocal[key]);
+      const hosts = this.hosts();
+      const named = hosts.find(h => this.hostName(h) === key);
+      if (named !== undefined) return knows(named) ? named : null;
+      const home = hosts.find(h => this.hostName(h) === DEFAULT_HOST);
+      for (const h of [home, ...hosts]) if (knows(h)) return h;
+      return null;
+    },
+    intakeProjects() {
+      const m = this.projectMaps[this.target];
+      if (!m) return [];
+      return this.intakeContexts.map(k => m.toLocal[k]).filter(Boolean);
     },
     peerBase(key) {
       const peer = this.peers.find(p => p.key === key);
@@ -407,16 +433,10 @@ frshtyApp({
       return "/tasks/" + it.id + (suffix || "") +
              (it.peer ? "?peer=" + encodeURIComponent(it.peer) : "");
     },
-    setSource(key) {
-      this.sourceFilter = key;
-      localStorage.setItem("workSourceFilter", key);
-      this.donePage = 1;
-      this.refresh();
-    },
-    onTargetChange() {
-      this.intakeContexts = [];
-      this.intakeSlack = false;
-      this.intakeRepo = "";
+    syncIntake() {
+      if (this.intakeRepo && this.intakeRepo !== "__none__" && !this.intakeRepos.includes(this.intakeRepo)) {
+        this.intakeRepo = "";
+      }
       const agents = this.targetMeta.agents || ["claude"];
       if (!agents.includes(this.intakeAgent)) this.intakeAgent = agents[0];
     },
@@ -455,8 +475,10 @@ frshtyApp({
       return this.note(kept.endsWith(":") ? kept.slice(0, -1) : kept);
     },
     projectsOf(it) {
+      const m = this.projectMaps[it.peer || ""];
       return (it.contexts || "").split(",").map(c => c.trim().toLowerCase())
-        .filter(c => c && c !== "slack_int");
+        .filter(c => c && c !== "slack_int")
+        .map(c => (m && m.toDisplay[c]) || c);
     },
     onSearch() {
       clearTimeout(this._searchT);
@@ -480,7 +502,15 @@ frshtyApp({
     },
     toggleContext(key) {
       const i = this.intakeContexts.indexOf(key);
-      if (i >= 0) this.intakeContexts.splice(i, 1); else this.intakeContexts.push(key);
+      if (i >= 0) {
+        this.intakeContexts.splice(i, 1);
+      } else if (this.intakeContexts.length && this.projectHost(key) !== this.target) {
+        this.intakeContexts = [key];
+      } else {
+        this.intakeContexts.push(key);
+      }
+      this.intakeContexts = this.intakeContexts.filter(k => this.projectHost(k) === this.target);
+      this.syncIntake();
     },
     clearProjectFilter() {
       this.projectFilter = [];
@@ -515,17 +545,12 @@ frshtyApp({
         const r = await fetch("/api/work/peers");
         if (!r.ok) throw new Error("HTTP " + r.status);
         this.peers = (await r.json()).peers || [];
-        const known = new Set(this.peers.map(p => p.key));
-        if (this.sourceFilter && this.sourceFilter !== "local" && !known.has(this.sourceFilter)) {
-          this.sourceFilter = "";
-          localStorage.setItem("workSourceFilter", "");
-        }
       } catch (e) {
         this.peers = [];
       }
     },
     async loadThreads() {
-      const perSource = await Promise.all(this.activeSources().map(async key => {
+      const perSource = await Promise.all(this.hosts().map(async key => {
         try {
           const r = await fetch(this.apiUrl(key, "/api/work/threads"));
           if (!r.ok) throw new Error("HTTP " + r.status);
@@ -538,11 +563,16 @@ frshtyApp({
       this.threads = perSource.flat().sort(
         (a, b) => (a.updated_at < b.updated_at) - (a.updated_at > b.updated_at));
     },
-    boardQuery() {
+    hostProjects(h) {
+      const m = this.projectMaps[h];
+      if (!m) return this.projectFilter.join(",");
+      return this.projectFilter.map(k => (m.toLocal[k] || {}).key).filter(Boolean).join(",");
+    },
+    boardQuery(projects) {
       const params = new URLSearchParams();
       const q = this.searchText.trim();
       if (q) params.set("q", q);
-      if (this.projectFilter.length) params.set("projects", this.projectFilter.join(","));
+      if (projects) params.set("projects", projects);
       if (this.donePage > 1) params.set("done_page", this.donePage);
       if (this.view === "archive") params.set("archive", "1");
       const qs = params.toString();
@@ -560,17 +590,19 @@ frshtyApp({
     },
     async refresh() {
       const seq = ++this._refreshSeq;
-      const qs = this.boardQuery();
       const wantPage = Math.max(1, this.donePage);
-      const wantProjects = this.projectFilter.join(",");
-      const results = await Promise.all(this.activeSources().map(k => this.fetchSource(k, qs)));
+      const hosts = this.hosts();
+      const unmapped = hosts.filter(h => !this.projectMaps[h]);
+      const wants = hosts.map(h => this.hostProjects(h));
+      const results = await Promise.all(hosts.map((k, i) => this.fetchSource(k, this.boardQuery(wants[i]))));
       if (seq !== this._refreshSeq) return;
       const groups = {};
       for (const g of this.groupOrder) groups[g] = [];
       const counts = {};
       const peerErrors = {};
       let donePages = 1, ok = 0;
-      for (const r of results) {
+      for (const [i, r] of results.entries()) {
+        const wantProjects = wants[i];
         if (r.error) {
           if (r.peer) peerErrors[r.peer] = r.error;
           else this.connError = "Disconnected from frshty (" + r.error + "). This host's tasks are missing below; retrying every 15s.";
@@ -583,10 +615,10 @@ frshtyApp({
         if (r.peer) {
           this.peerMeta[r.peer] = meta;
         } else {
-          this.personalLoaded = meta.personalLoaded; this.projects = meta.projects;
-          this.slackAvailable = meta.slackAvailable; this.agents = meta.agents;
+          this.localMeta = meta;
           this.connError = "";
         }
+        if (this.projectFilter.length && !wantProjects) continue;
         if (wantProjects && ((d.filter || {}).projects || "") !== wantProjects) {
           peerErrors[r.peer || this.instanceName || "local"] =
             "this host does not know the project filter; its tasks are hidden until it is updated";
@@ -604,6 +636,10 @@ frshtyApp({
       }
       this.peerErrors = peerErrors;
       if (!ok) return;
+      if (this.projectFilter.length && unmapped.some(h => this.projectMaps[h])) {
+        this.refresh();
+        return;
+      }
       if (results.length > 1) {
         for (const g of this.groupOrder) {
           groups[g].sort((a, b) => this.rowStamp(b).localeCompare(this.rowStamp(a)));
@@ -613,8 +649,7 @@ frshtyApp({
       this.counts = counts;
       this.donePages = donePages;
       this.donePage = Math.min(wantPage, donePages);
-      const agents = this.targetMeta.agents || ["claude"];
-      if (!agents.includes(this.intakeAgent)) this.intakeAgent = agents[0];
+      this.syncIntake();
       const known = new Set(this.filterProjects);
       const kept = this.projectFilter.filter(k => known.has(k));
       if (known.size && kept.length !== this.projectFilter.length) {
@@ -644,7 +679,8 @@ frshtyApp({
         const r = await fetch(this.apiUrl(this.target, "/api/work/intake"), {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ text: this.intakeText, agent: this.intakeAgent,
-                                 contexts: this.intakeContexts, slack: this.intakeSlack,
+                                 contexts: this.intakeProjects().map(p => p.key),
+                                 slack: this.intakeSlack && this.targetMeta.slackAvailable,
                                  critical: this.intakeCritical,
                                  repo: this.intakeRepo === "__none__" ? "" : this.intakeRepo,
                                  no_worktree: this.intakeRepo === "__none__",
@@ -700,7 +736,7 @@ frshtyApp({
     async archiveCompleted() {
       const n = this.count("done");
       if (!n || !confirm("Archive " + n + " completed task" + (n === 1 ? "" : "s") + "? They move to the Archive.")) return;
-      for (const peer of this.activeSources()) {
+      for (const peer of this.hosts()) {
         try {
           const r = await fetch(this.apiUrl(peer, "/api/work/items/archive-completed"), { method: "POST" });
           if (!r.ok) { this.connError = "archive failed on " + (peer || "local") + ": HTTP " + r.status; }
@@ -811,9 +847,10 @@ frshtyApp({
     this._fupBoxes = {};
     const b = document.getElementById("boot-error");
     if (b) b.remove();
-    this.loadConfig();
-    this.loadPeers().then(() => { this.loadLinkmap(); this.refresh(); this.loadThreads(); });
-    setInterval(() => { this.refresh(); this.loadThreads(); }, 15000);
+    Promise.all([this.loadConfig(), this.loadPeers()]).then(() => {
+      this.loadLinkmap(); this.refresh(); this.loadThreads();
+      setInterval(() => { this.refresh(); this.loadThreads(); }, 15000);
+    });
   },
 }).component("work-question", window.WorkQuestion)
   .component("paste-tray", window.PasteTray).mount("#app");
