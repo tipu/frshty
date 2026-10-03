@@ -259,6 +259,40 @@ class TestGates:
         day = db.query_one("SELECT * FROM standups WHERE id = ?", (standup_id,))
         assert standup.gate(row, day, _cfg()) == ""
 
+    def test_a_line_drafted_from_a_board_task_is_never_proposed(self, clean):
+        standup_id = _open_day()
+        waiting = work_store.create_item("ship the fix")
+        db.execute("UPDATE work_items SET state = 'needs_ack' WHERE id = ?", (waiting,))
+        line = standup._from_board()[0]
+        assert line["text"].startswith(f"Acknowledge task #{waiting}")
+        item_id = standup._insert_item(standup_id, line["text"], line["contexts"],
+                                       line["origin"], line["origin_ref"], 0)
+        _age(item_id, 4)
+        row = db.query_one("SELECT * FROM standup_items WHERE id = ?", (item_id,))
+        day = db.query_one("SELECT * FROM standups WHERE id = ?", (standup_id,))
+        assert standup.gate(row, day, _cfg()) == f"it is task #{waiting} on the board"
+        assert standup.tick(_cfg())["fired"] is None
+        assert db.query_one("SELECT id FROM work_items WHERE standup_item_id = ?",
+                            (item_id,)) is None
+
+    def test_a_carried_board_line_is_never_proposed(self, clean):
+        waiting = work_store.create_item("ship the fix")
+        db.execute("UPDATE work_items SET state = 'needs_ack' WHERE id = ?", (waiting,))
+        first = _open_day(_day(-1))
+        assert any(i["origin"] == "board" for i in standup.day_view(_day(-1))["items"])
+        standup.close_day(first, _cfg())
+        today = _open_day()
+        carried = db.query_one("SELECT * FROM standup_items WHERE standup_id = ?"
+                               " AND text LIKE 'Acknowledge task #%'", (today,))
+        assert carried["origin"] == "carry"
+        _age(carried["id"], 4)
+        row = db.query_one("SELECT * FROM standup_items WHERE id = ?", (carried["id"],))
+        day = db.query_one("SELECT * FROM standups WHERE id = ?", (today,))
+        assert standup.gate(row, day, _cfg()) == f"it is task #{waiting} on the board"
+        assert standup.tick(_cfg())["fired"] is None
+        assert db.query_one("SELECT id FROM work_items WHERE state = 'proposed'"
+                            " AND objective LIKE 'Acknowledge task #%'") is None
+
 
 class TestNudges:
     def test_the_first_nudge_puts_a_proposal_on_the_board(self, clean):
