@@ -356,10 +356,10 @@ frshtyApp({
       const first = this.catalog.find(e => e.key === this.intakeContexts[0]);
       if (first) return first.host;
       const home = this.hosts().find(h => this.hostName(h) === DEFAULT_HOST);
-      return home === undefined ? "" : home;
+      return home === undefined ? null : home;
     },
     targetMeta() {
-      return this.hostMeta(this.target) ||
+      return (this.target !== null && this.hostMeta(this.target)) ||
              { projects: [], agents: ["claude"], slackAvailable: false, personalLoaded: false };
     },
     total() {
