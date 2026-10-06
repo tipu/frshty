@@ -320,9 +320,9 @@ REWORDED_OUT = json.dumps({
                    "draft": "Open a pull request from the branch this run pushed."}],
 })
 OTHER_STEP_OUT = json.dumps({
-    "summary": "Committed the change.\nNothing is pushed.",
-    "followups": [{"kind": "work_item", "required": True, "unfinished": "push",
-                   "draft": "push the committed change"}],
+    "summary": "Merged the change.\nNothing is released.",
+    "followups": [{"kind": "work_item", "required": True, "unfinished": "release",
+                   "draft": "release the merged change"}],
 })
 
 
@@ -589,9 +589,49 @@ class TestProposalKey:
             1, "merge", "Merge https://github.com/Acme/App/pull/7 now.")
         b = work_debrief.proposal_key(
             2, "merge", "Review then merge PR https://github.com/acme/app/pull/7")
-        assert a == b == "merge:github.com/acme/app/7"
-        assert work_debrief.proposal_key(1, "pr", "open the PR") == "pr:item/1"
-        assert work_debrief.proposal_key(1, "push", "push it") != "pr:item/1"
+        assert a == b == "deliver:github.com/acme/app/7"
+        assert work_debrief.proposal_key(1, "pr", "open the PR") == "deliver:item/1"
+        assert work_debrief.proposal_key(2, "pr", "open the PR") != "deliver:item/1"
+
+    def test_a_drifted_step_label_keeps_the_key(self):
+        """Work item 9861 left one branch unfinished. Its debriefs named the
+        step commit, then push, then pr, then merge, and each name opened a
+        new proposal of that branch."""
+        keys = {work_debrief.proposal_key(9861, step, f"{step} the branch")
+                for step in ("commit", "push", "pr", "merge")}
+        assert keys == {"deliver:item/9861"}
+        assert work_debrief.proposal_key(9861, "release", "release it") == "release:item/9861"
+
+    def test_a_drifted_step_label_is_not_proposed_again(self, monkeypatch, tmp_path):
+        item_id = self._debriefed(monkeypatch, tmp_path, "drifted label", REQUIRED_OUT)
+        work_debrief.propose_required_followups()
+        [proposal] = self._proposals(item_id)
+        work_store.apply_action(proposal["id"], "decline")
+        for step in ("commit", "push", "merge"):
+            monkeypatch.setattr(work_debrief, "_run_claude", lambda p, s=step: json.dumps({
+                "summary": "Left the branch.\nIt has not landed.",
+                "followups": [{"kind": "work_item", "required": True, "unfinished": s,
+                               "draft": f"{s} the branch this run left"}]}))
+            work_debrief.run_debrief(item_id)
+
+            assert work_debrief.propose_required_followups() == []
+
+        assert len(self._proposals(item_id)) == 1
+
+    def test_a_release_after_a_declined_merge_is_proposed(self, monkeypatch, tmp_path):
+        """The operator declines the merge proposal and merges by hand. The
+        release the next debrief asks for is new work."""
+        item_id = self._debriefed(monkeypatch, tmp_path, "merged by hand", REQUIRED_OUT)
+        work_debrief.propose_required_followups()
+        [proposal] = self._proposals(item_id)
+        work_store.apply_action(proposal["id"], "decline")
+        monkeypatch.setattr(work_debrief, "_run_claude", lambda p: OTHER_STEP_OUT)
+        work_debrief.run_debrief(item_id)
+
+        assert len(work_debrief.propose_required_followups()) == 1
+        assert db.query_one(
+            "SELECT proposal_key FROM work_items WHERE source_item_id = ? ORDER BY id DESC",
+            (item_id,))["proposal_key"] == f"release:item/{item_id}"
 
     def test_a_second_debrief_of_the_same_work_keeps_the_open_proposal(
             self, monkeypatch, tmp_path):
@@ -658,7 +698,7 @@ class TestProposalKey:
         assert work_debrief.backfill_proposal_keys() == 1
 
         assert db.query_one("SELECT proposal_key FROM work_items WHERE id = ?",
-                            (proposal["id"],))["proposal_key"] == f"pr:item/{item_id}"
+                            (proposal["id"],))["proposal_key"] == f"deliver:item/{item_id}"
         monkeypatch.setattr(work_debrief, "_run_claude", lambda p: REWORDED_OUT)
         work_debrief.run_debrief(item_id)
         assert work_debrief.propose_required_followups() == []
