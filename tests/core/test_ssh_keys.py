@@ -355,13 +355,15 @@ class TestInstanceLauncher:
         monkeypatch.delenv("XAUTHORITY", raising=False)
         args = mod.gvoice_login_args(config)
         state = tmp_path / "boxes" / "aimyable" / "state"
-        profile = f"GVOICE_PROFILE_DIR={state / 'gvoice'}"
-        assert profile in run and profile in args
+        assert f"GVOICE_PROFILE_DIR={state / 'gvoice'}" in run
+        assert f"--user-data-dir={state / 'gvoice'}" in args
+        assert "--password-store=basic" in args
         volumes = [args[i + 1] for i, a in enumerate(args) if a == "-v"]
         assert f"{state}:{state}" in volumes
         assert f"{xauth}:/run/frshty/xauthority:ro" in volumes
         assert "DISPLAY=:0" in args
-        assert args[-3:] == ["gvoice", mod.IMAGE, "login"]
+        assert args[args.index("--entrypoint") + 1:][:2] == ["google-chrome", mod.IMAGE]
+        assert not any("enable-automation" in a for a in args)
 
     def test_gvoice_login_needs_a_display(self, tmp_path, monkeypatch):
         mod, _ = self._launcher(tmp_path, monkeypatch)
