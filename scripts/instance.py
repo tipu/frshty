@@ -40,11 +40,13 @@ that path, and refuse when a different file is already there.
 The gvoice CLI keeps its Google Voice session in a Chrome profile at
 state/gvoice/, named by GVOICE_PROFILE_DIR, or at direct_inbox.gvoice_profile_dir
 when the config sets it, which must lie inside state/. `gvoice-login` opens
-Google Voice in plain Chrome on that profile, in a throwaway container of the
-same image.
-`gvoice login` drives Chrome through Playwright, and Google refuses a sign-in
-from an automated browser. The Chrome window opens on the host display named
-by DISPLAY and XAUTHORITY. Close it when the sign-in is done.
+Google Voice on that profile, in a throwaway container of the same image.
+Google refuses a sign-in from a browser that reports automation, as the one
+`gvoice login` opens does. Google also drops a session that a differently
+launched Chrome made, as plain Chrome does. So `gvoice-login` launches Chrome
+through gvoice's own Playwright, without the automation flag and marker. The
+Chrome window opens on the host display named by DISPLAY and XAUTHORITY. Close
+it when the sign-in is done.
 
 On a macOS host the SQLite database lives on the Docker volume frshty-<key>-db,
 not in state/. File locks do not hold across processes on a macOS bind mount,
@@ -90,6 +92,21 @@ DOCKER_SOCKET = Path("/var/run/docker.sock")
 PEERS = CONTAINERS_ROOT / "peers.toml"
 GVOICE_PROFILE = "gvoice"
 GVOICE_URL = "https://voice.google.com/u/0/messages"
+GVOICE_DIR = "/usr/lib/node_modules/google-voice-cli"
+GVOICE_LOGIN_JS = f"""
+import {{ chromium }} from "playwright-core";
+const context = await chromium.launchPersistentContext(process.env.GVOICE_PROFILE_DIR, {{
+  channel: process.env.GVOICE_CHROME_CHANNEL || "chrome",
+  headless: false,
+  viewport: {{ width: 1280, height: 900 }},
+  ignoreDefaultArgs: ["--enable-automation"],
+  args: ["--disable-blink-features=AutomationControlled"],
+}});
+const page = context.pages()[0] || await context.newPage();
+await page.goto("{GVOICE_URL}", {{ waitUntil: "domcontentloaded" }});
+console.log("Sign in to Google Voice, wait for the inbox, then close the window.");
+await context.waitForEvent("close", {{ timeout: 0 }});
+"""
 X11_SOCKETS = Path("/tmp/.X11-unix")
 DB_DIR = "/var/lib/frshty"
 MEMORY = "32g"
@@ -334,10 +351,11 @@ def run_args(config: dict, config_path: Path, check: bool) -> list[str]:
 
 
 def gvoice_login_args(config: dict) -> list[str]:
-    """A throwaway container that opens Google Voice in plain Chrome on the
-    instance's gvoice profile and shows the window on the host display."""
+    """A throwaway container that opens Google Voice on the instance's gvoice
+    profile, launched the way gvoice launches it, on the host display."""
     state = CONTAINERS_ROOT / config["job"]["key"] / "state"
-    configured = (config.get("direct_inbox") or {}).get("gvoice_profile_dir")
+    settings = config.get("direct_inbox") or {}
+    configured = settings.get("gvoice_profile_dir")
     profile = _expand(configured) if configured else state / GVOICE_PROFILE
     if not profile.is_relative_to(state):
         raise SystemExit(f"gvoice-login: {profile} is outside {state}, which the instance does not mount")
@@ -356,10 +374,11 @@ def gvoice_login_args(config: dict) -> list[str]:
             "-e", "XAUTHORITY=/run/frshty/xauthority",
             "-v", f"{X11_SOCKETS}:{X11_SOCKETS}:ro",
             "-v", f"{xauth}:/run/frshty/xauthority:ro",
+            "-e", f"GVOICE_PROFILE_DIR={profile}",
+            "-e", f"GVOICE_CHROME_CHANNEL={settings.get('gvoice_chrome_channel') or 'chrome'}",
             "-v", f"{profile}:{profile}",
-            "--entrypoint", "google-chrome", IMAGE,
-            f"--user-data-dir={profile}", "--password-store=basic", "--no-sandbox",
-            "--no-first-run", "--no-default-browser-check", GVOICE_URL]
+            "-w", GVOICE_DIR,
+            "--entrypoint", "node", IMAGE, "--input-type=module", "-e", GVOICE_LOGIN_JS]
 
 
 def build() -> int:
