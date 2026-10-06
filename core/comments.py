@@ -2,6 +2,9 @@ from datetime import datetime, timezone
 
 import core.db as db
 
+MAX_AUTOMATED_REVIEW_FIX_RUNS = 2
+AUTOMATED_REVIEW_KINDS = ("issue_comment", "review_body")
+
 
 def fetch_and_detect_comments(
     instance_key: str,
@@ -469,3 +472,50 @@ def trigger_resource_recheck(
             "resource_id": resource_id,
         },
     )
+
+
+def is_automated_review(comment: dict) -> bool:
+    """Whether a comment is a bot's verdict on the whole pull request.
+
+    A review workflow posts one such comment on every push. An inline bot
+    finding is anchored to a line and stands on its own, so it is not one."""
+    return bool(comment.get("author_is_bot")) and comment.get("comment_kind") in AUTOMATED_REVIEW_KINDS
+
+
+def automated_review_skips(comments: list[dict], key, fixed: set) -> dict:
+    """key(comment) -> why frshty does not act on this automated review.
+
+    Each fix push starts the repository's review workflow again, and every
+    run posts a full re-review. Fixing each one pushes again, so the loop
+    never ends by itself. Only the newest review per bot is current: an
+    older one is superseded, because the newer run read the code after it.
+    The newest one is capped once the pull request has had
+    MAX_AUTOMATED_REVIEW_FIX_RUNS fix runs on automated reviews. `fixed`
+    holds the keys of the comments that already had a fix run. A skipped
+    review is not owed an answer, so it does not hold the merge."""
+    automated = [c for c in comments if is_automated_review(c)]
+    newest: dict = {}
+    for c in automated:
+        group = (c.get("author_id"), c.get("comment_kind"))
+        if group not in newest or c["id"] > newest[group]["id"]:
+            newest[group] = c
+    current = {key(c) for c in newest.values()}
+    automated_keys = {key(c) for c in automated}
+    capped = len(automated_keys & fixed) >= MAX_AUTOMATED_REVIEW_FIX_RUNS
+    skips = {}
+    for k in automated_keys:
+        if k not in current:
+            skips[k] = "superseded"
+        elif capped and k not in fixed:
+            skips[k] = "capped"
+    return skips
+
+
+def automated_review_skip_reason(comment: dict, key, skips: dict) -> str | None:
+    """Why frshty does not act on this comment, or None.
+
+    The keys of different comment kinds can be equal, so only an automated
+    review can match a skip."""
+    if not is_automated_review(comment):
+        return None
+    return skips.get(key(comment))
