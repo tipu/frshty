@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -213,6 +214,7 @@ def test_ask_agent_reports_a_failed_or_unparseable_call():
 
 def test_run_posts_the_agent_verdict_only_when_it_changes(tmp_path):
     state.init(tmp_path)
+    db.init(tmp_path / "t.db", ROOT / "migrations")
     problem = ('{"status": "problem", "problems": [{"instance": "aimyable", "what": "scan_tickets'
                ' repeats with no progress", "evidence": "scan_tickets x40", "likely_cause": "wedged job"}]}')
     healthy = '{"status": "ok", "problems": []}'
@@ -229,6 +231,100 @@ def test_run_posts_the_agent_verdict_only_when_it_changes(tmp_path):
         "global_watch_agent_alert", "global_watch_agent_failed", "global_watch_agent_ok"]
     assert "aimyable: scan_tickets repeats with no progress" in emit.call_args_list[0].args[1]
     assert out["agent"] == {"status": "ok", "problems": []}
+
+
+def _problem(instance, task_key, task="Repair the broken worktrees."):
+    return {"instance": instance, "what": "git status fails in every worktree",
+            "evidence": "work_worktree_broken x9", "likely_cause": "stale worktree metadata",
+            "task_key": task_key, "task": task}
+
+
+def _verdict(*problems):
+    return json.dumps({"status": "problem", "problems": list(problems)})
+
+
+def _run_agent(tmp_path, replies, config=None):
+    state.init(tmp_path)
+    db.init(tmp_path / "t.db", ROOT / "migrations")
+    entries = [{"key": "frshty", "root": str(tmp_path), "repos": [], "primary": True}]
+    with patch.object(global_watch, "discover_instances",
+                      return_value=[{"key": "personal", "base_url": "x"}]), \
+         patch.object(global_watch, "read_feed", return_value=([_ev("personal", "a")], {})), \
+         patch.object(global_watch.work_launch, "project_entries", return_value=entries), \
+         patch.object(global_watch, "run_external_model",
+                      side_effect=[(r, 0) for r in replies]) as model, \
+         patch.object(global_watch.log, "emit") as emit:
+        outs = [global_watch.run(config or _agent_config(), now=NOW + timedelta(minutes=15 * i))
+                for i in range(len(replies))]
+    return outs, model, emit
+
+
+def test_run_proposes_a_task_for_a_problem_once_while_it_persists(tmp_path):
+    reply = _verdict(_problem("aimyable", "Broken Worktrees!"))
+
+    outs, model, emit = _run_agent(tmp_path, [reply, reply])
+
+    rows = db.query_all("SELECT * FROM work_items")
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["state"] == "proposed"
+    assert row["proposal_key"] == "global_watch:broken-worktrees"
+    assert row["objective"] == "[aimyable] Repair the broken worktrees."
+    assert row["contexts"] == "frshty" and row["launch_cwd"] == str(tmp_path)
+    assert "work_worktree_broken x9" in row["launch_brief"]
+    assert outs[0]["proposed_tasks"] == [{"work_item_id": row["id"],
+                                          "task_key": "broken-worktrees", "instance": "aimyable"}]
+    assert outs[1]["proposed_tasks"] == []
+    assert "- broken-worktrees (proposed): [aimyable] Repair the broken worktrees." in \
+        model.call_args_list[1].kwargs["stdin_text"]
+    assert [c.args[0] for c in emit.call_args_list].count("global_watch_task_proposed") == 1
+
+
+def test_run_does_not_propose_a_declined_task_again(tmp_path):
+    reply = _verdict(_problem("aimyable", "broken-worktrees"))
+    _run_agent(tmp_path, [reply])
+    item_id = db.query_one("SELECT id FROM work_items")["id"]
+    db.execute("UPDATE work_items SET state = 'canceled', stop_reason = ? WHERE id = ?",
+               (global_watch.work_store.DECLINED_REASON, item_id))
+
+    outs, _, _ = _run_agent(tmp_path, [reply])
+
+    assert outs[0]["proposed_tasks"] == []
+    assert db.query_one("SELECT COUNT(*) AS n FROM work_items")["n"] == 1
+
+
+def test_run_stops_proposing_while_max_open_tasks_wait(tmp_path):
+    config = {"job": {"key": "personal"}, "global_watch": {"enabled": True, "max_open_tasks": 1}}
+    reply = _verdict(_problem("aimyable", "broken-worktrees"),
+                     _problem("personal", "preflight-github-repo", "Fix the github.repo preflight."))
+
+    outs, _, emit = _run_agent(tmp_path, [reply, reply], config)
+
+    assert [t["task_key"] for t in outs[0]["proposed_tasks"]] == ["broken-worktrees"]
+    assert outs[1]["proposed_tasks"] == []
+    assert [c.args[0] for c in emit.call_args_list].count("global_watch_task_capped") == 1
+    assert db.query_one("SELECT COUNT(*) AS n FROM work_items")["n"] == 1
+
+
+def test_the_cap_counts_waiting_proposals_beyond_the_known_tasks_limit(tmp_path):
+    config = {"job": {"key": "personal"}, "global_watch": {"enabled": True, "max_open_tasks": 1}}
+    _run_agent(tmp_path, [_verdict(_problem("aimyable", "old-fault"))], config)
+    for i in range(global_watch.KNOWN_TASKS_LIMIT):
+        global_watch.work_store.create_proposal(f"declined {i}", proposal_key=f"global_watch:d{i}")
+    db.execute("UPDATE work_items SET state = 'canceled' WHERE proposal_key LIKE 'global_watch:d%'")
+
+    outs, _, _ = _run_agent(tmp_path, [_verdict(_problem("aimyable", "new-fault"))], config)
+
+    assert outs[0]["proposed_tasks"] == []
+    assert db.query_one("SELECT COUNT(*) AS n FROM work_items WHERE state = 'proposed'")["n"] == 1
+
+
+def test_run_proposes_nothing_when_propose_tasks_is_off_or_the_task_is_missing(tmp_path):
+    off = {"job": {"key": "personal"}, "global_watch": {"enabled": True, "propose_tasks": False}}
+    _run_agent(tmp_path, [_verdict(_problem("aimyable", "broken-worktrees"))], off)
+    _run_agent(tmp_path, [_verdict(_problem("aimyable", "broken-worktrees", task=""))])
+
+    assert db.query_one("SELECT COUNT(*) AS n FROM work_items")["n"] == 0
 
 
 def _seed_config():
