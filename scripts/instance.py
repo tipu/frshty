@@ -105,7 +105,7 @@ const context = await chromium.launchPersistentContext(process.env.GVOICE_PROFIL
 const page = context.pages()[0] || await context.newPage();
 await page.goto("{GVOICE_URL}", {{ waitUntil: "domcontentloaded" }});
 console.log("Sign in to Google Voice, wait for the inbox, then close the window.");
-await context.waitForEvent("close");
+await context.waitForEvent("close", {{ timeout: 0 }});
 """
 X11_SOCKETS = Path("/tmp/.X11-unix")
 DB_DIR = "/var/lib/frshty"

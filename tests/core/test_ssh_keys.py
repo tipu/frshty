@@ -369,6 +369,7 @@ class TestInstanceLauncher:
         assert 'ignoreDefaultArgs: ["--enable-automation"]' in script
         assert "--disable-blink-features=AutomationControlled" in script
         assert mod.GVOICE_URL in script
+        assert "timeout: 0" in script
 
     def test_gvoice_login_signs_in_the_configured_profile(self, tmp_path, monkeypatch):
         mod, home = self._launcher(tmp_path, monkeypatch)
