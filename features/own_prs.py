@@ -7,6 +7,8 @@ import core.log as log
 import core.queue as q
 import core.state as state
 import core.comments as comments
+from core.comments import (MAX_AUTOMATED_REVIEW_FIX_RUNS, automated_review_skip_reason,
+                           automated_review_skips, is_automated_review)
 import core.git_util as git_util
 import core.branch_sync as branch_sync
 from core.claude_runner import run_claude_code, run_haiku, run_balanced, extract_json
@@ -211,9 +213,12 @@ def _check_comments(config, instance_key, platform, pr, base_url, seen=None, tic
     detection = comments.fetch_and_detect_comments(instance_key, platform, "pr", pr_key, platform_comments=platform_comments)
     all_to_process = [c for c in detection["new"] + detection["edited"]
                       if c.get("author_id") != user_id and not c.get("resolved")]
+    answered_ids = comments.answered_comment_ids(instance_key, "pr", pr_key)
     all_to_process = _drop_bot_rewrites(instance_key, pr, pr_key, pr_ref, base_url,
-                                        all_to_process,
-                                        comments.answered_comment_ids(instance_key, "pr", pr_key))
+                                        all_to_process, answered_ids)
+    skips = _automated_review_skips(platform_comments, answered_ids)
+    all_to_process = _drop_skipped_automated_reviews(instance_key, pr, pr_key, pr_ref, base_url,
+                                                     all_to_process, skips)
     if first_sight:
         all_to_process = _baseline_existing_comments(instance_key, pr_key, all_to_process)
     # General GitHub review bodies were added to the adapter after inline
@@ -245,7 +250,8 @@ def _check_comments(config, instance_key, platform, pr, base_url, seen=None, tic
 
     _settle_manual_comments(instance_key, pr_key, by_id)
 
-    _flush_deferred_comments(config, instance_key, pr, pr_key, pr_ref, base_url, by_id, seen, ticket_key)
+    _flush_deferred_comments(config, instance_key, pr, pr_key, pr_ref, base_url, by_id, seen, ticket_key,
+                             skips)
 
 
 def _drop_bot_rewrites(instance_key, pr, pr_key, pr_ref, base_url, candidates, answered_ids):
@@ -273,6 +279,43 @@ def _drop_bot_rewrites(instance_key, pr, pr_key, pr_ref, base_url, candidates, a
                  links={"pr": pr["url"], "detail": f"{base_url}/"},
                  meta={"repo": pr["repo"], "pr_id": pr["id"],
                        "comment_ids": [str(c["id"]) for c in dropped]})
+    return keep
+
+
+def _review_key(comment: dict) -> tuple:
+    return (comment.get("comment_kind"), str(comment["id"]))
+
+
+def _automated_review_skips(platform_comments, answered_ids) -> dict:
+    fixed = {_review_key(c) for c in platform_comments
+             if is_automated_review(c) and str(c["id"]) in answered_ids}
+    return automated_review_skips(platform_comments, _review_key, fixed)
+
+
+def _drop_skipped_automated_reviews(instance_key, pr, pr_key, pr_ref, base_url, candidates, skips):
+    """Settle an automated review that a newer one supersedes, or that comes
+    after the pull request spent its automated review fix runs. Fixing every
+    re-review pushes a commit, and the push starts the next re-review."""
+    keep, dropped = [], []
+    for c in candidates:
+        if automated_review_skip_reason(c, _review_key, skips):
+            dropped.append(c)
+            comments.mark_comment_seen(instance_key, "pr", pr_key, str(c["id"]),
+                                       c.get("updated_at") or c.get("created_at"))
+        else:
+            keep.append(c)
+    if dropped:
+        log.emit("pr_automated_review_skipped",
+                 f"{pr_ref}: not fixing {len(dropped)} automated review(s); a newer review "
+                 f"supersedes them or the PR had {MAX_AUTOMATED_REVIEW_FIX_RUNS} "
+                 f"automated review fix runs",
+                 links={"pr": pr["url"], "detail": f"{base_url}/"},
+                 meta={"repo": pr["repo"], "pr_id": pr["id"],
+                       "max_fix_runs": MAX_AUTOMATED_REVIEW_FIX_RUNS,
+                       "comments": [{"comment_id": str(c["id"]),
+                                     "reason": automated_review_skip_reason(
+                                         c, _review_key, skips)}
+                                    for c in dropped]})
     return keep
 
 
@@ -441,7 +484,8 @@ def _settle_manual_comments(instance_key, pr_key, by_id):
             comments.mark_comment_processed(instance_key, "pr", pr_key, comment_id)
 
 
-def _flush_deferred_comments(config, instance_key, pr, pr_key, pr_ref, base_url, by_id, seen, ticket_key=None):
+def _flush_deferred_comments(config, instance_key, pr, pr_key, pr_ref, base_url, by_id, seen, ticket_key=None,
+                             skips=None):
     deferred = comments.get_deferred_comments(instance_key, "pr", pr_key)
     if not deferred:
         seen.pop("fix_deadline", None)
@@ -466,6 +510,9 @@ def _flush_deferred_comments(config, instance_key, pr, pr_key, pr_ref, base_url,
             comments.mark_comment_processed(instance_key, "pr", pr_key, comment_id)
             continue
         edited_at = comment.get("updated_at") or comment.get("created_at")
+        if skips and automated_review_skip_reason(comment, _review_key, skips):
+            comments.mark_comment_seen(instance_key, "pr", pr_key, comment_id, edited_at)
+            continue
         comments.mark_comment_processing(instance_key, "pr", pr_key, comment_id, edited_at)
         comment_ids.append(comment_id)
 
@@ -667,6 +714,8 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
                                             {str(c["id"]) for c in fetched}),
                 _self_id(config, platform))
             by_id = {str(c["id"]): c for c in fetched}
+            skips = _automated_review_skips(
+                fetched, comments.answered_comment_ids(instance_key, "pr", pr_key))
             pending = []
             for cid in comment_ids:
                 comment = by_id.get(cid)
@@ -674,6 +723,9 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
                     comments.mark_comment_deleted(instance_key, "pr", pr_key, cid)
                 elif comment.get("resolved"):
                     comments.mark_comment_processed(instance_key, "pr", pr_key, cid)
+                elif automated_review_skip_reason(comment, _review_key, skips):
+                    comments.mark_comment_seen(instance_key, "pr", pr_key, cid,
+                                               comment.get("updated_at") or comment.get("created_at"))
                 else:
                     pending.append(comment)
             if not pending:
