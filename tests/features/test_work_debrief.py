@@ -504,6 +504,26 @@ class TestSupersede:
         assert db.query_one("SELECT id FROM work_items WHERE source_item_id = ?",
                             (item_id,)) is None
 
+    def test_a_proposal_the_debrief_did_not_open_is_left_alone(
+            self, monkeypatch, tmp_path):
+        """The agent of work item 10145 filed four proposals itself. Its
+        debrief withdrew three and wrote only two back as drafts, so one piece
+        of work left the board."""
+        t = tmp_path / "t.jsonl"
+        t.write_text(json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "x"}]}}) + "\n")
+        item_id = _done_item("agent filed its own proposal")
+        db.execute("UPDATE work_runs SET transcript_path = ? WHERE work_item_id = ?",
+                   (str(t), item_id))
+        filed = work_store.create_proposal("fix auto-archive", source_item_id=item_id)
+        monkeypatch.setattr(work_debrief, "_run_claude", lambda p: REQUIRED_OUT)
+
+        out = work_debrief.run_debrief(item_id)
+
+        assert out["superseded"] == []
+        assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                            (filed,))["state"] == work_store.PROPOSED_STATE
+
     def test_an_approved_proposal_is_left_alone(self, monkeypatch, tmp_path):
         """A proposal the operator approved is running work, not an open
         question. Withdrawing it would cancel a task the operator started."""

@@ -362,9 +362,9 @@ def release_proposal(item_id: int) -> None:
             "WHERE id = ? AND state = 'agent_working'", (PROPOSED_STATE, now, item_id))
 
 
-def supersede_proposals(source_item_id: int, conn=None,
+def supersede_proposals(source_item_id: int, item_ids: list[int], conn=None,
                         now: str | None = None) -> list[int]:
-    """Withdraw every open proposal one finished task put on the board.
+    """Withdraw the open proposals an older debrief of one task opened.
 
     A second debrief of a task writes the same follow-up a second time, and
     proposing it again puts two copies of one piece of work in front of the
@@ -374,6 +374,11 @@ def supersede_proposals(source_item_id: int, conn=None,
     here. A proposal the operator already approved or declined has left
     PROPOSED_STATE, so it is not touched.
 
+    `item_ids` names the proposals the older debrief opened. A proposal with
+    the same source that anything else opened is not the debrief's to take
+    back: the agent of work item 10145 filed four proposals itself, and its
+    debrief withdrew three of them and wrote only two back as drafts.
+
     The proposal is canceled rather than declined: the operator declined
     nothing, the board took its own proposal back. It is archived in the same
     step, because a withdrawn proposal asks the operator for nothing.
@@ -382,24 +387,22 @@ def supersede_proposals(source_item_id: int, conn=None,
     withdraw the old proposals in that same transaction, the way
     create_proposal takes one."""
     if conn is not None:
-        return _supersede_proposals(conn, source_item_id, now)
+        return _supersede_proposals(conn, source_item_id, item_ids, now)
     with db.tx() as c:
-        return _supersede_proposals(c, source_item_id, now)
+        return _supersede_proposals(c, source_item_id, item_ids, now)
 
 
-def _supersede_proposals(c, source_item_id: int, now: str | None = None) -> list[int]:
+def _supersede_proposals(c, source_item_id: int, item_ids: list[int],
+                         now: str | None = None) -> list[int]:
     now = now or _now()
-    rows = c.execute(
-        "SELECT id FROM work_items WHERE source_item_id = ? AND state = ?",
-        (source_item_id, PROPOSED_STATE)).fetchall()
     withdrawn = []
-    for row in rows:
-        item_id = int(row["id"])
+    for item_id in sorted(set(item_ids)):
         changed = c.execute(
             "UPDATE work_items SET state = ?, stop_reason = ?, pending_question = '', "
             "snoozed_until = NULL, archived_at = ?, updated_at = ? "
-            "WHERE id = ? AND state = ?",
-            (CANCELED_STATE, SUPERSEDED_REASON, now, now, item_id, PROPOSED_STATE))
+            "WHERE id = ? AND source_item_id = ? AND state = ?",
+            (CANCELED_STATE, SUPERSEDED_REASON, now, now, item_id, source_item_id,
+             PROPOSED_STATE))
         if changed.rowcount != 1:
             continue
         c.execute(
