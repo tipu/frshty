@@ -193,13 +193,14 @@ def build_digest(events: list[dict], expected: list[str], findings: list[dict],
     return "\n".join(parts)
 
 
-def known_tasks() -> list[dict]:
-    """The global_watch proposals that hold their key, newest first."""
+def known_tasks(limit: int = -1) -> list[dict]:
+    """The global_watch proposals that hold their key, newest first. A
+    negative limit reads all of them."""
     return db.query_all(
         "SELECT id, proposal_key, objective, state FROM work_items "
         f"WHERE proposal_key LIKE ? AND state NOT IN {work_store.FINISHED_STATES_SQL} "
         "AND COALESCE(stop_reason, '') != ? ORDER BY id DESC LIMIT ?",
-        (TASK_KEY_PREFIX + "%", work_store.SUPERSEDED_REASON, KNOWN_TASKS_LIMIT))
+        (TASK_KEY_PREFIX + "%", work_store.SUPERSEDED_REASON, limit))
 
 
 def _format_known(tasks: list[dict]) -> str:
@@ -373,7 +374,7 @@ def run(config: dict, now: datetime | None = None) -> dict:
     capped: list[str] = prior.get("capped_tasks") or []
     if cfg.get("agent", True):
         digest = build_digest(events, expected, findings, since)
-        verdict = ask_agent(config, digest, since, now, known_tasks())
+        verdict = ask_agent(config, digest, since, now, known_tasks(KNOWN_TASKS_LIMIT))
         agent_fingerprint = _report_agent(verdict, prior, expected)
         proposed, capped = propose_tasks(config, verdict.get("problems") or [], since, now,
                                          prior.get("capped_tasks") or [])

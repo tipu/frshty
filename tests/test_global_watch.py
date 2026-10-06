@@ -306,6 +306,19 @@ def test_run_stops_proposing_while_max_open_tasks_wait(tmp_path):
     assert db.query_one("SELECT COUNT(*) AS n FROM work_items")["n"] == 1
 
 
+def test_the_cap_counts_waiting_proposals_beyond_the_known_tasks_limit(tmp_path):
+    config = {"job": {"key": "personal"}, "global_watch": {"enabled": True, "max_open_tasks": 1}}
+    _run_agent(tmp_path, [_verdict(_problem("aimyable", "old-fault"))], config)
+    for i in range(global_watch.KNOWN_TASKS_LIMIT):
+        global_watch.work_store.create_proposal(f"declined {i}", proposal_key=f"global_watch:d{i}")
+    db.execute("UPDATE work_items SET state = 'canceled' WHERE proposal_key LIKE 'global_watch:d%'")
+
+    outs, _, _ = _run_agent(tmp_path, [_verdict(_problem("aimyable", "new-fault"))], config)
+
+    assert outs[0]["proposed_tasks"] == []
+    assert db.query_one("SELECT COUNT(*) AS n FROM work_items WHERE state = 'proposed'")["n"] == 1
+
+
 def test_run_proposes_nothing_when_propose_tasks_is_off_or_the_task_is_missing(tmp_path):
     off = {"job": {"key": "personal"}, "global_watch": {"enabled": True, "propose_tasks": False}}
     _run_agent(tmp_path, [_verdict(_problem("aimyable", "broken-worktrees"))], off)
