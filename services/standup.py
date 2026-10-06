@@ -925,6 +925,13 @@ class _NudgeRefused(Exception):
     the next tick."""
 
 
+_LINE = (
+    "WITH RECURSIVE line(id, carried_from) AS ("
+    " SELECT id, carried_from FROM standup_items WHERE id = ?"
+    " UNION SELECT i.id, i.carried_from FROM standup_items i"
+    " JOIN line ON i.id = line.carried_from) ")
+
+
 def _already_proposed(item_id: int) -> bool:
     """Whether a grade-1 card for this action item ever reached the board.
 
@@ -932,8 +939,9 @@ def _already_proposed(item_id: int) -> bool:
     spent. A reservation whose nudge then died would otherwise make the first
     thing he ever sees a question, and the cheap grade would be skipped."""
     return bool(db.query_one(
-        "SELECT 1 AS present FROM work_items"
-        " WHERE standup_item_id = ? AND scope = 'proposal' LIMIT 1", (item_id,)))
+        _LINE + "SELECT 1 AS present FROM work_items"
+        " WHERE standup_item_id IN (SELECT id FROM line)"
+        " AND scope = 'proposal' LIMIT 1", (item_id,)))
 
 
 def _propose(item: dict, now: datetime, conn=None) -> dict:
@@ -959,7 +967,8 @@ def _write_proposal(c, item: dict, now: datetime) -> dict:
     if not still_open:
         return {"error": "the day closed before the task was proposed"}
     standing = c.execute(
-        "SELECT id FROM work_items WHERE standup_item_id = ?"
+        _LINE + "SELECT id FROM work_items"
+        " WHERE standup_item_id IN (SELECT id FROM line)"
         " AND scope = 'proposal' AND state = ? LIMIT 1",
         (item_id, work_store.PROPOSED_STATE)).fetchone()
     if standing:
@@ -975,7 +984,8 @@ def _write_proposal(c, item: dict, now: datetime) -> dict:
 
 def _idle_question(item: dict) -> dict:
     declined = db.query_one(
-        "SELECT id FROM work_items WHERE standup_item_id = ? AND state = ?"
+        _LINE + "SELECT id FROM work_items"
+        " WHERE standup_item_id IN (SELECT id FROM line) AND state = ?"
         " AND stop_reason = ? ORDER BY id DESC LIMIT 1",
         (int(item["id"]), work_store.CANCELED_STATE, work_store.DECLINED_REASON))
     if declined:
