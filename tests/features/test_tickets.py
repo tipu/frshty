@@ -4408,3 +4408,43 @@ class TestCheckInReviewCommentQueueProgress:
             "the settled entry was written at another time, so it is another "
             f"comment and must not hide this one. Prompts: {prompts!r}"
         )
+
+
+class TestSubstantiateReplyWorktree:
+    """A PR branch can sit in a worktree outside tickets/<slug>/<repo>, the one
+    the comment fixer reuses. The evidence run uses that worktree and does not
+    record 'no worktree' as its verdict."""
+
+    def test_runs_in_the_worktree_that_holds_the_pr_branch(
+        self, fake_config, tmp_state, tmp_path
+    ):
+        from core.tasks.registry import TaskContext
+        from core.tasks.tickets import substantiate_reply
+        import core.state as state
+
+        slug = "PROJ-1-do-the-thing"
+        pr = {"repo": "r", "id": 1, "url": "u", "branch": "pr-branch"}
+        state.save("tickets", {"PROJ-1": make_ticket_state(
+            status="in_review", slug=slug, prs=[pr])})
+        cfg = {**fake_config, "features": {"defence": True}}
+        path = tickets._pr_comments_path(cfg, slug)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps([{"id": 7, "suggested_reply": "a claim"}]))
+        holder = tmp_path / "holder"
+        (holder / ".git").mkdir(parents=True)
+
+        ctx = TaskContext(
+            instance_key="inst", ticket_key="PROJ-1", task="substantiate_reply",
+            payload={"slug": slug, "repo": "r", "comment_id": 7}, job_id=1,
+            triggering_event_id=None, config=cfg, registry=None,
+            now=datetime.now(timezone.utc),
+        )
+        verdict = MagicMock()
+        verdict.to_dict.return_value = {"verdict": "SUPPORTED"}
+        with patch("core.tasks.tickets._ensure_pr_worktree", return_value=holder) as ensure, \
+             patch("core.tasks.tickets.defence.substantiate", return_value=verdict) as sub:
+            result = substantiate_reply(ctx)
+
+        assert result.status == "ok"
+        assert ensure.call_args.args[3] == pr
+        assert sub.call_args.args[3] == holder
