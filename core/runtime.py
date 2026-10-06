@@ -10,7 +10,7 @@ import os
 import random
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import core.db as db
@@ -530,6 +530,14 @@ def _seed_recurring_schedules(instance_configs: list[dict]) -> None:
                                         cadence=cadence, next_run_at=candidate)
         else:
             scheduler.delete(key, "manager_daily_digest")
+        watch_cfg = c.get("global_watch") or {}
+        if watch_cfg.get("enabled"):
+            minutes = int(watch_cfg.get("interval_minutes", 15))
+            scheduler.upsert_recurring(key, "global_watch", "global_watch",
+                                        cadence=f"every_{minutes}m",
+                                        next_run_at=now_pst + timedelta(minutes=minutes))
+        else:
+            scheduler.delete(key, "global_watch")
         today_cfg = c.get("today_agent") or {}
         if today_cfg.get("enabled"):
             cadence = today_cfg.get("cadence", "daily_8_local")

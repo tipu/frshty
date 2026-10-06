@@ -10,7 +10,7 @@ Two kinds of rows live side-by-side in the same table, keyed by
 
   recurring durable periodic schedules owned by the beat thread. Row stays;
            next_run_at is advanced after each firing. data = {"kind":"recurring",
-           "task":"<name>", "cadence":"weekly|monthly|daily_19pst",
+           "task":"<name>", "cadence":"weekly|monthly|daily_19pst|every_<N>m",
            "payload":{...}, "last_run_at":"<iso>"}.
 
 Both kinds surface together on /scheduled sorted by run_at.
@@ -252,6 +252,19 @@ def _advance_recurring(cadence: str, prev_run_at: datetime, now: datetime) -> da
         candidate = local.replace(hour=hour, minute=0, second=0, microsecond=0) + timedelta(days=1)
         while candidate.astimezone(timezone.utc) <= now:
             candidate = candidate + timedelta(days=1)
+        return candidate
+
+    if cadence.startswith("every_") and cadence.endswith("m"):
+        try:
+            minutes = int(cadence[len("every_"):-len("m")])
+        except ValueError:
+            return prev_run_at + timedelta(hours=1)
+        if minutes <= 0:
+            return prev_run_at + timedelta(hours=1)
+        step = timedelta(minutes=minutes)
+        candidate = prev_run_at + step
+        if candidate <= now:
+            candidate = candidate + step * ((now - candidate) // step + 1)
         return candidate
 
     return prev_run_at + timedelta(hours=1)
