@@ -1034,13 +1034,14 @@ def restore_open_sessions() -> list[int] | None:
     if personal_config() is None:
         return None
     rows = db.query_all(
-        "SELECT i.id AS item_id, r.id AS run_id, r.provider, r.agent_session_id "
+        "SELECT i.id AS item_id, i.state, r.id AS run_id, r.provider, r.agent_session_id "
         "FROM work_items i "
         "JOIN work_runs r ON r.id = (SELECT MAX(id) FROM work_runs WHERE work_item_id = i.id) "
         f"WHERE i.archived_at IS NULL AND i.state NOT IN ({','.join('?' * len(work_store.CLOSED_STATES))}) "
         "AND i.state != ? ORDER BY i.id",
         (*work_store.CLOSED_STATES, work_store.PROPOSED_STATE))
     restored: list[int] = []
+    interrupted: list[tuple[int, str]] = []
     for row in rows:
         item_id = int(row["item_id"])
         if terminal.session_healthy(f"work-{item_id}", agent=row["provider"])["alive"]:
@@ -1052,6 +1053,11 @@ def restore_open_sessions() -> list[int] | None:
         try:
             if resume_session(item_id):
                 restored.append(item_id)
+                if row["state"] == "agent_working":
+                    db.execute("UPDATE work_items SET updated_at = ? WHERE id = ? "
+                               "AND state = 'agent_working'",
+                               (datetime.now(timezone.utc).isoformat(), item_id))
+                    interrupted.append((item_id, row["provider"] or "claude"))
             else:
                 log.emit("work_resume_failed",
                          f"work item {item_id}: its session was gone after a restart "
@@ -1064,7 +1070,58 @@ def restore_open_sessions() -> list[int] | None:
         log.emit("work_sessions_restored",
                  f"resumed {len(restored)} open work session(s) whose tmux session "
                  f"was gone: {restored}")
+    if interrupted:
+        threading.Thread(target=_continue_interrupted, args=(interrupted,),
+                         daemon=True).start()
     return restored
+
+
+RESTART_CONTINUE_PROMPT = (
+    "frshty restarted and killed your session, and this session is a resume of it. "
+    "A tool call that was running when the restart came did not finish, and its "
+    "result is lost. Check the current state of the work, then continue the objective.")
+
+
+def _continue_interrupted(items: list[tuple[int, str]]) -> list[int]:
+    """Tell every restored agent that was working to continue.
+
+    A restart kills the agent in the middle of its turn, often inside a tool
+    call. The resume brings the conversation back but sends no prompt, so the
+    agent sits idle at its input box while its transcript ends on a tool call
+    with no result. No hook fires for an idle agent, and the stale sweep reads
+    the open call as a live one, so the task waited STUCK_AFTER_MINUTES and
+    then went to the operator as a tool call that had not returned. The
+    restore stamps each such task as fresh before this runs, so the stale
+    sweep that follows the restore cannot take the task away while its agent
+    comes up. A task that moved out of agent_working while its agent came up, for example on
+    an operator reply, gets no prompt. Returns the ids that got the prompt."""
+    sent: list[int] = []
+    for item_id, agent in items:
+        key = f"work-{item_id}"
+        for _ in range(REPLY_READY_POLLS):
+            if terminal.session_healthy(key, agent=agent).get("agent_running"):
+                time.sleep(REPLY_SETTLE_SECONDS)
+                break
+            time.sleep(REPLY_READY_POLL_SECONDS)
+        else:
+            log.emit("work_resume_failed",
+                     f"work item {item_id}: its session was resumed after a restart "
+                     f"but {agent} did not come up, so it was not told to continue")
+            continue
+        item = db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))
+        if not item or item["state"] != "agent_working":
+            continue
+        if work_store.tmux_send(key, RESTART_CONTINUE_PROMPT):
+            sent.append(item_id)
+        else:
+            log.emit("work_resume_failed",
+                     f"work item {item_id}: its session was resumed after a restart "
+                     "but the prompt to continue could not be sent")
+    if sent:
+        log.emit("work_sessions_continued",
+                 f"told {len(sent)} resumed work session(s) to continue the work "
+                 f"a restart interrupted: {sent}")
+    return sent
 
 
 def resume_session(item_id: int) -> bool:
