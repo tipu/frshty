@@ -898,7 +898,7 @@ def _start(item_id: int, plan: dict, slack: bool, brief: str) -> dict:
             "your harness sends no such notification, run the command in the "
             "foreground with a timeout long enough to hold it. "
             "When you stop, state a one-line checkpoint. "
-            + work_store.PROGRESS_RULE +
+            + work_store.PROGRESS_RULE + work_store.RUN_BUDGET_RULE +
             "When you hit a decision point, decide yourself by default: pick the "
             "most correct, cleanest, simplest option and keep going. Ask the "
             "operator only when you truly cannot decide — the choice is "
@@ -1318,7 +1318,8 @@ def launch_followup(source_item_id: int, objective: str, cwd: str = "",
                   images=images)
 
 
-def propose_followup(source_item_id: int, objective: str, note: str = "") -> dict:
+def propose_followup(source_item_id: int, objective: str, note: str = "",
+                     proposal_key: str = "") -> dict:
     """Put a task that continues a finished task on the board for approval.
 
     A follow-up the board wrote by itself is opened here instead of launched.
@@ -1336,7 +1337,7 @@ def propose_followup(source_item_id: int, objective: str, note: str = "") -> dic
     item_id = work_store.create_proposal(
         objective, note=note, instance_key=work_store.BOARD_INSTANCE_KEY, contexts=",".join(labels),
         cwd=inherited["cwd"], source_item_id=source_item_id,
-        critical=inherited["critical"])
+        critical=inherited["critical"], proposal_key=proposal_key)
     return {"item_id": item_id}
 
 

@@ -21,6 +21,8 @@ from services import work_artifacts
 STALE_AFTER_MINUTES = 30
 STUCK_AFTER_MINUTES = 90
 MISSED_DECISION_AFTER_MINUTES = 3
+RUN_CHECK_IN_MINUTES = 73
+RUN_BUDGET_MINUTES = 240
 BOARD_INSTANCE_KEY = core_config.BOARD_INSTANCE_KEY
 BG_WAIT_RECHECK_HOURS = 2
 PROPOSED_STATE = "proposed"
@@ -76,6 +78,27 @@ PROGRESS_RULE = (
     f"work, print one line starting {PROGRESS_MARKER} that names what you "
     "just established and what you are doing next. "
 )
+RUN_BUDGET_RULE = (
+    f"This run has a wall-clock budget of {RUN_BUDGET_MINUTES // 60} hours. "
+    f"After {RUN_CHECK_IN_MINUTES} minutes the board asks you to check in. "
+    "When the budget is spent the board stops continuing the run, so ship the "
+    "part that works before then and file the rest as a follow-up. "
+)
+CHECK_IN_PROMPT = (
+    f"Check-in: this run has used {RUN_CHECK_IN_MINUTES} minutes. Nine runs in "
+    f"ten finish inside that time. The budget is {RUN_BUDGET_MINUTES // 60} "
+    f"hours. Print one {PROGRESS_MARKER} line that names what is done, what "
+    "remains, and how many more minutes you need. If the rest does not fit in "
+    "the budget, cut scope: ship the part that works and file the rest as a "
+    "follow-up. Then continue."
+)
+BUDGET_SPENT_PROMPT = (
+    f"The wall-clock budget of {RUN_BUDGET_MINUTES // 60} hours for this run "
+    "is spent. Do not start new work. Commit and push the part that works if "
+    "its tests pass, file the rest as a follow-up, state a one-line checkpoint "
+    "that names what remains, and end your turn. The board does not continue "
+    "this run again until the operator replies."
+)
 TLDR_LONG_WORDS = 1200
 TLDR_RULE = (
     "Open every such document with a TL;DR section: put it first on the page, "
@@ -89,7 +112,7 @@ TLDR_RULE = (
     "the short version next to the long one. "
 )
 CONTINUE_PROMPT_TEMPLATE = (
-    "Continue toward the objective. {delivery}" + PROGRESS_RULE +
+    "Continue toward the objective. {delivery}" + PROGRESS_RULE + RUN_BUDGET_RULE +
     "When you hit a decision point, decide "
     "yourself by default: pick the most correct, cleanest, simplest option and "
     "keep going. Ask the operator only when you truly cannot decide — the "
@@ -275,10 +298,17 @@ def create_item(objective: str, scope: str = "ad-hoc", scope_ref: str = "",
         return cur.lastrowid
 
 
+class ProposalKeyHeld(Exception):
+    def __init__(self, holder: dict):
+        super().__init__(f"work item #{holder['id']} holds this proposal key")
+        self.holder = holder
+
+
 def create_proposal(objective: str, note: str = "", instance_key: str | None = None,
                     contexts: str = "", cwd: str = "",
                     brief: str = "", conn=None, now: str | None = None,
-                    source_item_id: int | None = None, critical: bool = False) -> int:
+                    source_item_id: int | None = None, critical: bool = False,
+                    proposal_key: str = "") -> int:
     """Put a task on the board that no agent has started.
 
     frshty writes this when it decides by itself that something needs doing.
@@ -297,27 +327,37 @@ def create_proposal(objective: str, note: str = "", instance_key: str | None = N
 
     `source_item_id` marks a proposal that continues a finished task, so the
     approved run reads that task's report and the board threads the two
-    together. `critical` carries the source task's mark onto it."""
+    together. `critical` carries the source task's mark onto it.
+
+    `proposal_key` names the piece of work the proposal asks for. When
+    proposal_holding_key finds another proposal of that work, nothing is
+    written and ProposalKeyHeld names it. The check and the insert share one
+    transaction, so two callers cannot both open the same work."""
     if conn is not None:
         return _insert_proposal(conn, objective, note, instance_key, contexts,
-                                cwd, brief, now, source_item_id, critical)
+                                cwd, brief, now, source_item_id, critical,
+                                proposal_key)
     with db.tx() as c:
         return _insert_proposal(c, objective, note, instance_key, contexts,
-                                cwd, brief, now, source_item_id, critical)
+                                cwd, brief, now, source_item_id, critical,
+                                proposal_key)
 
 
 def _insert_proposal(c, objective: str, note: str, instance_key: str | None,
                      contexts: str, cwd: str, brief: str,
                      now: str | None = None, source_item_id: int | None = None,
-                     critical: bool = False) -> int:
+                     critical: bool = False, proposal_key: str = "") -> int:
     now = now or _now()
+    holder = proposal_holding_key(c, proposal_key)
+    if holder is not None:
+        raise ProposalKeyHeld(holder)
     cur = c.execute(
         "INSERT INTO work_items(objective, scope, instance_key, contexts, "
         "state, current_checkpoint, launch_cwd, launch_brief, source_item_id, "
-        "critical, created_at, updated_at) "
-        "VALUES (?, 'proposal', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "critical, proposal_key, created_at, updated_at) "
+        "VALUES (?, 'proposal', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (objective, instance_key, contexts, PROPOSED_STATE, note, cwd,
-         brief, source_item_id, 1 if critical else 0, now, now),
+         brief, source_item_id, 1 if critical else 0, proposal_key, now, now),
     )
     item_id = cur.lastrowid
     c.execute(
@@ -411,6 +451,25 @@ def _supersede_proposals(c, source_item_id: int, item_ids: list[int],
             (item_id, db.dump_json({"source_item_id": source_item_id}), now))
         withdrawn.append(item_id)
     return withdrawn
+
+
+def proposal_holding_key(c, proposal_key: str) -> dict | None:
+    """The proposal that already asks for the work `proposal_key` names, or
+    None when a new proposal of that work is the first one.
+
+    A proposal that is open, approved and still running, declined or
+    canceled holds its key: the operator sees the work, has it under way, or
+    said no to it. One that ran to the end does not, so the
+    debrief of a run that left the work unfinished can propose it again, and
+    neither does one a newer debrief withdrew."""
+    if not proposal_key:
+        return None
+    row = c.execute(
+        "SELECT id, state, stop_reason FROM work_items "
+        f"WHERE proposal_key = ? AND state NOT IN {FINISHED_STATES_SQL} "
+        "AND COALESCE(stop_reason, '') != ? ORDER BY id DESC LIMIT 1",
+        (proposal_key, SUPERSEDED_REASON)).fetchone()
+    return dict(row) if row else None
 
 
 def add_run(item_id: int, session_id: str, tmux_key: str, cwd: str,
@@ -1619,7 +1678,7 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
     now = _now()
     with db.tx() as c:
         run = c.execute(
-            "SELECT id, work_item_id, tmux_key FROM work_runs WHERE session_id = ?",
+            "SELECT id, work_item_id, tmux_key, started_at FROM work_runs WHERE session_id = ?",
             (session_id,),
         ).fetchone()
         if not run:
@@ -1678,6 +1737,13 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
             )
             _record_stop(c, run, "waiting_external", "a background task is still running", now)
             return "waiting_external"
+        clock = _budget_clock(c, run)
+        if _budget_event_since(c, run, "budget_spent", clock):
+            _record_stop(c, run, "budget_spent",
+                         f"the run passed its wall-clock budget of {RUN_BUDGET_MINUTES} "
+                         "minutes; an operator reply or a reopen gives a new one", now)
+            return "budget_spent"
+        over_budget = _budget_minutes(clock) >= RUN_BUDGET_MINUTES
         if not item["autocontinue"]:
             _record_stop(c, run, "disabled", "autocontinue is off for this item", now)
             return "disabled"
@@ -1686,9 +1752,21 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
                          f"the continuation budget of {item['continue_cap']} is spent; "
                          "an operator reply or a reopen gives a new one", now)
             return "capped"
-    sent = tmux_send(run["tmux_key"], continue_prompt(contexts, run["work_item_id"]))
+        if over_budget:
+            c.execute(
+                "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+                "VALUES (?, ?, 'budget_spent', ?, ?)",
+                (run["work_item_id"], run["id"],
+                 db.dump_json({"minutes": _budget_minutes(clock)}), now),
+            )
+    sent = tmux_send(run["tmux_key"], BUDGET_SPENT_PROMPT if over_budget
+                     else continue_prompt(contexts, run["work_item_id"]))
+    budget_stamp = now
     now = _now()
     with db.tx() as c:
+        if over_budget and not sent:
+            c.execute("DELETE FROM work_events WHERE work_run_id = ? AND kind = 'budget_spent' "
+                      "AND created_at = ?", (run["id"], budget_stamp))
         current = c.execute("SELECT state FROM work_items WHERE id = ?",
                             (run["work_item_id"],)).fetchone()
         if not current or current["state"] != "needs_you":
@@ -1999,6 +2077,87 @@ def sweep_stale_items(now: datetime | None = None) -> list[dict]:
     actions.extend(fail_runless_items(cutoff))
     actions.extend(revive_resumed_runs())
     actions.extend(retry_missed_autocontinues(missed_cutoff))
+    return actions
+
+
+_BUDGET_RESET_KINDS_SQL = "('operator_reply', 'operator_reopen')"
+
+
+def _budget_clock(c, run) -> str:
+    """When the wall-clock budget of a run started counting.
+
+    The budget counts from the start of the run. An operator reply or a reopen
+    is new work, and the time the run sat waiting for it is not agent time, so
+    either one starts the budget again, the way a reply resets the
+    continuation budget."""
+    row = c.execute(
+        "SELECT MAX(created_at) AS at FROM work_events WHERE work_item_id = ? "
+        f"AND kind IN {_BUDGET_RESET_KINDS_SQL} AND created_at > ?",
+        (run["work_item_id"], run["started_at"])).fetchone()
+    return max(run["started_at"], (row["at"] if row else None) or "")
+
+
+def _budget_event_since(c, run, kind: str, since: str) -> bool:
+    return c.execute(
+        "SELECT 1 FROM work_events WHERE work_run_id = ? AND kind = ? AND created_at >= ?",
+        (run["id"], kind, since)).fetchone() is not None
+
+
+def _budget_minutes(clock: str, now: datetime | None = None) -> int:
+    now_dt = now or datetime.now(timezone.utc)
+    return int((now_dt - datetime.fromisoformat(clock)).total_seconds() // 60)
+
+
+def sweep_run_budgets(now: datetime | None = None) -> list[dict]:
+    """Hold every working run to its wall-clock budget.
+
+    A few long runs used most of the agent time: since 2026-09-17, 15 of 290
+    runs ran past four hours and used 77 % of it, while the median run took
+    ten minutes. At RUN_CHECK_IN_MINUTES, the p90 run length, the agent is
+    asked to report what remains and to cut scope when the rest does not fit.
+    At RUN_BUDGET_MINUTES it is told to ship what works and stop, and
+    maybe_autocontinue stops continuing the run. Each message goes once per
+    budget, and an operator reply or a reopen starts a new budget. The event
+    is written after the send, so a send that fails is tried again on the
+    next scan, and it carries the time of the check, so an operator reply
+    that lands during the send still starts a clean budget. A turn that ends past the budget before this sweep reaches it
+    gets the stop message from maybe_autocontinue instead."""
+    now_dt = now or datetime.now(timezone.utc)
+    rows = db.query_all(
+        "SELECT i.id AS work_item_id, r.id, r.tmux_key, r.started_at "
+        "FROM work_items i JOIN work_runs r ON r.id = "
+        "(SELECT r2.id FROM work_runs r2 WHERE r2.work_item_id = i.id ORDER BY r2.id DESC LIMIT 1) "
+        "WHERE i.state = 'agent_working'")
+    actions: list[dict] = []
+    for run in rows:
+        stamp = _now()
+        with db.tx() as c:
+            current = c.execute("SELECT state FROM work_items WHERE id = ?",
+                                (run["work_item_id"],)).fetchone()
+            if not current or current["state"] != "agent_working":
+                continue
+            clock = _budget_clock(c, run)
+            minutes = _budget_minutes(clock, now_dt)
+            if minutes >= RUN_BUDGET_MINUTES:
+                kind, prompt = "budget_spent", BUDGET_SPENT_PROMPT
+            elif minutes >= RUN_CHECK_IN_MINUTES:
+                kind, prompt = "budget_check_in", CHECK_IN_PROMPT
+            else:
+                continue
+            if _budget_event_since(c, run, kind, clock):
+                continue
+        if not tmux_send(run["tmux_key"], prompt):
+            log.emit("work_budget_send_failed",
+                     f"work item {run['work_item_id']}: the {kind} message did not "
+                     "reach the agent pane; the next scan tries again")
+            continue
+        with db.tx() as c:
+            c.execute(
+                "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (run["work_item_id"], run["id"], kind,
+                 db.dump_json({"minutes": minutes}), stamp))
+        actions.append({"id": run["work_item_id"], "action": kind, "minutes": minutes})
     return actions
 
 

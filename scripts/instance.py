@@ -38,8 +38,9 @@ every checkout and worktree. `up` and `check` copy the config they are given to
 that path, and refuse when a different file is already there.
 
 The gvoice CLI keeps its Google Voice session in a Chrome profile at
-state/gvoice/, named by GVOICE_PROFILE_DIR. `gvoice-login` opens Google Voice
-in plain Chrome on that profile, in a throwaway container of the same image.
+state/gvoice/, named by GVOICE_PROFILE_DIR, or at direct_inbox.gvoice_profile_dir
+when the config sets it. `gvoice-login` opens Google Voice in plain Chrome on
+that profile, in a throwaway container of the same image.
 `gvoice login` drives Chrome through Playwright, and Google refuses a sign-in
 from an automated browser. The Chrome window opens on the host display named
 by DISPLAY and XAUTHORITY. Close it when the sign-in is done.
@@ -335,7 +336,8 @@ def gvoice_login_args(config: dict) -> list[str]:
     """A throwaway container that opens Google Voice in plain Chrome on the
     instance's gvoice profile and shows the window on the host display."""
     state = CONTAINERS_ROOT / config["job"]["key"] / "state"
-    profile = state / GVOICE_PROFILE
+    configured = (config.get("direct_inbox") or {}).get("gvoice_profile_dir")
+    profile = _expand(configured) if configured else state / GVOICE_PROFILE
     display = os.environ.get("DISPLAY")
     if not display:
         raise SystemExit("gvoice-login: DISPLAY is not set; run it from the desktop session")
@@ -343,6 +345,7 @@ def gvoice_login_args(config: dict) -> list[str]:
     for path in (state, xauth, X11_SOCKETS):
         if not path.exists():
             raise SystemExit(f"gvoice-login: {path} does not exist")
+    profile.mkdir(parents=True, exist_ok=True)
     return ["docker", "run", "--rm", "-it", "--network", "host", "--init",
             "--shm-size", "1g",
             "-e", f"HOME={HOME}",
@@ -350,7 +353,7 @@ def gvoice_login_args(config: dict) -> list[str]:
             "-e", "XAUTHORITY=/run/frshty/xauthority",
             "-v", f"{X11_SOCKETS}:{X11_SOCKETS}:ro",
             "-v", f"{xauth}:/run/frshty/xauthority:ro",
-            "-v", f"{state}:{state}",
+            "-v", f"{profile}:{profile}",
             "--entrypoint", "google-chrome", IMAGE,
             f"--user-data-dir={profile}", "--password-store=basic", "--no-sandbox",
             "--no-first-run", "--no-default-browser-check", GVOICE_URL]

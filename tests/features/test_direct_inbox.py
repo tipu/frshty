@@ -177,7 +177,30 @@ def test_a_missing_gvoice_is_reported_and_email_still_runs():
 def test_a_signed_out_gvoice_names_the_login():
     signed_out = SimpleNamespace(returncode=2, stdout="", stderr="Not signed in")
     report, _, _, _ = _run(config=_config(gmail=False), gvoice=signed_out)
-    assert "gvoice login" in report["errors"][0]
+    assert "instance.py gvoice-login" in report["errors"][0]
+
+
+def test_a_failed_recent_asks_status_whether_the_session_is_signed_out():
+    crashed = SimpleNamespace(returncode=1, stdout="", stderr="browser has been closed")
+    status = SimpleNamespace(returncode=2, stdout="", stderr="Not signed in")
+    config = _config(gmail=False, gvoice_profile_dir="/state/gvoice-profile",
+                     gvoice_chrome_channel="chrome")
+    with patch.object(di.subprocess, "run", side_effect=[crashed, status]) as cli:
+        report = di.check(config, instance_key="personal", now=NOW)
+    assert "gvoice-login <config>` on the host to sign /state/gvoice-profile in" in report["errors"][0]
+    assert cli.call_args_list[1].args[0][1:] == ["status", "--json"]
+    env = cli.call_args_list[0].kwargs["env"]
+    assert env["GVOICE_PROFILE_DIR"] == "/state/gvoice-profile"
+    assert env["GVOICE_CHROME_CHANNEL"] == "chrome"
+
+
+def test_a_failed_recent_with_a_live_session_names_no_login():
+    crashed = SimpleNamespace(returncode=1, stdout="", stderr="selector changed")
+    status = SimpleNamespace(returncode=0, stdout="{}", stderr="")
+    with patch.object(di.subprocess, "run", side_effect=[crashed, status]):
+        report = di.check(_config(gmail=False), instance_key="personal", now=NOW)
+    assert "gvoice-login" not in report["errors"][0]
+    assert "selector changed" in report["errors"][0]
 
 
 def test_a_gvoice_timeout_is_reported():
