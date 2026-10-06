@@ -314,6 +314,24 @@ REQUIRED_OUT = json.dumps({
     "followups": [{"kind": "work_item", "required": True, "unfinished": "pr",
                    "draft": "open the pull request for the pushed branch"}],
 })
+REWORDED_OUT = json.dumps({
+    "summary": "Pushed the branch.\nNo pull request yet.",
+    "followups": [{"kind": "work_item", "required": True, "unfinished": "pr",
+                   "draft": "Open a pull request from the branch this run pushed."}],
+})
+OTHER_STEP_OUT = json.dumps({
+    "summary": "Committed the change.\nNothing is pushed.",
+    "followups": [{"kind": "work_item", "required": True, "unfinished": "push",
+                   "draft": "push the committed change"}],
+})
+
+
+def _push_out(url):
+    return json.dumps({
+        "summary": "Opened the pull request.\nThe review is not posted.",
+        "followups": [{"kind": "work_item", "required": True, "unfinished": "push",
+                       "draft": f"Post the finished review for {url}."}],
+    })
 
 
 def _debriefed_run(item_id, transcript_size=1, status="finished",
@@ -441,6 +459,7 @@ class TestSupersede:
         proposal = db.query_one(
             "SELECT id, state FROM work_items WHERE source_item_id = ?", (item_id,))
         assert proposal["state"] == work_store.PROPOSED_STATE
+        monkeypatch.setattr(work_debrief, "_run_claude", lambda p: OTHER_STEP_OUT)
 
         out = work_debrief.run_debrief(item_id)
 
@@ -472,6 +491,7 @@ class TestSupersede:
         work_debrief.propose_required_followups()
         proposal = db.query_one(
             "SELECT id FROM work_items WHERE source_item_id = ?", (item_id,))
+        monkeypatch.setattr(work_debrief, "_run_claude", lambda p: OTHER_STEP_OUT)
         work_debrief.run_debrief(item_id)
         retired = [f for f in work_debrief.followups_for(item_id)
                    if f["status"] == "dismissed"][0]
@@ -545,6 +565,115 @@ class TestSupersede:
         assert out["superseded"] == []
         assert db.query_one("SELECT state FROM work_items WHERE id = ?",
                             (proposal["id"],))["state"] == "agent_working"
+
+
+class TestProposalKey:
+    def _debriefed(self, monkeypatch, tmp_path, objective, out):
+        t = tmp_path / f"t-{objective.replace(' ', '-')}.jsonl"
+        t.write_text(json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "x"}]}}) + "\n")
+        item_id = _done_item(objective)
+        db.execute("UPDATE work_runs SET transcript_path = ? WHERE work_item_id = ?",
+                   (str(t), item_id))
+        monkeypatch.setattr(work_debrief, "_run_claude", lambda p: out)
+        work_debrief.run_debrief(item_id)
+        return item_id
+
+    def _proposals(self, item_id):
+        return db.query_all(
+            "SELECT id, state FROM work_items WHERE source_item_id = ? ORDER BY id",
+            (item_id,))
+
+    def test_the_key_is_the_step_and_the_pull_request(self):
+        a = work_debrief.proposal_key(
+            1, "merge", "Merge https://github.com/Acme/App/pull/7 now.")
+        b = work_debrief.proposal_key(
+            2, "merge", "Review then merge PR https://github.com/acme/app/pull/7")
+        assert a == b == "merge:github.com/acme/app/7"
+        assert work_debrief.proposal_key(1, "pr", "open the PR") == "pr:item/1"
+        assert work_debrief.proposal_key(1, "push", "push it") != "pr:item/1"
+
+    def test_a_second_debrief_of_the_same_work_keeps_the_open_proposal(
+            self, monkeypatch, tmp_path):
+        """Work item 9838 was debriefed eleven times and asked for one pull
+        request each time. Each debrief withdrew the open proposal and opened
+        it again, so the operator met one piece of work again and again."""
+        item_id = self._debriefed(monkeypatch, tmp_path, "debriefed twice", REQUIRED_OUT)
+        assert len(work_debrief.propose_required_followups()) == 1
+        [proposal] = self._proposals(item_id)
+        monkeypatch.setattr(work_debrief, "_run_claude", lambda p: REWORDED_OUT)
+
+        out = work_debrief.run_debrief(item_id)
+
+        assert out["superseded"] == [] and out["kept"] == [proposal["id"]]
+        assert work_debrief.propose_required_followups() == []
+        assert [dict(r) for r in self._proposals(item_id)] == [
+            {"id": proposal["id"], "state": work_store.PROPOSED_STATE}]
+        newest = work_debrief.followups_for(item_id)[-1]
+        assert newest["status"] == "proposed"
+        assert newest["detail"] == f"proposed work item #{proposal['id']}"
+        third = work_debrief.run_debrief(item_id)
+        assert third["kept"] == [proposal["id"]]
+
+    def test_a_declined_proposal_is_not_proposed_again(self, monkeypatch, tmp_path):
+        item_id = self._debriefed(monkeypatch, tmp_path, "declined once", REQUIRED_OUT)
+        work_debrief.propose_required_followups()
+        [proposal] = self._proposals(item_id)
+        work_store.apply_action(proposal["id"], "decline")
+        monkeypatch.setattr(work_debrief, "_run_claude", lambda p: REWORDED_OUT)
+        work_debrief.run_debrief(item_id)
+
+        assert work_debrief.propose_required_followups() == []
+
+        assert len(self._proposals(item_id)) == 1
+        newest = work_debrief.followups_for(item_id)[-1]
+        assert newest["status"] == "dismissed"
+        assert newest["detail"] == f"same work as work item #{proposal['id']} (canceled)"
+
+    def test_two_tasks_that_name_one_pull_request_propose_it_once(
+            self, monkeypatch, tmp_path):
+        url = "https://bitbucket.org/acme/dash/pull-requests/13"
+        first = self._debriefed(monkeypatch, tmp_path, "first task", _push_out(url))
+        second = self._debriefed(monkeypatch, tmp_path, "second task",
+                                 _push_out(url + "/overview"))
+        other = self._debriefed(monkeypatch, tmp_path, "other task",
+                                _push_out("https://bitbucket.org/acme/dash/pull-requests/14"))
+
+        opened = work_debrief.propose_required_followups()
+
+        assert [o["item_id"] for o in opened] == [first, other]
+        [held] = self._proposals(first)
+        assert self._proposals(second) == []
+        assert work_debrief.followups_for(second)[-1]["detail"] == (
+            f"same work as work item #{held['id']} (proposed)")
+
+    def test_a_proposal_declined_before_keys_existed_is_keyed_at_boot(
+            self, monkeypatch, tmp_path):
+        item_id = self._debriefed(monkeypatch, tmp_path, "declined unkeyed", REQUIRED_OUT)
+        work_debrief.propose_required_followups()
+        [proposal] = self._proposals(item_id)
+        work_store.apply_action(proposal["id"], "decline")
+        db.execute("UPDATE work_items SET proposal_key = '' WHERE id = ?", (proposal["id"],))
+
+        assert work_debrief.backfill_proposal_keys() == 1
+
+        assert db.query_one("SELECT proposal_key FROM work_items WHERE id = ?",
+                            (proposal["id"],))["proposal_key"] == f"pr:item/{item_id}"
+        monkeypatch.setattr(work_debrief, "_run_claude", lambda p: REWORDED_OUT)
+        work_debrief.run_debrief(item_id)
+        assert work_debrief.propose_required_followups() == []
+
+    def test_a_proposal_that_ran_to_the_end_frees_its_key(self, monkeypatch, tmp_path):
+        """A run that left the work unfinished again is new evidence, so its
+        own debrief can ask for the work once more."""
+        item_id = self._debriefed(monkeypatch, tmp_path, "ran to the end", REQUIRED_OUT)
+        work_debrief.propose_required_followups()
+        [proposal] = self._proposals(item_id)
+        db.execute("UPDATE work_items SET state = 'done' WHERE id = ?", (proposal["id"],))
+        monkeypatch.setattr(work_debrief, "_run_claude", lambda p: REWORDED_OUT)
+        work_debrief.run_debrief(item_id)
+
+        assert len(work_debrief.propose_required_followups()) == 1
 
 
 class TestLaunchContexts:
