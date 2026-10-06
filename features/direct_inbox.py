@@ -409,8 +409,8 @@ def _gvoice(config: dict, instance_key: str) -> tuple[dict | None, str]:
                            {"cmd": cmd})
     if result.returncode != 0:
         signed_out = result.returncode == 2 or _signed_out(cmd[0], env)
-        hint = (f" (signed out: run `GVOICE_PROFILE_DIR={env.get('GVOICE_PROFILE_DIR', '')}"
-                " gvoice login` on the host)" if signed_out else "")
+        hint = (" (signed out: run `scripts/instance.py gvoice-login <config>` on the host"
+                f" to sign {env.get('GVOICE_PROFILE_DIR', '')} in)" if signed_out else "")
         return None, _fail(instance_key, "direct_inbox_gvoice_failed",
                            f"`{' '.join(cmd)}` exited {result.returncode}{hint}:"
                            f" {result.stderr.strip()[-300:]}",
