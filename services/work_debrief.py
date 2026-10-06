@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import threading
 import time
@@ -38,6 +39,8 @@ UNFINISHED_ACTIONS = ("commit", "push", "pr", "merge", "release")
 # The events that say an agent took a turn in a run. One of them after a
 # debrief means the run did work the debrief never saw.
 AGENT_TURN_KINDS = ("SessionStart", "UserPromptSubmit", "Stop")
+PROPOSED_DETAIL_PREFIX = "proposed work item #"
+_PROPOSED_DETAIL_RE = re.compile(re.escape(PROPOSED_DETAIL_PREFIX) + r"(\d+)")
 HELD_DETAIL = "held: {key} is not approved in full; waiting on {urls}"
 UNAPPROVED_DETAIL = ("held: a merge on {projects} waits for an approval the "
                      "operator does not give himself; nobody has approved {urls}")
@@ -202,6 +205,14 @@ _debrief_locks: dict[int, threading.Lock] = {}
 _debrief_locks_guard = threading.Lock()
 
 
+def _opened_proposals(c, item_id: int) -> list[int]:
+    rows = c.execute(
+        "SELECT detail FROM work_followups WHERE work_item_id = ? AND status = 'proposed'",
+        (item_id,)).fetchall()
+    found = (_PROPOSED_DETAIL_RE.match(row["detail"] or "") for row in rows)
+    return [int(m.group(1)) for m in found if m]
+
+
 def _item_lock(item_id: int) -> threading.Lock:
     with _debrief_locks_guard:
         return _debrief_locks.setdefault(item_id, threading.Lock())
@@ -270,11 +281,12 @@ def _run_debrief_locked(item_id: int) -> dict:
         c.execute(
             "UPDATE work_followups SET status = 'dismissed', detail = 'superseded by new debrief', "
             "updated_at = ? WHERE work_item_id = ? AND status = 'draft'", (now, item_id))
+        opened = _opened_proposals(c, item_id)
         c.execute(
             "UPDATE work_followups SET status = 'dismissed', "
             "detail = detail || ' (superseded by new debrief)', updated_at = ? "
             "WHERE work_item_id = ? AND status = 'proposed'", (now, item_id))
-        withdrawn = work_store.supersede_proposals(item_id, conn=c, now=now)
+        withdrawn = work_store.supersede_proposals(item_id, opened, conn=c, now=now)
         for f in result["followups"]:
             c.execute(
                 "INSERT INTO work_followups(work_item_id, kind, workspace, recipient, "
@@ -700,7 +712,7 @@ def _propose_followup_locked(followup_id: int, objective: str = "") -> dict:
                  "work as authorised and unfinished")
         if "error" in result:
             raise RuntimeError(result["error"])
-        detail = f"proposed work item #{result['item_id']}"
+        detail = f"{PROPOSED_DETAIL_PREFIX}{result['item_id']}"
         status = "proposed"
     except Exception as e:
         detail = f"{type(e).__name__}: {e}"[:300]
