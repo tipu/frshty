@@ -750,6 +750,24 @@ class TestProposalKey:
         assert work_debrief.propose_required_followups() == []
         assert len(self._proposals(item_id)) == 2
 
+    def test_an_open_branch_proposal_does_not_take_a_held_pull_request(
+            self, monkeypatch, tmp_path):
+        url = "https://github.com/acme/app/pull/7"
+        mine = self._debriefed(monkeypatch, tmp_path, "branch first", REQUIRED_OUT)
+        work_debrief.propose_required_followups()
+        other = self._debriefed(monkeypatch, tmp_path, "url first", _push_out(url))
+        work_debrief.propose_required_followups()
+        [held] = self._proposals(other)
+        monkeypatch.setattr(work_debrief, "_run_claude", lambda p: _push_out(url))
+
+        work_debrief.run_debrief(mine)
+
+        assert work_debrief.propose_required_followups() == []
+        assert db.query_all(
+            "SELECT id FROM work_items WHERE proposal_key = ? AND state = ?",
+            ("deliver:github.com/acme/app/7", work_store.PROPOSED_STATE)) == [{"id": held["id"]}]
+        assert [r["state"] for r in self._proposals(mine)] == ["canceled"]
+
     def test_a_branch_proposal_moves_onto_its_pull_request_at_boot(
             self, monkeypatch, tmp_path):
         item_id = self._debriefed(monkeypatch, tmp_path, "keyed before", REQUIRED_OUT)
