@@ -2768,7 +2768,7 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
 
         repos = get_repos(config)
         repo_match = next((r for r in repos if r["name"] == pr["repo"]), None)
-        wt = ticket_worktree_path(config, slug, pr["repo"]) if repo_match else None
+        wt = _ensure_pr_worktree(config, ticket, ts, pr, base_url) if repo_match else None
         to_resolve = []
         resolvable_ids = {c["id"]: c.get("resolvable", True) for c in new_comments}
         made_commit = False
@@ -3190,6 +3190,31 @@ def _ticket_repo_path(config, repo_name):
     return next((r["path"] for r in get_repos(config) if r["name"] == repo_name), None)
 
 
+def _ensure_pr_worktree(config, ticket, ts, pr, base_url) -> Path | None:
+    """The ticket worktree that holds the PR branch, created when missing.
+
+    A PR can live in a repo the ticket had no worktree for when it was
+    planned, and on a branch other than the ticket's own. Without this the
+    base sync and the comment fixer both find no worktree and do nothing."""
+    wt = ticket_worktree_path(config, ts.get("slug") or "", pr["repo"])
+    if wt.is_dir():
+        return wt
+    repo_path = _ticket_repo_path(config, pr["repo"])
+    if not repo_path:
+        return None
+    branch = pr.get("branch") or ts.get("branch", "")
+    made = git_util.add_or_reuse_worktree(Path(repo_path), wt, branch,
+                                          base_branch_for(config, pr["repo"]))
+    if made is None:
+        log.emit("ticket_pr_worktree_failed",
+                 f"{_label(ticket['key'], ts)} · {pr['repo']}: could not create a worktree for "
+                 f"PR #{pr['id']} branch {branch}",
+                 links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+                 meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"],
+                       "branch": branch, "path": str(wt)})
+    return made
+
+
 def _pr_base_moved(config, ts) -> bool:
     sync_state = ts.get("base_sync", {})
     for pr in ts.get("prs", []):
@@ -3218,7 +3243,6 @@ def _sync_pr_base(config, ticket, ts, base_url) -> dict:
     if not prs or not branch:
         return ts
     platform = make_platform(config)
-    slug = ts.get("slug", "")
     key = ticket["key"]
     sync_state = ts.setdefault("base_sync", {})
 
@@ -3227,11 +3251,10 @@ def _sync_pr_base(config, ticket, ts, base_url) -> dict:
         if not repo_path:
             continue
         base_branch = base_branch_for(config, pr["repo"])
-        wt = ticket_worktree_path(config, slug, pr["repo"])
         st = sync_state.setdefault(f"{pr['repo']}/{pr['id']}", {})
         outcome = branch_sync.sync_branch_with_base(
             platform, repo_path, base_branch, pr.get("branch") or branch, st,
-            lambda wt=wt: wt if wt.is_dir() else None)
+            lambda pr=pr: _ensure_pr_worktree(config, ticket, ts, pr, base_url))
         result = outcome["result"]
         links = {"detail": f"{base_url}/tickets/{key}", "pr": pr.get("url", "")}
         meta = {"ticket": key, "repo": pr["repo"], "pr_id": pr["id"], "base": base_branch}
@@ -3250,7 +3273,7 @@ def _sync_pr_base(config, ticket, ts, base_url) -> dict:
                      f"Cannot merge {base_branch} into {_label(key, ts)} PR #{pr['id']}: "
                      f"{outcome.get('error', '')[:160]}",
                      links=links, meta={**meta, "error": outcome.get("error", "")})
-        elif result == "merge_failed" and outcome.get("capped"):
+        elif result in ("merge_failed", "no_worktree", "fetch_failed") and outcome.get("capped"):
             log.emit("ticket_base_sync_failed",
                      f"Could not merge {base_branch} into {_label(key, ts)} PR #{pr['id']} "
                      f"after {outcome['attempts']} attempts: {outcome.get('error', '')[:100]}",
