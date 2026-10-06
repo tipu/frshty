@@ -3195,8 +3195,12 @@ def substantiate_reply(ctx: TaskContext) -> TaskResult:
                                   "reason": "no drafted reply to substantiate"})
         return TaskResult("ok", artifacts={"verdict": defence.INCONCLUSIVE})
 
-    wt = ticket_worktree_path(ctx.config, slug, repo)
-    if not (wt / ".git").exists():
+    ts = state.load_ticket(ctx.ticket_key or "") or {}
+    pr = next((p for p in ts.get("prs", []) if p.get("repo") == repo), None)
+    wt = (_ensure_pr_worktree(ctx.config, {"key": ctx.ticket_key}, ts, pr,
+                              ctx.config.get("_base_url", ""))
+          if pr else ticket_worktree_path(ctx.config, slug, repo))
+    if wt is None or not (wt / ".git").exists():
         ft.record_defence_result(ctx.config, slug, comment_id,
                                  {"verdict": defence.INCONCLUSIVE,
                                   "reason": f"no worktree for {repo}"})
