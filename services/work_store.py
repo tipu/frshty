@@ -1,6 +1,7 @@
 import base64
 import binascii
 import contextlib
+import glob
 import json
 import os
 import re
@@ -14,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 import core.codex_session as codex_session
 import core.config as core_config
 import core.db as db
+import core.llm as llm
 import core.log as log
 import core.tmux as tmux_target
 from services import work_artifacts
@@ -1348,6 +1350,121 @@ def record_progress(session_id: str, transcript_path: str,
             (run["work_item_id"], run["id"], db.dump_json({"text": newest}), now),
         )
     return newest
+
+
+USAGE_FUNCTION = "work_task"
+USAGE_WINDOW_DAYS = 7
+
+
+def _usage_files(transcript_path: str) -> list[str]:
+    """The transcript of a run and, for claude, the transcripts of the
+    subagents it started, which claude keeps beside it."""
+    if codex_session.is_rollout(transcript_path):
+        return [transcript_path]
+    stem = transcript_path[:-len(".jsonl")] if transcript_path.endswith(".jsonl") else transcript_path
+    return [transcript_path] + sorted(glob.glob(os.path.join(stem, "subagents", "*.jsonl")))
+
+
+def _claude_usage(files: list[str]) -> dict | None:
+    """Token totals of claude transcripts. Claude writes one line per content
+    block and repeats the usage of the message on each, so a message counts
+    once by its id."""
+    by_message: dict[str, dict] = {}
+    model = ""
+    for index, path in enumerate(files):
+        try:
+            with open(path, "rb") as f:
+                for raw in f:
+                    if b'"usage"' not in raw:
+                        continue
+                    try:
+                        record = json.loads(raw.decode("utf-8", errors="replace"))
+                    except ValueError:
+                        continue
+                    message = record.get("message") if isinstance(record, dict) else None
+                    if not isinstance(message, dict) or not isinstance(message.get("usage"), dict):
+                        continue
+                    if message.get("model") == "<synthetic>":
+                        continue
+                    key = str(message.get("id") or f"{index}:{len(by_message)}")
+                    by_message[key] = message["usage"]
+                    if index == 0 and message.get("model"):
+                        model = str(message["model"])
+        except OSError:
+            continue
+    if not by_message:
+        return None
+    totals = {"model": model}
+    for field in ("input_tokens", "output_tokens", "cache_creation_input_tokens",
+                  "cache_read_input_tokens"):
+        totals[field] = sum(int(u.get(field) or 0) for u in by_message.values())
+    return totals
+
+
+def transcript_usage(transcript_path: str) -> dict | None:
+    """Token totals and model of one run transcript, subagents included."""
+    if codex_session.is_rollout(transcript_path):
+        found = codex_session.usage(transcript_path)
+        if found is not None:
+            found["model"] = f"codex:{found['model']}" if found["model"] else "codex"
+        return found
+    return _claude_usage(_usage_files(transcript_path))
+
+
+def _usage_status(run_status: str) -> str:
+    if run_status in ("launched", "running"):
+        return "running"
+    if run_status == LAUNCH_FAILED_STATUS:
+        return "error"
+    return "success"
+
+
+def sweep_usage() -> int:
+    """Put the LLM usage of every recent task run on the invocation log that
+    the /claude page of the board reads. A run is read again only when its transcript or
+    its status changed since the last sweep."""
+    since = (datetime.now(timezone.utc) - timedelta(days=USAGE_WINDOW_DAYS)).isoformat()
+    rows = db.query_all(
+        "SELECT r.id, r.work_item_id, r.provider, r.session_id, r.transcript_path, r.cwd, "
+        "r.status, r.started_at, r.agent_session_id, i.objective, "
+        "c.finished_at AS logged_at, c.status AS logged_status "
+        "FROM work_runs r JOIN work_items i ON i.id = r.work_item_id "
+        "LEFT JOIN claude_invocations c ON c.id = 'work-run-' || r.id "
+        "WHERE r.started_at >= ?", (since,))
+    recorded = 0
+    for row in rows:
+        path = resolve_transcript_path(row)
+        if not path or not os.path.isfile(path):
+            continue
+        mtimes = []
+        for f in _usage_files(path):
+            try:
+                mtimes.append(os.path.getmtime(f))
+            except OSError:
+                continue
+        if not mtimes:
+            continue
+        last = datetime.fromtimestamp(max(mtimes), timezone.utc)
+        last_iso = last.isoformat()
+        status = _usage_status(row["status"])
+        if row["logged_at"] and row["logged_at"] >= last_iso and row["logged_status"] == status:
+            continue
+        found = transcript_usage(path)
+        if found is None:
+            continue
+        try:
+            started = datetime.fromisoformat(row["started_at"])
+            duration_ms = max(0, int((last - started).total_seconds() * 1000))
+        except (TypeError, ValueError):
+            duration_ms = None
+        llm.record_session_usage(
+            f"work-run-{row['id']}", instance_key=core_config.BOARD_INSTANCE_KEY,
+            function_name=USAGE_FUNCTION, model=found["model"] or row["provider"],
+            prompt=row["objective"] or "", job_key=f"work-{row['work_item_id']}",
+            cwd=row["cwd"] or "", started_at=row["started_at"], finished_at=last_iso,
+            duration_ms=duration_ms, status=status, usage=found)
+        recorded += 1
+    return recorded
 
 
 def sweep_progress() -> list[dict]:
