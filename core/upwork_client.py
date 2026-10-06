@@ -104,7 +104,7 @@ def _capture(cdp_url: str, timeout: int) -> dict:
             while time.monotonic() < deadline:
                 if "authorization" in found and "org_id" in found:
                     break
-                time.sleep(0.5)
+                page.wait_for_timeout(500)
             cookies = ctx.cookies()
         finally:
             ctx.remove_listener("request", on_request)
