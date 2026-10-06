@@ -1725,8 +1725,12 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
             )
     sent = tmux_send(run["tmux_key"], BUDGET_SPENT_PROMPT if over_budget
                      else continue_prompt(contexts, run["work_item_id"]))
+    budget_stamp = now
     now = _now()
     with db.tx() as c:
+        if over_budget and not sent:
+            c.execute("DELETE FROM work_events WHERE work_run_id = ? AND kind = 'budget_spent' "
+                      "AND created_at = ?", (run["id"], budget_stamp))
         current = c.execute("SELECT state FROM work_items WHERE id = ?",
                             (run["work_item_id"],)).fetchone()
         if not current or current["state"] != "needs_you":

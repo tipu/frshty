@@ -973,3 +973,11 @@ class TestRunBudget:
                             lambda key, text: sent.append((key, text)) or True)
         assert self._actions(item_id) == ["budget_spent"]
         assert [t for k, t in sent if k == f"work-{item_id}"] == [work_store.BUDGET_SPENT_PROMPT]
+
+    def test_a_failed_stop_message_is_not_counted_as_sent(self, monkeypatch):
+        item_id, sid, _ = self._working_run(monkeypatch, work_store.RUN_BUDGET_MINUTES + 1)
+        monkeypatch.setattr(work_store, "tmux_send", lambda key, text: False)
+        with db.tx() as c:
+            c.execute("UPDATE work_items SET state = 'needs_you' WHERE id = ?", (item_id,))
+        assert work_store.maybe_autocontinue(sid, "", tail="still working") == "session_gone"
+        assert _events(item_id, "budget_spent") == []
