@@ -490,6 +490,27 @@ class TestRacesAndFailures:
         assert out["error"] == "the day closed before the question was asked"
         assert standup.item(item["id"])["question"] == close_question
 
+    def test_a_declined_proposal_is_not_proposed_again_on_a_carried_line(self, clean):
+        first = _open_day(_day())
+        item = _item(first, "Decide on SUD-0417")
+        row = db.query_one("SELECT * FROM standup_items WHERE id = ?", (item["id"],))
+        declined = standup._propose(row, datetime.now(timezone.utc))["work_item_id"]
+        work_store.apply_action(declined, "decline")
+        standup.close_day(first, _cfg())
+        carried = None
+        for offset in (1, 2):
+            day_id = _open_day(_day(offset))
+            carried = db.query_one(
+                "SELECT * FROM standup_items WHERE standup_id = ?"
+                " AND text = 'Decide on SUD-0417'", (day_id,))
+            assert carried["carried_from"] is not None
+            assert standup._already_proposed(int(carried["id"]))
+            assert f"task #{declined}" in standup._idle_question(carried)["prompt"]
+        out = standup._nudge(carried, _cfg(), datetime.now(timezone.utc), 6)
+        assert out["grade"] == 2
+        assert db.query_one("SELECT COUNT(*) AS n FROM work_items WHERE scope = 'proposal'"
+                            " AND objective = 'Decide on SUD-0417'")["n"] == 1
+
     def test_a_proposal_that_lands_after_the_close_is_dropped(self, clean):
         standup_id = _open_day()
         item = _item(standup_id)
