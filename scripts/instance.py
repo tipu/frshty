@@ -39,8 +39,9 @@ that path, and refuse when a different file is already there.
 
 The gvoice CLI keeps its Google Voice session in a Chrome profile at
 state/gvoice/, named by GVOICE_PROFILE_DIR, or at direct_inbox.gvoice_profile_dir
-when the config sets it. `gvoice-login` opens Google Voice in plain Chrome on
-that profile, in a throwaway container of the same image.
+when the config sets it, which must lie inside state/. `gvoice-login` opens
+Google Voice in plain Chrome on that profile, in a throwaway container of the
+same image.
 `gvoice login` drives Chrome through Playwright, and Google refuses a sign-in
 from an automated browser. The Chrome window opens on the host display named
 by DISPLAY and XAUTHORITY. Close it when the sign-in is done.
@@ -338,6 +339,8 @@ def gvoice_login_args(config: dict) -> list[str]:
     state = CONTAINERS_ROOT / config["job"]["key"] / "state"
     configured = (config.get("direct_inbox") or {}).get("gvoice_profile_dir")
     profile = _expand(configured) if configured else state / GVOICE_PROFILE
+    if not profile.is_relative_to(state):
+        raise SystemExit(f"gvoice-login: {profile} is outside {state}, which the instance does not mount")
     display = os.environ.get("DISPLAY")
     if not display:
         raise SystemExit("gvoice-login: DISPLAY is not set; run it from the desktop session")

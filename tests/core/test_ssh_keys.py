@@ -383,6 +383,9 @@ class TestInstanceLauncher:
         volumes = [args[i + 1] for i, a in enumerate(args) if a == "-v"]
         assert f"--user-data-dir={profile}" in args
         assert f"{profile}:{profile}" in volumes
+        config["direct_inbox"] = {"gvoice_profile_dir": str(tmp_path / "elsewhere")}
+        with pytest.raises(SystemExit, match="outside"):
+            mod.gvoice_login_args(config)
 
     def test_gvoice_login_needs_a_display(self, tmp_path, monkeypatch):
         mod, _ = self._launcher(tmp_path, monkeypatch)
