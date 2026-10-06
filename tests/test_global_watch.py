@@ -1,11 +1,15 @@
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
 
+import core.db as db
 import core.discovery as discovery
+import core.runtime as runtime
 import core.scheduler as scheduler
 import core.state as state
 from services import global_watch
 
+ROOT = Path(__file__).resolve().parent.parent
 NOW = datetime(2026, 10, 6, 18, 0, tzinfo=timezone.utc)
 SINCE = (NOW - timedelta(minutes=15)).isoformat()
 STALE = (NOW - timedelta(hours=2)).isoformat()
@@ -225,3 +229,28 @@ def test_run_posts_the_agent_verdict_only_when_it_changes(tmp_path):
         "global_watch_agent_alert", "global_watch_agent_failed", "global_watch_agent_ok"]
     assert "aimyable: scan_tickets repeats with no progress" in emit.call_args_list[0].args[1]
     assert out["agent"] == {"status": "ok", "problems": []}
+
+
+def _seed_config():
+    return {"job": {"key": "seedtest"}, "features": {}, "global_watch": {"enabled": True}}
+
+
+def test_a_restart_keeps_a_global_watch_run_that_is_already_due_soon(tmp_path):
+    db.init(tmp_path / "t.db", ROOT / "migrations")
+    soon = datetime.now(timezone.utc) + timedelta(minutes=2)
+    scheduler.upsert_recurring("seedtest", "global_watch", "global_watch",
+                               cadence="every_15m", next_run_at=soon)
+
+    runtime._seed_recurring_schedules([_seed_config()])
+
+    assert scheduler.run_at("seedtest", "global_watch") == soon
+
+
+def test_a_first_start_schedules_global_watch_one_interval_out(tmp_path):
+    db.init(tmp_path / "t.db", ROOT / "migrations")
+    before = datetime.now(timezone.utc)
+
+    runtime._seed_recurring_schedules([_seed_config()])
+
+    first = scheduler.run_at("seedtest", "global_watch")
+    assert before + timedelta(minutes=15) <= first <= datetime.now(timezone.utc) + timedelta(minutes=15)

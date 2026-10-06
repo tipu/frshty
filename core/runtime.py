@@ -533,9 +533,13 @@ def _seed_recurring_schedules(instance_configs: list[dict]) -> None:
         watch_cfg = c.get("global_watch") or {}
         if watch_cfg.get("enabled"):
             minutes = int(watch_cfg.get("interval_minutes", 15))
+            next_run = now_pst + timedelta(minutes=minutes)
+            existing = scheduler.run_at(key, "global_watch")
+            if existing is not None and existing <= next_run:
+                next_run = existing
             scheduler.upsert_recurring(key, "global_watch", "global_watch",
                                         cadence=f"every_{minutes}m",
-                                        next_run_at=now_pst + timedelta(minutes=minutes))
+                                        next_run_at=next_run)
         else:
             scheduler.delete(key, "global_watch")
         today_cfg = c.get("today_agent") or {}
