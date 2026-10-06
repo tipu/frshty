@@ -27,17 +27,26 @@ work as expected. The rules cannot see a fault whose events look ordinary: a
 ticket that loops, a job that repeats with no progress, a scan that stopped
 producing results. The model can. Its verdict goes to the feed on the same
 change-only terms. The model runs in an empty directory with a read-only
-sandbox, so it reads only the digest it is given."""
+sandbox, so it reads only the digest it is given.
+
+The model names one task for each problem it reports, and the run puts that
+task on the board as a proposal for the operator to approve. The task key the
+model gives is the proposal key, so a fault that persists is proposed once:
+an open, running, declined or canceled proposal holds its key. The model sees
+the tasks that already hold a key and reuses the key for the same fault. The
+run opens nothing while max_open_tasks of its proposals wait on the board."""
 import asyncio
 import math
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import core.db as db
 import core.log as log
 import core.state as state
 from core.llm import extract_json, run_external_model
 from core.discovery import discover_instances
+from services import work_launch, work_store
 from web.observability import _fetch_local_global_events, _fetch_remote_global_events
 
 DEFAULT_INTERVAL_MINUTES = 15
@@ -51,6 +60,11 @@ AGENT_TIMEOUT = 300
 DIGEST_TOP_EVENTS = 12
 DIGEST_RECENT_EVENTS = 15
 DIGEST_SUMMARY_CHARS = 160
+DEFAULT_MAX_OPEN_TASKS = 5
+TASK_KEY_PREFIX = "global_watch:"
+TASK_KEY_CHARS = 60
+TASK_PROJECT = "frshty"
+KNOWN_TASKS_LIMIT = 30
 AGENT_PROMPT = """You watch a fleet of frshty instances. frshty is an automation
 service: each instance polls tickets, pull requests, Slack and other sources,
 runs jobs and coding agents, and logs every step as an event in its feed.
@@ -64,14 +78,39 @@ Judge whether the instances work as expected. Report a problem only when the
 digest shows it: an instance whose work stopped, a ticket or job that repeats
 without progress, a failure that recurs, an instance that only logs noise
 while it has work, events that contradict each other. Ordinary churn, one
-failure that a retry cleared, and quiet periods are not problems. Do not
-repeat a rule finding unless you can add its likely cause.
+failure that a retry cleared, and quiet periods are not problems. Report a
+rule finding as a problem only when it needs work, and add its likely cause.
+
+For each problem, name one task that an agent can do to fix the problem or to
+find its cause: "task" is one imperative sentence, and "task_key" is a short
+kebab-case name of the fault. One fault on several instances is one problem
+with one task. KNOWN TASKS lists the tasks that already exist for a fault.
+When a problem is the fault of a known task, give that task's key.
 
 Reply with one JSON object and nothing else:
-{{"status": "ok" | "problem", "problems": [{{"instance": "<key>", "what": "<one sentence>", "evidence": "<event names or summaries from the digest>", "likely_cause": "<one sentence>"}}]}}
+{{"status": "ok" | "problem", "problems": [{{"instance": "<key>", "what": "<one sentence>", "evidence": "<event names or summaries from the digest>", "likely_cause": "<one sentence>", "task_key": "<kebab-case>", "task": "<one imperative sentence>"}}]}}
+
+KNOWN TASKS
+{known_tasks}
 
 DIGEST
 {digest}
+"""
+TASK_BRIEF = """
+
+## Why this task exists
+
+The global_watch check on {host} read the /global feed of every instance from
+{since} to {now}. A model judged that an instance does not work as expected,
+and the check proposed this task.
+
+- instance: {instance}
+- problem: {what}
+- evidence: {evidence}
+- likely cause: {likely_cause}
+
+The likely cause is the model's guess from an event digest. Confirm the
+problem in the instance's events and state before you change anything.
 """
 
 
@@ -154,14 +193,37 @@ def build_digest(events: list[dict], expected: list[str], findings: list[dict],
     return "\n".join(parts)
 
 
-def ask_agent(config: dict, digest: str, since: str, now: datetime) -> dict:
+def known_tasks(limit: int = -1) -> list[dict]:
+    """The global_watch proposals that hold their key, newest first. A
+    negative limit reads all of them."""
+    return db.query_all(
+        "SELECT id, proposal_key, objective, state FROM work_items "
+        f"WHERE proposal_key LIKE ? AND state NOT IN {work_store.FINISHED_STATES_SQL} "
+        "AND COALESCE(stop_reason, '') != ? ORDER BY id DESC LIMIT ?",
+        (TASK_KEY_PREFIX + "%", work_store.SUPERSEDED_REASON, limit))
+
+
+def _format_known(tasks: list[dict]) -> str:
+    lines = [f"- {t['proposal_key'][len(TASK_KEY_PREFIX):]} ({t['state']}): {t['objective']}"
+             for t in tasks]
+    return "\n".join(lines) or "- none"
+
+
+def _task_key(raw) -> str:
+    slug = "-".join("".join(ch if ch.isalnum() else " " for ch in str(raw or "").lower()).split())
+    return slug[:TASK_KEY_CHARS].strip("-")
+
+
+def ask_agent(config: dict, digest: str, since: str, now: datetime,
+              known: list[dict] | None = None) -> dict:
     """The model's verdict, or {"status": "failed", "reason": ...}.
 
     codex only: a failed call is reported, never retried on another vendor."""
     cfg = settings(config)
     model = str(cfg.get("agent_model") or DEFAULT_AGENT_MODEL)
     effort = str(cfg.get("agent_effort") or DEFAULT_AGENT_EFFORT)
-    prompt = AGENT_PROMPT.format(since=since, now=now.isoformat(), digest=digest)
+    prompt = AGENT_PROMPT.format(since=since, now=now.isoformat(), digest=digest,
+                                 known_tasks=_format_known(known or []))
     with tempfile.TemporaryDirectory(prefix="global-watch-") as tmp:
         last = Path(tmp) / "last.txt"
         cmd = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only",
@@ -207,6 +269,66 @@ def _report_agent(verdict: dict, prior: dict, expected: list[str]) -> list[str]:
     return fingerprint
 
 
+def propose_tasks(config: dict, problems: list[dict], since: str, now: datetime,
+                  prior_capped: list[str]) -> tuple[list[dict], list[str]]:
+    """Put one proposal on the board for each problem whose task no proposal
+    holds yet, until max_open_tasks of this check's proposals wait there.
+
+    Returns the proposals and the task keys the cap held back. The cap goes
+    to the feed only when that set of keys changes."""
+    cfg = settings(config)
+    if not cfg.get("propose_tasks", True):
+        return [], []
+    limit = int(cfg.get("max_open_tasks", DEFAULT_MAX_OPEN_TASKS))
+    known = known_tasks()
+    held = {t["proposal_key"] for t in known}
+    waiting = sum(1 for t in known if t["state"] == work_store.PROPOSED_STATE)
+    entry = next((e for e in work_launch.project_entries() if e["key"] == TASK_PROJECT), None)
+    host = config["job"]["key"]
+    proposed: list[dict] = []
+    capped: list[str] = []
+    for problem in problems:
+        objective = " ".join(str(problem.get("task") or "").split())
+        slug = _task_key(problem.get("task_key"))
+        if not objective or not slug or TASK_KEY_PREFIX + slug in held:
+            continue
+        if waiting >= limit:
+            capped.append(slug)
+            continue
+        instance = str(problem.get("instance") or "")
+        brief = TASK_BRIEF.format(host=host, since=since, now=now.isoformat(), instance=instance,
+                                  what=problem.get("what"), evidence=problem.get("evidence"),
+                                  likely_cause=problem.get("likely_cause"))
+        try:
+            item_id = work_store.create_proposal(
+                f"[{instance}] {objective}", note=f"Proposed by global_watch on {host}",
+                instance_key=work_store.BOARD_INSTANCE_KEY,
+                contexts=TASK_PROJECT if entry else "", cwd=entry["root"] if entry else "",
+                brief=brief, proposal_key=TASK_KEY_PREFIX + slug)
+        except work_store.ProposalKeyHeld:
+            continue
+        except Exception as e:
+            log.emit("global_watch_task_failed",
+                     f"global feed agent could not propose a task for {instance}: "
+                     f"{type(e).__name__}: {e}",
+                     links={"global": "/global"}, meta={"problem": problem})
+            continue
+        waiting += 1
+        held.add(TASK_KEY_PREFIX + slug)
+        log.emit("global_watch_task_proposed",
+                 f"global feed agent proposed task {item_id} for {instance}: {objective}",
+                 links={"detail": f"/tasks/{item_id}", "global": "/global"},
+                 meta={"work_item_id": item_id, "task_key": slug, "problem": problem})
+        proposed.append({"work_item_id": item_id, "task_key": slug, "instance": instance})
+    capped = sorted(set(capped))
+    if capped and capped != sorted(prior_capped):
+        log.emit("global_watch_task_capped",
+                 f"global feed agent held back {len(capped)} task(s): {', '.join(capped)}; "
+                 f"{waiting} of its proposals already wait on the board",
+                 links={"global": "/global"}, meta={"task_keys": capped, "limit": limit})
+    return proposed, capped
+
+
 def _fingerprint(findings: list[dict]) -> list[str]:
     return sorted(f"{f['kind']}:{f['instance']}:{f.get('event', '')}" for f in findings)
 
@@ -248,10 +370,14 @@ def run(config: dict, now: datetime | None = None) -> dict:
 
     verdict = {"status": "off", "problems": []}
     agent_fingerprint = prior.get("agent_fingerprint") or []
+    proposed: list[dict] = []
+    capped: list[str] = prior.get("capped_tasks") or []
     if cfg.get("agent", True):
         digest = build_digest(events, expected, findings, since)
-        verdict = ask_agent(config, digest, since, now)
+        verdict = ask_agent(config, digest, since, now, known_tasks(KNOWN_TASKS_LIMIT))
         agent_fingerprint = _report_agent(verdict, prior, expected)
+        proposed, capped = propose_tasks(config, verdict.get("problems") or [], since, now,
+                                         prior.get("capped_tasks") or [])
 
     state.save(_STATE_MODULE, {"last_run_at": now.isoformat(),
                                "fingerprint": fingerprint,
@@ -259,6 +385,9 @@ def run(config: dict, now: datetime | None = None) -> dict:
                                "expected": expected,
                                "agent_status": verdict["status"],
                                "agent_fingerprint": agent_fingerprint,
-                               "agent_problems": verdict.get("problems") or []})
+                               "agent_problems": verdict.get("problems") or [],
+                               "proposed_tasks": proposed,
+                               "capped_tasks": capped})
     return {"findings": findings, "expected": expected, "agent": verdict,
+            "proposed_tasks": proposed,
             "instances_seen": sorted({ev.get("instance_key") for ev in events})}
