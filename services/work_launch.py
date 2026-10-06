@@ -898,7 +898,7 @@ def _start(item_id: int, plan: dict, slack: bool, brief: str) -> dict:
             "your harness sends no such notification, run the command in the "
             "foreground with a timeout long enough to hold it. "
             "When you stop, state a one-line checkpoint. "
-            + work_store.PROGRESS_RULE +
+            + work_store.PROGRESS_RULE + work_store.RUN_BUDGET_RULE +
             "When you hit a decision point, decide yourself by default: pick the "
             "most correct, cleanest, simplest option and keep going. Ask the "
             "operator only when you truly cannot decide — the choice is "

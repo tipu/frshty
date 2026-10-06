@@ -21,6 +21,8 @@ from services import work_artifacts
 STALE_AFTER_MINUTES = 30
 STUCK_AFTER_MINUTES = 90
 MISSED_DECISION_AFTER_MINUTES = 3
+RUN_CHECK_IN_MINUTES = 73
+RUN_BUDGET_MINUTES = 240
 BOARD_INSTANCE_KEY = core_config.BOARD_INSTANCE_KEY
 BG_WAIT_RECHECK_HOURS = 2
 PROPOSED_STATE = "proposed"
@@ -76,6 +78,27 @@ PROGRESS_RULE = (
     f"work, print one line starting {PROGRESS_MARKER} that names what you "
     "just established and what you are doing next. "
 )
+RUN_BUDGET_RULE = (
+    f"This run has a wall-clock budget of {RUN_BUDGET_MINUTES // 60} hours. "
+    f"After {RUN_CHECK_IN_MINUTES} minutes the board asks you to check in. "
+    "When the budget is spent the board stops continuing the run, so ship the "
+    "part that works before then and file the rest as a follow-up. "
+)
+CHECK_IN_PROMPT = (
+    f"Check-in: this run has used {RUN_CHECK_IN_MINUTES} minutes. Nine runs in "
+    f"ten finish inside that time. The budget is {RUN_BUDGET_MINUTES // 60} "
+    f"hours. Print one {PROGRESS_MARKER} line that names what is done, what "
+    "remains, and how many more minutes you need. If the rest does not fit in "
+    "the budget, cut scope: ship the part that works and file the rest as a "
+    "follow-up. Then continue."
+)
+BUDGET_SPENT_PROMPT = (
+    f"The wall-clock budget of {RUN_BUDGET_MINUTES // 60} hours for this run "
+    "is spent. Do not start new work. Commit and push the part that works if "
+    "its tests pass, file the rest as a follow-up, state a one-line checkpoint "
+    "that names what remains, and end your turn. The board does not continue "
+    "this run again until the operator replies."
+)
 TLDR_LONG_WORDS = 1200
 TLDR_RULE = (
     "Open every such document with a TL;DR section: put it first on the page, "
@@ -89,7 +112,7 @@ TLDR_RULE = (
     "the short version next to the long one. "
 )
 CONTINUE_PROMPT_TEMPLATE = (
-    "Continue toward the objective. {delivery}" + PROGRESS_RULE +
+    "Continue toward the objective. {delivery}" + PROGRESS_RULE + RUN_BUDGET_RULE +
     "When you hit a decision point, decide "
     "yourself by default: pick the most correct, cleanest, simplest option and "
     "keep going. Ask the operator only when you truly cannot decide — the "
@@ -1619,7 +1642,7 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
     now = _now()
     with db.tx() as c:
         run = c.execute(
-            "SELECT id, work_item_id, tmux_key FROM work_runs WHERE session_id = ?",
+            "SELECT id, work_item_id, tmux_key, started_at FROM work_runs WHERE session_id = ?",
             (session_id,),
         ).fetchone()
         if not run:
@@ -1678,6 +1701,11 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
             )
             _record_stop(c, run, "waiting_external", "a background task is still running", now)
             return "waiting_external"
+        if _budget_spent(c, run):
+            _record_stop(c, run, "budget_spent",
+                         f"the run passed its wall-clock budget of {RUN_BUDGET_MINUTES} "
+                         "minutes; an operator reply or a reopen gives a new one", now)
+            return "budget_spent"
         if not item["autocontinue"]:
             _record_stop(c, run, "disabled", "autocontinue is off for this item", now)
             return "disabled"
@@ -1999,6 +2027,82 @@ def sweep_stale_items(now: datetime | None = None) -> list[dict]:
     actions.extend(fail_runless_items(cutoff))
     actions.extend(revive_resumed_runs())
     actions.extend(retry_missed_autocontinues(missed_cutoff))
+    return actions
+
+
+_BUDGET_RESET_KINDS_SQL = "('operator_reply', 'operator_reopen')"
+
+
+def _budget_clock(c, run) -> str:
+    """When the wall-clock budget of a run started counting.
+
+    The budget counts from the start of the run. An operator reply or a reopen
+    is new work, and the time the run sat waiting for it is not agent time, so
+    either one starts the budget again, the way a reply resets the
+    continuation budget."""
+    row = c.execute(
+        "SELECT MAX(created_at) AS at FROM work_events WHERE work_item_id = ? "
+        f"AND kind IN {_BUDGET_RESET_KINDS_SQL} AND created_at > ?",
+        (run["work_item_id"], run["started_at"])).fetchone()
+    return max(run["started_at"], (row["at"] if row else None) or "")
+
+
+def _budget_event_since(c, run, kind: str, since: str) -> bool:
+    return c.execute(
+        "SELECT 1 FROM work_events WHERE work_run_id = ? AND kind = ? AND created_at >= ?",
+        (run["id"], kind, since)).fetchone() is not None
+
+
+def _budget_spent(c, run) -> bool:
+    return _budget_event_since(c, run, "budget_spent", _budget_clock(c, run))
+
+
+def sweep_run_budgets(now: datetime | None = None) -> list[dict]:
+    """Hold every working run to its wall-clock budget.
+
+    A few long runs used most of the agent time: since 2026-09-17, 15 of 290
+    runs ran past four hours and used 77 % of it, while the median run took
+    ten minutes. At RUN_CHECK_IN_MINUTES, the p90 run length, the agent is
+    asked to report what remains and to cut scope when the rest does not fit.
+    At RUN_BUDGET_MINUTES it is told to ship what works and stop, and
+    maybe_autocontinue stops continuing the run. Each message goes once per
+    budget, and an operator reply or a reopen starts a new budget. The event
+    is written before the send, so a send that fails is not repeated every
+    scan; the stale sweep owns a pane that is gone."""
+    now_dt = now or datetime.now(timezone.utc)
+    rows = db.query_all(
+        "SELECT i.id AS work_item_id, r.id, r.tmux_key, r.started_at "
+        "FROM work_items i JOIN work_runs r ON r.id = "
+        "(SELECT r2.id FROM work_runs r2 WHERE r2.work_item_id = i.id ORDER BY r2.id DESC LIMIT 1) "
+        "WHERE i.state = 'agent_working'")
+    actions: list[dict] = []
+    for run in rows:
+        stamp = _now()
+        with db.tx() as c:
+            current = c.execute("SELECT state FROM work_items WHERE id = ?",
+                                (run["work_item_id"],)).fetchone()
+            if not current or current["state"] != "agent_working":
+                continue
+            clock = _budget_clock(c, run)
+            minutes = int((now_dt - datetime.fromisoformat(clock)).total_seconds() // 60)
+            if minutes >= RUN_BUDGET_MINUTES:
+                kind, prompt = "budget_spent", BUDGET_SPENT_PROMPT
+            elif minutes >= RUN_CHECK_IN_MINUTES:
+                kind, prompt = "budget_check_in", CHECK_IN_PROMPT
+            else:
+                continue
+            if _budget_event_since(c, run, kind, clock):
+                continue
+            c.execute(
+                "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (run["work_item_id"], run["id"], kind,
+                 db.dump_json({"minutes": minutes}), stamp))
+        if not tmux_send(run["tmux_key"], prompt):
+            log.emit("work_budget_send_failed",
+                     f"work item {run['work_item_id']}: the {kind} message did not "
+                     "reach the agent pane")
+        actions.append({"id": run["work_item_id"], "action": kind, "minutes": minutes})
     return actions
 
 
