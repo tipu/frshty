@@ -708,6 +708,25 @@ def _covering_task(item: dict) -> int | None:
     return None
 
 
+def _board_task(item: dict) -> str:
+    """The board task this action item was drafted from, or "" when none.
+
+    A carried line keeps the id of the line it came from, so the walk follows
+    that chain back to the line the board wrote."""
+    seen = set()
+    row = item
+    while row is not None and int(row["id"]) not in seen:
+        seen.add(int(row["id"]))
+        ref = row["origin_ref"] or ""
+        if row["origin"] in ("board", "proposal") and ref.startswith("work:"):
+            return ref[len("work:"):]
+        if row["carried_from"] is None:
+            return ""
+        row = db.query_one("SELECT id, origin, origin_ref, carried_from FROM standup_items"
+                           " WHERE id = ?", (int(row["carried_from"]),))
+    return ""
+
+
 def gate(item: dict, standup: dict, config: dict | None,
          now: datetime | None = None) -> str:
     """Why this action item must not be nudged, or "" when it may be.
@@ -718,6 +737,9 @@ def gate(item: dict, standup: dict, config: dict | None,
     now = now or datetime.now(timezone.utc)
     if item["state"] != "open":
         return f"the item is {item['state']}"
+    board_task = _board_task(item)
+    if board_task:
+        return f"it is task #{board_task} on the board"
     blocking = _blocking_task(int(item["id"]), config, now)
     if blocking:
         return f"task #{int(blocking['id'])} is already {blocking['state']} against it"
