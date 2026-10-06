@@ -10,6 +10,7 @@ cannot resolve is still refused before the work item is claimed. `ensure`
 materializes the plan once the item id exists. `gc` reclaims a worktree only
 when it can prove nothing is left in it.
 """
+import mimetypes
 import os
 import re
 import threading
@@ -29,6 +30,14 @@ from services import work_store
 GIT_TIMEOUT = 120
 BRANCH_CANDIDATES = 9
 KEEP_FINISHED_DAYS = 7
+MEDIA_SUFFIXES = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".svg", ".bmp", ".ico",
+    ".tif", ".tiff", ".heic", ".heif", ".psd", ".raw", ".cr2", ".nef", ".dng",
+    ".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v", ".mpg", ".mpeg", ".wmv",
+    ".3gp", ".mp3", ".wav", ".m4a", ".ogg", ".oga", ".opus", ".flac", ".aac",
+    ".aif", ".aiff", ".wma", ".tga", ".exr", ".qoi", ".jxl", ".mts", ".m2ts"})
+
+_reported_faults: set[str] = set()
 
 
 def _now() -> str:
@@ -587,7 +596,39 @@ def _ahead_of_base(row: dict) -> int | None:
     return None
 
 
-def _keep_reason(row: dict, now: datetime) -> str:
+def _ignored_keepers(paths: list[str]) -> list[str]:
+    """The ignored paths a removal would lose: .env files, media, and any
+    directory git did not list file by file, such as a nested repository."""
+    keep = []
+    for path in paths:
+        name = os.path.basename(path.rstrip("/"))
+        kind = (mimetypes.guess_type(name)[0] or "").split("/")[0]
+        if (path.endswith("/") or name == ".env" or name.startswith(".env.")
+                or os.path.splitext(name)[1].lower() in MEDIA_SUFFIXES
+                or kind in ("image", "video", "audio")):
+            keep.append(path)
+    return keep
+
+
+def _on_origin(row: dict) -> bool:
+    """Whether origin's copy of the branch, fetched by `gc`, holds HEAD."""
+    held = _git(row["path"], ["merge-base", "--is-ancestor", "HEAD",
+                              f"refs/remotes/origin/{row['branch']}"], timeout=30)
+    return held.returncode == 0
+
+
+def _report_fault(row: dict, stderr: str) -> None:
+    """Emit one event per broken worktree, not one per sweep."""
+    if row["path"] in _reported_faults:
+        return
+    _reported_faults.add(row["path"])
+    log.emit("work_worktree_fault",
+             f"work item {row['work_item_id']}: git status fails in "
+             f"{row['path']}: {stderr.strip()[:200]}",
+             meta={"path": row["path"], "repo": row["repo_name"]})
+
+
+def _keep_reason(row: dict, now: datetime, branch_fetched: bool = False) -> str:
     """Why a worktree must not be removed, "" when it can be.
 
     Every test here reads the worktree itself. A plain `status --porcelain`
@@ -598,7 +639,14 @@ def _keep_reason(row: dict, now: datetime) -> str:
     unreachable after removal; the HEAD is compared to the recorded branch
     instead. `gc` fetches the base before this runs, because a branch whose
     pull request was merged still looks ahead of a base ref that was last
-    updated when the worktree was made."""
+    updated when the worktree was made.
+
+    An ignored file keeps the worktree only when a removal would lose it: a
+    .env file or media. Build output and dependencies are made again. A branch
+    ahead of its base is removed when origin's copy of the branch, which `gc`
+    fetches as `branch_fetched`, holds HEAD. A worktree whose status fails is
+    kept and reported as a fault once per failure, because the operator has to
+    repair it."""
     for item_id in _items_using(row):
         item = db.query_one(
             "SELECT id, state, archived_at, updated_at FROM work_items WHERE id = ?",
@@ -609,20 +657,28 @@ def _keep_reason(row: dict, now: datetime) -> str:
             return f"work item {item_id} is not finished long enough"
         if terminal.session_healthy(f"work-{item_id}").get("alive"):
             return f"work item {item_id} still has a live session"
-    status = _git(row["path"], ["-c", "status.showUntrackedFiles=all", "status",
+    status = _git(row["path"], ["-c", "status.showUntrackedFiles=all",
+                                "-c", "core.quotePath=true", "status",
                                 "--porcelain", "--ignored"], timeout=60)
     if status.returncode != 0:
+        _report_fault(row, status.stderr or "")
         return f"status failed: {(status.stderr or '').strip()[:200]}"
-    if status.stdout.strip():
-        return "the worktree holds uncommitted or ignored files"
+    _reported_faults.discard(row["path"])
+    entries = [e for e in status.stdout.splitlines() if e]
+    if any(not e.startswith("!! ") for e in entries):
+        return "the worktree holds uncommitted files"
+    keepers = _ignored_keepers([e[3:].strip('"') for e in entries])
+    if keepers:
+        return f"the worktree holds ignored files to keep: {', '.join(keepers[:5])}"
     head = _git(row["path"], ["rev-parse", "--abbrev-ref", "HEAD"], timeout=30)
     if head.returncode != 0 or head.stdout.strip() != row["branch"]:
         return f"HEAD is {(head.stdout or '').strip() or 'unreadable'}, not {row['branch']}"
     ahead = _ahead_of_base(row)
     if ahead is None:
         return "no base branch to compare against"
-    if ahead:
-        return f"the branch is {ahead} commit(s) ahead of {row['base_branch']}"
+    if ahead and not (branch_fetched and _on_origin(row)):
+        return (f"the branch is {ahead} commit(s) ahead of {row['base_branch']} "
+                "and origin does not hold them")
     return ""
 
 
@@ -675,10 +731,14 @@ def gc(now: datetime | None = None) -> list[dict]:
         # Outside the lock, because a fetch talks to the network and every
         # launch would wait behind it.
         _git(row["repo_path"], ["fetch", "origin", row["base_branch"]], timeout=60)
+        branch_fetched = _git(row["repo_path"], [
+            "fetch", "origin",
+            f"+refs/heads/{row['branch']}:refs/remotes/origin/{row['branch']}"],
+            timeout=60).returncode == 0
         with work_store.launch_lock:
             if not os.path.isdir(row["path"]):
                 continue
-            if _keep_reason(row, now):
+            if _keep_reason(row, now, branch_fetched):
                 continue
             if _remove(row):
                 removed.append({"id": row["id"], "path": row["path"],
