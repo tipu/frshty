@@ -1701,11 +1701,13 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
             )
             _record_stop(c, run, "waiting_external", "a background task is still running", now)
             return "waiting_external"
-        if _budget_spent(c, run):
+        clock = _budget_clock(c, run)
+        if _budget_event_since(c, run, "budget_spent", clock):
             _record_stop(c, run, "budget_spent",
                          f"the run passed its wall-clock budget of {RUN_BUDGET_MINUTES} "
                          "minutes; an operator reply or a reopen gives a new one", now)
             return "budget_spent"
+        over_budget = _budget_minutes(clock) >= RUN_BUDGET_MINUTES
         if not item["autocontinue"]:
             _record_stop(c, run, "disabled", "autocontinue is off for this item", now)
             return "disabled"
@@ -1714,7 +1716,8 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
                          f"the continuation budget of {item['continue_cap']} is spent; "
                          "an operator reply or a reopen gives a new one", now)
             return "capped"
-    sent = tmux_send(run["tmux_key"], continue_prompt(contexts, run["work_item_id"]))
+    sent = tmux_send(run["tmux_key"], BUDGET_SPENT_PROMPT if over_budget
+                     else continue_prompt(contexts, run["work_item_id"]))
     now = _now()
     with db.tx() as c:
         current = c.execute("SELECT state FROM work_items WHERE id = ?",
@@ -1736,6 +1739,13 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
             "VALUES (?, ?, 'auto_continued', ?, ?)",
             (run["work_item_id"], run["id"], db.dump_json({"n": item["continues_used"] + 1}), now),
         )
+        if over_budget:
+            c.execute(
+                "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+                "VALUES (?, ?, 'budget_spent', ?, ?)",
+                (run["work_item_id"], run["id"],
+                 db.dump_json({"minutes": _budget_minutes(clock)}), now),
+            )
     return "continued"
 
 
@@ -2053,8 +2063,9 @@ def _budget_event_since(c, run, kind: str, since: str) -> bool:
         (run["id"], kind, since)).fetchone() is not None
 
 
-def _budget_spent(c, run) -> bool:
-    return _budget_event_since(c, run, "budget_spent", _budget_clock(c, run))
+def _budget_minutes(clock: str, now: datetime | None = None) -> int:
+    now_dt = now or datetime.now(timezone.utc)
+    return int((now_dt - datetime.fromisoformat(clock)).total_seconds() // 60)
 
 
 def sweep_run_budgets(now: datetime | None = None) -> list[dict]:
@@ -2067,8 +2078,9 @@ def sweep_run_budgets(now: datetime | None = None) -> list[dict]:
     At RUN_BUDGET_MINUTES it is told to ship what works and stop, and
     maybe_autocontinue stops continuing the run. Each message goes once per
     budget, and an operator reply or a reopen starts a new budget. The event
-    is written before the send, so a send that fails is not repeated every
-    scan; the stale sweep owns a pane that is gone."""
+    is written after the send, so a send that fails is tried again on the
+    next scan. A turn that ends past the budget before this sweep reaches it
+    gets the stop message from maybe_autocontinue instead."""
     now_dt = now or datetime.now(timezone.utc)
     rows = db.query_all(
         "SELECT i.id AS work_item_id, r.id, r.tmux_key, r.started_at "
@@ -2077,14 +2089,13 @@ def sweep_run_budgets(now: datetime | None = None) -> list[dict]:
         "WHERE i.state = 'agent_working'")
     actions: list[dict] = []
     for run in rows:
-        stamp = _now()
         with db.tx() as c:
             current = c.execute("SELECT state FROM work_items WHERE id = ?",
                                 (run["work_item_id"],)).fetchone()
             if not current or current["state"] != "agent_working":
                 continue
             clock = _budget_clock(c, run)
-            minutes = int((now_dt - datetime.fromisoformat(clock)).total_seconds() // 60)
+            minutes = _budget_minutes(clock, now_dt)
             if minutes >= RUN_BUDGET_MINUTES:
                 kind, prompt = "budget_spent", BUDGET_SPENT_PROMPT
             elif minutes >= RUN_CHECK_IN_MINUTES:
@@ -2093,15 +2104,17 @@ def sweep_run_budgets(now: datetime | None = None) -> list[dict]:
                 continue
             if _budget_event_since(c, run, kind, clock):
                 continue
+        if not tmux_send(run["tmux_key"], prompt):
+            log.emit("work_budget_send_failed",
+                     f"work item {run['work_item_id']}: the {kind} message did not "
+                     "reach the agent pane; the next scan tries again")
+            continue
+        with db.tx() as c:
             c.execute(
                 "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
                 "VALUES (?, ?, ?, ?, ?)",
                 (run["work_item_id"], run["id"], kind,
-                 db.dump_json({"minutes": minutes}), stamp))
-        if not tmux_send(run["tmux_key"], prompt):
-            log.emit("work_budget_send_failed",
-                     f"work item {run['work_item_id']}: the {kind} message did not "
-                     "reach the agent pane")
+                 db.dump_json({"minutes": minutes}), _now()))
         actions.append({"id": run["work_item_id"], "action": kind, "minutes": minutes})
     return actions
 
