@@ -2236,6 +2236,7 @@ def _substantiate_reply(config, slug, ticket, comment, pr, suggested: str) -> di
 
 
 MAX_PR_COMMENT_FIX_ATTEMPTS = 2
+PR_COMMENT_FIX_TIMEOUT = 1800
 
 COMMENT_SETTLED_STATUSES = ("addressed", "replied", "needs_reply")
 COMMENT_ANSWERED_STATUSES = ("addressed", "replied")
@@ -2854,7 +2855,7 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                     + COMMIT_SUBJECT_RULE
                 )
                 pre_dirty = _worktree_dirty_paths(wt)
-                fix_result = run_claude_code(context, cwd=wt)
+                fix_result = run_claude_code(context, cwd=wt, timeout=PR_COMMENT_FIX_TIMEOUT)
                 staging = git_util.stage_all(wt, pre_dirty)
                 if staging.returncode != 0:
                     log.emit("ticket_pr_comment_stage_failed",
