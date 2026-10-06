@@ -265,15 +265,27 @@ def _own_pr(c, item_id: int, drafts: list[str] | tuple[str, ...] = ()) -> str:
 
 
 def _rekey_own_pr(c, item_id: int, own_pr: str) -> int:
-    """Move the proposals keyed to one task onto its own pull request."""
+    """Move the proposals keyed to one task onto its own pull request.
+
+    An open proposal stays where it is when another proposal already holds
+    the pull request's key, so the work is not open twice. The debrief that
+    named the pull request withdraws it, and the holder stands."""
     if not own_pr:
         return 0
     moved = 0
     for stage in ("deliver", "release"):
-        moved += c.execute(
-            "UPDATE work_items SET proposal_key = ? WHERE source_item_id = ? "
-            "AND scope = 'proposal' AND proposal_key = ?",
-            (f"{stage}:{own_pr}", item_id, f"{stage}:item/{item_id}")).rowcount
+        key = f"{stage}:{own_pr}"
+        rows = c.execute(
+            "SELECT id, state FROM work_items WHERE source_item_id = ? "
+            "AND scope = 'proposal' AND proposal_key = ? ORDER BY id",
+            (item_id, f"{stage}:item/{item_id}")).fetchall()
+        for row in rows:
+            if row["state"] == work_store.PROPOSED_STATE:
+                holder = work_store.proposal_holding_key(c, key)
+                if holder is not None and holder["id"] != row["id"]:
+                    continue
+            c.execute("UPDATE work_items SET proposal_key = ? WHERE id = ?", (key, row["id"]))
+            moved += 1
     return moved
 
 
