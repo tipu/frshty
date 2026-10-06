@@ -28,6 +28,8 @@ def _cron_routes(event: dict, registries: dict) -> list[dict]:
                          "task": "slack_conversation_scan"})
         if features.get("upwork"):
             jobs.append({"instance_key": instance_key, "task": "upwork_scan"})
+        if features.get("direct_inbox"):
+            jobs.append({"instance_key": instance_key, "task": "direct_inbox_scan"})
         if (reg.config.get("prd") or {}).get("enabled"):
             jobs.append({"instance_key": instance_key, "task": "parse_prd"})
         if features.get("tickets") or features.get("review_prs"):
