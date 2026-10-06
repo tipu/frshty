@@ -555,6 +555,26 @@ class TestRacesAndFailures:
         assert standup._blocking_task(int(carried["id"]), _cfg(), now)["id"] == running
         assert standup._covering_task(carried) is None
 
+    def test_the_day_view_lists_the_tasks_of_the_whole_carried_line(self, clean):
+        first = _open_day(_day())
+        item = _item(first, "Unblock DEV-4747")
+        running = work_store.create_item("Unblock DEV-4747", instance_key="personal",
+                                         standup_item_id=item["id"])
+        db.execute("UPDATE work_items SET state = 'agent_working' WHERE id = ?", (running,))
+        standup.close_day(first, _cfg())
+        day_id = _open_day(_day(1))
+        carried = db.query_one("SELECT * FROM standup_items WHERE standup_id = ?"
+                               " AND text = 'Unblock DEV-4747'", (day_id,))
+        assert carried["carried_from"] == item["id"]
+        today = work_store.create_item("Unblock DEV-4747", instance_key="personal",
+                                       standup_item_id=carried["id"])
+        row = next(i for i in standup.day_view(_day(1))["items"]
+                   if i["id"] == carried["id"])
+        assert [t["id"] for t in row["tasks"]] == [running, today]
+        assert row["live_task"]["id"] == running
+        assert [t["id"] for t in standup.item(carried["id"])["tasks"]] == [running, today]
+        assert [t["id"] for t in standup.item(item["id"])["tasks"]] == [running]
+
     def test_a_proposal_that_lands_after_the_close_is_dropped(self, clean):
         standup_id = _open_day()
         item = _item(standup_id)
