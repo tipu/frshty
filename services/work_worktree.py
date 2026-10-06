@@ -35,7 +35,11 @@ MEDIA_SUFFIXES = frozenset({
     ".tif", ".tiff", ".heic", ".heif", ".psd", ".raw", ".cr2", ".nef", ".dng",
     ".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v", ".mpg", ".mpeg", ".wmv",
     ".3gp", ".mp3", ".wav", ".m4a", ".ogg", ".oga", ".opus", ".flac", ".aac",
-    ".aif", ".aiff", ".wma", ".tga", ".exr", ".qoi", ".jxl", ".mts", ".m2ts"})
+    ".aif", ".aiff", ".wma", ".tga", ".exr", ".qoi", ".jxl", ".m2ts"})
+DEPENDENCY_DIRS = frozenset({
+    "node_modules", "bower_components", ".venv", "venv", "site-packages",
+    "dist-packages", ".tox", ".nox", ".cache", ".mypy_cache", ".pytest_cache",
+    ".ruff_cache", "__pycache__", ".next", ".nuxt", ".turbo", ".parcel-cache"})
 
 _reported_faults: set[str] = set()
 
@@ -598,12 +602,19 @@ def _ahead_of_base(row: dict) -> int | None:
 
 def _ignored_keepers(paths: list[str]) -> list[str]:
     """The ignored paths a removal would lose: .env files, media, and any
-    directory git did not list file by file, such as a nested repository."""
+    directory git did not list file by file, such as a nested repository.
+    A file inside an installed dependency tree is made again by the install,
+    so an icon a package ships never keeps a worktree."""
     keep = []
     for path in paths:
-        name = os.path.basename(path.rstrip("/"))
+        if path.endswith("/"):
+            keep.append(path)
+            continue
+        if DEPENDENCY_DIRS.intersection(path.split("/")[:-1]):
+            continue
+        name = os.path.basename(path)
         kind = (mimetypes.guess_type(name)[0] or "").split("/")[0]
-        if (path.endswith("/") or name == ".env" or name.startswith(".env.")
+        if (name == ".env" or name.startswith(".env.")
                 or os.path.splitext(name)[1].lower() in MEDIA_SUFFIXES
                 or kind in ("image", "video", "audio")):
             keep.append(path)
