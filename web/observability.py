@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
+import core.db as db
 import core.log as log
 from web.state import _config, _configs_by_host, primary_config, events_enabled
 
@@ -59,6 +60,15 @@ def api_claude_invocations(
     params.append(max(1, min(limit, 1000)))
     rows = _db.query_all(sql, tuple(params))
     return {"invocations": rows}
+
+
+@router.get("/api/claude/functions")
+def api_claude_functions():
+    instance_key = _config.get("job", {}).get("key", "")
+    rows = db.query_all(
+        "SELECT DISTINCT function_name FROM claude_invocations WHERE instance_key = ? "
+        "ORDER BY function_name", (instance_key,))
+    return {"functions": [r["function_name"] for r in rows]}
 
 
 @router.get("/api/claude/invocations/{inv_id}")

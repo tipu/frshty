@@ -300,3 +300,43 @@ def assistant_texts(path: str, max_bytes: int = 4194304) -> list[str]:
 def last_assistant_text(path: str, max_bytes: int = 262144) -> str:
     texts = assistant_texts(path, max_bytes)
     return texts[-1] if texts else ""
+
+
+def usage(path: str) -> dict | None:
+    """The token totals and the model of one rollout, or None when the
+    rollout records no token count.
+
+    Codex writes a cumulative total in every token_count event, so the last
+    one holds the whole session. Its input count includes the cached input."""
+    total = None
+    model = ""
+    try:
+        with open(path, "rb") as f:
+            for raw in f:
+                if b'"token_count"' not in raw and b'"turn_context"' not in raw:
+                    continue
+                try:
+                    record = json.loads(raw.decode("utf-8", errors="replace"))
+                except ValueError:
+                    continue
+                payload = record.get("payload") if isinstance(record, dict) else None
+                if not isinstance(payload, dict):
+                    continue
+                if record.get("type") == "turn_context":
+                    model = str(payload.get("model") or "") or model
+                elif payload.get("type") == "token_count":
+                    info = payload.get("info")
+                    if isinstance(info, dict) and isinstance(info.get("total_token_usage"), dict):
+                        total = info["total_token_usage"]
+    except OSError:
+        return None
+    if total is None:
+        return None
+    cached = int(total.get("cached_input_tokens") or 0)
+    return {
+        "model": model,
+        "input_tokens": max(0, int(total.get("input_tokens") or 0) - cached),
+        "output_tokens": int(total.get("output_tokens") or 0),
+        "cache_creation_input_tokens": int(total.get("cache_write_input_tokens") or 0),
+        "cache_read_input_tokens": cached,
+    }
