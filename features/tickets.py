@@ -12,6 +12,8 @@ import core.log as log
 import core.queue as q
 import core.state as state
 import core.comments as comments
+from core.comments import (MAX_AUTOMATED_REVIEW_FIX_RUNS, automated_review_skip_reason,
+                           automated_review_skips)
 import core.branch_sync as branch_sync
 import core.freshness as freshness
 import core.consensus_scope as consensus_scope
@@ -2242,6 +2244,7 @@ COMMENT_SETTLED_STATUSES = ("addressed", "replied", "needs_reply")
 COMMENT_ANSWERED_STATUSES = ("addressed", "replied")
 RECONCILE_READ_KEY = "_comments_read_ok"
 RECONCILE_OWED_KEY = "_comments_owed"
+AUTOMATED_REVIEW_FIX_STATUSES = ("addressed", "fix_unpushed", "fix_failed", "fix_unresolved")
 
 
 def _comment_answered(entry: dict) -> bool:
@@ -2410,6 +2413,16 @@ def _owed_on_pr(unresolved: list[dict], detected: list[dict],
         if key in detected_keys or entry is not None:
             owed += 1
     return owed
+
+
+def _automated_review_skips(comments_on_pr: list[dict], latest_entries: dict) -> dict:
+    fix_runs = {key for key, e in latest_entries.items()
+                if e.get("status") in AUTOMATED_REVIEW_FIX_STATUSES}
+    return automated_review_skips(comments_on_pr, _comment_key, fix_runs)
+
+
+def _skip_reason(comment: dict, skips: dict) -> str | None:
+    return automated_review_skip_reason(comment, _comment_key, skips)
 
 
 def _worktree_dirty_paths(wt: Path) -> set:
@@ -2704,7 +2717,21 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
         settled_keys = {k for k, e in latest_entries.items() if _comment_settled(e)}
         unpushed_keys = {k for k, e in latest_entries.items()
                          if e.get("status") == "fix_unpushed"}
-        new_comments = [c for c in pending if _comment_key(c) not in settled_keys]
+        skips = _automated_review_skips(comments, latest_entries)
+        unresolved = [c for c in unresolved if not _skip_reason(c, skips)]
+        skipped_now = [c for c in pending
+                       if _skip_reason(c, skips) and _comment_key(c) not in settled_keys]
+        if skipped_now:
+            log.emit("ticket_pr_automated_review_skipped",
+                f"{_label(ticket['key'], ts)} \u00b7 {pr['repo']}: not fixing {len(skipped_now)} automated review(s); "
+                f"a newer review supersedes them or the PR had {MAX_AUTOMATED_REVIEW_FIX_RUNS} automated review fix runs",
+                links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+                meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"],
+                      "max_fix_runs": MAX_AUTOMATED_REVIEW_FIX_RUNS,
+                      "comments": [{"comment_id": c["id"], "reason": _skip_reason(c, skips)}
+                                   for c in skipped_now]})
+        new_comments = [c for c in pending
+                        if _comment_key(c) not in settled_keys and not _skip_reason(c, skips)]
 
         if not new_comments:
             if pending:
@@ -3111,7 +3138,7 @@ def _resolve_conflicts(config, ticket, ts, base_url, pr_info_map=None) -> dict:
         return ts
 
     for pr in prs:
-        base_branch = base_branch_for(config, pr["repo"])
+        base_branch = pr.get("base") or base_branch_for(config, pr["repo"])
         if pr_info_map is not None:
             info = pr_info_map.get((pr["repo"], pr["id"])) or {}
         else:
@@ -3205,7 +3232,7 @@ def _ensure_pr_worktree(config, ticket, ts, pr, base_url) -> Path | None:
         return None
     branch = pr.get("branch") or ts.get("branch", "")
     made = git_util.add_or_reuse_worktree(Path(repo_path), wt, branch,
-                                          base_branch_for(config, pr["repo"]))
+                                          pr.get("base") or base_branch_for(config, pr["repo"]))
     if made is None:
         log.emit("ticket_pr_worktree_failed",
                  f"{_label(ticket['key'], ts)} · {pr['repo']}: could not create a worktree for "
@@ -3222,7 +3249,7 @@ def _pr_base_moved(config, ts) -> bool:
         repo_path = _ticket_repo_path(config, pr["repo"])
         if not repo_path:
             continue
-        base_sha = branch_sync.ls_remote_sha(repo_path, base_branch_for(config, pr["repo"]))
+        base_sha = branch_sync.ls_remote_sha(repo_path, pr.get("base") or base_branch_for(config, pr["repo"]))
         if not base_sha:
             continue
         st = sync_state.get(f"{pr['repo']}/{pr['id']}", {})
@@ -3251,7 +3278,7 @@ def _sync_pr_base(config, ticket, ts, base_url) -> dict:
         repo_path = _ticket_repo_path(config, pr["repo"])
         if not repo_path:
             continue
-        base_branch = base_branch_for(config, pr["repo"])
+        base_branch = pr.get("base") or base_branch_for(config, pr["repo"])
         st = sync_state.setdefault(f"{pr['repo']}/{pr['id']}", {})
         outcome = branch_sync.sync_branch_with_base(
             platform, repo_path, base_branch, pr.get("branch") or branch, st,
@@ -3320,6 +3347,9 @@ def reconcile_comments_now(config, ts: dict) -> tuple[str, list[dict]]:
             ]
             latest_entries = _latest_comment_entries(
                 pr_comments, pr["repo"], pr["id"], _live_comment_index(fetched))
+            skips = _automated_review_skips(fetched, latest_entries)
+            unresolved = [c for c in unresolved if not _skip_reason(c, skips)]
+            detected = [c for c in detected if not _skip_reason(c, skips)]
             before = owed
             owed += _owed_on_pr(unresolved, detected, [], latest_entries)
             if owed > before:
