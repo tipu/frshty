@@ -411,12 +411,18 @@ def _linked_tasks(item_ids: list[int]) -> dict[int, list[dict]]:
         return {}
     placeholders = ", ".join("?" for _ in item_ids)
     rows = db.query_all(
-        "SELECT id, standup_item_id, objective, state, updated_at, archived_at"
-        f" FROM work_items WHERE standup_item_id IN ({placeholders})"
-        " ORDER BY id", tuple(item_ids))
+        "WITH RECURSIVE line(item_id, id, carried_from) AS ("
+        " SELECT id, id, carried_from FROM standup_items"
+        f" WHERE id IN ({placeholders})"
+        " UNION SELECT line.item_id, i.id, i.carried_from FROM standup_items i"
+        " JOIN line ON i.id = line.carried_from) "
+        "SELECT DISTINCT l.item_id, w.id, w.standup_item_id, w.objective, w.state,"
+        " w.updated_at, w.archived_at"
+        " FROM line l JOIN work_items w ON w.standup_item_id = l.id"
+        " ORDER BY w.id", tuple(item_ids))
     out: dict[int, list[dict]] = {}
     for r in rows:
-        out.setdefault(int(r["standup_item_id"]), []).append(r)
+        out.setdefault(int(r.pop("item_id")), []).append(r)
     return out
 
 
