@@ -564,23 +564,70 @@ class TestGc:
         _finish(item_id, archived=False, days_ago=work_worktree.KEEP_FINISHED_DAYS + 1)
         assert work_worktree.gc() != []
 
-    def test_keeps_a_worktree_holding_only_ignored_files(self, tmp_path, wt_root, monkeypatch):
-        repo, item_id, row = self._made(tmp_path, monkeypatch)
-        (Path(row["path"]) / ".gitignore").write_text("/notes/\n")
+    def _ignore(self, repo, row, patterns):
+        """Commit a .gitignore and make it the base, so the branch is not ahead."""
+        (Path(row["path"]) / ".gitignore").write_text(patterns)
         _git(row["path"], "add", "-A")
         _git(row["path"], "-c", "user.name=t", "-c", "user.email=t@e.com",
-             "commit", "-m", "ignore notes")
+             "commit", "-m", "ignore")
         _git(row["path"], "push", "-u", "origin", "HEAD:refs/heads/tmp-base")
         _git(repo, "fetch", "origin")
         with db.tx() as c:
             c.execute("UPDATE work_worktrees SET base_branch = 'tmp-base' WHERE id = ?",
                       (row["id"],))
+
+    def test_removes_a_worktree_holding_only_disposable_ignored_files(self, tmp_path,
+                                                                     wt_root, monkeypatch):
+        repo, item_id, row = self._made(tmp_path, monkeypatch)
+        self._ignore(repo, row, "/notes/\nnode_modules/\n*.log\n")
         (Path(row["path"]) / "notes").mkdir()
         (Path(row["path"]) / "notes" / "plan.md").write_text("the plan\n")
+        (Path(row["path"]) / "node_modules" / "a").mkdir(parents=True)
+        (Path(row["path"]) / "node_modules" / "a" / "index.js").write_text("x\n")
+        (Path(row["path"]) / "run.log").write_text("log\n")
+        assert _git(row["path"], "status", "--porcelain").stdout.strip() == ""
+        _finish(item_id)
+        assert [g["path"] for g in work_worktree.gc()] == [row["path"]]
+        assert not os.path.isdir(row["path"])
+
+    @pytest.mark.parametrize("name", [".env", ".env.local", "shot.PNG", "run.webm", "pic.avif", "voice.opus", "r.tga", "scan.pgm"])
+    def test_keeps_a_worktree_holding_an_ignored_env_or_media_file(self, tmp_path, wt_root,
+                                                                   monkeypatch, name):
+        repo, item_id, row = self._made(tmp_path, monkeypatch)
+        self._ignore(repo, row, "/out/\n.env*\n")
+        (Path(row["path"]) / "out").mkdir()
+        (Path(row["path"]) / "out" / "plan.md").write_text("the plan\n")
+        target = Path(row["path"]) / ("out" if not name.startswith(".env") else "") / name
+        target.write_text("keep\n")
         assert _git(row["path"], "status", "--porcelain").stdout.strip() == ""
         _finish(item_id)
         assert work_worktree.gc() == []
-        assert (Path(row["path"]) / "notes" / "plan.md").is_file()
+        assert target.is_file()
+
+    def test_classifies_an_ignored_file_whose_name_is_not_utf8(self, tmp_path, wt_root,
+                                                              monkeypatch):
+        repo, item_id, row = self._made(tmp_path, monkeypatch)
+        self._ignore(repo, row, "*.log\n*.png\n")
+        _git(row["path"], "config", "core.quotePath", "false")
+        root = os.fsencode(row["path"])
+        Path(os.fsdecode(root + b"/bad-\xff.log")).write_text("x\n")
+        Path(os.fsdecode(root + b"/bad-\xff.png")).write_text("x\n")
+        _finish(item_id)
+        assert work_worktree.gc() == []
+        os.remove(os.fsdecode(root + b"/bad-\xff.png"))
+        assert [g["path"] for g in work_worktree.gc()] == [row["path"]]
+
+    def test_keeps_a_worktree_holding_an_ignored_nested_repository(self, tmp_path, wt_root,
+                                                                   monkeypatch):
+        repo, item_id, row = self._made(tmp_path, monkeypatch)
+        self._ignore(repo, row, "/vendor/\n")
+        nested = Path(row["path"]) / "vendor" / "lib"
+        nested.mkdir(parents=True)
+        _git(nested, "init", "-q")
+        (nested / "work.py").write_text("x\n")
+        _finish(item_id)
+        assert work_worktree.gc() == []
+        assert (nested / "work.py").is_file()
 
     def test_keeps_a_worktree_when_show_untracked_files_is_off(self, tmp_path, wt_root,
                                                               monkeypatch):
@@ -632,6 +679,67 @@ class TestGc:
              "commit", "-m", "the work")
         _finish(item_id)
         assert work_worktree.gc() == []
+        assert os.path.isdir(row["path"])
+
+    def _commit_work(self, row):
+        (Path(row["path"]) / "feature.txt").write_text("new\n")
+        _git(row["path"], "add", "-A")
+        _git(row["path"], "-c", "user.name=t", "-c", "user.email=t@e.com",
+             "commit", "-m", "the work")
+
+    def test_removes_a_branch_ahead_of_its_base_that_origin_holds(self, tmp_path, wt_root,
+                                                                  monkeypatch):
+        repo, item_id, row = self._made(tmp_path, monkeypatch)
+        self._commit_work(row)
+        sha = _git(row["path"], "rev-parse", "HEAD").stdout.strip()
+        _git(row["path"], "push", "origin", f"HEAD:refs/heads/{row['branch']}")
+        _finish(item_id)
+        assert [g["path"] for g in work_worktree.gc()] == [row["path"]]
+        assert not os.path.isdir(row["path"])
+        origin = tmp_path / "app.git"
+        assert _git(origin, "rev-parse", f"refs/heads/{row['branch']}").stdout.strip() == sha
+
+    def test_keeps_a_branch_with_commits_origin_does_not_hold(self, tmp_path, wt_root,
+                                                              monkeypatch):
+        repo, item_id, row = self._made(tmp_path, monkeypatch)
+        self._commit_work(row)
+        _git(row["path"], "push", "origin", f"HEAD:refs/heads/{row['branch']}")
+        (Path(row["path"]) / "more.txt").write_text("more\n")
+        _git(row["path"], "add", "-A")
+        _git(row["path"], "-c", "user.name=t", "-c", "user.email=t@e.com",
+             "commit", "-m", "unpushed")
+        _finish(item_id)
+        assert work_worktree.gc() == []
+        assert os.path.isdir(row["path"])
+
+    def test_keeps_a_branch_origin_deleted_after_a_stale_fetch(self, tmp_path, wt_root,
+                                                               monkeypatch):
+        """A remote-tracking ref outlives the branch on origin. Only a fetch that
+        finds the branch now counts as origin holding it."""
+        repo, item_id, row = self._made(tmp_path, monkeypatch)
+        self._commit_work(row)
+        _git(row["path"], "push", "origin", f"HEAD:refs/heads/{row['branch']}")
+        _git(tmp_path / "app.git", "branch", "-D", row["branch"])
+        assert _git(repo, "rev-parse", "--verify",
+                    f"refs/remotes/origin/{row['branch']}", check=False).returncode == 0
+        _finish(item_id)
+        assert work_worktree.gc() == []
+        assert os.path.isdir(row["path"])
+
+    def test_reports_a_worktree_whose_status_fails_once(self, tmp_path, wt_root,
+                                                        monkeypatch):
+        repo, item_id, row = self._made(tmp_path, monkeypatch)
+        (Path(row["path"]) / ".git").write_text("gitdir: /nonexistent\n")
+        emitted = []
+        monkeypatch.setattr(work_worktree.log, "emit",
+                            lambda event, summary, **kw: emitted.append((event, summary)))
+        monkeypatch.setattr(work_worktree, "_reported_faults", set())
+        _finish(item_id)
+        assert work_worktree.gc() == []
+        assert work_worktree.gc() == []
+        faults = [e for e in emitted if e[0] == "work_worktree_fault"]
+        assert len(faults) == 1
+        assert row["path"] in faults[0][1]
         assert os.path.isdir(row["path"])
 
     def test_keeps_a_worktree_whose_task_still_has_a_live_session(self, tmp_path, wt_root,
