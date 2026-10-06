@@ -74,6 +74,13 @@ def watchdog_scan(ctx: TaskContext) -> TaskResult:
     return TaskResult("ok", artifacts={"opened": opened})
 
 
+@task("global_watch", timeout=120)
+def global_watch(ctx: TaskContext) -> TaskResult:
+    from services import global_watch as watch
+    out = watch.run(ctx.config)
+    return TaskResult("ok", artifacts=out)
+
+
 @task("scheduler_check", timeout=60)
 def scheduler_check(ctx: TaskContext) -> TaskResult:
     from core import scheduler
