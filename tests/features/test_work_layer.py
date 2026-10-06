@@ -1,6 +1,7 @@
 import base64
 import json
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
@@ -2321,7 +2322,75 @@ class TestSuspendResume:
         resumed = []
         monkeypatch.setattr(work_launch, "resume_session",
                             lambda item_id: resumed.append(item_id) or True)
+        self.continued = []
+        monkeypatch.setattr(work_launch, "_continue_interrupted", self.continued.extend)
         return work_launch.restore_open_sessions(), resumed
+
+    def test_restore_tells_only_a_working_task_to_continue(self, tmp_path, monkeypatch):
+        working = _mkitem("restore working item")
+        _mkrun(working, f"sid-restore-work-{working}", f"work-{working}", str(tmp_path))
+        db.execute("UPDATE work_items SET state = 'agent_working' WHERE id = ?", (working,))
+        waiting = _mkitem("restore asking item")
+        _mkrun(waiting, f"sid-restore-ask-{waiting}", f"work-{waiting}", str(tmp_path))
+        db.execute("UPDATE work_items SET state = 'needs_you' WHERE id = ?", (waiting,))
+        out, resumed = self._restore(monkeypatch, tmp_path)
+        assert {working, waiting} <= set(out)
+        for _ in range(50):
+            if (working, "claude") in self.continued:
+                break
+            time.sleep(0.02)
+        assert (working, "claude") in self.continued
+        assert all(item_id != waiting for item_id, _ in self.continued)
+
+    def test_restore_keeps_a_working_task_from_the_stale_sweep(self, tmp_path, monkeypatch):
+        item_id = _mkitem("restore stale working item")
+        _mkrun(item_id, f"sid-restore-stale-{item_id}", f"work-{item_id}", str(tmp_path))
+        old = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
+        db.execute("UPDATE work_items SET state = 'agent_working', updated_at = ? WHERE id = ?",
+                   (old, item_id))
+        self._restore(monkeypatch, tmp_path)
+        acted = [a["id"] for a in work_store.sweep_stale_items()]
+        assert item_id not in acted
+        assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                            (item_id,))["state"] == "agent_working"
+
+    def _continue(self, monkeypatch, running):
+        import core.terminal as terminal
+        from services import work_launch
+        monkeypatch.setattr(terminal, "session_healthy",
+                            lambda k, agent="claude": {"alive": running,
+                                                       "agent_running": running})
+        monkeypatch.setattr(work_launch, "REPLY_READY_POLLS", 2)
+        monkeypatch.setattr(work_launch, "REPLY_READY_POLL_SECONDS", 0)
+        monkeypatch.setattr(work_launch, "REPLY_SETTLE_SECONDS", 0)
+        sent = []
+        monkeypatch.setattr(work_store, "tmux_send",
+                            lambda key, text: sent.append((key, text)) or True)
+        return sent
+
+    def test_continue_prompts_a_task_still_working(self, monkeypatch):
+        from services import work_launch
+        item_id = _mkitem("continue working item")
+        db.execute("UPDATE work_items SET state = 'agent_working' WHERE id = ?", (item_id,))
+        sent = self._continue(monkeypatch, running=True)
+        assert work_launch._continue_interrupted([(item_id, "claude")]) == [item_id]
+        assert sent == [(f"work-{item_id}", work_launch.RESTART_CONTINUE_PROMPT)]
+
+    def test_continue_skips_a_task_that_left_agent_working(self, monkeypatch):
+        from services import work_launch
+        item_id = _mkitem("continue replied item")
+        db.execute("UPDATE work_items SET state = 'needs_you' WHERE id = ?", (item_id,))
+        sent = self._continue(monkeypatch, running=True)
+        assert work_launch._continue_interrupted([(item_id, "claude")]) == []
+        assert sent == []
+
+    def test_continue_skips_an_agent_that_never_came_up(self, monkeypatch):
+        from services import work_launch
+        item_id = _mkitem("continue dead item")
+        db.execute("UPDATE work_items SET state = 'agent_working' WHERE id = ?", (item_id,))
+        sent = self._continue(monkeypatch, running=False)
+        assert work_launch._continue_interrupted([(item_id, "claude")]) == []
+        assert sent == []
 
     def test_restore_resumes_an_open_task_whose_session_is_gone(self, tmp_path, monkeypatch):
         item_id = _mkitem("restore waiting item")
