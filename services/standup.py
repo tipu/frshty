@@ -679,7 +679,8 @@ def _last_activity(item: dict, standup: dict) -> datetime | None:
     if row:
         stamps.append(_parse(row["t"]))
     row = db.query_one(
-        "SELECT MAX(created_at) AS t FROM standup_events WHERE standup_item_id = ?"
+        _LINE + "SELECT MAX(created_at) AS t FROM standup_events"
+        " WHERE standup_item_id IN (SELECT id FROM line)"
         " AND kind NOT IN ('nudged', 'asked')", (int(item["id"]),))
     if row:
         stamps.append(_parse(row["t"]))
