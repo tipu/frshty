@@ -41,6 +41,11 @@ out.atroposTags = vm.projectsOf({ peer: "atropos", contexts: "frshty,slack_int" 
 delete vm.peerMeta.frshty;
 out.frshtyDown = vm.catalog.map(e => e.key);
 out.frshtyDownFilter = vm.filterProjects;
+vm.peers = vm.peers.filter(p => p.key !== "personal");
+vm.intakeContexts = [];
+out.noPersonal = [vm.target, vm.targetMeta.personalLoaded];
+vm.toggleContext("clarivis");
+out.noPersonalClarivis = [vm.hostName(vm.target), vm.targetMeta.personalLoaded];
 console.log(JSON.stringify(out));
 """
 
@@ -111,6 +116,12 @@ class TestProjectRouting:
 
     def test_a_project_whose_host_is_down_stays_in_the_filter(self, routed):
         assert "frshty" in routed["frshtyDownFilter"]
+
+    def test_a_task_without_a_project_does_not_launch_on_the_board_host_without_personal(self, routed):
+        assert routed["noPersonal"] == [None, False]
+
+    def test_a_project_still_routes_to_its_host_without_personal(self, routed):
+        assert routed["noPersonalClarivis"] == ["clarivis", True]
 
     def test_the_filter_sends_each_host_its_own_project_key(self, routed):
         assert routed["filterAtropos"] == {
