@@ -592,6 +592,11 @@ class TestProposalKey:
         assert a == b == "deliver:github.com/acme/app/7"
         assert work_debrief.proposal_key(1, "pr", "open the PR") == "deliver:item/1"
         assert work_debrief.proposal_key(2, "pr", "open the PR") != "deliver:item/1"
+        assert work_debrief.proposal_key(
+            1, "pr", "open the PR", "github.com/acme/app/7") == "deliver:github.com/acme/app/7"
+        assert work_debrief.proposal_key(
+            1, "merge", "merge https://github.com/acme/app/pull/9",
+            "github.com/acme/app/7") == "deliver:github.com/acme/app/9"
 
     def test_a_drifted_step_label_keeps_the_key(self):
         """Work item 9861 left one branch unfinished. Its debriefs named the
@@ -686,6 +691,78 @@ class TestProposalKey:
         assert self._proposals(second) == []
         assert work_debrief.followups_for(second)[-1]["detail"] == (
             f"same work as work item #{held['id']} (proposed)")
+
+    def _keys(self, item_id):
+        return [r["proposal_key"] for r in db.query_all(
+            "SELECT proposal_key FROM work_items WHERE source_item_id = ? ORDER BY id",
+            (item_id,))]
+
+    def test_a_branch_and_its_pull_request_url_are_proposed_once(
+            self, monkeypatch, tmp_path):
+        """Work item 9861 proposed one branch under its own key, and again
+        under the key of PR quill#4894 when one draft named the PR by URL."""
+        url = "https://github.com/acme/app/pull/4894"
+        item_id = self._debriefed(monkeypatch, tmp_path, "branch then url", REQUIRED_OUT)
+        work_debrief.propose_required_followups()
+        [proposal] = self._proposals(item_id)
+        work_store.apply_action(proposal["id"], "decline")
+        monkeypatch.setattr(work_debrief, "_run_claude", lambda p: _push_out(url))
+        work_debrief.run_debrief(item_id)
+
+        assert work_debrief.propose_required_followups() == []
+
+        assert self._keys(item_id) == ["deliver:github.com/acme/app/4894"]
+        monkeypatch.setattr(work_debrief, "_run_claude", lambda p: REWORDED_OUT)
+        work_debrief.run_debrief(item_id)
+        assert work_debrief.propose_required_followups() == []
+        assert len(self._proposals(item_id)) == 1
+
+    def test_an_open_branch_proposal_is_kept_when_the_url_appears(
+            self, monkeypatch, tmp_path):
+        item_id = self._debriefed(monkeypatch, tmp_path, "open then url", REQUIRED_OUT)
+        work_debrief.propose_required_followups()
+        [proposal] = self._proposals(item_id)
+        monkeypatch.setattr(work_debrief, "_run_claude",
+                            lambda p: _push_out("https://github.com/acme/app/pull/5"))
+
+        out = work_debrief.run_debrief(item_id)
+
+        assert out["superseded"] == [] and out["kept"] == [proposal["id"]]
+        assert work_debrief.propose_required_followups() == []
+        assert self._keys(item_id) == ["deliver:github.com/acme/app/5"]
+
+    def test_two_pull_requests_of_one_task_are_proposed_apart(
+            self, monkeypatch, tmp_path):
+        first = "https://github.com/acme/app/pull/1"
+        second = "https://github.com/acme/lib/pull/2"
+        item_id = self._debriefed(monkeypatch, tmp_path, "two prs", _push_out(first))
+        work_debrief.propose_required_followups()
+        work_store.apply_action(self._proposals(item_id)[0]["id"], "decline")
+        monkeypatch.setattr(work_debrief, "_run_claude", lambda p: _push_out(second))
+        work_debrief.run_debrief(item_id)
+
+        assert len(work_debrief.propose_required_followups()) == 1
+
+        assert self._keys(item_id) == ["deliver:github.com/acme/app/1",
+                                       "deliver:github.com/acme/lib/2"]
+        monkeypatch.setattr(work_debrief, "_run_claude", lambda p: REWORDED_OUT)
+        work_debrief.run_debrief(item_id)
+        assert work_debrief.propose_required_followups() == []
+        assert len(self._proposals(item_id)) == 2
+
+    def test_a_branch_proposal_moves_onto_its_pull_request_at_boot(
+            self, monkeypatch, tmp_path):
+        item_id = self._debriefed(monkeypatch, tmp_path, "keyed before", REQUIRED_OUT)
+        work_debrief.propose_required_followups()
+        db.execute(
+            "INSERT INTO work_followups(work_item_id, kind, workspace, recipient, draft, "
+            "required, unfinished, status, detail, created_at, updated_at) "
+            "VALUES (?, 'work_item', '', '', 'merge https://github.com/acme/app/pull/8', "
+            "1, 'merge', 'dismissed', '', '', '')", (item_id,))
+
+        work_debrief.backfill_proposal_keys()
+
+        assert self._keys(item_id) == ["deliver:github.com/acme/app/8"]
 
     def test_a_proposal_declined_before_keys_existed_is_keyed_at_boot(
             self, monkeypatch, tmp_path):
