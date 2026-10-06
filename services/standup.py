@@ -616,7 +616,8 @@ def _running_task(item_id: int) -> dict | None:
     would find no session, and an ad hoc request must launch instead."""
     placeholders = ", ".join("?" for _ in RUNNING_TASK_STATES)
     return db.query_one(
-        "SELECT id, state FROM work_items WHERE standup_item_id = ? AND archived_at IS NULL"
+        _LINE + "SELECT id, state FROM work_items"
+        " WHERE standup_item_id IN (SELECT id FROM line) AND archived_at IS NULL"
         f" AND state IN ({placeholders}) ORDER BY id DESC LIMIT 1",
         (item_id, *RUNNING_TASK_STATES))
 
@@ -632,14 +633,16 @@ def _blocking_task(item_id: int, config: dict | None, now: datetime) -> dict | N
     card silences the item for the rest of the day."""
     placeholders = ", ".join("?" for _ in BLOCKING_TASK_STATES)
     row = db.query_one(
-        "SELECT id, state FROM work_items WHERE standup_item_id = ? AND archived_at IS NULL"
+        _LINE + "SELECT id, state FROM work_items"
+        " WHERE standup_item_id IN (SELECT id FROM line) AND archived_at IS NULL"
         f" AND state IN ({placeholders}) ORDER BY id DESC LIMIT 1",
         (item_id, *BLOCKING_TASK_STATES))
     if row:
         return row
     cutoff = _iso(now - timedelta(hours=_backoff_hours({"nudge_count": 1}, config)))
     return db.query_one(
-        "SELECT id, state FROM work_items WHERE standup_item_id = ? AND archived_at IS NULL"
+        _LINE + "SELECT id, state FROM work_items"
+        " WHERE standup_item_id IN (SELECT id FROM line) AND archived_at IS NULL"
         " AND state = ? AND created_at > ? ORDER BY id DESC LIMIT 1",
         (item_id, work_store.PROPOSED_STATE, cutoff))
 
@@ -664,7 +667,8 @@ def _last_activity(item: dict, standup: dict) -> datetime | None:
     item the operator worked on all morning."""
     stamps = [_parse(standup.get("opened_at")), _parse(item.get("created_at"))]
     row = db.query_one(
-        "SELECT MAX(updated_at) AS t FROM work_items WHERE standup_item_id = ?",
+        _LINE + "SELECT MAX(updated_at) AS t FROM work_items"
+        " WHERE standup_item_id IN (SELECT id FROM line)",
         (int(item["id"]),))
     if row:
         stamps.append(_parse(row["t"]))
@@ -700,7 +704,8 @@ def _covering_task(item: dict) -> int | None:
     key = match.group(1)
     entry = watchdog.Entry(key, key, key, "")
     mine = frozenset(int(r["id"]) for r in db.query_all(
-        "SELECT id FROM work_items WHERE standup_item_id = ?", (int(item["id"]),)))
+        _LINE + "SELECT id FROM work_items WHERE standup_item_id IN (SELECT id FROM line)",
+        (int(item["id"]),)))
     for instance_key in [c for c in (item["contexts"] or "").split(",") if c] or [""]:
         covered = watchdog.covered_by_open_task(entry, instance_key, exclude=mine)
         if covered is not None:
