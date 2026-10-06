@@ -214,7 +214,8 @@ def _opened_proposals(c, item_id: int) -> list[int]:
     return [int(m.group(1)) for m in found if m]
 
 
-def proposal_key(source_item_id: int, unfinished: str, draft: str) -> str:
+def proposal_key(source_item_id: int, unfinished: str, draft: str,
+                 own_pr: str = "") -> str:
     """The natural key of the work one required follow-up asks for.
 
     It is the delivery stage the follow-up names and the pull requests its
@@ -224,17 +225,56 @@ def proposal_key(source_item_id: int, unfinished: str, draft: str) -> str:
     on, and each name asks for the same branch to land. Release is a stage
     of its own, so the release of a merged branch is proposed after its
     merge. A draft that names no pull request is
-    keyed to its own task: the debrief of one task writes the same step in
-    new words each time, and the words are not what identifies the work.
+    keyed to its own task, not to its words: the debrief of one task writes
+    the same step in new words each time.
+
+    A draft that names no pull request asks for the task's own pull request
+    (`own_pr`, from _own_pr) when the task has named one: one debrief names
+    the branch, the next names its pull request by URL, and both ask for the
+    same branch to land. A task that has named no pull request yet keys
+    such a draft to itself, and _rekey_own_pr moves that key onto the pull
+    request once the task names it.
 
     A debrief that asks again for a proposal its task already has open hands
     that proposal to the new follow-up rather than withdraw it and open a
     second one, and a draft whose key another proposal holds is not proposed
     at all (work_store.proposal_holding_key)."""
     prs = sorted(r["key"] for r in work_tickets.pr_refs_in(draft))
+    if not prs and own_pr:
+        prs = [own_pr]
     target = ",".join(prs) if prs else f"item/{source_item_id}"
     stage = "release" if unfinished == "release" else "deliver"
     return f"{stage}:{target}"
+
+
+def _own_pr(c, item_id: int, drafts: list[str] | tuple[str, ...] = ()) -> str:
+    """The pull request one task delivers: the first one its required
+    follow-ups name by address, then the first one `drafts` names, or "".
+
+    The first one stays the first one, so the key of a draft that names no
+    pull request does not move when the task later names a second pull
+    request. A draft that names that second pull request keeps its own key."""
+    rows = c.execute(
+        "SELECT draft FROM work_followups WHERE work_item_id = ? AND required = 1 "
+        "ORDER BY id", (item_id,)).fetchall()
+    for draft in [row["draft"] for row in rows] + list(drafts):
+        refs = work_tickets.pr_refs_in(draft)
+        if refs:
+            return refs[0]["key"]
+    return ""
+
+
+def _rekey_own_pr(c, item_id: int, own_pr: str) -> int:
+    """Move the proposals keyed to one task onto its own pull request."""
+    if not own_pr:
+        return 0
+    moved = 0
+    for stage in ("deliver", "release"):
+        moved += c.execute(
+            "UPDATE work_items SET proposal_key = ? WHERE source_item_id = ? "
+            "AND scope = 'proposal' AND proposal_key = ?",
+            (f"{stage}:{own_pr}", item_id, f"{stage}:item/{item_id}")).rowcount
+    return moved
 
 
 def _open_proposal_keys(c, item_id: int, proposal_ids: list[int]) -> dict[str, int]:
@@ -316,6 +356,8 @@ def _run_debrief_locked(item_id: int) -> dict:
         c.execute(
             "UPDATE work_followups SET status = 'dismissed', detail = 'superseded by new debrief', "
             "updated_at = ? WHERE work_item_id = ? AND status = 'draft'", (now, item_id))
+        own_pr = _own_pr(c, item_id, [f["draft"] for f in result["followups"] if f["required"]])
+        _rekey_own_pr(c, item_id, own_pr)
         opened = _opened_proposals(c, item_id)
         open_keys = _open_proposal_keys(c, item_id, opened)
         c.execute(
@@ -326,7 +368,8 @@ def _run_debrief_locked(item_id: int) -> dict:
         for f in result["followups"]:
             status, detail = "draft", ""
             if f["required"]:
-                held = open_keys.pop(proposal_key(item_id, f["unfinished"], f["draft"]), None)
+                held = open_keys.pop(
+                    proposal_key(item_id, f["unfinished"], f["draft"], own_pr), None)
                 if held is not None:
                     status, detail = "proposed", f"{PROPOSED_DETAIL_PREFIX}{held}"
                     kept.append(held)
@@ -760,12 +803,15 @@ def _propose_followup_locked(followup_id: int, objective: str = "") -> dict:
             "WHERE id = ? AND status = 'draft'", (now, followup_id))
         if claimed.rowcount != 1:
             return {"error": f"followup is not a draft (status: {row['status']})"}
+        own_pr = _own_pr(c, row["work_item_id"])
+        _rekey_own_pr(c, row["work_item_id"], own_pr)
     try:
         result = work_launch.propose_followup(
             row["work_item_id"], objective.strip() or row["draft"],
             note=f"the debrief of work item {row['work_item_id']} reported this "
                  "work as authorised and unfinished",
-            proposal_key=proposal_key(row["work_item_id"], row["unfinished"], row["draft"]))
+            proposal_key=proposal_key(row["work_item_id"], row["unfinished"], row["draft"],
+                                      own_pr))
         if "error" in result:
             raise RuntimeError(result["error"])
         detail = f"{PROPOSED_DETAIL_PREFIX}{result['item_id']}"
@@ -796,7 +842,10 @@ def backfill_proposal_keys() -> int:
 
     Without it the proposals the operator already declined hold no key, and
     the work they asked for is proposed once more. The key is read off the
-    follow-up that opened the proposal, the same way a new one is keyed."""
+    follow-up that opened the proposal, the same way a new one is keyed.
+    A proposal keyed to its task moves onto the task's own pull request, so
+    a task that named its pull request before this ran is keyed as one that
+    names it now."""
     with db.tx() as c:
         rows = c.execute(
             "SELECT i.id, f.work_item_id, f.unfinished, f.draft FROM work_items i "
@@ -809,9 +858,17 @@ def backfill_proposal_keys() -> int:
             if row["id"] in keyed:
                 continue
             c.execute("UPDATE work_items SET proposal_key = ? WHERE id = ?",
-                      (proposal_key(row["work_item_id"], row["unfinished"], row["draft"]),
+                      (proposal_key(row["work_item_id"], row["unfinished"], row["draft"],
+                                    _own_pr(c, row["work_item_id"])),
                        row["id"]))
             keyed.add(row["id"])
+        sources = c.execute(
+            "SELECT DISTINCT source_item_id FROM work_items WHERE scope = 'proposal' "
+            "AND (proposal_key = 'deliver:item/' || source_item_id "
+            "OR proposal_key = 'release:item/' || source_item_id)").fetchall()
+        for row in sources:
+            item_id = row["source_item_id"]
+            _rekey_own_pr(c, item_id, _own_pr(c, item_id))
     return len(keyed)
 
 
