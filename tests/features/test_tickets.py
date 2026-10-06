@@ -1774,34 +1774,34 @@ class TestFixCiFailuresTask:
         assert ts.get("ci_fix_attempts", 0) == 0
         assert "_ci_failed_pending" not in ts
 
-    def test_fixes_in_the_worktree_that_holds_the_pr_branch(self, fake_config, tmp_state, tmp_log):
-        """A PR branch can sit in a worktree outside tickets/<slug>/<repo>, the
-        one the comment fixer reuses. The CI fixer runs there and does not
-        skip the PR as worktree_missing."""
+    def test_uses_the_worktree_that_holds_the_pr_branch(self, fake_config, tmp_state, tmp_log, tmp_path):
         from core.tasks.tickets import fix_ci_failures
-        slug = "PROJ-1-do-the-thing"
-        pr = {"repo": "r", "id": 1, "url": "u", "branch": "PROJ-1-branch"}
-        self._seed(make_ticket_state(
-            status="in_review", _ci_failed_pending=True, slug=slug, prs=[pr]))
-        holder = fake_config["workspace"]["root"] / "tickets" / "PROJ-1-mono"
-        holder.mkdir(parents=True)
 
-        mock_platform = MagicMock()
-        mock_platform.get_pr_checks.return_value = [{"name": "lint", "state": "FAILED"}]
-        mock_platform.get_failed_logs.return_value = "logs"
-        mock_platform.get_pr_diff.return_value = "diff"
-        with patch("core.tasks.tickets.make_platform", return_value=mock_platform), \
-             patch("core.tasks.tickets._ensure_pr_worktree", return_value=holder) as ensure, \
-             patch("features.pr_ci.run_balanced",
-                   return_value='{"caused_by_us": true, "reason": "bad", "fix_hint": "fix it"}'), \
-             patch("features.pr_ci.run_claude_code", return_value="ok") as rcc:
+        def git(cwd, *args):
+            subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True)
+
+        origin = tmp_path / "origin.git"
+        repo = tmp_path / "repo"
+        holder = tmp_path / "holder"
+        git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
+        git(tmp_path, "clone", "-q", str(origin), str(repo))
+        git(repo, "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "base")
+        git(repo, "push", "-q", "origin", "HEAD:main")
+        git(repo, "branch", "pr-branch")
+        git(repo, "push", "-q", "origin", "pr-branch")
+        git(repo, "worktree", "add", "-q", str(holder), "pr-branch")
+
+        self._seed(make_ticket_state(
+            status="in_review", _ci_failed_pending=True, slug="PROJ-1-do-the-thing",
+            prs=[{"repo": "r", "id": 1, "url": "u", "branch": "pr-branch"}],
+        ))
+        with patch("core.tasks.tickets.make_platform", return_value=MagicMock()), \
+             patch("features.tickets._ticket_repo_path", return_value=str(repo)), \
+             patch("features.pr_ci.triage_and_fix_pr",
+                   return_value={"result": "no_failing", "attempts": 0, "failed_names": []}) as triage:
             result = fix_ci_failures(self._ctx(fake_config))
         assert result.status == "ok"
-        assert ensure.call_args.args[3] == pr
-        assert rcc.call_args.kwargs["cwd"] == holder
-        import core.state as state
-        ts = state.load("tickets")["PROJ-1"]
-        assert ts["ci_fix_attempts"] == 1
+        assert triage.call_args.kwargs["worktree"].resolve() == holder.resolve()
 
     def test_not_caused_by_us_no_increment(self, fake_config, tmp_state, tmp_log):
         from core.tasks.tickets import fix_ci_failures
