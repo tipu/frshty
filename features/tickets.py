@@ -3111,7 +3111,7 @@ def _resolve_conflicts(config, ticket, ts, base_url, pr_info_map=None) -> dict:
         return ts
 
     for pr in prs:
-        base_branch = base_branch_for(config, pr["repo"])
+        base_branch = pr.get("base") or base_branch_for(config, pr["repo"])
         if pr_info_map is not None:
             info = pr_info_map.get((pr["repo"], pr["id"])) or {}
         else:
@@ -3205,7 +3205,7 @@ def _ensure_pr_worktree(config, ticket, ts, pr, base_url) -> Path | None:
         return None
     branch = pr.get("branch") or ts.get("branch", "")
     made = git_util.add_or_reuse_worktree(Path(repo_path), wt, branch,
-                                          base_branch_for(config, pr["repo"]))
+                                          pr.get("base") or base_branch_for(config, pr["repo"]))
     if made is None:
         log.emit("ticket_pr_worktree_failed",
                  f"{_label(ticket['key'], ts)} · {pr['repo']}: could not create a worktree for "
@@ -3222,7 +3222,7 @@ def _pr_base_moved(config, ts) -> bool:
         repo_path = _ticket_repo_path(config, pr["repo"])
         if not repo_path:
             continue
-        base_sha = branch_sync.ls_remote_sha(repo_path, base_branch_for(config, pr["repo"]))
+        base_sha = branch_sync.ls_remote_sha(repo_path, pr.get("base") or base_branch_for(config, pr["repo"]))
         if not base_sha:
             continue
         st = sync_state.get(f"{pr['repo']}/{pr['id']}", {})
@@ -3251,7 +3251,7 @@ def _sync_pr_base(config, ticket, ts, base_url) -> dict:
         repo_path = _ticket_repo_path(config, pr["repo"])
         if not repo_path:
             continue
-        base_branch = base_branch_for(config, pr["repo"])
+        base_branch = pr.get("base") or base_branch_for(config, pr["repo"])
         st = sync_state.setdefault(f"{pr['repo']}/{pr['id']}", {})
         outcome = branch_sync.sync_branch_with_base(
             platform, repo_path, base_branch, pr.get("branch") or branch, st,
