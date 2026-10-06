@@ -312,6 +312,7 @@ class TestInstanceLauncher:
         state = tmp_path / "boxes" / "aimyable" / "state"
         assert f"{state}:{state}" in volumes
         assert f"FRSHTY_ROOT={state}" in args
+        assert f"GVOICE_PROFILE_DIR={state / 'gvoice'}" in args
         assert str(home / ".frshty") not in sources
         assert f"{tmp_path / 'ws'}:{tmp_path / 'ws'}" in volumes
         assert f"{home / '.claude.json'}:/run/frshty/seed/.claude.json:ro" in volumes
@@ -339,6 +340,61 @@ class TestInstanceLauncher:
             args = mod.run_args(mod.load(str(path)), path, check=check)
             mounts = [args[i + 1] for i, a in enumerate(args) if a == "--tmpfs"]
             assert mounts == ["/tmp:rw,exec,nosuid,nodev,size=8g,mode=1777"]
+
+    def test_gvoice_login_shares_the_instance_profile(self, tmp_path, monkeypatch):
+        mod, home = self._launcher(tmp_path, monkeypatch)
+        path = self._config(tmp_path)
+        config = mod.load(str(path))
+        run = mod.run_args(config, path, check=False)
+        xauth = home / ".Xauthority"
+        xauth.write_text("")
+        sockets = tmp_path / "x11"
+        sockets.mkdir()
+        monkeypatch.setattr(mod, "X11_SOCKETS", sockets)
+        monkeypatch.setenv("DISPLAY", ":0")
+        monkeypatch.delenv("XAUTHORITY", raising=False)
+        args = mod.gvoice_login_args(config)
+        state = tmp_path / "boxes" / "aimyable" / "state"
+        assert f"GVOICE_PROFILE_DIR={state / 'gvoice'}" in run
+        assert f"--user-data-dir={state / 'gvoice'}" in args
+        assert "--password-store=basic" in args
+        volumes = [args[i + 1] for i, a in enumerate(args) if a == "-v"]
+        assert f"{state / 'gvoice'}:{state / 'gvoice'}" in volumes
+        assert (state / "gvoice").is_dir()
+        assert f"{xauth}:/run/frshty/xauthority:ro" in volumes
+        assert "DISPLAY=:0" in args
+        assert args[args.index("--entrypoint") + 1:][:2] == ["google-chrome", mod.IMAGE]
+        assert not any("enable-automation" in a for a in args)
+
+    def test_gvoice_login_signs_in_the_configured_profile(self, tmp_path, monkeypatch):
+        mod, home = self._launcher(tmp_path, monkeypatch)
+        path = self._config(tmp_path)
+        config = mod.load(str(path))
+        mod.run_args(config, path, check=False)
+        (home / ".Xauthority").write_text("")
+        sockets = tmp_path / "x11"
+        sockets.mkdir()
+        monkeypatch.setattr(mod, "X11_SOCKETS", sockets)
+        monkeypatch.setenv("DISPLAY", ":0")
+        monkeypatch.delenv("XAUTHORITY", raising=False)
+        profile = tmp_path / "boxes" / "aimyable" / "state" / "gvoice-profile"
+        config["direct_inbox"] = {"gvoice_profile_dir": str(profile)}
+        args = mod.gvoice_login_args(config)
+        volumes = [args[i + 1] for i, a in enumerate(args) if a == "-v"]
+        assert f"--user-data-dir={profile}" in args
+        assert f"{profile}:{profile}" in volumes
+        config["direct_inbox"] = {"gvoice_profile_dir": str(tmp_path / "elsewhere")}
+        with pytest.raises(SystemExit, match="outside"):
+            mod.gvoice_login_args(config)
+
+    def test_gvoice_login_needs_a_display(self, tmp_path, monkeypatch):
+        mod, _ = self._launcher(tmp_path, monkeypatch)
+        path = self._config(tmp_path)
+        config = mod.load(str(path))
+        mod.run_args(config, path, check=False)
+        monkeypatch.delenv("DISPLAY", raising=False)
+        with pytest.raises(SystemExit, match="DISPLAY"):
+            mod.gvoice_login_args(config)
 
     def test_reload_never_uses_docker_kill(self, tmp_path, monkeypatch):
         mod, _ = self._launcher(tmp_path, monkeypatch)
