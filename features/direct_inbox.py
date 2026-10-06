@@ -21,6 +21,7 @@ verdict held back by either stays recorded and opens its task on a later scan,
 even after its message has left the read window.
 """
 import json
+import os
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -363,14 +364,37 @@ def read_emails(config: dict, instance_key: str, now: datetime) -> tuple[list[di
     return conversations, ""
 
 
+def _gvoice_env(settings: dict) -> dict[str, str]:
+    """The environment gvoice runs in. The profile directory is where the
+    signed-in Google session lives, and the channel picks the browser."""
+    env = dict(os.environ)
+    if settings.get("gvoice_profile_dir"):
+        env["GVOICE_PROFILE_DIR"] = os.path.expanduser(str(settings["gvoice_profile_dir"]))
+    if settings.get("gvoice_chrome_channel"):
+        env["GVOICE_CHROME_CHANNEL"] = str(settings["gvoice_chrome_channel"])
+    return env
+
+
+def _signed_out(binary: str, env: dict[str, str]) -> bool:
+    """Whether gvoice has no signed-in session. `gvoice recent` does not say
+    so when it fails, so `gvoice status` is asked, which exits 2 then."""
+    try:
+        result = subprocess.run([binary, "status", "--json"], capture_output=True,
+                                text=True, timeout=GVOICE_TIMEOUT, env=env)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 2
+
+
 def _gvoice(config: dict, instance_key: str) -> tuple[dict | None, str]:
     settings = _settings(config)
     hours = _int(settings, "window_hours", DEFAULT_WINDOW_HOURS)
+    env = _gvoice_env(settings)
     cmd = [str(settings.get("gvoice_bin") or DEFAULT_GVOICE_BIN), "recent",
            f"{hours}h", "--limit", "100", "--json"]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True,
-                                timeout=GVOICE_TIMEOUT)
+                                timeout=GVOICE_TIMEOUT, env=env)
     except FileNotFoundError:
         return None, _fail(instance_key, "direct_inbox_gvoice_failed",
                            f"the Google Voice CLI `{cmd[0]}` is not installed",
@@ -384,11 +408,14 @@ def _gvoice(config: dict, instance_key: str) -> tuple[dict | None, str]:
                            f"`{' '.join(cmd)}` ran past {GVOICE_TIMEOUT}s",
                            {"cmd": cmd})
     if result.returncode != 0:
-        hint = " (signed out: run `gvoice login`)" if result.returncode == 2 else ""
+        signed_out = result.returncode == 2 or _signed_out(cmd[0], env)
+        hint = (" (signed out: run `scripts/instance.py gvoice-login <config>` on the host"
+                f" to sign {env.get('GVOICE_PROFILE_DIR', '')} in)" if signed_out else "")
         return None, _fail(instance_key, "direct_inbox_gvoice_failed",
                            f"`{' '.join(cmd)}` exited {result.returncode}{hint}:"
-                           f" {result.stderr.strip()[:300]}",
-                           {"cmd": cmd, "returncode": result.returncode})
+                           f" {result.stderr.strip()[-300:]}",
+                           {"cmd": cmd, "returncode": result.returncode,
+                            "signed_out": signed_out})
     try:
         payload = json.loads(result.stdout)
     except json.JSONDecodeError:
