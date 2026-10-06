@@ -425,6 +425,24 @@ class TestCompletedTasks:
         assert standup.sweep_completed_tasks() == [item["id"]]
         assert standup.item(item["id"])["state"] == "awaiting_check"
 
+    def test_a_task_that_finishes_on_an_earlier_row_moves_the_carried_line(self, clean):
+        first = _open_day(_day())
+        item = _item(first, "Unblock DEV-4646")
+        work_id = work_store.create_item("Unblock DEV-4646", standup_item_id=item["id"])
+        db.execute("UPDATE work_items SET state = 'agent_working' WHERE id = ?", (work_id,))
+        standup.close_day(first, _cfg())
+        day_id = _open_day(_day(1))
+        carried = db.query_one("SELECT * FROM standup_items WHERE standup_id = ?"
+                               " AND text = 'Unblock DEV-4646'", (day_id,))
+        assert carried["carried_from"] == item["id"]
+        assert standup.sweep_completed_tasks() == []
+        done_id = work_store.create_item("Unblock DEV-4646", standup_item_id=carried["id"])
+        db.execute("UPDATE work_items SET state = 'needs_ack' WHERE id = ?", (done_id,))
+        assert carried["id"] not in standup.sweep_completed_tasks()
+        db.execute("UPDATE work_items SET state = 'needs_ack' WHERE id = ?", (work_id,))
+        assert carried["id"] in standup.sweep_completed_tasks()
+        assert standup.item(carried["id"])["state"] == "awaiting_check"
+
     def test_a_declined_proposal_does_not_check_the_item_off(self, clean):
         standup_id = _open_day()
         item = _item(standup_id)
