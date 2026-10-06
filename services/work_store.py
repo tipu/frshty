@@ -298,10 +298,17 @@ def create_item(objective: str, scope: str = "ad-hoc", scope_ref: str = "",
         return cur.lastrowid
 
 
+class ProposalKeyHeld(Exception):
+    def __init__(self, holder: dict):
+        super().__init__(f"work item #{holder['id']} holds this proposal key")
+        self.holder = holder
+
+
 def create_proposal(objective: str, note: str = "", instance_key: str | None = None,
                     contexts: str = "", cwd: str = "",
                     brief: str = "", conn=None, now: str | None = None,
-                    source_item_id: int | None = None, critical: bool = False) -> int:
+                    source_item_id: int | None = None, critical: bool = False,
+                    proposal_key: str = "") -> int:
     """Put a task on the board that no agent has started.
 
     frshty writes this when it decides by itself that something needs doing.
@@ -320,27 +327,37 @@ def create_proposal(objective: str, note: str = "", instance_key: str | None = N
 
     `source_item_id` marks a proposal that continues a finished task, so the
     approved run reads that task's report and the board threads the two
-    together. `critical` carries the source task's mark onto it."""
+    together. `critical` carries the source task's mark onto it.
+
+    `proposal_key` names the piece of work the proposal asks for. When
+    proposal_holding_key finds another proposal of that work, nothing is
+    written and ProposalKeyHeld names it. The check and the insert share one
+    transaction, so two callers cannot both open the same work."""
     if conn is not None:
         return _insert_proposal(conn, objective, note, instance_key, contexts,
-                                cwd, brief, now, source_item_id, critical)
+                                cwd, brief, now, source_item_id, critical,
+                                proposal_key)
     with db.tx() as c:
         return _insert_proposal(c, objective, note, instance_key, contexts,
-                                cwd, brief, now, source_item_id, critical)
+                                cwd, brief, now, source_item_id, critical,
+                                proposal_key)
 
 
 def _insert_proposal(c, objective: str, note: str, instance_key: str | None,
                      contexts: str, cwd: str, brief: str,
                      now: str | None = None, source_item_id: int | None = None,
-                     critical: bool = False) -> int:
+                     critical: bool = False, proposal_key: str = "") -> int:
     now = now or _now()
+    holder = proposal_holding_key(c, proposal_key)
+    if holder is not None:
+        raise ProposalKeyHeld(holder)
     cur = c.execute(
         "INSERT INTO work_items(objective, scope, instance_key, contexts, "
         "state, current_checkpoint, launch_cwd, launch_brief, source_item_id, "
-        "critical, created_at, updated_at) "
-        "VALUES (?, 'proposal', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "critical, proposal_key, created_at, updated_at) "
+        "VALUES (?, 'proposal', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (objective, instance_key, contexts, PROPOSED_STATE, note, cwd,
-         brief, source_item_id, 1 if critical else 0, now, now),
+         brief, source_item_id, 1 if critical else 0, proposal_key, now, now),
     )
     item_id = cur.lastrowid
     c.execute(
@@ -434,6 +451,25 @@ def _supersede_proposals(c, source_item_id: int, item_ids: list[int],
             (item_id, db.dump_json({"source_item_id": source_item_id}), now))
         withdrawn.append(item_id)
     return withdrawn
+
+
+def proposal_holding_key(c, proposal_key: str) -> dict | None:
+    """The proposal that already asks for the work `proposal_key` names, or
+    None when a new proposal of that work is the first one.
+
+    A proposal that is open, approved and still running, declined or
+    canceled holds its key: the operator sees the work, has it under way, or
+    said no to it. One that ran to the end does not, so the
+    debrief of a run that left the work unfinished can propose it again, and
+    neither does one a newer debrief withdrew."""
+    if not proposal_key:
+        return None
+    row = c.execute(
+        "SELECT id, state, stop_reason FROM work_items "
+        f"WHERE proposal_key = ? AND state NOT IN {FINISHED_STATES_SQL} "
+        "AND COALESCE(stop_reason, '') != ? ORDER BY id DESC LIMIT 1",
+        (proposal_key, SUPERSEDED_REASON)).fetchone()
+    return dict(row) if row else None
 
 
 def add_run(item_id: int, session_id: str, tmux_key: str, cwd: str,

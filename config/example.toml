@@ -130,6 +130,11 @@ pr_autofix = false                # github only: every newly created PR gets a c
 # max_threads = 50                    # how many threads one scan reads
 # texts = true                        # read texts through the gvoice CLI
 # gvoice_bin = "gvoice"               # path of the gvoice CLI
+# gvoice_profile_dir = "~/.frshty-containers/<key>/state/gvoice-profile"
+#                                     # the Chrome profile that holds the signed-in Google
+#                                     # Voice session. Sign it in once on the host with
+#                                     # scripts/gvoice_login.sh <key>.
+# gvoice_chrome_channel = "chrome"    # the browser gvoice launches
 
 # --- Upwork inbox (requires features.upwork and a logged-in local Chrome) ---
 # [upwork]
