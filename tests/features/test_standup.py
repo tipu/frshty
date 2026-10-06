@@ -511,6 +511,32 @@ class TestRacesAndFailures:
         assert db.query_one("SELECT COUNT(*) AS n FROM work_items WHERE scope = 'proposal'"
                             " AND objective = 'Decide on SUD-0417'")["n"] == 1
 
+    def test_a_task_on_an_earlier_row_of_a_carried_line_counts_today(self, clean):
+        first = _open_day(_day())
+        item = _item(first, "Unblock DEV-4545")
+        running = work_store.create_item("Unblock DEV-4545", instance_key="personal",
+                                         standup_item_id=item["id"])
+        db.execute("UPDATE work_items SET state = 'agent_working' WHERE id = ?", (running,))
+        standup.close_day(first, _cfg())
+        day_id = _open_day(_day(1))
+        carried = db.query_one("SELECT * FROM standup_items WHERE standup_id = ?"
+                               " AND text = 'Unblock DEV-4545'", (day_id,))
+        assert carried["carried_from"] == item["id"]
+        _age(carried["id"], 4)
+        stamp = datetime.now(timezone.utc) - timedelta(minutes=5)
+        db.execute("UPDATE work_items SET updated_at = ? WHERE id = ?", (_iso(stamp), running))
+        carried = db.query_one("SELECT * FROM standup_items WHERE id = ?", (carried["id"],))
+        day = db.query_one("SELECT * FROM standups WHERE id = ?", (day_id,))
+        now = datetime.now(timezone.utc)
+        assert standup._running_task(int(carried["id"]))["id"] == running
+        assert standup._blocking_task(int(carried["id"]), _cfg(), now)["id"] == running
+        assert standup._last_activity(carried, day) == stamp
+        assert "agent_working" in standup.gate(carried, day, _cfg())
+        db.execute("UPDATE work_items SET state = ?, created_at = ? WHERE id = ?",
+                   (work_store.PROPOSED_STATE, _iso(now - timedelta(minutes=5)), running))
+        assert standup._blocking_task(int(carried["id"]), _cfg(), now)["id"] == running
+        assert standup._covering_task(carried) is None
+
     def test_a_proposal_that_lands_after_the_close_is_dropped(self, clean):
         standup_id = _open_day()
         item = _item(standup_id)
