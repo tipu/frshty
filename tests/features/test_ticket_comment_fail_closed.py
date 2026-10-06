@@ -301,3 +301,25 @@ class TestADirtyWorktreeIsNotCreditedToTheComment(TicketCommentHarness):
         status = subprocess.run(["git", "status", "--porcelain"], cwd=str(wt),
                                 capture_output=True, text=True).stdout
         assert "Pipfile" in status, "the stray file must be left where it was"
+
+
+class TestALongFixRunIsNotCutShort(TicketCommentHarness):
+    def test_the_fix_run_gets_the_comment_fix_timeout(
+        self, fresh_db, fake_config, tmp_state, tmp_path
+    ):
+        """A re-review that lists several findings timed out twice at the
+        600 s default on rapid-analytics PR 25 and was capped unanswered."""
+        slug = "PROJ-1-do-the-thing"
+        wt = self._init_git_pair(tmp_path, slug)
+        ts, ticket, platform, bb_config = self._setup(fake_config, slug)
+        seen = {}
+        fix = self._fixes_app_py(wt)
+
+        def claude(prompt, cwd=None, **kwargs):
+            seen.update(kwargs)
+            return fix(prompt, cwd=cwd)
+
+        self._run(bb_config, ticket, ts, wt, platform, claude)
+
+        assert seen.get("timeout") == tickets.PR_COMMENT_FIX_TIMEOUT
+        assert tickets.PR_COMMENT_FIX_TIMEOUT > 600
