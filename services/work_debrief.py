@@ -41,6 +41,7 @@ UNFINISHED_ACTIONS = ("commit", "push", "pr", "merge", "release")
 AGENT_TURN_KINDS = ("SessionStart", "UserPromptSubmit", "Stop")
 PROPOSED_DETAIL_PREFIX = "proposed work item #"
 _PROPOSED_DETAIL_RE = re.compile(re.escape(PROPOSED_DETAIL_PREFIX) + r"(\d+)")
+DUPLICATE_DETAIL = "same work as work item #{id} ({state})"
 HELD_DETAIL = "held: {key} is not approved in full; waiting on {urls}"
 UNAPPROVED_DETAIL = ("held: a merge on {projects} waits for an approval the "
                      "operator does not give himself; nobody has approved {urls}")
@@ -213,6 +214,35 @@ def _opened_proposals(c, item_id: int) -> list[int]:
     return [int(m.group(1)) for m in found if m]
 
 
+def proposal_key(source_item_id: int, unfinished: str, draft: str) -> str:
+    """The natural key of the work one required follow-up asks for.
+
+    It is the delivery step the follow-up names and the pull requests its
+    draft names by address, so two tasks that both leave one pull request
+    unmerged ask for one piece of work. A draft that names no pull request is
+    keyed to its own task: the debrief of one task writes the same step in
+    new words each time, and the words are not what identifies the work.
+
+    A debrief that asks again for a proposal its task already has open hands
+    that proposal to the new follow-up rather than withdraw it and open a
+    second one, and a draft whose key another proposal holds is not proposed
+    at all (work_store.proposal_holding_key)."""
+    prs = sorted(r["key"] for r in work_tickets.pr_refs_in(draft))
+    target = ",".join(prs) if prs else f"item/{source_item_id}"
+    return f"{unfinished or 'work'}:{target}"
+
+
+def _open_proposal_keys(c, item_id: int, proposal_ids: list[int]) -> dict[str, int]:
+    if not proposal_ids:
+        return {}
+    marks = ",".join("?" * len(proposal_ids))
+    rows = c.execute(
+        f"SELECT id, proposal_key FROM work_items WHERE id IN ({marks}) "
+        "AND source_item_id = ? AND state = ? AND proposal_key != '' ORDER BY id",
+        (*proposal_ids, item_id, work_store.PROPOSED_STATE)).fetchall()
+    return {row["proposal_key"]: int(row["id"]) for row in rows}
+
+
 def _item_lock(item_id: int) -> threading.Lock:
     with _debrief_locks_guard:
         return _debrief_locks.setdefault(item_id, threading.Lock())
@@ -282,19 +312,28 @@ def _run_debrief_locked(item_id: int) -> dict:
             "UPDATE work_followups SET status = 'dismissed', detail = 'superseded by new debrief', "
             "updated_at = ? WHERE work_item_id = ? AND status = 'draft'", (now, item_id))
         opened = _opened_proposals(c, item_id)
+        open_keys = _open_proposal_keys(c, item_id, opened)
         c.execute(
             "UPDATE work_followups SET status = 'dismissed', "
             "detail = detail || ' (superseded by new debrief)', updated_at = ? "
             "WHERE work_item_id = ? AND status = 'proposed'", (now, item_id))
-        withdrawn = work_store.supersede_proposals(item_id, opened, conn=c, now=now)
+        kept = []
         for f in result["followups"]:
+            status, detail = "draft", ""
+            if f["required"]:
+                held = open_keys.pop(proposal_key(item_id, f["unfinished"], f["draft"]), None)
+                if held is not None:
+                    status, detail = "proposed", f"{PROPOSED_DETAIL_PREFIX}{held}"
+                    kept.append(held)
             c.execute(
                 "INSERT INTO work_followups(work_item_id, kind, workspace, recipient, "
-                "draft, required, unfinished, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "draft, required, unfinished, status, detail, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (item_id, f["kind"], f["workspace"], f["recipient"], f["draft"],
-                 1 if f["required"] else 0, f["unfinished"], now, now),
+                 1 if f["required"] else 0, f["unfinished"], status, detail, now, now),
             )
+        withdrawn = work_store.supersede_proposals(
+            item_id, [i for i in opened if i not in kept], conn=c, now=now)
     _record_debrief_event(item_id, "debrief_done",
                           {"followups": len(result["followups"]),
                            "superseded": withdrawn, **revision})
@@ -303,7 +342,8 @@ def _run_debrief_locked(item_id: int) -> dict:
                  f"work item {gone}: withdrawn; the debrief of work item "
                  f"{item_id} was written again and proposed the work afresh")
     return {"id": item_id, "summary": result["summary"],
-            "followups": len(result["followups"]), "superseded": withdrawn}
+            "followups": len(result["followups"]), "superseded": withdrawn,
+            "kept": kept}
 
 
 _DEBRIEF_EVENT_KINDS_SQL = ("('debrief_done', 'debrief_failed', "
@@ -476,6 +516,10 @@ def _scan_loop():
                 _record_debrief_event(item_id, "debrief_skipped", {"reason": "pre-feature"})
     except Exception as e:
         log.emit("work_debrief_error", f"boot marking failed: {type(e).__name__}: {e}")
+    try:
+        backfill_proposal_keys()
+    except Exception as e:
+        log.emit("work_debrief_error", f"proposal key backfill failed: {type(e).__name__}: {e}")
     restored = False
     while True:
         time.sleep(SCAN_INTERVAL)
@@ -715,11 +759,15 @@ def _propose_followup_locked(followup_id: int, objective: str = "") -> dict:
         result = work_launch.propose_followup(
             row["work_item_id"], objective.strip() or row["draft"],
             note=f"the debrief of work item {row['work_item_id']} reported this "
-                 "work as authorised and unfinished")
+                 "work as authorised and unfinished",
+            proposal_key=proposal_key(row["work_item_id"], row["unfinished"], row["draft"]))
         if "error" in result:
             raise RuntimeError(result["error"])
         detail = f"{PROPOSED_DETAIL_PREFIX}{result['item_id']}"
         status = "proposed"
+    except work_store.ProposalKeyHeld as e:
+        detail = DUPLICATE_DETAIL.format(id=e.holder["id"], state=e.holder["state"])
+        status = "dismissed"
     except Exception as e:
         detail = f"{type(e).__name__}: {e}"[:300]
         status = "failed"
@@ -733,9 +781,33 @@ def _propose_followup_locked(followup_id: int, objective: str = "") -> dict:
             (row["work_item_id"], "followup_" + status,
              db.dump_json({"followup_id": followup_id, "detail": detail}), now),
         )
-    if status == "failed":
+    if status != "proposed":
         return {"error": detail}
     return {"id": followup_id, "status": status, "detail": detail}
+
+
+def backfill_proposal_keys() -> int:
+    """Key every proposal a debrief opened before proposals carried a key.
+
+    Without it the proposals the operator already declined hold no key, and
+    the work they asked for is proposed once more. The key is read off the
+    follow-up that opened the proposal, the same way a new one is keyed."""
+    with db.tx() as c:
+        rows = c.execute(
+            "SELECT i.id, f.work_item_id, f.unfinished, f.draft FROM work_items i "
+            "JOIN work_followups f ON f.kind = 'work_item' AND f.work_item_id = i.source_item_id "
+            "AND (f.detail = ? || i.id OR f.detail LIKE ? || i.id || ' %') "
+            "WHERE i.scope = 'proposal' AND i.proposal_key = '' ORDER BY i.id, f.id",
+            (PROPOSED_DETAIL_PREFIX, PROPOSED_DETAIL_PREFIX)).fetchall()
+        keyed = set()
+        for row in rows:
+            if row["id"] in keyed:
+                continue
+            c.execute("UPDATE work_items SET proposal_key = ? WHERE id = ?",
+                      (proposal_key(row["work_item_id"], row["unfinished"], row["draft"]),
+                       row["id"]))
+            keyed.add(row["id"])
+    return len(keyed)
 
 
 def _pr_label(pr: dict) -> str:
