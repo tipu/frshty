@@ -324,3 +324,24 @@ def test_is_running_tells_a_live_task_from_a_finished_one(item_state, running):
 
 def test_an_unknown_task_is_not_running():
     assert work_store.is_running(987654) is False
+
+
+def test_the_migration_keys_an_old_proposal_on_its_stage(tmp_path):
+    """Proposals keyed on the step label before this change still hold their
+    work, so a declined one keeps the next debrief from asking again."""
+    migration = (pathlib.Path(__file__).resolve().parents[2]
+                 / "migrations" / "053_proposal_key_stage.sql")
+    conn = sqlite3.connect(tmp_path / "migration-053.db")
+    conn.execute("CREATE TABLE work_items (id INTEGER PRIMARY KEY, "
+                 "proposal_key TEXT NOT NULL DEFAULT '')")
+    conn.executemany("INSERT INTO work_items(id, proposal_key) VALUES (?, ?)",
+                     [(1, "commit:item/9861"), (2, "pr:item/9861"),
+                      (3, "merge:github.com/acme/app/7"), (4, "work:item/9425"),
+                      (5, "release:item/9861"), (6, ""), (7, "push:item/9861")])
+    conn.executescript(migration.read_text())
+
+    assert dict(conn.execute("SELECT id, proposal_key FROM work_items").fetchall()) == {
+        1: "deliver:item/9861", 2: "deliver:item/9861",
+        3: "deliver:github.com/acme/app/7", 4: "deliver:item/9425",
+        5: "release:item/9861", 6: "", 7: "deliver:item/9861"}
+    conn.close()

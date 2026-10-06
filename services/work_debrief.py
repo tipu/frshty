@@ -217,9 +217,13 @@ def _opened_proposals(c, item_id: int) -> list[int]:
 def proposal_key(source_item_id: int, unfinished: str, draft: str) -> str:
     """The natural key of the work one required follow-up asks for.
 
-    It is the delivery step the follow-up names and the pull requests its
+    It is the delivery stage the follow-up names and the pull requests its
     draft names by address, so two tasks that both leave one pull request
-    unmerged ask for one piece of work. A draft that names no pull request is
+    unmerged ask for one piece of work. Commit, push, pr and merge are one
+    stage: the debriefs of one branch name the step in turn as the run moves
+    on, and each name asks for the same branch to land. Release is a stage
+    of its own, so the release of a merged branch is proposed after its
+    merge. A draft that names no pull request is
     keyed to its own task: the debrief of one task writes the same step in
     new words each time, and the words are not what identifies the work.
 
@@ -229,7 +233,8 @@ def proposal_key(source_item_id: int, unfinished: str, draft: str) -> str:
     at all (work_store.proposal_holding_key)."""
     prs = sorted(r["key"] for r in work_tickets.pr_refs_in(draft))
     target = ",".join(prs) if prs else f"item/{source_item_id}"
-    return f"{unfinished or 'work'}:{target}"
+    stage = "release" if unfinished == "release" else "deliver"
+    return f"{stage}:{target}"
 
 
 def _open_proposal_keys(c, item_id: int, proposal_ids: list[int]) -> dict[str, int]:
