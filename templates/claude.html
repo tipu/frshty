@@ -51,11 +51,7 @@ pre.body { white-space: pre-wrap; word-break: break-word; }
     </select>
     <select v-model="filters.function" @change="load" class="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-300">
         <option value="">all functions</option>
-        <option value="run_haiku">run_haiku</option>
-        <option value="run_sonnet">run_sonnet</option>
-        <option value="run_balanced">run_balanced</option>
-        <option value="run_claude_code">run_claude_code</option>
-        <option value="work_debrief">work_debrief</option>
+        <option v-for="f in functions" :key="f" :value="f">{{ f }}</option>
     </select>
     <input type="text" v-model.lazy="filters.q" @change="load" placeholder="search prompt/output/job"
            class="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-300 flex-1 min-w-[200px]" />
@@ -129,6 +125,7 @@ const { createApp, ref, reactive, onMounted } = Vue;
 frshtyApp({
     setup() {
         const rows = ref([]);
+        const functions = ref([]);
         const features = ref({});
         const instanceName = ref('');
         const filters = reactive({ since_hours: 24, status: '', function: '', q: '' });
@@ -179,12 +176,14 @@ frshtyApp({
             if (filters.q) params.set('q', filters.q);
             params.set('limit', '500');
             try {
-                const [r1, r2] = await Promise.all([
+                const [r1, r2, r3] = await Promise.all([
                     fetch(`/api/claude/invocations?${params}`),
                     fetch('/api/config'),
+                    fetch('/api/claude/functions'),
                 ]);
                 const j = await r1.json();
                 rows.value = j.invocations || [];
+                functions.value = (await r3.json()).functions || [];
                 const cfg = await r2.json();
                 features.value = cfg.features || {};
                 instanceName.value = cfg.job?.key || '';
@@ -206,7 +205,7 @@ frshtyApp({
             setInterval(load, 10000);
         });
 
-        return { rows, features, instanceName, filters, expanded, details, totalCost,
+        return { rows, functions, features, instanceName, filters, expanded, details, totalCost,
                  fmtTime, fmtDur, fmtCost, fmtTokens, fmtCostsByModel, load, toggle };
     },
 }).mount('#app');

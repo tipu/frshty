@@ -607,6 +607,10 @@ def _scan_loop():
         except Exception as e:
             log.emit("work_progress_sweep_error", f"{type(e).__name__}: {e}")
         try:
+            work_store.sweep_usage()
+        except Exception as e:
+            log.emit("work_usage_sweep_error", f"{type(e).__name__}: {e}")
+        try:
             for act in work_store.sweep_run_budgets():
                 log.emit("work_run_budget",
                          f"work item {act['id']}: {act['action']} after {act['minutes']} minutes")
