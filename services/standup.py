@@ -1137,10 +1137,16 @@ def sweep_completed_tasks() -> list[int]:
     which is a cheaper question than "nothing is happening" and keeps the
     check-off honest."""
     rows = db.query_all(
-        "SELECT DISTINCT i.id FROM standup_items i"
-        " JOIN work_items w ON w.standup_item_id = i.id"
-        f" WHERE i.state = 'open' AND w.state IN {work_store.FINISHED_STATES_SQL}"
-        "   AND NOT EXISTS (SELECT 1 FROM work_items o WHERE o.standup_item_id = i.id"
+        "WITH RECURSIVE line(item_id, id, carried_from) AS ("
+        " SELECT id, id, carried_from FROM standup_items WHERE state = 'open'"
+        " UNION SELECT line.item_id, i.id, i.carried_from FROM standup_items i"
+        " JOIN line ON i.id = line.carried_from) "
+        "SELECT DISTINCT l.item_id AS id FROM line l"
+        " JOIN work_items w ON w.standup_item_id = l.id"
+        f" WHERE w.state IN {work_store.FINISHED_STATES_SQL}"
+        "   AND NOT EXISTS (SELECT 1 FROM line m"
+        "                  JOIN work_items o ON o.standup_item_id = m.id"
+        "                  WHERE m.item_id = l.item_id"
         f"                  AND o.state IN ({', '.join('?' for _ in LIVE_TASK_STATES)}))",
         tuple(LIVE_TASK_STATES))
     moved = []
