@@ -19,13 +19,24 @@ A finding is one of:
 
 An alert event goes to the feed when the set of findings changes, and a
 recovery event when it clears, so a fault that persists does not repeat every
-run."""
+run.
+
+After the rules, a cheap codex model reads a digest of each instance's events
+since the last run, plus the rule findings, and judges whether the instances
+work as expected. The rules cannot see a fault whose events look ordinary: a
+ticket that loops, a job that repeats with no progress, a scan that stopped
+producing results. The model can. Its verdict goes to the feed on the same
+change-only terms. The model runs in an empty directory with a read-only
+sandbox, so it reads only the digest it is given."""
 import asyncio
 import math
+import tempfile
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import core.log as log
 import core.state as state
+from core.llm import extract_json, run_external_model
 from core.discovery import discover_instances
 from web.observability import _fetch_local_global_events, _fetch_remote_global_events
 
@@ -34,6 +45,34 @@ DEFAULT_STALE_HOURS = 2
 FETCH_LIMIT = 5000
 ERROR_MARKERS = ("error", "fail", "crash")
 _STATE_MODULE = "global_watch"
+DEFAULT_AGENT_MODEL = "gpt-6-luna"
+DEFAULT_AGENT_EFFORT = "low"
+AGENT_TIMEOUT = 300
+DIGEST_TOP_EVENTS = 12
+DIGEST_RECENT_EVENTS = 15
+DIGEST_SUMMARY_CHARS = 160
+AGENT_PROMPT = """You watch a fleet of frshty instances. frshty is an automation
+service: each instance polls tickets, pull requests, Slack and other sources,
+runs jobs and coding agents, and logs every step as an event in its feed.
+
+Below is a digest of every instance's feed since the last check, {since}, up
+to now, {now}. Each instance lists its event count, its most frequent event
+names and its latest non-noise events. Rule findings come first; the rules
+already alert on them.
+
+Judge whether the instances work as expected. Report a problem only when the
+digest shows it: an instance whose work stopped, a ticket or job that repeats
+without progress, a failure that recurs, an instance that only logs noise
+while it has work, events that contradict each other. Ordinary churn, one
+failure that a retry cleared, and quiet periods are not problems. Do not
+repeat a rule finding unless you can add its likely cause.
+
+Reply with one JSON object and nothing else:
+{{"status": "ok" | "problem", "problems": [{{"instance": "<key>", "what": "<one sentence>", "evidence": "<event names or summaries from the digest>", "likely_cause": "<one sentence>"}}]}}
+
+DIGEST
+{digest}
+"""
 
 
 def settings(config: dict) -> dict:
@@ -90,6 +129,84 @@ def evaluate(events: list[dict], errors: dict, expected: list[str],
     return findings
 
 
+def build_digest(events: list[dict], expected: list[str], findings: list[dict],
+                 since: str) -> str:
+    by_instance: dict[str, list[dict]] = {key: [] for key in expected}
+    for ev in events:
+        if (ev.get("ts") or "") > since:
+            by_instance.setdefault(ev.get("instance_key") or "", []).append(ev)
+    parts = ["RULE FINDINGS"]
+    parts += [f"- {f['instance']} {f['kind']}: {f['detail']}" for f in findings] or ["- none"]
+    for key in sorted(by_instance):
+        rows = sorted(by_instance[key], key=lambda ev: ev.get("ts") or "")
+        noise = [ev for ev in rows if (ev.get("meta") or {}).get("category") == "noise"]
+        counts: dict[str, int] = {}
+        for ev in rows:
+            name = ev.get("event") or ""
+            counts[name] = counts.get(name, 0) + 1
+        top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:DIGEST_TOP_EVENTS]
+        recent = [ev for ev in rows if (ev.get("meta") or {}).get("category") != "noise"]
+        parts.append(f"\nINSTANCE {key}: {len(rows)} events, {len(noise)} noise")
+        parts.append("top: " + (", ".join(f"{name} x{n}" for name, n in top) or "none"))
+        for ev in recent[-DIGEST_RECENT_EVENTS:]:
+            summary = " ".join(str(ev.get("summary") or "").split())[:DIGEST_SUMMARY_CHARS]
+            parts.append(f"{(ev.get('ts') or '')[11:19]} {ev.get('event')}: {summary}")
+    return "\n".join(parts)
+
+
+def ask_agent(config: dict, digest: str, since: str, now: datetime) -> dict:
+    """The model's verdict, or {"status": "failed", "reason": ...}.
+
+    codex only: a failed call is reported, never retried on another vendor."""
+    cfg = settings(config)
+    model = str(cfg.get("agent_model") or DEFAULT_AGENT_MODEL)
+    effort = str(cfg.get("agent_effort") or DEFAULT_AGENT_EFFORT)
+    prompt = AGENT_PROMPT.format(since=since, now=now.isoformat(), digest=digest)
+    with tempfile.TemporaryDirectory(prefix="global-watch-") as tmp:
+        last = Path(tmp) / "last.txt"
+        cmd = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only",
+               "--ephemeral", "-m", model, "-c", f"model_reasoning_effort={effort}",
+               "-o", str(last), "-"]
+        text, code = run_external_model(cmd, fn_name="global_watch_agent", model=f"codex:{model}",
+                                        prompt=prompt, cwd=Path(tmp), timeout=AGENT_TIMEOUT,
+                                        last_message_file=last, stdin_text=prompt)
+    if code != 0 or not text:
+        return {"status": "failed", "reason": f"codex exit={code}"}
+    verdict = extract_json(text)
+    if not isinstance(verdict, dict) or verdict.get("status") not in ("ok", "problem"):
+        return {"status": "failed", "reason": f"unparseable verdict: {text.strip()[:200]}"}
+    raw_problems = verdict.get("problems") or []
+    if not isinstance(raw_problems, list):
+        return {"status": "failed", "reason": f"problems is not a list: {text.strip()[:200]}"}
+    problems = [p for p in raw_problems if isinstance(p, dict)]
+    if verdict["status"] == "problem" and not problems:
+        return {"status": "failed", "reason": "problem verdict names no problem"}
+    return {"status": verdict["status"], "problems": problems if verdict["status"] == "problem" else []}
+
+
+def _report_agent(verdict: dict, prior: dict, expected: list[str]) -> list[str]:
+    if verdict["status"] == "failed":
+        if prior.get("agent_status") != "failed":
+            log.emit("global_watch_agent_failed",
+                     f"global feed agent gave no verdict: {verdict['reason']}",
+                     links={"global": "/global"}, meta={"reason": verdict["reason"]})
+        return prior.get("agent_fingerprint") or []
+    problems = verdict["problems"]
+    fingerprint = sorted({str(p.get("instance") or "") for p in problems})
+    if problems and fingerprint != prior.get("agent_fingerprint"):
+        lines = [f"{p.get('instance')}: {p.get('what')} (cause: {p.get('likely_cause')})"
+                 for p in problems]
+        log.emit("global_watch_agent_alert",
+                 f"global feed agent: {len(problems)} problem(s): " + "; ".join(lines),
+                 links={"global": "/global"},
+                 meta={"problems": problems, "expected": expected})
+    elif not problems and prior.get("agent_fingerprint"):
+        log.emit("global_watch_agent_ok",
+                 f"global feed agent sees all {len(expected)} instance(s) working again",
+                 links={"global": "/global"}, meta={"expected": expected})
+    return fingerprint
+
+
 def _fingerprint(findings: list[dict]) -> list[str]:
     return sorted(f"{f['kind']}:{f['instance']}:{f.get('event', '')}" for f in findings)
 
@@ -129,9 +246,19 @@ def run(config: dict, now: datetime | None = None) -> dict:
                  f"global feed covers all {len(expected)} instance(s) again",
                  links={"global": "/global"}, meta={"expected": expected})
 
+    verdict = {"status": "off", "problems": []}
+    agent_fingerprint = prior.get("agent_fingerprint") or []
+    if cfg.get("agent", True):
+        digest = build_digest(events, expected, findings, since)
+        verdict = ask_agent(config, digest, since, now)
+        agent_fingerprint = _report_agent(verdict, prior, expected)
+
     state.save(_STATE_MODULE, {"last_run_at": now.isoformat(),
                                "fingerprint": fingerprint,
                                "findings": findings,
-                               "expected": expected})
-    return {"findings": findings, "expected": expected,
+                               "expected": expected,
+                               "agent_status": verdict["status"],
+                               "agent_fingerprint": agent_fingerprint,
+                               "agent_problems": verdict.get("problems") or []})
+    return {"findings": findings, "expected": expected, "agent": verdict,
             "instances_seen": sorted({ev.get("instance_key") for ev in events})}
