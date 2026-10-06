@@ -76,6 +76,37 @@ def discover_instances() -> list[dict]:
                 pass
             continue
 
+    peers_path = CONFIG_DIR / "peers.toml"
+    if peers_path.exists():
+        try:
+            with open(peers_path, "rb") as f:
+                raw = tomllib.load(f)
+            for peer in raw.get("peers") or []:
+                if not isinstance(peer, dict):
+                    continue
+                key = str(peer.get("key") or "").strip()
+                base_url = str(peer.get("base_url") or "").strip().rstrip("/")
+                if key and base_url and key not in seen_keys:
+                    instances.append({
+                        "key": key,
+                        "port": 0,
+                        "base_url": base_url,
+                        "config_path": str(peers_path),
+                        "platform": "",
+                        "ticket_system": "",
+                    })
+                    seen_keys.add(key)
+        except Exception as e:
+            try:
+                import core.log as _log
+                _log.emit(
+                    "discovery_load_error",
+                    f"failed to parse {peers_path}: {type(e).__name__}: {e}",
+                    meta={"path": str(peers_path)},
+                )
+            except Exception:
+                pass
+
     return instances
 
 
