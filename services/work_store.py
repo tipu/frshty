@@ -1869,13 +1869,15 @@ def side_question(item_id: int, text: str) -> dict:
     return {"id": item_id, "question": question, "answer": out["answer"]}
 
 
-def pending_tool_calls(transcript_path: str) -> bool:
+def pending_tool_calls(transcript_path: str, since: int = 0) -> bool:
     """True when the transcript tail ends inside an unanswered tool call.
 
     A tool_use id with no matching tool_result means Claude is blocked in
     that call, not idle. The sweep must not synthesize a Stop for it. A
     codex rollout records a command only once it completes, so it can never
-    show a call in flight and always answers False.
+    show a call in flight and always answers False. Only the bytes from
+    `since` on count: a resume writes no tool_result for the call the old
+    process died in, so a call written before the resume is never in flight.
     """
     if not transcript_path or not os.path.isfile(transcript_path):
         return False
@@ -1885,7 +1887,7 @@ def pending_tool_calls(transcript_path: str) -> bool:
         with open(transcript_path, "rb") as f:
             f.seek(0, os.SEEK_END)
             size = f.tell()
-            f.seek(max(0, size - 262144))
+            f.seek(max(0, size - 262144, since))
             tail = f.read().decode("utf-8", errors="replace")
     except OSError:
         return False
@@ -1907,6 +1909,30 @@ def pending_tool_calls(transcript_path: str) -> bool:
                 if isinstance(b, dict) and b.get("type") == "tool_result":
                     pending.discard(str(b.get("tool_use_id") or ""))
     return bool(pending)
+
+
+def resume_cursor(run_id: int, transcript_path: str) -> int:
+    """The transcript size the run's latest resume SessionStart recorded, or 0.
+
+    A restart kills the agent mid tool call and resumes the session at a
+    prompt. The transcript keeps that tool_use unanswered, so everything
+    before this offset belongs to a process that is gone. An offset into a
+    different transcript file says nothing about this one, so it counts as 0."""
+    for ev in db.query_all(
+            "SELECT payload FROM work_events WHERE work_run_id = ? "
+            "AND kind = 'SessionStart' ORDER BY id DESC", (run_id,)):
+        try:
+            payload = json.loads(ev["payload"] or "{}")
+        except ValueError:
+            continue
+        if payload.get("source") == "resume":
+            if payload.get("transcript_path") != transcript_path:
+                return 0
+            try:
+                return max(0, int(payload.get("transcript_cursor") or 0))
+            except (TypeError, ValueError):
+                return 0
+    return 0
 
 
 def retry_missed_autocontinues(cutoff: str) -> list[dict]:
@@ -2036,7 +2062,8 @@ def sweep_stale_items(now: datetime | None = None) -> list[dict]:
                 record_artifacts(row["session_id"], transcript_path)
                 actions.append({"id": row["item_id"], "action": "failed"})
             continue
-        if pending_tool_calls(transcript_path):
+        if pending_tool_calls(transcript_path,
+                              resume_cursor(row["run_id"], transcript_path)):
             if mtime_iso and mtime_iso > stuck_cutoff:
                 with db.tx() as c:
                     c.execute(
