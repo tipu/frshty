@@ -356,15 +356,20 @@ class TestInstanceLauncher:
         args = mod.gvoice_login_args(config)
         state = tmp_path / "boxes" / "aimyable" / "state"
         assert f"GVOICE_PROFILE_DIR={state / 'gvoice'}" in run
-        assert f"--user-data-dir={state / 'gvoice'}" in args
-        assert "--password-store=basic" in args
+        assert f"GVOICE_PROFILE_DIR={state / 'gvoice'}" in args
+        assert "GVOICE_CHROME_CHANNEL=chrome" in args
         volumes = [args[i + 1] for i, a in enumerate(args) if a == "-v"]
         assert f"{state / 'gvoice'}:{state / 'gvoice'}" in volumes
         assert (state / "gvoice").is_dir()
         assert f"{xauth}:/run/frshty/xauthority:ro" in volumes
         assert "DISPLAY=:0" in args
-        assert args[args.index("--entrypoint") + 1:][:2] == ["google-chrome", mod.IMAGE]
-        assert not any("enable-automation" in a for a in args)
+        assert args[args.index("--entrypoint") + 1:][:2] == ["node", mod.IMAGE]
+        assert args[args.index("-w") + 1] == mod.GVOICE_DIR
+        script = args[-1]
+        assert 'ignoreDefaultArgs: ["--enable-automation"]' in script
+        assert "--disable-blink-features=AutomationControlled" in script
+        assert mod.GVOICE_URL in script
+        assert "timeout: 0" in script
 
     def test_gvoice_login_signs_in_the_configured_profile(self, tmp_path, monkeypatch):
         mod, home = self._launcher(tmp_path, monkeypatch)
@@ -378,10 +383,12 @@ class TestInstanceLauncher:
         monkeypatch.setenv("DISPLAY", ":0")
         monkeypatch.delenv("XAUTHORITY", raising=False)
         profile = tmp_path / "boxes" / "aimyable" / "state" / "gvoice-profile"
-        config["direct_inbox"] = {"gvoice_profile_dir": str(profile)}
+        config["direct_inbox"] = {"gvoice_profile_dir": str(profile),
+                                  "gvoice_chrome_channel": "chrome-beta"}
         args = mod.gvoice_login_args(config)
         volumes = [args[i + 1] for i, a in enumerate(args) if a == "-v"]
-        assert f"--user-data-dir={profile}" in args
+        assert f"GVOICE_PROFILE_DIR={profile}" in args
+        assert "GVOICE_CHROME_CHANNEL=chrome-beta" in args
         assert f"{profile}:{profile}" in volumes
         config["direct_inbox"] = {"gvoice_profile_dir": str(tmp_path / "elsewhere")}
         with pytest.raises(SystemExit, match="outside"):
