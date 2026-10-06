@@ -953,3 +953,23 @@ class TestRunBudget:
     def test_launch_and_continue_prompts_state_the_budget(self):
         assert work_store.RUN_BUDGET_RULE in work_store.continue_prompt()
         assert str(work_store.RUN_CHECK_IN_MINUTES) in work_store.RUN_BUDGET_RULE
+
+    def test_a_turn_that_ends_past_the_budget_gets_the_stop_message(self, monkeypatch):
+        item_id, sid, sent = self._working_run(monkeypatch, work_store.RUN_BUDGET_MINUTES + 1)
+        with db.tx() as c:
+            c.execute("UPDATE work_items SET state = 'needs_you' WHERE id = ?", (item_id,))
+        assert work_store.maybe_autocontinue(sid, "", tail="still working") == "continued"
+        assert [t for k, t in sent if k == f"work-{item_id}"] == [work_store.BUDGET_SPENT_PROMPT]
+        assert self._actions(item_id) == []
+        with db.tx() as c:
+            c.execute("UPDATE work_items SET state = 'needs_you' WHERE id = ?", (item_id,))
+        assert work_store.maybe_autocontinue(sid, "", tail="shipped") == "budget_spent"
+
+    def test_a_failed_send_is_tried_again(self, monkeypatch):
+        item_id, _, sent = self._working_run(monkeypatch, work_store.RUN_BUDGET_MINUTES)
+        monkeypatch.setattr(work_store, "tmux_send", lambda key, text: False)
+        assert self._actions(item_id) == []
+        monkeypatch.setattr(work_store, "tmux_send",
+                            lambda key, text: sent.append((key, text)) or True)
+        assert self._actions(item_id) == ["budget_spent"]
+        assert [t for k, t in sent if k == f"work-{item_id}"] == [work_store.BUDGET_SPENT_PROMPT]
