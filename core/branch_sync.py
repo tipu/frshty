@@ -21,6 +21,17 @@ def ls_remote_sha(repo_path, base_branch: str) -> str:
     return result.stdout.split()[0]
 
 
+def _count_failure(st: dict, attempts: int, result: str, error: str) -> dict:
+    """Spend one attempt on a sync that could not start.
+
+    Callers re-queue the sync while an attempt is left, so a failure that
+    spends none re-queues it for ever and starves every later stage."""
+    st["base_sync_attempts"] = attempts + 1
+    st["last_base_error"] = error
+    return {"result": result, "error": error, "attempts": attempts + 1,
+            "capped": attempts + 1 >= MAX_BASE_SYNC_ATTEMPTS}
+
+
 def sync_branch_with_base(platform, repo_path, base_branch: str, branch: str,
                           st: dict, ensure_worktree) -> dict:
     """Merge base into branch when base has moved ahead, then push.
@@ -52,16 +63,16 @@ def sync_branch_with_base(platform, repo_path, base_branch: str, branch: str,
 
     worktree = ensure_worktree()
     if not worktree:
-        return {"result": "no_worktree"}
+        return _count_failure(st, attempts, "no_worktree", "no worktree for the PR branch")
     fetch = subprocess.run(["git", "fetch", "origin", base_branch],
                            cwd=str(worktree), capture_output=True, text=True, timeout=60)
     if fetch.returncode != 0:
-        return {"result": "fetch_failed"}
+        return _count_failure(st, attempts, "fetch_failed", (fetch.stderr or "").strip()[:200])
     try:
         behind = git_util.run_git(worktree, ["rev-list", "--count", f"HEAD..origin/{base_branch}"],
                                   timeout=10).stdout.strip()
     except git_util.GitCommandError as e:
-        return {"result": "fetch_failed", "error": str(e)[:200]}
+        return _count_failure(st, attempts, "fetch_failed", str(e)[:200])
     if behind == "0":
         st["base_synced"] = True
         return {"result": "uptodate"}
