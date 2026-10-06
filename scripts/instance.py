@@ -6,6 +6,7 @@
     scripts/instance.py up    config/frshty.toml
     scripts/instance.py down  config/frshty.toml
     scripts/instance.py logs  config/frshty.toml
+    scripts/instance.py gvoice-login config/personal.toml
     scripts/instance.py reload
     scripts/instance.py gateway-up --port 7130
     scripts/instance.py gateway-down
@@ -35,6 +36,12 @@ The container reads its config from ~/.frshty-containers/<key>/config/<key>.toml
 and the instance list from ~/.frshty-containers/peers.toml. Both paths outlive
 every checkout and worktree. `up` and `check` copy the config they are given to
 that path, and refuse when a different file is already there.
+
+The gvoice CLI keeps its Google Voice session in a Chrome profile at
+state/gvoice/, named by GVOICE_PROFILE_DIR. `gvoice-login` runs `gvoice login`
+on that profile in a throwaway container of the same image. The Chrome window
+opens on the host display named by DISPLAY and XAUTHORITY. Close it when the
+sign-in is done.
 
 On a macOS host the SQLite database lives on the Docker volume frshty-<key>-db,
 not in state/. File locks do not hold across processes on a macOS bind mount,
@@ -78,6 +85,8 @@ MODEL_DIRS = [".claude", ".codex", ".gemini"]
 SEED_FILES = [".claude.json", ".gitconfig"]
 DOCKER_SOCKET = Path("/var/run/docker.sock")
 PEERS = CONTAINERS_ROOT / "peers.toml"
+GVOICE_PROFILE = "gvoice"
+X11_SOCKETS = Path("/tmp/.X11-unix")
 DB_DIR = "/var/lib/frshty"
 MEMORY = "32g"
 DB_COPY = """
@@ -294,6 +303,7 @@ def run_args(config: dict, config_path: Path, check: bool) -> list[str]:
             "-e", f"FRSHTY_TIMEZONE={os.environ.get('FRSHTY_TIMEZONE', 'America/Los_Angeles')}",
             "-e", f"FRSHTY_WORKER_COUNT={int(box.get('workers') or 3)}",
             "-e", f"FRSHTY_MAX_CONCURRENT_LLM={int(box.get('llm') or 9)}",
+            "-e", f"GVOICE_PROFILE_DIR={root / 'state' / GVOICE_PROFILE}",
             "--memory", memory, "--memory-swap", memory,
             "--tmpfs", TMP_MOUNT]
     if box.get("env_file"):
@@ -317,6 +327,29 @@ def run_args(config: dict, config_path: Path, check: bool) -> list[str]:
         args += ["-d", "--restart", "unless-stopped", "--name", container_name(config), IMAGE,
                  f"/app/config/{key}.toml", "--port", str(port)]
     return args
+
+
+def gvoice_login_args(config: dict) -> list[str]:
+    """A throwaway container that runs `gvoice login` on the instance's
+    Chrome profile and shows the Chrome window on the host display."""
+    state = CONTAINERS_ROOT / config["job"]["key"] / "state"
+    display = os.environ.get("DISPLAY")
+    if not display:
+        raise SystemExit("gvoice-login: DISPLAY is not set; run it from the desktop session")
+    xauth = Path(os.environ.get("XAUTHORITY") or HOME / ".Xauthority")
+    for path in (state, xauth, X11_SOCKETS):
+        if not path.exists():
+            raise SystemExit(f"gvoice-login: {path} does not exist")
+    return ["docker", "run", "--rm", "-it", "--network", "host", "--init",
+            "--shm-size", "1g",
+            "-e", f"HOME={HOME}",
+            "-e", f"DISPLAY={display}",
+            "-e", "XAUTHORITY=/run/frshty/xauthority",
+            "-e", f"GVOICE_PROFILE_DIR={state / GVOICE_PROFILE}",
+            "-v", f"{X11_SOCKETS}:{X11_SOCKETS}:ro",
+            "-v", f"{xauth}:/run/frshty/xauthority:ro",
+            "-v", f"{state}:{state}",
+            "--entrypoint", "gvoice", IMAGE, "login"]
 
 
 def build() -> int:
@@ -394,7 +427,7 @@ def reload(timeout: float = 120) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="instance.py")
     parser.add_argument("action", choices=["build", "check", "up", "down", "logs", "reload",
-                                           "gateway-up", "gateway-down"])
+                                           "gateway-up", "gateway-down", "gvoice-login"])
     parser.add_argument("config", nargs="?")
     parser.add_argument("--port", type=int, default=7130, help="gateway listen port")
     args = parser.parse_args(argv)
@@ -422,6 +455,8 @@ def main(argv: list[str] | None = None) -> int:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
         prepare_db_volume(config, CONTAINERS_ROOT / config["job"]["key"], move=True)
         return subprocess.run(cmd).returncode
+    if args.action == "gvoice-login":
+        return subprocess.run(gvoice_login_args(config)).returncode
     if args.action == "down":
         return subprocess.run(["docker", "rm", "-f", name]).returncode
     return subprocess.run(["docker", "logs", "--tail", "200", name]).returncode

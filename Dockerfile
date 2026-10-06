@@ -30,8 +30,15 @@ RUN apt-get update && apt-get install -y unzip oathtool && \
 WORKDIR /app
 
 RUN pip install --no-cache-dir httpx fastapi 'uvicorn[standard]' watchfiles mcp playwright pytest uv pipenv pre-commit && \
-    python -m playwright install --with-deps chromium && \
+    python -m playwright install --with-deps chromium chrome && \
     chmod -R a+rX /ms-playwright
+
+ARG GVOICE_REF=7d7a74acf10c48cc3d0424d2ff96c24f0fb8a5d1
+RUN git clone https://github.com/tipu/google-voice-cli.git /opt/google-voice-cli && \
+    git -C /opt/google-voice-cli checkout --detach "${GVOICE_REF}" && \
+    npm ci --omit=dev --prefix /opt/google-voice-cli && \
+    ln -s /opt/google-voice-cli/src/cli.js /usr/local/bin/gvoice && \
+    gvoice --version
 
 RUN groupadd -o -g "${HOST_GID}" frshty && \
     useradd -o -m -d "${HOST_HOME}" -s /bin/bash -u "${HOST_UID}" -g "${HOST_GID}" frshty && \
