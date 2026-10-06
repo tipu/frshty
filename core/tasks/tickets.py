@@ -33,7 +33,7 @@ from core.tasks.preconditions import (
     repo_gate_clear,
 )
 from features.platforms import make_platform
-from features.tickets import clear_scope_fix_open, mark_scope_fix_open
+from features.tickets import _ensure_pr_worktree, clear_scope_fix_open, mark_scope_fix_open
 
 
 PLAN_TIMEOUT = 3000
@@ -1664,7 +1664,7 @@ def fix_ci_failures(ctx: TaskContext) -> TaskResult:
         platform = make_platform(ctx.config)
 
         for pr in prs:
-            wt = ticket_worktree_path(ctx.config, slug, pr["repo"])
+            wt = _ensure_pr_worktree(ctx.config, {"key": ctx.ticket_key}, ts, pr, base_url)
             outcome = triage_and_fix_pr(
                 platform, pr["repo"], pr["id"],
                 label=f"{ctx.ticket_key} {pr['repo']}#{pr['id']}",
@@ -3195,8 +3195,12 @@ def substantiate_reply(ctx: TaskContext) -> TaskResult:
                                   "reason": "no drafted reply to substantiate"})
         return TaskResult("ok", artifacts={"verdict": defence.INCONCLUSIVE})
 
-    wt = ticket_worktree_path(ctx.config, slug, repo)
-    if not (wt / ".git").exists():
+    ts = state.load_ticket(ctx.ticket_key or "") or {}
+    pr = next((p for p in ts.get("prs", []) if p.get("repo") == repo), None)
+    wt = (_ensure_pr_worktree(ctx.config, {"key": ctx.ticket_key}, ts, pr,
+                              ctx.config.get("_base_url", ""))
+          if pr else ticket_worktree_path(ctx.config, slug, repo))
+    if wt is None or not (wt / ".git").exists():
         ft.record_defence_result(ctx.config, slug, comment_id,
                                  {"verdict": defence.INCONCLUSIVE,
                                   "reason": f"no worktree for {repo}"})
