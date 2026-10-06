@@ -71,6 +71,7 @@ review_prs = false
 auto_review = true                # default true. when false, frshty never starts a code review on its own. the PRs waiting on this user are still listed on /reviews and /today, and a review runs only when the operator starts one there. the rest of review_prs (own-PR comments, CI fixes, the peer-review list) is unaffected.
 tickets = true
 slack = false
+direct_inbox = false              # read your direct emails (the Gmail connector of the claude.ai account the instance runs as) and Google Voice texts (the read-only `gvoice` CLI from github.com/tipu/google-voice-cli, signed in with `gvoice login`) and propose a follow-up task on /tasks for every conversation that waits on you. frshty sends nothing.
 upwork = false                    # read the Upwork inbox on THIS machine, through the logged-in Chrome profile. Local only: it needs a browser with remote debugging open on cdp_url, and it does nothing on a box that has none.
 timesheet = false
 billing = false
@@ -116,6 +117,19 @@ pr_autofix = false                # github only: every newly created PR gets a c
 # propose_judge_retry_minutes = 60    # a conversation the model answered nothing for is
 #                                     # held back this long, so it cannot spend the
 #                                     # allowance every scan and starve the ones behind it
+
+# --- Direct emails and texts (requires features.direct_inbox) ---
+# [direct_inbox]
+# operator_name = "Your Name"         # how the models refer to you
+# interval_minutes = 30               # one scan reads both surfaces at most this often
+# window_hours = 72                   # how far back a scan reads
+# max_pending = 5                     # ceiling on follow-up proposals waiting for your decision
+# gmail = true                        # read email through the Gmail connector
+# gmail_query = "in:inbox to:me -category:promotions -category:social -category:updates -category:forums"
+# gmail_model = "claude-sonnet-4-6"   # the model that reads the inbox
+# max_threads = 50                    # how many threads one scan reads
+# texts = true                        # read texts through the gvoice CLI
+# gvoice_bin = "gvoice"               # path of the gvoice CLI
 
 # --- Upwork inbox (requires features.upwork and a logged-in local Chrome) ---
 # [upwork]
