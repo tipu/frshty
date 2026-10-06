@@ -1716,6 +1716,13 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
                          f"the continuation budget of {item['continue_cap']} is spent; "
                          "an operator reply or a reopen gives a new one", now)
             return "capped"
+        if over_budget:
+            c.execute(
+                "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+                "VALUES (?, ?, 'budget_spent', ?, ?)",
+                (run["work_item_id"], run["id"],
+                 db.dump_json({"minutes": _budget_minutes(clock)}), now),
+            )
     sent = tmux_send(run["tmux_key"], BUDGET_SPENT_PROMPT if over_budget
                      else continue_prompt(contexts, run["work_item_id"]))
     now = _now()
@@ -1739,13 +1746,6 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
             "VALUES (?, ?, 'auto_continued', ?, ?)",
             (run["work_item_id"], run["id"], db.dump_json({"n": item["continues_used"] + 1}), now),
         )
-        if over_budget:
-            c.execute(
-                "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
-                "VALUES (?, ?, 'budget_spent', ?, ?)",
-                (run["work_item_id"], run["id"],
-                 db.dump_json({"minutes": _budget_minutes(clock)}), now),
-            )
     return "continued"
 
 
@@ -2079,7 +2079,8 @@ def sweep_run_budgets(now: datetime | None = None) -> list[dict]:
     maybe_autocontinue stops continuing the run. Each message goes once per
     budget, and an operator reply or a reopen starts a new budget. The event
     is written after the send, so a send that fails is tried again on the
-    next scan. A turn that ends past the budget before this sweep reaches it
+    next scan, and it carries the time of the check, so an operator reply
+    that lands during the send still starts a clean budget. A turn that ends past the budget before this sweep reaches it
     gets the stop message from maybe_autocontinue instead."""
     now_dt = now or datetime.now(timezone.utc)
     rows = db.query_all(
@@ -2089,6 +2090,7 @@ def sweep_run_budgets(now: datetime | None = None) -> list[dict]:
         "WHERE i.state = 'agent_working'")
     actions: list[dict] = []
     for run in rows:
+        stamp = _now()
         with db.tx() as c:
             current = c.execute("SELECT state FROM work_items WHERE id = ?",
                                 (run["work_item_id"],)).fetchone()
@@ -2114,7 +2116,7 @@ def sweep_run_budgets(now: datetime | None = None) -> list[dict]:
                 "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
                 "VALUES (?, ?, ?, ?, ?)",
                 (run["work_item_id"], run["id"], kind,
-                 db.dump_json({"minutes": minutes}), _now()))
+                 db.dump_json({"minutes": minutes}), stamp))
         actions.append({"id": run["work_item_id"], "action": kind, "minutes": minutes})
     return actions
 
