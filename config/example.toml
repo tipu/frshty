@@ -71,7 +71,7 @@ review_prs = false
 auto_review = true                # default true. when false, frshty never starts a code review on its own. the PRs waiting on this user are still listed on /reviews and /today, and a review runs only when the operator starts one there. the rest of review_prs (own-PR comments, CI fixes, the peer-review list) is unaffected.
 tickets = true
 slack = false
-direct_inbox = false              # read your direct emails (the Gmail connector of the claude.ai account the instance runs as) and Google Voice texts (the read-only `gvoice` CLI from github.com/tipu/google-voice-cli, signed in with `gvoice login`) and propose a follow-up task on /tasks for every conversation that waits on you. frshty sends nothing.
+direct_inbox = false              # read your direct emails (the Gmail connector of the claude.ai account the instance runs as) and Google Voice texts (the read-only `gvoice` CLI from github.com/tipu/google-voice-cli, signed in with `scripts/instance.py gvoice-login <config>`) and propose a follow-up task on /tasks for every conversation that waits on you. frshty sends nothing.
 upwork = false                    # read the Upwork inbox on THIS machine, through the logged-in Chrome profile. Local only: it needs a browser with remote debugging open on cdp_url, and it does nothing on a box that has none.
 timesheet = false
 billing = false
@@ -130,6 +130,11 @@ pr_autofix = false                # github only: every newly created PR gets a c
 # max_threads = 50                    # how many threads one scan reads
 # texts = true                        # read texts through the gvoice CLI
 # gvoice_bin = "gvoice"               # path of the gvoice CLI
+# gvoice_profile_dir = "~/.frshty-containers/<key>/state/gvoice"
+#                                     # the Chrome profile that holds the signed-in Google
+#                                     # Voice session. Sign it in once on the host with
+#                                     # scripts/instance.py gvoice-login <config>.
+# gvoice_chrome_channel = "chrome"    # the browser gvoice launches
 
 # --- Upwork inbox (requires features.upwork and a logged-in local Chrome) ---
 # [upwork]
