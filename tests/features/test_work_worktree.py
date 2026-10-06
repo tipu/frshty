@@ -579,12 +579,18 @@ class TestGc:
     def test_removes_a_worktree_holding_only_disposable_ignored_files(self, tmp_path,
                                                                      wt_root, monkeypatch):
         repo, item_id, row = self._made(tmp_path, monkeypatch)
-        self._ignore(repo, row, "/notes/\nnode_modules/\n*.log\n")
+        self._ignore(repo, row, "/notes/\nnode_modules/\n.venv/\n*.log\n")
         (Path(row["path"]) / "notes").mkdir()
         (Path(row["path"]) / "notes" / "plan.md").write_text("the plan\n")
         (Path(row["path"]) / "node_modules" / "a").mkdir(parents=True)
         (Path(row["path"]) / "node_modules" / "a" / "index.js").write_text("x\n")
         (Path(row["path"]) / "run.log").write_text("log\n")
+        (Path(row["path"]) / "node_modules" / "a" / "icon.png").write_text("x\n")
+        (Path(row["path"]) / "node_modules" / "a" / ".env").write_text("x\n")
+        (Path(row["path"]) / "node_modules" / "a" / "types.d.mts").write_text("x\n")
+        site = Path(row["path"]) / ".venv" / "lib" / "site-packages" / "pkg"
+        site.mkdir(parents=True)
+        (site / "logo.svg").write_text("x\n")
         assert _git(row["path"], "status", "--porcelain").stdout.strip() == ""
         _finish(item_id)
         assert [g["path"] for g in work_worktree.gc()] == [row["path"]]
@@ -620,8 +626,8 @@ class TestGc:
     def test_keeps_a_worktree_holding_an_ignored_nested_repository(self, tmp_path, wt_root,
                                                                    monkeypatch):
         repo, item_id, row = self._made(tmp_path, monkeypatch)
-        self._ignore(repo, row, "/vendor/\n")
-        nested = Path(row["path"]) / "vendor" / "lib"
+        self._ignore(repo, row, "/node_modules/\n")
+        nested = Path(row["path"]) / "node_modules" / "lib"
         nested.mkdir(parents=True)
         _git(nested, "init", "-q")
         (nested / "work.py").write_text("x\n")
