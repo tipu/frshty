@@ -944,6 +944,40 @@ class TestStaleSweep:
             "SELECT kind FROM work_events WHERE work_item_id = ?", (item_id,))}
         assert "stuck_tool" in kinds
 
+    def _resume(self, item_id, run_id, transcript):
+        db.execute(
+            "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at)"
+            " VALUES (?, ?, 'SessionStart', ?, ?)",
+            (item_id, run_id,
+             json.dumps({"source": "resume", "transcript_path": str(transcript),
+                         "transcript_cursor": transcript.stat().st_size}),
+             datetime.now(timezone.utc).isoformat()))
+
+    def test_tool_call_killed_by_a_restart_is_not_busy(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+        item_id, run_id, transcript = self._mkpending(tmp_path, minutes=40)
+        self._resume(item_id, run_id, transcript)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
+        monkeypatch.setattr(work_store, "tmux_send", MagicMock(return_value=True))
+        actions = work_store.sweep_stale_items()
+        mine = [a["action"] for a in actions if a["id"] == item_id]
+        assert mine and mine[0].startswith("stop_synthesized:")
+
+    def test_tool_call_after_a_resume_is_busy(self, tmp_path, monkeypatch):
+        from unittest.mock import MagicMock
+        item_id, run_id, transcript = self._mkpending(tmp_path, minutes=40)
+        self._resume(item_id, run_id, transcript)
+        with transcript.open("a") as f:
+            f.write(json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "toolu_2", "name": "Bash"}]}}) + "\n")
+        self._age_transcript(transcript, minutes=40)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
+        sender = MagicMock(return_value=True)
+        monkeypatch.setattr(work_store, "tmux_send", sender)
+        actions = work_store.sweep_stale_items()
+        assert {"id": item_id, "action": "busy_tool"} in actions
+        sender.assert_not_called()
+
     def test_answered_tool_call_is_not_pending(self, tmp_path):
         import json as _json
         p = tmp_path / "answered.jsonl"
