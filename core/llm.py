@@ -275,6 +275,35 @@ def _record_end(inv_id: str | None, started_ms: float, status: str,
         log.emit("claude_invocation_log_failed", f"failed to record claude end: {e}")
 
 
+def record_session_usage(inv_id: str, *, instance_key: str, function_name: str,
+                         model: str, prompt: str, job_key: str, cwd: str,
+                         started_at: str, finished_at: str,
+                         duration_ms: int | None, status: str, usage: dict) -> None:
+    """Write the usage of a session that frshty did not run through this
+    module, such as an interactive task agent, to the invocation log. One
+    row per session; a later call replaces the totals of the earlier one."""
+    try:
+        _db.execute(
+            "INSERT INTO claude_invocations(id, instance_key, job_key, function_name, model, "
+            "prompt, prompt_length, cwd, started_at, finished_at, duration_ms, status, "
+            "input_tokens, output_tokens, cache_creation_input_tokens, "
+            "cache_read_input_tokens) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET model=excluded.model, "
+            "finished_at=excluded.finished_at, duration_ms=excluded.duration_ms, "
+            "status=excluded.status, input_tokens=excluded.input_tokens, "
+            "output_tokens=excluded.output_tokens, "
+            "cache_creation_input_tokens=excluded.cache_creation_input_tokens, "
+            "cache_read_input_tokens=excluded.cache_read_input_tokens",
+            (inv_id, instance_key, job_key, function_name, model, prompt,
+             len(prompt), cwd, started_at, finished_at, duration_ms, status,
+             usage.get("input_tokens"), usage.get("output_tokens"),
+             usage.get("cache_creation_input_tokens"), usage.get("cache_read_input_tokens")),
+        )
+    except Exception as e:
+        log.emit("claude_invocation_log_failed",
+                 f"failed to record session usage {inv_id}: {type(e).__name__}: {e}")
+
+
 class LLMProvider(ABC):
     @abstractmethod
     def thinking(self, prompt: str, *, cwd: Path | None = None,
