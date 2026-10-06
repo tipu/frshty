@@ -555,6 +555,25 @@ class TestRacesAndFailures:
         assert standup._blocking_task(int(carried["id"]), _cfg(), now)["id"] == running
         assert standup._covering_task(carried) is None
 
+    def test_an_event_on_an_earlier_row_of_a_carried_line_resets_the_idle_clock(self, clean):
+        first = _open_day(_day())
+        item = _item(first, "Unblock DEV-4848")
+        standup.close_day(first, _cfg())
+        day_id = _open_day(_day(1))
+        carried = db.query_one("SELECT * FROM standup_items WHERE standup_id = ?"
+                               " AND text = 'Unblock DEV-4848'", (day_id,))
+        assert carried["carried_from"] == item["id"]
+        _age(carried["id"], 4)
+        stamp = datetime.now(timezone.utc) - timedelta(minutes=5)
+        db.execute("INSERT INTO standup_events(standup_item_id, kind, payload, created_at)"
+                   " VALUES (?, 'answered', '{}', ?)", (item["id"], _iso(stamp)))
+        db.execute("INSERT INTO standup_events(standup_item_id, kind, payload, created_at)"
+                   " VALUES (?, 'nudged', '{}', ?)",
+                   (item["id"], _iso(stamp + timedelta(minutes=2))))
+        carried = db.query_one("SELECT * FROM standup_items WHERE id = ?", (carried["id"],))
+        day = db.query_one("SELECT * FROM standups WHERE id = ?", (day_id,))
+        assert standup._last_activity(carried, day) == stamp
+
     def test_the_day_view_lists_the_tasks_of_the_whole_carried_line(self, clean):
         first = _open_day(_day())
         item = _item(first, "Unblock DEV-4747")

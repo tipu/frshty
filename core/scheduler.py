@@ -87,6 +87,17 @@ def upsert_recurring(instance_key: str, key: str, task: str, cadence: str,
     )
 
 
+def run_at(instance_key: str, key: str) -> datetime | None:
+    row = db.query_one("SELECT run_at FROM scheduler WHERE instance_key=? AND key=?",
+                       (instance_key, key))
+    if not row or not row["run_at"]:
+        return None
+    try:
+        return datetime.fromisoformat(row["run_at"])
+    except ValueError:
+        return None
+
+
 def list_all(instance_key: str | None = None) -> list[dict]:
     if instance_key is None:
         rows = db.query_all("SELECT instance_key, key, run_at, data FROM scheduler ORDER BY run_at")

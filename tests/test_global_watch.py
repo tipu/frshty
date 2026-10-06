@@ -1,11 +1,15 @@
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
 
+import core.db as db
 import core.discovery as discovery
+import core.runtime as runtime
 import core.scheduler as scheduler
 import core.state as state
 from services import global_watch
 
+ROOT = Path(__file__).resolve().parent.parent
 NOW = datetime(2026, 10, 6, 18, 0, tzinfo=timezone.utc)
 SINCE = (NOW - timedelta(minutes=15)).isoformat()
 STALE = (NOW - timedelta(hours=2)).isoformat()
@@ -83,7 +87,7 @@ def test_evaluate_flags_unreachable_relabelled_and_error_events():
 
 def _config():
     return {"job": {"key": "personal"}, "_base_url": "https://personal.frshty.localhost",
-            "global_watch": {"enabled": True}}
+            "global_watch": {"enabled": True, "agent": False}}
 
 
 def _response(events, errors=None):
@@ -157,3 +161,96 @@ def test_evaluate_accepts_a_full_page_that_reaches_back_to_the_last_run():
     events.append(_ev("aimyable", "old", ts=OLD))
 
     assert global_watch.evaluate(events, {}, ["aimyable"], SINCE, STALE) == []
+
+
+def _agent_config():
+    return {"job": {"key": "personal"}, "global_watch": {"enabled": True}}
+
+
+def test_build_digest_lists_every_instance_and_only_events_since_the_last_run():
+    events = [_ev("personal", "a", event="upwork_scan_done"),
+              _ev("personal", "b", event="job_started", ts=OLD),
+              {**_ev("frshty", "c"), "meta": {"category": "noise"}}]
+    findings = [{"kind": "silent", "instance": "quill", "detail": "no event in the stale window"}]
+
+    digest = global_watch.build_digest(events, ["frshty", "personal", "quill"], findings, SINCE)
+
+    assert "- quill silent: no event in the stale window" in digest
+    assert "INSTANCE frshty: 1 events, 1 noise" in digest
+    assert "INSTANCE personal: 1 events, 0 noise" in digest
+    assert "INSTANCE quill: 0 events, 0 noise" in digest
+    assert "upwork_scan_done" in digest and "job_started" not in digest.split("INSTANCE personal")[1]
+
+
+def _codex(text, code=0):
+    return patch.object(global_watch, "run_external_model", return_value=(text, code))
+
+
+def test_ask_agent_runs_codex_only_on_the_cheap_model_in_a_read_only_sandbox():
+    with _codex('{"status": "ok", "problems": []}') as call:
+        verdict = global_watch.ask_agent(_agent_config(), "DIGEST", SINCE, NOW)
+
+    cmd = call.call_args.args[0]
+    assert cmd[:2] == ["codex", "exec"]
+    assert cmd[cmd.index("-m") + 1] == "gpt-6-luna"
+    assert "model_reasoning_effort=low" in cmd
+    assert cmd[cmd.index("--sandbox") + 1] == "read-only"
+    assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+    assert "DIGEST" in call.call_args.kwargs["stdin_text"]
+    assert verdict == {"status": "ok", "problems": []}
+
+
+def test_ask_agent_reports_a_failed_or_unparseable_call():
+    with _codex(None, None):
+        assert global_watch.ask_agent(_agent_config(), "D", SINCE, NOW)["status"] == "failed"
+    with _codex("I think things look fine"):
+        assert global_watch.ask_agent(_agent_config(), "D", SINCE, NOW)["status"] == "failed"
+    with _codex('{"status": "problem", "problems": []}'):
+        assert global_watch.ask_agent(_agent_config(), "D", SINCE, NOW)["status"] == "failed"
+    with _codex('{"status": "problem", "problems": 1}'):
+        assert global_watch.ask_agent(_agent_config(), "D", SINCE, NOW)["status"] == "failed"
+
+
+def test_run_posts_the_agent_verdict_only_when_it_changes(tmp_path):
+    state.init(tmp_path)
+    problem = ('{"status": "problem", "problems": [{"instance": "aimyable", "what": "scan_tickets'
+               ' repeats with no progress", "evidence": "scan_tickets x40", "likely_cause": "wedged job"}]}')
+    healthy = '{"status": "ok", "problems": []}'
+    with patch.object(global_watch, "discover_instances",
+                      return_value=[{"key": "personal", "base_url": "x"}]), \
+         patch.object(global_watch, "read_feed", return_value=([_ev("personal", "a")], {})), \
+         patch.object(global_watch, "run_external_model",
+                      side_effect=[(problem, 0), (problem, 0), (None, None), (None, None), (healthy, 0)]), \
+         patch.object(global_watch.log, "emit") as emit:
+        for i in range(5):
+            out = global_watch.run(_agent_config(), now=NOW + timedelta(minutes=15 * i))
+
+    assert [c.args[0] for c in emit.call_args_list] == [
+        "global_watch_agent_alert", "global_watch_agent_failed", "global_watch_agent_ok"]
+    assert "aimyable: scan_tickets repeats with no progress" in emit.call_args_list[0].args[1]
+    assert out["agent"] == {"status": "ok", "problems": []}
+
+
+def _seed_config():
+    return {"job": {"key": "seedtest"}, "features": {}, "global_watch": {"enabled": True}}
+
+
+def test_a_restart_keeps_a_global_watch_run_that_is_already_due_soon(tmp_path):
+    db.init(tmp_path / "t.db", ROOT / "migrations")
+    soon = datetime.now(timezone.utc) + timedelta(minutes=2)
+    scheduler.upsert_recurring("seedtest", "global_watch", "global_watch",
+                               cadence="every_15m", next_run_at=soon)
+
+    runtime._seed_recurring_schedules([_seed_config()])
+
+    assert scheduler.run_at("seedtest", "global_watch") == soon
+
+
+def test_a_first_start_schedules_global_watch_one_interval_out(tmp_path):
+    db.init(tmp_path / "t.db", ROOT / "migrations")
+    before = datetime.now(timezone.utc)
+
+    runtime._seed_recurring_schedules([_seed_config()])
+
+    first = scheduler.run_at("seedtest", "global_watch")
+    assert before + timedelta(minutes=15) <= first <= datetime.now(timezone.utc) + timedelta(minutes=15)

@@ -34,7 +34,7 @@ RUN pip install --no-cache-dir httpx fastapi 'uvicorn[standard]' watchfiles mcp 
     chmod -R a+rX /ms-playwright
 
 RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then python -m playwright install --with-deps chrome; fi && \
-    npm install -g github:tipu/google-voice-cli#7d7a74acf10c48cc3d0424d2ff96c24f0fb8a5d1 && \
+    npm install -g github:tipu/google-voice-cli#7b45a995b131cab7fe1e2f1934c5c1e833d02f20 && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd -o -g "${HOST_GID}" frshty && \
