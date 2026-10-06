@@ -124,3 +124,20 @@ class TestDirtyWorktree:
         assert st["base_sync_attempts"] == bs.MAX_BASE_SYNC_ATTEMPTS
         assert not st.get("base_synced")
         platform.merge_base.assert_not_called()
+
+
+class TestASyncThatCannotStartSpendsAnAttempt:
+    def test_no_worktree_caps_after_max_attempts(self):
+        st = {}
+        with patch("core.branch_sync.ls_remote_sha", return_value="basesha"):
+            outs = [branch_sync.sync_branch_with_base(_platform(), "/repo", "main", "f", st,
+                                                      lambda: None)
+                    for _ in range(branch_sync.MAX_BASE_SYNC_ATTEMPTS + 1)]
+        assert [o["result"] for o in outs] == ["no_worktree"] * branch_sync.MAX_BASE_SYNC_ATTEMPTS + ["capped"]
+        assert outs[branch_sync.MAX_BASE_SYNC_ATTEMPTS - 1]["capped"] is True
+
+    def test_fetch_failure_spends_an_attempt(self):
+        st = {}
+        out = _sync(_platform(), st, fetch_rc=1)
+        assert out["result"] == "fetch_failed"
+        assert st["base_sync_attempts"] == 1

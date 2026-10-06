@@ -896,7 +896,7 @@ def _check_base_fresh(config, platform, pr, seen, base_url):
         log.emit("pr_base_sync_blocked",
                  f"{pr_ref}: cannot merge {base_branch}: {outcome.get('error', '')[:160]}",
                  links=links, meta={**meta, "error": outcome.get("error", "")})
-    elif result == "merge_failed" and outcome.get("capped"):
+    elif result in ("merge_failed", "no_worktree", "fetch_failed") and outcome.get("capped"):
         log.emit("pr_base_sync_failed",
                  f"{pr_ref}: could not merge {base_branch} after {outcome['attempts']} attempts: {outcome.get('error', '')[:100]}",
                  links=links, meta={**meta, "error": outcome.get("error", "")})
