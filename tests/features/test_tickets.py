@@ -707,7 +707,7 @@ class TestReconcilePrs:
         ts["ci_passed"] = True
         ts["checks_started_at"] = "2026-01-01T00:00:00+00:00"
 
-        result = tickets._reconcile_prs(ts, open_prs)
+        result = tickets._reconcile_prs(ts, open_prs, first_sighting=True)
 
         assert result["status"] == "in_review"
         assert result["conflict_resolution_attempts"] == 0
@@ -727,7 +727,7 @@ class TestReconcilePrs:
         assert result["conflict_resolution_attempts"] == 1
         assert result["ci_fix_attempts"] == 1
 
-    def test_new_pr_identity_resets_counters(self):
+    def test_new_pr_identity_holds_the_ticket(self):
         open_prs = [{"repo": "r", "id": 200, "branch": "PROJ-1", "url": "u2"}]
         ts = make_ticket_state(status="in_review", branch="PROJ-1",
                                prs=[{"repo": "r", "id": 100, "branch": "PROJ-1", "url": "u1"}])
@@ -735,12 +735,87 @@ class TestReconcilePrs:
         ts["ci_fix_attempts"] = 2
         ts["ci_passed"] = True
 
-        result = tickets._reconcile_prs(ts, open_prs)
+        with patch("features.tickets.log.emit") as emit:
+            result = tickets._reconcile_prs(ts, open_prs)
 
-        assert result["prs"][0]["id"] == 200
-        assert result["conflict_resolution_attempts"] == 0
-        assert result["ci_fix_attempts"] == 0
-        assert "ci_passed" not in result
+        assert result["prs"][0]["id"] == 100
+        assert result[state.FOREIGN_PRS_KEY] == [{"repo": "r", "id": 200, "url": "u2"}]
+        assert result["conflict_resolution_attempts"] == 2
+        assert result["ci_passed"] is True
+        assert [c.args[0] for c in emit.call_args_list] == ["ticket_foreign_pr_held"]
+
+    def test_foreign_pr_on_pr_ready_ticket_holds_without_adopting(self):
+        open_prs = [{"repo": "dev-tools", "id": 5, "branch": "PROJ-1", "url": "u"}]
+        ts = make_ticket_state(status="pr_ready", branch="PROJ-1")
+
+        with patch("features.tickets.log.emit") as emit:
+            result = tickets._reconcile_prs(ts, open_prs, "PROJ-1")
+
+        assert result["status"] == "pr_ready"
+        assert "prs" not in result
+        assert result[state.FOREIGN_PRS_KEY] == [{"repo": "dev-tools", "id": 5, "url": "u"}]
+        emit.assert_called_once()
+        assert emit.call_args.args[0] == "ticket_foreign_pr_held"
+
+    def test_held_foreign_pr_emits_once(self):
+        open_prs = [{"repo": "r", "id": 5, "branch": "PROJ-1", "url": "u"}]
+        ts = make_ticket_state(status="pr_ready", branch="PROJ-1")
+
+        with patch("features.tickets.log.emit") as emit:
+            ts = tickets._reconcile_prs(ts, open_prs, "PROJ-1")
+            ts = tickets._reconcile_prs(ts, open_prs, "PROJ-1")
+
+        assert emit.call_count == 1
+        assert ts[state.FOREIGN_PRS_KEY] == [{"repo": "r", "id": 5, "url": "u"}]
+
+    def test_hold_keeps_a_held_pr_missing_from_a_partial_listing(self):
+        ts = make_ticket_state(status="pr_ready", branch="PROJ-1")
+        ts[state.FOREIGN_PRS_KEY] = [{"repo": "a", "id": 1, "url": "u1"},
+                                     {"repo": "b", "id": 2, "url": "u2"}]
+        open_prs = [{"repo": "b", "id": 2, "branch": "PROJ-1", "url": "u2"}]
+
+        with patch("features.tickets.log.emit") as emit:
+            result = tickets._reconcile_prs(ts, open_prs, "PROJ-1")
+
+        assert {p["id"] for p in result[state.FOREIGN_PRS_KEY]} == {1, 2}
+        emit.assert_not_called()
+
+    def test_release_keeps_hold_while_a_foreign_pr_is_open(self):
+        ts = make_ticket_state(status="pr_ready", branch="PROJ-1")
+        ts[state.FOREIGN_PRS_KEY] = [{"repo": "r", "id": 5, "url": "u"}]
+        platform = MagicMock()
+        platform.get_pr_state.return_value = "OPEN"
+
+        with patch("features.tickets.make_platform", return_value=platform):
+            result = tickets._release_foreign_pr_hold({}, "PROJ-1", ts, "http://b")
+
+        assert result[state.FOREIGN_PRS_KEY] == [{"repo": "r", "id": 5, "url": "u"}]
+
+    def test_release_lifts_hold_once_every_foreign_pr_is_closed(self):
+        ts = make_ticket_state(status="pr_ready", branch="PROJ-1")
+        ts[state.FOREIGN_PRS_KEY] = [{"repo": "r", "id": 5, "url": "u"}]
+        platform = MagicMock()
+        platform.get_pr_state.return_value = "DECLINED"
+
+        with patch("features.tickets.make_platform", return_value=platform), \
+             patch("features.tickets.log.emit") as emit:
+            result = tickets._release_foreign_pr_hold({}, "PROJ-1", ts, "http://b")
+
+        assert state.FOREIGN_PRS_KEY not in result
+        assert emit.call_args.args[0] == "ticket_foreign_pr_released"
+
+    def test_release_keeps_hold_when_the_state_read_fails(self):
+        ts = make_ticket_state(status="pr_ready", branch="PROJ-1")
+        ts[state.FOREIGN_PRS_KEY] = [{"repo": "r", "id": 5, "url": "u"}]
+        platform = MagicMock()
+        platform.get_pr_state.side_effect = RuntimeError("boom")
+
+        with patch("features.tickets.make_platform", return_value=platform), \
+             patch("features.tickets.log.emit") as emit:
+            result = tickets._release_foreign_pr_hold({}, "PROJ-1", ts, "http://b")
+
+        assert result[state.FOREIGN_PRS_KEY] == [{"repo": "r", "id": 5, "url": "u"}]
+        assert emit.call_args.args[0] == "ticket_foreign_pr_state_failed"
 
     def test_key_fallback_matches_diverged_branch(self):
         open_prs = [
@@ -748,7 +823,7 @@ class TestReconcilePrs:
         ]
         ts = make_ticket_state(status="pr_ready", branch="danial/feature/PROJ-1-old-name")
 
-        result = tickets._reconcile_prs(ts, open_prs, "PROJ-1")
+        result = tickets._reconcile_prs(ts, open_prs, "PROJ-1", first_sighting=True)
 
         assert result["status"] == "in_review"
         assert result["prs"][0]["id"] == 147
@@ -761,7 +836,7 @@ class TestReconcilePrs:
         ]
         ts = make_ticket_state(status="in_review", branch="DSC-127-main")
 
-        result = tickets._reconcile_prs(ts, open_prs, "DSC-127")
+        result = tickets._reconcile_prs(ts, open_prs, "DSC-127", first_sighting=True)
 
         assert {p["id"] for p in result["prs"]} == {1, 2}
 

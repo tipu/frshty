@@ -29,6 +29,8 @@ from core.paths import db_path
 from core.ticket_status import TicketStatus as _TicketStatus
 from core.ticket_status import transition as _transition
 
+FOREIGN_PRS_KEY = "foreign_prs"
+
 _BLOCKED = _TicketStatus.blocked.value
 
 _default_instance_key: str | None = None
