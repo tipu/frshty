@@ -190,6 +190,15 @@ class TestArtifactSandboxPolicy:
             resp = client.get(f"/api/work/artifact_file/{artifact_id}")
         assert resp.headers["content-security-policy"] == "sandbox"
 
+    def test_video_artifact_may_load_itself(self, tmp_path, monkeypatch):
+        artifact_id = _seed_report(tmp_path, monkeypatch)
+        (tmp_path / "run-workspace" / "docs" / "demo.mp4").write_bytes(b"\x00mp4")
+        with TestClient(self._app()) as client:
+            video = client.get(f"/api/work/artifact_file/{artifact_id}/demo.mp4")
+        assert video.status_code == 200
+        assert video.headers["content-type"] == "video/mp4"
+        assert video.headers["content-security-policy"] == "default-src 'none'; media-src 'self'"
+
 
 
 class TestArtifactContentType:
