@@ -456,7 +456,7 @@ createApp({
         const STEP_CONCERN = { name: 'Concern', icon: '⚠', color: '#f59e0b' };
 
         function kindStyle(n) {
-            if (n.stepNum) return n.check === 'concern' ? STEP_CONCERN : STEP_OK;
+            if (!n.kind) return n.check === 'concern' ? STEP_CONCERN : STEP_OK;
             return KINDS[n.kind] || KINDS.process;
         }
 
@@ -464,9 +464,12 @@ createApp({
             const out = [];
             const v = (p.visual && typeof p.visual === 'object') ? p.visual : {};
             const steps = p.steps || [];
-            const flow = Array.isArray(v.flow) ? v.flow.filter(n => n && n.label) : [];
+            const flow = (Array.isArray(v.flow) ? v.flow.filter(n => n && n.label) : []).map(n => {
+                const k = Number(n.step);
+                return { ...n, kind: KINDS[n.kind] ? n.kind : 'process', stepNum: Number.isInteger(k) && k >= 1 && k <= steps.length ? k : null };
+            });
             if (flow.length) {
-                const used = [...new Set(flow.map(n => KINDS[n.kind] ? n.kind : 'process'))];
+                const used = [...new Set(flow.map(n => n.kind))];
                 out.push({ type: 'flowmap', nodes: flow, legend: used.map(k => KINDS[k]) });
             } else if (steps.length) {
                 out.push({ type: 'flowmap', fromSteps: true, legend: [STEP_OK, STEP_CONCERN],
