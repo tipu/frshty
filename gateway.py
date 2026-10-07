@@ -12,8 +12,9 @@ front of an instance that runs older code.
 """
 import argparse
 import asyncio
-from pathlib import Path
 import json
+import re
+from pathlib import Path
 from urllib.parse import quote, unquote_plus, urlsplit
 
 import httpx
@@ -103,9 +104,8 @@ def with_picker(html: bytes, pin: str = "") -> bytes:
     html = html[:at] + PICKER_TAG + html[at:] if at >= 0 else html + PICKER_TAG
     if not pin:
         return html
-    head = html.find(b"<head")
-    end = html.find(b">", head) if head >= 0 else -1
-    return html[:end + 1] + PIN_TAG + html[end + 1:] if end >= 0 else PIN_TAG + html
+    head = re.search(rb"<head(\s[^>]*)?>", html, re.IGNORECASE)
+    return html[:head.end()] + PIN_TAG + html[head.end():] if head else PIN_TAG + html
 
 
 def with_gateway_peers(body: bytes) -> bytes:
