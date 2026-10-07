@@ -3,6 +3,9 @@
 Every newly created PR gets one cycle: claude and codex each review the full
 diff, the two reviews are consolidated down to critical/high findings, and a
 fix run resolves those findings directly on the PR branch (commit + push).
+Only a PR whose author is the account frshty pushes as, opened from a branch
+of the configured repository and not from a fork, gets the cycle.
+Another author's PR is recorded as not_ours and never reviewed, fixed or pushed.
 Pre-existing open PRs are baselined on the first poll and never touched.
 GitHub-only. Enabled per instance via features.pr_autofix.
 """
@@ -65,6 +68,12 @@ def check(config: dict):
         return
     prs = platform.list_open_prs()
     st = state.load("pr_autofix")
+    me = platform.self_id()
+    if not me:
+        log.emit("pr_autofix_error",
+                 f"[{instance_key}] could not resolve the account frshty pushes as; "
+                 f"no PR is queued until it resolves")
+        return
 
     if not st.get(SEEDED_KEY):
         for pr in prs:
@@ -84,6 +93,19 @@ def check(config: dict):
         pr_key = f"{pr['repo']}/{pr['id']}"
         active_keys.add(pr_key)
         rec = st.get(pr_key)
+        if not _is_own(pr, me):
+            if rec is None:
+                st[pr_key] = {
+                    "status": "not_ours", "title": pr["title"], "url": pr["url"],
+                    "author": pr.get("author", ""), "seen_at": _now(),
+                }
+                log.emit("pr_autofix_not_ours",
+                         f"{pr['repo']}#{pr['id']}: opened by {pr.get('author') or 'an unknown account'}, "
+                         f"not {me} — frshty does not review, fix or push it",
+                         links={"pr": pr["url"]},
+                         meta={"repo": pr["repo"], "pr_id": pr["id"],
+                               "author": pr.get("author", ""), "self": me})
+            continue
         if rec is None:
             st[pr_key] = {
                 "status": "queued", "title": pr["title"], "url": pr["url"],
@@ -105,6 +127,12 @@ def check(config: dict):
     for stale_key in [k for k in st if k not in active_keys]:
         del st[stale_key]
     state.save("pr_autofix", st)
+
+
+def _is_own(pr: dict, me: str) -> bool:
+    author = pr.get("author", "")
+    return (bool(me) and bool(author) and author.lower() == me.lower()
+            and pr.get("cross_repo") is False)
 
 
 def _update_record(pr_key: str, **fields) -> None:
@@ -269,6 +297,15 @@ def run(config: dict, payload: dict) -> tuple[bool, str | None]:
     meta = {"repo": pr["repo"], "pr_id": pr["id"]}
     platform = make_platform(config)
 
+    me = platform.self_id()
+    if not _is_own(pr, me):
+        _update_record(pr_key, status="not_ours", finished_at=_now())
+        log.emit("pr_autofix_not_ours",
+                 f"{pr_ref}: opened by {pr.get('author') or 'an unknown account'}, "
+                 f"not {me or 'an unknown account'} — frshty does not review, fix or push it",
+                 links=links, meta={**meta, "author": pr.get("author", ""), "self": me})
+        return True, None
+
     st = state.load("pr_autofix")
     attempts = st.get(pr_key, {}).get("attempts", 0) + 1
     _update_record(pr_key, status="reviewing", attempts=attempts, started_at=_now())
@@ -394,6 +431,9 @@ def _ensure_worktree(config: dict, pr: dict) -> Path | None:
 
     if (worktree_path / ".git").is_file():
         if not worktree_path.resolve().is_relative_to(state_dir.resolve()):
+            return None
+        common = git_util.git_common_dir(worktree_path)
+        if not common or common != git_util.git_common_dir(repo_path):
             return None
         git_util.run_git(worktree_path, ["fetch", "origin", pr["branch"]])
         git_util.run_git(worktree_path, ["reset", "--hard", f"origin/{pr['branch']}"])
