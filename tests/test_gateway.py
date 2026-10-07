@@ -176,3 +176,24 @@ class TestPin:
     def test_a_redirect_in_a_pinned_tab_stays_pinned(self, peers, upstream, client):
         resp = client.get("/moved?frshty_instance=quartz")
         assert resp.headers["location"] == "/tickets/DEV-1?frshty_instance=quartz"
+
+    def test_a_navigation_from_a_pinned_page_stays_pinned(self, peers, upstream, client):
+        resp = client.get("/tasks/9?x=1", headers={
+            "referer": "http://testserver/tasks/5?frshty_instance=quartz", "sec-fetch-mode": "navigate"})
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/tasks/9?x=1&frshty_instance=quartz"
+        assert upstream == []
+
+    def test_a_subresource_of_a_pinned_page_follows_the_referer(self, peers, upstream, client):
+        client.cookies.set("frshty_instance", "frshty")
+        resp = client.get("/api/work/artifact_file/3", headers={
+            "referer": "http://testserver/artifacts/3?frshty_instance=quartz", "sec-fetch-mode": "no-cors"})
+        assert resp.json()["from"] == "127.0.0.1:7134"
+
+    def test_a_referer_from_another_host_is_ignored(self, peers, upstream, client):
+        resp = client.get("/api/x", headers={"referer": "http://elsewhere/x?frshty_instance=quartz"})
+        assert resp.json()["from"] == "127.0.0.1:7131"
+
+    def test_picking_an_instance_drops_the_referer(self, peers, client):
+        resp = client.get("/api/gateway/select", params={"key": "quartz", "next": "/tasks"})
+        assert resp.headers["referrer-policy"] == "no-referrer"

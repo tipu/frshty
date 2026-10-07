@@ -30,16 +30,6 @@
         };
     }
 
-    if (navigator.sendBeacon) {
-        const beacon0 = navigator.sendBeacon.bind(navigator);
-        navigator.sendBeacon = (url, data) => beacon0(pin(url), data);
-    }
-
-    const open0 = window.open;
-    window.open = function (url, ...rest) {
-        return open0.call(this, url === undefined ? url : pin(url), ...rest);
-    };
-
     for (const name of ['pushState', 'replaceState']) {
         const orig = history[name];
         history[name] = function (state, title, url) {
@@ -48,29 +38,4 @@
                 : orig.call(this, state, title, pin(url));
         };
     }
-
-    function pinLink(e) {
-        const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
-        if (!a) return;
-        const pinned = pin(a.href);
-        if (pinned !== a.href) a.href = pinned;
-    }
-    document.addEventListener('click', pinLink, true);
-    document.addEventListener('auxclick', pinLink, true);
-
-    document.addEventListener('submit', e => {
-        const form = e.target;
-        if (!(form instanceof HTMLFormElement)) return;
-        if ((form.method || 'get').toLowerCase() === 'get') {
-            if (!form.querySelector('input[name="' + PARAM + '"]')) {
-                const input = document.createElement('input');
-                input.type = 'hidden';
-                input.name = PARAM;
-                input.value = key;
-                form.appendChild(input);
-            }
-        } else {
-            form.action = pin(form.action);
-        }
-    }, true);
 })();
