@@ -34,7 +34,8 @@ class TestLoadConfig:
         assert config["upwork"] == {}
         assert config["timesheet"] == {}
 
-    def test_state_dir_derived(self, tmp_path):
+    def test_state_dir_derived(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("FRSHTY_ROOT", raising=False)
         config_file = tmp_path / "config.toml"
         config_file.write_text(
             '[job]\nkey = "mykey"\nport = 8000\nplatform = "github"\n\n'

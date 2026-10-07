@@ -351,7 +351,7 @@ def compute_target_time(start: datetime, estimate_seconds: int, jitter_hours: in
 
 
 def compute_delay_time(start: datetime, delay_hours: list[int], quiet_hours: list[int] | None = None,
-                        tz_name: str = "US/Pacific") -> datetime:
+                        tz_name: str = "America/Los_Angeles") -> datetime:
     if not quiet_hours:
         quiet_hours = [23, 7]
 

@@ -128,6 +128,18 @@ def with_gateway_peers(body: bytes) -> bytes:
     return json.dumps(data).encode()
 
 
+def with_gateway_events(body: bytes) -> bytes:
+    """The global feed links each event at its instance's base_url, which the
+    browser cannot reach, so every instance the gateway forwards to gets a
+    gateway address."""
+    data = json.loads(body)
+    keys = {i["key"] for i in instances()}
+    for event in data.get("events") or []:
+        if isinstance(event, dict) and event.get("instance_key") in keys:
+            event["base_url"] = AT_PREFIX + quote(event["instance_key"], safe="")
+    return json.dumps(data).encode()
+
+
 @app.get("/api/gateway/select")
 def api_select(key: str, next: str = "/"):
     if not any(i["key"] == key for i in instances()):
@@ -240,6 +252,11 @@ async def forward(path: str, request: Request):
         body = await resp.aread()
         await resp.aclose()
         response = Response(with_gateway_peers(body), status_code=resp.status_code)
+    elif (path == "api/global/events" and request.method == "GET" and resp.status_code == 200
+          and resp.headers.get("content-type", "").startswith("application/json")):
+        body = await resp.aread()
+        await resp.aclose()
+        response = Response(with_gateway_events(body), status_code=resp.status_code)
     else:
         response = StreamingResponse(resp.aiter_bytes(), status_code=resp.status_code,
                                      background=BackgroundTask(resp.aclose))

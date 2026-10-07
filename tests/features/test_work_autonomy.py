@@ -85,7 +85,7 @@ class TestPushGateBaseline:
         monkeypatch.setattr(work_launch, "_repo_root", lambda d: repo)
         self._lint_passes(monkeypatch)
         monkeypatch.setattr(work_launch, "_detect_runner",
-                            lambda d: (["bash", "-c", "echo boom; exit 1"], {}))
+                            lambda d, *_: (["bash", "-c", "echo boom; exit 1"], {}))
         out = work_launch.gate_push(sid, "git push", str(repo))
         assert out["decision"] == "allow"
         assert "merge base" in out["reason"]
@@ -102,7 +102,7 @@ class TestPushGateBaseline:
         # same command passes at the merge base and fails at HEAD.
         (repo / "boom").write_text("")
         runner = ["bash", "-c", "test ! -e boom || { echo boom; exit 1; }"]
-        monkeypatch.setattr(work_launch, "_detect_runner", lambda d: (runner, {}))
+        monkeypatch.setattr(work_launch, "_detect_runner", lambda d, *_: (runner, {}))
         out = work_launch.gate_push(sid, "git push", str(repo))
         assert out["decision"] == "deny"
         assert "passes at the merge base" in out["reason"]
@@ -116,7 +116,7 @@ class TestPushGateBaseline:
         monkeypatch.setattr(work_launch, "_outgoing_files", lambda r: ["a.py"])
         self._lint_passes(monkeypatch)
         monkeypatch.setattr(work_launch, "_detect_runner",
-                            lambda d: (["bash", "-c", "echo 1 failed; exit 1"], {}))
+                            lambda d, *_: (["bash", "-c", "echo 1 failed; exit 1"], {}))
         out = work_launch.gate_push(sid, "git push", str(tmp_path))
         assert out["decision"] == "deny"
         assert json.loads(_events(item_id, "push_gate")[0]["payload"])["verdict"] == "fail"
@@ -127,7 +127,7 @@ class TestPushGateBaseline:
         monkeypatch.setattr(work_launch, "_repo_root", lambda d: repo)
         self._lint_passes(monkeypatch)
         monkeypatch.setattr(work_launch, "_detect_runner",
-                            lambda d: (["bash", "-c", "echo boom; exit 1"], {}))
+                            lambda d, *_: (["bash", "-c", "echo boom; exit 1"], {}))
         runs = []
         real = work_launch._run_repo_tests
 
@@ -147,14 +147,14 @@ class TestPushGateBaseline:
         monkeypatch.setattr(work_launch, "_repo_root", lambda d: repo)
         self._lint_passes(monkeypatch)
         monkeypatch.setattr(work_launch, "_detect_runner",
-                            lambda d: (["bash", "-c", "echo boom; exit 1"], {}))
+                            lambda d, *_: (["bash", "-c", "echo boom; exit 1"], {}))
         assert work_launch.gate_push(sid, "git push", str(repo))["decision"] == "allow"
         # A different suite at HEAD, still failing. The cached answer is about
         # the old command and must not excuse this one.
         monkeypatch.setattr(work_launch, "_detect_runner",
-                            lambda d: (["bash", "-c", "echo other; exit 1"], {}))
+                            lambda d, *_: (["bash", "-c", "echo other; exit 1"], {}))
         monkeypatch.setattr(work_launch, "_run_baseline",
-                            lambda repo, base, head: {"result": "unresolved", "base": base,
+                            lambda repo, base, head, *_: {"result": "unresolved", "base": base,
                                                       "head_cmd": head, "note": "stub", "cmd": ""})
         assert work_launch.gate_push(sid, "git push", str(repo))["decision"] == "deny"
 
@@ -216,7 +216,7 @@ class TestPushGateBaseline:
         monkeypatch.setattr(work_launch, "_repo_root", lambda d: repo)
         self._lint_passes(monkeypatch)
         monkeypatch.setattr(work_launch, "_detect_runner",
-                            lambda d: (["bash", "-c", "echo boom; exit 1"], {}))
+                            lambda d, *_: (["bash", "-c", "echo boom; exit 1"], {}))
         out = work_launch.gate_push(sid, "git push", str(repo))
         assert out["decision"] == "deny"
         payload = json.loads(_events(item_id, "push_gate")[0]["payload"])
@@ -236,12 +236,19 @@ class TestPushGateBaseline:
         store = tmp_path / "baseline.json"
         old = (datetime.now(timezone.utc)
                - timedelta(seconds=work_launch.BASELINE_MAX_AGE_SECONDS + 60)).isoformat()
-        work_launch._write_baseline(store, {"base": "sha", "head_cmd": "cmd",
+        work_launch._write_baseline(store, {"base": "sha", "head_cmd": "cmd", "ci_env": True,
                                             "result": "fail", "at": old})
         assert work_launch._read_baseline(store, "sha", "cmd") is None
-        work_launch._write_baseline(store, {"base": "sha", "head_cmd": "cmd",
+        work_launch._write_baseline(store, {"base": "sha", "head_cmd": "cmd", "ci_env": True,
                                             "result": "fail", "at": work_launch._now_iso()})
         assert work_launch._read_baseline(store, "sha", "cmd")["result"] == "fail"
+
+    def test_a_cached_baseline_never_answers_for_a_different_ci_env(self, tmp_path):
+        store = tmp_path / "baseline.json"
+        work_launch._write_baseline(store, {"base": "sha", "head_cmd": "cmd", "ci_env": True,
+                                            "result": "fail", "at": work_launch._now_iso()})
+        assert work_launch._read_baseline(store, "sha", "cmd", False) is None
+        assert work_launch._read_baseline(store, "sha", "cmd", True)["result"] == "fail"
 
     def test_a_baseline_leaves_no_worktree_and_no_temporary_directory(self, tmp_path, monkeypatch):
         repo = _repo_with_origin(tmp_path)
@@ -266,7 +273,7 @@ class TestPushGateBaseline:
         monkeypatch.setattr(work_launch, "_outgoing_files", lambda r: [])
         self._lint_passes(monkeypatch)
         monkeypatch.setattr(work_launch, "_detect_runner",
-                            lambda d: (["bash", "-c", "echo 1 failed; exit 1"], {}))
+                            lambda d, *_: (["bash", "-c", "echo 1 failed; exit 1"], {}))
         out = work_launch.gate_push(sid, 'git commit -m "fix" && git push', str(tmp_path))
         assert out["decision"] == "deny"
         assert "1 failed" in out["reason"]
@@ -276,7 +283,7 @@ class TestPushGateBaseline:
         monkeypatch.setattr(work_launch, "_repo_root", lambda d: tmp_path)
         monkeypatch.setattr(work_launch, "_outgoing_files", lambda r: [])
         called = []
-        monkeypatch.setattr(work_launch, "_gate_tests", lambda repo: called.append(1))
+        monkeypatch.setattr(work_launch, "_gate_tests", lambda repo, *_: called.append(1))
         out = work_launch.gate_push(sid, "git push", str(tmp_path))
         assert out["decision"] == "allow"
         assert called == []
