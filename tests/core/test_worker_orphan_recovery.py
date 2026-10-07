@@ -111,6 +111,38 @@ def test_orphan_with_failing_postconditions_marks_failed_not_requeued(fresh_db, 
         "missing change-manifest.md must mark orphan failed, never requeue"
 
 
+def test_failed_orphan_forgets_its_claude_session(fresh_db, tmp_path):
+    """An orphan that ends without its postcondition often ran out of context.
+    The retry must start a fresh session, not resume the exhausted one."""
+    state.init(tmp_path / "state")
+
+    instance = "inst1"
+    ticket_key = "DEV-5"
+    slug = "dev5-test"
+
+    ticket_dir = tmp_path / "workspace" / "tickets" / slug
+    (ticket_dir / "docs").mkdir(parents=True)
+
+    state.use(instance)
+    state.save_ticket(ticket_key, {
+        "instance_key": instance,
+        "ticket_key": ticket_key,
+        "slug": slug,
+        "status": "proving",
+        "llm_sessions": {"prove": "exhausted", "write_tests": "kept"},
+    })
+    job_id = _seed_running_job(instance, "prove", ticket_key)
+
+    pool = _make_pool(tmp_path, instance)
+    pool._reconcile_orphans()
+
+    row = db.query_one("SELECT status FROM jobs WHERE id=?", (job_id,))
+    assert row and row["status"] == "failed"
+    state.use(instance)
+    t = state.load_ticket(ticket_key)
+    assert t and t["llm_sessions"] == {"write_tests": "kept"}
+
+
 def test_orphan_best_effort_task_with_failing_postconditions_is_requeued(fresh_db, tmp_path):
     """generate_flow_doc is requested once per ticket, and the reviewing handler
     moves on without it. A restart that kills it must requeue it, or the
