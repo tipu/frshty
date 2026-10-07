@@ -99,6 +99,10 @@
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Approve</h2>
     <div class="text-xs text-gray-600 mb-2">frshty opened this task by itself. No agent has read it. Approve it to start one on the objective above, or decline it to file it without running it.</div>
     <div class="text-sm mb-2" style="color:#c4b5fd; white-space:pre-wrap" v-if="item.current_checkpoint">{{ item.current_checkpoint }}</div>
+    <textarea class="w-full text-sm mb-2" rows="4" :disabled="approveBusy"
+              style="background:#101018; border:1px solid #2a2a35; border-radius:4px; padding:6px; color:#e0e0e0; resize:vertical"
+              :value="proposalText ?? item.objective" @input="proposalText = $event.target.value"
+              title="edit the objective before you approve it; the agent starts on this text"></textarea>
     <div class="flex flex-wrap gap-2 items-center">
       <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#3730a3;color:#c7d2fe"
             @click="approve()">approve and launch</span>
@@ -378,7 +382,7 @@ const app = frshtyApp({
                     fupAgent: "claude", agents: ["claude"], runs: [],
                     projects: [], slackAvailable: false,
                     tagText: "", tagError: "", tagBusy: false,
-                    debriefBusy: false, debriefError: "", actError: "", approveBusy: false, continueBusy: false, linkmap: null }; },
+                    debriefBusy: false, debriefError: "", actError: "", approveBusy: false, proposalText: null, continueBusy: false, linkmap: null }; },
   computed: {
     railCounts() {
       return { tasks: this.needsYou };
@@ -670,10 +674,11 @@ const app = frshtyApp({
       try {
         const r = await fetch(this.api(`/api/work/items/${this.item.id}/approve`), {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({}),
+          body: JSON.stringify({ objective: this.proposalText ?? this.item.objective }),
         });
         const d = await r.json().catch(() => ({}));
         if (!r.ok) this.actError = d.error || ("approve failed HTTP " + r.status);
+        else this.proposalText = null;
       } catch (e) {
         this.actError = "approve failed: " + e.message;
       } finally {
