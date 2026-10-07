@@ -23,6 +23,7 @@ from core import external_log
 from core.config import base_branch_for, get_repos, ticket_worktree_path, resolve_env
 from core.deps import run_dep_command, relink_shared_venv
 from core.claude_runner import run_haiku, run_balanced, run_claude_code, extract_json
+from core.llm import NO_PUBLISH_RULE
 from core.commit_message import COMMIT_SUBJECT_RULE, commit_subject
 from core.ticket_status import TicketStatus, can_transition, transition
 from features.platforms import make_platform
@@ -1475,7 +1476,7 @@ def check(config: dict, instance_key: str = ""):
                 ts["url"] = ticket.get("url", "")
                 ts["status"] = mapped
                 if mapped not in ("new", "planning", "reviewing"):
-                    ts = _reconcile_prs(ts, open_prs, key)
+                    ts = _reconcile_prs(ts, open_prs, key, first_sighting=True)
                     _save_ticket_if_unmoved(key, ts, loaded_status)
                     continue
 
@@ -1490,6 +1491,11 @@ def check(config: dict, instance_key: str = ""):
 
             if ts.get("branch"):
                 ts = _reconcile_prs(ts, open_prs, key)
+            if ts.get(state.FOREIGN_PRS_KEY):
+                ts = _release_foreign_pr_hold(config, key, ts, base_url)
+            if ts.get(state.FOREIGN_PRS_KEY):
+                _save_ticket_if_unmoved(key, ts, loaded_status)
+                continue
 
             if ts["status"] in ("planning", "reviewing") and ts.get("slug"):
                 ws = config["workspace"]
@@ -2879,7 +2885,8 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                     + (f"Drafted reply that commits to this change: {suggested}\n\n" if suggested else "")
                     + "Fix this review comment.\n\n"
                     + KEEP_GREEN_RULE + "\n\n"
-                    + COMMIT_SUBJECT_RULE
+                    + COMMIT_SUBJECT_RULE + "\n\n"
+                    + NO_PUBLISH_RULE
                 )
                 pre_dirty = _worktree_dirty_paths(wt)
                 fix_result = run_claude_code(context, cwd=wt, timeout=PR_COMMENT_FIX_TIMEOUT)
@@ -3067,7 +3074,31 @@ def _fetch_open_prs(config) -> list[dict]:
         return []
 
 
-def _reconcile_prs(ts: dict, open_prs: list[dict], key: str = "") -> dict:
+def _release_foreign_pr_hold(config: dict, key: str, ts: dict, base_url: str) -> dict:
+    held = ts.get(state.FOREIGN_PRS_KEY) or []
+    platform = make_platform(config)
+    for p in held:
+        try:
+            pr_state = platform.get_pr_state(p["repo"], p["id"])
+        except Exception as e:
+            log.emit("ticket_foreign_pr_state_failed",
+                f"{key}: could not read the state of held PR {p['repo']}#{p['id']}, the ticket stays held: {e}",
+                links={"detail": f"{base_url}/tickets/{key}", "pr": p.get("url", "")},
+                meta={"ticket": key, "repo": p["repo"], "pr_id": p["id"]})
+            return ts
+        if pr_state == "OPEN":
+            return ts
+    ts.pop(state.FOREIGN_PRS_KEY, None)
+    log.emit("ticket_foreign_pr_released",
+        f"{key}: every PR frshty did not open is closed, the ticket resumes: "
+        + ", ".join(f"{p['repo']}#{p['id']}" for p in held),
+        links={"detail": f"{base_url}/tickets/{key}"},
+        meta={"ticket": key, "prs": held})
+    return ts
+
+
+def _reconcile_prs(ts: dict, open_prs: list[dict], key: str = "",
+                   first_sighting: bool = False) -> dict:
     matches = [p for p in open_prs if p.get("branch") == ts.get("branch")]
     if key:
         pat = re.compile(rf"{re.escape(key)}(?![0-9])")
@@ -3077,10 +3108,24 @@ def _reconcile_prs(ts: dict, open_prs: list[dict], key: str = "") -> dict:
                 continue
             if pat.search(p.get("branch", "") or "") or pat.search(p.get("title", "") or ""):
                 matches.append(p)
+    prior_ids = {(p["repo"], p["id"]) for p in ts.get("prs", [])}
+    foreign = [] if first_sighting else [p for p in matches if (p["repo"], p["id"]) not in prior_ids]
+    if foreign:
+        held = list(ts.get(state.FOREIGN_PRS_KEY) or [])
+        held_ids = {(p["repo"], p["id"]) for p in held}
+        new = [{"repo": p["repo"], "id": p["id"], "url": p.get("url", "")}
+               for p in foreign if (p["repo"], p["id"]) not in held_ids]
+        if new:
+            log.emit("ticket_foreign_pr_held",
+                f"{key or ts.get('branch', '')}: found open PR(s) frshty did not open, holding the ticket: "
+                + ", ".join(f"{p['repo']}#{p['id']}" for p in new),
+                links={"pr": new[0]["url"]},
+                meta={"ticket": key, "status": ts.get("status"), "prs": new})
+        ts[state.FOREIGN_PRS_KEY] = held + new
+        return ts
     if not matches:
         return ts
 
-    prior_ids = {(p["repo"], p["id"]) for p in ts.get("prs", [])}
     current_ids = {(p["repo"], p["id"]) for p in matches}
     pr_changed = prior_ids != current_ids
     status_regressed = ts["status"] in ("new", "planning", "reviewing", "pr_ready")

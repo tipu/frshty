@@ -3,6 +3,8 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable
 
+import core.state as state
+
 _REGISTRY: dict[str, dict] = {}
 
 
@@ -167,6 +169,10 @@ def run_task(ctx: TaskContext, *, defer_success_status: bool = False) -> TaskRes
     postconds = entry["postconditions"]
     on_entry = entry.get("on_entry_status")
     on_success = entry.get("on_success_status")
+    held = (state.load_ticket(ctx.ticket_key) or {}).get(state.FOREIGN_PRS_KEY) if ctx.ticket_key else None
+    if held:
+        return TaskResult("skipped", "held: ticket has open PR(s) frshty did not open: "
+                          + ", ".join(f"{p['repo']}#{p['id']}" for p in held))
     for p in preconds:
         try:
             ok, reason = p(ctx)
