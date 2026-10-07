@@ -265,6 +265,12 @@ class WorkerPool:
                 log.emit("orphan_postcondition_failed",
                          f"job_id={ctx.job_id} task={ctx.task}: {reason}",
                          meta={"ticket": ctx.ticket_key})
+                if ctx.task in registry._BEST_EFFORT_TASKS:
+                    new_id = q.enqueue_job(ctx.instance_key, ctx.task, ctx.payload,
+                                           ticket_key=ctx.ticket_key)
+                    log.emit("orphan_requeued",
+                             f"job_id={ctx.job_id} task={ctx.task} requeued as job_id={new_id}",
+                             meta={"ticket": ctx.ticket_key})
                 return
 
         on_success = task_def.get("on_success_status")
