@@ -230,6 +230,24 @@ class WorkerPool:
             if state_token is not None:
                 state.reset(state_token)
 
+    def _drop_orphan_session(self, ctx: registry.TaskContext) -> None:
+        """Forget the Claude session an orphaned task held. The orphan ended
+        without its postcondition, often because its session ran out of
+        context, so a retry that resumes that session fails at once."""
+        if not ctx.ticket_key:
+            return
+        ticket = state.load_ticket(ctx.ticket_key) or {}
+        if ctx.task not in (ticket.get("llm_sessions") or {}):
+            return
+
+        def _drop(t: dict) -> dict:
+            sessions = dict(t.get("llm_sessions") or {})
+            sessions.pop(ctx.task, None)
+            t["llm_sessions"] = sessions
+            return t
+
+        state.update_ticket(ctx.ticket_key, _drop)
+
     def _finalize_via_postconditions(self, ctx: registry.TaskContext, task_def: dict | None) -> None:
         import core.state as state
         if not task_def:
@@ -255,6 +273,7 @@ class WorkerPool:
             except Exception as e:
                 q.mark_done(ctx.job_id, "failed",
                             {"reason": f"orphan postcondition errored: {type(e).__name__}: {e}"})
+                self._drop_orphan_session(ctx)
                 log.emit("orphan_postcondition_error",
                          f"job_id={ctx.job_id} {type(e).__name__}: {e}",
                          meta={"ticket": ctx.ticket_key})
@@ -262,9 +281,16 @@ class WorkerPool:
             if not ok:
                 q.mark_done(ctx.job_id, "failed",
                             {"reason": f"orphan postcondition: {reason}"})
+                self._drop_orphan_session(ctx)
                 log.emit("orphan_postcondition_failed",
                          f"job_id={ctx.job_id} task={ctx.task}: {reason}",
                          meta={"ticket": ctx.ticket_key})
+                if ctx.task in registry._BEST_EFFORT_TASKS:
+                    new_id = q.enqueue_job(ctx.instance_key, ctx.task, ctx.payload,
+                                           ticket_key=ctx.ticket_key)
+                    log.emit("orphan_requeued",
+                             f"job_id={ctx.job_id} task={ctx.task} requeued as job_id={new_id}",
+                             meta={"ticket": ctx.ticket_key})
                 return
 
         on_success = task_def.get("on_success_status")
