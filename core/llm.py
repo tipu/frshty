@@ -501,6 +501,9 @@ class ClaudeProvider(LLMProvider):
             _record_end(inv_id, t0, "timeout", None, output, usage=result_event)
             return None
         if proc.returncode != 0:
+            result_error = _result_error_text(result_event)
+            if result_error and result_error not in output:
+                output = output + "\n[result]\n" + result_error
             if non_json:
                 output = output + "\n[non-json output]\n" + "\n".join(non_json[-50:])
             _trip_llm_guard(output)
@@ -751,6 +754,21 @@ def _extract_text(evt: dict) -> str:
     if delta.get("type") == "text_delta":
         return delta.get("text") or ""
     return ""
+
+
+def _result_error_text(evt: dict | None) -> str:
+    if not evt:
+        return ""
+    lines: list[str] = []
+    result = evt.get("result")
+    if isinstance(result, str) and result.strip():
+        lines.append(result.strip())
+    errors = evt.get("errors")
+    if isinstance(errors, list):
+        lines.extend(str(e).strip() for e in errors if str(e).strip())
+    elif isinstance(errors, str) and errors.strip():
+        lines.append(errors.strip())
+    return "\n".join(lines)
 
 
 def _get_provider() -> LLMProvider:
