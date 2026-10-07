@@ -95,7 +95,10 @@ def _isolated_db(tmp_path_factory):
     event feed on every run. The environment carries the path so a test gets
     the isolation whether or not it remembers to pass it. FRSHTY_BOARD_FILE
     goes with it, because the same programs read the live board address from
-    that file and would otherwise post to the running server."""
+    that file and would otherwise post to the running server. FRSHTY_ROOT
+    goes with it too, because state.init creates the instance state folder
+    under it, and the default ~/.frshty is the live store or, inside an
+    instance container, a folder the test user cannot write."""
     global _SESSION_DB_PATH, _SESSION_MIGRATIONS_DIR
     db_dir = tmp_path_factory.mktemp("frshty-db")
     db_path = db_dir / "frshty.db"
@@ -113,8 +116,9 @@ def _isolated_db(tmp_path_factory):
     _SESSION_MIGRATIONS_DIR = migrations
 
     previous = {name: os.environ.get(name)
-                for name in ("FRSHTY_DB", "FRSHTY_BOARD_FILE")}
+                for name in ("FRSHTY_DB", "FRSHTY_BOARD_FILE", "FRSHTY_ROOT")}
     os.environ["FRSHTY_DB"] = str(db_path)
+    os.environ["FRSHTY_ROOT"] = str(tmp_path_factory.mktemp("frshty-root"))
     os.environ["FRSHTY_BOARD_FILE"] = str(db_dir / "board.json")
 
     yield db_path
