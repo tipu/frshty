@@ -436,8 +436,9 @@ def app_pid(name: str) -> str:
 
 
 def reload(timeout: float = 120) -> int:
-    """SIGHUP every instance container and restart the gateway. Fails unless
-    each instance runs a new frshty.py process afterwards. The signal goes
+    """SIGHUP every instance container and restart the gateway when the host
+    runs one. Fails unless each instance runs a new frshty.py process
+    afterwards, or a gateway that exists does not restart. The signal goes
     through `docker exec kill`, because `docker kill` marks the container as
     manually stopped and Docker then skips it at the next daemon start."""
     names = instance_containers()
@@ -459,7 +460,9 @@ def reload(timeout: float = 120) -> int:
                 failed.append(name)
                 break
             time.sleep(1)
-    if subprocess.run(["docker", "restart", GATEWAY], capture_output=True).returncode != 0:
+    gateway = subprocess.run(["docker", "ps", "-aq", "--filter", f"name=^{GATEWAY}$"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+    if gateway and subprocess.run(["docker", "restart", GATEWAY], capture_output=True).returncode != 0:
         failed.append(GATEWAY)
     if failed:
         print(f"reload: {', '.join(failed)} did not restart", file=sys.stderr)
