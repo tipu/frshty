@@ -716,7 +716,8 @@ class GitHubPlatform(_CIMonitorMixin):
         for repo in self.repos:
             result = self._run_gh([
                 "pr", "list", "--repo", repo, "--author", "@me",
-                "--json", "number,title,author,headRefName,baseRefName,createdAt,updatedAt,url,state",
+                "--json", "number,title,author,headRefName,baseRefName,createdAt,updatedAt,url,state,"
+                          "isCrossRepository",
                 "--limit", "50",
             ])
             if result.returncode != 0:
@@ -1250,6 +1251,7 @@ class GitHubPlatform(_CIMonitorMixin):
             "created_on": pr["createdAt"],
             "updated_on": pr["updatedAt"],
             "url": pr["url"],
+            "cross_repo": bool(pr.get("isCrossRepository")),
         }
 
     def _normalize_search_pr(self, pr: dict) -> dict:
