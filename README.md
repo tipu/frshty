@@ -126,7 +126,7 @@ On first boot the container generates an ed25519 key in `ssh/` and adds it to th
 
 The container uses the host network. An optional `[container]` block sets its port, worker and model limits, extra mounts, and extra files to copy into its home directory; `scripts/instance.py` documents each key. The work board of a container belongs to its own instance, through `FRSHTY_BOARD_INSTANCE`. The container reads its config from `~/.frshty-containers/<key>/config/<key>.toml`: `up` copies the config it is given there, and refuses when a different file is already there. List every container in `~/.frshty-containers/peers.toml` to see all of them on one board; each container skips its own entry.
 
-`scripts/instance.py gateway-up --port 7130` starts one more container, the gateway. It runs no instance. It reads the instances from `~/.frshty-containers/peers.toml`, adds an instance dropdown to the top right of every page, and forwards each page, action and terminal to the container of the picked instance. The choice lives in a browser cookie.
+`scripts/instance.py gateway-up --port 7130` starts one more container, the gateway. It runs no instance. It reads the instances from `~/.frshty-containers/peers.toml`, adds an instance dropdown to the top right of every page, and forwards each page, action and terminal to the container of the picked instance. The choice lives in a browser cookie. `reload` restarts the gateway when it exists; a host with one instance runs no gateway.
 
 ## Setup details
 
