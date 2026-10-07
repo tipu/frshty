@@ -211,11 +211,23 @@ def test_a_gvoice_timeout_is_reported():
 
 
 def test_an_empty_gmail_answer_is_reported():
-    with patch.object(di, "run_agentic", return_value=None), \
+    with patch.object(di, "run_agentic", return_value="no json here"), \
             patch.object(di.log, "emit") as emit:
         report = di.check(_config(texts=False), instance_key="personal", now=NOW)
     assert report["errors"] == ["the Gmail connector run returned no thread list"]
     assert "direct_inbox_gmail_failed" in [c.args[0] for c in emit.call_args_list]
+
+
+def test_a_failed_gmail_run_carries_the_cli_error():
+    error = "Failed to authenticate: OAuth session expired and could not be refreshed"
+    with patch.object(di, "run_agentic", return_value=None), \
+            patch.object(di, "consume_last_error", return_value=error), \
+            patch.object(di.log, "emit") as emit:
+        report = di.check(_config(texts=False), instance_key="personal", now=NOW)
+    assert report["errors"] == [f"the Gmail connector run failed: {error}"]
+    failed = [c for c in emit.call_args_list if c.args[0] == "direct_inbox_gmail_failed"]
+    assert failed[0].kwargs["meta"]["error"] == error
+    assert error in failed[0].args[1]
 
 
 def test_the_pending_cap_holds_the_rest_back():
