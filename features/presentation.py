@@ -74,11 +74,17 @@ def build_presentation(ticket_goal: str, diff_text: str, worktree: Path | None) 
         "the problem (errant, destructive, dead/benign, or does not advance the goal)\n"
         "4. verdict: an object with solves_problem (true/false), summary (3-5 sentences on whether the PR "
         "correctly and completely solves the goal with no errant, destructive, or dead code), and concerns "
-        "(array of short strings, empty if none).\n\n"
+        "(array of short strings, empty if none).\n"
+        "5. visual: material for picture-style recap slides, written for someone who never reads the code:\n"
+        "   - flow: 3-7 boxes that trace the change end to end in plain words (no code identifiers). Each box "
+        "has label (2-5 words), kind (one of input, process, decision, store, output), note (at most 10 words) and step (the 1-based number of the step above that this box mostly covers, or 0 if none)\n"
+        "   - before: 2-4 very short phrases on how things behave without this change\n"
+        "   - after: 2-4 very short phrases on how things behave with this change, parallel to before\n\n"
         "Order steps by execution flow, NOT by file or diff order. Aim for 4-10 steps.\n\n"
         'Return ONLY valid JSON (no markdown fences): '
         '{"problem":"...","approach":"...","steps":[{"title":"...","file":"...","code":"NUM: ...","narrative":"...","check":"ok|concern","check_note":"..."}],'
-        '"verdict":{"solves_problem":true,"summary":"...","concerns":["..."]}}\n\n'
+        '"verdict":{"solves_problem":true,"summary":"...","concerns":["..."]},'
+        '"visual":{"flow":[{"label":"...","kind":"input|process|decision|store|output","note":"...","step":1}],"before":["..."],"after":["..."]}}\n\n'
         f"--- DIFF START ---\n{diff_text[:60000]}\n--- DIFF END ---"
     )
     output = run_balanced(prompt, worktree=worktree, tools=tools, timeout=900)
