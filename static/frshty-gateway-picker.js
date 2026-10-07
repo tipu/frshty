@@ -24,7 +24,10 @@
                 select.appendChild(opt);
             });
             select.addEventListener('change', () => {
-                const next = window.location.pathname + window.location.search;
+                const params = new URLSearchParams(window.location.search);
+                params.delete('frshty_instance');
+                const query = params.toString();
+                const next = window.location.pathname + (query ? '?' + query : '');
                 window.location.href = '/api/gateway/select?key=' + encodeURIComponent(select.value)
                     + '&next=' + encodeURIComponent(next);
             });
