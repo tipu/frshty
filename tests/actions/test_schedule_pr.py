@@ -8,7 +8,7 @@ from actions import schedule_pr
 class TestHandle:
     def test_with_delay_hours(self, tmp_state):
         payload = {"ticket_key": "T-1", "slug": "s", "branch": "b"}
-        trigger = {"delay_hours": [1, 2], "quiet_hours": [23, 7], "timezone": "US/Pacific"}
+        trigger = {"delay_hours": [1, 2], "quiet_hours": [23, 7], "timezone": "America/Los_Angeles"}
         config = {}
 
         with patch("actions.schedule_pr.scheduler.compute_delay_time", return_value=datetime(2026, 4, 20, 10, 0, tzinfo=timezone.utc)) as mock_delay, \
