@@ -129,6 +129,10 @@
             </div>
             <div class="ln-task-id">#{{ it.id }}</div>
           </div>
+          <textarea class="wintake" rows="3" style="margin-top:8px; resize:vertical" v-if="g === 'proposed'"
+                    :value="propText[rowKey(it)] ?? it.objective" :disabled="approveBusy[rowKey(it)]"
+                    @input="propText[rowKey(it)] = $event.target.value"
+                    title="edit the objective before you approve it; the agent starts on this text"></textarea>
           <div class="ln-task-foot">
             <span class="ln-pill" :class="statePill(g, it)">{{ stateText(g, it) }}</span>
             <span class="ln-pill ln-pill-gold" v-if="it.critical" title="you marked this task critical">★ Critical</span>
@@ -290,7 +294,7 @@ frshtyApp({
       intakeRepo: "",
       intakeTray: PasteImages.tray(), fupTray: {},
       intakeAgent: localStorage.getItem("workAgent") || "claude",
-      connError: "", replyText: {}, sumOpen: {}, approveBusy: {}, linkmap: null, threads: [],
+      connError: "", replyText: {}, sumOpen: {}, approveBusy: {}, propText: {}, linkmap: null, threads: [],
       fupOpen: {}, fupText: {}, fupBusy: {}, fupError: {}, fupLaunched: {},
       peers: [], peerMeta: {}, peerErrors: {}, peerLinkmaps: {},
       searchText: "", projectFilter: JSON.parse(localStorage.getItem("workProjectFilter") || "[]"),
@@ -708,10 +712,11 @@ frshtyApp({
       try {
         const r = await fetch(this.apiUrl(it.peer, `/api/work/items/${it.id}/approve`), {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ agent: this.intakeAgent }),
+          body: JSON.stringify({ agent: this.intakeAgent, objective: this.propText[key] ?? it.objective }),
         });
         const d = await r.json().catch(() => ({}));
         if (!r.ok) this.connError = d.error || ("approve failed HTTP " + r.status);
+        else delete this.propText[key];
       } catch (e) {
         this.connError = "approve failed: " + e.message;
       } finally {
