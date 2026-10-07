@@ -12,6 +12,7 @@ import core.log as log
 from core import external_log
 from core.config import resolve_env, get_repos, base_branch_for
 from core.claude_runner import run_claude_code
+from core.llm import NO_PUBLISH_RULE
 from features.pr_ci import FAILED_STATES, PASSED_STATES
 
 
@@ -76,7 +77,8 @@ def _resolve_merge_conflicts(repo_path, base_branch: str, prev_error: str | None
         "else verify structurally). Fix any syntax error you introduce.\n"
         "5. `git add <file>` once clean.\n\n"
         "Do NOT run `git commit` — leave the resolved files staged. If you cannot resolve a file, "
-        "leave it conflicted and explain which file and why."
+        "leave it conflicted and explain which file and why.\n\n"
+        + NO_PUBLISH_RULE
     )
     run_claude_code(prompt, cwd=Path(repo_path), timeout=900,
                     model=_CONFLICT_RESOLVE_MODEL)

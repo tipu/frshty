@@ -603,3 +603,35 @@ class TestScanTicketsValidationSkip:
 
         assert any(task == "validate_merged_ticket" for _, task, _ in enqueued), \
             "scan_tickets must re-enqueue validate_merged_ticket when ticket is at validation status with prior failed job"
+
+
+class TestForeignPrHold:
+    def test_run_task_skips_a_ticket_held_for_a_foreign_pr(self, fresh_db, tmp_path, monkeypatch):
+        state.init(tmp_path / "state")
+        _seed_ticket("test", "TEST-9", "test-9-slug", "planning")
+        state.update_ticket("TEST-9", lambda cur: {
+            **cur, state.FOREIGN_PRS_KEY: [{"repo": "dev-tools", "id": 5, "url": "u"}]})
+        calls = []
+        monkeypatch.setattr("core.tasks.tickets.run_claude_code",
+                            lambda *a, **k: calls.append(a) or "ok")
+
+        from core import tasks as _tasks_import
+        _tasks_import.tickets
+
+        result = run_task(_task_ctx("TEST-9", _make_config(tmp_path)))
+
+        assert result.status == "skipped"
+        assert "dev-tools#5" in result.reason
+        assert calls == []
+        assert state.load_ticket("TEST-9")["status"] == "planning"
+
+    def test_pipeline_prompts_forbid_push_pr_and_ticket_writes(self, monkeypatch):
+        import core.tasks.tickets as task_tickets
+        from core.llm import NO_PUBLISH_RULE
+        seen = []
+        monkeypatch.setattr(task_tickets, "run_claude_code",
+                            lambda prompt, **k: seen.append(prompt) or "ok")
+
+        task_tickets._run_pipeline_agent("do the work", cwd=Path("/x"), timeout=5)
+
+        assert seen == [f"do the work\n\n{NO_PUBLISH_RULE}"]
