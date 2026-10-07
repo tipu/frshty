@@ -2086,7 +2086,8 @@ def _baseline_store(repo: Path) -> Path | None:
     return path / _BASELINE_FILE
 
 
-def _read_baseline(store: Path | None, base_sha: str, head_cmd: str) -> dict | None:
+def _read_baseline(store: Path | None, base_sha: str, head_cmd: str,
+                   ci_env: bool = True) -> dict | None:
     """The cached outcome for exactly this base commit and this suite.
 
     The command is part of the key. A cached failure for `npm run test` says
@@ -2100,7 +2101,8 @@ def _read_baseline(store: Path | None, base_sha: str, head_cmd: str) -> dict | N
         return None
     if not isinstance(held, dict):
         return None
-    if held.get("base") != base_sha or held.get("head_cmd") != head_cmd:
+    if held.get("base") != base_sha or held.get("head_cmd") != head_cmd \
+            or held.get("ci_env") != ci_env:
         return None
     # The record says what the suite did with the dependencies that were
     # installed when it ran. Repairing a broken dependency changes that answer
@@ -2152,7 +2154,7 @@ def _baseline_tests(repo: Path, base_sha: str, head_cmd: str,
     be established, and the caller then keeps denying."""
     store = _baseline_store(repo)
     with _baseline_guard:
-        cached = _read_baseline(store, base_sha, head_cmd)
+        cached = _read_baseline(store, base_sha, head_cmd, ci_env)
         if cached is not None:
             return cached
         outcome = _run_baseline(repo, base_sha, head_cmd, ci_env)
@@ -2168,7 +2170,7 @@ def _run_baseline(repo: Path, base_sha: str, head_cmd: str,
     a gate, and a gate that raises inside the hook prints nothing, so the push
     it could not judge would go through unexamined."""
     outcome = {"result": "unresolved", "cmd": "", "note": "", "base": base_sha,
-               "head_cmd": head_cmd, "at": _now_iso()}
+               "head_cmd": head_cmd, "ci_env": ci_env, "at": _now_iso()}
     holder, tree = "", Path("")
     try:
         # Inside the guard. mkdtemp raises when the temporary filesystem is
@@ -2198,7 +2200,7 @@ def _run_baseline(repo: Path, base_sha: str, head_cmd: str,
             return outcome
         outcome = {
             **_run_repo_tests(tree, cmd, env, timeout=PUSH_GATE_TEST_TIMEOUT),
-            "cmd": baseline_cmd, "base": base_sha, "head_cmd": head_cmd,
+            "cmd": baseline_cmd, "base": base_sha, "head_cmd": head_cmd, "ci_env": ci_env,
             "at": _now_iso(),
             "note": "dependencies linked: " + (", ".join(linked) or "none"),
         }
