@@ -741,6 +741,16 @@ def merge_approval_required(contexts) -> bool:
     return any(k not in own for k in project_keys(contexts))
 
 
+def ci_env_enabled_for(contexts) -> bool:
+    """Whether the push gate runs a package.json test script with CI=true.
+
+    The push lands in one repository and the board cannot tell which selected
+    project holds it, so CI=true stays on unless every selected project turns
+    it off. A project the board holds no config for keeps the default."""
+    return any(core_config.ci_env_enabled(_instance_config(k) or _config_on_disk(k) or {})
+               for k in project_keys(contexts))
+
+
 def merge_review_required(contexts) -> list[str]:
     """The projects this task selected that hold a merge for operator review.
 
@@ -1938,8 +1948,8 @@ def _outgoing_files(repo: Path) -> list[str] | None:
     return [ln.strip() for ln in out.splitlines() if ln.strip()]
 
 
-def _gate_tests(repo: Path) -> dict:
-    runner = _detect_runner(repo)
+def _gate_tests(repo: Path, ci_env: bool = True) -> dict:
+    runner = _detect_runner(repo, ci_env)
     if runner is None:
         return {"result": "no_runner", "cmd": "", "exit_code": 0, "tail": ""}
     cmd, env = runner
@@ -2125,7 +2135,8 @@ def _write_baseline(store: Path | None, outcome: dict) -> None:
             pass
 
 
-def _baseline_tests(repo: Path, base_sha: str, head_cmd: str) -> dict:
+def _baseline_tests(repo: Path, base_sha: str, head_cmd: str,
+                    ci_env: bool = True) -> dict:
     """Run the repository's own suite at the merge base, and cache the answer.
 
     The gate exists to catch a test the change broke, not to report a suite
@@ -2144,12 +2155,13 @@ def _baseline_tests(repo: Path, base_sha: str, head_cmd: str) -> dict:
         cached = _read_baseline(store, base_sha, head_cmd)
         if cached is not None:
             return cached
-        outcome = _run_baseline(repo, base_sha, head_cmd)
+        outcome = _run_baseline(repo, base_sha, head_cmd, ci_env)
         _write_baseline(store, outcome)
         return outcome
 
 
-def _run_baseline(repo: Path, base_sha: str, head_cmd: str) -> dict:
+def _run_baseline(repo: Path, base_sha: str, head_cmd: str,
+                  ci_env: bool = True) -> dict:
     """One baseline run, with its checkout removed whatever happens.
 
     Every failure path returns "unresolved" rather than raising: the caller is
@@ -2175,7 +2187,7 @@ def _run_baseline(repo: Path, base_sha: str, head_cmd: str) -> dict:
             outcome["note"] = ("the baseline cannot use these dependencies, so it "
                                "would fail for the wrong reason: " + ", ".join(refused))
             return outcome
-        runner = _detect_runner(tree)
+        runner = _detect_runner(tree, ci_env)
         if runner is None or runner[0][0] == _NO_LOCAL_PY_VENV_SENTINEL:
             outcome["note"] = "the merge base resolves no test runner"
             return outcome
@@ -2713,14 +2725,16 @@ def _gate_one_push(session_id: str, command: str, start_dir: str) -> dict:
                                     "repository; the suite was not run"}
         work_store.record_gate(session_id, "push_gate", "pass", payload)
         return {"decision": "allow", "reason": "no outgoing change in this repository"}
-    tests = _gate_tests(repo)
+    item = work_worktree.session_item(session_id)
+    ci_env = ci_env_enabled_for(item["contexts"] if item else "")
+    tests = _gate_tests(repo, ci_env)
     payload["tests"] = {**tests, "tail": (tests.get("tail") or "")[-_GATE_TAIL:]}
     if tests["result"] not in ("pass", "no_runner"):
         baseline = {}
         if tests["result"] == "fail" and tests.get("cmd"):
             base_sha = _merge_base(repo)
             if base_sha:
-                baseline = _baseline_tests(repo, base_sha, tests["cmd"])
+                baseline = _baseline_tests(repo, base_sha, tests["cmd"], ci_env)
                 payload["baseline"] = {
                     **baseline, "tail": (baseline.get("tail") or "")[-_GATE_TAIL:]}
         if baseline.get("result") == "fail":
