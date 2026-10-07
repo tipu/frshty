@@ -28,6 +28,7 @@ import core.log as log
 from core.config import get_repos, ticket_worktree_path
 from core.llm import (
     CODEX_EXEC,
+    NO_PUBLISH_RULE,
     run_thinking,
     run_external_model,
     validate_model_output,
@@ -155,7 +156,8 @@ def _synthesize_and_implement(ticket_dir: Path, plan_files: list[Path],
         "Step 2 — Implement: Implement the consensus plan. All source changes "
         "go inside the repository worktree subdirectories of this ticket "
         "directory. Follow each project's conventions. Commit incrementally by "
-        "logical unit inside each repo worktree."
+        "logical unit inside each repo worktree.\n\n"
+        + NO_PUBLISH_RULE
     )
     run_thinking(prompt, cwd=ticket_dir, timeout=timeout)
     tp = ticket_dir / "docs" / "technical-plan.md"
@@ -200,7 +202,8 @@ def _write_manifest(ticket_dir: Path, patch: Path, timeout: int) -> bool:
         "Release-note framing, Problem and approach, What changed by area, New "
         "surfaces, Changed surfaces, Integration obligations, Tradeoffs "
         "accepted, What could break, What tests prove. Derive 'what changed' "
-        "from the diff, not from the plan."
+        "from the diff, not from the plan.\n\n"
+        + NO_PUBLISH_RULE
     )
     run_thinking(prompt, cwd=ticket_dir, timeout=timeout)
     cm = ticket_dir / "docs" / "change-manifest.md"
@@ -235,7 +238,7 @@ Write only docs/change-explainer.html. Build it incrementally in several smaller
 
 
 def _write_explainer(ticket_dir: Path, patch: Path, timeout: int) -> bool:
-    prompt = EXPLAINER_DIRECTIVE.format(patch=patch)
+    prompt = f"{EXPLAINER_DIRECTIVE.format(patch=patch)}\n\n{NO_PUBLISH_RULE}"
     run_thinking(prompt, cwd=ticket_dir, timeout=timeout)
     return (ticket_dir / "docs" / "change-explainer.html").is_file()
 
@@ -253,7 +256,7 @@ def run_consensus_plan(config: dict, ticket_dir: Path, slug: str, *,
     if not baselines:
         return False, "no repo worktrees found to plan against"
 
-    prompt = PLAN_DIRECTIVE
+    prompt = f"{PLAN_DIRECTIVE}\n\n{NO_PUBLISH_RULE}"
     (run_dir / "composed-prompt.md").write_text(prompt)
     include_dirs = [str(wt) for wt, _ in baselines.values()]
 

@@ -18,6 +18,7 @@ import core.log as log
 import core.state as state
 from core.claude_runner import run_claude_code, run_haiku, extract_json
 from core.commit_message import COMMIT_SUBJECT_RULE, HOOKS_RULE, commit_subject
+from core.llm import NO_PUBLISH_RULE
 from core.config import base_branch_for, get_repos, ticket_worktree_path
 from core.deps import relink_shared_venv
 from core.consensus_plan import run_consensus_plan
@@ -57,6 +58,10 @@ TEST_RUN_TIMEOUT = 5400
 PROOF_TIMEOUT = 3600
 FLOW_TIMEOUT = 1800
 MIN_TESTING_MD_BYTES = 200
+
+
+def _run_pipeline_agent(prompt: str, **kwargs) -> str | None:
+    return run_claude_code(f"{prompt}\n\n{NO_PUBLISH_RULE}", **kwargs)
 
 
 def _testing_md_is_substantive(path: Path) -> bool:
@@ -1212,7 +1217,7 @@ def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
                        "paths": unreproducible})
         return "block_unknown"
 
-    fixed = run_claude_code(
+    fixed = _run_pipeline_agent(
         "The pre-commit hooks rejected this commit. Fix ONLY what the hook output below "
         "reports, in this repository. Do not change behaviour, do not touch unrelated "
         "files, and do not disable, skip or reconfigure the hook. Make the smallest edit "
@@ -1437,7 +1442,7 @@ def start_planning(ctx: TaskContext) -> TaskResult:
             "accepted, what could break, what tests prove. Ground it in the actual "
             "technical-plan content."
         )
-        recovery_result = run_claude_code(recovery_prompt, cwd=ticket_dir, timeout=300)
+        recovery_result = _run_pipeline_agent(recovery_prompt, cwd=ticket_dir, timeout=300)
         if recovery_result is None:
             return TaskResult("failed", "recovery: claude returned non-zero or empty "
                                         "while generating change-manifest.md")
@@ -1510,7 +1515,7 @@ def start_reviewing(ctx: TaskContext) -> TaskResult:
     log.emit("ticket_review_started", f"Headless tri-review for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key,
                    "repos": [name for name, _, _ in repos]})
-    result = run_claude_code(prompt, cwd=ticket_dir, timeout=REVIEW_TIMEOUT)
+    result = _run_pipeline_agent(prompt, cwd=ticket_dir, timeout=REVIEW_TIMEOUT)
     if result is None:
         return TaskResult("failed", "claude returned non-zero or empty")
     review = ticket_dir / "docs" / "tri-review.md"
@@ -1563,7 +1568,7 @@ def generate_flow_doc(ctx: TaskContext) -> TaskResult:
     prompt = _FLOW_PROMPT_TEMPLATE.format(base_branch=base_branch)
     log.emit("ticket_flow_doc_started", f"Building FLOW.html for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key})
-    result = run_claude_code(prompt, cwd=ticket_dir, timeout=FLOW_TIMEOUT)
+    result = _run_pipeline_agent(prompt, cwd=ticket_dir, timeout=FLOW_TIMEOUT)
     if result is None:
         return TaskResult("failed", "claude returned non-zero or empty")
     return TaskResult("ok")
@@ -1591,8 +1596,8 @@ def fix_review_findings(ctx: TaskContext) -> TaskResult:
              meta={"ticket": ctx.ticket_key})
     baseline = _capture_repo_heads(ticket_dir)
     sid, resume = _claim_session(ctx, "fix_review_findings")
-    fix_result = run_claude_code(fix_prompt, cwd=ticket_dir, timeout=FIX_TIMEOUT,
-                                 session_id=sid, resume=resume)
+    fix_result = _run_pipeline_agent(fix_prompt, cwd=ticket_dir, timeout=FIX_TIMEOUT,
+                                     session_id=sid, resume=resume)
     if fix_result is None:
         if resume:
             _drop_session(ctx, "fix_review_findings")
@@ -1637,7 +1642,7 @@ def fix_review_findings(ctx: TaskContext) -> TaskResult:
     )
     log.emit("ticket_review_verifying", f"Fresh verify for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key})
-    verify_result = run_claude_code(verify_prompt, cwd=ticket_dir, timeout=REVIEW_TIMEOUT)
+    verify_result = _run_pipeline_agent(verify_prompt, cwd=ticket_dir, timeout=REVIEW_TIMEOUT)
     if verify_result is None:
         return TaskResult("failed", "verify step: claude returned non-zero or empty")
     return TaskResult("ok")
@@ -1784,7 +1789,7 @@ def backfill_artifacts(ctx: TaskContext) -> TaskResult:
     )
     log.emit("ticket_backfill_started", f"Backfilling artifacts for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key, "pr_url": pr_url})
-    result = run_claude_code(prompt, cwd=ticket_dir, timeout=BACKFILL_TIMEOUT)
+    result = _run_pipeline_agent(prompt, cwd=ticket_dir, timeout=BACKFILL_TIMEOUT)
     if result is None:
         return TaskResult("failed", "claude returned non-zero or empty")
     return TaskResult("ok")
@@ -1825,7 +1830,7 @@ def plan_tests(ctx: TaskContext) -> TaskResult:
              f"Headless plan_tests for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key,
                    "has_testing_guide": _testing_md_is_substantive(testing_md_path)})
-    result = run_claude_code(prompt, cwd=ticket_dir, timeout=TEST_PLAN_TIMEOUT)
+    result = _run_pipeline_agent(prompt, cwd=ticket_dir, timeout=TEST_PLAN_TIMEOUT)
     if result is None:
         return TaskResult("failed", "claude returned non-zero or empty")
     return TaskResult("ok")
@@ -1876,9 +1881,9 @@ def write_tests(ctx: TaskContext) -> TaskResult:
              f"Headless write_tests for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key})
     sid, resume = _claim_session(ctx, "write_tests")
-    result = run_claude_code(_WRITE_TESTS_PROMPT, cwd=ticket_dir,
-                             timeout=TEST_WRITE_TIMEOUT,
-                             session_id=sid, resume=resume)
+    result = _run_pipeline_agent(_WRITE_TESTS_PROMPT, cwd=ticket_dir,
+                                 timeout=TEST_WRITE_TIMEOUT,
+                                 session_id=sid, resume=resume)
     if result is None:
         if resume:
             _drop_session(ctx, "write_tests")
@@ -1988,9 +1993,9 @@ def run_tests_and_fix(ctx: TaskContext) -> TaskResult:
 
     fix_prompt = _build_fix_prompt(per_repo)
     sid, resume = _claim_session(ctx, "run_tests_and_fix")
-    fix_result = run_claude_code(fix_prompt, cwd=ticket_dir,
-                                 timeout=TEST_RUN_TIMEOUT,
-                                 session_id=sid, resume=resume)
+    fix_result = _run_pipeline_agent(fix_prompt, cwd=ticket_dir,
+                                     timeout=TEST_RUN_TIMEOUT,
+                                     session_id=sid, resume=resume)
     if fix_result is None:
         if resume:
             _drop_session(ctx, "run_tests_and_fix")
@@ -2125,8 +2130,8 @@ def prove(ctx: TaskContext) -> TaskResult:
     _kill_stray_recorders()
     sid, resume = _claim_session(ctx, "prove")
     try:
-        result = run_claude_code(prompt, cwd=ticket_dir, timeout=PROOF_TIMEOUT,
-                                 session_id=sid, resume=resume)
+        result = _run_pipeline_agent(prompt, cwd=ticket_dir, timeout=PROOF_TIMEOUT,
+                                     session_id=sid, resume=resume)
     finally:
         _kill_stray_recorders()
     if result is None:
@@ -2317,8 +2322,8 @@ def generate_pr_descriptions(ctx: TaskContext) -> TaskResult:
         session_prompt = _PR_DESCRIPTIONS_SESSION_PROMPT.format(
             ticket_key=ctx.ticket_key, repo_lines=repo_lines,
         )
-        run_claude_code(session_prompt, cwd=ticket_dir,
-                        timeout=PR_DESCRIPTION_SESSION_TIMEOUT)
+        _run_pipeline_agent(session_prompt, cwd=ticket_dir,
+                            timeout=PR_DESCRIPTION_SESSION_TIMEOUT)
         if out_path.exists():
             try:
                 parsed_file = json.loads(out_path.read_text())
@@ -2471,7 +2476,7 @@ def fix_reported_bug(ctx: TaskContext) -> TaskResult:
                    "comment_ids": [str(r.get("comment_id")) for r in reports],
                    "reports": len(reports)})
     before = _capture_repo_heads(ticket_dir)
-    result = run_claude_code(prompt, cwd=ticket_dir, timeout=FIX_TIMEOUT)
+    result = _run_pipeline_agent(prompt, cwd=ticket_dir, timeout=FIX_TIMEOUT)
     if result is None:
         _settle_bug_reports(ctx, reports, "claude returned non-zero or empty")
         return TaskResult("failed", "claude returned non-zero or empty")
@@ -2791,7 +2796,7 @@ def fix_scope_findings(ctx: TaskContext) -> TaskResult:
         except OSError:
             pass
     before = _capture_repo_heads(ticket_dir)
-    result = run_claude_code(prompt, cwd=ticket_dir, timeout=FIX_TIMEOUT)
+    result = _run_pipeline_agent(prompt, cwd=ticket_dir, timeout=FIX_TIMEOUT)
     if result is None:
         return TaskResult("failed", "claude returned non-zero or empty")
     try:
@@ -3094,7 +3099,7 @@ def do_research(ctx: TaskContext) -> TaskResult:
         + revision +
         f"\nResearch question:\n{ts.get('summary', '')}\n\n{ts.get('description', '')}"
     )
-    result = run_claude_code(prompt, cwd=ticket_dir, timeout=RESEARCH_TIMEOUT)
+    result = _run_pipeline_agent(prompt, cwd=ticket_dir, timeout=RESEARCH_TIMEOUT)
     if result is None:
         return TaskResult("failed", "research: claude returned non-zero or empty")
     if not research_md.exists():
