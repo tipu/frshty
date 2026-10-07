@@ -11,7 +11,7 @@ def make_pr(**overrides):
 
 
 def _config(**overrides):
-    base = {"job": {"key": "clarivis"}, "features": {"pr_autofix": True}}
+    base = {"job": {"key": "clarivis", "platform": "github"}, "features": {"pr_autofix": True}}
     base.update(overrides)
     return base
 
@@ -21,7 +21,7 @@ class TestCheck:
         prs = [make_pr(id=1), make_pr(id=2)]
         platform = MagicMock()
         platform.self_id.return_value = "alice"
-        platform.list_open_prs.return_value = prs
+        platform.list_my_open_prs.return_value = prs
         store = {}
         with patch("features.pr_autofix.make_platform", return_value=platform), \
              patch("features.pr_autofix.state.load", return_value=store), \
@@ -40,7 +40,7 @@ class TestCheck:
                  "myrepo/1": {"status": "baselined"}}
         platform = MagicMock()
         platform.self_id.return_value = "alice"
-        platform.list_open_prs.return_value = [make_pr(id=1), make_pr(id=2)]
+        platform.list_my_open_prs.return_value = [make_pr(id=1), make_pr(id=2)]
         with patch("features.pr_autofix.make_platform", return_value=platform), \
              patch("features.pr_autofix.state.load", return_value=store), \
              patch("features.pr_autofix.state.save") as mock_save, \
@@ -58,7 +58,7 @@ class TestCheck:
                  "myrepo/9": {"status": "clean"}}
         platform = MagicMock()
         platform.self_id.return_value = "alice"
-        platform.list_open_prs.return_value = []
+        platform.list_my_open_prs.return_value = []
         with patch("features.pr_autofix.make_platform", return_value=platform), \
              patch("features.pr_autofix.state.load", return_value=store), \
              patch("features.pr_autofix.state.save") as mock_save, \
@@ -75,7 +75,7 @@ class TestCheck:
                  "myrepo/1": {"status": "error", "attempts": 1}}
         platform = MagicMock()
         platform.self_id.return_value = "alice"
-        platform.list_open_prs.return_value = [make_pr(id=1)]
+        platform.list_my_open_prs.return_value = [make_pr(id=1)]
         with patch("features.pr_autofix.make_platform", return_value=platform), \
              patch("features.pr_autofix.state.load", return_value=store), \
              patch("features.pr_autofix.state.save"), \
@@ -89,7 +89,7 @@ class TestCheck:
                  "myrepo/1": {"status": "error", "attempts": pr_autofix.MAX_ATTEMPTS}}
         platform = MagicMock()
         platform.self_id.return_value = "alice"
-        platform.list_open_prs.return_value = [make_pr(id=1)]
+        platform.list_my_open_prs.return_value = [make_pr(id=1)]
         with patch("features.pr_autofix.make_platform", return_value=platform), \
              patch("features.pr_autofix.state.load", return_value=store), \
              patch("features.pr_autofix.state.save"), \
@@ -98,12 +98,12 @@ class TestCheck:
             pr_autofix.check(_config())
         mock_enqueue.assert_not_called()
 
-    def test_platform_without_list_open_prs_skips(self):
-        platform = MagicMock(spec=[])
-        with patch("features.pr_autofix.make_platform", return_value=platform), \
+    def test_non_github_platform_skips(self):
+        with patch("features.pr_autofix.make_platform") as mock_make, \
              patch("features.pr_autofix.state.load") as mock_load, \
              patch("features.pr_autofix.log.emit"):
-            pr_autofix.check(_config())
+            pr_autofix.check(_config(job={"key": "clarivis", "platform": "bitbucket"}))
+        mock_make.assert_not_called()
         mock_load.assert_not_called()
 
 
@@ -345,7 +345,7 @@ class TestForeignPrIsNotPushed:
     def _check(self, store, prs, me):
         platform = MagicMock()
         platform.self_id.return_value = me
-        platform.list_open_prs.return_value = prs
+        platform.list_my_open_prs.return_value = prs
         with patch("features.pr_autofix.make_platform", return_value=platform), \
              patch("features.pr_autofix.state.load", return_value=store), \
              patch("features.pr_autofix.state.save"), \

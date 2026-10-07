@@ -299,6 +299,7 @@ class TestInstanceLauncher:
         monkeypatch.setattr(mod, "HOME", home)
         monkeypatch.setattr(mod, "CONTAINERS_ROOT", tmp_path / "boxes")
         monkeypatch.setattr(mod, "PEERS", tmp_path / "boxes" / "peers.toml")
+        monkeypatch.setattr(mod, "DOCKER_SOCKET", tmp_path / "no-docker.sock")
         return mod, home
 
     def test_host_ssh_is_never_mounted(self, tmp_path, monkeypatch):
@@ -570,16 +571,33 @@ class TestInstanceLauncher:
         sock = tmp_path / "docker.sock"
         sock.write_text("")
         monkeypatch.setattr(mod, "DOCKER_SOCKET", sock)
+        probes = []
+
+        real_run = subprocess.run
+
+        def run(cmd, **kwargs):
+            if cmd[0] != "docker":
+                return real_run(cmd, **kwargs)
+            probes.append(cmd)
+            return subprocess.CompletedProcess(cmd, 0, "0\n", "")
+
+        monkeypatch.setattr(mod.subprocess, "run", run)
         path = self._config(tmp_path, f'[container]\ndevices = ["{sock}"]\n')
         args = mod.run_args(mod.load(str(path)), path, check=False)
         assert f"{sock}:{sock}" in args
-        assert args[args.index("--group-add") + 1] == str(sock.stat().st_gid)
+        assert args[args.index("--group-add") + 1] == "0"
+        assert probes == [["docker", "run", "--rm", "--entrypoint", "stat", "-v", f"{sock}:{sock}",
+                           mod.IMAGE, "-c", "%g", str(sock)]]
         assert args[args.index("--device") + 1] == str(sock)
         assert args[args.index("--device") + 2:args.index("--device") + 4] == ["--group-add", str(sock.stat().st_gid)]
         (tmp_path / "boxes" / "aimyable" / "config" / "aimyable.toml").unlink()
         path = self._config(tmp_path, '[container]\ndevices = ["/definitely/not/a/device"]\n')
         with pytest.raises(SystemExit, match="device /definitely/not/a/device does not exist"):
             mod.run_args(mod.load(str(path)), path, check=False)
+        monkeypatch.setattr(mod.subprocess, "run",
+                            lambda cmd, **kwargs: subprocess.CompletedProcess(cmd, 125, "", "no such image"))
+        with pytest.raises(SystemExit, match="no such image"):
+            mod.docker_socket_gid()
 
     def test_missing_mount_source_is_refused(self, tmp_path, monkeypatch):
         mod, _ = self._launcher(tmp_path, monkeypatch)
