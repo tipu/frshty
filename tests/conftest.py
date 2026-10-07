@@ -7,6 +7,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
+for _name in ("FRSHTY_BOARD_INSTANCE", "FRSHTY_ROOT", "FRSHTY_BOARD_FILE", "FRSHTY_DB"):
+    os.environ.pop(_name, None)
+
 import core.db as db
 import core.state as state
 import core.log as log
