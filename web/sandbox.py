@@ -5,6 +5,11 @@ them from its own origin. A page among them needs its own scripts, dialogs,
 downloads, and links that open a third-party site outside the sandbox. Every
 other kind is data the browser renders, so it runs nothing.
 
+Audio and video are the exception to the sandbox. A browser opens a media file
+as a media document that loads the file again from its own URL, and a sandboxed
+media document never loads it: the player stays at 0:00 with no length. A media
+policy lets the document load media from the board's origin and nothing else.
+
 A page policy carries no allow-same-origin, so the page cannot hold the board's
 origin, and it pins three directives so the page cannot reach the board
 sideways: connect-src stops its own fetch and WebSocket while still allowing
@@ -27,12 +32,20 @@ DATA = "sandbox"
 PAGE = ("sandbox allow-scripts allow-modals allow-popups "
         "allow-popups-to-escape-sandbox allow-downloads; "
         "connect-src blob: data:; frame-src 'none'; object-src 'none'")
+MEDIA = "default-src 'none'; media-src 'self'"
 
 _PAGE_SUFFIXES = (".html", ".htm")
+_MEDIA_SUFFIXES = (".mp4", ".m4v", ".webm", ".mov", ".mkv", ".ogv", ".ogg",
+                   ".mp3", ".m4a", ".aac", ".wav", ".oga", ".opus", ".flac")
 
 
 def policy_for(path: str) -> str:
-    return PAGE if path.lower().endswith(_PAGE_SUFFIXES) else DATA
+    lowered = path.lower()
+    if lowered.endswith(_PAGE_SUFFIXES):
+        return PAGE
+    if lowered.endswith(_MEDIA_SUFFIXES):
+        return MEDIA
+    return DATA
 
 
 def origin_is_opaque(origin: str) -> bool:

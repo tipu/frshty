@@ -1,6 +1,6 @@
 import pytest
 
-from web.sandbox import DATA, PAGE, origin_is_opaque, policy_for
+from web.sandbox import DATA, MEDIA, PAGE, origin_is_opaque, policy_for
 
 
 class TestSandboxPolicy:
@@ -12,12 +12,19 @@ class TestSandboxPolicy:
         assert "allow-scripts" in policy_for(name)
 
     @pytest.mark.parametrize("name", [
-        "shot.png", "notes.md", "data.json", "clip.webm", "diagram.svg",
-        "report.html.txt", "", "htm", "html",
+        "shot.png", "notes.md", "data.json", "diagram.svg",
+        "report.html.txt", "clip.mp4.txt", "", "htm", "html", "mp4",
     ])
     def test_everything_else_runs_nothing(self, name):
         assert policy_for(name) == DATA
         assert policy_for(name) == "sandbox"
+
+    @pytest.mark.parametrize("name", [
+        "demo.mp4", "DEMO.MP4", "clip.webm", "clip.mov", "voice.mp3", "a.b.wav",
+    ])
+    def test_media_may_load_itself_and_nothing_else(self, name):
+        assert policy_for(name) == MEDIA
+        assert policy_for(name) == "default-src 'none'; media-src 'self'"
 
     def test_no_policy_grants_the_board_origin(self):
         for policy in (DATA, PAGE):
