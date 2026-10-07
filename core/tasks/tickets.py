@@ -18,7 +18,7 @@ import core.log as log
 import core.state as state
 from core.claude_runner import run_claude_code, run_haiku, extract_json
 from core.commit_message import COMMIT_SUBJECT_RULE, HOOKS_RULE, commit_subject
-from core.config import base_branch_for, get_repos, ticket_worktree_path
+from core.config import base_branch_for, ci_env_enabled, get_repos, ticket_worktree_path
 from core.deps import relink_shared_venv
 from core.consensus_plan import run_consensus_plan
 from core.consensus_scope import (
@@ -74,7 +74,7 @@ def _testing_md_is_substantive(path: Path) -> bool:
 _NO_LOCAL_PY_VENV_SENTINEL = "__NO_LOCAL_PY_VENV__"
 
 
-def _detect_runner(repo_dir: Path) -> tuple[list[str], dict[str, str]] | None:
+def _detect_runner(repo_dir: Path, ci_env: bool = True) -> tuple[list[str], dict[str, str]] | None:
     """Return (cmd_argv, env_extras) for the repo's native test runner, or
     None if no runner is detectable. package.json takes priority over
     pyproject/go/cargo for polyglot repos. For Python: never falls back to
@@ -95,7 +95,7 @@ def _detect_runner(repo_dir: Path) -> tuple[list[str], dict[str, str]] | None:
                 # react-scripts test) run once and exit instead of hanging
                 # until TEST_RUN_TIMEOUT; jest and already-run-mode scripts
                 # are unaffected by the var.
-                env = {"CI": "true"}
+                env = {"CI": "true"} if ci_env else {}
                 if (repo_dir / "pnpm-lock.yaml").exists():
                     return (["pnpm", "run", candidate], env)
                 if (repo_dir / "yarn.lock").exists():
@@ -1938,7 +1938,7 @@ def run_tests_and_fix(ctx: TaskContext) -> TaskResult:
                              "tail": f"no changes vs origin/{base_branch} — "
                              f"out of scope for this ticket"})
             continue
-        runner = _detect_runner(repo_dir)
+        runner = _detect_runner(repo_dir, ci_env_enabled(ctx.config))
         if runner is None:
             per_repo.append({"repo": repo_dir.name, "result": "no_runner"})
             log.emit("test_runner_not_detected",

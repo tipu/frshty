@@ -8,6 +8,7 @@ returns.
 import json
 import pytest
 
+from core.config import ci_env_enabled
 from core.tasks.tickets import _NO_LOCAL_PY_VENV_SENTINEL, _detect_runner
 
 
@@ -23,6 +24,19 @@ class TestPackageJson:
         cmd, env = _detect_runner(tmp_path)
         assert cmd == ["npm", "run", "test"]
         assert env == {"CI": "true"}
+
+    def test_ci_env_off_drops_ci_var(self, tmp_path):
+        _write(tmp_path / "package.json",
+               json.dumps({"scripts": {"test": "jest"}}))
+        _write(tmp_path / "pnpm-lock.yaml", "lockfileVersion: '6.0'\n")
+        cmd, env = _detect_runner(tmp_path, ci_env=False)
+        assert cmd == ["pnpm", "run", "test"]
+        assert env == {}
+
+    def test_ci_env_enabled_config_default_and_off(self):
+        assert ci_env_enabled({"workspace": {}}) is True
+        assert ci_env_enabled({}) is True
+        assert ci_env_enabled({"workspace": {"test_ci_env": False}}) is False
 
     def test_pnpm_preferred_when_lockfile_present(self, tmp_path):
         _write(tmp_path / "package.json",
