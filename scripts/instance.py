@@ -297,6 +297,20 @@ def prepare_db_volume(config: dict, root: Path, move: bool) -> None:
             old.rename(root / "state" / f"frshty.db.pre-volume{suffix}")
 
 
+def docker_socket_gid() -> str:
+    """The group of the Docker socket as a container sees it. On Linux it is
+    the host group. Docker Desktop on macOS shows the host user's group on the
+    host but root's group inside the container."""
+    r = subprocess.run(["docker", "run", "--rm", "--entrypoint", "stat",
+                        "-v", f"{DOCKER_SOCKET}:{DOCKER_SOCKET}", IMAGE,
+                        "-c", "%g", str(DOCKER_SOCKET)],
+                       capture_output=True, text=True, check=False)
+    if r.returncode != 0 or not r.stdout.strip().isdigit():
+        raise SystemExit(f"stat of {DOCKER_SOCKET} inside {IMAGE} failed: "
+                         f"{(r.stderr or r.stdout).strip()}")
+    return r.stdout.strip()
+
+
 def run_args(config: dict, config_path: Path, check: bool) -> list[str]:
     key = config["job"]["key"]
     box = config.get("container") or {}
@@ -331,7 +345,7 @@ def run_args(config: dict, config_path: Path, check: bool) -> list[str]:
         args += ["--env-file", str(_expand(box["env_file"]))]
     if DOCKER_SOCKET.exists():
         args += ["-v", f"{DOCKER_SOCKET}:{DOCKER_SOCKET}",
-                 "--group-add", str(DOCKER_SOCKET.stat().st_gid)]
+                 "--group-add", docker_socket_gid()]
     for device in box.get("devices") or []:
         if not Path(device).exists():
             raise SystemExit(f"{key}: device {device} does not exist")
