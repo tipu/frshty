@@ -15,7 +15,7 @@ import asyncio
 import json
 import re
 from pathlib import Path
-from urllib.parse import quote, unquote_plus, urlsplit
+from urllib.parse import quote, unquote, unquote_plus, urlsplit
 
 import httpx
 import uvicorn
@@ -33,6 +33,8 @@ PICKER_TAG = b'<script src="/api/gateway/picker.js"></script>'
 PIN = Path(__file__).resolve().parent / "static" / "frshty-gateway-pin.js"
 PIN_TAG = b'<script src="/api/gateway/pin.js"></script>'
 AT_PREFIX = "/api/gateway/at/"
+IN_PREFIX = "/api/gateway/in/"
+SANDBOX = re.compile(r"(^|;)\s*sandbox(\s|;|$)", re.IGNORECASE)
 HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
                "trailers", "transfer-encoding", "upgrade", "host", "content-length"}
 
@@ -126,6 +128,18 @@ def with_gateway_peers(body: bytes) -> bytes:
     return json.dumps(data).encode()
 
 
+def with_gateway_events(body: bytes) -> bytes:
+    """The global feed links each event at its instance's base_url, which the
+    browser cannot reach, so every instance the gateway forwards to gets a
+    gateway address."""
+    data = json.loads(body)
+    keys = {i["key"] for i in instances()}
+    for event in data.get("events") or []:
+        if isinstance(event, dict) and event.get("instance_key") in keys:
+            event["base_url"] = AT_PREFIX + quote(event["instance_key"], safe="")
+    return json.dumps(data).encode()
+
+
 @app.get("/api/gateway/select")
 def api_select(key: str, next: str = "/"):
     if not any(i["key"] == key for i in instances()):
@@ -168,10 +182,36 @@ def _pinned_location(location: str, pin: str) -> str:
     return with_pin(location, pin) if location.startswith("/") and not location.startswith("//") else location
 
 
+def split_in(raw: str) -> tuple[str, str] | None:
+    """A sandboxed page sends no cookie and no query in its referer, so the
+    gateway serves it under /api/gateway/in/<key>/<path>. Its relative links
+    then name the instance in their own path."""
+    if not raw.startswith(IN_PREFIX):
+        return None
+    key, _, rest = raw[len(IN_PREFIX):].partition("/")
+    return unquote(key), "/" + rest
+
+
+def is_sandboxed_page(headers) -> bool:
+    return (headers.get("content-type", "").startswith("text/html")
+            and bool(SANDBOX.search(headers.get("content-security-policy", ""))))
+
+
+def _in_location(location: str, key: str) -> str:
+    """A redirect inside a sandboxed page keeps the page on its instance."""
+    if location.startswith("/") and not location.startswith("//"):
+        return IN_PREFIX + quote(key, safe="") + location
+    return location
+
+
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
 async def forward(path: str, request: Request):
     pin, query = split_pin(request.scope.get("query_string", b"").decode("latin-1"))
-    if not pin:
+    upstream_path = raw_path(request.scope)
+    inside = split_in(upstream_path)
+    if inside:
+        pin, upstream_path = inside
+    elif not pin:
         pin = referer_pin(request.headers)
         if pin and request.method in ("GET", "HEAD"):
             return RedirectResponse(with_pin("/" + raw_path(request.scope).lstrip("/") + (f"?{query}" if query else ""), pin),
@@ -184,21 +224,26 @@ async def forward(path: str, request: Request):
     base = target["base_url"]
     headers = [(k, v) for k, v in request.headers.items() if k.lower() not in HOP_HEADERS]
     headers += [("host", urlsplit(base).netloc), ("x-forwarded-host", request.headers.get("host", ""))]
-    upstream = client.build_request(request.method, base + raw_path(request.scope) + (f"?{query}" if query else ""),
+    upstream = client.build_request(request.method, base + upstream_path + (f"?{query}" if query else ""),
                                     headers=headers, content=await request.body())
     try:
         resp = await client.send(upstream, stream=True)
     except httpx.HTTPError as e:
         return JSONResponse({"error": f"instance '{target['key']}' is unreachable: {type(e).__name__}: {e}"},
                             status_code=502)
-    out = [(k.encode("latin-1"), (_pinned_location(_local_location(v, base), pin)
+    if not inside and request.method in ("GET", "HEAD") and is_sandboxed_page(resp.headers):
+        await resp.aclose()
+        return RedirectResponse(_in_location(upstream_path + (f"?{query}" if query else ""), target["key"]),
+                                status_code=303, headers={"Cache-Control": "no-store"})
+    relocate = _in_location if inside else _pinned_location
+    out = [(k.encode("latin-1"), (relocate(_local_location(v, base), pin)
                                   if k.lower() == "location" else v).encode("latin-1"))
            for k, v in resp.headers.multi_items()
            if k.lower() not in HOP_HEADERS and k.lower() != "content-encoding"]
     if request.method == "HEAD":
         await resp.aclose()
         response = Response(status_code=resp.status_code)
-    elif resp.headers.get("content-type", "").startswith("text/html"):
+    elif resp.headers.get("content-type", "").startswith("text/html") and not inside:
         body = await resp.aread()
         await resp.aclose()
         response = Response(with_picker(body, pin), status_code=resp.status_code)
@@ -207,6 +252,11 @@ async def forward(path: str, request: Request):
         body = await resp.aread()
         await resp.aclose()
         response = Response(with_gateway_peers(body), status_code=resp.status_code)
+    elif (path == "api/global/events" and request.method == "GET" and resp.status_code == 200
+          and resp.headers.get("content-type", "").startswith("application/json")):
+        body = await resp.aread()
+        await resp.aclose()
+        response = Response(with_gateway_events(body), status_code=resp.status_code)
     else:
         response = StreamingResponse(resp.aiter_bytes(), status_code=resp.status_code,
                                      background=BackgroundTask(resp.aclose))

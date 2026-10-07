@@ -34,10 +34,25 @@ def upstream(monkeypatch):
         if request.url.path == "/head":
             return httpx.Response(200, headers={"content-type": "text/html"},
                                   content=b"<html><head lang=en><title>T</title></head><body></body></html>")
+        if request.url.path.startswith("/artifact/"):
+            if request.url.path == "/artifact/5":
+                return httpx.Response(307, headers={"location": "/artifact/5/"})
+            if request.url.path == "/artifact/5/":
+                return httpx.Response(200, headers={"content-type": "text/html",
+                                                    "content-security-policy": "sandbox allow-scripts; frame-src 'none'"},
+                                      content=b"<html><head></head><body><img src=a.png></body></html>")
+            return httpx.Response(200, headers={"content-type": "image/png", "content-security-policy": "sandbox"},
+                                  content=request.url.host.encode() + b":" + str(request.url.port).encode())
         if request.url.path == "/api/work/peers":
             return httpx.Response(200, json={"peers": [
                 {"key": "quill", "base_url": "http://127.0.0.1:7134", "label": "Quill"},
                 {"key": "atropos", "base_url": "http://192.168.1.117:7100", "label": "atropos"}]})
+        if request.url.path == "/api/global/events":
+            return httpx.Response(200, json={"events": [
+                {"id": "1", "instance_key": "frshty", "base_url": "", "links": {"detail": "/tasks/7"}},
+                {"id": "2", "instance_key": "quill", "base_url": "http://127.0.0.1:7134", "links": {}},
+                {"id": "3", "instance_key": "atropos", "base_url": "http://192.168.1.117:7100", "links": {}}],
+                "errors": {}})
         return httpx.Response(201, json={"from": request.url.host + ":" + str(request.url.port),
                                          "path": request.url.path})
 
@@ -141,6 +156,12 @@ class TestPin:
             {"key": "quill", "base_url": "/api/gateway/at/quill", "label": "Quill"},
             {"key": "atropos", "base_url": "http://192.168.1.117:7100", "label": "atropos"}]}
 
+    def test_global_event_links_point_at_the_gateway(self, peers, upstream, client):
+        events = client.get("/api/global/events").json()["events"]
+        assert [e["base_url"] for e in events] == [
+            "/api/gateway/at/frshty", "/api/gateway/at/quill", "http://192.168.1.117:7100"]
+        assert events[0]["links"] == {"detail": "/tasks/7"}
+
     def test_a_peer_path_redirects_to_a_pinned_page(self, peers, client):
         resp = client.get("/api/gateway/at/quill/tasks/5/terminal?x=1&frshty_instance=frshty")
         assert resp.status_code == 303
@@ -200,3 +221,44 @@ class TestPin:
     def test_picking_an_instance_drops_the_referer(self, peers, client):
         resp = client.get("/api/gateway/select", params={"key": "quill", "next": "/tasks"})
         assert resp.headers["referrer-policy"] == "no-referrer"
+
+
+class TestSandboxedPage:
+    def test_a_sandboxed_page_moves_under_its_instance_path(self, peers, upstream, client):
+        client.cookies.set("frshty_instance", "quill")
+        resp = client.get("/artifact/5")
+        assert resp.headers["location"] == "/artifact/5/"
+        resp = client.get("/artifact/5/?x=1")
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/api/gateway/in/quill/artifact/5/?x=1"
+        assert resp.headers["cache-control"] == "no-store"
+
+    def test_a_pinned_sandboxed_page_moves_under_the_pinned_instance(self, peers, upstream, client):
+        resp = client.get("/artifact/5?frshty_instance=quill")
+        assert resp.headers["location"] == "/artifact/5/?frshty_instance=quill"
+        resp = client.get("/artifact/5/?frshty_instance=quill")
+        assert resp.headers["location"] == "/api/gateway/in/quill/artifact/5/"
+
+    def test_the_page_and_its_files_load_from_the_path_instance_without_cookie_or_referer(
+            self, peers, upstream, client):
+        resp = client.get("/api/gateway/in/quill/artifact/5/")
+        assert resp.status_code == 200
+        assert resp.text == "<html><head></head><body><img src=a.png></body></html>"
+        assert upstream[-1].url.path == "/artifact/5/"
+        assert upstream[-1].url.port == 7134
+        resp = client.get("/api/gateway/in/quill/artifact/5/a.png", headers={"referer": "http://testserver/"})
+        assert resp.content == b"127.0.0.1:7134"
+        assert upstream[-1].url.path == "/artifact/5/a.png"
+
+    def test_a_redirect_under_the_instance_path_stays_there(self, peers, upstream, client):
+        resp = client.get("/api/gateway/in/quill/artifact/5")
+        assert resp.headers["location"] == "/api/gateway/in/quill/artifact/5/"
+        resp = client.get("/api/gateway/in/quill/moved")
+        assert resp.headers["location"] == "/api/gateway/in/quill/tickets/DEV-1"
+
+    def test_an_unknown_path_instance_answers_404(self, peers, upstream, client):
+        assert client.get("/api/gateway/in/nope/artifact/5/a.png").status_code == 404
+        assert upstream == []
+
+    def test_a_page_without_a_sandbox_stays_in_place(self, peers, upstream, client):
+        assert client.get("/page").status_code == 200
