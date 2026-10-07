@@ -104,3 +104,28 @@ def test_balanced_runs_inside_the_worktree(tmp_path, monkeypatch):
     assert Path(lines[0]).resolve() == checkout.resolve()
     argv = lines[1:]
     assert argv[argv.index("--allowedTools") + 1] == "Read,Grep"
+
+
+def _run_thinking(tmp_path, monkeypatch, **kwargs):
+    record = tmp_path / "record.txt"
+    _install_recording_claude(tmp_path / "bin", record)
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}:{os.environ['PATH']}")
+    llm._providers.clear()
+    llm.run_thinking("implement this", cwd=tmp_path, timeout=30, **kwargs)
+    return record.read_text().splitlines()[1:]
+
+
+def test_thinking_denies_push_curl_and_gh(tmp_path, monkeypatch):
+    argv = _run_thinking(tmp_path, monkeypatch)
+    assert "--dangerously-skip-permissions" in argv
+    assert argv[argv.index("--disallowedTools") + 1] == "Bash(git push:*),Bash(curl:*),Bash(gh:*)"
+
+
+def test_thinking_denies_publish_tools_beside_an_allow_list(tmp_path, monkeypatch):
+    argv = _run_thinking(tmp_path, monkeypatch, allowed_tools=["Read"])
+    assert argv[argv.index("--disallowedTools") + 1] == "Bash(git push:*),Bash(curl:*),Bash(gh:*)"
+
+
+def test_thinking_takes_a_narrower_deny_list(tmp_path, monkeypatch):
+    argv = _run_thinking(tmp_path, monkeypatch, denied_tools=("Bash(curl:*)",))
+    assert argv[argv.index("--disallowedTools") + 1] == "Bash(curl:*)"
