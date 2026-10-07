@@ -135,7 +135,8 @@ def triage_and_fix_pr(platform, repo: str, pr_id: int, label: str,
         "If you cannot get it green locally, do not push: say what you tried and stop."
         + keep_green
     )
-    ran = run_claude_code(fix_prompt, cwd=worktree, timeout=FIX_TIMEOUT)
+    ran = run_claude_code(fix_prompt, cwd=worktree, timeout=FIX_TIMEOUT,
+                          denied_tools=("Bash(curl:*)",))
     if ran is None:
         return {"result": "fix_failed", "attempts": attempts,
                 "failed_names": failed_names, "fix_hint": fix_hint}
