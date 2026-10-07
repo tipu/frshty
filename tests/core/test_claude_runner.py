@@ -150,6 +150,47 @@ def test_run_claude_code_non_zero_exit_writes_exit_marker_and_returns_none(tmp_p
     assert b"[EXIT code=7]" in data
 
 
+def test_run_claude_code_failure_records_the_result_error_on_the_invocation(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    events = [
+        {"type": "system", "subtype": "init"},
+        {"type": "result", "subtype": "success", "is_error": True,
+         "result": "Prompt is too long", "num_turns": 1},
+    ]
+    events_file = _write_events(tmp_path, events)
+    _install_fake_claude(bin_dir, f'cat "{events_file}"; exit 1')
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    prompt = f"result error probe {tmp_path}"
+
+    out = run_claude_code(prompt, cwd=tmp_path, timeout=10)
+
+    row = db.query_one(
+        "SELECT status, exit_code, output FROM claude_invocations WHERE prompt=?",
+        (prompt,),
+    )
+    assert out is None
+    assert row["status"] == "error"
+    assert row["exit_code"] == 1
+    assert "Prompt is too long" in row["output"]
+
+
+def test_run_claude_code_failure_records_the_result_errors_list(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    events = [
+        {"type": "result", "subtype": "error_during_execution", "is_error": True,
+         "errors": ["API Error: 500 overloaded"]},
+    ]
+    events_file = _write_events(tmp_path, events)
+    _install_fake_claude(bin_dir, f'cat "{events_file}"; exit 1')
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    prompt = f"result errors probe {tmp_path}"
+
+    run_claude_code(prompt, cwd=tmp_path, timeout=10)
+
+    row = db.query_one("SELECT output FROM claude_invocations WHERE prompt=?", (prompt,))
+    assert "API Error: 500 overloaded" in row["output"]
+
+
 def test_run_claude_code_timeout_writes_timeout_marker_and_returns_none(tmp_path, monkeypatch):
     bin_dir = tmp_path / "bin"
     events_file = tmp_path / "events.ndjson"
