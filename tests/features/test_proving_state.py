@@ -240,6 +240,20 @@ class TestProveTask:
             result = prove(ctx)
         assert result.status == "failed"
 
+    def test_failed_fresh_prove_forgets_its_session(self, tmp_path, tmp_state):
+        """A fresh run can fail because its session ran out of context. A retry
+        that resumes that session fails at once with the same error."""
+        import core.state as state
+        ctx = self._ctx(tmp_path)
+        (tmp_path / "PROOF.md").write_text("# proof guide\n\ncontent\n")
+        state.save_ticket("PROJ-1", {"status": "proving",
+                                     "slug": "PROJ-1-do-the-thing"})
+        with patch("core.tasks.tickets.run_claude_code", return_value=None) as rc:
+            result = prove(ctx)
+        assert result.status == "failed"
+        assert rc.call_args.kwargs["resume"] is False
+        assert "prove" not in (state.load_ticket("PROJ-1").get("llm_sessions") or {})
+
 
 class TestProofChangeScope:
     def test_uses_configured_base_branch_and_lists_only_changed_repo(self, tmp_path):
