@@ -86,6 +86,55 @@ body { font-family: 'SF Mono', 'Cascadia Code', ui-monospace, monospace; backgro
 .diff-add { background: rgba(56,139,87,.22); }
 .diff-del { background: rgba(248,81,73,.18); }
 .diff-add .diff-gutter, .diff-add .diff-sign, .diff-del .diff-gutter, .diff-del .diff-sign { color: #aeb8c4; }
+.viz-flow { display: flex; flex-wrap: wrap; align-items: stretch; gap: 10px 0; margin-top: 30px; }
+.viz-node-wrap { display: flex; align-items: center; animation: vizIn .45s cubic-bezier(.4,0,.2,1) both; }
+.viz-node { width: 170px; min-height: 118px; border-radius: 14px; border: 1.5px solid; background: #0f121a; padding: 14px; display: flex; flex-direction: column; gap: 6px; text-align: left; font-family: inherit; color: inherit; }
+button.viz-node { cursor: pointer; transition: transform .2s, background .2s; }
+button.viz-node:hover { transform: translateY(-3px); background: #151a26; }
+.viz-node-icon { font-size: 22px; line-height: 1; }
+.viz-node-label { font-size: 14px; font-weight: 700; color: #f4f6fb; line-height: 1.3; }
+.viz-node-note { font-size: 11.5px; color: #8a91a0; line-height: 1.45; word-break: break-word; }
+.viz-node-kind { font-size: 10px; letter-spacing: .16em; text-transform: uppercase; margin-top: auto; }
+.viz-arrow { width: 34px; text-align: center; color: #3f4759; font-size: 20px; flex-shrink: 0; }
+.viz-legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 26px; font-size: 11.5px; color: #8a91a0; }
+.viz-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.viz-swatch { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+@keyframes vizIn { from { opacity: 0; transform: translateY(14px) scale(.96); } to { opacity: 1; transform: none; } }
+
+.viz-ba { display: grid; grid-template-columns: 1fr 48px 1fr; gap: 0; margin-top: 30px; align-items: stretch; }
+.viz-ba-col { border-radius: 14px; padding: 18px 20px; display: flex; flex-direction: column; gap: 12px; }
+.viz-ba-before { background: rgba(248,81,73,.08); border: 1px solid rgba(248,81,73,.35); }
+.viz-ba-after { background: rgba(52,180,100,.08); border: 1px solid rgba(52,180,100,.4); }
+.viz-ba-title { font-size: 12px; letter-spacing: .2em; text-transform: uppercase; font-weight: 700; }
+.viz-ba-item { display: flex; gap: 10px; align-items: flex-start; font-size: 15px; line-height: 1.5; color: #d6dae3; animation: vizIn .4s both; }
+.viz-ba-mid { display: flex; align-items: center; justify-content: center; font-size: 26px; color: #8b5cf6; }
+
+.viz-bars { margin-top: 26px; display: flex; flex-direction: column; gap: 9px; }
+.viz-bar-row { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr) 92px; gap: 14px; align-items: center; font-size: 12.5px; animation: vizIn .4s both; }
+.viz-bar-name { color: #c5cbd6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.viz-bar-track { height: 14px; background: #151924; border-radius: 4px; overflow: hidden; display: flex; }
+.viz-bar-add { background: #2ea05a; height: 100%; }
+.viz-bar-del { background: #d0453e; height: 100%; }
+.viz-bar-count { color: #8a91a0; text-align: right; white-space: nowrap; }
+.viz-mark { display: inline-block; width: 8px; height: 8px; border-radius: 999px; margin-right: 6px; vertical-align: middle; }
+
+.viz-score { display: flex; gap: 40px; align-items: center; flex-wrap: wrap; margin-top: 30px; }
+.viz-donut-label { font-size: 30px; font-weight: 700; fill: #f4f6fb; font-family: inherit; }
+.viz-donut-sub { font-size: 10px; fill: #8a91a0; letter-spacing: .14em; font-family: inherit; }
+.viz-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; flex: 1; min-width: 260px; }
+.viz-tile { background: #0f121a; border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; }
+.viz-tile-num { font-size: 28px; font-weight: 700; line-height: 1.1; }
+.viz-tile-label { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: #6b7280; margin-top: 6px; }
+
+@media (max-width: 640px) {
+    .viz-node { width: 100%; min-height: 0; }
+    .viz-node-wrap { width: 100%; flex-direction: column; }
+    .viz-arrow { transform: rotate(90deg); width: auto; height: 26px; }
+    .viz-ba { grid-template-columns: 1fr; gap: 10px; }
+    .viz-ba-mid { transform: rotate(90deg); }
+    .viz-bar-row { grid-template-columns: minmax(0, 1fr) 70px; }
+    .viz-bar-track { grid-column: 1 / -1; grid-row: 2; }
+}
 </style>
 <script src="/static/frshty-usage.js"></script>
 </head>
@@ -198,6 +247,94 @@ body { font-family: 'SF Mono', 'Cascadia Code', ui-monospace, monospace; backgro
                         </div>
                     </template>
 
+                    <template v-else-if="slide.type === 'flowmap'">
+                        <div class="kicker">At a glance</div>
+                        <div class="headline" style="font-size: clamp(22px,3vw,38px);">How the change flows</div>
+                        <div class="sub">{{ slide.fromSteps ? 'Each box is one walkthrough step, in execution order. Click a box to revisit it.' : 'The change end to end, in plain words.' }}</div>
+                        <div class="viz-flow">
+                            <div v-for="(n, i) in slide.nodes" :key="i" class="viz-node-wrap" :style="{ animationDelay: (i * 90) + 'ms' }">
+                                <component :is="n.stepNum ? 'button' : 'div'" class="viz-node" :style="{ borderColor: kindStyle(n).color }"
+                                           :title="n.stepNum ? 'Go to step ' + n.stepNum : ''" @click="n.stepNum && jumpToStep(n.stepNum)">
+                                    <span class="viz-node-icon" :style="{ color: kindStyle(n).color }">{{ kindStyle(n).icon }}</span>
+                                    <span class="viz-node-label">{{ n.label }}</span>
+                                    <span v-if="n.note" class="viz-node-note">{{ n.note }}</span>
+                                    <span class="viz-node-kind" :style="{ color: kindStyle(n).color }">{{ kindStyle(n).name }}</span>
+                                </component>
+                                <span v-if="i < slide.nodes.length - 1" class="viz-arrow">&rarr;</span>
+                            </div>
+                        </div>
+                        <div class="viz-legend">
+                            <span v-for="k in slide.legend" :key="k.name"><i class="viz-swatch" :style="{ background: k.color }"></i>{{ k.name }}</span>
+                        </div>
+                    </template>
+
+                    <template v-else-if="slide.type === 'beforeafter'">
+                        <div class="kicker">What changes</div>
+                        <div class="headline" style="font-size: clamp(22px,3vw,38px);">Before &rarr; After</div>
+                        <div class="viz-ba">
+                            <div class="viz-ba-col viz-ba-before">
+                                <div class="viz-ba-title" style="color:#f87171;">Before</div>
+                                <div v-for="(b, i) in slide.before" :key="i" class="viz-ba-item" :style="{ animationDelay: (i * 90) + 'ms' }">
+                                    <span style="color:#f87171;">&times;</span><span>{{ b }}</span>
+                                </div>
+                            </div>
+                            <div class="viz-ba-mid">&rarr;</div>
+                            <div class="viz-ba-col viz-ba-after">
+                                <div class="viz-ba-title" style="color:#7ee2a8;">After</div>
+                                <div v-for="(a, i) in slide.after" :key="i" class="viz-ba-item" :style="{ animationDelay: (300 + i * 90) + 'ms' }">
+                                    <span style="color:#7ee2a8;">&check;</span><span>{{ a }}</span>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+
+                    <template v-else-if="slide.type === 'changemap'">
+                        <div class="kicker">Where it lands</div>
+                        <div class="headline" style="font-size: clamp(22px,3vw,38px);">Size of the change, file by file</div>
+                        <div class="sub">{{ diffStats }} &mdash; green bars are added lines, red bars are removed lines.</div>
+                        <div class="viz-bars">
+                            <div v-for="(f, i) in changeMap.files" :key="f.name" class="viz-bar-row" :style="{ animationDelay: (i * 40) + 'ms' }">
+                                <span class="viz-bar-name" :title="f.name"><bdi><i class="viz-mark" :style="{ background: f.mark }" :title="f.markTitle"></i>{{ f.name }}</bdi></span>
+                                <span class="viz-bar-track">
+                                    <span class="viz-bar-add" :style="{ width: (f.adds / changeMap.max * 100) + '%' }"></span>
+                                    <span class="viz-bar-del" :style="{ width: (f.dels / changeMap.max * 100) + '%' }"></span>
+                                </span>
+                                <span class="viz-bar-count"><span style="color:#7ee2a8;">+{{ f.adds }}</span> <span style="color:#f87171;">&minus;{{ f.dels }}</span></span>
+                            </div>
+                        </div>
+                        <div v-if="changeMap.hidden" class="sub">{{ changeMap.hidden }} smaller file{{ changeMap.hidden !== 1 ? 's' : '' }} not shown.</div>
+                        <div class="viz-legend">
+                            <span><i class="viz-mark" style="background:#34d399;"></i>covered by a step</span>
+                            <span><i class="viz-mark" style="background:#f59e0b;"></i>step raised a concern</span>
+                            <span><i class="viz-mark" style="background:#3a4150;"></i>not in the walkthrough</span>
+                        </div>
+                    </template>
+
+                    <template v-else-if="slide.type === 'scorecard'">
+                        <div class="kicker">Scorecard</div>
+                        <div class="headline" style="font-size: clamp(22px,3vw,38px);">
+                            {{ scorecard.solves === false ? '⚠️ Needs work' : scorecard.solves === true ? '✅ Ready to review' : 'The review in numbers' }}
+                        </div>
+                        <div class="viz-score">
+                            <svg width="180" height="180" viewBox="0 0 140 140" role="img" :aria-label="scorecard.ok + ' steps ok, ' + scorecard.concern + ' steps with concerns'">
+                                <circle cx="70" cy="70" r="54" fill="none" stroke="#1b1e27" stroke-width="16"/>
+                                <circle v-if="scorecard.total" cx="70" cy="70" r="54" fill="none" stroke="#34d399" stroke-width="16"
+                                        :stroke-dasharray="scorecard.okArc + ' ' + scorecard.circ" transform="rotate(-90 70 70)"/>
+                                <circle v-if="scorecard.concern" cx="70" cy="70" r="54" fill="none" stroke="#f59e0b" stroke-width="16"
+                                        :stroke-dasharray="scorecard.concernArc + ' ' + scorecard.circ" :stroke-dashoffset="-scorecard.okArc" transform="rotate(-90 70 70)"/>
+                                <text x="70" y="72" text-anchor="middle" class="viz-donut-label">{{ scorecard.ok }}/{{ scorecard.total }}</text>
+                                <text x="70" y="92" text-anchor="middle" class="viz-donut-sub">STEPS OK</text>
+                            </svg>
+                            <div class="viz-tiles">
+                                <div class="viz-tile"><div class="viz-tile-num" style="color:#93c5fd;">{{ scorecard.total }}</div><div class="viz-tile-label">Steps</div></div>
+                                <div class="viz-tile"><div class="viz-tile-num" style="color:#c4b5fd;">{{ scorecard.files }}</div><div class="viz-tile-label">Files</div></div>
+                                <div class="viz-tile"><div class="viz-tile-num" style="color:#7ee2a8;">+{{ scorecard.adds }}</div><div class="viz-tile-label">Lines added</div></div>
+                                <div class="viz-tile"><div class="viz-tile-num" style="color:#f87171;">&minus;{{ scorecard.dels }}</div><div class="viz-tile-label">Lines removed</div></div>
+                                <div class="viz-tile"><div class="viz-tile-num" :style="{ color: scorecard.concerns ? '#fcd34d' : '#7ee2a8' }">{{ scorecard.concerns }}</div><div class="viz-tile-label">Concerns</div></div>
+                            </div>
+                        </div>
+                    </template>
+
                 </div>
             </div>
         </transition>
@@ -259,6 +396,7 @@ createApp({
             (p.steps || []).forEach((s, i) => out.push({ type: 'step', stepNum: i + 1, ...s }));
             if (diffText.value) out.push({ type: 'fulldiff' });
             if (p.verdict) out.push({ type: 'verdict', ...p.verdict });
+            out.push(...visualSlides(p));
             return out;
         });
 
@@ -307,6 +445,86 @@ createApp({
             return `${n} file${n !== 1 ? 's' : ''} · +${adds} −${dels}`;
         });
 
+        const KINDS = {
+            input:    { name: 'Input',    icon: '⇢', color: '#60a5fa' },
+            process:  { name: 'Process',  icon: '⚙', color: '#a78bfa' },
+            decision: { name: 'Decision', icon: '◆', color: '#f59e0b' },
+            store:    { name: 'Store',    icon: '▤', color: '#22d3ee' },
+            output:   { name: 'Output',   icon: '✓', color: '#34d399' },
+        };
+        const STEP_OK = { name: 'Step ok', icon: '✓', color: '#34d399' };
+        const STEP_CONCERN = { name: 'Concern', icon: '⚠', color: '#f59e0b' };
+
+        function kindStyle(n) {
+            if (n.stepNum) return n.check === 'concern' ? STEP_CONCERN : STEP_OK;
+            return KINDS[n.kind] || KINDS.process;
+        }
+
+        function visualSlides(p) {
+            const out = [];
+            const v = (p.visual && typeof p.visual === 'object') ? p.visual : {};
+            const steps = p.steps || [];
+            const flow = Array.isArray(v.flow) ? v.flow.filter(n => n && n.label) : [];
+            if (flow.length) {
+                const used = [...new Set(flow.map(n => KINDS[n.kind] ? n.kind : 'process'))];
+                out.push({ type: 'flowmap', nodes: flow, legend: used.map(k => KINDS[k]) });
+            } else if (steps.length) {
+                out.push({ type: 'flowmap', fromSteps: true, legend: [STEP_OK, STEP_CONCERN],
+                           nodes: steps.map((s, i) => ({ label: s.title || `Step ${i + 1}`, note: s.file || '', stepNum: i + 1, check: s.check })) });
+            }
+            const before = Array.isArray(v.before) ? v.before.filter(Boolean) : [];
+            const after = Array.isArray(v.after) ? v.after.filter(Boolean) : [];
+            if (before.length && after.length) out.push({ type: 'beforeafter', before, after });
+            if (diffText.value) out.push({ type: 'changemap' });
+            out.push({ type: 'scorecard' });
+            return out;
+        }
+
+        function fileMatches(a, b) {
+            if (!a || !b) return false;
+            return a === b || a.endsWith('/' + b) || b.endsWith('/' + a);
+        }
+
+        const changeMap = computed(() => {
+            const steps = (presentation.value && presentation.value.steps) || [];
+            const all = parsedDiff.value.map(f => {
+                let adds = 0, dels = 0;
+                for (const l of f.lines) { if (l.type === 'add') adds++; else if (l.type === 'del') dels++; }
+                const hits = steps.filter(s => fileMatches(f.header, s.file));
+                const concern = hits.some(s => s.check === 'concern');
+                return { name: f.header || '(unnamed)', adds, dels,
+                         mark: concern ? '#f59e0b' : hits.length ? '#34d399' : '#3a4150',
+                         markTitle: concern ? 'A step raised a concern here' : hits.length ? 'Covered by a step' : 'Not in the walkthrough' };
+            }).sort((a, b) => (b.adds + b.dels) - (a.adds + a.dels));
+            const files = all.slice(0, 20);
+            const max = Math.max(1, ...files.map(f => f.adds + f.dels));
+            return { files, max, hidden: all.length - files.length };
+        });
+
+        const scorecard = computed(() => {
+            const p = presentation.value || {};
+            const steps = p.steps || [];
+            const concern = steps.filter(s => s.check === 'concern').length;
+            const ok = steps.length - concern;
+            const circ = 2 * Math.PI * 54;
+            let adds = 0, dels = 0;
+            for (const f of parsedDiff.value) for (const l of f.lines) {
+                if (l.type === 'add') adds++; else if (l.type === 'del') dels++;
+            }
+            const verdict = p.verdict || {};
+            return { total: steps.length, ok, concern, circ,
+                     okArc: steps.length ? circ * ok / steps.length : 0,
+                     concernArc: steps.length ? circ * concern / steps.length : 0,
+                     files: parsedDiff.value.length, adds, dels,
+                     concerns: (verdict.concerns || []).length,
+                     solves: p.verdict ? !!verdict.solves_problem : null };
+        });
+
+        function jumpToStep(n) {
+            const i = slides.value.findIndex(s => s.type === 'step' && s.stepNum === n);
+            if (i >= 0) current.value = i;
+        }
+
         const slide = computed(() => slides.value[current.value] || {});
         const progressPct = computed(() => slides.value.length ? ((current.value + 1) / slides.value.length) * 100 : 0);
 
@@ -329,6 +547,11 @@ createApp({
             if (s.type === 'ticket') return 'Ticket';
             if (s.type === 'problem') return 'Problem';
             if (s.type === 'verdict') return 'Verdict';
+            if (s.type === 'flowmap') return 'How the change flows';
+            if (s.type === 'beforeafter') return 'Before → After';
+            if (s.type === 'changemap') return 'Where it lands';
+            if (s.type === 'scorecard') return 'Scorecard';
+            if (s.type === 'fulldiff') return 'Full diff';
             return `Step ${s.stepNum}: ${s.title || ''}`;
         }
 
@@ -384,7 +607,8 @@ createApp({
         });
 
         return { repo, prId, ready, statusMsg, current, slides, slide, progressPct,
-                 parseCode, hl, dotTitle, go, jump, parsedDiff, diffStats, escHtml };
+                 parseCode, hl, dotTitle, go, jump, parsedDiff, diffStats, escHtml,
+                 kindStyle, changeMap, scorecard, jumpToStep };
     },
 }).mount('#app');
 </script>
