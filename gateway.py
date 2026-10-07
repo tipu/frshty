@@ -12,8 +12,10 @@ front of an instance that runs older code.
 """
 import argparse
 import asyncio
+import json
+import re
 from pathlib import Path
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote_plus, urlsplit
 
 import httpx
 import uvicorn
@@ -28,6 +30,9 @@ from services import work_peers
 COOKIE = "frshty_instance"
 PICKER = Path(__file__).resolve().parent / "static" / "frshty-gateway-picker.js"
 PICKER_TAG = b'<script src="/api/gateway/picker.js"></script>'
+PIN = Path(__file__).resolve().parent / "static" / "frshty-gateway-pin.js"
+PIN_TAG = b'<script src="/api/gateway/pin.js"></script>'
+AT_PREFIX = "/api/gateway/at/"
 HOP_HEADERS = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te",
                "trailers", "transfer-encoding", "upgrade", "host", "content-length"}
 
@@ -47,9 +52,43 @@ def selected(cookie: str | None) -> dict | None:
     return items[0] if items else None
 
 
+def split_pin(query: str) -> tuple[str, str]:
+    """A tab pins its instance with ?frshty_instance=<key>. The instance never
+    sees that parameter, so it is cut from the query that goes upstream."""
+    pin, kept = "", []
+    for part in query.split("&") if query else []:
+        name, _, value = part.partition("=")
+        if unquote_plus(name) == COOKIE:
+            pin = unquote_plus(value)
+        else:
+            kept.append(part)
+    return pin, "&".join(kept)
+
+
+def with_pin(url: str, pin: str) -> str:
+    if not pin:
+        return url
+    head, hash_, fragment = url.partition("#")
+    return head + ("&" if "?" in head else "?") + f"{COOKIE}={quote(pin, safe='')}" + hash_ + fragment
+
+
+def referer_pin(headers) -> str:
+    """Every request a pinned page makes names that page as its referer, so an
+    iframe, an image or a navigation the page starts stays on its instance."""
+    return split_pin(urlsplit(headers.get("referer", "")).query)[0]
+
+
+def routed(cookie: str | None, pin: str) -> dict | None:
+    """A pinned tab goes to its own instance and leaves the cookie alone, so a
+    peer page opened from the board does not move the board to that peer."""
+    if pin:
+        return next((i for i in instances() if i["key"] == pin), None)
+    return selected(cookie)
+
+
 @app.get("/api/gateway/instances")
 def api_instances(request: Request):
-    current = selected(request.cookies.get(COOKIE))
+    current = routed(request.cookies.get(COOKIE), request.query_params.get(COOKIE, ""))
     return {"current": current["key"] if current else "",
             "instances": [{"key": i["key"], "label": i["label"]} for i in instances()]}
 
@@ -60,9 +99,31 @@ def api_picker():
                         headers={"Cache-Control": "no-cache"})
 
 
-def with_picker(html: bytes) -> bytes:
+@app.get("/api/gateway/pin.js")
+def api_pin():
+    return FileResponse(PIN, media_type="application/javascript",
+                        headers={"Cache-Control": "no-cache"})
+
+
+def with_picker(html: bytes, pin: str = "") -> bytes:
     at = html.rfind(b"</body>")
-    return html[:at] + PICKER_TAG + html[at:] if at >= 0 else html + PICKER_TAG
+    html = html[:at] + PICKER_TAG + html[at:] if at >= 0 else html + PICKER_TAG
+    if not pin:
+        return html
+    head = re.search(rb"<head(\s[^>]*)?>", html, re.IGNORECASE)
+    return html[:head.end()] + PIN_TAG + html[head.end():] if head else PIN_TAG + html
+
+
+def with_gateway_peers(body: bytes) -> bytes:
+    """The board links a peer's pages and files at the peer's base_url. That
+    address is container to container, so the browser gets a gateway address
+    for every peer the gateway forwards to."""
+    data = json.loads(body)
+    keys = {i["key"] for i in instances()}
+    for peer in data.get("peers") or []:
+        if isinstance(peer, dict) and peer.get("key") in keys:
+            peer["base_url"] = AT_PREFIX + quote(peer["key"], safe="")
+    return json.dumps(data).encode()
 
 
 @app.get("/api/gateway/select")
@@ -70,7 +131,7 @@ def api_select(key: str, next: str = "/"):
     if not any(i["key"] == key for i in instances()):
         return JSONResponse({"error": f"unknown instance '{key}'"}, status_code=404)
     target = next if next.startswith("/") and not next.startswith("//") else "/"
-    response = RedirectResponse(target, status_code=303)
+    response = RedirectResponse(target, status_code=303, headers={"Referrer-Policy": "no-referrer"})
     response.set_cookie(COOKIE, key, max_age=365 * 86400, samesite="lax")
     return response
 
@@ -82,6 +143,18 @@ def raw_path(scope) -> str:
     return raw.decode("latin-1") if raw else quote(scope["path"])
 
 
+@app.get("/api/gateway/at/{key}")
+@app.get("/api/gateway/at/{key}/{path:path}")
+def api_at(key: str, request: Request, path: str = ""):
+    """Open a path on one instance in this tab only."""
+    if not any(i["key"] == key for i in instances()):
+        return JSONResponse({"error": f"unknown instance '{key}'"}, status_code=404)
+    rest = "/".join(raw_path(request.scope).split("/")[5:])
+    _, query = split_pin(request.scope.get("query_string", b"").decode("latin-1"))
+    return RedirectResponse(with_pin("/" + rest.lstrip("/") + (f"?{query}" if query else ""), key),
+                            status_code=303)
+
+
 def _local_location(location: str, base_url: str) -> str:
     """A redirect the instance sends to its own address stays on the gateway."""
     if location == base_url:
@@ -90,15 +163,27 @@ def _local_location(location: str, base_url: str) -> str:
     return rest if rest and not rest.startswith("//") else location
 
 
+def _pinned_location(location: str, pin: str) -> str:
+    """A redirect inside a pinned tab keeps the tab on its instance."""
+    return with_pin(location, pin) if location.startswith("/") and not location.startswith("//") else location
+
+
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
 async def forward(path: str, request: Request):
-    target = selected(request.cookies.get(COOKIE))
+    pin, query = split_pin(request.scope.get("query_string", b"").decode("latin-1"))
+    if not pin:
+        pin = referer_pin(request.headers)
+        if pin and request.method in ("GET", "HEAD"):
+            return RedirectResponse(with_pin("/" + raw_path(request.scope).lstrip("/") + (f"?{query}" if query else ""), pin),
+                                    status_code=303, headers={"Cache-Control": "no-store"})
+    target = routed(request.cookies.get(COOKIE), pin)
+    if target is None and pin:
+        return JSONResponse({"error": f"unknown instance '{pin}'"}, status_code=404)
     if target is None:
         return JSONResponse({"error": "config/peers.toml names no instance"}, status_code=503)
     base = target["base_url"]
     headers = [(k, v) for k, v in request.headers.items() if k.lower() not in HOP_HEADERS]
     headers += [("host", urlsplit(base).netloc), ("x-forwarded-host", request.headers.get("host", ""))]
-    query = request.scope.get("query_string", b"").decode("latin-1")
     upstream = client.build_request(request.method, base + raw_path(request.scope) + (f"?{query}" if query else ""),
                                     headers=headers, content=await request.body())
     try:
@@ -106,7 +191,8 @@ async def forward(path: str, request: Request):
     except httpx.HTTPError as e:
         return JSONResponse({"error": f"instance '{target['key']}' is unreachable: {type(e).__name__}: {e}"},
                             status_code=502)
-    out = [(k.encode("latin-1"), (_local_location(v, base) if k.lower() == "location" else v).encode("latin-1"))
+    out = [(k.encode("latin-1"), (_pinned_location(_local_location(v, base), pin)
+                                  if k.lower() == "location" else v).encode("latin-1"))
            for k, v in resp.headers.multi_items()
            if k.lower() not in HOP_HEADERS and k.lower() != "content-encoding"]
     if request.method == "HEAD":
@@ -115,7 +201,12 @@ async def forward(path: str, request: Request):
     elif resp.headers.get("content-type", "").startswith("text/html"):
         body = await resp.aread()
         await resp.aclose()
-        response = Response(with_picker(body), status_code=resp.status_code)
+        response = Response(with_picker(body, pin), status_code=resp.status_code)
+    elif (path == "api/work/peers" and request.method == "GET" and resp.status_code == 200
+          and resp.headers.get("content-type", "").startswith("application/json")):
+        body = await resp.aread()
+        await resp.aclose()
+        response = Response(with_gateway_peers(body), status_code=resp.status_code)
     else:
         response = StreamingResponse(resp.aiter_bytes(), status_code=resp.status_code,
                                      background=BackgroundTask(resp.aclose))
@@ -125,12 +216,12 @@ async def forward(path: str, request: Request):
 
 @app.websocket("/{path:path}")
 async def forward_ws(websocket: WebSocket, path: str):
-    target = selected(websocket.cookies.get(COOKIE))
+    pin, query = split_pin(websocket.scope.get("query_string", b"").decode("latin-1"))
+    target = routed(websocket.cookies.get(COOKIE), pin)
     if target is None:
         await websocket.close(code=1011)
         return
     base = target["base_url"].replace("https://", "wss://", 1).replace("http://", "ws://", 1)
-    query = websocket.scope.get("query_string", b"").decode("latin-1")
     url = base + raw_path(websocket.scope) + (f"?{query}" if query else "")
     headers = {k: websocket.headers[k] for k in ("origin", "cookie") if k in websocket.headers}
     try:
