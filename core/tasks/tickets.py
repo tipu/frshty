@@ -420,8 +420,9 @@ def _claim_session(ctx: TaskContext, task_name: str) -> tuple[str | None, bool]:
 
 def _drop_session(ctx: TaskContext, task_name: str) -> None:
     """Forget the stored session_id for (ticket, task) so the next call starts
-    fresh. Use after a resume=True call fails — the on-disk session may have
-    been cleaned up and continuing to --resume against it will error every time."""
+    fresh. Use after any call on the session fails — the on-disk session may
+    have been cleaned up or may have run out of context, and continuing to
+    --resume against it will error every time."""
     if not ctx.ticket_key:
         return
     def _del(t: dict) -> dict:
@@ -1594,8 +1595,7 @@ def fix_review_findings(ctx: TaskContext) -> TaskResult:
     fix_result = run_claude_code(fix_prompt, cwd=ticket_dir, timeout=FIX_TIMEOUT,
                                  session_id=sid, resume=resume)
     if fix_result is None:
-        if resume:
-            _drop_session(ctx, "fix_review_findings")
+        _drop_session(ctx, "fix_review_findings")
         return TaskResult("failed", "fix step: claude returned non-zero or empty")
 
     # Commit first. Verifying first meant a failed commit left "VERDICT: PASS"
@@ -1880,8 +1880,7 @@ def write_tests(ctx: TaskContext) -> TaskResult:
                              timeout=TEST_WRITE_TIMEOUT,
                              session_id=sid, resume=resume)
     if result is None:
-        if resume:
-            _drop_session(ctx, "write_tests")
+        _drop_session(ctx, "write_tests")
         return TaskResult("failed", "claude returned non-zero or empty")
     _commit_workspace_changes(ticket_dir, ctx.ticket_key or "",
                               message=f"test: scaffold tests for {ctx.ticket_key}")
@@ -1992,8 +1991,7 @@ def run_tests_and_fix(ctx: TaskContext) -> TaskResult:
                                  timeout=TEST_RUN_TIMEOUT,
                                  session_id=sid, resume=resume)
     if fix_result is None:
-        if resume:
-            _drop_session(ctx, "run_tests_and_fix")
+        _drop_session(ctx, "run_tests_and_fix")
         state.update_ticket(ctx.ticket_key or "",
                             lambda t: {**t, "test_fix_attempts": attempt - 1} if t else t)
         return TaskResult("failed", "fix step: claude returned non-zero")
@@ -2130,8 +2128,7 @@ def prove(ctx: TaskContext) -> TaskResult:
     finally:
         _kill_stray_recorders()
     if result is None:
-        if resume:
-            _drop_session(ctx, "prove")
+        _drop_session(ctx, "prove")
         return TaskResult("failed", "claude returned non-zero or empty")
     if feedback:
         def _clear_feedback(t: dict) -> dict:
