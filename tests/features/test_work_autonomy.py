@@ -236,12 +236,19 @@ class TestPushGateBaseline:
         store = tmp_path / "baseline.json"
         old = (datetime.now(timezone.utc)
                - timedelta(seconds=work_launch.BASELINE_MAX_AGE_SECONDS + 60)).isoformat()
-        work_launch._write_baseline(store, {"base": "sha", "head_cmd": "cmd",
+        work_launch._write_baseline(store, {"base": "sha", "head_cmd": "cmd", "ci_env": True,
                                             "result": "fail", "at": old})
         assert work_launch._read_baseline(store, "sha", "cmd") is None
-        work_launch._write_baseline(store, {"base": "sha", "head_cmd": "cmd",
+        work_launch._write_baseline(store, {"base": "sha", "head_cmd": "cmd", "ci_env": True,
                                             "result": "fail", "at": work_launch._now_iso()})
         assert work_launch._read_baseline(store, "sha", "cmd")["result"] == "fail"
+
+    def test_a_cached_baseline_never_answers_for_a_different_ci_env(self, tmp_path):
+        store = tmp_path / "baseline.json"
+        work_launch._write_baseline(store, {"base": "sha", "head_cmd": "cmd", "ci_env": True,
+                                            "result": "fail", "at": work_launch._now_iso()})
+        assert work_launch._read_baseline(store, "sha", "cmd", False) is None
+        assert work_launch._read_baseline(store, "sha", "cmd", True)["result"] == "fail"
 
     def test_a_baseline_leaves_no_worktree_and_no_temporary_directory(self, tmp_path, monkeypatch):
         repo = _repo_with_origin(tmp_path)
