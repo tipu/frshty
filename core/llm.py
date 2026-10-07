@@ -45,6 +45,33 @@ def _flag_guard_blocked() -> None:
     _guard_blocked_cv.set(True)
 
 
+_last_error_cv: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "frshty_llm_last_error", default=""
+)
+
+
+def reset_last_error() -> None:
+    _last_error_cv.set("")
+
+
+def consume_last_error() -> str:
+    """The error text of the newest failed `claude -p` run in this context.
+
+    A runner answers None on failure, so a caller that reports the failure
+    reads the recorded reason here instead of guessing at it."""
+    val = _last_error_cv.get()
+    if val:
+        _last_error_cv.set("")
+    return val
+
+
+def _cli_error_text(stdout: str, stderr: str, returncode: int) -> str:
+    text, envelope = _parse_claude_json_output(stdout)
+    detail = _result_error_text(envelope) if envelope else text
+    parts = [p for p in (detail.strip(), stderr.strip()) if p]
+    return "\n".join(parts) or f"exit code {returncode} with no output"
+
+
 _providers: dict[str, "LLMProvider"] = {}
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _LLM_LIMIT_PATTERNS = (
@@ -533,6 +560,7 @@ class ClaudeProvider(LLMProvider):
         blocked, reason, remaining_s = _guard_status()
         if blocked:
             _record_end(inv_id, t0, "blocked", None, _guard_block_output(reason, remaining_s))
+            _last_error_cv.set(_guard_block_output(reason, remaining_s))
             log.emit("llm_guard_blocked",
                      f"[{_active_instance_key()}] skipped {label} invocation "
                      f"while cooldown active ({remaining_s}s left)",
@@ -550,12 +578,15 @@ class ClaudeProvider(LLMProvider):
                 )
             except subprocess.TimeoutExpired:
                 _record_end(inv_id, t0, "timeout", None, None)
+                _last_error_cv.set(f"{label} timed out after {timeout}s")
                 return None, None
             except OSError as e:
+                _last_error_cv.set(f"{type(e).__name__}: {e}")
                 return _spawn_failed(inv_id, t0, function_name, model, e), None
             raw = result.stdout.decode() if result.stdout else ""
             if result.returncode != 0 or not result.stdout:
                 err = result.stderr.decode() if result.stderr else ""
+                _last_error_cv.set(_cli_error_text(raw, err, result.returncode))
                 if err:
                     raw = raw + "\n[stderr]\n" + err
                 _trip_llm_guard(raw)
