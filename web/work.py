@@ -198,7 +198,8 @@ def api_work_approve(item_id: int, body: dict | None = Body(default=None)):
     what turns it into a normal task, so it goes through the same launch every
     other task uses."""
     result = work_launch.launch_proposed(item_id,
-                                         agent=(body or {}).get("agent") or "claude")
+                                         agent=(body or {}).get("agent") or "claude",
+                                         objective=(body or {}).get("objective"))
     if "error" in result:
         error = result["error"]
         status = 503 if "personal instance" in error else (

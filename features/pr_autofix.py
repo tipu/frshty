@@ -1,12 +1,11 @@
 """Bespoke PR auto-review + auto-fix pipeline (features.pr_autofix).
 
-Every newly created PR gets one cycle: claude and codex each review the full
+Every PR the instance account opens gets one cycle: claude and codex each review the full
 diff, the two reviews are consolidated down to critical/high findings, and a
 fix run resolves those findings directly on the PR branch (commit + push).
-Only a PR whose author is the account frshty pushes as, opened from a branch
-of the configured repository and not from a fork, gets the cycle.
-Another author's PR is recorded as not_ours and never reviewed, fixed or pushed.
-Pre-existing open PRs are baselined on the first poll and never touched.
+PRs by other authors are never touched. A PR from a fork, and a PR whose
+author is not the account frshty pushes as, is recorded as not_ours and never
+reviewed, fixed or pushed. Pre-existing open PRs are baselined on the first poll and never touched.
 GitHub-only. Enabled per instance via features.pr_autofix.
 """
 import json
@@ -61,12 +60,12 @@ def _now() -> str:
 
 def check(config: dict):
     instance_key = config["job"]["key"]
-    platform = make_platform(config)
-    if not hasattr(platform, "list_open_prs"):
+    if config["job"].get("platform") != "github":
         log.emit("pr_autofix_unsupported",
-                 f"[{instance_key}] pr_autofix requires a platform with list_open_prs")
+                 f"[{instance_key}] pr_autofix requires the github platform")
         return
-    prs = platform.list_open_prs()
+    platform = make_platform(config)
+    prs = platform.list_my_open_prs()
     st = state.load("pr_autofix")
     me = platform.self_id()
     if not me:
@@ -100,8 +99,9 @@ def check(config: dict):
                     "author": pr.get("author", ""), "seen_at": _now(),
                 }
                 log.emit("pr_autofix_not_ours",
-                         f"{pr['repo']}#{pr['id']}: opened by {pr.get('author') or 'an unknown account'}, "
-                         f"not {me} — frshty does not review, fix or push it",
+                         f"{pr['repo']}#{pr['id']}: opened by {pr.get('author') or 'an unknown account'}"
+                         f"{' from a fork' if pr.get('cross_repo') else ''}, as {me} — "
+                         f"frshty does not review, fix or push it",
                          links={"pr": pr["url"]},
                          meta={"repo": pr["repo"], "pr_id": pr["id"],
                                "author": pr.get("author", ""), "self": me})
@@ -301,8 +301,9 @@ def run(config: dict, payload: dict) -> tuple[bool, str | None]:
     if not _is_own(pr, me):
         _update_record(pr_key, status="not_ours", finished_at=_now())
         log.emit("pr_autofix_not_ours",
-                 f"{pr_ref}: opened by {pr.get('author') or 'an unknown account'}, "
-                 f"not {me or 'an unknown account'} — frshty does not review, fix or push it",
+                 f"{pr_ref}: opened by {pr.get('author') or 'an unknown account'}"
+                 f"{' from a fork' if pr.get('cross_repo') else ''}, as {me or 'an unknown account'} — "
+                 f"frshty does not review, fix or push it",
                  links=links, meta={**meta, "author": pr.get("author", ""), "self": me})
         return True, None
 
