@@ -420,8 +420,9 @@ def _claim_session(ctx: TaskContext, task_name: str) -> tuple[str | None, bool]:
 
 def _drop_session(ctx: TaskContext, task_name: str) -> None:
     """Forget the stored session_id for (ticket, task) so the next call starts
-    fresh. Use after a resume=True call fails — the on-disk session may have
-    been cleaned up and continuing to --resume against it will error every time."""
+    fresh. Use after any call on the session fails — the on-disk session may
+    have been cleaned up or may have run out of context, and continuing to
+    --resume against it will error every time."""
     if not ctx.ticket_key:
         return
     def _del(t: dict) -> dict:
@@ -1594,8 +1595,7 @@ def fix_review_findings(ctx: TaskContext) -> TaskResult:
     fix_result = run_claude_code(fix_prompt, cwd=ticket_dir, timeout=FIX_TIMEOUT,
                                  session_id=sid, resume=resume)
     if fix_result is None:
-        if resume:
-            _drop_session(ctx, "fix_review_findings")
+        _drop_session(ctx, "fix_review_findings")
         return TaskResult("failed", "fix step: claude returned non-zero or empty")
 
     # Commit first. Verifying first meant a failed commit left "VERDICT: PASS"
@@ -1678,11 +1678,7 @@ def fix_ci_failures(ctx: TaskContext) -> TaskResult:
             meta = {"ticket": ctx.ticket_key, "repo": pr["repo"], "pr_id": pr["id"],
                     "failed_checks": failed_names}
 
-            if kind == "worktree_missing":
-                log.emit("ticket_ci_fix_skipped",
-                         f"Skipped CI fix for {slug or ctx.ticket_key}/{pr['repo']}: worktree missing",
-                         links=ticket_link, meta={**meta, "reason": "worktree_missing"})
-            elif kind == "unrelated":
+            if kind == "unrelated":
                 def _memo(current, names=failed_names):
                     if not current:
                         return None
@@ -1701,7 +1697,8 @@ def fix_ci_failures(ctx: TaskContext) -> TaskResult:
                          f"CI failure for {slug or ctx.ticket_key} not caused by our changes: "
                          f"{outcome.get('reason','')[:100]}",
                          links=pr_link, meta={**meta, "reason": outcome.get("reason", "")})
-            elif kind in ("fixed", "fix_failed", "haiku_empty", "haiku_parse_error"):
+            elif kind in ("fixed", "fix_failed", "haiku_empty", "haiku_parse_error",
+                          "worktree_missing"):
                 # Every outcome that burned a real fix cycle counts toward the
                 # cap — not just successful sends. Otherwise a CI failure the
                 # auto-fixer can't resolve (fix_failed/haiku_*) loops forever,
@@ -1735,12 +1732,17 @@ def fix_ci_failures(ctx: TaskContext) -> TaskResult:
                              f"{updated.get('ci_fix_attempts', 0)}): {outcome.get('fix_hint','')[:80]}",
                              links=pr_link,
                              meta={**meta, "fix_hint": outcome.get("fix_hint", "")})
+                elif kind == "worktree_missing":
+                    log.emit("ticket_ci_fix_skipped",
+                             f"Skipped CI fix for {slug or ctx.ticket_key}/{pr['repo']}: worktree missing "
+                             f"(attempt {updated.get('ci_fix_attempts', 0)}/{MAX_CI_FIX_ATTEMPTS})",
+                             links=ticket_link, meta={**meta, "reason": "worktree_missing"})
                 else:
                     log.emit("ticket_ci_fix_attempt_failed",
                              f"CI fix attempt for {slug or ctx.ticket_key} did not produce a fix "
                              f"({kind}, attempt {updated.get('ci_fix_attempts', 0)}/{MAX_CI_FIX_ATTEMPTS})",
                              links=pr_link, meta={**meta, "kind": kind})
-            # no_failing / capped / unrelated / worktree_missing: don't count toward cap
+            # no_failing / capped / unrelated: don't count toward cap
 
         return TaskResult("ok", artifacts={"ci_fix_attempts": ts.get("ci_fix_attempts", 0)})
     finally:
@@ -1880,8 +1882,7 @@ def write_tests(ctx: TaskContext) -> TaskResult:
                              timeout=TEST_WRITE_TIMEOUT,
                              session_id=sid, resume=resume)
     if result is None:
-        if resume:
-            _drop_session(ctx, "write_tests")
+        _drop_session(ctx, "write_tests")
         return TaskResult("failed", "claude returned non-zero or empty")
     _commit_workspace_changes(ticket_dir, ctx.ticket_key or "",
                               message=f"test: scaffold tests for {ctx.ticket_key}")
@@ -1992,8 +1993,7 @@ def run_tests_and_fix(ctx: TaskContext) -> TaskResult:
                                  timeout=TEST_RUN_TIMEOUT,
                                  session_id=sid, resume=resume)
     if fix_result is None:
-        if resume:
-            _drop_session(ctx, "run_tests_and_fix")
+        _drop_session(ctx, "run_tests_and_fix")
         state.update_ticket(ctx.ticket_key or "",
                             lambda t: {**t, "test_fix_attempts": attempt - 1} if t else t)
         return TaskResult("failed", "fix step: claude returned non-zero")
@@ -2130,8 +2130,7 @@ def prove(ctx: TaskContext) -> TaskResult:
     finally:
         _kill_stray_recorders()
     if result is None:
-        if resume:
-            _drop_session(ctx, "prove")
+        _drop_session(ctx, "prove")
         return TaskResult("failed", "claude returned non-zero or empty")
     if feedback:
         def _clear_feedback(t: dict) -> dict:
