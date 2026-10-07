@@ -1,9 +1,9 @@
 """Bespoke PR auto-review + auto-fix pipeline (features.pr_autofix).
 
-Every newly created PR gets one cycle: claude and codex each review the full
+Every PR the instance account opens gets one cycle: claude and codex each review the full
 diff, the two reviews are consolidated down to critical/high findings, and a
 fix run resolves those findings directly on the PR branch (commit + push).
-Pre-existing open PRs are baselined on the first poll and never touched.
+PRs by other authors are never touched. Pre-existing open PRs are baselined on the first poll and never touched.
 GitHub-only. Enabled per instance via features.pr_autofix.
 """
 import json
@@ -58,12 +58,12 @@ def _now() -> str:
 
 def check(config: dict):
     instance_key = config["job"]["key"]
-    platform = make_platform(config)
-    if not hasattr(platform, "list_open_prs"):
+    if config["job"].get("platform") != "github":
         log.emit("pr_autofix_unsupported",
-                 f"[{instance_key}] pr_autofix requires a platform with list_open_prs")
+                 f"[{instance_key}] pr_autofix requires the github platform")
         return
-    prs = platform.list_open_prs()
+    platform = make_platform(config)
+    prs = platform.list_my_open_prs()
     st = state.load("pr_autofix")
 
     if not st.get(SEEDED_KEY):
