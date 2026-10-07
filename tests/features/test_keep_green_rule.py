@@ -128,6 +128,7 @@ class TestCommentFixersCarryTheRule:
         platform = MagicMock()
         platform.get_pr_diff.return_value = "diff --git a/a.py b/a.py\n"
         platform.push_branch.return_value = {"ok": True}
+        platform.self_id.return_value = "alice"
         config = {"job": {"key": "clarivis"}, "features": {"pr_autofix": True},
                   "_state_dir": tmp_path, "_base_url": "http://base"}
         with patch("features.pr_autofix.make_platform", return_value=platform), \
@@ -146,7 +147,7 @@ class TestCommentFixersCarryTheRule:
              patch("features.pr_autofix.state.save"), \
              patch("features.pr_autofix.log.emit"):
             run_git.return_value = MagicMock(returncode=1, stdout="abc1234\n")
-            pr_autofix.run(config, {"pr": make_pr()})
+            pr_autofix.run(config, {"pr": make_pr(cross_repo=False)})
         assert pr_ci.KEEP_GREEN_RULE in fixer.call_args[0][0]
 
     def test_ticket_pr_comment_fix(self, fresh_db, fake_config, tmp_state):

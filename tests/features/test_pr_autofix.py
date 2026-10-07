@@ -2,7 +2,12 @@ import subprocess
 from unittest.mock import patch, MagicMock
 
 from features import pr_autofix
-from tests.conftest import make_pr
+from tests.conftest import make_pr as _make_pr
+
+
+
+def make_pr(**overrides):
+    return _make_pr(**{"cross_repo": False, **overrides})
 
 
 def _config(**overrides):
@@ -15,6 +20,7 @@ class TestCheck:
     def test_first_run_baselines_without_queueing(self):
         prs = [make_pr(id=1), make_pr(id=2)]
         platform = MagicMock()
+        platform.self_id.return_value = "alice"
         platform.list_my_open_prs.return_value = prs
         store = {}
         with patch("features.pr_autofix.make_platform", return_value=platform), \
@@ -33,6 +39,7 @@ class TestCheck:
         store = {pr_autofix.SEEDED_KEY: "2026-01-01T00:00:00+00:00",
                  "myrepo/1": {"status": "baselined"}}
         platform = MagicMock()
+        platform.self_id.return_value = "alice"
         platform.list_my_open_prs.return_value = [make_pr(id=1), make_pr(id=2)]
         with patch("features.pr_autofix.make_platform", return_value=platform), \
              patch("features.pr_autofix.state.load", return_value=store), \
@@ -50,6 +57,7 @@ class TestCheck:
         store = {pr_autofix.SEEDED_KEY: "2026-01-01T00:00:00+00:00",
                  "myrepo/9": {"status": "clean"}}
         platform = MagicMock()
+        platform.self_id.return_value = "alice"
         platform.list_my_open_prs.return_value = []
         with patch("features.pr_autofix.make_platform", return_value=platform), \
              patch("features.pr_autofix.state.load", return_value=store), \
@@ -66,6 +74,7 @@ class TestCheck:
         store = {pr_autofix.SEEDED_KEY: "2026-01-01T00:00:00+00:00",
                  "myrepo/1": {"status": "error", "attempts": 1}}
         platform = MagicMock()
+        platform.self_id.return_value = "alice"
         platform.list_my_open_prs.return_value = [make_pr(id=1)]
         with patch("features.pr_autofix.make_platform", return_value=platform), \
              patch("features.pr_autofix.state.load", return_value=store), \
@@ -79,6 +88,7 @@ class TestCheck:
         store = {pr_autofix.SEEDED_KEY: "2026-01-01T00:00:00+00:00",
                  "myrepo/1": {"status": "error", "attempts": pr_autofix.MAX_ATTEMPTS}}
         platform = MagicMock()
+        platform.self_id.return_value = "alice"
         platform.list_my_open_prs.return_value = [make_pr(id=1)]
         with patch("features.pr_autofix.make_platform", return_value=platform), \
              patch("features.pr_autofix.state.load", return_value=store), \
@@ -178,6 +188,7 @@ class TestFixCommitSubject:
         platform = MagicMock()
         platform.get_pr_diff.return_value = "diff --git a/a.py b/a.py\n"
         platform.push_branch.return_value = {"ok": True}
+        platform.self_id.return_value = "alice"
         commit = MagicMock()
         commit.returncode = 0
         config = {**_config(), "_state_dir": tmp_path, "_base_url": "http://base"}
@@ -255,6 +266,7 @@ class TestFixRunCommitsItself:
         platform = MagicMock()
         platform.get_pr_diff.return_value = "diff --git a/a.py b/a.py\n"
         platform.push_branch.return_value = {"ok": True}
+        platform.self_id.return_value = "alice"
         config = {**_config(), "_state_dir": tmp_path, "_base_url": "http://base"}
 
         with patch("features.pr_autofix.make_platform", return_value=platform), \
@@ -322,3 +334,147 @@ class TestFixRunCommitsItself:
         assert ok is False
         assert reason == "fix run produced no changes"
         platform.push_branch.assert_not_called()
+
+
+class TestForeignPrIsNotPushed:
+    """Observed live on clarivis#695 (2026-10-07): soyouz17 opened the PR and
+    the autofix run pushed bec8a8a2b4 to its branch as tipu. frshty must not
+    push to a PR another account opened, and must not hand that PR's checkout
+    to review agents that can push either."""
+
+    def _check(self, store, prs, me):
+        platform = MagicMock()
+        platform.self_id.return_value = me
+        platform.list_my_open_prs.return_value = prs
+        with patch("features.pr_autofix.make_platform", return_value=platform), \
+             patch("features.pr_autofix.state.load", return_value=store), \
+             patch("features.pr_autofix.state.save"), \
+             patch("features.pr_autofix.q.enqueue_job") as mock_enqueue, \
+             patch("features.pr_autofix.log.emit") as emit:
+            pr_autofix.check(_config())
+        return mock_enqueue, emit
+
+    def test_a_new_foreign_pr_is_recorded_and_not_queued(self):
+        store = {pr_autofix.SEEDED_KEY: "2026-01-01T00:00:00+00:00"}
+        enqueue, emit = self._check(
+            store, [make_pr(id=1, author="soyouz17"), make_pr(id=2, author="Tipu")], "tipu")
+
+        assert enqueue.call_count == 1
+        assert enqueue.call_args[1]["payload"]["pr"]["id"] == 2
+        assert store["myrepo/1"]["status"] == "not_ours"
+        assert [c[0][0] for c in emit.call_args_list].count("pr_autofix_not_ours") == 1
+
+    def test_a_foreign_pr_in_error_is_not_requeued(self):
+        store = {pr_autofix.SEEDED_KEY: "2026-01-01T00:00:00+00:00",
+                 "myrepo/1": {"status": "error", "attempts": 1}}
+        enqueue, _ = self._check(store, [make_pr(id=1, author="soyouz17")], "tipu")
+
+        enqueue.assert_not_called()
+
+    def test_an_unresolved_own_account_queues_nothing(self):
+        store = {pr_autofix.SEEDED_KEY: "2026-01-01T00:00:00+00:00"}
+        enqueue, emit = self._check(store, [make_pr(id=1, author="alice")], "")
+
+        enqueue.assert_not_called()
+        assert "myrepo/1" not in store
+        assert "pr_autofix_error" in [c[0][0] for c in emit.call_args_list]
+
+    def _run(self, tmp_path, author, me):
+        platform = MagicMock()
+        platform.self_id.return_value = me
+        platform.get_pr_diff.return_value = "diff --git a/a.py b/a.py\n"
+        config = {**_config(), "_state_dir": tmp_path, "_base_url": "http://base"}
+        store = {}
+        with patch("features.pr_autofix.make_platform", return_value=platform), \
+             patch("features.pr_autofix._ensure_worktree") as ensure, \
+             patch("features.pr_autofix._claude_review") as claude, \
+             patch("features.pr_autofix._codex_review") as codex, \
+             patch("features.pr_autofix.run_claude_code") as fixer, \
+             patch("features.pr_autofix.state.load", return_value=store), \
+             patch("features.pr_autofix.state.save"), \
+             patch("features.pr_autofix.log.emit") as emit:
+            ok, reason = pr_autofix.run(config, {"pr": make_pr(author=author)})
+        return ok, reason, platform, store, emit, (ensure, claude, codex, fixer)
+
+    def test_a_queued_foreign_pr_gets_no_worktree_review_fix_or_push(self, tmp_path):
+        ok, reason, platform, store, emit, agents = self._run(tmp_path, "soyouz17", "tipu")
+
+        assert ok is True, reason
+        for mock in agents:
+            mock.assert_not_called()
+        platform.get_pr_diff.assert_not_called()
+        platform.push_branch.assert_not_called()
+        assert store["myrepo/1"]["status"] == "not_ours"
+        assert "pr_autofix_not_ours" in [c[0][0] for c in emit.call_args_list]
+
+    def test_an_own_fork_pr_gets_no_worktree_review_fix_or_push(self, tmp_path):
+        platform = MagicMock()
+        platform.self_id.return_value = "tipu"
+        config = {**_config(), "_state_dir": tmp_path, "_base_url": "http://base"}
+        store = {}
+        with patch("features.pr_autofix.make_platform", return_value=platform), \
+             patch("features.pr_autofix._ensure_worktree") as ensure, \
+             patch("features.pr_autofix.state.load", return_value=store), \
+             patch("features.pr_autofix.state.save"), \
+             patch("features.pr_autofix.log.emit"):
+            ok, _ = pr_autofix.run(config, {"pr": make_pr(author="tipu", cross_repo=True)})
+
+        assert ok is True
+        ensure.assert_not_called()
+        platform.push_branch.assert_not_called()
+        assert store["myrepo/1"]["status"] == "not_ours"
+
+    def test_a_payload_without_fork_metadata_fails_closed(self, tmp_path):
+        platform = MagicMock()
+        platform.self_id.return_value = "tipu"
+        pr = make_pr(author="tipu")
+        del pr["cross_repo"]
+        config = {**_config(), "_state_dir": tmp_path, "_base_url": "http://base"}
+        store = {}
+        with patch("features.pr_autofix.make_platform", return_value=platform), \
+             patch("features.pr_autofix._ensure_worktree") as ensure, \
+             patch("features.pr_autofix.state.load", return_value=store), \
+             patch("features.pr_autofix.state.save"), \
+             patch("features.pr_autofix.log.emit"):
+            pr_autofix.run(config, {"pr": pr})
+
+        ensure.assert_not_called()
+        platform.push_branch.assert_not_called()
+        assert store["myrepo/1"]["status"] == "not_ours"
+
+    def test_an_unknown_own_account_fails_closed_in_the_run(self, tmp_path):
+        ok, reason, platform, store, _, agents = self._run(tmp_path, "alice", "")
+
+        assert ok is True, reason
+        for mock in agents:
+            mock.assert_not_called()
+        platform.push_branch.assert_not_called()
+        assert store["myrepo/1"]["status"] == "not_ours"
+
+
+class TestWorktreeReuseStaysInItsRepo:
+    """A worktree is keyed by branch name only. A leftover worktree of another
+    repository's PR on the same branch name must not take this PR's fix, or
+    the push lands on that other PR."""
+
+    def test_a_worktree_of_another_repo_is_not_reused(self, tmp_path):
+        repos = {}
+        for name in ("a", "b"):
+            repo = tmp_path / name
+            subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t",
+                            "commit", "-q", "--allow-empty", "-m", "base"], check=True)
+            repos[name] = repo
+        state_dir = tmp_path / "state"
+        leftover = state_dir / "autofix_worktrees" / "fix-shared"
+        subprocess.run(["git", "-C", str(repos["a"]), "worktree", "add", "-q",
+                        "-b", "fix/shared", str(leftover)], check=True)
+        config = {"_state_dir": state_dir,
+                  "repos": [{"name": "b", "path": repos["b"]}]}
+
+        with patch("features.pr_autofix.get_repos", return_value=config["repos"]), \
+             patch("features.pr_autofix.git_util.run_git") as run_git:
+            result = pr_autofix._ensure_worktree(config, make_pr(repo="b", branch="fix/shared"))
+
+        assert result is None
+        run_git.assert_not_called()
