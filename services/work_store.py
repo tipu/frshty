@@ -370,16 +370,19 @@ def _insert_proposal(c, objective: str, note: str, instance_key: str | None,
     return item_id
 
 
-def claim_proposal(item_id: int) -> bool:
+def claim_proposal(item_id: int, objective: str | None = None) -> bool:
     """Take a proposal off the board so exactly one approval can launch it.
 
     Two clicks on Approve race, and the loser must not start a second agent
-    on the same objective. The state flip is the claim: it succeeds once."""
+    on the same objective. The state flip is the claim: it succeeds once.
+    An objective the operator edited before approving is written in the same
+    update, so only the approval that wins the claim changes it."""
     now = _now()
     with db.tx() as c:
         claimed = c.execute(
-            "UPDATE work_items SET state = 'agent_working', updated_at = ? "
-            "WHERE id = ? AND state = ?", (now, item_id, PROPOSED_STATE))
+            "UPDATE work_items SET state = 'agent_working', updated_at = ?, "
+            "objective = COALESCE(?, objective) "
+            "WHERE id = ? AND state = ?", (now, objective, item_id, PROPOSED_STATE))
         if claimed.rowcount != 1:
             return False
         c.execute(
