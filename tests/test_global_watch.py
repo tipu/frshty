@@ -210,6 +210,35 @@ def test_ask_agent_reports_a_failed_or_unparseable_call():
         assert global_watch.ask_agent(_agent_config(), "D", SINCE, NOW)["status"] == "failed"
     with _codex('{"status": "problem", "problems": 1}'):
         assert global_watch.ask_agent(_agent_config(), "D", SINCE, NOW)["status"] == "failed"
+    with _codex('{"status": "ok"}'):
+        assert global_watch.ask_agent(_agent_config(), "D", SINCE, NOW)["status"] == "failed"
+
+
+def test_ask_agent_asks_for_a_problem_list_and_no_separate_status():
+    with _codex('{"problems": []}') as call:
+        global_watch.ask_agent(_agent_config(), "D", SINCE, NOW)
+
+    prompt = call.call_args.kwargs["stdin_text"]
+    assert '{"problems": [{"instance"' in prompt
+    assert '"status"' not in prompt
+
+
+def test_ask_agent_derives_the_status_from_the_problem_list():
+    with _codex('{"problems": []}'):
+        assert global_watch.ask_agent(_agent_config(), "D", SINCE, NOW) == {"status": "ok", "problems": []}
+    problem = {"instance": "aimyable", "what": "scan_tickets repeats"}
+    with _codex(json.dumps({"problems": [problem]})):
+        assert global_watch.ask_agent(_agent_config(), "D", SINCE, NOW) == {
+            "status": "problem", "problems": [problem]}
+
+
+def test_ask_agent_fails_a_problem_without_details():
+    for problems in ([{"instance": "aimyable", "what": " "}], [{"what": "scan_tickets repeats"}],
+                     ["scan_tickets repeats"]):
+        with _codex(json.dumps({"problems": problems})):
+            verdict = global_watch.ask_agent(_agent_config(), "D", SINCE, NOW)
+        assert verdict["status"] == "failed"
+        assert verdict["reason"].startswith("a problem names no instance or detail")
 
 
 def test_run_posts_the_agent_verdict_only_when_it_changes(tmp_path):

@@ -88,7 +88,9 @@ with one task. KNOWN TASKS lists the tasks that already exist for a fault.
 When a problem is the fault of a known task, give that task's key.
 
 Reply with one JSON object and nothing else:
-{{"status": "ok" | "problem", "problems": [{{"instance": "<key>", "what": "<one sentence>", "evidence": "<event names or summaries from the digest>", "likely_cause": "<one sentence>", "task_key": "<kebab-case>", "task": "<one imperative sentence>"}}]}}
+{{"problems": [{{"instance": "<key>", "what": "<one sentence>", "evidence": "<event names or summaries from the digest>", "likely_cause": "<one sentence>", "task_key": "<kebab-case>", "task": "<one imperative sentence>"}}]}}
+Each problem fills every field. An empty "problems" list means every
+instance works as expected; to report a problem, list it.
 
 KNOWN TASKS
 {known_tasks}
@@ -235,15 +237,16 @@ def ask_agent(config: dict, digest: str, since: str, now: datetime,
     if code != 0 or not text:
         return {"status": "failed", "reason": f"codex exit={code}"}
     verdict = extract_json(text)
-    if not isinstance(verdict, dict) or verdict.get("status") not in ("ok", "problem"):
+    if not isinstance(verdict, dict) or not isinstance(verdict.get("problems"), list):
         return {"status": "failed", "reason": f"unparseable verdict: {text.strip()[:200]}"}
-    raw_problems = verdict.get("problems") or []
-    if not isinstance(raw_problems, list):
-        return {"status": "failed", "reason": f"problems is not a list: {text.strip()[:200]}"}
-    problems = [p for p in raw_problems if isinstance(p, dict)]
-    if verdict["status"] == "problem" and not problems:
+    problems = [p for p in verdict["problems"] if isinstance(p, dict)]
+    if len(problems) != len(verdict["problems"]) or any(
+            not str(p.get("instance") or "").strip() or not str(p.get("what") or "").strip()
+            for p in problems):
+        return {"status": "failed", "reason": f"a problem names no instance or detail: {text.strip()[:200]}"}
+    if verdict.get("status") == "problem" and not problems:
         return {"status": "failed", "reason": "problem verdict names no problem"}
-    return {"status": verdict["status"], "problems": problems if verdict["status"] == "problem" else []}
+    return {"status": "problem" if problems else "ok", "problems": problems}
 
 
 def _report_agent(verdict: dict, prior: dict, expected: list[str]) -> list[str]:
