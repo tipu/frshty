@@ -442,3 +442,24 @@ def test_the_opencode_fast_tier_denies_every_tool():
     assert "--dangerously-skip-permissions" not in seen["cmd"]
     assert json.loads(seen["env"]["OPENCODE_CONFIG_CONTENT"]) == {
         "permission": {"*": {"*": "deny"}}}
+
+
+def test_a_failed_print_run_keeps_the_cli_error_for_the_caller(tmp_path, monkeypatch):
+    """An agentic run answers None when the CLI exits non-zero. The caller
+    reports the failure, so the recorded result text must reach it."""
+    bin_dir = tmp_path / "bin"
+    envelope = json.dumps({
+        "type": "result", "is_error": True,
+        "result": "Failed to authenticate: OAuth session expired and could not be refreshed",
+    })
+    _install_fake_claude(bin_dir, f"cat >/dev/null\nprintf '%s\\n' '{envelope}'\nexit 1")
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    db.execute("DELETE FROM kv WHERE key='llm_guard'")
+    llm.reset_last_error()
+
+    out = llm.ClaudeProvider().agentic("hi", cwd=tmp_path, timeout=5)
+
+    assert out is None
+    assert llm.consume_last_error() == (
+        "Failed to authenticate: OAuth session expired and could not be refreshed")
+    assert llm.consume_last_error() == ""
