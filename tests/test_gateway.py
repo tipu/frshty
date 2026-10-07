@@ -31,6 +31,13 @@ def upstream(monkeypatch):
                                   json={"query": str(request.url.query, "ascii") if isinstance(request.url.query, bytes) else request.url.query})
         if request.url.path == "/moved":
             return httpx.Response(303, headers={"location": "http://127.0.0.1:7134/tickets/DEV-1"})
+        if request.url.path == "/head":
+            return httpx.Response(200, headers={"content-type": "text/html"},
+                                  content=b"<html><head lang=en><title>T</title></head><body></body></html>")
+        if request.url.path == "/api/work/peers":
+            return httpx.Response(200, json={"peers": [
+                {"key": "quill", "base_url": "http://127.0.0.1:7134", "label": "Quill"},
+                {"key": "atropos", "base_url": "http://192.168.1.117:7100", "label": "atropos"}]})
         return httpx.Response(201, json={"from": request.url.host + ":" + str(request.url.port),
                                          "path": request.url.path})
 
@@ -126,3 +133,46 @@ class TestForward:
         monkeypatch.setattr(work_peers, "PEERS_PATH", tmp_path / "missing.toml")
         monkeypatch.setattr(work_peers, "_cache", None)
         assert client.get("/tickets").status_code == 503
+
+
+class TestPin:
+    def test_peer_links_point_at_the_gateway(self, peers, upstream, client):
+        assert client.get("/api/work/peers").json() == {"peers": [
+            {"key": "quill", "base_url": "/api/gateway/at/quill", "label": "Quill"},
+            {"key": "atropos", "base_url": "http://192.168.1.117:7100", "label": "atropos"}]}
+
+    def test_a_peer_path_redirects_to_a_pinned_page(self, peers, client):
+        resp = client.get("/api/gateway/at/quill/tasks/5/terminal?x=1&frshty_instance=frshty")
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/tasks/5/terminal?x=1&frshty_instance=quill"
+        assert "set-cookie" not in resp.headers
+        assert client.get("/api/gateway/at/quill").headers["location"] == "/?frshty_instance=quill"
+
+    def test_a_peer_path_never_leaves_the_gateway(self, peers, client):
+        resp = client.get("/api/gateway/at/quill//evil.example/x")
+        assert resp.headers["location"] == "/evil.example/x?frshty_instance=quill"
+
+    def test_a_peer_path_refuses_an_unknown_instance(self, peers, client):
+        assert client.get("/api/gateway/at/nope/tasks").status_code == 404
+
+    def test_the_pin_beats_the_cookie_and_is_not_forwarded(self, peers, upstream, client):
+        client.cookies.set("frshty_instance", "frshty")
+        resp = client.get("/api/x?a=1&frshty_instance=quill&b=2")
+        assert resp.json()["from"] == "127.0.0.1:7134"
+        assert str(upstream[-1].url.query, "ascii") == "a=1&b=2"
+        assert client.get("/api/gateway/instances?frshty_instance=quill").json()["current"] == "quill"
+        assert client.get("/api/x").json()["from"] == "127.0.0.1:7131"
+
+    def test_an_unknown_pin_answers_404(self, peers, upstream, client):
+        assert client.get("/api/x?frshty_instance=nope").status_code == 404
+        assert upstream == []
+
+    def test_a_pinned_page_loads_the_pin_script_first(self, peers, upstream, client):
+        resp = client.get("/head?frshty_instance=quill")
+        assert resp.text.startswith('<html><head lang=en><script src="/api/gateway/pin.js"></script><title>')
+        assert "pin.js" not in client.get("/head").text
+        assert client.get("/api/gateway/pin.js").text.startswith("(function ()")
+
+    def test_a_redirect_in_a_pinned_tab_stays_pinned(self, peers, upstream, client):
+        resp = client.get("/moved?frshty_instance=quill")
+        assert resp.headers["location"] == "/tickets/DEV-1?frshty_instance=quill"
