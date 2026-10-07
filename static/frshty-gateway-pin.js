@@ -30,6 +30,31 @@
         };
     }
 
+    for (const Element0 of [HTMLImageElement, HTMLIFrameElement, HTMLMediaElement,
+                            HTMLSourceElement, HTMLEmbedElement, HTMLScriptElement]) {
+        const desc = Object.getOwnPropertyDescriptor(Element0.prototype, 'src');
+        if (!desc || !desc.set) continue;
+        Object.defineProperty(Element0.prototype, 'src', {
+            ...desc,
+            set(value) { desc.set.call(this, pin(value)); },
+        });
+    }
+
+    const setAttribute0 = Element.prototype.setAttribute;
+    Element.prototype.setAttribute = function (name, value) {
+        const pinned = String(name).toLowerCase() === 'src' ? pin(value) : value;
+        return setAttribute0.call(this, name, pinned);
+    };
+
+    function pinLink(e) {
+        const a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+        if (!a) return;
+        const pinned = pin(a.href);
+        if (pinned !== a.href) a.href = pinned;
+    }
+    document.addEventListener('click', pinLink, true);
+    document.addEventListener('auxclick', pinLink, true);
+
     for (const name of ['pushState', 'replaceState']) {
         const orig = history[name];
         history[name] = function (state, title, url) {
