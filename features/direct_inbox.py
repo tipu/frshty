@@ -30,7 +30,7 @@ import core.db as db
 import core.log as log
 import core.state as state
 from core.claude_runner import extract_json, run_agentic, run_haiku
-from core.llm import _SKIP_PERMISSIONS
+from core.llm import _SKIP_PERMISSIONS, consume_last_error, reset_last_error
 from services import work_launch, work_store
 
 STATE_MODULE = "direct_inbox"
@@ -332,9 +332,15 @@ def read_emails(config: dict, instance_key: str, now: datetime) -> tuple[list[di
         max_threads=_int(settings, "max_threads", 50),
         judged=_judged_lines(instance_key, EMAIL, now - timedelta(hours=hours)))
     kwargs = {"model": settings["gmail_model"]} if settings.get("gmail_model") else {}
+    reset_last_error()
     output = run_agentic(prompt, cwd=Path.home(), tools=GMAIL_READ_TOOLS,
                          denied_tools=GMAIL_DENIED_TOOLS, timeout=GMAIL_TIMEOUT,
                          function_name="direct_inbox_gmail", **kwargs)
+    if output is None:
+        error = consume_last_error() or "no reason was recorded"
+        return [], _fail(instance_key, "direct_inbox_gmail_failed",
+                         f"the Gmail connector run failed: {error[:500]}",
+                         {"output": "", "error": error[:2000]})
     verdict = extract_json(output or "")
     if not isinstance(verdict, dict) or not isinstance(verdict.get("threads"), list):
         return [], _fail(instance_key, "direct_inbox_gmail_failed",
