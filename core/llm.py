@@ -339,6 +339,11 @@ NO_TOOLS_FLAGS = ("--tools", "", "--strict-mcp-config")
 NO_TOOLS_OPENCODE_ENV = {
     "OPENCODE_CONFIG_CONTENT": json.dumps({"permission": {"*": {"*": "deny"}}}),
 }
+PUBLISH_DENIED_TOOLS = ("Bash(git push:*)", "Bash(curl:*)", "Bash(gh:*)")
+NO_PUBLISH_RULE = (
+    "Do not push, do not open a pull request, and do not update the ticket in "
+    "Jira or any other tracker: frshty does those steps itself."
+)
 
 
 class ClaudeProvider(LLMProvider):
@@ -368,6 +373,7 @@ class ClaudeProvider(LLMProvider):
                  timeout: int = 600, session_id: str | None = None,
                  resume: bool = False, model: str | None = None,
                  allowed_tools: list[str] | None = None,
+                 denied_tools: tuple[str, ...] | list[str] = PUBLISH_DENIED_TOOLS,
                  **kwargs) -> str | None:
         chosen_model = model or _THINKING_MODEL
         cmd = self._cmd(
@@ -385,6 +391,8 @@ class ClaudeProvider(LLMProvider):
             cmd += ["--allowedTools", ",".join(allowed_tools)]
         else:
             cmd += ["--dangerously-skip-permissions"]
+        if denied_tools:
+            cmd += ["--disallowedTools", ",".join(denied_tools)]
         inv_id = _record_start("run_claude_code", chosen_model, prompt, cwd, allowed_tools, timeout)
         t0 = time.monotonic()
         blocked, reason, remaining_s = _guard_status()
