@@ -94,7 +94,7 @@ class TestRecurring:
         run_at = datetime(2026, 5, 1, 19, 0, tzinfo=timezone.utc)
         scheduler.upsert_recurring(
             tmp_state.name, "beat-a", "billing_autogen", "daily_19pst",
-            run_at, payload={"tz": "US/Pacific"},
+            run_at, payload={"tz": "America/Los_Angeles"},
         )
         row = db.query_one(
             "SELECT run_at, data FROM scheduler WHERE instance_key=? AND key=?",
@@ -105,7 +105,7 @@ class TestRecurring:
         assert data["kind"] == "recurring"
         assert data["task"] == "billing_autogen"
         assert data["cadence"] == "daily_19pst"
-        assert data["payload"] == {"tz": "US/Pacific"}
+        assert data["payload"] == {"tz": "America/Los_Angeles"}
 
     def test_upsert_preserves_last_run_at(self, tmp_state):
         run_at = datetime(2026, 5, 1, 19, 0, tzinfo=timezone.utc)
@@ -225,8 +225,8 @@ class TestComputeDelayTime:
     def test_quiet_hours_shift(self):
         start = datetime(2026, 4, 15, 20, 0, tzinfo=timezone.utc)
         random.seed(0)
-        result = scheduler.compute_delay_time(start, [4, 5], quiet_hours=[23, 7], tz_name="US/Pacific")
-        tz = ZoneInfo("US/Pacific")
+        result = scheduler.compute_delay_time(start, [4, 5], quiet_hours=[23, 7], tz_name="America/Los_Angeles")
+        tz = ZoneInfo("America/Los_Angeles")
         local = result.astimezone(tz)
         assert local.hour >= 7 or local.hour < 23
 
