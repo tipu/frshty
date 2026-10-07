@@ -47,6 +47,12 @@ def upstream(monkeypatch):
             return httpx.Response(200, json={"peers": [
                 {"key": "quill", "base_url": "http://127.0.0.1:7134", "label": "Quill"},
                 {"key": "atropos", "base_url": "http://192.168.1.117:7100", "label": "atropos"}]})
+        if request.url.path == "/api/global/events":
+            return httpx.Response(200, json={"events": [
+                {"id": "1", "instance_key": "frshty", "base_url": "", "links": {"detail": "/tasks/7"}},
+                {"id": "2", "instance_key": "quill", "base_url": "http://127.0.0.1:7134", "links": {}},
+                {"id": "3", "instance_key": "atropos", "base_url": "http://192.168.1.117:7100", "links": {}}],
+                "errors": {}})
         return httpx.Response(201, json={"from": request.url.host + ":" + str(request.url.port),
                                          "path": request.url.path})
 
@@ -149,6 +155,12 @@ class TestPin:
         assert client.get("/api/work/peers").json() == {"peers": [
             {"key": "quill", "base_url": "/api/gateway/at/quill", "label": "Quill"},
             {"key": "atropos", "base_url": "http://192.168.1.117:7100", "label": "atropos"}]}
+
+    def test_global_event_links_point_at_the_gateway(self, peers, upstream, client):
+        events = client.get("/api/global/events").json()["events"]
+        assert [e["base_url"] for e in events] == [
+            "/api/gateway/at/frshty", "/api/gateway/at/quill", "http://192.168.1.117:7100"]
+        assert events[0]["links"] == {"detail": "/tasks/7"}
 
     def test_a_peer_path_redirects_to_a_pinned_page(self, peers, client):
         resp = client.get("/api/gateway/at/quill/tasks/5/terminal?x=1&frshty_instance=frshty")

@@ -15,6 +15,7 @@ from core import external_log
 @pytest.fixture
 def tmp_home(monkeypatch, tmp_path):
 	"""Redirect ~/.frshty/<instance>/logs/ writes to a tmp dir."""
+	monkeypatch.delenv("FRSHTY_ROOT", raising=False)
 	monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
 	return tmp_path
 

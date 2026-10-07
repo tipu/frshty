@@ -115,6 +115,13 @@ def base_branch_for(config: dict, repo_name: str) -> str:
     return overrides.get(repo_name, ws.get("base_branch", "main"))
 
 
+def ci_env_enabled(config: dict) -> bool:
+    """Whether a package.json test script runs with CI=true. A project sets
+    workspace.test_ci_env = false when its scripts already run once, because
+    CI=true also changes how pnpm installs dependencies before the script."""
+    return bool((config.get("workspace") or {}).get("test_ci_env", True))
+
+
 def ticket_worktree_path(config: dict, ticket_slug: str, repo_name: str) -> Path:
     ws = config["workspace"]
     root = ws["root"]

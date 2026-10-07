@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 
 import core.db as db
 import core.log as log
-from web.state import _config, _configs_by_host, primary_config, events_enabled
+from web.state import _config, _configs_by_host, active_config, primary_config, events_enabled
 
 
 router = APIRouter()
@@ -80,11 +80,25 @@ def api_claude_invocation_detail(inv_id: str):
     return row
 
 
+def _relative_links(events: list[dict], base_url: str) -> list[dict]:
+    """An event links its own instance at the configured host, which only this
+    machine resolves. The browser gets the path, so the link opens on the
+    address the page itself came from."""
+    base = (base_url or "").rstrip("/")
+    if not base:
+        return events
+    for ev in events:
+        ev["links"] = {k: (v[len(base):] or "/") if isinstance(v, str) and (v == base or v.startswith(base + "/")) else v
+                       for k, v in (ev.get("links") or {}).items()}
+    return events
+
+
 @router.get("/api/events")
 def api_events(limit: int = 100, after: str = "", unread: bool = False, since_hours: int = 0):
     if since_hours > 0 and not after:
         after = (datetime.now(timezone.utc) - timedelta(hours=since_hours)).isoformat()
-    return log.get_events(limit=limit, after=after or None, unread_only=unread)
+    return _relative_links(log.get_events(limit=limit, after=after or None, unread_only=unread),
+                           _config.get("_base_url", ""))
 
 
 @router.post("/api/events/{event_id}/dismiss")
@@ -118,15 +132,17 @@ def _fetch_local_global_events(limit: int, unread_only: bool, after: str) -> lis
     primary = primary_config()
     if not configs and primary:
         configs = [primary]
+    current = active_config()
     for config in configs:
         state_dir = config["_state_dir"]
         key = config["job"]["key"]
+        base_url = config.get("_base_url") or config["job"].get("host", "")
         log_tokens = log.use(state_dir, key)
         try:
-            for ev in log.get_events(limit=limit, unread_only=unread_only, after=after or None):
+            for ev in _relative_links(log.get_events(limit=limit, unread_only=unread_only, after=after or None), base_url):
                 ev["instance_key"] = key
                 ev["global_id"] = f"{key}:{ev['id']}"
-                ev["base_url"] = config.get("_base_url") or config["job"].get("host", "")
+                ev["base_url"] = "" if config is current else base_url
                 out.append(ev)
         finally:
             log.reset(log_tokens)
