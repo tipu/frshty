@@ -99,6 +99,46 @@ def test_approving_starts_a_run(client):
     assert c.get("/api/work/items").json()["counts"]["proposed"] == 0
 
 
+def test_approving_with_an_edited_objective_launches_the_edited_text(client):
+    c, tmp_path = client
+    item_id = _proposal()
+    edited = "Move WB-304 to the PLT board only. Leave the sprint alone."
+
+    patches = _launch_patches(tmp_path)
+    mocks = [p.start() for p in patches]
+    try:
+        r = c.post(f"/api/work/items/{item_id}/approve", json={"objective": "  " + edited + "\n"})
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert r.status_code == 200, r.text
+    row = db.query_one("SELECT objective FROM work_items WHERE id = ?", (item_id,))
+    assert row["objective"] == edited
+    context = mocks[2].call_args.args[3]
+    assert f"## Objective\n\n{edited}\n" in context
+    assert "TRIAGE sprint" not in context
+
+
+def test_approving_with_a_blank_objective_keeps_the_proposed_text(client):
+    c, tmp_path = client
+    item_id = _proposal()
+    before = db.query_one("SELECT objective FROM work_items WHERE id = ?", (item_id,))["objective"]
+
+    patches = _launch_patches(tmp_path)
+    for p in patches:
+        p.start()
+    try:
+        r = c.post(f"/api/work/items/{item_id}/approve", json={"objective": "   "})
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert r.status_code == 200, r.text
+    row = db.query_one("SELECT objective FROM work_items WHERE id = ?", (item_id,))
+    assert row["objective"] == before
+
+
 def test_approving_twice_is_refused(client):
     c, tmp_path = client
     item_id = _proposal()

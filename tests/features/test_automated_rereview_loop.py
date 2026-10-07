@@ -6,12 +6,15 @@ one and pushed again. The PR got 4 automated re-reviews in one hour. Only the
 newest automated review per bot is current, and a PR gets at most
 MAX_AUTOMATED_REVIEW_FIX_RUNS fix runs on automated reviews.
 """
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import core.comments as comments
 import features.own_prs as own_prs
 import features.tickets as tickets
 from tests.conftest import make_ticket_state
+
+_WRITTEN = (datetime.now(timezone.utc) - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _review(cid, **overrides):
@@ -27,9 +30,9 @@ def _review(cid, **overrides):
         "resolved": False,
         "resolvable": False,
         "comment_kind": "issue_comment",
-        "created_on": "2026-10-06T20:00:00Z",
-        "created_at": "2026-10-06T20:00:00Z",
-        "updated_at": "2026-10-06T20:00:00Z",
+        "created_on": _WRITTEN,
+        "created_at": _WRITTEN,
+        "updated_at": _WRITTEN,
     }
     base.update(overrides)
     return base
@@ -43,7 +46,7 @@ def _human(cid, **overrides):
 def _entry(cid, status):
     return {"id": cid, "comment_kind": "issue_comment", "pr_repo": "repo", "pr_id": 99,
             "body": f"PR re-review {cid}: fix the guard", "status": status,
-            "created_at": "2026-10-06T20:00:00Z"}
+            "created_at": _WRITTEN}
 
 
 def _key(c):
