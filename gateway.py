@@ -72,6 +72,15 @@ def with_pin(url: str, pin: str) -> str:
     return head + ("&" if "?" in head else "?") + f"{COOKIE}={quote(pin, safe='')}" + hash_ + fragment
 
 
+def referer_pin(headers) -> str:
+    """Every request a pinned page makes names that page as its referer, so an
+    iframe, an image or a navigation the page starts stays on its instance."""
+    ref = urlsplit(headers.get("referer", ""))
+    if not ref.netloc or ref.netloc != headers.get("host", ""):
+        return ""
+    return split_pin(ref.query)[0]
+
+
 def routed(cookie: str | None, pin: str) -> dict | None:
     """A pinned tab goes to its own instance and leaves the cookie alone, so a
     peer page opened from the board does not move the board to that peer."""
@@ -125,7 +134,7 @@ def api_select(key: str, next: str = "/"):
     if not any(i["key"] == key for i in instances()):
         return JSONResponse({"error": f"unknown instance '{key}'"}, status_code=404)
     target = next if next.startswith("/") and not next.startswith("//") else "/"
-    response = RedirectResponse(target, status_code=303)
+    response = RedirectResponse(target, status_code=303, headers={"Referrer-Policy": "no-referrer"})
     response.set_cookie(COOKIE, key, max_age=365 * 86400, samesite="lax")
     return response
 
@@ -165,6 +174,11 @@ def _pinned_location(location: str, pin: str) -> str:
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"])
 async def forward(path: str, request: Request):
     pin, query = split_pin(request.scope.get("query_string", b"").decode("latin-1"))
+    if not pin:
+        pin = referer_pin(request.headers)
+        if pin and request.method == "GET" and request.headers.get("sec-fetch-mode") == "navigate":
+            return RedirectResponse(with_pin("/" + raw_path(request.scope).lstrip("/") + (f"?{query}" if query else ""), pin),
+                                    status_code=303)
     target = routed(request.cookies.get(COOKIE), pin)
     if target is None and pin:
         return JSONResponse({"error": f"unknown instance '{pin}'"}, status_code=404)
