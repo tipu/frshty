@@ -533,7 +533,8 @@ def launch(objective: str, cwd: str = "", contexts: list[str] | None = None,
     return _start(item_id, plan, slack, brief)
 
 
-def launch_proposed(item_id: int, agent: str = "claude") -> dict:
+def launch_proposed(item_id: int, agent: str = "claude",
+                    objective: str | None = None) -> dict:
     """Start the agent on a proposal the operator approved.
 
     The item is already on the board with its objective, project labels,
@@ -549,7 +550,10 @@ def launch_proposed(item_id: int, agent: str = "claude") -> dict:
     Such a proposal also waits, and the worktree it recorded can be reclaimed
     while it waits. A recorded directory that has gone is dropped, the way
     _followup_context drops an inherited directory that no longer exists, so
-    approval resolves a new one instead of refusing every approval."""
+    approval resolves a new one instead of refusing every approval.
+
+    The operator can edit the objective before approving. A non-empty edited
+    objective replaces the proposed one for the launch and on the row."""
     item = db.query_one(
         "SELECT i.id, i.state, i.objective, i.contexts, i.source_item_id, "
         "i.launch_cwd, i.launch_brief, i.worktree_opt_out, "
@@ -567,14 +571,14 @@ def launch_proposed(item_id: int, agent: str = "claude") -> dict:
         cwd = ""
     labels = [c for c in (item["contexts"] or "").split(",") if c]
     slack = SLACK_LABEL in labels
-    plan = _resolve_launch(item["objective"], cwd,
+    plan = _resolve_launch(str(objective or "").strip() or item["objective"], cwd,
                            [c for c in labels if c != SLACK_LABEL], agent,
                            item["source_item_id"],
                            no_worktree=bool(item["worktree_opt_out"]),
                            item_id=item_id)
     if "error" in plan:
         return plan
-    if not work_store.claim_proposal(item_id):
+    if not work_store.claim_proposal(item_id, plan["objective"]):
         return {"error": f"work item {item_id} is no longer awaiting approval"}
     # A claimed proposal that produced no run never reached an agent, so it
     # goes back on the board for the operator to approve again. The test is
