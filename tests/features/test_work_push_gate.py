@@ -137,7 +137,7 @@ class TestGatePush:
                                                  "output": "E501 line too long"})
         tests_called = []
         monkeypatch.setattr(work_launch, "_gate_tests",
-                            lambda repo: tests_called.append(1))
+                            lambda repo, *_: tests_called.append(1))
         out = work_launch.gate_push(sid, "git push", str(tmp_path))
         assert out["decision"] == "deny"
         assert "lint" in out["reason"]
@@ -156,7 +156,7 @@ class TestGatePush:
                             lambda repo, files: {"status": "pass", "exit_code": 0,
                                                  "output": ""})
         monkeypatch.setattr(work_launch, "_detect_runner",
-                            lambda repo: (["bash", "-c", "echo 1 failed; exit 1"], {}))
+                            lambda repo, *_: (["bash", "-c", "echo 1 failed; exit 1"], {}))
         out = work_launch.gate_push(sid, "git push origin main", str(tmp_path))
         assert out["decision"] == "deny"
         assert "test suite" in out["reason"]
@@ -172,13 +172,42 @@ class TestGatePush:
                             lambda repo, files: {"status": "pass", "exit_code": 0,
                                                  "output": "ok"})
         monkeypatch.setattr(work_launch, "_detect_runner",
-                            lambda repo: (["bash", "-c", "exit 0"], {}))
+                            lambda repo, *_: (["bash", "-c", "exit 0"], {}))
         out = work_launch.gate_push(sid, "git push", str(tmp_path))
         assert out["decision"] == "allow"
         payload = json.loads(_gate_events(item_id)[0]["payload"])
         assert payload["verdict"] == "pass"
         assert payload["lint"]["status"] == "pass"
         assert payload["tests"]["result"] == "pass"
+
+    def test_project_config_turns_off_ci_env(self, tmp_path, monkeypatch):
+        item_id = work_store.create_item("push gate item", contexts="aimyable")
+        sid = f"sid-gate-{item_id}"
+        work_store.add_run(item_id, sid, f"work-{item_id}", "/tmp")
+        self._resolve_to(monkeypatch, tmp_path)
+        monkeypatch.setattr(work_launch.git_util, "lint_files",
+                            lambda repo, files: {"status": "pass", "exit_code": 0,
+                                                 "output": ""})
+        configs = {"aimyable": {"workspace": {"test_ci_env": False}}}
+        monkeypatch.setattr(work_launch, "_instance_config", configs.get)
+        monkeypatch.setattr(work_launch, "_config_on_disk", lambda k: None)
+        seen = []
+
+        def runner(repo, ci_env=True):
+            seen.append(ci_env)
+            return (["bash", "-c", "exit 0"], {})
+        monkeypatch.setattr(work_launch, "_detect_runner", runner)
+        assert work_launch.gate_push(sid, "git push", str(tmp_path))["decision"] == "allow"
+        assert seen == [False]
+
+    def test_ci_env_stays_on_unless_every_project_turns_it_off(self, monkeypatch):
+        configs = {"aimyable": {"workspace": {"test_ci_env": False}},
+                   "lsc": {"workspace": {}}}
+        monkeypatch.setattr(work_launch, "_instance_config", configs.get)
+        monkeypatch.setattr(work_launch, "_config_on_disk", lambda k: None)
+        assert work_launch.ci_env_enabled_for("aimyable") is False
+        assert work_launch.ci_env_enabled_for("aimyable,lsc") is True
+        assert work_launch.ci_env_enabled_for("unknown") is True
 
     def test_no_repo_allows_but_records(self, tmp_path, monkeypatch):
         item_id, sid = _mkrun()
@@ -195,7 +224,7 @@ class TestGatePush:
                             lambda repo, files: {"status": "no_config",
                                                  "exit_code": 0, "output": ""})
         monkeypatch.setattr(work_launch, "_detect_runner",
-                            lambda repo: ([work_launch._NO_LOCAL_PY_VENV_SENTINEL], {}))
+                            lambda repo, *_: ([work_launch._NO_LOCAL_PY_VENV_SENTINEL], {}))
         out = work_launch.gate_push(sid, "git push", str(tmp_path))
         assert out["decision"] == "deny"
         assert "virtualenv" in out["reason"]

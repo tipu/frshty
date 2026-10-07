@@ -1833,21 +1833,32 @@ class TestFixCiFailuresTask:
         ts = state.load("tickets")["PROJ-1"]
         assert "_ci_failed_pending" not in ts
 
-    def test_worktree_missing_emits_skip(self, fake_config, tmp_state, tmp_log):
+    def test_worktree_missing_spends_attempts_until_pr_failed(self, fake_config, tmp_state, tmp_log):
         from core.tasks.tickets import fix_ci_failures
-        self._seed(make_ticket_state(
-            status="in_review", _ci_failed_pending=True,
-            prs=[{"repo": "r", "id": 1, "url": "u"}],
-        ))
-        mock_platform = MagicMock()
-        mock_platform.get_pr_checks.return_value = [{"name": "lint", "state": "FAILED"}]
-        with patch("core.tasks.tickets.make_platform", return_value=mock_platform):
-            result = fix_ci_failures(self._ctx(fake_config))
-        assert result.status == "ok"
         import core.state as state
-        ts = state.load("tickets")["PROJ-1"]
-        assert ts.get("ci_fix_attempts", 0) == 0
-        assert "_ci_failed_pending" not in ts
+        pr = {"repo": "r", "id": 1, "url": "u"}
+        checks = [{"name": "lint", "state": "FAILED"}]
+        self._seed(make_ticket_state(status="in_review", _ci_failed_pending=True, prs=[pr]))
+        mock_platform = MagicMock()
+        mock_platform.get_pr_checks.return_value = checks
+        mock_platform.get_pr_info.return_value = {"head_sha": "abc"}
+        enqueued = []
+        with patch("core.tasks.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets._enqueue_stage",
+                   side_effect=lambda *a: enqueued.append(a)):
+            for _ in range(tickets.MAX_CI_FIX_ATTEMPTS + 1):
+                result = fix_ci_failures(self._ctx(fake_config))
+                assert result.status == "ok"
+                ts = state.load("tickets")["PROJ-1"]
+                assert "_ci_failed_pending" not in ts
+                ts = tickets._handle_ci_failure(make_ticket(), ts, pr, checks,
+                                                "http://base", "inst", head_sha="abc")
+                state.save_ticket("PROJ-1", ts)
+                if ts["status"] == "pr_failed":
+                    break
+        assert ts["status"] == "pr_failed"
+        assert ts["ci_fix_attempts"] == tickets.MAX_CI_FIX_ATTEMPTS
+        assert len(enqueued) == tickets.MAX_CI_FIX_ATTEMPTS - 1
 
     def test_uses_the_worktree_that_holds_the_pr_branch(self, fake_config, tmp_state, tmp_log, tmp_path):
         from core.tasks.tickets import fix_ci_failures
