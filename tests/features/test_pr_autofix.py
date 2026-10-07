@@ -6,7 +6,7 @@ from tests.conftest import make_pr
 
 
 def _config(**overrides):
-    base = {"job": {"key": "clarivis"}, "features": {"pr_autofix": True}}
+    base = {"job": {"key": "clarivis", "platform": "github"}, "features": {"pr_autofix": True}}
     base.update(overrides)
     return base
 
@@ -15,7 +15,7 @@ class TestCheck:
     def test_first_run_baselines_without_queueing(self):
         prs = [make_pr(id=1), make_pr(id=2)]
         platform = MagicMock()
-        platform.list_open_prs.return_value = prs
+        platform.list_my_open_prs.return_value = prs
         store = {}
         with patch("features.pr_autofix.make_platform", return_value=platform), \
              patch("features.pr_autofix.state.load", return_value=store), \
@@ -33,7 +33,7 @@ class TestCheck:
         store = {pr_autofix.SEEDED_KEY: "2026-01-01T00:00:00+00:00",
                  "myrepo/1": {"status": "baselined"}}
         platform = MagicMock()
-        platform.list_open_prs.return_value = [make_pr(id=1), make_pr(id=2)]
+        platform.list_my_open_prs.return_value = [make_pr(id=1), make_pr(id=2)]
         with patch("features.pr_autofix.make_platform", return_value=platform), \
              patch("features.pr_autofix.state.load", return_value=store), \
              patch("features.pr_autofix.state.save") as mock_save, \
@@ -50,7 +50,7 @@ class TestCheck:
         store = {pr_autofix.SEEDED_KEY: "2026-01-01T00:00:00+00:00",
                  "myrepo/9": {"status": "clean"}}
         platform = MagicMock()
-        platform.list_open_prs.return_value = []
+        platform.list_my_open_prs.return_value = []
         with patch("features.pr_autofix.make_platform", return_value=platform), \
              patch("features.pr_autofix.state.load", return_value=store), \
              patch("features.pr_autofix.state.save") as mock_save, \
@@ -66,7 +66,7 @@ class TestCheck:
         store = {pr_autofix.SEEDED_KEY: "2026-01-01T00:00:00+00:00",
                  "myrepo/1": {"status": "error", "attempts": 1}}
         platform = MagicMock()
-        platform.list_open_prs.return_value = [make_pr(id=1)]
+        platform.list_my_open_prs.return_value = [make_pr(id=1)]
         with patch("features.pr_autofix.make_platform", return_value=platform), \
              patch("features.pr_autofix.state.load", return_value=store), \
              patch("features.pr_autofix.state.save"), \
@@ -79,7 +79,7 @@ class TestCheck:
         store = {pr_autofix.SEEDED_KEY: "2026-01-01T00:00:00+00:00",
                  "myrepo/1": {"status": "error", "attempts": pr_autofix.MAX_ATTEMPTS}}
         platform = MagicMock()
-        platform.list_open_prs.return_value = [make_pr(id=1)]
+        platform.list_my_open_prs.return_value = [make_pr(id=1)]
         with patch("features.pr_autofix.make_platform", return_value=platform), \
              patch("features.pr_autofix.state.load", return_value=store), \
              patch("features.pr_autofix.state.save"), \
@@ -88,12 +88,12 @@ class TestCheck:
             pr_autofix.check(_config())
         mock_enqueue.assert_not_called()
 
-    def test_platform_without_list_open_prs_skips(self):
-        platform = MagicMock(spec=[])
-        with patch("features.pr_autofix.make_platform", return_value=platform), \
+    def test_non_github_platform_skips(self):
+        with patch("features.pr_autofix.make_platform") as mock_make, \
              patch("features.pr_autofix.state.load") as mock_load, \
              patch("features.pr_autofix.log.emit"):
-            pr_autofix.check(_config())
+            pr_autofix.check(_config(job={"key": "clarivis", "platform": "bitbucket"}))
+        mock_make.assert_not_called()
         mock_load.assert_not_called()
 
 
