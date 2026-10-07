@@ -75,10 +75,7 @@ def with_pin(url: str, pin: str) -> str:
 def referer_pin(headers) -> str:
     """Every request a pinned page makes names that page as its referer, so an
     iframe, an image or a navigation the page starts stays on its instance."""
-    ref = urlsplit(headers.get("referer", ""))
-    if not ref.netloc or ref.netloc != headers.get("host", ""):
-        return ""
-    return split_pin(ref.query)[0]
+    return split_pin(urlsplit(headers.get("referer", "")).query)[0]
 
 
 def routed(cookie: str | None, pin: str) -> dict | None:
@@ -176,9 +173,9 @@ async def forward(path: str, request: Request):
     pin, query = split_pin(request.scope.get("query_string", b"").decode("latin-1"))
     if not pin:
         pin = referer_pin(request.headers)
-        if pin and request.method == "GET" and request.headers.get("sec-fetch-mode") == "navigate":
+        if pin and request.method in ("GET", "HEAD"):
             return RedirectResponse(with_pin("/" + raw_path(request.scope).lstrip("/") + (f"?{query}" if query else ""), pin),
-                                    status_code=303)
+                                    status_code=303, headers={"Cache-Control": "no-store"})
     target = routed(request.cookies.get(COOKIE), pin)
     if target is None and pin:
         return JSONResponse({"error": f"unknown instance '{pin}'"}, status_code=404)
