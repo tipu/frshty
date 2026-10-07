@@ -325,6 +325,7 @@ class TestPromptRule:
         (tmp_path / "tickets" / "PROJ-1-x").mkdir(parents=True)
         with patch("core.state.load_ticket", return_value={"slug": "PROJ-1-x"}), \
              patch("core.tasks.tickets._claim_session", return_value=("s", False)), \
+             patch("core.tasks.tickets._drop_session"), \
              patch("core.tasks.tickets._capture_repo_heads", return_value={}), \
              patch("core.tasks.tickets.run_claude_code", return_value=None) as fixer:
             T.fix_review_findings(ctx)
@@ -368,6 +369,7 @@ class TestHooksRule:
         (tmp_path / "tickets" / "PROJ-1-x").mkdir(parents=True)
         with patch("core.state.load_ticket", return_value={"slug": "PROJ-1-x"}), \
              patch("core.tasks.tickets._claim_session", return_value=("s", False)), \
+             patch("core.tasks.tickets._drop_session"), \
              patch("core.tasks.tickets._capture_repo_heads", return_value={}), \
              patch("core.tasks.tickets.run_claude_code", return_value=None) as fixer:
             T.fix_review_findings(ctx)
