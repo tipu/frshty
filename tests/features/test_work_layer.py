@@ -389,6 +389,7 @@ class TestIntake:
         assert r.status_code == 200, r.text
         context = mock_launch.call_args.args[3]
         assert work_store.TLDR_RULE in context
+        assert work_store.PLAIN_REPORT_RULE in context
         assert "Open every such document with a TL;DR section" in context
         assert f"runs past {work_store.TLDR_LONG_WORDS} words" in context
         assert "<stem>-tldr.html" in context
@@ -726,6 +727,7 @@ class TestAutocontinue:
         assert work_store.maybe_autocontinue(f"sid-auto-{item_id}", "/tmp/t.jsonl") == "continued"
         prompt = sender.call_args.args[1]
         assert work_store.TLDR_RULE in prompt
+        assert work_store.PLAIN_REPORT_RULE in prompt
         assert "Open every such document with a TL;DR section" in prompt
         assert f"runs past {work_store.TLDR_LONG_WORDS} words" in prompt
 
