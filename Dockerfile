@@ -7,6 +7,7 @@ ARG HOOK_DIR=
 
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ENV NODE_PATH=/usr/lib/node_modules
+ENV PLAYWRIGHT_MCP_SANDBOX=false
 
 RUN apt-get update && apt-get install -y curl git git-lfs openssh-client tmux libsecret-1-0 tree procps sqlite3 \
         build-essential gnupg jq ripgrep rsync ffmpeg xvfb postgresql-client default-libmysqlclient-dev pkg-config && \
