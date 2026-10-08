@@ -54,7 +54,7 @@ def test_workspace_instance_gets_only_its_own_token(host):
     assert (str(slack / "resolve_user.py"), str(slack / "resolve_user.py"), True) in binds
     assert not any(host == str(slack / "tokens.json") for host, _, _ in binds)
     assert not any(inside == str(slack / "tokens.json.bak") for _, inside, _ in binds)
-    assert instance.slack_int_view(c, binds) == (str(slack), True)
+    assert instance.slack_int_views(c, binds) == [str(slack)]
 
 
 def test_covering_mount_without_workspace_hides_every_token(host):
@@ -66,14 +66,14 @@ def test_covering_mount_without_workspace_hides_every_token(host):
     assert json.loads(tokens.read_text()) == {}
     binds = instance.mounts(c, config_path, root)
     assert (str(tokens), str(slack / "tokens.json"), True) in binds
-    assert (str(slack / "messages"), str(slack / "messages"), False) in binds
-    assert (str(slack / "send.py"), str(slack / "send.py"), False) in binds
+    assert (str(slack / "messages"), str(slack / "messages"), True) in binds
+    assert (str(slack / "send.py"), str(slack / "send.py"), True) in binds
     seen = {inside for _, inside, _ in binds}
     assert str(slack / "tokens.json.bak") not in seen
     assert str(slack / ".env") not in seen
     secrets = (str(slack / "tokens.json"), str(slack / "tokens.json.bak"), str(slack / ".env"))
     assert not any(host in secrets for host, _, _ in binds)
-    assert instance.slack_int_view(c, binds) == (str(slack), False)
+    assert instance.slack_int_views(c, binds) == [str(slack)]
 
 
 def test_no_covering_mount_and_no_workspace_mounts_nothing(host):
@@ -82,7 +82,7 @@ def test_no_covering_mount_and_no_workspace_mounts_nothing(host):
     instance.write_slack_tokens(c, root)
     binds = instance.mounts(c, config_path, root)
     assert not any(str(slack) in inside for _, inside, _ in binds)
-    assert instance.slack_int_view(c, binds) is None
+    assert instance.slack_int_views(c, binds) == []
 
 
 def test_missing_workspace_token_is_fatal(host):
@@ -99,3 +99,17 @@ def test_whole_checkout_mount_beside_a_workspace_is_refused(host):
     instance.write_slack_tokens(c, root)
     with pytest.raises(SystemExit, match="mount a parent"):
         instance.mounts(c, config_path, root)
+
+
+def test_symlinked_parent_mount_gets_a_view_too(host, tmp_path):
+    slack, root, workspace, config_path = host
+    alias = tmp_path / "alias"
+    alias.symlink_to(slack.parent)
+    c = config(slack, workspace)
+    c["container"]["mounts"] = [str(alias)]
+    instance.write_slack_tokens(c, root)
+    binds = instance.mounts(c, config_path, root)
+    view = str(alias / "slack_int")
+    assert instance.slack_int_views(c, binds) == [view]
+    assert (str(root / "slack" / "tokens.json"), f"{view}/tokens.json", True) in binds
+    assert f"{view}/tokens.json.bak" not in {inside for _, inside, _ in binds}
