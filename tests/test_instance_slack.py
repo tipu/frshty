@@ -66,7 +66,7 @@ def test_covering_mount_without_workspace_hides_every_token(host):
     assert json.loads(tokens.read_text()) == {}
     binds = instance.mounts(c, config_path, root)
     assert (str(tokens), str(slack / "tokens.json"), True) in binds
-    assert (str(slack / "messages"), str(slack / "messages"), True) in binds
+    assert str(slack / "messages") not in {inside for _, inside, _ in binds}
     assert (str(slack / "send.py"), str(slack / "send.py"), True) in binds
     seen = {inside for _, inside, _ in binds}
     assert str(slack / "tokens.json.bak") not in seen
