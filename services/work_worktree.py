@@ -292,7 +292,7 @@ def plan(objective: str, caller_cwd: str, cwd: str, contexts: list[str],
     R3 the resolved directory is a ticket directory holding a worktree
     R4 the caller named no directory and the objective names a ticket key of a
        selected project whose ticket worktree exists
-    R5 a single repository resolves, so a task worktree is created
+    R5 a single writable repository resolves, so a task worktree is created
     R6 nothing resolves, so the launch runs where it runs today
     """
     if item_id is not None:
@@ -310,7 +310,7 @@ def plan(objective: str, caller_cwd: str, cwd: str, contexts: list[str],
     if no_worktree:
         return {"rule": "R6", "cwd": cwd, "create": False}
     repo = _resolve_repo(caller_cwd, contexts, entries, repo_pick)
-    if repo and repo["repo_common_dir"]:
+    if repo and repo["repo_common_dir"] and os.access(repo["repo_common_dir"], os.W_OK):
         return {"rule": "R5", "cwd": cwd, "create": True, **repo}
     return {"rule": "R6", "cwd": cwd, "create": False}
 
@@ -384,6 +384,11 @@ def ensure(item_id: int, spec: dict, objective: str = "") -> dict:
         row = for_item_repo(item_id, common)
         if row and os.path.isdir(row["path"]):
             return row
+        if not os.access(common, os.W_OK):
+            log.emit("work_worktree_failed",
+                     f"work item {item_id}: {spec['repo_name']} is read-only here; "
+                     f"no worktree can be made in {repo_path}")
+            return {}
         config = instance_config(spec.get("project_key") or "")
         path = core_config.task_worktree_path(
             config, spec.get("project_key") or "", item_id, spec["repo_name"])
