@@ -24,7 +24,9 @@ token of that one workspace, copied to ~/.frshty-containers/<key>/slack/ at
 `up`. Its own capture directory, from slack.messages_dir, lies inside it. An
 instance with no workspace whose mount covers the checkout, such as
 ~/Documents/dev, sees a tmpfs there too, with every entry of the checkout but
-the token files and .env, and an empty tokens.json. Every entry of a view is
+the token files, .env and messages/, and an empty tokens.json. messages/ goes
+because each raw capture log repeats its workspace's token in every WebSocket
+URL. Every entry of a view is
 read-only. Re-run `up` when the Slack token of the workspace changes.
 The container never sees the host's ~/.ssh, ~/.frshty, or another
 instance's workspace or state.
@@ -140,6 +142,7 @@ os.replace(part, dst)
 """
 SLACK_INT = "~/Documents/dev/slack_int"
 SLACK_INT_CODE = ["send.py", "resolve_user.py"]
+SLACK_INT_HIDDEN = [".env", "messages"]
 TMP_MOUNT = "/tmp:rw,exec,nosuid,nodev,size=8g,mode=1777"
 
 
@@ -296,8 +299,8 @@ def slack_int_mounts(config: dict, root: Path,
                      binds: list[tuple[str, str, bool]]) -> list[tuple[str, str, bool]]:
     """The read-only bind mounts inside each slack_int view. With a workspace,
     a view holds the code and the instance's tokens.json. Without one, it
-    holds every entry of the checkout but the token files and .env, and the
-    instance's empty tokens.json. A tmpfs carries the view, because the host
+    holds every entry of the checkout but the token files and SLACK_INT_HIDDEN,
+    and the instance's empty tokens.json. A tmpfs carries the view, because the host
     rewrites tokens.json by rename, and a rename detaches a bind over that one
     file. Read-only, because every other instance runs the same code with its
     own token."""
@@ -308,7 +311,7 @@ def slack_int_mounts(config: dict, root: Path,
         names = [name for name in SLACK_INT_CODE if (slack / name).is_file()]
     else:
         names = sorted(p.name for p in slack.iterdir()
-                       if p.name != ".env" and not p.name.startswith("tokens.json"))
+                       if p.name not in SLACK_INT_HIDDEN and not p.name.startswith("tokens.json"))
     out = []
     for view in slack_int_views(config, binds):
         out += [(str(slack / name), str(Path(view) / name), True) for name in names]
