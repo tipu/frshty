@@ -113,6 +113,17 @@ TLDR_RULE = (
     "full document, and print an ARTIFACT line for it too, so the board lists "
     "the short version next to the long one. "
 )
+PLAIN_REPORT_RULE = (
+    "Write the document for a reader who knows nothing about the task, the way "
+    "a patient special education teacher explains a subject to a learner who "
+    "needs every step spelled out. Keep the technical content: names, numbers, "
+    "file paths, commands and code stay in. Define each term the first time it "
+    "appears. Put one idea in each short sentence. Walk through the subject one "
+    "step at a time, in the order things happen, and skip no step because it "
+    "looks obvious. Give a concrete example for each claim. Use plain headings, "
+    "short lists, tables and simple diagrams where they make a point easier to "
+    "follow. "
+)
 CONTINUE_PROMPT_TEMPLATE = (
     "Continue toward the objective. {delivery}" + PROGRESS_RULE + RUN_BUDGET_RULE +
     "When you hit a decision point, decide "
@@ -128,6 +139,7 @@ CONTINUE_PROMPT_TEMPLATE = (
     "{correspondence}"
     "Write any report, summary or other prose document for the operator as a "
     "self-contained .html file, never as Markdown or plain text. " + TLDR_RULE +
+    PLAIN_REPORT_RULE +
     f"If the objective is fully met, end your message with the single line {DONE_MARKER}."
 )
 
