@@ -18,6 +18,16 @@ same path and named by FRSHTY_ROOT, so every worktree the container registers
 in a shared repository names a path the host sees too. Its ssh/ is mounted at
 ~/.ssh. Its totp/, when present, is mounted read-only at ~/.totp for the
 totp command; it holds only the TOTP secrets of that instance's accounts.
+An instance whose [slack] block names a workspace sees the slack_int checkout
+as a tmpfs that holds send.py, resolve_user.py and a tokens.json with the
+token of that one workspace, copied to ~/.frshty-containers/<key>/slack/ at
+`up`. Its own capture directory, from slack.messages_dir, lies inside it. An
+instance with no workspace whose mount covers the checkout, such as
+~/Documents/dev, sees a tmpfs there too, with every entry of the checkout but
+the token files, .env and messages/, and an empty tokens.json. messages/ goes
+because each raw capture log repeats its workspace's token in every WebSocket
+URL. Every entry of a view is
+read-only. Re-run `up` when the Slack token of the workspace changes.
 The container never sees the host's ~/.ssh, ~/.frshty, or another
 instance's workspace or state.
 
@@ -65,6 +75,7 @@ An optional [container] block in the instance config tunes the container:
     seed = ["~/.gitconfig-quill"]            # extra host files copied into ~
     devices = ["/dev/kvm"]                   # host devices passed through
     env_file = "~/.frshty-containers/aimyable.env"  # extra variables, e.g. BILLCOM_*
+    slack_int = "~/slack_int"                # slack_int checkout; default ~/Documents/dev/slack_int
 """
 import argparse
 import json
@@ -129,6 +140,9 @@ if check != "ok":
     sys.exit(f"quick_check failed: {check}")
 os.replace(part, dst)
 """
+SLACK_INT = "~/Documents/dev/slack_int"
+SLACK_INT_CODE = ["send.py", "resolve_user.py"]
+SLACK_INT_HIDDEN = [".env", "messages"]
 TMP_MOUNT = "/tmp:rw,exec,nosuid,nodev,size=8g,mode=1777"
 
 
@@ -225,6 +239,86 @@ def install_config(config_path: Path, root: Path, key: str) -> Path:
     return target
 
 
+def slack_int_dir(config: dict) -> Path:
+    return _expand((config.get("container") or {}).get("slack_int") or SLACK_INT)
+
+
+def slack_workspace(config: dict) -> str:
+    return str((config.get("slack") or {}).get("workspace") or "")
+
+
+def write_slack_tokens(config: dict, root: Path) -> None:
+    """Copy the token of the instance's own Slack workspace out of the
+    slack_int tokens.json into slack/tokens.json. An instance that names no
+    workspace gets an empty one."""
+    key = config["job"]["key"]
+    slack = slack_int_dir(config)
+    if not slack.is_dir():
+        return
+    workspace = slack_workspace(config)
+    mine = {}
+    if workspace:
+        try:
+            tokens = json.loads((slack / "tokens.json").read_text())
+        except (OSError, ValueError) as e:
+            raise SystemExit(f"{key}: cannot read {slack / 'tokens.json'}: {e}")
+        if workspace not in tokens:
+            raise SystemExit(f"{key}: {slack / 'tokens.json'} has no token for workspace {workspace!r}")
+        mine = {workspace: tokens[workspace]}
+    (root / "slack").mkdir(exist_ok=True)
+    (root / "slack").chmod(0o700)
+    path = root / "slack" / "tokens.json"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(mine, f)
+    os.chmod(path, 0o600)
+
+
+def slack_int_views(config: dict, binds: list[tuple[str, str, bool]]) -> list[str]:
+    """The container paths where a tmpfs stands in for the slack_int
+    checkout: the checkout path for an instance with a workspace, and the
+    place of the checkout inside every bind that covers it, such as
+    ~/Documents/dev. Symlinks are resolved, so an alias of a parent counts."""
+    key = config["job"]["key"]
+    slack = slack_int_dir(config)
+    if not slack.is_dir():
+        return []
+    real = slack.resolve()
+    views = [str(slack)] if slack_workspace(config) else []
+    for host, inside, _ in binds:
+        source = Path(host).resolve()
+        if source == real:
+            raise SystemExit(f"{key}: [container] mounts names {slack}; the instance sees it "
+                             f"through its own view, so set [slack] workspace or mount a parent")
+        if real.is_relative_to(source):
+            views.append(str(Path(inside) / real.relative_to(source)))
+    return list(dict.fromkeys(views))
+
+
+def slack_int_mounts(config: dict, root: Path,
+                     binds: list[tuple[str, str, bool]]) -> list[tuple[str, str, bool]]:
+    """The read-only bind mounts inside each slack_int view. With a workspace,
+    a view holds the code and the instance's tokens.json. Without one, it
+    holds every entry of the checkout but the token files and SLACK_INT_HIDDEN,
+    and the instance's empty tokens.json. A tmpfs carries the view, because the host
+    rewrites tokens.json by rename, and a rename detaches a bind over that one
+    file. Read-only, because every other instance runs the same code with its
+    own token."""
+    slack = slack_int_dir(config)
+    if not slack.is_dir():
+        return []
+    if slack_workspace(config):
+        names = [name for name in SLACK_INT_CODE if (slack / name).is_file()]
+    else:
+        names = sorted(p.name for p in slack.iterdir()
+                       if p.name not in SLACK_INT_HIDDEN and not p.name.startswith("tokens.json"))
+    out = []
+    for view in slack_int_views(config, binds):
+        out += [(str(slack / name), str(Path(view) / name), True) for name in names]
+        out.append((str(root / "slack" / "tokens.json"), str(Path(view) / "tokens.json"), True))
+    return out
+
+
 def mounts(config: dict, config_path: Path, root: Path) -> list[tuple[str, str, bool]]:
     """(host path, container path, read only) for every bind mount."""
     key = config["job"]["key"]
@@ -256,6 +350,7 @@ def mounts(config: dict, config_path: Path, root: Path) -> list[tuple[str, str, 
         src = _expand(HOME / name if not str(name).startswith(("~", "/")) else name)
         if src.is_file():
             out.append((str(src), f"{SEED_DIR}/{src.name}", True))
+    out += slack_int_mounts(config, root, out)
     for host, _, _ in out:
         if not Path(host).exists():
             raise SystemExit(f"{key}: mount source {host} does not exist")
@@ -320,6 +415,7 @@ def run_args(config: dict, config_path: Path, check: bool) -> list[str]:
     (root / "ssh").chmod(0o700)
     config_path = install_config(config_path, root, key)
     env_file = write_env_file(root, config)
+    write_slack_tokens(config, root)
     port = int(box.get("port") or config["job"]["port"])
     memory = str(box.get("memory") or MEMORY)
     volume = db_volume(config)
@@ -353,7 +449,10 @@ def run_args(config: dict, config_path: Path, check: bool) -> list[str]:
     if volume:
         args += ["-v", f"{volume}:{DB_DIR}"]
     args += code_args()
-    for host, inside, ro in mounts(config, config_path, root):
+    binds = mounts(config, config_path, root)
+    for view in slack_int_views(config, binds):
+        args += ["--mount", f"type=tmpfs,destination={view}"]
+    for host, inside, ro in binds:
         args += ["-v", f"{host}:{inside}" + (":ro" if ro else "")]
     if check:
         args += ["--rm", "--name", f"{container_name(config)}-check", IMAGE,
