@@ -296,6 +296,20 @@ class TestPlan:
         assert got["base_branch"] == "main"
         assert got["project_key"] == "proj"
 
+    def test_r6_when_the_single_repository_is_read_only(self, tmp_path, wt_root, monkeypatch):
+        root = tmp_path / "proj"
+        root.mkdir()
+        repo = make_repo(root, "app")
+        config = project_config(root, ["app"], base="main")
+        monkeypatch.setattr(work_worktree.runtime, "instances",
+                            lambda: instances(proj=config))
+        (repo / ".git").chmod(0o555)
+        try:
+            got = work_worktree.plan("build it", "", str(root), ["proj"], [])
+        finally:
+            (repo / ".git").chmod(0o755)
+        assert got == {"rule": "R6", "cwd": str(root), "create": False}
+
     def test_r6_when_several_repositories_resolve_and_none_was_picked(self, tmp_path, wt_root,
                                                                      monkeypatch):
         root = tmp_path / "proj"
@@ -454,6 +468,24 @@ class TestEnsure:
         (target / "in the way").write_text("x")
         assert work_worktree.ensure(item_id, _spec(repo), "blocked") == {}
         assert work_worktree.for_item(item_id) is None
+
+    def test_a_read_only_repository_is_reported_and_left_untouched(self, tmp_path, wt_root,
+                                                                   monkeypatch):
+        repo = make_repo(tmp_path)
+        monkeypatch.setattr(work_worktree.runtime, "instances", lambda: None)
+        emitted = []
+        monkeypatch.setattr(work_worktree.log, "emit",
+                            lambda event, summary, **kw: emitted.append((event, summary)))
+        item_id = _item("read only")
+        (repo / ".git").chmod(0o555)
+        try:
+            assert work_worktree.ensure(item_id, _spec(repo), "read only") == {}
+        finally:
+            (repo / ".git").chmod(0o755)
+        assert work_worktree.for_item(item_id) is None
+        assert _git(repo, "branch", "--list").stdout.split() == ["*", "main"]
+        assert [e for e, _ in emitted] == ["work_worktree_failed"]
+        assert "read-only" in emitted[0][1]
 
     def test_a_repository_that_is_gone_is_reported_not_raised(self, tmp_path, wt_root,
                                                               monkeypatch):
