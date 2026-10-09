@@ -62,7 +62,7 @@ def _sha(text: str) -> str:
 def hits(text: str, names: dict[str, int], allowed_owner: str = "") -> set[str]:
     text = text.lower()
     if allowed_owner:
-        text = re.sub(rf"github(?:\.com)?[:/]{re.escape(allowed_owner)}/", "github.com/", text)
+        text = re.sub(rf"(?:github\.com/|github:){re.escape(allowed_owner)}/", "github.com/", text)
     lengths = sorted({n for n in names.values() if n >= SUBSTRING_MIN})
     found = set()
     for run in set(RUN.findall(text)):
@@ -85,6 +85,7 @@ def test_hits_finds_a_name_alone_inside_a_word_and_in_any_case():
     assert hits("azqb", names) == set()
     assert hits("github.com/acmeco/tool", names, "acmeco") == set()
     assert hits("github.com/acmeco/tool", names, "other") == {_sha("acmeco")}
+    assert hits("github/acmeco/tool", names, "acmeco") == {_sha("acmeco")}
 
 
 def test_no_tracked_file_names_a_client_company_or_person():
@@ -92,9 +93,14 @@ def test_no_tracked_file_names_a_client_company_or_person():
     allowed_owner = owner()
     offenders = []
     for path in tracked():
-        try:
-            text = (ROOT / path).read_text()
-        except (UnicodeDecodeError, FileNotFoundError, IsADirectoryError):
+        if hits(path, names, allowed_owner):
+            offenders.append(f"{path} (the path itself)")
+        file = ROOT / path
+        if file.is_symlink():
+            text = os.readlink(file)
+        elif file.is_file():
+            text = file.read_bytes().decode("latin-1")
+        else:
             continue
         if hits(text, names, allowed_owner):
             offenders += [f"{path}:{n}" for n, line in enumerate(text.splitlines(), 1)
