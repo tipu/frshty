@@ -126,12 +126,12 @@ class TestTheRepoScopeSurvivedTheSwap:
 
     def _repos(self, config):
         root = config["workspace"]["root"] / "tickets" / SLUG
-        return [("desktop-client", root / "desktop-client", "main")]
+        return [("windows-agent", root / "windows-agent", "main")]
 
     def test_the_repo_block_still_leads_the_prompt(self, fake_config, tmp_state):
         prompt = _prompt(fake_config, self._repos(fake_config))
         assert "must be named in docs/tri-review.md" in prompt
-        assert "desktop-client" in prompt
+        assert "windows-agent" in prompt
 
     def test_the_provenance_step_knows_the_base_branch_without_a_repo_block(
             self, fake_config, tmp_state):
