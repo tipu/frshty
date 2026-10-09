@@ -236,6 +236,7 @@ def _resolve_cwd(config: dict, ticket_key: str) -> str | None:
 
 
 STATE_ENV = ("FRSHTY_ROOT", "FRSHTY_DB", "FRSHTY_BOARD_FILE", "FRSHTY_BOARD_INSTANCE")
+IMAGE_ENV = ("PLAYWRIGHT_BROWSERS_PATH", "NODE_PATH", "PLAYWRIGHT_MCP_SANDBOX")
 
 
 def _child_env():
@@ -247,8 +248,16 @@ def _child_env():
         "LANG": os.environ.get("LANG", "C.UTF-8"),
         "TMUX": "",
     }
-    env.update({k: os.environ[k] for k in STATE_ENV if os.environ.get(k)})
+    env.update({k: os.environ[k] for k in STATE_ENV + IMAGE_ENV if os.environ.get(k)})
     return env
+
+
+def _pane_env_args() -> list[str]:
+    args = []
+    for key in IMAGE_ENV:
+        if os.environ.get(key):
+            args += ["-e", f"{key}={os.environ[key]}"]
+    return args
 
 
 def launch_pane_command(ticket_key: str, cwd: str, command: str):
@@ -266,12 +275,12 @@ def launch_pane_command(ticket_key: str, cwd: str, command: str):
     if _tmux_session_exists(session_name):
         args = [
             _tmux_bin(), "-S", TMUX_SOCKET, "respawn-pane", "-k", "-t", tmux_target.pane(session_name),
-            "-c", cwd, pane_command,
+            "-c", cwd, *_pane_env_args(), pane_command,
         ]
     else:
         args = [
             _tmux_bin(), "-S", TMUX_SOCKET, "new-session", "-d", "-s", session_name,
-            "-c", cwd, "-x", "80", "-y", "24", pane_command,
+            "-c", cwd, *_pane_env_args(), "-x", "80", "-y", "24", pane_command,
         ]
     result = subprocess.run(args, env=_child_env(), capture_output=True, text=True)
     if result.returncode != 0:
@@ -471,7 +480,7 @@ def _get_or_spawn(ticket_key: str, cwd: str):
         subprocess.run(
             [
                 _tmux_bin(), "-S", TMUX_SOCKET, "new-session", "-d", "-s", session_name,
-                "-c", cwd, "-x", "80", "-y", "24", f"exec {_pane_shell()}",
+                "-c", cwd, *_pane_env_args(), "-x", "80", "-y", "24", f"exec {_pane_shell()}",
             ],
             env=env, capture_output=True,
         )
