@@ -1081,7 +1081,7 @@ class TestFixCommentWorktreeDirt:
     """`_ensure_worktree` resets the tracked files but never runs `git clean`,
     so an untracked file an earlier run left in the PR worktree survives into
     the next one. `add -A` committed it as part of the fix. On a live
-    ticket the same shape put a Pipfile on django-drf-app PR 203 twice."""
+    ticket the same shape put a Pipfile on django-api PR 203 twice."""
 
     def _payload(self):
         return {"pr": make_pr(),

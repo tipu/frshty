@@ -12,7 +12,7 @@ import core.db as db
 import core.log as log
 import core.state as state
 
-ROOM = "room_18eeda9cac2e6bb6a6c540f36c8cf49a"
+ROOM = "room_0123456789abcdef0123456789abcdef"
 
 
 @pytest.fixture()

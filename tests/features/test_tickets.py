@@ -2540,7 +2540,7 @@ class TestCheckInReviewFixFailedRetry:
 
 class TestLoadPrCommentsDedupe:
     """Live on acme DEV-728: pr_comments.json holds rows
-    ['fix_failed', 'addressed'] for django-drf-app#198 comment 861363220,
+    ['fix_failed', 'addressed'] for django-api#198 comment 861363220,
     because every scan appends a fresh row. _pr_comment_breakdown counts every
     row it is handed, so the stale fix_failed row kept not_done at 1 and
     _pr_court answered your_court long after the comment was fixed. Only the
@@ -2555,11 +2555,11 @@ class TestLoadPrCommentsDedupe:
     def test_only_the_last_row_for_a_comment_survives(self, fake_config):
         slug = "DEV-728-persist"
         self._write(fake_config, slug, [
-            {"id": 861363220, "pr_repo": "django-drf-app", "pr_id": 198,
+            {"id": 861363220, "pr_repo": "django-api", "pr_id": 198,
              "status": "fix_failed", "body": "sanitize this"},
-            {"id": 861363206, "pr_repo": "django-drf-app", "pr_id": 198,
+            {"id": 861363206, "pr_repo": "django-api", "pr_id": 198,
              "status": "addressed", "body": "rename that"},
-            {"id": 861363220, "pr_repo": "django-drf-app", "pr_id": 198,
+            {"id": 861363220, "pr_repo": "django-api", "pr_id": 198,
              "status": "addressed", "body": "sanitize this"},
         ])
 
@@ -2634,7 +2634,7 @@ class TestLoadPrCommentsDedupe:
         assert tickets._load_pr_comments(fake_config, slug) == {"comments": [{"id": 1}]}
 
 class TestCheckInReviewPushFailure:
-    """Observed live on acme/saas-dashboard#286: three Arslan review
+    """Observed live on acme/spa-dashboard#286: three Arslan review
     comments were fixed as local commits, then push_branch was rejected with
     non-fast-forward because a squash rewrote the branch history. The push
     failure emptied to_resolve, but the cursor block below it still ran,
@@ -2836,7 +2836,7 @@ class TestCheckInReviewReviewerReply:
 
 
 class TestReplyCommitsToChangeReroute:
-    """Observed live on acme/saas-dashboard#249 (DEV-644): the triage batch
+    """Observed live on acme/spa-dashboard#249 (DEV-644): the triage batch
     classified the 'file count removed, seems odd' comment as not actionable,
     the drafted reply admitted a regression and promised 'I will restore the
     count', and the comment parked at needs_reply. The promise was never kept.
@@ -3053,7 +3053,7 @@ class TestSubstantiateReplyEnqueueOrdering:
 
 
 class TestCheckInReviewSelfCommittedFix:
-    """Observed live on acme django-drf-app PR #174 (DEV-644, 2026-08-20):
+    """Observed live on acme django-api PR #174 (DEV-644, 2026-08-20):
     Trevin Avery's review comment 845507041 was resolved on Bitbucket at
     23:46:00Z with no commit delivered to the remote. The inline fix path
     judged "did the agent produce a fix" solely from `git add -A` +
@@ -3641,7 +3641,7 @@ class TestResolveStatusInvalidEntry:
 
 
 class TestCheckInReviewPipelineCommentHold:
-    """Observed on acme windows-rpa-client #56 and websocket-server #118
+    """Observed on acme windows-agent #56 and websocket-hub #118
     (DEV-635, 2026-08-21): pipeline-failure comments ("N of M checks failed")
     were resolved via the "already addressed (no change needed)" branch while
     the PR's pipeline was still red. That branch is gone. A no-change verdict
@@ -4027,7 +4027,7 @@ class TestCheckInReviewIssueComments:
 
 
 class TestCheckInReviewCommentQueueProgress:
-    """Observed live on acme django-drf-app PR #203 (DEV-743, 2026-09-21):
+    """Observed live on acme django-api PR #203 (DEV-743, 2026-09-21):
     Arslan Syed's comment 867755302 sat at position 15 of a 16-comment queue
     and was never read. The cursor only moved when a whole batch settled, so
     one retryable fix failure made the next scan re-read the whole list and

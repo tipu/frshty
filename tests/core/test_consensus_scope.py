@@ -196,7 +196,7 @@ class TestReposWithBranchDiff:
 
 class TestScopeDirective:
     """The directive must be able to report a dead-code finding. Running the
-    prior wording against windows-rpa-client-schema at e374679 returned
+    prior wording against windows-agent-schema at e374679 returned
     SCOPE VERDICT: PASS over an enum with no caller, because the prompt told
     every voice that code quality must not affect the verdict."""
 

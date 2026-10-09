@@ -1,6 +1,6 @@
 """Every fixer that pushes to a live PR branch must hold the green checks green.
 
-Observed on LSC-78 (astrocohealth/text-to-tql-service#184). The PR-comment
+Observed on LSC-78 (astrocohealth/query-service#184). The PR-comment
 fixer pushed 3fd23633, which broke the `build` check (two ruff errors) while
 `unit-tests` stayed green. CI fix attempt 1 pushed 11b3e083: `build` went
 green, `unit-tests` went red. CI fix attempt 2 pushed 7576ca84: `unit-tests`

@@ -63,7 +63,7 @@ PUB = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKEY frshty-frshty"
 
 
 class TestGithub:
-    def _handler(self, calls, login="tipu", keys=(), post_status=201):
+    def _handler(self, calls, login="octocat", keys=(), post_status=201):
         def handler(request):
             calls.append((request.method, request.url.path, request.content))
             if request.url.path == "/user":
@@ -76,7 +76,7 @@ class TestGithub:
     def test_adds_a_missing_key(self):
         calls = []
         client = _client(self._handler(calls), ssh_keys.GITHUB_API)
-        assert ssh_keys.register_github("t", "tipu", "frshty-frshty", PUB, client) == "created"
+        assert ssh_keys.register_github("t", "octocat", "frshty-frshty", PUB, client) == "created"
         posts = [c for c in calls if c[0] == "POST"]
         assert len(posts) == 1
         assert json.loads(posts[0][2]) == {"title": "frshty-frshty", "key": PUB}
@@ -85,20 +85,20 @@ class TestGithub:
         calls = []
         client = _client(self._handler(calls, keys=["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKEY"]),
                          ssh_keys.GITHUB_API)
-        assert ssh_keys.register_github("t", "tipu", "frshty-frshty", PUB, client) == "existing"
+        assert ssh_keys.register_github("t", "octocat", "frshty-frshty", PUB, client) == "existing"
         assert not [c for c in calls if c[0] == "POST"]
 
     def test_wrong_account_is_refused(self):
         calls = []
         client = _client(self._handler(calls, login="someone"), ssh_keys.GITHUB_API)
         with pytest.raises(ssh_keys.KeyBootstrapError, match="belongs to 'someone'"):
-            ssh_keys.register_github("t", "tipu", "frshty-frshty", PUB, client)
+            ssh_keys.register_github("t", "octocat", "frshty-frshty", PUB, client)
         assert not [c for c in calls if c[0] == "POST"]
 
     def test_rejected_add_is_fatal(self):
         client = _client(self._handler([], post_status=403), ssh_keys.GITHUB_API)
         with pytest.raises(ssh_keys.KeyBootstrapError, match="HTTP 403"):
-            ssh_keys.register_github("t", "tipu", "frshty-frshty", PUB, client)
+            ssh_keys.register_github("t", "octocat", "frshty-frshty", PUB, client)
 
     def test_missing_key_scope_names_the_fix(self):
         def handler(request):
@@ -111,7 +111,7 @@ class TestGithub:
 
     def test_missing_token_is_fatal(self):
         with pytest.raises(ssh_keys.KeyBootstrapError, match="GH_TOKEN"):
-            ssh_keys.register_github("", "tipu", "frshty-frshty", PUB)
+            ssh_keys.register_github("", "octocat", "frshty-frshty", PUB)
 
 
 class TestBitbucket:

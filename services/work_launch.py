@@ -442,7 +442,7 @@ def _cross_check_block(agent: str, config: dict) -> str:
 
 
 SLACK_LABEL = "slack_int"
-BOARD_PROJECT_KEY = "personal"
+BOARD_PROJECT_KEY = core_config.BOARD_INSTANCE_KEY
 
 
 def _resolve_launch(objective: str, cwd: str, contexts: list[str], agent: str,
