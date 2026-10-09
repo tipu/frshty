@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 
 import core.db as db
 import core.log as log
+from services import pending_work
 from web.state import _config, _configs_by_host, active_config, primary_config, events_enabled
 
 
@@ -205,6 +206,11 @@ async def api_global_events(limit: int = 5000, unread: bool = False, since_hours
     merged = local_events + remote_events
     merged.sort(key=lambda e: e.get("ts") or "", reverse=True)
     return {"events": merged[:limit], "errors": errors}
+
+
+@router.get("/api/work/pending")
+def api_work_pending():
+    return pending_work.snapshot(_config.get("job", {}).get("key", ""))
 
 
 SYSTEM_EVENTS = {"cycle_start", "cycle_end", "cycle_sleep"}
