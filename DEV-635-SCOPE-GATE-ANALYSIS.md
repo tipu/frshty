@@ -2,7 +2,7 @@
 
 Question: did frshty run the final ticket step that checks for unnecessary code and
 branch state against main, for
-https://bitbucket.org/<org>/desktop-client-schema/pull-requests/19 ?
+https://bitbucket.org/<org>/windows-agent-schema/pull-requests/19 ?
 
 Answer: no. The step did not run before the PR was opened. The step also cannot
 report the defect that was found. Both facts are bugs. They are separate bugs.
@@ -99,7 +99,7 @@ correctness are reviewed elsewhere; they must not affect your verdict"
 class of finding.
 
 This matches the 19 recorded runs. Every one of them failed the ticket overall, and
-every one of them passed `desktop-client-schema`.
+every one of them passed `windows-agent-schema`.
 
 ## Bug 3: tri-review has no repo coverage requirement
 
@@ -108,8 +108,8 @@ lists "dead code" as a target (`features/reviewer.py:69`, and the same persona i
 `~/.claude/commands/tri-review.md`).
 
 It never examined the schema repo. `docs/tri-review.md` for DEV-635 names
-`django-api`, `spa-dashboard`, `websocket-hub`, and `desktop-client`. It
-never names `desktop-client-schema`, although that repo had a branch diff at review
+`django-api`, `spa-dashboard`, `websocket-hub`, and `windows-agent`. It
+never names `windows-agent-schema`, although that repo had a branch diff at review
 time.
 
 The cause is that `start_reviewing` (`core/tasks/tickets.py:1328`) passes a bare prompt,

@@ -35,7 +35,7 @@ def _projects(monkeypatch, **auto_merge):
 class TestParsePrMerge:
     def test_detects_a_pull_request_merge(self):
         for command in (
-            "gh pr merge 184 --repo astrocohealth/text-to-query-service --squash",
+            "gh pr merge 184 --repo astrocohealth/query-service --squash",
             "gh pr merge --admin --merge",
             "cd /x && gh pr merge 1",
             "/opt/homebrew/bin/gh pr merge 1 --rebase",
@@ -48,7 +48,7 @@ class TestParsePrMerge:
             "curl -s -X POST http://localhost:7100/api/tickets/LSC-78/merge",
             'curl -X PUT "https://api.github.com/repos/o/r/pulls/$PR/merge"',
             "git status; gh pr merge 1",
-            "gh pr --repo astrocohealth/text-to-query-service merge 184",
+            "gh pr --repo astrocohealth/query-service merge 184",
             "env gh pr merge 184",
             "env -u GH_TOKEN gh pr merge 184",
             "sudo -u root gh pr merge 184",
@@ -257,7 +257,7 @@ class TestMergeGate:
 
     def test_an_objective_that_asks_for_the_merge_permits_it(self, monkeypatch):
         _projects(monkeypatch, frshty=False)
-        item_id, sid = _mkrun("Merge PR tipu/frshty#20 into main", contexts="frshty")
+        item_id, sid = _mkrun("Merge PR octocat/frshty#20 into main", contexts="frshty")
         out = work_launch.gate_merge(sid, "gh pr merge 20 --squash")
         assert out["decision"] == "allow"
         assert _gate_events(item_id)[0]["verdict"] == "operator_asked"
@@ -307,7 +307,7 @@ class TestMergeGate:
             "provided by create_deep_agent function",
             contexts=f"frshty,{work_launch.SLACK_LABEL}")
         out = work_launch.gate_merge(
-            sid, "gh pr merge 184 --repo astrocohealth/text-to-query-service --merge")
+            sid, "gh pr merge 184 --repo astrocohealth/query-service --merge")
         assert out["decision"] == "deny"
         assert _gate_events(item_id)[0]["projects"] == ["frshty"]
 

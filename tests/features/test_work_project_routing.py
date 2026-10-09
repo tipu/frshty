@@ -61,6 +61,7 @@ def _meta(*projects):
 
 STATE = {
     "instanceName": "quartz",
+    "boardInstance": "personal",
     "localMeta": _meta(_project("frshty"), _project("quartz", ["quartz"])),
     "peers": [{"key": k, "base_url": "", "label": k}
               for k in ("frshty", "apexco", "cobalt", "personal", "astroco")],

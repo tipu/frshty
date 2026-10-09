@@ -983,7 +983,7 @@ class TestWholeTicketMerge:
             self, monkeypatch, tmp_path):
         self._ticket([_pr("django-api", 198, ["Prain"]),
                       _pr("websocket-hub", 129, ["Prain"]),
-                      _pr("desktop-client", 60, ["Prain"])])
+                      _pr("windows-agent", 60, ["Prain"])])
         item_id = self._required_draft(monkeypatch, tmp_path, self.DRAFT)
 
         assert len(work_debrief.propose_required_followups()) == 1
@@ -992,7 +992,7 @@ class TestWholeTicketMerge:
             "SELECT objective FROM work_items WHERE source_item_id = ?", (item_id,))
         assert "DEV-728 holds 3 open pull requests" in proposal["objective"]
         for repo, pr_id in (("django-api", 198), ("websocket-hub", 129),
-                            ("desktop-client", 60)):
+                            ("windows-agent", 60)):
             assert f"{repo}/pull-requests/{pr_id}" in proposal["objective"]
 
     def test_a_hold_that_clears_is_proposed_on_the_next_scan(

@@ -86,7 +86,7 @@ class TestWithConfigDir:
 CLAUDE_TRUST_PANE = (
     "─────────────────────────────────────────────\n"
     " Accessing workspace:\n"
-    " /Users/dakota/dev/frshty\n"
+    " /Users/user/dev/frshty\n"
     " Quick safety check: Is this a project you created or one you trust?\n"
     " Claude Code'll be able to read, edit, and execute files here.\n"
     " Security guide\n"

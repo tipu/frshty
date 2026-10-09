@@ -3382,7 +3382,7 @@ SEA_FIRST = (
 SEA_SECOND = (
     'You can also use the "Deploy" workflow in that repo to deploy to the '
     "life-sciences portal instance "
-    "(<https://portal.life-sciences.astrocohealth.com>) if you'd like to test "
+    "(<https://portal.astrocohealth.example>) if you'd like to test "
     "out your pod-specific environment")
 SEA_FIRST_OBJECTIVE = (
     "Re-open PR #1293 (LSC-96: Apply user-tier billing classification to all "
@@ -3392,7 +3392,7 @@ SEA_SECOND_OBJECTIVE = (
     "product types) from https://github.com/astrocohealth/console-api/pull/1293"
     " in the https://github.com/astrocohealth/portal repository. The Deploy "
     "workflow in the new repo can be used to test on "
-    "https://portal.life-sciences.astrocohealth.com.")
+    "https://portal.astrocohealth.example.")
 
 
 def test_the_two_messages_that_opened_two_tasks_open_one(tmp_path):
