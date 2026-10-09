@@ -8,7 +8,7 @@ import core.discovery as discovery
 import core.runtime as runtime
 import core.scheduler as scheduler
 import core.state as state
-from services import global_watch
+from services import global_watch, pending_work
 
 ROOT = Path(__file__).resolve().parent.parent
 NOW = datetime(2026, 10, 6, 18, 0, tzinfo=timezone.utc)
@@ -379,3 +379,125 @@ def test_a_first_start_schedules_global_watch_one_interval_out(tmp_path):
 
     first = scheduler.run_at("seedtest", "global_watch")
     assert before + timedelta(minutes=15) <= first <= datetime.now(timezone.utc) + timedelta(minutes=15)
+
+
+def _seed_pending():
+    for key, status in [("A-1", "planning"), ("A-2", "in_review"), ("A-3", "in_review"),
+                        ("A-4", "done"), ("A-5", "pr_ready")]:
+        db.execute("INSERT INTO tickets (instance_key, ticket_key, status, updated_at) VALUES (?, ?, ?, ?)",
+                   ("aimyable", key, status, RECENT))
+    db.execute("INSERT INTO tickets (instance_key, ticket_key, status, updated_at) VALUES (?, ?, ?, ?)",
+               ("other", "B-1", "planning", RECENT))
+    for state_name in ("agent_working", "needs_you", "done", "canceled", "needs_ack"):
+        db.execute("INSERT INTO work_items (objective, state, instance_key, created_at, updated_at)"
+                   " VALUES (?, ?, ?, ?, ?)", ("x", state_name, "aimyable", RECENT, RECENT))
+    db.execute("INSERT INTO work_items (objective, state, instance_key, created_at, updated_at)"
+               " VALUES (?, ?, ?, ?, ?)", ("x", "agent_working", "other", RECENT, RECENT))
+    for status in ("queued", "running", "ok", "failed"):
+        db.execute("INSERT INTO jobs (instance_key, task, status, enqueued_at) VALUES (?, ?, ?, ?)",
+                   ("aimyable", "scan_tickets", status, RECENT))
+
+
+def test_pending_work_splits_unfinished_work_by_who_acts_next(tmp_path):
+    db.init(tmp_path / "t.db", ROOT / "migrations")
+    _seed_pending()
+
+    assert pending_work.snapshot("aimyable") == {
+        "agent": {"tickets": {"planning": 1}, "work_items": {"agent_working": 1},
+                  "jobs": {"queued": 1, "running": 1}},
+        "person": {"tickets": {"in_review": 2, "pr_ready": 1}, "work_items": {"needs_you": 1}}}
+
+
+def test_pending_work_of_an_idle_instance_is_empty(tmp_path):
+    db.init(tmp_path / "t.db", ROOT / "migrations")
+
+    snapshot = pending_work.snapshot("clarivis")
+
+    assert snapshot == {"agent": {"tickets": {}, "work_items": {}, "jobs": {}},
+                        "person": {"tickets": {}, "work_items": {}}}
+    assert global_watch._format_pending(snapshot) == "none"
+
+
+def test_read_pending_asks_remote_instances_and_marks_the_ones_that_do_not_answer():
+    instances = [{"key": "personal", "base_url": "http://p"}, {"key": "aimyable", "base_url": "http://a"},
+                 {"key": "atropos", "base_url": "http://t"}, {"key": "quill", "base_url": "http://q"}]
+    idle = {"agent": {"tickets": {}, "work_items": {}, "jobs": {}}, "person": {"tickets": {"in_review": 2}}}
+    answers = {"http://a": idle, "http://t": {"error": "timed out"}, "http://q": {"detail": "Not Found"}}
+
+    async def _call(base_url, method, path, timeout):
+        assert (method, path) == ("GET", "/api/work/pending")
+        return answers[base_url]
+
+    with patch.object(global_watch, "call_instance", side_effect=_call), \
+         patch.object(global_watch.pending_work, "snapshot", return_value=idle) as local:
+        out = global_watch.read_pending(["aimyable", "atropos", "clarivis", "personal", "quill"],
+                                        instances, "personal")
+
+    local.assert_called_once_with("personal")
+    assert out["personal"] == idle and out["aimyable"] == idle
+    assert out["atropos"] == {"error": "timed out"}
+    assert out["quill"]["error"].startswith("unexpected response")
+    assert out["clarivis"] == {"error": "not discovered"}
+    assert global_watch._format_pending(out["aimyable"]) == "person: tickets in_review x2"
+    assert global_watch._format_pending(out["atropos"]) == "unknown (timed out)"
+
+
+def test_build_digest_shows_pending_work_and_leaves_out_its_own_events():
+    events = [_ev("personal", "a", event="global_watch_agent_alert"),
+              _ev("personal", "b", event="global_watch_task_proposed"),
+              _ev("personal", "c", event="upwork_scan_done")]
+    pending = {"personal": {"agent": {"tickets": {}, "work_items": {"agent_working": 1}, "jobs": {}},
+                            "person": {"tickets": {}, "work_items": {}}},
+               "frshty": {"agent": {"tickets": {}, "work_items": {}, "jobs": {}},
+                          "person": {"tickets": {}, "work_items": {}}}}
+
+    findings = [{"kind": "error_events", "instance": "personal",
+                 "detail": "global_watch_agent_failed x1", "event": "global_watch_agent_failed"}]
+
+    digest = global_watch.build_digest(events, ["frshty", "personal"], findings, SINCE, pending)
+
+    assert "global_watch" not in digest
+    assert "INSTANCE personal: 1 events, 0 noise" in digest
+    assert "pending work: agent: work_items agent_working x1" in digest
+    assert "INSTANCE frshty: 0 events, 0 noise\ntop: none\npending work: none" in digest
+
+
+def test_run_digest_covers_a_full_poll_cycle_when_the_last_run_was_recent(tmp_path):
+    state.init(tmp_path)
+    db.init(tmp_path / "t.db", ROOT / "migrations")
+    state.save("global_watch", {"last_run_at": SINCE, "fingerprint": []})
+    cycle = (NOW - timedelta(minutes=25)).isoformat()
+    events = [_ev("atropos", "a", event="job_started", ts=cycle),
+              _ev("personal", "p", event="upwork_scan_done")]
+    instances = [{"key": "personal", "base_url": "x"}, {"key": "atropos", "base_url": "http://t"}]
+
+    async def _call(*_args, **_kwargs):
+        return {"agent": {"tickets": {}, "work_items": {}, "jobs": {}},
+                "person": {"tickets": {}, "work_items": {}}}
+
+    with patch.object(global_watch, "discover_instances", return_value=instances), \
+         patch.object(global_watch, "read_feed", return_value=(events, {})), \
+         patch.object(global_watch, "call_instance", side_effect=_call), \
+         patch.object(global_watch, "run_external_model", return_value=('{"problems": []}', 0)) as model, \
+         patch.object(global_watch.log, "emit"):
+        out = global_watch.run(_agent_config(), now=NOW)
+
+    prompt = model.call_args.kwargs["stdin_text"]
+    assert f"from {(NOW - timedelta(minutes=30)).isoformat()} up to now" in prompt
+    assert "INSTANCE atropos: 1 events, 0 noise\ntop: job_started x1\npending work: none" in prompt
+    assert out["agent"]["status"] == "ok"
+
+
+def test_run_digest_reaches_back_to_the_last_run_when_it_is_older_than_a_poll_cycle(tmp_path):
+    state.init(tmp_path)
+    db.init(tmp_path / "t.db", ROOT / "migrations")
+    last = (NOW - timedelta(minutes=45)).isoformat()
+    state.save("global_watch", {"last_run_at": last, "fingerprint": []})
+    with patch.object(global_watch, "discover_instances",
+                      return_value=[{"key": "personal", "base_url": "x"}]), \
+         patch.object(global_watch, "read_feed", return_value=([_ev("personal", "a")], {})), \
+         patch.object(global_watch, "run_external_model", return_value=('{"problems": []}', 0)) as model, \
+         patch.object(global_watch.log, "emit"):
+        global_watch.run(_agent_config(), now=NOW)
+
+    assert f"from {last} up to now" in model.call_args.kwargs["stdin_text"]
