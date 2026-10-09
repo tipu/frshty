@@ -21,9 +21,9 @@ from features import upwork_inbox as ui
 from services import work_store
 
 NOW = datetime(2026, 9, 14, 20, 0, tzinfo=timezone.utc)
-OPERATOR = "718034110359347200"
-CLIENT = "1983307503892022664"
-ROOM = "room_18eeda9cac2e6bb6a6c540f36c8cf49a"
+OPERATOR = "100000000000000001"
+CLIENT = "1000000000000000002"
+ROOM = "room_0123456789abcdef0123456789abcdef"
 OTHER_ROOM = "room_46106935158ff0b5a1ee0a70c0d5ba49"
 BOARD = "http://127.0.0.1:7100"
 
@@ -48,23 +48,23 @@ def _clean(fresh_db, tmp_path):
 
 def _config(**upwork):
     settings = {"user_id": OPERATOR, "propose_tasks": True,
-                "operator_name": "Danial Jaffry"}
+                "operator_name": "Dakota Jones"}
     settings.update(upwork)
     return {"job": {"key": "personal"}, "features": {"upwork": True},
             "upwork": settings, "_base_url": "http://localhost:7100"}
 
 
-def _room(room_id=ROOM, recent=None, job="Build a Shopify scraper"):
+def _room(room_id=ROOM, recent=None, job="Build a storefront scraper"):
     return {
         "roomId": room_id,
-        "roomName": "Alex H",
+        "roomName": "Riley S",
         "topic": job,
-        "jobUid": "1983307503892022664",
+        "jobUid": "1000000000000000002",
         "recentTimestamp": recent if recent is not None else _millis(30),
         "numUnread": 1,
-        "context": {"clientId": CLIENT, "clientName": "Alex Hammer, Alex H",
-                    "freelancerId": OPERATOR, "freelancerName": "Danial Jaffry",
-                    "jobTitle": job, "jobUid": "1983307503892022664"},
+        "context": {"clientId": CLIENT, "clientName": "Riley Stone, Riley S",
+                    "freelancerId": OPERATOR, "freelancerName": "Dakota Jones",
+                    "jobTitle": job, "jobUid": "1000000000000000002"},
     }
 
 
@@ -133,8 +133,8 @@ class TestIngest:
             counts = ui.ingest(_config(), instance_key="personal", now=NOW)
         assert counts == {"messages": 2, "rooms": 1, "complete": True}
         row = _room_row()
-        assert row["client_name"] == "Alex Hammer"
-        assert row["job_title"] == "Build a Shopify scraper"
+        assert row["client_name"] == "Riley Stone"
+        assert row["job_title"] == "Build a storefront scraper"
         assert row["message_count"] == 2
         # The two stamps are the oldest and newest message, not the order the
         # API listed them in.
@@ -545,7 +545,7 @@ class TestPropose:
         assert item["state"] == work_store.PROPOSED_STATE
         assert "upwork" in item["contexts"]
         assert item["objective"].startswith(
-            "Reply to Alex Hammer on Upwork about Build a Shopify scraper.")
+            "Reply to Riley Stone on Upwork about Build a storefront scraper.")
         assert "github.com/acme/shop" in item["objective"]
         assert len(_events("upwork_reply_task_opened")) == 1
 
@@ -965,7 +965,7 @@ class TestBoard:
             ui.ingest(_config(), instance_key="personal", now=NOW)
         rooms = ui.board(_config(), instance_key="personal")["rooms"]
         assert len(rooms) == 1
-        assert rooms[0]["label"] == "Alex Hammer — Build a Shopify scraper"
+        assert rooms[0]["label"] == "Riley Stone — Build a storefront scraper"
         assert [m["mine"] for m in rooms[0]["messages"]] == [True, False]
 
     def test_recording_a_sent_reply_stamps_the_room(self):
@@ -1065,10 +1065,10 @@ class TestStatus:
         assert s["proposal"]["work_item_id"] == _room_row()["work_item_id"]
         assert s["proposal"]["work_state"] == work_store.PROPOSED_STATE
         assert "Add pagination to the scraper" in s["proposal"]["objective"]
-        assert s["proposal"]["label"] == "Alex Hammer — Build a Shopify scraper"
+        assert s["proposal"]["label"] == "Riley Stone — Build a storefront scraper"
         assert s["proposal"]["at"] == _room_row()["proposed_at"]
         assert s["reply"]["at"] == _room_row()["reply_sent_at"]
-        assert s["reply"]["label"] == "Alex Hammer — Build a Shopify scraper"
+        assert s["reply"]["label"] == "Riley Stone — Build a storefront scraper"
         assert s["rooms"] == 1
         assert s["blocked"] == 0
         assert s["pending"] == 1

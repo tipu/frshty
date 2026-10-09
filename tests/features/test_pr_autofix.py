@@ -11,7 +11,7 @@ def make_pr(**overrides):
 
 
 def _config(**overrides):
-    base = {"job": {"key": "clarivis", "platform": "github"}, "features": {"pr_autofix": True}}
+    base = {"job": {"key": "cobalt", "platform": "github"}, "features": {"pr_autofix": True}}
     base.update(overrides)
     return base
 
@@ -102,7 +102,7 @@ class TestCheck:
         with patch("features.pr_autofix.make_platform") as mock_make, \
              patch("features.pr_autofix.state.load") as mock_load, \
              patch("features.pr_autofix.log.emit"):
-            pr_autofix.check(_config(job={"key": "clarivis", "platform": "bitbucket"}))
+            pr_autofix.check(_config(job={"key": "cobalt", "platform": "bitbucket"}))
         mock_make.assert_not_called()
         mock_load.assert_not_called()
 
@@ -237,7 +237,7 @@ class TestFixCommitSubject:
 
 
 class TestFixRunCommitsItself:
-    """Observed live on clarivis#229 (2026-09-08): three autofix passes each
+    """Observed live on cobalt#229 (2026-09-08): three autofix passes each
     committed their own work in the worktree (2445f10, 9ed7dbd, 560c934) and
     each was reported as "fix run produced no changes". `add -A` plus
     `diff --cached --quiet` sees a clean index after a self-commit, so the
@@ -337,8 +337,8 @@ class TestFixRunCommitsItself:
 
 
 class TestForeignPrIsNotPushed:
-    """Observed live on clarivis#695 (2026-10-07): soyouz17 opened the PR and
-    the autofix run pushed bec8a8a2b4 to its branch as tipu. frshty must not
+    """Observed live on cobalt#695 (2026-10-07): otherdev opened the PR and
+    the autofix run pushed bec8a8a2b4 to its branch as octocat. frshty must not
     push to a PR another account opened, and must not hand that PR's checkout
     to review agents that can push either."""
 
@@ -357,7 +357,7 @@ class TestForeignPrIsNotPushed:
     def test_a_new_foreign_pr_is_recorded_and_not_queued(self):
         store = {pr_autofix.SEEDED_KEY: "2026-01-01T00:00:00+00:00"}
         enqueue, emit = self._check(
-            store, [make_pr(id=1, author="soyouz17"), make_pr(id=2, author="Tipu")], "tipu")
+            store, [make_pr(id=1, author="otherdev"), make_pr(id=2, author="Octocat")], "octocat")
 
         assert enqueue.call_count == 1
         assert enqueue.call_args[1]["payload"]["pr"]["id"] == 2
@@ -367,7 +367,7 @@ class TestForeignPrIsNotPushed:
     def test_a_foreign_pr_in_error_is_not_requeued(self):
         store = {pr_autofix.SEEDED_KEY: "2026-01-01T00:00:00+00:00",
                  "myrepo/1": {"status": "error", "attempts": 1}}
-        enqueue, _ = self._check(store, [make_pr(id=1, author="soyouz17")], "tipu")
+        enqueue, _ = self._check(store, [make_pr(id=1, author="otherdev")], "octocat")
 
         enqueue.assert_not_called()
 
@@ -397,7 +397,7 @@ class TestForeignPrIsNotPushed:
         return ok, reason, platform, store, emit, (ensure, claude, codex, fixer)
 
     def test_a_queued_foreign_pr_gets_no_worktree_review_fix_or_push(self, tmp_path):
-        ok, reason, platform, store, emit, agents = self._run(tmp_path, "soyouz17", "tipu")
+        ok, reason, platform, store, emit, agents = self._run(tmp_path, "otherdev", "octocat")
 
         assert ok is True, reason
         for mock in agents:
@@ -409,7 +409,7 @@ class TestForeignPrIsNotPushed:
 
     def test_an_own_fork_pr_gets_no_worktree_review_fix_or_push(self, tmp_path):
         platform = MagicMock()
-        platform.self_id.return_value = "tipu"
+        platform.self_id.return_value = "octocat"
         config = {**_config(), "_state_dir": tmp_path, "_base_url": "http://base"}
         store = {}
         with patch("features.pr_autofix.make_platform", return_value=platform), \
@@ -417,7 +417,7 @@ class TestForeignPrIsNotPushed:
              patch("features.pr_autofix.state.load", return_value=store), \
              patch("features.pr_autofix.state.save"), \
              patch("features.pr_autofix.log.emit"):
-            ok, _ = pr_autofix.run(config, {"pr": make_pr(author="tipu", cross_repo=True)})
+            ok, _ = pr_autofix.run(config, {"pr": make_pr(author="octocat", cross_repo=True)})
 
         assert ok is True
         ensure.assert_not_called()
@@ -426,8 +426,8 @@ class TestForeignPrIsNotPushed:
 
     def test_a_payload_without_fork_metadata_fails_closed(self, tmp_path):
         platform = MagicMock()
-        platform.self_id.return_value = "tipu"
-        pr = make_pr(author="tipu")
+        platform.self_id.return_value = "octocat"
+        pr = make_pr(author="octocat")
         del pr["cross_repo"]
         config = {**_config(), "_state_dir": tmp_path, "_base_url": "http://base"}
         store = {}

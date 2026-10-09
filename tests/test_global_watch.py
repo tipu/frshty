@@ -27,14 +27,14 @@ def test_discovery_reads_peers_when_only_own_config_is_mounted(tmp_path, monkeyp
     (tmp_path / "peers.toml").write_text(
         '[[peers]]\nkey = "frshty"\nbase_url = "http://127.0.0.1:7131/"\n'
         '[[peers]]\nkey = "personal"\nbase_url = "http://127.0.0.1:7135"\n'
-        '[[peers]]\nkey = "aimyable"\nbase_url = "http://127.0.0.1:7132"\n')
+        '[[peers]]\nkey = "apexco"\nbase_url = "http://127.0.0.1:7132"\n')
     monkeypatch.setattr(discovery, "CONFIG_DIR", tmp_path)
 
     found = {i["key"]: i["base_url"] for i in discovery.discover_instances()}
 
     assert found == {"personal": "http://localhost:7110",
                      "frshty": "http://127.0.0.1:7131",
-                     "aimyable": "http://127.0.0.1:7132"}
+                     "apexco": "http://127.0.0.1:7132"}
 
 
 def test_discovery_without_peers_finds_only_own_config(tmp_path, monkeypatch):
@@ -67,22 +67,22 @@ def test_evaluate_healthy_feed_has_no_findings():
 def test_evaluate_flags_a_feed_that_shows_only_one_instance():
     events = [_ev("personal", "a")]
 
-    findings = global_watch.evaluate(events, {}, ["aimyable", "frshty", "personal"], SINCE, STALE)
+    findings = global_watch.evaluate(events, {}, ["apexco", "frshty", "personal"], SINCE, STALE)
 
     assert [(f["kind"], f["instance"]) for f in findings] == [
-        ("silent", "aimyable"), ("silent", "frshty")]
+        ("silent", "apexco"), ("silent", "frshty")]
 
 
 def test_evaluate_flags_unreachable_relabelled_and_error_events():
-    events = [_ev("aimyable", "x"), _ev("bh", "x"),
+    events = [_ev("apexco", "x"), _ev("bolt", "x"),
               _ev("frshty", "y", event="ticket_check_error"),
               _ev("frshty", "z", event="pr_base_sync_failed", ts=OLD)]
 
-    findings = global_watch.evaluate(events, {"quill": "timed out"},
-                                     ["aimyable", "bh", "frshty", "quill"], SINCE, STALE)
+    findings = global_watch.evaluate(events, {"quartz": "timed out"},
+                                     ["apexco", "bolt", "frshty", "quartz"], SINCE, STALE)
 
     assert [(f["kind"], f["instance"]) for f in findings] == [
-        ("unreachable", "quill"), ("relabelled", "bh"), ("error_events", "frshty")]
+        ("unreachable", "quartz"), ("relabelled", "bolt"), ("error_events", "frshty")]
     assert findings[2]["detail"] == "ticket_check_error x1"
 
 
@@ -115,8 +115,8 @@ def test_run_alerts_once_per_finding_set_and_reports_recovery(tmp_path):
 
 
 def test_read_feed_keeps_every_instance_past_the_merged_cut():
-    busy = [_ev("atropos", str(i)) for i in range(global_watch.FETCH_LIMIT - 1)]
-    busy.append(_ev("atropos", "old", ts=OLD))
+    busy = [_ev("astroco", str(i)) for i in range(global_watch.FETCH_LIMIT - 1)]
+    busy.append(_ev("astroco", "old", ts=OLD))
     quiet = [_ev("personal", "p", event="preflight_fail")]
 
     async def _remote(**_kwargs):
@@ -127,7 +127,7 @@ def test_read_feed_keeps_every_instance_past_the_merged_cut():
         events, errors = global_watch.read_feed(2, NOW)
 
     assert len(events) == global_watch.FETCH_LIMIT + 1
-    findings = global_watch.evaluate(events, errors, ["atropos", "personal"], SINCE, STALE)
+    findings = global_watch.evaluate(events, errors, ["astroco", "personal"], SINCE, STALE)
     assert [(f["kind"], f["instance"]) for f in findings] == [("error_events", "personal")]
 
 
@@ -150,18 +150,18 @@ def test_run_reads_back_to_the_last_run_when_it_is_older_than_the_stale_window(t
 
 
 def test_evaluate_flags_an_instance_whose_page_starts_after_the_last_run():
-    events = [_ev("aimyable", str(i)) for i in range(global_watch.FETCH_LIMIT)]
+    events = [_ev("apexco", str(i)) for i in range(global_watch.FETCH_LIMIT)]
 
-    findings = global_watch.evaluate(events, {}, ["aimyable"], SINCE, STALE)
+    findings = global_watch.evaluate(events, {}, ["apexco"], SINCE, STALE)
 
-    assert [(f["kind"], f["instance"]) for f in findings] == [("truncated", "aimyable")]
+    assert [(f["kind"], f["instance"]) for f in findings] == [("truncated", "apexco")]
 
 
 def test_evaluate_accepts_a_full_page_that_reaches_back_to_the_last_run():
-    events = [_ev("aimyable", str(i)) for i in range(global_watch.FETCH_LIMIT - 1)]
-    events.append(_ev("aimyable", "old", ts=OLD))
+    events = [_ev("apexco", str(i)) for i in range(global_watch.FETCH_LIMIT - 1)]
+    events.append(_ev("apexco", "old", ts=OLD))
 
-    assert global_watch.evaluate(events, {}, ["aimyable"], SINCE, STALE) == []
+    assert global_watch.evaluate(events, {}, ["apexco"], SINCE, STALE) == []
 
 
 def _agent_config():
@@ -172,14 +172,14 @@ def test_build_digest_lists_every_instance_and_only_events_since_the_last_run():
     events = [_ev("personal", "a", event="upwork_scan_done"),
               _ev("personal", "b", event="job_started", ts=OLD),
               {**_ev("frshty", "c"), "meta": {"category": "noise"}}]
-    findings = [{"kind": "silent", "instance": "quill", "detail": "no event in the stale window"}]
+    findings = [{"kind": "silent", "instance": "quartz", "detail": "no event in the stale window"}]
 
-    digest = global_watch.build_digest(events, ["frshty", "personal", "quill"], findings, SINCE)
+    digest = global_watch.build_digest(events, ["frshty", "personal", "quartz"], findings, SINCE)
 
-    assert "- quill silent: no event in the stale window" in digest
+    assert "- quartz silent: no event in the stale window" in digest
     assert "INSTANCE frshty: 1 events, 1 noise" in digest
     assert "INSTANCE personal: 1 events, 0 noise" in digest
-    assert "INSTANCE quill: 0 events, 0 noise" in digest
+    assert "INSTANCE quartz: 0 events, 0 noise" in digest
     assert "upwork_scan_done" in digest and "job_started" not in digest.split("INSTANCE personal")[1]
 
 
@@ -226,14 +226,14 @@ def test_ask_agent_asks_for_a_problem_list_and_no_separate_status():
 def test_ask_agent_derives_the_status_from_the_problem_list():
     with _codex('{"problems": []}'):
         assert global_watch.ask_agent(_agent_config(), "D", SINCE, NOW) == {"status": "ok", "problems": []}
-    problem = {"instance": "aimyable", "what": "scan_tickets repeats"}
+    problem = {"instance": "apexco", "what": "scan_tickets repeats"}
     with _codex(json.dumps({"problems": [problem]})):
         assert global_watch.ask_agent(_agent_config(), "D", SINCE, NOW) == {
             "status": "problem", "problems": [problem]}
 
 
 def test_ask_agent_fails_a_problem_without_details():
-    for problems in ([{"instance": "aimyable", "what": " "}], [{"what": "scan_tickets repeats"}],
+    for problems in ([{"instance": "apexco", "what": " "}], [{"what": "scan_tickets repeats"}],
                      ["scan_tickets repeats"]):
         with _codex(json.dumps({"problems": problems})):
             verdict = global_watch.ask_agent(_agent_config(), "D", SINCE, NOW)
@@ -244,7 +244,7 @@ def test_ask_agent_fails_a_problem_without_details():
 def test_run_posts_the_agent_verdict_only_when_it_changes(tmp_path):
     state.init(tmp_path)
     db.init(tmp_path / "t.db", ROOT / "migrations")
-    problem = ('{"status": "problem", "problems": [{"instance": "aimyable", "what": "scan_tickets'
+    problem = ('{"status": "problem", "problems": [{"instance": "apexco", "what": "scan_tickets'
                ' repeats with no progress", "evidence": "scan_tickets x40", "likely_cause": "wedged job"}]}')
     healthy = '{"status": "ok", "problems": []}'
     with patch.object(global_watch, "discover_instances",
@@ -258,7 +258,7 @@ def test_run_posts_the_agent_verdict_only_when_it_changes(tmp_path):
 
     assert [c.args[0] for c in emit.call_args_list] == [
         "global_watch_agent_alert", "global_watch_agent_failed", "global_watch_agent_ok"]
-    assert "aimyable: scan_tickets repeats with no progress" in emit.call_args_list[0].args[1]
+    assert "apexco: scan_tickets repeats with no progress" in emit.call_args_list[0].args[1]
     assert out["agent"] == {"status": "ok", "problems": []}
 
 
@@ -289,7 +289,7 @@ def _run_agent(tmp_path, replies, config=None):
 
 
 def test_run_proposes_a_task_for_a_problem_once_while_it_persists(tmp_path):
-    reply = _verdict(_problem("aimyable", "Broken Worktrees!"))
+    reply = _verdict(_problem("apexco", "Broken Worktrees!"))
 
     outs, model, emit = _run_agent(tmp_path, [reply, reply])
 
@@ -298,19 +298,19 @@ def test_run_proposes_a_task_for_a_problem_once_while_it_persists(tmp_path):
     row = rows[0]
     assert row["state"] == "proposed"
     assert row["proposal_key"] == "global_watch:broken-worktrees"
-    assert row["objective"] == "[aimyable] Repair the broken worktrees."
+    assert row["objective"] == "[apexco] Repair the broken worktrees."
     assert row["contexts"] == "frshty" and row["launch_cwd"] == str(tmp_path)
     assert "work_worktree_broken x9" in row["launch_brief"]
     assert outs[0]["proposed_tasks"] == [{"work_item_id": row["id"],
-                                          "task_key": "broken-worktrees", "instance": "aimyable"}]
+                                          "task_key": "broken-worktrees", "instance": "apexco"}]
     assert outs[1]["proposed_tasks"] == []
-    assert "- broken-worktrees (proposed): [aimyable] Repair the broken worktrees." in \
+    assert "- broken-worktrees (proposed): [apexco] Repair the broken worktrees." in \
         model.call_args_list[1].kwargs["stdin_text"]
     assert [c.args[0] for c in emit.call_args_list].count("global_watch_task_proposed") == 1
 
 
 def test_run_does_not_propose_a_declined_task_again(tmp_path):
-    reply = _verdict(_problem("aimyable", "broken-worktrees"))
+    reply = _verdict(_problem("apexco", "broken-worktrees"))
     _run_agent(tmp_path, [reply])
     item_id = db.query_one("SELECT id FROM work_items")["id"]
     db.execute("UPDATE work_items SET state = 'canceled', stop_reason = ? WHERE id = ?",
@@ -324,7 +324,7 @@ def test_run_does_not_propose_a_declined_task_again(tmp_path):
 
 def test_run_stops_proposing_while_max_open_tasks_wait(tmp_path):
     config = {"job": {"key": "personal"}, "global_watch": {"enabled": True, "max_open_tasks": 1}}
-    reply = _verdict(_problem("aimyable", "broken-worktrees"),
+    reply = _verdict(_problem("apexco", "broken-worktrees"),
                      _problem("personal", "preflight-github-repo", "Fix the github.repo preflight."))
 
     outs, _, emit = _run_agent(tmp_path, [reply, reply], config)
@@ -337,12 +337,12 @@ def test_run_stops_proposing_while_max_open_tasks_wait(tmp_path):
 
 def test_the_cap_counts_waiting_proposals_beyond_the_known_tasks_limit(tmp_path):
     config = {"job": {"key": "personal"}, "global_watch": {"enabled": True, "max_open_tasks": 1}}
-    _run_agent(tmp_path, [_verdict(_problem("aimyable", "old-fault"))], config)
+    _run_agent(tmp_path, [_verdict(_problem("apexco", "old-fault"))], config)
     for i in range(global_watch.KNOWN_TASKS_LIMIT):
         global_watch.work_store.create_proposal(f"declined {i}", proposal_key=f"global_watch:d{i}")
     db.execute("UPDATE work_items SET state = 'canceled' WHERE proposal_key LIKE 'global_watch:d%'")
 
-    outs, _, _ = _run_agent(tmp_path, [_verdict(_problem("aimyable", "new-fault"))], config)
+    outs, _, _ = _run_agent(tmp_path, [_verdict(_problem("apexco", "new-fault"))], config)
 
     assert outs[0]["proposed_tasks"] == []
     assert db.query_one("SELECT COUNT(*) AS n FROM work_items WHERE state = 'proposed'")["n"] == 1
@@ -350,8 +350,8 @@ def test_the_cap_counts_waiting_proposals_beyond_the_known_tasks_limit(tmp_path)
 
 def test_run_proposes_nothing_when_propose_tasks_is_off_or_the_task_is_missing(tmp_path):
     off = {"job": {"key": "personal"}, "global_watch": {"enabled": True, "propose_tasks": False}}
-    _run_agent(tmp_path, [_verdict(_problem("aimyable", "broken-worktrees"))], off)
-    _run_agent(tmp_path, [_verdict(_problem("aimyable", "broken-worktrees", task=""))])
+    _run_agent(tmp_path, [_verdict(_problem("apexco", "broken-worktrees"))], off)
+    _run_agent(tmp_path, [_verdict(_problem("apexco", "broken-worktrees", task=""))])
 
     assert db.query_one("SELECT COUNT(*) AS n FROM work_items")["n"] == 0
 
@@ -385,24 +385,24 @@ def _seed_pending():
     for key, status in [("A-1", "planning"), ("A-2", "in_review"), ("A-3", "in_review"),
                         ("A-4", "done"), ("A-5", "pr_ready")]:
         db.execute("INSERT INTO tickets (instance_key, ticket_key, status, updated_at) VALUES (?, ?, ?, ?)",
-                   ("aimyable", key, status, RECENT))
+                   ("apexco", key, status, RECENT))
     db.execute("INSERT INTO tickets (instance_key, ticket_key, status, updated_at) VALUES (?, ?, ?, ?)",
                ("other", "B-1", "planning", RECENT))
     for state_name in ("agent_working", "needs_you", "done", "canceled", "needs_ack"):
         db.execute("INSERT INTO work_items (objective, state, instance_key, created_at, updated_at)"
-                   " VALUES (?, ?, ?, ?, ?)", ("x", state_name, "aimyable", RECENT, RECENT))
+                   " VALUES (?, ?, ?, ?, ?)", ("x", state_name, "apexco", RECENT, RECENT))
     db.execute("INSERT INTO work_items (objective, state, instance_key, created_at, updated_at)"
                " VALUES (?, ?, ?, ?, ?)", ("x", "agent_working", "other", RECENT, RECENT))
     for status in ("queued", "running", "ok", "failed"):
         db.execute("INSERT INTO jobs (instance_key, task, status, enqueued_at) VALUES (?, ?, ?, ?)",
-                   ("aimyable", "scan_tickets", status, RECENT))
+                   ("apexco", "scan_tickets", status, RECENT))
 
 
 def test_pending_work_splits_unfinished_work_by_who_acts_next(tmp_path):
     db.init(tmp_path / "t.db", ROOT / "migrations")
     _seed_pending()
 
-    assert pending_work.snapshot("aimyable") == {
+    assert pending_work.snapshot("apexco") == {
         "agent": {"tickets": {"planning": 1}, "work_items": {"agent_working": 1},
                   "jobs": {"queued": 1, "running": 1}},
         "person": {"tickets": {"in_review": 2, "pr_ready": 1}, "work_items": {"needs_you": 1}}}
@@ -411,7 +411,7 @@ def test_pending_work_splits_unfinished_work_by_who_acts_next(tmp_path):
 def test_pending_work_of_an_idle_instance_is_empty(tmp_path):
     db.init(tmp_path / "t.db", ROOT / "migrations")
 
-    snapshot = pending_work.snapshot("clarivis")
+    snapshot = pending_work.snapshot("cobalt")
 
     assert snapshot == {"agent": {"tickets": {}, "work_items": {}, "jobs": {}},
                         "person": {"tickets": {}, "work_items": {}}}
@@ -419,8 +419,8 @@ def test_pending_work_of_an_idle_instance_is_empty(tmp_path):
 
 
 def test_read_pending_asks_remote_instances_and_marks_the_ones_that_do_not_answer():
-    instances = [{"key": "personal", "base_url": "http://p"}, {"key": "aimyable", "base_url": "http://a"},
-                 {"key": "atropos", "base_url": "http://t"}, {"key": "quill", "base_url": "http://q"}]
+    instances = [{"key": "personal", "base_url": "http://p"}, {"key": "apexco", "base_url": "http://a"},
+                 {"key": "astroco", "base_url": "http://t"}, {"key": "quartz", "base_url": "http://q"}]
     idle = {"agent": {"tickets": {}, "work_items": {}, "jobs": {}}, "person": {"tickets": {"in_review": 2}}}
     answers = {"http://a": idle, "http://t": {"error": "timed out"}, "http://q": {"detail": "Not Found"}}
 
@@ -430,16 +430,16 @@ def test_read_pending_asks_remote_instances_and_marks_the_ones_that_do_not_answe
 
     with patch.object(global_watch, "call_instance", side_effect=_call), \
          patch.object(global_watch.pending_work, "snapshot", return_value=idle) as local:
-        out = global_watch.read_pending(["aimyable", "atropos", "clarivis", "personal", "quill"],
+        out = global_watch.read_pending(["apexco", "astroco", "cobalt", "personal", "quartz"],
                                         instances, "personal")
 
     local.assert_called_once_with("personal")
-    assert out["personal"] == idle and out["aimyable"] == idle
-    assert out["atropos"] == {"error": "timed out"}
-    assert out["quill"]["error"].startswith("unexpected response")
-    assert out["clarivis"] == {"error": "not discovered"}
-    assert global_watch._format_pending(out["aimyable"]) == "person: tickets in_review x2"
-    assert global_watch._format_pending(out["atropos"]) == "unknown (timed out)"
+    assert out["personal"] == idle and out["apexco"] == idle
+    assert out["astroco"] == {"error": "timed out"}
+    assert out["quartz"]["error"].startswith("unexpected response")
+    assert out["cobalt"] == {"error": "not discovered"}
+    assert global_watch._format_pending(out["apexco"]) == "person: tickets in_review x2"
+    assert global_watch._format_pending(out["astroco"]) == "unknown (timed out)"
 
 
 def test_build_digest_shows_pending_work_and_leaves_out_its_own_events():
@@ -467,9 +467,9 @@ def test_run_digest_covers_a_full_poll_cycle_when_the_last_run_was_recent(tmp_pa
     db.init(tmp_path / "t.db", ROOT / "migrations")
     state.save("global_watch", {"last_run_at": SINCE, "fingerprint": []})
     cycle = (NOW - timedelta(minutes=25)).isoformat()
-    events = [_ev("atropos", "a", event="job_started", ts=cycle),
+    events = [_ev("astroco", "a", event="job_started", ts=cycle),
               _ev("personal", "p", event="upwork_scan_done")]
-    instances = [{"key": "personal", "base_url": "x"}, {"key": "atropos", "base_url": "http://t"}]
+    instances = [{"key": "personal", "base_url": "x"}, {"key": "astroco", "base_url": "http://t"}]
 
     async def _call(*_args, **_kwargs):
         return {"agent": {"tickets": {}, "work_items": {}, "jobs": {}},
@@ -484,7 +484,7 @@ def test_run_digest_covers_a_full_poll_cycle_when_the_last_run_was_recent(tmp_pa
 
     prompt = model.call_args.kwargs["stdin_text"]
     assert f"from {(NOW - timedelta(minutes=30)).isoformat()} up to now" in prompt
-    assert "INSTANCE atropos: 1 events, 0 noise\ntop: job_started x1\npending work: none" in prompt
+    assert "INSTANCE astroco: 1 events, 0 noise\ntop: job_started x1\npending work: none" in prompt
     assert out["agent"]["status"] == "ok"
 
 

@@ -8,10 +8,10 @@ def _config(key, tmp_path):
 
 
 def test_the_serving_instance_links_its_own_events_relative(tmp_path, monkeypatch):
-    personal, quill = _config("personal", tmp_path), _config("quill", tmp_path)
+    personal, quartz = _config("personal", tmp_path), _config("quartz", tmp_path)
     monkeypatch.setattr(state, "_configs_by_host", {})
     monkeypatch.setattr(observability, "_configs_by_host",
-                        {"personal.frshty.localhost": personal, "quill.frshty.localhost": quill})
+                        {"personal.frshty.localhost": personal, "quartz.frshty.localhost": quartz})
     token = state._cv_config.set(personal)
     try:
         with patch.object(observability.log, "use", return_value=None), \
@@ -22,10 +22,10 @@ def test_the_serving_instance_links_its_own_events_relative(tmp_path, monkeypatc
     finally:
         state._cv_config.reset(token)
     assert {e["instance_key"]: e["base_url"] for e in events} == {
-        "personal": "", "quill": "https://quill.frshty.localhost"}
+        "personal": "", "quartz": "https://quartz.frshty.localhost"}
     links = {e["instance_key"]: e["links"] for e in events}
     assert links["personal"] == {"detail": "/tasks/7", "pr": "https://github.com/o/r/pull/1"}
-    assert links["quill"]["detail"] == "https://personal.frshty.localhost/tasks/7"
+    assert links["quartz"]["detail"] == "https://personal.frshty.localhost/tasks/7"
 
 
 def test_relative_links_strip_only_the_instance_host():
@@ -52,10 +52,10 @@ def test_a_single_instance_links_its_own_events_relative(tmp_path, monkeypatch):
 
 
 def test_the_event_feed_links_its_own_pages_relative(tmp_path):
-    token = state._cv_config.set(_config("aimyable", tmp_path))
+    token = state._cv_config.set(_config("apexco", tmp_path))
     try:
         with patch.object(observability.log, "get_events",
-                          return_value=[{"id": "1", "links": {"detail": "https://aimyable.frshty.localhost/tickets/DEV-1"}}]):
+                          return_value=[{"id": "1", "links": {"detail": "https://apexco.frshty.localhost/tickets/DEV-1"}}]):
             events = observability.api_events(limit=10)
     finally:
         state._cv_config.reset(token)
@@ -63,10 +63,10 @@ def test_the_event_feed_links_its_own_pages_relative(tmp_path):
 
 
 def test_the_pending_work_endpoint_reads_the_serving_instance(tmp_path):
-    token = state._cv_config.set(_config("aimyable", tmp_path))
+    token = state._cv_config.set(_config("apexco", tmp_path))
     try:
         with patch.object(observability.pending_work, "snapshot", return_value={"agent": {}, "person": {}}) as snap:
             assert observability.api_work_pending() == {"agent": {}, "person": {}}
     finally:
         state._cv_config.reset(token)
-    snap.assert_called_once_with("aimyable")
+    snap.assert_called_once_with("apexco")

@@ -442,7 +442,7 @@ def _cross_check_block(agent: str, config: dict) -> str:
 
 
 SLACK_LABEL = "slack_int"
-BOARD_PROJECT_KEY = "personal"
+BOARD_PROJECT_KEY = core_config.BOARD_INSTANCE_KEY
 
 
 def _resolve_launch(objective: str, cwd: str, contexts: list[str], agent: str,
@@ -650,7 +650,7 @@ def _scan_config_dir(key: str) -> tuple[dict | None, bool]:
     """The config file whose [job] key is `key`, parsed or None, and whether
     every config file in the directory was read.
 
-    A file is found by the key it declares, not by its name: the atropos
+    A file is found by the key it declares, not by its name: the astroco
     instance is keyed "frshty" and lives in config/local.toml, so a lookup by
     file name answers for the wrong project or for none."""
     try:

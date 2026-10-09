@@ -36,14 +36,14 @@ def _insert_comment(resource_id, comment_id, state_val, error_count, last_error,
 
 def test_surfaces_stuck_comment_with_pr_metadata():
     _set_instance()
-    _insert_comment("saas-dashboard/147", "806275043", "new", 3, "Could not create worktree")
-    state.save("own_prs", {"saas-dashboard/147": {"title": "DEV-457", "url": "http://pr/147"}})
+    _insert_comment("spa-dashboard/147", "806275043", "new", 3, "Could not create worktree")
+    state.save("own_prs", {"spa-dashboard/147": {"title": "DEV-457", "url": "http://pr/147"}})
 
     out = staleness.blocked_pr_comments("test")
 
     assert len(out) == 1
     row = out[0]
-    assert row["repo"] == "saas-dashboard"
+    assert row["repo"] == "spa-dashboard"
     assert row["pr_id"] == "147"
     assert row["comment_id"] == "806275043"
     assert row["attempts"] == 3
@@ -55,17 +55,17 @@ def test_surfaces_stuck_comment_with_pr_metadata():
 
 def test_ignores_processed():
     _set_instance()
-    _insert_comment("saas-dashboard/200", "c-processed", "processed", 5, "Could not create worktree")
+    _insert_comment("spa-dashboard/200", "c-processed", "processed", 5, "Could not create worktree")
 
     assert staleness.blocked_pr_comments("test") == []
 
 
 def test_a_single_failure_is_still_owed():
     """The floor this selector used to carry was error_count >= 2. Thirteen
-    comments on saas-dashboard/149 sat in 'new' with error_count=1 from
+    comments on spa-dashboard/149 sat in 'new' with error_count=1 from
     2026-06-02, never retried and never shown. One failure is owed."""
     _set_instance()
-    _insert_comment("saas-dashboard/149", "c-transient", "new", 1, "classification failed")
+    _insert_comment("spa-dashboard/149", "c-transient", "new", 1, "classification failed")
 
     out = staleness.blocked_pr_comments("test")
 
@@ -77,7 +77,7 @@ def test_a_row_with_no_error_is_owed_as_stalled():
     """The other half of the old floor: a recorded error. A row nothing ever
     touched has none, and was invisible for that reason alone."""
     _set_instance()
-    _insert_comment("saas-dashboard/150", "c-quiet", "new", 0, None)
+    _insert_comment("spa-dashboard/150", "c-quiet", "new", 0, None)
 
     out = staleness.blocked_pr_comments("test")
 
@@ -88,7 +88,7 @@ def test_a_row_with_no_error_is_owed_as_stalled():
 
 def test_a_manual_comment_is_owed_and_named_manual():
     _set_instance()
-    _insert_comment("saas-dashboard/151", "c-manual", "manual", 0, "open question")
+    _insert_comment("spa-dashboard/151", "c-manual", "manual", 0, "open question")
 
     out = staleness.blocked_pr_comments("test")
 
@@ -101,6 +101,6 @@ def test_a_deleted_comment_leaves_the_bucket():
     attempt and can never reach 'processed'. Reading only 'processed' as
     finished pins it in the bucket for good."""
     _set_instance()
-    _insert_comment("saas-dashboard/300", "c-deleted", "deleted", 6, "no changes produced")
+    _insert_comment("spa-dashboard/300", "c-deleted", "deleted", 6, "no changes produced")
 
     assert staleness.blocked_pr_comments("test") == []

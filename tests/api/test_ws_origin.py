@@ -39,7 +39,7 @@ def _client(module):
 @pytest.mark.parametrize("path,module", ROUTES)
 @pytest.mark.parametrize("origin", [
     f"https://{HOST}", "https://personal.frshty.local",
-    "https://personal.frshty.danialjaffry.com"])
+    "https://personal.frshty.dakotajones.example"])
 def test_a_board_page_is_served(path, module, origin):
     with patch.object(module.terminal, "terminal_handler", _serve), \
          patch.object(tickets_routes.work_launch, "resume_session", MagicMock()):

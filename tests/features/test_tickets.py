@@ -316,7 +316,7 @@ class TestRepoGate:
         assert "start_planning" in calls
 
     def test_advance_after_start_dev_setup_classifies_stored_text(self, fresh_db):
-        """Observed on atropos 2026-09-30: start-dev wrote the bare _setup_ticket
+        """Observed on astroco 2026-09-30: start-dev wrote the bare _setup_ticket
         result over LSC-124, the next advance classified an empty text as
         'unknown' without calling the model, and the ticket never planned."""
         import core.state as state
@@ -541,7 +541,7 @@ class TestResolveConflicts:
             tickets._resolve_conflicts(fake_config, make_ticket(), ts, "http://base")
 
         assert (repo / "a.txt").read_text() == "one\n", (
-            "observed live on atropos 2026-07-07 (DSC-127 analysis_dev#589): stray "
+            "observed live on astroco 2026-07-07 (DSC-127 analysis_dev#589): stray "
             "uncommitted edits make `git merge` refuse to start, surfacing as "
             "'no conflicted files found' until the attempts cap; the worktree must "
             "be reset to HEAD before conflict resolution"
@@ -819,9 +819,9 @@ class TestReconcilePrs:
 
     def test_key_fallback_matches_diverged_branch(self):
         open_prs = [
-            {"repo": "r", "id": 147, "branch": "danial/feature/PROJ-1-realtime", "title": "PROJ-1: rework", "url": "u"},
+            {"repo": "r", "id": 147, "branch": "dakota/feature/PROJ-1-realtime", "title": "PROJ-1: rework", "url": "u"},
         ]
-        ts = make_ticket_state(status="pr_ready", branch="danial/feature/PROJ-1-old-name")
+        ts = make_ticket_state(status="pr_ready", branch="dakota/feature/PROJ-1-old-name")
 
         result = tickets._reconcile_prs(ts, open_prs, "PROJ-1", first_sighting=True)
 
@@ -842,9 +842,9 @@ class TestReconcilePrs:
 
     def test_key_fallback_ignores_numeric_prefix_collision(self):
         open_prs = [
-            {"repo": "r", "id": 5, "branch": "danial/feature/PROJ-10-other", "title": "PROJ-10: x", "url": "u"},
+            {"repo": "r", "id": 5, "branch": "dakota/feature/PROJ-10-other", "title": "PROJ-10: x", "url": "u"},
         ]
-        ts = make_ticket_state(status="pr_ready", branch="danial/feature/PROJ-1-old")
+        ts = make_ticket_state(status="pr_ready", branch="dakota/feature/PROJ-1-old")
 
         result = tickets._reconcile_prs(ts, open_prs, "PROJ-1")
 
@@ -1014,7 +1014,7 @@ class TestHandleCiFailureStub:
         """The fix_ci_failures precondition reads _ci_failed_pending from the
         persisted ticket. A worker can pick the job up within a second, so the
         flag must be saved before the enqueue, not at end-of-scan — observed
-        on atropos 2026-08-21: job 1484952 skipped on a stale flag read."""
+        on astroco 2026-08-21: job 1484952 skipped on a stale flag read."""
         calls = []
         ts = make_ticket_state(status="in_review")
         pr = {"repo": "r", "id": 1, "url": "u"}
@@ -1507,16 +1507,16 @@ class TestHasHumanReopenAfter:
         )
 
     def test_no_reopen_when_human_moved_to_post_pr_state(self):
-        h = [{"created_at": "2026-05-12T16:00:00Z", "to_state": "QA", "actor_email": "danial@x.com"}]
+        h = [{"created_at": "2026-05-12T16:00:00Z", "to_state": "QA", "actor_email": "dakota@x.com"}]
         assert tickets._has_human_reopen_after(h, self.MERGED) is None, (
             "human moved to QA (post-PR wait state); not a reopen — this is the SC-3100 case"
         )
 
     def test_detects_reopen_when_human_moves_to_active_work(self):
         h = [{"created_at": "2026-05-06T10:00:00Z", "to_state": "In Progress",
-              "actor_email": "danial@x.com", "from_state": "Done"}]
+              "actor_email": "dakota@x.com", "from_state": "Done"}]
         match = tickets._has_human_reopen_after(h, self.MERGED)
-        assert match is not None and match["actor_email"] == "danial@x.com"
+        assert match is not None and match["actor_email"] == "dakota@x.com"
 
 
 class TestFindPreMergedPr:
@@ -1536,7 +1536,7 @@ class TestFindPreMergedPr:
     def test_returns_pr_when_no_human_reopen_in_history(self):
         pr = {"id": 702, "merged_at": "2026-05-04T23:20:07Z", "url": "u", "branch": "b", "repo": "r"}
         history = [{"created_at": "2026-05-12T16:00:00Z", "to_state": "QA",
-                    "actor_email": "danial@x.com", "from_state": "In Review"}]
+                    "actor_email": "dakota@x.com", "from_state": "In Review"}]
         with patch("features.tickets.make_platform", return_value=self._make_platform(pr)), \
              patch("features.tickets.make_ticket_system", return_value=self._make_ticket_system(history)):
             result = tickets._find_pre_merged_pr({}, self._ticket())
@@ -1552,7 +1552,7 @@ class TestFindPreMergedPr:
     def test_returns_none_when_human_reopened_to_active_state(self):
         pr = {"id": 702, "merged_at": "2026-05-04T23:20:07Z", "url": "u", "branch": "b", "repo": "r"}
         history = [{"created_at": "2026-05-06T10:00:00Z", "to_state": "In Progress",
-                    "actor_email": "danial@x.com", "from_state": "Done"}]
+                    "actor_email": "dakota@x.com", "from_state": "Done"}]
         with patch("features.tickets.make_platform", return_value=self._make_platform(pr)), \
              patch("features.tickets.make_ticket_system", return_value=self._make_ticket_system(history)), \
              patch("features.tickets.log.emit") as emit:
@@ -2295,11 +2295,11 @@ class TestRenderPrdTicketMd:
         db.execute(
             "INSERT INTO prd_section_ticket(prd_section_id, instance_key, ticket_key) "
             "VALUES(?, ?, ?)",
-            (section_id, "lumeninv", "PRD-5_MOCK_STUB_CATALOGUE-20"),
+            (section_id, "lynxinv", "PRD-5_MOCK_STUB_CATALOGUE-20"),
         )
         ts = {"summary": "", "description": ""}
         md = tickets.render_prd_ticket_md(
-            ts, instance_key="lumeninv", ticket_key="PRD-5_MOCK_STUB_CATALOGUE-20",
+            ts, instance_key="lynxinv", ticket_key="PRD-5_MOCK_STUB_CATALOGUE-20",
         )
         assert section_header in md, f"expected section header, got: {md!r}"
         assert "Single registry of mock vendors" in md
@@ -2540,7 +2540,7 @@ class TestCheckInReviewFixFailedRetry:
 
 class TestLoadPrCommentsDedupe:
     """Live on acme DEV-728: pr_comments.json holds rows
-    ['fix_failed', 'addressed'] for django-drf-app#198 comment 861363220,
+    ['fix_failed', 'addressed'] for django-api#198 comment 861363220,
     because every scan appends a fresh row. _pr_comment_breakdown counts every
     row it is handed, so the stale fix_failed row kept not_done at 1 and
     _pr_court answered your_court long after the comment was fixed. Only the
@@ -2555,11 +2555,11 @@ class TestLoadPrCommentsDedupe:
     def test_only_the_last_row_for_a_comment_survives(self, fake_config):
         slug = "DEV-728-persist"
         self._write(fake_config, slug, [
-            {"id": 861363220, "pr_repo": "django-drf-app", "pr_id": 198,
+            {"id": 861363220, "pr_repo": "django-api", "pr_id": 198,
              "status": "fix_failed", "body": "sanitize this"},
-            {"id": 861363206, "pr_repo": "django-drf-app", "pr_id": 198,
+            {"id": 861363206, "pr_repo": "django-api", "pr_id": 198,
              "status": "addressed", "body": "rename that"},
-            {"id": 861363220, "pr_repo": "django-drf-app", "pr_id": 198,
+            {"id": 861363220, "pr_repo": "django-api", "pr_id": 198,
              "status": "addressed", "body": "sanitize this"},
         ])
 
@@ -2634,7 +2634,7 @@ class TestLoadPrCommentsDedupe:
         assert tickets._load_pr_comments(fake_config, slug) == {"comments": [{"id": 1}]}
 
 class TestCheckInReviewPushFailure:
-    """Observed live on acme/saas-dashboard#286: three Arslan review
+    """Observed live on acme/spa-dashboard#286: three Arslan review
     comments were fixed as local commits, then push_branch was rejected with
     non-fast-forward because a squash rewrote the branch history. The push
     failure emptied to_resolve, but the cursor block below it still ran,
@@ -2836,7 +2836,7 @@ class TestCheckInReviewReviewerReply:
 
 
 class TestReplyCommitsToChangeReroute:
-    """Observed live on acme/saas-dashboard#249 (DEV-644): the triage batch
+    """Observed live on acme/spa-dashboard#249 (DEV-644): the triage batch
     classified the 'file count removed, seems odd' comment as not actionable,
     the drafted reply admitted a regression and promised 'I will restore the
     count', and the comment parked at needs_reply. The promise was never kept.
@@ -3053,7 +3053,7 @@ class TestSubstantiateReplyEnqueueOrdering:
 
 
 class TestCheckInReviewSelfCommittedFix:
-    """Observed live on acme django-drf-app PR #174 (DEV-644, 2026-08-20):
+    """Observed live on acme django-api PR #174 (DEV-644, 2026-08-20):
     Trevin Avery's review comment 845507041 was resolved on Bitbucket at
     23:46:00Z with no commit delivered to the remote. The inline fix path
     judged "did the agent produce a fix" solely from `git add -A` +
@@ -3288,7 +3288,7 @@ class TestRecheckPrFailed:
         )
 
     def test_ci_failed_same_head_still_red_stays_parked(self, fake_config):
-        """Observed on atropos 2026-08-21: LSC-46 flip-flopped pr_failed ↔
+        """Observed on astroco 2026-08-21: LSC-46 flip-flopped pr_failed ↔
         in_review every scan cycle for a full day. Recovery on an OPEN PR
         whose CI is still failing on the exact head that spent the fix budget
         re-enters the capped in_review path, which parks it again: churn and
@@ -3487,7 +3487,7 @@ class TestPrFailedReason:
 
 
 class TestRecheckPrFailedConflictLoop:
-    """Observed live on atropos 2026-05-20: FRG-186 PR #1180 bounced between
+    """Observed live on astroco 2026-05-20: FRG-186 PR #1180 bounced between
     in_review and pr_failed every 5-7m for 1h+. _resolve_conflicts hit
     MAX_CONFLICT_ATTEMPTS=2 with the PR still CONFLICTING → pr_failed
     (reason=conflict_failed). _recheck_pr_failed then saw the PR still OPEN
@@ -3599,7 +3599,7 @@ class TestRecheckPrFailedConflictLoop:
              patch("features.tickets.log"):
             result = tickets._recheck_pr_failed(fake_config, self._ticket(), ts, "http://b")
         assert result["status"] == "pr_failed", (
-            "observed live on atropos 2026-07-07 (DSC-127): recovering on 'any "
+            "observed live on astroco 2026-07-07 (DSC-127): recovering on 'any "
             "healthy open PR' resets the attempts counter while the conflicted "
             "PR is unchanged, so the ticket bounces in_review ↔ pr_failed every "
             "scan; stay parked until NO open PR is conflicting. "
@@ -3641,7 +3641,7 @@ class TestResolveStatusInvalidEntry:
 
 
 class TestCheckInReviewPipelineCommentHold:
-    """Observed on acme windows-rpa-client #56 and websocket-server #118
+    """Observed on acme windows-agent #56 and websocket-hub #118
     (DEV-635, 2026-08-21): pipeline-failure comments ("N of M checks failed")
     were resolved via the "already addressed (no change needed)" branch while
     the PR's pipeline was still red. That branch is gone. A no-change verdict
@@ -4027,7 +4027,7 @@ class TestCheckInReviewIssueComments:
 
 
 class TestCheckInReviewCommentQueueProgress:
-    """Observed live on acme django-drf-app PR #203 (DEV-743, 2026-09-21):
+    """Observed live on acme django-api PR #203 (DEV-743, 2026-09-21):
     Arslan Syed's comment 867755302 sat at position 15 of a 16-comment queue
     and was never read. The cursor only moved when a whole batch settled, so
     one retryable fix failure made the next scan re-read the whole list and

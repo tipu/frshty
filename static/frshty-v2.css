@@ -1,5 +1,5 @@
 /* frshty v2 — Linear-ish design system.
-   Extracted from /home/tipu/Downloads/frshty-v2-linear.html.
+   Extracted from /home/user/Downloads/frshty-v2-linear.html.
    Namespace: .ln-*  (paired with the .ln-root container).
    All existing pages get this stylesheet via base layout; pages that opt in
    wrap their content in <div class="ln-root"> + use .ln-* classes.

@@ -72,9 +72,9 @@ An optional [container] block in the instance config tunes the container:
     llm = 9              # FRSHTY_MAX_CONCURRENT_LLM
     memory = "32g"       # RAM cap for the whole container, swap included
     mounts = ["~/Documents/dev/slack_int"]   # extra host paths, same path inside
-    seed = ["~/.gitconfig-quill"]            # extra host files copied into ~
+    seed = ["~/.gitconfig-quartz"]            # extra host files copied into ~
     devices = ["/dev/kvm"]                   # host devices passed through
-    env_file = "~/.frshty-containers/aimyable.env"  # extra variables, e.g. BILLCOM_*
+    env_file = "~/.frshty-containers/apexco.env"  # extra variables, e.g. BILLCOM_*
     slack_int = "~/slack_int"                # slack_int checkout; default ~/Documents/dev/slack_int
 """
 import argparse

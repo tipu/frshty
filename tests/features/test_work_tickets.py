@@ -55,14 +55,14 @@ class TestKeysIn:
         assert work_tickets.keys_in("xDEV-635 and DEV-635x and DEV-6355", idx) == []
 
     def test_finds_a_key_no_project_number_pattern_matches(self):
-        _mkticket("bh", "PRD-6_FUNCTIONAL_REQUIREMENTS-3")
+        _mkticket("bolt", "PRD-6_FUNCTIONAL_REQUIREMENTS-3")
         idx = work_tickets.index()
         assert work_tickets.keys_in("finish PRD-6_FUNCTIONAL_REQUIREMENTS-3 today", idx) \
             == ["PRD-6_FUNCTIONAL_REQUIREMENTS-3"]
 
     def test_the_long_key_wins_over_the_short_one_it_starts_with(self):
-        _mkticket("bh", "PRD-6")
-        _mkticket("bh", "PRD-6_FUNCTIONAL_REQUIREMENTS-3")
+        _mkticket("bolt", "PRD-6")
+        _mkticket("bolt", "PRD-6_FUNCTIONAL_REQUIREMENTS-3")
         idx = work_tickets.index()
         assert work_tickets.keys_in("finish PRD-6_FUNCTIONAL_REQUIREMENTS-3", idx) \
             == ["PRD-6_FUNCTIONAL_REQUIREMENTS-3"]
@@ -188,10 +188,10 @@ class TestTasksForATicket:
         assert [r["id"] for r in work_tickets.tasks_for("acme", "DEV-635")] == [long_one]
 
     def test_an_underscore_in_the_key_is_not_a_wildcard(self):
-        _mkticket("bh", "PRD-6_FUNCTIONAL_REQUIREMENTS-3")
-        _mkitem("finish PRD-6xFUNCTIONALxREQUIREMENTS-3", contexts="bh")
-        named = _mkitem("finish PRD-6_FUNCTIONAL_REQUIREMENTS-3", contexts="bh")
-        rows = work_tickets.tasks_for("bh", "PRD-6_FUNCTIONAL_REQUIREMENTS-3")
+        _mkticket("bolt", "PRD-6_FUNCTIONAL_REQUIREMENTS-3")
+        _mkitem("finish PRD-6xFUNCTIONALxREQUIREMENTS-3", contexts="bolt")
+        named = _mkitem("finish PRD-6_FUNCTIONAL_REQUIREMENTS-3", contexts="bolt")
+        rows = work_tickets.tasks_for("bolt", "PRD-6_FUNCTIONAL_REQUIREMENTS-3")
         assert [r["id"] for r in rows] == [named]
 
     def test_another_instances_ticket_does_not_claim_the_task(self):
@@ -303,16 +303,16 @@ class TestMergeScope:
     behind that address decides whether the whole ticket can be merged."""
 
     def test_text_that_names_no_pull_request_has_no_scope(self):
-        _mkticket_prs("acme", "DEV-728", [_pr("django-drf-app", 198, ["Jawad"])])
+        _mkticket_prs("acme", "DEV-728", [_pr("django-api", 198, ["Jawad"])])
         assert work_tickets.merge_scopes("push the branch and open a pull request") == []
 
     def test_the_ticket_behind_the_named_address_is_resolved(self):
         _mkticket_prs("acme", "DEV-728", [
-            _pr("django-drf-app", 198, ["Jawad"]),
-            _pr("websocket-server", 129, ["Jawad"]),
+            _pr("django-api", 198, ["Jawad"]),
+            _pr("websocket-hub", 129, ["Jawad"]),
         ])
         scope = _one_scope(
-            "Merge PR #198 (https://bitbucket.org/acme/django-drf-app/"
+            "Merge PR #198 (https://bitbucket.org/acme/django-api/"
             "pull-requests/198/overview) into main.")
         assert scope["ticket_key"] == "DEV-728"
         assert scope["instance_key"] == "acme"
@@ -322,29 +322,29 @@ class TestMergeScope:
 
     def test_a_sibling_nobody_approved_is_reported(self):
         _mkticket_prs("acme", "DEV-728", [
-            _pr("django-drf-app", 198, ["Jawad"]),
-            _pr("websocket-server", 129),
-            _pr("windows-rpa-client", 60, ["Jawad"]),
+            _pr("django-api", 198, ["Jawad"]),
+            _pr("websocket-hub", 129),
+            _pr("windows-agent", 60, ["Jawad"]),
         ])
         scope = _one_scope(
-            "Merge https://bitbucket.org/acme/django-drf-app/pull-requests/198")
+            "Merge https://bitbucket.org/acme/django-api/pull-requests/198")
         assert [p["id"] for p in scope["unapproved"]] == [129]
 
     def test_a_sibling_that_is_no_longer_open_is_not_counted(self):
         _mkticket_prs("acme", "DEV-728", [
-            _pr("django-drf-app", 198, ["Jawad"]),
-            _pr("websocket-server", 129, pr_state="MERGED"),
+            _pr("django-api", 198, ["Jawad"]),
+            _pr("websocket-hub", 129, pr_state="MERGED"),
         ])
         scope = _one_scope(
-            "Merge https://bitbucket.org/acme/django-drf-app/pull-requests/198")
+            "Merge https://bitbucket.org/acme/django-api/pull-requests/198")
         assert scope["siblings"] == [] and scope["unapproved"] == []
 
     def test_the_named_pull_request_is_never_reported_unapproved(self):
         """Its own approval is what the run that wrote the follow-up
         established. The cache here can be older than that run."""
-        _mkticket_prs("acme", "DEV-728", [_pr("django-drf-app", 198)])
+        _mkticket_prs("acme", "DEV-728", [_pr("django-api", 198)])
         scope = _one_scope(
-            "Merge https://bitbucket.org/acme/django-drf-app/pull-requests/198")
+            "Merge https://bitbucket.org/acme/django-api/pull-requests/198")
         assert [p["id"] for p in scope["named"]] == [198]
         assert scope["unapproved"] == []
 
@@ -352,11 +352,11 @@ class TestMergeScope:
         """The operator can merge the named pull request by hand while the
         follow-up waits. The siblings it waits for are still unapproved."""
         _mkticket_prs("acme", "DEV-728", [
-            _pr("django-drf-app", 198, ["Jawad"], pr_state="MERGED"),
-            _pr("websocket-server", 129),
+            _pr("django-api", 198, ["Jawad"], pr_state="MERGED"),
+            _pr("websocket-hub", 129),
         ])
         scope = _one_scope(
-            "Merge https://bitbucket.org/acme/django-drf-app/pull-requests/198")
+            "Merge https://bitbucket.org/acme/django-api/pull-requests/198")
         assert scope["ticket_key"] == "DEV-728"
         assert scope["named"] == []
         assert [p["id"] for p in scope["unapproved"]] == [129]
@@ -365,11 +365,11 @@ class TestMergeScope:
         """in_review is the only status whose poll refreshes the approver
         cache, so it is the only status the cache answers for."""
         _mkticket_prs("acme", "DEV-728", [
-            _pr("django-drf-app", 198, ["Jawad"]),
-            _pr("websocket-server", 129),
+            _pr("django-api", 198, ["Jawad"]),
+            _pr("websocket-hub", 129),
         ], status="done")
         assert work_tickets.merge_scopes(
-            "Merge https://bitbucket.org/acme/django-drf-app/pull-requests/198") == []
+            "Merge https://bitbucket.org/acme/django-api/pull-requests/198") == []
 
     def test_a_github_address_resolves_the_same_way(self):
         _mkticket_prs("someclient", "SC-3064", [
@@ -383,6 +383,6 @@ class TestMergeScope:
         assert [p["id"] for p in scope["unapproved"]] == [12]
 
     def test_a_pull_request_no_ticket_holds_has_no_scope(self):
-        _mkticket_prs("acme", "DEV-728", [_pr("django-drf-app", 198, ["Jawad"])])
+        _mkticket_prs("acme", "DEV-728", [_pr("django-api", 198, ["Jawad"])])
         assert work_tickets.merge_scopes(
             "Merge https://bitbucket.org/acme/other-repo/pull-requests/5") == []

@@ -535,8 +535,8 @@ class TestSelfId:
     def test_github_falls_back_to_the_authenticated_login(self):
         p = self._github({"repo": "org/repo"})
         with patch.object(GitHubPlatform, "_run_gh",
-                          return_value=MagicMock(returncode=0, stdout="danialjatropos\n")):
-            assert p.self_id() == "danialjatropos"
+                          return_value=MagicMock(returncode=0, stdout="dakotajastroco\n")):
+            assert p.self_id() == "dakotajastroco"
 
     def test_github_is_empty_when_gh_cannot_answer(self):
         p = self._github({"repo": "org/repo"})

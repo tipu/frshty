@@ -131,7 +131,7 @@ purpose by topic. `core/consensus_scope.py:52` then says code quality and correc
 must not affect the verdict, which directs every voice away from this class of finding.
 
 The record matches. All 19 DEV-635 scope reviews failed the ticket overall. Every one
-passed `windows-rpa-client-schema`.
+passed `windows-agent-schema`.
 
 Change: add a third question on reachability. For each symbol, field, enum member and
 branch the diff adds, the reviewer must name a caller or a reader on the branch, in any
@@ -151,7 +151,7 @@ Launch draft:
 
 > Make the frshty consensus scope review able to fail on unreachable code. Today it cannot.
 > Running the real `SCOPE_DIRECTIVE` from `core/consensus_scope.py` against
-> `windows-rpa-client-schema` at commit `e374679` returns `SCOPE VERDICT: PASS`, even though
+> `windows-agent-schema` at commit `e374679` returns `SCOPE VERDICT: PASS`, even though
 > that commit adds `FileExplorerOperation`, an enum with no caller, and
 > `FileExplorerAction.recursive`, a field with no reader. Add a third question to
 > `SCOPE_DIRECTIVE` on reachability: for every symbol, field, enum member and branch the diff
@@ -261,7 +261,7 @@ Launch draft:
 `/tri-review` is the step that does look for dead code. Its maintainability persona
 names dead code as a target at `features/reviewer.py:69`. It never examined the schema
 repo. `docs/tri-review.md` for DEV-635 names four repos and omits
-`windows-rpa-client-schema`, although that repo had a branch diff at review time.
+`windows-agent-schema`, although that repo had a branch diff at review time.
 
 The cause is the prompt. `core/tasks/tickets.py:1332` `start_reviewing` passes only
 "Run /tri-review and save the full output to docs/tri-review.md". The command itself
@@ -280,12 +280,12 @@ repository must appear in `docs/tri-review.md`. Add a postcondition that
 A silently skipped repo then fails the task instead of passing it.
 
 Verification that can fail: run the new postcondition against the existing DEV-635
-`docs/tri-review.md`, which omits `windows-rpa-client-schema`, and require it to fail.
+`docs/tri-review.md`, which omits `windows-agent-schema`, and require it to fail.
 
 Launch draft:
 
 > Make frshty's `/tri-review` step cover every repository on the ticket branch. For DEV-635 it
-> reviewed four of five repos and skipped `windows-rpa-client-schema`, which is the repo that
+> reviewed four of five repos and skipped `windows-agent-schema`, which is the repo that
 > carried the dead code into PR #19. The cause is the prompt at `core/tasks/tickets.py:1332`:
 > `start_reviewing` passes only "Run /tri-review and save the full output to docs/tri-review.md",
 > and the command's own `git diff main...HEAD` finds nothing at a multi-repo ticket root, so the

@@ -67,7 +67,7 @@ def record(fresh_db, tmp_path):
     _event("ctp_complete", "consensus plan implemented", _at(minutes=29),
            meta={"ticket": TICKET, "changed": ["repo-a", "repo-b"]})
     _transition("planning", "blocked", _at(minutes=31), reason="task failed")
-    _transition("blocked", "reviewing", _at(hours=12), actor="danial",
+    _transition("blocked", "reviewing", _at(hours=12), actor="dakota",
                 reason="manual override")
     _job(2, "sync_pr_base", "ok", _at(hours=13), _at(hours=13, minutes=1))
     _job(3, "sync_pr_base", "ok", _at(hours=14), _at(hours=14, minutes=1))

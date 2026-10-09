@@ -31,12 +31,12 @@ QA_NOTE = (
 class TestBugReportPrompt:
     def test_the_prompt_quotes_the_report(self):
         prompt = _bug_report_prompt("DEV-635", "File explorer tool", [
-            {"comment_id": "17285", "author": "Dan Brisco",
+            {"comment_id": "17285", "author": "Sam Rivers",
              "created_at": "2026-09-01T18:22:03+00:00",
              "body": QA_NOTE, "reason": "QA found the write toggle does not save"},
         ])
         assert QA_NOTE in prompt
-        assert "Dan Brisco" in prompt
+        assert "Sam Rivers" in prompt
         assert "File explorer tool" in prompt
         assert "QA found the write toggle does not save" in prompt
 
@@ -65,14 +65,14 @@ def _ctx(tmp_path, payload=None, slug="DEV-635-file-explorer-tool"):
     )
 
 
-REPORTS = [{"comment_id": "17285", "author": "Dan Brisco", "body": QA_NOTE,
+REPORTS = [{"comment_id": "17285", "author": "Sam Rivers", "body": QA_NOTE,
             "reason": "the write toggle does not save"}]
 
 
 class TestFixReportedBugProvesItsWork:
     def test_a_run_that_commits_nothing_fails_and_reopens_the_comment(self, tmp_path):
         ctx = _ctx(tmp_path, {"reports": REPORTS, "ticket_summary": "File explorer tool"})
-        heads = {"saas-dashboard": "aaa"}
+        heads = {"spa-dashboard": "aaa"}
         with patch("core.state.load_ticket", return_value={"slug": "DEV-635-file-explorer-tool"}), \
              patch("core.tasks.tickets._capture_repo_heads", return_value=heads), \
              patch("core.tasks.tickets._commit_workspace_changes", return_value=[]), \
@@ -88,16 +88,16 @@ class TestFixReportedBugProvesItsWork:
 
     def test_a_run_that_commits_passes_and_closes_the_comment(self, tmp_path):
         ctx = _ctx(tmp_path, {"reports": REPORTS, "ticket_summary": "File explorer tool"})
-        moved = iter([{"saas-dashboard": "aaa"}, {"saas-dashboard": "bbb"}])
+        moved = iter([{"spa-dashboard": "aaa"}, {"spa-dashboard": "bbb"}])
         with patch("core.state.load_ticket", return_value={"slug": "DEV-635-file-explorer-tool"}), \
              patch("core.tasks.tickets._capture_repo_heads", side_effect=lambda _d: next(moved)), \
-             patch("core.tasks.tickets._commit_workspace_changes", return_value=["saas-dashboard"]), \
+             patch("core.tasks.tickets._commit_workspace_changes", return_value=["spa-dashboard"]), \
              patch("core.tasks.tickets.run_claude_code", return_value="done"), \
              patch("core.tasks.tickets.comments.mark_comment_error") as err, \
              patch("core.tasks.tickets.comments.mark_comment_processed") as done:
             result = fix_reported_bug(ctx)
         assert result.status == "ok"
-        assert result.artifacts["repos"] == ["saas-dashboard"]
+        assert result.artifacts["repos"] == ["spa-dashboard"]
         done.assert_called_once()
         err.assert_not_called()
 
@@ -127,35 +127,35 @@ class TestFixReportedBugPushesToThePr:
     def test_a_committed_fix_reaches_the_open_pr_branch(self, tmp_path):
         ctx = _ctx(tmp_path, {"reports": REPORTS})
         slug = "DEV-635-file-explorer-tool"
-        wt = tmp_path / "tickets" / slug / "workspace" / "saas-dashboard"
+        wt = tmp_path / "tickets" / slug / "workspace" / "spa-dashboard"
         wt.mkdir(parents=True)
         ticket_state = {
-            "slug": slug, "branch": "danial/feature/DEV-635",
-            "prs": [{"repo": "saas-dashboard", "id": 248,
-                     "branch": "danial/feature/DEV-635"}],
+            "slug": slug, "branch": "dakota/feature/DEV-635",
+            "prs": [{"repo": "spa-dashboard", "id": 248,
+                     "branch": "dakota/feature/DEV-635"}],
         }
-        moved = iter([{"saas-dashboard": "aaa"}, {"saas-dashboard": "bbb"}])
+        moved = iter([{"spa-dashboard": "aaa"}, {"spa-dashboard": "bbb"}])
         platform = MagicMock()
         platform.push_branch.return_value = {"ok": True}
         with patch("core.state.load_ticket", return_value=ticket_state), \
              patch("core.tasks.tickets._capture_repo_heads", side_effect=lambda _d: next(moved)), \
-             patch("core.tasks.tickets._commit_workspace_changes", return_value=["saas-dashboard"]), \
+             patch("core.tasks.tickets._commit_workspace_changes", return_value=["spa-dashboard"]), \
              patch("core.tasks.tickets.run_claude_code", return_value="done"), \
              patch("core.tasks.tickets.ticket_worktree_path", return_value=wt), \
              patch("core.tasks.tickets.make_platform", return_value=platform), \
              patch("core.tasks.tickets.comments.mark_comment_processed"):
             result = fix_reported_bug(ctx)
-        assert result.artifacts["pushed"] == ["saas-dashboard"]
-        platform.push_branch.assert_called_once_with(wt, "danial/feature/DEV-635")
+        assert result.artifacts["pushed"] == ["spa-dashboard"]
+        platform.push_branch.assert_called_once_with(wt, "dakota/feature/DEV-635")
 
     def test_a_ticket_with_no_pr_is_left_unpushed(self, tmp_path):
         ctx = _ctx(tmp_path, {"reports": REPORTS})
-        moved = iter([{"saas-dashboard": "aaa"}, {"saas-dashboard": "bbb"}])
+        moved = iter([{"spa-dashboard": "aaa"}, {"spa-dashboard": "bbb"}])
         platform = MagicMock()
         with patch("core.state.load_ticket",
                    return_value={"slug": "DEV-635-file-explorer-tool", "prs": []}), \
              patch("core.tasks.tickets._capture_repo_heads", side_effect=lambda _d: next(moved)), \
-             patch("core.tasks.tickets._commit_workspace_changes", return_value=["saas-dashboard"]), \
+             patch("core.tasks.tickets._commit_workspace_changes", return_value=["spa-dashboard"]), \
              patch("core.tasks.tickets.run_claude_code", return_value="done"), \
              patch("core.tasks.tickets.make_platform", return_value=platform), \
              patch("core.tasks.tickets.comments.mark_comment_processed"):
@@ -166,28 +166,28 @@ class TestFixReportedBugPushesToThePr:
     def test_a_failed_push_is_reported_not_swallowed(self, tmp_path):
         ctx = _ctx(tmp_path, {"reports": REPORTS})
         slug = "DEV-635-file-explorer-tool"
-        wt = tmp_path / "tickets" / slug / "workspace" / "saas-dashboard"
+        wt = tmp_path / "tickets" / slug / "workspace" / "spa-dashboard"
         wt.mkdir(parents=True)
-        moved = iter([{"saas-dashboard": "aaa"}, {"saas-dashboard": "bbb"}])
+        moved = iter([{"spa-dashboard": "aaa"}, {"spa-dashboard": "bbb"}])
         platform = MagicMock()
         platform.push_branch.return_value = {"ok": False, "error": "rejected"}
         with patch("core.state.load_ticket",
                    return_value={"slug": slug, "branch": "b",
-                                 "prs": [{"repo": "saas-dashboard", "id": 248}]}), \
+                                 "prs": [{"repo": "spa-dashboard", "id": 248}]}), \
              patch("core.tasks.tickets._capture_repo_heads", side_effect=lambda _d: next(moved)), \
-             patch("core.tasks.tickets._commit_workspace_changes", return_value=["saas-dashboard"]), \
+             patch("core.tasks.tickets._commit_workspace_changes", return_value=["spa-dashboard"]), \
              patch("core.tasks.tickets.run_claude_code", return_value="done"), \
              patch("core.tasks.tickets.ticket_worktree_path", return_value=wt), \
              patch("core.tasks.tickets.make_platform", return_value=platform), \
              patch("core.tasks.tickets.comments.mark_comment_processed"):
             result = fix_reported_bug(ctx)
-        assert result.artifacts["push_failed"] == ["saas-dashboard"]
+        assert result.artifacts["push_failed"] == ["spa-dashboard"]
         assert result.status == "ok"
 
 
 COMMENT = {
     "id": "17285",
-    "author_name": "Dan Brisco",
+    "author_name": "Sam Rivers",
     "body": QA_NOTE,
     "created_at": "2026-09-01T18:22:03+00:00",
     "updated_at": "2026-09-01T18:22:03+00:00",
@@ -225,7 +225,7 @@ class TestTheReportReachesTheJob:
         payload = eq.call_args.kwargs["payload"]
         assert payload["reports"][0]["body"] == QA_NOTE
         assert payload["reports"][0]["comment_id"] == "17285"
-        assert payload["reports"][0]["author"] == "Dan Brisco"
+        assert payload["reports"][0]["author"] == "Sam Rivers"
         assert payload["ticket_summary"] == "File explorer tool"
 
     def test_the_comment_is_not_closed_at_enqueue_time(self, fake_config):

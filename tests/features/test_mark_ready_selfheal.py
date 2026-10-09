@@ -56,7 +56,7 @@ class TestNoiseSet:
 class TestCleanScratch:
     def test_removes_playwright_and_test_results(self, tmp_path):
         ticket_dir = tmp_path / "tickets" / "PROJ-1-x"
-        repo = _make_repo(ticket_dir, "saas-dashboard")
+        repo = _make_repo(ticket_dir, "spa-dashboard")
         (repo / ".playwright-cli").mkdir()
         (repo / ".playwright-cli" / "page.yml").write_text("snap\n")
         (repo / "test-results").mkdir()
@@ -71,7 +71,7 @@ class TestCleanScratch:
 
     def test_removes_scratch_that_gitignore_hides(self, tmp_path):
         ticket_dir = tmp_path / "tickets" / "PROJ-1-x"
-        repo = _make_repo(ticket_dir, "saas-dashboard")
+        repo = _make_repo(ticket_dir, "spa-dashboard")
         (repo / ".gitignore").write_text(".playwright-cli/\ntest-results/\nnode_modules/\n")
         _git(repo, "add", "-A")
         _git(repo, "commit", "-qm", "ignore scratch")
@@ -90,7 +90,7 @@ class TestCleanScratch:
 
     def test_leaves_real_untracked_source(self, tmp_path):
         ticket_dir = tmp_path / "tickets" / "PROJ-1-x"
-        repo = _make_repo(ticket_dir, "saas-dashboard")
+        repo = _make_repo(ticket_dir, "spa-dashboard")
         (repo / "new_feature.py").write_text("y = 2\n")
         (repo / ".playwright-cli").mkdir()
         (repo / ".playwright-cli" / "p.yml").write_text("s\n")
@@ -106,7 +106,7 @@ class TestMarkReadySelfHeal:
         """A worktree dirtied only by playwright scratch must NOT block —
         mark_ready cleans it and reaches the success path."""
         ticket_dir = tmp_path / "tickets" / "PROJ-1-x"
-        repo = _make_repo(ticket_dir, "saas-dashboard")
+        repo = _make_repo(ticket_dir, "spa-dashboard")
         (repo / ".playwright-cli").mkdir()
         (repo / ".playwright-cli" / "p.yml").write_text("s\n")
         ctx = _ctx(tmp_path)
@@ -120,7 +120,7 @@ class TestMarkReadySelfHeal:
         """Real uncommitted source left by a prior stage is committed, not
         blocked."""
         ticket_dir = tmp_path / "tickets" / "PROJ-1-x"
-        repo = _make_repo(ticket_dir, "saas-dashboard")
+        repo = _make_repo(ticket_dir, "spa-dashboard")
         (repo / "leftover.py").write_text("z = 3\n")
         ctx = _ctx(tmp_path)
         with patch("core.state.load_ticket", return_value={"slug": "PROJ-1-x"}), \
@@ -144,7 +144,7 @@ class TestMarkReadyRecordsWhatTheProofStandsFor:
     def test_a_finalize_commit_is_not_labelled_proved(self, tmp_path, tmp_state):
         import core.state as state
         ticket_dir = tmp_path / "tickets" / "PROJ-1-x"
-        repo = _make_repo(ticket_dir, "saas-dashboard")
+        repo = _make_repo(ticket_dir, "spa-dashboard")
         (repo / "leftover.py").write_text("z = 3\n")
         state.save_ticket("PROJ-1", {"status": "proving", "slug": "PROJ-1-x",
                                      "proof_fingerprint": "r:proved"})
@@ -160,7 +160,7 @@ class TestMarkReadyRecordsWhatTheProofStandsFor:
     def test_a_clean_worktree_keeps_the_proof_current(self, tmp_path, tmp_state):
         import core.state as state
         ticket_dir = tmp_path / "tickets" / "PROJ-1-x"
-        _make_repo(ticket_dir, "saas-dashboard")
+        _make_repo(ticket_dir, "spa-dashboard")
         state.save_ticket("PROJ-1", {"status": "proving", "slug": "PROJ-1-x",
                                      "proof_fingerprint": "r:stale"})
         ctx = _ctx(tmp_path)

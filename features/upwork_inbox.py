@@ -1,6 +1,6 @@
 """Read the Upwork inbox on this machine and act on what a client asks for.
 
-Applying to jobs runs on linode and stays there. It is a write, it is rate
+Applying to jobs runs on a remote host and stays there. It is a write, it is rate
 capped, and it is already scheduled. Reading is idempotent, and it belongs
 next to the thing that consumes it, which is this daemon. So there is no
 poller on the other box, no capture file and no rsync: core/upwork_client.py
