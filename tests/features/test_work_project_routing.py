@@ -31,21 +31,21 @@ for (const e of vm.catalog) {
 vm.intakeContexts = [];
 out.idle = vm.hostName(vm.target);
 vm.toggleContext("personal");
-vm.toggleContext("lawphem");
-out.personalThenLawphem = [vm.hostName(vm.target), vm.intakeContexts.slice()];
-vm.toggleContext("clarivis");
-out.thenClarivis = [vm.hostName(vm.target), vm.intakeContexts.slice()];
-vm.projectFilter = ["atropos"];
-out.filterAtropos = Object.fromEntries(vm.hosts().map(h => [vm.hostName(h), vm.hostProjects(h)]));
-out.atroposTags = vm.projectsOf({ peer: "atropos", contexts: "frshty,slack_int" });
+vm.toggleContext("labsite");
+out.personalThenLabsite = [vm.hostName(vm.target), vm.intakeContexts.slice()];
+vm.toggleContext("cobalt");
+out.thenCobalt = [vm.hostName(vm.target), vm.intakeContexts.slice()];
+vm.projectFilter = ["astroco"];
+out.filterAstroco = Object.fromEntries(vm.hosts().map(h => [vm.hostName(h), vm.hostProjects(h)]));
+out.astrocoTags = vm.projectsOf({ peer: "astroco", contexts: "frshty,slack_int" });
 delete vm.peerMeta.frshty;
 out.frshtyDown = vm.catalog.map(e => e.key);
 out.frshtyDownFilter = vm.filterProjects;
 vm.peers = vm.peers.filter(p => p.key !== "personal");
 vm.intakeContexts = [];
 out.noPersonal = [vm.target, vm.targetMeta.personalLoaded];
-vm.toggleContext("clarivis");
-out.noPersonalClarivis = [vm.hostName(vm.target), vm.targetMeta.personalLoaded];
+vm.toggleContext("cobalt");
+out.noPersonalCobalt = [vm.hostName(vm.target), vm.targetMeta.personalLoaded];
 console.log(JSON.stringify(out));
 """
 
@@ -60,17 +60,18 @@ def _meta(*projects):
 
 
 STATE = {
-    "instanceName": "quill",
-    "localMeta": _meta(_project("frshty"), _project("quill", ["quill"])),
+    "instanceName": "quartz",
+    "boardInstance": "personal",
+    "localMeta": _meta(_project("frshty"), _project("quartz", ["quartz"])),
     "peers": [{"key": k, "base_url": "", "label": k}
-              for k in ("frshty", "aimyable", "clarivis", "personal", "atropos")],
+              for k in ("frshty", "apexco", "cobalt", "personal", "astroco")],
     "peerMeta": {
         "frshty": _meta(_project("frshty", ["frshty"])),
-        "aimyable": _meta(_project("aimyable", ["app"]), _project("frshty")),
-        "clarivis": _meta(_project("clarivis", ["clarivis"]), _project("frshty")),
-        "personal": _meta(_project("clarivis"), _project("frshty"), _project("lawphem"),
+        "apexco": _meta(_project("apexco", ["app"]), _project("frshty")),
+        "cobalt": _meta(_project("cobalt", ["cobalt"]), _project("frshty")),
+        "personal": _meta(_project("cobalt"), _project("frshty"), _project("labsite"),
                           _project("personal")),
-        "atropos": _meta(_project("frshty", ["portal"])),
+        "astroco": _meta(_project("frshty", ["portal"])),
     },
 }
 
@@ -88,31 +89,31 @@ def routed():
 class TestProjectRouting:
     def test_every_project_routes_to_its_host(self, routed):
         assert routed["launches"] == {
-            "aimyable": ["aimyable", ["aimyable"]],
-            "atropos": ["atropos", ["frshty"]],
-            "clarivis": ["clarivis", ["clarivis"]],
+            "apexco": ["apexco", ["apexco"]],
+            "astroco": ["astroco", ["frshty"]],
+            "cobalt": ["cobalt", ["cobalt"]],
             "frshty": ["frshty", ["frshty"]],
-            "lawphem": ["personal", ["lawphem"]],
+            "labsite": ["personal", ["labsite"]],
             "personal": ["personal", ["personal"]],
-            "quill": ["quill", ["quill"]],
+            "quartz": ["quartz", ["quartz"]],
         }
 
     def test_the_catalog_lists_each_project_once(self, routed):
         assert [row[0] for row in routed["catalog"]] == [
-            "aimyable", "atropos", "clarivis", "frshty", "lawphem", "personal", "quill"]
+            "apexco", "astroco", "cobalt", "frshty", "labsite", "personal", "quartz"]
 
     def test_a_task_without_a_project_launches_on_personal(self, routed):
         assert routed["idle"] == "personal"
 
     def test_a_second_project_of_the_same_host_joins_the_selection(self, routed):
-        assert routed["personalThenLawphem"] == ["personal", ["personal", "lawphem"]]
+        assert routed["personalThenLabsite"] == ["personal", ["personal", "labsite"]]
 
     def test_a_project_of_another_host_replaces_the_selection(self, routed):
-        assert routed["thenClarivis"] == ["clarivis", ["clarivis"]]
+        assert routed["thenCobalt"] == ["cobalt", ["cobalt"]]
 
     def test_a_project_whose_host_is_down_does_not_fall_back_to_personal(self, routed):
         assert "frshty" not in routed["frshtyDown"]
-        assert "lawphem" in routed["frshtyDown"]
+        assert "labsite" in routed["frshtyDown"]
 
     def test_a_project_whose_host_is_down_stays_in_the_filter(self, routed):
         assert "frshty" in routed["frshtyDownFilter"]
@@ -121,15 +122,15 @@ class TestProjectRouting:
         assert routed["noPersonal"] == [None, False]
 
     def test_a_project_still_routes_to_its_host_without_personal(self, routed):
-        assert routed["noPersonalClarivis"] == ["clarivis", True]
+        assert routed["noPersonalCobalt"] == ["cobalt", True]
 
     def test_the_filter_sends_each_host_its_own_project_key(self, routed):
-        assert routed["filterAtropos"] == {
-            "quill": "", "frshty": "", "aimyable": "", "clarivis": "", "personal": "",
-            "atropos": "frshty"}
+        assert routed["filterAstroco"] == {
+            "quartz": "", "frshty": "", "apexco": "", "cobalt": "", "personal": "",
+            "astroco": "frshty"}
 
-    def test_an_atropos_task_shows_the_atropos_tag(self, routed):
-        assert routed["atroposTags"] == ["atropos"]
+    def test_an_astroco_task_shows_the_astroco_tag(self, routed):
+        assert routed["astrocoTags"] == ["astroco"]
 
 
 class TestBoardHidesHosts:

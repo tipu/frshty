@@ -103,6 +103,8 @@ python frshty.py --multi config/a.toml config/b.toml --port 7000   # several
 
 Open `http://localhost:<port>`.
 
+Instance discovery skips `test.toml`, every `*-test.toml` and every `*.example.toml` in `config/`. Name a scratch config `<name>-test.toml` to keep it out of the board.
+
 Credentials come from environment variables named in your config (`BB_TOKEN`, `JIRA_TOKEN`, `LINEAR_TOKEN`, and so on). See `config/example.toml` for the full list. The model CLIs (Claude Code, Codex, and the third consensus voice `agy`) each manage their own auth. Log in once on the host, then mount those auth directories into the container.
 
 Containers:

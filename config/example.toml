@@ -145,7 +145,7 @@ pr_autofix = false                # github only: every PR the instance account o
 #                                     # Upwork on this machine. frshty opens one throwaway tab
 #                                     # there to lift the bearer token the inbox API needs, and
 #                                     # never touches the tab you are reading.
-# user_id = "718034110359347200"      # your own Upwork user id, the `user_uid` cookie of that
+# user_id = "100000000000000001"      # your own Upwork user id, the `user_uid` cookie of that
 #                                     # profile. It decides which lines in a room are yours.
 #                                     # Left unset, frshty reads it off the lifted session.
 # operator_name = "Your Name"         # how the judge refers to you when it names the task
@@ -321,6 +321,6 @@ pr_autofix = false                # github only: every PR the instance account o
 # Maps github logins to Slack targets so /wizard can draft and send pings.
 # slack_int's HTTP bridge (127.0.0.1:8900) does the actual sending.
 # [slack_targets.octocat]
-# workspace = "tipucorp"
+# workspace = "examplecorp"
 # slack_user_id = "U01ABC"
 # dm_channel_id = "D01XYZ"

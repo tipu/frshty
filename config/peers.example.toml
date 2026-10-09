@@ -7,5 +7,5 @@
 # label    optional display name; defaults to key
 
 # [[peers]]
-# key = "atropos"
-# base_url = "http://192.168.1.117:7100"
+# key = "astroco"
+# base_url = "http://192.0.2.10:7100"

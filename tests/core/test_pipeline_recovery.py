@@ -586,9 +586,9 @@ class TestScanTicketsValidationSkip:
         config["job"]["platform"] = "github"
         config["_base_url"] = "http://localhost:8000"
         config["_state_dir"] = tmp_path / ".frshty" / "test"
-        config["workspace"]["repos"] = ["lumeninv"]
-        (config["workspace"]["root"] / "lumeninv").mkdir(parents=True, exist_ok=True)
-        (config["workspace"]["root"] / "lumeninv" / ".git").mkdir(parents=True, exist_ok=True)
+        config["workspace"]["repos"] = ["lynxinv"]
+        (config["workspace"]["root"] / "lynxinv").mkdir(parents=True, exist_ok=True)
+        (config["workspace"]["root"] / "lynxinv" / ".git").mkdir(parents=True, exist_ok=True)
         config["github"] = {"repo": "org/repo"}
 
         monkeypatch.setattr(tix, "_fetch_open_prs", lambda c: [])

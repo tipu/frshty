@@ -2,7 +2,7 @@
 
 Question: did frshty run the final ticket step that checks for unnecessary code and
 branch state against main, for
-https://bitbucket.org/<org>/windows-rpa-client-schema/pull-requests/19 ?
+https://bitbucket.org/<org>/windows-agent-schema/pull-requests/19 ?
 
 Answer: no. The step did not run before the PR was opened. The step also cannot
 report the defect that was found. Both facts are bugs. They are separate bugs.
@@ -27,7 +27,7 @@ recursive field"). The dead code stood in the PR for nine days.
 | 2026-08-18T00:58 - 01:07 | `start_reviewing` runs `/tri-review` | jobs 319552 |
 | 2026-08-18T01:07 - 01:25 | `fix_review_findings` fails: `git commit` returned exit status 1 | job 319578 |
 | 2026-08-18T01:31 | ticket moves to `blocked` | ticket_transitions |
-| 2026-08-19T20:36 | operator override back to `reviewing`, reason "manual override: review passed but fix_review_findings died on the commit" | ticket_transitions, actor `danial` |
+| 2026-08-19T20:36 | operator override back to `reviewing`, reason "manual override: review passed but fix_review_findings died on the commit" | ticket_transitions, actor `dakota` |
 | 2026-08-19T21:59 | ticket reaches `pr_ready` | ticket_transitions |
 | 2026-08-20T08:20:36 | `ticket_pr_created`, 5 repos. Transition reason `manual create-pr`. PR #19 opens | log_events, ticket_transitions |
 | 2026-08-20T09:00:53 | commit `e895a14` adds the consensus scope review to frshty | git log, frshty repo |
@@ -99,7 +99,7 @@ correctness are reviewed elsewhere; they must not affect your verdict"
 class of finding.
 
 This matches the 19 recorded runs. Every one of them failed the ticket overall, and
-every one of them passed `windows-rpa-client-schema`.
+every one of them passed `windows-agent-schema`.
 
 ## Bug 3: tri-review has no repo coverage requirement
 
@@ -108,8 +108,8 @@ lists "dead code" as a target (`features/reviewer.py:69`, and the same persona i
 `~/.claude/commands/tri-review.md`).
 
 It never examined the schema repo. `docs/tri-review.md` for DEV-635 names
-`django-drf-app`, `saas-dashboard`, `websocket-server`, and `windows-rpa-client`. It
-never names `windows-rpa-client-schema`, although that repo had a branch diff at review
+`django-api`, `spa-dashboard`, `websocket-hub`, and `windows-agent`. It
+never names `windows-agent-schema`, although that repo had a branch diff at review
 time.
 
 The cause is that `start_reviewing` (`core/tasks/tickets.py:1328`) passes a bare prompt,

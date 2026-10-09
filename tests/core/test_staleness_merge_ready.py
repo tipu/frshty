@@ -33,7 +33,7 @@ def _ticket(key, prs, ci_passed=True, status="in_review"):
 
 def _pr(repo, pr_id, approvers, pr_state="OPEN"):
     return {"repo": repo, "id": pr_id, "url": f"http://pr/{repo}/{pr_id}",
-            "author": "danial", "approvers": approvers, "pr_state": pr_state}
+            "author": "dakota", "approvers": approvers, "pr_state": pr_state}
 
 
 def test_every_open_pr_approved_qualifies():

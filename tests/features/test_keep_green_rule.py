@@ -1,6 +1,6 @@
 """Every fixer that pushes to a live PR branch must hold the green checks green.
 
-Observed on LSC-78 (atroposhealth/text-to-tql-service#184). The PR-comment
+Observed on LSC-78 (astrocohealth/query-service#184). The PR-comment
 fixer pushed 3fd23633, which broke the `build` check (two ruff errors) while
 `unit-tests` stayed green. CI fix attempt 1 pushed 11b3e083: `build` went
 green, `unit-tests` went red. CI fix attempt 2 pushed 7576ca84: `unit-tests`
@@ -129,7 +129,7 @@ class TestCommentFixersCarryTheRule:
         platform.get_pr_diff.return_value = "diff --git a/a.py b/a.py\n"
         platform.push_branch.return_value = {"ok": True}
         platform.self_id.return_value = "alice"
-        config = {"job": {"key": "clarivis"}, "features": {"pr_autofix": True},
+        config = {"job": {"key": "cobalt"}, "features": {"pr_autofix": True},
                   "_state_dir": tmp_path, "_base_url": "http://base"}
         with patch("features.pr_autofix.make_platform", return_value=platform), \
              patch("features.pr_autofix._ensure_worktree", return_value=tmp_path), \

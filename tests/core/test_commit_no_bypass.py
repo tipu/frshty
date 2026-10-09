@@ -3,7 +3,7 @@
 The docstring claimed it withholds --no-verify so real lint failures surface. It
 did not: `args.append("--no-verify")` sat outside the config check, so any repo
 where the pre-commit binary could not be located committed unverified, and a repo
-with no pre-commit config had its native git hooks suppressed too. windows-rpa-client
+with no pre-commit config had its native git hooks suppressed too. windows-agent
 committed that way during DEV-635 and was reported as clean.
 
 It also could not find a binary it had itself just chosen: _find_pre_commit falls

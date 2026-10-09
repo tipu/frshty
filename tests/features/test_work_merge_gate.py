@@ -1,7 +1,7 @@
 """The work board asks a project whether a task may merge its own PR.
 
 The board used to tell every agent on every project to merge. A task on the
-atropos instance merged a company pull request while that instance's config
+astroco instance merged a company pull request while that instance's config
 said auto_merge = false, because nothing on the work board read that switch.
 These cover the switch, the delivery rule that states it, and the gate that
 enforces it.
@@ -35,7 +35,7 @@ def _projects(monkeypatch, **auto_merge):
 class TestParsePrMerge:
     def test_detects_a_pull_request_merge(self):
         for command in (
-            "gh pr merge 184 --repo atroposhealth/text-to-tql-service --squash",
+            "gh pr merge 184 --repo astrocohealth/query-service --squash",
             "gh pr merge --admin --merge",
             "cd /x && gh pr merge 1",
             "/opt/homebrew/bin/gh pr merge 1 --rebase",
@@ -48,7 +48,7 @@ class TestParsePrMerge:
             "curl -s -X POST http://localhost:7100/api/tickets/LSC-78/merge",
             'curl -X PUT "https://api.github.com/repos/o/r/pulls/$PR/merge"',
             "git status; gh pr merge 1",
-            "gh pr --repo atroposhealth/text-to-tql-service merge 184",
+            "gh pr --repo astrocohealth/query-service merge 184",
             "env gh pr merge 184",
             "env -u GH_TOKEN gh pr merge 184",
             "sudo -u root gh pr merge 184",
@@ -131,8 +131,8 @@ class TestSegmentProgram:
 
 class TestMergePolicy:
     def test_a_project_that_allows_a_merge_holds_nothing(self, monkeypatch):
-        _projects(monkeypatch, bh=True)
-        assert work_launch.merge_review_required(["bh"]) == []
+        _projects(monkeypatch, bolt=True)
+        assert work_launch.merge_review_required(["bolt"]) == []
 
     def test_a_project_that_forbids_a_merge_holds_it(self, monkeypatch):
         _projects(monkeypatch, acme=False)
@@ -141,13 +141,13 @@ class TestMergePolicy:
     def test_a_project_with_no_config_holds_it(self, monkeypatch, tmp_path):
         _projects(monkeypatch)
         monkeypatch.setattr(work_launch, "_CONFIG_DIR", str(tmp_path))
-        assert work_launch.merge_review_required(["clarivis"]) == ["clarivis"]
+        assert work_launch.merge_review_required(["cobalt"]) == ["cobalt"]
 
     def test_frshty_with_no_config_merges(self, monkeypatch, tmp_path):
         _projects(monkeypatch)
         monkeypatch.setattr(work_launch, "_CONFIG_DIR", str(tmp_path))
         assert work_launch.merge_review_required(["frshty"]) == []
-        assert work_launch.merge_review_required(["frshty", "clarivis"]) == ["clarivis"]
+        assert work_launch.merge_review_required(["frshty", "cobalt"]) == ["cobalt"]
 
     def test_a_config_keyed_frshty_still_decides(self, monkeypatch, tmp_path):
         _projects(monkeypatch, frshty=False)
@@ -173,12 +173,12 @@ class TestMergePolicy:
         assert work_launch.merge_review_required(["frshty"]) == ["frshty"]
 
     def test_one_holding_project_holds_the_whole_task(self, monkeypatch):
-        _projects(monkeypatch, bh=True, clarivis=False)
-        assert work_launch.merge_review_required(["bh", "clarivis"]) == ["clarivis"]
+        _projects(monkeypatch, bolt=True, cobalt=False)
+        assert work_launch.merge_review_required(["bolt", "cobalt"]) == ["cobalt"]
 
     def test_the_slack_label_is_not_a_project(self, monkeypatch):
-        _projects(monkeypatch, bh=True)
-        assert work_launch.merge_review_required(f"bh,{work_launch.SLACK_LABEL}") == []
+        _projects(monkeypatch, bolt=True)
+        assert work_launch.merge_review_required(f"bolt,{work_launch.SLACK_LABEL}") == []
 
     def test_a_task_with_no_project_falls_back_to_the_board(self, monkeypatch):
         _projects(monkeypatch)
@@ -189,7 +189,7 @@ class TestMergePolicy:
     def test_a_registry_that_is_not_loaded_reads_the_config_file(self, monkeypatch, tmp_path):
         monkeypatch.setattr(work_launch, "_instance_config", lambda key: None)
         monkeypatch.setattr(work_launch, "_CONFIG_DIR", str(tmp_path))
-        # A file is found by the key it declares, not by its name: the atropos
+        # A file is found by the key it declares, not by its name: the astroco
         # instance is keyed "frshty" and lives in config/local.toml.
         (tmp_path / "local.toml").write_text('[job]\nkey = "opener"\n[pr]\nauto_merge = true\n')
         (tmp_path / "shut.toml").write_text('[job]\nkey = "shut"\n[pr]\nauto_merge = false\n')
@@ -225,16 +225,16 @@ class TestDeliveryRule:
         assert "Delivery is part of the objective" in rule
 
     def test_a_holding_project_removes_the_merge_step_and_is_named(self):
-        rule = work_store.delivery_rule(["frshty", "clarivis"])
+        rule = work_store.delivery_rule(["frshty", "cobalt"])
         assert "merge it when it is mergeable" not in rule
         assert "Stop at the pull request" in rule
-        assert "frshty, clarivis" in rule
+        assert "frshty, cobalt" in rule
         assert "Delivery is part of the objective" in rule
 
     def test_the_continue_prompt_carries_the_rule_of_the_task(self, monkeypatch):
-        _projects(monkeypatch, bh=True, clarivis=False)
-        assert "merge it when it is mergeable" in work_store.continue_prompt("bh")
-        held = work_store.continue_prompt("clarivis")
+        _projects(monkeypatch, bolt=True, cobalt=False)
+        assert "merge it when it is mergeable" in work_store.continue_prompt("bolt")
+        held = work_store.continue_prompt("cobalt")
         assert "merge it when it is mergeable" not in held
         assert "Stop at the pull request" in held
 
@@ -249,15 +249,15 @@ class TestMergeGate:
         assert _gate_events(item_id)[0]["verdict"] == "fail"
 
     def test_an_allowing_project_permits_the_merge(self, monkeypatch):
-        _projects(monkeypatch, bh=True)
-        item_id, sid = _mkrun("add the job runner", contexts="bh")
+        _projects(monkeypatch, bolt=True)
+        item_id, sid = _mkrun("add the job runner", contexts="bolt")
         out = work_launch.gate_merge(sid, "gh pr merge 3 --squash")
         assert out["decision"] == "allow"
         assert _gate_events(item_id)[0]["verdict"] == "pass"
 
     def test_an_objective_that_asks_for_the_merge_permits_it(self, monkeypatch):
         _projects(monkeypatch, frshty=False)
-        item_id, sid = _mkrun("Merge PR tipu/frshty#20 into main", contexts="frshty")
+        item_id, sid = _mkrun("Merge PR octocat/frshty#20 into main", contexts="frshty")
         out = work_launch.gate_merge(sid, "gh pr merge 20 --squash")
         assert out["decision"] == "allow"
         assert _gate_events(item_id)[0]["verdict"] == "operator_asked"
@@ -299,7 +299,7 @@ class TestMergeGate:
         assert out["decision"] == "allow"
 
     def test_the_incident_that_produced_this_gate(self, monkeypatch):
-        """Work item 125 on atropos, whose instance sets auto_merge = false."""
+        """Work item 125 on astroco, whose instance sets auto_merge = false."""
         _projects(monkeypatch, frshty=False)
         item_id, sid = _mkrun(
             "Remove or simplify the explicit code generation in "
@@ -307,7 +307,7 @@ class TestMergeGate:
             "provided by create_deep_agent function",
             contexts=f"frshty,{work_launch.SLACK_LABEL}")
         out = work_launch.gate_merge(
-            sid, "gh pr merge 184 --repo atroposhealth/text-to-tql-service --merge")
+            sid, "gh pr merge 184 --repo astrocohealth/query-service --merge")
         assert out["decision"] == "deny"
         assert _gate_events(item_id)[0]["projects"] == ["frshty"]
 
@@ -349,12 +349,12 @@ class TestTaskIdRule:
         assert work_launch._task_id_rule(9993, ["frshty"]) == ""
 
     def test_any_other_project_keeps_the_id_out(self):
-        rule = work_launch._task_id_rule(9993, ["clarivis"])
+        rule = work_launch._task_id_rule(9993, ["cobalt"])
         assert "Never write the work item id 9993" in rule
         assert "work-9993" in rule
 
     def test_one_other_project_brings_the_rule_back(self):
-        assert work_launch._task_id_rule(9993, "frshty,clarivis") != ""
+        assert work_launch._task_id_rule(9993, "frshty,cobalt") != ""
 
     def test_a_task_with_no_project_keeps_the_id_out(self):
         assert work_launch._task_id_rule(9993, "") != ""
@@ -365,23 +365,23 @@ class TestTaskIdRule:
 
 class TestLocalMergeTaskId:
     def test_a_merge_with_the_default_message_is_denied(self):
-        item_id, sid = _mkrun("merge main in", contexts="clarivis")
+        item_id, sid = _mkrun("merge main in", contexts="cobalt")
         out = work_launch.gate_merge(sid, "git merge origin/main --no-edit")
         assert out["decision"] == "deny"
         assert str(item_id) in out["reason"]
 
     def test_a_merge_message_with_the_id_is_denied(self):
-        item_id, sid = _mkrun("merge main in", contexts="clarivis")
+        item_id, sid = _mkrun("merge main in", contexts="cobalt")
         out = work_launch.gate_merge(sid, f'git merge origin/main -m "Merge main into work-{item_id}-x"')
         assert out["decision"] == "deny"
 
     def test_a_merge_with_its_own_message_is_allowed(self):
-        item_id, sid = _mkrun("merge main in", contexts="clarivis")
+        item_id, sid = _mkrun("merge main in", contexts="cobalt")
         out = work_launch.gate_merge(sid, 'git merge origin/main -m "Merge main"')
         assert out["decision"] == "allow"
 
     def test_a_merge_that_makes_no_commit_is_allowed(self):
-        item_id, sid = _mkrun("merge main in", contexts="clarivis")
+        item_id, sid = _mkrun("merge main in", contexts="cobalt")
         assert work_launch.gate_merge(sid, "git merge --abort")["decision"] == "allow"
         assert work_launch.gate_merge(sid, "git merge --ff-only origin/main")["decision"] == "allow"
 

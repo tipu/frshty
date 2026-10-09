@@ -120,8 +120,8 @@ def test_preview_endpoint_returns_descriptions(fresh_db, tmp_path):
 def test_next_invoice_number_scopes_billcom_query_to_customer(fresh_db, tmp_path):
     """Observed bug: next_invoice_number called billcom.list_invoices() with no
     customer filter, which returned the GLOBAL 100 oldest invoices (sorted
-    ASC by createdTime). A recent invoice like DJ-AIMY-INV-1 from 2026-04-14
-    was never in the window, so the function returned DJ-AIMY-INV-1 again,
+    ASC by createdTime). A recent invoice like AB-APEX-INV-1 from 2026-04-14
+    was never in the window, so the function returned AB-APEX-INV-1 again,
     causing a bill.com 422 'duplicate invoice number' (BDC_1171) on POST.
     Fix: pass customer_id to list_invoices so bill.com filters server-side."""
     import asyncio
@@ -235,7 +235,7 @@ def test_day_hours_capped_at_8_on_invoice(fresh_db, tmp_path):
 
 def test_list_invoices_filters_to_instance_prefix(fresh_db, tmp_path):
     """A bill.com customer can carry invoices from multiple prefix schemes
-    (e.g. legacy `DJ-AIMY-N` plus the current `DJ-AIMY-INV-N`). Each frshty
+    (e.g. legacy `AB-APEX-N` plus the current `AB-APEX-INV-N`). Each frshty
     instance owns its own series via [billing].invoice_prefix and must NOT
     treat cross-scheme invoices as part of its own — otherwise next-number
     computation and overlap detection both get polluted."""

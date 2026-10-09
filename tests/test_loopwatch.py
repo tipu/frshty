@@ -226,7 +226,7 @@ def test_probe_survives_a_truncated_transcript(tmp_path):
 
 
 def test_probe_is_python_38_syntax():
-    """The linode loop runs Python 3.8.2, so the probe must parse there."""
+    """The remote loop runs Python 3.8.2, so the probe must parse there."""
     done = subprocess.run(
         [sys.executable, "-c",
          "import ast,sys; ast.parse(open(sys.argv[1]).read(), feature_version=(3,8))",
@@ -289,7 +289,7 @@ def test_config_reports_a_missing_file(tmp_path):
 
 def test_remote_argv_quotes_the_path_and_the_note():
     loop = {"key": "k", "label": "k", "host": "box", "repo": "/srv/a loop",
-            "run_as": "tipu", "python": "python3", "cadence_minutes": None}
+            "run_as": "octocat", "python": "python3", "cadence_minutes": None}
     command = loopwatch.probe_argv(loop, 5, 15)[-1]
     inner = shlex.split(command)
     assert inner[:3] == ["su", "-s", "/bin/sh"]

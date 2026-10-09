@@ -591,7 +591,7 @@ class TestPersonalConfig:
         import tomllib
         seen_hosts = {}
         for p in sorted(pathlib.Path("config").glob("*.toml")):
-            if p.name in ("example.toml", "test.toml", "tipu-test.toml", "discovery.toml"):
+            if p.name in ("example.toml", "test.toml", "discovery.toml") or p.name.endswith("-test.toml"):
                 continue
             raw = tomllib.loads(p.read_text())
             host = (raw.get("job") or {}).get("host", "")

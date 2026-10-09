@@ -51,7 +51,7 @@ def client(tmp_path):
         "pr": {"auto_pr": True},
         "slack": {},
         "slack_targets": {
-            "alice": {"workspace": "tipucorp", "slack_user_id": "U1"},
+            "alice": {"workspace": "examplecorp", "slack_user_id": "U1"},
         },
         "slack_bridge": {
             "url": "http://127.0.0.1:8900/send",
@@ -180,7 +180,7 @@ class TestReviewerMappingFallback:
         actions = items[0]["actions"]
         assert len(actions) == 1
         assert actions[0]["action_type"] == "slack_ping"
-        assert actions[0]["payload"]["target"] == {"workspace": "tipucorp", "channel": "U1"}
+        assert actions[0]["payload"]["target"] == {"workspace": "examplecorp", "channel": "U1"}
 
 
 class TestSlackPing:
@@ -190,7 +190,7 @@ class TestSlackPing:
                 "github_login": "alice", "text": "hello", "dry_run": True,
             })
         assert resp.status_code == 200, resp.text
-        assert resp.json() == {"would_send": {"workspace": "tipucorp", "channel": "U1", "text": "hello"}}
+        assert resp.json() == {"would_send": {"workspace": "examplecorp", "channel": "U1", "text": "hello"}}
         bridge.assert_not_called()
 
     def test_real_send_forwards_to_bridge_and_returns_its_response(self, client):
@@ -203,7 +203,7 @@ class TestSlackPing:
         assert resp.json() == {"ok": True, "ts": "1234.5678", "channel": "U1"}
         bridge.assert_called_once()
         payload = bridge.call_args[0][0]
-        assert payload == {"workspace": "tipucorp", "channel": "U1", "text": "real ping"}
+        assert payload == {"workspace": "examplecorp", "channel": "U1", "text": "real ping"}
 
     def test_bridge_unavailable_returns_502(self, client):
         with patch("web.wizard._post_slack_bridge",
@@ -248,7 +248,7 @@ class TestDraftPing:
                 "github_login": "alice", "pr_url": "u", "pr_title": "t", "context": "",
             })
         body = resp.json()
-        assert body["target"] == {"workspace": "tipucorp", "channel": "U1"}
+        assert body["target"] == {"workspace": "examplecorp", "channel": "U1"}
         assert body["text"] == "ping text"
 
 

@@ -63,7 +63,7 @@ PUB = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKEY frshty-frshty"
 
 
 class TestGithub:
-    def _handler(self, calls, login="tipu", keys=(), post_status=201):
+    def _handler(self, calls, login="octocat", keys=(), post_status=201):
         def handler(request):
             calls.append((request.method, request.url.path, request.content))
             if request.url.path == "/user":
@@ -76,7 +76,7 @@ class TestGithub:
     def test_adds_a_missing_key(self):
         calls = []
         client = _client(self._handler(calls), ssh_keys.GITHUB_API)
-        assert ssh_keys.register_github("t", "tipu", "frshty-frshty", PUB, client) == "created"
+        assert ssh_keys.register_github("t", "octocat", "frshty-frshty", PUB, client) == "created"
         posts = [c for c in calls if c[0] == "POST"]
         assert len(posts) == 1
         assert json.loads(posts[0][2]) == {"title": "frshty-frshty", "key": PUB}
@@ -85,20 +85,20 @@ class TestGithub:
         calls = []
         client = _client(self._handler(calls, keys=["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKEY"]),
                          ssh_keys.GITHUB_API)
-        assert ssh_keys.register_github("t", "tipu", "frshty-frshty", PUB, client) == "existing"
+        assert ssh_keys.register_github("t", "octocat", "frshty-frshty", PUB, client) == "existing"
         assert not [c for c in calls if c[0] == "POST"]
 
     def test_wrong_account_is_refused(self):
         calls = []
         client = _client(self._handler(calls, login="someone"), ssh_keys.GITHUB_API)
         with pytest.raises(ssh_keys.KeyBootstrapError, match="belongs to 'someone'"):
-            ssh_keys.register_github("t", "tipu", "frshty-frshty", PUB, client)
+            ssh_keys.register_github("t", "octocat", "frshty-frshty", PUB, client)
         assert not [c for c in calls if c[0] == "POST"]
 
     def test_rejected_add_is_fatal(self):
         client = _client(self._handler([], post_status=403), ssh_keys.GITHUB_API)
         with pytest.raises(ssh_keys.KeyBootstrapError, match="HTTP 403"):
-            ssh_keys.register_github("t", "tipu", "frshty-frshty", PUB, client)
+            ssh_keys.register_github("t", "octocat", "frshty-frshty", PUB, client)
 
     def test_missing_key_scope_names_the_fix(self):
         def handler(request):
@@ -107,11 +107,11 @@ class TestGithub:
             return httpx.Response(404, json={"message": "Not Found"})
 
         with pytest.raises(ssh_keys.KeyBootstrapError, match="admin:public_key"):
-            ssh_keys.register_github("t", "q", "frshty-quill", PUB, _client(handler, ssh_keys.GITHUB_API))
+            ssh_keys.register_github("t", "q", "frshty-quartz", PUB, _client(handler, ssh_keys.GITHUB_API))
 
     def test_missing_token_is_fatal(self):
         with pytest.raises(ssh_keys.KeyBootstrapError, match="GH_TOKEN"):
-            ssh_keys.register_github("", "tipu", "frshty-frshty", PUB)
+            ssh_keys.register_github("", "octocat", "frshty-frshty", PUB)
 
 
 class TestBitbucket:
@@ -129,7 +129,7 @@ class TestBitbucket:
             return httpx.Response(201, json={})
 
         client = _client(handler, ssh_keys.BITBUCKET_API)
-        assert ssh_keys.register_bitbucket("me", "tok", "u1", "frshty-aimyable", PUB, client) == "created"
+        assert ssh_keys.register_bitbucket("me", "tok", "u1", "frshty-apexco", PUB, client) == "created"
         assert [c[0] for c in calls] == ["GET", "GET", "POST"]
 
     def test_existing_key_on_second_page(self):
@@ -285,8 +285,8 @@ class TestInstanceLauncher:
     def _config(self, tmp_path, extra=""):
         ws = tmp_path / "ws"
         ws.mkdir(exist_ok=True)
-        path = tmp_path / "aimyable.toml"
-        path.write_text('[job]\nkey = "aimyable"\nplatform = "bitbucket"\nport = 7100\n'
+        path = tmp_path / "apexco.toml"
+        path.write_text('[job]\nkey = "apexco"\nplatform = "bitbucket"\nport = 7100\n'
                         f'[workspace]\nroot = "{ws}"\n' + extra)
         return path
 
@@ -309,23 +309,23 @@ class TestInstanceLauncher:
         volumes = [args[i + 1] for i, a in enumerate(args) if a == "-v"]
         sources = [v.split(":")[0] for v in volumes]
         assert str(home / ".ssh") not in sources
-        assert f"{tmp_path / 'boxes' / 'aimyable' / 'ssh'}:{home / '.ssh'}" in volumes
-        state = tmp_path / "boxes" / "aimyable" / "state"
+        assert f"{tmp_path / 'boxes' / 'apexco' / 'ssh'}:{home / '.ssh'}" in volumes
+        state = tmp_path / "boxes" / "apexco" / "state"
         assert f"{state}:{state}" in volumes
         assert f"FRSHTY_ROOT={state}" in args
         assert f"GVOICE_PROFILE_DIR={state / 'gvoice'}" in args
         assert str(home / ".frshty") not in sources
         assert f"{tmp_path / 'ws'}:{tmp_path / 'ws'}" in volumes
         assert f"{home / '.claude.json'}:/run/frshty/seed/.claude.json:ro" in volumes
-        assert stat.S_IMODE((tmp_path / "boxes" / "aimyable" / "env").stat().st_mode) == 0o600
+        assert stat.S_IMODE((tmp_path / "boxes" / "apexco" / "env").stat().st_mode) == 0o600
 
     def test_container_port_overrides_job_port(self, tmp_path, monkeypatch):
         mod, _ = self._launcher(tmp_path, monkeypatch)
         path = self._config(tmp_path, "[container]\nport = 7132\n")
         args = mod.run_args(mod.load(str(path)), path, check=False)
         assert args[-2:] == ["--port", "7132"]
-        assert "FRSHTY_BOARD_INSTANCE=aimyable" in args
-        assert "FRSHTY_PEER_SELF=aimyable" in args
+        assert "FRSHTY_BOARD_INSTANCE=apexco" in args
+        assert "FRSHTY_PEER_SELF=apexco" in args
 
     def test_check_runs_the_proof_only(self, tmp_path, monkeypatch):
         mod, _ = self._launcher(tmp_path, monkeypatch)
@@ -355,7 +355,7 @@ class TestInstanceLauncher:
         monkeypatch.setenv("DISPLAY", ":0")
         monkeypatch.delenv("XAUTHORITY", raising=False)
         args = mod.gvoice_login_args(config)
-        state = tmp_path / "boxes" / "aimyable" / "state"
+        state = tmp_path / "boxes" / "apexco" / "state"
         assert f"GVOICE_PROFILE_DIR={state / 'gvoice'}" in run
         assert f"GVOICE_PROFILE_DIR={state / 'gvoice'}" in args
         assert "GVOICE_CHROME_CHANNEL=chrome" in args
@@ -383,7 +383,7 @@ class TestInstanceLauncher:
         monkeypatch.setattr(mod, "X11_SOCKETS", sockets)
         monkeypatch.setenv("DISPLAY", ":0")
         monkeypatch.delenv("XAUTHORITY", raising=False)
-        profile = tmp_path / "boxes" / "aimyable" / "state" / "gvoice-profile"
+        profile = tmp_path / "boxes" / "apexco" / "state" / "gvoice-profile"
         config["direct_inbox"] = {"gvoice_profile_dir": str(profile),
                                   "gvoice_chrome_channel": "chrome-beta"}
         args = mod.gvoice_login_args(config)
@@ -408,7 +408,7 @@ class TestInstanceLauncher:
         mod, _ = self._launcher(tmp_path, monkeypatch)
         calls = []
         pids = iter(["10", "20"])
-        monkeypatch.setattr(mod, "instance_containers", lambda: ["frshty-aimyable"])
+        monkeypatch.setattr(mod, "instance_containers", lambda: ["frshty-apexco"])
         monkeypatch.setattr(mod, "app_pid", lambda name: next(pids))
 
         def run(cmd, **kwargs):
@@ -417,7 +417,7 @@ class TestInstanceLauncher:
 
         monkeypatch.setattr(mod.subprocess, "run", run)
         assert mod.reload(timeout=1) == 0
-        assert ["docker", "exec", "frshty-aimyable", "kill", "-HUP", "1"] in calls
+        assert ["docker", "exec", "frshty-apexco", "kill", "-HUP", "1"] in calls
         assert not any(cmd[:2] == ["docker", "kill"] for cmd in calls)
 
     def test_macos_puts_the_database_on_a_volume(self, tmp_path, monkeypatch):
@@ -426,7 +426,7 @@ class TestInstanceLauncher:
         path = self._config(tmp_path)
         args = mod.run_args(mod.load(str(path)), path, check=False)
         volumes = [args[i + 1] for i, a in enumerate(args) if a == "-v"]
-        assert "frshty-aimyable-db:/var/lib/frshty" in volumes
+        assert "frshty-apexco-db:/var/lib/frshty" in volumes
         assert "FRSHTY_DB=/var/lib/frshty/frshty.db" in args
 
     def test_linux_keeps_the_database_in_state(self, tmp_path, monkeypatch):
@@ -434,14 +434,14 @@ class TestInstanceLauncher:
         monkeypatch.setattr(mod.platform, "system", lambda: "Linux")
         path = self._config(tmp_path)
         args = mod.run_args(mod.load(str(path)), path, check=False)
-        state = tmp_path / "boxes" / "aimyable" / "state"
+        state = tmp_path / "boxes" / "apexco" / "state"
         assert f"FRSHTY_DB={state / 'frshty.db'}" in args
         assert not any(a.endswith(":/var/lib/frshty") for a in args)
 
     def test_check_before_the_move_reads_the_state_database(self, tmp_path, monkeypatch):
         mod, _ = self._launcher(tmp_path, monkeypatch)
         monkeypatch.setattr(mod.platform, "system", lambda: "Darwin")
-        state = tmp_path / "boxes" / "aimyable" / "state"
+        state = tmp_path / "boxes" / "apexco" / "state"
         state.mkdir(parents=True)
         (state / "frshty.db").write_bytes(b"")
         path = self._config(tmp_path)
@@ -469,7 +469,7 @@ class TestInstanceLauncher:
     def test_up_moves_the_state_database_into_the_volume(self, tmp_path, monkeypatch):
         mod, _ = self._launcher(tmp_path, monkeypatch)
         monkeypatch.setattr(mod.platform, "system", lambda: "Darwin")
-        root = tmp_path / "boxes" / "aimyable"
+        root = tmp_path / "boxes" / "apexco"
         (root / "state").mkdir(parents=True)
         conn = sqlite3.connect(root / "state" / "frshty.db")
         conn.execute("PRAGMA journal_mode=WAL")
@@ -484,7 +484,7 @@ class TestInstanceLauncher:
             mod.prepare_db_volume(config, root, move=True)
         finally:
             conn.close()
-        assert ["docker", "volume", "create", "frshty-aimyable-db"] in calls
+        assert ["docker", "volume", "create", "frshty-apexco-db"] in calls
         moved = sqlite3.connect(volume_dir / "frshty.db")
         assert moved.execute("SELECT v FROM t").fetchall() == [("kept",)]
         moved.close()
@@ -494,7 +494,7 @@ class TestInstanceLauncher:
     def test_up_refuses_when_the_volume_already_holds_a_database(self, tmp_path, monkeypatch):
         mod, _ = self._launcher(tmp_path, monkeypatch)
         monkeypatch.setattr(mod.platform, "system", lambda: "Darwin")
-        root = tmp_path / "boxes" / "aimyable"
+        root = tmp_path / "boxes" / "apexco"
         (root / "state").mkdir(parents=True)
         sqlite3.connect(root / "state" / "frshty.db").close()
         volume_dir = tmp_path / "volume"
@@ -514,21 +514,21 @@ class TestInstanceLauncher:
         (tmp_path / "boxes" / "peers.toml").write_text("")
         args = mod.run_args(mod.load(str(path)), path, check=False)
         volumes = [args[i + 1] for i, a in enumerate(args) if a == "-v"]
-        stable = tmp_path / "boxes" / "aimyable" / "config" / "aimyable.toml"
-        assert f"{stable}:/app/config/aimyable.toml" in volumes
+        stable = tmp_path / "boxes" / "apexco" / "config" / "apexco.toml"
+        assert f"{stable}:/app/config/apexco.toml" in volumes
         assert f"{tmp_path / 'boxes' / 'peers.toml'}:/app/config/peers.toml:ro" in volumes
         assert not any(v.startswith(f"{path}:") for v in volumes)
         assert stable.read_text() == path.read_text()
         assert stat.S_IMODE(stable.stat().st_mode) == 0o600
         path.unlink()
         args = mod.run_args(mod.load(str(stable)), stable, check=False)
-        assert f"{stable}:/app/config/aimyable.toml" in [args[i + 1] for i, a in enumerate(args) if a == "-v"]
+        assert f"{stable}:/app/config/apexco.toml" in [args[i + 1] for i, a in enumerate(args) if a == "-v"]
 
     def test_an_edited_stable_config_is_never_overwritten(self, tmp_path, monkeypatch):
         mod, _ = self._launcher(tmp_path, monkeypatch)
         path = self._config(tmp_path)
         mod.run_args(mod.load(str(path)), path, check=False)
-        stable = tmp_path / "boxes" / "aimyable" / "config" / "aimyable.toml"
+        stable = tmp_path / "boxes" / "apexco" / "config" / "apexco.toml"
         stable.write_text(stable.read_text() + "# edited in the web UI\n")
         with pytest.raises(SystemExit, match="differs"):
             mod.run_args(mod.load(str(path)), path, check=False)
@@ -554,7 +554,7 @@ class TestInstanceLauncher:
         assert "type=tmpfs,destination=/app/config" in args
         assert "/dev/null:/app/.env:ro" in args
         assert f"FRSHTY_CODE_DIR={code}" in args
-        assert "frshty.instance=aimyable" in args
+        assert "frshty.instance=apexco" in args
 
     def test_code_dir_is_the_main_checkout_not_a_worktree(self, tmp_path, monkeypatch):
         mod = _load_script("instance")
@@ -590,7 +590,7 @@ class TestInstanceLauncher:
                            mod.IMAGE, "-c", "%g", str(sock)]]
         assert args[args.index("--device") + 1] == str(sock)
         assert args[args.index("--device") + 2:args.index("--device") + 4] == ["--group-add", str(sock.stat().st_gid)]
-        (tmp_path / "boxes" / "aimyable" / "config" / "aimyable.toml").unlink()
+        (tmp_path / "boxes" / "apexco" / "config" / "apexco.toml").unlink()
         path = self._config(tmp_path, '[container]\ndevices = ["/definitely/not/a/device"]\n')
         with pytest.raises(SystemExit, match="device /definitely/not/a/device does not exist"):
             mod.run_args(mod.load(str(path)), path, check=False)

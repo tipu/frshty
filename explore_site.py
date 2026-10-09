@@ -2,7 +2,7 @@ import os, json, re
 from collections import Counter
 from pathlib import Path
 
-projects_dir = Path('/home/tipu/.claude/projects')
+projects_dir = Path.home() / '.claude' / 'projects'
 
 all_jsonl = []
 for p in projects_dir.rglob('*.jsonl'):

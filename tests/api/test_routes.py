@@ -1076,7 +1076,7 @@ class TestRerunReview:
 class TestReviewInfoReadsTheProvidersOwnVerdict:
     """The info route took a provider argument but always read the unsuffixed
     review.json, so the codex tab showed claude's verdict. On
-    django-drf-app#175 that printed 'approved' above eleven codex blockers."""
+    django-api#175 that printed 'approved' above eleven codex blockers."""
 
     def _seed(self, tmp_path):
         branch_dir = tmp_path / "reviews" / "myrepo" / "JIRA-9-branch"

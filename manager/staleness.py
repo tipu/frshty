@@ -68,7 +68,7 @@ def blocked_pr_comments(instance_key: str) -> list[dict]:
     Every non-terminal comment_state row, with the reason it is owed: manual,
     failing or stalled. The selector used to require error_count >= 2 and a
     recorded error, which hid every comment that had not failed twice — 16 of
-    the 18 owed an answer on 2026-09-21, including 13 on saas-dashboard/149
+    the 18 owed an answer on 2026-09-21, including 13 on spa-dashboard/149
     that had sat untouched since June with error_count=1. Self-clears once the
     comment is settled — processed, or gone from the platform. A deleted
     comment keeps the error_count of its last live attempt and can never reach

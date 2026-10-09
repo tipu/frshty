@@ -83,8 +83,8 @@
 		props: {
 			features: { type: Object, default: () => ({}) },
 			instance: { type: String, default: '' },
-			userInitials: { type: String, default: 'DJ' },
-			userName: { type: String, default: 'danial jaffry' },
+			userInitials: { type: String, default: '' },
+			userName: { type: String, default: '' },
 			counts: { type: Object, default: () => ({}) },
 			// Pages can override the breadcrumb (e.g., ticket_detail wants
 			// "Tickets / DEV-475" with a clickable Tickets link rather than
@@ -174,9 +174,9 @@
 						</div>
 					</template>
 					<div class="ln-rail-foot">
-						<div class="ln-avatar">{{ userInitials }}</div>
+						<div class="ln-avatar">{{ userInitials || (userName || instance).slice(0, 2).toUpperCase() }}</div>
 						<div>
-							<div class="ln-foot-name">{{ userName }}</div>
+							<div class="ln-foot-name">{{ userName || instance }}</div>
 							<div class="ln-foot-sub">● live</div>
 						</div>
 					</div>

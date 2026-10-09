@@ -18,7 +18,7 @@ leaves the channel out. It has to: a conversations.replies batch is where the
 body of a thread arrives, and its entries carry no channel at all, so a key
 including the channel would file the same thread twice and never join the two.
 The cost is that two messages in different channels sharing one ts would merge.
-Measured over the atropos capture — 24,192 records, 375 distinct message
+Measured over the astroco capture — 24,192 records, 375 distinct message
 timestamps — no timestamp appeared in more than one channel.
 
 A thread is not how most requests are written. A direct message has no threads
@@ -375,7 +375,7 @@ def _endpoint_channel(record: dict) -> str:
     string instead, and reading it there is what lets a direct message seen
     only through a REST pull be recognised as one.
 
-    slack_int is not one of them. Of 58 REST message batches in the atropos
+    slack_int is not one of them. Of 58 REST message batches in the astroco
     capture, none named the channel in the URL and one carried it on the
     message. A thread still gets its channel from the websocket record that
     delivered it live, which is every thread the operator has not only
@@ -432,7 +432,7 @@ def _message_records(record: dict) -> list[dict]:
             # A deleted reply carries its parent only on previous_message; the
             # wrapper has no thread_ts of its own. Without that the reply is
             # looked up as the root of a thread that does not exist and stays
-            # in the index. 43 of 161 deletion events in the atropos capture
+            # in the index. 43 of 161 deletion events in the astroco capture
             # have exactly this shape.
             previous = payload.get("previous_message")
             parent = (str(previous.get("thread_ts") or "")
@@ -1135,7 +1135,7 @@ def _quote(text: str) -> str:
     A transcript line frshty writes starts at the left margin: a message opens
     with its bracketed time, ANSWERED_MARK and ELIDED_MARK open with three
     dashes. A message body is free text and can hold newlines, so without this
-    a person could write the text of either mark, or a whole "[time] Danial
+    a person could write the text of either mark, or a whole "[time] Dakota
     (the operator):" line, and it would arrive at the judge indistinguishable
     from the ones frshty puts there. Indenting every line of the body after the
     first leaves the left margin to frshty alone.

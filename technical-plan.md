@@ -30,14 +30,14 @@ The first 5 are the core behavioral acceptance criteria. The 6th is a performanc
 ## 2. Current State Analysis
 
 ### Entry Point
-- [core/tasks/polls.py](/home/tipu/Documents/dev/frshty/core/tasks/polls.py:12) defines `poll_reviewer`.
-- [core/tasks/polls.py](/home/tipu/Documents/dev/frshty/core/tasks/polls.py:13) calls `reviewer.check(ctx.config)`.
+- [core/tasks/polls.py](/home/user/Documents/dev/frshty/core/tasks/polls.py:12) defines `poll_reviewer`.
+- [core/tasks/polls.py](/home/user/Documents/dev/frshty/core/tasks/polls.py:13) calls `reviewer.check(ctx.config)`.
 
 ### Current Review Flow
-- [features/reviewer.py](/home/tipu/Documents/dev/frshty/features/reviewer.py:80) builds the platform adapter and fetches review PRs via `platform.list_review_prs()`.
-- [features/reviewer.py](/home/tipu/Documents/dev/frshty/features/reviewer.py:90) iterates PRs one-by-one.
-- [features/reviewer.py](/home/tipu/Documents/dev/frshty/features/reviewer.py:116) immediately calls `review_pr(config, platform, pr)` for each PR needing work.
-- [features/reviewer.py](/home/tipu/Documents/dev/frshty/features/reviewer.py:138) persists review status under `state.save("reviews", review_state)`.
+- [features/reviewer.py](/home/user/Documents/dev/frshty/features/reviewer.py:80) builds the platform adapter and fetches review PRs via `platform.list_review_prs()`.
+- [features/reviewer.py](/home/user/Documents/dev/frshty/features/reviewer.py:90) iterates PRs one-by-one.
+- [features/reviewer.py](/home/user/Documents/dev/frshty/features/reviewer.py:116) immediately calls `review_pr(config, platform, pr)` for each PR needing work.
+- [features/reviewer.py](/home/user/Documents/dev/frshty/features/reviewer.py:138) persists review status under `state.save("reviews", review_state)`.
 
 ### Current Review State Shape
 - `reviews` state is keyed per PR as `"{repo}/{id}"`.
@@ -61,7 +61,7 @@ Example:
 ```
 
 ### Current Review Output Contract
-- [features/reviewer.py](/home/tipu/Documents/dev/frshty/features/reviewer.py:142) defines `review_pr(config, platform, pr) -> dict | None`.
+- [features/reviewer.py](/home/user/Documents/dev/frshty/features/reviewer.py:142) defines `review_pr(config, platform, pr) -> dict | None`.
 - The merged review written to disk contains:
   - `verdict`
   - `issues`
@@ -76,7 +76,7 @@ Example:
 - Queued comments are written per PR branch to `reviews/<repo>/<branch>/queued_comments.json`.
 
 ### Existing Ticket Extraction Logic
-- [features/timesheet.py](/home/tipu/Documents/dev/frshty/features/timesheet.py:601) already has `_extract_ticket(text: str) -> str`.
+- [features/timesheet.py](/home/user/Documents/dev/frshty/features/timesheet.py:601) already has `_extract_ticket(text: str) -> str`.
 - It uses a simple regex and normalizes matches to uppercase:
 
 ```python
@@ -88,7 +88,7 @@ def _extract_ticket(text: str) -> str:
 This is the best current candidate to reuse for review batching instead of inventing a separate parser.
 
 ### State Layer Constraints
-- [core/state.py](/home/tipu/Documents/dev/frshty/core/state.py:72) and [core/state.py](/home/tipu/Documents/dev/frshty/core/state.py:86) already support generic module-level KV blobs through `state.load(module)` and `state.save(module, data)`.
+- [core/state.py](/home/user/Documents/dev/frshty/core/state.py:72) and [core/state.py](/home/user/Documents/dev/frshty/core/state.py:86) already support generic module-level KV blobs through `state.load(module)` and `state.save(module, data)`.
 - That means `reviews_pending` can be added without a schema migration.
 - There is no generic transactional `update(module, mutate)` helper for KV blobs, so the first implementation will likely remain `load -> mutate -> save`, which is acceptable if `poll_reviewer` is effectively single-writer in practice.
 

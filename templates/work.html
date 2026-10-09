@@ -281,11 +281,10 @@ const STATE_TEXT = {
   canceled: "⊘ Canceled",
 };
 const DECLINED_REASON = "Proposal declined";
-const DEFAULT_HOST = "personal";
 frshtyApp({
   data() {
     return {
-      features: {}, instanceName: "",
+      features: {}, instanceName: "", boardInstance: "",
       view: new URLSearchParams(location.search).get("view") === "archive" ? "archive" : "board",
       groups: { proposed: [], needs_ack: [], needs_you: [], agent_working: [], waiting_external: [], failed_stale: [], canceled: [], done: [] },
       localMeta: null, intakeText: "", intakeError: "", intakeBusy: false,
@@ -359,7 +358,7 @@ frshtyApp({
     target() {
       const first = this.catalog.find(e => e.key === this.intakeContexts[0]);
       if (first) return first.host;
-      const home = this.hosts().find(h => this.hostName(h) === DEFAULT_HOST);
+      const home = this.hosts().find(h => this.hostName(h) === this.boardInstance);
       return home === undefined ? null : home;
     },
     targetMeta() {
@@ -417,7 +416,7 @@ frshtyApp({
       const hosts = this.hosts();
       const named = hosts.find(h => this.hostName(h) === key);
       if (named !== undefined) return knows(named) ? named : null;
-      const home = hosts.find(h => this.hostName(h) === DEFAULT_HOST);
+      const home = hosts.find(h => this.hostName(h) === this.boardInstance);
       for (const h of [home, ...hosts]) if (knows(h)) return h;
       return null;
     },
@@ -620,6 +619,7 @@ frshtyApp({
           this.peerMeta[r.peer] = meta;
         } else {
           this.localMeta = meta;
+          this.boardInstance = d.board_instance || "";
           this.connError = "";
         }
         if (this.projectFilter.length && !wantProjects) continue;
