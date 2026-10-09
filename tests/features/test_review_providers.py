@@ -136,7 +136,7 @@ def _blocking(body, path="b.ts", line=9):
 class TestEveryProvidersBlockersReachThePrimaryReview:
     """The A/B ran both providers and then posted claude's list alone, so a
     defect only codex found reached nobody and the verdict was computed as if
-    it did not exist. That is how django-drf-app#175 was approved while codex
+    it did not exist. That is how django-api#175 was approved while codex
     held eleven blocking findings on the same diff."""
 
     def _run(self, tmp_path, claude_review, codex_review):
@@ -183,7 +183,7 @@ class TestEveryProvidersBlockersReachThePrimaryReview:
         assert sorted(c["body"] for c in queued) == ["first", "second"]
 
     def test_the_more_severe_rating_wins_on_a_shared_finding(self, tmp_path):
-        """Claude graded the S3 orphan on django-drf-app#175 a suggestion and
+        """Claude graded the S3 orphan on django-api#175 a suggestion and
         codex graded the same defect blocking. The worse rating decides."""
         result, queued = self._run(tmp_path, _review("from claude"),
                                    _blocking("from codex", path="a.ts", line=1))

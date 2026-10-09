@@ -21,7 +21,7 @@ lint error to the caller.
 There is no bypass. A repo that configures pre-commit but whose binary cannot
 be located returns exit 127 with an explanatory stderr. It used to commit with
 --no-verify instead, which let a ticket advance as though the hooks had passed;
-windows-rpa-client committed that way during DEV-635 and was reported clean.
+windows-agent committed that way during DEV-635 and was reported clean.
 Because that flag was appended outside the config check, it also suppressed
 native git hooks in repos with no pre-commit config at all.
 """

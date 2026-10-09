@@ -278,7 +278,7 @@ class TestADirtyWorktreeIsNotCreditedToTheComment(TicketCommentHarness):
         self, fresh_db, fake_config, tmp_state, tmp_path
     ):
         """A stray Pipfile was committed as the answer to a comment about an
-        attachment id on django-drf-app 203. Only what the run produced may
+        attachment id on django-api 203. Only what the run produced may
         reach the commit; the stray file stays in the worktree."""
         slug = "PROJ-1-do-the-thing"
         wt = self._init_git_pair(tmp_path, slug)

@@ -26,13 +26,13 @@ REPORT = "\n".join([
     f"Ticket: {KEY}",
     "Votes: agy=FAIL, codex=FAIL", "",
     "## agy", "", "Offending changes:", "",
-    "- `saas-dashboard`: paced-stream catch-up fix at src/MessageLog.tsx:120",
-    "- `django-drf-app`: root admin route at src/acme/urls.py:36", "",
+    "- `spa-dashboard`: paced-stream catch-up fix at src/MessageLog.tsx:120",
+    "- `django-api`: root admin route at src/acme/urls.py:36", "",
     "SCOPE VERDICT: FAIL", ""])
 
 FINDINGS = [
-    "`saas-dashboard`: paced-stream catch-up fix at src/MessageLog.tsx:120",
-    "`django-drf-app`: root admin route at src/acme/urls.py:36",
+    "`spa-dashboard`: paced-stream catch-up fix at src/MessageLog.tsx:120",
+    "`django-api`: root admin route at src/acme/urls.py:36",
 ]
 
 
@@ -70,7 +70,7 @@ def _seed(tmp_path, tmp_state, **overrides):
 
 
 def _moved_heads():
-    return iter([{"saas-dashboard": "aaa"}, {"saas-dashboard": "bbb"}])
+    return iter([{"spa-dashboard": "aaa"}, {"spa-dashboard": "bbb"}])
 
 
 def _fingerprints(*values):
@@ -104,7 +104,7 @@ class TestTheFixerIsToldWhatToRemove:
              patch("core.tasks.tickets._capture_repo_heads",
                    side_effect=lambda _d: next(heads)), \
              patch("core.tasks.tickets._commit_workspace_changes",
-                   return_value=["saas-dashboard"]), \
+                   return_value=["spa-dashboard"]), \
              patch("core.tasks.tickets.run_claude_code", return_value="done") as rc:
             heads = _moved_heads()
             fix_scope_findings(_ctx(tmp_path))
@@ -123,12 +123,12 @@ class TestTheCorrectionForcesAFreshProof:
              patch("core.tasks.tickets._capture_repo_heads",
                    side_effect=lambda _d: next(heads)), \
              patch("core.tasks.tickets._commit_workspace_changes",
-                   return_value=["saas-dashboard"]), \
+                   return_value=["spa-dashboard"]), \
              patch("core.tasks.tickets.run_claude_code", return_value="done"):
             heads = _moved_heads()
             result = fix_scope_findings(_ctx(tmp_path))
         assert result.status == "ok"
-        assert result.artifacts["repos"] == ["saas-dashboard"]
+        assert result.artifacts["repos"] == ["spa-dashboard"]
         assert not (ticket_dir / "docs" / "proof.md").exists()
         assert (ticket_dir / "docs" / "proof.prev.md").exists()
         ts = state.load_ticket(KEY)
@@ -144,7 +144,7 @@ class TestTheCorrectionForcesAFreshProof:
         with patch("core.tasks.tickets.scope_fingerprint",
                    side_effect=_fingerprints(REVIEWED)), \
              patch("core.tasks.tickets._capture_repo_heads",
-                   return_value={"saas-dashboard": "aaa"}), \
+                   return_value={"spa-dashboard": "aaa"}), \
              patch("core.tasks.tickets._commit_workspace_changes", return_value=[]), \
              patch("core.tasks.tickets.run_claude_code", return_value="done"):
             result = fix_scope_findings(_ctx(tmp_path))
@@ -233,7 +233,7 @@ class TestTheStatusMovesOnlyOnARecordedCorrection:
              patch("core.tasks.tickets._capture_repo_heads",
                    side_effect=lambda _d: next(heads)), \
              patch("core.tasks.tickets._commit_workspace_changes",
-                   return_value=["saas-dashboard"]), \
+                   return_value=["spa-dashboard"]), \
              patch("core.tasks.tickets.run_claude_code", side_effect=_fix):
             heads = _moved_heads()
             return run_task(_ctx(tmp_path))
@@ -281,7 +281,7 @@ class TestTheStatusMovesOnlyOnARecordedCorrection:
         def _fix(prompt, **kwargs):
             (ticket_dir / "docs" / "scope-fix.md").write_text("- removed src/a.ts\n")
             state.transition_ticket(KEY, "in_review",
-                                    prs=[{"repo": "saas-dashboard", "id": 1}])
+                                    prs=[{"repo": "spa-dashboard", "id": 1}])
             return "done"
 
         with patch("core.tasks.tickets.scope_fingerprint",
@@ -289,10 +289,10 @@ class TestTheStatusMovesOnlyOnARecordedCorrection:
              patch("core.tasks.tickets._capture_repo_heads",
                    side_effect=lambda _d: next(heads)), \
              patch("core.tasks.tickets._commit_workspace_changes",
-                   return_value=["saas-dashboard"]), \
+                   return_value=["spa-dashboard"]), \
              patch("core.tasks.tickets.run_claude_code", side_effect=_fix), \
              patch("core.tasks.tickets._push_to_open_prs",
-                   return_value=(["saas-dashboard"], [])) as push:
+                   return_value=(["spa-dashboard"], [])) as push:
             heads = _moved_heads()
             result = run_task(_ctx(tmp_path))
         assert result.status == "ok", result.reason
@@ -311,7 +311,7 @@ class TestTheStatusMovesOnlyOnARecordedCorrection:
         def _fix(prompt, **kwargs):
             (ticket_dir / "docs" / "scope-fix.md").write_text("- removed src/a.ts\n")
             state.transition_ticket(KEY, "in_review",
-                                    prs=[{"repo": "saas-dashboard", "id": 1}])
+                                    prs=[{"repo": "spa-dashboard", "id": 1}])
             return "done"
 
         with patch("core.tasks.tickets.scope_fingerprint",
@@ -319,10 +319,10 @@ class TestTheStatusMovesOnlyOnARecordedCorrection:
              patch("core.tasks.tickets._capture_repo_heads",
                    side_effect=lambda _d: next(heads)), \
              patch("core.tasks.tickets._commit_workspace_changes",
-                   return_value=["saas-dashboard"]), \
+                   return_value=["spa-dashboard"]), \
              patch("core.tasks.tickets.run_claude_code", side_effect=_fix), \
              patch("core.tasks.tickets._push_to_open_prs",
-                   return_value=([], ["saas-dashboard"])):
+                   return_value=([], ["spa-dashboard"])):
             heads = _moved_heads()
             result = run_task(_ctx(tmp_path))
         assert result.status == "failed"
@@ -384,7 +384,7 @@ class TestAnUnfinishedPassLeavesAMark:
              patch("core.tasks.tickets.run_claude_code", return_value="done"), \
              patch("core.tasks.tickets._commit_workspace_changes",
                    side_effect=CommitBlocked(
-                       "django-drf-app", "hooks",
+                       "django-api", "hooks",
                        SimpleNamespace(phase="pre-commit", output="ruff E501"))):
             result = fix_scope_findings(_ctx(tmp_path))
         assert result.status == "failed"
@@ -401,7 +401,7 @@ class TestAnUnfinishedPassLeavesAMark:
              patch("core.tasks.tickets._capture_repo_heads",
                    side_effect=lambda _d: next(heads)), \
              patch("core.tasks.tickets._commit_workspace_changes",
-                   return_value=["saas-dashboard"]), \
+                   return_value=["spa-dashboard"]), \
              patch("core.tasks.tickets.run_claude_code", return_value="done"):
             heads = _moved_heads()
             result = run_task(_ctx(tmp_path))
@@ -419,7 +419,7 @@ class TestAnUnfinishedPassLeavesAMark:
              patch("core.tasks.tickets._capture_repo_heads",
                    side_effect=lambda _d: next(heads)), \
              patch("core.tasks.tickets._commit_workspace_changes",
-                   return_value=["saas-dashboard"]), \
+                   return_value=["spa-dashboard"]), \
              patch("core.tasks.tickets.run_claude_code", side_effect=_fix):
             heads = _moved_heads()
             result = run_task(_ctx(tmp_path))

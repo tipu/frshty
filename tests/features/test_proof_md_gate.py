@@ -102,7 +102,7 @@ class TestWorktreeGuard:
              patch("core.state.load_ticket",
                    return_value={"slug": "PROJ-1-do-the-thing"}), \
              patch("core.tasks.tickets._dirty_workspace_repos",
-                   return_value=["saas-dashboard"]):
+                   return_value=["spa-dashboard"]):
             result = enter_proving(ctx)
         assert result.status == "failed"
         assert "uncommitted" in result.reason

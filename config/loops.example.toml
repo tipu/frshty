@@ -36,5 +36,5 @@
 # label = "saas idea"
 # host = "vps"
 # repo = "/home/user/Documents/dev/expirement"
-# run_as = "tipu"
+# run_as = "octocat"
 # cadence_minutes = 15

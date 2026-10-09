@@ -351,14 +351,14 @@ def compute_target_time(start: datetime, estimate_seconds: int, jitter_hours: in
 
 
 def compute_delay_time(start: datetime, delay_hours: list[int], quiet_hours: list[int] | None = None,
-                        tz_name: str = "America/Los_Angeles") -> datetime:
+                        tz_name: str = "") -> datetime:
     if not quiet_hours:
         quiet_hours = [23, 7]
 
     delay = random.uniform(delay_hours[0], delay_hours[1])
     target = start + timedelta(hours=delay)
 
-    zone = ZoneInfo(tz_name)
+    zone = ZoneInfo(tz_name) if tz_name else core_tz.local_tz()
     local = target.astimezone(zone)
 
     quiet_start, quiet_end = quiet_hours

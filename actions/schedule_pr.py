@@ -11,7 +11,7 @@ def handle(payload: dict, trigger: dict, config: dict):
     delay_hours = trigger.get("delay_hours")
     if delay_hours:
         quiet_hours = trigger.get("quiet_hours", [23, 7])
-        tz_name = trigger.get("timezone", "America/Los_Angeles")
+        tz_name = trigger.get("timezone", "")
         run_at = scheduler.compute_delay_time(datetime.now(timezone.utc), delay_hours, quiet_hours, tz_name)
     else:
         estimate_seconds = payload.get("estimate_seconds", 0)

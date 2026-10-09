@@ -92,7 +92,7 @@ class TestTheScopeCorrectionStalesTheProof:
         (tmp_path / "tickets" / SLUG / "workspace").mkdir(parents=True, exist_ok=True)
         (docs / "scope-review.md").write_text(
             "# Consensus scope review\n\nOffending changes:\n\n"
-            "- `saas-dashboard`: paced-stream catch-up fix\n\nSCOPE VERDICT: FAIL\n")
+            "- `spa-dashboard`: paced-stream catch-up fix\n\nSCOPE VERDICT: FAIL\n")
         state.save_ticket(KEY, {
             "status": "in_review", "slug": SLUG, "branch": SLUG,
             "scope_review": {"fingerprint": "r:abc", "verdict": "fail",
@@ -100,15 +100,15 @@ class TestTheScopeCorrectionStalesTheProof:
 
     def _run(self, tmp_path, inst):
         seq = iter(["r:abc", "r:corrected", "r:corrected", "r:corrected"])
-        heads = iter([{"saas-dashboard": "aaa"}, {"saas-dashboard": "bbb"}])
+        heads = iter([{"spa-dashboard": "aaa"}, {"spa-dashboard": "bbb"}])
         with patch("core.tasks.tickets.scope_fingerprint",
                    side_effect=lambda *_a: next(seq)), \
              patch("core.tasks.tickets._capture_repo_heads",
                    side_effect=lambda _d: next(heads)), \
              patch("core.tasks.tickets._commit_workspace_changes",
-                   return_value=["saas-dashboard"]), \
+                   return_value=["spa-dashboard"]), \
              patch("core.tasks.tickets._push_to_open_prs",
-                   return_value=(["saas-dashboard"], [])), \
+                   return_value=(["spa-dashboard"], [])), \
              patch("core.tasks.tickets.run_claude_code", return_value="done"):
             return T.fix_scope_findings(_ctx(tmp_path, inst))
 
