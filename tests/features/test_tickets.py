@@ -3641,7 +3641,7 @@ class TestResolveStatusInvalidEntry:
 
 
 class TestCheckInReviewPipelineCommentHold:
-    """Observed on acme desktop-client #56 and websocket-hub #118
+    """Observed on acme windows-agent #56 and websocket-hub #118
     (DEV-635, 2026-08-21): pipeline-failure comments ("N of M checks failed")
     were resolved via the "already addressed (no change needed)" branch while
     the PR's pipeline was still red. That branch is gone. A no-change verdict

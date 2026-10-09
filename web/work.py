@@ -154,6 +154,7 @@ def api_work_items(q: str = "", projects: str = "", done_page: int = 1, archive:
             "filter": {"q": q, "projects": projects},
             "done_page": done_page, "done_pages": done_pages,
             "personal_loaded": work_launch.personal_config() is not None,
+            "board_instance": work_launch.BOARD_PROJECT_KEY,
             "projects": work_launch.project_entries(),
             "agents": list(terminal.AGENTS),
             "slack_available": work_launch.slack_available()}

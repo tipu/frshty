@@ -324,7 +324,7 @@ class TestMergeScope:
         _mkticket_prs("acme", "DEV-728", [
             _pr("django-api", 198, ["Prain"]),
             _pr("websocket-hub", 129),
-            _pr("desktop-client", 60, ["Prain"]),
+            _pr("windows-agent", 60, ["Prain"]),
         ])
         scope = _one_scope(
             "Merge https://bitbucket.org/acme/django-api/pull-requests/198")

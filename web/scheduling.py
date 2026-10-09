@@ -1,5 +1,4 @@
 from datetime import datetime, time, timedelta, timezone
-from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -17,7 +16,7 @@ _WEEKDAY = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6
 
 
 def _project_virtual_rows(config: dict, days: int = 7) -> list[dict]:
-    pst = ZoneInfo("America/Los_Angeles")
+    zone = _ctz.local_tz()
     out = []
     recurring = config.get("timesheet", {}).get("recurring", []) or []
     if not recurring:
@@ -30,8 +29,8 @@ def _project_virtual_rows(config: dict, days: int = 7) -> list[dict]:
             weekdays = {_WEEKDAY[n] for n in day_names if n in _WEEKDAY}
             if day.weekday() not in weekdays:
                 continue
-            fire_pst = datetime.combine(day, time(19, 0), tzinfo=pst)
-            fire_utc = fire_pst.astimezone(timezone.utc)
+            fire_local = datetime.combine(day, time(19, 0), tzinfo=zone)
+            fire_utc = fire_local.astimezone(timezone.utc)
             if fire_utc < datetime.now(timezone.utc):
                 continue
             out.append({
