@@ -1121,7 +1121,7 @@ class TestCheckDoneTicketResurrection:
     merged reingest path, not in_review."""
 
     def _run(self, fake_config, tmp_state, external_status, extra_state=None,
-             ticket_overrides=None, fetch_comments=None):
+             ticket_overrides=None, fetch_comments=None, resolved=None):
         import core.state as state
         slug = "PROJ-1-do-the-thing"
         state.save_ticket("PROJ-1", make_ticket_state(
@@ -1136,7 +1136,7 @@ class TestCheckDoneTicketResurrection:
              patch("features.tickets._fetch_open_prs", return_value=[]), \
              patch("features.tickets.get_repos", return_value=[]), \
              patch("features.tickets._process_ticket_comments"), \
-             patch("features.tickets._resolve_status", return_value=None), \
+             patch("features.tickets._resolve_status", return_value=resolved), \
              patch("features.tickets._fetch_ticket_comments",
                    return_value=fetch_comments or []) as fc, \
              patch("features.tickets._reingest_merged_ticket",
@@ -1155,6 +1155,36 @@ class TestCheckDoneTicketResurrection:
     def test_revives_when_external_status_changed(self, fake_config, tmp_state):
         saved, eq, ri, fc = self._run(fake_config, tmp_state, "In Progress")
         assert saved["status"] != "done"
+
+    def test_forward_move_past_review_stays_done(self, fake_config, tmp_state):
+        saved, eq, ri, fc = self._run(
+            fake_config, tmp_state, "In DEV",
+            extra_state={"merged_at": "2026-06-29T00:00:00+00:00",
+                         "merged_comment_snapshot": {"count": 0, "latest_created_at": None}},
+            resolved="in_review")
+        assert saved["status"] == "done"
+        ri.assert_not_called()
+        eq.assert_not_called()
+
+    def test_forward_move_with_new_comment_reingests(self, fake_config, tmp_state):
+        saved, eq, ri, fc = self._run(
+            fake_config, tmp_state, "In DEV",
+            extra_state={"merged_at": "2026-06-29T00:00:00+00:00",
+                         "merged_comment_snapshot": {"count": 0, "latest_created_at": None}},
+            ticket_overrides={"updated_at": "2026-07-01T00:00:00+00:00"},
+            fetch_comments=[{"id": "1", "created_at": "2026-07-01T00:00:00+00:00",
+                             "body": "qa failed"}],
+            resolved="in_review")
+        ri.assert_called_once()
+        eq.assert_called_once_with("inst", "PROJ-1", "start_planning")
+
+    def test_move_back_to_planning_reingests(self, fake_config, tmp_state):
+        saved, eq, ri, fc = self._run(
+            fake_config, tmp_state, "In Progress",
+            extra_state={"merged_at": "2026-06-29T00:00:00+00:00"},
+            resolved="planning")
+        ri.assert_called_once()
+        eq.assert_called_once_with("inst", "PROJ-1", "start_planning")
 
     def test_status_change_with_merged_prs_reingests(self, fake_config, tmp_state):
         saved, eq, ri, fc = self._run(
@@ -2200,6 +2230,19 @@ class TestCheckRequeue:
         assert saved["last_merged_external_status"] == "QA"
         assert "merged_external_status" not in saved
         menq.assert_any_call("inst", "PROJ-1", "start_planning")
+
+    def test_forward_external_status_keeps_merged(self, tmp_path, fake_config):
+        fake_config["jira"] = {"status_map": {"QA": "in_review", "In DEV": "in_review"}}
+        saved, menq = self._run_check(tmp_path, fake_config,
+            saved_state={"status": "merged", "slug": "PROJ-1-slug", "branch": "PROJ-1-slug",
+                         "merged_external_status": "QA",
+                         "merged_comment_snapshot": {"count": 0, "latest_created_at": None}},
+            external_status="In DEV")
+        assert saved is not None
+        assert saved["status"] == "merged"
+        assert saved["merged_external_status"] == "QA"
+        assert "reopened_count" not in saved
+        menq.assert_any_call("inst", "PROJ-1", "validate_merged_ticket")
 
 
 class TestRenderPrdTicketMd:
