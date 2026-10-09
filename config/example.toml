@@ -290,6 +290,7 @@ pr_autofix = false                # github only: every PR the instance account o
 # enabled = true                       # off unless set; checks /global and alerts in the feed when it breaks
 # interval_minutes = 15                # how often the check runs
 # stale_hours = 2                      # an instance with no event for this long counts as silent
+# digest_minutes = 30                  # the model's digest reaches back at least this far: one poll cycle
 # agent = true                         # a cheap codex model also judges each run's feed digest
 # agent_model = "gpt-6-luna"           # codex model for that verdict
 # agent_effort = "low"                 # codex reasoning effort for that verdict
