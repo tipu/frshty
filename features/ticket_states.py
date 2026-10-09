@@ -517,7 +517,9 @@ def _handle_merged_ticket(
         ts["merged_external_status"] = curr_ext or "_merged_"
         state.save_ticket(key, ts)
         return ts, True
-    if curr_ext and curr_ext != ts["merged_external_status"]:
+    if (curr_ext and curr_ext != ts["merged_external_status"]
+            and (not _t._is_past_review(config, curr_ext)
+                 or _t._done_ticket_has_new_comments(config, key, ts, ticket))):
         ts = _t._reingest_merged_ticket(config, ticket, ts, base_url)
         state.save_ticket(key, ts)
         if instance_key:
