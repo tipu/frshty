@@ -5,3 +5,5 @@ Plan a browser task before you run the first command. Collapse first, then count
 If a tool call inside a subagent returns "requires approval" or any permission denial, return that error to the parent immediately. Do NOT invoke `fewer-permission-prompts` or any other skill to "fix" permissions from inside a subagent — scanning transcripts and rewriting settings is way out of scope and produces large retry-heavy logs.
 
 Release: when a frshty pull request merges to main, run `scripts/deploy_local.sh` from the worktree. It merges origin/main into the shared checkout and reloads every instance container, and it fails when either step does not happen.
+
+Never write a client, company or person name into this repository: code, tests, docs, examples, fixtures or commit messages. Use a fictional placeholder in tests and examples, and read real values from the gitignored instance config. `tests/test_no_org_names.py` fails CI on a forbidden name. When you learn a new organization or person name, add it with `python3 scripts/forbid_name.py <name>`; the list stores only hashes.
