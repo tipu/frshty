@@ -10,7 +10,7 @@ from services import work_peers
 def peers(tmp_path, monkeypatch):
     path = tmp_path / "peers.toml"
     path.write_text('[[peers]]\nkey = "frshty"\nbase_url = "http://127.0.0.1:7131"\n'
-                    '[[peers]]\nkey = "quill"\nbase_url = "http://127.0.0.1:7134"\nlabel = "Quill"\n')
+                    '[[peers]]\nkey = "quartz"\nbase_url = "http://127.0.0.1:7134"\nlabel = "Quartz"\n')
     monkeypatch.setattr(work_peers, "PEERS_PATH", path)
     monkeypatch.setattr(work_peers, "_cache", None)
     monkeypatch.delenv("FRSHTY_PEER_SELF", raising=False)
@@ -45,13 +45,13 @@ def upstream(monkeypatch):
                                   content=request.url.host.encode() + b":" + str(request.url.port).encode())
         if request.url.path == "/api/work/peers":
             return httpx.Response(200, json={"peers": [
-                {"key": "quill", "base_url": "http://127.0.0.1:7134", "label": "Quill"},
-                {"key": "atropos", "base_url": "http://192.168.1.117:7100", "label": "atropos"}]})
+                {"key": "quartz", "base_url": "http://127.0.0.1:7134", "label": "Quartz"},
+                {"key": "astroco", "base_url": "http://192.0.2.10:7100", "label": "astroco"}]})
         if request.url.path == "/api/global/events":
             return httpx.Response(200, json={"events": [
                 {"id": "1", "instance_key": "frshty", "base_url": "", "links": {"detail": "/tasks/7"}},
-                {"id": "2", "instance_key": "quill", "base_url": "http://127.0.0.1:7134", "links": {}},
-                {"id": "3", "instance_key": "atropos", "base_url": "http://192.168.1.117:7100", "links": {}}],
+                {"id": "2", "instance_key": "quartz", "base_url": "http://127.0.0.1:7134", "links": {}},
+                {"id": "3", "instance_key": "astroco", "base_url": "http://192.0.2.10:7100", "links": {}}],
                 "errors": {}})
         return httpx.Response(201, json={"from": request.url.host + ":" + str(request.url.port),
                                          "path": request.url.path})
@@ -69,19 +69,19 @@ class TestPicker:
     def test_lists_instances_and_defaults_to_the_first(self, peers, client):
         assert client.get("/api/gateway/instances").json() == {
             "current": "frshty",
-            "instances": [{"key": "frshty", "label": "frshty"}, {"key": "quill", "label": "Quill"}]}
+            "instances": [{"key": "frshty", "label": "frshty"}, {"key": "quartz", "label": "Quartz"}]}
 
     def test_select_sets_the_cookie_and_returns_to_the_page(self, peers, client):
-        resp = client.get("/api/gateway/select", params={"key": "quill", "next": "/tickets?x=1"})
+        resp = client.get("/api/gateway/select", params={"key": "quartz", "next": "/tickets?x=1"})
         assert resp.status_code == 303
         assert resp.headers["location"] == "/tickets?x=1"
-        assert "frshty_instance=quill" in resp.headers["set-cookie"]
+        assert "frshty_instance=quartz" in resp.headers["set-cookie"]
 
     def test_select_refuses_an_unknown_instance(self, peers, client):
         assert client.get("/api/gateway/select", params={"key": "nope"}).status_code == 404
 
     def test_select_never_redirects_off_the_gateway(self, peers, client):
-        resp = client.get("/api/gateway/select", params={"key": "quill", "next": "//evil.example/x"})
+        resp = client.get("/api/gateway/select", params={"key": "quartz", "next": "//evil.example/x"})
         assert resp.headers["location"] == "/"
 
 
@@ -97,7 +97,7 @@ class TestForward:
         assert sent.headers["host"] == "127.0.0.1:7131"
 
     def test_the_cookie_routes_to_the_picked_instance(self, peers, upstream, client):
-        client.cookies.set("frshty_instance", "quill")
+        client.cookies.set("frshty_instance", "quartz")
         assert client.get("/reviews").json()["from"] == "127.0.0.1:7134"
 
     def test_a_stale_cookie_falls_back_to_the_first_instance(self, peers, upstream, client):
@@ -105,7 +105,7 @@ class TestForward:
         assert client.get("/reviews").json()["from"] == "127.0.0.1:7131"
 
     def test_a_redirect_to_the_instance_stays_on_the_gateway(self, peers, upstream, client):
-        client.cookies.set("frshty_instance", "quill")
+        client.cookies.set("frshty_instance", "quartz")
         resp = client.get("/moved")
         assert resp.status_code == 303
         assert resp.headers["location"] == "/tickets/DEV-1"
@@ -153,35 +153,35 @@ class TestForward:
 class TestPin:
     def test_peer_links_point_at_the_gateway(self, peers, upstream, client):
         assert client.get("/api/work/peers").json() == {"peers": [
-            {"key": "quill", "base_url": "/api/gateway/at/quill", "label": "Quill"},
-            {"key": "atropos", "base_url": "http://192.168.1.117:7100", "label": "atropos"}]}
+            {"key": "quartz", "base_url": "/api/gateway/at/quartz", "label": "Quartz"},
+            {"key": "astroco", "base_url": "http://192.0.2.10:7100", "label": "astroco"}]}
 
     def test_global_event_links_point_at_the_gateway(self, peers, upstream, client):
         events = client.get("/api/global/events").json()["events"]
         assert [e["base_url"] for e in events] == [
-            "/api/gateway/at/frshty", "/api/gateway/at/quill", "http://192.168.1.117:7100"]
+            "/api/gateway/at/frshty", "/api/gateway/at/quartz", "http://192.0.2.10:7100"]
         assert events[0]["links"] == {"detail": "/tasks/7"}
 
     def test_a_peer_path_redirects_to_a_pinned_page(self, peers, client):
-        resp = client.get("/api/gateway/at/quill/tasks/5/terminal?x=1&frshty_instance=frshty")
+        resp = client.get("/api/gateway/at/quartz/tasks/5/terminal?x=1&frshty_instance=frshty")
         assert resp.status_code == 303
-        assert resp.headers["location"] == "/tasks/5/terminal?x=1&frshty_instance=quill"
+        assert resp.headers["location"] == "/tasks/5/terminal?x=1&frshty_instance=quartz"
         assert "set-cookie" not in resp.headers
-        assert client.get("/api/gateway/at/quill").headers["location"] == "/?frshty_instance=quill"
+        assert client.get("/api/gateway/at/quartz").headers["location"] == "/?frshty_instance=quartz"
 
     def test_a_peer_path_never_leaves_the_gateway(self, peers, client):
-        resp = client.get("/api/gateway/at/quill//evil.example/x")
-        assert resp.headers["location"] == "/evil.example/x?frshty_instance=quill"
+        resp = client.get("/api/gateway/at/quartz//evil.example/x")
+        assert resp.headers["location"] == "/evil.example/x?frshty_instance=quartz"
 
     def test_a_peer_path_refuses_an_unknown_instance(self, peers, client):
         assert client.get("/api/gateway/at/nope/tasks").status_code == 404
 
     def test_the_pin_beats_the_cookie_and_is_not_forwarded(self, peers, upstream, client):
         client.cookies.set("frshty_instance", "frshty")
-        resp = client.get("/api/x?a=1&frshty_instance=quill&b=2")
+        resp = client.get("/api/x?a=1&frshty_instance=quartz&b=2")
         assert resp.json()["from"] == "127.0.0.1:7134"
         assert str(upstream[-1].url.query, "ascii") == "a=1&b=2"
-        assert client.get("/api/gateway/instances?frshty_instance=quill").json()["current"] == "quill"
+        assert client.get("/api/gateway/instances?frshty_instance=quartz").json()["current"] == "quartz"
         assert client.get("/api/x").json()["from"] == "127.0.0.1:7131"
 
     def test_an_unknown_pin_answers_404(self, peers, upstream, client):
@@ -189,72 +189,72 @@ class TestPin:
         assert upstream == []
 
     def test_a_pinned_page_loads_the_pin_script_first(self, peers, upstream, client):
-        resp = client.get("/head?frshty_instance=quill")
+        resp = client.get("/head?frshty_instance=quartz")
         assert resp.text.startswith('<html><head lang=en><script src="/api/gateway/pin.js"></script><title>')
         assert "pin.js" not in client.get("/head").text
         assert client.get("/api/gateway/pin.js").text.startswith("(function ()")
 
     def test_a_redirect_in_a_pinned_tab_stays_pinned(self, peers, upstream, client):
-        resp = client.get("/moved?frshty_instance=quill")
-        assert resp.headers["location"] == "/tickets/DEV-1?frshty_instance=quill"
+        resp = client.get("/moved?frshty_instance=quartz")
+        assert resp.headers["location"] == "/tickets/DEV-1?frshty_instance=quartz"
 
     def test_a_navigation_from_a_pinned_page_stays_pinned(self, peers, upstream, client):
         resp = client.get("/tasks/9?x=1", headers={
-            "referer": "http://testserver/tasks/5?frshty_instance=quill"})
+            "referer": "http://testserver/tasks/5?frshty_instance=quartz"})
         assert resp.status_code == 303
-        assert resp.headers["location"] == "/tasks/9?x=1&frshty_instance=quill"
+        assert resp.headers["location"] == "/tasks/9?x=1&frshty_instance=quartz"
         assert upstream == []
 
     def test_a_subresource_of_a_pinned_page_gets_its_own_url(self, peers, upstream, client):
         resp = client.get("/api/work/items/5/transcript-image/0-0", headers={
-            "referer": "https://personal.frshty.local/tasks/5?frshty_instance=quill"})
+            "referer": "https://personal.frshty.local/tasks/5?frshty_instance=quartz"})
         assert resp.status_code == 303
-        assert resp.headers["location"] == "/api/work/items/5/transcript-image/0-0?frshty_instance=quill"
+        assert resp.headers["location"] == "/api/work/items/5/transcript-image/0-0?frshty_instance=quartz"
         assert resp.headers["cache-control"] == "no-store"
         assert upstream == []
 
     def test_a_post_from_a_pinned_page_follows_the_referer(self, peers, upstream, client):
         client.cookies.set("frshty_instance", "frshty")
-        resp = client.post("/api/x", headers={"referer": "http://testserver/tasks/5?frshty_instance=quill"})
+        resp = client.post("/api/x", headers={"referer": "http://testserver/tasks/5?frshty_instance=quartz"})
         assert resp.json()["from"] == "127.0.0.1:7134"
 
     def test_picking_an_instance_drops_the_referer(self, peers, client):
-        resp = client.get("/api/gateway/select", params={"key": "quill", "next": "/tasks"})
+        resp = client.get("/api/gateway/select", params={"key": "quartz", "next": "/tasks"})
         assert resp.headers["referrer-policy"] == "no-referrer"
 
 
 class TestSandboxedPage:
     def test_a_sandboxed_page_moves_under_its_instance_path(self, peers, upstream, client):
-        client.cookies.set("frshty_instance", "quill")
+        client.cookies.set("frshty_instance", "quartz")
         resp = client.get("/artifact/5")
         assert resp.headers["location"] == "/artifact/5/"
         resp = client.get("/artifact/5/?x=1")
         assert resp.status_code == 303
-        assert resp.headers["location"] == "/api/gateway/in/quill/artifact/5/?x=1"
+        assert resp.headers["location"] == "/api/gateway/in/quartz/artifact/5/?x=1"
         assert resp.headers["cache-control"] == "no-store"
 
     def test_a_pinned_sandboxed_page_moves_under_the_pinned_instance(self, peers, upstream, client):
-        resp = client.get("/artifact/5?frshty_instance=quill")
-        assert resp.headers["location"] == "/artifact/5/?frshty_instance=quill"
-        resp = client.get("/artifact/5/?frshty_instance=quill")
-        assert resp.headers["location"] == "/api/gateway/in/quill/artifact/5/"
+        resp = client.get("/artifact/5?frshty_instance=quartz")
+        assert resp.headers["location"] == "/artifact/5/?frshty_instance=quartz"
+        resp = client.get("/artifact/5/?frshty_instance=quartz")
+        assert resp.headers["location"] == "/api/gateway/in/quartz/artifact/5/"
 
     def test_the_page_and_its_files_load_from_the_path_instance_without_cookie_or_referer(
             self, peers, upstream, client):
-        resp = client.get("/api/gateway/in/quill/artifact/5/")
+        resp = client.get("/api/gateway/in/quartz/artifact/5/")
         assert resp.status_code == 200
         assert resp.text == "<html><head></head><body><img src=a.png></body></html>"
         assert upstream[-1].url.path == "/artifact/5/"
         assert upstream[-1].url.port == 7134
-        resp = client.get("/api/gateway/in/quill/artifact/5/a.png", headers={"referer": "http://testserver/"})
+        resp = client.get("/api/gateway/in/quartz/artifact/5/a.png", headers={"referer": "http://testserver/"})
         assert resp.content == b"127.0.0.1:7134"
         assert upstream[-1].url.path == "/artifact/5/a.png"
 
     def test_a_redirect_under_the_instance_path_stays_there(self, peers, upstream, client):
-        resp = client.get("/api/gateway/in/quill/artifact/5")
-        assert resp.headers["location"] == "/api/gateway/in/quill/artifact/5/"
-        resp = client.get("/api/gateway/in/quill/moved")
-        assert resp.headers["location"] == "/api/gateway/in/quill/tickets/DEV-1"
+        resp = client.get("/api/gateway/in/quartz/artifact/5")
+        assert resp.headers["location"] == "/api/gateway/in/quartz/artifact/5/"
+        resp = client.get("/api/gateway/in/quartz/moved")
+        assert resp.headers["location"] == "/api/gateway/in/quartz/tickets/DEV-1"
 
     def test_an_unknown_path_instance_answers_404(self, peers, upstream, client):
         assert client.get("/api/gateway/in/nope/artifact/5/a.png").status_code == 404

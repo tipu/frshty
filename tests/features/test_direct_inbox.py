@@ -35,7 +35,7 @@ def _clean(fresh_db, tmp_path):
 
 def _config(**settings):
     return {"job": {"key": "personal"}, "features": {"direct_inbox": True},
-            "direct_inbox": {"operator_name": "Danial Jaffry", **settings}}
+            "direct_inbox": {"operator_name": "Dakota Jones", **settings}}
 
 
 def _email(thread_id="t1", last_at="2026-10-06T17:00:00Z", needs_reply=True):

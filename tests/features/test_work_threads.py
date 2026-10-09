@@ -67,11 +67,11 @@ class TestThreadDerivation:
 
     def test_thread_reports_the_projects_of_its_members(self):
         root = work_store.create_item("root in raven", contexts="raven")
-        work_store.create_item("follow up in raven and clarivis",
-                               contexts="raven,clarivis,slack_int",
+        work_store.create_item("follow up in raven and cobalt",
+                               contexts="raven,cobalt,slack_int",
                                source_item_id=root)
         thread = next(t for t in work_store.threads() if t["root_id"] == root)
-        assert thread["projects"] == ["raven", "clarivis"]
+        assert thread["projects"] == ["raven", "cobalt"]
 
     def test_thread_without_a_project_context_reports_none(self):
         ids = _chain(["root with no project", "follow up with no project"])

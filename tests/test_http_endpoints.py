@@ -80,7 +80,7 @@ def test_endpoints_round_trip(tmp_path):
                      worker_count=1, cron_interval=3600)
 
     state.save("tickets", {
-        "T-1": {"status": "pr_failed", "slug": "t-1", "branch": "danial/t-1", "auto_pr": False},
+        "T-1": {"status": "pr_failed", "slug": "t-1", "branch": "dakota/t-1", "auto_pr": False},
     })
 
     import frshty

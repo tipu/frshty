@@ -51,7 +51,7 @@ class TestWebSocketOrigin:
 
     @pytest.mark.parametrize("origin", [
         "", "https://personal.frshty.localhost", "https://personal.frshty.local",
-        "https://personal.frshty.danialjaffry.com", "http://127.0.0.1:7100",
+        "https://personal.frshty.dakotajones.example", "http://127.0.0.1:7100",
         "null.example", "https://null",
     ])
     def test_every_real_client_is_let_through(self, origin):

@@ -41,7 +41,7 @@ def _proposal():
     return work_store.create_proposal(
         "Move WB-304 to the PLT board and assign it to the TRIAGE sprint.",
         note="Proposed from Slack #wb-alerts: Erik asked for the board move",
-        instance_key="atropos", contexts="atropos,slack",
+        instance_key="astroco", contexts="astroco,slack",
         brief="\n\n## Slack conversation\n\nErik: move it to PLT\n")
 
 

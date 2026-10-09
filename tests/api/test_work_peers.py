@@ -70,20 +70,20 @@ class TestPeerList:
 
     def test_reads_key_base_url_and_label(self, peers_file):
         peers_file.write_text(
-            '[[peers]]\nkey = "atropos"\nbase_url = "http://10.0.0.2:7100/"\n'
-            'label = "Atropos"\n')
+            '[[peers]]\nkey = "astroco"\nbase_url = "http://10.0.0.2:7100/"\n'
+            'label = "Astroco"\n')
         assert work_peers.peers() == [
-            {"key": "atropos", "base_url": "http://10.0.0.2:7100", "label": "Atropos"}]
+            {"key": "astroco", "base_url": "http://10.0.0.2:7100", "label": "Astroco"}]
 
     def test_own_entry_is_skipped(self, peers_file, monkeypatch):
         monkeypatch.setenv("FRSHTY_PEER_SELF", "frshty")
         peers_file.write_text('[[peers]]\nkey = "frshty"\nbase_url = "http://x:1"\n'
-                              '[[peers]]\nkey = "quill"\nbase_url = "http://x:2"\n')
-        assert [p["key"] for p in work_peers.peers()] == ["quill"]
+                              '[[peers]]\nkey = "quartz"\nbase_url = "http://x:2"\n')
+        assert [p["key"] for p in work_peers.peers()] == ["quartz"]
 
     def test_label_defaults_to_key(self, peers_file):
-        peers_file.write_text('[[peers]]\nkey = "atropos"\nbase_url = "http://x:1"\n')
-        assert work_peers.peers()[0]["label"] == "atropos"
+        peers_file.write_text('[[peers]]\nkey = "astroco"\nbase_url = "http://x:1"\n')
+        assert work_peers.peers()[0]["label"] == "astroco"
 
     def test_incomplete_and_duplicate_entries_are_dropped(self, peers_file):
         peers_file.write_text(

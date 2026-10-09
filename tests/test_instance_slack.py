@@ -9,31 +9,31 @@ SPEC = importlib.util.spec_from_file_location(
 instance = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(instance)
 
-TOKENS = {"aimyable": {"token": "tok-a", "cookie": "d=a"},
-          "quillmeetings": {"token": "tok-q", "cookie": "d=q"}}
+TOKENS = {"apexco": {"token": "tok-a", "cookie": "d=a"},
+          "quartzmeetings": {"token": "tok-q", "cookie": "d=q"}}
 
 
 @pytest.fixture
 def host(tmp_path):
     slack = tmp_path / "dev" / "slack_int"
-    (slack / "messages" / "aimyable").mkdir(parents=True)
+    (slack / "messages" / "apexco").mkdir(parents=True)
     (slack / "send.py").write_text("")
     (slack / "resolve_user.py").write_text("")
     (slack / "tokens.json").write_text(json.dumps(TOKENS))
     (slack / "tokens.json.bak").write_text(json.dumps(TOKENS))
     (slack / ".env").write_text("SLACK_INT_TOKEN=x\n")
-    root = tmp_path / "containers" / "aimyable"
+    root = tmp_path / "containers" / "apexco"
     (root / "state").mkdir(parents=True)
     (root / "ssh").mkdir()
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    config_path = root / "aimyable.toml"
+    config_path = root / "apexco.toml"
     config_path.write_text("")
     return slack, root, workspace, config_path
 
 
 def config(checkout, workspace, **extra):
-    c = {"job": {"key": "aimyable"}, "workspace": {"root": str(workspace)},
+    c = {"job": {"key": "apexco"}, "workspace": {"root": str(workspace)},
          "container": {"slack_int": str(checkout)}}
     c.update(extra)
     return c
@@ -41,12 +41,12 @@ def config(checkout, workspace, **extra):
 
 def test_workspace_instance_gets_only_its_own_token(host):
     slack, root, workspace, config_path = host
-    c = config(slack, workspace, slack={"workspace": "aimyable",
-                                        "messages_dir": str(slack / "messages" / "aimyable")},
+    c = config(slack, workspace, slack={"workspace": "apexco",
+                                        "messages_dir": str(slack / "messages" / "apexco")},
                features={"slack": True})
     instance.write_slack_tokens(c, root)
     tokens = root / "slack" / "tokens.json"
-    assert json.loads(tokens.read_text()) == {"aimyable": TOKENS["aimyable"]}
+    assert json.loads(tokens.read_text()) == {"apexco": TOKENS["apexco"]}
     assert tokens.stat().st_mode & 0o777 == 0o600
     binds = instance.mounts(c, config_path, root)
     assert (str(tokens), str(slack / "tokens.json"), True) in binds
@@ -87,14 +87,14 @@ def test_no_covering_mount_and_no_workspace_mounts_nothing(host):
 
 def test_missing_workspace_token_is_fatal(host):
     slack, root, workspace, _ = host
-    c = config(slack, workspace, slack={"workspace": "clarivis"})
-    with pytest.raises(SystemExit, match="no token for workspace 'clarivis'"):
+    c = config(slack, workspace, slack={"workspace": "cobalt"})
+    with pytest.raises(SystemExit, match="no token for workspace 'cobalt'"):
         instance.write_slack_tokens(c, root)
 
 
 def test_whole_checkout_mount_beside_a_workspace_is_refused(host):
     slack, root, workspace, config_path = host
-    c = config(slack, workspace, slack={"workspace": "aimyable"})
+    c = config(slack, workspace, slack={"workspace": "apexco"})
     c["container"]["mounts"] = [str(slack)]
     instance.write_slack_tokens(c, root)
     with pytest.raises(SystemExit, match="mount a parent"):

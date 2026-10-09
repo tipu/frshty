@@ -181,14 +181,14 @@ class TestGatePush:
         assert payload["tests"]["result"] == "pass"
 
     def test_project_config_turns_off_ci_env(self, tmp_path, monkeypatch):
-        item_id = work_store.create_item("push gate item", contexts="aimyable")
+        item_id = work_store.create_item("push gate item", contexts="apexco")
         sid = f"sid-gate-{item_id}"
         work_store.add_run(item_id, sid, f"work-{item_id}", "/tmp")
         self._resolve_to(monkeypatch, tmp_path)
         monkeypatch.setattr(work_launch.git_util, "lint_files",
                             lambda repo, files: {"status": "pass", "exit_code": 0,
                                                  "output": ""})
-        configs = {"aimyable": {"workspace": {"test_ci_env": False}}}
+        configs = {"apexco": {"workspace": {"test_ci_env": False}}}
         monkeypatch.setattr(work_launch, "_instance_config", configs.get)
         monkeypatch.setattr(work_launch, "_config_on_disk", lambda k: None)
         seen = []
@@ -201,12 +201,12 @@ class TestGatePush:
         assert seen == [False]
 
     def test_ci_env_stays_on_unless_every_project_turns_it_off(self, monkeypatch):
-        configs = {"aimyable": {"workspace": {"test_ci_env": False}},
+        configs = {"apexco": {"workspace": {"test_ci_env": False}},
                    "lsc": {"workspace": {}}}
         monkeypatch.setattr(work_launch, "_instance_config", configs.get)
         monkeypatch.setattr(work_launch, "_config_on_disk", lambda k: None)
-        assert work_launch.ci_env_enabled_for("aimyable") is False
-        assert work_launch.ci_env_enabled_for("aimyable,lsc") is True
+        assert work_launch.ci_env_enabled_for("apexco") is False
+        assert work_launch.ci_env_enabled_for("apexco,lsc") is True
         assert work_launch.ci_env_enabled_for("unknown") is True
 
     def test_no_repo_allows_but_records(self, tmp_path, monkeypatch):

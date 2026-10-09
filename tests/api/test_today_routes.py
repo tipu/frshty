@@ -309,7 +309,7 @@ class TestPrCommentBucketExcludesStalePrs:
         (slug_dir / "pr_comments.json").write_text(json.dumps([{
             "id": 200,
             "status": "needs_reply",
-            "pr_repo": "saas-dashboard",
+            "pr_repo": "spa-dashboard",
             "pr_id": 115,
             "path": "src/x.tsx",
             "line": None,

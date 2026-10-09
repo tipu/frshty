@@ -700,7 +700,7 @@ class TestProposalKey:
     def test_a_branch_and_its_pull_request_url_are_proposed_once(
             self, monkeypatch, tmp_path):
         """Work item 9861 proposed one branch under its own key, and again
-        under the key of PR quill#4894 when one draft named the PR by URL."""
+        under the key of PR quartz#4894 when one draft named the PR by URL."""
         url = "https://github.com/acme/app/pull/4894"
         item_id = self._debriefed(monkeypatch, tmp_path, "branch then url", REQUIRED_OUT)
         work_debrief.propose_required_followups()
@@ -942,13 +942,13 @@ class TestWholeTicketMerge:
         work_debrief.run_debrief(item_id)
         return item_id
 
-    DRAFT = ("Merge PR #198 (https://bitbucket.org/acme/django-drf-app/"
+    DRAFT = ("Merge PR #198 (https://bitbucket.org/acme/django-api/"
              "pull-requests/198/overview) into main.")
 
     def test_a_merge_waits_for_the_ticket_s_other_pull_requests(
             self, monkeypatch, tmp_path):
-        self._ticket([_pr("django-drf-app", 198, ["Jawad"]),
-                      _pr("websocket-server", 129)])
+        self._ticket([_pr("django-api", 198, ["Jawad"]),
+                      _pr("websocket-hub", 129)])
         item_id = self._required_draft(monkeypatch, tmp_path, self.DRAFT)
 
         assert work_debrief.propose_required_followups() == []
@@ -958,14 +958,14 @@ class TestWholeTicketMerge:
         held = work_debrief.followups_for(item_id)[0]
         assert held["status"] == "draft"
         assert "DEV-728" in held["detail"]
-        assert "websocket-server/pull-requests/129" in held["detail"]
+        assert "websocket-hub/pull-requests/129" in held["detail"]
 
     def test_the_hold_is_written_once_however_often_the_scan_runs(
             self, monkeypatch, tmp_path):
         """The scan runs every minute. A hold that wrote the row every time
         would report the same reason for ever."""
-        self._ticket([_pr("django-drf-app", 198, ["Jawad"]),
-                      _pr("websocket-server", 129)])
+        self._ticket([_pr("django-api", 198, ["Jawad"]),
+                      _pr("websocket-hub", 129)])
         item_id = self._required_draft(monkeypatch, tmp_path, self.DRAFT)
         work_debrief.propose_required_followups()
         first = db.query_one(
@@ -981,9 +981,9 @@ class TestWholeTicketMerge:
 
     def test_the_proposal_names_every_pull_request_once_all_are_approved(
             self, monkeypatch, tmp_path):
-        self._ticket([_pr("django-drf-app", 198, ["Jawad"]),
-                      _pr("websocket-server", 129, ["Jawad"]),
-                      _pr("windows-rpa-client", 60, ["Jawad"])])
+        self._ticket([_pr("django-api", 198, ["Jawad"]),
+                      _pr("websocket-hub", 129, ["Jawad"]),
+                      _pr("windows-agent", 60, ["Jawad"])])
         item_id = self._required_draft(monkeypatch, tmp_path, self.DRAFT)
 
         assert len(work_debrief.propose_required_followups()) == 1
@@ -991,19 +991,19 @@ class TestWholeTicketMerge:
         proposal = db.query_one(
             "SELECT objective FROM work_items WHERE source_item_id = ?", (item_id,))
         assert "DEV-728 holds 3 open pull requests" in proposal["objective"]
-        for repo, pr_id in (("django-drf-app", 198), ("websocket-server", 129),
-                            ("windows-rpa-client", 60)):
+        for repo, pr_id in (("django-api", 198), ("websocket-hub", 129),
+                            ("windows-agent", 60)):
             assert f"{repo}/pull-requests/{pr_id}" in proposal["objective"]
 
     def test_a_hold_that_clears_is_proposed_on_the_next_scan(
             self, monkeypatch, tmp_path):
-        self._ticket([_pr("django-drf-app", 198, ["Jawad"]),
-                      _pr("websocket-server", 129)])
+        self._ticket([_pr("django-api", 198, ["Jawad"]),
+                      _pr("websocket-hub", 129)])
         item_id = self._required_draft(monkeypatch, tmp_path, self.DRAFT)
         assert work_debrief.propose_required_followups() == []
 
-        self._ticket([_pr("django-drf-app", 198, ["Jawad"]),
-                      _pr("websocket-server", 129, ["Jawad"])])
+        self._ticket([_pr("django-api", 198, ["Jawad"]),
+                      _pr("websocket-hub", 129, ["Jawad"])])
 
         assert len(work_debrief.propose_required_followups()) == 1
         assert db.query_one("SELECT id FROM work_items WHERE source_item_id = ?",
@@ -1014,13 +1014,13 @@ class TestWholeTicketMerge:
         """The operator merged PR #198 himself while the follow-up waited. The
         draft still names it, and the ticket still holds an unapproved sibling,
         so the stale draft must not reach the board."""
-        self._ticket([_pr("django-drf-app", 198, ["Jawad"]),
-                      _pr("websocket-server", 129)])
+        self._ticket([_pr("django-api", 198, ["Jawad"]),
+                      _pr("websocket-hub", 129)])
         item_id = self._required_draft(monkeypatch, tmp_path, self.DRAFT)
         assert work_debrief.propose_required_followups() == []
 
-        self._ticket([_pr("django-drf-app", 198, ["Jawad"], pr_state="MERGED"),
-                      _pr("websocket-server", 129)])
+        self._ticket([_pr("django-api", 198, ["Jawad"], pr_state="MERGED"),
+                      _pr("websocket-hub", 129)])
 
         assert work_debrief.propose_required_followups() == []
         assert db.query_one("SELECT id FROM work_items WHERE source_item_id = ?",
@@ -1028,7 +1028,7 @@ class TestWholeTicketMerge:
 
     def test_a_ticket_with_one_pull_request_is_proposed_as_the_debrief_wrote_it(
             self, monkeypatch, tmp_path):
-        self._ticket([_pr("django-drf-app", 198, ["Jawad"])])
+        self._ticket([_pr("django-api", 198, ["Jawad"])])
         item_id = self._required_draft(monkeypatch, tmp_path, self.DRAFT)
 
         assert len(work_debrief.propose_required_followups()) == 1
@@ -1039,11 +1039,11 @@ class TestWholeTicketMerge:
 
     def test_a_step_that_is_not_a_merge_is_never_held(self, monkeypatch, tmp_path):
         """A branch left unpushed is not waiting for anyone's approval."""
-        self._ticket([_pr("django-drf-app", 198, ["Jawad"]),
-                      _pr("websocket-server", 129)])
+        self._ticket([_pr("django-api", 198, ["Jawad"]),
+                      _pr("websocket-hub", 129)])
         item_id = self._required_draft(
             monkeypatch, tmp_path,
-            "Push the branch behind https://bitbucket.org/acme/django-drf-app/"
+            "Push the branch behind https://bitbucket.org/acme/django-api/"
             "pull-requests/198", unfinished="push")
 
         assert len(work_debrief.propose_required_followups()) == 1

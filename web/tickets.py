@@ -189,7 +189,7 @@ def api_ticket_pr_info(ticket_key: str):
         # so the change-manifest haiku call is skipped. The file count is NOT
         # taken from the cache. It was written once at pr_ready entry and says
         # nothing about the branch now: DEV-636's cache still advertised two
-        # changed files in websocket-server days after a replan reset wiped that
+        # changed files in websocket-hub days after a replan reset wiped that
         # commit, so the modal offered a PR for code the branch no longer had.
         # Recount against the worktree, and mark any repo with nothing to push.
         if pr_descriptions:

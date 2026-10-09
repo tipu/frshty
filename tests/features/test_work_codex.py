@@ -835,7 +835,7 @@ class TestCodexFollowupAgent:
         assert seen["agent"] == "codex"
 
 
-TRUST_PANE = ("> You are in /home/tipu/Documents/dev/frshty/frshty\n"
+TRUST_PANE = ("> You are in /home/user/Documents/dev/frshty/frshty\n"
               "  Do you trust the contents of this directory? Working with untrusted contents\n"
               "\u203a 1. Yes, continue\n  2. No, quit\n")
 READY_PANE = "> _ OpenAI Codex (v0.149.1)\n\u203a Ask Codex to do anything\n"

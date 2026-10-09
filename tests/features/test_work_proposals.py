@@ -26,7 +26,7 @@ def _clean(fresh_db, tmp_path):
 def _proposal(objective="Move WB-412 to the PLT board.", **kwargs):
     return work_store.create_proposal(
         objective, note="Proposed from Slack #platform: Erik asked",
-        instance_key="atropos", contexts="atropos,slack",
+        instance_key="astroco", contexts="astroco,slack",
         brief="\n\n## Slack conversation\n\nErik: please move it\n", **kwargs)
 
 

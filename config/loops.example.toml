@@ -28,13 +28,13 @@
 # [[loops]]
 # key = "games"
 # label = "games portfolio"
-# repo = "/home/tipu/Documents/dev/game_expirement"
+# repo = "/home/user/Documents/dev/game_expirement"
 # cadence_minutes = 15
 
 # [[loops]]
 # key = "saas"
 # label = "saas idea"
-# host = "linode"
-# repo = "/home/tipu/Documents/dev/expirement"
-# run_as = "tipu"
+# host = "vps"
+# repo = "/home/user/Documents/dev/expirement"
+# run_as = "octocat"
 # cadence_minutes = 15

@@ -25,7 +25,7 @@ NOW = datetime(2026, 9, 3, 20, 0, tzinfo=timezone.utc)
 OPERATOR = "U0OPERATOR"
 ERIK = "U0ERIK"
 CHANNEL = "C0PLATFORM"
-WORKSPACE = "atropos-workspace"
+WORKSPACE = "astroco-workspace"
 ROOT_TS = "1788458400.000100"
 REPLY_TS = "1788458500.000200"
 
@@ -33,9 +33,9 @@ REPLY_TS = "1788458500.000200"
 @pytest.fixture(autouse=True)
 def _clean(fresh_db, tmp_path):
     state.init(tmp_path)
-    state._default_instance_key = "atropos"
-    state._instance_key_cv.set("atropos")
-    state.save("slack", {"user_id": OPERATOR, "names": {OPERATOR: "Danial"}})
+    state._default_instance_key = "astroco"
+    state._instance_key_cv.set("astroco")
+    state.save("slack", {"user_id": OPERATOR, "names": {OPERATOR: "Dakota"}})
     slack_monitor._last_channel_resolve = ""
     yield
 
@@ -44,7 +44,7 @@ def _config(tmp_path, **slack):
     settings = {"messages_dir": str(tmp_path / "capture"),
                 "workspace": WORKSPACE, "user_id": OPERATOR}
     settings.update(slack)
-    return {"job": {"key": "atropos"}, "features": {"slack": True},
+    return {"job": {"key": "astroco"}, "features": {"slack": True},
             "slack": settings, "_base_url": "http://localhost:7100"}
 
 
@@ -206,7 +206,7 @@ def test_an_edited_bot_message_opens_no_conversation(tmp_path):
                   subtype="message_changed", edited=True),
     ])
 
-    counts = sc.ingest(_config(tmp_path), instance_key="atropos", now=NOW)
+    counts = sc.ingest(_config(tmp_path), instance_key="astroco", now=NOW)
 
     assert counts["messages"] == 0
     assert _conversations() == []
@@ -264,7 +264,7 @@ def test_a_filtered_thread_lands_in_one_conversation(tmp_path):
                   thread_ts=ROOT_TS, name="Erik"),
     ])
 
-    counts = sc.ingest(_config(tmp_path), instance_key="atropos", now=NOW)
+    counts = sc.ingest(_config(tmp_path), instance_key="astroco", now=NOW)
 
     rows = _conversations()
     assert len(rows) == 1
@@ -279,12 +279,12 @@ def test_a_filtered_thread_lands_in_one_conversation(tmp_path):
 def test_a_filtered_edit_rewrites_the_message_it_changes(tmp_path):
     _write(tmp_path, "filtered.jsonl", [
         _filtered(ROOT_TS, ERIK, "move WB-412 to PLT")])
-    sc.ingest(_config(tmp_path), instance_key="atropos", now=NOW)
+    sc.ingest(_config(tmp_path), instance_key="astroco", now=NOW)
     _write(tmp_path, "filtered.jsonl", [
         _filtered(ROOT_TS, ERIK, "move WB-412 to PLT and to TRIAGE",
                   subtype="message_changed", edited=True)])
 
-    sc.ingest(_config(tmp_path), instance_key="atropos",
+    sc.ingest(_config(tmp_path), instance_key="astroco",
               now=NOW + timedelta(minutes=1))
 
     rows = _conversations()
@@ -296,12 +296,12 @@ def test_a_filtered_edit_rewrites_the_message_it_changes(tmp_path):
 def test_a_filtered_deletion_removes_the_message(tmp_path):
     _write(tmp_path, "filtered.jsonl", [
         _filtered(ROOT_TS, ERIK, "move WB-412 to PLT")])
-    sc.ingest(_config(tmp_path), instance_key="atropos", now=NOW)
+    sc.ingest(_config(tmp_path), instance_key="astroco", now=NOW)
     _write(tmp_path, "filtered.jsonl", [
         _filtered(ROOT_TS, ERIK, "move WB-412 to PLT",
                   subtype="message_deleted", deleted=True)])
 
-    sc.ingest(_config(tmp_path), instance_key="atropos",
+    sc.ingest(_config(tmp_path), instance_key="astroco",
               now=NOW + timedelta(minutes=1))
 
     assert _messages(_conversations()[0]["id"]) == []
@@ -311,7 +311,7 @@ def test_a_filtered_bot_message_opens_no_conversation(tmp_path):
     _write(tmp_path, "filtered.jsonl", [
         _filtered(ROOT_TS, "B0DEPLOY", "deploy finished", bot="Deploybot")])
 
-    counts = sc.ingest(_config(tmp_path), instance_key="atropos", now=NOW)
+    counts = sc.ingest(_config(tmp_path), instance_key="astroco", now=NOW)
 
     assert counts["messages"] == 0
     assert _conversations() == []
@@ -325,7 +325,7 @@ def test_a_conversation_name_comes_from_the_index_beside_the_capture(tmp_path):
     _write(tmp_path, "filtered.jsonl", [
         _filtered(ROOT_TS, ERIK, "move WB-412 to PLT")])
 
-    sc.ingest(_config(tmp_path), instance_key="atropos", now=NOW)
+    sc.ingest(_config(tmp_path), instance_key="astroco", now=NOW)
 
     assert _messages(_conversations()[0]["id"])[0]["user_name"] == "Erik Lund"
 
@@ -339,7 +339,7 @@ def _recent_ts(minutes_ago=1):
 
 def _armed_state(**extra):
     blob = {"user_id": OPERATOR, "last_dt": "2026-01-01T00:00:00+00:00",
-            "names": {OPERATOR: "Danial", CHANNEL: "#platform"}}
+            "names": {OPERATOR: "Dakota", CHANNEL: "#platform"}}
     blob.update(extra)
     state.save("slack", blob)
 

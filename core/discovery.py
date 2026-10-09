@@ -5,11 +5,11 @@ from pathlib import Path
 import httpx
 
 CONFIG_DIR = Path(__file__).parent.parent / "config"
-SKIP_CONFIGS = {"example.toml", "test.toml", "discovery.toml", "discovery.example.toml", "tipu-test.toml"}
+SKIP_CONFIGS = {"example.toml", "test.toml", "discovery.toml", "discovery.example.toml"}
 
 
 def skip_config(name: str) -> bool:
-    return name in SKIP_CONFIGS or name.endswith(".example.toml")
+    return name in SKIP_CONFIGS or name.endswith((".example.toml", "-test.toml"))
 
 
 def discover_instances() -> list[dict]:
