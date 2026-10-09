@@ -33,6 +33,28 @@ class TestLaunchPaneCommand:
         assert "FRSHTY_DB" not in env
         assert "GH_TOKEN" not in env
 
+    def test_the_image_browser_settings_reach_the_agent_pane(self, monkeypatch):
+        monkeypatch.setenv("PLAYWRIGHT_MCP_SANDBOX", "false")
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "/ms-playwright")
+        monkeypatch.setenv("NODE_PATH", "/usr/lib/node_modules")
+        env = terminal._child_env()
+        assert env["PLAYWRIGHT_MCP_SANDBOX"] == "false"
+        assert env["PLAYWRIGHT_BROWSERS_PATH"] == "/ms-playwright"
+        assert env["NODE_PATH"] == "/usr/lib/node_modules"
+
+    @pytest.mark.parametrize("exists", [False, True])
+    def test_the_pane_command_carries_the_image_browser_settings(self, monkeypatch, tmp_path, exists):
+        monkeypatch.setenv("PLAYWRIGHT_MCP_SANDBOX", "false")
+        monkeypatch.setattr(terminal, "_tmux_session_exists", lambda name: exists)
+        run = MagicMock(return_value=subprocess.CompletedProcess([], 0, "", ""))
+        monkeypatch.setattr(terminal.subprocess, "run", run)
+
+        terminal.launch_pane_command("work-9", str(tmp_path), "claude")
+
+        args = run.call_args_list[0].args[0]
+        assert "PLAYWRIGHT_MCP_SANDBOX=false" in args
+        assert args[args.index("PLAYWRIGHT_MCP_SANDBOX=false") - 1] == "-e"
+
     def test_existing_agentless_pane_is_respawned(self, monkeypatch, tmp_path):
         monkeypatch.setenv("SHELL", "/test/shell")
         monkeypatch.setattr(terminal, "_tmux_session_exists", lambda name: True)
