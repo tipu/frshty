@@ -23,9 +23,13 @@ run.
 
 After the rules, a cheap codex model reads a digest of each instance's events
 since the last run, plus the rule findings, and judges whether the instances
-work as expected. The rules cannot see a fault whose events look ordinary: a
-ticket that loops, a job that repeats with no progress, a scan that stopped
-producing results. The model can. Its verdict goes to the feed on the same
+work as expected. The digest reaches back at least digest_minutes, one poll
+cycle, so a window between two cycles does not read as a stopped instance. It
+lists each instance's pending work, so the model can tell an idle instance
+from a stuck one, and it leaves out this check's own events, so the model
+does not judge its own alerts. The rules cannot see a fault whose events look
+ordinary: a ticket that loops, a job that repeats with no progress, a scan
+that stopped producing results. The model can. Its verdict goes to the feed on the same
 change-only terms. The model runs in an empty directory with a read-only
 sandbox, so it reads only the digest it is given.
 
@@ -45,12 +49,16 @@ import core.db as db
 import core.log as log
 import core.state as state
 from core.llm import extract_json, run_external_model
-from core.discovery import discover_instances
-from services import work_launch, work_store
+from core.discovery import call_instance, discover_instances
+from services import pending_work, work_launch, work_store
 from web.observability import _fetch_local_global_events, _fetch_remote_global_events
 
 DEFAULT_INTERVAL_MINUTES = 15
 DEFAULT_STALE_HOURS = 2
+DEFAULT_DIGEST_MINUTES = 30
+PENDING_PATH = "/api/work/pending"
+PENDING_TIMEOUT = 3.0
+OWN_EVENT_PREFIX = "global_watch"
 FETCH_LIMIT = 5000
 ERROR_MARKERS = ("error", "fail", "crash")
 _STATE_MODULE = "global_watch"
@@ -69,15 +77,27 @@ AGENT_PROMPT = """You watch a fleet of frshty instances. frshty is an automation
 service: each instance polls tickets, pull requests, Slack and other sources,
 runs jobs and coding agents, and logs every step as an event in its feed.
 
-Below is a digest of every instance's feed since the last check, {since}, up
-to now, {now}. Each instance lists its event count, its most frequent event
-names and its latest non-noise events. Rule findings come first; the rules
-already alert on them.
+Below is a digest of every instance's feed from {since} up to now, {now}.
+The digest covers at least {digest_minutes} minutes, so it holds at least one
+poll cycle of each instance: a batch of routine jobs (job_started,
+job_finished) that every instance runs about every 30 minutes. Each instance
+lists its event count, its most frequent event names, its pending work and
+its latest non-noise events. Rule findings come first; the rules already
+alert on them.
+
+Pending work lists the instance's unfinished tickets, work items and jobs by
+state. "agent" is work that waits on the instance: a ticket an agent plans,
+codes or tests, a running work item, a queued or running job. "person" is
+work that waits on a person or an outside system: a pull request in review,
+an approval, a question. "none" means the instance holds no unfinished work.
+"unknown" means the instance did not answer; judge it from its events alone.
 
 Judge whether the instances work as expected. Report a problem only when the
 digest shows it: an instance whose work stopped, a ticket or job that repeats
-without progress, a failure that recurs, an instance that only logs noise
-while it has work, events that contradict each other. Ordinary churn, one
+without progress, a failure that recurs, an instance that only logs routine
+poll jobs while work waits on its agent, events that contradict each other.
+An instance with no work that waits on its agent is idle: routine poll jobs,
+noise-only events and few events are correct for it. Ordinary churn, one
 failure that a retry cleared, and quiet periods are not problems. Report a
 rule finding as a problem only when it needs work, and add its likely cause.
 
@@ -170,12 +190,55 @@ def evaluate(events: list[dict], errors: dict, expected: list[str],
     return findings
 
 
+def read_pending(expected: list[str], instances: list[dict], local_key: str) -> dict[str, dict]:
+    """Each expected instance's pending_work.snapshot, or {"error": ...}."""
+    out: dict[str, dict] = {}
+    try:
+        out[local_key] = pending_work.snapshot(local_key)
+    except Exception as e:
+        out[local_key] = {"error": f"{type(e).__name__}: {e}"}
+    remote = [inst for inst in instances if inst["key"] in expected and inst["key"] != local_key]
+
+    async def _all():
+        return await asyncio.gather(*[call_instance(inst["base_url"], "GET", PENDING_PATH,
+                                                    timeout=PENDING_TIMEOUT) for inst in remote])
+
+    for inst, payload in zip(remote, asyncio.run(_all()) if remote else []):
+        if not isinstance(payload, dict) or not isinstance(payload.get("agent"), dict) \
+                or not isinstance(payload.get("person"), dict):
+            err = payload.get("error") if isinstance(payload, dict) else None
+            out[inst["key"]] = {"error": str(err or f"unexpected response: {str(payload)[:100]}")}
+            continue
+        out[inst["key"]] = payload
+    for key in expected:
+        out.setdefault(key, {"error": "not discovered"})
+    return out
+
+
+def _format_pending(snapshot: dict | None) -> str:
+    if not snapshot:
+        return "unknown (not read)"
+    if "error" in snapshot:
+        return f"unknown ({' '.join(str(snapshot['error']).split())[:DIGEST_SUMMARY_CHARS]})"
+    sides = []
+    for side in ("agent", "person"):
+        groups = snapshot.get(side) or {}
+        items = [f"{kind} {name} x{n}" for kind in sorted(groups) if isinstance(groups[kind], dict)
+                 for name, n in sorted(groups[kind].items()) if n]
+        if items:
+            sides.append(f"{side}: " + ", ".join(items))
+    return "; ".join(sides) or "none"
+
+
 def build_digest(events: list[dict], expected: list[str], findings: list[dict],
-                 since: str) -> str:
+                 since: str, pending: dict[str, dict] | None = None) -> str:
     by_instance: dict[str, list[dict]] = {key: [] for key in expected}
     for ev in events:
+        if (ev.get("event") or "").startswith(OWN_EVENT_PREFIX):
+            continue
         if (ev.get("ts") or "") > since:
             by_instance.setdefault(ev.get("instance_key") or "", []).append(ev)
+    findings = [f for f in findings if not str(f.get("event") or "").startswith(OWN_EVENT_PREFIX)]
     parts = ["RULE FINDINGS"]
     parts += [f"- {f['instance']} {f['kind']}: {f['detail']}" for f in findings] or ["- none"]
     for key in sorted(by_instance):
@@ -189,6 +252,8 @@ def build_digest(events: list[dict], expected: list[str], findings: list[dict],
         recent = [ev for ev in rows if (ev.get("meta") or {}).get("category") != "noise"]
         parts.append(f"\nINSTANCE {key}: {len(rows)} events, {len(noise)} noise")
         parts.append("top: " + (", ".join(f"{name} x{n}" for name, n in top) or "none"))
+        if pending is not None:
+            parts.append("pending work: " + _format_pending(pending.get(key)))
         for ev in recent[-DIGEST_RECENT_EVENTS:]:
             summary = " ".join(str(ev.get("summary") or "").split())[:DIGEST_SUMMARY_CHARS]
             parts.append(f"{(ev.get('ts') or '')[11:19]} {ev.get('event')}: {summary}")
@@ -217,7 +282,7 @@ def _task_key(raw) -> str:
 
 
 def ask_agent(config: dict, digest: str, since: str, now: datetime,
-              known: list[dict] | None = None) -> dict:
+              known: list[dict] | None = None, digest_minutes: int = DEFAULT_DIGEST_MINUTES) -> dict:
     """The model's verdict, or {"status": "failed", "reason": ...}.
 
     codex only: a failed call is reported, never retried on another vendor."""
@@ -225,6 +290,7 @@ def ask_agent(config: dict, digest: str, since: str, now: datetime,
     model = str(cfg.get("agent_model") or DEFAULT_AGENT_MODEL)
     effort = str(cfg.get("agent_effort") or DEFAULT_AGENT_EFFORT)
     prompt = AGENT_PROMPT.format(since=since, now=now.isoformat(), digest=digest,
+                                 digest_minutes=digest_minutes,
                                  known_tasks=_format_known(known or []))
     with tempfile.TemporaryDirectory(prefix="global-watch-") as tmp:
         last = Path(tmp) / "last.txt"
@@ -343,8 +409,11 @@ def run(config: dict, now: datetime | None = None) -> dict:
     interval = int(cfg.get("interval_minutes", DEFAULT_INTERVAL_MINUTES))
     prior = state.load(_STATE_MODULE) or {}
     since = prior.get("last_run_at") or (now - timedelta(minutes=interval)).isoformat()
+    digest_minutes = int(cfg.get("digest_minutes", DEFAULT_DIGEST_MINUTES))
+    digest_since = min(datetime.fromisoformat(since),
+                       now - timedelta(minutes=digest_minutes)).isoformat()
     stale_since = (now - timedelta(hours=stale_hours)).isoformat()
-    gap_hours = math.ceil((now - datetime.fromisoformat(since)).total_seconds() / 3600)
+    gap_hours = math.ceil((now - datetime.fromisoformat(digest_since)).total_seconds() / 3600)
     window_hours = max(stale_hours, gap_hours)
 
     instances = discover_instances()
@@ -376,10 +445,12 @@ def run(config: dict, now: datetime | None = None) -> dict:
     proposed: list[dict] = []
     capped: list[str] = prior.get("capped_tasks") or []
     if cfg.get("agent", True):
-        digest = build_digest(events, expected, findings, since)
-        verdict = ask_agent(config, digest, since, now, known_tasks(KNOWN_TASKS_LIMIT))
+        pending = read_pending(expected, instances, config["job"]["key"])
+        digest = build_digest(events, expected, findings, digest_since, pending)
+        verdict = ask_agent(config, digest, digest_since, now, known_tasks(KNOWN_TASKS_LIMIT),
+                            digest_minutes)
         agent_fingerprint = _report_agent(verdict, prior, expected)
-        proposed, capped = propose_tasks(config, verdict.get("problems") or [], since, now,
+        proposed, capped = propose_tasks(config, verdict.get("problems") or [], digest_since, now,
                                          prior.get("capped_tasks") or [])
 
     state.save(_STATE_MODULE, {"last_run_at": now.isoformat(),
