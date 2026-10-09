@@ -63,10 +63,10 @@ def test_the_event_feed_links_its_own_pages_relative(tmp_path):
 
 
 def test_the_pending_work_endpoint_reads_the_serving_instance(tmp_path):
-    token = state._cv_config.set(_config("aimyable", tmp_path))
+    token = state._cv_config.set(_config("apexco", tmp_path))
     try:
         with patch.object(observability.pending_work, "snapshot", return_value={"agent": {}, "person": {}}) as snap:
             assert observability.api_work_pending() == {"agent": {}, "person": {}}
     finally:
         state._cv_config.reset(token)
-    snap.assert_called_once_with("aimyable")
+    snap.assert_called_once_with("apexco")
