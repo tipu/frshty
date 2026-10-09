@@ -62,7 +62,7 @@ def _sha(text: str) -> str:
 def hits(text: str, names: dict[str, int], allowed_owner: str = "") -> set[str]:
     text = text.lower()
     if allowed_owner:
-        text = re.sub(rf"(?:github\.com/|github:){re.escape(allowed_owner)}/", "github.com/", text)
+        text = re.sub(rf"(?<![a-z0-9.-])(?:github\.com/|github:){re.escape(allowed_owner)}/", "github.com/", text)
     lengths = sorted({n for n in names.values() if n >= SUBSTRING_MIN})
     found = set()
     for run in set(RUN.findall(text)):
@@ -86,6 +86,7 @@ def test_hits_finds_a_name_alone_inside_a_word_and_in_any_case():
     assert hits("github.com/acmeco/tool", names, "acmeco") == set()
     assert hits("github.com/acmeco/tool", names, "other") == {_sha("acmeco")}
     assert hits("github/acmeco/tool", names, "acmeco") == {_sha("acmeco")}
+    assert hits("notgithub.com/acmeco/tool", names, "acmeco") == {_sha("acmeco")}
 
 
 def test_no_tracked_file_names_a_client_company_or_person():
