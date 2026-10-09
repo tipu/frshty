@@ -46,12 +46,12 @@ def upstream(monkeypatch):
         if request.url.path == "/api/work/peers":
             return httpx.Response(200, json={"peers": [
                 {"key": "quartz", "base_url": "http://127.0.0.1:7134", "label": "Quartz"},
-                {"key": "astroco", "base_url": "http://192.168.1.117:7100", "label": "astroco"}]})
+                {"key": "astroco", "base_url": "http://192.0.2.10:7100", "label": "astroco"}]})
         if request.url.path == "/api/global/events":
             return httpx.Response(200, json={"events": [
                 {"id": "1", "instance_key": "frshty", "base_url": "", "links": {"detail": "/tasks/7"}},
                 {"id": "2", "instance_key": "quartz", "base_url": "http://127.0.0.1:7134", "links": {}},
-                {"id": "3", "instance_key": "astroco", "base_url": "http://192.168.1.117:7100", "links": {}}],
+                {"id": "3", "instance_key": "astroco", "base_url": "http://192.0.2.10:7100", "links": {}}],
                 "errors": {}})
         return httpx.Response(201, json={"from": request.url.host + ":" + str(request.url.port),
                                          "path": request.url.path})
@@ -154,12 +154,12 @@ class TestPin:
     def test_peer_links_point_at_the_gateway(self, peers, upstream, client):
         assert client.get("/api/work/peers").json() == {"peers": [
             {"key": "quartz", "base_url": "/api/gateway/at/quartz", "label": "Quartz"},
-            {"key": "astroco", "base_url": "http://192.168.1.117:7100", "label": "astroco"}]}
+            {"key": "astroco", "base_url": "http://192.0.2.10:7100", "label": "astroco"}]}
 
     def test_global_event_links_point_at_the_gateway(self, peers, upstream, client):
         events = client.get("/api/global/events").json()["events"]
         assert [e["base_url"] for e in events] == [
-            "/api/gateway/at/frshty", "/api/gateway/at/quartz", "http://192.168.1.117:7100"]
+            "/api/gateway/at/frshty", "/api/gateway/at/quartz", "http://192.0.2.10:7100"]
         assert events[0]["links"] == {"detail": "/tasks/7"}
 
     def test_a_peer_path_redirects_to_a_pinned_page(self, peers, client):
