@@ -933,6 +933,11 @@ def _done_ticket_has_new_comments(config: dict, key: str, ts: dict, ticket: dict
     )
 
 
+def _is_past_review(config: dict, external_status: str) -> bool:
+    return _resolve_status(config, external_status) in (
+        TicketStatus.in_review.value, TicketStatus.merged.value)
+
+
 def clip_text(text: str, limit: int) -> tuple[str, int]:
     """The text as an event stores it, and how long the text really is.
 
@@ -1438,7 +1443,8 @@ def check(config: dict, instance_key: str = ""):
                 continue
             if ts.get("status") == "done":
                 merged_ext = ts.get("merged_external_status")
-                if (merged_ext and ticket.get("status", "") == merged_ext
+                external = ticket.get("status", "")
+                if (merged_ext and (external == merged_ext or _is_past_review(config, external))
                         and not _done_ticket_has_new_comments(config, key, ts, ticket)):
                     _save_ticket_if_unmoved(key, ts, loaded_status)
                     continue
