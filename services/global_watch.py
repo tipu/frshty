@@ -190,11 +190,13 @@ def evaluate(events: list[dict], errors: dict, expected: list[str],
     return findings
 
 
-def read_pending(expected: list[str], instances: list[dict], local_key: str) -> dict[str, dict]:
-    """Each expected instance's pending_work.snapshot, or {"error": ...}."""
+def read_pending(expected: list[str], instances: list[dict], local_key: str,
+                 own_job_id: int | None = None) -> dict[str, dict]:
+    """Each expected instance's pending_work.snapshot, or {"error": ...}.
+    The local snapshot leaves out own_job_id, the global_watch job itself."""
     out: dict[str, dict] = {}
     try:
-        out[local_key] = pending_work.snapshot(local_key)
+        out[local_key] = pending_work.snapshot(local_key, exclude_job_id=own_job_id)
     except Exception as e:
         out[local_key] = {"error": f"{type(e).__name__}: {e}"}
     remote = [inst for inst in instances if inst["key"] in expected and inst["key"] != local_key]
@@ -402,7 +404,7 @@ def _fingerprint(findings: list[dict]) -> list[str]:
     return sorted(f"{f['kind']}:{f['instance']}:{f.get('event', '')}" for f in findings)
 
 
-def run(config: dict, now: datetime | None = None) -> dict:
+def run(config: dict, now: datetime | None = None, job_id: int | None = None) -> dict:
     cfg = settings(config)
     now = now or datetime.now(timezone.utc)
     stale_hours = int(cfg.get("stale_hours", DEFAULT_STALE_HOURS))
@@ -445,7 +447,7 @@ def run(config: dict, now: datetime | None = None) -> dict:
     proposed: list[dict] = []
     capped: list[str] = prior.get("capped_tasks") or []
     if cfg.get("agent", True):
-        pending = read_pending(expected, instances, config["job"]["key"])
+        pending = read_pending(expected, instances, config["job"]["key"], job_id)
         digest = build_digest(events, expected, findings, digest_since, pending)
         verdict = ask_agent(config, digest, digest_since, now, known_tasks(KNOWN_TASKS_LIMIT),
                             digest_minutes)

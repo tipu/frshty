@@ -77,7 +77,7 @@ def watchdog_scan(ctx: TaskContext) -> TaskResult:
 @task("global_watch", timeout=420)
 def global_watch(ctx: TaskContext) -> TaskResult:
     from services import global_watch as watch
-    out = watch.run(ctx.config)
+    out = watch.run(ctx.config, job_id=ctx.job_id)
     return TaskResult("ok", artifacts=out)
 
 
