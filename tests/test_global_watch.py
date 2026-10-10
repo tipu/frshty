@@ -408,6 +408,32 @@ def test_pending_work_splits_unfinished_work_by_who_acts_next(tmp_path):
         "person": {"tickets": {"in_review": 2, "pr_ready": 1}, "work_items": {"needs_you": 1}}}
 
 
+def test_pending_work_leaves_out_the_job_that_asks(tmp_path):
+    db.init(tmp_path / "t.db", ROOT / "migrations")
+    db.execute("INSERT INTO jobs (instance_key, task, status, enqueued_at) VALUES (?, ?, ?, ?)",
+               ("apexco", "global_watch", "running", RECENT))
+    own_id = db.query_one("SELECT id FROM jobs WHERE task = 'global_watch'")["id"]
+
+    assert pending_work.snapshot("apexco")["agent"]["jobs"] == {"running": 1}
+    assert pending_work.snapshot("apexco", exclude_job_id=own_id)["agent"]["jobs"] == {}
+
+
+def test_run_digest_does_not_count_its_own_running_job(tmp_path):
+    state.init(tmp_path)
+    db.init(tmp_path / "t.db", ROOT / "migrations")
+    db.execute("INSERT INTO jobs (instance_key, task, status, enqueued_at) VALUES (?, ?, ?, ?)",
+               ("personal", "global_watch", "running", RECENT))
+    own_id = db.query_one("SELECT id FROM jobs WHERE task = 'global_watch'")["id"]
+    with patch.object(global_watch, "discover_instances",
+                      return_value=[{"key": "personal", "base_url": "x"}]), \
+         patch.object(global_watch, "read_feed", return_value=([_ev("personal", "a")], {})), \
+         patch.object(global_watch, "run_external_model", return_value=('{"problems": []}', 0)) as model, \
+         patch.object(global_watch.log, "emit"):
+        global_watch.run(_agent_config(), now=NOW, job_id=own_id)
+
+    assert "pending work: none" in model.call_args.kwargs["stdin_text"]
+
+
 def test_pending_work_of_an_idle_instance_is_empty(tmp_path):
     db.init(tmp_path / "t.db", ROOT / "migrations")
 
@@ -431,9 +457,9 @@ def test_read_pending_asks_remote_instances_and_marks_the_ones_that_do_not_answe
     with patch.object(global_watch, "call_instance", side_effect=_call), \
          patch.object(global_watch.pending_work, "snapshot", return_value=idle) as local:
         out = global_watch.read_pending(["apexco", "astroco", "cobalt", "personal", "quartz"],
-                                        instances, "personal")
+                                        instances, "personal", 7)
 
-    local.assert_called_once_with("personal")
+    local.assert_called_once_with("personal", exclude_job_id=7)
     assert out["personal"] == idle and out["apexco"] == idle
     assert out["astroco"] == {"error": "timed out"}
     assert out["quartz"]["error"].startswith("unexpected response")
