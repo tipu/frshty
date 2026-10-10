@@ -17,10 +17,10 @@ def _placeholders(values: tuple) -> str:
     return ", ".join("?" for _ in values)
 
 
-def snapshot(instance_key: str) -> dict:
+def snapshot(instance_key: str, exclude_job_id: int | None = None) -> dict:
     """{"agent": {...}, "person": {...}}: each maps "tickets" and
     "work_items" to {state: count}; "agent" also maps "jobs" to the queued
-    and running jobs."""
+    and running jobs, leaving out exclude_job_id, the job that asks."""
     tickets = db.query_all(
         "SELECT status, COUNT(*) AS n FROM tickets WHERE instance_key = ? AND obsolete_at IS NULL "
         f"AND status NOT IN ({_placeholders(CLOSED_TICKET_STATUSES)}) GROUP BY status",
@@ -30,9 +30,9 @@ def snapshot(instance_key: str) -> dict:
         f"AND state NOT IN ({_placeholders(work_store.CLOSED_STATES)}) GROUP BY state",
         (instance_key, *work_store.CLOSED_STATES))
     jobs = db.query_all(
-        "SELECT status, COUNT(*) AS n FROM jobs WHERE instance_key = ? "
+        "SELECT status, COUNT(*) AS n FROM jobs WHERE instance_key = ? AND id IS NOT ? "
         f"AND status IN ({_placeholders(OPEN_JOB_STATUSES)}) GROUP BY status",
-        (instance_key, *OPEN_JOB_STATUSES))
+        (instance_key, exclude_job_id, *OPEN_JOB_STATUSES))
     out = {"agent": {"tickets": {}, "work_items": {}, "jobs": {}},
            "person": {"tickets": {}, "work_items": {}}}
     for row in tickets:
