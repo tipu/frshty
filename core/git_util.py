@@ -243,7 +243,9 @@ def add_or_reuse_worktree(repo_path: Path, worktree_path: Path, branch: str,
     Resolution: if the holder is the canonical repo checkout (`repo_path`
     itself), free it by checking out `base_branch` there and retry the add;
     otherwise reuse the holder worktree directly. Returns the usable worktree
-    path, or None if it could not be resolved."""
+    path, or None if it could not be resolved. A holder this process cannot
+    see, such as a host worktree registered in a repository that is mounted
+    into a container, cannot be used and resolves to None."""
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(["git", "fetch", "origin", branch], cwd=str(repo_path), capture_output=True, timeout=timeout)
     prune_worktrees(repo_path, timeout=timeout)
@@ -270,7 +272,7 @@ def add_or_reuse_worktree(repo_path: Path, worktree_path: Path, branch: str,
             cwd=str(repo_path), capture_output=True, text=True, timeout=timeout,
         )
         return worktree_path if retry.returncode == 0 else None
-    return holder
+    return holder if holder.is_dir() else None
 
 
 def pre_commit_candidates(repo_dir: Path) -> list[Path]:
