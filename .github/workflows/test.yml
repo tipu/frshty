@@ -21,6 +21,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reject history from before the 2026-10-10 rewrite
+        run: |
+          if git cat-file -e bb7693d42f0e55a5421f000da5545dda600e6fde^{commit} 2>/dev/null; then
+            echo "This branch holds commits from before the history rewrite. Rebuild it from the current main." >&2
+            exit 1
+          fi
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
