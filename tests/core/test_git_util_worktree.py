@@ -64,3 +64,18 @@ def test_adds_fresh_worktree_when_branch_free(tmp_path):
     assert result is not None
     assert result.resolve() == pr_wt.resolve()
     assert (pr_wt / ".git").exists()
+
+
+def test_returns_none_when_holder_is_not_visible(tmp_path):
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    _git(repo, "branch", "feature/w")
+    holder = tmp_path / "host_wt"
+    _git(repo, "worktree", "add", str(holder), "feature/w")
+    holder.rename(tmp_path / "elsewhere")
+
+    pr_wt = tmp_path / "pr_wt"
+    result = git_util.add_or_reuse_worktree(repo, pr_wt, "feature/w", base_branch="main")
+
+    assert result is None
+    assert not pr_wt.exists()
