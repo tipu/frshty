@@ -76,7 +76,9 @@ def test_emit_job_finished_events(monkeypatch):
     pool._emit_job_finished(job, TaskResult("ok"))
     recovered = [e for e in events if e[0] == "job_recovered"]
     assert len(recovered) == 1 and "recovered after 202 failures" in recovered[0][1]
-    assert events[-1][0] == "job_finished" and events[-1][2] == {"category": "noise"}
+    assert events[-1][0] == "worker_alive" and events[-1][2] == {"category": "noise"}
+    pool._emit_job_finished(job, TaskResult("ok"))
+    assert events[-1][0] == "worker_alive"
 
     pool._emit_job_finished(job, TaskResult("ok"))
     assert len([e for e in events if e[0] == "job_recovered"]) == 1
