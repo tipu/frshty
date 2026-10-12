@@ -25,9 +25,19 @@ def _fresh(resp: HTMLResponse) -> HTMLResponse:
     return resp
 
 
+REDESIGNS = (1, 2, 3)
+
+
 @router.get("/tasks", response_class=HTMLResponse)
 def tasks_page():
     return _fresh(_template("work.html"))
+
+
+@router.get("/tasks/design/{n}", response_class=HTMLResponse)
+def tasks_redesign_page(n: int):
+    if n not in REDESIGNS:
+        return HTMLResponse("unknown design", status_code=404)
+    return _fresh(_template(f"redesign_{n}.html"))
 
 
 @router.get("/threads", response_class=HTMLResponse)
