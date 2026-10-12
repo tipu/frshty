@@ -8,12 +8,14 @@ Safe to call once per process. Re-entrancy is guarded.
 from __future__ import annotations
 import os
 import random
+import signal
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import core.db as db
+import core.drain as drain
 import core.log as log
 from core.git_util import own_worktree_root
 from core.paths import db_path
@@ -36,6 +38,7 @@ _instances: Instances | None = None
 _pool: WorkerPool | None = None
 _dispatcher: Dispatcher | None = None
 _cron_stop = threading.Event()
+_drain_lock = threading.Lock()
 
 
 def instances() -> Instances | None:
@@ -593,6 +596,29 @@ def _clock(value: str, fallback: str) -> tuple[int, int]:
         if 0 <= h <= 23 and 0 <= m <= 59:
             return h, m
     return 0, 0
+
+
+def drain_and_exit(timeout: float = drain.DRAIN_SECONDS) -> None:
+    """Stop claiming jobs, wait up to timeout seconds for the live jobs to
+    finish, and then send SIGTERM to this process so uvicorn shuts down. The
+    board keeps answering while the jobs drain. A second call returns at once."""
+    if not _drain_lock.acquire(blocking=False):
+        return
+    log.emit("drain_started", f"stop claiming jobs; wait up to {timeout:.0f}s for live jobs")
+    left = _pool.drain(timeout) if _pool else []
+    if left:
+        log.emit("drain_deadline_passed",
+                 f"{len(left)} job(s) still running after {timeout:.0f}s: "
+                 f"job_ids={','.join(map(str, left))}")
+    else:
+        log.emit("drain_finished", "no live jobs; exiting")
+    os.kill(os.getpid(), signal.SIGTERM)
+
+
+def install_drain_handler() -> None:
+    """Run drain_and_exit on a thread of its own when DRAIN_SIGNAL arrives."""
+    signal.signal(drain.DRAIN_SIGNAL, lambda signum, frame: threading.Thread(
+        target=drain_and_exit, name="drain", daemon=True).start())
 
 
 def stop_events() -> None:
