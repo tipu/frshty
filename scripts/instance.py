@@ -92,6 +92,7 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 import core.git_util as git_util  # noqa: E402  (needs the path above)
+import core.drain as drain  # noqa: E402
 IMAGE = "frshty-instance:latest"
 GATEWAY = "frshty-gateway"
 HOME = Path.home()
@@ -534,12 +535,14 @@ def app_pid(name: str) -> str:
     return r.stdout.strip()
 
 
-def reload(timeout: float = 120) -> int:
+def reload(timeout: float = drain.DRAIN_SECONDS + 120) -> int:
     """SIGHUP every instance container and restart the gateway when the host
     runs one. Fails unless each instance runs a new frshty.py process
-    afterwards, or a gateway that exists does not restart. The signal goes
-    through `docker exec kill`, because `docker kill` marks the container as
-    manually stopped and Docker then skips it at the next daemon start."""
+    afterwards, or a gateway that exists does not restart. The old process
+    drains its live jobs first, so the wait covers the drain deadline and a
+    boot. The signal goes through `docker exec kill`, because `docker kill`
+    marks the container as manually stopped and Docker then skips it at the
+    next daemon start."""
     names = instance_containers()
     if not names:
         print("reload: no instance container is running", file=sys.stderr)

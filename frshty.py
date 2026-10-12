@@ -103,6 +103,7 @@ def main():
     try:
         import core.runtime as _rt
         _rt.start_events(configs, cron_interval=240)
+        _rt.install_drain_handler()
     except Exception as e:
         log.emit("events_boot_failed", f"{type(e).__name__}: {e}")
         raise
