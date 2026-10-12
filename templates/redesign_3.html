@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tasks Lanes — frshty</title>
+<script src="/static/vendor/vue.global.prod.js"></script>
+<script src="/static/frshty-time.js"></script>
+<script src="/static/frshty-nav.js"></script>
+<script src="/static/frshty-shell.js"></script>
+<script src="/static/frshty-work-question.js"></script>
+<script src="/static/frshty-paste-images.js"></script>
+<script src="/static/frshty-linkify.js"></script>
+<script src="/static/frshty-redesign.js"></script>
+<link rel="stylesheet" href="/static/frshty.css">
+<link rel="stylesheet" href="/static/frshty-v2.css">
+<link rel="stylesheet" href="/static/frshty-mobile.css">
+<link rel="stylesheet" href="/static/frshty-redesign.css">
+<style>
+.ln-head { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.kb { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(220px, 1fr); gap: 12px; overflow-x: auto; padding-bottom: 8px; align-items: start; }
+.kb-col { background: var(--ln-surface); border: 1px solid var(--ln-border); border-radius: 10px; display: flex; flex-direction: column; max-height: calc(100vh - 230px); min-width: 0; }
+.kb-col-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; font-size: 12px; font-weight: 600; border-bottom: 1px solid var(--ln-border); }
+.kb-col-head .n { color: var(--ln-text-3); font-weight: 500; }
+.kb-col-body { overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+.kb-card { background: var(--ln-surface-2); border: 1px solid var(--ln-border); border-radius: 8px; padding: 9px 10px; cursor: pointer; display: flex; flex-direction: column; gap: 6px; }
+.kb-card:hover { border-color: var(--ln-border-hi); }
+.kb-card.sel { border-color: var(--ln-accent); box-shadow: 0 0 0 1px var(--ln-accent); }
+.kb-card.crit { border-color: var(--ln-gold); }
+.kb-card.threaded { border-left: 3px solid var(--ln-violet); }
+.kb-obj { font-size: 12.5px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.kb-note { font-size: 11px; color: var(--ln-amber); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.kb-note.prog { color: var(--ln-text-3); }
+.kb-meta { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 11px; color: var(--ln-text-3); }
+.kb-quick { display: flex; gap: 4px; }
+.kb-thread { color: var(--ln-violet); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 160px; }
+.sw { display: flex; flex-direction: column; gap: 10px; }
+.sw-lane { background: var(--ln-surface); border: 1px solid var(--ln-border); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.sw-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; font-weight: 600; }
+.sw-chain { display: flex; gap: 0; overflow-x: auto; align-items: stretch; padding-bottom: 4px; }
+.sw-chip { flex: none; width: 210px; background: var(--ln-surface-2); border: 1px solid var(--ln-border); border-radius: 8px; padding: 7px 9px; cursor: pointer; display: flex; flex-direction: column; gap: 4px; }
+.sw-chip:hover { border-color: var(--ln-border-hi); }
+.sw-chip.sel { border-color: var(--ln-accent); }
+.sw-chip .kb-obj { -webkit-line-clamp: 2; font-size: 12px; }
+.sw-arrow { flex: none; align-self: center; color: var(--ln-text-4); padding: 0 6px; }
+.sw-progress { width: 90px; height: 4px; border-radius: 2px; background: var(--ln-surface-3); overflow: hidden; }
+.sw-progress span { display: block; height: 100%; background: var(--ln-green); }
+.dr-scrim { position: fixed; inset: 0; background: rgb(0 0 0 / 0.35); z-index: 40; }
+.dr { position: fixed; top: 0; right: 0; bottom: 0; width: min(640px, 100vw); background: var(--ln-bg); border-left: 1px solid var(--ln-border-hi); z-index: 41; overflow-y: auto; padding: 16px 22px 40px; box-shadow: -20px 0 40px rgb(0 0 0 / 0.35); }
+.dr-top { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+</style>
+<script src="/static/frshty-usage.js"></script>
+</head>
+<body>
+<div id="boot-error" style="padding:12px 36px;font-size:13px;background:#7f1d1d;color:#fca5a5;">
+  The board application failed to start. Hard-refresh this page (Ctrl/Cmd+Shift+R).
+</div>
+<div id="app" v-cloak>
+<frshty-shell :features="features" :instance="instanceName" :counts="railCounts" :crumbs="['Work', 'Tasks', 'Lanes']" width="wide">
+  <template #actions><design-switch current="3"></design-switch></template>
+
+  <div class="rd-banner" v-if="connError">{{ connError }}</div>
+  <div class="rd-banner" v-for="(msg, key) in peerErrors" :key="key">{{ key }}: {{ msg }}</div>
+
+  <rd-compose :compact="true"></rd-compose>
+
+  <div class="ln-head">
+    <div class="ln-segment">
+      <button class="ln-seg-btn" :class="{ on: mode === 'state' }" @click="setMode('state')">By state</button>
+      <button class="ln-seg-btn" :class="{ on: mode === 'thread' }" @click="setMode('thread')">By thread</button>
+    </div>
+    <label class="rd-muted" style="display:flex;gap:6px;align-items:center;cursor:pointer" v-if="mode === 'state'">
+      <input type="checkbox" v-model="showDone" /> show done column ({{ count('done') }})
+    </label>
+    <label class="rd-muted" style="display:flex;gap:6px;align-items:center;cursor:pointer" v-else>
+      <input type="checkbox" v-model="showFinished" /> show finished threads
+    </label>
+    <span class="rd-grow"></span>
+    <input class="rd-input" style="width:240px" data-focus="search" v-model="searchText" @input="onSearch" placeholder="Search… (/)" />
+    <button class="ln-btn ln-btn-sm ln-btn-ghost" v-if="mode === 'state' && showDone && count('done') && !searchText.trim()" @click="archiveDone">Archive all done</button>
+  </div>
+
+  <div class="kb" v-if="mode === 'state'">
+    <div class="kb-col" v-for="col in columns" :key="col.key">
+      <div class="kb-col-head"><span :class="dot(col.dotState)"></span>{{ col.label }} <span class="n">{{ col.rows.length }}</span></div>
+      <div class="kb-col-body">
+        <div class="kb-card" v-for="it in col.rows" :key="rowKey(it)" :data-rowkey="rowKey(it)"
+             :class="{ sel: selectedKey === rowKey(it), crit: it.critical, threaded: !!it.thread }" @click="select(it)">
+          <div class="kb-obj">{{ it.objective }}</div>
+          <div class="kb-note" v-if="it.pending_question || stopNote(it)">{{ it.pending_question ? 'asks a question' : stopNote(it) }}</div>
+          <div class="kb-note prog" v-else-if="it.state === 'agent_working' && progressNote(it)">{{ progressNote(it) }}</div>
+          <div class="kb-meta">
+            <span class="rd-id">{{ it.peer ? it.peer + ' ' : '' }}#{{ it.id }}</span>
+            <span class="ln-tag" v-for="p in projectsOf(it)" :key="p">{{ p }}</span>
+            <span class="kb-thread" v-if="it.thread">⑂ {{ it.thread.title }}</span>
+            <span class="rd-grow"></span>
+            <span>{{ ago(stamp(it)) }}</span>
+          </div>
+          <div class="kb-quick" @click.stop v-if="it.state === 'proposed' || it.state === 'needs_ack' || (it.state === 'done' && !it.archived_at)">
+            <template v-if="it.state === 'proposed'">
+              <button class="ln-btn ln-btn-sm ln-btn-primary" @click="approve(it)">Approve</button>
+              <button class="ln-btn ln-btn-sm ln-btn-ghost" @click="act(it, 'decline')">Decline</button>
+            </template>
+            <template v-else-if="it.state === 'needs_ack'">
+              <button class="ln-btn ln-btn-sm ln-btn-primary" @click="act(it, 'ack')">Acknowledge</button>
+              <button class="ln-btn ln-btn-sm ln-btn-ghost" @click="act(it, 'archive')">Archive</button>
+            </template>
+            <button class="ln-btn ln-btn-sm ln-btn-ghost" v-else @click="act(it, 'archive')">Archive</button>
+          </div>
+        </div>
+        <div class="rd-muted" style="padding:8px" v-if="!col.rows.length">empty</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sw" v-else>
+    <div class="sw-lane" v-for="t in lanes" :key="(t.peer || 'local') + '#' + t.root_id">
+      <div class="sw-head">
+        <span>⑂ {{ t.title }}</span>
+        <span class="ln-tag" v-for="p in t.projects" :key="p">{{ p }}</span>
+        <span class="ln-pill ln-pill-ghost" v-if="t.peer">⇄ {{ t.peer }}</span>
+        <span class="sw-progress"><span :style="{ width: Math.round(100 * (t.counts.done || 0) / t.task_count) + '%' }"></span></span>
+        <span class="rd-muted">{{ t.counts.done || 0 }}/{{ t.task_count }} done · {{ t.artifact_count }} artifacts · {{ ago(t.updated_at) }}</span>
+        <span class="rd-grow"></span>
+        <a class="rd-link" :href="threadHref(t)" target="_blank">thread page ↗</a>
+      </div>
+      <div class="sw-chain">
+        <template v-for="(task, i) in t.tasks" :key="task.id">
+          <span class="sw-arrow" v-if="i > 0">→</span>
+          <div class="sw-chip" :data-rowkey="(t.peer || 'local') + '#' + task.id"
+               :class="{ sel: selectedKey === (t.peer || 'local') + '#' + task.id }"
+               @click="select({ id: task.id, peer: t.peer, objective: task.objective, state: task.state })">
+            <div class="kb-meta"><span :class="dot(task.state)"></span><span class="rd-id">#{{ task.id }}</span><span>{{ groupLabel(task.state) }}</span></div>
+            <div class="kb-obj">{{ task.objective }}</div>
+          </div>
+        </template>
+      </div>
+    </div>
+    <div class="rd-muted" v-if="!lanes.length">No thread matches.</div>
+  </div>
+
+  <template v-if="cur">
+    <div class="dr-scrim" @click="select(null)"></div>
+    <aside class="dr">
+      <div class="dr-top">
+        <button class="rd-link" @click="select(null)">✕ close <kbd>esc</kbd></button>
+        <span class="rd-grow"></span>
+        <span class="rd-muted"><kbd>j</kbd>/<kbd>k</kbd> next / previous</span>
+      </div>
+      <rd-task variant="drawer"></rd-task>
+    </aside>
+  </template>
+</frshty-shell>
+</div>
+<script>
+const COLUMNS = [
+  { key: "needs_you", label: "Needs you", groups: ["needs_you", "failed_stale"], dotState: "needs_you" },
+  { key: "proposed", label: "Proposed", groups: ["proposed"], dotState: "proposed" },
+  { key: "working", label: "Working", groups: ["agent_working", "waiting_external"], dotState: "agent_working" },
+  { key: "needs_ack", label: "To acknowledge", groups: ["needs_ack"], dotState: "needs_ack" },
+  { key: "done", label: "Done", groups: ["done"], dotState: "done" },
+];
+redesignApp({
+  data() {
+    let mode = "state";
+    try { mode = localStorage.getItem("rdLanesMode") || "state"; } catch (e) {}
+    return { mode, showDone: true, showFinished: false, autoAdvance: true };
+  },
+  computed: {
+    columns() {
+      return COLUMNS.filter(c => c.key !== "done" || this.showDone).map(c => Object.assign({}, c, {
+        rows: c.groups.flatMap(g => this.groups[g] || []),
+      }));
+    },
+    lanes() {
+      const q = this.searchText.trim().toLowerCase();
+      const cutoff = new Date(Date.now() - 30 * 86400 * 1000).toISOString();
+      return this.threads.filter(t => {
+        if (q) return (t.tasks || []).some(task => (task.objective || "").toLowerCase().includes(q));
+        if (t.updated_at < cutoff) return false;
+        return this.showFinished || (t.counts.done || 0) < t.task_count;
+      });
+    },
+    navList() {
+      if (this.mode === "thread") {
+        return this.lanes.flatMap(t => t.tasks.map(task =>
+          ({ id: task.id, peer: t.peer, objective: task.objective, state: task.state })));
+      }
+      return this.columns.flatMap(c => c.rows);
+    },
+  },
+  methods: {
+    setMode(m) {
+      this.mode = m;
+      try { localStorage.setItem("rdLanesMode", m); } catch (e) {}
+    },
+    closeSelection() { this.select(null); },
+  },
+  mounted() { this.boot(); },
+}).mount("#app");
+</script>
+</body>
+</html>

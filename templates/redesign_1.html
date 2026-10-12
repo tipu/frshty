@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tasks Inbox — frshty</title>
+<script src="/static/vendor/vue.global.prod.js"></script>
+<script src="/static/frshty-time.js"></script>
+<script src="/static/frshty-nav.js"></script>
+<script src="/static/frshty-shell.js"></script>
+<script src="/static/frshty-work-question.js"></script>
+<script src="/static/frshty-paste-images.js"></script>
+<script src="/static/frshty-linkify.js"></script>
+<script src="/static/frshty-redesign.js"></script>
+<link rel="stylesheet" href="/static/frshty.css">
+<link rel="stylesheet" href="/static/frshty-v2.css">
+<link rel="stylesheet" href="/static/frshty-mobile.css">
+<link rel="stylesheet" href="/static/frshty-redesign.css">
+<style>
+.ib { display: grid; grid-template-columns: minmax(340px, 440px) 1fr; gap: 0; border: 1px solid var(--ln-border); border-radius: 10px; min-height: calc(100vh - 140px); background: var(--ln-surface); }
+.ib-list { border-right: 1px solid var(--ln-border); display: flex; flex-direction: column; min-width: 0; max-height: calc(100vh - 140px); }
+.ib-list-head { padding: 12px; border-bottom: 1px solid var(--ln-border); display: flex; flex-direction: column; gap: 8px; }
+.ib-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+.ib-tab { all: unset; cursor: pointer; font-size: 11.5px; padding: 3px 9px; border-radius: 999px; color: var(--ln-text-3); border: 1px solid transparent; }
+.ib-tab.on { color: var(--ln-text); border-color: var(--ln-border-hi); background: var(--ln-surface-3); }
+.ib-tab b { font-weight: 600; margin-left: 4px; color: var(--ln-text-2); }
+.ib-scroll { overflow-y: auto; flex: 1; }
+.ib-group { padding: 10px 14px 4px; font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ln-text-4); display: flex; align-items: center; gap: 6px; }
+.ib-row { display: grid; grid-template-columns: 14px 1fr auto; gap: 4px 8px; padding: 9px 14px; cursor: pointer; border-left: 2px solid transparent; align-items: start; }
+.ib-row:hover { background: var(--ln-surface-2); }
+.ib-row.sel { background: var(--ln-surface-3); border-left-color: var(--ln-accent); }
+.ib-row.crit { border-left-color: var(--ln-gold); }
+.ib-row .rd-dot { margin-top: 5px; }
+.ib-title { font-size: 13px; line-height: 1.35; color: var(--ln-text); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.ib-sub { grid-column: 2 / 4; display: flex; gap: 6px; align-items: center; font-size: 11px; color: var(--ln-text-3); min-width: 0; flex-wrap: wrap; }
+.ib-sub .ib-thread { color: var(--ln-violet); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 200px; }
+.ib-note { grid-column: 2 / 4; font-size: 11.5px; color: var(--ln-amber); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.ib-note.prog { color: var(--ln-text-3); }
+.ib-age { font-size: 11px; color: var(--ln-text-4); white-space: nowrap; }
+.ib-detail { padding: 18px 24px; overflow-y: auto; max-height: calc(100vh - 140px); min-width: 0; }
+.ib-empty { color: var(--ln-text-3); font-size: 13px; padding: 40px 0; text-align: center; line-height: 1.8; }
+.ib-back { display: none; }
+@media (max-width: 900px) {
+  .ib { grid-template-columns: 1fr; }
+  .ib.has-sel .ib-list { display: none; }
+  .ib:not(.has-sel) .ib-detail { display: none; }
+  .ib-list, .ib-detail { max-height: none; }
+  .ib-back { display: inline-block; margin-bottom: 10px; }
+}
+</style>
+<script src="/static/frshty-usage.js"></script>
+</head>
+<body>
+<div id="boot-error" style="padding:12px 36px;font-size:13px;background:#7f1d1d;color:#fca5a5;">
+  The board application failed to start. Hard-refresh this page (Ctrl/Cmd+Shift+R).
+</div>
+<div id="app" v-cloak>
+<frshty-shell :features="features" :instance="instanceName" :counts="railCounts" :crumbs="['Work', 'Tasks', 'Inbox']" width="wide">
+  <template #actions><design-switch current="1"></design-switch></template>
+
+  <div class="rd-banner" v-if="connError">{{ connError }}</div>
+  <div class="rd-banner" v-for="(msg, key) in peerErrors" :key="key">{{ key }}: {{ msg }}</div>
+
+  <div class="ib" :class="{ 'has-sel': !!cur }">
+    <div class="ib-list">
+      <div class="ib-list-head">
+        <rd-compose :compact="true"></rd-compose>
+        <div class="ib-tabs">
+          <button class="ib-tab" :class="{ on: tab === 'attention' }" @click="setTab('attention')">Inbox<b>{{ attentionCount }}</b></button>
+          <button class="ib-tab" :class="{ on: tab === 'running' }" @click="setTab('running')">Running<b>{{ count('agent_working') + count('failed_stale') + count('waiting_external') }}</b></button>
+          <button class="ib-tab" :class="{ on: tab === 'done' }" @click="setTab('done')">Done<b>{{ count('done') }}</b></button>
+          <button class="ib-tab" :class="{ on: tab === 'threads' }" @click="setTab('threads')">Threads<b>{{ liveThreads.length }}</b></button>
+          <button class="ib-tab" :class="{ on: tab === 'archive' }" @click="setTab('archive')">Archive</button>
+        </div>
+        <input class="rd-input" data-focus="search" v-model="searchText" @input="onSearch"
+               :placeholder="tab === 'archive' ? 'Search the archive… (/)' : 'Search tasks… (/)'" />
+      </div>
+      <div class="ib-scroll">
+        <template v-if="tab === 'threads'">
+          <template v-for="t in liveThreads" :key="(t.peer || 'local') + '#' + t.root_id">
+            <div class="ib-group">⑂ {{ t.title }} <span class="rd-grow"></span><span class="rd-id">{{ (t.counts.done || 0) }}/{{ t.task_count }}</span></div>
+            <div class="ib-row" v-for="task in t.tasks.slice().reverse()" :key="task.id"
+                 :data-rowkey="(t.peer || 'local') + '#' + task.id"
+                 :class="{ sel: selectedKey === (t.peer || 'local') + '#' + task.id }"
+                 @click="select({ id: task.id, peer: t.peer, objective: task.objective, state: task.state })">
+              <span :class="dot(task.state)"></span>
+              <div class="ib-title">{{ task.objective }}</div>
+              <span class="ib-age">{{ ago(task.updated_at) }}</span>
+            </div>
+          </template>
+          <div class="ib-empty" v-if="!liveThreads.length">No thread moved in the last 14 days.</div>
+        </template>
+        <template v-else>
+          <template v-for="g in tabGroups" :key="g">
+            <div class="ib-group" v-if="(groups[g] || []).length">
+              <span :class="dot(g)"></span>{{ groupLabel(g) }} · {{ count(g) }}
+              <span class="rd-grow"></span>
+              <button class="rd-link" v-if="g === 'done' && tab === 'done' && !searchText.trim()" @click="archiveDone">archive all</button>
+            </div>
+            <div class="ib-row" v-for="it in groups[g]" :key="rowKey(it)" :data-rowkey="rowKey(it)"
+                 :class="{ sel: selectedKey === rowKey(it), crit: it.critical && selectedKey !== rowKey(it) }" @click="select(it)">
+              <span :class="dot(it.state)"></span>
+              <div class="ib-title">{{ it.objective }}</div>
+              <span class="ib-age">{{ ago(stamp(it)) }}</span>
+              <div class="ib-note" v-if="it.pending_question || stopNote(it)">{{ it.pending_question ? 'asks a question' : stopNote(it) }}</div>
+              <div class="ib-note prog" v-else-if="it.state === 'agent_working' && progressNote(it)">{{ progressNote(it) }}</div>
+              <div class="ib-sub">
+                <span class="rd-id">{{ it.peer ? it.peer + ' ' : '' }}#{{ it.id }}</span>
+                <span class="ln-tag" v-for="p in projectsOf(it)" :key="p">{{ p }}</span>
+                <span class="ib-thread" v-if="it.thread">⑂ {{ it.thread.title }}</span>
+                <span v-if="it.critical" style="color:var(--ln-gold)">★</span>
+              </div>
+            </div>
+          </template>
+          <div style="display:flex;gap:8px;align-items:center;padding:10px 14px" class="rd-muted" v-if="tabGroups.includes('done') && donePages > 1">
+            <button class="rd-link" v-if="donePage > 1" @click="setDonePage(donePage - 1)">‹ prev</button>
+            <span>page {{ donePage }} / {{ donePages }}</span>
+            <button class="rd-link" v-if="donePage < donePages" @click="setDonePage(donePage + 1)">next ›</button>
+          </div>
+          <div class="ib-empty" v-if="loaded && !navList.length">
+            <template v-if="tab === 'attention'">Inbox zero. Nothing waits on you.</template>
+            <template v-else>No tasks here.</template>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <div class="ib-detail">
+      <button class="rd-link ib-back" @click="select(null)">← back to the list</button>
+      <rd-task v-if="cur" variant="split"></rd-task>
+      <div class="ib-empty" v-else>
+        Pick a task on the left.<br>
+        <kbd>j</kbd>/<kbd>k</kbd> move · <kbd>a</kbd> approve / acknowledge / archive · <kbd>d</kbd> decline · <kbd>e</kbd> archive<br>
+        <kbd>r</kbd> answer · <kbd>f</kbd> follow up · <kbd>c</kbd> new task · <kbd>/</kbd> search · <kbd>o</kbd> full page · <kbd>t</kbd> terminal
+      </div>
+    </div>
+  </div>
+</frshty-shell>
+</div>
+<script>
+const TAB_GROUPS = {
+  attention: ["needs_you", "needs_ack", "proposed"],
+  running: ["agent_working", "failed_stale", "waiting_external"],
+  done: ["done"],
+  archive: ["done", "canceled"],
+};
+redesignApp({
+  data() {
+    return { tab: "attention", autoAdvance: true };
+  },
+  computed: {
+    tabGroups() { return TAB_GROUPS[this.tab] || []; },
+    navList() {
+      if (this.tab === "threads") {
+        return this.liveThreads.flatMap(t => t.tasks.slice().reverse().map(task =>
+          ({ id: task.id, peer: t.peer, objective: task.objective, state: task.state })));
+      }
+      return this.tabGroups.flatMap(g => this.groups[g] || []);
+    },
+    liveThreads() {
+      const cutoff = new Date(Date.now() - 14 * 86400 * 1000).toISOString();
+      return this.threads.filter(t => t.updated_at >= cutoff);
+    },
+  },
+  methods: {
+    setTab(t) {
+      this.tab = t;
+      const wantArchive = t === "archive";
+      if ((this.view === "archive") !== wantArchive) this.setView(wantArchive ? "archive" : "board");
+    },
+    closeSelection() { this.select(null); },
+  },
+  mounted() { this.boot(); },
+}).mount("#app");
+</script>
+</body>
+</html>
