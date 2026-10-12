@@ -31,6 +31,16 @@ def _invocation(inv_id: str, age_days: float) -> None:
          "ok", "the output", 10, 1.5))
 
 
+def _read(ev_id: str, instance_key: str = "rt") -> None:
+    db.execute("INSERT INTO log_read_state(instance_key, event_id) VALUES(?,?)",
+               (instance_key, ev_id))
+
+
+def _read_ids() -> set[tuple[str, str]]:
+    return {(r["instance_key"], r["event_id"])
+            for r in db.query_all("SELECT instance_key, event_id FROM log_read_state")}
+
+
 def _ids() -> set[str]:
     return {r["id"] for r in db.query_all("SELECT id FROM log_events WHERE instance_key='rt'")}
 
@@ -51,8 +61,26 @@ def test_prune_applies_each_retention_window(fresh_db):
     assert (old["prompt_length"], old["output_length"], old["cost_usd"]) == (10, 10, 1.5)
     recent = db.query_one("SELECT * FROM claude_invocations WHERE id='inv_29d'")
     assert (recent["prompt"], recent["output"]) == ("the prompt", "the output")
-    assert result == {"noise_deleted": 1, "expired_deleted": 1, "invocations_blanked": 1}
-    assert log.prune(NOW) == {"noise_deleted": 0, "expired_deleted": 0, "invocations_blanked": 0}
+    assert result == {"noise_deleted": 1, "expired_deleted": 1, "read_state_deleted": 0,
+                      "invocations_blanked": 1}
+    assert log.prune(NOW) == {"noise_deleted": 0, "expired_deleted": 0, "read_state_deleted": 0,
+                              "invocations_blanked": 0}
+
+
+def test_prune_deletes_the_read_state_of_every_event_that_no_longer_exists(fresh_db):
+    _event("noise_8d", 8, True)
+    _event("plain_61d", 61, False)
+    _event("plain_1d", 1, False)
+    _read("noise_8d")
+    _read("plain_61d")
+    _read("plain_1d")
+    _read("plain_1d", instance_key="other")
+    _read("never_existed")
+
+    result = log.prune(NOW)
+
+    assert _read_ids() == {("rt", "plain_1d")}
+    assert result["read_state_deleted"] == 4
 
 
 def test_prune_drains_a_backlog_larger_than_one_batch(fresh_db, monkeypatch):
@@ -60,11 +88,14 @@ def test_prune_drains_a_backlog_larger_than_one_batch(fresh_db, monkeypatch):
     for i in range(5):
         _event(f"n{i}", 10, True)
         _invocation(f"i{i}", 40)
+        _read(f"n{i}")
 
     result = log.prune(NOW)
 
     assert _ids() == set()
+    assert _read_ids() == set()
     assert result["noise_deleted"] == 5 and result["invocations_blanked"] == 5
+    assert result["read_state_deleted"] == 5
 
 
 def test_seed_schedules_log_retention_for_every_instance(fresh_db):
