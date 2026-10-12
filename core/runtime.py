@@ -559,6 +559,11 @@ def _seed_recurring_schedules(instance_configs: list[dict]) -> None:
                                         cadence=cadence, next_run_at=candidate)
         else:
             scheduler.delete(key, "today_agent_tick")
+        retention = now_pst.replace(hour=3, minute=0, second=0, microsecond=0)
+        if retention <= now_pst:
+            retention += timedelta(days=1)
+        scheduler.upsert_recurring(key, "log_retention", "log_retention",
+                                   cadence="daily_3_local", next_run_at=retention)
         standup_cfg = c.get("standup") or {}
         if standup_cfg.get("enabled"):
             for name, setting, default, roll_up in (

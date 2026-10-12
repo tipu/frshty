@@ -15,6 +15,7 @@ import core.tasks.registry as registry
 from core.job_logs import job_pid_path
 
 ORPHAN_POLL_INTERVAL = 60
+ALIVE_INTERVAL = 3600
 
 
 def transition_ticket_and_emit(ticket_key: str | None, instance_key: str | None, *,
@@ -109,6 +110,20 @@ class WorkerPool:
         self._stop = threading.Event()
         self._live_jobs: set[int] = set()
         self._live_lock = threading.Lock()
+        self._alive_at: dict[str, float] = {}
+
+    def _alive_due(self, instance_key: str) -> bool:
+        """True at most once per ALIVE_INTERVAL for an instance.
+
+        A successful job writes no event. One noise event an hour keeps the
+        feed of a working instance from looking silent to global_watch."""
+        now = time.monotonic()
+        with self._live_lock:
+            last = self._alive_at.get(instance_key)
+            if last is not None and now - last < ALIVE_INTERVAL:
+                return False
+            self._alive_at[instance_key] = now
+            return True
 
     def start(self) -> None:
         self._reconcile_orphans()
@@ -362,8 +377,6 @@ class WorkerPool:
                 registry=reg,
                 now=datetime.now(timezone.utc),
             )
-            log.emit("job_started", f"{job['task']} ticket={job['ticket_key']} job_id={job['id']}",
-                     meta={"category": "noise"})
             llm.reset_guard_blocked()
             result = registry.run_task(ctx, defer_success_status=True)
             if result.status == "failed" and llm.consume_guard_blocked():
@@ -400,11 +413,15 @@ class WorkerPool:
                     job_id=job["id"], job_status=result.status, job_response=response,
                     next_events=next_events, advance=False,
                 )
-            log.emit("job_finished",
-                     f"{job['task']} ticket={job['ticket_key']} "
-                     f"job_id={job['id']} status={result.status}"
-                     f"{(' reason='+result.reason) if result.reason else ''}",
-                     meta={"category": "noise"} if result.status == "ok" else None)
+            if result.status != "ok":
+                log.emit("job_finished",
+                         f"{job['task']} ticket={job['ticket_key']} "
+                         f"job_id={job['id']} status={result.status}"
+                         f"{(' reason='+result.reason) if result.reason else ''}")
+            elif self._alive_due(instance_key):
+                log.emit("worker_alive",
+                         f"{job['task']} ticket={job['ticket_key']} job_id={job['id']} status=ok",
+                         meta={"category": "noise"})
         finally:
             log_path = job_logs.job_log_path(instance_key, job["id"])
             if log_path.exists() and log_path.stat().st_size == 0:
