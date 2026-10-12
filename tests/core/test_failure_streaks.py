@@ -82,3 +82,22 @@ def test_emit_job_finished_events(monkeypatch):
     assert len([e for e in events if e[0] == "job_recovered"]) == 1
     pool._emit_job_finished(job, fail)
     assert events[-1][2] is None
+
+
+def test_a_partial_scan_repeats_quietly_and_recovers(monkeypatch):
+    events = []
+    monkeypatch.setattr(worker_mod.log, "emit",
+                        lambda event, summary, meta=None, **kw: events.append((event, summary, meta)))
+    pool = WorkerPool({}, size=1)
+    pool._failures = FailureStreaks(Clock())
+    job = {"id": 1, "instance_key": "i", "task": "upwork_scan", "ticket_key": None}
+    partial = TaskResult("partial", artifacts={"complete": False})
+
+    for _ in range(5):
+        pool._emit_job_finished(job, partial)
+    loud = [e for e in events if (e[2] or {}).get("category") != "noise"]
+    assert len(loud) == 1 and "status=partial" in loud[0][1]
+
+    pool._emit_job_finished(job, TaskResult("ok"))
+    recovered = [e for e in events if e[0] == "job_recovered"]
+    assert len(recovered) == 1 and "recovered after 5 failures" in recovered[0][1]
