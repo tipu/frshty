@@ -283,7 +283,7 @@ def api_poll():
         return {"status": "error", "error": str(e)}
 
 
-_TERMINAL_JOB_STATUSES = {"ok", "failed", "skipped"}
+_TERMINAL_JOB_STATUSES = {"ok", "partial", "failed", "skipped"}
 
 
 def _trim_to_utf8_boundary(data: bytes) -> bytes:

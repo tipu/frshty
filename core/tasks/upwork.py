@@ -1,4 +1,4 @@
-from core.tasks.registry import TaskContext, TaskResult, task
+from core.tasks.registry import TaskContext, TaskResult, read_result, task
 from core.tasks.preconditions import feature_enabled
 
 UPWORK_SCAN_TIMEOUT = 600
@@ -9,5 +9,5 @@ UPWORK_SCAN_TIMEOUT = 600
 def upwork_scan(ctx: TaskContext) -> TaskResult:
     """Read this instance's Upwork inbox and propose the work it asks for."""
     from features import upwork_inbox
-    return TaskResult("ok", artifacts=upwork_inbox.check(
+    return read_result(upwork_inbox.check(
         ctx.config, instance_key=ctx.instance_key, now=ctx.now))
