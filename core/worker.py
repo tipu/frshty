@@ -408,8 +408,9 @@ class WorkerPool:
                 log.emit("job_recovered",
                          f"{task} ticket={ticket_key} job_id={job['id']} "
                          f"recovered after {count} failure{'s' if count != 1 else ''}: {reason}")
-        elif result.status == "failed":
-            kind, count = self._failures.failed(instance_key, task, ticket_key, result.reason)
+        elif result.status in ("failed", "partial"):
+            kind, count = self._failures.failed(instance_key, task, ticket_key,
+                                                result.reason or result.status)
             if kind == "still":
                 summary += f" still failing x{count}"
             elif kind == "repeat":
