@@ -6,6 +6,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import httpx
@@ -258,6 +259,53 @@ class TestSupervise:
         assert runs.read_text() == "xx"
 
 
+class TestSuperviseDrain:
+    def _run(self, boot, script, **kwargs):
+        saved = {sig: signal.getsignal(sig) for sig in (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)}
+        try:
+            return boot.supervise([sys.executable, "-c", script], **kwargs)
+        finally:
+            for sig, handler in saved.items():
+                signal.signal(sig, handler)
+
+    def test_sighup_asks_the_child_to_drain_and_waits_for_its_exit(self, tmp_path):
+        boot = _load_script("container_boot")
+        runs = tmp_path / "runs"
+        script = ("import os, pathlib, signal, sys, time\n"
+                  f"p = pathlib.Path({str(runs)!r})\n"
+                  "n = len(p.read_text()) if p.exists() else 0\n"
+                  "p.write_text(p.read_text() + 'r' if n else 'r')\n"
+                  "if n == 0:\n"
+                  "    def drain(signum, frame):\n"
+                  "        time.sleep(1.5)\n"
+                  "        p.write_text(p.read_text() + 'd')\n"
+                  "        sys.exit(0)\n"
+                  "    signal.signal(signal.SIGUSR1, drain)\n"
+                  "    os.kill(os.getppid(), signal.SIGHUP)\n"
+                  "    os.kill(os.getppid(), signal.SIGHUP)\n"
+                  "    time.sleep(30)\n"
+                  "sys.exit(7)\n")
+        assert self._run(boot, script) == 7
+        assert runs.read_text() == "rdr"
+
+    def test_a_child_that_outlives_the_drain_deadline_gets_sigterm(self, tmp_path):
+        boot = _load_script("container_boot")
+        runs = tmp_path / "runs"
+        script = ("import os, pathlib, signal, sys, time\n"
+                  f"p = pathlib.Path({str(runs)!r})\n"
+                  "n = len(p.read_text()) if p.exists() else 0\n"
+                  "p.write_text('x' * (n + 1))\n"
+                  "if n == 0:\n"
+                  "    signal.signal(signal.SIGUSR1, signal.SIG_IGN)\n"
+                  "    os.kill(os.getppid(), signal.SIGHUP)\n"
+                  "    time.sleep(30)\n"
+                  "sys.exit(7)\n")
+        started = time.monotonic()
+        assert self._run(boot, script, drain_timeout=1) == 7
+        assert time.monotonic() - started < 15
+        assert runs.read_text() == "xx"
+
+
 class TestSuperviseStop:
     def test_sigterm_after_a_pending_sighup_ends_the_container(self, tmp_path):
         boot = _load_script("container_boot")
@@ -266,6 +314,7 @@ class TestSuperviseStop:
                   f"p = pathlib.Path({str(runs)!r})\n"
                   "p.write_text((p.read_text() if p.exists() else '') + 'x')\n"
                   "import signal\n"
+                  "signal.signal(signal.SIGUSR1, signal.SIG_IGN)\n"
                   "signal.pthread_sigmask(signal.SIG_BLOCK, [signal.SIGTERM])\n"
                   "os.kill(os.getppid(), 1)\n"
                   "os.kill(os.getppid(), 15)\n"
