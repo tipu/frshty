@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import signal
 import threading
 import time
@@ -15,6 +16,55 @@ import core.tasks.registry as registry
 from core.job_logs import job_pid_path
 
 ORPHAN_POLL_INTERVAL = 60
+FAILURE_REPORT_INTERVAL = 3600
+
+_HEX_RE = re.compile(r"\b(?=[0-9a-f]*\d)[0-9a-f]{7,}\b", re.IGNORECASE)
+_DIGITS_RE = re.compile(r"\d+")
+
+
+def normalize_reason(reason: str | None) -> str:
+    """Strip the parts of a failure reason that change between runs of the
+    same failure: commit shas, ids, counts and timestamps."""
+    text = _HEX_RE.sub("<hex>", reason or "")
+    text = _DIGITS_RE.sub("N", text)
+    return " ".join(text.split())[:300]
+
+
+class FailureStreaks:
+    """Collapse a job that fails the same way on every run into one event.
+
+    A streak is keyed by (instance, task, ticket, normalized reason). The
+    first failure is reported. Repeats are noise, except one report each
+    FAILURE_REPORT_INTERVAL seconds. The next ok of the same (instance, task,
+    ticket) ends every streak it holds and reports one recovery."""
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic):
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._streaks: dict[tuple, dict] = {}
+
+    def failed(self, instance_key: str, task: str, ticket_key, reason: str | None) -> tuple[str, int]:
+        """Record one failure. Returns (kind, count): kind is "first",
+        "still" (due for the periodic report) or "repeat"."""
+        key = (instance_key, task, ticket_key, normalize_reason(reason))
+        now = self._clock()
+        with self._lock:
+            streak = self._streaks.get(key)
+            if streak is None:
+                self._streaks[key] = {"count": 1, "reported": now}
+                return "first", 1
+            streak["count"] += 1
+            if now - streak["reported"] >= FAILURE_REPORT_INTERVAL:
+                streak["reported"] = now
+                return "still", streak["count"]
+            return "repeat", streak["count"]
+
+    def succeeded(self, instance_key: str, task: str, ticket_key) -> list[tuple[str, int]]:
+        """End the streaks of this job. Returns (normalized reason, count)
+        for each streak that ended."""
+        with self._lock:
+            ended = [k for k in self._streaks if k[:3] == (instance_key, task, ticket_key)]
+            return [(k[3], self._streaks.pop(k)["count"]) for k in ended]
 
 
 def transition_ticket_and_emit(ticket_key: str | None, instance_key: str | None, *,
@@ -109,6 +159,7 @@ class WorkerPool:
         self._stop = threading.Event()
         self._live_jobs: set[int] = set()
         self._live_lock = threading.Lock()
+        self._failures = FailureStreaks()
 
     def start(self) -> None:
         self._reconcile_orphans()
@@ -346,6 +397,25 @@ class WorkerPool:
                 log.emit("worker_run_error", f"w{worker_idx}: job_id={job['id']}: "
                          f"{type(e).__name__}: {e}")
 
+    def _emit_job_finished(self, job: dict, result: registry.TaskResult) -> None:
+        instance_key, task, ticket_key = job["instance_key"], job["task"], job["ticket_key"]
+        summary = (f"{task} ticket={ticket_key} job_id={job['id']} status={result.status}"
+                   f"{(' reason='+result.reason) if result.reason else ''}")
+        meta = None
+        if result.status == "ok":
+            meta = {"category": "noise"}
+            for reason, count in self._failures.succeeded(instance_key, task, ticket_key):
+                log.emit("job_recovered",
+                         f"{task} ticket={ticket_key} job_id={job['id']} "
+                         f"recovered after {count} failure{'s' if count != 1 else ''}: {reason}")
+        elif result.status == "failed":
+            kind, count = self._failures.failed(instance_key, task, ticket_key, result.reason)
+            if kind == "still":
+                summary += f" still failing x{count}"
+            elif kind == "repeat":
+                meta = {"category": "noise", "repeat": count}
+        log.emit("job_finished", summary, meta=meta)
+
     def _run_one(self, job: dict) -> None:
         import core.state as state
         import core.job_logs as job_logs
@@ -413,11 +483,7 @@ class WorkerPool:
                     job_id=job["id"], job_status=result.status, job_response=response,
                     next_events=next_events, advance=False,
                 )
-            log.emit("job_finished",
-                     f"{job['task']} ticket={job['ticket_key']} "
-                     f"job_id={job['id']} status={result.status}"
-                     f"{(' reason='+result.reason) if result.reason else ''}",
-                     meta={"category": "noise"} if result.status == "ok" else None)
+            self._emit_job_finished(job, result)
         finally:
             log_path = job_logs.job_log_path(instance_key, job["id"])
             if log_path.exists() and log_path.stat().st_size == 0:
