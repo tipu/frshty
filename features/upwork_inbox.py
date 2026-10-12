@@ -1427,8 +1427,9 @@ def check(config: dict, instance_key: str = "",
     pipeline is working while no request is reaching a task.
 
     An inbox that could not be read is reported the same way and then acted
-    on. The run still ends `ok`, because the task did what it could, and a run
-    of scans that all could not read the inbox opens a proposal on /tasks."""
+    on. `complete` is false for that run, the task ends it `partial` rather
+    than `ok`, and a run of scans that all could not read the inbox opens a
+    proposal on /tasks."""
     now = now or _now()
     if not configured(config):
         return {"messages": 0, "rooms": 0, "proposed": 0,
@@ -1440,12 +1441,14 @@ def check(config: dict, instance_key: str = "",
     if not complete:
         return _report_outage(config, instance_key, error, now,
                               {**counts, "proposed": 0,
-                               "skipped": UNREACHABLE_SKIP})
+                               "skipped": UNREACHABLE_SKIP,
+                               "complete": False})
     opened, extra = propose(config, instance_key=instance_key, now=now)
     report = {"messages": counts["messages"] + extra["messages"],
               "rooms": counts["rooms"] + extra["rooms"],
               "screened": extra["screened"], "blocked": extra["blocked"],
-              "unanswered": extra["unanswered"], "proposed": len(opened)}
+              "unanswered": extra["unanswered"], "proposed": len(opened),
+              "complete": extra["complete"]}
     if not extra["complete"]:
         report["skipped"] = UNREACHABLE_SKIP
         return _report_outage(config, instance_key, extra.get("error", ""),
