@@ -1365,3 +1365,40 @@ class TestUnreachableTask:
         rows = db.query_all("SELECT instance_key FROM work_items"
                             " WHERE state = 'proposed' ORDER BY id")
         assert [r["instance_key"] for r in rows] == ["personal", "someclient"]
+
+
+class TestScanStatus:
+    def _scan(self):
+        from core.tasks.registry import TaskContext
+        from core.tasks.upwork import upwork_scan
+        ctx = TaskContext(instance_key="personal", ticket_key=None,
+                          task=ui.SCAN_TASK, payload={}, job_id=0,
+                          triggering_event_id=None, config=_config(),
+                          registry=None, now=NOW)
+        return upwork_scan(ctx)
+
+    def test_an_unreadable_inbox_ends_the_scan_partial(self):
+        with patch.object(upwork_client, "rooms",
+                          side_effect=upwork_client.UpworkAuthError("logged out")), \
+                patch.object(ui, "run_haiku"):
+            result = self._scan()
+        assert result.status == "partial"
+        assert result.artifacts["complete"] is False
+        assert result.artifacts["skipped"] == ui.UNREACHABLE_SKIP
+
+    def test_a_room_that_cannot_be_read_ends_the_scan_partial(self):
+        rooms_patch, _ = _inbox([_room()], {})
+        with rooms_patch, \
+                patch.object(upwork_client, "stories",
+                             side_effect=upwork_client.UpworkApiError(500, "boom")), \
+                patch.object(ui, "run_haiku"):
+            result = self._scan()
+        assert result.status == "partial"
+        assert result.artifacts["complete"] is False
+
+    def test_a_read_inbox_ends_the_scan_ok(self):
+        rooms_patch, stories_patch = _inbox([], {})
+        with rooms_patch, stories_patch, patch.object(ui, "run_haiku"):
+            result = self._scan()
+        assert result.status == "ok"
+        assert result.artifacts["complete"] is True

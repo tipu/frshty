@@ -2186,13 +2186,15 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
                                       DEFAULT_MAX_JUDGEMENTS_PER_SCAN))
     budget = max(0, max_pending - _proposals_awaiting_operator(instance_key))
     if budget <= 0 or max_judgements <= 0:
-        return [], {"messages": 0, "conversations": 0, "reopened": 0}
+        return [], {"messages": 0, "conversations": 0, "reopened": 0,
+                    "complete": True}
 
     names = _names(config)
     operator_id = _operator_id(config)
     operator = names.get(operator_id, "") or operator_id
     opened: list[dict] = []
-    counts = {"messages": 0, "conversations": 0, "reopened": 0}
+    counts = {"messages": 0, "conversations": 0, "reopened": 0,
+              "complete": True}
     judged = 0
     held = 0
     queue = _candidates(instance_key, config, now)
@@ -2217,6 +2219,7 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
             # A capture file could not be read. A thread's later messages may
             # be sitting in it, so the index is not a fair account of what was
             # said and nothing may be proposed from it.
+            counts["complete"] = False
             break
         fresh = db.query_one("SELECT * FROM slack_conversations WHERE id = ?",
                              (row["id"],))
@@ -2257,6 +2260,7 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
         counts["messages"] += scan["messages"]
         counts["conversations"] += scan["conversations"]
         if not scan["complete"]:
+            counts["complete"] = False
             break
         if verdict.get("actionable") is not True or not objective:
             # A no is written only when the transcript still reads as the judge
@@ -2395,10 +2399,12 @@ def check(config: dict, instance_key: str = "", now: datetime | None = None) -> 
 
     Indexing runs whenever the capture is configured. Proposing runs only
     when the config asks for it, so an instance can build the conversation
-    index without frshty ever opening a task by itself."""
+    index without frshty ever opening a task by itself.
+
+    `complete` says every capture file was read, by the ingest and by every
+    fold-in the judging did. The task reports a run without it as partial."""
     now = now or _now()
     counts = ingest(config, instance_key=instance_key, now=now)
-    counts.pop("complete", None)
     if not capture_files(config):
         # An instance with no capture configured has no evidence source. The
         # index it built before the capture was removed is not a reason to go
@@ -2412,4 +2418,5 @@ def check(config: dict, instance_key: str = "", now: datetime | None = None) -> 
     return {"messages": counts["messages"] + extra["messages"],
             "conversations": counts["conversations"] + extra["conversations"],
             "reopened": extra["reopened"],
-            "proposed": len(opened)}
+            "proposed": len(opened),
+            "complete": counts["complete"] and extra["complete"]}
