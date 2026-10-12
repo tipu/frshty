@@ -17,6 +17,8 @@ message, so the same message is judged once. Tasks are opened from the
 recorded verdicts, not from the scan that read them: the newest verdict of a
 conversation opens a task when it waits on the operator, no earlier task of
 that conversation is still open, and the cap on pending proposals has room. A
+declined proposal holds its conversation for DECLINE_HOLD_DAYS, or until a
+verdict records that the operator wrote after the declined message. A
 verdict held back by either stays recorded and opens its task on a later scan,
 even after its message has left the read window.
 """
@@ -40,6 +42,7 @@ TEXT = "text"
 DEFAULT_INTERVAL_MINUTES = 30
 DEFAULT_WINDOW_HOURS = 72
 DEFAULT_MAX_PENDING = 5
+DECLINE_HOLD_DAYS = 7
 DEFAULT_GMAIL_QUERY = ("in:inbox to:me -category:promotions -category:social"
                        " -category:updates -category:forums")
 DEFAULT_GVOICE_BIN = "gvoice"
@@ -251,12 +254,29 @@ def _seen(instance_key: str, source: str, thread_key: str, last_at: str) -> bool
         (instance_key, source, thread_key, last_at)) is not None
 
 
-def _task_outstanding(conn, instance_key: str, source: str, thread_key: str) -> bool:
+def _task_outstanding(conn, instance_key: str, source: str, thread_key: str,
+                      now: datetime) -> bool:
+    """Whether the conversation holds a task that is still open, or a
+    proposal the operator declined less than DECLINE_HOLD_DAYS ago with no
+    reply from the operator recorded after the declined message."""
+    if conn.execute(
+            "SELECT 1 FROM direct_followups d JOIN work_items w"
+            " ON w.id = d.work_item_id WHERE d.instance_key = ? AND d.source = ?"
+            f" AND d.thread_key = ? AND w.state NOT IN {_CLOSED_STATES_SQL}"
+            " LIMIT 1", (instance_key, source, thread_key)).fetchone() is not None:
+        return True
     return conn.execute(
         "SELECT 1 FROM direct_followups d JOIN work_items w"
-        " ON w.id = d.work_item_id WHERE d.instance_key = ? AND d.source = ?"
-        f" AND d.thread_key = ? AND w.state NOT IN {_CLOSED_STATES_SQL}"
-        " LIMIT 1", (instance_key, source, thread_key)).fetchone() is not None
+        " ON w.id = d.work_item_id JOIN work_events e ON e.work_item_id = w.id"
+        " WHERE d.instance_key = ? AND d.source = ? AND d.thread_key = ?"
+        " AND w.state = ? AND w.stop_reason = ? AND e.kind = 'operator_decline'"
+        " AND e.created_at >= ? AND NOT EXISTS (SELECT 1 FROM direct_followups r"
+        "   WHERE r.instance_key = d.instance_key AND r.source = d.source"
+        "   AND r.thread_key = d.thread_key AND r.needs_reply = 0"
+        "   AND r.last_at > d.last_at) LIMIT 1",
+        (instance_key, source, thread_key, work_store.CANCELED_STATE,
+         work_store.DECLINED_REASON,
+         _iso(now - timedelta(days=DECLINE_HOLD_DAYS)))).fetchone() is not None
 
 
 def _pending(conn, instance_key: str) -> int:
@@ -558,7 +578,8 @@ def _open_tasks(instance_key: str, now: datetime, max_pending: int) -> list[dict
         with db.tx() as c:
             if _pending(c, instance_key) >= max_pending:
                 break
-            if _task_outstanding(c, instance_key, row["source"], row["thread_key"]):
+            if _task_outstanding(c, instance_key, row["source"], row["thread_key"],
+                                 now):
                 continue
             current = c.execute(
                 "SELECT work_item_id FROM direct_followups WHERE id = ?",
