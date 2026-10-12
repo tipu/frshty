@@ -1,3 +1,4 @@
+import core.log as log
 from core.tasks.registry import TaskContext, TaskResult, task
 from core.tasks.preconditions import feature_enabled
 
@@ -93,3 +94,8 @@ def dep_store_gc(ctx: TaskContext) -> TaskResult:
     from core import deps
     result = deps.gc_dep_stores(ctx.config)
     return TaskResult("ok", artifacts=result)
+
+
+@task("log_retention", timeout=1800)
+def log_retention(ctx: TaskContext) -> TaskResult:
+    return TaskResult("ok", artifacts=log.prune())
