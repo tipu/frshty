@@ -81,8 +81,8 @@ runs jobs and coding agents, and logs every step as an event in its feed.
 
 Below is a digest of every instance's feed from {since} up to now, {now}.
 The digest covers at least {digest_minutes} minutes, so it holds at least one
-poll cycle of each instance: a batch of routine jobs (job_started,
-job_finished) that every instance runs about every 30 minutes. Each instance
+poll cycle of each instance. A working instance writes one worker_alive
+event an hour; a job writes job_finished only when it does not end ok. Each instance
 lists its event count, its most frequent event names, its pending work and
 its latest non-noise events. Rule findings come first; the rules already
 alert on them.
