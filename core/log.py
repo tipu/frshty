@@ -89,7 +89,7 @@ INVOCATION_TEXT_RETENTION_DAYS = 30
 PRUNE_BATCH = 5000
 
 
-def _prune_batches(sql: str, cutoff: str) -> int:
+def _prune_batches(sql: str, *params) -> int:
     """Run one bounded write per transaction until it touches no row.
 
     A small batch keeps each write lock short, so the worker threads that
@@ -97,7 +97,7 @@ def _prune_batches(sql: str, cutoff: str) -> int:
     total = 0
     while True:
         with _db.tx() as conn:
-            n = conn.execute(sql, (cutoff, PRUNE_BATCH)).rowcount
+            n = conn.execute(sql, (*params, PRUNE_BATCH)).rowcount
         total += n
         if n < PRUNE_BATCH:
             return total
@@ -105,8 +105,9 @@ def _prune_batches(sql: str, cutoff: str) -> int:
 
 def prune(now: datetime | None = None) -> dict:
     """Delete noise events older than NOISE_RETENTION_DAYS, every event older
-    than EVENT_RETENTION_DAYS, and blank the prompt and output of model calls
-    older than INVOCATION_TEXT_RETENTION_DAYS.
+    than EVENT_RETENTION_DAYS, the read state of every event that no longer
+    exists, and blank the prompt and output of model calls older than
+    INVOCATION_TEXT_RETENTION_DAYS.
 
     The model call row stays, so its cost, tokens and duration still count."""
     now = now or datetime.now(timezone.utc)
@@ -119,13 +120,18 @@ def prune(now: datetime | None = None) -> dict:
         "DELETE FROM log_events WHERE rowid IN ("
         "  SELECT rowid FROM log_events WHERE ts < ? LIMIT ?)",
         (now - timedelta(days=EVENT_RETENTION_DAYS)).isoformat())
+    orphaned = _prune_batches(
+        "DELETE FROM log_read_state WHERE rowid IN ("
+        "  SELECT r.rowid FROM log_read_state r WHERE NOT EXISTS ("
+        "    SELECT 1 FROM log_events e"
+        "    WHERE e.instance_key = r.instance_key AND e.id = r.event_id) LIMIT ?)")
     blanked = _prune_batches(
         "UPDATE claude_invocations SET prompt = '', output = '' WHERE rowid IN ("
         "  SELECT rowid FROM claude_invocations WHERE started_at < ?"
         "  AND (prompt != '' OR COALESCE(output, '') != '') LIMIT ?)",
         (now - timedelta(days=INVOCATION_TEXT_RETENTION_DAYS)).isoformat())
     return {"noise_deleted": noise, "expired_deleted": expired,
-            "invocations_blanked": blanked}
+            "read_state_deleted": orphaned, "invocations_blanked": blanked}
 
 
 def get_events(limit: int = 100, after: str | None = None, unread_only: bool = False) -> list[dict]:
