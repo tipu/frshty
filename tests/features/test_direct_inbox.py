@@ -349,3 +349,65 @@ def test_the_feature_flag_routes_the_scan():
     config["features"]["direct_inbox"] = False
     tasks = [j["task"] for j in _cron_routes({"instance_key": "personal"}, registries)]
     assert "direct_inbox_scan" not in tasks
+
+
+def _decline(item_id, at=NOW):
+    work_store.apply_action(item_id, "decline")
+    db.execute("UPDATE work_events SET created_at = ? WHERE work_item_id = ?"
+               " AND kind = 'operator_decline'", (at.isoformat(), item_id))
+
+
+def test_a_declined_proposal_holds_the_next_message_of_its_thread():
+    _run(emails=[_email()])
+    _decline(_proposals()[0]["id"])
+    later = _email(last_at="2026-10-06T18:30:00Z")
+    report, _, _, _ = _run(emails=[later], now=NOW + timedelta(hours=1))
+    assert report["proposed"] == 0
+    report, _, _, _ = _run(emails=[], now=NOW + timedelta(days=6))
+    assert report["proposed"] == 0
+    assert len(_proposals()) == 1
+
+
+def test_a_declined_proposal_holds_no_other_thread():
+    _run(emails=[_email()])
+    _decline(_proposals()[0]["id"])
+    report, _, _, _ = _run(emails=[_email(thread_id="t2")],
+                           now=NOW + timedelta(hours=1))
+    assert report["proposed"] == 1
+
+
+def test_the_decline_hold_ends_after_seven_days():
+    _run(emails=[_email()])
+    _decline(_proposals()[0]["id"])
+    later = _email(last_at="2026-10-06T18:30:00Z")
+    _run(emails=[later], now=NOW + timedelta(hours=1))
+    report, _, _, _ = _run(emails=[], now=NOW + timedelta(days=7, minutes=1))
+    assert report["proposed"] == 1
+    assert "2026-10-06T18:30:00+00:00" in _proposals()[1]["launch_brief"]
+
+
+def test_a_reply_by_the_operator_ends_the_decline_hold():
+    judge = {"conversations": [{"index": 1, "needs_reply": True,
+                                "reason": "Bob asks for the invoice.",
+                                "objective": "Send Bob the invoice."}]}
+    _run(config=_config(gmail=False),
+         gvoice=_texts(_text("incoming", 30, text="invoice?")), judge=judge)
+    _decline(_proposals()[0]["id"])
+    asked = _texts(_text("incoming", 30, text="invoice?"),
+                   _text("incoming", -50, text="still need it"))
+    report, _, _, _ = _run(config=_config(gmail=False), gvoice=asked, judge=judge,
+                           now=NOW + timedelta(hours=1))
+    assert report["proposed"] == 0
+    answered = _texts(_text("incoming", 30, text="invoice?"),
+                      _text("incoming", -50, text="still need it"),
+                      _text("outgoing", -70, text="sending today"))
+    _run(config=_config(gmail=False), gvoice=answered,
+         now=NOW + timedelta(hours=2))
+    again = _texts(_text("incoming", 30, text="invoice?"),
+                   _text("incoming", -50, text="still need it"),
+                   _text("outgoing", -70, text="sending today"),
+                   _text("incoming", -150, text="not here yet"))
+    report, _, _, _ = _run(config=_config(gmail=False), gvoice=again, judge=judge,
+                           now=NOW + timedelta(hours=3))
+    assert report["proposed"] == 1
+    assert len(_proposals()) == 2

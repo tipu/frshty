@@ -257,9 +257,32 @@ def test_run_posts_the_agent_verdict_only_when_it_changes(tmp_path):
             out = global_watch.run(_agent_config(), now=NOW + timedelta(minutes=15 * i))
 
     assert [c.args[0] for c in emit.call_args_list] == [
-        "global_watch_agent_alert", "global_watch_agent_failed", "global_watch_agent_ok"]
+        "global_watch_agent_alert", "global_watch_agent_failed", "global_watch_agent_recovered"]
     assert "apexco: scan_tickets repeats with no progress" in emit.call_args_list[0].args[1]
     assert out["agent"] == {"status": "ok", "problems": []}
+
+
+def test_run_keys_agent_alerts_by_instance_and_problem_not_by_instance_set(tmp_path):
+    worktree = _problem("apexco", "Missing Worktree")
+    reworded = {**_problem("apexco", "missing-worktree"), "what": "poll_own_prs fails again"}
+    other = _problem("borealis", "upwork-inbox")
+    second = _problem("apexco", "base-sync-blocked")
+    replies = [_verdict(worktree), _verdict(reworded, other), _verdict(reworded),
+               _verdict(reworded, second), _verdict(second), json.dumps({"problems": []})]
+
+    outs, model, emit = _run_agent(tmp_path, replies, {"job": {"key": "personal"},
+                                                       "global_watch": {"propose_tasks": False}})
+
+    calls = [(c.args[0], c.kwargs["meta"].get("problem_key")) for c in emit.call_args_list]
+    assert calls == [
+        ("global_watch_agent_alert", "apexco:missing-worktree"),
+        ("global_watch_agent_alert", "borealis:upwork-inbox"),
+        ("global_watch_agent_recovered", "borealis:upwork-inbox"),
+        ("global_watch_agent_alert", "apexco:base-sync-blocked"),
+        ("global_watch_agent_recovered", "apexco:missing-worktree"),
+        ("global_watch_agent_recovered", "apexco:base-sync-blocked")]
+    assert "git status fails in every worktree" in emit.call_args_list[4].args[1]
+    assert state.load(global_watch._STATE_MODULE)["agent_open"] == {}
 
 
 def _problem(instance, task_key, task="Repair the broken worktrees."):
