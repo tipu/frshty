@@ -16,6 +16,7 @@ import core.tasks.registry as registry
 from core.job_logs import job_pid_path
 
 ORPHAN_POLL_INTERVAL = 60
+ALIVE_INTERVAL = 3600
 FAILURE_REPORT_INTERVAL = 3600
 
 _HEX_RE = re.compile(r"\b(?=[0-9a-f]*\d)[0-9a-f]{7,}\b", re.IGNORECASE)
@@ -160,6 +161,20 @@ class WorkerPool:
         self._live_jobs: set[int] = set()
         self._live_lock = threading.Lock()
         self._failures = FailureStreaks()
+        self._alive_at: dict[str, float] = {}
+
+    def _alive_due(self, instance_key: str) -> bool:
+        """True at most once per ALIVE_INTERVAL for an instance.
+
+        A successful job writes no event. One noise event an hour keeps the
+        feed of a working instance from looking silent to global_watch."""
+        now = time.monotonic()
+        with self._live_lock:
+            last = self._alive_at.get(instance_key)
+            if last is not None and now - last < ALIVE_INTERVAL:
+                return False
+            self._alive_at[instance_key] = now
+            return True
 
     def start(self) -> None:
         self._reconcile_orphans()
@@ -183,6 +198,19 @@ class WorkerPool:
             if t is threading.current_thread():
                 continue
             t.join(join_timeout)
+
+    def drain(self, timeout: float) -> list[int]:
+        """Stop claiming jobs and wait up to timeout seconds in all for the
+        live jobs to finish. Returns the ids of the jobs still running at the
+        deadline."""
+        self._stop.set()
+        deadline = time.monotonic() + timeout
+        for t in self._threads:
+            if t is threading.current_thread():
+                continue
+            t.join(max(0.0, deadline - time.monotonic()))
+        with self._live_lock:
+            return sorted(self._live_jobs)
 
     def _reconcile_orphans(self) -> None:
         try:
@@ -390,12 +418,15 @@ class WorkerPool:
                    f"{(' reason='+result.reason) if result.reason else ''}")
         meta = None
         if result.status == "ok":
-            meta = {"category": "noise"}
             for reason, count in self._failures.succeeded(instance_key, task, ticket_key):
                 log.emit("job_recovered",
                          f"{task} ticket={ticket_key} job_id={job['id']} "
                          f"recovered after {count} failure{'s' if count != 1 else ''}: {reason}")
-        elif result.status == "failed":
+            if self._alive_due(instance_key):
+                log.emit("worker_alive", f"{task} ticket={ticket_key} job_id={job['id']} status=ok",
+                         meta={"category": "noise"})
+            return
+        if result.status == "failed":
             kind, count = self._failures.failed(instance_key, task, ticket_key, result.reason)
             if kind == "still":
                 summary += f" still failing x{count}"
@@ -432,8 +463,6 @@ class WorkerPool:
                 registry=reg,
                 now=datetime.now(timezone.utc),
             )
-            log.emit("job_started", f"{job['task']} ticket={job['ticket_key']} job_id={job['id']}",
-                     meta={"category": "noise"})
             llm.reset_guard_blocked()
             result = registry.run_task(ctx, defer_success_status=True)
             if result.status == "failed" and llm.consume_guard_blocked():

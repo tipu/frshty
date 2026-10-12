@@ -4,9 +4,10 @@ Logs gh in with the instance's GH_TOKEN, makes sure the instance's own SSH key
 exists and is on its GitHub or Bitbucket account, proves git can reach every
 repository, and then runs frshty.py as its child. SIGHUP restarts the child
 and keeps the container, so a deploy loads new code while the tmux sessions
-of running agents live on. With --check it stops after the proof and exits 0,
-so a container can be tested next to a live instance without running a
-second copy of its pipeline.
+of running agents live on. The child first drains: it stops claiming jobs
+and exits once its live jobs finish or core.drain.DRAIN_SECONDS pass. With
+--check it stops after the proof and exits 0, so a container can be tested
+next to a live instance without running a second copy of its pipeline.
 """
 import argparse
 import json
@@ -15,16 +16,19 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import core.config as cfg  # noqa: E402  (needs the path above)
+import core.drain as drain  # noqa: E402
 import core.git_util as git_util  # noqa: E402
 import core.ssh_keys as ssh_keys  # noqa: E402
 
 APP = Path(__file__).resolve().parent.parent / "frshty.py"
 SEED_DIR = Path("/run/frshty/seed")
+DRAIN_GRACE = 60
 
 
 def copy_seed_files(seed_dir: Path, home: Path) -> list[str]:
@@ -55,17 +59,23 @@ def gh_login(token: str) -> None:
         raise ssh_keys.KeyBootstrapError(f"gh auth login failed: {r.stderr.strip()[:300]}")
 
 
-def supervise(cmd: list[str]) -> int:
-    """Run `cmd` until it exits on its own. SIGHUP stops it and starts it
-    again. SIGTERM and SIGINT stop it and end the container."""
+def supervise(cmd: list[str], drain_timeout: float = drain.DRAIN_SECONDS + DRAIN_GRACE) -> int:
+    """Run `cmd` until it exits on its own. SIGHUP asks it to drain with
+    DRAIN_SIGNAL and starts it again once it exits. A child still running
+    drain_timeout seconds after the SIGHUP gets SIGTERM. SIGTERM and SIGINT
+    stop it and end the container."""
     restart = stopping = False
+    hup_at: float | None = None
     child: subprocess.Popen | None = None
 
     def on_hup(signum, frame):
-        nonlocal restart
+        nonlocal restart, hup_at
+        if restart:
+            return
         restart = True
+        hup_at = time.monotonic()
         if child is not None:
-            child.terminate()
+            child.send_signal(drain.DRAIN_SIGNAL)
 
     def on_stop(signum, frame):
         nonlocal stopping
@@ -78,8 +88,17 @@ def supervise(cmd: list[str]) -> int:
     signal.signal(signal.SIGINT, on_stop)
     while True:
         restart = False
+        hup_at = None
         child = subprocess.Popen(cmd)
-        code = child.wait()
+        forced = False
+        while True:
+            try:
+                code = child.wait(timeout=1)
+                break
+            except subprocess.TimeoutExpired:
+                if hup_at is not None and not forced and time.monotonic() - hup_at > drain_timeout:
+                    child.terminate()
+                    forced = True
         if stopping or not restart:
             return code
         print(json.dumps({"restart": "SIGHUP", "exit": code}), flush=True)
