@@ -148,6 +148,19 @@ class WorkerPool:
                 continue
             t.join(join_timeout)
 
+    def drain(self, timeout: float) -> list[int]:
+        """Stop claiming jobs and wait up to timeout seconds in all for the
+        live jobs to finish. Returns the ids of the jobs still running at the
+        deadline."""
+        self._stop.set()
+        deadline = time.monotonic() + timeout
+        for t in self._threads:
+            if t is threading.current_thread():
+                continue
+            t.join(max(0.0, deadline - time.monotonic()))
+        with self._live_lock:
+            return sorted(self._live_jobs)
+
     def _reconcile_orphans(self) -> None:
         try:
             jobs = q.running_jobs()

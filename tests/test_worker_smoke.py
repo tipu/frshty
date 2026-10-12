@@ -256,3 +256,40 @@ if __name__ == "__main__":
         with tempfile.TemporaryDirectory() as d:
             t(Path(d))
             print(f"{t.__name__}: PASS")
+
+
+def test_drain_stops_claiming_and_waits_for_the_live_job(fresh_db):
+    import threading
+    release = threading.Event()
+
+    @task("slow")
+    def slow(ctx):
+        release.wait(5)
+        return TaskResult("ok")
+
+    class FakeRegistry:
+        def __init__(self):
+            self.instance_key = "t"
+            self.config = {}
+            self.base_url = ""
+
+    pool = worker_mod.WorkerPool({"t": FakeRegistry()}, size=1, poll_interval=0.1)
+    pool.start()
+    try:
+        live = q.enqueue_job("t", "slow")
+        deadline = time.time() + 5
+        while time.time() < deadline and live not in pool._live_jobs:
+            time.sleep(0.05)
+        assert live in pool._live_jobs
+        assert pool.drain(0.3) == [live]
+        later = q.enqueue_job("t", "slow")
+        release.set()
+        assert pool.drain(5) == []
+        assert _wait_job(live)["status"] == "ok"
+        time.sleep(0.3)
+        row = db.query_one("SELECT status FROM jobs WHERE id=?", (later,))
+        assert row["status"] == "queued", row
+    finally:
+        release.set()
+        pool.stop()
+        _REGISTRY.pop("slow", None)
