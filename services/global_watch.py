@@ -29,8 +29,10 @@ lists each instance's pending work, so the model can tell an idle instance
 from a stuck one, and it leaves out this check's own events, so the model
 does not judge its own alerts. The rules cannot see a fault whose events look
 ordinary: a ticket that loops, a job that repeats with no progress, a scan
-that stopped producing results. The model can. Its verdict goes to the feed on the same
-change-only terms. The model runs in an empty directory with a read-only
+that stopped producing results. The model can. Each problem it reports is keyed
+by its instance and its normalized task key, which stays the same from run to
+run while the model rewords the detail. An alert goes to the feed when a key
+opens, and one recovered event when that key closes. The model runs in an empty directory with a read-only
 sandbox, so it reads only the digest it is given.
 
 The model names one task for each problem it reports, and the run puts that
@@ -317,27 +319,37 @@ def ask_agent(config: dict, digest: str, since: str, now: datetime,
     return {"status": "problem" if problems else "ok", "problems": problems}
 
 
-def _report_agent(verdict: dict, prior: dict, expected: list[str]) -> list[str]:
+def _problem_key(problem: dict) -> str:
+    text = _task_key(problem.get("task_key")) or _task_key(problem.get("what"))
+    return f"{problem.get('instance')}:{text}"
+
+
+def _report_agent(verdict: dict, prior: dict) -> dict[str, str]:
+    """Alert once per problem key that opens and post one recovered line per
+    key that closes. Returns the open keys, each with its alert line."""
+    opened = prior.get("agent_open") or {}
     if verdict["status"] == "failed":
         if prior.get("agent_status") != "failed":
             log.emit("global_watch_agent_failed",
                      f"global feed agent gave no verdict: {verdict['reason']}",
                      links={"global": "/global"}, meta={"reason": verdict["reason"]})
-        return prior.get("agent_fingerprint") or []
-    problems = verdict["problems"]
-    fingerprint = sorted({str(p.get("instance") or "") for p in problems})
-    if problems and fingerprint != prior.get("agent_fingerprint"):
-        lines = [f"{p.get('instance')}: {p.get('what')} (cause: {p.get('likely_cause')})"
-                 for p in problems]
-        log.emit("global_watch_agent_alert",
-                 f"global feed agent: {len(problems)} problem(s): " + "; ".join(lines),
-                 links={"global": "/global"},
-                 meta={"problems": problems, "expected": expected})
-    elif not problems and prior.get("agent_fingerprint"):
-        log.emit("global_watch_agent_ok",
-                 f"global feed agent sees all {len(expected)} instance(s) working again",
-                 links={"global": "/global"}, meta={"expected": expected})
-    return fingerprint
+        return opened
+    current: dict[str, str] = {}
+    for problem in verdict["problems"]:
+        key = _problem_key(problem)
+        line = f"{problem.get('instance')}: {problem.get('what')} (cause: {problem.get('likely_cause')})"
+        if key in current:
+            continue
+        current[key] = opened.get(key, line)
+        if key not in opened:
+            log.emit("global_watch_agent_alert", f"global feed agent: {line}",
+                     links={"global": "/global"},
+                     meta={"problem_key": key, "problem": problem})
+    for key in sorted(set(opened) - set(current)):
+        log.emit("global_watch_agent_recovered",
+                 f"global feed agent: recovered {key}: {opened[key]}",
+                 links={"global": "/global"}, meta={"problem_key": key})
+    return current
 
 
 def propose_tasks(config: dict, problems: list[dict], since: str, now: datetime,
@@ -443,7 +455,7 @@ def run(config: dict, now: datetime | None = None, job_id: int | None = None) ->
                  links={"global": "/global"}, meta={"expected": expected})
 
     verdict = {"status": "off", "problems": []}
-    agent_fingerprint = prior.get("agent_fingerprint") or []
+    agent_open = prior.get("agent_open") or {}
     proposed: list[dict] = []
     capped: list[str] = prior.get("capped_tasks") or []
     if cfg.get("agent", True):
@@ -451,7 +463,7 @@ def run(config: dict, now: datetime | None = None, job_id: int | None = None) ->
         digest = build_digest(events, expected, findings, digest_since, pending)
         verdict = ask_agent(config, digest, digest_since, now, known_tasks(KNOWN_TASKS_LIMIT),
                             digest_minutes)
-        agent_fingerprint = _report_agent(verdict, prior, expected)
+        agent_open = _report_agent(verdict, prior)
         proposed, capped = propose_tasks(config, verdict.get("problems") or [], digest_since, now,
                                          prior.get("capped_tasks") or [])
 
@@ -460,7 +472,7 @@ def run(config: dict, now: datetime | None = None, job_id: int | None = None) ->
                                "findings": findings,
                                "expected": expected,
                                "agent_status": verdict["status"],
-                               "agent_fingerprint": agent_fingerprint,
+                               "agent_open": agent_open,
                                "agent_problems": verdict.get("problems") or [],
                                "proposed_tasks": proposed,
                                "capped_tasks": capped})
