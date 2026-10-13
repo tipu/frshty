@@ -633,13 +633,40 @@ def _on_origin(row: dict) -> bool:
     return held.returncode == 0
 
 
-def _report_fault(row: dict, stderr: str) -> None:
+def _link_fault(path: str) -> str:
+    """Why the worktree's .git does not lead back to it, "" when it does.
+
+    A worktree's .git file names an admin directory, and that directory's
+    gitdir file names the worktree's .git. When Git hands a free admin name to
+    another worktree, the .git file still resolves and `git status` reads the
+    other worktree's index and HEAD, so status alone cannot see the fault."""
+    dotgit = os.path.join(path, ".git")
+    if os.path.isdir(dotgit):
+        return ""
+    try:
+        content = Path(dotgit).read_text(errors="surrogateescape").strip()
+    except OSError as exc:
+        return f"{dotgit} is unreadable: {exc}"
+    if not content.startswith("gitdir:"):
+        return f"{dotgit} does not name a gitdir"
+    admin = os.path.join(path, content[len("gitdir:"):].strip())
+    try:
+        backlink = Path(admin, "gitdir").read_text(errors="surrogateescape").strip()
+    except OSError as exc:
+        return f"admin directory {admin!r} has no gitdir file: {exc}"
+    target = os.path.realpath(os.path.join(admin, backlink))
+    if target != os.path.realpath(dotgit):
+        return f"admin directory {admin!r} belongs to {target!r}"
+    return ""
+
+
+def _report_fault(row: dict, stderr: str, what: str = "git status fails") -> None:
     """Emit one event per broken worktree, not one per sweep."""
     if row["path"] in _reported_faults:
         return
     _reported_faults.add(row["path"])
     log.emit("work_worktree_fault",
-             f"work item {row['work_item_id']}: git status fails in "
+             f"work item {row['work_item_id']}: {what} in "
              f"{row['path']}: {stderr.strip()[:200]}",
              meta={"path": row["path"], "repo": row["repo_name"]})
 
@@ -673,6 +700,10 @@ def _keep_reason(row: dict, now: datetime, branch_fetched: bool = False) -> str:
             return f"work item {item_id} is not finished long enough"
         if terminal.session_healthy(f"work-{item_id}").get("alive"):
             return f"work item {item_id} still has a live session"
+    link_fault = _link_fault(row["path"])
+    if link_fault:
+        _report_fault(row, link_fault, "the git link is broken")
+        return f"the git link is broken: {link_fault}"
     status = _git(row["path"], ["-c", "status.showUntrackedFiles=all",
                                 "-c", "core.quotePath=true", "status",
                                 "--porcelain", "--ignored"], timeout=60)
