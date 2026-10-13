@@ -1401,7 +1401,7 @@ def api_discard_ticket(key: str):
         for repo in repos:
             wt_path = cfg.ticket_worktree_path(_config, slug, repo["name"])
             if (wt_path / ".git").is_file():
-                subprocess.run(["git", "worktree", "remove", "--force", str(wt_path)], cwd=str(repo["path"]), capture_output=True, timeout=60)
+                subprocess.run(["git", *git_util.WORKTREE_REMOVE, str(wt_path)], cwd=str(repo["path"]), capture_output=True, timeout=60)
         ticket_dir = ws["root"] / ws["tickets_dir"] / slug
         if ticket_dir.is_dir():
             try:
