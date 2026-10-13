@@ -62,9 +62,12 @@
     <div v-if="!visibleReviews.length" class="text-gray-600">No reviews queued.</div>
     <template v-else>
         <div v-for="(group, ticket) in groups" :key="ticket" class="mb-4">
-            <div class="text-sm text-gray-400 mb-1">
-                {{ ticket }} — {{ group.label }}
-                <span v-if="group.authors.length" class="text-gray-500">by {{ group.authors.join(', ') }}</span>
+            <div class="text-sm text-gray-400 mb-1 flex items-center gap-2">
+                <span>
+                    {{ ticket }} — {{ group.label }}
+                    <span v-if="group.authors.length" class="text-gray-500">by {{ group.authors.join(', ') }}</span>
+                </span>
+                <a :href="'/review-tickets/' + ticket + '/presentation'" class="badge badge-purple whitespace-nowrap hover:opacity-80 ml-auto" title="guided slide walkthrough of the ticket across all its PRs">▶ present ticket</a>
             </div>
             <div class="space-y-1">
                 <pr-card v-for="r in group.items" :key="r.repo + '/' + r.pr_id" :r="r"></pr-card>
