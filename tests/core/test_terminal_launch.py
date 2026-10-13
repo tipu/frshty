@@ -79,14 +79,27 @@ class TestLaunchPaneCommand:
         args = run.call_args_list[0].args[0]
         assert args[-1] == f"claude; exec /bin/bash --rcfile {terminal.PANE_BASHRC} -i"
 
-    def test_alias_rcfile_defines_cl_and_clc(self, tmp_path):
+    def test_pane_shell_without_shell_env_uses_the_passwd_shell(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("SHELL", raising=False)
+        monkeypatch.setattr(terminal, "_passwd_shell", lambda: "/bin/bash")
+        monkeypatch.setattr(terminal, "_tmux_session_exists", lambda name: False)
+        run = MagicMock(return_value=subprocess.CompletedProcess([], 0, "", ""))
+        monkeypatch.setattr(terminal.subprocess, "run", run)
+
+        terminal.launch_pane_command("work-7", str(tmp_path), "claude")
+
+        args = run.call_args_list[0].args[0]
+        assert args[-1] == f"claude; exec /bin/bash --rcfile {terminal.PANE_BASHRC} -i"
+
+    def test_alias_rcfile_defines_cl_clc_and_co(self, tmp_path):
         out = subprocess.run(
-            ["bash", "--rcfile", terminal.PANE_BASHRC, "-i", "-c", "alias cl clc"],
+            ["bash", "--rcfile", terminal.PANE_BASHRC, "-i", "-c", "alias cl clc co"],
             env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin"},
             capture_output=True, text=True,
         )
         assert "alias cl='claude --dangerously-skip-permissions'" in out.stdout
         assert "alias clc='cl --continue'" in out.stdout
+        assert "alias co='codex --dangerously-bypass-approvals-and-sandbox'" in out.stdout
 
     def test_alias_rcfile_keeps_the_operators_own_alias(self, tmp_path):
         (tmp_path / ".profile").write_text("alias cl='my-claude'\n")
