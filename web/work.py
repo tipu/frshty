@@ -487,7 +487,9 @@ def _serve_artifact(artifact_id: int, real: str, shown: str):
         return JSONResponse(
             {"error": f"artifact path outside the run's workspace: {shown}"},
             status_code=403)
-    resp = FileResponse(real, media_type=_media_type(real))
+    resp = FileResponse(real, media_type=_media_type(real),
+                        filename=os.path.basename(real),
+                        content_disposition_type="inline")
     resp.headers["Content-Security-Policy"] = policy_for(real)
     return resp
 
