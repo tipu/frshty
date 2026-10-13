@@ -69,6 +69,11 @@ def review_presentation_page(repo: str, pr_id: int):
     return _template("review_presentation.html")
 
 
+@router.get("/review-tickets/{key}/presentation", response_class=HTMLResponse)
+def review_ticket_presentation_page(key: str):
+    return _template("ticket_presentation.html")
+
+
 @router.get("/tickets", response_class=HTMLResponse)
 def tickets_page():
     return _template("tickets.html")
