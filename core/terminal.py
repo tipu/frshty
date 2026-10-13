@@ -1,4 +1,5 @@
 import os
+import pwd
 import re
 import shlex
 import shutil
@@ -130,17 +131,26 @@ PANE_BASHRC = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts", "pane_bashrc")
 
 
+def _passwd_shell() -> str:
+    try:
+        return pwd.getpwuid(os.getuid()).pw_shell
+    except KeyError:
+        return ""
+
+
 def _pane_shell() -> str:
     """The interactive shell a pane runs after its agent exits, or starts
     with when it runs no agent.
 
     A bash pane reads scripts/pane_bashrc. That file runs the startup files
-    a login shell reads and then defines the cl and clc aliases, so the
-    operator can start claude by hand in any pane. Bash ignores --rcfile in
+    a login shell reads and then defines the cl, clc and co aliases, so the
+    operator can start claude or codex by hand in any pane. Bash ignores --rcfile in
     a login shell, so the pane shell is interactive and not a login shell,
     and the rcfile reads the login files itself. Another shell keeps its
-    own login startup files."""
-    login_shell = os.environ.get("SHELL") or "/bin/sh"
+    own login startup files. A process started without SHELL, such as the
+    server in an instance container, takes the login shell from its passwd
+    entry."""
+    login_shell = os.environ.get("SHELL") or _passwd_shell() or "/bin/sh"
     if os.path.basename(login_shell) == "bash":
         return f"{shlex.quote(login_shell)} --rcfile {shlex.quote(PANE_BASHRC)} -i"
     return f"{shlex.quote(login_shell)} -l"
