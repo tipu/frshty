@@ -1,10 +1,32 @@
+import fcntl
 import json
+import os
 import re
+from contextlib import contextmanager
 from pathlib import Path
 
 
 def provider_suffix(provider: str) -> str:
     return "" if provider == "claude" else f".{provider}"
+
+
+@contextmanager
+def queue_lock(branch_dir: Path):
+    """Hold this review's comment queues for one read-modify-write.
+
+    The page edits a queue while a background run fills explainers into it, and
+    a pipeline review runs in another process, so the lock is a file lock on
+    the review directory itself."""
+    fd = os.open(branch_dir, os.O_RDONLY)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def load_queue(branch_dir: Path, provider: str = "claude") -> list:
+    return json.loads((branch_dir / f"queued_comments{provider_suffix(provider)}.json").read_text())
 
 
 def find_review(state_dir: Path, repo: str, pr_id: int, provider: str = "claude"):

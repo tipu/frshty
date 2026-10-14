@@ -780,7 +780,8 @@ class TestReviewTicket:
              patch("features.reviewer._run_single_persona",
                    side_effect=lambda args: (args[0], dict(persona_data))), \
              patch("features.reviewer._merge_reviews", return_value=dict(persona_data)), \
-             patch("features.reviewer._simplify_all_issues", side_effect=lambda i: i):
+             patch("features.reviewer._simplify_all_issues", side_effect=lambda i: i), \
+             patch("features.reviewer.explain_review", return_value=0):
             results = reviewer.review_ticket(config, "JIRA-9", prs)
 
         assert results["backend/1"]["verdict"] == "changes_requested"
