@@ -1082,7 +1082,7 @@ EXPLAIN_PROMPT = (
     "1. Is this a valid concern? Do not take the comment's word for it. Open the code, read the "
     "functions around the flagged line, grep for callers, and check the claim against what the "
     "code really does. Say \"yes\", \"no\" or \"partly\".\n"
-    "2. Explain the problem to me like I know nothing about code. Use short sentences. Put one idea "
+    "2. Explain the problem to me like I'm retarded. Use short sentences. Put one idea "
     "in each sentence. Walk through it step by step in the order things happen. Give one concrete "
     "example: a real input and what goes wrong with it. Keep file and function names. When the "
     "concern is not valid, explain why the code is fine instead.\n\n"
