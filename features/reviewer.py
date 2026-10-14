@@ -1,3 +1,4 @@
+import contextvars
 import fcntl
 import hashlib
 import json
@@ -397,7 +398,7 @@ def _launch_task_review(config: dict, pr: dict, review_dir: Path, worktree,
         error = result.get("error") or ""
         if not error:
             placeholder["item_id"] = result.get("item_id")
-            with _TASK_REVIEW_LOCK:
+            with _TASK_REVIEW_LOCK, review_store.queue_lock(review_dir):
                 (review_dir / f"review{suffix}.json").write_text(
                     json.dumps(placeholder, indent=2))
                 (review_dir / f"queued_comments{suffix}.json").write_text("[]")
@@ -579,7 +580,8 @@ def _write_review_files(review_dir: Path, pr: dict, merged: dict, diff_text: str
         }
         for issue in merged.get("issues", [])
     ]
-    (review_dir / f"queued_comments{suffix}.json").write_text(json.dumps(queued, indent=2))
+    with review_store.queue_lock(review_dir):
+        (review_dir / f"queued_comments{suffix}.json").write_text(json.dumps(queued, indent=2))
 
 
 def _build_persona_prompt(persona_text, pr, diff_path, changed_paths, conventions,
@@ -705,6 +707,17 @@ def _run_codex_persona(args):
     return (name, data)
 
 
+def _submit(pool: ThreadPoolExecutor, fn, *args):
+    """Submit with the caller's context. A pool thread starts with empty
+    context variables, so the model call would run under the primary instance's
+    configuration instead of the instance that asked for it."""
+    return pool.submit(contextvars.copy_context().run, fn, *args)
+
+
+def _map(pool: ThreadPoolExecutor, fn, items) -> list:
+    return [f.result() for f in [_submit(pool, fn, item) for item in items]]
+
+
 def _run_personas_for_providers(prompts: dict, providers: list[str], *,
                                 worktree, model, run_key: str,
                                 add_dirs: list | None = None) -> dict[str, list]:
@@ -722,11 +735,11 @@ def _run_personas_for_providers(prompts: dict, providers: list[str], *,
     with ThreadPoolExecutor(max_workers=6) as pool:
         futures = {}
         if "claude" in providers:
-            futures["claude"] = [pool.submit(_run_single_persona, (name, prompt, worktree, model, add_dirs))
+            futures["claude"] = [_submit(pool, _run_single_persona, (name, prompt, worktree, model, add_dirs))
                                  for name, prompt in prompts.items() if name != CODEX_PERSONA]
         if "codex" in providers:
-            futures["codex"] = [pool.submit(_run_codex_persona,
-                                            (CODEX_PERSONA, prompts[CODEX_PERSONA], worktree, run_key))]
+            futures["codex"] = [_submit(pool, _run_codex_persona,
+                                        (CODEX_PERSONA, prompts[CODEX_PERSONA], worktree, run_key))]
         return {provider: [f.result() for f in futs] for provider, futs in futures.items()}
 
 
@@ -972,7 +985,7 @@ def _validate_issues(issues: list[dict], worktree: Path | None) -> list[dict]:
         return issues
     tasks = [(issue, worktree) for issue in issues]
     with ThreadPoolExecutor(max_workers=5) as pool:
-        results = list(pool.map(_validate_single, tasks))
+        results = _map(pool, _validate_single, tasks)
     return [r for r in results if r is not None]
 
 
@@ -1057,7 +1070,7 @@ def build_walkthrough_context(comment: dict, worktree: Path | None) -> dict:
 
 def _simplify_all_issues(issues: list[dict]) -> list[dict]:
     with ThreadPoolExecutor(max_workers=10) as pool:
-        bodies = list(pool.map(lambda i: _simplify_body(i["body"]), issues))
+        bodies = _map(pool, lambda i: _simplify_body(i["body"]), issues)
     for issue, body in zip(issues, bodies):
         issue["body"] = body
     return issues
@@ -1079,7 +1092,6 @@ EXPLAIN_PROMPT = (
 )
 
 EXPLAIN_TIMEOUT = 600
-_EXPLAIN_LOCK = threading.Lock()
 
 
 def explain_key(comment: dict) -> tuple:
@@ -1141,11 +1153,11 @@ def explain_review(branch_dir: Path, worktree: Path | None) -> int:
         return 0
     if todo:
         with ThreadPoolExecutor(max_workers=4) as pool:
-            answers = list(pool.map(lambda c: explain_comment(c, branch_dir, worktree),
-                                    todo.values()))
+            answers = _map(pool, lambda c: explain_comment(c, branch_dir, worktree),
+                           todo.values())
         known.update({k: a for k, a in zip(todo, answers) if a})
     filled = 0
-    with _EXPLAIN_LOCK:
+    with review_store.queue_lock(branch_dir):
         for f in files:
             try:
                 comments = json.loads(f.read_text())
