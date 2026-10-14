@@ -62,72 +62,139 @@ class TestExplainComment:
         assert log.emit.call_args.args[0] == "review_explain_failed"
 
 
+def _models(claude=None, codex=None):
+    """Stub both models. Each argument is a return value or a side effect."""
+    def stub(name, value):
+        if callable(value):
+            return patch.object(reviewer, name, side_effect=value)
+        return patch.object(reviewer, name, return_value=value)
+    return stub("run_balanced", claude), stub("_ask_codex", codex)
+
+
+CODEX = {"valid": "partly", "text": "Codex says partly."}
+
+
+def _codex_answer():
+    return json.dumps({"valid": "partly", "explanation": "Codex says partly."})
+
+
+class TestExplainCommentWithCodex:
+    def test_codex_runs_in_the_checkout(self, tmp_path):
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        claude, codex = _models(codex=_codex_answer())
+        with claude as balanced, codex as ask, patch.object(reviewer, "log"):
+            out = reviewer.explain_comment(_comment("x"), tmp_path, worktree, "codex")
+        assert out == CODEX
+        balanced.assert_not_called()
+        assert ask.call_args.args[1] == worktree
+        assert "Is this a valid concern?" in ask.call_args.args[0]
+
+    def test_codex_asks_codex_outside_the_sandbox(self, tmp_path):
+        with patch.object(reviewer, "run_external_model", return_value=(_codex_answer(), 0)) as run:
+            out = reviewer._ask_codex("prompt", tmp_path)
+        assert out == _codex_answer()
+        cmd = run.call_args.args[0]
+        assert cmd[:2] == ["codex", "exec"]
+        assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+        assert run.call_args.kwargs["cwd"] == tmp_path
+
+    def test_a_failed_codex_exit_gives_no_text(self, tmp_path):
+        with patch.object(reviewer, "run_external_model", return_value=("partial", 1)):
+            assert reviewer._ask_codex("prompt", tmp_path) is None
+
+
 class TestExplainReview:
-    def test_fills_every_provider_queue_and_asks_once_per_distinct_comment(self, tmp_path):
+    def test_fills_both_models_in_every_queue_and_asks_once_per_distinct_comment(self, tmp_path):
         main = _write(tmp_path, "queued_comments.json", [_comment("shared"), _comment("only claude", line=9)])
-        codex = _write(tmp_path, "queued_comments.codex.json", [_comment("shared")])
-        with patch.object(reviewer, "run_balanced", return_value=_answer()) as balanced, \
-             patch.object(reviewer, "log"):
+        other = _write(tmp_path, "queued_comments.codex.json", [_comment("shared")])
+        claude, codex = _models(_answer(), _codex_answer())
+        with claude as balanced, codex as ask, patch.object(reviewer, "log"):
             filled = reviewer.explain_review(tmp_path, None)
         assert balanced.call_count == 2
-        assert filled == 3
-        for f in (main, codex):
+        assert ask.call_count == 2
+        assert filled == 6
+        for f in (main, other):
             for c in json.loads(f.read_text()):
                 assert c["explainer"] == {"valid": "yes", "text": "The loop stops one row early."}
+                assert c["explainer_codex"] == CODEX
 
     def test_an_explained_comment_is_never_asked_again(self, tmp_path):
         done = {"valid": "no", "text": "already"}
-        f = _write(tmp_path, "queued_comments.json", [_comment("old", explainer=done)])
+        f = _write(tmp_path, "queued_comments.json",
+                   [_comment("old", explainer=done, explainer_codex=CODEX)])
         _write(tmp_path, "queued_comments.tasks.json", [_comment("old")])
-        with patch.object(reviewer, "run_balanced") as balanced, patch.object(reviewer, "log"):
+        claude, codex = _models()
+        with claude as balanced, codex as ask, patch.object(reviewer, "log"):
             filled = reviewer.explain_review(tmp_path, None)
         balanced.assert_not_called()
-        assert filled == 1
+        ask.assert_not_called()
+        assert filled == 2
         assert json.loads(f.read_text())[0]["explainer"] == done
         tasks = json.loads((tmp_path / "queued_comments.tasks.json").read_text())
         assert tasks[0]["explainer"] == done
+        assert tasks[0]["explainer_codex"] == CODEX
 
-    def test_a_failed_answer_leaves_the_comment_for_the_next_run(self, tmp_path):
+    def test_only_the_missing_model_is_asked(self, tmp_path):
+        done = {"valid": "no", "text": "already"}
+        f = _write(tmp_path, "queued_comments.json", [_comment("old", explainer=done)])
+        claude, codex = _models(codex=_codex_answer())
+        with claude as balanced, codex as ask, patch.object(reviewer, "log"):
+            assert reviewer.explain_review(tmp_path, None) == 1
+        balanced.assert_not_called()
+        assert ask.call_count == 1
+        stored = json.loads(f.read_text())[0]
+        assert stored["explainer"] == done
+        assert stored["explainer_codex"] == CODEX
+
+    def test_a_failed_answer_leaves_that_model_for_the_next_run(self, tmp_path):
         f = _write(tmp_path, "queued_comments.json", [_comment("x")])
-        with patch.object(reviewer, "run_balanced", return_value=None), \
-             patch.object(reviewer, "log"):
-            assert reviewer.explain_review(tmp_path, None) == 0
-        assert "explainer" not in json.loads(f.read_text())[0]
+        claude, codex = _models(None, _codex_answer())
+        with claude, codex, patch.object(reviewer, "log"):
+            assert reviewer.explain_review(tmp_path, None) == 1
+        stored = json.loads(f.read_text())[0]
+        assert "explainer" not in stored
+        assert stored["explainer_codex"] == CODEX
 
-    def test_a_delete_made_while_claude_ran_is_kept(self, tmp_path):
+    def test_a_delete_made_while_the_models_ran_is_kept(self, tmp_path):
         f = _write(tmp_path, "queued_comments.json", [_comment("keep"), _comment("drop", line=8)])
 
         def answer_and_delete(prompt, **kwargs):
             f.write_text(json.dumps([_comment("keep")]))
             return _answer()
 
-        with patch.object(reviewer, "run_balanced", side_effect=answer_and_delete), \
-             patch.object(reviewer, "log"):
+        claude, codex = _models(answer_and_delete, _codex_answer())
+        with claude, codex, patch.object(reviewer, "log"):
             reviewer.explain_review(tmp_path, None)
         stored = json.loads(f.read_text())
         assert [c["body"] for c in stored] == ["keep"]
         assert stored[0]["explainer"]["valid"] == "yes"
+        assert stored[0]["explainer_codex"] == CODEX
 
 
 class TestExplainReviewIsolation:
-    def test_the_worker_runs_under_the_callers_instance(self, tmp_path):
+    def test_the_workers_run_under_the_callers_instance(self, tmp_path):
         """A pool thread starts with empty context variables, so without the
         copy the model call ran under the primary instance's configuration."""
         _write(tmp_path, "queued_comments.json", [_comment("x")])
         seen = []
 
-        def record(prompt, **kwargs):
-            seen.append(llm._active_instance_key())
+        def record_claude(prompt, **kwargs):
+            seen.append(("claude", llm._active_instance_key()))
             return _answer()
+
+        def record_codex(prompt, cwd):
+            seen.append(("codex", llm._active_instance_key()))
+            return _codex_answer()
 
         token = state._instance_key_cv.set("secondary")
         try:
-            with patch.object(reviewer, "run_balanced", side_effect=record), \
-                 patch.object(reviewer, "log"):
+            claude, codex = _models(record_claude, record_codex)
+            with claude, codex, patch.object(reviewer, "log"):
                 reviewer.explain_review(tmp_path, None)
         finally:
             state._instance_key_cv.reset(token)
-        assert seen == ["secondary"]
+        assert sorted(seen) == [("claude", "secondary"), ("codex", "secondary")]
 
     def test_the_write_back_waits_for_a_page_edit_in_progress(self, tmp_path):
         """A delete on the page holds the queue lock, so the write-back reads
@@ -136,8 +203,8 @@ class TestExplainReviewIsolation:
         done = threading.Event()
 
         def run():
-            with patch.object(reviewer, "run_balanced", return_value=_answer()), \
-                 patch.object(reviewer, "log"):
+            claude, codex = _models(_answer(), _codex_answer())
+            with claude, codex, patch.object(reviewer, "log"):
                 reviewer.explain_review(tmp_path, None)
             done.set()
 

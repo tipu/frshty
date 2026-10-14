@@ -1,8 +1,8 @@
-"""Add the "is this a valid concern" explainer to every stored review comment.
+"""Add the Claude and Codex "is this a valid concern" explainers to every stored review comment.
 
 New reviews get the explainer when the pipeline writes them. This script
-fills it into the reviews stored before that. It asks Claude once for each
-distinct comment that has no explainer yet, so a second run only fills what the
+fills it into the reviews stored before that. It asks each model once for
+each distinct comment that has no explainer from it yet, so a second run only fills what the
 first one missed.
 
 Run a dry run first. It prints how many comments each review would send.
@@ -23,7 +23,7 @@ import core.llm as llm
 import core.log as log
 import core.state as state
 from core.config import load_config
-from features.reviewer import explain_key, explain_review
+from features.reviewer import EXPLAINERS, explain_key, explain_review
 
 
 def _flag(name: str) -> str:
@@ -43,7 +43,8 @@ def _missing(branch_dir: Path) -> int:
             continue
         for c in comments if isinstance(comments, list) else []:
             if isinstance(c, dict) and c.get("body"):
-                (done if c.get("explainer") else keys).add(explain_key(c))
+                for field in EXPLAINERS:
+                    (done if c.get(field) else keys).add((field, *explain_key(c)))
     return len(keys - done)
 
 
@@ -72,7 +73,7 @@ def main() -> int:
         wt = branch_dir / "worktree"
         worktree = wt if (wt / ".git").exists() else None
         if not apply:
-            print(f"{branch_dir.relative_to(reviews_dir)}: {missing} comment(s) to explain")
+            print(f"{branch_dir.relative_to(reviews_dir)}: {missing} explainer(s) to write")
             total += missing
             continue
         filled = explain_review(branch_dir, worktree)
@@ -81,7 +82,7 @@ def main() -> int:
         total += filled
         print(f"{branch_dir.relative_to(reviews_dir)}: explained {filled}, still missing {left}",
               flush=True)
-    print(f"{'explained' if apply else 'would explain'} {total} comment(s), {failed} still missing")
+    print(f"{'wrote' if apply else 'would write'} {total} explainer(s), {failed} still missing")
     return 1 if failed else 0
 
 

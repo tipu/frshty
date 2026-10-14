@@ -1092,15 +1092,28 @@ EXPLAIN_PROMPT = (
 )
 
 EXPLAIN_TIMEOUT = 600
+EXPLAINERS = {"explainer": "claude", "explainer_codex": "codex"}
 
 
 def explain_key(comment: dict) -> tuple:
     return (comment.get("path") or "", str(comment.get("line") or ""), comment.get("body") or "")
 
 
-def explain_comment(comment: dict, branch_dir: Path, worktree: Path | None) -> dict | None:
-    """Ask Claude, outside the sandbox, whether one review comment holds up and
-    what it means in plain words. None when the run gives no usable answer."""
+def _ask_codex(prompt: str, cwd: Path) -> str | None:
+    with tempfile.TemporaryDirectory(prefix="frshty-explain-") as tmp:
+        last = Path(tmp) / "last.md"
+        text, exit_code = run_external_model(
+            [*CODEX_EXEC, "-c", 'model_reasoning_effort="medium"', "-o", str(last), "-"],
+            fn_name="review_explain_codex", model="codex", prompt=prompt, cwd=cwd,
+            timeout=EXPLAIN_TIMEOUT, last_message_file=last, stdin_text=prompt)
+    return text if exit_code == 0 else None
+
+
+def explain_comment(comment: dict, branch_dir: Path, worktree: Path | None,
+                    model: str = "claude") -> dict | None:
+    """Ask Claude or Codex, outside the sandbox, whether one review comment
+    holds up and what it means in plain words. None when the run gives no
+    usable answer."""
     where = (f"The pull request branch is checked out at {worktree}." if worktree
              else "There is no checkout of the branch, so judge it from the diff.")
     prompt = (
@@ -1110,15 +1123,19 @@ def explain_comment(comment: dict, branch_dir: Path, worktree: Path | None) -> d
         + f"file: {comment.get('path') or 'general'}, line: {comment.get('line') or 'none'}):\n"
         + f"{comment.get('body', '')}\n"
     )
-    output = run_balanced(prompt, worktree=worktree or branch_dir, timeout=EXPLAIN_TIMEOUT,
-                          function_name="review_explain")
+    if model == "codex":
+        output = _ask_codex(prompt, worktree or branch_dir)
+    else:
+        output = run_balanced(prompt, worktree=worktree or branch_dir, timeout=EXPLAIN_TIMEOUT,
+                              function_name="review_explain")
     data = extract_json(output) if output else None
     if not isinstance(data, dict) or not str(data.get("explanation") or "").strip():
         log.emit("review_explain_failed",
-                 f"No explanation for {comment.get('path') or 'general'}:{comment.get('line') or ''} "
-                 f"in {branch_dir.name}",
+                 f"No {model} explanation for {comment.get('path') or 'general'}:"
+                 f"{comment.get('line') or ''} in {branch_dir.name}",
                  meta={"branch_dir": str(branch_dir), "path": comment.get("path"),
-                       "line": comment.get("line"), "output": (output or "")[:500]})
+                       "line": comment.get("line"), "model": model,
+                       "output": (output or "")[:500]})
         return None
     valid = str(data.get("valid") or "").strip().lower()
     return {"valid": valid if valid in ("yes", "no", "partly") else "partly",
@@ -1126,13 +1143,14 @@ def explain_comment(comment: dict, branch_dir: Path, worktree: Path | None) -> d
 
 
 def explain_review(branch_dir: Path, worktree: Path | None) -> int:
-    """Fill the explainer of every comment in every provider's queue of one review.
+    """Fill the Claude and the Codex explainer of every comment in every
+    provider's queue of one review.
 
     The same finding often sits in several provider queues, so each distinct
-    comment is asked once and its answer goes to every copy. A comment that
-    already has an explainer is never asked again. The queues are read again
-    just before the write, so an edit or a delete made on the page while Claude
-    ran is kept. Returns the number of comments that got an explainer."""
+    comment is asked once per model and the answer goes to every copy. An
+    explainer that is already there is never asked again. The queues are read
+    again just before the write, so an edit or a delete made on the page while
+    the models ran is kept. Returns the number of explainers written."""
     files = sorted(branch_dir.glob("queued_comments*.json"))
     known: dict[tuple, dict] = {}
     todo: dict[tuple, dict] = {}
@@ -1144,17 +1162,18 @@ def explain_review(branch_dir: Path, worktree: Path | None) -> int:
         for c in comments if isinstance(comments, list) else []:
             if not isinstance(c, dict) or not c.get("body"):
                 continue
-            if c.get("explainer"):
-                known.setdefault(explain_key(c), c["explainer"])
-            else:
-                todo.setdefault(explain_key(c), c)
+            for field in EXPLAINERS:
+                if c.get(field):
+                    known.setdefault((field, *explain_key(c)), c[field])
+                else:
+                    todo.setdefault((field, *explain_key(c)), c)
     todo = {k: c for k, c in todo.items() if k not in known}
     if not todo and not known:
         return 0
     if todo:
         with ThreadPoolExecutor(max_workers=4) as pool:
-            answers = _map(pool, lambda c: explain_comment(c, branch_dir, worktree),
-                           todo.values())
+            answers = _map(pool, lambda item: explain_comment(
+                item[1], branch_dir, worktree, EXPLAINERS[item[0][0]]), todo.items())
         known.update({k: a for k, a in zip(todo, answers) if a})
     filled = 0
     with review_store.queue_lock(branch_dir):
@@ -1165,10 +1184,14 @@ def explain_review(branch_dir: Path, worktree: Path | None) -> int:
                 continue
             changed = False
             for c in comments if isinstance(comments, list) else []:
-                if isinstance(c, dict) and not c.get("explainer") and explain_key(c) in known:
-                    c["explainer"] = known[explain_key(c)]
-                    changed = True
-                    filled += 1
+                if not isinstance(c, dict):
+                    continue
+                for field in EXPLAINERS:
+                    answer = known.get((field, *explain_key(c)))
+                    if answer and not c.get(field):
+                        c[field] = answer
+                        changed = True
+                        filled += 1
             if changed:
                 f.write_text(json.dumps(comments, indent=2))
     return filled
