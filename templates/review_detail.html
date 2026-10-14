@@ -72,6 +72,11 @@ textarea { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; }
 .discuss-header { display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: #141425; border-bottom: 1px solid #2a2a2a; font-size: 12px; flex-shrink: 0; }
 .discuss-term { flex: 1; min-height: 0; padding: 4px; }
 .discuss-term .xterm { height: 100%; }
+.explainer { margin: 8px 0 0; padding: 8px 10px; background: #12121c; border: 1px solid #2a2a3a; border-radius: 4px; font-size: 12px; }
+.explainer-text { white-space: pre-wrap; color: #cbd5e1; line-height: 1.5; }
+.explainer-valid-yes { background: #14532d; color: #86efac; }
+.explainer-valid-no { background: #7f1d1d; color: #fca5a5; }
+.explainer-valid-partly { background: #713f12; color: #fde047; }
 [v-cloak] { display: none; }
 </style>
 <script src="/static/frshty-usage.js"></script>
@@ -242,6 +247,13 @@ const CommentBlock = {
                 <button @click="$emit('discuss')" class="bg-blue-700 hover:bg-blue-600 text-white px-2 py-0.5 rounded text-xs">Discuss</button>
                 <button @click="$emit('dismiss')" class="text-red-900 hover:text-red-400 text-xs">x</button>
                 <button @click="$emit('next')" class="text-gray-600 hover:text-white text-xs ml-auto">↓ next</button>
+            </div>
+            <div v-if="c.explainer" class="explainer">
+                <div class="flex items-center gap-2 mb-1 text-xs">
+                    <span class="text-gray-400">Is this a valid concern?</span>
+                    <span class="badge" :class="'explainer-valid-' + c.explainer.valid">{{ c.explainer.valid }}</span>
+                </div>
+                <div class="explainer-text">{{ c.explainer.text }}</div>
             </div>
             <div v-if="discussOpen" class="discuss-panel" :id="'discuss-panel-' + c.idx">
                 <div class="discuss-header">

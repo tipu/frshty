@@ -42,6 +42,7 @@ class TestReviewPrRunsEveryConfiguredProvider:
              patch.object(reviewer, "_merge_reviews", side_effect=lambda r: r[0][1]), \
              patch.object(reviewer, "_validate_issues", side_effect=lambda i, w: i), \
              patch.object(reviewer, "_simplify_all_issues", side_effect=lambda i: i), \
+             patch.object(reviewer, "explain_review", return_value=0), \
              patch.object(reviewer, "_run_single_persona",
                           side_effect=lambda t: (t[0], _review("from claude") if claude else None)), \
              patch.object(reviewer, "_run_codex_persona",
@@ -146,6 +147,7 @@ class TestEveryProvidersBlockersReachThePrimaryReview:
              patch.object(reviewer, "_merge_reviews", side_effect=lambda r: r[0][1]), \
              patch.object(reviewer, "_validate_issues", side_effect=lambda i, w: i), \
              patch.object(reviewer, "_simplify_all_issues", side_effect=lambda i: i), \
+             patch.object(reviewer, "explain_review", return_value=0), \
              patch.object(reviewer, "_run_single_persona",
                           side_effect=lambda t: (t[0], claude_review)), \
              patch.object(reviewer, "_run_codex_persona",
