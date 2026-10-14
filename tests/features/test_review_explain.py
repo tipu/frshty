@@ -5,10 +5,14 @@ once per distinct comment, outside the sandbox, so the model can open the
 checkout and check the claim itself.
 """
 import json
+import threading
 from pathlib import Path
 from unittest.mock import patch
 
+import core.llm as llm
+import core.state as state
 from features import reviewer
+from services import review_store
 
 
 def _comment(body, path="a.py", line=3, **extra):
@@ -100,6 +104,49 @@ class TestExplainReview:
         with patch.object(reviewer, "run_balanced", side_effect=answer_and_delete), \
              patch.object(reviewer, "log"):
             reviewer.explain_review(tmp_path, None)
+        stored = json.loads(f.read_text())
+        assert [c["body"] for c in stored] == ["keep"]
+        assert stored[0]["explainer"]["valid"] == "yes"
+
+
+class TestExplainReviewIsolation:
+    def test_the_worker_runs_under_the_callers_instance(self, tmp_path):
+        """A pool thread starts with empty context variables, so without the
+        copy the model call ran under the primary instance's configuration."""
+        _write(tmp_path, "queued_comments.json", [_comment("x")])
+        seen = []
+
+        def record(prompt, **kwargs):
+            seen.append(llm._active_instance_key())
+            return _answer()
+
+        token = state._instance_key_cv.set("secondary")
+        try:
+            with patch.object(reviewer, "run_balanced", side_effect=record), \
+                 patch.object(reviewer, "log"):
+                reviewer.explain_review(tmp_path, None)
+        finally:
+            state._instance_key_cv.reset(token)
+        assert seen == ["secondary"]
+
+    def test_the_write_back_waits_for_a_page_edit_in_progress(self, tmp_path):
+        """A delete on the page holds the queue lock, so the write-back reads
+        the queue after the delete and cannot bring the comment back."""
+        f = _write(tmp_path, "queued_comments.json", [_comment("keep"), _comment("drop", line=8)])
+        done = threading.Event()
+
+        def run():
+            with patch.object(reviewer, "run_balanced", return_value=_answer()), \
+                 patch.object(reviewer, "log"):
+                reviewer.explain_review(tmp_path, None)
+            done.set()
+
+        with review_store.queue_lock(tmp_path):
+            worker = threading.Thread(target=run)
+            worker.start()
+            assert not done.wait(0.5)
+            f.write_text(json.dumps([_comment("keep")]))
+        worker.join(5)
         stored = json.loads(f.read_text())
         assert [c["body"] for c in stored] == ["keep"]
         assert stored[0]["explainer"]["valid"] == "yes"

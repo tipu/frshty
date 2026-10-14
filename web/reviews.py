@@ -730,29 +730,31 @@ def api_submit_comment(repo: str, pr_id: int, idx: int, provider: str = "claude"
     found = review_store.find_review(_config["_state_dir"], repo, pr_id, provider=provider)
     if not found:
         return JSONResponse({"error": "not found"}, status_code=404)
-    branch_dir, comments, _ = found
+    branch_dir = found[0]
     queued = branch_dir / f"queued_comments{review_store.provider_suffix(provider)}.json"
-    if idx < 0 or idx >= len(comments):
-        return JSONResponse({"error": "invalid index"}, status_code=400)
-    comment = comments[idx]
-    remote_id = comment.get("remote_id")
-    if remote_id:
-        result = platform.edit_pr_comment(repo, pr_id, remote_id, comment["body"])
-        if result.get("status") == "updated":
-            comments[idx]["status"] = "submitted"
-            queued.write_text(json.dumps(comments, indent=2))
-            log.emit("review_comment_edited", f"Edited comment on {repo} PR #{pr_id}",
-                links={"pr": comment.get("pr_url", "")},
-                meta={"repo": repo, "pr_id": pr_id})
-    else:
-        result = platform.post_pr_comment(repo, pr_id, comment["body"], comment.get("path"), comment.get("line"))
-        if result.get("status") == "posted":
-            comments[idx]["status"] = "submitted"
-            comments[idx]["remote_id"] = result.get("id")
-            queued.write_text(json.dumps(comments, indent=2))
-            log.emit("review_comment_submitted", f"Submitted comment on {repo} PR #{pr_id}",
-                links={"pr": comment.get("pr_url", "")},
-                meta={"repo": repo, "pr_id": pr_id})
+    with review_store.queue_lock(branch_dir):
+        comments = review_store.load_queue(branch_dir, provider)
+        if idx < 0 or idx >= len(comments):
+            return JSONResponse({"error": "invalid index"}, status_code=400)
+        comment = comments[idx]
+        remote_id = comment.get("remote_id")
+        if remote_id:
+            result = platform.edit_pr_comment(repo, pr_id, remote_id, comment["body"])
+            if result.get("status") == "updated":
+                comments[idx]["status"] = "submitted"
+                queued.write_text(json.dumps(comments, indent=2))
+                log.emit("review_comment_edited", f"Edited comment on {repo} PR #{pr_id}",
+                    links={"pr": comment.get("pr_url", "")},
+                    meta={"repo": repo, "pr_id": pr_id})
+        else:
+            result = platform.post_pr_comment(repo, pr_id, comment["body"], comment.get("path"), comment.get("line"))
+            if result.get("status") == "posted":
+                comments[idx]["status"] = "submitted"
+                comments[idx]["remote_id"] = result.get("id")
+                queued.write_text(json.dumps(comments, indent=2))
+                log.emit("review_comment_submitted", f"Submitted comment on {repo} PR #{pr_id}",
+                    links={"pr": comment.get("pr_url", "")},
+                    meta={"repo": repo, "pr_id": pr_id})
     log.emit("review_ab_action", f"{provider} comment submit on {repo}#{pr_id}",
         meta={"repo": repo, "pr_id": pr_id, "provider": provider, "action": "submit"})
     return result
@@ -780,8 +782,10 @@ def api_new_comment(repo: str, pr_id: int, body: dict, provider: str = "claude")
         "body": body.get("body", ""),
         "status": "draft",
     }
-    comments.append(new_comment)
-    (branch_dir / f"queued_comments{review_store.provider_suffix(provider)}.json").write_text(json.dumps(comments, indent=2))
+    with review_store.queue_lock(branch_dir):
+        comments = review_store.load_queue(branch_dir, provider)
+        comments.append(new_comment)
+        (branch_dir / f"queued_comments{review_store.provider_suffix(provider)}.json").write_text(json.dumps(comments, indent=2))
     return {"status": "ok", "idx": len(comments) - 1}
 
 
@@ -790,11 +794,13 @@ def api_delete_comment(repo: str, pr_id: int, idx: int, provider: str = "claude"
     found = review_store.find_review(_config["_state_dir"], repo, pr_id, provider=provider)
     if not found:
         return JSONResponse({"error": "not found"}, status_code=404)
-    branch_dir, comments, _ = found
-    if idx < 0 or idx >= len(comments):
-        return JSONResponse({"error": "invalid index"}, status_code=400)
-    comments.pop(idx)
-    (branch_dir / f"queued_comments{review_store.provider_suffix(provider)}.json").write_text(json.dumps(comments, indent=2))
+    branch_dir = found[0]
+    with review_store.queue_lock(branch_dir):
+        comments = review_store.load_queue(branch_dir, provider)
+        if idx < 0 or idx >= len(comments):
+            return JSONResponse({"error": "invalid index"}, status_code=400)
+        comments.pop(idx)
+        (branch_dir / f"queued_comments{review_store.provider_suffix(provider)}.json").write_text(json.dumps(comments, indent=2))
     log.emit("review_ab_action", f"{provider} comment delete on {repo}#{pr_id}",
         meta={"repo": repo, "pr_id": pr_id, "provider": provider, "action": "delete"})
     return {"status": "ok"}
@@ -805,14 +811,16 @@ def api_update_comment(repo: str, pr_id: int, idx: int, body: dict, provider: st
     found = review_store.find_review(_config["_state_dir"], repo, pr_id, provider=provider)
     if not found:
         return JSONResponse({"error": "not found"}, status_code=404)
-    branch_dir, comments, _ = found
-    if idx < 0 or idx >= len(comments):
-        return JSONResponse({"error": "invalid index"}, status_code=400)
-    if "body" in body:
-        comments[idx]["body"] = body["body"]
-    if "line" in body:
-        comments[idx]["line"] = body["line"]
-    (branch_dir / f"queued_comments{review_store.provider_suffix(provider)}.json").write_text(json.dumps(comments, indent=2))
+    branch_dir = found[0]
+    with review_store.queue_lock(branch_dir):
+        comments = review_store.load_queue(branch_dir, provider)
+        if idx < 0 or idx >= len(comments):
+            return JSONResponse({"error": "invalid index"}, status_code=400)
+        if "body" in body:
+            comments[idx]["body"] = body["body"]
+        if "line" in body:
+            comments[idx]["line"] = body["line"]
+        (branch_dir / f"queued_comments{review_store.provider_suffix(provider)}.json").write_text(json.dumps(comments, indent=2))
     log.emit("review_ab_action", f"{provider} comment edit on {repo}#{pr_id}",
         meta={"repo": repo, "pr_id": pr_id, "provider": provider, "action": "edit"})
     return {"status": "ok"}
