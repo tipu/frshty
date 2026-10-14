@@ -1141,7 +1141,7 @@ class TestSnoozedQuestion:
     def test_reply_clears_snooze_and_question(self, monkeypatch):
         now = datetime.now(timezone.utc)
         item_id = self._snoozed_with_question((now + timedelta(hours=1)).isoformat())
-        monkeypatch.setattr(work_store, "tmux_send", lambda k, t: True)
+        monkeypatch.setattr(work_store, "tmux_send", lambda k, t, enter=True: True)
         monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
         out = work_store.reply(item_id, "push it")
         assert out == {"id": item_id, "action": "reply"}
@@ -1961,6 +1961,271 @@ class TestBackgroundWait:
             "transcript_path": path, "message": "Claude needs your permission to use Bash"})
         assert db.query_one("SELECT state FROM work_items WHERE id = ?",
                             (item_id,))["state"] == "needs_you"
+
+    _DIALOG = [
+        "● Reviewer 2 is done. I am waiting for reviewer 3.",
+        "",
+        "✻ Waiting for 1 background agent to finish",
+        "",
+        "─" * 80,
+        " Bash command · from the code-reviewer agent",
+        " Find files differing between worktree and scratch copy",
+        "╌" * 80,
+        " │ git ls-files -z | xargs -0 -I{} sh -c 'cmp -s \"$1/{}\" \"$2/{}\"' _ $W $S",
+        "╌" * 80,
+        " This shell -c script runs rm and could not be checked",
+        "",
+        " Do you want to proceed?",
+        " ❯ 1. Yes",
+        "   2. No, and tell Claude what to do",
+        "      differently",
+        "",
+        " Esc to cancel · Tab to amend",
+    ]
+
+    def test_permission_dialog_parses_pane(self):
+        dialog = work_store.permission_dialog(self._DIALOG)
+        assert [o["key"] for o in dialog["options"]] == ["1", "2"]
+        assert dialog["options"][0]["label"] == "1. Yes"
+        assert dialog["options"][1]["label"] == "2. No, and tell Claude what to do differently"
+        assert dialog["question"].startswith("Bash command · from the code-reviewer agent")
+        assert "Do you want to proceed?" in dialog["question"]
+        assert "╌" not in dialog["question"]
+
+    def test_pane_without_dialog_is_none(self):
+        assert work_store.permission_dialog(self._DIALOG[:4]) is None
+        assert work_store.permission_dialog([]) is None
+
+    def _permission_item(self, tmp_path, monkeypatch, sid, pane):
+        path = self._transcript(tmp_path, [
+            self._monitor_start("bfff"), self._checkpoint("Reviewer 2 is done.")])
+        item_id = _mkitem("bg perm question item")
+        work_store.add_run(item_id, sid, f"work-{item_id}", "/tmp")
+        monkeypatch.setattr(work_store, "_capture_pane", lambda session: list(pane))
+        work_store.record_event(sid, "Notification", {
+            "transcript_path": path, "message": "Claude needs your permission"})
+        return item_id, path
+
+    def test_permission_notification_records_the_dialog(self, tmp_path, monkeypatch):
+        sid = "sid-bgpq-1"
+        item_id, path = self._permission_item(tmp_path, monkeypatch, sid, self._DIALOG)
+        item = db.query_one("SELECT state, stop_reason, pending_question, snoozed_until "
+                            "FROM work_items WHERE id = ?", (item_id,))
+        assert item["state"] == "needs_you"
+        assert item["snoozed_until"] is None
+        assert item["stop_reason"] == ("Claude needs your permission · "
+                                       "Bash command · from the code-reviewer agent")
+        q = json.loads(item["pending_question"])["questions"][0]
+        assert q["keystroke"] is True
+        assert [o["key"] for o in q["options"]] == ["1", "2"]
+        assert "Do you want to proceed?" in q["question"]
+        assert work_store.maybe_autocontinue(sid, path) == "question"
+        item = db.query_one("SELECT state, pending_question FROM work_items WHERE id = ?",
+                            (item_id,))
+        assert item["state"] == "needs_you"
+        assert item["pending_question"]
+
+    def test_permission_question_survives_the_missed_decision_sweep(self, tmp_path, monkeypatch):
+        sid = "sid-bgpq-2"
+        item_id, _ = self._permission_item(tmp_path, monkeypatch, sid, self._DIALOG)
+        db.execute("UPDATE work_items SET updated_at = '2000-01-01T00:00:00+00:00' WHERE id = ?",
+                   (item_id,))
+        monkeypatch.setattr(work_store, "agent_running", lambda *a: True)
+        actions = work_store.retry_missed_autocontinues(work_store._now())
+        assert item_id not in {a["id"] for a in actions}
+        assert db.query_one("SELECT state FROM work_items WHERE id = ?",
+                            (item_id,))["state"] == "needs_you"
+
+    def test_unreadable_pane_still_records_a_question(self, tmp_path, monkeypatch):
+        item_id, _ = self._permission_item(tmp_path, monkeypatch, "sid-bgpq-3", [])
+        q = json.loads(db.query_one("SELECT pending_question FROM work_items WHERE id = ?",
+                                    (item_id,))["pending_question"])["questions"][0]
+        assert q["question"] == "Claude needs your permission"
+        assert q["options"] == []
+
+    def test_stop_keeps_an_open_dialog(self, tmp_path, monkeypatch):
+        sid = "sid-bgpq-4"
+        item_id, path = self._permission_item(tmp_path, monkeypatch, sid, self._DIALOG)
+        work_store.record_event(sid, "Stop", {"transcript_path": path})
+        item = db.query_one("SELECT state, pending_question FROM work_items WHERE id = ?",
+                            (item_id,))
+        assert item["state"] == "needs_you"
+        assert item["pending_question"]
+
+    def test_stop_clears_an_answered_dialog(self, tmp_path, monkeypatch):
+        sid = "sid-bgpq-5"
+        item_id, path = self._permission_item(tmp_path, monkeypatch, sid, self._DIALOG)
+        monkeypatch.setattr(work_store, "_capture_pane", lambda session: self._DIALOG[:4])
+        work_store.record_event(sid, "Stop", {"transcript_path": path})
+        item = db.query_one("SELECT state, pending_question FROM work_items WHERE id = ?",
+                            (item_id,))
+        assert item["pending_question"] == ""
+        assert item["state"] == "waiting_external"
+
+    def test_unreadable_pane_keeps_the_dialog(self, tmp_path, monkeypatch):
+        sid = "sid-bgpq-7"
+        item_id, path = self._permission_item(tmp_path, monkeypatch, sid, self._DIALOG)
+        monkeypatch.setattr(work_store, "_capture_pane", lambda session: [])
+        work_store.record_event(sid, "Stop", {"transcript_path": path})
+        item = db.query_one("SELECT state, pending_question FROM work_items WHERE id = ?",
+                            (item_id,))
+        assert item["state"] == "needs_you"
+        assert item["pending_question"]
+
+    def test_dialog_taller_than_the_pane_stays_open(self, tmp_path, monkeypatch):
+        sid = "sid-bgpq-8"
+        item_id, path = self._permission_item(tmp_path, monkeypatch, sid, self._DIALOG)
+        monkeypatch.setattr(work_store, "_capture_pane", lambda session: self._DIALOG[8:])
+        work_store.record_event(sid, "Stop", {"transcript_path": path})
+        assert db.query_one("SELECT pending_question FROM work_items WHERE id = ?",
+                            (item_id,))["pending_question"]
+
+    def test_session_end_clears_the_dialog(self, tmp_path, monkeypatch):
+        sid = "sid-bgpq-9"
+        item_id, path = self._permission_item(tmp_path, monkeypatch, sid, self._DIALOG)
+        monkeypatch.setattr(work_store, "_capture_pane", lambda session: [])
+        work_store.record_event(sid, "SessionEnd", {"transcript_path": path})
+        assert db.query_one("SELECT pending_question FROM work_items WHERE id = ?",
+                            (item_id,))["pending_question"] == ""
+
+    def test_reply_with_an_option_key_sends_no_enter(self, tmp_path, monkeypatch):
+        sid = "sid-bgpq-10"
+        item_id, _ = self._permission_item(tmp_path, monkeypatch, sid, self._DIALOG)
+        sent = []
+        monkeypatch.setattr(work_store, "tmux_send",
+                            lambda k, t, enter=True: sent.append((t, enter)) or True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
+        held = db.query_one("SELECT pending_question FROM work_items WHERE id = ?",
+                            (item_id,))["pending_question"]
+        assert work_store.reply(item_id, "1", held) == {"id": item_id, "action": "reply"}
+        assert sent == [("1", False)]
+        assert db.query_one("SELECT pending_question FROM work_items WHERE id = ?",
+                            (item_id,))["pending_question"] == ""
+
+    def _refused(self, tmp_path, monkeypatch, sid, pane, question=None, pane_now=None):
+        item_id, _ = self._permission_item(tmp_path, monkeypatch, sid, pane)
+        held = db.query_one("SELECT pending_question FROM work_items WHERE id = ?",
+                            (item_id,))["pending_question"]
+        if pane_now is not None:
+            monkeypatch.setattr(work_store, "_capture_pane", lambda session: list(pane_now))
+        sent = []
+        monkeypatch.setattr(work_store, "tmux_send",
+                            lambda k, t, enter=True: sent.append((t, enter)) or True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
+        out = work_store.reply(item_id, "1", held if question is None else question)
+        assert "error" in out
+        assert sent == []
+        assert db.query_one("SELECT pending_question FROM work_items WHERE id = ?",
+                            (item_id,))["pending_question"] == held
+
+    def test_reply_to_a_stale_question_is_refused(self, tmp_path, monkeypatch):
+        self._refused(tmp_path, monkeypatch, "sid-bgpq-12", self._DIALOG, question="{}")
+
+    def test_reply_when_the_pane_shows_another_dialog_is_refused(self, tmp_path, monkeypatch):
+        other = [ln.replace("code-reviewer", "planner") for ln in self._DIALOG]
+        self._refused(tmp_path, monkeypatch, "sid-bgpq-13", self._DIALOG, pane_now=other)
+
+    def test_reply_when_the_dialog_is_gone_is_refused(self, tmp_path, monkeypatch):
+        self._refused(tmp_path, monkeypatch, "sid-bgpq-14", self._DIALOG,
+                      pane_now=self._DIALOG[:4])
+
+    def test_stale_permission_answer_after_a_clear_is_refused(self, tmp_path, monkeypatch):
+        item_id, _ = self._permission_item(tmp_path, monkeypatch, "sid-bgpq-16", self._DIALOG)
+        held = db.query_one("SELECT pending_question FROM work_items WHERE id = ?",
+                            (item_id,))["pending_question"]
+        db.execute("UPDATE work_items SET pending_question = '' WHERE id = ?", (item_id,))
+        sent = []
+        monkeypatch.setattr(work_store, "tmux_send",
+                            lambda k, t, enter=True: sent.append((t, enter)) or True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
+        assert "error" in work_store.reply(item_id, "1", held)
+        assert sent == []
+
+    def test_second_answer_to_one_dialog_is_refused(self, tmp_path, monkeypatch):
+        item_id, _ = self._permission_item(tmp_path, monkeypatch, "sid-bgpq-17", self._DIALOG)
+        held = db.query_one("SELECT pending_question FROM work_items WHERE id = ?",
+                            (item_id,))["pending_question"]
+        sent = []
+
+        def send(k, t, enter=True):
+            sent.append((t, enter))
+            sent.append(work_store.reply(item_id, "1", held))
+            return True
+        monkeypatch.setattr(work_store, "tmux_send", send)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
+        assert work_store.reply(item_id, "1", held) == {"id": item_id, "action": "reply"}
+        assert sent[0] == ("1", False)
+        assert "error" in sent[1]
+        assert len(sent) == 2
+
+    def test_failed_send_keeps_the_dialog(self, tmp_path, monkeypatch):
+        item_id, _ = self._permission_item(tmp_path, monkeypatch, "sid-bgpq-18", self._DIALOG)
+        held = db.query_one("SELECT pending_question FROM work_items WHERE id = ?",
+                            (item_id,))["pending_question"]
+        monkeypatch.setattr(work_store, "tmux_send", lambda k, t, enter=True: False)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
+        assert "error" in work_store.reply(item_id, "1", held)
+        assert db.query_one("SELECT pending_question FROM work_items WHERE id = ?",
+                            (item_id,))["pending_question"] == held
+
+    def test_reply_when_the_options_changed_is_refused(self, tmp_path, monkeypatch):
+        other = [ln.replace("2. No", "2. Yes, allow for this session") for ln in self._DIALOG]
+        self._refused(tmp_path, monkeypatch, "sid-bgpq-19", self._DIALOG, pane_now=other)
+
+    def test_claim_moves_the_item_off_needs_you(self, tmp_path, monkeypatch):
+        item_id, _ = self._permission_item(tmp_path, monkeypatch, "sid-bgpq-20", self._DIALOG)
+        held = db.query_one("SELECT pending_question FROM work_items WHERE id = ?",
+                            (item_id,))["pending_question"]
+        states = []
+        monkeypatch.setattr(work_store, "tmux_send", lambda k, t, enter=True: states.append(
+            db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))["state"]) or True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
+        work_store.reply(item_id, "1", held)
+        assert states == ["agent_working"]
+
+    def test_new_dialog_during_the_send_survives(self, tmp_path, monkeypatch):
+        sid = "sid-bgpq-21"
+        item_id, path = self._permission_item(tmp_path, monkeypatch, sid, self._DIALOG)
+        held = db.query_one("SELECT pending_question FROM work_items WHERE id = ?",
+                            (item_id,))["pending_question"]
+        other = [ln.replace("code-reviewer", "planner") for ln in self._DIALOG]
+
+        def send(k, t, enter=True):
+            monkeypatch.setattr(work_store, "_capture_pane", lambda session: list(other))
+            work_store.record_event(sid, "Notification", {
+                "transcript_path": path, "message": "Claude needs your permission"})
+            return True
+        monkeypatch.setattr(work_store, "tmux_send", send)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
+        assert work_store.reply(item_id, "1", held) == {"id": item_id, "action": "reply"}
+        item = db.query_one("SELECT state, pending_question FROM work_items WHERE id = ?",
+                            (item_id,))
+        assert item["state"] == "needs_you"
+        assert "planner" in item["pending_question"]
+
+    def test_digit_to_an_unread_dialog_is_refused(self, tmp_path, monkeypatch):
+        self._refused(tmp_path, monkeypatch, "sid-bgpq-15", [], pane_now=self._DIALOG)
+
+    def test_reply_with_text_to_a_dialog_sends_enter(self, tmp_path, monkeypatch):
+        sid = "sid-bgpq-11"
+        item_id, _ = self._permission_item(tmp_path, monkeypatch, sid, self._DIALOG)
+        sent = []
+        monkeypatch.setattr(work_store, "tmux_send",
+                            lambda k, t, enter=True: sent.append((t, enter)) or True)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
+        work_store.reply(item_id, "use a plain loop instead")
+        assert sent == [("use a plain loop instead", True)]
+
+    def test_stop_keeps_an_asked_question(self, tmp_path, monkeypatch):
+        path = self._transcript(tmp_path, [self._checkpoint("Blocked.")])
+        item_id = _mkitem("asked question item")
+        sid = f"sid-bgpq-6-{item_id}"
+        work_store.add_run(item_id, sid, f"work-{item_id}", "/tmp")
+        work_store.record_question(sid, {"questions": [{"question": "Staging or prod?"}]})
+        monkeypatch.setattr(work_store, "_capture_pane", lambda session: [])
+        work_store.record_event(sid, "Stop", {"transcript_path": path})
+        assert db.query_one("SELECT pending_question FROM work_items WHERE id = ?",
+                            (item_id,))["pending_question"]
 
 
 class TestSuspendResume:
