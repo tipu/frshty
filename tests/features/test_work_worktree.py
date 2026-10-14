@@ -181,7 +181,7 @@ class TestPlan:
         monkeypatch.setattr(work_worktree.runtime, "instances", lambda: None)
         item_id = _item("gone")
         row = work_worktree.ensure(item_id, _spec(repo), "gone")
-        _git(repo, "worktree", "remove", row["path"])
+        _git(repo, "worktree", "remove", "--force", "--force", row["path"])
         got = work_worktree.plan("gone", "", str(tmp_path), [], [], item_id=item_id)
         assert got["rule"] != "R1"
 
@@ -378,6 +378,39 @@ class TestEnsure:
         assert git_util.is_worktree(row["path"])
         head = _git(row["path"], "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
         assert head == row["branch"]
+
+    def test_a_created_worktree_survives_a_plain_prune(self, tmp_path, wt_root, monkeypatch):
+        repo = make_repo(tmp_path)
+        monkeypatch.setattr(work_worktree.runtime, "instances", lambda: None)
+        item_id = _item("lock the worktree")
+        row = work_worktree.ensure(item_id, _spec(repo), "lock the worktree")
+        listed = _git(repo, "worktree", "list", "--porcelain").stdout
+        assert f"locked {git_util.WORKTREE_LOCK_REASON}" in listed
+        moved = tmp_path / "moved-away"
+        Path(row["path"]).rename(moved)
+        _git(repo, "worktree", "prune")
+        assert f"worktree {row['path']}" in _git(repo, "worktree", "list", "--porcelain").stdout
+        moved.rename(row["path"])
+        assert _git(row["path"], "status", "--porcelain").returncode == 0
+
+    def test_remove_keeps_a_dirty_locked_worktree(self, tmp_path, wt_root, monkeypatch):
+        repo = make_repo(tmp_path)
+        monkeypatch.setattr(work_worktree.runtime, "instances", lambda: None)
+        item_id = _item("dirty worktree")
+        row = work_worktree.ensure(item_id, _spec(repo), "dirty worktree")
+        (Path(row["path"]) / "new.txt").write_text("work\n")
+        assert work_worktree._remove(row) is False
+        assert (Path(row["path"]) / "new.txt").is_file()
+        listed = _git(repo, "worktree", "list", "--porcelain").stdout
+        assert f"locked {git_util.WORKTREE_LOCK_REASON}" in listed
+        (Path(row["path"]) / "new.txt").unlink()
+        git_dir = _git(row["path"], "rev-parse", "--absolute-git-dir").stdout.strip()
+        (Path(git_dir) / "modules" / "sub").mkdir(parents=True)
+        assert work_worktree._remove(row) is False
+        assert Path(row["path"]).is_dir()
+        shutil.rmtree(Path(git_dir) / "modules")
+        assert work_worktree._remove(row) is True
+        assert not Path(row["path"]).exists()
 
     def test_is_idempotent(self, tmp_path, wt_root, monkeypatch):
         repo = make_repo(tmp_path)
@@ -946,7 +979,7 @@ class TestGc:
         row_two = work_worktree.ensure(
             item_id, _spec(second, "second"), "two repositories")
         assert work_worktree.last_row(item_id)["path"] == row_two["path"]
-        _git(first, "worktree", "remove", row_one["path"])
+        _git(first, "worktree", "remove", "--force", "--force", row_one["path"])
         back = work_worktree.rebuild(item_id, "two repositories", row_one["path"])
         assert back["repo_path"] == str(first)
         assert back["path"] == row_one["path"]
@@ -956,7 +989,7 @@ class TestGc:
                                                                      wt_root,
                                                                      monkeypatch):
         repo, item_id, row = self._made(tmp_path, monkeypatch)
-        _git(repo, "worktree", "remove", row["path"])
+        _git(repo, "worktree", "remove", "--force", "--force", row["path"])
         back = work_worktree.rebuild(item_id, "sweep me", str(tmp_path / "unknown"))
         assert back["repo_path"] == str(repo)
         assert os.path.isdir(back["path"])
