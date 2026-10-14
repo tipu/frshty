@@ -40,6 +40,11 @@ from core.paths import frshty_root
 
 PRE_COMMIT_TIMEOUT = 600
 
+WORKTREE_LOCK_REASON = ("frshty owns this worktree; a checkout in another "
+                        "container cannot see it, so only frshty removes it")
+WORKTREE_ADD = ["worktree", "add", "--lock", "--reason", WORKTREE_LOCK_REASON]
+WORKTREE_REMOVE = ["worktree", "remove", "--force", "--force"]
+
 _worktree_locks: dict[str, threading.Lock] = {}
 _worktree_locks_guard = threading.Lock()
 
@@ -187,24 +192,46 @@ def prune_worktrees(repo_path, timeout: int = 60) -> list[str]:
     registration it cannot see as a deleted worktree and drops it. This drops
     only a missing worktree under frshty_root(), the task worktree root or a
     root handed to own_worktree_root, and leaves every other registration alone. Returns the
-    paths it dropped."""
+    paths it dropped.
+
+    frshty adds every worktree with WORKTREE_ADD, so `git worktree prune` from
+    any other process skips it. Git never reports a locked worktree as
+    prunable, so a worktree that carries frshty's lock counts as missing here
+    when its directory is gone. A lock with any other reason is left alone.
+    `git worktree add` creates the directory before it records the path, so a
+    worktree another thread is adding never reads as missing. A live worktree
+    under an owned root that has no lock yet, one added before frshty locked
+    them, gets the lock here."""
     roots = [os.path.realpath(frshty_root()), os.path.realpath(core_config.TASK_WORKTREE_ROOT),
              *sorted(_owned_roots)]
     listed = run_git_status(repo_path, ["worktree", "list", "--porcelain"], timeout=timeout)
     if listed.returncode != 0:
         return []
     dropped = []
-    current = ""
+    blocks, block = [], []
     for line in listed.stdout.splitlines() + [""]:
-        if line.startswith("worktree "):
-            current = line[len("worktree "):].strip()
-        elif line.startswith("prunable") and current:
-            real = os.path.realpath(current)
-            if any(real == r or real.startswith(r + os.sep) for r in roots):
-                if run_git_status(repo_path, ["worktree", "remove", "--force", current],
-                                  timeout=timeout).returncode == 0:
-                    dropped.append(current)
-            current = ""
+        if line:
+            block.append(line)
+        elif block:
+            blocks.append(block)
+            block = []
+    for lines in blocks[1:]:
+        if not lines[0].startswith("worktree "):
+            continue
+        current = lines[0][len("worktree "):].strip()
+        real = os.path.realpath(current)
+        if not any(real == r or real.startswith(r + os.sep) for r in roots):
+            continue
+        locked = any(ln == "locked" or ln.startswith("locked ") for ln in lines)
+        ours = f"locked {WORKTREE_LOCK_REASON}" in lines
+        prunable = any(ln.startswith("prunable") for ln in lines)
+        if prunable or (ours and not os.path.lexists(current)):
+            if run_git_status(repo_path, [*WORKTREE_REMOVE, current],
+                              timeout=timeout).returncode == 0:
+                dropped.append(current)
+        elif not locked:
+            run_git_status(repo_path, ["worktree", "lock", "--reason", WORKTREE_LOCK_REASON,
+                                       current], timeout=timeout)
     return dropped
 
 
@@ -250,7 +277,7 @@ def add_or_reuse_worktree(repo_path: Path, worktree_path: Path, branch: str,
     subprocess.run(["git", "fetch", "origin", branch], cwd=str(repo_path), capture_output=True, timeout=timeout)
     prune_worktrees(repo_path, timeout=timeout)
     result = subprocess.run(
-        ["git", "worktree", "add", str(worktree_path), branch],
+        ["git", *WORKTREE_ADD, str(worktree_path), branch],
         cwd=str(repo_path), capture_output=True, text=True, timeout=timeout,
     )
     if result.returncode == 0:
@@ -268,7 +295,7 @@ def add_or_reuse_worktree(repo_path: Path, worktree_path: Path, branch: str,
             return None
         prune_worktrees(repo_path, timeout=timeout)
         retry = subprocess.run(
-            ["git", "worktree", "add", str(worktree_path), branch],
+            ["git", *WORKTREE_ADD, str(worktree_path), branch],
             cwd=str(repo_path), capture_output=True, text=True, timeout=timeout,
         )
         return worktree_path if retry.returncode == 0 else None

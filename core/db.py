@@ -29,6 +29,8 @@ def _connect() -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 30000")
+    if conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal":
+        conn.execute("PRAGMA synchronous = NORMAL")
     return conn
 
 

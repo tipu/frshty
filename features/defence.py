@@ -28,6 +28,7 @@ import tempfile
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
+import core.git_util as git_util
 import core.log as log
 from core.claude_runner import run_balanced, extract_json
 from core.deps import relink_shared_venv
@@ -328,7 +329,7 @@ def substantiate(config: dict, claim: str, repo_name: str, worktree: Path,
     try:
         for target in (with_dir, without_dir):
             add = subprocess.run(
-                ["git", "worktree", "add", "--detach", str(target), result.head_sha],
+                ["git", *git_util.WORKTREE_ADD, "--detach", str(target), result.head_sha],
                 cwd=str(worktree), capture_output=True, text=True, timeout=180)
             if add.returncode != 0:
                 result.reason = f"could not create scratch checkout: {(add.stderr or '').strip()[:200]}"
@@ -358,7 +359,7 @@ def substantiate(config: dict, claim: str, repo_name: str, worktree: Path,
             without_cmd or cmd, without_dir)
     finally:
         for target in (with_dir, without_dir):
-            subprocess.run(["git", "worktree", "remove", "--force", str(target)],
+            subprocess.run(["git", *git_util.WORKTREE_REMOVE, str(target)],
                            cwd=str(worktree), capture_output=True, timeout=120)
         shutil.rmtree(scratch, ignore_errors=True)
 

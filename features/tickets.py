@@ -1016,7 +1016,7 @@ def _ensure_worktree(config: dict, ticket_key: str, slug: str) -> dict | None:
                     )
 
                 wt_result = subprocess.run(
-                    ["git", "worktree", "add", str(wt_path), branch],
+                    ["git", *git_util.WORKTREE_ADD, str(wt_path), branch],
                     cwd=str(repo["path"]), capture_output=True, text=True, timeout=60
                 )
                 if wt_result.returncode != 0:
@@ -1706,7 +1706,7 @@ def _setup_ticket(config, ticket, base_url, comments=None) -> dict:
             result = subprocess.run(["git", "branch", branch, f"origin/{base_branch}"], cwd=str(repo["path"]), capture_output=True, timeout=60)
             if result.returncode != 0:
                 subprocess.run(["git", "branch", branch, base_branch], cwd=str(repo["path"]), capture_output=True, timeout=60)
-        wt_result = subprocess.run(["git", "worktree", "add", str(wt_path), branch], cwd=str(repo["path"]), capture_output=True, text=True, timeout=60)
+        wt_result = subprocess.run(["git", *git_util.WORKTREE_ADD, str(wt_path), branch], cwd=str(repo["path"]), capture_output=True, text=True, timeout=60)
         if wt_result.returncode != 0:
             log.emit("ticket_worktree_error", f"Failed to create worktree for {slug} in {repo['name']}: {wt_result.stderr.strip()}",
                 meta={"ticket": key, "repo": repo["name"]})
@@ -1888,7 +1888,7 @@ def materialize_prd_ticket(config: dict, ticket_key: str, ts: dict, base_url: st
             if res.returncode != 0:
                 subprocess.run(["git", "branch", branch, base_branch],
                                cwd=str(repo["path"]), capture_output=True, timeout=60)
-        wt_result = subprocess.run(["git", "worktree", "add", str(wt_path), branch],
+        wt_result = subprocess.run(["git", *git_util.WORKTREE_ADD, str(wt_path), branch],
                                    cwd=str(repo["path"]), capture_output=True, text=True, timeout=60)
         if wt_result.returncode != 0:
             log.emit("prd_ticket_worktree_error",
