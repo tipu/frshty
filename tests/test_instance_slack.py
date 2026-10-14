@@ -113,3 +113,12 @@ def test_symlinked_parent_mount_gets_a_view_too(host, tmp_path):
     assert instance.slack_int_views(c, binds) == [view]
     assert (str(root / "slack" / "tokens.json"), f"{view}/tokens.json", True) in binds
     assert f"{view}/tokens.json.bak" not in {inside for _, inside, _ in binds}
+
+
+def test_aws_dir_is_mounted_at_home_aws_only_when_present(host):
+    slack, root, workspace, config_path = host
+    c = config(slack, workspace)
+    aws_home = str(instance.HOME / ".aws")
+    assert not any(inside == aws_home for _, inside, _ in instance.mounts(c, config_path, root))
+    (root / "aws").mkdir()
+    assert (str(root / "aws"), aws_home, False) in instance.mounts(c, config_path, root)
