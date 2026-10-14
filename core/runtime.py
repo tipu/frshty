@@ -391,6 +391,15 @@ def _enforce_git_identity(instance_configs: list[dict]) -> set[str]:
     return failed
 
 
+def mark_killed_invocations() -> None:
+    db.execute(
+        "UPDATE claude_invocations SET status='error', finished_at=?, "
+        "output=COALESCE(output,'') || '[killed by restart]' "
+        "WHERE status IN ('running','queued') AND function_name != 'work_task'",
+        (datetime.now(timezone.utc).isoformat(),),
+    )
+
+
 def start_events(
     instance_configs: list[dict],
     db_path: Path = DEFAULT_DB_PATH,
@@ -405,12 +414,7 @@ def start_events(
             return _instances  # type: ignore[return-value]
         db.init(db_path, migrations_dir)
         try:
-            db.execute(
-                "UPDATE claude_invocations SET status='error', finished_at=?, "
-                "output=COALESCE(output,'') || '[killed by restart]' "
-                "WHERE status IN ('running','queued')",
-                (datetime.now(timezone.utc).isoformat(),),
-            )
+            mark_killed_invocations()
         except Exception as e:
             log.emit("claude_invocation_recovery_failed",
                      f"could not mark stuck claude invocations: {e}")

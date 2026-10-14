@@ -488,7 +488,7 @@ def _ensure_review_worktree(config: dict, repo: str, pr_id: int, branch_dir: Pat
         wt.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "fetch", "origin", branch], cwd=str(repo_path), capture_output=True, timeout=60)
         git_util.prune_worktrees(repo_path)
-        subprocess.run(["git", "worktree", "add", str(wt), branch], cwd=str(repo_path), capture_output=True, timeout=60)
+        subprocess.run(["git", *git_util.WORKTREE_ADD, str(wt), branch], cwd=str(repo_path), capture_output=True, timeout=60)
         if (wt / ".git").exists():
             return wt
     platform = make_platform(config)
