@@ -1,3 +1,4 @@
+import threading
 from datetime import datetime, timezone
 
 import pytest
@@ -125,6 +126,19 @@ class TestRouteMiddleware:
         client.get("/no/such/page")
         assert db.query_all(
             "SELECT * FROM usage_counters WHERE kind='route'") == []
+
+    def test_record_runs_off_the_event_loop(self, client, monkeypatch):
+        seen = {}
+
+        @client.app.get("/api/loop-thread")
+        async def loop_thread():
+            seen["loop"] = threading.get_ident()
+            return {}
+
+        monkeypatch.setattr(usage, "record",
+                            lambda *a, **kw: seen.setdefault("record", threading.get_ident()))
+        client.get("/api/loop-thread")
+        assert seen["record"] != seen["loop"]
 
 
 class TestUiEndpoint:
