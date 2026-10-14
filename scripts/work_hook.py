@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import core.correspondence as correspondence  # noqa: E402  (needs the path above)
+import core.worktree_prune_gate as worktree_prune_gate  # noqa: E402  (needs the path above)
 
 DB_PATH = os.environ.get("FRSHTY_DB") or os.path.join(os.environ.get("FRSHTY_ROOT") or os.path.expanduser("~/.frshty"), "frshty.db")
 BOARD_FILE = os.environ.get("FRSHTY_BOARD_FILE") or os.path.join(os.environ.get("FRSHTY_ROOT") or os.path.expanduser("~/.frshty"), "board.json")
@@ -269,6 +270,18 @@ def main() -> int:
         kind = data.get("hook_event_name") or ""
         if not session_id or not kind:
             return 0
+        if kind == "PreToolUse" and data.get("tool_name") == "Bash":
+            reason = worktree_prune_gate.bash_reason(
+                (data.get("tool_input") or {}).get("command") or "")
+            if reason:
+                print(json.dumps({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": reason,
+                    }
+                }))
+                return 0
         row, readable = _is_work_run(session_id)
         if not row:
             # A database this process cannot read leaves it unable to say
