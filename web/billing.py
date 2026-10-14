@@ -1,8 +1,10 @@
+import asyncio
 import re
 
 import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
+from starlette.concurrency import run_in_threadpool
 
 import core.log as log
 import features.billing as billing
@@ -19,8 +21,8 @@ def api_billing_client():
 
 
 @router.get("/api/billing/schedule-status")
-async def api_billing_schedule_status():
-    return await billing.get_schedule_status(_config)
+def api_billing_schedule_status():
+    return asyncio.run(billing.get_schedule_status(_config))
 
 
 @router.get("/api/billing/entries")
@@ -31,7 +33,7 @@ def api_billing_entries(month: str = ""):
 @router.post("/api/billing/entries")
 async def api_billing_upsert_entry(request: Request):
     body = await request.json()
-    return billing.upsert_entries(_config, body)
+    return await run_in_threadpool(billing.upsert_entries, _config, body)
 
 
 @router.delete("/api/billing/entries/{day}")
@@ -40,14 +42,14 @@ def api_billing_delete_entry(day: str):
 
 
 @router.get("/api/billing/invoices")
-async def api_billing_invoices():
-    return await billing.list_invoices(_config)
+def api_billing_invoices():
+    return asyncio.run(billing.list_invoices(_config))
 
 
 @router.post("/api/billing/invoices")
-async def api_billing_create_invoice(body: dict):
+def api_billing_create_invoice(body: dict):
     try:
-        return await billing.create_invoice(_config, body, source="manual")
+        return asyncio.run(billing.create_invoice(_config, body, source="manual"))
     except OverlapError as e:
         return JSONResponse({"error": str(e), "conflict": e.conflict}, status_code=409)
     except ValueError as e:
@@ -58,9 +60,9 @@ async def api_billing_create_invoice(body: dict):
 
 
 @router.get("/api/billing/invoices/{invoice_id}/pdf")
-async def api_billing_invoice_pdf(invoice_id: str, number: str = ""):
+def api_billing_invoice_pdf(invoice_id: str, number: str = ""):
     try:
-        pdf = await billing.invoice_pdf(_config, invoice_id)
+        pdf = asyncio.run(billing.invoice_pdf(_config, invoice_id))
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
     except httpx.HTTPError as e:
@@ -77,8 +79,8 @@ async def api_billing_invoice_pdf(invoice_id: str, number: str = ""):
 
 
 @router.get("/api/billing/next-invoice-number")
-async def api_billing_next_number():
-    return await billing.next_invoice_number(_config)
+def api_billing_next_number():
+    return asyncio.run(billing.next_invoice_number(_config))
 
 
 @router.get("/api/billing/preview")
