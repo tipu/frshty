@@ -1,6 +1,7 @@
 import time
 from uuid import uuid4
 
+from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse
 
 from services import usage
@@ -66,6 +67,7 @@ def install(app):
             print(f"[USAGE] {host} {method} {path} status={response.status_code} ms={ms}", flush=True)
             if response.status_code not in (404, 405):
                 route = request.scope.get("route")
-                usage.record("route", f"{method} {getattr(route, 'path', path)}", instance=host)
+                await run_in_threadpool(usage.record, "route",
+                                        f"{method} {getattr(route, 'path', path)}", instance=host)
         response.headers["X-Response-Time"] = f"{elapsed:.3f}s"
         return response

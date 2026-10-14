@@ -15,6 +15,7 @@ trigger simply rebuilds.
 Auto-triggers are gated behind the `features.presentations` config flag;
 the manual preprocess endpoints on the web layer work regardless.
 """
+import contextvars
 import json
 import re
 import subprocess
@@ -201,24 +202,30 @@ def resolve_ticket_goal(config: dict, branch: str, repo: str, pr_id: int) -> str
     m = re.search(r"[A-Za-z]+-\d+", branch or "")
     key = m.group().upper() if m else ""
     if key:
-        t = state.load("tickets").get(key) or {}
-        goal = _goal_from_ticket_state(t)
+        goal = ticket_goal_for_key(config, key)
         if goal:
             return goal
-        try:
-            ts_sys = make_ticket_system(config)
-            ticket = ts_sys.fetch_ticket(key) if ts_sys else None
-        except Exception:
-            ticket = None
-        if ticket:
-            goal = "\n".join(p for p in [ticket.get("summary", ""), ticket.get("description", "")] if p).strip()[:4000]
-            if goal:
-                return f"{key}: {goal}"
     try:
         info = make_platform(config).get_pr_info(repo, pr_id) or {}
         return f"{info.get('title', '')}\n{info.get('description', '')}".strip()[:4000]
     except Exception:
         return ""
+
+
+def ticket_goal_for_key(config: dict, key: str) -> str:
+    goal = _goal_from_ticket_state(state.load("tickets").get(key) or {})
+    if goal:
+        return goal
+    try:
+        ts_sys = make_ticket_system(config)
+        ticket = ts_sys.fetch_ticket(key) if ts_sys else None
+    except Exception:
+        ticket = None
+    if ticket:
+        goal = "\n".join(p for p in [ticket.get("summary", ""), ticket.get("description", "")] if p).strip()[:4000]
+        if goal:
+            return f"{key}: {goal}"
+    return ""
 
 
 def _goal_from_ticket_state(ts: dict) -> str:
@@ -324,7 +331,7 @@ def _spawn(key: tuple, cache_file: Path | None, sha: str, auto: bool, build_fn) 
             with _inflight_lock:
                 _inflight.discard(key)
 
-    threading.Thread(target=run, daemon=True).start()
+    threading.Thread(target=contextvars.copy_context().run, args=(run,), daemon=True).start()
     return "started"
 
 
@@ -378,6 +385,61 @@ def spawn_ticket_build(config: dict, ticket_key: str,
         return build_ticket_presentation(goal, acceptance.all_criteria(ts), diffs, wt)
 
     return _spawn(("ticket", ticket_key), cache_file, head_sha, auto, build)
+
+
+def review_ticket_cache_file(config: dict, ticket_key: str) -> Path:
+    return config["_state_dir"] / "review_tickets" / ticket_key / "ticket_presentation_cache.json"
+
+
+def review_pr_diff(config: dict, platform, pr: dict) -> str:
+    diff_path = config["_state_dir"] / "reviews" / pr["repo"] / pr["branch"] / "diff.txt"
+    if diff_path.exists():
+        d = diff_path.read_text()
+        if d:
+            return d
+    review_store.populate_repo_cache(platform, config["_state_dir"], pr["repo"])
+    try:
+        return platform.get_pr_diff(pr["repo"], pr["id"]) or ""
+    except Exception:
+        return ""
+
+
+def review_ticket_fingerprint(config: dict, prs: list[dict]) -> str:
+    parts = []
+    for pr in prs:
+        branch_dir = config["_state_dir"] / "reviews" / pr["repo"] / pr["branch"]
+        stamps = []
+        for name in ("review.json", "diff.txt"):
+            try:
+                stamps.append(str((branch_dir / name).stat().st_mtime_ns))
+            except OSError:
+                stamps.append("")
+        parts.append(f"{pr['repo']}#{pr['id']}@{':'.join(stamps)}")
+    return "|".join(sorted(parts))
+
+
+def spawn_review_ticket_build(config: dict, ticket_key: str, prs: list[dict],
+                              auto: bool = False) -> str:
+    if not prs:
+        return "unavailable"
+
+    def build():
+        platform = make_platform(config)
+        diffs = [(pr["repo"], f"{pr['repo']}#{pr['id']}", review_pr_diff(config, platform, pr)) for pr in prs]
+        if not any(d for _, _, d in diffs):
+            return {}
+        wt = None
+        for pr in prs:
+            p = config["_state_dir"] / "reviews" / pr["repo"] / pr["branch"] / "worktree"
+            if (p / ".git").exists():
+                wt = p
+                break
+        ts = state.load("tickets").get(ticket_key) or {}
+        return build_ticket_presentation(ticket_goal_for_key(config, ticket_key),
+                                         acceptance.all_criteria(ts), diffs, wt)
+
+    return _spawn(("review_ticket", ticket_key), review_ticket_cache_file(config, ticket_key),
+                  review_ticket_fingerprint(config, prs), auto, build)
 
 
 def _ticket_diffs(config: dict, ts: dict) -> list[tuple[str, str, str]]:

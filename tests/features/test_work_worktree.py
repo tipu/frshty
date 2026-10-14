@@ -814,6 +814,37 @@ class TestGc:
         assert row["path"] in faults[0][1]
         assert os.path.isdir(row["path"])
 
+    def test_reports_a_worktree_whose_admin_directory_another_worktree_owns(
+            self, tmp_path, wt_root, monkeypatch):
+        """Git hands a free admin name to the next worktree. A .git file that
+        still names it reads that worktree's index, so status passes."""
+        repo, item_id, row = self._made(tmp_path, monkeypatch)
+        own_admin = Path(_git(row["path"], "rev-parse", "--absolute-git-dir").stdout.strip())
+        other = tmp_path / "other"
+        _git(repo, "worktree", "add", "-b", "other-branch", str(other))
+        other_admin = (other / ".git").read_text().strip()[len("gitdir:"):].strip()
+        shutil.rmtree(own_admin)
+        (Path(row["path"]) / ".git").write_text(f"gitdir: {other_admin}\n")
+        assert _git(row["path"], "status", "--porcelain", check=False).returncode == 0
+        emitted = []
+        monkeypatch.setattr(work_worktree.log, "emit",
+                            lambda event, summary, **kw: emitted.append((event, summary)))
+        monkeypatch.setattr(work_worktree, "_reported_faults", set())
+        _finish(item_id)
+        assert work_worktree.gc() == []
+        assert work_worktree.gc() == []
+        faults = [e for e in emitted if e[0] == "work_worktree_fault"]
+        assert len(faults) == 1
+        assert row["path"] in faults[0][1]
+        assert str(other) in faults[0][1]
+        assert os.path.isdir(row["path"])
+        assert _git(other, "status", "--porcelain").returncode == 0
+
+    def test_link_fault_is_empty_for_a_linked_worktree(self, tmp_path, wt_root, monkeypatch):
+        repo, _, row = self._made(tmp_path, monkeypatch)
+        assert work_worktree._link_fault(row["path"]) == ""
+        assert work_worktree._link_fault(str(repo)) == ""
+
     def test_keeps_a_worktree_whose_task_still_has_a_live_session(self, tmp_path, wt_root,
                                                                   monkeypatch):
         repo, item_id, row = self._made(tmp_path, monkeypatch)
