@@ -69,18 +69,18 @@ def api_work_peers():
 
 
 @router.get("/api/work/peers/{key}/{path:path}")
-def api_work_peer_get(key: str, path: str, request: Request):
-    status, payload = work_peers.request(key, "GET", path,
-                                         params=dict(request.query_params))
+async def api_work_peer_get(key: str, path: str, request: Request):
+    status, payload = await work_peers.request(key, "GET", path,
+                                               params=dict(request.query_params))
     return JSONResponse(payload, status_code=status)
 
 
 @router.post("/api/work/peers/{key}/{path:path}")
-def api_work_peer_post(key: str, path: str, request: Request,
-                       body: dict | None = Body(default=None)):
-    status, payload = work_peers.request(key, "POST", path,
-                                         params=dict(request.query_params),
-                                         body=body or {})
+async def api_work_peer_post(key: str, path: str, request: Request,
+                             body: dict | None = Body(default=None)):
+    status, payload = await work_peers.request(key, "POST", path,
+                                               params=dict(request.query_params),
+                                               body=body or {})
     return JSONResponse(payload, status_code=status)
 
 
