@@ -97,6 +97,25 @@ class TestApplyMigrations:
         assert conn.execute("SELECT name FROM _migrations").fetchall() == [("001_a.sql",)]
 
 
+class TestConnect:
+    def test_wal_connection_uses_normal_synchronous(self, tmp_path, monkeypatch):
+        sqlite3.connect(tmp_path / "c.db").execute("PRAGMA journal_mode = WAL").fetchone()
+        monkeypatch.setattr(db, "_DB_PATH", tmp_path / "c.db")
+        conn = db._connect()
+        try:
+            assert conn.execute("PRAGMA synchronous").fetchone()[0] == 1
+        finally:
+            conn.close()
+
+    def test_rollback_journal_connection_keeps_full_synchronous(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(db, "_DB_PATH", tmp_path / "c.db")
+        conn = db._connect()
+        try:
+            assert conn.execute("PRAGMA synchronous").fetchone()[0] == 2
+        finally:
+            conn.close()
+
+
 class TestWatchdogLaunchLedger:
     """The rolling launch cap moved from watchdog_observations, which keeps only
     an entity's latest attempt, to watchdog_launches, one row per attempt. The
