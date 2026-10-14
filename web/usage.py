@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Request
 from fastapi.routing import APIRoute
+from starlette.concurrency import run_in_threadpool
 from starlette.routing import Match
 
 from services import usage
@@ -55,7 +56,11 @@ async def api_usage_ui(request: Request):
     if not page:
         return {"ok": False, "error": "page must be an absolute path"}
     host = (request.headers.get("host") or "").split(":")[0]
-    events = body.get("events") or []
+    recorded = await run_in_threadpool(_record_ui_events, page, host, body.get("events") or [])
+    return {"ok": True, "recorded": recorded}
+
+
+def _record_ui_events(page: str, host: str, events: list) -> int:
     recorded = 0
     for ev in events[:_MAX_EVENTS_PER_POST]:
         element = str(ev.get("element") or "")
@@ -66,7 +71,7 @@ async def api_usage_ui(request: Request):
         if element and n > 0:
             usage.record("ui", f"{page} {element}", instance=host, n=n)
             recorded += 1
-    return {"ok": True, "recorded": recorded}
+    return recorded
 
 
 @router.get("/api/usage/report")

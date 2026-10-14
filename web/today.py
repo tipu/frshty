@@ -243,7 +243,7 @@ def api_today_loops(live: int = 0):
 
 
 @router.post("/api/today/snoozes")
-async def api_today_snooze_create(body: dict):
+def api_today_snooze_create(body: dict):
     instance_key = _config.get("job", {}).get("key", "")
     if not instance_key:
         return JSONResponse({"error": "no instance"}, status_code=400)

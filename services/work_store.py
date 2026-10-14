@@ -289,6 +289,88 @@ def is_idle_stop(kind: str, payload: dict) -> bool:
     return kind == "Notification" and "waiting for your input" in (payload.get("message") or "")
 
 
+_DIALOG_RULE = "─" * 10
+_DIALOG_FOOTER = "Esc to cancel"
+_DIALOG_OPTION_RE = re.compile(r"^\s*(?:❯\s*)?(\d+)\.\s+(\S.*)$")
+
+
+def is_permission_prompt(kind: str, payload: dict) -> bool:
+    return kind == "Notification" and "permission" in (payload.get("message") or "")
+
+
+def permission_dialog(lines: list[str]) -> dict | None:
+    """The permission dialog drawn at the bottom of a Claude pane, or None.
+
+    The dialog opens under a full-width rule. It describes the tool call,
+    asks a question, and lists numbered options. Pressing the number of an
+    option answers the dialog."""
+    rule = max((i for i, ln in enumerate(lines) if ln.strip().startswith(_DIALOG_RULE)),
+               default=-1)
+    if rule < 0:
+        return None
+    text: list[str] = []
+    options: list[dict] = []
+    for ln in lines[rule + 1:]:
+        m = _DIALOG_OPTION_RE.match(ln)
+        if m:
+            options.append({"key": m.group(1), "label": f"{m.group(1)}. {m.group(2).strip()}"})
+        elif options:
+            if not ln.strip():
+                break
+            options[-1]["label"] += " " + ln.strip()
+        elif ln.strip() and not ln.strip().startswith("╌"):
+            text.append(ln.strip())
+    if not options or not text:
+        return None
+    return {"question": "\n".join(text), "options": options}
+
+
+def permission_question(tmux_key: str, message: str) -> str:
+    """The pending question that puts a permission dialog on the board.
+
+    The options carry the key to press in the pane. When the pane cannot be
+    read, the question still names the dialog, so the board shows that the
+    agent waits on a permission and not on nothing."""
+    dialog = permission_dialog(_capture_pane(f"term-{tmux_key}")) if tmux_key else None
+    question = {"header": "Permission", "keystroke": True,
+                "question": message or "The agent needs your permission",
+                "options": []}
+    if dialog:
+        question.update(question=f"{question['question']}\n{dialog['question']}",
+                        options=dialog["options"])
+    return db.dump_json({"permission": True, "questions": [question]})
+
+
+def permission_dialog_closed(lines: list[str]) -> bool:
+    """Whether a pane that held a permission dialog shows it no longer.
+
+    An empty capture is a pane tmux could not read, and a dialog taller than
+    the pane hides its opening rule but still shows its footer. Neither one
+    proves the dialog is gone."""
+    return (bool(lines) and permission_dialog(lines) is None
+            and not any(_DIALOG_FOOTER in ln for ln in lines))
+
+
+def _shows_held_dialog(tmux_key: str, pending: str) -> bool:
+    """Whether the pane shows the dialog the held question was read from."""
+    dialog = permission_dialog(_capture_pane(f"term-{tmux_key}"))
+    held = json.loads(pending)["questions"][0]
+    return bool(dialog and held.get("options")) and held["options"] == dialog["options"] \
+        and held["question"].endswith(dialog["question"])
+
+
+def _permission_keys(pending: str) -> set[str] | None:
+    """The option keys of a held permission question, or None for any other."""
+    try:
+        held = json.loads(pending or "")
+    except ValueError:
+        return None
+    if not isinstance(held, dict) or held.get("permission") is not True:
+        return None
+    return {str(o.get("key")) for q in held.get("questions") or []
+            for o in q.get("options") or [] if isinstance(o, dict) and o.get("key")}
+
+
 def create_item(objective: str, scope: str = "ad-hoc", scope_ref: str = "",
                 instance_key: str | None = None, contexts: str = "",
                 source_item_id: int | None = None,
@@ -680,6 +762,17 @@ def record_event(session_id: str, kind: str, payload: dict) -> bool:
         finished = bool(final_lines) and final_lines[-1] == DONE_MARKER
         if not finished and not _blocked_on_operator(tail):
             bg_pending = bool(pending_background_tasks(transcript_path))
+    permission = ""
+    permission_closed = False
+    if kind != "UserPromptSubmit":
+        held = db.query_one(
+            "SELECT r.tmux_key, i.pending_question FROM work_runs r "
+            "JOIN work_items i ON i.id = r.work_item_id WHERE r.session_id = ?", (session_id,))
+        if held and is_permission_prompt(kind, payload):
+            permission = permission_question(held["tmux_key"], payload.get("message") or "")
+        elif held and _permission_keys(held["pending_question"]) is not None:
+            permission_closed = kind == "SessionEnd" or permission_dialog_closed(
+                _capture_pane(f"term-{held['tmux_key']}"))
     now = _now()
     with db.tx() as c:
         run = c.execute(
@@ -690,6 +783,11 @@ def record_event(session_id: str, kind: str, payload: dict) -> bool:
         item = c.execute(
             "SELECT state, pending_question FROM work_items WHERE id = ?", (run["work_item_id"],)
         ).fetchone()
+        pending = item["pending_question"]
+        if permission_closed and _permission_keys(pending) is not None:
+            pending = ""
+            c.execute("UPDATE work_items SET pending_question = '' WHERE id = ?",
+                      (run["work_item_id"],))
         c.execute(
             "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -716,7 +814,10 @@ def record_event(session_id: str, kind: str, payload: dict) -> bool:
                 excerpt = (payload.get("last_assistant_message") or "").strip()
                 if excerpt:
                     reason = f"{reason}: {excerpt[:300]}"
-                if bg_pending and not item["pending_question"]:
+                if permission:
+                    first = json.loads(permission)["questions"][0]["question"].splitlines()
+                    reason = " · ".join(first[:2])[:300]
+                elif bg_pending and not pending:
                     item_state = "waiting_external"
                     snooze = (datetime.now(timezone.utc)
                               + timedelta(hours=BG_WAIT_RECHECK_HOURS)).isoformat()
@@ -732,6 +833,12 @@ def record_event(session_id: str, kind: str, payload: dict) -> bool:
                         "snoozed_until = NULL, updated_at = ? WHERE id = ?",
                         (item_state, reason, now, run["work_item_id"]),
                     )
+            elif permission:
+                c.execute(
+                    "UPDATE work_items SET state = ?, stop_reason = ?, pending_question = ?, "
+                    "snoozed_until = NULL, updated_at = ? WHERE id = ?",
+                    (item_state, reason, permission, now, run["work_item_id"]),
+                )
             else:
                 c.execute(
                     "UPDATE work_items SET state = ?, stop_reason = ?, snoozed_until = ?, "
@@ -1019,7 +1126,7 @@ def pane_activity(tmux_key: str) -> str:
     return datetime.fromtimestamp(int(stamp), timezone.utc).isoformat()
 
 
-def tmux_send(tmux_key: str, text: str) -> bool:
+def tmux_send(tmux_key: str, text: str, enter: bool = True) -> bool:
     session = f"term-{tmux_key}"
     tmux = _tmux_bin()
     with _pane_lock(session):
@@ -1035,11 +1142,13 @@ def tmux_send(tmux_key: str, text: str) -> bool:
                               capture_output=True)
         if sent.returncode != 0:
             return False
+        if not enter:
+            return True
         time.sleep(0.4)
-        enter = subprocess.run([tmux, "-S", TMUX_SOCKET, "send-keys", "-t",
-                                tmux_target.pane(session), "Enter"],
-                              capture_output=True)
-        return enter.returncode == 0
+        pressed = subprocess.run([tmux, "-S", TMUX_SOCKET, "send-keys", "-t",
+                                  tmux_target.pane(session), "Enter"],
+                                 capture_output=True)
+        return pressed.returncode == 0
 
 
 BTW_ANSWER_TIMEOUT = 120
@@ -1921,7 +2030,7 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
     return "continued"
 
 
-def reply(item_id: int, text: str) -> dict:
+def reply(item_id: int, text: str, question: str | None = None) -> dict:
     """Send the operator's answer into the item's pane and put it back to work.
 
     The send is two subprocess calls outside any transaction, so the state is
@@ -1931,7 +2040,8 @@ def reply(item_id: int, text: str) -> dict:
     the next terminal connect would resume its agent."""
     now = _now()
     with db.tx() as c:
-        item = c.execute("SELECT state FROM work_items WHERE id = ?", (item_id,)).fetchone()
+        item = c.execute("SELECT state, pending_question FROM work_items WHERE id = ?",
+                         (item_id,)).fetchone()
         if not item:
             return {"error": "unknown work item"}
         if item["state"] in CLOSED_STATES:
@@ -1945,7 +2055,28 @@ def reply(item_id: int, text: str) -> dict:
     if not agent_running(run["tmux_key"], run["provider"]):
         return {"error": f"no live {run['provider'].capitalize()} in the session; open the terminal",
                 "agent_down": True}
-    if not tmux_send(run["tmux_key"], text):
+    keys = _permission_keys(item["pending_question"])
+    keystroke = text.isdigit() and (keys is not None
+                                    or _permission_keys(question or "") is not None)
+    if keystroke:
+        changed = {"error": "the permission dialog changed; look at it again before you answer"}
+        if (keys is None or question != item["pending_question"] or text not in keys
+                or not _shows_held_dialog(run["tmux_key"], question)):
+            return changed
+        with db.tx() as c:
+            if not c.execute("UPDATE work_items SET state = 'agent_working', "
+                             "pending_question = '' WHERE id = ? AND pending_question = ?",
+                             (item_id, question)).rowcount:
+                return changed
+        sent = tmux_send(run["tmux_key"], text, enter=False)
+        if not sent:
+            with db.tx() as c:
+                c.execute("UPDATE work_items SET state = ?, pending_question = ? "
+                          "WHERE id = ? AND pending_question = ''",
+                          (item["state"], question, item_id))
+    else:
+        sent = tmux_send(run["tmux_key"], text)
+    if not sent:
         return {"error": "tmux session gone"}
     with db.tx() as c:
         current = c.execute("SELECT state FROM work_items WHERE id = ?",
@@ -1958,7 +2089,7 @@ def reply(item_id: int, text: str) -> dict:
         c.execute(
             "UPDATE work_items SET state = 'agent_working', stop_reason = '', "
             "pending_question = '', snoozed_until = NULL, continues_used = 0, "
-            "updated_at = ? WHERE id = ?",
+            "updated_at = ? WHERE id = ?" + (" AND pending_question = ''" if keystroke else ""),
             (now, item_id),
         )
         c.execute("UPDATE work_runs SET status = 'running' WHERE id = ?", (run["id"],))

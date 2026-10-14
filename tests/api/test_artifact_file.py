@@ -230,6 +230,14 @@ class TestArtifactContentType:
         resp = self._get(tmp_path, monkeypatch, "shot.png", b"\x89PNG\x00")
         assert resp.headers["content-type"] == "image/png"
 
+    def test_download_keeps_the_file_name(self, tmp_path, monkeypatch):
+        resp = self._get(tmp_path, monkeypatch, "tax-documents.zip", b"PK\x03\x04\x00")
+        assert resp.headers["content-disposition"] == 'inline; filename="tax-documents.zip"'
+
+    def test_non_ascii_file_name_is_encoded(self, tmp_path, monkeypatch):
+        resp = self._get(tmp_path, monkeypatch, "résumé.pdf", b"%PDF-1.4")
+        assert resp.headers["content-disposition"] == "inline; filename*=utf-8''r%C3%A9sum%C3%A9.pdf"
+
 class TestArtifactClaudeRoute:
     def _stub(self, tmp_path, monkeypatch, running=False):
         launched = []
