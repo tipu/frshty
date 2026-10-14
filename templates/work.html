@@ -34,7 +34,7 @@
       <a class="ln-seg-btn" :class="{ on: view === 'archive' }" href="/tasks?view=archive">Archive</a>
     </div>
     <button class="ln-btn ln-btn-ghost" title="Filter view (not wired)">Filter</button>
-    <button class="ln-btn ln-btn-ghost" title="Display options (not wired)">Display</button>
+    <a class="ln-btn ln-btn-ghost" href="/tasks/design/1" title="try the three redesigns of this page">Redesigns</a>
   </template>
 
   <div class="ln-small" style="color:var(--ln-red)" v-if="connError">{{ connError }}</div>
@@ -760,7 +760,7 @@ frshtyApp({
       try {
         const r = await fetch(this.apiUrl(it.peer, `/api/work/items/${it.id}/reply`), {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text }),
+          body: JSON.stringify({ text, question: it.pending_question || "" }),
         });
         if (!r.ok) {
           const d = await r.json().catch(() => ({}));

@@ -2802,11 +2802,42 @@ def test_a_sibling_deleted_mid_scan_proposes_nothing(tmp_path):
 
     with patch.object(sc, "run_haiku", return_value=_verdict()) as haiku, \
          patch.object(sc.work_launch, "project_entries", return_value=[]):
-        opened, _ = sc.propose(config, instance_key="astroco", now=NOW)
+        opened, counts = sc.propose(config, instance_key="astroco", now=NOW)
 
     assert haiku.call_count == 0, "a file the scan had a position in went away"
     assert opened == []
+    assert counts["complete"] is False
     assert db.query_all("SELECT id FROM work_items") == []
+
+
+def test_a_scan_that_could_not_read_a_capture_file_ends_partial(tmp_path):
+    """A capture file that went away leaves the index short. The job row must
+    say so rather than call the run ok, and the next scan that reads every
+    file ends ok again."""
+    from core.tasks.registry import TaskContext
+    from core.tasks.slack import slack_conversation_scan
+
+    folder = tmp_path / "capture"
+    folder.mkdir()
+    (folder / "messages.jsonl").write_text(
+        json.dumps(_ws(ROOT_TS, ERIK, f"<@{OPERATOR}> please deploy WB-412")) + "\n")
+    oldest = folder / "messages.jsonl.1"
+    oldest.write_text(json.dumps(_ws("1788458300.000100", ERIK, "older")) + "\n")
+    config = _config(tmp_path)
+    ctx = TaskContext(instance_key="astroco", ticket_key=None,
+                      task="slack_conversation_scan", payload={}, job_id=0,
+                      triggering_event_id=None, config=config,
+                      registry=None, now=NOW)
+    assert slack_conversation_scan(ctx).status == "ok"
+
+    oldest.unlink()
+    result = slack_conversation_scan(ctx)
+    assert result.status == "partial"
+    assert result.artifacts["complete"] is False
+
+    result = slack_conversation_scan(ctx)
+    assert result.status == "ok"
+    assert result.artifacts["complete"] is True
 
 
 def test_a_sibling_that_went_away_only_stops_one_scan(tmp_path):

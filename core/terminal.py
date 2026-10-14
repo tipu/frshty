@@ -1,4 +1,5 @@
 import os
+import pwd
 import re
 import shlex
 import shutil
@@ -10,7 +11,9 @@ import fcntl
 import termios
 import signal
 import subprocess
+import threading
 from starlette.websockets import WebSocket, WebSocketDisconnect
+from starlette.concurrency import run_in_threadpool
 
 import core.state as state
 import core.tmux as tmux_target
@@ -23,6 +26,7 @@ def _tmux_bin():
     return shutil.which("tmux") or "tmux"
 
 _terminals: dict[str, dict] = {}
+_spawn_lock = threading.Lock()
 
 
 AGENTS = ("claude", "codex")
@@ -130,17 +134,26 @@ PANE_BASHRC = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts", "pane_bashrc")
 
 
+def _passwd_shell() -> str:
+    try:
+        return pwd.getpwuid(os.getuid()).pw_shell
+    except KeyError:
+        return ""
+
+
 def _pane_shell() -> str:
     """The interactive shell a pane runs after its agent exits, or starts
     with when it runs no agent.
 
     A bash pane reads scripts/pane_bashrc. That file runs the startup files
-    a login shell reads and then defines the cl and clc aliases, so the
-    operator can start claude by hand in any pane. Bash ignores --rcfile in
+    a login shell reads and then defines the cl, clc and co aliases, so the
+    operator can start claude or codex by hand in any pane. Bash ignores --rcfile in
     a login shell, so the pane shell is interactive and not a login shell,
     and the rcfile reads the login files itself. Another shell keeps its
-    own login startup files."""
-    login_shell = os.environ.get("SHELL") or "/bin/sh"
+    own login startup files. A process started without SHELL, such as the
+    server in an instance container, takes the login shell from its passwd
+    entry."""
+    login_shell = os.environ.get("SHELL") or _passwd_shell() or "/bin/sh"
     if os.path.basename(login_shell) == "bash":
         return f"{shlex.quote(login_shell)} --rcfile {shlex.quote(PANE_BASHRC)} -i"
     return f"{shlex.quote(login_shell)} -l"
@@ -468,7 +481,7 @@ def launch_agent(key: str, cwd: str, session_uuid: str, context: str, first_run:
     launch_claude(key, cwd, session_uuid, context, first_run, config=config)
 
 
-def _get_or_spawn(ticket_key: str, cwd: str):
+def _get_or_spawn(ticket_key: str, cwd: str, loop: asyncio.AbstractEventLoop):
     entry = _terminals.get(ticket_key)
     if entry and _process_alive(entry["pid"]):
         return entry
@@ -503,37 +516,44 @@ def _get_or_spawn(ticket_key: str, cwd: str):
     entry = {"pid": pid, "fd": fd, "scrollback": bytearray(), "readers": set(), "session": session_name}
     _terminals[ticket_key] = entry
 
-    asyncio.get_event_loop().create_task(_background_reader(ticket_key))
+    threading.Thread(target=_background_reader, args=(entry, loop),
+                     name=f"pty-{ticket_key}", daemon=True).start()
     return entry
 
 
-async def _background_reader(ticket_key: str):
-    loop = asyncio.get_event_loop()
-    entry = _terminals.get(ticket_key)
-    if not entry:
-        return
-    fd = entry["fd"]
+def _background_reader(entry: dict, loop: asyncio.AbstractEventLoop):
+    """Read the pty on a thread of its own and hand each chunk to the loop.
 
+    A read blocks until the pane prints, so it never runs on the event loop
+    or in a shared pool: a pooled worker would stay parked for as long as the
+    terminal lives."""
+    fd = entry["fd"]
     while True:
         try:
-            data = await loop.run_in_executor(None, os.read, fd, 4096)
+            data = os.read(fd, 4096)
         except OSError:
             break
         if not data:
             break
+        try:
+            asyncio.run_coroutine_threadsafe(_deliver(entry, data), loop).result()
+        except RuntimeError:
+            break
 
-        buf = entry["scrollback"]
-        buf.extend(data)
-        if len(buf) > MAX_SCROLLBACK:
-            del buf[: len(buf) - MAX_SCROLLBACK]
 
-        dead = set()
-        for ws in entry["readers"]:
-            try:
-                await ws.send_bytes(data)
-            except Exception:
-                dead.add(ws)
-        entry["readers"] -= dead
+async def _deliver(entry: dict, data: bytes):
+    buf = entry["scrollback"]
+    buf.extend(data)
+    if len(buf) > MAX_SCROLLBACK:
+        del buf[: len(buf) - MAX_SCROLLBACK]
+
+    dead = set()
+    for ws in entry["readers"]:
+        try:
+            await ws.send_bytes(data)
+        except Exception:
+            dead.add(ws)
+    entry["readers"] -= dead
 
 
 def kill_terminal(ticket_key: str):
@@ -558,23 +578,30 @@ def kill_terminal(ticket_key: str):
                         tmux_target.session(session_name)], capture_output=True)
 
 
-async def terminal_handler(websocket: WebSocket, ticket_key: str, config: dict):
-    entry = _terminals.get(ticket_key)
-    if not entry or not _process_alive(entry["pid"]):
+def _attach(ticket_key: str, config: dict, loop: asyncio.AbstractEventLoop) -> dict | None:
+    with _spawn_lock:
+        entry = _terminals.get(ticket_key)
+        if entry and _process_alive(entry["pid"]):
+            return entry
         cwd = _resolve_cwd(config, ticket_key)
         if not cwd:
             session_name = _tmux_session_name(ticket_key)
-            if _tmux_session_exists(session_name):
-                result = subprocess.run(
-                    [_tmux_bin(), "-S", TMUX_SOCKET, "display-message", "-t",
-                     tmux_target.pane(session_name), "-p", "#{pane_current_path}"],
-                    capture_output=True, text=True, timeout=5,
-                )
-                cwd = result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else str(config["workspace"]["root"])
-            else:
-                await websocket.close(code=1008)
-                return
-        entry = _get_or_spawn(ticket_key, cwd)
+            if not _tmux_session_exists(session_name):
+                return None
+            result = subprocess.run(
+                [_tmux_bin(), "-S", TMUX_SOCKET, "display-message", "-t",
+                 tmux_target.pane(session_name), "-p", "#{pane_current_path}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            cwd = result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else str(config["workspace"]["root"])
+        return _get_or_spawn(ticket_key, cwd, loop)
+
+
+async def terminal_handler(websocket: WebSocket, ticket_key: str, config: dict):
+    entry = await run_in_threadpool(_attach, ticket_key, config, asyncio.get_running_loop())
+    if entry is None:
+        await websocket.close(code=1008)
+        return
 
     await websocket.accept()
     fd = entry["fd"]
@@ -608,12 +635,12 @@ async def terminal_handler(websocket: WebSocket, ticket_key: str, config: dict):
                 except (json.JSONDecodeError, ValueError):
                     pass
                 try:
-                    os.write(fd, text.encode())
+                    await run_in_threadpool(os.write, fd, text.encode())
                 except OSError:
                     break
             elif "bytes" in message:
                 try:
-                    os.write(fd, message["bytes"])
+                    await run_in_threadpool(os.write, fd, message["bytes"])
                 except OSError:
                     break
     finally:

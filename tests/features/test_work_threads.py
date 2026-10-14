@@ -312,6 +312,21 @@ class TestRoutes:
         assert "<frshty-shell" in r.text
         assert "/api/work/threads" in r.text
 
+    def test_every_redesign_page_renders_on_the_shared_core(self):
+        for n in (1, 2, 3):
+            r = _client().get(f"/tasks/design/{n}")
+            assert r.status_code == 200
+            assert "<frshty-shell" in r.text
+            assert "/static/frshty-redesign.js" in r.text
+            assert "redesignApp({" in r.text
+            assert f'<design-switch current="{n}">' in r.text
+
+    def test_an_unknown_redesign_answers_404(self):
+        assert _client().get("/tasks/design/4").status_code == 404
+
+    def test_the_classic_board_links_to_the_redesigns(self):
+        assert 'href="/tasks/design/1"' in _client().get("/tasks").text
+
     def test_work_routes_redirect_to_tasks(self):
         client = _client(follow_redirects=False)
         assert client.get("/work").headers["location"] == "/tasks"

@@ -33,6 +33,15 @@ class TaskResult:
     success_status: str | None = field(default=None, kw_only=True)
 
 
+def read_result(artifacts: dict) -> TaskResult:
+    """The result of a scan that reads an integration.
+
+    A scan whose artifacts carry `complete: False` read only part of its
+    source. It ends `partial`, so the job row does not call a half read `ok`."""
+    return TaskResult("ok" if artifacts.get("complete", True) else "partial",
+                      artifacts=artifacts)
+
+
 Precondition = Callable[[TaskContext], tuple[bool, str]]
 Postcondition = Callable[[TaskContext], tuple[bool, str]]
 SuccessStatus = str | Callable[[TaskContext, "TaskResult"], str | None] | None

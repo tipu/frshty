@@ -25,9 +25,19 @@ def _fresh(resp: HTMLResponse) -> HTMLResponse:
     return resp
 
 
+REDESIGNS = (1, 2, 3)
+
+
 @router.get("/tasks", response_class=HTMLResponse)
 def tasks_page():
     return _fresh(_template("work.html"))
+
+
+@router.get("/tasks/design/{n}", response_class=HTMLResponse)
+def tasks_redesign_page(n: int):
+    if n not in REDESIGNS:
+        return HTMLResponse("unknown design", status_code=404)
+    return _fresh(_template(f"redesign_{n}.html"))
 
 
 @router.get("/threads", response_class=HTMLResponse)
@@ -59,18 +69,18 @@ def api_work_peers():
 
 
 @router.get("/api/work/peers/{key}/{path:path}")
-def api_work_peer_get(key: str, path: str, request: Request):
-    status, payload = work_peers.request(key, "GET", path,
-                                         params=dict(request.query_params))
+async def api_work_peer_get(key: str, path: str, request: Request):
+    status, payload = await work_peers.request(key, "GET", path,
+                                               params=dict(request.query_params))
     return JSONResponse(payload, status_code=status)
 
 
 @router.post("/api/work/peers/{key}/{path:path}")
-def api_work_peer_post(key: str, path: str, request: Request,
-                       body: dict | None = Body(default=None)):
-    status, payload = work_peers.request(key, "POST", path,
-                                         params=dict(request.query_params),
-                                         body=body or {})
+async def api_work_peer_post(key: str, path: str, request: Request,
+                             body: dict | None = Body(default=None)):
+    status, payload = await work_peers.request(key, "POST", path,
+                                               params=dict(request.query_params),
+                                               body=body or {})
     return JSONResponse(payload, status_code=status)
 
 
@@ -262,7 +272,7 @@ def api_work_reply(item_id: int, body: dict):
     if not text:
         return JSONResponse({"error": "empty reply"}, status_code=400)
     try:
-        result = work_launch.reply(item_id, text)
+        result = work_launch.reply(item_id, text, body.get("question"))
     except Exception as e:
         log.emit("work_reply_failed",
                  f"work item {item_id}: reply failed: {type(e).__name__}: {e}")
@@ -477,7 +487,9 @@ def _serve_artifact(artifact_id: int, real: str, shown: str):
         return JSONResponse(
             {"error": f"artifact path outside the run's workspace: {shown}"},
             status_code=403)
-    resp = FileResponse(real, media_type=_media_type(real))
+    resp = FileResponse(real, media_type=_media_type(real),
+                        filename=os.path.basename(real),
+                        content_disposition_type="inline")
     resp.headers["Content-Security-Policy"] = policy_for(real)
     return resp
 

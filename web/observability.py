@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 import core.db as db
 import core.log as log
@@ -154,7 +155,7 @@ async def _fetch_remote_global_events(limit: int, unread_only: bool, since_hours
     from core.discovery import discover_instances, call_instance
 
     local_key = _config.get("job", {}).get("key", "")
-    remote = [i for i in discover_instances() if i["key"] != local_key]
+    remote = [i for i in await run_in_threadpool(discover_instances) if i["key"] != local_key]
     if not remote:
         return [], {}
 
@@ -201,7 +202,8 @@ async def api_global_events(limit: int = 5000, unread: bool = False, since_hours
     after = ""
     if since_hours > 0:
         after = (datetime.now(timezone.utc) - timedelta(hours=since_hours)).isoformat()
-    local_events = _fetch_local_global_events(limit=limit, unread_only=unread, after=after)
+    local_events = await run_in_threadpool(_fetch_local_global_events, limit=limit,
+                                           unread_only=unread, after=after)
     remote_events, errors = await _fetch_remote_global_events(limit=limit, unread_only=unread, since_hours=since_hours)
     merged = local_events + remote_events
     merged.sort(key=lambda e: e.get("ts") or "", reverse=True)
@@ -283,7 +285,7 @@ def api_poll():
         return {"status": "error", "error": str(e)}
 
 
-_TERMINAL_JOB_STATUSES = {"ok", "failed", "skipped"}
+_TERMINAL_JOB_STATUSES = {"ok", "partial", "failed", "skipped"}
 
 
 def _trim_to_utf8_boundary(data: bytes) -> bytes:

@@ -94,6 +94,14 @@ def api_submit_review(body: dict):
     return {"status": "started", "repo": full_repo, "pr_id": pr_id}
 
 
+_TICKET_KEY_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*-\d+")
+
+
+def _branch_names_ticket(branch: str, ticket_key: str) -> bool:
+    pattern = rf"(?<![A-Za-z0-9]){re.escape(ticket_key)}(?!\d)"
+    return re.search(pattern, branch, re.IGNORECASE) is not None
+
+
 def _stored_prs_for_ticket(state_dir, ticket_key: str) -> list[dict]:
     reviews_dir = state_dir / "reviews"
     prs = []
@@ -107,25 +115,26 @@ def _stored_prs_for_ticket(state_dir, ticket_key: str) -> list[dict]:
             if not branch_dir.is_dir():
                 continue
             branch = branch_dir.name
-            if ticket_key.lower() not in branch.lower():
+            if not _branch_names_ticket(branch, ticket_key):
                 continue
             queued_file = branch_dir / "queued_comments.json"
             if queued_file.exists():
                 try:
                     queued = json.loads(queued_file.read_text())
-                    if queued:
-                        first = queued[0]
-                        pr_id = first.get("pr_id")
-                        pr_url = first.get("pr_url", "")
-                        if pr_id:
-                            prs.append({
-                                "repo": repo,
-                                "id": pr_id,
-                                "branch": branch,
-                                "url": pr_url,
-                                "head_sha": ""
-                            })
-                except (json.JSONDecodeError, IndexError, KeyError, TypeError):
+                    review_file = branch_dir / "review.json"
+                    review_data = json.loads(review_file.read_text()) if review_file.exists() else {}
+                    first = queued[0] if queued else {}
+                    pr_id = first.get("pr_id") or review_data.get("pr_id")
+                    pr_url = first.get("pr_url") or review_data.get("pr_url", "")
+                    if pr_id:
+                        prs.append({
+                            "repo": repo,
+                            "id": pr_id,
+                            "branch": branch,
+                            "url": pr_url,
+                            "head_sha": ""
+                        })
+                except (json.JSONDecodeError, IndexError, KeyError, TypeError, AttributeError):
                     pass
     return prs
 
@@ -617,6 +626,70 @@ def api_presentation(repo: str, pr_id: int):
     except (OSError, ValueError):
         return {"status": "missing"}
     return {"status": "ok", "presentation": data, "building": building}
+
+
+def _review_ticket_prs(ticket_key: str) -> list[dict]:
+    if not _TICKET_KEY_RE.fullmatch(ticket_key):
+        return []
+    seen = {}
+    for pr in _stored_prs_for_ticket(_config["_state_dir"], ticket_key):
+        seen.setdefault((pr["repo"], pr["id"]), pr)
+    return sorted(seen.values(), key=lambda pr: (pr["repo"], pr["id"]))
+
+
+@router.post("/api/review-tickets/{ticket_key}/presentation/preprocess")
+def api_review_ticket_presentation_preprocess(ticket_key: str):
+    result = presentation.spawn_review_ticket_build(_config, ticket_key, _review_ticket_prs(ticket_key))
+    if result == "unavailable":
+        return JSONResponse({"error": "no reviews found for ticket"}, status_code=404)
+    if result == "cached":
+        return {"status": "ok", "cached": True}
+    if result == "in_progress":
+        return {"status": "in_progress", "cached": False}
+    return {"status": "ok", "cached": False}
+
+
+@router.get("/api/review-tickets/{ticket_key}/presentation")
+def api_review_ticket_presentation(ticket_key: str):
+    prs = _review_ticket_prs(ticket_key)
+    if not prs:
+        return {"status": "not_found"}
+    cache_file = presentation.review_ticket_cache_file(_config, ticket_key)
+    if cache_file.exists():
+        presentation.spawn_review_ticket_build(_config, ticket_key, prs, auto=True)
+    building = presentation.is_building(("review_ticket", ticket_key))
+    if not cache_file.exists():
+        return {"status": "building" if building else "missing"}
+    try:
+        data = json.loads(cache_file.read_text())
+    except (OSError, ValueError):
+        return {"status": "missing"}
+    return {"status": "ok", "presentation": data, "building": building}
+
+
+@router.get("/api/review-tickets/{ticket_key}/detail")
+def api_review_ticket_detail(ticket_key: str):
+    prs = _review_ticket_prs(ticket_key)
+    ts = state.load("tickets").get(ticket_key) or {}
+    ticket = {"summary": ts.get("summary", ""), "description": ts.get("description", "")}
+    if prs and not ticket["summary"]:
+        try:
+            ts_sys = make_ticket_system(_config)
+            ticket = (ts_sys.fetch_ticket(ticket_key) if ts_sys else None) or ticket
+        except Exception:
+            pass
+    return {"state": {"url": ts.get("url", ""),
+                      "prs": [{"repo": pr["repo"], "id": pr["id"], "url": pr["url"]} for pr in prs],
+                      "summary": ticket.get("summary", ""),
+                      "description": ticket.get("description", "")},
+            "summary": ""}
+
+
+@router.get("/api/review-tickets/{ticket_key}/diff")
+def api_review_ticket_diff(ticket_key: str):
+    platform = make_platform(_config)
+    return {"repos": [{"repo": pr["repo"], "diff": presentation.review_pr_diff(_config, platform, pr)}
+                      for pr in _review_ticket_prs(ticket_key)]}
 
 
 @router.get("/api/reviews/{repo}/{pr_id}/bb-comments")

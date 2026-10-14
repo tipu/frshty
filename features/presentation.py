@@ -1,8 +1,9 @@
 """Background builder for the guided slide presentations shown on the review
 and ticket detail pages.
 
-Presentations are cached as presentation_cache.json next to the review/ticket
-artifacts, with a sibling presentation_meta.json recording the head sha the
+Presentations are cached as presentation_cache.json next to the review
+artifacts (ticket_presentation_cache.json for a ticket), with a sibling
+presentation_meta.json (ticket_presentation_meta.json) recording the head sha the
 deck was built from ({"status": "ok"|"failed", "sha": ..., "ts": ...}).
 Auto-triggers (post-review hook, in_review reconcile) compare that sha against
 the current head and rebuild only when it moved; a failed build is not
@@ -14,6 +15,7 @@ trigger simply rebuilds.
 Auto-triggers are gated behind the `features.presentations` config flag;
 the manual preprocess endpoints on the web layer work regardless.
 """
+import contextvars
 import json
 import re
 import subprocess
@@ -25,6 +27,7 @@ import core.config as cfg
 import core.git_util as git_util
 import core.log as log
 import core.state as state
+import features.acceptance as acceptance
 from core.claude_runner import run_balanced, extract_json
 from core.config import get_repos
 from features.platforms import make_platform
@@ -103,28 +106,126 @@ def build_presentation(ticket_goal: str, diff_text: str, worktree: Path | None) 
     return parsed
 
 
+def build_ticket_presentation(ticket_goal: str, criteria: list[dict],
+                              diffs: list[tuple[str, str, str]], worktree: Path | None) -> dict:
+    labelled = [(label, d) for _, label, d in diffs if d]
+    if not labelled:
+        return {}
+    per_pr = max(4000, 60000 // len(labelled))
+    diff_text = "\n".join(
+        f"=== PR {label} START ===\n{d[:per_pr]}\n=== PR {label} END ===" for label, d in labelled)
+    pr_labels = ", ".join(label for label, _ in labelled)
+    crit_lines = "\n".join(
+        f"- {c.get('id') or f'c{i + 1}'}: {c.get('criterion', '')}"
+        for i, c in enumerate(criteria) if isinstance(c, dict) and c.get("criterion"))
+    if crit_lines:
+        req_source = (
+            "STRUCTURED ACCEPTANCE CRITERIA (use exactly these as the requirements, one entry each, "
+            "same id, same order, wording kept):\n" + crit_lines + "\n\n")
+    else:
+        req_source = (
+            "There is no structured criteria list. Extract the requirements from the ticket text "
+            "yourself: every distinct outcome the author asked for becomes one requirement, ids r1, r2, ... "
+            "Do not invent requirements the author did not state.\n\n")
+    tools = ["Read", "Glob", "Grep"] if worktree else None
+    grounding = (
+        "You have read-only access to one of the ticket's checked-out branches. Use Read/Grep/Glob to open "
+        "the full files and the code around each change so your mapping is grounded in the real code, "
+        "not just the diff.\n\n"
+        if worktree else ""
+    )
+    prompt = (
+        "You are preparing a guided, slide-by-slide PRESENTATION of a TICKET. The ticket is delivered by "
+        f"one or more pull requests ({pr_labels}). The presentation goes through the ticket's requirements one "
+        "by one and shows how the code from the pull requests resolves each requirement, so a reviewer can "
+        "confirm the ticket is done.\n\n"
+        "AUDIENCE AND STYLE: the reviewer needs every step spelled out. Write the way a patient special "
+        "education teacher explains a subject to a learner who knows nothing about this codebase. Use plain "
+        "words and short sentences, one idea per sentence. Define every technical term, function name and "
+        "concept the first time it appears. Never skip a step because it looks obvious. Give a concrete "
+        "example with real values wherever it helps. Keep names, file paths and numbers. This applies to "
+        "every prose field.\n\n"
+        f"TICKET:\n{ticket_goal or '(no ticket text provided; infer the intent from the diffs)'}\n\n"
+        + req_source + grounding +
+        "Each pull request diff below sits between '=== PR <label> START ===' and '=== PR <label> END ==='. "
+        "Use those labels exactly wherever a field asks for a pr.\n\n"
+        "Produce these parts:\n"
+        "1. problem: 3-6 short plain-language sentences framing what the ticket asks for, with one concrete example.\n"
+        "2. approach: 1-3 sentences on how the pull requests split the work between them.\n"
+        "3. steps: an ORDERED list that walks the code changes of ALL the pull requests the way the code "
+        "actually EXECUTES (entry point -> downstream calls -> data/state changes -> result). Small, "
+        "digestible steps; never dump a whole file. For each step provide:\n"
+        "   - title: a short label\n"
+        "   - pr: the label of the pull request this code comes from\n"
+        "   - file: the file path\n"
+        "   - code: ONLY the relevant lines, each prefixed 'NUM: ' with the real line number, kept short\n"
+        "   - narrative: 3-6 short sentences on what this code does, with an example value where it helps\n"
+        "   - check: 'ok' if the chunk is correct and on-purpose, or 'concern' if it looks wrong, risky, "
+        "destructive, dead, or unrelated to the ticket\n"
+        "   - check_note: one sentence justifying the check\n"
+        "4. requirements: one entry per requirement, in ticket order. For each provide:\n"
+        "   - id: the requirement id\n"
+        "   - requirement: the requirement in plain words\n"
+        "   - status: 'met' if the code fully resolves it, 'partial' if it resolves part of it, 'not_met' if no code resolves it\n"
+        "   - how: 3-6 short sentences that explain, step by step, how the code resolves this requirement, "
+        "naming the pull request and the function for each part, with a concrete example input and result\n"
+        "   - prs: the labels of the pull requests whose code contributes to this requirement (empty if none)\n"
+        "   - steps: the 1-based numbers of the steps above that implement this requirement (empty if none)\n"
+        "   - gap: one sentence naming what is missing or wrong; empty string when status is 'met'\n"
+        "5. verdict: solves_problem (true only if every requirement is met), summary (3-5 sentences on "
+        "whether the pull requests together resolve the ticket with no errant, destructive, or dead code), "
+        "and concerns (array of short strings, empty if none).\n"
+        "6. visual: material for picture-style recap slides, written for someone who never reads the code:\n"
+        "   - flow: 3-7 boxes that trace the change end to end in plain words. Each box has label (2-5 words), "
+        "kind (input, process, decision, store or output), note (at most 10 words) and step (the 1-based step number it mostly covers, or 0)\n"
+        "   - before: 2-4 very short phrases on how things behave without the ticket\n"
+        "   - after: 2-4 very short phrases on how things behave with it, parallel to before\n\n"
+        "Order steps by execution flow, NOT by pull request or file. Aim for 4-12 steps.\n\n"
+        'Return ONLY valid JSON (no markdown fences): '
+        '{"problem":"...","approach":"...",'
+        '"steps":[{"title":"...","pr":"...","file":"...","code":"NUM: ...","narrative":"...","check":"ok|concern","check_note":"..."}],'
+        '"requirements":[{"id":"...","requirement":"...","status":"met|partial|not_met","how":"...","prs":["..."],"steps":[1],"gap":""}],'
+        '"verdict":{"solves_problem":true,"summary":"...","concerns":["..."]},'
+        '"visual":{"flow":[{"label":"...","kind":"input|process|decision|store|output","note":"...","step":1}],"before":["..."],"after":["..."]}}\n\n'
+        f"--- DIFFS START ---\n{diff_text}\n--- DIFFS END ---"
+    )
+    output = run_balanced(prompt, worktree=worktree, tools=tools, timeout=900)
+    if not output:
+        return {}
+    parsed = extract_json(output)
+    if not isinstance(parsed, dict):
+        return {}
+    return parsed
+
+
 def resolve_ticket_goal(config: dict, branch: str, repo: str, pr_id: int) -> str:
     m = re.search(r"[A-Za-z]+-\d+", branch or "")
     key = m.group().upper() if m else ""
     if key:
-        t = state.load("tickets").get(key) or {}
-        goal = _goal_from_ticket_state(t)
+        goal = ticket_goal_for_key(config, key)
         if goal:
             return goal
-        try:
-            ts_sys = make_ticket_system(config)
-            ticket = ts_sys.fetch_ticket(key) if ts_sys else None
-        except Exception:
-            ticket = None
-        if ticket:
-            goal = "\n".join(p for p in [ticket.get("summary", ""), ticket.get("description", "")] if p).strip()[:4000]
-            if goal:
-                return f"{key}: {goal}"
     try:
         info = make_platform(config).get_pr_info(repo, pr_id) or {}
         return f"{info.get('title', '')}\n{info.get('description', '')}".strip()[:4000]
     except Exception:
         return ""
+
+
+def ticket_goal_for_key(config: dict, key: str) -> str:
+    goal = _goal_from_ticket_state(state.load("tickets").get(key) or {})
+    if goal:
+        return goal
+    try:
+        ts_sys = make_ticket_system(config)
+        ticket = ts_sys.fetch_ticket(key) if ts_sys else None
+    except Exception:
+        ticket = None
+    if ticket:
+        goal = "\n".join(p for p in [ticket.get("summary", ""), ticket.get("description", "")] if p).strip()[:4000]
+        if goal:
+            return f"{key}: {goal}"
+    return ""
 
 
 def _goal_from_ticket_state(ts: dict) -> str:
@@ -136,7 +237,7 @@ def _goal_from_ticket_state(ts: dict) -> str:
 
 
 def meta_path(cache_file: Path) -> Path:
-    return cache_file.with_name("presentation_meta.json")
+    return cache_file.with_name(cache_file.name.replace("cache", "meta"))
 
 
 def read_meta(cache_file: Path) -> dict:
@@ -165,7 +266,7 @@ def ticket_cache_file(config: dict, ts: dict) -> Path | None:
     if not slug:
         return None
     ws = config["workspace"]
-    return ws["root"] / ws["tickets_dir"] / slug / "presentation_cache.json"
+    return ws["root"] / ws["tickets_dir"] / slug / "ticket_presentation_cache.json"
 
 
 def ticket_head_sha(config: dict, ts: dict) -> str:
@@ -230,7 +331,7 @@ def _spawn(key: tuple, cache_file: Path | None, sha: str, auto: bool, build_fn) 
             with _inflight_lock:
                 _inflight.discard(key)
 
-    threading.Thread(target=run, daemon=True).start()
+    threading.Thread(target=contextvars.copy_context().run, args=(run,), daemon=True).start()
     return "started"
 
 
@@ -271,23 +372,79 @@ def spawn_ticket_build(config: dict, ticket_key: str,
 
     def build():
         diffs = _ticket_diffs(config, ts)
-        diff_text = "\n".join(d for _, d in diffs if d)
-        if not diff_text:
+        if not any(d for _, _, d in diffs):
             return {}
         slug = ts.get("slug", "")
         wt = None
-        for repo_name, _ in diffs:
+        for repo_name, _, _ in diffs:
             p = cfg.ticket_worktree_path(config, slug, repo_name)
             if p.is_dir():
                 wt = p
                 break
         goal = _goal_from_ticket_state(ts)
-        return build_presentation(goal, diff_text, wt)
+        return build_ticket_presentation(goal, acceptance.all_criteria(ts), diffs, wt)
 
     return _spawn(("ticket", ticket_key), cache_file, head_sha, auto, build)
 
 
-def _ticket_diffs(config: dict, ts: dict) -> list[tuple[str, str]]:
+def review_ticket_cache_file(config: dict, ticket_key: str) -> Path:
+    return config["_state_dir"] / "review_tickets" / ticket_key / "ticket_presentation_cache.json"
+
+
+def review_pr_diff(config: dict, platform, pr: dict) -> str:
+    diff_path = config["_state_dir"] / "reviews" / pr["repo"] / pr["branch"] / "diff.txt"
+    if diff_path.exists():
+        d = diff_path.read_text()
+        if d:
+            return d
+    review_store.populate_repo_cache(platform, config["_state_dir"], pr["repo"])
+    try:
+        return platform.get_pr_diff(pr["repo"], pr["id"]) or ""
+    except Exception:
+        return ""
+
+
+def review_ticket_fingerprint(config: dict, prs: list[dict]) -> str:
+    parts = []
+    for pr in prs:
+        branch_dir = config["_state_dir"] / "reviews" / pr["repo"] / pr["branch"]
+        stamps = []
+        for name in ("review.json", "diff.txt"):
+            try:
+                stamps.append(str((branch_dir / name).stat().st_mtime_ns))
+            except OSError:
+                stamps.append("")
+        parts.append(f"{pr['repo']}#{pr['id']}@{':'.join(stamps)}")
+    return "|".join(sorted(parts))
+
+
+def spawn_review_ticket_build(config: dict, ticket_key: str, prs: list[dict],
+                              auto: bool = False) -> str:
+    if not prs:
+        return "unavailable"
+
+    def build():
+        platform = make_platform(config)
+        diffs = [(pr["repo"], f"{pr['repo']}#{pr['id']}", review_pr_diff(config, platform, pr)) for pr in prs]
+        if not any(d for _, _, d in diffs):
+            return {}
+        wt = None
+        for pr in prs:
+            p = config["_state_dir"] / "reviews" / pr["repo"] / pr["branch"] / "worktree"
+            if (p / ".git").exists():
+                wt = p
+                break
+        ts = state.load("tickets").get(ticket_key) or {}
+        return build_ticket_presentation(ticket_goal_for_key(config, ticket_key),
+                                         acceptance.all_criteria(ts), diffs, wt)
+
+    return _spawn(("review_ticket", ticket_key), review_ticket_cache_file(config, ticket_key),
+                  review_ticket_fingerprint(config, prs), auto, build)
+
+
+def _ticket_diffs(config: dict, ts: dict) -> list[tuple[str, str, str]]:
+    """(repo, label, diff) per PR; label is "repo#id", or the repo name for
+    an unpushed worktree diff."""
     prs = ts.get("prs") or []
     if prs:
         platform = make_platform(config)
@@ -297,7 +454,7 @@ def _ticket_diffs(config: dict, ts: dict) -> list[tuple[str, str]]:
                 d = platform.get_pr_diff(pr["repo"], pr["id"]) or ""
             except Exception:
                 d = ""
-            out.append((pr["repo"], d))
+            out.append((pr["repo"], f"{pr['repo']}#{pr['id']}", d))
         return out
     slug = ts.get("slug")
     if not slug:
@@ -316,7 +473,7 @@ def _ticket_diffs(config: dict, ts: dict) -> list[tuple[str, str]]:
             ["git", "diff", f"{base_ref}...HEAD"],
             cwd=str(wt), capture_output=True, text=True, timeout=30)
         if result.stdout.strip():
-            out.append((repo["name"], result.stdout))
+            out.append((repo["name"], repo["name"], result.stdout))
     return out
 
 

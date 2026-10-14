@@ -43,6 +43,16 @@ body { font-family: 'SF Mono', 'Cascadia Code', ui-monospace, monospace; backgro
 .checkbadge { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; padding: 6px 13px; border-radius: 8px; margin-top: 4px; }
 .check-ok { background: rgba(34,150,80,.14); border: 1px solid rgba(52,180,100,.4); color: #7ee2a8; }
 .check-concern { background: rgba(200,120,20,.14); border: 1px solid rgba(220,150,40,.45); color: #fcd34d; }
+.check-missing { background: rgba(200,50,50,.14); border: 1px solid rgba(230,80,80,.45); color: #fca5a5; }
+.req-row { display: flex; gap: 12px; align-items: flex-start; width: 100%; text-align: left; background: none; border: 0; border-top: 1px solid #1d2130; padding: 12px 0; color: inherit; cursor: pointer; font: inherit; }
+.req-row:hover .req-text { color: #fff; }
+.req-icon { flex: none; width: 26px; text-align: center; font-size: 18px; }
+.req-text { flex: 1; min-width: 0; font-size: 16px; color: #d6dae3; }
+.req-prs { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.req-ev { margin-top: 18px; }
+.req-ev-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 13px; color: #9aa3b5; }
+.req-ev-head button { background: none; border: 0; color: #93c5fd; cursor: pointer; font: inherit; padding: 0; }
+.req-ev .code-card { margin-top: 8px; }
 
 .code-card { margin-top: 22px; background: #0c0e14; border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
 .code-scroll { overflow-x: auto; padding: 14px 0; }
@@ -143,7 +153,7 @@ button.viz-node:hover { transform: translateY(-3px); background: #151a26; }
 <div class="stage">
 
     <div class="topbar">
-        <a :href="'/tickets/' + ticketKey">&larr; {{ ticketKey }}</a>
+        <a :href="backHref">&larr; {{ ticketKey }}</a>
         <div class="progress-track"><div class="progress-fill" :style="{ width: progressPct + '%' }"></div></div>
         <span class="hint" v-if="ready">{{ current + 1 }} / {{ slides.length }}</span>
     </div>
@@ -153,7 +163,7 @@ button.viz-node:hover { transform: translateY(-3px); background: #151a26; }
             <div class="slide-inner text-center flex flex-col items-center gap-5">
                 <div class="spinner"></div>
                 <div class="lead" style="margin:0">{{ statusMsg }}</div>
-                <div class="hint">Reading the ticket, the diff and the branch to build a flow-ordered walkthrough.</div>
+                <div class="hint">Reading the ticket, every pull request diff and the branch to map each requirement to the code that resolves it.</div>
             </div>
         </div>
 
@@ -181,6 +191,51 @@ button.viz-node:hover { transform: translateY(-3px); background: #151a26; }
                         </div>
                     </template>
 
+                    <template v-else-if="slide.type === 'requirements'">
+                        <div class="kicker">The requirements</div>
+                        <div class="headline" style="font-size: clamp(22px,3vw,38px);">{{ reqSummary.met }} of {{ reqSummary.total }} requirements met</div>
+                        <div class="sub">Each row is one requirement of the ticket. Click a row to see how the code resolves it.</div>
+                        <div class="mt-4">
+                            <button v-for="r in slide.requirements" :key="r.num" class="req-row" @click="jumpToReq(r.num)">
+                                <span class="req-icon" :style="{ color: reqStyle(r.status).color }">{{ reqStyle(r.status).icon }}</span>
+                                <span class="req-text">
+                                    <span>{{ r.requirement }}</span>
+                                    <span class="req-prs">
+                                        <span class="checkbadge" :class="reqStyle(r.status).cls" style="margin-top:0; padding:2px 9px; font-size:12px;">{{ reqStyle(r.status).name }}</span>
+                                        <span v-for="pr in (r.prs || [])" :key="pr" class="pill">{{ pr }}</span>
+                                    </span>
+                                </span>
+                            </button>
+                        </div>
+                    </template>
+
+                    <template v-else-if="slide.type === 'requirement'">
+                        <div class="kicker">Requirement {{ slide.num }} of {{ reqSummary.total }}</div>
+                        <div class="headline" style="font-size: clamp(20px,2.4vw,30px);">{{ slide.requirement }}</div>
+                        <div class="flex items-center gap-2 flex-wrap">
+                            <span class="checkbadge" :class="reqStyle(slide.status).cls">
+                                <span>{{ reqStyle(slide.status).icon }}</span><span>{{ reqStyle(slide.status).name }}</span>
+                            </span>
+                            <a v-for="pr in (slide.prs || [])" :key="pr" :href="prUrl(pr) || null" target="_blank" class="pill">{{ pr }}<template v-if="prUrl(pr)"> &nearr;</template></a>
+                        </div>
+                        <div v-if="slide.how" class="lead" style="margin-top:18px;">{{ slide.how }}</div>
+                        <div v-if="slide.gap" class="concern-item" style="margin-top:10px;"><span style="color:#f59e0b;">⚠</span><span>{{ slide.gap }}</span></div>
+                        <div v-for="st in reqSteps(slide)" :key="st.stepNum" class="req-ev">
+                            <div class="req-ev-head">
+                                <button @click="jumpToStep(st.stepNum)">Step {{ st.stepNum }}: {{ st.title }} &rarr;</button>
+                                <span v-if="st.pr" class="pill">{{ st.pr }}</span>
+                                <span v-if="st.file" class="fileloc" style="margin:0;">{{ st.file }}</span>
+                            </div>
+                            <div v-if="st.code" class="code-card">
+                                <div class="code-scroll">
+                                    <div v-for="(ln, i) in parseCode(st.code)" :key="i" class="code-line">
+                                        <span class="code-num">{{ ln.num != null ? ln.num : '' }}</span><span class="code-body" v-html="hl(st, i)"></span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </template>
+
                     <template v-else-if="slide.type === 'step'">
                         <div class="step-head">
                             <span class="step-num">{{ slide.stepNum }}</span>
@@ -188,6 +243,7 @@ button.viz-node:hover { transform: translateY(-3px); background: #151a26; }
                                 <div class="kicker" style="margin-bottom:8px;">Step {{ slide.stepNum }}</div>
                                 <div class="headline" style="font-size: clamp(20px,2.4vw,30px);">{{ slide.title }}</div>
                                 <div v-if="slide.file" class="fileloc">{{ slide.file }}</div>
+                                <a v-if="slide.pr" :href="prUrl(slide.pr) || null" target="_blank" class="pill" style="margin-top:8px;">{{ slide.pr }}<template v-if="prUrl(slide.pr)"> &nearr;</template></a>
                             </div>
                         </div>
                         <div class="lead" style="margin-top:18px;">{{ slide.narrative }}</div>
@@ -243,7 +299,7 @@ button.viz-node:hover { transform: translateY(-3px); background: #151a26; }
                         </div>
                         <div v-else class="sub" style="color:#7ee2a8;">No errant, destructive, or dead code flagged.</div>
                         <div class="mt-8 flex gap-3">
-                            <a :href="'/tickets/' + ticketKey" class="pill">Open ticket detail &rarr;</a>
+                            <a :href="backHref" class="pill">{{ reviewMode ? 'Back to reviews' : 'Open ticket detail' }} &rarr;</a>
                         </div>
                     </template>
 
@@ -326,6 +382,7 @@ button.viz-node:hover { transform: translateY(-3px); background: #151a26; }
                                 <text x="70" y="92" text-anchor="middle" class="viz-donut-sub">STEPS OK</text>
                             </svg>
                             <div class="viz-tiles">
+                                <div v-if="scorecard.reqTotal" class="viz-tile"><div class="viz-tile-num" :style="{ color: scorecard.reqMet === scorecard.reqTotal ? '#7ee2a8' : '#fcd34d' }">{{ scorecard.reqMet }}/{{ scorecard.reqTotal }}</div><div class="viz-tile-label">Requirements met</div></div>
                                 <div class="viz-tile"><div class="viz-tile-num" style="color:#93c5fd;">{{ scorecard.total }}</div><div class="viz-tile-label">Steps</div></div>
                                 <div class="viz-tile"><div class="viz-tile-num" style="color:#c4b5fd;">{{ scorecard.files }}</div><div class="viz-tile-label">Files</div></div>
                                 <div class="viz-tile"><div class="viz-tile-num" style="color:#7ee2a8;">+{{ scorecard.adds }}</div><div class="viz-tile-label">Lines added</div></div>
@@ -345,7 +402,7 @@ button.viz-node:hover { transform: translateY(-3px); background: #151a26; }
 
     <div class="dots" v-if="ready">
         <button v-for="(s, i) in slides" :key="i" class="dot"
-                :class="{ active: i === current, concern: s.type === 'step' && s.check === 'concern' }"
+                :class="{ active: i === current, concern: (s.type === 'step' && s.check === 'concern') || (s.type === 'requirement' && s.status !== 'met') }"
                 :title="dotTitle(s)" @click="jump(i)"></button>
     </div>
 
@@ -375,6 +432,9 @@ createApp({
     setup() {
         const parts = window.location.pathname.split('/');
         const ticketKey = parts[2];
+        const reviewMode = parts[1] === 'review-tickets';
+        const apiBase = reviewMode ? `/api/review-tickets/${ticketKey}` : `/api/tickets/${ticketKey}`;
+        const backHref = reviewMode ? '/reviews' : '/tickets/' + ticketKey;
 
         const presentation = ref(null);
         const info = ref({});
@@ -383,7 +443,46 @@ createApp({
         const statusMsg = ref('Building presentation…');
         const current = ref(0);
         let pollTimer = null;
+        let rebuilding = false;
         let keyHandler = null;
+
+        const requirements = computed(() => {
+            const p = presentation.value || {};
+            return (Array.isArray(p.requirements) ? p.requirements : [])
+                .filter(r => r && r.requirement)
+                .map((r, i) => ({ ...r, num: i + 1, prs: Array.isArray(r.prs) ? r.prs : [], steps: Array.isArray(r.steps) ? r.steps : [] }));
+        });
+
+        const reqSummary = computed(() => {
+            const rs = requirements.value;
+            return { total: rs.length, met: rs.filter(r => r.status === 'met').length,
+                     partial: rs.filter(r => r.status === 'partial').length,
+                     notMet: rs.filter(r => r.status !== 'met' && r.status !== 'partial').length };
+        });
+
+        const REQ_STATUS = {
+            met:     { name: 'Met',      icon: '✓', color: '#34d399', cls: 'check-ok' },
+            partial: { name: 'Partial',  icon: '◐', color: '#f59e0b', cls: 'check-concern' },
+            not_met: { name: 'Not met',  icon: '✗', color: '#f87171', cls: 'check-missing' },
+        };
+        function reqStyle(status) { return REQ_STATUS[status] || REQ_STATUS.not_met; }
+
+        function prUrl(label) {
+            const pr = (info.value.prs || []).find(x => `${x.repo}#${x.id}` === label);
+            return pr ? pr.url || '' : '';
+        }
+
+        function reqSteps(r) {
+            const steps = (presentation.value && presentation.value.steps) || [];
+            return [...new Set(r.steps.map(Number))]
+                .filter(n => Number.isInteger(n) && n >= 1 && n <= steps.length)
+                .map(n => ({ stepNum: n, ...steps[n - 1] }));
+        }
+
+        function jumpToReq(n) {
+            const i = slides.value.findIndex(s => s.type === 'requirement' && s.num === n);
+            if (i >= 0) current.value = i;
+        }
 
         const slides = computed(() => {
             if (!presentation.value) return [];
@@ -392,6 +491,11 @@ createApp({
                            prs: info.value.prs, pr_title: info.value.pr_title, pr_description: info.value.pr_description,
                            summary: info.value.summary }];
             if (p.problem || p.approach) out.push({ type: 'problem', problem: p.problem || '', approach: p.approach || '' });
+            const reqs = requirements.value;
+            if (reqs.length) {
+                out.push({ type: 'requirements', requirements: reqs });
+                reqs.forEach(r => out.push({ type: 'requirement', ...r }));
+            }
             (p.steps || []).forEach((s, i) => out.push({ type: 'step', stepNum: i + 1, ...s }));
             if (diffText.value) out.push({ type: 'fulldiff' });
             if (p.verdict) out.push({ type: 'verdict', ...p.verdict });
@@ -514,7 +618,7 @@ createApp({
                 if (l.type === 'add') adds++; else if (l.type === 'del') dels++;
             }
             const verdict = p.verdict || {};
-            return { total: steps.length, ok, concern, circ,
+            return { reqTotal: reqSummary.value.total, reqMet: reqSummary.value.met, total: steps.length, ok, concern, circ,
                      okArc: steps.length ? circ * ok / steps.length : 0,
                      concernArc: steps.length ? circ * concern / steps.length : 0,
                      files: parsedDiff.value.length, adds, dels,
@@ -548,6 +652,8 @@ createApp({
         function dotTitle(s) {
             if (s.type === 'ticket') return 'Ticket';
             if (s.type === 'problem') return 'Problem';
+            if (s.type === 'requirements') return 'Requirements';
+            if (s.type === 'requirement') return `Requirement ${s.num}: ${s.requirement || ''}`;
             if (s.type === 'verdict') return 'Verdict';
             if (s.type === 'flowmap') return 'How the change flows';
             if (s.type === 'beforeafter') return 'Before → After';
@@ -566,16 +672,17 @@ createApp({
 
         async function tick() {
             try {
-                const resp = await fetch(`/api/tickets/${ticketKey}/presentation`);
+                const resp = await fetch(`${apiBase}/presentation`);
                 const data = await resp.json();
                 if (data.status === 'ok' && data.presentation) {
                     presentation.value = data.presentation;
                     ready.value = true;
-                    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+                    rebuilding = !!data.building;
+                    if (!rebuilding && pollTimer) { clearInterval(pollTimer); pollTimer = null; }
                     return;
                 }
                 if (data.status === 'missing' || data.status === 'not_found') {
-                    await fetch(`/api/tickets/${ticketKey}/presentation/preprocess`, { method: 'POST' });
+                    await fetch(`${apiBase}/presentation/preprocess`, { method: 'POST' });
                     statusMsg.value = 'Analyzing the change…';
                 } else if (data.status === 'building') {
                     statusMsg.value = 'Analyzing the change…';
@@ -586,8 +693,8 @@ createApp({
         onMounted(async () => {
             try {
                 const [r, dr] = await Promise.all([
-                    fetch(`/api/tickets/${ticketKey}/detail`),
-                    fetch(`/api/tickets/${ticketKey}/diff`),
+                    fetch(`${apiBase}/detail`),
+                    fetch(`${apiBase}/diff`),
                 ]);
                 const detail = await r.json();
                 const st = detail.state || {};
@@ -602,7 +709,7 @@ createApp({
                 diffText.value = repos.map(x => x.diff).filter(Boolean).join('\n');
             } catch (e) {}
             await tick();
-            if (!ready.value) pollTimer = setInterval(tick, 3000);
+            if (!ready.value || rebuilding) pollTimer = setInterval(tick, 3000);
             keyHandler = (e) => {
                 if (e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') { e.preventDefault(); go(1); }
                 else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { e.preventDefault(); go(-1); }
@@ -617,9 +724,10 @@ createApp({
             if (keyHandler) document.removeEventListener('keydown', keyHandler);
         });
 
-        return { ticketKey, ready, statusMsg, current, slides, slide, progressPct,
+        return { ticketKey, reviewMode, backHref, ready, statusMsg, current, slides, slide, progressPct,
                  parseCode, hl, dotTitle, go, jump, parsedDiff, diffStats, escHtml,
-                 kindStyle, changeMap, scorecard, jumpToStep };
+                 kindStyle, changeMap, scorecard, jumpToStep,
+                 reqSummary, reqStyle, reqSteps, jumpToReq, prUrl };
     },
 }).mount('#app');
 </script>

@@ -1284,7 +1284,7 @@ REPLY_READY_POLL_SECONDS = 1.5
 REPLY_SETTLE_SECONDS = 4
 
 
-def reply(item_id: int, text: str) -> dict:
+def reply(item_id: int, text: str, question: str | None = None) -> dict:
     """Send the operator's answer, restarting the agent first when it is gone.
 
     A task can hold a question while its agent process is gone: the idle sweep
@@ -1295,7 +1295,7 @@ def reply(item_id: int, text: str) -> dict:
     has settled, as the kickoff does before its first prompt. Only a run in
     the task's own pane is resumed, because resume_session relaunches that
     pane; a run another launcher opened keeps the refusal."""
-    result = work_store.reply(item_id, text)
+    result = work_store.reply(item_id, text, question)
     if not result.get("agent_down"):
         return result
     run = db.query_one("SELECT tmux_key, provider FROM work_runs WHERE work_item_id = ? "
@@ -1310,7 +1310,7 @@ def reply(item_id: int, text: str) -> dict:
     for _ in range(REPLY_READY_POLLS):
         if terminal.session_healthy(key, agent=agent).get("agent_running"):
             time.sleep(REPLY_SETTLE_SECONDS)
-            return work_store.reply(item_id, text)
+            return work_store.reply(item_id, text, question)
         time.sleep(REPLY_READY_POLL_SECONDS)
     return {"error": f"the agent session was restarted but {agent} did not come up; "
                      "open the terminal to see why"}
