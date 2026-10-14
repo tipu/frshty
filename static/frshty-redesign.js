@@ -426,7 +426,7 @@
       async answer(it, text) {
         text = (text || "").trim();
         if (!text) return false;
-        const d = await this.post(it, "/reply", { text });
+        const d = await this.post(it, "/reply", { text, question: it.pending_question || "" });
         if (!d) return false;
         this.replyText = "";
         await this.after(it, false);

@@ -79,6 +79,10 @@
         return this.questions.map((q, i) => {
           const a = (picks[i] || []).concat((own || {})[i] ? [own[i].trim()] : []).filter(Boolean).join(", ");
           if (!a) return "";
+          if (q.keystroke) {
+            const o = (q.options || []).find(o => o.label === (picks[i] || [])[0]);
+            if (o) return o.key;
+          }
           const tag = (q.header || q.question || "answer").trim().slice(0, 80);
           return `${tag}: ${a}`;
         }).filter(Boolean).join(" | ");
