@@ -113,7 +113,7 @@ class TestLaunch:
             row = real_ensure(item_id, spec, objective)
             if row and not state["swept"]:
                 state["swept"] = True
-                _git(spec["repo_path"], "worktree", "remove", row["path"])
+                _git(spec["repo_path"], "worktree", "remove", "--force", "--force", row["path"])
                 db.execute("UPDATE work_worktrees SET removed_at = ? WHERE id = ?",
                            ("2026-01-01T00:00:00+00:00", row["id"]))
             return row
@@ -141,7 +141,7 @@ class TestLaunch:
         real_adopt = work_worktree.adopt_path
 
         def adopt_after_sweep(child_id, path):
-            _git(project["repo"], "worktree", "remove", path)
+            _git(project["repo"], "worktree", "remove", "--force", "--force", path)
             db.execute("UPDATE work_worktrees SET removed_at = ? WHERE path = ?",
                        ("2026-01-01T00:00:00+00:00", path))
             return real_adopt(child_id, path)
@@ -211,7 +211,7 @@ class TestResume:
                    return_value={"alive": False, "agent_running": False}):
             work_launch.resume_session(item_id)
             row = work_worktree.for_item(item_id)
-            _git(project["repo"], "worktree", "remove", row["path"])
+            _git(project["repo"], "worktree", "remove", "--force", "--force", row["path"])
             db.execute("UPDATE work_worktrees SET removed_at = NULL WHERE id = ?",
                        (row["id"],))
             with patch("services.work_launch.terminal.launch_agent") as again:
@@ -282,7 +282,7 @@ class TestResume:
             def plan_then_sweep(*args, **kwargs):
                 resolved = real_plan(*args, **kwargs)
                 if os.path.isdir(first["path"]):
-                    _git(project["repo"], "worktree", "remove", first["path"])
+                    _git(project["repo"], "worktree", "remove", "--force", "--force", first["path"])
                     db.execute("UPDATE work_worktrees SET removed_at = ? WHERE id = ?",
                                ("2026-01-01T00:00:00+00:00", first["id"]))
                 return resolved

@@ -410,7 +410,7 @@ def ensure(item_id: int, spec: dict, objective: str = "") -> dict:
             if made.returncode == 0:
                 break
         path.parent.mkdir(parents=True, exist_ok=True)
-        added = _git(repo_path, ["worktree", "add", str(path), branch])
+        added = _git(repo_path, [*git_util.WORKTREE_ADD, str(path), branch])
         if added.returncode != 0:
             log.emit("work_worktree_failed",
                      f"work item {item_id}: worktree add failed for "
@@ -633,13 +633,40 @@ def _on_origin(row: dict) -> bool:
     return held.returncode == 0
 
 
-def _report_fault(row: dict, stderr: str) -> None:
+def _link_fault(path: str) -> str:
+    """Why the worktree's .git does not lead back to it, "" when it does.
+
+    A worktree's .git file names an admin directory, and that directory's
+    gitdir file names the worktree's .git. When Git hands a free admin name to
+    another worktree, the .git file still resolves and `git status` reads the
+    other worktree's index and HEAD, so status alone cannot see the fault."""
+    dotgit = os.path.join(path, ".git")
+    if os.path.isdir(dotgit):
+        return ""
+    try:
+        content = Path(dotgit).read_text(errors="surrogateescape").strip()
+    except OSError as exc:
+        return f"{dotgit} is unreadable: {exc}"
+    if not content.startswith("gitdir:"):
+        return f"{dotgit} does not name a gitdir"
+    admin = os.path.join(path, content[len("gitdir:"):].strip())
+    try:
+        backlink = Path(admin, "gitdir").read_text(errors="surrogateescape").strip()
+    except OSError as exc:
+        return f"admin directory {admin!r} has no gitdir file: {exc}"
+    target = os.path.realpath(os.path.join(admin, backlink))
+    if target != os.path.realpath(dotgit):
+        return f"admin directory {admin!r} belongs to {target!r}"
+    return ""
+
+
+def _report_fault(row: dict, stderr: str, what: str = "git status fails") -> None:
     """Emit one event per broken worktree, not one per sweep."""
     if row["path"] in _reported_faults:
         return
     _reported_faults.add(row["path"])
     log.emit("work_worktree_fault",
-             f"work item {row['work_item_id']}: git status fails in "
+             f"work item {row['work_item_id']}: {what} in "
              f"{row['path']}: {stderr.strip()[:200]}",
              meta={"path": row["path"], "repo": row["repo_name"]})
 
@@ -673,6 +700,10 @@ def _keep_reason(row: dict, now: datetime, branch_fetched: bool = False) -> str:
             return f"work item {item_id} is not finished long enough"
         if terminal.session_healthy(f"work-{item_id}").get("alive"):
             return f"work item {item_id} still has a live session"
+    link_fault = _link_fault(row["path"])
+    if link_fault:
+        _report_fault(row, link_fault, "the git link is broken")
+        return f"the git link is broken: {link_fault}"
     status = _git(row["path"], ["-c", "status.showUntrackedFiles=all",
                                 "-c", "core.quotePath=true", "status",
                                 "--porcelain", "--ignored"], timeout=60)
@@ -704,8 +735,40 @@ def _mark_removed(row: dict) -> None:
                   (_now(), row["id"]))
 
 
+def _has_submodules(path: str) -> bool:
+    """Whether the worktree holds an initialized submodule, the case in which
+    a plain `git worktree remove` refuses. True when git cannot tell."""
+    git_dir = _git(path, ["rev-parse", "--absolute-git-dir"], timeout=30)
+    staged = _git(path, ["ls-files", "--stage", "-z"], timeout=60)
+    if git_dir.returncode != 0 or staged.returncode != 0:
+        return True
+    if os.path.lexists(os.path.join(git_dir.stdout.strip(), "modules")):
+        return True
+    return any(entry.startswith("160000 ")
+               and os.path.lexists(os.path.join(path, entry.split("\t", 1)[1], ".git"))
+               for entry in staged.stdout.split("\0") if "\t" in entry)
+
+
 def _remove(row: dict) -> bool:
-    removed = _git(row["repo_path"], ["worktree", "remove", row["path"]])
+    """Remove the worktree with its lock still on.
+
+    Unlocking first would leave a gap in which a prune from another container
+    deletes the registration. A forced removal skips the check that the plain
+    one makes, so the same checks run here first: the tree is clean and holds
+    no initialized submodule, whose repository a removal would delete."""
+    status = _git(row["path"], ["-c", "status.showUntrackedFiles=all", "status",
+                                "--porcelain", "--ignore-submodules=none"], timeout=60)
+    if status.returncode != 0 or status.stdout.strip():
+        log.emit("work_worktree_remove_failed",
+                 f"work item {row['work_item_id']}: {row['path']} is not clean: "
+                 f"{(status.stderr or status.stdout or '').strip()[:200]}")
+        return False
+    if _has_submodules(row["path"]):
+        log.emit("work_worktree_remove_failed",
+                 f"work item {row['work_item_id']}: {row['path']} holds an "
+                 "initialized submodule")
+        return False
+    removed = _git(row["repo_path"], [*git_util.WORKTREE_REMOVE, row["path"]])
     if removed.returncode != 0:
         log.emit("work_worktree_remove_failed",
                  f"work item {row['work_item_id']}: {(removed.stderr or '').strip()[:200]}")

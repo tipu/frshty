@@ -5,6 +5,7 @@ mocked away: the branch holders, the ignored files, the detached HEAD and the
 prunable registration are all real git states.
 """
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -180,7 +181,7 @@ class TestPlan:
         monkeypatch.setattr(work_worktree.runtime, "instances", lambda: None)
         item_id = _item("gone")
         row = work_worktree.ensure(item_id, _spec(repo), "gone")
-        _git(repo, "worktree", "remove", row["path"])
+        _git(repo, "worktree", "remove", "--force", "--force", row["path"])
         got = work_worktree.plan("gone", "", str(tmp_path), [], [], item_id=item_id)
         assert got["rule"] != "R1"
 
@@ -377,6 +378,39 @@ class TestEnsure:
         assert git_util.is_worktree(row["path"])
         head = _git(row["path"], "rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
         assert head == row["branch"]
+
+    def test_a_created_worktree_survives_a_plain_prune(self, tmp_path, wt_root, monkeypatch):
+        repo = make_repo(tmp_path)
+        monkeypatch.setattr(work_worktree.runtime, "instances", lambda: None)
+        item_id = _item("lock the worktree")
+        row = work_worktree.ensure(item_id, _spec(repo), "lock the worktree")
+        listed = _git(repo, "worktree", "list", "--porcelain").stdout
+        assert f"locked {git_util.WORKTREE_LOCK_REASON}" in listed
+        moved = tmp_path / "moved-away"
+        Path(row["path"]).rename(moved)
+        _git(repo, "worktree", "prune")
+        assert f"worktree {row['path']}" in _git(repo, "worktree", "list", "--porcelain").stdout
+        moved.rename(row["path"])
+        assert _git(row["path"], "status", "--porcelain").returncode == 0
+
+    def test_remove_keeps_a_dirty_locked_worktree(self, tmp_path, wt_root, monkeypatch):
+        repo = make_repo(tmp_path)
+        monkeypatch.setattr(work_worktree.runtime, "instances", lambda: None)
+        item_id = _item("dirty worktree")
+        row = work_worktree.ensure(item_id, _spec(repo), "dirty worktree")
+        (Path(row["path"]) / "new.txt").write_text("work\n")
+        assert work_worktree._remove(row) is False
+        assert (Path(row["path"]) / "new.txt").is_file()
+        listed = _git(repo, "worktree", "list", "--porcelain").stdout
+        assert f"locked {git_util.WORKTREE_LOCK_REASON}" in listed
+        (Path(row["path"]) / "new.txt").unlink()
+        git_dir = _git(row["path"], "rev-parse", "--absolute-git-dir").stdout.strip()
+        (Path(git_dir) / "modules" / "sub").mkdir(parents=True)
+        assert work_worktree._remove(row) is False
+        assert Path(row["path"]).is_dir()
+        shutil.rmtree(Path(git_dir) / "modules")
+        assert work_worktree._remove(row) is True
+        assert not Path(row["path"]).exists()
 
     def test_is_idempotent(self, tmp_path, wt_root, monkeypatch):
         repo = make_repo(tmp_path)
@@ -780,6 +814,37 @@ class TestGc:
         assert row["path"] in faults[0][1]
         assert os.path.isdir(row["path"])
 
+    def test_reports_a_worktree_whose_admin_directory_another_worktree_owns(
+            self, tmp_path, wt_root, monkeypatch):
+        """Git hands a free admin name to the next worktree. A .git file that
+        still names it reads that worktree's index, so status passes."""
+        repo, item_id, row = self._made(tmp_path, monkeypatch)
+        own_admin = Path(_git(row["path"], "rev-parse", "--absolute-git-dir").stdout.strip())
+        other = tmp_path / "other"
+        _git(repo, "worktree", "add", "-b", "other-branch", str(other))
+        other_admin = (other / ".git").read_text().strip()[len("gitdir:"):].strip()
+        shutil.rmtree(own_admin)
+        (Path(row["path"]) / ".git").write_text(f"gitdir: {other_admin}\n")
+        assert _git(row["path"], "status", "--porcelain", check=False).returncode == 0
+        emitted = []
+        monkeypatch.setattr(work_worktree.log, "emit",
+                            lambda event, summary, **kw: emitted.append((event, summary)))
+        monkeypatch.setattr(work_worktree, "_reported_faults", set())
+        _finish(item_id)
+        assert work_worktree.gc() == []
+        assert work_worktree.gc() == []
+        faults = [e for e in emitted if e[0] == "work_worktree_fault"]
+        assert len(faults) == 1
+        assert row["path"] in faults[0][1]
+        assert str(other) in faults[0][1]
+        assert os.path.isdir(row["path"])
+        assert _git(other, "status", "--porcelain").returncode == 0
+
+    def test_link_fault_is_empty_for_a_linked_worktree(self, tmp_path, wt_root, monkeypatch):
+        repo, _, row = self._made(tmp_path, monkeypatch)
+        assert work_worktree._link_fault(row["path"]) == ""
+        assert work_worktree._link_fault(str(repo)) == ""
+
     def test_keeps_a_worktree_whose_task_still_has_a_live_session(self, tmp_path, wt_root,
                                                                   monkeypatch):
         repo, item_id, row = self._made(tmp_path, monkeypatch)
@@ -914,7 +979,7 @@ class TestGc:
         row_two = work_worktree.ensure(
             item_id, _spec(second, "second"), "two repositories")
         assert work_worktree.last_row(item_id)["path"] == row_two["path"]
-        _git(first, "worktree", "remove", row_one["path"])
+        _git(first, "worktree", "remove", "--force", "--force", row_one["path"])
         back = work_worktree.rebuild(item_id, "two repositories", row_one["path"])
         assert back["repo_path"] == str(first)
         assert back["path"] == row_one["path"]
@@ -924,7 +989,7 @@ class TestGc:
                                                                      wt_root,
                                                                      monkeypatch):
         repo, item_id, row = self._made(tmp_path, monkeypatch)
-        _git(repo, "worktree", "remove", row["path"])
+        _git(repo, "worktree", "remove", "--force", "--force", row["path"])
         back = work_worktree.rebuild(item_id, "sweep me", str(tmp_path / "unknown"))
         assert back["repo_path"] == str(repo)
         assert os.path.isdir(back["path"])
