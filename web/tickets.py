@@ -8,6 +8,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse, JSONResponse
+from starlette.concurrency import run_in_threadpool
 from starlette.websockets import WebSocket
 
 import core.config as cfg
@@ -979,7 +980,7 @@ async def ws_terminal(websocket: WebSocket, key: str):
     try:
         suffix = key[len("work-"):] if key.startswith("work-") else ""
         if suffix.isdigit():
-            work_launch.resume_session(int(suffix))
+            await run_in_threadpool(work_launch.resume_session, int(suffix))
         await terminal.terminal_handler(websocket, key, _config)
     finally:
         multi_reset(tokens)
@@ -1194,6 +1195,10 @@ async def api_merge_ticket(key: str, request: Request):
     except (json.JSONDecodeError, ValueError):
         data = {}
     force = (data or {}).get("force") is True
+    return await run_in_threadpool(_merge_ticket_sync, key, force)
+
+
+def _merge_ticket_sync(key: str, force: bool):
     ts = state.load_ticket(key)
     if not ts:
         return JSONResponse({"error": "not found"}, status_code=404)
@@ -1201,8 +1206,7 @@ async def api_merge_ticket(key: str, request: Request):
         return JSONResponse({"error": f"ticket is {ts.get('status')}, not in_review"}, status_code=400)
     if not ts.get("prs"):
         return JSONResponse({"error": "no PRs to merge"}, status_code=400)
-    hold, owed_comments = await asyncio.to_thread(
-        _tickets_mod.reconcile_comments_now, _config, ts)
+    hold, owed_comments = _tickets_mod.reconcile_comments_now(_config, ts)
     if hold and not force:
         return JSONResponse(
             {"error": f"merge held: {hold}",

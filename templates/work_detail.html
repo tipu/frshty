@@ -817,7 +817,7 @@ const app = frshtyApp({
       try {
         const r = await fetch(this.api(`/api/work/items/${this.item.id}/reply`), {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text }),
+          body: JSON.stringify({ text, question: this.item.pending_question || "" }),
         });
         if (!r.ok) {
           const d = await r.json().catch(() => ({}));
