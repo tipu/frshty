@@ -1,5 +1,6 @@
 import json
 import time
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -138,3 +139,59 @@ class TestResolveTicketGoal:
         p1, p2, p3 = self._patches(pr_info={"title": "the pr title", "description": "d"})
         with p1, p2, p3:
             assert presentation.resolve_ticket_goal({}, "jwd/dev-9-x", "r", 1) == "the pr title\nd"
+
+
+class TestTicketPresentation:
+    def test_meta_file_follows_cache_name(self, tmp_path):
+        assert presentation.meta_path(tmp_path / "presentation_cache.json").name == "presentation_meta.json"
+        assert presentation.meta_path(
+            tmp_path / "ticket_presentation_cache.json").name == "ticket_presentation_meta.json"
+
+    def test_ticket_cache_file_is_separate_from_review_deck(self, tmp_path):
+        config = {"workspace": {"root": tmp_path, "tickets_dir": "tickets"}}
+        path = presentation.ticket_cache_file(config, {"slug": "dev-9"})
+        assert path == tmp_path / "tickets" / "dev-9" / "ticket_presentation_cache.json"
+
+    def test_ticket_diffs_label_each_pr(self):
+        platform = MagicMock()
+        platform.get_pr_diff.side_effect = lambda repo, pr_id: f"diff {repo} {pr_id}"
+        ts = {"prs": [{"repo": "api", "id": 4}, {"repo": "web", "id": 7}]}
+        with patch("features.presentation.make_platform", return_value=platform):
+            diffs = presentation._ticket_diffs({}, ts)
+        assert diffs == [("api", "api#4", "diff api 4"), ("web", "web#7", "diff web 7")]
+
+    def test_prompt_lists_criteria_and_labels_every_pr(self):
+        seen = {}
+
+        def fake_run(prompt, **kwargs):
+            seen["prompt"] = prompt
+            return '{"requirements": [{"id": "c1", "requirement": "x", "status": "met"}]}'
+
+        criteria = [{"id": "c1", "criterion": "Export the report as CSV"},
+                    {"id": "c2", "criterion": "Email the report nightly"}]
+        diffs = [("api", "api#4", "+export"), ("web", "web#7", "+button"), ("cli", "cli#1", "")]
+        with patch("features.presentation.run_balanced", side_effect=fake_run):
+            out = presentation.build_ticket_presentation("Reports", criteria, diffs, None)
+        assert out["requirements"][0]["status"] == "met"
+        prompt = seen["prompt"]
+        assert "- c1: Export the report as CSV" in prompt
+        assert "- c2: Email the report nightly" in prompt
+        assert "=== PR api#4 START ===\n+export" in prompt
+        assert "=== PR web#7 START ===\n+button" in prompt
+        assert "cli#1" not in prompt
+
+    def test_prompt_extracts_requirements_without_criteria(self):
+        seen = {}
+
+        def fake_run(prompt, **kwargs):
+            seen["prompt"] = prompt
+            return "{}"
+
+        with patch("features.presentation.run_balanced", side_effect=fake_run):
+            presentation.build_ticket_presentation("Reports", [], [("api", "api#4", "+x")], None)
+        assert "Extract the requirements from the ticket text" in seen["prompt"]
+
+    def test_no_diffs_skips_the_model(self):
+        with patch("features.presentation.run_balanced") as run:
+            assert presentation.build_ticket_presentation("g", [], [("api", "api#4", "")], None) == {}
+        run.assert_not_called()

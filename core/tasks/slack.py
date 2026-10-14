@@ -1,4 +1,4 @@
-from core.tasks.registry import TaskContext, TaskResult, task
+from core.tasks.registry import TaskContext, TaskResult, read_result, task
 from core.tasks.preconditions import feature_enabled
 
 CONVERSATION_SCAN_TIMEOUT = 600
@@ -16,7 +16,7 @@ def slack_scan(ctx: TaskContext) -> TaskResult:
 def slack_conversation_scan(ctx: TaskContext) -> TaskResult:
     """Index this instance's Slack conversations and propose the work they ask for."""
     from features import slack_conversations
-    return TaskResult("ok", artifacts=slack_conversations.check(
+    return read_result(slack_conversations.check(
         ctx.config, instance_key=ctx.instance_key, now=ctx.now))
 
 
