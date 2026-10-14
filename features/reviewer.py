@@ -528,6 +528,7 @@ def review_pr(config: dict, platform, pr: dict, ticket_context: str = "",
     primary["issues"] = issues
     primary["verdict"] = "changes_requested" if blocking else "approved"
     _write_review_artifacts(config, pr, primary, diff_text, provider="claude")
+    explain_review(review_dir, worktree)
     return primary
 
 
@@ -1062,6 +1063,105 @@ def _simplify_all_issues(issues: list[dict]) -> list[dict]:
     return issues
 
 
+EXPLAIN_PROMPT = (
+    "A code reviewer left the comment below on a pull request. Answer two questions for the "
+    "person who has to act on it.\n\n"
+    "1. Is this a valid concern? Do not take the comment's word for it. Open the code, read the "
+    "functions around the flagged line, grep for callers, and check the claim against what the "
+    "code really does. Say \"yes\", \"no\" or \"partly\".\n"
+    "2. Explain the problem to me like I know nothing about code. Use short sentences. Put one idea "
+    "in each sentence. Walk through it step by step in the order things happen. Give one concrete "
+    "example: a real input and what goes wrong with it. Keep file and function names. When the "
+    "concern is not valid, explain why the code is fine instead.\n\n"
+    "Do not modify any file. Do not commit. Do not push.\n\n"
+    "Return ONLY a JSON object (no markdown fences):\n"
+    '{"valid":"yes"|"no"|"partly","explanation":"the plain explanation, several short sentences"}\n\n'
+)
+
+EXPLAIN_TIMEOUT = 600
+_EXPLAIN_LOCK = threading.Lock()
+
+
+def explain_key(comment: dict) -> tuple:
+    return (comment.get("path") or "", str(comment.get("line") or ""), comment.get("body") or "")
+
+
+def explain_comment(comment: dict, branch_dir: Path, worktree: Path | None) -> dict | None:
+    """Ask Claude, outside the sandbox, whether one review comment holds up and
+    what it means in plain words. None when the run gives no usable answer."""
+    where = (f"The pull request branch is checked out at {worktree}." if worktree
+             else "There is no checkout of the branch, so judge it from the diff.")
+    prompt = (
+        EXPLAIN_PROMPT
+        + f"{where}\nThe pull request diff is at {branch_dir / 'diff.txt'}.\n\n"
+        + f"COMMENT (severity: {comment.get('severity', 'suggestion')}, "
+        + f"file: {comment.get('path') or 'general'}, line: {comment.get('line') or 'none'}):\n"
+        + f"{comment.get('body', '')}\n"
+    )
+    output = run_balanced(prompt, worktree=worktree or branch_dir, timeout=EXPLAIN_TIMEOUT,
+                          function_name="review_explain")
+    data = extract_json(output) if output else None
+    if not isinstance(data, dict) or not str(data.get("explanation") or "").strip():
+        log.emit("review_explain_failed",
+                 f"No explanation for {comment.get('path') or 'general'}:{comment.get('line') or ''} "
+                 f"in {branch_dir.name}",
+                 meta={"branch_dir": str(branch_dir), "path": comment.get("path"),
+                       "line": comment.get("line"), "output": (output or "")[:500]})
+        return None
+    valid = str(data.get("valid") or "").strip().lower()
+    return {"valid": valid if valid in ("yes", "no", "partly") else "partly",
+            "text": str(data["explanation"]).strip()}
+
+
+def explain_review(branch_dir: Path, worktree: Path | None) -> int:
+    """Fill the explainer of every comment in every provider's queue of one review.
+
+    The same finding often sits in several provider queues, so each distinct
+    comment is asked once and its answer goes to every copy. A comment that
+    already has an explainer is never asked again. The queues are read again
+    just before the write, so an edit or a delete made on the page while Claude
+    ran is kept. Returns the number of comments that got an explainer."""
+    files = sorted(branch_dir.glob("queued_comments*.json"))
+    known: dict[tuple, dict] = {}
+    todo: dict[tuple, dict] = {}
+    for f in files:
+        try:
+            comments = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        for c in comments if isinstance(comments, list) else []:
+            if not isinstance(c, dict) or not c.get("body"):
+                continue
+            if c.get("explainer"):
+                known.setdefault(explain_key(c), c["explainer"])
+            else:
+                todo.setdefault(explain_key(c), c)
+    todo = {k: c for k, c in todo.items() if k not in known}
+    if not todo and not known:
+        return 0
+    if todo:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            answers = list(pool.map(lambda c: explain_comment(c, branch_dir, worktree),
+                                    todo.values()))
+        known.update({k: a for k, a in zip(todo, answers) if a})
+    filled = 0
+    with _EXPLAIN_LOCK:
+        for f in files:
+            try:
+                comments = json.loads(f.read_text())
+            except (OSError, ValueError):
+                continue
+            changed = False
+            for c in comments if isinstance(comments, list) else []:
+                if isinstance(c, dict) and not c.get("explainer") and explain_key(c) in known:
+                    c["explainer"] = known[explain_key(c)]
+                    changed = True
+                    filled += 1
+            if changed:
+                f.write_text(json.dumps(comments, indent=2))
+    return filled
+
+
 def _ensure_review_worktree(config, pr) -> Path | None:
     repos = get_repos(config)
     matching = [r for r in repos if r["name"] == pr["repo"]]
@@ -1482,6 +1582,8 @@ def review_ticket(config: dict, ticket_key: str, prs: list[dict],
             "source_branch": pr.get("branch") or primary.get("source_branch", ""),
         }
         _write_review_artifacts(config, pr, results[key], diffs[key], provider="claude")
+    for pr in live:
+        explain_review(_review_dir(config, pr), worktrees[f"{pr['repo']}/{pr['id']}"])
     if all(v is None for v in results.values()):
         return none_result
     return results

@@ -201,6 +201,24 @@ def api_rerun_review(repo: str, pr_id: int):
     return {"status": "started", "repo": repo, "pr_id": pr_id, "ticket": ticket_key, "pr_count": len(prs)}
 
 
+def _explain_in_background(cfg: dict, repo: str, pr_id: int, provider: str) -> None:
+    found = review_store.find_review(cfg["_state_dir"], repo, pr_id, provider=provider)
+    if not found:
+        return
+
+    def explain():
+        state.use(cfg["_state_dir"])
+        log.use(cfg["_state_dir"], cfg["job"]["key"])
+        try:
+            reviewer.explain_review(found[0], found[2])
+        except Exception as e:
+            log.emit("review_explain_failed",
+                     f"Explaining {repo}#{pr_id} crashed: {type(e).__name__}: {e}",
+                     meta={"repo": repo, "pr_id": pr_id, "provider": provider})
+
+    threading.Thread(target=explain, daemon=True).start()
+
+
 @router.post("/api/reviews/{repo}/{pr_id}/task-review")
 def api_task_review(repo: str, pr_id: int, body: dict, token: str = ""):
     """Take the findings of the /tasks review this PR's review kicked off.
@@ -221,6 +239,7 @@ def api_task_review(repo: str, pr_id: int, body: dict, token: str = ""):
                               f"?provider={reviewer.TASK_REVIEW_PROVIDER}"},
              meta={"repo": repo, "pr_id": pr_id, "provider": reviewer.TASK_REVIEW_PROVIDER,
                    "verdict": merged["verdict"], "issue_count": len(merged["issues"])})
+    _explain_in_background(active_config(), repo, pr_id, reviewer.TASK_REVIEW_PROVIDER)
     return {"status": "stored", "verdict": merged["verdict"],
             "issues": len(merged["issues"])}
 
