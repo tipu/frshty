@@ -1,6 +1,7 @@
 import asyncio
 import calendar
 import re
+import threading
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -40,6 +41,10 @@ def get_client(config: dict) -> dict:
     }
 
 
+_entries_lock = threading.Lock()
+_invoices_lock = threading.Lock()
+
+
 def _load_entries() -> dict:
     return state.load("billing_entries")
 
@@ -58,27 +63,29 @@ def list_entries(config: dict, month: str = "") -> list[dict]:
 
 def upsert_entries(config: dict, payload) -> dict:
     items = payload if isinstance(payload, list) else [payload]
-    entries = _load_entries()
-    count = 0
-    for item in items:
-        d = item.get("date")
-        if not d:
-            continue
-        entries[d] = {
-            "date": d,
-            "type": item.get("type", "work"),
-            "hours": item.get("hours", 8 if item.get("type", "work") == "work" else 0),
-        }
-        count += 1
-    _save_entries(entries)
+    with _entries_lock:
+        entries = _load_entries()
+        count = 0
+        for item in items:
+            d = item.get("date")
+            if not d:
+                continue
+            entries[d] = {
+                "date": d,
+                "type": item.get("type", "work"),
+                "hours": item.get("hours", 8 if item.get("type", "work") == "work" else 0),
+            }
+            count += 1
+        _save_entries(entries)
     return {"ok": True, "count": count}
 
 
 def delete_entry(config: dict, date_str: str) -> dict:
-    entries = _load_entries()
-    if date_str in entries:
-        del entries[date_str]
-        _save_entries(entries)
+    with _entries_lock:
+        entries = _load_entries()
+        if date_str in entries:
+            del entries[date_str]
+            _save_entries(entries)
     return {"ok": True}
 
 
@@ -350,9 +357,10 @@ async def create_invoice(config: dict, body: dict, source: str = "manual") -> di
         "source": "billcom",
     }
 
-    locals_ = _local_invoices()
-    locals_[result["id"]] = inv_record
-    _save_local_invoices(locals_)
+    with _invoices_lock:
+        locals_ = _local_invoices()
+        locals_[result["id"]] = inv_record
+        _save_local_invoices(locals_)
 
     try:
         verify = await billcom.get_invoice(result["id"])

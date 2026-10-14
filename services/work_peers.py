@@ -4,6 +4,7 @@ import tomllib
 from pathlib import Path
 
 import httpx
+from starlette.concurrency import run_in_threadpool
 
 import core.log as log
 
@@ -78,32 +79,32 @@ def resolve(key: str, path: str) -> tuple[str, str]:
     return f"{peer['base_url']}/{clean}", ""
 
 
-def request(key: str, method: str, path: str, params: dict | None = None,
-            body: dict | None = None, timeout: float = DEFAULT_TIMEOUT) -> tuple[int, dict]:
+async def request(key: str, method: str, path: str, params: dict | None = None,
+                  body: dict | None = None, timeout: float = DEFAULT_TIMEOUT) -> tuple[int, dict]:
     """Proxy one board call to a peer and return its status and JSON body."""
-    url, error = resolve(key, path)
+    url, error = await run_in_threadpool(resolve, key, path)
     if error:
         return (404 if error.startswith("unknown peer") else 403), {"error": error}
     try:
-        with httpx.Client(timeout=timeout, verify=False, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=timeout, verify=False, follow_redirects=True) as client:
             if method.upper() == "GET":
-                resp = client.get(url, params=params or {})
+                resp = await client.get(url, params=params or {})
             else:
-                resp = client.post(url, params=params or {}, json=body or {})
+                resp = await client.post(url, params=params or {}, json=body or {})
     except Exception as e:
         message = f"peer '{key}' is unreachable: {type(e).__name__}: {e}"
-        log.emit("work_peer_unreachable",
-                 f"{method.upper()} {url} failed: {type(e).__name__}: {e}",
-                 meta={"peer": key, "path": path, "url": url})
+        await run_in_threadpool(log.emit, "work_peer_unreachable",
+                                f"{method.upper()} {url} failed: {type(e).__name__}: {e}",
+                                meta={"peer": key, "path": path, "url": url})
         return 502, {"error": message}
     try:
         payload = resp.json()
     except ValueError:
         message = (f"peer '{key}' answered {resp.status_code} with "
                    f"{resp.headers.get('content-type', 'no content type')}, not JSON")
-        log.emit("work_peer_bad_response", f"{method.upper()} {url}: {message}",
-                 meta={"peer": key, "path": path, "url": url,
-                       "status": resp.status_code})
+        await run_in_threadpool(log.emit, "work_peer_bad_response", f"{method.upper()} {url}: {message}",
+                                meta={"peer": key, "path": path, "url": url,
+                                      "status": resp.status_code})
         return 502, {"error": message}
     if not isinstance(payload, dict):
         payload = {"data": payload}
