@@ -726,3 +726,49 @@ class TestScopedPrune:
         shutil.rmtree(locked)
         assert git_util.prune_worktrees(repo) == []
         assert {str(live), str(locked)} <= set(self._registered(repo))
+
+    def _locks(self, repo):
+        out = subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=repo,
+                             capture_output=True, text=True, check=True).stdout
+        found, current = {}, ""
+        for line in out.splitlines():
+            if line.startswith("worktree "):
+                current = line.split(" ", 1)[1]
+            elif line.startswith("locked"):
+                found[current] = line[len("locked "):]
+        return found
+
+    def test_a_missing_worktree_with_the_frshty_lock_is_dropped(self, tmp_path, monkeypatch):
+        import shutil
+        import core.git_util as git_util
+        repo = self._repo(tmp_path)
+        mine, theirs = tmp_path / "state" / "w", tmp_path / "elsewhere" / "w"
+        monkeypatch.setenv("FRSHTY_ROOT", str(tmp_path / "state"))
+        monkeypatch.setattr(git_util, "_owned_roots", set())
+        _git(*git_util.WORKTREE_ADD, "-q", "-b", "a", str(mine), cwd=repo)
+        _git(*git_util.WORKTREE_ADD, "-q", "-b", "b", str(theirs), cwd=repo)
+        shutil.rmtree(mine)
+        shutil.rmtree(theirs)
+        _git("worktree", "prune", cwd=repo)
+        assert {str(mine), str(theirs)} <= set(self._registered(repo))
+        assert git_util.prune_worktrees(repo) == [str(mine)]
+        assert str(mine) not in self._registered(repo)
+        assert str(theirs) in self._registered(repo)
+
+    def test_an_unlocked_live_worktree_under_an_owned_root_gets_the_lock(self, tmp_path, monkeypatch):
+        import core.git_util as git_util
+        repo = self._repo(tmp_path)
+        mine, theirs = tmp_path / "state" / "w", tmp_path / "elsewhere" / "w"
+        foreign = tmp_path / "state" / "foreign"
+        monkeypatch.setenv("FRSHTY_ROOT", str(tmp_path / "state"))
+        monkeypatch.setattr(git_util, "_owned_roots", set())
+        _git("worktree", "add", "-q", "-b", "a", str(mine), cwd=repo)
+        _git("worktree", "add", "-q", "-b", "b", str(theirs), cwd=repo)
+        _git("worktree", "add", "-q", "--lock", "--reason", "operator", "-b", "c",
+             str(foreign), cwd=repo)
+        assert git_util.prune_worktrees(repo) == []
+        locks = self._locks(repo)
+        assert locks.get(str(mine)) == git_util.WORKTREE_LOCK_REASON
+        assert str(theirs) not in locks
+        assert locks.get(str(foreign)) == "operator"
+        assert str(repo) not in locks

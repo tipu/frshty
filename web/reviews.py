@@ -478,7 +478,7 @@ def api_start_discuss(repo: str, pr_id: int, body: dict):
                 wt.parent.mkdir(parents=True, exist_ok=True)
                 subprocess.run(["git", "fetch", "origin", branch], cwd=str(repo_path), capture_output=True, timeout=60)
                 git_util.prune_worktrees(repo_path)
-                subprocess.run(["git", "worktree", "add", str(wt), branch], cwd=str(repo_path), capture_output=True, timeout=60)
+                subprocess.run(["git", *git_util.WORKTREE_ADD, str(wt), branch], cwd=str(repo_path), capture_output=True, timeout=60)
                 if (wt / ".git").exists():
                     cwd = str(wt)
     if not cwd:

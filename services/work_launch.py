@@ -2183,7 +2183,7 @@ def _run_baseline(repo: Path, base_sha: str, head_cmd: str,
         holder = tempfile.mkdtemp(prefix="frshty-gate-baseline-")
         tree = Path(holder) / "tree"
         try:
-            git_util.run_git(repo, ["worktree", "add", "--detach", "--force",
+            git_util.run_git(repo, [*git_util.WORKTREE_ADD, "--detach", "--force",
                                     str(tree), base_sha], timeout=300)
         except (git_util.GitCommandError, subprocess.TimeoutExpired, OSError) as e:
             outcome["note"] = f"could not check out the merge base: {type(e).__name__}: {e}"[:300]
@@ -2218,7 +2218,7 @@ def _run_baseline(repo: Path, base_sha: str, head_cmd: str,
         # behind for every later `git worktree list` to report.
         if holder:
             try:
-                git_util.run_git(repo, ["worktree", "remove", "--force", str(tree)], timeout=120)
+                git_util.run_git(repo, [*git_util.WORKTREE_REMOVE, str(tree)], timeout=120)
             except (git_util.GitCommandError, subprocess.TimeoutExpired, OSError):
                 pass
             shutil.rmtree(holder, ignore_errors=True)
