@@ -1,3 +1,4 @@
+import asyncio
 
 import httpx
 import pytest
@@ -29,17 +30,17 @@ class _StubClient:
         self.calls = calls
         self.response = response
 
-    def __enter__(self):
+    async def __aenter__(self):
         return self
 
-    def __exit__(self, *exc):
+    async def __aexit__(self, *exc):
         return False
 
-    def get(self, url, params=None):
+    async def get(self, url, params=None):
         self.calls.append(("GET", url, params, None))
         return self.response
 
-    def post(self, url, params=None, json=None):
+    async def post(self, url, params=None, json=None):
         self.calls.append(("POST", url, params, json))
         return self.response
 
@@ -59,7 +60,7 @@ class _StubResponse:
 
 def _stub_httpx(monkeypatch, response):
     calls = []
-    monkeypatch.setattr(work_peers.httpx, "Client",
+    monkeypatch.setattr(work_peers.httpx, "AsyncClient",
                         lambda **kw: _StubClient(calls, response))
     return calls
 
@@ -112,22 +113,22 @@ class TestPeerList:
 
 class TestPeerRequest:
     def test_unknown_peer_is_404(self, peers_file):
-        status, payload = work_peers.request("ghost", "GET", "api/work/items")
+        status, payload = asyncio.run(work_peers.request("ghost", "GET", "api/work/items"))
         assert status == 404
         assert "unknown peer" in payload["error"]
 
     def test_only_the_work_api_is_reachable(self, peers_file):
         peers_file.write_text('[[peers]]\nkey = "a"\nbase_url = "http://x:1"\n')
         for path in ("api/config", "api/work/../config", "tasks"):
-            status, payload = work_peers.request("a", "GET", path)
+            status, payload = asyncio.run(work_peers.request("a", "GET", path))
             assert status == 403, path
             assert "not allowed" in payload["error"]
 
     def test_get_is_forwarded_with_the_query(self, peers_file, monkeypatch):
         peers_file.write_text('[[peers]]\nkey = "a"\nbase_url = "http://x:1"\n')
         calls = _stub_httpx(monkeypatch, _StubResponse(payload={"groups": {}}))
-        status, payload = work_peers.request("a", "GET", "api/work/items",
-                                             params={"q": "release"})
+        status, payload = asyncio.run(work_peers.request("a", "GET", "api/work/items",
+                                                         params={"q": "release"}))
         assert status == 200
         assert payload == {"groups": {}}
         assert calls == [("GET", "http://x:1/api/work/items", {"q": "release"}, None)]
@@ -135,16 +136,16 @@ class TestPeerRequest:
     def test_post_is_forwarded_with_the_body(self, peers_file, monkeypatch):
         peers_file.write_text('[[peers]]\nkey = "a"\nbase_url = "http://x:1"\n')
         calls = _stub_httpx(monkeypatch, _StubResponse(payload={"item_id": 7}))
-        status, payload = work_peers.request("a", "POST", "/api/work/intake",
-                                             body={"text": "go"})
+        status, payload = asyncio.run(work_peers.request("a", "POST", "/api/work/intake",
+                                                         body={"text": "go"}))
         assert (status, payload) == (200, {"item_id": 7})
         assert calls == [("POST", "http://x:1/api/work/intake", {}, {"text": "go"})]
 
     def test_peer_status_is_passed_through(self, peers_file, monkeypatch):
         peers_file.write_text('[[peers]]\nkey = "a"\nbase_url = "http://x:1"\n')
         _stub_httpx(monkeypatch, _StubResponse(status_code=409, payload={"error": "busy"}))
-        status, payload = work_peers.request("a", "POST", "api/work/items/3/reply",
-                                             body={"text": "hi"})
+        status, payload = asyncio.run(work_peers.request("a", "POST", "api/work/items/3/reply",
+                                                         body={"text": "hi"}))
         assert (status, payload) == (409, {"error": "busy"})
 
     def test_unreachable_peer_is_502_and_is_logged(self, peers_file, monkeypatch):
@@ -156,8 +157,8 @@ class TestPeerRequest:
         def boom(**kw):
             raise httpx.ConnectError("no route to host")
 
-        monkeypatch.setattr(work_peers.httpx, "Client", boom)
-        status, payload = work_peers.request("a", "GET", "api/work/items")
+        monkeypatch.setattr(work_peers.httpx, "AsyncClient", boom)
+        status, payload = asyncio.run(work_peers.request("a", "GET", "api/work/items"))
         assert status == 502
         assert "unreachable" in payload["error"]
         assert "work_peer_unreachable" in emitted
@@ -169,7 +170,7 @@ class TestPeerRequest:
                             lambda event, summary, **kw: emitted.append(event))
         _stub_httpx(monkeypatch, _StubResponse(status_code=502, text="<html>",
                                                content_type="text/html"))
-        status, payload = work_peers.request("a", "GET", "api/work/items")
+        status, payload = asyncio.run(work_peers.request("a", "GET", "api/work/items"))
         assert status == 502
         assert "not JSON" in payload["error"]
         assert "work_peer_bad_response" in emitted
