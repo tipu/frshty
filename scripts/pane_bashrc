@@ -10,3 +10,4 @@ elif [ -f ~/.profile ]; then
 fi
 alias cl >/dev/null 2>&1 || alias cl='claude --dangerously-skip-permissions'
 alias clc >/dev/null 2>&1 || alias clc='cl --continue'
+alias co >/dev/null 2>&1 || alias co='codex --dangerously-bypass-approvals-and-sandbox'
