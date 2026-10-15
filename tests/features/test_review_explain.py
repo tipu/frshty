@@ -270,6 +270,17 @@ class TestSummarizeComment:
                 _comment("x"), {"explainer": CLAUDE, "explainer_codex": CODEX}, tmp_path, worktree)
         assert out["code"] == []
 
+    def test_a_symlink_loop_is_dropped(self, tmp_path):
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        (worktree / "loop").symlink_to("loop")
+        code = [{"path": "loop", "start": 1, "end": 1, "note": "x"}]
+        with patch.object(reviewer, "run_balanced", return_value=_summary_answer(code)), \
+             patch.object(reviewer, "log"):
+            out = reviewer.summarize_comment(
+                _comment("x"), {"explainer": CLAUDE, "explainer_codex": CODEX}, tmp_path, worktree)
+        assert out["code"] == []
+
     def test_the_snippet_is_cut_to_the_line_limit_and_the_file_end(self, tmp_path):
         worktree = tmp_path / "worktree"
         worktree.mkdir()

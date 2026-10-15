@@ -1185,9 +1185,12 @@ def _snippet(part: dict, worktree: Path | None) -> dict | None:
         if not rel or not code.strip():
             return None
         return {"path": rel, "start": start, "end": end, "code": code, "note": note}
-    root = worktree.resolve()
-    target = (root / rel).resolve()
-    if not rel or not target.is_relative_to(root) or not target.is_file():
+    try:
+        root = worktree.resolve()
+        target = (root / rel).resolve()
+        if not rel or not target.is_relative_to(root) or not target.is_file():
+            return None
+    except (OSError, RuntimeError):
         return None
     try:
         lines = target.read_text(errors="replace").splitlines()
