@@ -205,6 +205,7 @@ const { createApp, ref, reactive, computed, watch, onMounted, nextTick } = Vue;
 
 const EXT_LANG = {py:'python',js:'javascript',ts:'typescript',tsx:'tsx',jsx:'jsx',java:'java',rb:'ruby',go:'go',rs:'rust',css:'css',html:'html',json:'json',yml:'yaml',yaml:'yaml',sh:'bash',sql:'sql',md:'markdown'};
 const PERSONAS = ['spec', 'breakage', 'maintainability'];
+const EXPLAINERS = [['explainer', 'Claude'], ['explainer_codex', 'Codex']];
 
 function escHtml(s) {
     const d = document.createElement('div');
@@ -224,7 +225,7 @@ const CommentBlock = {
             return personas.value.includes(p) || (props.c.agreed_by || []).includes(p);
         }
         const sev = computed(() => props.c.severity || 'suggestion');
-        return { isPublished, isDraft, isManual, sev, PERSONAS, personaActive, escHtml };
+        return { isPublished, isDraft, isManual, sev, PERSONAS, EXPLAINERS, personaActive, escHtml };
     },
     template: `
         <div :id="'comment-' + c.idx" class="comment-inline" :class="sev">
@@ -248,13 +249,15 @@ const CommentBlock = {
                 <button @click="$emit('dismiss')" class="text-red-900 hover:text-red-400 text-xs">x</button>
                 <button @click="$emit('next')" class="text-gray-600 hover:text-white text-xs ml-auto">↓ next</button>
             </div>
-            <div v-if="c.explainer" class="explainer">
-                <div class="flex items-center gap-2 mb-1 text-xs">
-                    <span class="text-gray-400">Is this a valid concern?</span>
-                    <span class="badge" :class="'explainer-valid-' + c.explainer.valid">{{ c.explainer.valid }}</span>
+            <template v-for="[field, model] in EXPLAINERS" :key="field">
+                <div v-if="c[field]" class="explainer" :class="'explainer-' + model.toLowerCase()">
+                    <div class="flex items-center gap-2 mb-1 text-xs">
+                        <span class="text-gray-400">{{ model }}: Is this a valid concern?</span>
+                        <span class="badge" :class="'explainer-valid-' + c[field].valid">{{ c[field].valid }}</span>
+                    </div>
+                    <div class="explainer-text">{{ c[field].text }}</div>
                 </div>
-                <div class="explainer-text">{{ c.explainer.text }}</div>
-            </div>
+            </template>
             <div v-if="discussOpen" class="discuss-panel" :id="'discuss-panel-' + c.idx">
                 <div class="discuss-header">
                     <span class="text-blue-400">{{ c.path ? c.path + (c.line ? ':' + c.line : '') : 'general' }}</span>
