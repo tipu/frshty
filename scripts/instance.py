@@ -18,6 +18,8 @@ same path and named by FRSHTY_ROOT, so every worktree the container registers
 in a shared repository names a path the host sees too. Its ssh/ is mounted at
 ~/.ssh. Its totp/, when present, is mounted read-only at ~/.totp for the
 totp command; it holds only the TOTP secrets of that instance's accounts.
+Its aws/, when present, is mounted at ~/.aws; it holds only the AWS profiles
+of that instance.
 An instance whose [slack] block names a workspace sees the slack_int checkout
 as a tmpfs that holds send.py, resolve_user.py and a tokens.json with the
 token of that one workspace, copied to ~/.frshty-containers/<key>/slack/ at
@@ -329,6 +331,8 @@ def mounts(config: dict, config_path: Path, root: Path) -> list[tuple[str, str, 
            (str(config_path), f"/app/config/{key}.toml", False)]
     if (root / "totp").is_dir():
         out.append((str(root / "totp"), str(HOME / ".totp"), True))
+    if (root / "aws").is_dir():
+        out.append((str(root / "aws"), str(HOME / ".aws"), False))
     workspace = _expand(config["workspace"]["root"])
     out.append((str(workspace), str(workspace), False))
     for name in MODEL_DIRS:
