@@ -26,3 +26,8 @@ def test_a_single_fenced_answer_still_wins():
 
 def test_text_with_no_object_is_none():
     assert extract_json("no json here {not json") is None
+
+
+def test_raw_newlines_and_tabs_inside_a_string_are_read():
+    text = 'Here it is:\n{"code": "def f():\n\treturn 1", "note": "n"}'
+    assert extract_json(text) == {"code": "def f():\n\treturn 1", "note": "n"}

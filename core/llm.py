@@ -931,7 +931,7 @@ def extract_json(text: str) -> dict | None:
     m = re.search(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
     raw = m.group(1) if m else text
     try:
-        obj = json.loads(raw)
+        obj = json.loads(raw, strict=False)
         if isinstance(obj, dict):
             return obj
     except (json.JSONDecodeError, ValueError):
@@ -939,19 +939,19 @@ def extract_json(text: str) -> dict | None:
     for i in range(len(text) - 1, -1, -1):
         if text[i] == "{":
             try:
-                obj = json.loads(text[i:])
+                obj = json.loads(text[i:], strict=False)
                 if isinstance(obj, dict):
                     return obj
             except (json.JSONDecodeError, ValueError):
                 continue
     for block in reversed(re.findall(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)):
         try:
-            obj = json.loads(block)
+            obj = json.loads(block, strict=False)
         except (json.JSONDecodeError, ValueError):
             continue
         if isinstance(obj, dict):
             return obj
-    decoder = json.JSONDecoder()
+    decoder = json.JSONDecoder(strict=False)
     found = None
     i = text.find("{")
     while i != -1:
