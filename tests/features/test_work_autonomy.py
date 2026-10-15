@@ -460,6 +460,17 @@ class TestProgressLines:
         assert row["current_checkpoint"] == "the tail of the last message"
         assert row["latest_progress"] == "shipped the fix"
 
+    def test_an_idle_notification_after_the_finish_does_not_republish_the_line(self):
+        item_id, sid = _mkrun("idle after finish")
+        work_store.record_progress(sid, "", texts=["PROGRESS: reviewer 3 done; I wait for reviewer 1"])
+        db.execute("UPDATE work_items SET current_checkpoint = ?, state = 'needs_ack' "
+                   "WHERE id = ?", ("the tail of the last message", item_id))
+        assert work_store.record_progress(
+            sid, "", texts=["PROGRESS: reviewer 3 done; I wait for reviewer 1"]) == ""
+        item = db.query_one("SELECT current_checkpoint FROM work_items WHERE id = ?", (item_id,))
+        assert item["current_checkpoint"] == "the tail of the last message"
+        assert len(_events(item_id, "progress")) == 1
+
     def test_a_row_without_a_progress_line_reports_an_empty_string(self):
         item_id, _ = _mkrun("silent item")
         assert _board_row(item_id)["latest_progress"] == ""

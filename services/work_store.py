@@ -1466,6 +1466,12 @@ def record_progress(session_id: str, transcript_path: str,
                          (run["work_item_id"],)).fetchone()
         if not item or item["current_checkpoint"] == newest:
             return ""
+        last = c.execute(
+            "SELECT payload FROM work_events WHERE work_item_id = ? AND kind = 'progress' "
+            "ORDER BY id DESC LIMIT 1", (run["work_item_id"],),
+        ).fetchone()
+        if last and db.load_json(dict(last), "payload").get("text") == newest:
+            return ""
         c.execute("UPDATE work_items SET current_checkpoint = ? WHERE id = ?",
                   (newest, run["work_item_id"]))
         c.execute(
