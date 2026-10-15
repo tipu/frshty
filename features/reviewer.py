@@ -1091,8 +1091,33 @@ EXPLAIN_PROMPT = (
     '{"valid":"yes"|"no"|"partly","explanation":"the plain explanation, several short sentences"}\n\n'
 )
 
+SUMMARY_SNIPPET_LINES = 30
+
+SUMMARY_PROMPT = (
+    "A code reviewer left the comment below on a pull request. Claude and Codex each checked "
+    "whether it is a valid concern. Their two answers are below. Merge them into one answer for "
+    "a person who knows nothing about this code.\n\n"
+    "Open the code and the diff yourself. Where the two answers disagree, check the code and say "
+    "which one is right.\n\n"
+    "Return ONLY a JSON object (no markdown fences) with these keys:\n"
+    '- "valid": "yes", "no" or "partly". The final verdict after you checked the code.\n'
+    '- "summary": one merged answer. Say where Claude and Codex agree, where they differ, and '
+    "which one is right. Several short sentences.\n"
+    '- "plain": a brain dead simple breakdown of what the issue is. Explain it like I am super '
+    "retarded. No jargon. Use an everyday comparison. Then say in plain words what the code "
+    "does today, what goes wrong, and when. One idea per sentence. When the concern is not "
+    "valid, explain in the same way why the code is fine.\n"
+    '- "code": the parts of this pull request that the comment is about. A list of 1 to 3 '
+    'objects {"path": file path relative to the repository root, "start": first line number, '
+    '"end": last line number, "code": those lines copied exactly, "note": what this code does in '
+    'plain words and how it ties to the comment}. Take the line numbers from the file on the '
+    f"pull request branch. Keep each part at most {SUMMARY_SNIPPET_LINES} lines.\n\n"
+    "Do not modify any file. Do not commit. Do not push.\n\n"
+)
+
 EXPLAIN_TIMEOUT = 600
 EXPLAINERS = {"explainer": "claude", "explainer_codex": "codex"}
+SUMMARY_FIELD = "explainer_summary"
 
 
 def explain_key(comment: dict) -> tuple:
@@ -1142,18 +1167,95 @@ def explain_comment(comment: dict, branch_dir: Path, worktree: Path | None,
             "text": str(data["explanation"]).strip()}
 
 
+def _snippet(part: dict, worktree: Path | None) -> dict | None:
+    """One code part of a summary. With a checkout the lines are read from it,
+    so the page shows the real code and not the model's copy of it. Without a
+    checkout the model's copy is all there is."""
+    if not isinstance(part, dict):
+        return None
+    rel = str(part.get("path") or "").strip().lstrip("/")
+    try:
+        start = int(part.get("start"))
+        end = int(part.get("end") or start)
+    except (TypeError, ValueError):
+        return None
+    note = str(part.get("note") or "").strip()
+    if not worktree:
+        code = "\n".join(str(part.get("code") or "").splitlines()[:SUMMARY_SNIPPET_LINES])
+        if not rel or not code.strip():
+            return None
+        return {"path": rel, "start": start, "end": end, "code": code, "note": note}
+    try:
+        root = worktree.resolve()
+        target = (root / rel).resolve()
+        if not rel or not target.is_relative_to(root) or not target.is_file():
+            return None
+    except (OSError, RuntimeError):
+        return None
+    try:
+        lines = target.read_text(errors="replace").splitlines()
+    except OSError:
+        return None
+    start = max(start, 1)
+    end = min(max(end, start), start + SUMMARY_SNIPPET_LINES - 1, len(lines))
+    if start > end:
+        return None
+    return {"path": rel, "start": start, "end": end,
+            "code": "\n".join(lines[start - 1:end]), "note": note}
+
+
+def summarize_comment(comment: dict, answers: dict, branch_dir: Path,
+                      worktree: Path | None) -> dict | None:
+    """Merge the Claude and the Codex explainer of one review comment into one
+    summary with a plain breakdown and the pull request code it is about.
+    None when the run gives no usable answer."""
+    where = (f"The pull request branch is checked out at {worktree}." if worktree
+             else "There is no checkout of the branch, so judge it from the diff.")
+    prompt = (
+        SUMMARY_PROMPT
+        + f"{where}\nThe pull request diff is at {branch_dir / 'diff.txt'}.\n\n"
+        + f"COMMENT (severity: {comment.get('severity', 'suggestion')}, "
+        + f"file: {comment.get('path') or 'general'}, line: {comment.get('line') or 'none'}):\n"
+        + f"{comment.get('body', '')}\n\n"
+        + "".join(f"{model.upper()} ANSWER (valid: {answers[field].get('valid')}):\n"
+                  f"{answers[field].get('text')}\n\n"
+                  for field, model in EXPLAINERS.items())
+    )
+    output = run_balanced(prompt, worktree=worktree or branch_dir, timeout=EXPLAIN_TIMEOUT,
+                          function_name="review_explain_summary")
+    data = extract_json(output) if output else None
+    if (not isinstance(data, dict) or not str(data.get("summary") or "").strip()
+            or not str(data.get("plain") or "").strip()):
+        log.emit("review_explain_failed",
+                 f"No summary for {comment.get('path') or 'general'}:"
+                 f"{comment.get('line') or ''} in {branch_dir.name}",
+                 meta={"branch_dir": str(branch_dir), "path": comment.get("path"),
+                       "line": comment.get("line"), "model": "summary",
+                       "output": (output or "")[:500]})
+        return None
+    valid = str(data.get("valid") or "").strip().lower()
+    parts = data.get("code") if isinstance(data.get("code"), list) else []
+    return {"valid": valid if valid in ("yes", "no", "partly") else "partly",
+            "summary": str(data["summary"]).strip(),
+            "plain": str(data["plain"]).strip(),
+            "code": [s for s in (_snippet(p, worktree) for p in parts[:3]) if s],
+            "models": {model: answers[field].get("valid") for field, model in EXPLAINERS.items()}}
+
+
 def explain_review(branch_dir: Path, worktree: Path | None) -> int:
     """Fill the Claude and the Codex explainer of every comment in every
-    provider's queue of one review.
+    provider's queue of one review, then merge the two into one summary.
 
     The same finding often sits in several provider queues, so each distinct
     comment is asked once per model and the answer goes to every copy. An
-    explainer that is already there is never asked again. The queues are read
-    again just before the write, so an edit or a delete made on the page while
-    the models ran is kept. Returns the number of explainers written."""
+    explainer that is already there is never asked again. The summary is asked
+    only when both explainers are there. The queues are read again just before
+    the write, so an edit or a delete made on the page while the models ran is
+    kept. Returns the number of explainers and summaries written."""
     files = sorted(branch_dir.glob("queued_comments*.json"))
     known: dict[tuple, dict] = {}
     todo: dict[tuple, dict] = {}
+    comments_by_key: dict[tuple, dict] = {}
     for f in files:
         try:
             comments = json.loads(f.read_text())
@@ -1162,19 +1264,29 @@ def explain_review(branch_dir: Path, worktree: Path | None) -> int:
         for c in comments if isinstance(comments, list) else []:
             if not isinstance(c, dict) or not c.get("body"):
                 continue
-            for field in EXPLAINERS:
+            comments_by_key.setdefault(explain_key(c), c)
+            for field in (*EXPLAINERS, SUMMARY_FIELD):
                 if c.get(field):
                     known.setdefault((field, *explain_key(c)), c[field])
-                else:
+                elif field in EXPLAINERS:
                     todo.setdefault((field, *explain_key(c)), c)
     todo = {k: c for k, c in todo.items() if k not in known}
-    if not todo and not known:
+    if not comments_by_key:
         return 0
     if todo:
         with ThreadPoolExecutor(max_workers=4) as pool:
             answers = _map(pool, lambda item: explain_comment(
                 item[1], branch_dir, worktree, EXPLAINERS[item[0][0]]), todo.items())
         known.update({k: a for k, a in zip(todo, answers) if a})
+    to_merge = {k: c for k, c in comments_by_key.items()
+                if (SUMMARY_FIELD, *k) not in known
+                and all((field, *k) in known for field in EXPLAINERS)}
+    if to_merge:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            summaries = _map(pool, lambda item: summarize_comment(
+                item[1], {field: known[(field, *item[0])] for field in EXPLAINERS},
+                branch_dir, worktree), to_merge.items())
+        known.update({(SUMMARY_FIELD, *k): s for k, s in zip(to_merge, summaries) if s})
     filled = 0
     with review_store.queue_lock(branch_dir):
         for f in files:
@@ -1186,7 +1298,7 @@ def explain_review(branch_dir: Path, worktree: Path | None) -> int:
             for c in comments if isinstance(comments, list) else []:
                 if not isinstance(c, dict):
                     continue
-                for field in EXPLAINERS:
+                for field in (*EXPLAINERS, SUMMARY_FIELD):
                     answer = known.get((field, *explain_key(c)))
                     if answer and not c.get(field):
                         c[field] = answer

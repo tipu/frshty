@@ -1,4 +1,5 @@
-"""Add the Claude and Codex "is this a valid concern" explainers to every stored review comment.
+"""Add the Claude and Codex "is this a valid concern" explainers, and the summary that
+merges them, to every stored review comment.
 
 New reviews get the explainer when the pipeline writes them. This script
 fills it into the reviews stored before that. It asks each model once for
@@ -25,7 +26,7 @@ import core.llm as llm
 import core.log as log
 import core.state as state
 from core.config import load_config
-from features.reviewer import EXPLAINERS, explain_key, explain_review
+from features.reviewer import EXPLAINERS, SUMMARY_FIELD, explain_key, explain_review
 from services import review_store
 
 
@@ -46,7 +47,7 @@ def _missing(branch_dir: Path, redo: bool = False) -> int:
             continue
         for c in comments if isinstance(comments, list) else []:
             if isinstance(c, dict) and c.get("body"):
-                for field in EXPLAINERS:
+                for field in (*EXPLAINERS, SUMMARY_FIELD):
                     (done if c.get(field) else keys).add((field, *explain_key(c)))
     return len(keys | done) if redo else len(keys - done)
 
@@ -62,7 +63,7 @@ def _clear(branch_dir: Path) -> None:
                 continue
             for c in comments:
                 if isinstance(c, dict):
-                    for field in EXPLAINERS:
+                    for field in (*EXPLAINERS, SUMMARY_FIELD):
                         c.pop(field, None)
             f.write_text(json.dumps(comments, indent=2))
 
@@ -96,7 +97,7 @@ def main() -> int:
         wt = branch_dir / "worktree"
         worktree = wt if (wt / ".git").exists() else None
         if not apply:
-            print(f"{branch_dir.relative_to(reviews_dir)}: {missing} explainer(s) to write")
+            print(f"{branch_dir.relative_to(reviews_dir)}: {missing} explainer(s) and summaries to write")
             total += missing
             continue
         filled = explain_review(branch_dir, worktree)
