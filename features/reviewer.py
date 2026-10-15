@@ -1214,8 +1214,8 @@ def summarize_comment(comment: dict, answers: dict, branch_dir: Path,
         + f"COMMENT (severity: {comment.get('severity', 'suggestion')}, "
         + f"file: {comment.get('path') or 'general'}, line: {comment.get('line') or 'none'}):\n"
         + f"{comment.get('body', '')}\n\n"
-        + "".join(f"{model.upper()} ANSWER (valid: {answers[field]['valid']}):\n"
-                  f"{answers[field]['text']}\n\n"
+        + "".join(f"{model.upper()} ANSWER (valid: {answers[field].get('valid')}):\n"
+                  f"{answers[field].get('text')}\n\n"
                   for field, model in EXPLAINERS.items())
     )
     output = run_balanced(prompt, worktree=worktree or branch_dir, timeout=EXPLAIN_TIMEOUT,
@@ -1236,7 +1236,7 @@ def summarize_comment(comment: dict, answers: dict, branch_dir: Path,
             "summary": str(data["summary"]).strip(),
             "plain": str(data["plain"]).strip(),
             "code": [s for s in (_snippet(p, worktree) for p in parts[:3]) if s],
-            "models": {model: answers[field]["valid"] for field, model in EXPLAINERS.items()}}
+            "models": {model: answers[field].get("valid") for field, model in EXPLAINERS.items()}}
 
 
 def explain_review(branch_dir: Path, worktree: Path | None) -> int:
