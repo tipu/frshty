@@ -24,7 +24,7 @@ from core.config import base_branch_for, get_repos, ticket_worktree_path, resolv
 from core.deps import run_dep_command, relink_shared_venv
 from core.claude_runner import run_haiku, run_balanced, run_claude_code, extract_json
 from core.llm import NO_PUBLISH_RULE
-from core.commit_message import COMMIT_SUBJECT_RULE, commit_subject
+from core.commit_message import COMMIT_SUBJECT_RULE, commit_subject, merge_message_args
 from core.ticket_status import TicketStatus, can_transition, transition
 from features.platforms import make_platform
 from features.pr_ci import ci_summary, FAILED_STATES, KEEP_GREEN_RULE
@@ -990,7 +990,9 @@ def _ensure_worktree(config: dict, ticket_key: str, slug: str) -> dict | None:
         base_branch = base_branch_for(config, repo["name"])
         try:
             if (wt_path / ".git").is_file():
-                outcome = git_util.refresh_worktree_onto_base(wt_path, base_branch)
+                outcome = git_util.refresh_worktree_onto_base(
+                    wt_path, base_branch,
+                    merge_message_args(config, ticket_key, f"origin/{base_branch}"))
                 if outcome["result"] == "merge_failed":
                     log.emit("worktree_base_merge_conflict",
                              f"{repo['name']} conflicts with origin/{base_branch}; leaving the branch as it is",
@@ -1689,7 +1691,9 @@ def _setup_ticket(config, ticket, base_url, comments=None) -> dict:
             any_worktree = True
             subprocess.run(["git", "fetch", "origin"], cwd=str(wt_path), capture_output=True, timeout=60)
             subprocess.run(["git", "checkout", branch], cwd=str(wt_path), capture_output=True, timeout=60)
-            outcome = git_util.refresh_worktree_onto_base(wt_path, base_branch)
+            outcome = git_util.refresh_worktree_onto_base(
+                wt_path, base_branch,
+                merge_message_args(config, key, f"origin/{base_branch}"))
             if outcome["result"] in ("merged", "merge_failed"):
                 log.emit("ticket_worktree_preserved",
                          f"{key}: kept {outcome['ahead']} existing commit(s) in the "
@@ -1868,7 +1872,9 @@ def materialize_prd_ticket(config: dict, ticket_key: str, ts: dict, base_url: st
             any_worktree = True
             subprocess.run(["git", "fetch", "origin"], cwd=str(wt_path), capture_output=True, timeout=60)
             subprocess.run(["git", "checkout", branch], cwd=str(wt_path), capture_output=True, timeout=60)
-            outcome = git_util.refresh_worktree_onto_base(wt_path, base_branch)
+            outcome = git_util.refresh_worktree_onto_base(
+                wt_path, base_branch,
+                merge_message_args(config, ticket_key, f"origin/{base_branch}"))
             if outcome["result"] in ("merged", "merge_failed"):
                 log.emit("ticket_worktree_preserved",
                          f"{ticket_key}: kept {outcome['ahead']} existing commit(s) in the "
@@ -2511,7 +2517,8 @@ def _push_comment_branch(platform, wt, branch: str, ticket: dict, ts: dict,
 
 
 def _commit_pr_comment_changes(worktree: Path, ticket_key: str, message: str,
-                               exclude=()) -> tuple[git_util.CommitOutcome, str]:
+                               exclude=(), config: dict | None = None
+                               ) -> tuple[git_util.CommitOutcome, str]:
     """Use the ticket pipeline's diagnostic-preserving commit/repair path.
 
     Kept as a small seam here so the comment workflow does not duplicate the
@@ -2521,7 +2528,8 @@ def _commit_pr_comment_changes(worktree: Path, ticket_key: str, message: str,
     """
     from core.tasks.tickets import commit_repo_changes
 
-    return commit_repo_changes(worktree, ticket_key, message, exclude=exclude)
+    return commit_repo_changes(worktree, ticket_key, message, exclude=exclude,
+                               config=config)
 
 
 def _recheck_pr_failed(config, ticket, ts, base_url) -> dict:
@@ -2944,6 +2952,7 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                             ticket_key=ticket["key"],
                         ),
                         exclude=pre_dirty,
+                        config=config,
                     )
                     commit_rc = commit_outcome.exit_code
                 if fix_result and ((commit_outcome is not None and commit_outcome.ok)
@@ -3216,7 +3225,7 @@ def _resolve_conflicts(config, ticket, ts, base_url, pr_info_map=None) -> dict:
         subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=str(wt), capture_output=True, timeout=60)
 
         prev_error = ts.get("last_conflict_error")
-        synced = platform.sync_remote_branch(wt, ts["branch"])
+        synced = platform.sync_remote_branch(wt, ts["branch"], ticket_key=ticket["key"])
         if not synced["ok"]:
             error = synced.get("error", "")
             log.emit("ticket_conflict_failed", f"Remote branch sync failed for {_label(ticket['key'], ts)} PR #{pr['id']}: {error[:100]}",
@@ -3228,7 +3237,8 @@ def _resolve_conflicts(config, ticket, ts, base_url, pr_info_map=None) -> dict:
                 ts["status"] = transition(ts["status"], "pr_failed")
                 ts["pr_failed_reason"] = "conflict_failed"
             return ts
-        result = platform.merge_base(wt, base_branch, prev_error=prev_error)
+        result = platform.merge_base(wt, base_branch, prev_error=prev_error,
+                                     ticket_key=ticket["key"])
         if not result["ok"]:
             error = result.get("error", "")
             log.emit("ticket_conflict_failed", f"Merge failed for {_label(ticket['key'], ts)} PR #{pr['id']}: {error[:100]}",
@@ -3333,7 +3343,8 @@ def _sync_pr_base(config, ticket, ts, base_url) -> dict:
         st = sync_state.setdefault(f"{pr['repo']}/{pr['id']}", {})
         outcome = branch_sync.sync_branch_with_base(
             platform, repo_path, base_branch, pr.get("branch") or branch, st,
-            lambda pr=pr: _ensure_pr_worktree(config, ticket, ts, pr, base_url))
+            lambda pr=pr: _ensure_pr_worktree(config, ticket, ts, pr, base_url),
+            ticket_key=key)
         result = outcome["result"]
         links = {"detail": f"{base_url}/tickets/{key}", "pr": pr.get("url", "")}
         meta = {"ticket": key, "repo": pr["repo"], "pr_id": pr["id"], "base": base_branch}

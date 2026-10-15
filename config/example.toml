@@ -56,6 +56,13 @@ auto_merge = false                # governs both halves of frshty. the ticket pi
 # merge_strategy = "squash"       # squash, merge, rebase
 # merge_flags = ["--admin"]       # extra flags for gh pr merge
 
+# [commits]
+# key_first = false               # true starts every commit message frshty writes with the
+#                                 # ticket key, merge commits included: `DEV-123 fix: add retry`,
+#                                 # `DEV-123 Merge origin/main into DEV-123-add-retry`. The key of a
+#                                 # merge comes from the branch name. false keeps `fix: DEV-123 ...`
+#                                 # and git's own merge message.
+
 # [work]
 # dispatch = true                 # default true. the task board's project picker shows
 #                                 # this instance in its first row. false moves it behind
