@@ -466,3 +466,110 @@ class TestTicketKeyAppearsOnce:
                 repo, "fix: address tri-review findings for DEV-635",
                 ticket_key="DEV-635")
         assert "dev-6350" in got
+
+
+class TestKeyFirst:
+    """A project can require every commit, merge commits included, to start
+    with the ticket key. `[commits] key_first` turns that on without a branch on
+    the project's name."""
+
+    ON = {"commits": {"key_first": True}}
+
+    @pytest.mark.parametrize("message,expected", [
+        ("fix: PROJ-1 add retry", "PROJ-1 fix: add retry"),
+        ("fix: PROJ-1: add retry", "PROJ-1 fix: add retry"),
+        ("test: scaffold tests", "PROJ-1 test: scaffold tests"),
+        ("PROJ-1: add retry", "PROJ-1: add retry"),
+        ("PROJ-1 add retry", "PROJ-1 add retry"),
+        ("add retry", "PROJ-1 add retry"),
+        ("fix: PROJ-12 add retry", "PROJ-1 fix: PROJ-12 add retry"),
+    ])
+    def test_moves_the_key_to_the_front(self, message, expected):
+        assert commit_message.keyed(self.ON, message, "PROJ-1") == expected
+
+    @pytest.mark.parametrize("config", [{}, {"commits": {}}, {"commits": {"key_first": False}}, None])
+    def test_off_leaves_the_message_alone(self, config):
+        assert commit_message.keyed(config, "fix: PROJ-1 add retry", "PROJ-1") == "fix: PROJ-1 add retry"
+
+    def test_no_key_leaves_the_message_alone(self):
+        assert commit_message.keyed(self.ON, "fix: add retry", "") == "fix: add retry"
+
+    @pytest.mark.parametrize("branch,key", [
+        ("PROJ-1-add-retry", "PROJ-1"),
+        ("someone/feature/PROJ-22-add-retry", "PROJ-22"),
+        ("PRD-6_FUNCTIONAL_REQUIREMENTS-3-add-retry", "PRD-6_FUNCTIONAL_REQUIREMENTS-3"),
+        ("PROJ-12-34-retries", "PROJ-12"),
+        ("PRD-FUNCTIONAL_REQUIREMENTS-3-add-retry", "PRD-FUNCTIONAL_REQUIREMENTS-3"),
+        ("PRD-6_1_FUNCTIONAL_REQUIREMENTS-3-add-retry", "PRD-6_1_FUNCTIONAL_REQUIREMENTS-3"),
+        ("PRD-FUNCTIONAL_REQUIREMENTS-3-3-retries", "PRD-FUNCTIONAL_REQUIREMENTS-3"),
+        ("PROJ-1", "PROJ-1"),
+        ("PROJ-x", ""),
+        ("main", ""),
+        ("work-129-add-rules", ""),
+    ])
+    def test_reads_the_key_from_a_branch(self, branch, key):
+        assert commit_message.branch_key(branch) == key
+
+    def test_merge_message_starts_with_the_ticket_key(self):
+        assert commit_message.merge_message_args(self.ON, "PROJ-1", "origin/main") == [
+            "-m", "PROJ-1 Merge origin/main"]
+
+    def test_merge_message_off_or_keyless_keeps_git_default(self):
+        assert commit_message.merge_message_args({}, "PROJ-1", "origin/main") == []
+        assert commit_message.merge_message_args(self.ON, "", "origin/main") == []
+
+    def test_platform_merge_commit_starts_with_the_ticket_key(self, tmp_path):
+        from features.platforms import GitHubPlatform
+        origin = tmp_path / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", str(origin)], check=True)
+        repo = _repo(tmp_path / "r")
+        subprocess.run(["git", "branch", "-M", "main"], cwd=str(repo), check=True)
+        subprocess.run(["git", "remote", "add", "origin", str(origin)], cwd=str(repo), check=True)
+        subprocess.run(["git", "push", "-q", "origin", "main"], cwd=str(repo), check=True)
+        subprocess.run(["git", "checkout", "-q", "-b", "PROJ-1-add-retry"], cwd=str(repo), check=True)
+        (repo / "b.py").write_text("y = 1\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "branch work"], cwd=str(repo), check=True)
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=str(repo), check=True)
+        (repo / "c.py").write_text("z = 1\n")
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "base work"], cwd=str(repo), check=True)
+        subprocess.run(["git", "push", "-q", "origin", "main"], cwd=str(repo), check=True)
+        subprocess.run(["git", "checkout", "-q", "PROJ-1-add-retry"], cwd=str(repo), check=True)
+
+        platform = GitHubPlatform({"job": {"platform": "github"}, "github": {"repo": "o/r"},
+                                   "workspace": {}, **self.ON})
+        assert platform.merge_base(repo, "main", ticket_key="PROJ-1")["ok"]
+        subject = subprocess.run(["git", "log", "-1", "--format=%s"], cwd=str(repo),
+                                 capture_output=True, text=True, check=True).stdout.strip()
+        assert subject == "PROJ-1 Merge origin/main"
+
+    def test_commit_repo_changes_commits_with_the_key_first(self, tmp_path):
+        from core.tasks import tickets as T
+        repo = _repo(tmp_path / "r")
+        (repo / "a.py").write_text("x = 2\n")
+        outcome, route = T.commit_repo_changes(repo, "PROJ-1", "fix: PROJ-1 add retry",
+                                               config=self.ON)
+        assert outcome.ok, outcome
+        subject = subprocess.run(["git", "log", "-1", "--format=%s"], cwd=str(repo),
+                                 capture_output=True, text=True, check=True).stdout.strip()
+        assert subject == "PROJ-1 fix: add retry"
+
+    def test_workspace_commit_passes_the_config(self, tmp_path):
+        from core.tasks import tickets as T
+        ticket_dir = tmp_path / "tickets" / "PROJ-1-x"
+        (ticket_dir / "workspace").mkdir(parents=True)
+        repo = _repo(ticket_dir / "workspace" / "app")
+        (repo / "a.py").write_text("x = 2\n")
+        T._commit_workspace_changes(ticket_dir, "PROJ-1",
+                                    message="chore: finalize PROJ-1 worktree for PR",
+                                    config=self.ON)
+        subject = subprocess.run(["git", "log", "-1", "--format=%s"], cwd=str(repo),
+                                 capture_output=True, text=True, check=True).stdout.strip()
+        assert subject == "PROJ-1 chore: finalize PROJ-1 worktree for PR"
+
+    def test_config_defaults_key_first_off(self, tmp_path):
+        from core.config import load_config
+        path = tmp_path / "c.toml"
+        path.write_text('[job]\nkey = "t"\nport = 1\n[workspace]\nroot = "/tmp"\n')
+        assert load_config(str(path))["commits"]["key_first"] is False

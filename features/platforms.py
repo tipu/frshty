@@ -12,6 +12,7 @@ import core.log as log
 from core import external_log
 from core.config import resolve_env, get_repos, base_branch_for
 from core.claude_runner import run_claude_code
+from core.commit_message import merge_message_args
 from core.llm import NO_PUBLISH_RULE
 from features.pr_ci import FAILED_STATES, PASSED_STATES
 
@@ -577,18 +578,21 @@ class BitbucketPlatform(_CIMonitorMixin):
             return {"ok": True}
         return {"ok": False, "error": result.stderr.strip()}
 
-    def merge_base(self, repo_path, base_branch: str, prev_error: str | None = None) -> dict:
+    def merge_base(self, repo_path, base_branch: str, prev_error: str | None = None,
+                   ticket_key: str = "") -> dict:
         _run_git(repo_path, ["fetch", "origin", base_branch])
-        result = _run_git(repo_path, ["merge", f"origin/{base_branch}", "--no-edit"])
+        result = _run_git(repo_path, ["merge", f"origin/{base_branch}", "--no-edit",
+                                       *merge_message_args(self.config, ticket_key, f"origin/{base_branch}")])
         if result.returncode == 0:
             return {"ok": True}
         return _resolve_merge_conflicts(repo_path, base_branch, prev_error=prev_error, merge_error=result.stderr)
 
-    def sync_remote_branch(self, repo_path, branch: str) -> dict:
+    def sync_remote_branch(self, repo_path, branch: str, ticket_key: str = "") -> dict:
         fetched = _run_git(repo_path, ["fetch", "origin", branch])
         if fetched.returncode != 0:
             return {"ok": True}
-        result = _run_git(repo_path, ["merge", f"origin/{branch}", "--no-edit"])
+        result = _run_git(repo_path, ["merge", f"origin/{branch}", "--no-edit",
+                                       *merge_message_args(self.config, ticket_key, f"origin/{branch}")])
         if result.returncode == 0:
             return {"ok": True}
         return _resolve_merge_conflicts(repo_path, branch, merge_error=result.stderr)
@@ -1132,18 +1136,21 @@ class GitHubPlatform(_CIMonitorMixin):
             return {"ok": True}
         return {"ok": False, "error": result.stderr.strip()}
 
-    def merge_base(self, repo_path, base_branch: str, prev_error: str | None = None) -> dict:
+    def merge_base(self, repo_path, base_branch: str, prev_error: str | None = None,
+                   ticket_key: str = "") -> dict:
         _run_git(repo_path, ["fetch", "origin", base_branch])
-        result = _run_git(repo_path, ["merge", f"origin/{base_branch}", "--no-edit"])
+        result = _run_git(repo_path, ["merge", f"origin/{base_branch}", "--no-edit",
+                                       *merge_message_args(self.config, ticket_key, f"origin/{base_branch}")])
         if result.returncode == 0:
             return {"ok": True}
         return _resolve_merge_conflicts(repo_path, base_branch, prev_error=prev_error, merge_error=result.stderr)
 
-    def sync_remote_branch(self, repo_path, branch: str) -> dict:
+    def sync_remote_branch(self, repo_path, branch: str, ticket_key: str = "") -> dict:
         fetched = _run_git(repo_path, ["fetch", "origin", branch])
         if fetched.returncode != 0:
             return {"ok": True}
-        result = _run_git(repo_path, ["merge", f"origin/{branch}", "--no-edit"])
+        result = _run_git(repo_path, ["merge", f"origin/{branch}", "--no-edit",
+                                       *merge_message_args(self.config, ticket_key, f"origin/{branch}")])
         if result.returncode == 0:
             return {"ok": True}
         return _resolve_merge_conflicts(repo_path, branch, merge_error=result.stderr)

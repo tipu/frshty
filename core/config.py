@@ -50,6 +50,7 @@ def load_config(path: str) -> dict:
     raw.setdefault("billing", {})
     raw.setdefault("llm", {"provider": "claude"})
     raw.setdefault("slack_targets", {})
+    raw.setdefault("commits", {})
 
     ws = raw["workspace"]
     ws["root"] = Path(ws["root"])
@@ -68,6 +69,8 @@ def load_config(path: str) -> dict:
     raw["pr"].setdefault("auto_merge", False)
     raw["pr"].setdefault("merge_strategy", "squash")
     raw["pr"].setdefault("merge_flags", [])
+
+    raw["commits"].setdefault("key_first", False)
 
     _resolve_slack_paths(raw["slack"])
 
