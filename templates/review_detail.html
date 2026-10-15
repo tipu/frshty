@@ -77,6 +77,14 @@ textarea { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0; }
 .explainer-valid-yes { background: #14532d; color: #86efac; }
 .explainer-valid-no { background: #7f1d1d; color: #fca5a5; }
 .explainer-valid-partly { background: #713f12; color: #fde047; }
+.explainer-heading { color: #94a3b8; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; margin: 8px 0 3px; }
+.explainer-plain { white-space: pre-wrap; color: #f1f5f9; line-height: 1.6; font-size: 13px; }
+.explainer-code { margin: 6px 0 0; }
+.explainer-code-path { color: #64748b; font-family: monospace; font-size: 11px; }
+.explainer-code pre { margin: 2px 0; padding: 6px 8px; background: #0b0b12; border: 1px solid #23233a; border-radius: 3px; overflow-x: auto; font-size: 11px; line-height: 1.45; color: #e2e8f0; }
+.explainer-code-line { display: block; white-space: pre; }
+.explainer-code-ln { color: #475569; user-select: none; display: inline-block; min-width: 3.5em; }
+.explainer-models summary { cursor: pointer; color: #64748b; font-size: 11px; margin-top: 8px; }
 [v-cloak] { display: none; }
 </style>
 <script src="/static/frshty-usage.js"></script>
@@ -249,14 +257,47 @@ const CommentBlock = {
                 <button @click="$emit('dismiss')" class="text-red-900 hover:text-red-400 text-xs">x</button>
                 <button @click="$emit('next')" class="text-gray-600 hover:text-white text-xs ml-auto">↓ next</button>
             </div>
-            <template v-for="[field, model] in EXPLAINERS" :key="field">
-                <div v-if="c[field]" class="explainer" :class="'explainer-' + model.toLowerCase()">
-                    <div class="flex items-center gap-2 mb-1 text-xs">
-                        <span class="text-gray-400">{{ model }}: Is this a valid concern?</span>
-                        <span class="badge" :class="'explainer-valid-' + c[field].valid">{{ c[field].valid }}</span>
-                    </div>
-                    <div class="explainer-text">{{ c[field].text }}</div>
+            <div v-if="c.explainer_summary" class="explainer explainer-summary">
+                <div class="flex items-center gap-2 mb-1 text-xs">
+                    <span class="text-gray-400">Is this a valid concern?</span>
+                    <span class="badge" :class="'explainer-valid-' + c.explainer_summary.valid">{{ c.explainer_summary.valid }}</span>
+                    <span class="text-gray-600">Claude: {{ c.explainer_summary.models?.claude }} · Codex: {{ c.explainer_summary.models?.codex }}</span>
                 </div>
+                <div class="explainer-heading">What the issue is, in plain words</div>
+                <div class="explainer-plain">{{ c.explainer_summary.plain }}</div>
+                <template v-if="(c.explainer_summary.code || []).length">
+                    <div class="explainer-heading">The code in this PR</div>
+                    <div v-for="part in c.explainer_summary.code" :key="part.path + ':' + part.start" class="explainer-code">
+                        <div class="explainer-code-path">{{ part.path }}:{{ part.start }}<template v-if="part.end > part.start">-{{ part.end }}</template></div>
+                        <pre><span v-for="(text, i) in part.code.split('\\n')" :key="i" class="explainer-code-line"><span class="explainer-code-ln">{{ part.start + i }}</span>{{ text }}</span></pre>
+                        <div v-if="part.note" class="explainer-text">{{ part.note }}</div>
+                    </div>
+                </template>
+                <div class="explainer-heading">Summary of Claude and Codex</div>
+                <div class="explainer-text">{{ c.explainer_summary.summary }}</div>
+                <details class="explainer-models">
+                    <summary>Claude and Codex answers</summary>
+                    <template v-for="[field, model] in EXPLAINERS" :key="field">
+                        <div v-if="c[field]" class="explainer" :class="'explainer-' + model.toLowerCase()">
+                            <div class="flex items-center gap-2 mb-1 text-xs">
+                                <span class="text-gray-400">{{ model }}: Is this a valid concern?</span>
+                                <span class="badge" :class="'explainer-valid-' + c[field].valid">{{ c[field].valid }}</span>
+                            </div>
+                            <div class="explainer-text">{{ c[field].text }}</div>
+                        </div>
+                    </template>
+                </details>
+            </div>
+            <template v-else>
+                <template v-for="[field, model] in EXPLAINERS" :key="field">
+                    <div v-if="c[field]" class="explainer" :class="'explainer-' + model.toLowerCase()">
+                        <div class="flex items-center gap-2 mb-1 text-xs">
+                            <span class="text-gray-400">{{ model }}: Is this a valid concern?</span>
+                            <span class="badge" :class="'explainer-valid-' + c[field].valid">{{ c[field].valid }}</span>
+                        </div>
+                        <div class="explainer-text">{{ c[field].text }}</div>
+                    </div>
+                </template>
             </template>
             <div v-if="discussOpen" class="discuss-panel" :id="'discuss-panel-' + c.idx">
                 <div class="discuss-header">

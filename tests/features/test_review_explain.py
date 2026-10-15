@@ -9,6 +9,8 @@ import threading
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 import core.llm as llm
 import core.state as state
 from features import reviewer
@@ -104,6 +106,13 @@ class TestExplainCommentWithCodex:
             assert reviewer._ask_codex("prompt", tmp_path) is None
 
 
+@pytest.fixture
+def no_summary():
+    with patch.object(reviewer, "summarize_comment", return_value=None) as summarize:
+        yield summarize
+
+
+@pytest.mark.usefixtures("no_summary")
 class TestExplainReview:
     def test_fills_both_models_in_every_queue_and_asks_once_per_distinct_comment(self, tmp_path):
         main = _write(tmp_path, "queued_comments.json", [_comment("shared"), _comment("only claude", line=9)])
@@ -172,6 +181,7 @@ class TestExplainReview:
         assert stored[0]["explainer_codex"] == CODEX
 
 
+@pytest.mark.usefixtures("no_summary")
 class TestExplainReviewIsolation:
     def test_the_workers_run_under_the_callers_instance(self, tmp_path):
         """A pool thread starts with empty context variables, so without the
@@ -217,3 +227,129 @@ class TestExplainReviewIsolation:
         stored = json.loads(f.read_text())
         assert [c["body"] for c in stored] == ["keep"]
         assert stored[0]["explainer"]["valid"] == "yes"
+
+
+CLAUDE = {"valid": "yes", "text": "The loop stops one row early."}
+
+
+def _summary_answer(code=None, **extra):
+    return json.dumps({"valid": "yes", "summary": "Both agree.", "plain": "A box holds 3 eggs.",
+                       "code": code if code is not None else [], **extra})
+
+
+class TestSummarizeComment:
+    def test_merges_both_answers_and_reads_the_code_from_the_checkout(self, tmp_path):
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        (worktree / "a.py").write_text("one\ntwo\nthree\nfour\n")
+        code = [{"path": "a.py", "start": 2, "end": 3, "code": "made up", "note": "Reads rows."}]
+        with patch.object(reviewer, "run_balanced", return_value=_summary_answer(code)) as balanced, \
+             patch.object(reviewer, "log"):
+            out = reviewer.summarize_comment(
+                _comment("off by one"), {"explainer": CLAUDE, "explainer_codex": CODEX},
+                tmp_path, worktree)
+        assert out == {"valid": "yes", "summary": "Both agree.", "plain": "A box holds 3 eggs.",
+                       "code": [{"path": "a.py", "start": 2, "end": 3, "code": "two\nthree",
+                                 "note": "Reads rows."}],
+                       "models": {"claude": "yes", "codex": "partly"}}
+        prompt = balanced.call_args.args[0]
+        assert balanced.call_args.kwargs["worktree"] == worktree
+        assert "off by one" in prompt
+        assert "The loop stops one row early." in prompt
+        assert "Codex says partly." in prompt
+
+    def test_a_path_outside_the_checkout_is_dropped(self, tmp_path):
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        (tmp_path / "secret.txt").write_text("key\n")
+        code = [{"path": "../secret.txt", "start": 1, "end": 1, "note": "x"},
+                {"path": "missing.py", "start": 1, "end": 1, "note": "x"}]
+        with patch.object(reviewer, "run_balanced", return_value=_summary_answer(code)), \
+             patch.object(reviewer, "log"):
+            out = reviewer.summarize_comment(
+                _comment("x"), {"explainer": CLAUDE, "explainer_codex": CODEX}, tmp_path, worktree)
+        assert out["code"] == []
+
+    def test_the_snippet_is_cut_to_the_line_limit_and_the_file_end(self, tmp_path):
+        worktree = tmp_path / "worktree"
+        worktree.mkdir()
+        (worktree / "a.py").write_text("\n".join(str(n) for n in range(1, 101)))
+        code = [{"path": "a.py", "start": 10, "end": 90, "note": ""},
+                {"path": "a.py", "start": 99, "end": 120, "note": ""}]
+        with patch.object(reviewer, "run_balanced", return_value=_summary_answer(code)), \
+             patch.object(reviewer, "log"):
+            out = reviewer.summarize_comment(
+                _comment("x"), {"explainer": CLAUDE, "explainer_codex": CODEX}, tmp_path, worktree)
+        first, last = out["code"]
+        assert (first["start"], first["end"]) == (10, 10 + reviewer.SUMMARY_SNIPPET_LINES - 1)
+        assert (last["start"], last["end"], last["code"]) == (99, 100, "99\n100")
+
+    def test_without_a_checkout_the_models_copy_is_kept(self, tmp_path):
+        code = [{"path": "a.py", "start": 4, "end": 5, "code": "x = 1\ny = 2", "note": "Sets x."}]
+        with patch.object(reviewer, "run_balanced", return_value=_summary_answer(code)), \
+             patch.object(reviewer, "log"):
+            out = reviewer.summarize_comment(
+                _comment("x"), {"explainer": CLAUDE, "explainer_codex": CODEX}, tmp_path, None)
+        assert out["code"] == [{"path": "a.py", "start": 4, "end": 5, "code": "x = 1\ny = 2",
+                                "note": "Sets x."}]
+
+    def test_no_plain_breakdown_is_logged_and_returns_none(self, tmp_path):
+        with patch.object(reviewer, "run_balanced", return_value=_summary_answer(plain="")), \
+             patch.object(reviewer, "log") as log:
+            assert reviewer.summarize_comment(
+                _comment("x"), {"explainer": CLAUDE, "explainer_codex": CODEX},
+                tmp_path, None) is None
+        assert log.emit.call_args.args[0] == "review_explain_failed"
+
+
+def _claude_and_summary(prompt, **kwargs):
+    if kwargs["function_name"] == "review_explain_summary":
+        return _summary_answer()
+    return _answer()
+
+
+class TestExplainReviewSummary:
+    def test_both_explainers_are_merged_into_one_summary_in_every_queue(self, tmp_path):
+        main = _write(tmp_path, "queued_comments.json", [_comment("shared")])
+        other = _write(tmp_path, "queued_comments.codex.json", [_comment("shared")])
+        claude, codex = _models(_claude_and_summary, _codex_answer())
+        with claude as balanced, codex, patch.object(reviewer, "log"):
+            filled = reviewer.explain_review(tmp_path, None)
+        assert filled == 6
+        assert [k.kwargs["function_name"] for k in balanced.call_args_list].count(
+            "review_explain_summary") == 1
+        for f in (main, other):
+            stored = json.loads(f.read_text())[0]
+            assert stored[reviewer.SUMMARY_FIELD]["plain"] == "A box holds 3 eggs."
+            assert stored[reviewer.SUMMARY_FIELD]["models"] == {"claude": "yes", "codex": "partly"}
+
+    def test_no_summary_while_one_explainer_is_missing(self, tmp_path):
+        f = _write(tmp_path, "queued_comments.json", [_comment("x")])
+        claude, codex = _models(_claude_and_summary, None)
+        with claude as balanced, codex, patch.object(reviewer, "log"):
+            assert reviewer.explain_review(tmp_path, None) == 1
+        assert [k.kwargs["function_name"] for k in balanced.call_args_list] == ["review_explain"]
+        assert reviewer.SUMMARY_FIELD not in json.loads(f.read_text())[0]
+
+    def test_an_explained_comment_gets_only_the_summary(self, tmp_path):
+        f = _write(tmp_path, "queued_comments.json",
+                   [_comment("old", explainer=CLAUDE, explainer_codex=CODEX)])
+        claude, codex = _models(_claude_and_summary)
+        with claude as balanced, codex as ask, patch.object(reviewer, "log"):
+            assert reviewer.explain_review(tmp_path, None) == 1
+        ask.assert_not_called()
+        assert [k.kwargs["function_name"] for k in balanced.call_args_list] == [
+            "review_explain_summary"]
+        assert json.loads(f.read_text())[0][reviewer.SUMMARY_FIELD]["summary"] == "Both agree."
+
+    def test_a_summarized_comment_is_never_asked_again(self, tmp_path):
+        done = {"valid": "no", "summary": "s", "plain": "p", "code": []}
+        _write(tmp_path, "queued_comments.json",
+               [_comment("old", explainer=CLAUDE, explainer_codex=CODEX, explainer_summary=done)])
+        tasks = _write(tmp_path, "queued_comments.tasks.json", [_comment("old")])
+        claude, codex = _models()
+        with claude as balanced, codex as ask, patch.object(reviewer, "log"):
+            assert reviewer.explain_review(tmp_path, None) == 3
+        balanced.assert_not_called()
+        ask.assert_not_called()
+        assert json.loads(tasks.read_text())[0][reviewer.SUMMARY_FIELD] == done
