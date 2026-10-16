@@ -327,6 +327,13 @@ class TestTheObjectiveCarriesTheArm:
     def test_it_asks_for_clearances(self, tmp_path):
         assert "CLEARANCES:" in self._objective(tmp_path)
 
+    def test_it_grades_findings_by_proportion(self, tmp_path):
+        text = self._objective(tmp_path)
+        assert reviewer.PROPORTION_RULES in text
+        assert "returns that path to the old behavior" in text
+        assert "Name the cost of the fix you propose" in text
+        assert "at most two" in text
+
     def test_it_names_the_staged_diff_and_the_post_it_owes(self, tmp_path):
         text = self._objective(tmp_path)
         assert str(_review_dir(tmp_path) / "diff.txt") in text
