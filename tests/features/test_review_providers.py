@@ -210,6 +210,17 @@ class TestSeverityRulesAreInEveryPersonaPrompt:
                 persona, "DEV-1", "goal", ["section"], True)
             assert "Silent data loss is blocking." in prompt
 
+    def test_every_persona_grades_findings_by_proportion(self):
+        """A finding whose worst case only restores the old behavior blocked a
+        small change, and a long tail of suggestions buried the one that mattered."""
+        for persona in reviewer.PROMPT_PERSONAS.values():
+            assert reviewer.PROPORTION_RULES in persona
+            prompt = reviewer._build_persona_prompt(
+                persona, _pr(), Path("/tmp/diff.txt"), ["a.ts"], "", None)
+            assert "It never blocks" in prompt
+            assert "Drop the finding when its fix adds more risk" in prompt
+            assert "at most two" in prompt
+
     def test_no_persona_still_invites_an_approval(self):
         """Three personas each ended with an instruction to approve. An empty
         finding list is the neutral way to say the same thing."""
