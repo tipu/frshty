@@ -43,6 +43,7 @@ def _run(tmp_path, attempts_before, fix_result):
 	     patch.object(T, "_claim_session", return_value=("sid", False)), \
 	     patch.object(T, "_commit_workspace_changes"), \
 	     patch.object(T, "run_claude_code", return_value=fix_result), \
+	     patch.object(T, "ticket_rules_files", return_value=[]), \
 	     patch.object(T, "log"):
 		result = T.run_tests_and_fix(_ctx(tmp_path))
 	return result, ticket.get("test_fix_attempts")

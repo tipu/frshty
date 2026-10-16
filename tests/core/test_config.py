@@ -4,7 +4,9 @@ from unittest.mock import patch
 
 import pytest
 
-from core.config import load_config, resolve_env, get_repos, ticket_worktree_path, save_feature_toggle
+from core.config import (
+    load_config, resolve_env, get_repos, ticket_rules_files, ticket_worktree_path, save_feature_toggle,
+)
 
 
 class TestLoadConfig:
@@ -125,6 +127,28 @@ class TestTicketWorktreePath:
         config = {"workspace": {"root": tmp_path, "tickets_dir": "tickets", "ticket_layout": "workspace"}}
         result = ticket_worktree_path(config, "PROJ-1-slug", "myrepo")
         assert result == tmp_path / "tickets" / "PROJ-1-slug" / "workspace" / "myrepo"
+
+
+class TestTicketRulesFiles:
+    def _config(self, tmp_path):
+        for name in ("a", "b", "c"):
+            (tmp_path / name).mkdir()
+        return {"workspace": {"root": tmp_path, "repos": ["a", "b", "c"],
+                              "tickets_dir": "tickets", "ticket_layout": "workspace"}}
+
+    def test_lists_root_then_each_repo_file(self, tmp_path):
+        config = self._config(tmp_path)
+        (tmp_path / "CLAUDE.md").write_text("root rules")
+        wt = ticket_worktree_path(config, "PROJ-1-x", "a")
+        wt.mkdir(parents=True)
+        (wt / "CLAUDE.md").write_text("branch rules")
+        (tmp_path / "a" / "CLAUDE.md").write_text("checkout rules")
+        (tmp_path / "b" / "CLAUDE.md").write_text("checkout rules")
+        assert ticket_rules_files(config, "PROJ-1-x") == [
+            tmp_path / "CLAUDE.md", wt / "CLAUDE.md", tmp_path / "b" / "CLAUDE.md"]
+
+    def test_empty_when_no_file_exists(self, tmp_path):
+        assert ticket_rules_files(self._config(tmp_path), "PROJ-1-x") == []
 
 
 class TestSaveFeatureToggle:
