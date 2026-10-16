@@ -53,7 +53,7 @@ def index(rows: list[dict] | None = None) -> dict:
     system still reports the couples it can see."""
     if rows is None:
         rows = db.query_all(
-            "SELECT instance_key, ticket_key, status, slug FROM tickets")
+            "SELECT instance_key, ticket_key, status, slug, url FROM tickets")
     by_key: dict[str, list[dict]] = {}
     for r in rows:
         by_key.setdefault(r["ticket_key"], []).append(r)
@@ -134,8 +134,24 @@ def links_for(item: dict, idx: dict) -> list[dict]:
                 "instance": r["instance_key"],
                 "status": r["status"] or "",
                 "slug": r["slug"] or "",
-                "url": _detail_url(r["instance_key"], r["ticket_key"]),
+                "url": r.get("url") or _detail_url(r["instance_key"], r["ticket_key"]),
             })
+    return out
+
+
+def external_urls() -> dict[str, dict[str, str]]:
+    """The Jira or Linear address of every ticket key, per instance that
+    holds the key, in instance key order. The address is empty where the
+    ticket has none.
+
+    One key can exist on more than one instance, so a page that knows the
+    task's projects picks the address of the instance the task selected, and
+    an empty address there means that instance's own ticket page."""
+    rows = db.query_all(
+        "SELECT instance_key, ticket_key, url FROM tickets ORDER BY instance_key")
+    out: dict[str, dict[str, str]] = {}
+    for r in rows:
+        out.setdefault(r["ticket_key"], {})[r["instance_key"]] = r["url"] or ""
     return out
 
 

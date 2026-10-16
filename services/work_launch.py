@@ -23,7 +23,7 @@ import core.terminal as terminal
 from core.tasks.tickets import (
     TEST_RUN_TIMEOUT, _NO_LOCAL_PY_VENV_SENTINEL, _detect_runner, _run_repo_tests,
 )
-from services import work_artifacts, work_store, work_worktree
+from services import work_artifacts, work_store, work_tickets, work_worktree
 
 
 def personal_config() -> dict | None:
@@ -181,7 +181,7 @@ def link_map() -> dict:
                     "pr": f"https://bitbucket.org/{org}/{name}/pull-requests/{{n}}",
                     "commit": f"https://bitbucket.org/{org}/{name}/commits/{{sha}}",
                 })
-    return {"repos": repos}
+    return {"repos": repos, "tickets": work_tickets.external_urls()}
 
 
 def slack_available() -> bool:

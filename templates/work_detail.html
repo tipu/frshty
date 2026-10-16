@@ -479,7 +479,10 @@ const app = frshtyApp({
     },
   },
   methods: {
-    lk(text) { return window.frshtyLinkify(text, this.linkmap, this.peerBase); },
+    lk(text) {
+      const contexts = (this.item && this.item.contexts || "").split(",").map(c => c.trim());
+      return window.frshtyLinkify(text, this.linkmap, this.peerBase, contexts);
+    },
     api(path) {
       return this.peer ? "/api/work/peers/" + encodeURIComponent(this.peer) + path : path;
     },
