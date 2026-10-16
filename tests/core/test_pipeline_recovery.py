@@ -652,7 +652,8 @@ class TestForeignPrHold:
         monkeypatch.setattr(task_tickets, "run_claude_code",
                             lambda prompt, **k: seen.append(prompt) or "ok")
 
-        task_tickets._run_pipeline_agent("do the work", ctx=_task_ctx("TEST-1", config),
+        task_tickets._run_pipeline_agent("do the work",
+                                         rules_files=task_tickets._ticket_rules(_task_ctx("TEST-1", config)),
                                          cwd=root / "tickets" / "TEST-1-x", timeout=5)
 
         assert len(seen) == 1

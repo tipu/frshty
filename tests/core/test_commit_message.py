@@ -561,9 +561,10 @@ class TestKeyFirst:
         (ticket_dir / "workspace").mkdir(parents=True)
         repo = _repo(ticket_dir / "workspace" / "app")
         (repo / "a.py").write_text("x = 2\n")
-        T._commit_workspace_changes(ticket_dir, "PROJ-1",
-                                    message="chore: finalize PROJ-1 worktree for PR",
-                                    config=self.ON)
+        with patch.object(T, "ticket_rules_files", return_value=[]):
+            T._commit_workspace_changes(ticket_dir, "PROJ-1",
+                                        message="chore: finalize PROJ-1 worktree for PR",
+                                        config=self.ON)
         subject = subprocess.run(["git", "log", "-1", "--format=%s"], cwd=str(repo),
                                  capture_output=True, text=True, check=True).stdout.strip()
         assert subject == "PROJ-1 chore: finalize PROJ-1 worktree for PR"
