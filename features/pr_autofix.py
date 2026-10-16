@@ -19,7 +19,7 @@ import core.log as log
 import core.queue as q
 import core.state as state
 from core.claude_runner import run_agentic, run_balanced, run_claude_code, extract_json
-from core.commit_message import COMMIT_SUBJECT_RULE, commit_subject
+from core.commit_message import COMMIT_SUBJECT_RULE, branch_key, commit_subject, keyed
 from core.config import base_branch_for, get_repos
 from core.llm import CODEX_EXEC, READ_ONLY_TOOLS, WRITE_TOOLS, run_external_model
 from features.pr_ci import KEEP_GREEN_RULE
@@ -387,11 +387,11 @@ def run(config: dict, payload: dict) -> tuple[bool, str | None]:
             if staged:
                 commit = git_util.commit_with_hooks(
                     worktree,
-                    message=commit_subject(
+                    message=keyed(config, commit_subject(
                         worktree,
                         f"fix: resolve {len(findings)} critical/high review finding(s)",
                         findings_list,
-                    ),
+                    ), branch_key(pr["branch"])),
                     timeout=900,
                 )
                 if commit.returncode != 0:
