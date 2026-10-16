@@ -22,8 +22,9 @@ from pathlib import Path
 
 import core.git_util as git_util
 import core.log as log
-from core.config import base_branch_for, get_repos, ticket_worktree_path
+from core.config import base_branch_for, get_repos, ticket_rules_files, ticket_worktree_path
 from core.consensus_plan import _fan_out, _run_stamp
+from core.llm import rules_directive
 
 SCOPE_FANOUT_TIMEOUT = 1800
 
@@ -178,6 +179,9 @@ def run_scope_review(config: dict, ticket_dir: Path, slug: str, *,
 
     prompt = SCOPE_DIRECTIVE.format(docs_dir=ticket_dir / "docs",
                                     repo_list="\n".join(repo_lines))
+    rules = rules_directive(ticket_rules_files(config, slug))
+    if rules:
+        prompt = f"{prompt}\n\n{rules}"
     (run_dir / "composed-prompt.md").write_text(prompt)
 
     results = _fan_out(prompt, ticket_dir, run_dir, include_dirs,

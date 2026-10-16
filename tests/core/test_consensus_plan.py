@@ -8,6 +8,8 @@ flags that keep them from silently failing.
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
@@ -16,6 +18,49 @@ from core.llm import validate_model_output  # noqa: E402
 
 
 REAL_PLAN = "# Technical Plan\n\n" + ("Detailed proposal with file:line evidence. " * 20)
+
+
+@pytest.fixture(autouse=True)
+def _no_rules_files(monkeypatch):
+    monkeypatch.setattr(cp, "ticket_rules_files", lambda config, slug: [])
+
+
+def test_every_stage_gets_the_project_rules_files(tmp_path, monkeypatch):
+    rules = [tmp_path / "CLAUDE.md", tmp_path / "repo" / "CLAUDE.md"]
+    monkeypatch.setattr(cp, "ticket_rules_files", lambda config, slug: rules)
+    monkeypatch.setattr(cp.log, "emit", lambda *a, **k: None)
+    monkeypatch.setattr(cp, "_capture_baselines",
+                        lambda config, slug: {"repo": (tmp_path, "abc123")})
+    monkeypatch.setattr(cp, "_assemble_diff", lambda *a, **k: (tmp_path / "p.patch", ["repo"]))
+    (tmp_path / "p.patch").write_text("diff")
+    prompts = {}
+
+    def _fan_out(prompt, *a, **k):
+        prompts["plan"] = prompt
+        return {name: {"text": REAL_PLAN, "valid": True, "reason": "ok"}
+                for name in ("claude", "codex", "agy")}
+
+    def _thinking(prompt, **k):
+        if "Synthesize" in prompt:
+            prompts["synth"] = prompt
+            (tmp_path / "docs").mkdir(exist_ok=True)
+            (tmp_path / "docs" / "technical-plan.md").write_text(REAL_PLAN)
+        elif "change-manifest.md" in prompt:
+            prompts["manifest"] = prompt
+            (tmp_path / "docs" / "change-manifest.md").write_text("manifest")
+        else:
+            prompts["explainer"] = prompt
+        return "ok"
+
+    monkeypatch.setattr(cp, "_fan_out", _fan_out)
+    monkeypatch.setattr(cp, "run_thinking", _thinking)
+
+    ok, reason = cp.run_consensus_plan({}, tmp_path, "slug", ticket_key="T-1")
+
+    assert ok, reason
+    assert set(prompts) == {"plan", "synth", "manifest", "explainer"}
+    for name, prompt in prompts.items():
+        assert f"- {rules[0]}\n- {rules[1]}" in prompt, name
 
 
 def test_validate_accepts_real_plan():
@@ -198,7 +243,7 @@ def test_quorum_proceeds_with_two_valid(tmp_path, monkeypatch):
     })
     seen = {}
 
-    def fake_synth(ticket_dir, plan_files, timeout):
+    def fake_synth(ticket_dir, plan_files, timeout, rules):
         seen["plan_files"] = plan_files
         return False
 
