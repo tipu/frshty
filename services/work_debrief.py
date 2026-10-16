@@ -45,6 +45,9 @@ DUPLICATE_DETAIL = "same work as work item #{id} ({state})"
 HELD_DETAIL = "held: {key} is not approved in full; waiting on {urls}"
 UNAPPROVED_DETAIL = ("held: a merge on {projects} waits for an approval the "
                      "operator does not give himself; nobody has approved {urls}")
+CI_PASSING = "passing"
+RED_CI_DETAIL = ("held: a merge on {projects} waits for passing CI; CI is not "
+                 "passing on {urls}")
 NO_PR_DETAIL = ("held: a merge on {projects} waits for an approval the operator "
                 "does not give himself, and this draft names no open pull "
                 "request whose approval can be read")
@@ -909,8 +912,9 @@ def _hold(followup_id: int, item_id: int, detail: str) -> None:
                  f"yet; {detail}")
 
 
-def _polled_approvers(keys: list[str], pr: dict) -> list[str]:
-    """The approvers the own-PR poll last saw on one pull request.
+def _polled_entry(keys: list[str], pr: dict) -> dict:
+    """What the own-PR poll last saw on one approved pull request, {} when it
+    saw no approver.
 
     A pull request no ticket tracks has no ticket cache to read. The own-PR
     poll writes the same fact for every open pull request of the account it
@@ -940,8 +944,8 @@ def _polled_approvers(keys: list[str], pr: dict) -> list[str]:
         address = work_tickets.pr_address(entry.get("url") or "")
         if address and address != pr.get("key"):
             continue
-        return list(entry["approvers"])
-    return []
+        return entry
+    return {}
 
 
 def _loose_pr_refs(draft: str, scopes: list[dict]) -> list[dict]:
@@ -967,7 +971,11 @@ def _merge_hold_reason(contexts, draft: str, scopes: list[dict]) -> str:
     answer. Every pull request the follow-up would merge has to carry an
     approver before the proposal opens: the one the draft names, every open
     sibling under its ticket, and every further pull request the draft names
-    outside that ticket. A project the operator reviews himself
+    outside that ticket. Every one of them also has to pass CI: an approved
+    pull request whose last cached CI state is not 'passing' (failing,
+    pending, none or unknown in features/pr_ci.ci_summary) is held as well,
+    because a merge proposal over red CI asks for a merge nobody should make.
+    A project the operator reviews himself
     (work_launch.self_merge_projects) waits for nobody, so nothing is held
     there.
 
@@ -991,11 +999,21 @@ def _merge_hold_reason(contexts, draft: str, scopes: list[dict]) -> str:
         return NO_PR_DETAIL.format(projects=projects)
     keys = work_launch.project_keys(contexts)
     waiting = [p for p in tracked if not p.get("approvers")]
-    waiting += [p for p in loose if not _polled_approvers(keys, p)]
-    if not waiting:
-        return ""
-    return UNAPPROVED_DETAIL.format(
-        projects=projects, urls=", ".join(_pr_label(p) for p in waiting))
+    red = [p for p in tracked if p.get("approvers") and p.get("ci") != CI_PASSING]
+    for p in loose:
+        entry = _polled_entry(keys, p)
+        if not entry:
+            waiting.append(p)
+        elif entry.get("ci") != CI_PASSING:
+            red.append(p)
+    reasons = []
+    if waiting:
+        reasons.append(UNAPPROVED_DETAIL.format(
+            projects=projects, urls=", ".join(_pr_label(p) for p in waiting)))
+    if red:
+        reasons.append(RED_CI_DETAIL.format(
+            projects=projects, urls=", ".join(_pr_label(p) for p in red)))
+    return "; ".join(reasons)
 
 
 def _whole_ticket_objective(draft: str, scopes: list[dict]) -> str:
@@ -1050,7 +1068,7 @@ def propose_required_followups() -> list[dict]:
     for the approval as well. He cannot merge a client pull request before a
     reviewer approves it, so a proposal that asks him to is a question he
     cannot answer; it is held until every pull request it would merge carries
-    an approver."""
+    an approver and passes CI."""
     rows = db.query_all(
         "SELECT f.id, f.work_item_id, f.draft, f.unfinished, i.contexts "
         "FROM work_followups f "

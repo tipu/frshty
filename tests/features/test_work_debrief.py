@@ -901,10 +901,10 @@ def _merge_out(draft, unfinished="merge"):
     })
 
 
-def _pr(repo, pr_id, approvers=(), pr_state="OPEN"):
+def _pr(repo, pr_id, approvers=(), pr_state="OPEN", ci="passing"):
     return {"repo": repo, "id": pr_id, "pr_state": pr_state,
             "url": f"https://bitbucket.org/acme/{repo}/pull-requests/{pr_id}",
-            "approvers": list(approvers)}
+            "approvers": list(approvers), "ci": ci}
 
 
 class TestWholeTicketMerge:
@@ -1091,14 +1091,14 @@ class TestOperatorMergeApproval:
         finally:
             state.reset(token)
 
-    def _ticket(self, approvers, pr_state="OPEN", extra=()):
+    def _ticket(self, approvers, pr_state="OPEN", extra=(), ci="passing"):
         token = state.use("acme")
         try:
             state.save_ticket("DEV-900", {
                 "status": "in_review", "slug": "dev-900",
                 "prs": [{"repo": "api", "id": 7, "pr_state": pr_state,
                          "url": "https://github.com/acme/api/pull/7",
-                         "approvers": list(approvers)}] + list(extra)})
+                         "approvers": list(approvers), "ci": ci}] + list(extra)})
         finally:
             state.reset(token)
 
@@ -1106,13 +1106,13 @@ class TestOperatorMergeApproval:
     def _other_pr(approvers=()):
         return {"repo": "web", "id": 3, "pr_state": "OPEN",
                 "url": "https://github.com/acme/web/pull/3",
-                "approvers": list(approvers)}
+                "approvers": list(approvers), "ci": "passing"}
 
     @staticmethod
-    def _prd(repo, pr_id, approvers=(), owner="acme"):
+    def _prd(repo, pr_id, approvers=(), owner="acme", ci="passing"):
         return {"repo": repo, "id": pr_id, "pr_state": "OPEN",
                 "url": f"https://github.com/{owner}/{repo}/pull/{pr_id}",
-                "approvers": list(approvers)}
+                "approvers": list(approvers), "ci": ci}
 
     def _save_ticket(self, key, prs):
         token = state.use("acme")
@@ -1139,7 +1139,7 @@ class TestOperatorMergeApproval:
         item_id = self._required_draft(monkeypatch, tmp_path, "acme")
         assert work_debrief.propose_required_followups() == []
 
-        self._polled("acme", {"api/7": {"approvers": ["Prain"]}})
+        self._polled("acme", {"api/7": {"approvers": ["Prain"], "ci": "passing"}})
 
         assert len(work_debrief.propose_required_followups()) == 1
         assert db.query_one("SELECT id FROM work_items WHERE source_item_id = ?",
@@ -1150,7 +1150,7 @@ class TestOperatorMergeApproval:
         """The blob belongs to the project that polled it. A task on acme
         is not released by an approval someclient's poll recorded."""
         self._required_draft(monkeypatch, tmp_path, "acme")
-        self._polled("someclient", {"api/7": {"approvers": ["Prain"]}})
+        self._polled("someclient", {"api/7": {"approvers": ["Prain"], "ci": "passing"}})
 
         assert work_debrief.propose_required_followups() == []
 
@@ -1236,7 +1236,7 @@ class TestOperatorMergeApproval:
                              draft=self.TWO_PR_DRAFT)
         assert work_debrief.propose_required_followups() == []
 
-        self._polled("acme", {"web/3": {"approvers": ["Prain"]}})
+        self._polled("acme", {"web/3": {"approvers": ["Prain"], "ci": "passing"}})
 
         assert len(work_debrief.propose_required_followups()) == 1
 
@@ -1246,7 +1246,7 @@ class TestOperatorMergeApproval:
         holds for one can predate the adoption. The ticket's own cache is the
         fact that is kept current."""
         self._ticket([])
-        self._polled("acme", {"api/7": {"approvers": ["Prain"]}})
+        self._polled("acme", {"api/7": {"approvers": ["Prain"], "ci": "passing"}})
         self._required_draft(monkeypatch, tmp_path, "acme")
 
         assert work_debrief.propose_required_followups() == []
@@ -1334,7 +1334,7 @@ class TestOperatorMergeApproval:
         for other's."""
         self._save_ticket("DEV-900", [self._prd("api", 7, ["Prain"])])
         self._polled("acme", {"api/7": {
-            "approvers": ["Prain"],
+            "approvers": ["Prain"], "ci": "passing",
             "url": "https://github.com/acme/api/pull/7"}})
         self._required_draft(monkeypatch, tmp_path, "acme",
                              draft=self.OWNER_DRAFT)
@@ -1345,7 +1345,7 @@ class TestOperatorMergeApproval:
             self, monkeypatch, tmp_path):
         self._save_ticket("DEV-900", [self._prd("api", 7, ["Prain"])])
         self._polled("acme", {"api/7": {
-            "approvers": ["Prain"],
+            "approvers": ["Prain"], "ci": "passing",
             "url": "https://github.com/other/api/pull/7"}})
         item_id = self._required_draft(monkeypatch, tmp_path, "acme",
                                        draft=self.OWNER_DRAFT)
@@ -1353,3 +1353,76 @@ class TestOperatorMergeApproval:
         assert len(work_debrief.propose_required_followups()) == 1
         assert db.query_one("SELECT id FROM work_items WHERE source_item_id = ?",
                             (item_id,))
+
+    def test_an_approved_pull_request_with_failing_ci_is_held(
+            self, monkeypatch, tmp_path):
+        self._ticket(["Prain"], ci="failing")
+        item_id = self._required_draft(monkeypatch, tmp_path, "acme")
+
+        assert work_debrief.propose_required_followups() == []
+
+        held = work_debrief.followups_for(item_id)[0]
+        assert "passing CI" in held["detail"]
+        assert "api/pull/7" in held["detail"]
+
+    def test_the_hold_clears_once_ci_passes(self, monkeypatch, tmp_path):
+        self._ticket(["Prain"], ci="pending")
+        item_id = self._required_draft(monkeypatch, tmp_path, "acme")
+        assert work_debrief.propose_required_followups() == []
+
+        self._ticket(["Prain"])
+
+        assert len(work_debrief.propose_required_followups()) == 1
+        assert db.query_one("SELECT id FROM work_items WHERE source_item_id = ?",
+                            (item_id,))
+
+    def test_a_sibling_with_red_ci_holds_the_ticket(self, monkeypatch, tmp_path):
+        self._save_ticket("DEV-900", [self._prd("api", 7, ["Prain"]),
+                                      self._prd("cli", 4, ["Prain"], ci="failing")])
+        item_id = self._required_draft(monkeypatch, tmp_path, "acme")
+
+        assert work_debrief.propose_required_followups() == []
+
+        held = work_debrief.followups_for(item_id)[0]
+        assert "cli/pull/4" in held["detail"]
+
+    def test_a_ticket_pull_request_with_no_ci_state_is_held(
+            self, monkeypatch, tmp_path):
+        self._save_ticket("DEV-900", [{"repo": "api", "id": 7, "pr_state": "OPEN",
+                                       "url": "https://github.com/acme/api/pull/7",
+                                       "approvers": ["Prain"]}])
+        self._required_draft(monkeypatch, tmp_path, "acme")
+
+        assert work_debrief.propose_required_followups() == []
+
+    def test_a_loose_pull_request_needs_passing_ci_too(
+            self, monkeypatch, tmp_path):
+        self._polled("acme", {"api/7": {"approvers": ["Prain"], "ci": "failing"}})
+        item_id = self._required_draft(monkeypatch, tmp_path, "acme")
+
+        assert work_debrief.propose_required_followups() == []
+        held = work_debrief.followups_for(item_id)[0]
+        assert "passing CI" in held["detail"]
+
+        self._polled("acme", {"api/7": {"approvers": ["Prain"], "ci": "passing"}})
+
+        assert len(work_debrief.propose_required_followups()) == 1
+
+    def test_an_unapproved_pull_request_with_red_ci_names_both_reasons(
+            self, monkeypatch, tmp_path):
+        self._save_ticket("DEV-900", [self._prd("api", 7),
+                                      self._prd("cli", 4, ["Prain"], ci="failing")])
+        item_id = self._required_draft(monkeypatch, tmp_path, "acme")
+
+        assert work_debrief.propose_required_followups() == []
+
+        detail = work_debrief.followups_for(item_id)[0]["detail"]
+        assert "nobody has approved https://github.com/acme/api/pull/7" in detail
+        assert "CI is not passing on https://github.com/acme/cli/pull/4" in detail
+
+    def test_red_ci_does_not_hold_a_project_the_operator_reviews_himself(
+            self, monkeypatch, tmp_path):
+        self._polled("frshty", {"api/7": {"approvers": [], "ci": "failing"}})
+        self._required_draft(monkeypatch, tmp_path, "frshty")
+
+        assert len(work_debrief.propose_required_followups()) == 1

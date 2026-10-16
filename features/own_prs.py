@@ -14,7 +14,7 @@ import core.branch_sync as branch_sync
 from core.claude_runner import run_claude_code, run_haiku, run_balanced, extract_json
 from core.commit_message import COMMIT_SUBJECT_RULE, branch_key, commit_subject, keyed
 from core.config import base_branch_for, get_repos
-from features.pr_ci import KEEP_GREEN_RULE
+from features.pr_ci import KEEP_GREEN_RULE, ci_summary
 from features.platforms import make_platform
 
 RECLAIM_STALE_SECONDS = 1200
@@ -101,6 +101,10 @@ def _cache_pr_metadata(platform, pr: dict, seen: dict) -> None:
     approvers = info.get("approvers") or []
     seen["approvers"] = approvers
     seen["review_state"] = "approved" if approvers else "pending"
+    try:
+        seen["ci"] = ci_summary(platform.get_pr_checks(pr["repo"], pr["id"]))
+    except Exception:
+        seen["ci"] = "unknown"
 
 
 def _self_id(config: dict, platform=None) -> str:

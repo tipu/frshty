@@ -332,7 +332,8 @@ def merge_scopes(text: str) -> list[dict]:
                 continue
             entry = {"repo": pr.get("repo"), "id": pr.get("id"),
                      "url": pr.get("url") or "",
-                     "approvers": list(pr.get("approvers") or [])}
+                     "approvers": list(pr.get("approvers") or []),
+                     "ci": pr.get("ci") or "unknown"}
             if matched:
                 named.append(entry)
             else:
