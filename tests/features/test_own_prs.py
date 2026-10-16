@@ -2142,3 +2142,13 @@ class TestCachePrMetadata:
         seen = {}
         own_prs._cache_pr_metadata(platform, make_pr(), seen)
         assert seen["ci"] == "unknown"
+
+    @pytest.mark.parametrize("check_state", ["ERROR", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"])
+    def test_a_check_state_outside_the_allowlist_is_not_passing(self, check_state):
+        platform = MagicMock()
+        platform.get_pr_info.return_value = {"approvers": ["Jawad"]}
+        platform.get_pr_checks.return_value = [{"name": "test", "state": "SUCCESS"},
+                                               {"name": "lint", "state": check_state}]
+        seen = {}
+        own_prs._cache_pr_metadata(platform, make_pr(), seen)
+        assert seen["ci"] == "unknown"
