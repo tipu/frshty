@@ -21,6 +21,22 @@ import features.presentation as presentation
 from features.platforms import make_platform
 from services import review_store, work_launch, work_store
 
+PROPORTION_RULES = (
+    "PROPORTION RULES: Grade each finding against the behavior before this change, not against "
+    "ideal code.\n"
+    "- Read the base branch and name what the code did there on the path the finding is about. "
+    "When the worst case you traced only returns that path to the old behavior, the change made "
+    "nothing worse. File that finding as a \"suggestion\". It never blocks, even when a blocking "
+    "rule in the SEVERITY RULES names its kind of defect.\n"
+    "- Name the cost of the fix you propose: the code it adds, the callers it touches, and the "
+    "new ways it can fail. Drop the finding when its fix adds more risk than the defect removes.\n"
+    "- A small change whose failures stay contained gets its blocking findings and at most two "
+    "suggestions. Keep the two suggestions with the worst consequence and drop the rest. A "
+    "change is small when it touches a few files and about a hundred changed lines or fewer. A "
+    "failure stays contained when it cannot lose data, cross an auth or tenant boundary, or "
+    "break a caller outside the diff.\n"
+)
+
 PERSONA_SPEC = (
     "You are a spec reviewer. Your single concern: does this diff solve what the ticket or PR description asks for?\n\n"
     "Focus on:\n"
@@ -40,6 +56,7 @@ PERSONA_SPEC = (
     "- Open the tests for the new behaviour. A criterion with no test is not delivered.\n"
     "- Take as many tool calls as you need. Many reads and greps, then the answer. A verified answer "
     "in twenty turns beats a guess in one.\n"
+    + PROPORTION_RULES
 )
 
 PERSONA_BREAKAGE = (
@@ -67,6 +84,7 @@ PERSONA_BREAKAGE = (
     "- Open the tests that cover the changed code paths. No test for a new path is a finding.\n"
     "- Take as many tool calls as you need. Report a finding only after you traced its failure path "
     "through real code. A verified answer in twenty turns beats a guess in one.\n"
+    + PROPORTION_RULES
 )
 
 PERSONA_MAINTAINABILITY = (
@@ -93,6 +111,7 @@ PERSONA_MAINTAINABILITY = (
     "- Before you call a name inconsistent, grep for the term across the repository and see which "
     "spelling the codebase already uses.\n"
     "- Take as many tool calls as you need. A verified answer in twenty turns beats a guess in one.\n"
+    + PROPORTION_RULES
 )
 
 PERSONA_COMBINED = (
@@ -146,6 +165,7 @@ PERSONA_COMBINED = (
     "and see which spelling the codebase already uses.\n"
     "- Take as many tool calls as you need. Many reads and greps, then the answer. A verified answer "
     "in twenty turns beats a guess in one.\n"
+    + PROPORTION_RULES
 )
 
 PERSONAS = {"spec": PERSONA_SPEC, "breakage": PERSONA_BREAKAGE, "maintainability": PERSONA_MAINTAINABILITY}
@@ -291,7 +311,10 @@ TASK_REVIEW_RULES = (
     "non-trivial part of the diff you examined and cleared, add one line to \"summary\" naming what "
     "you opened, what you concluded, and the evidence that decided it (file:line, a test, a "
     "caller). An empty issues list with no clearances cannot be told apart from never having "
-    "looked.\n"
+    "looked.\n\n"
+    "Pass the PROPORTION RULES below to every sub-agent, and apply them again when you "
+    "consolidate. The two-suggestion limit applies to the consolidated review.\n"
+    + PROPORTION_RULES
 )
 
 
