@@ -33,7 +33,7 @@ def _count_failure(st: dict, attempts: int, result: str, error: str) -> dict:
 
 
 def sync_branch_with_base(platform, repo_path, base_branch: str, branch: str,
-                          st: dict, ensure_worktree) -> dict:
+                          st: dict, ensure_worktree, ticket_key: str = "") -> dict:
     """Merge base into branch when base has moved ahead, then push.
 
     st keys (read/written): base_sync_sha, base_synced, base_sync_attempts,
@@ -92,7 +92,8 @@ def sync_branch_with_base(platform, repo_path, base_branch: str, branch: str,
         return {"result": "dirty_worktree", "error": error,
                 "attempts": MAX_BASE_SYNC_ATTEMPTS, "capped": True}
 
-    merged = platform.merge_base(worktree, base_branch, prev_error=st.get("last_base_error"))
+    merged = platform.merge_base(worktree, base_branch, prev_error=st.get("last_base_error"),
+                                 ticket_key=ticket_key)
     if not merged.get("ok"):
         st["base_sync_attempts"] = attempts + 1
         st["last_base_error"] = merged.get("error", "")

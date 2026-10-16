@@ -12,7 +12,7 @@ from core.comments import (MAX_AUTOMATED_REVIEW_FIX_RUNS, automated_review_skip_
 import core.git_util as git_util
 import core.branch_sync as branch_sync
 from core.claude_runner import run_claude_code, run_haiku, run_balanced, extract_json
-from core.commit_message import COMMIT_SUBJECT_RULE, commit_subject
+from core.commit_message import COMMIT_SUBJECT_RULE, branch_key, commit_subject, keyed
 from core.config import base_branch_for, get_repos
 from features.pr_ci import KEEP_GREEN_RULE
 from features.platforms import make_platform
@@ -560,7 +560,8 @@ def _comment_fix_tools(worktree: Path) -> list[str]:
 
 
 def _commit_fix(worktree, message, context: str = "",
-                head_before: str = "", pre_dirty=()) -> tuple[bool, str]:
+                head_before: str = "", pre_dirty=(), config: dict | None = None,
+                ticket_key: str = "") -> tuple[bool, str]:
     """Commit what the fix run produced.
 
     `pre_dirty` is a `git_util.dirty_paths` snapshot taken before the run.
@@ -582,6 +583,7 @@ def _commit_fix(worktree, message, context: str = "",
         return False, "no changes produced"
     if context:
         message = commit_subject(worktree, message, context)
+    message = keyed(config, message, ticket_key)
     commit = git_util.commit_with_hooks(worktree, message=message, timeout=900,
                                         exclude=pre_dirty)
     if commit.returncode != 0:
@@ -632,7 +634,8 @@ def fix_comment(config, payload) -> tuple[bool, str | None]:
 
             committed, commit_reason = _commit_fix(
                 worktree, f"fix: address review comment on {comment.get('path', 'unknown')}",
-                context=comment["body"], head_before=head_before, pre_dirty=pre_dirty)
+                context=comment["body"], head_before=head_before, pre_dirty=pre_dirty,
+                config=config, ticket_key=branch_key(pr["branch"]))
             if not committed:
                 log.emit("pr_comment_blocked", f"{pr_ref}: {commit_reason} — {comment['body'][:80]}", links=links, meta={**meta, "reason": commit_reason})
                 comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, commit_reason)
@@ -757,7 +760,8 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
 
             committed, commit_reason = _commit_fix(
                 worktree, f"fix: address {len(pending)} review comments",
-                context=comment_list, head_before=head_before, pre_dirty=pre_dirty)
+                context=comment_list, head_before=head_before, pre_dirty=pre_dirty,
+                config=config, ticket_key=branch_key(pr["branch"]))
             if not committed:
                 return _fail_all(pending_ids, commit_reason)
 
@@ -933,7 +937,7 @@ def _check_base_fresh(config, platform, pr, seen, base_url):
     try:
         outcome = branch_sync.sync_branch_with_base(
             platform, repo_path, base_branch, pr["branch"], seen,
-            lambda: _ensure_worktree(config, pr))
+            lambda: _ensure_worktree(config, pr), ticket_key=branch_key(pr["branch"]))
     finally:
         lock.release()
     result = outcome["result"]
