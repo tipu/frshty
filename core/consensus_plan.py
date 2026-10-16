@@ -25,10 +25,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import core.log as log
-from core.config import get_repos, ticket_worktree_path
+from core.config import get_repos, ticket_rules_files, ticket_worktree_path
 from core.llm import (
     CODEX_EXEC,
     NO_PUBLISH_RULE,
+    rules_directive,
     run_thinking,
     run_external_model,
     validate_model_output,
@@ -133,7 +134,7 @@ def _fan_out(prompt: str, ticket_dir: Path, run_dir: Path,
 
 
 def _synthesize_and_implement(ticket_dir: Path, plan_files: list[Path],
-                              timeout: int) -> bool:
+                              timeout: int, rules: str = "") -> bool:
     listing = "\n".join(f"- {p}" for p in plan_files)
     prompt = (
         "You are the orchestrator producing the final technical plan and "
@@ -157,6 +158,7 @@ def _synthesize_and_implement(ticket_dir: Path, plan_files: list[Path],
         "go inside the repository worktree subdirectories of this ticket "
         "directory. Follow each project's conventions. Commit incrementally by "
         "logical unit inside each repo worktree.\n\n"
+        + (f"{rules}\n\n" if rules else "")
         + NO_PUBLISH_RULE
     )
     run_thinking(prompt, cwd=ticket_dir, timeout=timeout)
@@ -194,7 +196,7 @@ def _assemble_diff(baselines: dict[str, tuple[Path, str]],
     return patch, changed
 
 
-def _write_manifest(ticket_dir: Path, patch: Path, timeout: int) -> bool:
+def _write_manifest(ticket_dir: Path, patch: Path, timeout: int, rules: str = "") -> bool:
     prompt = (
         "Write docs/change-manifest.md at technical-product-owner altitude, "
         f"grounded in the ACTUAL diff at {patch} and the plan at "
@@ -203,6 +205,7 @@ def _write_manifest(ticket_dir: Path, patch: Path, timeout: int) -> bool:
         "surfaces, Changed surfaces, Integration obligations, Tradeoffs "
         "accepted, What could break, What tests prove. Derive 'what changed' "
         "from the diff, not from the plan.\n\n"
+        + (f"{rules}\n\n" if rules else "")
         + NO_PUBLISH_RULE
     )
     run_thinking(prompt, cwd=ticket_dir, timeout=timeout)
@@ -237,8 +240,11 @@ QUALITY BAR: every function in TREE must exist in FUNCS with a real file:line yo
 Write only docs/change-explainer.html. Build it incrementally in several smaller writes (initial skeleton, then append each data const and section separately) rather than one single giant write. Do not modify code in the repository worktrees."""
 
 
-def _write_explainer(ticket_dir: Path, patch: Path, timeout: int) -> bool:
-    prompt = f"{EXPLAINER_DIRECTIVE.format(patch=patch)}\n\n{NO_PUBLISH_RULE}"
+def _write_explainer(ticket_dir: Path, patch: Path, timeout: int, rules: str = "") -> bool:
+    prompt = EXPLAINER_DIRECTIVE.format(patch=patch)
+    if rules:
+        prompt = f"{prompt}\n\n{rules}"
+    prompt = f"{prompt}\n\n{NO_PUBLISH_RULE}"
     run_thinking(prompt, cwd=ticket_dir, timeout=timeout)
     return (ticket_dir / "docs" / "change-explainer.html").is_file()
 
@@ -256,7 +262,11 @@ def run_consensus_plan(config: dict, ticket_dir: Path, slug: str, *,
     if not baselines:
         return False, "no repo worktrees found to plan against"
 
-    prompt = f"{PLAN_DIRECTIVE}\n\n{NO_PUBLISH_RULE}"
+    rules = rules_directive(ticket_rules_files(config, slug))
+    prompt = PLAN_DIRECTIVE
+    if rules:
+        prompt = f"{prompt}\n\n{rules}"
+    prompt = f"{prompt}\n\n{NO_PUBLISH_RULE}"
     (run_dir / "composed-prompt.md").write_text(prompt)
     include_dirs = [str(wt) for wt, _ in baselines.values()]
 
@@ -288,7 +298,7 @@ def run_consensus_plan(config: dict, ticket_dir: Path, slug: str, *,
                            f"valid={valid}; dropped {dropped}")
 
     plan_files = [run_dir / f"{name}-plan.md" for name in valid]
-    if not _synthesize_and_implement(ticket_dir, plan_files, BUILD_TIMEOUT):
+    if not _synthesize_and_implement(ticket_dir, plan_files, BUILD_TIMEOUT, rules):
         return False, "synthesis/implementation did not produce docs/technical-plan.md"
 
     patch, changed = _assemble_diff(baselines, run_dir)
@@ -297,16 +307,16 @@ def run_consensus_plan(config: dict, ticket_dir: Path, slug: str, *,
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         manifest_fut = pool.submit(_write_manifest, ticket_dir, patch,
-                                   MANIFEST_TIMEOUT)
+                                   MANIFEST_TIMEOUT, rules)
         explainer_fut = pool.submit(_write_explainer, ticket_dir, patch,
-                                    EXPLAINER_TIMEOUT)
+                                    EXPLAINER_TIMEOUT, rules)
         manifest_ok = manifest_fut.result()
         if not manifest_ok:
             log.emit("ctp_manifest_retry",
                      f"[{ticket_key}] manifest step did not produce "
                      f"docs/change-manifest.md; retrying once",
                      meta={"ticket": ticket_key})
-            manifest_ok = _write_manifest(ticket_dir, patch, MANIFEST_TIMEOUT)
+            manifest_ok = _write_manifest(ticket_dir, patch, MANIFEST_TIMEOUT, rules)
         try:
             explainer_ok = explainer_fut.result()
         except Exception as e:
