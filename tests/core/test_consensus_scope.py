@@ -85,6 +85,22 @@ class TestRunScopeReview:
             return consensus_scope.run_scope_review(
                 scope_config, ticket_dir, slug, ticket_key="PROJ-1"), ticket_dir
 
+    def test_prompt_names_the_project_rules_files(self, tmp_path, scope_config):
+        slug = "PROJ-1-x"
+        wt = _make_worktree(tmp_path / "tickets" / slug / "r")
+        (wt / "CLAUDE.md").write_text("repo rules")
+        (tmp_path / "CLAUDE.md").write_text("root rules")
+        fanout = _fanout_result(claude="SCOPE VERDICT: PASS")
+        with patch("core.consensus_scope.get_repos", return_value=[{"name": "r", "path": wt}]), \
+             patch("core.config.get_repos", return_value=[{"name": "r", "path": wt}]), \
+             patch("core.consensus_scope.ticket_worktree_path", return_value=wt), \
+             patch("core.consensus_scope._fan_out", return_value=fanout) as fan_out, \
+             patch("core.consensus_scope.log"):
+            consensus_scope.run_scope_review(scope_config, tmp_path / "tickets" / slug, slug,
+                                             ticket_key="PROJ-1")
+        prompt = fan_out.call_args.args[0]
+        assert f"- {tmp_path / 'CLAUDE.md'}\n- {wt / 'CLAUDE.md'}" in prompt
+
     def test_all_pass(self, tmp_path, scope_config):
         (result, ticket_dir) = self._run(tmp_path, scope_config, _fanout_result(
             claude="review\nSCOPE VERDICT: PASS",

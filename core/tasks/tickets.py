@@ -18,8 +18,10 @@ import core.log as log
 import core.state as state
 from core.claude_runner import run_claude_code, run_haiku, extract_json
 from core.commit_message import COMMIT_SUBJECT_RULE, HOOKS_RULE, commit_subject, keyed, merge_message_args
-from core.llm import NO_PUBLISH_RULE
-from core.config import base_branch_for, ci_env_enabled, get_repos, ticket_worktree_path
+from core.llm import NO_PUBLISH_RULE, rules_directive
+from core.config import (
+    base_branch_for, ci_env_enabled, get_repos, ticket_rules_files, ticket_worktree_path,
+)
 from core.deps import relink_shared_venv
 from core.consensus_plan import run_consensus_plan
 from core.consensus_scope import (
@@ -60,7 +62,10 @@ FLOW_TIMEOUT = 1800
 MIN_TESTING_MD_BYTES = 200
 
 
-def _run_pipeline_agent(prompt: str, **kwargs) -> str | None:
+def _run_pipeline_agent(prompt: str, rules_files: list[Path] | None = None, **kwargs) -> str | None:
+    rules = rules_directive(rules_files or [])
+    if rules:
+        prompt = f"{prompt}\n\n{rules}"
     return run_claude_code(f"{prompt}\n\n{NO_PUBLISH_RULE}", **kwargs)
 
 
@@ -568,6 +573,7 @@ def _commit_workspace_changes(ticket_dir: Path, ticket_key: str,
 
     commit_msg = message or f"fix: address tri-review findings for {ticket_key}"
 
+    rules_files = ticket_rules_files(config, ticket_dir.name) if config else None
     committed: list[str] = []
     for repo_dir in candidates:
         # Same failure, worse consequence: an unreadable status looks like
@@ -586,7 +592,7 @@ def _commit_workspace_changes(ticket_dir: Path, ticket_key: str,
             git_util.run_git(repo_dir, ["add", "-A"], timeout=60)
             repo_msg = commit_subject(repo_dir, commit_msg, ticket_key=ticket_key)
         outcome, route = commit_repo_changes(repo_dir, ticket_key, repo_msg,
-                                             config=config)
+                                             config=config, rules_files=rules_files)
         if not outcome.ok:
             raise CommitBlocked(repo_dir.name, route, outcome)
         committed.append(repo_dir.name)
@@ -594,7 +600,8 @@ def _commit_workspace_changes(ticket_dir: Path, ticket_key: str,
 
 
 def commit_repo_changes(repo_dir: Path, ticket_key: str, message: str,
-                        exclude=(), config: dict | None = None
+                        exclude=(), config: dict | None = None,
+                        rules_files: list[Path] | None = None
                         ) -> tuple[git_util.CommitOutcome, str]:
     """Commit one repo and give a repairable hook failure a bounded repair.
 
@@ -624,7 +631,7 @@ def commit_repo_changes(repo_dir: Path, ticket_key: str, message: str,
     for repair_round in range(HOOK_REPAIR_ROUNDS):
         if outcome.ok:
             break
-        step = _route_hook_failure(repo_dir, outcome, ticket_key)
+        step = _route_hook_failure(repo_dir, outcome, ticket_key, rules_files)
         if repair_round == 0:
             route = step
         if step != "repair":
@@ -1168,7 +1175,8 @@ def _added_suppressions(repo_dir: Path, snapshot: tuple[str, set[str]] | None,
     return [m for m, n in now.items() if n > was.get(m, 0)]
 
 
-def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
+def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str,
+                        rules_files: list[Path] | None = None) -> str:
     """Decide what a failed commit deserves, and only then maybe edit code.
 
     Returns repair | block_dependency | block_environment | block_git |
@@ -1229,7 +1237,7 @@ def _route_hook_failure(repo_dir: Path, outcome, ticket_key: str) -> str:
         "that satisfies it. If it cannot be fixed by editing code in this repository, "
         "change nothing and say so.\n\n"
         f"HOOK OUTPUT:\n{(outcome.output or '')[-4000:]}",
-        cwd=repo_dir, timeout=HOOK_REPAIR_TIMEOUT)
+        rules_files=rules_files, cwd=repo_dir, timeout=HOOK_REPAIR_TIMEOUT)
     def _undo(why: str) -> str:
         # The hook setup goes back first. _restore_repo enumerates untracked
         # files, and that enumeration reads info/exclude, so cleaning up while
@@ -1285,12 +1293,19 @@ def _kill_stray_recorders() -> None:
     subprocess.run(["pkill", "-f", r"x11grab.*:9[89]"], capture_output=True)
 
 
+def _ticket_slug(ctx: TaskContext) -> str:
+    ts = state.load_ticket(ctx.ticket_key or "") or {}
+    return ts.get("slug") or (ctx.ticket_key or "")
+
+
+def _ticket_rules(ctx: TaskContext) -> list[Path]:
+    return ticket_rules_files(ctx.config, _ticket_slug(ctx))
+
+
 def _ticket_dir(ctx: TaskContext) -> Path:
     ws = ctx.config["workspace"]
-    ts = state.load_ticket(ctx.ticket_key or "") or {}
-    slug = ts.get("slug") or (ctx.ticket_key or "")
     root = Path(ws["root"]) if isinstance(ws["root"], str) else ws["root"]
-    return root / ws["tickets_dir"] / slug
+    return root / ws["tickets_dir"] / _ticket_slug(ctx)
 
 
 @task("scan_tickets", preconditions=[feature_enabled("tickets")], timeout=120)
@@ -1449,7 +1464,7 @@ def start_planning(ctx: TaskContext) -> TaskResult:
             "accepted, what could break, what tests prove. Ground it in the actual "
             "technical-plan content."
         )
-        recovery_result = _run_pipeline_agent(recovery_prompt, cwd=ticket_dir, timeout=300)
+        recovery_result = _run_pipeline_agent(recovery_prompt, rules_files=_ticket_rules(ctx), cwd=ticket_dir, timeout=300)
         if recovery_result is None:
             return TaskResult("failed", "recovery: claude returned non-zero or empty "
                                         "while generating change-manifest.md")
@@ -1522,7 +1537,7 @@ def start_reviewing(ctx: TaskContext) -> TaskResult:
     log.emit("ticket_review_started", f"Headless tri-review for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key,
                    "repos": [name for name, _, _ in repos]})
-    result = _run_pipeline_agent(prompt, cwd=ticket_dir, timeout=REVIEW_TIMEOUT)
+    result = _run_pipeline_agent(prompt, rules_files=_ticket_rules(ctx), cwd=ticket_dir, timeout=REVIEW_TIMEOUT)
     if result is None:
         return TaskResult("failed", "claude returned non-zero or empty")
     review = ticket_dir / "docs" / "tri-review.md"
@@ -1575,7 +1590,7 @@ def generate_flow_doc(ctx: TaskContext) -> TaskResult:
     prompt = _FLOW_PROMPT_TEMPLATE.format(base_branch=base_branch)
     log.emit("ticket_flow_doc_started", f"Building FLOW.html for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key})
-    result = _run_pipeline_agent(prompt, cwd=ticket_dir, timeout=FLOW_TIMEOUT)
+    result = _run_pipeline_agent(prompt, rules_files=_ticket_rules(ctx), cwd=ticket_dir, timeout=FLOW_TIMEOUT)
     if result is None:
         return TaskResult("failed", "claude returned non-zero or empty")
     return TaskResult("ok")
@@ -1603,7 +1618,7 @@ def fix_review_findings(ctx: TaskContext) -> TaskResult:
              meta={"ticket": ctx.ticket_key})
     baseline = _capture_repo_heads(ticket_dir)
     sid, resume = _claim_session(ctx, "fix_review_findings")
-    fix_result = _run_pipeline_agent(fix_prompt, cwd=ticket_dir, timeout=FIX_TIMEOUT,
+    fix_result = _run_pipeline_agent(fix_prompt, rules_files=_ticket_rules(ctx), cwd=ticket_dir, timeout=FIX_TIMEOUT,
                                      session_id=sid, resume=resume)
     if fix_result is None:
         _drop_session(ctx, "fix_review_findings")
@@ -1648,7 +1663,7 @@ def fix_review_findings(ctx: TaskContext) -> TaskResult:
     )
     log.emit("ticket_review_verifying", f"Fresh verify for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key})
-    verify_result = _run_pipeline_agent(verify_prompt, cwd=ticket_dir, timeout=REVIEW_TIMEOUT)
+    verify_result = _run_pipeline_agent(verify_prompt, rules_files=_ticket_rules(ctx), cwd=ticket_dir, timeout=REVIEW_TIMEOUT)
     if verify_result is None:
         return TaskResult("failed", "verify step: claude returned non-zero or empty")
     return TaskResult("ok")
@@ -1797,7 +1812,7 @@ def backfill_artifacts(ctx: TaskContext) -> TaskResult:
     )
     log.emit("ticket_backfill_started", f"Backfilling artifacts for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key, "pr_url": pr_url})
-    result = _run_pipeline_agent(prompt, cwd=ticket_dir, timeout=BACKFILL_TIMEOUT)
+    result = _run_pipeline_agent(prompt, rules_files=_ticket_rules(ctx), cwd=ticket_dir, timeout=BACKFILL_TIMEOUT)
     if result is None:
         return TaskResult("failed", "claude returned non-zero or empty")
     return TaskResult("ok")
@@ -1838,7 +1853,7 @@ def plan_tests(ctx: TaskContext) -> TaskResult:
              f"Headless plan_tests for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key,
                    "has_testing_guide": _testing_md_is_substantive(testing_md_path)})
-    result = _run_pipeline_agent(prompt, cwd=ticket_dir, timeout=TEST_PLAN_TIMEOUT)
+    result = _run_pipeline_agent(prompt, rules_files=_ticket_rules(ctx), cwd=ticket_dir, timeout=TEST_PLAN_TIMEOUT)
     if result is None:
         return TaskResult("failed", "claude returned non-zero or empty")
     return TaskResult("ok")
@@ -1889,7 +1904,7 @@ def write_tests(ctx: TaskContext) -> TaskResult:
              f"Headless write_tests for {ctx.ticket_key}",
              meta={"ticket": ctx.ticket_key})
     sid, resume = _claim_session(ctx, "write_tests")
-    result = _run_pipeline_agent(_WRITE_TESTS_PROMPT, cwd=ticket_dir,
+    result = _run_pipeline_agent(_WRITE_TESTS_PROMPT, rules_files=_ticket_rules(ctx), cwd=ticket_dir,
                                  timeout=TEST_WRITE_TIMEOUT,
                                  session_id=sid, resume=resume)
     if result is None:
@@ -2000,7 +2015,7 @@ def run_tests_and_fix(ctx: TaskContext) -> TaskResult:
 
     fix_prompt = _build_fix_prompt(per_repo)
     sid, resume = _claim_session(ctx, "run_tests_and_fix")
-    fix_result = _run_pipeline_agent(fix_prompt, cwd=ticket_dir,
+    fix_result = _run_pipeline_agent(fix_prompt, rules_files=_ticket_rules(ctx), cwd=ticket_dir,
                                      timeout=TEST_RUN_TIMEOUT,
                                      session_id=sid, resume=resume)
     if fix_result is None:
@@ -2136,7 +2151,7 @@ def prove(ctx: TaskContext) -> TaskResult:
     _kill_stray_recorders()
     sid, resume = _claim_session(ctx, "prove")
     try:
-        result = _run_pipeline_agent(prompt, cwd=ticket_dir, timeout=PROOF_TIMEOUT,
+        result = _run_pipeline_agent(prompt, rules_files=_ticket_rules(ctx), cwd=ticket_dir, timeout=PROOF_TIMEOUT,
                                      session_id=sid, resume=resume)
     finally:
         _kill_stray_recorders()
@@ -2327,7 +2342,7 @@ def generate_pr_descriptions(ctx: TaskContext) -> TaskResult:
         session_prompt = _PR_DESCRIPTIONS_SESSION_PROMPT.format(
             ticket_key=ctx.ticket_key, repo_lines=repo_lines,
         )
-        _run_pipeline_agent(session_prompt, cwd=ticket_dir,
+        _run_pipeline_agent(session_prompt, rules_files=_ticket_rules(ctx), cwd=ticket_dir,
                             timeout=PR_DESCRIPTION_SESSION_TIMEOUT)
         if out_path.exists():
             try:
@@ -2481,7 +2496,7 @@ def fix_reported_bug(ctx: TaskContext) -> TaskResult:
                    "comment_ids": [str(r.get("comment_id")) for r in reports],
                    "reports": len(reports)})
     before = _capture_repo_heads(ticket_dir)
-    result = _run_pipeline_agent(prompt, cwd=ticket_dir, timeout=FIX_TIMEOUT)
+    result = _run_pipeline_agent(prompt, rules_files=_ticket_rules(ctx), cwd=ticket_dir, timeout=FIX_TIMEOUT)
     if result is None:
         _settle_bug_reports(ctx, reports, "claude returned non-zero or empty")
         return TaskResult("failed", "claude returned non-zero or empty")
@@ -2801,7 +2816,7 @@ def fix_scope_findings(ctx: TaskContext) -> TaskResult:
         except OSError:
             pass
     before = _capture_repo_heads(ticket_dir)
-    result = _run_pipeline_agent(prompt, cwd=ticket_dir, timeout=FIX_TIMEOUT)
+    result = _run_pipeline_agent(prompt, rules_files=_ticket_rules(ctx), cwd=ticket_dir, timeout=FIX_TIMEOUT)
     if result is None:
         return TaskResult("failed", "claude returned non-zero or empty")
     try:
@@ -3106,7 +3121,7 @@ def do_research(ctx: TaskContext) -> TaskResult:
         + revision +
         f"\nResearch question:\n{ts.get('summary', '')}\n\n{ts.get('description', '')}"
     )
-    result = _run_pipeline_agent(prompt, cwd=ticket_dir, timeout=RESEARCH_TIMEOUT)
+    result = _run_pipeline_agent(prompt, rules_files=_ticket_rules(ctx), cwd=ticket_dir, timeout=RESEARCH_TIMEOUT)
     if result is None:
         return TaskResult("failed", "research: claude returned non-zero or empty")
     if not research_md.exists():

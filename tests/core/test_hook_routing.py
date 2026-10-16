@@ -44,6 +44,15 @@ class TestRouting:
         assert route == "repair"
         agent.assert_called_once()
 
+    def test_a_repair_prompt_names_the_project_rules_files(self, tmp_path):
+        r = _git_repo(tmp_path)
+        rules = [tmp_path / "CLAUDE.md", r / "CLAUDE.md"]
+        with patch.object(T, "run_claude_code",
+                          side_effect=lambda *a, **k: (r / "src.py").write_text("entry = 1\n") or "fixed") as agent, \
+             patch.object(T, "log"):
+            T._route_hook_failure(r, _outcome("hook_failed", "E741 Ambiguous name"), "DEV-1", rules)
+        assert f"- {rules[0]}\n- {rules[1]}" in agent.call_args.args[0]
+
     def test_a_dependency_failure_is_never_repaired(self, tmp_path):
         with patch.object(T, "run_claude_code") as agent, patch.object(T, "log"):
             route = T._route_hook_failure(

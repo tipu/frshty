@@ -635,3 +635,28 @@ class TestForeignPrHold:
         task_tickets._run_pipeline_agent("do the work", cwd=Path("/x"), timeout=5)
 
         assert seen == [f"do the work\n\n{NO_PUBLISH_RULE}"]
+
+    def test_pipeline_prompts_name_the_project_rules_files(self, monkeypatch, tmp_path):
+        import core.tasks.tickets as task_tickets
+        from core.llm import NO_PUBLISH_RULE
+        config = _make_config(tmp_path)
+        root = config["workspace"]["root"]
+        (root / "repo").mkdir()
+        config["workspace"]["repos"] = ["repo"]
+        (root / "CLAUDE.md").write_text("root rules")
+        wt = root / "tickets" / "TEST-1-x" / "repo"
+        wt.mkdir(parents=True)
+        (wt / "CLAUDE.md").write_text("repo rules")
+        _seed_ticket("test", "TEST-1", "TEST-1-x", "planning")
+        seen = []
+        monkeypatch.setattr(task_tickets, "run_claude_code",
+                            lambda prompt, **k: seen.append(prompt) or "ok")
+
+        task_tickets._run_pipeline_agent("do the work",
+                                         rules_files=task_tickets._ticket_rules(_task_ctx("TEST-1", config)),
+                                         cwd=root / "tickets" / "TEST-1-x", timeout=5)
+
+        assert len(seen) == 1
+        assert seen[0].startswith("do the work\n\n")
+        assert seen[0].endswith(NO_PUBLISH_RULE)
+        assert f"- {root / 'CLAUDE.md'}\n- {wt / 'CLAUDE.md'}\n" in seen[0]

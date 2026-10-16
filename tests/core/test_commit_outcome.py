@@ -181,7 +181,7 @@ class TestTicketCommitRepairBridge:
         assert outcome is committed
         assert selected == "repair"
         assert commit.call_count == 2
-        route.assert_called_once_with(r, failed, "DEV-635")
+        route.assert_called_once_with(r, failed, "DEV-635", None)
 
     def test_a_failure_left_by_a_repair_gets_a_second_repair(self, tmp_path):
         """LSC-144: the repair fixed a return type, and the next commit failed

@@ -373,6 +373,15 @@ NO_PUBLISH_RULE = (
 )
 
 
+def rules_directive(paths: list) -> str:
+    """The prompt line that names the project rules files, or "" for none."""
+    if not paths:
+        return ""
+    return ("Read every file listed below before you do anything else. Those files "
+            "hold the rules of the project. Follow them for this task.\n"
+            + "\n".join(f"- {p}" for p in paths))
+
+
 class ClaudeProvider(LLMProvider):
     def __init__(self, config: dict | None = None):
         llm_cfg = (config or {}).get("llm", {})
