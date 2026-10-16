@@ -852,7 +852,7 @@ def is_dirty(worktree) -> bool:
     return bool(run_git(worktree, ["status", "--porcelain"], timeout=30).stdout.strip())
 
 
-def refresh_worktree_onto_base(worktree, base_branch: str) -> dict:
+def refresh_worktree_onto_base(worktree, base_branch: str, message_args=()) -> dict:
     """Bring a ticket worktree up to date with its base without destroying work.
 
     A plain `reset --hard origin/<base>` is correct only when the branch has no
@@ -897,7 +897,8 @@ def refresh_worktree_onto_base(worktree, base_branch: str) -> dict:
             return {"result": "unknown", "ahead": 0, "error": str(e)[:200]}
         return {"result": "reset", "ahead": 0}
 
-    merged = subprocess.run(["git", "merge", f"origin/{base_branch}", "--no-edit"],
+    merged = subprocess.run(["git", "merge", f"origin/{base_branch}", "--no-edit",
+                             *message_args],
                             cwd=wt, capture_output=True, text=True, timeout=120)
     if merged.returncode != 0:
         aborted = subprocess.run(["git", "merge", "--abort"], cwd=wt,

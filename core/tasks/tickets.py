@@ -17,7 +17,7 @@ import core.git_util as git_util
 import core.log as log
 import core.state as state
 from core.claude_runner import run_claude_code, run_haiku, extract_json
-from core.commit_message import COMMIT_SUBJECT_RULE, HOOKS_RULE, commit_subject
+from core.commit_message import COMMIT_SUBJECT_RULE, HOOKS_RULE, commit_subject, keyed, merge_message_args
 from core.llm import NO_PUBLISH_RULE
 from core.config import base_branch_for, ci_env_enabled, get_repos, ticket_worktree_path
 from core.deps import relink_shared_venv
@@ -542,7 +542,8 @@ def _dirty_workspace_repos(ticket_dir: Path) -> list[str]:
 
 def _commit_workspace_changes(ticket_dir: Path, ticket_key: str,
                               message: str | None = None,
-                              describe: bool = False) -> list[str]:
+                              describe: bool = False,
+                              config: dict | None = None) -> list[str]:
     """Commit meaningful worktree changes left uncommitted by a Claude run.
 
     Skips any repo whose only dirty files are Pipfile / Pipfile.lock — those
@@ -584,7 +585,8 @@ def _commit_workspace_changes(ticket_dir: Path, ticket_key: str,
         if describe:
             git_util.run_git(repo_dir, ["add", "-A"], timeout=60)
             repo_msg = commit_subject(repo_dir, commit_msg, ticket_key=ticket_key)
-        outcome, route = commit_repo_changes(repo_dir, ticket_key, repo_msg)
+        outcome, route = commit_repo_changes(repo_dir, ticket_key, repo_msg,
+                                             config=config)
         if not outcome.ok:
             raise CommitBlocked(repo_dir.name, route, outcome)
         committed.append(repo_dir.name)
@@ -592,7 +594,8 @@ def _commit_workspace_changes(ticket_dir: Path, ticket_key: str,
 
 
 def commit_repo_changes(repo_dir: Path, ticket_key: str, message: str,
-                        exclude=()) -> tuple[git_util.CommitOutcome, str]:
+                        exclude=(), config: dict | None = None
+                        ) -> tuple[git_util.CommitOutcome, str]:
     """Commit one repo and give a repairable hook failure a bounded repair.
 
     Ticket pipeline stages and in-review comment fixes must take the same path.
@@ -613,6 +616,7 @@ def commit_repo_changes(repo_dir: Path, ticket_key: str, message: str,
     bounded diagnostic repair was attempted, or one of ``block_*`` when editing
     this repository cannot safely address the failure.
     """
+    message = keyed(config, message, ticket_key)
     git_util.stage_all(repo_dir, exclude, check=True)
     outcome = git_util.commit_outcome(repo_dir, message=message,
                                       timeout=HOOK_RUN_TIMEOUT, exclude=exclude)
@@ -1388,7 +1392,9 @@ def start_planning(ctx: TaskContext) -> TaskResult:
                 if not wt.is_dir():
                     continue
                 base_branch = base_branch_for(ctx.config, repo["name"])
-                outcome = git_util.refresh_worktree_onto_base(wt, base_branch)
+                outcome = git_util.refresh_worktree_onto_base(
+                    wt, base_branch,
+                    merge_message_args(ctx.config, ctx.ticket_key or "", f"origin/{base_branch}"))
                 if outcome["result"] == "merged":
                     log.emit("ticket_worktree_rebased",
                              f"{ctx.ticket_key}: merged {base_branch} into {repo['name']} "
@@ -1606,7 +1612,7 @@ def fix_review_findings(ctx: TaskContext) -> TaskResult:
     # Commit first. Verifying first meant a failed commit left "VERDICT: PASS"
     # standing over uncommitted work, which is how DEV-635 reached the next stage
     # claiming a review it could not show.
-    committed = _commit_workspace_changes(ticket_dir, ctx.ticket_key or "", describe=True)
+    committed = _commit_workspace_changes(ticket_dir, ctx.ticket_key or "", config=ctx.config, describe=True)
     if committed:
         log.emit("ticket_review_committed",
                  f"Committed fix changes for {ctx.ticket_key}: {', '.join(committed)}",
@@ -1889,7 +1895,7 @@ def write_tests(ctx: TaskContext) -> TaskResult:
     if result is None:
         _drop_session(ctx, "write_tests")
         return TaskResult("failed", "claude returned non-zero or empty")
-    _commit_workspace_changes(ticket_dir, ctx.ticket_key or "",
+    _commit_workspace_changes(ticket_dir, ctx.ticket_key or "", config=ctx.config,
                               message=f"test: scaffold tests for {ctx.ticket_key}")
     return TaskResult("ok")
 
@@ -2004,7 +2010,7 @@ def run_tests_and_fix(ctx: TaskContext) -> TaskResult:
         return TaskResult("failed", "fix step: claude returned non-zero")
 
     _commit_workspace_changes(
-        ticket_dir, ctx.ticket_key or "",
+        ticket_dir, ctx.ticket_key or "", config=ctx.config,
         message=f"fix: address failing tests for {ctx.ticket_key} (attempt {attempt})")
     return TaskResult("ok", artifacts={"attempt": attempt, "verdict": "FAIL",
                                         "fix_dispatched": True})
@@ -2168,7 +2174,7 @@ def mark_ready(ctx: TaskContext) -> TaskResult:
     ticket_dir = _ticket_dir(ctx)
     _clean_workspace_scratch(ticket_dir)
     committed = _commit_workspace_changes(
-        ticket_dir, ctx.ticket_key or "",
+        ticket_dir, ctx.ticket_key or "", config=ctx.config,
         message=f"chore: finalize {ctx.ticket_key} worktree for PR")
     if not committed:
         _record_proof_fingerprint(ctx)
@@ -2481,7 +2487,7 @@ def fix_reported_bug(ctx: TaskContext) -> TaskResult:
         return TaskResult("failed", "claude returned non-zero or empty")
 
     try:
-        _commit_workspace_changes(ticket_dir, ctx.ticket_key or "",
+        _commit_workspace_changes(ticket_dir, ctx.ticket_key or "", config=ctx.config,
                                   message=f"fix: {ctx.ticket_key} address reported issue",
                                   describe=True)
     except CommitBlocked as e:
@@ -2800,7 +2806,7 @@ def fix_scope_findings(ctx: TaskContext) -> TaskResult:
         return TaskResult("failed", "claude returned non-zero or empty")
     try:
         _commit_workspace_changes(
-            ticket_dir, ctx.ticket_key or "",
+            ticket_dir, ctx.ticket_key or "", config=ctx.config,
             message=f"chore: {ctx.ticket_key} remove out-of-scope changes",
             describe=True)
     except CommitBlocked as e:
@@ -3077,7 +3083,9 @@ def do_research(ctx: TaskContext) -> TaskResult:
             if not wt.is_dir():
                 continue
             base_branch = base_branch_for(ctx.config, repo["name"])
-            git_util.refresh_worktree_onto_base(wt, base_branch)
+            git_util.refresh_worktree_onto_base(
+                wt, base_branch,
+                merge_message_args(ctx.config, ctx.ticket_key or "", f"origin/{base_branch}"))
     research_md = ticket_dir / "docs" / "research.md"
     before = _research_digest(research_md)
     revision = _research_revision_context(ticket_dir)
