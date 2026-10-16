@@ -22,7 +22,7 @@
       .join("");
   }
 
-  window.frshtyLinkify = function (text, linkmap, base) {
+  window.frshtyLinkify = function (text, linkmap, base, contexts) {
     let t = esc(text || "");
     t = t.replace(/https?:\/\/[^\s<>()"']+[^\s<>()"'.,;:]/g, m => anchor(m, m));
     const repos = (linkmap && linkmap.repos) || {};
@@ -39,8 +39,15 @@
       t = outsideAnchors(t, seg => seg.replace(hashRe, m =>
         anchor(repos[mentioned[0]].commit.replace("{sha}", m), m)));
     }
+    const tickets = (linkmap && linkmap.tickets) || {};
+    const ticketUrl = key => {
+      const owners = tickets[key];
+      if (!owners) return "";
+      const own = (contexts || []).find(c => Object.prototype.hasOwnProperty.call(owners, c));
+      return own ? owners[own] : (Object.values(owners).find(Boolean) || "");
+    };
     t = outsideAnchors(t, seg => seg.replace(/\b([A-Z]{2,6})-(\d+)\b/g, (m, p, n) =>
-      TICKET_BLOCKLIST.has(p) ? m : anchor((base || "") + "/tickets/" + p + "-" + n, m)));
+      TICKET_BLOCKLIST.has(p) ? m : anchor(ticketUrl(m) ? esc(ticketUrl(m)) : (base || "") + "/tickets/" + m, m)));
     return t;
   };
 })();
