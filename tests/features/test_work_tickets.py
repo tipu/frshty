@@ -24,10 +24,10 @@ def _mkitem(objective, **kw):
     return work_store.create_item(objective, **kw)
 
 
-def _mkticket(instance, key, status="new", slug=""):
+def _mkticket(instance, key, status="new", slug="", url=""):
     token = state.use(instance)
     try:
-        state.save_ticket(key, {"status": status, "slug": slug or key.lower()})
+        state.save_ticket(key, {"status": status, "slug": slug or key.lower(), "url": url})
     finally:
         state.reset(token)
 
@@ -168,6 +168,28 @@ class TestLinksForATask:
         _loaded(monkeypatch, "acme", base_url="http://acme.local/")
         links = work_tickets.links_for(_row(1, "fix DEV-635", "acme"), work_tickets.index())
         assert links[0]["url"] == "http://acme.local/tickets/DEV-635"
+
+    def test_the_link_points_at_the_external_ticket_when_it_has_one(self, monkeypatch):
+        _mkticket("acme", "DEV-635", url="https://tracker.example/browse/DEV-635")
+        _loaded(monkeypatch, "acme", base_url="http://acme.local/")
+        links = work_tickets.links_for(_row(1, "fix DEV-635", "acme"), work_tickets.index())
+        assert links[0]["url"] == "https://tracker.example/browse/DEV-635"
+
+
+class TestExternalUrls:
+    def test_maps_every_key_with_an_external_address(self):
+        _mkticket("acme", "DEV-635", url="https://tracker.example/browse/DEV-635")
+        _mkticket("acme", "PRD-6")
+        assert work_tickets.external_urls() == {
+            "DEV-635": {"acme": "https://tracker.example/browse/DEV-635"},
+            "PRD-6": {"acme": ""}}
+
+    def test_a_key_two_instances_hold_keeps_both_in_instance_order(self):
+        _mkticket("someclient", "DEV-635", url="https://b.example/DEV-635")
+        _mkticket("acme", "DEV-635", url="https://a.example/DEV-635")
+        urls = work_tickets.external_urls()["DEV-635"]
+        assert list(urls.items()) == [("acme", "https://a.example/DEV-635"),
+                                      ("someclient", "https://b.example/DEV-635")]
 
 
 class TestTasksForATicket:
