@@ -86,6 +86,26 @@ def _isolated_artifact_root(tmp_path_factory):
 
 
 @pytest.fixture(scope="session", autouse=True)
+def _no_real_model_binaries(tmp_path_factory):
+    """Put failing `claude` and `codex` stubs first on PATH for the session.
+
+    A route that starts a model run in a background thread reaches the real
+    binaries when a test does not patch that thread: the /tasks review route
+    tests started a Claude and a Codex explainer on every suite run, which
+    spent the operator's plan limit. A stub that exits 1 makes such a call
+    fail fast. A test that needs a model binary passes its own path."""
+    bin_dir = tmp_path_factory.mktemp("frshty-no-model-bin")
+    for name in ("claude", "codex"):
+        stub = bin_dir / name
+        stub.write_text(f"#!/bin/sh\necho 'frshty tests: real {name} call blocked' >&2\nexit 1\n")
+        stub.chmod(0o755)
+    previous = os.environ.get("PATH", "")
+    os.environ["PATH"] = f"{bin_dir}{os.pathsep}{previous}"
+    yield bin_dir
+    os.environ["PATH"] = previous
+
+
+@pytest.fixture(scope="session", autouse=True)
 def _isolated_db(tmp_path_factory):
     """Point the test session, and every program it runs, at a temporary
     database.
