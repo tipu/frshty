@@ -32,7 +32,8 @@ COMMIT_SUBJECT_RULE = (
     "Commit message rule: write the subject as one sentence in lower case, at "
     f"most {SUBJECT_LIMIT} characters after the `fix:` prefix, and say what the "
     "change does. Do not write that the commit answers a review, a finding or a "
-    "report. Do not name any tool or model. Do not add a co-author trailer."
+    "report. Do not name any tool or model. Do not add a co-author trailer. "
+    "When the project's rules put the ticket ID first, start the message with it."
 )
 
 HOOKS_RULE = (
@@ -48,6 +49,8 @@ _TYPE_PREFIX = re.compile(
     r"^(fix|feat|chore|refactor|docs|test|style|perf|build|ci)(\([^)]*\))?:\s*",
     re.IGNORECASE,
 )
+
+_KEY_TOKEN = re.compile(r"[A-Z0-9_]+")
 
 _LABEL_PREFIX = re.compile(r"^(subject|commit subject|commit message)\s*:\s*", re.IGNORECASE)
 
@@ -168,6 +171,74 @@ def subject_prefix(fallback: str, ticket_key: str = "") -> str:
     type_match = _TYPE_PREFIX.match(fallback.strip())
     prefix = type_match.group(0).strip().rstrip(":").lower() + ": " if type_match else ""
     return f"{prefix}{ticket_key} " if ticket_key else prefix
+
+
+def key_first_enabled(config: dict | None) -> bool:
+    """Whether this instance puts the ticket key at the start of every commit
+    message frshty writes, merge commits included. Set by `[commits] key_first`."""
+    return bool(((config or {}).get("commits") or {}).get("key_first"))
+
+
+def branch_key(branch: str) -> str:
+    """The ticket key a branch name carries, or an empty string.
+
+    Ticket branches are `{KEY}-{slug}` or `{prefix}/{type}/{KEY}-{slug}`, and
+    the slug is lower case, so the key is the leading run of upper-case parts
+    of the last path segment. A Jira key is two parts, `DEV-12`, so a slug
+    that starts with a number does not join it. A PRD key such as
+    `PRD-FUNCTIONAL_REQUIREMENTS-3` runs to its first numeric part, so a slug
+    that starts with a number does not join it either."""
+    parts = (branch or "").rsplit("/", 1)[-1].split("-")
+    run = []
+    for part in parts:
+        if not _KEY_TOKEN.fullmatch(part):
+            break
+        run.append(part)
+    if len(run) < 2 or not run[0][:1].isalpha():
+        return ""
+    if run[1].isdigit():
+        return f"{run[0]}-{run[1]}"
+    for end, part in enumerate(run[2:], start=2):
+        if part.isdigit():
+            return "-".join(run[:end + 1])
+    return ""
+
+
+def lead_with_key(message: str, ticket_key: str) -> str:
+    """`message` with `ticket_key` moved or added to the front.
+
+    `fix: DEV-1 add retry` becomes `DEV-1 fix: add retry`, and `test: scaffold
+    tests` becomes `DEV-1 test: scaffold tests`. A message that already starts
+    with the key is returned as it is."""
+    if not ticket_key:
+        return message
+    starts_with_key = re.compile(rf"{re.escape(ticket_key)}(?![A-Za-z0-9])")
+    if starts_with_key.match(message):
+        return message
+    type_match = _TYPE_PREFIX.match(message)
+    if type_match:
+        rest = message[type_match.end():]
+        if starts_with_key.match(rest):
+            rest = rest[len(ticket_key):].lstrip(" :-")
+        message = f"{type_match.group(0).strip()} {rest}"
+    return f"{ticket_key} {message}"
+
+
+def keyed(config: dict | None, message: str, ticket_key: str) -> str:
+    """`message` as this instance's `[commits] key_first` setting wants it."""
+    if not key_first_enabled(config):
+        return message
+    return lead_with_key(message, ticket_key)
+
+
+def merge_message_args(config: dict | None, ticket_key: str, ref: str) -> list[str]:
+    """The `-m` arguments for `git merge <ref>`, or none for git's own message.
+
+    With `[commits] key_first` set, a merge commit starts with the ticket key:
+    `DEV-1 Merge origin/main`. Without a key, git writes its own message."""
+    if not ticket_key or not key_first_enabled(config):
+        return []
+    return ["-m", f"{ticket_key} Merge {ref}"]
 
 
 def clean_subject(raw: str | None, limit: int = SUBJECT_LIMIT) -> str:
