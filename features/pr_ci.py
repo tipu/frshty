@@ -41,7 +41,9 @@ def green_check_names(checks) -> list[str]:
 
 def ci_summary(checks) -> str:
     """Collapse a get_pr_checks() result into one display state for the PR board:
-    'unknown' (fetch failed), 'none' (no checks), 'failing', 'pending', 'passing'."""
+    'unknown' (fetch failed, or a check in a state outside PASSED_STATES,
+    FAILED_STATES and PENDING_STATES), 'none' (no checks), 'failing',
+    'pending', 'passing'."""
     if checks is None:
         return "unknown"
     if not checks:
@@ -51,6 +53,8 @@ def ci_summary(checks) -> str:
         return "failing"
     if any(s in PENDING_STATES for s in states):
         return "pending"
+    if any(s not in PASSED_STATES for s in states):
+        return "unknown"
     return "passing"
 
 

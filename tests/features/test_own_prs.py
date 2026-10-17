@@ -2123,3 +2123,32 @@ class TestUnrelatedCheckRecord:
         with patch("features.own_prs._ensure_worktree", return_value=None):
             own_prs._check_ci({"_state_dir": tmp_path}, platform, make_pr(), seen, "http://base")
         assert seen["ci_unrelated_checks"] == []
+
+
+class TestCachePrMetadata:
+    def test_the_ci_state_is_cached(self):
+        platform = MagicMock()
+        platform.get_pr_info.return_value = {"approvers": ["Prain"]}
+        platform.get_pr_checks.return_value = [{"name": "test", "state": "SUCCESS"}]
+        seen = {}
+        own_prs._cache_pr_metadata(platform, make_pr(), seen)
+        assert seen["ci"] == "passing"
+        assert seen["approvers"] == ["Prain"]
+
+    def test_a_failed_checks_fetch_reads_as_unknown(self):
+        platform = MagicMock()
+        platform.get_pr_info.return_value = {}
+        platform.get_pr_checks.side_effect = RuntimeError("boom")
+        seen = {}
+        own_prs._cache_pr_metadata(platform, make_pr(), seen)
+        assert seen["ci"] == "unknown"
+
+    @pytest.mark.parametrize("check_state", ["ERROR", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"])
+    def test_a_check_state_outside_the_allowlist_is_not_passing(self, check_state):
+        platform = MagicMock()
+        platform.get_pr_info.return_value = {"approvers": ["Prain"]}
+        platform.get_pr_checks.return_value = [{"name": "test", "state": "SUCCESS"},
+                                               {"name": "lint", "state": check_state}]
+        seen = {}
+        own_prs._cache_pr_metadata(platform, make_pr(), seen)
+        assert seen["ci"] == "unknown"
