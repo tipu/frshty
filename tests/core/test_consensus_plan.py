@@ -253,3 +253,26 @@ def test_quorum_proceeds_with_two_valid(tmp_path, monkeypatch):
     assert not ok
     assert "synthesis" in reason
     assert len(seen["plan_files"]) == 2
+
+
+def test_implement_timeout_fails_even_when_the_plan_was_written(tmp_path, monkeypatch):
+    # The implement agent writes docs/technical-plan.md first and then edits
+    # code. A timeout kills it mid-edit, so the plan file alone must not count
+    # as a finished implementation.
+    def _thinking(prompt, **k):
+        (tmp_path / "docs").mkdir(exist_ok=True)
+        (tmp_path / "docs" / "technical-plan.md").write_text(REAL_PLAN)
+        return None
+
+    monkeypatch.setattr(cp, "run_thinking", _thinking)
+    assert cp._synthesize_and_implement(tmp_path, [], 1) is False
+
+
+def test_implement_success_with_plan_passes(tmp_path, monkeypatch):
+    def _thinking(prompt, **k):
+        (tmp_path / "docs").mkdir(exist_ok=True)
+        (tmp_path / "docs" / "technical-plan.md").write_text(REAL_PLAN)
+        return "done"
+
+    monkeypatch.setattr(cp, "run_thinking", _thinking)
+    assert cp._synthesize_and_implement(tmp_path, [], 1) is True

@@ -161,7 +161,8 @@ def _synthesize_and_implement(ticket_dir: Path, plan_files: list[Path],
         + (f"{rules}\n\n" if rules else "")
         + NO_PUBLISH_RULE
     )
-    run_thinking(prompt, cwd=ticket_dir, timeout=timeout)
+    if run_thinking(prompt, cwd=ticket_dir, timeout=timeout) is None:
+        return False
     tp = ticket_dir / "docs" / "technical-plan.md"
     try:
         return tp.is_file() and len(tp.read_text().strip()) >= MIN_TECHNICAL_PLAN_BYTES
@@ -299,7 +300,8 @@ def run_consensus_plan(config: dict, ticket_dir: Path, slug: str, *,
 
     plan_files = [run_dir / f"{name}-plan.md" for name in valid]
     if not _synthesize_and_implement(ticket_dir, plan_files, BUILD_TIMEOUT, rules):
-        return False, "synthesis/implementation did not produce docs/technical-plan.md"
+        return False, ("synthesis/implementation did not finish or did not "
+                       "produce docs/technical-plan.md")
 
     patch, changed = _assemble_diff(baselines, run_dir)
     if patch is None:
