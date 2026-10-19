@@ -1,3 +1,4 @@
+import asyncio
 import os
 import threading
 import tomllib
@@ -11,6 +12,7 @@ import core.log as log
 PEERS_PATH = Path(__file__).parent.parent / "config" / "peers.toml"
 ALLOWED_PREFIX = "api/work/"
 DEFAULT_TIMEOUT = 15.0
+CONNECT_TIMEOUT = 5.0
 
 _cache_lock = threading.Lock()
 _cache: tuple[float, list[dict]] | None = None
@@ -85,16 +87,20 @@ async def request(key: str, method: str, path: str, params: dict | None = None,
     url, error = await run_in_threadpool(resolve, key, path)
     if error:
         return (404 if error.startswith("unknown peer") else 403), {"error": error}
+    phases = httpx.Timeout(timeout, connect=min(CONNECT_TIMEOUT, timeout))
     try:
-        async with httpx.AsyncClient(timeout=timeout, verify=False, follow_redirects=True) as client:
-            if method.upper() == "GET":
-                resp = await client.get(url, params=params or {})
-            else:
-                resp = await client.post(url, params=params or {}, json=body or {})
+        async with asyncio.timeout(timeout):
+            async with httpx.AsyncClient(timeout=phases, verify=False, follow_redirects=True) as client:
+                if method.upper() == "GET":
+                    resp = await client.get(url, params=params or {})
+                else:
+                    resp = await client.post(url, params=params or {}, json=body or {})
     except Exception as e:
-        message = f"peer '{key}' is unreachable: {type(e).__name__}: {e}"
+        reason = (f"no answer within {timeout:g}s" if isinstance(e, TimeoutError)
+                  else f"{type(e).__name__}: {e}")
+        message = f"peer '{key}' is unreachable: {reason}"
         await run_in_threadpool(log.emit, "work_peer_unreachable",
-                                f"{method.upper()} {url} failed: {type(e).__name__}: {e}",
+                                f"{method.upper()} {url} failed: {reason}",
                                 meta={"peer": key, "path": path, "url": url})
         return 502, {"error": message}
     try:
