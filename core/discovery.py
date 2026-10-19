@@ -119,12 +119,15 @@ def find_instance(instances: list[dict], key: str) -> dict | None:
 
 async def call_instance(base_url: str, method: str, path: str, body: dict | None = None, timeout: float = 10.0) -> dict:
     try:
-        async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
-            if method.upper() == "GET":
-                resp = await client.get(f"{base_url}{path}")
-            else:
-                resp = await client.post(f"{base_url}{path}", json=body or {})
-            return resp.json()
+        async with asyncio.timeout(timeout):
+            async with httpx.AsyncClient(timeout=timeout, verify=False) as client:
+                if method.upper() == "GET":
+                    resp = await client.get(f"{base_url}{path}")
+                else:
+                    resp = await client.post(f"{base_url}{path}", json=body or {})
+                return resp.json()
+    except TimeoutError:
+        return {"error": f"no answer within {timeout:g}s"}
     except Exception as e:
         return {"error": str(e)}
 

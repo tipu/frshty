@@ -1,4 +1,5 @@
 import asyncio
+import time
 
 import httpx
 import pytest
@@ -161,6 +162,36 @@ class TestPeerRequest:
         status, payload = asyncio.run(work_peers.request("a", "GET", "api/work/items"))
         assert status == 502
         assert "unreachable" in payload["error"]
+        assert "work_peer_unreachable" in emitted
+
+    def test_slow_peer_is_cut_at_the_total_timeout(self, peers_file, monkeypatch):
+        emitted = []
+        monkeypatch.setattr(log, "emit",
+                            lambda event, summary, **kw: emitted.append(event))
+
+        async def dribble(reader, writer):
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n"
+                         b"content-length: 3\r\n\r\n")
+            for byte in (b"{", b" ", b"}"):
+                await asyncio.sleep(0.4)
+                writer.write(byte)
+                await writer.drain()
+            writer.close()
+
+        async def run():
+            server = await asyncio.start_server(dribble, "127.0.0.1", 0)
+            port = server.sockets[0].getsockname()[1]
+            peers_file.write_text(f'[[peers]]\nkey = "a"\nbase_url = "http://127.0.0.1:{port}"\n')
+            async with server:
+                started = time.monotonic()
+                result = await work_peers.request("a", "GET", "api/work/items", timeout=0.6)
+                return result, time.monotonic() - started
+
+        (status, payload), elapsed = asyncio.run(run())
+        assert status == 502
+        assert "no answer within 0.6s" in payload["error"]
+        assert elapsed < 1.0
         assert "work_peer_unreachable" in emitted
 
     def test_non_json_answer_is_502_and_is_logged(self, peers_file, monkeypatch):
