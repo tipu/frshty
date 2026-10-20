@@ -8,6 +8,7 @@ import time
 import pytest
 
 import core.terminal as terminal
+from scripts import task_display
 
 pytestmark = pytest.mark.skipif(not shutil.which("Xvfb"), reason="Xvfb is not installed")
 
@@ -84,3 +85,45 @@ class TestTaskDisplay:
         assert out.returncode == 0
         assert out.stdout == "display=[]\n"
         assert "Xvfb is not installed" in out.stderr
+
+    def test_the_command_runs_without_display_when_xvfb_cannot_execute(self, tmp_path):
+        fake = tmp_path / "Xvfb"
+        fake.write_bytes(b"\x00not an executable format")
+        fake.chmod(0o755)
+        out = subprocess.run(
+            [sys.executable, terminal.TASK_DISPLAY_SCRIPT, 'echo "display=[$DISPLAY]"'],
+            env={"PATH": f"{tmp_path}:/usr/bin:/bin"}, capture_output=True, text=True,
+        )
+        assert out.returncode == 0
+        assert out.stdout == "display=[]\n"
+        assert "Xvfb did not start" in out.stderr
+
+    def test_only_a_client_with_the_task_cookie_reaches_the_display(self, tmp_path):
+        probe = tmp_path / "probe.py"
+        probe.write_text(
+            "import ctypes\n"
+            "x = ctypes.CDLL('libX11.so.6')\n"
+            "x.XOpenDisplay.restype = ctypes.c_void_p\n"
+            "print('connected' if x.XOpenDisplay(None) else 'refused')\n")
+        command = f"{sys.executable} {probe}; XAUTHORITY=/dev/null {sys.executable} {probe}"
+        out = subprocess.run([sys.executable, terminal.TASK_DISPLAY_SCRIPT, command],
+                             env={"PATH": os.environ["PATH"]}, capture_output=True, text=True)
+        if "OSError" in out.stderr and "libX11" in out.stderr:
+            pytest.skip("libX11 is not installed")
+        assert out.stdout.split() == ["connected", "refused"]
+
+    def test_a_start_removes_the_cookies_of_exited_tasks(self, tmp_path):
+        os.makedirs(task_display.AUTH_DIR, mode=0o700, exist_ok=True)
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        stale = os.path.join(task_display.AUTH_DIR, str(dead.pid))
+        live = os.path.join(task_display.AUTH_DIR, str(os.getpid()))
+        for path in (stale, live):
+            with open(path, "wb") as f:
+                f.write(b"x")
+        try:
+            task_display._prune_cookies()
+            assert not os.path.exists(stale)
+            assert os.path.exists(live)
+        finally:
+            os.unlink(live)
