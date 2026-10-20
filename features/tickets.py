@@ -3498,9 +3498,7 @@ def _handle_ci_failure(ticket, ts, pr, checks, base_url, instance_key="", head_s
 
 
 def _make_slug(key: str, summary: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", summary.lower()).strip("-")
-    words = slug.split("-")[:7]
-    slug = "-".join(words)
+    slug = "-".join(git_util.slug_words(summary))
     return f"{key}-{slug}" if slug else key
 
 
