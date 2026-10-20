@@ -125,6 +125,7 @@ class TestGitHelpers:
             None, 7, "Check https://acme.example.com/board/12?x=1 and www.acme.example.org now")
         assert name == "work-7-check-and-now"
         assert work_worktree.branch_name(None, 7, "https://acme.example.com/a") == "work-7"
+        assert work_worktree.branch_name(None, 7, "see _https://acme.example.com/a_") == "work-7-see"
 
     def test_task_worktree_path_follows_the_ticket_layout(self, tmp_path):
         flat = project_config(tmp_path, ["app"], layout="flat")

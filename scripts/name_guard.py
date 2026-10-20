@@ -108,13 +108,12 @@ def scan_push(repo: str, remote: str, lines: list[str], matcher: Matcher) -> lis
                                timeout=GIT_TIMEOUT).stdout
     for line in objects.splitlines():
         oid, _, path = line.partition(" ")
-        if path:
-            paths.setdefault(oid, path)
-    for oid, data in git_util.read_blobs(repo, list(paths)):
-        if b"\0" in data[:BINARY_PROBE]:
+        paths.setdefault(oid, path)
+    for oid, kind, data in git_util.read_objects(repo, list(paths)):
+        if kind not in ("blob", "tag") or b"\0" in data[:BINARY_PROBE]:
             continue
         for term in matcher.find(data.decode("utf-8", errors="replace")):
-            hits.append((f"file {paths[oid]} ({oid[:10]})", term))
+            hits.append((f"{kind} {paths[oid] or '-'} ({oid[:10]})", term))
     return hits
 
 

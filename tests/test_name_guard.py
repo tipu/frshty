@@ -12,9 +12,9 @@ import name_guard  # noqa: E402
 TERMS = "nesiorkly\tknown\nlus laico\tslack\nlus@pufoundworks.io\temail\n"
 
 
-def _git(cwd, *args, env=None, check=True):
+def _git(cwd, *args, check=True, input_text=None):
     return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True,
-                          check=check, timeout=60, env=env)
+                          check=check, timeout=60, input=input_text)
 
 
 @pytest.fixture
@@ -77,6 +77,18 @@ def test_a_rename_to_a_term_rejects_it(repo):
     got = _push(repo)
     assert got.returncode != 0
     assert "path nesiorkly.md: nesiorkly" in got.stderr
+
+
+@pytest.mark.parametrize("make_tag", [
+    lambda repo: _git(repo, "tag", "-a", "v1", "-m", "release for Nesiorkly"),
+    lambda repo: _git(repo, "tag", "raw", _git(
+        repo, "hash-object", "-w", "--stdin", input_text="client Nesiorkly\n").stdout.strip()),
+])
+def test_a_term_in_a_pushed_tag_rejects_it(repo, make_tag):
+    make_tag(repo)
+    got = _push(repo, "--tags")
+    assert got.returncode != 0
+    assert "nesiorkly" in got.stderr
 
 
 def test_a_term_in_the_branch_name_rejects_it(repo):

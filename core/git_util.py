@@ -45,7 +45,7 @@ WORKTREE_LOCK_REASON = ("frshty owns this worktree; a checkout in another "
 WORKTREE_ADD = ["worktree", "add", "--lock", "--reason", WORKTREE_LOCK_REASON]
 WORKTREE_REMOVE = ["worktree", "remove", "--force", "--force"]
 SLUG_WORDS = 7
-_URL = re.compile(r"(?i)\b(?:[a-z][a-z0-9+.-]*://|www\.)\S*")
+_URL = re.compile(r"(?i)(?:[a-z][a-z0-9+.-]*://|www\.)\S*")
 
 _worktree_locks: dict[str, threading.Lock] = {}
 _worktree_locks_guard = threading.Lock()
@@ -730,10 +730,10 @@ def run_git(cwd, args: list[str], *, allowed_codes=(0,), timeout: int = 60):
     return result
 
 
-def read_blobs(cwd, oids: list[str]):
-    """Yield (oid, bytes) for each blob in `oids`, read through one
-    `git cat-file --batch`. Trees, commits and tags are skipped. A missing
-    object or a failed git raises GitCommandError."""
+def read_objects(cwd, oids: list[str]):
+    """Yield (oid, type, bytes) for each object in `oids`, read through one
+    `git cat-file --batch`. A missing object or a failed git raises
+    GitCommandError."""
     args = ["cat-file", "--batch"]
     proc = subprocess.Popen(["git", *args], cwd=str(cwd), stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -756,8 +756,7 @@ def read_blobs(cwd, oids: list[str]):
                     args, proc.returncode or 1, "", f"no object {oid}"))
             data = proc.stdout.read(int(header[2]))
             proc.stdout.read(1)
-            if header[1] == b"blob":
-                yield oid, data
+            yield oid, header[1].decode(), data
     finally:
         if proc.poll() is None:
             proc.stdout.close()
