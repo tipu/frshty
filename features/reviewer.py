@@ -10,13 +10,14 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import core.log as log
 import core.state as state
 import core.git_util as git_util
 from core.claude_runner import run_agentic, run_balanced, run_haiku, extract_json
 from core.llm import CODEX_EXEC, READ_ONLY_TOOLS, WRITE_TOOLS, run_external_model
-from core.config import base_branch_for, get_repos
+from core.config import base_branch_for, board_url, get_repos
 import features.presentation as presentation
 from features.platforms import make_platform
 from services import review_store, work_launch, work_store
@@ -320,8 +321,11 @@ TASK_REVIEW_RULES = (
 
 def _task_review_objective(config: dict, pr: dict, review_dir: Path, worktree,
                            token: str) -> str:
-    endpoint = (f"{config.get('_base_url', '')}/api/reviews/"
+    base_url = config.get("_base_url", "")
+    endpoint = (f"{board_url() or base_url}/api/reviews/"
                 f"{pr['repo']}/{pr['id']}/task-review?token={token}")
+    host = urlsplit(base_url).hostname
+    host_header = f" -H 'Host: {host}'" if host else ""
     checkout = (f"The branch is checked out read-only at {worktree}." if worktree
                 else "There is no checkout of this branch, so review from the diff alone.")
     return (
@@ -331,7 +335,8 @@ def _task_review_objective(config: dict, pr: dict, review_dir: Path, worktree,
         + TASK_REVIEW_RULES
         + "\nPost the consolidated review to frshty as one JSON object. Write it to a file first, "
           "then send that file:\n"
-        f"    curl -sS -X POST {endpoint} -H 'Content-Type: application/json' -d @review.json\n"
+        f"    curl -sS -X POST {endpoint}{host_header} -H 'Content-Type: application/json' "
+        "-d @review.json\n"
         "The POST is the deliverable. A review that is not posted did not happen. Do not modify "
         "any source file, do not commit, and do not open a pull request.\n\n"
         + JSON_OUTPUT_SCHEMA + SEVERITY_RULES + LINE_NUMBER_RULES + BODY_RULES

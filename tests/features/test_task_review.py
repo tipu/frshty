@@ -309,9 +309,10 @@ class TestARerunOfTheSameDiffKeepsTheOpenTask:
 
 
 class TestTheObjectiveCarriesTheArm:
-    def _objective(self, tmp_path, worktree=None):
-        return reviewer._task_review_objective(_cfg(tmp_path), _pr(),
-                                               _review_dir(tmp_path), worktree, "tok")
+    def _objective(self, tmp_path, worktree=None, bound=""):
+        with patch.object(reviewer, "board_url", return_value=bound):
+            return reviewer._task_review_objective(_cfg(tmp_path), _pr(),
+                                                   _review_dir(tmp_path), worktree, "tok")
 
     def test_it_fans_out_with_no_lane_split(self, tmp_path):
         text = self._objective(tmp_path)
@@ -339,6 +340,11 @@ class TestTheObjectiveCarriesTheArm:
         assert str(_review_dir(tmp_path) / "diff.txt") in text
         assert "http://board/api/reviews/raven/4536/task-review?token=tok" in text
         assert "The POST is the deliverable." in text
+
+    def test_it_posts_to_the_bound_address_under_the_instance_host(self, tmp_path):
+        text = self._objective(tmp_path, bound="http://127.0.0.1:7100")
+        assert ("curl -sS -X POST http://127.0.0.1:7100/api/reviews/raven/4536/"
+                "task-review?token=tok -H 'Host: board'") in text
 
     def test_it_forbids_editing_the_code_it_reviews(self, tmp_path):
         text = self._objective(tmp_path)
