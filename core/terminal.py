@@ -11,6 +11,7 @@ import fcntl
 import termios
 import signal
 import subprocess
+import sys
 import threading
 from starlette.websockets import WebSocket, WebSocketDisconnect
 from starlette.concurrency import run_in_threadpool
@@ -132,6 +133,16 @@ CODEX_NOTIFY_SCRIPT = os.path.join(
 
 PANE_BASHRC = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts", "pane_bashrc")
+
+
+TASK_DISPLAY_SCRIPT = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts", "task_display.py")
+
+
+def with_task_display(command: str) -> str:
+    """`command` run under scripts/task_display.py, which gives it an Xvfb
+    display of its own for exactly as long as it runs."""
+    return f"{shlex.quote(sys.executable)} {shlex.quote(TASK_DISPLAY_SCRIPT)} {shlex.quote(command)}"
 
 
 def _passwd_shell() -> str:
@@ -282,9 +293,12 @@ def launch_pane_command(ticket_key: str, cwd: str, command: str):
     shell non-interactive, so files such as .zshrc are not read. An existing
     pane with no agent is respawned the same way, which also recovers panes
     whose shell startup is stuck.
+
+    The agent runs under scripts/task_display.py, so each agent has a
+    private X display that starts with it and stops when it exits.
     """
     session_name = _tmux_session_name(ticket_key)
-    pane_command = f"{command}; exec {_pane_shell()}"
+    pane_command = f"{with_task_display(command)}; exec {_pane_shell()}"
     if _tmux_session_exists(session_name):
         args = [
             _tmux_bin(), "-S", TMUX_SOCKET, "respawn-pane", "-k", "-t", tmux_target.pane(session_name),
