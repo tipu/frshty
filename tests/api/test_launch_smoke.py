@@ -51,10 +51,10 @@ def test_launch_creates_session_and_resumes(client):
     wt.mkdir(parents=True)
     state.save_ticket("FRG-186", {
         "status": "in_review", "slug": slug, "summary": "Clinician review",
-        "prs": [{"repo": "analysis_dev", "id": 551, "url": "http://x/551", "approvers": ["cody"]}],
+        "prs": [{"repo": "analytics_dev", "id": 551, "url": "http://x/551", "approvers": ["dou"]}],
     })
     # pr_comments.json with a needs_reply comment
-    (wt / "pr_comments.json").write_text('[{"id":1,"pr_repo":"analysis_dev","pr_id":551,"body":"Sanitize?","path":"a.py","line":5,"diff_hunk":"@@","status":"needs_reply","suggested_reply":"done"}]')
+    (wt / "pr_comments.json").write_text('[{"id":1,"pr_repo":"analytics_dev","pr_id":551,"body":"Sanitize?","path":"a.py","line":5,"diff_hunk":"@@","status":"needs_reply","suggested_reply":"done"}]')
 
     calls = []
     def fake_launch(key, cwd, sid, ctx, first_run, config=None):
@@ -100,10 +100,10 @@ def test_launch_reseeds_when_the_agent_never_started(client):
     wt.mkdir(parents=True)
     state.save_ticket("FRG-187", {
         "status": "in_review", "slug": slug, "summary": "Never started",
-        "prs": [{"repo": "analysis_dev", "id": 552, "url": "http://x/552", "approvers": ["cody"]}],
+        "prs": [{"repo": "analytics_dev", "id": 552, "url": "http://x/552", "approvers": ["dou"]}],
     })
     (wt / "pr_comments.json").write_text(
-        '[{"id":2,"pr_repo":"analysis_dev","pr_id":552,"body":"Why?","path":"a.py","line":5,'
+        '[{"id":2,"pr_repo":"analytics_dev","pr_id":552,"body":"Why?","path":"a.py","line":5,'
         '"diff_hunk":"@@","status":"needs_reply","suggested_reply":"because"}]')
 
     calls = []

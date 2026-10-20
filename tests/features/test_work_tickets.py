@@ -325,13 +325,13 @@ class TestMergeScope:
     behind that address decides whether the whole ticket can be merged."""
 
     def test_text_that_names_no_pull_request_has_no_scope(self):
-        _mkticket_prs("acme", "DEV-728", [_pr("django-api", 198, ["Jawad"])])
+        _mkticket_prs("acme", "DEV-728", [_pr("django-api", 198, ["Prain"])])
         assert work_tickets.merge_scopes("push the branch and open a pull request") == []
 
     def test_the_ticket_behind_the_named_address_is_resolved(self):
         _mkticket_prs("acme", "DEV-728", [
-            _pr("django-api", 198, ["Jawad"]),
-            _pr("websocket-hub", 129, ["Jawad"]),
+            _pr("django-api", 198, ["Prain"]),
+            _pr("websocket-hub", 129, ["Prain"]),
         ])
         scope = _one_scope(
             "Merge PR #198 (https://bitbucket.org/acme/django-api/"
@@ -344,9 +344,9 @@ class TestMergeScope:
 
     def test_a_sibling_nobody_approved_is_reported(self):
         _mkticket_prs("acme", "DEV-728", [
-            _pr("django-api", 198, ["Jawad"]),
+            _pr("django-api", 198, ["Prain"]),
             _pr("websocket-hub", 129),
-            _pr("windows-agent", 60, ["Jawad"]),
+            _pr("windows-agent", 60, ["Prain"]),
         ])
         scope = _one_scope(
             "Merge https://bitbucket.org/acme/django-api/pull-requests/198")
@@ -354,7 +354,7 @@ class TestMergeScope:
 
     def test_a_sibling_that_is_no_longer_open_is_not_counted(self):
         _mkticket_prs("acme", "DEV-728", [
-            _pr("django-api", 198, ["Jawad"]),
+            _pr("django-api", 198, ["Prain"]),
             _pr("websocket-hub", 129, pr_state="MERGED"),
         ])
         scope = _one_scope(
@@ -374,7 +374,7 @@ class TestMergeScope:
         """The operator can merge the named pull request by hand while the
         follow-up waits. The siblings it waits for are still unapproved."""
         _mkticket_prs("acme", "DEV-728", [
-            _pr("django-api", 198, ["Jawad"], pr_state="MERGED"),
+            _pr("django-api", 198, ["Prain"], pr_state="MERGED"),
             _pr("websocket-hub", 129),
         ])
         scope = _one_scope(
@@ -387,7 +387,7 @@ class TestMergeScope:
         """in_review is the only status whose poll refreshes the approver
         cache, so it is the only status the cache answers for."""
         _mkticket_prs("acme", "DEV-728", [
-            _pr("django-api", 198, ["Jawad"]),
+            _pr("django-api", 198, ["Prain"]),
             _pr("websocket-hub", 129),
         ], status="done")
         assert work_tickets.merge_scopes(
@@ -395,7 +395,7 @@ class TestMergeScope:
 
     def test_a_github_address_resolves_the_same_way(self):
         _mkticket_prs("someclient", "SC-3064", [
-            _pr("someclient-app-backend", 692, ["Ana"], host="github.com",
+            _pr("someclient-app-backend", 692, ["Glion"], host="github.com",
                 owner="SomeClientLabs"),
             _pr("someclient-app-web", 12, host="github.com", owner="SomeClientLabs"),
         ])
@@ -405,6 +405,6 @@ class TestMergeScope:
         assert [p["id"] for p in scope["unapproved"]] == [12]
 
     def test_a_pull_request_no_ticket_holds_has_no_scope(self):
-        _mkticket_prs("acme", "DEV-728", [_pr("django-api", 198, ["Jawad"])])
+        _mkticket_prs("acme", "DEV-728", [_pr("django-api", 198, ["Prain"])])
         assert work_tickets.merge_scopes(
             "Merge https://bitbucket.org/acme/other-repo/pull-requests/5") == []

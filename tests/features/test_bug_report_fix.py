@@ -42,8 +42,8 @@ class TestBugReportPrompt:
 
     def test_every_report_reaches_the_prompt(self):
         prompt = _bug_report_prompt("DEV-635", "File explorer tool", [
-            {"comment_id": "1", "body": "first failure", "author": "Dan"},
-            {"comment_id": "2", "body": "second failure", "author": "Dan"},
+            {"comment_id": "1", "body": "first failure", "author": "Veal"},
+            {"comment_id": "2", "body": "second failure", "author": "Veal"},
         ])
         assert "first failure" in prompt
         assert "second failure" in prompt

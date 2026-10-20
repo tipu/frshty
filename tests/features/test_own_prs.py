@@ -794,9 +794,9 @@ class TestReopenedThreadEndToEnd:
 
     def test_reply_after_resolve_is_deferred_for_a_fix(self, tmp_path):
         platform = MagicMock()
-        root = make_comment(id=10, author_id="adamwalz", body="Add a fingerprint",
+        root = make_comment(id=10, author_id="mukouven", body="Add a fingerprint",
                             resolved=True, thread_id="T1")
-        reply = make_comment(id=11, author_id="adamwalz", resolved=True, thread_id="T1",
+        reply = make_comment(id=11, author_id="mukouven", resolved=True, thread_id="T1",
                              body="Reopening - this landed as resolved but the line is unchanged")
         platform.get_pr_comments.return_value = [root, reply]
         pr = make_pr()
@@ -819,8 +819,8 @@ class TestReopenedThreadEndToEnd:
 
     def test_reopened_thread_emits_an_event(self, tmp_path):
         platform = MagicMock()
-        root = make_comment(id=10, author_id="adamwalz", resolved=True, thread_id="T1")
-        reply = make_comment(id=11, author_id="adamwalz", resolved=True, thread_id="T1")
+        root = make_comment(id=10, author_id="mukouven", resolved=True, thread_id="T1")
+        reply = make_comment(id=11, author_id="mukouven", resolved=True, thread_id="T1")
         platform.get_pr_comments.return_value = [root, reply]
 
         with patch("features.own_prs.comments") as mock_comments, \
@@ -840,7 +840,7 @@ class TestReopenedThreadEndToEnd:
 
     def test_a_reply_frshty_wrote_itself_is_not_a_reopen(self, tmp_path):
         platform = MagicMock()
-        root = make_comment(id=10, author_id="adamwalz", resolved=True, thread_id="T1")
+        root = make_comment(id=10, author_id="mukouven", resolved=True, thread_id="T1")
         reply = make_comment(id=11, author_id="me-gh", body="fixed in abc123",
                              resolved=True, thread_id="T1")
         platform.get_pr_comments.return_value = [root, reply]
@@ -862,8 +862,8 @@ class TestReopenedThreadEndToEnd:
 
     def test_reclaim_does_not_close_a_reopened_thread(self, tmp_path):
         platform = MagicMock()
-        root = make_comment(id=10, author_id="adamwalz", resolved=True, thread_id="T1")
-        reply = make_comment(id=11, author_id="adamwalz", resolved=True, thread_id="T1")
+        root = make_comment(id=10, author_id="mukouven", resolved=True, thread_id="T1")
+        reply = make_comment(id=11, author_id="mukouven", resolved=True, thread_id="T1")
         platform.get_pr_comments.return_value = [root, reply]
 
         with patch("features.own_prs.comments") as mock_comments, \
@@ -2128,12 +2128,12 @@ class TestUnrelatedCheckRecord:
 class TestCachePrMetadata:
     def test_the_ci_state_is_cached(self):
         platform = MagicMock()
-        platform.get_pr_info.return_value = {"approvers": ["Jawad"]}
+        platform.get_pr_info.return_value = {"approvers": ["Prain"]}
         platform.get_pr_checks.return_value = [{"name": "test", "state": "SUCCESS"}]
         seen = {}
         own_prs._cache_pr_metadata(platform, make_pr(), seen)
         assert seen["ci"] == "passing"
-        assert seen["approvers"] == ["Jawad"]
+        assert seen["approvers"] == ["Prain"]
 
     def test_a_failed_checks_fetch_reads_as_unknown(self):
         platform = MagicMock()
@@ -2146,7 +2146,7 @@ class TestCachePrMetadata:
     @pytest.mark.parametrize("check_state", ["ERROR", "ACTION_REQUIRED", "STARTUP_FAILURE", "STALE"])
     def test_a_check_state_outside_the_allowlist_is_not_passing(self, check_state):
         platform = MagicMock()
-        platform.get_pr_info.return_value = {"approvers": ["Jawad"]}
+        platform.get_pr_info.return_value = {"approvers": ["Prain"]}
         platform.get_pr_checks.return_value = [{"name": "test", "state": "SUCCESS"},
                                                {"name": "lint", "state": check_state}]
         seen = {}

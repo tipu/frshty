@@ -272,18 +272,18 @@ def test_a_reply_by_the_operator_supersedes_a_held_back_message():
 
 
 def test_a_reply_to_one_of_two_people_of_one_name_hides_nothing():
-    a = dict(_text("incoming", 30, participant="Alex", text="invoice?"), thread=1)
-    b = dict(_text("outgoing", 5, participant="Alex", text="see you"), thread=2)
+    a = dict(_text("incoming", 30, participant="Gix", text="invoice?"), thread=1)
+    b = dict(_text("outgoing", 5, participant="Gix", text="see you"), thread=2)
     judge = {"conversations": [{"index": 1, "needs_reply": True,
-                                "reason": "Alex asks for the invoice.",
-                                "objective": "Send Alex the invoice."}]}
+                                "reason": "Gix asks for the invoice.",
+                                "objective": "Send Gix the invoice."}]}
     report, _, _, haiku = _run(config=_config(gmail=False), gvoice=_texts(a, b),
                                judge=judge)
     assert "invoice?" in haiku.call_args.args[0]
     assert "see you" not in haiku.call_args.args[0]
     assert report["proposed"] == 1
     keys = {r["thread_key"] for r in db.query_all("SELECT thread_key FROM direct_followups")}
-    assert keys == {"Alex"}
+    assert keys == {"Gix"}
 
 
 def test_a_nameless_text_key_holds_when_the_threads_move():
@@ -301,12 +301,12 @@ def test_a_nameless_text_key_holds_when_the_threads_move():
 
 def test_a_text_key_holds_when_the_threads_move():
     judge = {"conversations": [{"index": 1, "needs_reply": True,
-                                "reason": "Alex asks for the invoice.",
-                                "objective": "Send Alex the invoice."}]}
-    alex = dict(_text("incoming", 30, participant="Alex", text="invoice?"), thread=1)
-    _run(config=_config(gmail=False), gvoice=_texts(alex), judge=judge)
-    moved = dict(alex, thread=2)
-    other = dict(_text("outgoing", 5, participant="Alex", text="see you"), thread=1)
+                                "reason": "Gix asks for the invoice.",
+                                "objective": "Send Gix the invoice."}]}
+    gix = dict(_text("incoming", 30, participant="Gix", text="invoice?"), thread=1)
+    _run(config=_config(gmail=False), gvoice=_texts(gix), judge=judge)
+    moved = dict(gix, thread=2)
+    other = dict(_text("outgoing", 5, participant="Gix", text="see you"), thread=1)
     report, _, _, _ = _run(config=_config(gmail=False), gvoice=_texts(moved, other),
                            judge=judge, now=NOW + timedelta(hours=1))
     assert report["proposed"] == 0

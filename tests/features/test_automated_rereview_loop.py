@@ -1,6 +1,6 @@
 """A fix push must not feed an endless automated re-review loop.
 
-Observed live on rapid-analytics PR 25: the repository's review workflow
+Observed live on quick-insights PR 25: the repository's review workflow
 posts a full re-review on every push, and the ticket comment fixer fixed each
 one and pushed again. The PR got 4 automated re-reviews in one hour. Only the
 newest automated review per bot is current, and a PR gets at most

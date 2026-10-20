@@ -1658,14 +1658,14 @@ class TestFollowup:
 
     def test_followup_carries_parent_context(self, tmp_path):
         from services import work_launch
-        parent = self._done_parent("upgrade normalize_ace")
+        parent = self._done_parent("upgrade normalize_core")
         p_inst, p_launch, p_health = self._patched(tmp_path)
         with p_inst, p_launch as mock_launch, p_health:
             out = work_launch.launch_followup(parent, "open the follow-up PR")
         assert "error" not in out, out
         ctx = mock_launch.call_args.args[3]
         assert "Previous work item" in ctx
-        assert f"work item {parent}: upgrade normalize_ace" in ctx
+        assert f"work item {parent}: upgrade normalize_core" in ctx
         assert "shipped the widget, PR #9" in ctx
         assert "/tmp/report.html - the report" in ctx
         child = db.query_one("SELECT source_item_id FROM work_items WHERE id = ?",

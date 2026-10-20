@@ -131,11 +131,11 @@ class TestTheDay:
 
     def test_a_parked_line_carries_parked_so_no_nudge_fires_on_it(self, clean):
         first = _open_day(_day())
-        item = _item(first, "Waiting on Erik")
+        item = _item(first, "Waiting on Ros")
         standup.set_item_state(item["id"], "parked")
         standup.ensure_day(_cfg(), _day(1))
         carried = next(i for i in standup.day_view(_day(1))["items"]
-                       if i["text"] == "Waiting on Erik")
+                       if i["text"] == "Waiting on Ros")
         assert carried["state"] == "parked"
         day = db.query_one("SELECT * FROM standups WHERE day = ?", (_day(1),))
         row = db.query_one("SELECT * FROM standup_items WHERE id = ?", (carried["id"],))

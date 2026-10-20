@@ -23,7 +23,7 @@ from features import slack_monitor
 
 NOW = datetime(2026, 9, 3, 20, 0, tzinfo=timezone.utc)
 OPERATOR = "U0OPERATOR"
-ERIK = "U0ERIK"
+ROS = "U0ROS"
 CHANNEL = "C0PLATFORM"
 WORKSPACE = "astroco-workspace"
 ROOT_TS = "1788458400.000100"
@@ -82,14 +82,14 @@ def _raw(ts, user, text, channel=CHANNEL):
 # --- which log is read -----------------------------------------------------
 
 def test_the_filtered_log_is_read_when_it_is_there(tmp_path):
-    _write(tmp_path, "messages.jsonl", [_raw(ROOT_TS, ERIK, "raw")])
-    _write(tmp_path, "filtered.jsonl", [_filtered(ROOT_TS, ERIK, "filtered")])
+    _write(tmp_path, "messages.jsonl", [_raw(ROOT_TS, ROS, "raw")])
+    _write(tmp_path, "filtered.jsonl", [_filtered(ROOT_TS, ROS, "filtered")])
 
     assert sc.capture_path(_config(tmp_path)).endswith("/filtered.jsonl")
 
 
 def test_the_raw_log_is_read_when_there_is_no_filtered_log(tmp_path):
-    _write(tmp_path, "messages.jsonl", [_raw(ROOT_TS, ERIK, "raw")])
+    _write(tmp_path, "messages.jsonl", [_raw(ROOT_TS, ROS, "raw")])
 
     assert sc.capture_path(_config(tmp_path)).endswith("/messages.jsonl")
 
@@ -97,7 +97,7 @@ def test_the_raw_log_is_read_when_there_is_no_filtered_log(tmp_path):
 def test_the_raw_path_alone_still_names_the_filtered_log(tmp_path):
     """A config that predates messages_dir names the raw file. The filtered
     log lives in the same directory, so it is still the one that is read."""
-    _write(tmp_path, "filtered.jsonl", [_filtered(ROOT_TS, ERIK, "filtered")])
+    _write(tmp_path, "filtered.jsonl", [_filtered(ROOT_TS, ROS, "filtered")])
     config = {"slack": {"raw_path": str(_folder(tmp_path) / "messages.jsonl"),
                         "workspace": WORKSPACE}}
 
@@ -105,9 +105,9 @@ def test_the_raw_path_alone_still_names_the_filtered_log(tmp_path):
 
 
 def test_the_rotated_siblings_of_the_filtered_log_are_read_too(tmp_path):
-    _write(tmp_path, "filtered.jsonl", [_filtered(REPLY_TS, ERIK, "newest")])
-    _write(tmp_path, "filtered.jsonl.1", [_filtered(ROOT_TS, ERIK, "older")])
-    _write(tmp_path, "messages.jsonl.1", [_raw(ROOT_TS, ERIK, "raw")])
+    _write(tmp_path, "filtered.jsonl", [_filtered(REPLY_TS, ROS, "newest")])
+    _write(tmp_path, "filtered.jsonl.1", [_filtered(ROOT_TS, ROS, "older")])
+    _write(tmp_path, "messages.jsonl.1", [_raw(ROOT_TS, ROS, "raw")])
 
     names = [path.rsplit("/", 1)[-1] for path in sc.capture_files(_config(tmp_path))]
     assert names == ["filtered.jsonl", "filtered.jsonl.1"]
@@ -120,23 +120,23 @@ def test_a_directory_with_no_capture_names_nothing():
 # --- the shape a filtered line reaches the scanners in ---------------------
 
 def test_a_raw_record_is_not_a_filtered_one():
-    assert not slack_capture.is_filtered_record(_raw(ROOT_TS, ERIK, "hi"))
-    assert slack_capture.is_filtered_record(_filtered(ROOT_TS, ERIK, "hi"))
+    assert not slack_capture.is_filtered_record(_raw(ROOT_TS, ROS, "hi"))
+    assert slack_capture.is_filtered_record(_filtered(ROOT_TS, ROS, "hi"))
 
 
 def test_a_filtered_line_becomes_the_message_it_was_distilled_from():
     record = slack_capture.as_capture_record(
-        _filtered(REPLY_TS, ERIK, "move WB-412 to PLT", thread_ts=ROOT_TS,
-                  name="Erik"))
+        _filtered(REPLY_TS, ROS, "move WB-412 to PLT", thread_ts=ROOT_TS,
+                  name="Ros"))
 
     payload = record["payload"]
     assert payload["type"] == "message"
     assert payload["ts"] == REPLY_TS
-    assert payload["user"] == ERIK
+    assert payload["user"] == ROS
     assert payload["text"] == "move WB-412 to PLT"
     assert payload["channel"] == CHANNEL
     assert payload["thread_ts"] == ROOT_TS
-    assert payload["user_profile"]["real_name"] == "Erik"
+    assert payload["user_profile"]["real_name"] == "Ros"
     assert record["workspace"] == WORKSPACE
 
 
@@ -145,7 +145,7 @@ def test_a_top_level_message_carries_no_thread_ts():
     reply and for a top level message. A thread_ts equal to the message's own
     ts would make every top level mention look like a reply."""
     payload = slack_capture.as_capture_record(
-        _filtered(ROOT_TS, ERIK, "standup in five"))["payload"]
+        _filtered(ROOT_TS, ROS, "standup in five"))["payload"]
 
     assert "thread_ts" not in payload
 
@@ -156,7 +156,7 @@ def test_an_edit_keeps_its_text_off_the_wrapper():
     edit whose text sat on the wrapper would raise a second mention for the
     message it edits."""
     payload = slack_capture.as_capture_record(
-        _filtered(REPLY_TS, ERIK, "move WB-412 to PLT today",
+        _filtered(REPLY_TS, ROS, "move WB-412 to PLT today",
                   thread_ts=ROOT_TS, subtype="message_changed",
                   edited=True))["payload"]
 
@@ -168,7 +168,7 @@ def test_an_edit_keeps_its_text_off_the_wrapper():
 
 def test_a_deletion_names_the_message_it_removed():
     payload = slack_capture.as_capture_record(
-        _filtered(REPLY_TS, ERIK, "move WB-412 to PLT", thread_ts=ROOT_TS,
+        _filtered(REPLY_TS, ROS, "move WB-412 to PLT", thread_ts=ROOT_TS,
                   subtype="message_deleted", deleted=True))["payload"]
 
     assert payload["subtype"] == "message_deleted"
@@ -214,7 +214,7 @@ def test_an_edited_bot_message_opens_no_conversation(tmp_path):
 
 def test_a_file_record_is_not_a_message():
     record = {"dt": "2026-09-03T19:00:00+00:00", "ts": "1788458400.000100",
-              "ws": WORKSPACE, "ch": "", "user": ERIK, "kind": "file",
+              "ws": WORKSPACE, "ch": "", "user": ROS, "kind": "file",
               "file": {"id": "F1", "name": "plan.pdf"}, "src": "files.info"}
 
     assert slack_capture.is_filtered_record(record)
@@ -232,11 +232,11 @@ def test_names_come_from_the_index_beside_the_filtered_log(tmp_path):
     """The filter drops the boot payloads that carried Slack's user lists and
     writes users.json instead. Reading it is what replaces the scrape."""
     (_folder(tmp_path) / "users.json").write_text(json.dumps(
-        {ERIK: {"name": "Erik Lund", "email": "erik@acme.test"},
+        {ROS: {"name": "Ros Ceatust", "email": "ros@acme.test"},
          "U0EMPTY": {"email": "nobody@acme.test"}}))
 
     names = slack_capture.user_names(str(_folder(tmp_path)))
-    assert names == {ERIK: "Erik Lund"}
+    assert names == {ROS: "Ros Ceatust"}
 
 
 def test_a_broken_user_index_names_nobody(tmp_path):
@@ -260,8 +260,8 @@ def _messages(conversation_id):
 def test_a_filtered_thread_lands_in_one_conversation(tmp_path):
     _write(tmp_path, "filtered.jsonl", [
         _filtered(ROOT_TS, OPERATOR, "raised WB-412 for the duplicate export"),
-        _filtered(REPLY_TS, ERIK, "please move it to the PLT board",
-                  thread_ts=ROOT_TS, name="Erik"),
+        _filtered(REPLY_TS, ROS, "please move it to the PLT board",
+                  thread_ts=ROOT_TS, name="Ros"),
     ])
 
     counts = sc.ingest(_config(tmp_path), instance_key="astroco", now=NOW)
@@ -278,10 +278,10 @@ def test_a_filtered_thread_lands_in_one_conversation(tmp_path):
 
 def test_a_filtered_edit_rewrites_the_message_it_changes(tmp_path):
     _write(tmp_path, "filtered.jsonl", [
-        _filtered(ROOT_TS, ERIK, "move WB-412 to PLT")])
+        _filtered(ROOT_TS, ROS, "move WB-412 to PLT")])
     sc.ingest(_config(tmp_path), instance_key="astroco", now=NOW)
     _write(tmp_path, "filtered.jsonl", [
-        _filtered(ROOT_TS, ERIK, "move WB-412 to PLT and to TRIAGE",
+        _filtered(ROOT_TS, ROS, "move WB-412 to PLT and to TRIAGE",
                   subtype="message_changed", edited=True)])
 
     sc.ingest(_config(tmp_path), instance_key="astroco",
@@ -295,10 +295,10 @@ def test_a_filtered_edit_rewrites_the_message_it_changes(tmp_path):
 
 def test_a_filtered_deletion_removes_the_message(tmp_path):
     _write(tmp_path, "filtered.jsonl", [
-        _filtered(ROOT_TS, ERIK, "move WB-412 to PLT")])
+        _filtered(ROOT_TS, ROS, "move WB-412 to PLT")])
     sc.ingest(_config(tmp_path), instance_key="astroco", now=NOW)
     _write(tmp_path, "filtered.jsonl", [
-        _filtered(ROOT_TS, ERIK, "move WB-412 to PLT",
+        _filtered(ROOT_TS, ROS, "move WB-412 to PLT",
                   subtype="message_deleted", deleted=True)])
 
     sc.ingest(_config(tmp_path), instance_key="astroco",
@@ -319,15 +319,15 @@ def test_a_filtered_bot_message_opens_no_conversation(tmp_path):
 
 def test_a_conversation_name_comes_from_the_index_beside_the_capture(tmp_path):
     """slack_monitor stores the names it resolves in state, and this instance
-    has none for Erik. The index slack_int wrote is what names him."""
+    has none for Ros. The index slack_int wrote is what names him."""
     (_folder(tmp_path) / "users.json").write_text(
-        json.dumps({ERIK: {"name": "Erik Lund", "email": ""}}))
+        json.dumps({ROS: {"name": "Ros Ceatust", "email": ""}}))
     _write(tmp_path, "filtered.jsonl", [
-        _filtered(ROOT_TS, ERIK, "move WB-412 to PLT")])
+        _filtered(ROOT_TS, ROS, "move WB-412 to PLT")])
 
     sc.ingest(_config(tmp_path), instance_key="astroco", now=NOW)
 
-    assert _messages(_conversations()[0]["id"])[0]["user_name"] == "Erik Lund"
+    assert _messages(_conversations()[0]["id"])[0]["user_name"] == "Ros Ceatust"
 
 
 # --- the mention scanner over a filtered capture ---------------------------
@@ -360,7 +360,7 @@ def test_a_mention_in_the_filtered_log_raises_one_event(tmp_path):
     _armed_state()
     ts = _recent_ts()
     _write(tmp_path, "filtered.jsonl", [
-        _filtered(ts, ERIK, f"<@{OPERATOR}> can you look at WB-412", name="Erik")])
+        _filtered(ts, ROS, f"<@{OPERATOR}> can you look at WB-412", name="Ros")])
 
     with patch.object(slack_monitor, "run_haiku", return_value="REPLY"):
         slack_monitor.check(_config(tmp_path))
@@ -378,8 +378,8 @@ def test_one_message_captured_twice_raises_one_event(tmp_path):
     ts = _recent_ts()
     text = f"<@{OPERATOR}> can you look at WB-412"
     _write(tmp_path, "filtered.jsonl", [
-        _filtered(ts, ERIK, text, name="Erik"),
-        dict(_filtered(ts, ERIK, text, name="Erik"), src="conversations.history"),
+        _filtered(ts, ROS, text, name="Ros"),
+        dict(_filtered(ts, ROS, text, name="Ros"), src="conversations.history"),
     ])
 
     with patch.object(slack_monitor, "run_haiku", return_value="REPLY"):
@@ -393,9 +393,9 @@ def test_an_edit_in_the_filtered_log_raises_no_second_mention(tmp_path):
     ts = _recent_ts()
     text = f"<@{OPERATOR}> can you look at WB-412"
     _write(tmp_path, "filtered.jsonl", [
-        _filtered(ts, ERIK, text, name="Erik"),
-        _filtered(ts, ERIK, text + " today", subtype="message_changed",
-                  edited=True, name="Erik"),
+        _filtered(ts, ROS, text, name="Ros"),
+        _filtered(ts, ROS, text + " today", subtype="message_changed",
+                  edited=True, name="Ros"),
     ])
 
     with patch.object(slack_monitor, "run_haiku", return_value="REPLY"):
@@ -411,8 +411,8 @@ def test_a_message_that_names_no_channel_raises_no_event(tmp_path):
     in the live filtered archive name no channel."""
     _armed_state()
     _write(tmp_path, "filtered.jsonl", [
-        dict(_filtered(_recent_ts(), ERIK, f"<@{OPERATOR}> look at WB-412",
-                       name="Erik"), ch="", src="conversations.history")])
+        dict(_filtered(_recent_ts(), ROS, f"<@{OPERATOR}> look at WB-412",
+                       name="Ros"), ch="", src="conversations.history")])
 
     with patch.object(slack_monitor, "run_haiku", return_value="REPLY"):
         slack_monitor.check(_config(tmp_path))
@@ -429,9 +429,9 @@ def test_the_copy_that_names_the_channel_is_the_one_that_is_used(tmp_path):
     ts = _recent_ts()
     text = f"<@{OPERATOR}> can you look at WB-412"
     _write(tmp_path, "filtered.jsonl", [
-        dict(_filtered(ts, ERIK, text, name="Erik"), ch="",
+        dict(_filtered(ts, ROS, text, name="Ros"), ch="",
              src="conversations.history"),
-        _filtered(ts, ERIK, text, name="Erik"),
+        _filtered(ts, ROS, text, name="Ros"),
     ])
 
     with patch.object(slack_monitor, "run_haiku", return_value="REPLY"):
@@ -446,7 +446,7 @@ def test_the_copy_that_names_the_channel_is_the_one_that_is_used(tmp_path):
 def test_a_message_from_another_workspace_is_not_read(tmp_path):
     _armed_state()
     ts = _recent_ts()
-    other = _filtered(ts, ERIK, f"<@{OPERATOR}> look at WB-412")
+    other = _filtered(ts, ROS, f"<@{OPERATOR}> look at WB-412")
     other["ws"] = "some-other-workspace"
     _write(tmp_path, "filtered.jsonl", [other])
 
@@ -465,9 +465,9 @@ def test_the_position_of_each_capture_file_is_kept_apart(tmp_path):
     The mention here sits at the start of the filtered log, and the carried
     position is the raw log's. A shared position skips the mention. A position
     kept per file has none for the filtered log and reads it from the start."""
-    mention = _filtered(_recent_ts(), ERIK,
-                        f"<@{OPERATOR}> can you look at WB-412", name="Erik")
-    later = _filtered(_recent_ts(), ERIK, "and the deploy is green", name="Erik")
+    mention = _filtered(_recent_ts(), ROS,
+                        f"<@{OPERATOR}> can you look at WB-412", name="Ros")
+    later = _filtered(_recent_ts(), ROS, "and the deploy is green", name="Ros")
     carried = len(json.dumps(mention)) + 1
     _armed_state(file_offset=carried)
     path = _write(tmp_path, "filtered.jsonl", [mention, later])
@@ -485,13 +485,13 @@ def test_the_position_of_each_capture_file_is_kept_apart(tmp_path):
 def test_a_second_scan_reads_only_what_arrived_after_the_first(tmp_path):
     _armed_state()
     _write(tmp_path, "filtered.jsonl", [
-        _filtered(_recent_ts(minutes_ago=2), ERIK,
-                  f"<@{OPERATOR}> can you look at WB-412", name="Erik")])
+        _filtered(_recent_ts(minutes_ago=2), ROS,
+                  f"<@{OPERATOR}> can you look at WB-412", name="Ros")])
     with patch.object(slack_monitor, "run_haiku", return_value="REPLY"):
         slack_monitor.check(_config(tmp_path))
     _write(tmp_path, "filtered.jsonl", [
-        _filtered(_recent_ts(minutes_ago=1), ERIK,
-                  f"<@{OPERATOR}> and WB-500 as well", name="Erik")])
+        _filtered(_recent_ts(minutes_ago=1), ROS,
+                  f"<@{OPERATOR}> and WB-500 as well", name="Ros")])
 
     with patch.object(slack_monitor, "run_haiku", return_value="REPLY"):
         slack_monitor.check(_config(tmp_path))
@@ -509,7 +509,7 @@ def test_no_operator_id_is_reported_once(tmp_path):
     _armed_state(user_id="")
     config = _config(tmp_path, user_id="")
     _write(tmp_path, "filtered.jsonl", [
-        _filtered(_recent_ts(), ERIK, "anyone around?", name="Erik")])
+        _filtered(_recent_ts(), ROS, "anyone around?", name="Ros")])
 
     with patch.object(slack_monitor, "run_haiku", return_value="REPLY"):
         slack_monitor.check(config)
@@ -522,7 +522,7 @@ def test_the_configured_operator_id_wins_over_a_stale_stored_one(tmp_path):
     _armed_state(user_id="U0STALE")
     ts = _recent_ts()
     _write(tmp_path, "filtered.jsonl", [
-        _filtered(ts, ERIK, f"<@{OPERATOR}> can you look at WB-412", name="Erik")])
+        _filtered(ts, ROS, f"<@{OPERATOR}> can you look at WB-412", name="Ros")])
 
     with patch.object(slack_monitor, "run_haiku", return_value="REPLY"):
         slack_monitor.check(_config(tmp_path))
@@ -534,7 +534,7 @@ def test_a_raw_capture_still_raises_its_mentions(tmp_path):
     """slack_int on another host may not write a filtered log yet."""
     _armed_state()
     _write(tmp_path, "messages.jsonl", [
-        _raw(_recent_ts(), ERIK, f"<@{OPERATOR}> can you look at WB-412")])
+        _raw(_recent_ts(), ROS, f"<@{OPERATOR}> can you look at WB-412")])
 
     with patch.object(slack_monitor, "run_haiku", return_value="REPLY"):
         slack_monitor.check(_config(tmp_path))

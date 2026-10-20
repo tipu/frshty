@@ -25,9 +25,9 @@ def _clean(fresh_db, tmp_path):
 
 def _proposal(objective="Move WB-412 to the PLT board.", **kwargs):
     return work_store.create_proposal(
-        objective, note="Proposed from Slack #platform: Erik asked",
+        objective, note="Proposed from Slack #platform: Ros asked",
         instance_key="astroco", contexts="astroco,slack",
-        brief="\n\n## Slack conversation\n\nErik: please move it\n", **kwargs)
+        brief="\n\n## Slack conversation\n\nRos: please move it\n", **kwargs)
 
 
 def _personal_config(tmp_path):
@@ -127,7 +127,7 @@ def test_approving_starts_the_agent_on_the_stored_objective(tmp_path):
     assert result["state"] == "agent_working"
     context = launch_agent.call_args[0][3]
     assert "Move WB-412 to the PLT board." in context
-    assert "Erik: please move it" in context, "the brief reaches the session"
+    assert "Ros: please move it" in context, "the brief reaches the session"
     row = db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))
     assert row["state"] == "agent_working"
     assert len(db.query_all("SELECT id FROM work_runs WHERE work_item_id = ?",

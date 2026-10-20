@@ -308,7 +308,7 @@ class TestALongFixRunIsNotCutShort(TicketCommentHarness):
         self, fresh_db, fake_config, tmp_state, tmp_path
     ):
         """A re-review that lists several findings timed out twice at the
-        600 s default on rapid-analytics PR 25 and was capped unanswered."""
+        600 s default on quick-insights PR 25 and was capped unanswered."""
         slug = "PROJ-1-do-the-thing"
         wt = self._init_git_pair(tmp_path, slug)
         ts, ticket, platform, bb_config = self._setup(fake_config, slug)

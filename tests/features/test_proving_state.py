@@ -257,12 +257,12 @@ class TestProveTask:
 
 class TestProofChangeScope:
     def test_uses_configured_base_branch_and_lists_only_changed_repo(self, tmp_path):
-        repo = tmp_path / "ticket" / "rapid-analytics-ui"
+        repo = tmp_path / "ticket" / "quick-insights-ui"
         (repo / ".git").mkdir(parents=True)
         config = {
             "workspace": {
                 "base_branch": "main",
-                "base_branches": {"rapid-analytics-ui": "development"},
+                "base_branches": {"quick-insights-ui": "development"},
             }
         }
         completed = subprocess.CompletedProcess(
@@ -271,12 +271,12 @@ class TestProofChangeScope:
         with patch.object(T.git_util, "run_git", return_value=completed) as run:
             scope = T._proof_change_scope(tmp_path / "ticket", config)
 
-        assert "rapid-analytics-ui (base: development)" in scope
+        assert "quick-insights-ui (base: development)" in scope
         assert "src/analytics.ts" in scope
         assert run.call_args.args[1][-1] == "origin/development...HEAD"
 
     def test_repo_whose_diff_fails_is_reported_as_indeterminate(self, tmp_path):
-        repo = tmp_path / "ticket" / "rapid-analytics-ui"
+        repo = tmp_path / "ticket" / "quick-insights-ui"
         (repo / ".git").mkdir(parents=True)
         config = {"workspace": {"base_branch": "main"}}
         failure = T.git_util.GitCommandError(

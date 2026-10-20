@@ -40,9 +40,9 @@ def client(tmp_path, fresh_db):
 def _proposal():
     return work_store.create_proposal(
         "Move WB-304 to the PLT board and assign it to the TRIAGE sprint.",
-        note="Proposed from Slack #wb-alerts: Erik asked for the board move",
+        note="Proposed from Slack #wb-alerts: Ros asked for the board move",
         instance_key="astroco", contexts="astroco,slack",
-        brief="\n\n## Slack conversation\n\nErik: move it to PLT\n")
+        brief="\n\n## Slack conversation\n\nRos: move it to PLT\n")
 
 
 def _launch_patches(tmp_path):
@@ -75,7 +75,7 @@ def test_the_detail_page_serves_the_brief(client):
 
     body = c.get(f"/api/work/items/{item_id}/detail").json()
     assert body["item"]["state"] == "proposed"
-    assert "Erik: move it to PLT" in body["item"]["launch_brief"]
+    assert "Ros: move it to PLT" in body["item"]["launch_brief"]
     assert body["runs"] == []
 
 

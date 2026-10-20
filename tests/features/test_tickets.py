@@ -541,7 +541,7 @@ class TestResolveConflicts:
             tickets._resolve_conflicts(fake_config, make_ticket(), ts, "http://base")
 
         assert (repo / "a.txt").read_text() == "one\n", (
-            "observed live on astroco 2026-07-07 (DSC-127 analysis_dev#589): stray "
+            "observed live on astroco 2026-07-07 (DSC-127 analytics_dev#589): stray "
             "uncommitted edits make `git merge` refuse to start, surfacing as "
             "'no conflicted files found' until the attempts cap; the worktree must "
             "be reset to HEAD before conflict resolution"
@@ -2350,12 +2350,12 @@ class TestRenderPrdTicketMd:
 
 
 class TestCheckInReviewFixFailedRetry:
-    """Observed live on acme/root-cdk#23 (DEV-467 'update Lambda runtime
-    to Node.js 24'): 3 reviewer review comments from Trevin Avery were processed
+    """Observed live on acme/infra-cdk#23 (DEV-467 'update Lambda runtime
+    to Node.js 24'): 3 reviewer review comments from Fou Saibrou were processed
     in one scan after the run_thinking() positional-arg TypeError was fixed; 2
     landed in fix_failed (Claude produced no code change for inline comments on
     lib/runtime-aspect.ts:8 and lib/vpn-stack.ts:168) and 1 ambiguous->needs_reply.
-    Then features/tickets.py:1258 set last_comment_ids['root-cdk/23'] to
+    Then features/tickets.py:1258 set last_comment_ids['infra-cdk/23'] to
     max(id)=795537372, so every subsequent scan filters all 3 comments out via
     `c["id"] > last_seen` — fix_failed comments are permanently locked out of
     retry, even if a future push to the PR would make a fix possible. Compare to
@@ -2677,7 +2677,7 @@ class TestLoadPrCommentsDedupe:
         assert tickets._load_pr_comments(fake_config, slug) == {"comments": [{"id": 1}]}
 
 class TestCheckInReviewPushFailure:
-    """Observed live on acme/spa-dashboard#286: three Arslan review
+    """Observed live on acme/spa-dashboard#286: three Dres review
     comments were fixed as local commits, then push_branch was rejected with
     non-fast-forward because a squash rewrote the branch history. The push
     failure emptied to_resolve, but the cursor block below it still ran,
@@ -2807,7 +2807,7 @@ class TestCheckInReviewPushFailure:
 
 
 class TestCheckInReviewReviewerReply:
-    """Observed live on ravenmeetings/raven#4561: Adam Walz answered the
+    """Observed live on ravenmeetings/raven#4561: Mu Kouven answered the
     notifier.ts:71 thread twice after it was resolved, and neither reply was
     ever registered. A reply is how a reviewer says the fix did not land, so it
     has to reach the classifier like any other comment."""
@@ -3097,7 +3097,7 @@ class TestSubstantiateReplyEnqueueOrdering:
 
 class TestCheckInReviewSelfCommittedFix:
     """Observed live on acme django-api PR #174 (DEV-644, 2026-08-20):
-    Trevin Avery's review comment 845507041 was resolved on Bitbucket at
+    Fou Saibrou's review comment 845507041 was resolved on Bitbucket at
     23:46:00Z with no commit delivered to the remote. The inline fix path
     judged "did the agent produce a fix" solely from `git add -A` +
     `git diff --cached --quiet`. The agent committed the fix itself
@@ -3140,7 +3140,7 @@ class TestCheckInReviewSelfCommittedFix:
         )
         ticket = {"key": "PROJ-1", "summary": "Do thing", "url": "http://j/PROJ-1"}
         comment = {"id": 100, "body": "You are overriding the original definition without removing the old one",
-                   "author_id": "reviewer1", "author_name": "Trevin",
+                   "author_id": "reviewer1", "author_name": "Fou",
                    "path": "app.py", "line": 1, "parent_id": None,
                    "created_on": "2026-08-20T23:00:00Z",
                    "created_at": "2026-08-20T23:00:00Z",
@@ -4071,7 +4071,7 @@ class TestCheckInReviewIssueComments:
 
 class TestCheckInReviewCommentQueueProgress:
     """Observed live on acme django-api PR #203 (DEV-743, 2026-09-21):
-    Arslan Syed's comment 867755302 sat at position 15 of a 16-comment queue
+    Dres Vinu's comment 867755302 sat at position 15 of a 16-comment queue
     and was never read. The cursor only moved when a whole batch settled, so
     one retryable fix failure made the next scan re-read the whole list and
     re-run the fix agent on every comment it had already handled. Three scans
@@ -4103,7 +4103,7 @@ class TestCheckInReviewCommentQueueProgress:
 
     def _comment(self, cid, body):
         return {"id": cid, "body": body, "author_id": "reviewer1",
-                "author_name": "Arslan", "path": "app.py", "line": 1,
+                "author_name": "Dres", "path": "app.py", "line": 1,
                 "parent_id": None, "created_on": "2026-09-21T18:46:47Z",
                 "created_at": "2026-09-21T18:46:47Z",
                 "updated_at": "2026-09-21T18:46:47Z"}

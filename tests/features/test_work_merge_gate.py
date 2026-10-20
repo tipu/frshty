@@ -303,7 +303,7 @@ class TestMergeGate:
         _projects(monkeypatch, frshty=False)
         item_id, sid = _mkrun(
             "Remove or simplify the explicit code generation in "
-            "text-to-tql-service/pull/184 to use the automatic backend handling "
+            "text-to-query-service/pull/184 to use the automatic backend handling "
             "provided by create_deep_agent function",
             contexts=f"frshty,{work_launch.SLACK_LABEL}")
         out = work_launch.gate_merge(
