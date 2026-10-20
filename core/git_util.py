@@ -730,6 +730,40 @@ def run_git(cwd, args: list[str], *, allowed_codes=(0,), timeout: int = 60):
     return result
 
 
+def read_blobs(cwd, oids: list[str]):
+    """Yield (oid, bytes) for each blob in `oids`, read through one
+    `git cat-file --batch`. Trees, commits and tags are skipped. A missing
+    object or a failed git raises GitCommandError."""
+    args = ["cat-file", "--batch"]
+    proc = subprocess.Popen(["git", *args], cwd=str(cwd), stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def feed():
+        try:
+            proc.stdin.write(("\n".join(oids) + "\n").encode())
+            proc.stdin.close()
+        except OSError:
+            pass
+
+    threading.Thread(target=feed, daemon=True).start()
+    try:
+        for oid in oids:
+            header = proc.stdout.readline().split()
+            if len(header) != 3:
+                proc.kill()
+                proc.wait()
+                raise GitCommandError(args, subprocess.CompletedProcess(
+                    args, proc.returncode or 1, "", f"no object {oid}"))
+            data = proc.stdout.read(int(header[2]))
+            proc.stdout.read(1)
+            if header[1] == b"blob":
+                yield oid, data
+    finally:
+        if proc.poll() is None:
+            proc.stdout.close()
+            proc.wait()
+
+
 def head_sha(worktree) -> str:
     """The worktree's HEAD sha, or "" when git cannot report it."""
     try:

@@ -14,11 +14,14 @@ guard with no terms cannot fail.
 """
 import os
 import re
-import subprocess
 import sys
-import threading
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import core.git_util as git_util
+
+GIT_TIMEOUT = 600
 TERMS_FILE = Path(__file__).resolve().parent.parent / "config" / "name_guard_terms.tsv"
 ZERO = re.compile(r"^0+$")
 TOKEN = re.compile(r"[a-z0-9À-ÿ]+")
@@ -69,34 +72,6 @@ class Matcher:
         return found
 
 
-def _git(repo: str, *args: str) -> str:
-    got = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True,
-                         errors="replace")
-    if got.returncode != 0:
-        raise RuntimeError(f"git {' '.join(args)}: {got.stderr.strip()}")
-    return got.stdout
-
-
-def _blobs(repo: str, ids: list[str]):
-    proc = subprocess.Popen(["git", "-C", repo, "cat-file", "--batch"],
-                            stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-
-    def feed():
-        proc.stdin.write(("\n".join(ids) + "\n").encode())
-        proc.stdin.close()
-
-    threading.Thread(target=feed, daemon=True).start()
-    for oid in ids:
-        header = proc.stdout.readline().split()
-        if len(header) < 3:
-            raise RuntimeError(f"git cat-file: no object {oid}")
-        data = proc.stdout.read(int(header[2]))
-        proc.stdout.read(1)
-        if header[1] == b"blob" and b"\0" not in data[:BINARY_PROBE]:
-            yield oid, data.decode("utf-8", errors="replace")
-    proc.wait()
-
-
 def scan_push(repo: str, remote: str, lines: list[str], matcher: Matcher) -> list[tuple[str, str]]:
     """Every (place, term) hit in what this push sends."""
     hits = []
@@ -111,26 +86,30 @@ def scan_push(repo: str, remote: str, lines: list[str], matcher: Matcher) -> lis
         for term in matcher.find(remote_ref):
             hits.append((f"ref {remote_ref}", term))
         tips.append(local_sha)
-        if not ZERO.match(remote_sha) and subprocess.run(
-                ["git", "-C", repo, "cat-file", "-e", f"{remote_sha}^{{commit}}"],
-                capture_output=True).returncode == 0:
+        if not ZERO.match(remote_sha) and git_util.run_git_status(
+                repo, ["cat-file", "-e", f"{remote_sha}^{{commit}}"]).returncode == 0:
             exclude.append(remote_sha)
     if not tips:
         return hits
-    log = _git(repo, "log", "--format=%x00%H%x01%an <%ae>%n%cn <%ce>%n%B", *tips, "--not", *exclude)
+    log = git_util.run_git(repo, ["log", "--format=%x00%H%x01%an <%ae>%n%cn <%ce>%n%B",
+                                  *tips, "--not", *exclude], timeout=GIT_TIMEOUT).stdout
     for record in log.split("\0")[1:]:
         sha, body = record.split("\x01", 1)
         for term in matcher.find(body):
             hits.append((f"commit {sha[:10]}", term))
     paths: dict[str, str] = {}
-    for line in _git(repo, "rev-list", "--objects", *tips, "--not", *exclude).splitlines():
+    objects = git_util.run_git(repo, ["rev-list", "--objects", *tips, "--not", *exclude],
+                               timeout=GIT_TIMEOUT).stdout
+    for line in objects.splitlines():
         oid, _, path = line.partition(" ")
         if path:
             paths.setdefault(oid, path)
             for term in matcher.find(path):
                 hits.append((f"path {path}", term))
-    for oid, text in _blobs(repo, list(paths)):
-        for term in matcher.find(text):
+    for oid, data in git_util.read_blobs(repo, list(paths)):
+        if b"\0" in data[:BINARY_PROBE]:
+            continue
+        for term in matcher.find(data.decode("utf-8", errors="replace")):
             hits.append((f"file {paths[oid]} ({oid[:10]})", term))
     return hits
 
