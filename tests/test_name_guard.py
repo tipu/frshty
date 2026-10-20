@@ -91,6 +91,35 @@ def test_a_term_in_a_pushed_tag_rejects_it(repo, make_tag):
     assert "nesiorkly" in got.stderr
 
 
+def test_a_tag_on_a_tree_with_a_term_path_rejects_it(repo):
+    (repo / "nesiorkly-new.txt").write_text("clean\n")
+    _git(repo, "add", "-A")
+    tree = _git(repo, "write-tree").stdout.strip()
+    _git(repo, "reset", "-q", "--hard")
+    _git(repo, "tag", "treetag", tree)
+    got = _push(repo, "refs/tags/treetag")
+    assert got.returncode != 0
+    assert "path nesiorkly-new.txt: nesiorkly" in got.stderr
+
+
+def test_deleting_a_term_path_the_remote_holds_passes(repo):
+    _commit(repo, "nesiorkly.txt", "clean\n")
+    _git(repo, "-c", "core.hooksPath=/dev/null", "push", "origin", "HEAD")
+    _git(repo, "rm", "-q", "nesiorkly.txt")
+    _git(repo, "commit", "-m", "remove")
+    got = _push(repo)
+    assert got.returncode == 0, got.stderr
+
+
+def test_retagging_a_blob_the_remote_holds_passes(repo):
+    blob = _git(repo, "hash-object", "-w", "--stdin", input_text="client Nesiorkly\n").stdout.strip()
+    _git(repo, "tag", "raw", blob)
+    _git(repo, "-c", "core.hooksPath=/dev/null", "push", "origin", "refs/tags/raw")
+    _git(repo, "tag", "-f", "-a", "raw", "-m", "release", blob)
+    got = _push(repo, "--force", "refs/tags/raw")
+    assert got.returncode == 0, got.stderr
+
+
 def test_a_term_in_the_branch_name_rejects_it(repo):
     _commit(repo, "app.py", "x = 1\n")
     got = _push(repo, "HEAD:refs/heads/work-1-fix-nesiorkly-login")

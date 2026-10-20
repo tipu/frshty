@@ -87,7 +87,7 @@ def scan_push(repo: str, remote: str, lines: list[str], matcher: Matcher) -> lis
             hits.append((f"ref {remote_ref}", term))
         tips.append(local_sha)
         if not ZERO.match(remote_sha) and git_util.run_git_status(
-                repo, ["cat-file", "-e", f"{remote_sha}^{{commit}}"]).returncode == 0:
+                repo, ["cat-file", "-e", remote_sha]).returncode == 0:
             exclude.append(remote_sha)
     if not tips:
         return hits
@@ -98,17 +98,20 @@ def scan_push(repo: str, remote: str, lines: list[str], matcher: Matcher) -> lis
         for term in matcher.find(body):
             hits.append((f"commit {sha[:10]}", term))
     changed = git_util.run_git(repo, ["-c", "core.quotePath=false", "log", "-z", "-m", "--root",
-                                      "--name-only", "--format=", *tips, "--not", *exclude],
+                                      "--no-renames", "--diff-filter=d", "--name-only",
+                                      "--format=", *tips, "--not", *exclude],
                                timeout=GIT_TIMEOUT).stdout
-    for path in sorted({p.strip("\n") for p in changed.split("\0")} - {""}):
-        for term in matcher.find(path):
-            hits.append((f"path {path}", term))
+    pushed_paths = {p.strip("\n") for p in changed.split("\0")}
     paths: dict[str, str] = {}
     objects = git_util.run_git(repo, ["rev-list", "--objects", *tips, "--not", *exclude],
                                timeout=GIT_TIMEOUT).stdout
     for line in objects.splitlines():
         oid, _, path = line.partition(" ")
         paths.setdefault(oid, path)
+        pushed_paths.add(path)
+    for path in sorted(pushed_paths - {""}):
+        for term in matcher.find(path):
+            hits.append((f"path {path}", term))
     for oid, kind, data in git_util.read_objects(repo, list(paths)):
         if kind not in ("blob", "tag") or b"\0" in data[:BINARY_PROBE]:
             continue
