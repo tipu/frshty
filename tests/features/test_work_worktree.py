@@ -120,6 +120,12 @@ class TestGitHelpers:
             project_config("/x", [], prefix="feat"), 42, "Fix it")
         assert prefixed == "feat/work-42-fix-it"
 
+    def test_branch_name_drops_urls_from_the_objective(self):
+        name = work_worktree.branch_name(
+            None, 7, "Check https://acme.example.com/board/12?x=1 and www.acme.example.org now")
+        assert name == "work-7-check-and-now"
+        assert work_worktree.branch_name(None, 7, "https://acme.example.com/a") == "work-7"
+
     def test_task_worktree_path_follows_the_ticket_layout(self, tmp_path):
         flat = project_config(tmp_path, ["app"], layout="flat")
         nested = project_config(tmp_path, ["app"], layout="workspace")

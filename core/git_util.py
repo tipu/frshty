@@ -44,6 +44,8 @@ WORKTREE_LOCK_REASON = ("frshty owns this worktree; a checkout in another "
                         "container cannot see it, so only frshty removes it")
 WORKTREE_ADD = ["worktree", "add", "--lock", "--reason", WORKTREE_LOCK_REASON]
 WORKTREE_REMOVE = ["worktree", "remove", "--force", "--force"]
+SLUG_WORDS = 7
+_URL = re.compile(r"(?i)\b(?:[a-z][a-z0-9+.-]*://|www\.)\S*")
 
 _worktree_locks: dict[str, threading.Lock] = {}
 _worktree_locks_guard = threading.Lock()
@@ -377,6 +379,15 @@ class CommitOutcome:
 # Scoped to the hook runner. A bare "permission denied" or "command not found"
 # appears in ordinary test output too, and classifying a genuine test failure as
 # an environment problem blocks work that an agent could have fixed.
+def slug_words(text: str, limit: int = SLUG_WORDS) -> list[str]:
+    """The first kebab words of a branch slug.
+
+    A URL is dropped before the words are taken, so a pasted link never
+    becomes part of a branch name."""
+    slug = re.sub(r"[^a-z0-9]+", "-", _URL.sub(" ", text or "").lower())
+    return [w for w in slug.split("-") if w][:limit]
+
+
 _ENVIRONMENT_MARKERS = (
     "pre-commit not found", "pre-commit: not found", "did you forget to activate",
     "no such file or directory: 'pre-commit'", "pre-commit: command not found",
