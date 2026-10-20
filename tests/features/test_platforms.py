@@ -601,3 +601,57 @@ class TestGitHubListReviewPrs:
         args = run.call_args_list[0].args[0]
         assert "user-review-requested:@me" in args
         assert not any(a.startswith("--review-requested") for a in args)
+
+
+def _search_hit(number, author, repo="org/r"):
+    return {"number": number, "title": f"PR {number}", "author": {"login": author},
+            "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-02T00:00:00Z",
+            "url": f"https://github.com/{repo}/pull/{number}",
+            "repository": {"nameWithOwner": repo}}
+
+
+class TestGitHubListPendingReviewsForMe:
+    def _run(self, requested, assigned, assigned_rc=0):
+        import json as _json
+        p = _gh_platform()
+        p._me_login_cache = "me"
+        calls = []
+
+        def fake(args):
+            calls.append(args)
+            if args[:2] == ["search", "prs"] and "user-review-requested:@me" in args:
+                return _gh_result(stdout=_json.dumps(requested))
+            if args[:2] == ["search", "prs"] and "assignee:@me" in args:
+                return _gh_result(stdout=_json.dumps(assigned), returncode=assigned_rc)
+            return _gh_result(stdout='{"data": {}}')
+
+        with patch.object(p, "_run_gh", side_effect=fake), \
+             patch("features.platforms.log.emit") as emit:
+            prs = p.list_pending_reviews_for_me()
+        return prs, calls, emit
+
+    def test_merges_review_requests_and_assignments(self):
+        prs, calls, _ = self._run([_search_hit(1, "a")], [_search_hit(2, "b")])
+        assert [(pr["full_repo"], pr["id"]) for pr in prs] == [("org/r", 1), ("org/r", 2)]
+        searched = [a[2] for a in calls if a[:2] == ["search", "prs"]]
+        assert searched == ["user-review-requested:@me", "assignee:@me"]
+
+    def test_deduplicates_a_pr_found_by_both_searches(self):
+        prs, _, _ = self._run([_search_hit(1, "a")], [_search_hit(1, "a"), _search_hit(1, "a", repo="org/other")])
+        assert [(pr["full_repo"], pr["id"]) for pr in prs] == [("org/r", 1), ("org/other", 1)]
+
+    def test_skips_my_own_assigned_pr(self):
+        prs, _, _ = self._run([], [_search_hit(3, "me"), _search_hit(4, "b")])
+        assert [pr["id"] for pr in prs] == [4]
+
+    def test_failed_assignee_search_keeps_review_requests_and_logs(self):
+        prs, _, emit = self._run([_search_hit(1, "a")], [], assigned_rc=1)
+        assert [pr["id"] for pr in prs] == [1]
+        assert emit.call_args.args[0] == "github_pr_search_failed"
+
+    def test_list_review_prs_still_skips_assignments(self):
+        import json as _json
+        p = _gh_platform()
+        with patch.object(p, "_run_gh", return_value=_gh_result(stdout=_json.dumps([]))) as run:
+            p.list_review_prs()
+        assert not any("assignee:@me" in c.args[0] for c in run.call_args_list)
