@@ -52,7 +52,7 @@ const id = location.pathname.split("/")[2];
 const fileUrl = "/api/work/artifact_file/" + id;
 document.getElementById("frame").src = fileUrl;
 document.getElementById("raw").href = fileUrl;
-document.title = document.title + " #" + id;
+const baseTitle = document.title;
 const statusEl = document.getElementById("status");
 const panel = document.getElementById("panel");
 const toggle = document.getElementById("toggle");
@@ -131,11 +131,13 @@ fetch("/api/work/artifacts/" + id)
   .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
   .then((a) => {
     document.getElementById("path").textContent = a.path + (a.note ? " — " + a.note : "");
+    document.title = baseTitle.replace(/Artifact$/, () => "#" + a.work_item_id + " - " + a.path.split("/").pop());
     const back = document.getElementById("back");
     back.href = "/tasks/" + a.work_item_id;
     back.textContent = "← task #" + a.work_item_id;
   })
   .catch((e) => {
+    document.title = baseTitle + " #" + id;
     document.getElementById("path").textContent = "could not read artifact #" + id + ": " + (e.message || String(e));
   });
 </script>
