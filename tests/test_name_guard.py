@@ -102,6 +102,14 @@ def test_a_tag_on_a_tree_with_a_term_path_rejects_it(repo):
     assert "path nesiorkly-new.txt: nesiorkly" in got.stderr
 
 
+def test_a_shared_blob_under_a_term_path_rejects_it(repo):
+    _commit(repo, "a-clean.txt", "same\n")
+    _commit(repo, "nesiorkly-copy.txt", "same\n")
+    got = _push(repo)
+    assert got.returncode != 0
+    assert "path nesiorkly-copy.txt: nesiorkly" in got.stderr
+
+
 def test_deleting_a_term_path_the_remote_holds_passes(repo):
     _commit(repo, "nesiorkly.txt", "clean\n")
     _git(repo, "-c", "core.hooksPath=/dev/null", "push", "origin", "HEAD")

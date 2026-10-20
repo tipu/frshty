@@ -26,6 +26,7 @@ TERMS_FILE = Path(__file__).resolve().parent.parent / "config" / "name_guard_ter
 ZERO = re.compile(r"^0+$")
 TOKEN = re.compile(r"[a-z0-9À-ÿ]+")
 BINARY_PROBE = 8000
+OID_BYTES = 20
 
 
 def load_terms(path: Path) -> list[str]:
@@ -72,6 +73,18 @@ class Matcher:
         return found
 
 
+def tree_names(data: bytes) -> list[str]:
+    """The entry names of one raw tree object: `<mode> <name>\\0<oid bytes>`
+    repeated. A new tree lists every name in its directory, so a renamed,
+    copied or shared blob cannot hide its path."""
+    names, i = [], 0
+    while i < len(data):
+        nul = data.index(b"\0", i)
+        names.append(data[i:nul].split(b" ", 1)[1].decode("utf-8", errors="replace"))
+        i = nul + 1 + OID_BYTES
+    return names
+
+
 def scan_push(repo: str, remote: str, lines: list[str], matcher: Matcher) -> list[tuple[str, str]]:
     """Every (place, term) hit in what this push sends."""
     hits = []
@@ -97,22 +110,19 @@ def scan_push(repo: str, remote: str, lines: list[str], matcher: Matcher) -> lis
         sha, body = record.split("\x01", 1)
         for term in matcher.find(body):
             hits.append((f"commit {sha[:10]}", term))
-    changed = git_util.run_git(repo, ["-c", "core.quotePath=false", "log", "-z", "-m", "--root",
-                                      "--no-renames", "--diff-filter=d", "--name-only",
-                                      "--format=", *tips, "--not", *exclude],
-                               timeout=GIT_TIMEOUT).stdout
-    pushed_paths = {p.strip("\n") for p in changed.split("\0")}
     paths: dict[str, str] = {}
     objects = git_util.run_git(repo, ["rev-list", "--objects", *tips, "--not", *exclude],
                                timeout=GIT_TIMEOUT).stdout
     for line in objects.splitlines():
         oid, _, path = line.partition(" ")
         paths.setdefault(oid, path)
-        pushed_paths.add(path)
-    for path in sorted(pushed_paths - {""}):
-        for term in matcher.find(path):
-            hits.append((f"path {path}", term))
     for oid, kind, data in git_util.read_objects(repo, list(paths)):
+        if kind == "tree":
+            for name in tree_names(data):
+                path = f"{paths[oid]}/{name}" if paths[oid] else name
+                for term in matcher.find(path):
+                    hits.append((f"path {path}", term))
+            continue
         if kind not in ("blob", "tag") or b"\0" in data[:BINARY_PROBE]:
             continue
         for term in matcher.find(data.decode("utf-8", errors="replace")):
