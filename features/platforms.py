@@ -785,45 +785,69 @@ class GitHubPlatform(_CIMonitorMixin):
         posts with, so it is the correct fallback."""
         return (self.config.get("github") or {}).get("user", "") or self._me_login()
 
-    def list_review_prs(self) -> list[dict]:
-        result = self._run_gh([
-            "search", "prs", "user-review-requested:@me", "--state=open",
-            "--json", "number,title,author,createdAt,updatedAt,url,repository",
-            "--limit", "50",
-        ])
+    def _search_open_prs(self, qualifier: str) -> list[dict]:
+        try:
+            result = self._run_gh([
+                "search", "prs", qualifier, "--state=open",
+                "--json", "number,title,author,createdAt,updatedAt,url,repository",
+                "--limit", "50",
+            ])
+        except subprocess.TimeoutExpired:
+            log.emit("github_pr_search_failed",
+                     f"gh search prs {qualifier} timed out",
+                     meta={"qualifier": qualifier})
+            return []
         if result.returncode != 0:
+            log.emit("github_pr_search_failed",
+                     f"gh search prs {qualifier} failed: {result.stderr.strip()[:200]}",
+                     meta={"qualifier": qualifier})
             return []
         prs = [self._normalize_search_pr(pr) for pr in json.loads(result.stdout)]
         for pr in prs:
             if pr.get("full_repo"):
                 self._repo_cache[pr["repo"]] = pr["full_repo"]
-        if prs:
-            fragments = []
+        return prs
+
+    def _attach_heads(self, prs: list[dict]) -> None:
+        if not prs:
+            return
+        fragments = []
+        for i, pr in enumerate(prs):
+            full = pr.get("full_repo") or self._resolve_repo(pr["repo"])
+            owner, name = full.split("/", 1)
+            fragments.append(f'pr{i}: repository(owner:"{owner}",name:"{name}") {{ pullRequest(number:{pr["id"]}) {{ headRefName headRefOid }} }}')
+        query = "{ " + " ".join(fragments) + " }"
+        gql = self._run_gh(["api", "graphql", "-f", f"query={query}"])
+        if gql.returncode == 0:
+            data = json.loads(gql.stdout).get("data", {})
             for i, pr in enumerate(prs):
-                full = pr.get("full_repo") or self._resolve_repo(pr["repo"])
-                owner, name = full.split("/", 1)
-                fragments.append(f'pr{i}: repository(owner:"{owner}",name:"{name}") {{ pullRequest(number:{pr["id"]}) {{ headRefName headRefOid }} }}')
-            query = "{ " + " ".join(fragments) + " }"
-            gql = self._run_gh(["api", "graphql", "-f", f"query={query}"])
-            if gql.returncode == 0:
-                data = json.loads(gql.stdout).get("data", {})
-                for i, pr in enumerate(prs):
-                    node = data.get(f"pr{i}", {}).get("pullRequest", {})
-                    if not node:
-                        continue
-                    if not pr.get("branch") and node.get("headRefName"):
-                        pr["branch"] = node["headRefName"]
-                    if node.get("headRefOid"):
-                        pr["head_sha"] = node["headRefOid"]
+                node = data.get(f"pr{i}", {}).get("pullRequest", {})
+                if not node:
+                    continue
+                if not pr.get("branch") and node.get("headRefName"):
+                    pr["branch"] = node["headRefName"]
+                if node.get("headRefOid"):
+                    pr["head_sha"] = node["headRefOid"]
+
+    def list_review_prs(self) -> list[dict]:
+        prs = self._search_open_prs("user-review-requested:@me")
+        self._attach_heads(prs)
         return prs
 
     def list_pending_reviews_for_me(self) -> list[dict]:
         me = self._me_login()
+        seen = set()
         out = []
-        for pr in self.list_review_prs():
-            if me and pr.get("author") == me:
-                continue
-            out.append(pr)
+        for qualifier in ("user-review-requested:@me", "assignee:@me"):
+            for pr in self._search_open_prs(qualifier):
+                key = (pr.get("full_repo"), pr["id"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                if me and pr.get("author") == me:
+                    continue
+                out.append(pr)
+        self._attach_heads(out)
         return out
 
     _REVIEW_COMMENTS_QUERY = (
