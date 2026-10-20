@@ -71,6 +71,14 @@ def test_a_term_anywhere_in_the_push_rejects_it(repo, path, text, message):
     assert _git(repo, "ls-remote", "origin", "main").stdout.split()[0] == before.strip()
 
 
+def test_a_rename_to_a_term_rejects_it(repo):
+    _git(repo, "mv", "README.md", "nesiorkly.md")
+    _git(repo, "commit", "-m", "rename")
+    got = _push(repo)
+    assert got.returncode != 0
+    assert "path nesiorkly.md: nesiorkly" in got.stderr
+
+
 def test_a_term_in_the_branch_name_rejects_it(repo):
     _commit(repo, "app.py", "x = 1\n")
     got = _push(repo, "HEAD:refs/heads/work-1-fix-nesiorkly-login")

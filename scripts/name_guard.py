@@ -97,6 +97,12 @@ def scan_push(repo: str, remote: str, lines: list[str], matcher: Matcher) -> lis
         sha, body = record.split("\x01", 1)
         for term in matcher.find(body):
             hits.append((f"commit {sha[:10]}", term))
+    changed = git_util.run_git(repo, ["-c", "core.quotePath=false", "log", "-z", "-m", "--root",
+                                      "--name-only", "--format=", *tips, "--not", *exclude],
+                               timeout=GIT_TIMEOUT).stdout
+    for path in sorted({p.strip("\n") for p in changed.split("\0")} - {""}):
+        for term in matcher.find(path):
+            hits.append((f"path {path}", term))
     paths: dict[str, str] = {}
     objects = git_util.run_git(repo, ["rev-list", "--objects", *tips, "--not", *exclude],
                                timeout=GIT_TIMEOUT).stdout
@@ -104,8 +110,6 @@ def scan_push(repo: str, remote: str, lines: list[str], matcher: Matcher) -> lis
         oid, _, path = line.partition(" ")
         if path:
             paths.setdefault(oid, path)
-            for term in matcher.find(path):
-                hits.append((f"path {path}", term))
     for oid, data in git_util.read_blobs(repo, list(paths)):
         if b"\0" in data[:BINARY_PROBE]:
             continue
