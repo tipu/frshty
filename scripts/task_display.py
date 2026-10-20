@@ -32,6 +32,7 @@ import secrets
 import select
 import shutil
 import signal
+import stat
 import struct
 import subprocess
 import sys
@@ -94,9 +95,16 @@ def _auth_entry(cookie: bytes) -> bytes:
 def write_cookie() -> str:
     """The path of a new Xauthority file that holds a random cookie."""
     os.makedirs(AUTH_DIR, mode=0o700, exist_ok=True)
+    info = os.lstat(AUTH_DIR)
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise OSError(f"{AUTH_DIR} is not a private directory of this user")
     _prune_cookies()
     path = os.path.join(AUTH_DIR, str(os.getpid()))
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "wb") as f:
         f.write(_auth_entry(secrets.token_bytes(16)))
     return path
