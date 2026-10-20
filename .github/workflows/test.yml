@@ -29,6 +29,12 @@ jobs:
             echo "This branch holds commits from before the history rewrite. Rebuild it from the current main." >&2
             exit 1
           fi
+      - name: Reject history from before the 2026-10-20 rewrite
+        run: |
+          if git merge-base --is-ancestor ab80b7bec5430917d6f708f4aa3a7ec4e2532745 HEAD 2>/dev/null; then
+            echo "This branch holds commits from before the 2026-10-20 history rewrite. Rebuild it from the current main." >&2
+            exit 1
+          fi
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
