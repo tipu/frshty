@@ -612,7 +612,6 @@ def _search_hit(number, author, repo="org/r"):
 
 class TestGitHubListPendingReviewsForMe:
     def _run(self, requested, assigned, assigned_rc=0):
-        import json as _json
         p = _gh_platform()
         p._me_login_cache = "me"
         calls = []
@@ -620,9 +619,9 @@ class TestGitHubListPendingReviewsForMe:
         def fake(args):
             calls.append(args)
             if args[:2] == ["search", "prs"] and "user-review-requested:@me" in args:
-                return _gh_result(stdout=_json.dumps(requested))
+                return _gh_result(stdout=json.dumps(requested))
             if args[:2] == ["search", "prs"] and "assignee:@me" in args:
-                return _gh_result(stdout=_json.dumps(assigned), returncode=assigned_rc)
+                return _gh_result(stdout=json.dumps(assigned), returncode=assigned_rc)
             return _gh_result(stdout='{"data": {}}')
 
         with patch.object(p, "_run_gh", side_effect=fake), \
@@ -650,8 +649,7 @@ class TestGitHubListPendingReviewsForMe:
         assert emit.call_args.args[0] == "github_pr_search_failed"
 
     def test_list_review_prs_still_skips_assignments(self):
-        import json as _json
         p = _gh_platform()
-        with patch.object(p, "_run_gh", return_value=_gh_result(stdout=_json.dumps([]))) as run:
+        with patch.object(p, "_run_gh", return_value=_gh_result(stdout=json.dumps([]))) as run:
             p.list_review_prs()
         assert not any("assignee:@me" in c.args[0] for c in run.call_args_list)
