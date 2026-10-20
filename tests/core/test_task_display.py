@@ -127,3 +127,23 @@ class TestTaskDisplay:
             assert os.path.exists(live)
         finally:
             os.unlink(live)
+
+    def test_a_cookie_directory_others_can_open_is_refused(self, monkeypatch, tmp_path):
+        shared = tmp_path / "xauth"
+        shared.mkdir(mode=0o777)
+        shared.chmod(0o777)
+        monkeypatch.setattr(task_display, "AUTH_DIR", str(shared))
+        with pytest.raises(OSError, match="not a private directory"):
+            task_display.write_cookie()
+
+    def test_a_cookie_replaces_a_planted_file_instead_of_writing_through_it(self, monkeypatch, tmp_path):
+        private = tmp_path / "xauth"
+        private.mkdir(mode=0o700)
+        target = tmp_path / "target"
+        target.write_text("keep")
+        (private / str(os.getpid())).symlink_to(target)
+        monkeypatch.setattr(task_display, "AUTH_DIR", str(private))
+        path = task_display.write_cookie()
+        assert target.read_text() == "keep"
+        assert not os.path.islink(path)
+        assert os.stat(path).st_mode & 0o777 == 0o600
