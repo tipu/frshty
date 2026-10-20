@@ -1,4 +1,7 @@
+import os
+import shlex
 import subprocess
+import sys
 from unittest.mock import MagicMock
 
 import pytest
@@ -17,7 +20,7 @@ class TestLaunchPaneCommand:
 
         args = run.call_args_list[0].args[0]
         assert args[3:8] == ["new-session", "-d", "-s", "term-work-7", "-c"]
-        assert args[-1] == "claude --resume abc; exec /test/shell -l"
+        assert args[-1] == f"{terminal.with_task_display('claude --resume abc')}; exec /test/shell -l"
         assert "send-keys" not in args
         assert run.call_args_list[0].kwargs["env"] == terminal._child_env()
         assert run.call_args_list[1].args[0][3:] == ["set-option", "-g", "mouse", "on"]
@@ -55,6 +58,12 @@ class TestLaunchPaneCommand:
         assert "PLAYWRIGHT_MCP_SANDBOX=false" in args
         assert args[args.index("PLAYWRIGHT_MCP_SANDBOX=false") - 1] == "-e"
 
+    def test_the_agent_runs_under_the_task_display(self):
+        command = terminal.with_task_display("claude --resume 'a b'")
+        argv = shlex.split(command)
+        assert argv == [sys.executable, terminal.TASK_DISPLAY_SCRIPT, "claude --resume 'a b'"]
+        assert os.path.isfile(terminal.TASK_DISPLAY_SCRIPT)
+
     def test_existing_agentless_pane_is_respawned(self, monkeypatch, tmp_path):
         monkeypatch.setenv("SHELL", "/test/shell")
         monkeypatch.setattr(terminal, "_tmux_session_exists", lambda name: True)
@@ -65,7 +74,7 @@ class TestLaunchPaneCommand:
 
         args = run.call_args_list[0].args[0]
         assert args[3:9] == ["respawn-pane", "-k", "-t", "=term-work-8:", "-c", str(tmp_path)]
-        assert args[-1] == "codex resume --last; exec /test/shell -l"
+        assert args[-1] == f"{terminal.with_task_display('codex resume --last')}; exec /test/shell -l"
         assert "send-keys" not in args
 
     def test_bash_pane_shell_reads_the_alias_rcfile(self, monkeypatch, tmp_path):
@@ -77,7 +86,7 @@ class TestLaunchPaneCommand:
         terminal.launch_pane_command("work-7", str(tmp_path), "claude")
 
         args = run.call_args_list[0].args[0]
-        assert args[-1] == f"claude; exec /bin/bash --rcfile {terminal.PANE_BASHRC} -i"
+        assert args[-1] == f"{terminal.with_task_display('claude')}; exec /bin/bash --rcfile {terminal.PANE_BASHRC} -i"
 
     def test_pane_shell_without_shell_env_uses_the_passwd_shell(self, monkeypatch, tmp_path):
         monkeypatch.delenv("SHELL", raising=False)
@@ -89,7 +98,7 @@ class TestLaunchPaneCommand:
         terminal.launch_pane_command("work-7", str(tmp_path), "claude")
 
         args = run.call_args_list[0].args[0]
-        assert args[-1] == f"claude; exec /bin/bash --rcfile {terminal.PANE_BASHRC} -i"
+        assert args[-1] == f"{terminal.with_task_display('claude')}; exec /bin/bash --rcfile {terminal.PANE_BASHRC} -i"
 
     def test_alias_rcfile_defines_cl_clc_and_co(self, tmp_path):
         out = subprocess.run(
