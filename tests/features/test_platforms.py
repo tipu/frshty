@@ -1,4 +1,5 @@
 import json
+import subprocess
 from unittest.mock import patch, MagicMock
 
 from features.platforms import make_platform, GitHubPlatform, BitbucketPlatform, _parse_ts
@@ -611,7 +612,7 @@ def _search_hit(number, author, repo="org/r"):
 
 
 class TestGitHubListPendingReviewsForMe:
-    def _run(self, requested, assigned, assigned_rc=0):
+    def _run(self, requested, assigned, assigned_rc=0, assigned_timeout=False):
         p = _gh_platform()
         p._me_login_cache = "me"
         calls = []
@@ -621,6 +622,8 @@ class TestGitHubListPendingReviewsForMe:
             if args[:2] == ["search", "prs"] and "user-review-requested:@me" in args:
                 return _gh_result(stdout=json.dumps(requested))
             if args[:2] == ["search", "prs"] and "assignee:@me" in args:
+                if assigned_timeout:
+                    raise subprocess.TimeoutExpired(["gh"] + args, 60)
                 return _gh_result(stdout=json.dumps(assigned), returncode=assigned_rc)
             return _gh_result(stdout='{"data": {}}')
 
@@ -645,6 +648,11 @@ class TestGitHubListPendingReviewsForMe:
 
     def test_failed_assignee_search_keeps_review_requests_and_logs(self):
         prs, _, emit = self._run([_search_hit(1, "a")], [], assigned_rc=1)
+        assert [pr["id"] for pr in prs] == [1]
+        assert emit.call_args.args[0] == "github_pr_search_failed"
+
+    def test_timed_out_assignee_search_keeps_review_requests_and_logs(self):
+        prs, _, emit = self._run([_search_hit(1, "a")], [], assigned_timeout=True)
         assert [pr["id"] for pr in prs] == [1]
         assert emit.call_args.args[0] == "github_pr_search_failed"
 

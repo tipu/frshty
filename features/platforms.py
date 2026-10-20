@@ -786,11 +786,17 @@ class GitHubPlatform(_CIMonitorMixin):
         return (self.config.get("github") or {}).get("user", "") or self._me_login()
 
     def _search_open_prs(self, qualifier: str) -> list[dict]:
-        result = self._run_gh([
-            "search", "prs", qualifier, "--state=open",
-            "--json", "number,title,author,createdAt,updatedAt,url,repository",
-            "--limit", "50",
-        ])
+        try:
+            result = self._run_gh([
+                "search", "prs", qualifier, "--state=open",
+                "--json", "number,title,author,createdAt,updatedAt,url,repository",
+                "--limit", "50",
+            ])
+        except subprocess.TimeoutExpired:
+            log.emit("github_pr_search_failed",
+                     f"gh search prs {qualifier} timed out",
+                     meta={"qualifier": qualifier})
+            return []
         if result.returncode != 0:
             log.emit("github_pr_search_failed",
                      f"gh search prs {qualifier} failed: {result.stderr.strip()[:200]}",
