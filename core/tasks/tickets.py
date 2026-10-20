@@ -1,4 +1,5 @@
 """Ticket pipeline tasks. Headless claude -p invocations, postcondition-gated."""
+import codecs
 import hashlib
 import json
 import re
@@ -516,6 +517,44 @@ def _clean_workspace_scratch(ticket_dir: Path) -> list[str]:
     return removed
 
 
+def _untracked_hook_paths(repo_dir: Path, lines: list[str]) -> tuple[set[str], set[str]]:
+    """Untracked files inside the repo's hooks directory.
+
+    A repo that sets core.hooksPath to a directory inside its tree, as husky
+    does with `.husky/_`, gets hooks written there by tools such as git-lfs.
+    Those files are not the ticket's work, so they never make a worktree dirty
+    and never go into a commit.
+
+    `lines` is the caller's `git status --porcelain`, which collapses an
+    untracked directory into one entry such as `?? .husky/`. Returns the
+    entries of `lines` that hold nothing but hook files, and the hook files one
+    by one. A commit excludes single files, so a tracked change elsewhere in
+    the same directory is still staged."""
+    try:
+        hooks = git_util.run_git(repo_dir, ["rev-parse", "--path-format=absolute",
+                                            "--git-path", "hooks"], timeout=30)
+        rel = Path(hooks.stdout.strip()).resolve().relative_to(repo_dir.resolve())
+        status = git_util.run_git(repo_dir, ["status", "--porcelain", "-z",
+                                             "--untracked-files=all"], timeout=30)
+    except (git_util.GitCommandError, ValueError):
+        return set(), set()
+    untracked = [f[3:] for f in status.stdout.split("\0") if f.startswith("?? ")]
+    hook_files = {u for u in untracked if rel in Path(u).parents}
+    ignored = set()
+    for l in lines:
+        if not l.startswith("?? "):
+            continue
+        entry = l[3:]
+        name = entry
+        if len(name) > 1 and name.startswith('"') and name.endswith('"'):
+            name = codecs.escape_decode(name[1:-1])[0].decode("utf-8", "surrogateescape")
+        inside = [u for u in untracked
+                  if u == name or (name.endswith("/") and u.startswith(name))]
+        if inside and all(u in hook_files for u in inside):
+            ignored.add(entry)
+    return ignored, hook_files
+
+
 def _dirty_workspace_repos(ticket_dir: Path) -> list[str]:
     """Return names of workspace repos that have meaningful uncommitted changes
     (excluding Pipfile / Pipfile.lock noise)."""
@@ -536,9 +575,11 @@ def _dirty_workspace_repos(ticket_dir: Path) -> list[str]:
             dirty.append(child.name)
             continue
         lines = [l for l in status.stdout.splitlines() if l.strip()]
+        hook_entries, _ = _untracked_hook_paths(child, lines)
         meaningful = [
             l for l in lines
             if Path(l[3:].split(" -> ")[-1]).name not in _NOISE_ONLY
+            and l[3:] not in hook_entries
         ]
         if meaningful:
             dirty.append(child.name)
@@ -581,18 +622,21 @@ def _commit_workspace_changes(ticket_dir: Path, ticket_key: str,
         # success while the work stays uncommitted.
         status = git_util.run_git(repo_dir, ["status", "--porcelain"], timeout=30)
         lines = [l for l in status.stdout.splitlines() if l.strip()]
+        hook_entries, hook_files = _untracked_hook_paths(repo_dir, lines)
         meaningful = [
             l for l in lines
             if Path(l[3:].split(" -> ")[-1]).name not in _NOISE_ONLY
+            and l[3:] not in hook_entries
         ]
         if not meaningful:
             continue
         repo_msg = commit_msg
         if describe:
-            git_util.run_git(repo_dir, ["add", "-A"], timeout=60)
+            git_util.stage_all(repo_dir, hook_files, check=True)
             repo_msg = commit_subject(repo_dir, commit_msg, ticket_key=ticket_key)
         outcome, route = commit_repo_changes(repo_dir, ticket_key, repo_msg,
-                                             config=config, rules_files=rules_files)
+                                             exclude=hook_files, config=config,
+                                             rules_files=rules_files)
         if not outcome.ok:
             raise CommitBlocked(repo_dir.name, route, outcome)
         committed.append(repo_dir.name)
