@@ -110,6 +110,15 @@ def test_a_shared_blob_under_a_term_path_rejects_it(repo):
     assert "path nesiorkly-copy.txt: nesiorkly" in got.stderr
 
 
+def test_a_copied_subtree_that_forms_a_term_path_rejects_it(repo):
+    _commit(repo, "a-clean/laico.txt", "x\n")
+    _git(repo, "-c", "core.hooksPath=/dev/null", "push", "origin", "HEAD")
+    _commit(repo, "lus/laico.txt", "x\n")
+    got = _push(repo)
+    assert got.returncode != 0
+    assert "path lus/laico.txt: lus laico" in got.stderr
+
+
 def test_deleting_a_term_path_the_remote_holds_passes(repo):
     _commit(repo, "nesiorkly.txt", "clean\n")
     _git(repo, "-c", "core.hooksPath=/dev/null", "push", "origin", "HEAD")

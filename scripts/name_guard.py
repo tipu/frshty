@@ -110,6 +110,13 @@ def scan_push(repo: str, remote: str, lines: list[str], matcher: Matcher) -> lis
         sha, body = record.split("\x01", 1)
         for term in matcher.find(body):
             hits.append((f"commit {sha[:10]}", term))
+    changed = git_util.run_git(repo, ["-c", "core.quotePath=false", "log", "-z", "-m", "--root",
+                                      "--no-renames", "--diff-filter=d", "--name-only",
+                                      "--format=", *tips, "--not", *exclude],
+                               timeout=GIT_TIMEOUT).stdout
+    for path in sorted({p.strip("\n") for p in changed.split("\0")} - {""}):
+        for term in matcher.find(path):
+            hits.append((f"path {path}", term))
     paths: dict[str, str] = {}
     objects = git_util.run_git(repo, ["rev-list", "--objects", *tips, "--not", *exclude],
                                timeout=GIT_TIMEOUT).stdout
