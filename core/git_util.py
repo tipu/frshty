@@ -44,6 +44,8 @@ WORKTREE_LOCK_REASON = ("frshty owns this worktree; a checkout in another "
                         "container cannot see it, so only frshty removes it")
 WORKTREE_ADD = ["worktree", "add", "--lock", "--reason", WORKTREE_LOCK_REASON]
 WORKTREE_REMOVE = ["worktree", "remove", "--force", "--force"]
+SLUG_WORDS = 7
+_URL = re.compile(r"(?i)(?:[a-z][a-z0-9+.-]*://|www\.)\S*")
 
 _worktree_locks: dict[str, threading.Lock] = {}
 _worktree_locks_guard = threading.Lock()
@@ -377,6 +379,15 @@ class CommitOutcome:
 # Scoped to the hook runner. A bare "permission denied" or "command not found"
 # appears in ordinary test output too, and classifying a genuine test failure as
 # an environment problem blocks work that an agent could have fixed.
+def slug_words(text: str, limit: int = SLUG_WORDS) -> list[str]:
+    """The first kebab words of a branch slug.
+
+    A URL is dropped before the words are taken, so a pasted link never
+    becomes part of a branch name."""
+    slug = re.sub(r"[^a-z0-9]+", "-", _URL.sub(" ", text or "").lower())
+    return [w for w in slug.split("-") if w][:limit]
+
+
 _ENVIRONMENT_MARKERS = (
     "pre-commit not found", "pre-commit: not found", "did you forget to activate",
     "no such file or directory: 'pre-commit'", "pre-commit: command not found",
@@ -717,6 +728,39 @@ def run_git(cwd, args: list[str], *, allowed_codes=(0,), timeout: int = 60):
     if result.returncode not in allowed_codes:
         raise GitCommandError(args, result)
     return result
+
+
+def read_objects(cwd, oids: list[str]):
+    """Yield (oid, type, bytes) for each object in `oids`, read through one
+    `git cat-file --batch`. A missing object or a failed git raises
+    GitCommandError."""
+    args = ["cat-file", "--batch"]
+    proc = subprocess.Popen(["git", *args], cwd=str(cwd), stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def feed():
+        try:
+            proc.stdin.write(("\n".join(oids) + "\n").encode())
+            proc.stdin.close()
+        except OSError:
+            pass
+
+    threading.Thread(target=feed, daemon=True).start()
+    try:
+        for oid in oids:
+            header = proc.stdout.readline().split()
+            if len(header) != 3:
+                proc.kill()
+                proc.wait()
+                raise GitCommandError(args, subprocess.CompletedProcess(
+                    args, proc.returncode or 1, "", f"no object {oid}"))
+            data = proc.stdout.read(int(header[2]))
+            proc.stdout.read(1)
+            yield oid, header[1].decode(), data
+    finally:
+        if proc.poll() is None:
+            proc.stdout.close()
+            proc.wait()
 
 
 def head_sha(worktree) -> str:

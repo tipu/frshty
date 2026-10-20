@@ -38,6 +38,10 @@ class TestMakeSlug:
     def test_empty_summary(self):
         assert tickets._make_slug("T-1", "") == "T-1"
 
+    def test_drops_urls(self):
+        assert tickets._make_slug("T-1", "See HTTPS://acme.example.com/x for the bug") == \
+            "T-1-see-for-the-bug"
+
 
 class TestResolveStatus:
     def test_mapped_status(self):
