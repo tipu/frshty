@@ -1962,6 +1962,8 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
             )
             if not auto_ack:
                 return "needs_ack"
+            c.execute("UPDATE work_items SET archived_at = ? WHERE id = ?",
+                      (now, run["work_item_id"]))
             c.execute(
                 "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
                 "VALUES (?, ?, 'auto_ack', '{}', ?)",
