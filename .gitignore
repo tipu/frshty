@@ -19,6 +19,7 @@ config/*.toml
 !config/peers.example.toml
 !config/loops.example.toml
 !config/frshty.example.toml
+config/name_guard_terms.tsv
 
 # Scratch scripts (may contain hardcoded credentials)
 /_fetch_*.py

@@ -1,0 +1,5 @@
+#!/bin/sh
+root="$(dirname "$0")/../.."
+python="$root/.venv/bin/python"
+[ -x "$python" ] || python=python3
+exec "$python" "$root/scripts/name_guard.py" pre-push "$@"

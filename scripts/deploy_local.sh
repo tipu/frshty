@@ -44,6 +44,12 @@ if ! git -C "$CHECKOUT" merge-base --is-ancestor "$target" HEAD; then
 fi
 git -C "$CHECKOUT" merge-base --is-ancestor "$target" HEAD
 
+if [ -f "$CHECKOUT/config/name_guard_terms.tsv" ]; then
+  git -C "$CHECKOUT" config core.hooksPath "$CHECKOUT/scripts/git-hooks"
+else
+  echo "deploy: $CHECKOUT/config/name_guard_terms.tsv is missing; the pre-push name guard is not installed" >&2
+fi
+
 if ! git -C "$CHECKOUT" diff --quiet "$previous" HEAD -- Dockerfile; then
   python3 "$CHECKOUT/scripts/instance.py" build
   echo "deploy: the Dockerfile changed; the image is rebuilt, and each container runs it after scripts/instance.py up" >&2
