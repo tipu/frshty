@@ -1,0 +1,7 @@
+if [ -n "${FRSHTY_CLAUDE_CONFIG_DIR:-}" ]; then
+  alias cl >/dev/null 2>&1 || alias cl="CLAUDE_CONFIG_DIR=$(printf %q "$FRSHTY_CLAUDE_CONFIG_DIR") claude --dangerously-skip-permissions"
+else
+  alias cl >/dev/null 2>&1 || alias cl='claude --dangerously-skip-permissions'
+fi
+alias clc >/dev/null 2>&1 || alias clc='cl --continue'
+alias co >/dev/null 2>&1 || alias co='codex --dangerously-bypass-approvals-and-sandbox'
