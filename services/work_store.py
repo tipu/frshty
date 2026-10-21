@@ -47,6 +47,7 @@ _send_locks_guard = threading.Lock()
 TMUX_SOCKET = os.path.expanduser("~/.frshty-tmux")
 AGENTS = ("claude", "codex")
 DONE_MARKER = "WORK_DONE"
+REVIEW_OBJECTIVE_PREFIX = "Review pull request #"
 ARTIFACT_MARKER = "ARTIFACT:"
 PROGRESS_MARKER = "PROGRESS:"
 _IMAGE_ID_RE = re.compile(r"^(\d+)-(\d+)$")
@@ -1932,7 +1933,7 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
             return "unknown_session"
         item = c.execute(
             "SELECT state, autocontinue, continues_used, continue_cap, pending_question, "
-            "contexts FROM work_items WHERE id = ?", (run["work_item_id"],),
+            "contexts, objective FROM work_items WHERE id = ?", (run["work_item_id"],),
         ).fetchone()
         if not item or item["state"] != "needs_you":
             return "not_applicable"
@@ -1946,10 +1947,11 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
             )
             return "question"
         if finished:
+            auto_ack = (item["objective"] or "").startswith(REVIEW_OBJECTIVE_PREFIX)
             c.execute(
-                "UPDATE work_items SET state = 'needs_ack', stop_reason = '', "
+                "UPDATE work_items SET state = ?, stop_reason = '', "
                 "pending_question = '', current_checkpoint = ?, updated_at = ? WHERE id = ?",
-                (excerpt, now, run["work_item_id"]),
+                ("done" if auto_ack else "needs_ack", excerpt, now, run["work_item_id"]),
             )
             c.execute("UPDATE work_runs SET status = 'finished', finished_at = ? WHERE id = ?",
                       (now, run["id"]))
@@ -1958,7 +1960,14 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
                 "VALUES (?, ?, 'self_reported_done', ?, ?)",
                 (run["work_item_id"], run["id"], db.dump_json({"tail": excerpt}), now),
             )
-            return "needs_ack"
+            if not auto_ack:
+                return "needs_ack"
+            c.execute(
+                "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+                "VALUES (?, ?, 'auto_ack', '{}', ?)",
+                (run["work_item_id"], run["id"], now),
+            )
+            return "auto_acked"
         if excerpt:
             c.execute("UPDATE work_items SET stop_reason = ? WHERE id = ?",
                       (excerpt, run["work_item_id"]))
