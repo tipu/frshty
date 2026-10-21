@@ -322,6 +322,13 @@ def slack_int_mounts(config: dict, root: Path,
     return out
 
 
+def claude_config_dir(config: dict) -> Path | None:
+    """The claude configuration directory the instance runs with, None when it
+    runs the operator's default account."""
+    claude_dir = ((config.get("llm") or {}).get("claude") or {}).get("config_dir")
+    return _expand(claude_dir) if claude_dir else None
+
+
 def mounts(config: dict, config_path: Path, root: Path) -> list[tuple[str, str, bool]]:
     """(host path, container path, read only) for every bind mount."""
     key = config["job"]["key"]
@@ -343,9 +350,9 @@ def mounts(config: dict, config_path: Path, root: Path) -> list[tuple[str, str, 
         out.append((str(agy), "/usr/local/bin/agy", True))
     if PEERS.is_file():
         out.append((str(PEERS), "/app/config/peers.toml", True))
-    claude_dir = ((config.get("llm") or {}).get("claude") or {}).get("config_dir")
+    claude_dir = claude_config_dir(config)
     if claude_dir:
-        out.append((str(_expand(claude_dir)), str(_expand(claude_dir)), False))
+        out.append((str(claude_dir), str(claude_dir), False))
     slack_dir = (config.get("slack") or {}).get("messages_dir")
     if slack_dir and (config.get("features") or {}).get("slack"):
         out.append((str(_expand(slack_dir)), str(_expand(slack_dir)), False))
@@ -442,6 +449,8 @@ def run_args(config: dict, config_path: Path, check: bool) -> list[str]:
             "-e", f"GVOICE_PROFILE_DIR={root / 'state' / GVOICE_PROFILE}",
             "--memory", memory, "--memory-swap", memory,
             "--tmpfs", TMP_MOUNT]
+    if claude_config_dir(config):
+        args += ["-e", f"FRSHTY_CLAUDE_CONFIG_DIR={claude_config_dir(config)}"]
     if box.get("env_file"):
         args += ["--env-file", str(_expand(box["env_file"]))]
     if DOCKER_SOCKET.exists():
