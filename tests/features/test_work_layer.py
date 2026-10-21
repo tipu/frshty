@@ -114,6 +114,31 @@ class TestAcknowledgement:
         item_id = self._reported_done(monkeypatch)
         assert self._state(item_id)["state"] == "needs_ack"
 
+    def test_a_finished_pull_request_review_is_acknowledged_automatically(self, monkeypatch):
+        item_id = self._reported_done(
+            monkeypatch, "Review pull request #7 in repository 'app' (branch: b).")
+        assert self._state(item_id)["state"] == "done"
+        kinds = {e["kind"] for e in work_store.item_detail(item_id)["events"]}
+        assert {"self_reported_done", "auto_ack"} <= kinds
+        assert "operator_ack" not in kinds
+
+    def test_a_task_that_only_mentions_a_review_still_waits(self, monkeypatch):
+        item_id = self._reported_done(
+            monkeypatch, 'auto ack every "Review pull request #..." task')
+        assert self._state(item_id)["state"] == "needs_ack"
+
+    def test_a_review_that_asks_a_question_still_waits_for_the_operator(self, monkeypatch):
+        from unittest.mock import MagicMock
+        item_id = _mkitem("Review pull request #8 in repository 'app' (branch: b).")
+        sid = f"sid-ack-{item_id}"
+        work_store.add_run(item_id, sid, f"work-{item_id}", "/tmp")
+        work_store.record_event(sid, "Stop", {})
+        monkeypatch.setattr(work_store, "last_assistant_text",
+                            lambda p: "The POST was refused. Should I retry?")
+        monkeypatch.setattr(work_store, "tmux_send", MagicMock(return_value=True))
+        assert work_store.maybe_autocontinue(sid, "/tmp/t.jsonl") == "question"
+        assert self._state(item_id)["state"] == "needs_you"
+
     def test_the_operator_marking_it_done_skips_the_acknowledgement(self):
         item_id = _mkitem("operator marked done")
         work_store.apply_action(item_id, "done")
