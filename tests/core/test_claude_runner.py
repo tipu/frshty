@@ -463,3 +463,42 @@ def test_a_failed_print_run_keeps_the_cli_error_for_the_caller(tmp_path, monkeyp
     assert llm.consume_last_error() == (
         "Failed to authenticate: OAuth session expired and could not be refreshed")
     assert llm.consume_last_error() == ""
+
+
+def test_print_tiers_leave_the_model_to_the_cli_unless_one_is_named(tmp_path):
+    provider = llm.ClaudeProvider({"llm": {"claude": {"bin": "claude", "args": []}}})
+    seen = []
+
+    def capture(cmd, **kwargs):
+        seen.append((cmd, kwargs["model"]))
+        return ("ok", {})
+
+    with patch.object(provider, "_run_print", side_effect=capture):
+        provider.balanced("p")
+        provider.agentic("p", cwd=tmp_path)
+        provider.fast("p")
+        provider.balanced("p", model="claude-opus-4-8")
+        provider.agentic("p", cwd=tmp_path, model="claude-opus-4-8")
+
+    for cmd, model in seen[:3]:
+        assert "--model" not in cmd
+        assert model == "default"
+    for cmd, model in seen[3:]:
+        assert cmd[cmd.index("--model") + 1] == "claude-opus-4-8"
+        assert model == "claude-opus-4-8"
+
+
+def test_run_claude_code_leaves_the_model_to_the_cli_unless_one_is_named(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    args_file = tmp_path / "args"
+    _install_fake_claude(bin_dir, f'printf "%s\\n" "$@" >> "{args_file}"\nexit 0')
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    db.execute("DELETE FROM kv WHERE key='llm_guard'")
+
+    run_claude_code("hi", cwd=tmp_path, timeout=5)
+    assert "--model" not in args_file.read_text().splitlines()
+
+    args_file.unlink()
+    run_claude_code("hi", cwd=tmp_path, timeout=5, model="claude-opus-4-8")
+    args = args_file.read_text().splitlines()
+    assert args[args.index("--model") + 1] == "claude-opus-4-8"
