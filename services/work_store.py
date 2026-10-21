@@ -1017,10 +1017,15 @@ def apply_action(item_id: int, action: str, until: str | None = None) -> dict:
         elif action == "snooze":
             if not until:
                 return {"error": "snooze requires until"}
-            c.execute(
-                "UPDATE work_items SET state = 'waiting_external', snoozed_until = ?, updated_at = ? WHERE id = ?",
-                (until, now, item_id),
-            )
+            try:
+                stamp = datetime.fromisoformat(until).astimezone(timezone.utc).isoformat()
+            except ValueError:
+                return {"error": "snooze needs an ISO timestamp"}
+            c.execute("UPDATE work_items SET board_snoozed_until = ? WHERE id = ?",
+                      (stamp, item_id))
+        elif action == "unsnooze":
+            c.execute("UPDATE work_items SET board_snoozed_until = NULL WHERE id = ?",
+                      (item_id,))
         elif action in ("autocontinue_on", "autocontinue_off"):
             c.execute("UPDATE work_items SET autocontinue = ?, updated_at = ? WHERE id = ?",
                       (1 if action == "autocontinue_on" else 0, now, item_id))
@@ -1030,7 +1035,8 @@ def apply_action(item_id: int, action: str, until: str | None = None) -> dict:
         elif action == "reopen":
             c.execute(
                 "UPDATE work_items SET state = 'needs_you', snoozed_until = NULL, "
-                "archived_at = NULL, continues_used = 0, updated_at = ? WHERE id = ?",
+                "board_snoozed_until = NULL, archived_at = NULL, continues_used = 0, "
+                "updated_at = ? WHERE id = ?",
                 (now, item_id),
             )
         elif action == "ack":
@@ -2103,7 +2109,8 @@ def reply(item_id: int, text: str, question: str | None = None) -> dict:
         # before the reply stops again on the first turn after it.
         c.execute(
             "UPDATE work_items SET state = 'agent_working', stop_reason = '', "
-            "pending_question = '', snoozed_until = NULL, continues_used = 0, "
+            "pending_question = '', snoozed_until = NULL, board_snoozed_until = NULL, "
+            "continues_used = 0, "
             "updated_at = ? WHERE id = ?" + (" AND pending_question = ''" if keystroke else ""),
             (now, item_id),
         )
@@ -2590,7 +2597,12 @@ def grouped_items(now: datetime | None = None, q: str = "",
     Every row carries the newest PROGRESS line its agent printed. The line
     comes from the progress events, not from current_checkpoint, because a
     run that reports itself done overwrites current_checkpoint with the tail
-    of its last message and would hide the progress line."""
+    of its last message and would hide the progress line.
+
+    A task the operator snoozed carries board_snoozed while its snooze runs.
+    The snooze keeps the task in its own group: the board hides it until the
+    snooze ends, and shows it in that group when the operator asks for the
+    snoozed tasks."""
     now = now or datetime.now(timezone.utc)
     stale_cutoff = (now - timedelta(minutes=STALE_AFTER_MINUTES)).isoformat()
     now_iso = now.isoformat()
@@ -2627,6 +2639,9 @@ def grouped_items(now: datetime | None = None, q: str = "",
             continue
         row["latest_progress"] = db.load_json(row, "latest_progress_payload").get("text") or ""
         row.pop("latest_progress_payload", None)
+        row["board_snoozed"] = row["state"] not in ("done", CANCELED_STATE) \
+            and bool(row["board_snoozed_until"]) \
+            and datetime.fromisoformat(row["board_snoozed_until"]) > now
         state = row["state"]
         if state == "needs_ack":
             groups["needs_ack"].append(row)
@@ -2811,9 +2826,10 @@ def attention_count(now: datetime | None = None) -> int:
     now = now or datetime.now(timezone.utc)
     row = db.query_one(
         "SELECT COUNT(*) AS n FROM work_items WHERE "
-        "state IN ('proposed', 'needs_ack', 'needs_you') "
-        "OR (state = 'waiting_external' AND snoozed_until IS NOT NULL AND snoozed_until <= ?)",
-        (now.isoformat(),))
+        "(state IN ('proposed', 'needs_ack', 'needs_you') "
+        "OR (state = 'waiting_external' AND snoozed_until IS NOT NULL AND snoozed_until <= ?)) "
+        "AND (board_snoozed_until IS NULL OR board_snoozed_until <= ?)",
+        (now.isoformat(), now.isoformat()))
     return row["n"] if row else 0
 
 

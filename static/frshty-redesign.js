@@ -421,7 +421,7 @@
         this.act(it, "cancel");
       },
       snooze(it) {
-        this.act(it, "snooze", { until: new Date(Date.now() + 4 * 3600 * 1000).toISOString() });
+        this.act(it, "snooze", { until: new Date(Date.now() + 3600 * 1000).toISOString() });
       },
       async answer(it, text) {
         text = (text || "").trim();
@@ -618,7 +618,7 @@
     <template v-else>
       <a class="ln-btn" v-if="it.last_tmux_key" :href="c.terminalHref(it)" :target="c.terminalWindow(it)">Terminal <kbd>t</kbd></a>
       <button class="ln-btn ln-btn-ghost" @click="c.act(it, 'done')">Done</button>
-      <button class="ln-btn ln-btn-ghost" @click="c.snooze(it)">Snooze 4h</button>
+      <button class="ln-btn ln-btn-ghost" @click="c.snooze(it)">Snooze 1h</button>
       <button class="ln-btn ln-btn-ghost" v-if="it.state === 'failed_stale' || it.state === 'waiting_external'" @click="c.act(it, 'reopen')">Reopen</button>
       <button class="ln-btn ln-btn-ghost" @click="c.cancel(it)">Cancel</button>
     </template>
