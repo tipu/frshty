@@ -6,9 +6,12 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 import core.db as db
 from services import work_artifacts, work_launch, work_store
+from web.work import router as work_router
 
 
 def _mkitem(objective="do the thing", **kw):
@@ -1146,7 +1149,8 @@ class TestSnoozedQuestion:
         work_store.add_run(item_id, f"sid-sq-{item_id}", f"work-{item_id}", "/tmp")
         db.execute("UPDATE work_items SET pending_question = ? WHERE id = ?",
                    ('{"questions": [{"question": "Push it?"}]}', item_id))
-        work_store.apply_action(item_id, "snooze", until=until)
+        db.execute("UPDATE work_items SET state = 'waiting_external', snoozed_until = ? "
+                   "WHERE id = ?", (until, item_id))
         return item_id
 
     def test_detail_remaps_expired_snooze_to_needs_you(self):
@@ -1187,6 +1191,78 @@ class TestSnoozedQuestion:
         assert item["state"] == "agent_working"
         assert item["pending_question"] == ""
         assert item["snoozed_until"] is None
+
+
+class TestBoardSnooze:
+    def _board_ids(self, now=None):
+        groups = work_store.grouped_items(now)
+        return {g: {r["id"] for r in rows if not r["board_snoozed"]} for g, rows in groups.items()}
+
+    def test_snooze_keeps_the_state_and_marks_the_row(self):
+        item_id = _mkitem("board snooze keeps state")
+        db.execute("UPDATE work_items SET state = 'needs_you' WHERE id = ?", (item_id,))
+        until = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        assert "error" not in work_store.apply_action(item_id, "snooze", until=until)
+        row = db.query_one("SELECT state, snoozed_until FROM work_items WHERE id = ?", (item_id,))
+        assert row["state"] == "needs_you"
+        assert row["snoozed_until"] is None
+        snoozed = {r["id"]: r for r in work_store.grouped_items()["needs_you"]}
+        assert snoozed[item_id]["board_snoozed"] is True
+        assert item_id not in self._board_ids()["needs_you"]
+
+    def test_the_snooze_ends_and_the_task_returns(self):
+        item_id = _mkitem("board snooze ends")
+        db.execute("UPDATE work_items SET state = 'needs_you' WHERE id = ?", (item_id,))
+        until = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        work_store.apply_action(item_id, "snooze", until=until)
+        later = datetime.now(timezone.utc) + timedelta(hours=1, minutes=1)
+        assert item_id in self._board_ids(later)["needs_you"]
+
+    def test_a_snoozed_task_leaves_the_attention_count(self):
+        item_id = _mkitem("board snooze attention")
+        db.execute("UPDATE work_items SET state = 'needs_you' WHERE id = ?", (item_id,))
+        later = datetime.now(timezone.utc) + timedelta(hours=2)
+        before, before_later = work_store.attention_count(), work_store.attention_count(later)
+        until = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        work_store.apply_action(item_id, "snooze", until=until)
+        assert work_store.attention_count() == before - 1
+        assert work_store.attention_count(later) == before_later
+
+    def test_unsnooze_and_reopen_clear_the_snooze(self):
+        item_id = _mkitem("board snooze cleared")
+        until = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        for action in ("unsnooze", "reopen"):
+            work_store.apply_action(item_id, "snooze", until=until)
+            work_store.apply_action(item_id, action)
+            row = db.query_one("SELECT board_snoozed_until FROM work_items WHERE id = ?", (item_id,))
+            assert row["board_snoozed_until"] is None, action
+
+    def test_a_finished_task_ignores_its_snooze(self):
+        item_id = _mkitem("board snooze then done")
+        until = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        work_store.apply_action(item_id, "snooze", until=until)
+        work_store.apply_action(item_id, "done")
+        assert item_id in self._board_ids()["done"]
+
+    def test_snooze_refuses_a_bad_timestamp(self):
+        item_id = _mkitem("board snooze bad stamp")
+        assert work_store.apply_action(item_id, "snooze", until="soon") == {
+            "error": "snooze needs an ISO timestamp"}
+
+    def test_the_route_hides_snoozed_tasks_unless_asked(self):
+        item_id = _mkitem("board snooze route")
+        db.execute("UPDATE work_items SET state = 'needs_you' WHERE id = ?", (item_id,))
+        until = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        work_store.apply_action(item_id, "snooze", until=until)
+        app = FastAPI()
+        app.include_router(work_router)
+        client = TestClient(app)
+        hidden = client.get("/api/work/items").json()
+        assert item_id not in {r["id"] for r in hidden["groups"]["needs_you"]}
+        assert hidden["counts"]["snoozed"] >= 1
+        shown = client.get("/api/work/items?snoozed=1").json()
+        assert item_id in {r["id"] for r in shown["groups"]["needs_you"]}
+        assert shown["counts"]["snoozed"] == hidden["counts"]["snoozed"]
 
 
 class TestTranscriptTail:
