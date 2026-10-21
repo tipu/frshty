@@ -42,6 +42,7 @@ RUN groupadd -o -g "${HOST_GID}" frshty && \
     useradd -o -m -d "${HOST_HOME}" -s /bin/bash -u "${HOST_UID}" -g "${HOST_GID}" frshty && \
     mkdir -p /run/frshty/seed && \
     ln -s /app/scripts/totp /usr/local/bin/totp && \
+    echo '[ -f /app/scripts/shell_aliases ] && . /app/scripts/shell_aliases' >> /etc/bash.bashrc && \
     if [ -n "${HOOK_DIR}" ]; then mkdir -p "$(dirname "${HOOK_DIR}")" && ln -s /app "${HOOK_DIR}"; fi
 
 COPY . .

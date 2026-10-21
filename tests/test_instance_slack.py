@@ -122,3 +122,13 @@ def test_aws_dir_is_mounted_at_home_aws_only_when_present(host):
     assert not any(inside == aws_home for _, inside, _ in instance.mounts(c, config_path, root))
     (root / "aws").mkdir()
     assert (str(root / "aws"), aws_home, False) in instance.mounts(c, config_path, root)
+
+
+def test_claude_config_dir_is_mounted_and_named_for_the_aliases(host, tmp_path):
+    slack, root, workspace, config_path = host
+    account = tmp_path / ".team-claude"
+    account.mkdir()
+    c = config(slack, workspace, llm={"claude": {"config_dir": str(account)}})
+    assert instance.claude_config_dir(c) == account
+    assert (str(account), str(account), False) in instance.mounts(c, config_path, root)
+    assert instance.claude_config_dir(config(slack, workspace)) is None
