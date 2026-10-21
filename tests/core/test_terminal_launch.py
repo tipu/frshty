@@ -45,6 +45,19 @@ class TestLaunchPaneCommand:
         assert env["PLAYWRIGHT_BROWSERS_PATH"] == "/ms-playwright"
         assert env["NODE_PATH"] == "/usr/lib/node_modules"
 
+    def test_the_instance_claude_dir_reaches_the_pane(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("FRSHTY_CLAUDE_CONFIG_DIR", "/home/x/.team-claude")
+        monkeypatch.setattr(terminal, "_tmux_session_exists", lambda name: True)
+        run = MagicMock(return_value=subprocess.CompletedProcess([], 0, "", ""))
+        monkeypatch.setattr(terminal.subprocess, "run", run)
+
+        terminal.launch_pane_command("work-9", str(tmp_path), "claude")
+
+        args = run.call_args_list[0].args[0]
+        assert args[args.index("FRSHTY_CLAUDE_CONFIG_DIR=/home/x/.team-claude") - 1] == "-e"
+        assert run.call_args_list[0].kwargs["env"]["FRSHTY_CLAUDE_CONFIG_DIR"] == "/home/x/.team-claude"
+        assert "CLAUDE_CONFIG_DIR" not in run.call_args_list[0].kwargs["env"]
+
     @pytest.mark.parametrize("exists", [False, True])
     def test_the_pane_command_carries_the_image_browser_settings(self, monkeypatch, tmp_path, exists):
         monkeypatch.setenv("PLAYWRIGHT_MCP_SANDBOX", "false")
@@ -109,6 +122,37 @@ class TestLaunchPaneCommand:
         assert "alias cl='claude --dangerously-skip-permissions'" in out.stdout
         assert "alias clc='cl --continue'" in out.stdout
         assert "alias co='codex --dangerously-bypass-approvals-and-sandbox'" in out.stdout
+
+    def test_alias_rcfile_runs_cl_under_the_instance_claude_dir(self, tmp_path):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        fake = bin_dir / "claude"
+        fake.write_text('#!/bin/sh\necho "dir=$CLAUDE_CONFIG_DIR args=$*"\n')
+        fake.chmod(0o755)
+        (tmp_path / ".profile").write_text(f'PATH="{bin_dir}:$PATH"\n')
+        account = str(tmp_path / "team claude")
+        out = subprocess.run(
+            ["bash", "--rcfile", terminal.PANE_BASHRC, "-i", "-c", "cl\nclc"],
+            env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin",
+                 "FRSHTY_CLAUDE_CONFIG_DIR": account},
+            capture_output=True, text=True,
+        )
+        assert out.stdout.splitlines() == [
+            f"dir={account} args=--dangerously-skip-permissions",
+            f"dir={account} args=--dangerously-skip-permissions --continue",
+        ]
+
+    def test_shell_aliases_reach_a_plain_interactive_bash(self, tmp_path):
+        aliases = os.path.join(os.path.dirname(terminal.PANE_BASHRC), "shell_aliases")
+        (tmp_path / ".bashrc").write_text(f". {aliases}\n")
+        out = subprocess.run(
+            ["bash", "-i", "-c", "alias cl"],
+            env={"HOME": str(tmp_path), "PATH": "/usr/bin:/bin",
+                 "FRSHTY_CLAUDE_CONFIG_DIR": "/home/x/.team-claude"},
+            capture_output=True, text=True,
+        )
+        assert out.stdout.strip() == (
+            "alias cl='CLAUDE_CONFIG_DIR=/home/x/.team-claude claude --dangerously-skip-permissions'")
 
     def test_alias_rcfile_keeps_the_operators_own_alias(self, tmp_path):
         (tmp_path / ".profile").write_text("alias cl='my-claude'\n")
