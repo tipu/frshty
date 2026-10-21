@@ -329,7 +329,7 @@ def _task_review_objective(config: dict, pr: dict, review_dir: Path, worktree,
     checkout = (f"The branch is checked out read-only at {worktree}." if worktree
                 else "There is no checkout of this branch, so review from the diff alone.")
     return (
-        f"Review pull request #{pr['id']} in repository '{pr['repo']}' "
+        f"{work_store.REVIEW_OBJECTIVE_PREFIX}{pr['id']} in repository '{pr['repo']}' "
         f"(branch: {pr.get('branch', '')}).\n"
         f"The diff is staged at {review_dir / 'diff.txt'}. Read it from there. {checkout}\n\n"
         + TASK_REVIEW_RULES
