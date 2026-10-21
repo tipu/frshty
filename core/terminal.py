@@ -140,8 +140,8 @@ TASK_DISPLAY_SCRIPT = os.path.join(
 
 
 def with_task_display(command: str) -> str:
-    """`command` run under scripts/task_display.py, which gives it an Xvfb
-    display of its own for exactly as long as it runs."""
+    """`command` run under scripts/task_display.py, which gives it an X
+    display of its own that starts an Xvfb only when a window opens."""
     return f"{shlex.quote(sys.executable)} {shlex.quote(TASK_DISPLAY_SCRIPT)} {shlex.quote(command)}"
 
 
@@ -298,7 +298,8 @@ def launch_pane_command(ticket_key: str, cwd: str, command: str):
     whose shell startup is stuck.
 
     The agent runs under scripts/task_display.py, so each agent has a
-    private X display that starts with it and stops when it exits.
+    private X display. Its Xvfb starts when the agent first opens a window
+    and stops when the agent exits.
     """
     session_name = _tmux_session_name(ticket_key)
     pane_command = f"{with_task_display(command)}; exec {_pane_shell()}"
