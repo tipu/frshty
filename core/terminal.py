@@ -157,8 +157,10 @@ def _pane_shell() -> str:
     with when it runs no agent.
 
     A bash pane reads scripts/pane_bashrc. That file runs the startup files
-    a login shell reads and then defines the cl, clc and co aliases, so the
-    operator can start claude or codex by hand in any pane. Bash ignores --rcfile in
+    a login shell reads and then sources scripts/shell_aliases, which defines
+    the cl, clc and co aliases, so the operator can start claude or codex by
+    hand in any pane. The cl alias runs claude under FRSHTY_CLAUDE_CONFIG_DIR
+    when the container sets it, so it uses the instance's claude account. Bash ignores --rcfile in
     a login shell, so the pane shell is interactive and not a login shell,
     and the rcfile reads the login files itself. Another shell keeps its
     own login startup files. A process started without SHELL, such as the
@@ -261,6 +263,7 @@ def _resolve_cwd(config: dict, ticket_key: str) -> str | None:
 
 STATE_ENV = ("FRSHTY_ROOT", "FRSHTY_DB", "FRSHTY_BOARD_FILE", "FRSHTY_BOARD_INSTANCE")
 IMAGE_ENV = ("PLAYWRIGHT_BROWSERS_PATH", "NODE_PATH", "PLAYWRIGHT_MCP_SANDBOX")
+ALIAS_ENV = ("FRSHTY_CLAUDE_CONFIG_DIR",)
 
 
 def _child_env():
@@ -272,13 +275,13 @@ def _child_env():
         "LANG": os.environ.get("LANG", "C.UTF-8"),
         "TMUX": "",
     }
-    env.update({k: os.environ[k] for k in STATE_ENV + IMAGE_ENV if os.environ.get(k)})
+    env.update({k: os.environ[k] for k in STATE_ENV + IMAGE_ENV + ALIAS_ENV if os.environ.get(k)})
     return env
 
 
 def _pane_env_args() -> list[str]:
     args = []
-    for key in IMAGE_ENV:
+    for key in IMAGE_ENV + ALIAS_ENV:
         if os.environ.get(key):
             args += ["-e", f"{key}={os.environ[key]}"]
     return args

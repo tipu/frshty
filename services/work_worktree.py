@@ -63,9 +63,7 @@ def instance_config(key: str) -> dict | None:
 def branch_name(config: dict | None, item_id: int, objective: str) -> str:
     """The branch one task works on, built the way the ticket pipeline builds a
     ticket branch: the id, then the first seven kebab words of the objective."""
-    slug = re.sub(r"[^a-z0-9]+", "-", (objective or "").lower()).strip("-")
-    words = [w for w in slug.split("-") if w][:7]
-    tail = "-".join(words)
+    tail = "-".join(git_util.slug_words(objective))
     name = f"work-{item_id}" + (f"-{tail}" if tail else "")
     prefix = ((config or {}).get("workspace") or {}).get("branch_prefix", "")
     return f"{prefix}/{name}" if prefix else name
