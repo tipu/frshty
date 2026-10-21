@@ -179,3 +179,20 @@ def test_load_terms_takes_the_first_column_and_skips_comments(tmp_path):
     matcher = name_guard.Matcher(name_guard.load_terms(terms))
     assert matcher.find("Lus  LAICO wrote it") == {"lus laico"}
     assert matcher.find("nothing here") == set()
+
+
+def test_the_hook_prefers_the_checkout_venv_python(tmp_path):
+    hooks = tmp_path / "scripts" / "git-hooks"
+    hooks.mkdir(parents=True)
+    hook = hooks / "pre-push"
+    hook.write_bytes((ROOT / "scripts" / "git-hooks" / "pre-push").read_bytes())
+    hook.chmod(0o755)
+    (tmp_path / "scripts" / "name_guard.py").write_text("import sys\nsys.exit(4)\n")
+    got = subprocess.run([str(hook), "origin"], input="", capture_output=True, text=True)
+    assert got.returncode == 4
+    venv = tmp_path / ".venv" / "bin"
+    venv.mkdir(parents=True)
+    (venv / "python").write_text("#!/bin/sh\nexit 5\n")
+    (venv / "python").chmod(0o755)
+    got = subprocess.run([str(hook), "origin"], input="", capture_output=True, text=True)
+    assert got.returncode == 5
