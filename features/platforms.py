@@ -17,11 +17,6 @@ from core.llm import NO_PUBLISH_RULE
 from features.pr_ci import FAILED_STATES, PASSED_STATES
 
 
-_CONFLICT_RESOLVE_MODEL = os.environ.get(
-    "FRSHTY_CONFLICT_RESOLVE_MODEL", "claude-opus-4-7"
-)
-
-
 def make_platform(config: dict):
     platform = config["job"]["platform"]
     if platform == "bitbucket":
@@ -81,8 +76,7 @@ def _resolve_merge_conflicts(repo_path, base_branch: str, prev_error: str | None
         "leave it conflicted and explain which file and why.\n\n"
         + NO_PUBLISH_RULE
     )
-    run_claude_code(prompt, cwd=Path(repo_path), timeout=900,
-                    model=_CONFLICT_RESOLVE_MODEL)
+    run_claude_code(prompt, cwd=Path(repo_path), timeout=900)
 
     still_conflicted = _run_git(repo_path, ["diff", "--name-only", "--diff-filter=U"])
     if still_conflicted.stdout.strip():
