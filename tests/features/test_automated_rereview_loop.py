@@ -147,6 +147,24 @@ class TestAutomatedReviewSkips:
 
         assert skips == {_key(live[0]): "superseded", _key(live[1]): "checks_failed"}
 
+    def test_a_single_passed_check_report_is_skipped(self):
+        """Observed on DEV-916: "ESLint passed" was marked needs_reply."""
+        live = [_bb_report(1, body="## \u2705 ESLint passed \u2014 `a6b7f60`\n\n"
+                                   "See the Reports panel for details.")]
+
+        assert comments.automated_review_skips(live, _key, set()) == {_key(live[0]): "passed"}
+
+    def test_a_single_failed_check_report_is_skipped(self):
+        live = [_bb_report(1, body="## \u274c ESLint failed \u2014 `6b0d832`\n\n"
+                                   "```\n1 error(s), 8 warning(s)\n```")]
+
+        assert comments.automated_review_skips(live, _key, set()) == {_key(live[0]): "checks_failed"}
+
+    def test_a_bot_review_that_mentions_passed_is_not_skipped(self):
+        live = [_bb_report(1, body="## Review\n\nThe tests passed, but rename `a6b7f60`.")]
+
+        assert comments.automated_review_skips(live, _key, set()) == {}
+
     def test_a_person_writing_checks_failed_is_never_skipped(self):
         live = [{**_human(1), "body": "1 of 6 checks failed, fix the migration."}]
 
