@@ -4,7 +4,7 @@ import shlex
 
 from fastapi import APIRouter, Body, Request
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
-                               RedirectResponse, Response)
+                               RedirectResponse, Response, StreamingResponse)
 
 import core.db as db
 import core.log as log
@@ -66,6 +66,15 @@ def api_work_peers():
     browser, so a peer that is asleep costs one failed request instead of
     stalling the local board."""
     return {"peers": work_peers.peers()}
+
+
+@router.get("/api/work/peers/{key}/api/work/artifact_file/{name:path}")
+async def api_work_peer_artifact_file(key: str, name: str, request: Request):
+    status, headers, body, error = await work_peers.open_file(
+        key, "api/work/artifact_file/" + name, request.headers.get("range", ""))
+    if error:
+        return JSONResponse({"error": error}, status_code=status)
+    return StreamingResponse(body, status_code=status, headers=headers)
 
 
 @router.get("/api/work/peers/{key}/{path:path}")

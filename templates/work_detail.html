@@ -495,10 +495,10 @@ const app = frshtyApp({
              (this.peer ? "?peer=" + encodeURIComponent(this.peer) : "");
     },
     artifactUrl(a) {
-      return (this.peerBase || "") + "/api/work/artifact_file/" + a.id;
+      return this.api("/api/work/artifact_file/" + a.id);
     },
     viewerUrl(a) {
-      return (this.peerBase || "") + "/artifacts/" + a.id;
+      return "/artifacts/" + a.id + (this.peer ? "?peer=" + encodeURIComponent(this.peer) : "");
     },
     ts(at) {
       return window.frshtyTime.stamp(at);
