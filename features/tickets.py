@@ -2757,7 +2757,7 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
         if skipped_now:
             log.emit("ticket_pr_automated_review_skipped",
                 f"{_label(ticket['key'], ts)} \u00b7 {pr['repo']}: not fixing {len(skipped_now)} automated review(s); "
-                f"a newer review supersedes them, they report that all checks passed, or the PR had {MAX_AUTOMATED_REVIEW_FIX_RUNS} automated review fix runs",
+                f"a newer review supersedes them, they report that all checks passed, they report failed checks for the CI fix, or the PR had {MAX_AUTOMATED_REVIEW_FIX_RUNS} automated review fix runs",
                 links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
                 meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"],
                       "max_fix_runs": MAX_AUTOMATED_REVIEW_FIX_RUNS,
