@@ -58,7 +58,7 @@ def test_agentic_passes_tools_add_dirs_and_system_prompt(tmp_path, monkeypatch):
                       add_dirs=[extra])
     assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
     assert argv[argv.index("--allowedTools") + 1] == "Read,Bash(git:*)"
-    assert argv[argv.index("--disallowedTools") + 1] == "Write,Edit"
+    assert argv[argv.index("--disallowedTools") + 1] == "ScheduleWakeup,Write,Edit"
     assert argv[argv.index("--add-dir") + 1] == str(extra)
     assert argv[argv.index("--append-system-prompt") + 1] == "be a reviewer"
     assert "--dangerously-skip-permissions" not in argv
@@ -118,14 +118,14 @@ def _run_thinking(tmp_path, monkeypatch, **kwargs):
 def test_thinking_denies_push_curl_and_gh(tmp_path, monkeypatch):
     argv = _run_thinking(tmp_path, monkeypatch)
     assert "--dangerously-skip-permissions" in argv
-    assert argv[argv.index("--disallowedTools") + 1] == "Bash(git push:*),Bash(curl:*),Bash(gh:*)"
+    assert argv[argv.index("--disallowedTools") + 1] == "ScheduleWakeup,Bash(git push:*),Bash(curl:*),Bash(gh:*)"
 
 
 def test_thinking_denies_publish_tools_beside_an_allow_list(tmp_path, monkeypatch):
     argv = _run_thinking(tmp_path, monkeypatch, allowed_tools=["Read"])
-    assert argv[argv.index("--disallowedTools") + 1] == "Bash(git push:*),Bash(curl:*),Bash(gh:*)"
+    assert argv[argv.index("--disallowedTools") + 1] == "ScheduleWakeup,Bash(git push:*),Bash(curl:*),Bash(gh:*)"
 
 
 def test_thinking_takes_a_narrower_deny_list(tmp_path, monkeypatch):
     argv = _run_thinking(tmp_path, monkeypatch, denied_tools=("Bash(curl:*)",))
-    assert argv[argv.index("--disallowedTools") + 1] == "Bash(curl:*)"
+    assert argv[argv.index("--disallowedTools") + 1] == "ScheduleWakeup,Bash(curl:*)"

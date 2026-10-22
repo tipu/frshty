@@ -502,3 +502,42 @@ def test_run_claude_code_leaves_the_model_to_the_cli_unless_one_is_named(tmp_pat
     run_claude_code("hi", cwd=tmp_path, timeout=5, model="claude-opus-5-5")
     args = args_file.read_text().splitlines()
     assert args[args.index("--model") + 1] == "claude-opus-5-5"
+
+
+def test_every_headless_tier_denies_schedule_wakeup(tmp_path, monkeypatch):
+    provider = llm.ClaudeProvider({"llm": {"claude": {"bin": "claude", "args": []}}})
+    seen = []
+
+    def capture(cmd, **kwargs):
+        seen.append(cmd)
+        return ("ok", {})
+
+    with patch.object(provider, "_run_print", side_effect=capture):
+        provider.balanced("p")
+        provider.balanced("p", worktree=tmp_path, tools=["Read"])
+        provider.agentic("p", cwd=tmp_path)
+        provider.agentic("p", cwd=tmp_path, denied_tools=["Write"])
+
+    for cmd in seen:
+        denied = cmd[cmd.index("--disallowedTools") + 1].split(",")
+        assert "ScheduleWakeup" in denied
+    assert "Write" in seen[-1][seen[-1].index("--disallowedTools") + 1].split(",")
+
+
+def test_run_claude_code_denies_schedule_wakeup_with_the_callers_tools(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    args_file = tmp_path / "args"
+    _install_fake_claude(bin_dir, f'printf "%s\\n" "$@" >> "{args_file}"\nexit 0')
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    db.execute("DELETE FROM kv WHERE key='llm_guard'")
+
+    run_claude_code("hi", cwd=tmp_path, timeout=5)
+    args = args_file.read_text().splitlines()
+    denied = args[args.index("--disallowedTools") + 1].split(",")
+    assert "ScheduleWakeup" in denied
+    assert set(llm.PUBLISH_DENIED_TOOLS) <= set(denied)
+
+    args_file.unlink()
+    run_claude_code("hi", cwd=tmp_path, timeout=5, denied_tools=())
+    args = args_file.read_text().splitlines()
+    assert args[args.index("--disallowedTools") + 1] == "ScheduleWakeup"
