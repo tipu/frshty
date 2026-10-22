@@ -428,6 +428,21 @@ class TestBitbucketGetPrComments:
         assert by_id[20]["resolved"] is False
         assert by_id[21]["resolved"] is False
 
+    def test_app_user_author_is_flagged_as_bot(self):
+        p = _bb_platform()
+        values = {"values": [
+            {"id": 30, "content": {"raw": "## 1 of 6 checks failed"},
+             "user": {"type": "app_user", "account_id": "app-1", "display_name": "pipeline"},
+             "created_on": "2026-01-01T00:00:00Z"},
+            {"id": 31, "content": {"raw": "please rename"},
+             "user": {"type": "user", "account_id": "u1", "display_name": "U1"},
+             "created_on": "2026-01-01T00:00:00Z"},
+        ]}
+        with patch("features.platforms.httpx.Client", return_value=_bb_get(values)):
+            by_id = {c["id"]: c for c in p.get_pr_comments("repo", 1)}
+        assert by_id[30]["author_is_bot"] is True
+        assert by_id[31]["author_is_bot"] is False
+
 
 class TestBitbucketMonitorCI:
     """BitbucketPlatform.monitor_ci was a stub that unconditionally set
