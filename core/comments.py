@@ -5,8 +5,10 @@ import core.db as db
 
 MAX_AUTOMATED_REVIEW_FIX_RUNS = 2
 AUTOMATED_REVIEW_KINDS = ("issue_comment", "review_body")
-CHECKS_PASSED_RE = re.compile(r"^[#\s]*\W*\s*All \d+ checks? passed\b", re.IGNORECASE)
-CHECKS_FAILED_RE = re.compile(r"^[#\s]*\W*\s*\d+ of \d+ checks? failed\b", re.IGNORECASE)
+CHECKS_PASSED_RE = re.compile(r"^[#\s]*\W*\s*(?:All \d+ checks? passed\b|[^\n]+? passed \u2014 `[0-9a-f]{7,40}`)",
+                              re.IGNORECASE)
+CHECKS_FAILED_RE = re.compile(r"^[#\s]*\W*\s*(?:\d+ of \d+ checks? failed\b|[^\n]+? failed \u2014 `[0-9a-f]{7,40}`)",
+                              re.IGNORECASE)
 
 
 def fetch_and_detect_comments(
