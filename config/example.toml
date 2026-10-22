@@ -42,6 +42,7 @@ repos = ["repo-name"]             # explicit repo list, OR use projects_dir to s
 # projects_dir = "projects"       # scan this subdir for git repos (mutually exclusive with repos)
 # exclude = ["some-repo"]         # skip these when scanning projects_dir
 tickets_dir = "tickets"
+# rules_file = "~/dev/CLAUDE.md"  # the CLAUDE.md every ticket prompt names; default <root>/CLAUDE.md
 ticket_layout = "flat"            # "flat": tickets/{KEY}/{repo}/ or "workspace": tickets/{KEY}/workspace/{repo}/
 base_branch = "main"
 branch_prefix = ""                # empty = branch is {KEY}-{slug}. set to "yourname" for yourname/feature/{KEY}-{slug}

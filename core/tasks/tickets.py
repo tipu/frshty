@@ -573,7 +573,7 @@ def _commit_workspace_changes(ticket_dir: Path, ticket_key: str,
 
     commit_msg = message or f"fix: address tri-review findings for {ticket_key}"
 
-    rules_files = ticket_rules_files(config, ticket_dir.name) if config else None
+    rules_files = ticket_rules_files(config) if config else None
     committed: list[str] = []
     for repo_dir in candidates:
         # Same failure, worse consequence: an unreadable status looks like
@@ -1299,7 +1299,7 @@ def _ticket_slug(ctx: TaskContext) -> str:
 
 
 def _ticket_rules(ctx: TaskContext) -> list[Path]:
-    return ticket_rules_files(ctx.config, _ticket_slug(ctx))
+    return ticket_rules_files(ctx.config)
 
 
 def _ticket_dir(ctx: TaskContext) -> Path:

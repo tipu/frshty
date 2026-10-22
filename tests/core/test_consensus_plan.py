@@ -22,12 +22,12 @@ REAL_PLAN = "# Technical Plan\n\n" + ("Detailed proposal with file:line evidence
 
 @pytest.fixture(autouse=True)
 def _no_rules_files(monkeypatch):
-    monkeypatch.setattr(cp, "ticket_rules_files", lambda config, slug: [])
+    monkeypatch.setattr(cp, "ticket_rules_files", lambda config: [])
 
 
 def test_every_stage_gets_the_project_rules_files(tmp_path, monkeypatch):
     rules = [tmp_path / "CLAUDE.md", tmp_path / "repo" / "CLAUDE.md"]
-    monkeypatch.setattr(cp, "ticket_rules_files", lambda config, slug: rules)
+    monkeypatch.setattr(cp, "ticket_rules_files", lambda config: rules)
     monkeypatch.setattr(cp.log, "emit", lambda *a, **k: None)
     monkeypatch.setattr(cp, "_capture_baselines",
                         lambda config, slug: {"repo": (tmp_path, "abc123")})
