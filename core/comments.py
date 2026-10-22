@@ -497,11 +497,11 @@ def reports_checks_passed(comment: dict) -> bool:
 
 
 def reports_checks_failed(comment: dict) -> bool:
-    """Whether a pipeline status comment reports that some checks failed.
+    """Whether a pipeline status comment reports failed checks.
 
-    The CI pass reads the failed checks themselves and owns their fix. The
-    report only names them, so a fix run on it has nothing to act on, makes
-    no change, and spends its retries until the comment is abandoned."""
+    The CI fix owns a failed check: it decides whether the pull request
+    caused the failure before it changes anything. A comment fix on the same
+    report skips that decision and commits work the ticket did not ask for."""
     return bool(CHECKS_FAILED_RE.match(comment.get("body") or ""))
 
 
@@ -516,8 +516,8 @@ def automated_review_skips(comments: list[dict], key, fixed: set) -> dict:
     MAX_AUTOMATED_REVIEW_FIX_RUNS fix runs on automated reviews. `fixed`
     holds the keys of the comments that already had a fix run. A skipped
     review is not owed an answer, so it does not hold the merge. The newest
-    one is also skipped when it reports that every check passed, and when
-    it reports failed checks, which the CI pass handles."""
+    one is also skipped when it reports that every check passed, or that
+    checks failed."""
     automated = [c for c in comments if is_automated_review(c)]
     newest: dict = {}
     for c in automated:
@@ -536,7 +536,7 @@ def automated_review_skips(comments: list[dict], key, fixed: set) -> dict:
         elif k in passed:
             skips[k] = "passed"
         elif k in failed:
-            skips[k] = "ci"
+            skips[k] = "checks_failed"
         elif capped and k not in fixed:
             skips[k] = "capped"
     return skips
