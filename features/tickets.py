@@ -208,13 +208,22 @@ def _repo_gate_blocked(instance_key: str, ticket_key: str, config: dict | None =
     two take turns rather than serializing. updated_at cannot order them
     either, because every poll cycle writes every ticket back, so it records
     the scan order rather than the order the tickets entered the pipeline.
+
+    A ticket that cannot drain is never elected. A ticket held behind a PR
+    frshty did not open skips every task until a human closes that PR, and an
+    epic is never planned. Either one elected as holder blocked every other
+    ticket in the instance for as long as it sat in an occupying status. A
+    ticket whose hold is released takes a new lease from the release time, so
+    it queues behind the holder elected while it was held.
     """
     import core.db as _db
     auto_merge = bool((config or {}).get("pr", {}).get("auto_merge"))
     statuses = _GATE_OCCUPYING_AUTO_MERGE if auto_merge else _GATE_OCCUPYING_STATUSES
     marks = ",".join("?" for _ in statuses)
     rows = _db.query_all(
+        "SELECT ticket_key FROM ("
         "SELECT t.ticket_key AS ticket_key,"
+        "       json_extract(t.data, '$.foreign_prs_released_at') AS released_at,"
         "       (SELECT MAX(tr.ts) FROM ticket_transitions tr"
         "         WHERE tr.instance_key=t.instance_key"
         "           AND tr.ticket_key=t.ticket_key"
@@ -225,7 +234,11 @@ def _repo_gate_blocked(instance_key: str, ticket_key: str, config: dict | None =
         "  FROM tickets t"
         " WHERE t.instance_key=?"
         f"      AND t.status IN ({marks})"
-        " ORDER BY held_since IS NULL, held_since ASC, t.ticket_key ASC"
+        f"      AND COALESCE(json_array_length(t.data, '$.{state.FOREIGN_PRS_KEY}'), 0) = 0"
+        "      AND COALESCE(json_extract(t.data, '$.issue_type'), '') != 'Epic'"
+        ") ORDER BY COALESCE(MAX(held_since, released_at), held_since, released_at) IS NULL,"
+        "          COALESCE(MAX(held_since, released_at), held_since, released_at) ASC,"
+        "          ticket_key ASC"
         " LIMIT 1",
         (*statuses, *statuses, instance_key, *statuses),
     )
@@ -3104,6 +3117,7 @@ def _release_foreign_pr_hold(config: dict, key: str, ts: dict, base_url: str) ->
         if pr_state == "OPEN":
             return ts
     ts.pop(state.FOREIGN_PRS_KEY, None)
+    ts["foreign_prs_released_at"] = datetime.now(timezone.utc).isoformat()
     log.emit("ticket_foreign_pr_released",
         f"{key}: every PR frshty did not open is closed, the ticket resumes: "
         + ", ".join(f"{p['repo']}#{p['id']}" for p in held),
