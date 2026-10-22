@@ -484,7 +484,8 @@ class TestIntake:
         assert "Loading work item…" in r.text
         assert "Unable to load this work item:" in r.text
         assert 'id="work-fatal"' in r.text
-        assert "setInterval(() => this.refresh(), 15000)" in r.text
+        assert "setInterval(() => { if (!document.hidden) this.refresh(); }, 15000)" in r.text
+        assert 'document.addEventListener("visibilitychange", () => { if (!document.hidden) this.refresh(); })' in r.text
 
     def test_transcript_image_endpoint_serves_lazy_image(self, tmp_path):
         import json as _json

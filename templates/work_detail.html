@@ -844,7 +844,8 @@ const app = frshtyApp({
     this.loadPeerBase();
     this.loadLinkmap();
     this.refresh();
-    setInterval(() => this.refresh(), 15000);
+    setInterval(() => { if (!document.hidden) this.refresh(); }, 15000);
+    document.addEventListener("visibilitychange", () => { if (!document.hidden) this.refresh(); });
   },
 });
 app.config.errorHandler = (error, instance, info) => {
