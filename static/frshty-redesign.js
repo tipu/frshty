@@ -198,7 +198,7 @@
       },
       terminalHref(it) { return (it.peer ? this.peerBase(it.peer) : "") + "/tasks/" + it.id + "/terminal"; },
       terminalWindow(it) { return window.frshtyTerminalWindow(it.id, it.peer); },
-      artifactViewer(it, a) { return (it.peer ? this.peerBase(it.peer) : "") + "/artifacts/" + a.id; },
+      artifactViewer(it, a) { return "/artifacts/" + a.id + (it.peer ? "?peer=" + encodeURIComponent(it.peer) : ""); },
       lkFor(it, text) {
         const peer = (it && it.peer) || "";
         return window.frshtyLinkify(text || "", this.linkmaps[peer] || null, peer ? this.peerBase(peer) : "");

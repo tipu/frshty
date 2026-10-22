@@ -2,6 +2,7 @@ import asyncio
 import os
 import threading
 import tomllib
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import httpx
@@ -11,6 +12,10 @@ import core.log as log
 
 PEERS_PATH = Path(__file__).parent.parent / "config" / "peers.toml"
 ALLOWED_PREFIX = "api/work/"
+FILE_PREFIX = "api/work/artifact_file/"
+FILE_HEADERS = ("content-type", "content-length", "content-range", "accept-ranges",
+                "content-disposition", "content-encoding", "content-security-policy",
+                "last-modified", "etag")
 DEFAULT_TIMEOUT = 15.0
 CONNECT_TIMEOUT = 5.0
 
@@ -115,3 +120,56 @@ async def request(key: str, method: str, path: str, params: dict | None = None,
     if not isinstance(payload, dict):
         payload = {"data": payload}
     return resp.status_code, payload
+
+
+async def open_file(key: str, path: str, range_header: str = "",
+                    timeout: float = DEFAULT_TIMEOUT) -> tuple[int, dict, AsyncIterator[bytes] | None, str]:
+    """Open one artifact file on a peer and return its status, headers, body and error.
+
+    The browser cannot reach a peer's base_url, so the board serves the file
+    from its own origin. The body streams, so a large video never sits in
+    memory. A redirect stays inside the proxy: an HTML artifact answers with a
+    redirect to its folder, and the page's relative asset URLs then resolve
+    under the same proxy path."""
+    clean = path.strip("/")
+    if not clean.startswith(FILE_PREFIX):
+        return 403, {}, None, f"peer path not allowed: /{clean}"
+    url, error = await run_in_threadpool(resolve, key, path)
+    if error:
+        return (404 if error.startswith("unknown peer") else 403), {}, None, error
+    if path.endswith("/"):
+        url += "/"
+    phases = httpx.Timeout(timeout, connect=min(CONNECT_TIMEOUT, timeout))
+    client = httpx.AsyncClient(timeout=phases, verify=False, follow_redirects=False)
+    try:
+        async with asyncio.timeout(timeout):
+            resp = await client.send(
+                client.build_request("GET", url, headers={"range": range_header} if range_header else {}),
+                stream=True)
+    except Exception as e:
+        await client.aclose()
+        reason = (f"no answer within {timeout:g}s" if isinstance(e, TimeoutError)
+                  else f"{type(e).__name__}: {e}")
+        await run_in_threadpool(log.emit, "work_peer_unreachable",
+                                f"GET {url} failed: {reason}",
+                                meta={"peer": key, "path": path, "url": url})
+        return 502, {}, None, f"peer '{key}' is unreachable: {reason}"
+    headers = {name: resp.headers[name] for name in FILE_HEADERS if name in resp.headers}
+    location = resp.headers.get("location", "")
+    if location:
+        target = httpx.URL(url).join(location)
+        if not target.path.lstrip("/").startswith(FILE_PREFIX):
+            await resp.aclose()
+            await client.aclose()
+            return 502, {}, None, f"peer '{key}' redirected outside the artifact files: {location}"
+        headers["location"] = f"/api/work/peers/{key}{target.raw_path.decode()}"
+
+    async def body() -> AsyncIterator[bytes]:
+        try:
+            async for chunk in resp.aiter_raw():
+                yield chunk
+        finally:
+            await resp.aclose()
+            await client.aclose()
+
+    return resp.status_code, headers, body(), ""

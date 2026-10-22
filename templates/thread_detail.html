@@ -253,7 +253,7 @@ frshtyApp({
       return window.frshtyTerminalWindow(id, this.peer);
     },
     viewerUrl(a) {
-      return (this.peerBase || "") + "/artifacts/" + a.id;
+      return "/artifacts/" + a.id + (this.peer ? "?peer=" + encodeURIComponent(this.peer) : "");
     },
     async loadPeers() {
       if (!this.peer) return;
