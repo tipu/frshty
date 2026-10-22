@@ -136,7 +136,7 @@ pr_autofix = false                # github only: every PR the instance account o
 # max_pending = 5                     # ceiling on follow-up proposals waiting for your decision
 # gmail = true                        # read email through the Gmail connector
 # gmail_query = "in:inbox to:me -category:promotions -category:social -category:updates -category:forums"
-# gmail_model = "claude-sonnet-4-6"   # the model that reads the inbox
+# gmail_model = "claude-sonnet-5-5"   # the model that reads the inbox (unset: the CLI default)
 # max_threads = 50                    # how many threads one scan reads
 # texts = true                        # read texts through the gvoice CLI
 # gvoice_bin = "gvoice"               # path of the gvoice CLI
@@ -265,7 +265,7 @@ pr_autofix = false                # github only: every PR the instance account o
 
 # --- Peer PR reviewer ---
 # [reviewer]
-# model = "claude-opus-4-8"            # model for the review personas
+# model = "claude-opus-4-8"            # model for the review personas (unset: the CLI default)
 # providers = ["claude", "codex"]      # every persona runs once per provider
 # max_changed_lines = 8000             # a ticket whose PR diffs add up to more changed
 #                                      # lines than this is not reviewed automatically.
