@@ -118,6 +118,7 @@ class TestAcknowledgement:
         item_id = self._reported_done(
             monkeypatch, "Review pull request #7 in repository 'app' (branch: b).")
         assert self._state(item_id)["state"] == "done"
+        assert self._state(item_id)["archived_at"]
         kinds = {e["kind"] for e in work_store.item_detail(item_id)["events"]}
         assert {"self_reported_done", "auto_ack"} <= kinds
         assert "operator_ack" not in kinds
