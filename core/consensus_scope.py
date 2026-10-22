@@ -179,7 +179,7 @@ def run_scope_review(config: dict, ticket_dir: Path, slug: str, *,
 
     prompt = SCOPE_DIRECTIVE.format(docs_dir=ticket_dir / "docs",
                                     repo_list="\n".join(repo_lines))
-    rules = rules_directive(ticket_rules_files(config, slug))
+    rules = rules_directive(ticket_rules_files(config))
     if rules:
         prompt = f"{prompt}\n\n{rules}"
     (run_dir / "composed-prompt.md").write_text(prompt)
