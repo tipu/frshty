@@ -381,6 +381,7 @@ class BitbucketPlatform(_CIMonitorMixin):
                     "body": c["content"]["raw"],
                     "author_id": c.get("user", {}).get("account_id", ""),
                     "author_name": c.get("user", {}).get("display_name", ""),
+                    "author_is_bot": c.get("user", {}).get("type") == "app_user",
                     "path": c.get("inline", {}).get("path"),
                     "line": c.get("inline", {}).get("to"),
                     "html_url": c.get("links", {}).get("html", {}).get("href", ""),

@@ -43,6 +43,14 @@ def _human(cid, **overrides):
                    author_is_bot=False, body=f"Human comment {cid}", **overrides)
 
 
+def _bb_report(cid, **overrides):
+    base = _review(cid, author_id="app-pipeline", author_name="pipeline: Code Insights",
+                   body=f"## 1 of 6 checks failed for commit {cid}", resolvable=True)
+    del base["comment_kind"]
+    base.update(overrides)
+    return base
+
+
 def _entry(cid, status):
     return {"id": cid, "comment_kind": "issue_comment", "pr_repo": "repo", "pr_id": 99,
             "body": f"PR re-review {cid}: fix the guard", "status": status,
@@ -97,6 +105,18 @@ class TestAutomatedReviewSkips:
 
         assert comments.automated_review_skips(live, _key, set()) == {}
 
+    def test_older_bitbucket_pipeline_reports_are_superseded(self):
+        live = [_bb_report(1), _bb_report(2), _bb_report(3)]
+
+        skips = comments.automated_review_skips(live, _key, set())
+
+        assert skips == {_key(live[0]): "superseded", _key(live[1]): "superseded"}
+
+    def test_an_inline_bitbucket_bot_finding_is_never_skipped(self):
+        live = [_bb_report(1, path="app.py", line=4), _bb_report(2, path="app.py", line=9)]
+
+        assert comments.automated_review_skips(live, _key, set()) == {}
+
 
 class TestTicketCommentPass:
     def _run(self, fake_config, live, registered=()):
@@ -127,6 +147,15 @@ class TestTicketCommentPass:
         assert "PR re-review 12" in prompts[0]
         assert "PR re-review 10" not in prompts[0]
         assert "PR re-review 11" not in prompts[0]
+        assert "ticket_pr_automated_review_skipped" in events
+
+    def test_only_the_newest_bitbucket_pipeline_report_is_triaged(self, fake_config):
+        out, prompts, events = self._run(fake_config, [_bb_report(10), _bb_report(11), _bb_report(12)])
+
+        assert len(prompts) == 1
+        assert "commit 12" in prompts[0]
+        assert "commit 10" not in prompts[0]
+        assert "commit 11" not in prompts[0]
         assert "ticket_pr_automated_review_skipped" in events
 
     def test_a_review_after_the_cap_is_not_triaged_and_not_owed(self, fake_config):

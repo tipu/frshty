@@ -478,8 +478,12 @@ def is_automated_review(comment: dict) -> bool:
     """Whether a comment is a bot's verdict on the whole pull request.
 
     A review workflow posts one such comment on every push. An inline bot
-    finding is anchored to a line and stands on its own, so it is not one."""
-    return bool(comment.get("author_is_bot")) and comment.get("comment_kind") in AUTOMATED_REVIEW_KINDS
+    finding is anchored to a line and stands on its own, so it is not one.
+    Bitbucket gives a pull request comment no kind, so a bot comment with no
+    file anchor counts as one there."""
+    if not comment.get("author_is_bot"):
+        return False
+    return comment.get("comment_kind") in AUTOMATED_REVIEW_KINDS or not comment.get("path")
 
 
 def automated_review_skips(comments: list[dict], key, fixed: set) -> dict:
