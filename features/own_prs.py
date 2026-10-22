@@ -311,7 +311,7 @@ def _drop_skipped_automated_reviews(instance_key, pr, pr_key, pr_ref, base_url, 
     if dropped:
         log.emit("pr_automated_review_skipped",
                  f"{pr_ref}: not fixing {len(dropped)} automated review(s); a newer review "
-                 f"supersedes them or the PR had {MAX_AUTOMATED_REVIEW_FIX_RUNS} "
+                 f"supersedes them, they report that all checks passed, or the PR had {MAX_AUTOMATED_REVIEW_FIX_RUNS} "
                  f"automated review fix runs",
                  links={"pr": pr["url"], "detail": f"{base_url}/"},
                  meta={"repo": pr["repo"], "pr_id": pr["id"],
