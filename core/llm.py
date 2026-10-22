@@ -371,10 +371,18 @@ NO_TOOLS_OPENCODE_ENV = {
     "OPENCODE_CONFIG_CONTENT": json.dumps({"permission": {"*": {"*": "deny"}}}),
 }
 PUBLISH_DENIED_TOOLS = ("Bash(git push:*)", "Bash(curl:*)", "Bash(gh:*)")
+HEADLESS_DENIED_TOOLS = ("ScheduleWakeup",)
 NO_PUBLISH_RULE = (
     "Do not push, do not open a pull request, and do not update the ticket in "
     "Jira or any other tracker: frshty does those steps itself."
 )
+
+
+def _denied_tools_args(denied_tools: tuple[str, ...] | list[str] | None) -> list[str]:
+    """A `claude -p` run keeps its process alive until a scheduled wakeup
+    fires, so every headless run denies HEADLESS_DENIED_TOOLS on top of the
+    caller's own list."""
+    return ["--disallowedTools", ",".join([*HEADLESS_DENIED_TOOLS, *(denied_tools or ())])]
 
 
 def rules_directive(paths: list) -> str:
@@ -431,8 +439,7 @@ class ClaudeProvider(LLMProvider):
             cmd += ["--allowedTools", ",".join(allowed_tools)]
         else:
             cmd += ["--dangerously-skip-permissions"]
-        if denied_tools:
-            cmd += ["--disallowedTools", ",".join(denied_tools)]
+        cmd += _denied_tools_args(denied_tools)
         inv_id = _record_start("run_claude_code", chosen_model, prompt, cwd, allowed_tools, timeout)
         t0 = time.monotonic()
         blocked, reason, remaining_s = _guard_status()
@@ -620,6 +627,7 @@ class ClaudeProvider(LLMProvider):
             cmd += ["--dangerously-skip-permissions", "--add-dir", str(cwd)]
             if tools:
                 cmd += ["--allowedTools", ",".join(tools)]
+        cmd += _denied_tools_args(None)
         text, _ = self._run_print(cmd, prompt=prompt, function_name=function_name,
                                   model=chosen_model, cwd=cwd, tools=tools,
                                   timeout=timeout, label="Claude")
@@ -646,8 +654,7 @@ class ClaudeProvider(LLMProvider):
             cmd += ["--append-system-prompt", system_prompt]
         if tools:
             cmd += ["--allowedTools", ",".join(tools)]
-        if denied_tools:
-            cmd += ["--disallowedTools", ",".join(denied_tools)]
+        cmd += _denied_tools_args(denied_tools)
         for extra in add_dirs or []:
             cmd += ["--add-dir", str(extra)]
         text, usage = self._run_print(cmd, prompt=prompt, function_name=function_name,
