@@ -262,7 +262,7 @@ def run_consensus_plan(config: dict, ticket_dir: Path, slug: str, *,
     if not baselines:
         return False, "no repo worktrees found to plan against"
 
-    rules = rules_directive(ticket_rules_files(config, slug))
+    rules = rules_directive(ticket_rules_files(config))
     prompt = PLAN_DIRECTIVE
     if rules:
         prompt = f"{prompt}\n\n{rules}"

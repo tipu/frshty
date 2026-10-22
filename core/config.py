@@ -134,20 +134,19 @@ def ticket_worktree_path(config: dict, ticket_slug: str, repo_name: str) -> Path
     return tickets_dir / ticket_slug / repo_name
 
 
-def ticket_rules_files(config: dict, ticket_slug: str) -> list[Path]:
-    """Every CLAUDE.md that holds the rules of a ticket's project: the file at
-    the workspace root and the file in each repo.
+def ticket_rules_files(config: dict) -> list[Path]:
+    """The operator's CLAUDE.md for every ticket of a project: the file that
+    workspace.rules_file names, or the file at the workspace root.
 
-    A ticket agent starts in the ticket directory. The CLI loads a repo's
-    CLAUDE.md only after the agent opens a file in that repo, so the paths
-    have to be written into the prompt. A repo's file is read from the
-    ticket's worktree, and from the repo checkout when the worktree has none."""
-    root = Path(config["workspace"]["root"])
-    candidates = [root / "CLAUDE.md"]
-    for repo in get_repos(config):
-        in_worktree = ticket_worktree_path(config, ticket_slug, repo["name"]) / "CLAUDE.md"
-        candidates.append(in_worktree if in_worktree.is_file() else Path(repo["path"]) / "CLAUDE.md")
-    return [p for p in candidates if p.is_file()]
+    A ticket agent starts in the ticket directory, and the codex and agy
+    voices load no CLAUDE.md at all, so the path has to be written into the
+    prompt. A repo's own CLAUDE.md is left out. A ticket directory holds a
+    worktree of every repo, so a repo's rules would reach tickets that never
+    touch that repo, and the client owns those files."""
+    ws = config["workspace"]
+    rules_file = ws.get("rules_file")
+    path = Path(rules_file).expanduser() if rules_file else Path(ws["root"]) / "CLAUDE.md"
+    return [path] if path.is_file() else []
 
 
 TASK_WORKTREE_ROOT = frshty_root() / "worktrees"
