@@ -22,7 +22,7 @@ _LLM_MAX_CONCURRENT = int(os.environ.get(
     os.environ.get("FRSHTY_CLAUDE_MAX_CONCURRENT", "15"),
 ))
 _LLM_LIMIT_COOLDOWN_SECONDS = int(os.environ.get("FRSHTY_LLM_LIMIT_COOLDOWN_SECONDS", "1800"))
-_THINKING_MODEL = os.environ.get("FRSHTY_THINKING_MODEL", "claude-sonnet-4-6")
+_DEFAULT_MODEL = "default"
 _llm_sem = threading.BoundedSemaphore(max(1, _LLM_MAX_CONCURRENT))
 
 _guard_blocked_cv: contextvars.ContextVar[bool] = contextvars.ContextVar(
@@ -226,6 +226,10 @@ def _guard_block_output(reason: str, remaining_s: int) -> str:
     )
 
 
+def _model_args(model: str | None) -> list[str]:
+    return ["--model", model] if model else []
+
+
 def _record_start(function_name: str, model: str, prompt: str,
                   cwd: Path | None = None, tools: list[str] | None = None,
                   timeout: int | None = None) -> str | None:
@@ -411,10 +415,10 @@ class ClaudeProvider(LLMProvider):
                  allowed_tools: list[str] | None = None,
                  denied_tools: tuple[str, ...] | list[str] = PUBLISH_DENIED_TOOLS,
                  **kwargs) -> str | None:
-        chosen_model = model or _THINKING_MODEL
+        chosen_model = model or _DEFAULT_MODEL
         cmd = self._cmd(
             "-p", prompt,
-            "--model", chosen_model,
+            *_model_args(model),
             "--output-format", "stream-json",
             "--include-partial-messages",
             "--verbose",
@@ -609,8 +613,8 @@ class ClaudeProvider(LLMProvider):
                  tools: list[str] | None = None, timeout: int = 600,
                  model: str | None = None, function_name: str = "run_balanced",
                  **kwargs) -> str | None:
-        chosen_model = model or "claude-sonnet-4-6"
-        cmd = self._cmd("-p", "-", "--output-format", "json", "--model", chosen_model)
+        chosen_model = model or _DEFAULT_MODEL
+        cmd = self._cmd("-p", "-", "--output-format", "json", *_model_args(model))
         cwd = worktree if worktree and worktree.is_dir() else None
         if cwd:
             cmd += ["--dangerously-skip-permissions", "--add-dir", str(cwd)]
@@ -618,7 +622,7 @@ class ClaudeProvider(LLMProvider):
                 cmd += ["--allowedTools", ",".join(tools)]
         text, _ = self._run_print(cmd, prompt=prompt, function_name=function_name,
                                   model=chosen_model, cwd=cwd, tools=tools,
-                                  timeout=timeout, label="Claude Sonnet")
+                                  timeout=timeout, label="Claude")
         return text
 
     def agentic(self, prompt: str, *, cwd: Path, system_prompt: str | None = None,
@@ -635,8 +639,8 @@ class ClaudeProvider(LLMProvider):
         what an interactive session does. Permission mode `dontAsk` denies
         anything outside `tools` instead of prompting, so the run stays
         read-only without a permission dialog."""
-        chosen_model = model or "claude-sonnet-4-6"
-        cmd = self._cmd("-p", "-", "--output-format", "json", "--model", chosen_model,
+        chosen_model = model or _DEFAULT_MODEL
+        cmd = self._cmd("-p", "-", "--output-format", "json", *_model_args(model),
                         "--permission-mode", "dontAsk")
         if system_prompt:
             cmd += ["--append-system-prompt", system_prompt]
@@ -667,13 +671,13 @@ class ClaudeProvider(LLMProvider):
         the tool set is emptied outright, which also overrides the user,
         project and local settings files, so a settings file that allows an
         MCP tool cannot put one back."""
-        model = "claude-haiku-4-5-20251001"
+        model = _DEFAULT_MODEL
         cmd = [self.bin, *(a for a in self.extra_args if a != _SKIP_PERMISSIONS),
-               "-p", "-", "--output-format", "json", "--model", model,
+               "-p", "-", "--output-format", "json",
                *NO_TOOLS_FLAGS]
         text, _ = self._run_print(cmd, prompt=prompt, function_name="run_haiku",
                                   model=model, cwd=None, tools=None,
-                                  timeout=timeout, label="Claude Haiku")
+                                  timeout=timeout, label="Claude fast")
         return text
 
 
