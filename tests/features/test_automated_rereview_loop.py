@@ -45,7 +45,7 @@ def _human(cid, **overrides):
 
 def _bb_report(cid, **overrides):
     base = _review(cid, author_id="app-pipeline", author_name="pipeline: Code Insights",
-                   body=f"## 1 of 6 checks failed for commit {cid}", resolvable=True)
+                   body=f"## Code Insights report for commit {cid}", resolvable=True)
     del base["comment_kind"]
     base.update(overrides)
     return base
@@ -54,6 +54,11 @@ def _bb_report(cid, **overrides):
 def _bb_passed(cid, **overrides):
     return _bb_report(cid, body=f"## \u2705 All 6 checks passed \u2014 `{cid}`\n\n"
                                 "See the Reports panel on this PR for details.", **overrides)
+
+
+def _bb_failed(cid, **overrides):
+    return _bb_report(cid, body=f"## \u274c 1 of 6 checks failed \u2014 `{cid}`\n\n"
+                                "- Dependency Vulnerabilities (production)", **overrides)
 
 
 def _entry(cid, status):
@@ -124,13 +129,28 @@ class TestAutomatedReviewSkips:
 
         assert skips == {_key(live[0]): "superseded", _key(live[1]): "passed"}
 
-    def test_the_newest_failed_pipeline_report_is_current(self):
-        """The control: a failure report still asks for a fix."""
+    def test_the_newest_pipeline_report_is_current(self):
+        """The control: a report that neither passes nor fails checks still asks for a fix."""
         live = [_bb_passed(1), _bb_report(2)]
 
         skips = comments.automated_review_skips(live, _key, set())
 
         assert skips == {_key(live[0]): "superseded"}
+
+    def test_the_newest_failed_pipeline_report_is_skipped(self):
+        """Observed on DEV-916: the comment fix answered "Dependency
+        Vulnerabilities (production)" with lockfile upgrades the CI fix had
+        judged unrelated, and the scope review failed the branch for them."""
+        live = [_bb_passed(1), _bb_failed(2)]
+
+        skips = comments.automated_review_skips(live, _key, set())
+
+        assert skips == {_key(live[0]): "superseded", _key(live[1]): "checks_failed"}
+
+    def test_a_person_writing_checks_failed_is_never_skipped(self):
+        live = [{**_human(1), "body": "1 of 6 checks failed, fix the migration."}]
+
+        assert comments.automated_review_skips(live, _key, set()) == {}
 
     def test_a_person_writing_all_checks_passed_is_never_skipped(self):
         live = [{**_human(1), "body": "All 6 checks passed, but rename this."}]
@@ -181,6 +201,14 @@ class TestTicketCommentPass:
         assert "commit 12" in prompts[0]
         assert "commit 10" not in prompts[0]
         assert "commit 11" not in prompts[0]
+        assert "ticket_pr_automated_review_skipped" in events
+
+    def test_a_failed_pipeline_report_is_not_triaged_and_not_owed(self, fake_config):
+        out, prompts, events = self._run(fake_config, [_bb_passed(10), _bb_failed(11)])
+
+        assert prompts == []
+        assert out[tickets.RECONCILE_OWED_KEY] == 0
+        assert "ticket_pr_comment_needs_reply" not in events
         assert "ticket_pr_automated_review_skipped" in events
 
     def test_a_passed_pipeline_report_is_not_triaged_and_not_owed(self, fake_config):
@@ -287,6 +315,14 @@ class TestOwnPrs:
 
     def test_a_passed_pipeline_report_is_dropped_and_baselined(self):
         live = [_bb_report(10), _bb_passed(11), _human(12)]
+
+        keep, seen, _ = self._drop(live, set())
+
+        assert [c["id"] for c in keep] == [12]
+        assert sorted(call.args[3] for call in seen.call_args_list) == ["10", "11"]
+
+    def test_a_failed_pipeline_report_is_dropped_and_baselined(self):
+        live = [_bb_passed(10), _bb_failed(11), _human(12)]
 
         keep, seen, _ = self._drop(live, set())
 
