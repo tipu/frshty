@@ -507,7 +507,9 @@ class TestEnsure:
         target = core_config.task_worktree_path(None, "proj", item_id, "app")
         target.mkdir(parents=True)
         (target / "in the way").write_text("x")
-        assert work_worktree.ensure(item_id, _spec(repo), "blocked") == {}
+        got = work_worktree.ensure(item_id, _spec(repo), "blocked")
+        assert "not a git checkout" in got["error"]
+        assert str(target) in got["error"]
         assert work_worktree.for_item(item_id) is None
 
     def test_a_read_only_repository_is_reported_and_left_untouched(self, tmp_path, wt_root,
@@ -520,7 +522,8 @@ class TestEnsure:
         item_id = _item("read only")
         (repo / ".git").chmod(0o555)
         try:
-            assert work_worktree.ensure(item_id, _spec(repo), "read only") == {}
+            assert "read-only" in work_worktree.ensure(item_id, _spec(repo),
+                                                       "read only")["error"]
         finally:
             (repo / ".git").chmod(0o755)
         assert work_worktree.for_item(item_id) is None
@@ -537,7 +540,7 @@ class TestEnsure:
         monkeypatch.setattr(work_worktree.runtime, "instances", lambda: None)
         spec = _spec(repo)
         shutil.rmtree(repo)
-        assert work_worktree.ensure(_item("gone repo"), spec, "gone repo") == {}
+        assert "error" in work_worktree.ensure(_item("gone repo"), spec, "gone repo")
         assert git_util.worktree_holding_branch(repo, "main") is None
 
     def test_a_project_whose_tree_is_gone_resolves_no_repository(self, tmp_path, wt_root,
@@ -594,6 +597,123 @@ class TestEnsure:
         assert row["project_key"] == "proj"
         assert row["repo_path"] == str(repo)
         assert git_util.is_worktree(row["path"])
+
+
+    def test_ensure_for_repo_refuses_a_clone_no_project_owns(self, tmp_path, wt_root,
+                                                             monkeypatch):
+        """An agent that cannot write the shared checkout clones it, and a
+        worktree whose parent is that clone breaks when the clone is deleted."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        repo = make_repo(root, "app")
+        clone = tmp_path / "scratch" / "app"
+        _git(tmp_path, "clone", str(repo), str(clone))
+        config = project_config(root, ["app"], base="main")
+        monkeypatch.setattr(work_worktree.runtime, "instances",
+                            lambda: instances(proj=config))
+        item_id = _item("own clone", contexts="proj")
+        got = work_worktree.ensure_for_repo(item_id, str(clone / "README.md"),
+                                            entries=[])
+        assert got == {"unowned": str(clone)}
+        assert work_worktree.for_item(item_id) is None
+        assert _git(clone, "worktree", "list", "--porcelain").stdout.count("worktree ") == 1
+
+    def test_ensure_for_repo_finds_the_owner_among_projects_the_task_did_not_select(
+            self, tmp_path, wt_root, monkeypatch):
+        """A shared checkout of a project the task did not select is still a
+        shared checkout, so the gates must keep the task out of it."""
+        root = tmp_path / "proj"
+        root.mkdir()
+        repo = make_repo(root, "app")
+        config = project_config(root, ["app"], base="main")
+        monkeypatch.setattr(work_worktree.runtime, "instances",
+                            lambda: instances(proj=config))
+        item_id = _item("other project", contexts="else")
+        row = work_worktree.ensure_for_repo(
+            item_id, str(repo / "README.md"),
+            entries=[{"key": "proj", "root": str(root), "repos": ["app"]}])
+        assert row["project_key"] == "proj"
+        assert git_util.is_worktree(row["path"])
+
+    def test_a_recorded_worktree_moved_to_another_branch_is_named(self, tmp_path, wt_root,
+                                                                  monkeypatch):
+        repo = make_repo(tmp_path)
+        monkeypatch.setattr(work_worktree.runtime, "instances", lambda: None)
+        item_id = _item("moved branch")
+        row = work_worktree.ensure(item_id, _spec(repo), "moved branch")
+        _git(row["path"], "checkout", "-b", "unrelated-task")
+        got = work_worktree.ensure(item_id, _spec(repo), "moved branch")
+        assert "on unrelated-task" in got["error"]
+        assert row["path"] in got["error"]
+
+    def test_a_branch_holder_replaced_by_another_repository_is_named(self, tmp_path,
+                                                                     wt_root, monkeypatch):
+        repo = make_repo(tmp_path)
+        other = make_repo(tmp_path, "other")
+        monkeypatch.setattr(work_worktree.runtime, "instances", lambda: None)
+        item_id = _item("swapped holder")
+        branch = work_worktree.branch_name(None, item_id, "swapped holder")
+        holder = tmp_path / "holder"
+        _git(repo, "worktree", "add", "-b", branch, str(holder))
+        shutil.move(str(holder), str(tmp_path / "aside"))
+        _git(other, "worktree", "add", "-b", "unrelated-task", str(holder))
+        got = work_worktree.ensure(item_id, _spec(repo), "swapped holder")
+        assert "a worktree whose git directory is" in got["error"]
+        assert work_worktree.for_item(item_id) is None
+
+    def test_a_project_whose_root_is_a_symlink_to_its_checkout_owns_it(self, tmp_path,
+                                                                       wt_root,
+                                                                       monkeypatch):
+        repo = make_repo(tmp_path)
+        link = tmp_path / "linked-root"
+        link.symlink_to(repo)
+        monkeypatch.setattr(work_worktree.runtime, "instances", lambda: None)
+        item_id = _item("symlinked root", contexts="proj")
+        row = work_worktree.ensure_for_repo(
+            item_id, str(repo / "README.md"),
+            entries=[{"key": "proj", "root": str(link), "repos": []}])
+        assert row["project_key"] == "proj"
+        assert git_util.is_worktree(row["path"])
+
+    def test_an_occupied_path_held_by_a_clone_is_named_not_retried(self, tmp_path, wt_root,
+                                                                   monkeypatch):
+        repo = make_repo(tmp_path)
+        monkeypatch.setattr(work_worktree.runtime, "instances", lambda: None)
+        item_id = _item("replaced by a clone")
+        target = core_config.task_worktree_path(None, "proj", item_id, "app")
+        target.parent.mkdir(parents=True)
+        _git(tmp_path, "clone", str(repo), str(target))
+        got = work_worktree.ensure(item_id, _spec(repo), "replaced by a clone")
+        assert "a separate clone" in got["error"]
+        assert os.path.realpath(target / ".git") in got["error"]
+        assert work_worktree.for_item(item_id) is None
+
+    def test_an_occupied_path_on_another_branch_is_named(self, tmp_path, wt_root,
+                                                         monkeypatch):
+        repo = make_repo(tmp_path)
+        monkeypatch.setattr(work_worktree.runtime, "instances", lambda: None)
+        item_id = _item("wrong branch")
+        target = core_config.task_worktree_path(None, "proj", item_id, "app")
+        target.parent.mkdir(parents=True)
+        _git(repo, "worktree", "add", "-b", "elsewhere", str(target))
+        got = work_worktree.ensure(item_id, _spec(repo), "wrong branch")
+        assert "on elsewhere" in got["error"]
+        assert work_worktree.for_item(item_id) is None
+
+    def test_an_occupied_path_on_the_expected_branch_is_reused(self, tmp_path, wt_root,
+                                                               monkeypatch):
+        repo = make_repo(tmp_path)
+        monkeypatch.setattr(work_worktree.runtime, "instances", lambda: None)
+        item_id = _item("lost its row")
+        target = core_config.task_worktree_path(None, "proj", item_id, "app")
+        target.parent.mkdir(parents=True)
+        branch = work_worktree.branch_name(None, item_id, "lost its row")
+        _git(repo, "worktree", "add", "-b", branch, str(target))
+        monkeypatch.setattr(work_worktree, "_pick_branch",
+                            lambda repo_path, base: (base, "free", None))
+        row = work_worktree.ensure(item_id, _spec(repo), "lost its row")
+        assert row["path"] == str(target)
+        assert row["branch"] == branch
 
 
 # ------------------------------------------------------------------ gc

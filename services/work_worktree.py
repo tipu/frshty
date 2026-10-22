@@ -234,8 +234,11 @@ def _project_repos(key: str, entries: list[dict]) -> list[tuple[dict | None, str
         return [(config, str(r["path"]), r["name"]) for r in _repos_of(config)]
     entry = next((e for e in entries if e["key"] == key), None)
     root = entry["root"] if entry else ""
-    if root and repo_root(root) == os.path.abspath(root):
-        return [(None, os.path.abspath(root), os.path.basename(str(root).rstrip("/")))]
+    if root and os.path.isdir(root):
+        top = _git(root, ["rev-parse", "--show-toplevel"], timeout=30)
+        if top.returncode == 0 and \
+                os.path.realpath(top.stdout.strip()) == os.path.realpath(root):
+            return [(None, os.path.abspath(root), os.path.basename(str(root).rstrip("/")))]
     return []
 
 
@@ -366,9 +369,46 @@ def _install_deps(config: dict | None, repo_name: str, path: Path) -> None:
                  meta={"repo": repo_name, "path": str(path)})
 
 
+def _failed(message: str) -> dict:
+    log.emit("work_worktree_failed", message)
+    return {"error": message}
+
+
+def _path_holder(path: Path, common: str, branch: str) -> str:
+    """What already occupies the directory a worktree is about to be added at.
+
+    "" when nothing does, "reuse" when it is a worktree of the same repository
+    on `branch`, and otherwise a description of what holds it. The row lookup
+    is keyed on the repository and the path on the project, so an agent that
+    replaced its worktree with a clone of its own leaves a directory no row
+    names, and `git worktree add` then failed with "already exists" on every
+    later write."""
+    if not path.exists() and not path.is_symlink():
+        return ""
+    if not path.is_dir():
+        return "a file that is not a directory"
+    try:
+        if not any(path.iterdir()):
+            return ""
+    except OSError as e:
+        return f"a directory this process cannot read ({type(e).__name__})"
+    top = _git(path, ["rev-parse", "--show-toplevel"], timeout=30)
+    if top.returncode != 0 or os.path.realpath(top.stdout.strip()) != os.path.realpath(path):
+        return "a directory that is not a git checkout"
+    git_dir, holder_common = git_util.git_dirs(path)
+    if holder_common != os.path.realpath(common):
+        kind = "a separate clone" if git_dir == holder_common else "a worktree"
+        return f"{kind} whose git directory is {holder_common}"
+    head = _git(path, ["symbolic-ref", "--short", "HEAD"], timeout=30)
+    on = head.stdout.strip() if head.returncode == 0 else "a detached HEAD"
+    if on != branch:
+        return f"a worktree of the same repository on {on}, not on {branch}"
+    return "reuse"
+
+
 def ensure(item_id: int, spec: dict, objective: str = "") -> dict:
-    """Materialize the worktree `plan` chose. Returns the row, or {} when the
-    worktree could not be made.
+    """Materialize the worktree `plan` chose. Returns the row, or {"error": ...}
+    when the worktree could not be made.
 
     Idempotent on (work item, repository). A launch never fails because a
     worktree could not be created: the caller falls back to the directory it
@@ -381,25 +421,37 @@ def ensure(item_id: int, spec: dict, objective: str = "") -> dict:
     with _ensure_lock:
         row = for_item_repo(item_id, common)
         if row and os.path.isdir(row["path"]):
-            return row
+            held = _path_holder(Path(row["path"]), common, row["branch"])
+            if held == "reuse":
+                return row
+            if held:
+                return _failed(f"work item {item_id}: its worktree {row['path']} "
+                               f"is now {held}")
         if not os.access(common, os.W_OK):
-            log.emit("work_worktree_failed",
-                     f"work item {item_id}: {spec['repo_name']} is read-only here; "
-                     f"no worktree can be made in {repo_path}")
-            return {}
+            return _failed(f"work item {item_id}: {spec['repo_name']} is read-only "
+                           f"here; no worktree can be made in {repo_path}")
         config = instance_config(spec.get("project_key") or "")
         path = core_config.task_worktree_path(
             config, spec.get("project_key") or "", item_id, spec["repo_name"])
         base = branch_name(config, item_id, objective)
         branch, state, holder = _pick_branch(repo_path, base)
         if state == "exhausted":
-            log.emit("work_worktree_failed",
-                     f"work item {item_id}: no free branch name for "
-                     f"{spec['repo_name']}; the task stays in {repo_path}")
-            return {}
+            return _failed(f"work item {item_id}: no free branch name for "
+                           f"{spec['repo_name']}; the task stays in {repo_path}")
         if state == "worktree" and holder is not None:
+            held = _path_holder(holder, common, branch)
+            if held != "reuse":
+                return _failed(f"work item {item_id}: {holder} holds {branch} in "
+                               f"{repo_path}, but it is now {held}")
             _install_deps(config, spec["repo_name"], holder)
             return _record(item_id, spec, str(holder), branch, "reused_holder")
+        held = _path_holder(path, common, branch)
+        if held:
+            if held == "reuse":
+                _install_deps(config, spec["repo_name"], path)
+                return _record(item_id, spec, str(path), branch, "created")
+            return _failed(f"work item {item_id}: {path} is already taken by "
+                           f"{held}; no worktree of {repo_path} can be made there")
         base_branch = spec["base_branch"]
         _git(repo_path, ["fetch", "origin", base_branch])
         git_util.prune_worktrees(repo_path)
@@ -410,10 +462,8 @@ def ensure(item_id: int, spec: dict, objective: str = "") -> dict:
         path.parent.mkdir(parents=True, exist_ok=True)
         added = _git(repo_path, [*git_util.WORKTREE_ADD, str(path), branch])
         if added.returncode != 0:
-            log.emit("work_worktree_failed",
-                     f"work item {item_id}: worktree add failed for "
-                     f"{spec['repo_name']}: {(added.stderr or '').strip()[:300]}")
-            return {}
+            return _failed(f"work item {item_id}: worktree add failed for "
+                           f"{spec['repo_name']}: {(added.stderr or '').strip()[:300]}")
         _install_deps(config, spec["repo_name"], path)
         return _record(item_id, spec, str(path), branch, "created")
 
@@ -424,14 +474,24 @@ def ensure_for_repo(item_id: int, repo_dir: str, objective: str = "",
 
     The write and commit gates know the file or directory a session tried to
     change, and that names the repository even when the task selected a
-    project holding several. Returns the row, or {} when none could be made."""
+    project holding several. Returns the row, or {"error": ...} when none
+    could be made.
+
+    Only a repository a known project owns can be a parent. An agent that
+    cannot write the shared checkout clones it somewhere it can, and a
+    worktree whose parent is that clone breaks the moment the clone is
+    deleted. Such a repository answers {"unowned": root}: it is the agent's
+    own copy, not a shared checkout, so the gates let the agent work in it."""
     root = repo_root(repo_dir)
     if not root:
-        return {}
+        return {"error": f"{repo_dir} is not in a git checkout"}
     item = db.query_one("SELECT contexts, objective FROM work_items WHERE id = ?",
                         (item_id,))
     contexts = [c for c in ((item["contexts"] if item else "") or "").split(",") if c]
-    config, project_key = project_for_repo(root, contexts, entries or [])
+    known = list(dict.fromkeys(contexts + [e["key"] for e in entries or []]))
+    config, project_key = project_for_repo(root, known, entries or [])
+    if not project_key:
+        return {"unowned": root}
     spec = _repo_entry(config, root, os.path.basename(root), project_key)
     return ensure(item_id, spec, objective or (item["objective"] if item else ""))
 
@@ -478,7 +538,8 @@ def rebuild(item_id: int, objective: str = "", path: str = "") -> dict:
     launch the wrong directory. `path` also covers the task that reuses
     another task's worktree and lost the race before it had a row of its own.
 
-    Returns the row, or {} when nothing records what the directory was."""
+    Returns the row, {} when nothing records what the directory was, or
+    {"error": ...} when the worktree could not be made."""
     row = None
     if path:
         row = _row(db.query_one(

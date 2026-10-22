@@ -617,7 +617,7 @@ def _materialize(item_id: int, plan: dict) -> tuple[str, dict]:
         # so the sweep holds the directory to this task's state as well.
         return cwd, work_worktree.adopt_path(item_id, cwd)
     row = work_worktree.ensure(item_id, worktree, plan["objective"])
-    return (row["path"], row) if row else (cwd, {})
+    return (row["path"], row) if row.get("path") else (cwd, {})
 
 
 def _context_keys(contexts) -> list[str]:
@@ -878,7 +878,7 @@ def _start(item_id: int, plan: dict, slack: bool, brief: str) -> dict:
             # alternative is a launch that fails, or one that falls back into
             # the shared checkout this whole path exists to keep it out of.
             rebuilt = work_worktree.rebuild(item_id, objective, cwd)
-            if rebuilt:
+            if rebuilt.get("path"):
                 cwd, worktree_row = rebuilt["path"], rebuilt
         if not os.path.isdir(cwd):
             log.emit("work_launch_failed",
@@ -1226,7 +1226,7 @@ def resume_session(item_id: int) -> bool:
         cwd = worktree["cwd"]
         if worktree.get("create"):
             row = work_worktree.ensure(item_id, worktree, item["objective"])
-            if row:
+            if row.get("path"):
                 cwd = row["path"]
     # Re-check and launch are one critical section: the sweep must not remove
     # the directory between the check and tmux opening it, because a tmux
@@ -1239,7 +1239,7 @@ def resume_session(item_id: int) -> bool:
         if not cwd or not os.path.isdir(cwd):
             rebuilt = work_worktree.rebuild(
                 item_id, item["objective"] if item else "", cwd)
-            if rebuilt:
+            if rebuilt.get("path"):
                 cwd = rebuilt["path"]
         if not os.path.isdir(cwd):
             # A task that ever had a worktree is never resumed in the workspace
@@ -1409,6 +1409,31 @@ def propose_followup(source_item_id: int, objective: str, note: str = "",
         objective, note=note, instance_key=work_store.BOARD_INSTANCE_KEY, contexts=",".join(labels),
         cwd=inherited["cwd"], source_item_id=source_item_id,
         critical=inherited["critical"], proposal_key=proposal_key)
+    return {"item_id": item_id}
+
+
+def propose(objective: str, contexts, note: str = "", proposal_key: str = "") -> dict:
+    """Put a task another instance asked for on this board for approval.
+
+    An instance that cannot write or push a project's code files the change
+    here, where the checkout is writable and the key exists. The proposal runs
+    in the root of the first project it names, as a launch from the board
+    would."""
+    objective = (objective or "").strip()
+    if not objective:
+        return {"error": "empty objective"}
+    keys = _context_keys(contexts)
+    entries = {e["key"]: e for e in project_entries()}
+    unknown = [k for k in keys if k not in entries]
+    if not keys or unknown:
+        return {"error": f"unknown projects: {', '.join(unknown) or 'none named'}"}
+    try:
+        item_id = work_store.create_proposal(
+            objective, note=note, instance_key=work_store.BOARD_INSTANCE_KEY,
+            contexts=",".join(keys), cwd=entries[keys[0]]["root"],
+            proposal_key=proposal_key)
+    except work_store.ProposalKeyHeld as e:
+        return {"error": str(e), "item_id": e.holder["id"]}
     return {"item_id": item_id}
 
 
@@ -2675,8 +2700,12 @@ def gate_commit(session_id: str, command: str, cwd: str = "") -> dict:
     where = (f"A worktree for this task is ready at {row['path']} on branch "
              f"{row['branch']}." if row and os.path.isdir(row["path"])
              else "Ask the work board for a worktree of this repository.")
-    return {"decision": "deny", "need_worktree": shared[0], "item_id": item["id"],
-            "reason": _SHARED_COMMIT_DENY.format(repo=shared[0], where=where)}
+    denied = {"decision": "deny", "need_worktree": shared[0], "shared": shared,
+              "item_id": item["id"],
+              "reason": _SHARED_COMMIT_DENY.format(repo=shared[0], where=where)}
+    if rewritten:
+        denied["command"] = rewritten
+    return denied
 
 
 def gate_push(session_id: str, command: str, cwd: str) -> dict:

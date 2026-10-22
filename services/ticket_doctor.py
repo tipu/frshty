@@ -22,10 +22,11 @@ import core.log as log
 import core.queue as q
 import core.scheduler as scheduler
 import core.state as state
-from services import work_launch, work_store
+from services import work_launch, work_store, work_worktree
 
 FRSHTY_ROOT = str(Path(__file__).resolve().parent.parent)
 FRSHTY_TAG = "frshty"
+FRSHTY_BOARD = "personal"
 MAX_DESCRIPTION = 2000
 MAX_STATE_CHARS = 12000
 JOB_LIMIT = 25
@@ -209,8 +210,49 @@ ARTIFACT line.
 """
 
 
+FRSHTY_ELSEWHERE = """
+### frshty code changes go to the frshty board
+
+This instance cannot change frshty. {checkout} is read-only here, and this
+instance holds no key that can push frshty. Do not clone frshty and do not
+edit a copy of it: a commit made here is never pushed, and it is lost when
+the copy is deleted.
+
+When the remedy is a change to frshty code, file it as a proposal on the
+frshty board and stop there. Write the request body to a file, then send it:
+
+```
+curl -sS -X POST {url} -H 'Content-Type: application/json' --data @proposal.json
+```
+
+The body is a JSON object: `objective` states the change, the evidence and
+the file and line to change; `contexts` is `["frshty"]`; `note` says in one
+line that ticket {ticket} on {instance} needs it; `proposal_key` is
+`doctor-{ticket}:` followed by a short slug. The answer carries the `item_id`
+of the proposal, or of the proposal that already asks for the same change.
+Name that id in your report. Every remedy that is not a frshty code change
+still applies here.
+"""
+
+
+def frshty_writable() -> bool:
+    """Whether this instance can change frshty code itself.
+
+    A container runs frshty from a read-only mount, and only an instance that
+    also mounts the host checkout can commit to it."""
+    common = work_worktree.repo_common_dir(work_launch._frshty_checkout())
+    return bool(common) and os.access(common, os.W_OK)
+
+
 def brief(config: dict, key: str, ts: dict) -> str:
-    return snapshot(config, key, ts) + "\n" + PIPELINE_MAP
+    text = snapshot(config, key, ts) + "\n" + PIPELINE_MAP
+    if frshty_writable():
+        return text
+    board = (config.get("work") or {}).get("frshty_board") or FRSHTY_BOARD
+    url = f"{cfg.board_url()}/api/work/peers/{board}/api/work/proposals"
+    return text + FRSHTY_ELSEWHERE.format(
+        checkout=work_launch._frshty_checkout(), url=url, ticket=key,
+        instance=_instance_key(config))
 
 
 def _newest_run(instance_key: str, key: str) -> dict | None:

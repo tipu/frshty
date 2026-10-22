@@ -1,3 +1,4 @@
+import subprocess
 import sys
 from unittest.mock import patch
 
@@ -79,6 +80,41 @@ def test_brief_carries_state_jobs_events_and_pipeline_map(tmp_path):
     assert "plan.md" in brief
     assert "features/ticket_states.py" in brief
     assert str(db.path()) in brief
+
+
+def test_brief_sends_frshty_code_changes_to_the_frshty_board_when_frshty_is_read_only(
+        tmp_path):
+    key, _ = _seed_ticket(tmp_path, key="DEV-904", slug="dev-904-ro")
+    config = {**_config_for(tmp_path), "work": {"frshty_board": "home"}}
+    with patch.object(ticket_doctor, "frshty_writable", return_value=False), \
+         patch.object(ticket_doctor.cfg, "board_url", return_value="http://127.0.0.1:9"):
+        brief = ticket_doctor.brief(config, key, state.load_ticket(key))
+    assert "frshty code changes go to the frshty board" in brief
+    assert "http://127.0.0.1:9/api/work/peers/home/api/work/proposals" in brief
+    assert "doctor-DEV-904:" in brief
+
+
+def test_brief_keeps_frshty_code_changes_local_when_frshty_is_writable(tmp_path):
+    key, _ = _seed_ticket(tmp_path, key="DEV-905", slug="dev-905-rw")
+    with patch.object(ticket_doctor, "frshty_writable", return_value=True):
+        brief = ticket_doctor.brief(_config_for(tmp_path), key, state.load_ticket(key))
+    assert "frshty code changes go to the frshty board" not in brief
+
+
+def test_frshty_is_not_writable_from_a_read_only_checkout(tmp_path):
+    repo = tmp_path / "frshty"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".git").chmod(0o555)
+    try:
+        with patch.object(ticket_doctor.work_launch, "_frshty_checkout",
+                          return_value=str(repo)):
+            assert ticket_doctor.frshty_writable() is False
+    finally:
+        (repo / ".git").chmod(0o755)
+    with patch.object(ticket_doctor.work_launch, "_frshty_checkout",
+                      return_value=str(repo)):
+        assert ticket_doctor.frshty_writable() is True
 
 
 def test_brief_excludes_another_tickets_job(tmp_path):
