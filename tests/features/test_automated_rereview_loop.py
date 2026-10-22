@@ -45,7 +45,7 @@ def _human(cid, **overrides):
 
 def _bb_report(cid, **overrides):
     base = _review(cid, author_id="app-pipeline", author_name="pipeline: Code Insights",
-                   body=f"## 1 of 6 checks failed for commit {cid}", resolvable=True)
+                   body=f"## Code review for commit {cid}: fix the guard", resolvable=True)
     del base["comment_kind"]
     base.update(overrides)
     return base
@@ -53,6 +53,12 @@ def _bb_report(cid, **overrides):
 
 def _bb_passed(cid, **overrides):
     return _bb_report(cid, body=f"## \u2705 All 6 checks passed \u2014 `{cid}`\n\n"
+                                "See the Reports panel on this PR for details.", **overrides)
+
+
+def _bb_failed(cid, **overrides):
+    return _bb_report(cid, body=f"## \u274c 1 of 4 checks failed \u2014 `{cid}`\n\n"
+                                "- Dependency Vulnerabilities (production)\n\n"
                                 "See the Reports panel on this PR for details.", **overrides)
 
 
@@ -124,13 +130,25 @@ class TestAutomatedReviewSkips:
 
         assert skips == {_key(live[0]): "superseded", _key(live[1]): "passed"}
 
-    def test_the_newest_failed_pipeline_report_is_current(self):
-        """The control: a failure report still asks for a fix."""
-        live = [_bb_passed(1), _bb_report(2)]
+    def test_the_newest_failed_pipeline_report_is_left_to_ci(self):
+        live = [_bb_passed(1), _bb_failed(2)]
+
+        skips = comments.automated_review_skips(live, _key, set())
+
+        assert skips == {_key(live[0]): "superseded", _key(live[1]): "ci"}
+
+    def test_the_newest_bitbucket_bot_review_is_current(self):
+        """The control: a bot review that is not a check report still asks for a fix."""
+        live = [_bb_failed(1), _bb_report(2)]
 
         skips = comments.automated_review_skips(live, _key, set())
 
         assert skips == {_key(live[0]): "superseded"}
+
+    def test_a_person_writing_checks_failed_is_never_skipped(self):
+        live = [{**_human(1), "body": "1 of 4 checks failed, please fix the audit."}]
+
+        assert comments.automated_review_skips(live, _key, set()) == {}
 
     def test_a_person_writing_all_checks_passed_is_never_skipped(self):
         live = [{**_human(1), "body": "All 6 checks passed, but rename this."}]
@@ -189,6 +207,13 @@ class TestTicketCommentPass:
         assert prompts == []
         assert out[tickets.RECONCILE_OWED_KEY] == 0
         assert "ticket_pr_comment_needs_reply" not in events
+        assert "ticket_pr_automated_review_skipped" in events
+
+    def test_a_failed_pipeline_report_is_not_triaged_and_not_owed(self, fake_config):
+        out, prompts, events = self._run(fake_config, [_bb_failed(10)])
+
+        assert prompts == []
+        assert out[tickets.RECONCILE_OWED_KEY] == 0
         assert "ticket_pr_automated_review_skipped" in events
 
     def test_a_review_after_the_cap_is_not_triaged_and_not_owed(self, fake_config):
@@ -293,6 +318,14 @@ class TestOwnPrs:
         assert [c["id"] for c in keep] == [12]
         assert sorted(call.args[3] for call in seen.call_args_list) == ["10", "11"]
 
+    def test_a_failed_pipeline_report_is_dropped_and_baselined(self):
+        live = [_bb_failed(10), _human(11)]
+
+        keep, seen, _ = self._drop(live, set())
+
+        assert [c["id"] for c in keep] == [11]
+        assert [call.args[3] for call in seen.call_args_list] == ["10"]
+
     def test_a_person_with_the_id_of_a_superseded_review_is_kept(self):
         inline = _human(10, comment_kind=None, path="app.py", line=3, resolvable=True)
         live = [_review(10), _review(11), inline]
@@ -300,6 +333,23 @@ class TestOwnPrs:
         keep, _, _ = self._drop(live, set())
 
         assert inline in keep
+
+    def test_an_abandoned_failed_pipeline_report_is_settled_by_the_reclaim_pass(self):
+        live = [_bb_failed(10)]
+        pr = {"repo": "repo", "id": 99, "url": "http://u/99"}
+        skips = own_prs._automated_review_skips(live, set())
+        row = {"comment_id": "10", "state": "new", "error_count": 6,
+               "last_checked_at": _WRITTEN}
+        with patch.object(comments, "get_unprocessed_comments", return_value=[row]), \
+             patch.object(comments, "mark_comment_seen") as seen, \
+             patch.object(comments, "mark_comment_deferred") as deferred, \
+             patch("features.own_prs.log") as log:
+            own_prs._reclaim_stuck_comments("inst", pr, "repo/99", "repo#99", "http://base",
+                                            {"10": live[0]}, "bot-self", set(), {}, None, skips)
+
+        assert [call.args[3] for call in seen.call_args_list] == ["10"]
+        deferred.assert_not_called()
+        assert log.emit.call_args_list == []
 
     def test_a_deferred_review_that_is_now_superseded_is_not_queued(self):
         live = [_review(10), _review(11)]

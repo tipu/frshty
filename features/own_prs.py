@@ -250,7 +250,8 @@ def _check_comments(config, instance_key, platform, pr, base_url, seen=None, tic
     if all_to_process:
         _process_detected_comments(config, instance_key, platform, pr, pr_ref, base_url, all_to_process, handled, seen, ticket_key)
 
-    _reclaim_stuck_comments(instance_key, pr, pr_key, pr_ref, base_url, by_id, user_id, handled, seen, ticket_key)
+    _reclaim_stuck_comments(instance_key, pr, pr_key, pr_ref, base_url, by_id, user_id, handled, seen, ticket_key,
+                            skips)
 
     _settle_manual_comments(instance_key, pr_key, by_id)
 
@@ -311,7 +312,7 @@ def _drop_skipped_automated_reviews(instance_key, pr, pr_key, pr_ref, base_url, 
     if dropped:
         log.emit("pr_automated_review_skipped",
                  f"{pr_ref}: not fixing {len(dropped)} automated review(s); a newer review "
-                 f"supersedes them, they report that all checks passed, or the PR had {MAX_AUTOMATED_REVIEW_FIX_RUNS} "
+                 f"supersedes them, they report check results the CI pass handles, or the PR had {MAX_AUTOMATED_REVIEW_FIX_RUNS} "
                  f"automated review fix runs",
                  links={"pr": pr["url"], "detail": f"{base_url}/"},
                  meta={"repo": pr["repo"], "pr_id": pr["id"],
@@ -430,7 +431,8 @@ def _is_stale(ts, now, seconds) -> bool:
     return (now - t).total_seconds() > seconds
 
 
-def _reclaim_stuck_comments(instance_key, pr, pr_key, pr_ref, base_url, by_id, user_id, handled, seen, ticket_key=None):
+def _reclaim_stuck_comments(instance_key, pr, pr_key, pr_ref, base_url, by_id, user_id, handled, seen, ticket_key=None,
+                            skips=None):
     now = datetime.now(timezone.utc)
     for row in comments.get_unprocessed_comments(instance_key, "pr", pr_key):
         comment_id = str(row["comment_id"])
@@ -444,6 +446,10 @@ def _reclaim_stuck_comments(instance_key, pr, pr_key, pr_ref, base_url, by_id, u
             continue
         if comment.get("resolved"):
             comments.mark_comment_processed(instance_key, "pr", pr_key, comment_id)
+            continue
+        if skips and automated_review_skip_reason(comment, _review_key, skips):
+            comments.mark_comment_seen(instance_key, "pr", pr_key, comment_id,
+                                       comment.get("updated_at") or comment.get("created_at"))
             continue
 
         error_count = row.get("error_count") or 0

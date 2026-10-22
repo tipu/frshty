@@ -6,6 +6,7 @@ import core.db as db
 MAX_AUTOMATED_REVIEW_FIX_RUNS = 2
 AUTOMATED_REVIEW_KINDS = ("issue_comment", "review_body")
 CHECKS_PASSED_RE = re.compile(r"^[#\s]*\W*\s*All \d+ checks? passed\b", re.IGNORECASE)
+CHECKS_FAILED_RE = re.compile(r"^[#\s]*\W*\s*\d+ of \d+ checks? failed\b", re.IGNORECASE)
 
 
 def fetch_and_detect_comments(
@@ -495,6 +496,15 @@ def reports_checks_passed(comment: dict) -> bool:
     return bool(CHECKS_PASSED_RE.match(comment.get("body") or ""))
 
 
+def reports_checks_failed(comment: dict) -> bool:
+    """Whether a pipeline status comment reports that some checks failed.
+
+    The CI pass reads the failed checks themselves and owns their fix. The
+    report only names them, so a fix run on it has nothing to act on, makes
+    no change, and spends its retries until the comment is abandoned."""
+    return bool(CHECKS_FAILED_RE.match(comment.get("body") or ""))
+
+
 def automated_review_skips(comments: list[dict], key, fixed: set) -> dict:
     """key(comment) -> why frshty does not act on this automated review.
 
@@ -506,7 +516,8 @@ def automated_review_skips(comments: list[dict], key, fixed: set) -> dict:
     MAX_AUTOMATED_REVIEW_FIX_RUNS fix runs on automated reviews. `fixed`
     holds the keys of the comments that already had a fix run. A skipped
     review is not owed an answer, so it does not hold the merge. The newest
-    one is also skipped when it reports that every check passed."""
+    one is also skipped when it reports that every check passed, and when
+    it reports failed checks, which the CI pass handles."""
     automated = [c for c in comments if is_automated_review(c)]
     newest: dict = {}
     for c in automated:
@@ -516,6 +527,7 @@ def automated_review_skips(comments: list[dict], key, fixed: set) -> dict:
     current = {key(c) for c in newest.values()}
     automated_keys = {key(c) for c in automated}
     passed = {key(c) for c in automated if reports_checks_passed(c)}
+    failed = {key(c) for c in automated if reports_checks_failed(c)}
     capped = len(automated_keys & fixed) >= MAX_AUTOMATED_REVIEW_FIX_RUNS
     skips = {}
     for k in automated_keys:
@@ -523,6 +535,8 @@ def automated_review_skips(comments: list[dict], key, fixed: set) -> dict:
             skips[k] = "superseded"
         elif k in passed:
             skips[k] = "passed"
+        elif k in failed:
+            skips[k] = "ci"
         elif capped and k not in fixed:
             skips[k] = "capped"
     return skips
