@@ -136,19 +136,29 @@ class TestTicketRulesFiles:
         return {"workspace": {"root": tmp_path, "repos": ["a", "b", "c"],
                               "tickets_dir": "tickets", "ticket_layout": "workspace"}}
 
-    def test_lists_root_then_each_repo_file(self, tmp_path):
+    def test_lists_the_root_file_and_no_repo_file(self, tmp_path):
         config = self._config(tmp_path)
         (tmp_path / "CLAUDE.md").write_text("root rules")
         wt = ticket_worktree_path(config, "PROJ-1-x", "a")
         wt.mkdir(parents=True)
         (wt / "CLAUDE.md").write_text("branch rules")
-        (tmp_path / "a" / "CLAUDE.md").write_text("checkout rules")
         (tmp_path / "b" / "CLAUDE.md").write_text("checkout rules")
-        assert ticket_rules_files(config, "PROJ-1-x") == [
-            tmp_path / "CLAUDE.md", wt / "CLAUDE.md", tmp_path / "b" / "CLAUDE.md"]
+        assert ticket_rules_files(config) == [tmp_path / "CLAUDE.md"]
+
+    def test_rules_file_replaces_the_root_file(self, tmp_path):
+        config = self._config(tmp_path)
+        (tmp_path / "CLAUDE.md").write_text("root rules")
+        own = tmp_path / "own" / "CLAUDE.md"
+        own.parent.mkdir()
+        own.write_text("operator rules")
+        config["workspace"]["rules_file"] = str(own)
+        assert ticket_rules_files(config) == [own]
 
     def test_empty_when_no_file_exists(self, tmp_path):
-        assert ticket_rules_files(self._config(tmp_path), "PROJ-1-x") == []
+        config = self._config(tmp_path)
+        assert ticket_rules_files(config) == []
+        config["workspace"]["rules_file"] = str(tmp_path / "missing.md")
+        assert ticket_rules_files(config) == []
 
 
 class TestSaveFeatureToggle:

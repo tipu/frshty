@@ -99,7 +99,8 @@ class TestRunScopeReview:
             consensus_scope.run_scope_review(scope_config, tmp_path / "tickets" / slug, slug,
                                              ticket_key="PROJ-1")
         prompt = fan_out.call_args.args[0]
-        assert f"- {tmp_path / 'CLAUDE.md'}\n- {wt / 'CLAUDE.md'}" in prompt
+        assert f"- {tmp_path / 'CLAUDE.md'}" in prompt
+        assert str(wt / 'CLAUDE.md') not in prompt
 
     def test_all_pass(self, tmp_path, scope_config):
         (result, ticket_dir) = self._run(tmp_path, scope_config, _fanout_result(
