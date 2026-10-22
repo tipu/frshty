@@ -259,6 +259,8 @@ def _handle_planning_ticket(
     instance_key: str,
     existing: bool,
 ) -> tuple[dict, bool]:
+    if "Epic" in (ticket.get("issue_type"), ts.get("issue_type")):
+        return ts, True
     if instance_key:
         _t._enqueue_stage(instance_key, ticket["key"], "start_planning")
     return ts, False
