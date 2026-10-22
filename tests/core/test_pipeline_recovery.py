@@ -659,4 +659,5 @@ class TestForeignPrHold:
         assert len(seen) == 1
         assert seen[0].startswith("do the work\n\n")
         assert seen[0].endswith(NO_PUBLISH_RULE)
-        assert f"- {root / 'CLAUDE.md'}\n- {wt / 'CLAUDE.md'}\n" in seen[0]
+        assert f"- {root / 'CLAUDE.md'}\n" in seen[0]
+        assert str(wt / 'CLAUDE.md') not in seen[0]
