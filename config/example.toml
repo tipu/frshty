@@ -265,7 +265,7 @@ pr_autofix = false                # github only: every PR the instance account o
 
 # --- Peer PR reviewer ---
 # [reviewer]
-# model = "claude-opus-4-8"            # model for the review personas (unset: the CLI default)
+# model = "claude-opus-5-5"            # model for the review personas (unset: the CLI default)
 # providers = ["claude", "codex"]      # every persona runs once per provider
 # max_changed_lines = 8000             # a ticket whose PR diffs add up to more changed
 #                                      # lines than this is not reviewed automatically.

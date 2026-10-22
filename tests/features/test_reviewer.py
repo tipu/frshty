@@ -683,12 +683,12 @@ class TestReviewerModel:
         assert reviewer._reviewer_model({}) is None
 
     def test_reads_config_knob(self):
-        assert reviewer._reviewer_model({"reviewer": {"model": "claude-opus-4-8"}}) == "claude-opus-4-8"
+        assert reviewer._reviewer_model({"reviewer": {"model": "claude-opus-5-5"}}) == "claude-opus-5-5"
 
     def test_persona_run_passes_model(self, tmp_path):
         with patch("features.reviewer.run_agentic", return_value=None) as mock_run:
-            reviewer._run_single_persona(("spec", "prompt", tmp_path, "claude-opus-4-8", None))
-        assert mock_run.call_args.kwargs["model"] == "claude-opus-4-8"
+            reviewer._run_single_persona(("spec", "prompt", tmp_path, "claude-opus-5-5", None))
+        assert mock_run.call_args.kwargs["model"] == "claude-opus-5-5"
 
 
 class TestPersonaRunsAsAgent:
