@@ -63,8 +63,8 @@ createApp({
     api(path) {
       return this.peer ? "/api/work/peers/" + encodeURIComponent(this.peer) + path : path;
     },
-    artifactUrl(a) { return (this.peerBase || "") + "/api/work/artifact_file/" + a.id; },
-    viewerUrl(a) { return (this.peerBase || "") + "/artifacts/" + a.id; },
+    artifactUrl(a) { return this.api("/api/work/artifact_file/" + a.id); },
+    viewerUrl(a) { return "/artifacts/" + a.id + (this.peer ? "?peer=" + encodeURIComponent(this.peer) : ""); },
   },
   async mounted() {
     if (this.peer) {

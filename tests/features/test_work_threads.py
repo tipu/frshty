@@ -613,10 +613,14 @@ class TestPeerAwareThreads:
         assert 'this.api("/api/work/threads/" + this.rootId + "/tasks")' in text
         assert 'this.api("/api/work/threads/" + this.rootId + "/archive")' in text
 
-    def test_the_thread_page_sends_terminal_and_artifact_to_the_peer_host(self):
+    def test_the_thread_page_sends_the_terminal_to_the_peer_host(self):
         text = self._read("templates/thread_detail.html")
         assert '(this.peerBase || "") + "/tasks/" + id + "/terminal"' in text
-        assert '(this.peerBase || "") + "/artifacts/" + a.id' in text
+
+    def test_the_thread_page_opens_a_peer_artifact_through_this_board(self):
+        text = self._read("templates/thread_detail.html")
+        assert '"/artifacts/" + a.id + (this.peer ? "?peer=" + encodeURIComponent(this.peer) : "")' in text
+        assert '(this.peerBase || "") + "/artifacts/"' not in text
 
     def test_the_thread_page_reports_an_unknown_peer(self):
         text = self._read("templates/thread_detail.html")

@@ -257,3 +257,121 @@ class TestPeerRoutes:
         resp = client.get("/api/work/items")
         assert resp.status_code == 200
         assert "groups" in resp.json()
+
+
+class _PeerStream(httpx.AsyncByteStream):
+    def __init__(self, data=b""):
+        self.data = data
+
+    async def __aiter__(self):
+        yield self.data
+
+
+def _mock_peer(monkeypatch, handler):
+    real_client = httpx.AsyncClient
+    seen = []
+
+    def record(request):
+        seen.append(request)
+        return handler(request)
+
+    monkeypatch.setattr(work_peers.httpx, "AsyncClient",
+                        lambda **kw: real_client(transport=httpx.MockTransport(record), **kw))
+    return seen
+
+
+class TestPeerArtifactFile:
+    def test_file_is_served_from_this_board(self, peers_file, client, monkeypatch):
+        peers_file.write_text('[[peers]]\nkey = "a"\nbase_url = "http://x:1"\n')
+        seen = _mock_peer(monkeypatch, lambda r: httpx.Response(
+            200, stream=_PeerStream(b"\x89PNG data"),
+            headers={"content-type": "image/png", "content-security-policy": "sandbox",
+                     "set-cookie": "s=1"}))
+        resp = client.get("/api/work/peers/a/api/work/artifact_file/7")
+        assert resp.status_code == 200
+        assert resp.content == b"\x89PNG data"
+        assert resp.headers["content-type"] == "image/png"
+        assert resp.headers["content-security-policy"] == "sandbox"
+        assert "set-cookie" not in resp.headers
+        assert str(seen[0].url) == "http://x:1/api/work/artifact_file/7"
+
+    def test_page_redirect_stays_inside_the_proxy(self, peers_file, client, monkeypatch):
+        peers_file.write_text('[[peers]]\nkey = "a"\nbase_url = "http://x:1"\n')
+        _mock_peer(monkeypatch, lambda r: httpx.Response(
+            307, stream=_PeerStream(), headers={"location": "/api/work/artifact_file/7/"}))
+        resp = client.get("/api/work/peers/a/api/work/artifact_file/7", follow_redirects=False)
+        assert resp.status_code == 307
+        assert resp.headers["location"] == "/api/work/peers/a/api/work/artifact_file/7/"
+
+    def test_page_folder_keeps_its_trailing_slash(self, peers_file, client, monkeypatch):
+        peers_file.write_text('[[peers]]\nkey = "a"\nbase_url = "http://x:1"\n')
+        seen = _mock_peer(monkeypatch, lambda r: httpx.Response(
+            200, stream=_PeerStream(b"<html></html>"), headers={"content-type": "text/html"}))
+        resp = client.get("/api/work/peers/a/api/work/artifact_file/7/", follow_redirects=False)
+        assert resp.status_code == 200
+        assert str(seen[0].url) == "http://x:1/api/work/artifact_file/7/"
+
+    def test_page_asset_is_proxied(self, peers_file, client, monkeypatch):
+        peers_file.write_text('[[peers]]\nkey = "a"\nbase_url = "http://x:1"\n')
+        seen = _mock_peer(monkeypatch, lambda r: httpx.Response(
+            200, stream=_PeerStream(b"<html></html>"), headers={"content-type": "text/html"}))
+        resp = client.get("/api/work/peers/a/api/work/artifact_file/7/img/a.png")
+        assert resp.status_code == 200
+        assert str(seen[0].url) == "http://x:1/api/work/artifact_file/7/img/a.png"
+
+    def test_range_header_is_forwarded(self, peers_file, client, monkeypatch):
+        peers_file.write_text('[[peers]]\nkey = "a"\nbase_url = "http://x:1"\n')
+        seen = _mock_peer(monkeypatch, lambda r: httpx.Response(
+            206, stream=_PeerStream(b"01"),
+            headers={"content-type": "video/mp4", "content-range": "bytes 0-1/10"}))
+        resp = client.get("/api/work/peers/a/api/work/artifact_file/7",
+                          headers={"range": "bytes=0-1"})
+        assert resp.status_code == 206
+        assert resp.headers["content-range"] == "bytes 0-1/10"
+        assert seen[0].headers["range"] == "bytes=0-1"
+
+    def test_redirect_outside_the_artifact_files_is_refused(self, peers_file, client, monkeypatch):
+        peers_file.write_text('[[peers]]\nkey = "a"\nbase_url = "http://x:1"\n')
+        _mock_peer(monkeypatch, lambda r: httpx.Response(
+            302, stream=_PeerStream(), headers={"location": "/api/config"}))
+        resp = client.get("/api/work/peers/a/api/work/artifact_file/7", follow_redirects=False)
+        assert resp.status_code == 502
+        assert "redirected outside" in resp.json()["error"]
+
+    def test_unknown_peer_is_404(self, peers_file, client):
+        resp = client.get("/api/work/peers/nope/api/work/artifact_file/7")
+        assert resp.status_code == 404
+        assert "unknown peer" in resp.json()["error"]
+
+    def test_unreachable_peer_is_502_and_is_logged(self, peers_file, client, monkeypatch):
+        peers_file.write_text('[[peers]]\nkey = "a"\nbase_url = "http://x:1"\n')
+        emitted = []
+        monkeypatch.setattr(log, "emit", lambda kind, msg, **kw: emitted.append(kind))
+
+        def refuse(request):
+            raise httpx.ConnectError("refused")
+
+        _mock_peer(monkeypatch, refuse)
+        resp = client.get("/api/work/peers/a/api/work/artifact_file/7")
+        assert resp.status_code == 502
+        assert "unreachable" in resp.json()["error"]
+        assert emitted == ["work_peer_unreachable"]
+
+
+class TestPeerArtifactLinks:
+    def _read(self, path):
+        return (work_peers.Path(__file__).parent.parent.parent / path).read_text()
+
+    def test_viewer_reads_a_peer_artifact_through_the_proxy(self):
+        text = self._read("templates/work_artifact.html")
+        assert 'const apiBase = peer ? "/api/work/peers/" + encodeURIComponent(peer) : "";' in text
+        assert 'const fileUrl = apiBase + "/api/work/artifact_file/" + id;' in text
+        assert 'fetch(apiBase + "/api/work/artifacts/" + id)' in text
+
+    def test_no_page_sends_the_browser_to_a_peer_base_url_for_an_artifact(self):
+        for path in ("templates/work_detail.html", "templates/work_summary.html",
+                     "templates/thread_detail.html", "static/frshty-redesign.js"):
+            text = self._read(path)
+            assert '"/artifacts/" + a.id + (' in text, path
+            assert ') + "/artifacts/"' not in text, path
+            assert ') + "/api/work/artifact_file/"' not in text, path
