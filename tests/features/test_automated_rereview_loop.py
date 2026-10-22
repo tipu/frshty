@@ -147,6 +147,24 @@ class TestAutomatedReviewSkips:
 
         assert skips == {_key(live[0]): "superseded", _key(live[1]): "checks_failed"}
 
+    def test_a_single_passed_check_report_is_skipped(self):
+        """Observed on DEV-916: "ESLint passed" was marked needs_reply."""
+        live = [_bb_report(1, body="## \u2705 ESLint passed \u2014 `a6b7f60`\n\n"
+                                   "See the Reports panel for details.")]
+
+        assert comments.automated_review_skips(live, _key, set()) == {_key(live[0]): "passed"}
+
+    def test_a_single_failed_check_report_is_skipped(self):
+        live = [_bb_report(1, body="## \u274c ESLint failed \u2014 `6b0d832`\n\n"
+                                   "```\n1 error(s), 8 warning(s)\n```")]
+
+        assert comments.automated_review_skips(live, _key, set()) == {_key(live[0]): "checks_failed"}
+
+    def test_a_bot_review_that_mentions_passed_is_not_skipped(self):
+        live = [_bb_report(1, body="## Review\n\nThe tests passed, but rename `a6b7f60`.")]
+
+        assert comments.automated_review_skips(live, _key, set()) == {}
+
     def test_a_person_writing_checks_failed_is_never_skipped(self):
         live = [{**_human(1), "body": "1 of 6 checks failed, fix the migration."}]
 
@@ -336,6 +354,23 @@ class TestOwnPrs:
         keep, _, _ = self._drop(live, set())
 
         assert inline in keep
+
+    def test_an_abandoned_failed_pipeline_report_is_settled_by_the_reclaim_pass(self):
+        live = [_bb_failed(10)]
+        pr = {"repo": "repo", "id": 99, "url": "http://u/99"}
+        skips = own_prs._automated_review_skips(live, set())
+        row = {"comment_id": "10", "state": "new", "error_count": 6,
+               "last_checked_at": _WRITTEN}
+        with patch.object(comments, "get_unprocessed_comments", return_value=[row]), \
+             patch.object(comments, "mark_comment_seen") as seen, \
+             patch.object(comments, "mark_comment_deferred") as deferred, \
+             patch("features.own_prs.log") as log:
+            own_prs._reclaim_stuck_comments("inst", pr, "repo/99", "repo#99", "http://base",
+                                            {"10": live[0]}, "bot-self", set(), {}, None, skips)
+
+        assert [call.args[3] for call in seen.call_args_list] == ["10"]
+        deferred.assert_not_called()
+        assert log.emit.call_args_list == []
 
     def test_a_deferred_review_that_is_now_superseded_is_not_queued(self):
         live = [_review(10), _review(11)]
