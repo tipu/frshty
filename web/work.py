@@ -235,6 +235,16 @@ def api_work_approve(item_id: int, body: dict | None = Body(default=None)):
     return result
 
 
+@router.post("/api/work/proposals")
+def api_work_propose(body: dict):
+    result = work_launch.propose(body.get("objective") or "", body.get("contexts"),
+                                 note=body.get("note") or "",
+                                 proposal_key=body.get("proposal_key") or "")
+    if "error" in result:
+        return JSONResponse(result, status_code=409 if "item_id" in result else 400)
+    return result
+
+
 @router.post("/api/work/items/{item_id}/worktree")
 def api_work_worktree(item_id: int, body: dict):
     """Hand one task a worktree of the repository it tried to write into.
@@ -254,9 +264,11 @@ def api_work_worktree(item_id: int, body: dict):
     # a live session, and gc keeps any worktree whose holder has one.
     row = work_worktree.ensure_for_repo(
         item_id, repo_path, entries=work_launch.project_entries())
-    if not row:
+    if row.get("unowned"):
+        return {"shared": False, "repo_path": row["unowned"]}
+    if not row.get("path"):
         return JSONResponse(
-            {"error": f"no worktree could be created for {repo_path}"},
+            {"error": row.get("error") or f"no worktree could be created for {repo_path}"},
             status_code=409)
     work_worktree.adopt_run(item_id, row["path"])
     return {"path": row["path"], "branch": row["branch"],

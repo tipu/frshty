@@ -527,3 +527,54 @@ class TestWorktreeEndpoint:
                      json={"repo_path": str(project["repo"])}).json()
         detail = c.get(f"/api/work/items/{item_id}/detail").json()
         assert detail["worktree"]["path"] == got["path"]
+
+
+class TestOwnership:
+    def test_the_board_says_a_clone_no_project_owns_is_not_shared(self, project, tmp_path):
+        clone = tmp_path / "scratch" / "app"
+        _git(tmp_path, "clone", str(project["repo"]), str(clone))
+        item_id = work_store.create_item("own clone", contexts="proj")
+        resp = client().post(f"/api/work/items/{item_id}/worktree",
+                             json={"repo_path": str(clone)})
+        assert resp.status_code == 200
+        assert resp.json() == {"shared": False, "repo_path": str(clone)}
+        assert work_worktree.for_item(item_id) is None
+
+    def test_the_board_names_what_holds_an_occupied_path(self, project):
+        item_id = work_store.create_item("taken path", contexts="proj")
+        target = core_config.task_worktree_path(None, "proj", item_id, "app")
+        target.parent.mkdir(parents=True)
+        _git(project["root"], "clone", str(project["repo"]), str(target))
+        resp = client().post(f"/api/work/items/{item_id}/worktree",
+                             json={"repo_path": str(project["repo"])})
+        assert resp.status_code == 409
+        assert "a separate clone" in resp.json()["error"]
+        assert str(target) in resp.json()["error"]
+
+
+class TestProposals:
+    def test_a_proposal_filed_over_http_waits_for_approval(self, project):
+        resp = client().post("/api/work/proposals", json={
+            "objective": "Fix the stuck handler.", "contexts": ["proj"],
+            "note": "ticket DEV-1 on another instance needs it",
+            "proposal_key": "doctor-DEV-1:stuck-handler"})
+        assert resp.status_code == 200, resp.text
+        row = db.query_one("SELECT state, contexts, launch_cwd, proposal_key "
+                           "FROM work_items WHERE id = ?", (resp.json()["item_id"],))
+        assert dict(row) == {"state": work_store.PROPOSED_STATE, "contexts": "proj",
+                             "launch_cwd": str(project["root"]),
+                             "proposal_key": "doctor-DEV-1:stuck-handler"}
+
+    def test_a_second_proposal_of_the_same_change_names_the_first(self, project):
+        body = {"objective": "Fix it.", "contexts": ["proj"],
+                "proposal_key": "doctor-DEV-2:same"}
+        first = client().post("/api/work/proposals", json=body).json()
+        again = client().post("/api/work/proposals", json=body)
+        assert again.status_code == 409
+        assert again.json()["item_id"] == first["item_id"]
+
+    def test_a_proposal_for_an_unknown_project_is_refused(self, project):
+        resp = client().post("/api/work/proposals",
+                             json={"objective": "Fix it.", "contexts": ["nowhere"]})
+        assert resp.status_code == 400
+        assert "nowhere" in resp.json()["error"]
