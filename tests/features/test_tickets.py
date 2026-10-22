@@ -6,7 +6,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 import core.state as state
-from features import tickets
+from features import ticket_states, tickets
 from tests.conftest import make_ticket, make_ticket_state
 
 
@@ -260,6 +260,50 @@ class TestRepoGate:
             assert tickets._enqueue_stage("inst", "T-2", "fix_scope_findings") == 7
             assert tickets._enqueue_stage("inst", "T-1", "fix_scope_findings") is None
         assert eq.call_count == 1
+
+    def test_ticket_held_behind_a_foreign_pr_is_never_elected(self, fresh_db):
+        """A held ticket skips every task until a human closes the PR, so it
+        cannot drain. Elected as holder, it blocked every new ticket."""
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-2", {"status": "pr_ready", "slug": "x", "branch": "x"})
+        state.transition_ticket("T-2", "proving")
+        state.save_ticket("T-2", {"status": "proving", "slug": "x", "branch": "x",
+                                   state.FOREIGN_PRS_KEY: [{"repo": "r", "id": 1, "url": ""}]})
+        assert tickets._repo_gate_blocked("inst", "T-1") is None
+        state.save_ticket("T-2", {"status": "proving", "slug": "x", "branch": "x"})
+        assert tickets._repo_gate_blocked("inst", "T-1") == "T-2"
+
+    def test_epic_is_never_elected(self, fresh_db):
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-2", {"status": "planning", "slug": "x", "branch": "x",
+                                   "issue_type": "Epic"})
+        assert tickets._repo_gate_blocked("inst", "T-1") is None
+
+    def test_released_ticket_queues_behind_the_holder_elected_while_it_was_held(self, fresh_db):
+        import core.state as state
+        state.init("inst")
+        state.save_ticket("T-1", {"status": "new", "slug": "x", "branch": "x"})
+        state.transition_ticket("T-1", "planning")
+        state.save_ticket("T-2", {"status": "new", "slug": "x", "branch": "x"})
+        state.transition_ticket("T-2", "planning")
+        released = (datetime.now(timezone.utc) + timedelta(seconds=1)).isoformat()
+        state.save_ticket("T-1", {"status": "planning", "slug": "x", "branch": "x",
+                                   "foreign_prs_released_at": released})
+        assert tickets._repo_gate_blocked("inst", "T-2") is None
+        assert tickets._repo_gate_blocked("inst", "T-1") == "T-2"
+
+    def test_planning_handler_does_not_plan_an_epic(self):
+        with patch("features.tickets._enqueue_stage") as eq:
+            _, stop = ticket_states._handle_planning_ticket(
+                {}, {"key": "T-2", "issue_type": "Epic"}, {"status": "planning"},
+                "", "inst", True)
+            _, stop_persisted = ticket_states._handle_planning_ticket(
+                {}, {"key": "T-2"}, {"status": "planning", "issue_type": "Epic"},
+                "", "inst", True)
+        assert stop is True and stop_persisted is True
+        eq.assert_not_called()
 
     def test_gate_isolates_per_instance(self, fresh_db):
         """A ticket in a different instance does not block this one."""
