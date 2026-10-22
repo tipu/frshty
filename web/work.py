@@ -145,13 +145,19 @@ def api_work_thread_archive(root_id: int):
 
 
 @router.get("/api/work/items")
-def api_work_items(q: str = "", projects: str = "", done_page: int = 1, archive: int = 0):
+def api_work_items(q: str = "", projects: str = "", done_page: int = 1, archive: int = 0,
+                   snoozed: int = 0):
     groups = work_store.grouped_items(q=q, projects=projects, archived=bool(archive))
+    snoozed_count = sum(row["board_snoozed"] for rows in groups.values() for row in rows)
+    if not snoozed:
+        groups = {g: [row for row in rows if not row["board_snoozed"]]
+                  for g, rows in groups.items()}
     threads = work_store.thread_map()
     for rows in groups.values():
         for row in rows:
             row["thread"] = threads.get(row["id"])
     counts = {g: len(rows) for g, rows in groups.items()}
+    counts["snoozed"] = snoozed_count
     done_pages = max(1, -(-counts["done"] // DONE_PAGE_SIZE))
     done_page = min(max(1, done_page), done_pages)
     start = (done_page - 1) * DONE_PAGE_SIZE

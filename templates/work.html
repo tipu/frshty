@@ -54,6 +54,12 @@
       <p class="ln-subtitle" v-else>
         Launch a standalone task. Group it into a thread only when the work grows past one run.
       </p>
+      <label class="ln-small ln-muted" style="display:flex;align-items:center;gap:6px;cursor:pointer"
+             v-if="view !== 'archive'"
+             title="a snoozed task leaves the board until its snooze ends">
+        <input type="checkbox" v-model="showSnoozed" @change="onShowSnoozed" />
+        Show snoozed ({{ count('snoozed') }})
+      </label>
     </div>
     <input class="ln-input" style="min-width:280px" v-model="searchText" @input="onSearch"
            placeholder="Search past tasks…" />
@@ -136,6 +142,8 @@
           <div class="ln-task-foot">
             <span class="ln-pill" :class="statePill(g, it)">{{ stateText(g, it) }}</span>
             <span class="ln-pill ln-pill-gold" v-if="it.critical" title="you marked this task critical">★ Critical</span>
+            <span class="ln-pill ln-pill-ghost" v-if="it.board_snoozed"
+                  title="this task is off the board until its snooze ends">snoozed until {{ clock(it.board_snoozed_until) }}</span>
             <span class="ln-pill ln-pill-ghost" v-if="view === 'board' && it.archived_at"
                   title="this task is in the archive, not on the board">Archived</span>
             <a class="ln-pill ln-pill-violet ln-thread-pill" v-if="it.thread" style="text-decoration:none"
@@ -185,7 +193,10 @@
               <template v-else>
                 <button class="ln-btn ln-btn-sm ln-btn-ghost" v-if="it.last_tmux_key" @click="openTerminal(it)">Terminal</button>
                 <button class="ln-btn ln-btn-sm ln-btn-ghost" @click="act(it, 'done')">Done</button>
-                <button class="ln-btn ln-btn-sm ln-btn-ghost" @click="snooze(it)">Snooze</button>
+                <button class="ln-btn ln-btn-sm ln-btn-ghost" v-if="it.board_snoozed"
+                        title="put this task back on the board now" @click="act(it, 'unsnooze')">Unsnooze</button>
+                <button class="ln-btn ln-btn-sm ln-btn-ghost" v-else
+                        title="take this task off the board for one hour" @click="snooze(it)">Snooze 1h</button>
                 <button class="ln-btn ln-btn-sm ln-btn-ghost"
                         title="stop this task and kill the terminal its agent runs in"
                         @click="cancel(it)">Cancel</button>
@@ -298,6 +309,7 @@ frshtyApp({
       peers: [], peerMeta: {}, peerErrors: {}, peerLinkmaps: {},
       searchText: "", projectFilter: JSON.parse(localStorage.getItem("workProjectFilter") || "[]"),
       showCanceled: localStorage.getItem("archiveShowCanceled") === "1",
+      showSnoozed: localStorage.getItem("workShowSnoozed") === "1",
       donePage: 1, donePages: 1, counts: {},
       groupOrder: ["proposed", "needs_ack", "agent_working", "needs_you", "waiting_external", "failed_stale", "canceled", "done"],
       labels: { proposed: "Proposed — needs your approval", needs_ack: "Needs acknowledgement", needs_you: "Needs you", agent_working: "Agent working", waiting_external: "Waiting external", failed_stale: "Failed or stale", canceled: "Canceled", done: "Completed" },
@@ -312,7 +324,8 @@ frshtyApp({
       return !this.visibleGroups.some(g => (this.groups[g] || []).length);
     },
     railCounts() {
-      return { tasks: this.count("proposed") + this.count("needs_ack") + this.count("needs_you") };
+      const awake = g => (this.groups[g] || []).filter(it => !it.board_snoozed).length;
+      return { tasks: awake("proposed") + awake("needs_ack") + awake("needs_you") };
     },
     crumbs() {
       return this.view === "archive" ? ["Work", "Tasks", "Archive"] : ["Work", "Tasks"];
@@ -490,6 +503,10 @@ frshtyApp({
     onShowCanceled() {
       localStorage.setItem("archiveShowCanceled", this.showCanceled ? "1" : "0");
     },
+    onShowSnoozed() {
+      localStorage.setItem("workShowSnoozed", this.showSnoozed ? "1" : "0");
+      this.refresh();
+    },
     onProjectFilter() {
       localStorage.setItem("workProjectFilter", JSON.stringify(this.projectFilter));
       this.donePage = 1;
@@ -578,6 +595,7 @@ frshtyApp({
       if (projects) params.set("projects", projects);
       if (this.donePage > 1) params.set("done_page", this.donePage);
       if (this.view === "archive") params.set("archive", "1");
+      if (this.showSnoozed) params.set("snoozed", "1");
       const qs = params.toString();
       return qs ? "?" + qs : "";
     },
@@ -828,7 +846,7 @@ frshtyApp({
       await this.loadThreads();
     },
     snooze(it) {
-      const until = new Date(Date.now() + 4 * 3600 * 1000).toISOString();
+      const until = new Date(Date.now() + 3600 * 1000).toISOString();
       this.act(it, "snooze", until);
     },
     cancel(it) {
@@ -838,6 +856,9 @@ frshtyApp({
     openTerminal(it) {
       const base = it.peer ? this.peerBase(it.peer) : "";
       window.open(`${base}/tasks/${it.id}/terminal`, window.frshtyTerminalWindow(it.id, it.peer));
+    },
+    clock(iso) {
+      return new Date(iso).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
     },
     ago(iso) {
       const s = (Date.now() - new Date(iso).getTime()) / 1000;
