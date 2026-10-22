@@ -107,6 +107,35 @@ class TestWriteGate:
         assert len(board.seen) == 1
         assert board.seen[0]["body"] == {"repo_path": str(repo)}
 
+    def test_allows_a_write_into_a_clone_the_board_says_no_project_owns(self, tmp_path):
+        repo = make_repo(tmp_path)
+        item_id = work_store.create_item("own clone")
+        sid = _run(item_id)
+        with FakeBoard({"shared": False, "repo_path": str(repo)}) as board:
+            result = run_hook({"session_id": sid, "hook_event_name": "PreToolUse",
+                               "tool_name": "Edit",
+                               "tool_input": {"file_path": str(repo / "README.md")}},
+                              board_file(tmp_path, board.url))
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == ""
+        assert board.seen[0]["body"] == {"repo_path": str(repo)}
+
+    def test_allows_a_commit_in_a_clone_the_board_says_no_project_owns(self, tmp_path):
+        repo = make_repo(tmp_path)
+        item_id = work_store.create_item("own clone commit")
+        sid = _run(item_id)
+        command = ('git commit -m "$(cat <<\'MSG\'\nfix: thing\n\n'
+                   'Claude-Session: https://claude.ai/code/session_01C\nMSG\n)"')
+        with FakeBoard({"shared": False, "repo_path": str(repo)}) as board:
+            result = run_hook({"session_id": sid, "hook_event_name": "PreToolUse",
+                               "tool_name": "Bash", "cwd": str(repo),
+                               "tool_input": {"command": command}},
+                              board_file(tmp_path, board.url))
+        assert result.returncode == 0, result.stderr
+        out = json.loads(result.stdout)["hookSpecificOutput"]
+        assert out["permissionDecision"] == "allow"
+        assert "Claude-Session" not in out["updatedInput"]["command"]
+
     def test_denies_even_when_the_task_already_owns_a_worktree_of_that_repo(self, tmp_path,
                                                                            monkeypatch):
         """The repository id is the ownership key, never an authorisation. A

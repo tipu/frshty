@@ -140,8 +140,14 @@ def _existing_dir(path: str) -> str:
 def _worktree_deny(session_id: str, item: dict, repo_path: str, target: str,
                    what: str, gate: str) -> str:
     """The message that sends a session out of a shared checkout, after making
-    sure the worktree it names exists."""
+    sure the worktree it names exists.
+
+    "" when the board answers that no project owns `repo_path`. That is a
+    clone the agent made for itself, not a shared checkout, and only the
+    board holds the project configs that tell the two apart."""
     got = _request_worktree(session_id, item["id"], repo_path)
+    if got.get("shared") is False:
+        return ""
     if "error" in got:
         if got["error"] == "no board address":
             return NO_BOARD_REASON.format(path=target, board_file=BOARD_FILE)
@@ -173,6 +179,8 @@ def _gate_write(session_id: str, tool_input: dict) -> str:
             return ""
         reason = _worktree_deny(session_id, item, repo_path, target,
                                 "Write", "write gate")
+        if not reason:
+            return ""
         work_store.record_gate(session_id, "write_gate", "fail",
                                {"path": target[:300], "repo": repo_path})
         return reason
@@ -352,10 +360,16 @@ def main() -> int:
                 if _mentions(command, "commit"):
                     gate = work_launch.gate_commit(session_id, command, cwd)
                     if gate.get("need_worktree"):
-                        gate["reason"] = _worktree_deny(
-                            session_id, {"id": gate["item_id"]},
-                            gate["need_worktree"], gate["need_worktree"],
-                            "Commit", "commit gate")
+                        for repo in gate.get("shared") or [gate["need_worktree"]]:
+                            gate["reason"] = _worktree_deny(
+                                session_id, {"id": gate["item_id"]},
+                                repo, repo, "Commit", "commit gate")
+                            if gate["reason"]:
+                                break
+                        if not gate["reason"]:
+                            gate = {"decision": "allow",
+                                    "reason": "no project owns this repository",
+                                    "command": gate.get("command") or ""}
                     # The commit gate strips agent attribution rather than
                     # denying it, so everything after it gates the command git
                     # will actually run.
