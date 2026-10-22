@@ -51,6 +51,11 @@ def _bb_report(cid, **overrides):
     return base
 
 
+def _bb_passed(cid, **overrides):
+    return _bb_report(cid, body=f"## \u2705 All 6 checks passed \u2014 `{cid}`\n\n"
+                                "See the Reports panel on this PR for details.", **overrides)
+
+
 def _entry(cid, status):
     return {"id": cid, "comment_kind": "issue_comment", "pr_repo": "repo", "pr_id": 99,
             "body": f"PR re-review {cid}: fix the guard", "status": status,
@@ -112,6 +117,26 @@ class TestAutomatedReviewSkips:
 
         assert skips == {_key(live[0]): "superseded", _key(live[1]): "superseded"}
 
+    def test_the_newest_passed_pipeline_report_is_skipped(self):
+        live = [_bb_report(1), _bb_passed(2)]
+
+        skips = comments.automated_review_skips(live, _key, set())
+
+        assert skips == {_key(live[0]): "superseded", _key(live[1]): "passed"}
+
+    def test_the_newest_failed_pipeline_report_is_current(self):
+        """The control: a failure report still asks for a fix."""
+        live = [_bb_passed(1), _bb_report(2)]
+
+        skips = comments.automated_review_skips(live, _key, set())
+
+        assert skips == {_key(live[0]): "superseded"}
+
+    def test_a_person_writing_all_checks_passed_is_never_skipped(self):
+        live = [{**_human(1), "body": "All 6 checks passed, but rename this."}]
+
+        assert comments.automated_review_skips(live, _key, set()) == {}
+
     def test_an_inline_bitbucket_bot_finding_is_never_skipped(self):
         live = [_bb_report(1, path="app.py", line=4), _bb_report(2, path="app.py", line=9)]
 
@@ -156,6 +181,14 @@ class TestTicketCommentPass:
         assert "commit 12" in prompts[0]
         assert "commit 10" not in prompts[0]
         assert "commit 11" not in prompts[0]
+        assert "ticket_pr_automated_review_skipped" in events
+
+    def test_a_passed_pipeline_report_is_not_triaged_and_not_owed(self, fake_config):
+        out, prompts, events = self._run(fake_config, [_bb_report(10), _bb_passed(11)])
+
+        assert prompts == []
+        assert out[tickets.RECONCILE_OWED_KEY] == 0
+        assert "ticket_pr_comment_needs_reply" not in events
         assert "ticket_pr_automated_review_skipped" in events
 
     def test_a_review_after_the_cap_is_not_triaged_and_not_owed(self, fake_config):
@@ -212,6 +245,12 @@ class TestReconcileNow:
 
         assert self._reason(fake_config, live, registered) == ""
 
+    def test_a_passed_pipeline_report_registered_as_needs_reply_is_not_owed(self, fake_config):
+        live = [_bb_report(10), _bb_passed(11)]
+        registered = [_entry(10, "addressed"), _entry(11, "needs_reply")]
+
+        assert self._reason(fake_config, live, registered) == ""
+
     def test_the_current_review_below_the_cap_is_owed(self, fake_config):
         """The control: the gate still holds on the one current review."""
         live = [_review(10), _review(11)]
@@ -245,6 +284,14 @@ class TestOwnPrs:
         keep, _, _ = self._drop(live, set())
 
         assert [c["id"] for c in keep] == [11]
+
+    def test_a_passed_pipeline_report_is_dropped_and_baselined(self):
+        live = [_bb_report(10), _bb_passed(11), _human(12)]
+
+        keep, seen, _ = self._drop(live, set())
+
+        assert [c["id"] for c in keep] == [12]
+        assert sorted(call.args[3] for call in seen.call_args_list) == ["10", "11"]
 
     def test_a_person_with_the_id_of_a_superseded_review_is_kept(self):
         inline = _human(10, comment_kind=None, path="app.py", line=3, resolvable=True)

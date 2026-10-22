@@ -1,9 +1,11 @@
+import re
 from datetime import datetime, timezone
 
 import core.db as db
 
 MAX_AUTOMATED_REVIEW_FIX_RUNS = 2
 AUTOMATED_REVIEW_KINDS = ("issue_comment", "review_body")
+CHECKS_PASSED_RE = re.compile(r"^[#\s]*\W*\s*All \d+ checks? passed\b", re.IGNORECASE)
 
 
 def fetch_and_detect_comments(
@@ -486,6 +488,13 @@ def is_automated_review(comment: dict) -> bool:
     return comment.get("comment_kind") in AUTOMATED_REVIEW_KINDS or not comment.get("path")
 
 
+def reports_checks_passed(comment: dict) -> bool:
+    """Whether a pipeline status comment reports that every check passed.
+
+    Such a report asks for nothing, so it is owed no fix and no reply."""
+    return bool(CHECKS_PASSED_RE.match(comment.get("body") or ""))
+
+
 def automated_review_skips(comments: list[dict], key, fixed: set) -> dict:
     """key(comment) -> why frshty does not act on this automated review.
 
@@ -496,7 +505,8 @@ def automated_review_skips(comments: list[dict], key, fixed: set) -> dict:
     The newest one is capped once the pull request has had
     MAX_AUTOMATED_REVIEW_FIX_RUNS fix runs on automated reviews. `fixed`
     holds the keys of the comments that already had a fix run. A skipped
-    review is not owed an answer, so it does not hold the merge."""
+    review is not owed an answer, so it does not hold the merge. The newest
+    one is also skipped when it reports that every check passed."""
     automated = [c for c in comments if is_automated_review(c)]
     newest: dict = {}
     for c in automated:
@@ -505,11 +515,14 @@ def automated_review_skips(comments: list[dict], key, fixed: set) -> dict:
             newest[group] = c
     current = {key(c) for c in newest.values()}
     automated_keys = {key(c) for c in automated}
+    passed = {key(c) for c in automated if reports_checks_passed(c)}
     capped = len(automated_keys & fixed) >= MAX_AUTOMATED_REVIEW_FIX_RUNS
     skips = {}
     for k in automated_keys:
         if k not in current:
             skips[k] = "superseded"
+        elif k in passed:
+            skips[k] = "passed"
         elif capped and k not in fixed:
             skips[k] = "capped"
     return skips
