@@ -477,15 +477,15 @@ def test_print_tiers_leave_the_model_to_the_cli_unless_one_is_named(tmp_path):
         provider.balanced("p")
         provider.agentic("p", cwd=tmp_path)
         provider.fast("p")
-        provider.balanced("p", model="claude-opus-4-8")
-        provider.agentic("p", cwd=tmp_path, model="claude-opus-4-8")
+        provider.balanced("p", model="claude-opus-5-5")
+        provider.agentic("p", cwd=tmp_path, model="claude-opus-5-5")
 
     for cmd, model in seen[:3]:
         assert "--model" not in cmd
         assert model == "default"
     for cmd, model in seen[3:]:
-        assert cmd[cmd.index("--model") + 1] == "claude-opus-4-8"
-        assert model == "claude-opus-4-8"
+        assert cmd[cmd.index("--model") + 1] == "claude-opus-5-5"
+        assert model == "claude-opus-5-5"
 
 
 def test_run_claude_code_leaves_the_model_to_the_cli_unless_one_is_named(tmp_path, monkeypatch):
@@ -499,6 +499,6 @@ def test_run_claude_code_leaves_the_model_to_the_cli_unless_one_is_named(tmp_pat
     assert "--model" not in args_file.read_text().splitlines()
 
     args_file.unlink()
-    run_claude_code("hi", cwd=tmp_path, timeout=5, model="claude-opus-4-8")
+    run_claude_code("hi", cwd=tmp_path, timeout=5, model="claude-opus-5-5")
     args = args_file.read_text().splitlines()
-    assert args[args.index("--model") + 1] == "claude-opus-4-8"
+    assert args[args.index("--model") + 1] == "claude-opus-5-5"
