@@ -337,6 +337,23 @@ class TestOwnPrs:
 
         assert inline in keep
 
+    def test_an_abandoned_failed_pipeline_report_is_settled_by_the_reclaim_pass(self):
+        live = [_bb_failed(10)]
+        pr = {"repo": "repo", "id": 99, "url": "http://u/99"}
+        skips = own_prs._automated_review_skips(live, set())
+        row = {"comment_id": "10", "state": "new", "error_count": 6,
+               "last_checked_at": _WRITTEN}
+        with patch.object(comments, "get_unprocessed_comments", return_value=[row]), \
+             patch.object(comments, "mark_comment_seen") as seen, \
+             patch.object(comments, "mark_comment_deferred") as deferred, \
+             patch("features.own_prs.log") as log:
+            own_prs._reclaim_stuck_comments("inst", pr, "repo/99", "repo#99", "http://base",
+                                            {"10": live[0]}, "bot-self", set(), {}, None, skips)
+
+        assert [call.args[3] for call in seen.call_args_list] == ["10"]
+        deferred.assert_not_called()
+        assert log.emit.call_args_list == []
+
     def test_a_deferred_review_that_is_now_superseded_is_not_queued(self):
         live = [_review(10), _review(11)]
         pr = {"repo": "repo", "id": 99, "url": "http://u/99"}
