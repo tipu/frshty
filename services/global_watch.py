@@ -407,7 +407,9 @@ def propose_tasks(config: dict, problems: list[dict], since: str, now: datetime,
                                   likely_cause=problem.get("likely_cause"))
         try:
             item_id = work_store.create_proposal(
-                f"[{instance}] {objective}", note=f"Proposed by global_watch on {host}",
+                f"[{instance}] {objective}",
+                note=f"Proposed by global_watch on {host}: {problem.get('what')} "
+                     f"(evidence: {problem.get('evidence')})",
                 instance_key=work_store.BOARD_INSTANCE_KEY,
                 contexts=TASK_PROJECT if entry else "", cwd=entry["root"] if entry else "",
                 brief=brief, proposal_key=TASK_KEY_PREFIX + slug)
