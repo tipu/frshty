@@ -52,7 +52,6 @@ const id = location.pathname.split("/")[2];
 const peer = new URLSearchParams(location.search).get("peer") || "";
 const apiBase = peer ? "/api/work/peers/" + encodeURIComponent(peer) : "";
 const fileUrl = apiBase + "/api/work/artifact_file/" + id;
-if (peer) document.getElementById("bottom").style.display = "none";
 document.getElementById("frame").src = fileUrl;
 document.getElementById("raw").href = fileUrl;
 const baseTitle = document.title;
@@ -69,7 +68,8 @@ function sendSize() {
 
 function connect() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  ws = new WebSocket(`${proto}//${location.host}/ws/terminal/artifact-${id}`);
+  const wsPath = peer ? `/ws/peers/${encodeURIComponent(peer)}/terminal/artifact-${id}` : `/ws/terminal/artifact-${id}`;
+  ws = new WebSocket(`${proto}//${location.host}${wsPath}`);
   ws.binaryType = "arraybuffer";
   ws.onopen = () => { delay = 0; statusEl.textContent = "connected"; fit.fit(); sendSize(); };
   ws.onmessage = (e) => term.write(e.data instanceof ArrayBuffer ? new Uint8Array(e.data) : e.data);
@@ -88,7 +88,7 @@ function connect() {
 async function start() {
   statusEl.textContent = "starting claude…";
   try {
-    const resp = await fetch(`/api/work/artifacts/${id}/claude/start`, { method: "POST" });
+    const resp = await fetch(`${apiBase}/api/work/artifacts/${id}/claude/start`, { method: "POST" });
     const body = await resp.json().catch(() => ({}));
     if (!resp.ok) {
       statusEl.textContent = "error: " + (body.error || resp.statusText);

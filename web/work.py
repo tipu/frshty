@@ -2,7 +2,7 @@ import mimetypes
 import os
 import shlex
 
-from fastapi import APIRouter, Body, Request
+from fastapi import APIRouter, Body, Request, WebSocket
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
                                RedirectResponse, Response, StreamingResponse)
 
@@ -12,7 +12,7 @@ import core.terminal as terminal
 from services import (work_artifacts, work_debrief, work_launch, work_peers,
                       work_store, work_tickets, work_worktree)
 from web.pages import _template
-from web.sandbox import policy_for
+from web.sandbox import origin_is_opaque, policy_for
 from web.tickets import schedule_discuss_kill
 
 
@@ -91,6 +91,14 @@ async def api_work_peer_post(key: str, path: str, request: Request,
                                                params=dict(request.query_params),
                                                body=body or {})
     return JSONResponse(payload, status_code=status)
+
+
+@router.websocket("/ws/peers/{key}/terminal/{term_key}")
+async def ws_work_peer_terminal(websocket: WebSocket, key: str, term_key: str):
+    if origin_is_opaque(websocket.headers.get("origin", "")):
+        await websocket.close(code=1008, reason="opaque origin")
+        return
+    await work_peers.relay_terminal(websocket, key, term_key)
 
 
 @router.get("/api/work/threads")
