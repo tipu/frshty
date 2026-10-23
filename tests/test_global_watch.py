@@ -3,6 +3,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 import core.db as db
 import core.discovery as discovery
 import core.runtime as runtime
@@ -16,6 +18,13 @@ SINCE = (NOW - timedelta(minutes=15)).isoformat()
 STALE = (NOW - timedelta(hours=2)).isoformat()
 RECENT = (NOW - timedelta(minutes=5)).isoformat()
 OLD = (NOW - timedelta(minutes=60)).isoformat()
+REAL_READ_DUE = global_watch.read_due
+
+
+@pytest.fixture(autouse=True)
+def _no_stalls():
+    with patch.object(global_watch, "read_due", return_value=({}, {})):
+        yield
 
 
 def _ev(key, ev_id, event="job_started", ts=RECENT):
@@ -552,3 +561,91 @@ def test_run_digest_reaches_back_to_the_last_run_when_it_is_older_than_a_poll_cy
         global_watch.run(_agent_config(), now=NOW)
 
     assert f"from {last} up to now" in model.call_args.kwargs["stdin_text"]
+
+
+STALL_INSTANCES = [{"key": "apexco", "base_url": "http://127.0.0.1:7132"},
+                   {"key": "frshty", "base_url": "http://127.0.0.1:7131"}]
+
+
+def _stall(entity="DEV-908", first_seen="2026-10-06T09:00:00+00:00"):
+    return {"bucket": "blocked_tickets", "entity_id": entity, "ticket_key": entity,
+            "first_seen_at": first_seen,
+            "objective": f"Doctor ticket {entity} (apexco). It sits at blocked.",
+            "brief": "## Ticket snapshot\n\n- ticket: " + entity}
+
+
+def _propose_stalls(tmp_path, due, config=None, errors=None, prior=None):
+    state.init(tmp_path)
+    db.init(tmp_path / "t.db", ROOT / "migrations")
+    entries = [{"key": "frshty", "root": str(tmp_path), "repos": [], "primary": True}]
+    config = config or {"job": {"key": "frshty"}, "global_watch": {"enabled": True}}
+    with patch.object(global_watch, "read_due", return_value=(due, errors or {})), \
+         patch.object(global_watch.work_launch, "project_entries", return_value=entries), \
+         patch.object(global_watch.log, "emit") as emit:
+        out = global_watch.propose_stalls(config, STALL_INSTANCES, prior or {})
+    return out, emit
+
+
+def test_read_due_reads_every_instance_and_names_the_ones_that_fail():
+    async def _call(base_url, method, path, timeout):
+        assert (method, path) == ("GET", "/api/watchdog/due")
+        if base_url.endswith("7132"):
+            return {"due": [_stall(), "junk"], "due_at": NOW.isoformat()}
+        return {"detail": "Not Found"}
+
+    with patch.object(global_watch, "call_instance", side_effect=_call):
+        due, errors = REAL_READ_DUE(STALL_INSTANCES)
+
+    assert due == {"apexco": [_stall()]}
+    assert list(errors) == ["frshty"]
+
+
+def test_a_reported_stall_becomes_one_doctor_proposal_on_this_board(tmp_path):
+    (proposed, _), emit = _propose_stalls(tmp_path, {"apexco": [_stall()], "frshty": []})
+    (again, _), _ = _propose_stalls(tmp_path, {"apexco": [_stall()], "frshty": []})
+
+    [item] = proposed
+    row = db.query_one("SELECT * FROM work_items WHERE id=?", (item["work_item_id"],))
+    assert row["state"] == "proposed"
+    assert row["objective"] == "[apexco] Doctor ticket DEV-908 (apexco). It sits at blocked."
+    assert row["contexts"] == "frshty"
+    assert row["launch_cwd"] == str(tmp_path)
+    assert row["proposal_key"] == ("watchdog:apexco:blocked_tickets:DEV-908:"
+                                   "2026-10-06T09:00:00+00:00")
+    assert "- ticket: DEV-908" in row["launch_brief"]
+    assert "lives on apexco, at http://127.0.0.1:7132" in row["launch_brief"]
+    assert again == []
+    assert [c.args[0] for c in emit.call_args_list] == ["global_watch_stall_proposed"]
+
+
+def test_a_stall_that_comes_back_is_proposed_again(tmp_path):
+    _propose_stalls(tmp_path, {"apexco": [_stall()]})
+    (proposed, _), _ = _propose_stalls(
+        tmp_path, {"apexco": [_stall(first_seen="2026-10-07T09:00:00+00:00")]})
+
+    assert len(proposed) == 1
+    assert db.query_one("SELECT COUNT(*) AS n FROM work_items")["n"] == 2
+
+
+def test_stall_proposals_stop_while_max_open_stalls_wait(tmp_path):
+    config = {"job": {"key": "frshty"}, "global_watch": {"max_open_stalls": 1}}
+    (proposed, _), _ = _propose_stalls(
+        tmp_path, {"apexco": [_stall("DEV-1"), _stall("DEV-2")]}, config)
+
+    assert [p["proposal_key"].split(":")[3] for p in proposed] == ["DEV-1"]
+
+
+def test_stall_proposals_are_off_when_the_config_says_so(tmp_path):
+    config = {"job": {"key": "frshty"}, "global_watch": {"propose_stalls": False}}
+    (proposed, _), _ = _propose_stalls(tmp_path, {"apexco": [_stall()]}, config)
+
+    assert proposed == []
+    assert db.query_one("SELECT COUNT(*) AS n FROM work_items")["n"] == 0
+
+
+def test_unreadable_stalls_reach_the_feed_once_per_set(tmp_path):
+    (_, errors), emit = _propose_stalls(tmp_path, {}, errors={"apexco": "timed out"})
+    (_, _), quiet = _propose_stalls(tmp_path, {}, errors={"apexco": "timed out"}, prior=errors)
+
+    assert [c.args[0] for c in emit.call_args_list] == ["global_watch_stalls_unread"]
+    assert quiet.call_count == 0

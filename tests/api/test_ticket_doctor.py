@@ -8,6 +8,7 @@ import core.db as db
 import core.log as log
 import core.queue as q
 import core.state as state
+import web.state as web_state
 from services import ticket_doctor
 
 
@@ -43,6 +44,7 @@ def _config_for(tmp_path):
         "features": {"tickets": True},
         "pr": {"auto_pr": True},
         "slack": {},
+        "doctor": {"enabled": True},
         "_config_path": tmp_path / "config.toml",
         "_state_dir": tmp_path,
         "_base_url": "http://localhost:8000",
@@ -144,6 +146,27 @@ def test_doctor_route_launches_task_tagged_with_instance_and_frshty(client, tmp_
     assert kwargs["contexts"] == ["test", "frshty"]
     assert kwargs["cwd"] == ticket_doctor.FRSHTY_ROOT
     assert '"status": "reviewing"' in kwargs["brief"]
+
+
+def test_doctor_route_refuses_when_the_doctor_is_off(client, tmp_path):
+    key, _ = _seed_ticket(tmp_path)
+    config = _config_for(tmp_path)
+    del config["doctor"]
+    web_state.set_primary_config(config)
+    with patch("services.work_launch.launch") as launched:
+        resp = client.post(f"/api/tickets/{key}/doctor", json={"description": "stuck"})
+        listed = client.get(f"/api/tickets/{key}/doctor")
+
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["error"].startswith("the doctor is off")
+    assert launched.call_count == 0
+    assert listed.json()["enabled"] is False
+
+
+def test_doctor_get_says_the_doctor_is_on(client, tmp_path):
+    key, _ = _seed_ticket(tmp_path)
+
+    assert client.get(f"/api/tickets/{key}/doctor").json()["enabled"] is True
 
 
 def test_doctor_route_rejects_empty_description(client, tmp_path):
