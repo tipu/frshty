@@ -1,10 +1,13 @@
 import asyncio
+import threading
 import time
 
 import httpx
 import pytest
+import websockets
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 import core.log as log
 from services import work_peers
@@ -358,6 +361,91 @@ class TestPeerArtifactFile:
         assert emitted == ["work_peer_unreachable"]
 
 
+@pytest.fixture
+def peer_terminal():
+    """A websocket server that stands in for a peer's /ws/terminal route."""
+    seen = []
+    ready = threading.Event()
+    box = {}
+
+    async def handler(conn):
+        seen.append(conn.request.path)
+        if conn.request.path == "/ws/terminal/artifact-9":
+            await conn.close(code=1008)
+            return
+        await conn.send(b"scrollback")
+        async for message in conn:
+            await conn.send(message)
+
+    async def serve():
+        async with websockets.serve(handler, "127.0.0.1", 0) as server:
+            box["port"] = server.sockets[0].getsockname()[1]
+            box["stop"] = asyncio.get_running_loop().create_future()
+            box["loop"] = asyncio.get_running_loop()
+            ready.set()
+            await box["stop"]
+
+    thread = threading.Thread(target=asyncio.run, args=(serve(),), daemon=True)
+    thread.start()
+    ready.wait(5)
+    yield box["port"], seen
+    box["loop"].call_soon_threadsafe(box["stop"].set_result, None)
+    thread.join(5)
+
+
+class TestPeerTerminalProxy:
+    def test_only_an_artifact_terminal_is_reachable(self, peers_file):
+        peers_file.write_text('[[peers]]\nkey = "a"\nbase_url = "https://10.0.0.2:7100"\n')
+        assert work_peers.terminal_url("a", "artifact-12") == ("wss://10.0.0.2:7100/ws/terminal/artifact-12", "")
+        assert work_peers.terminal_url("a", "work-12")[1] == "peer terminal not allowed: work-12"
+        assert work_peers.terminal_url("a", "artifact-12-discuss")[1].startswith("peer terminal not allowed")
+        assert work_peers.terminal_url("b", "artifact-12")[1] == "unknown peer 'b'"
+
+    def test_frames_are_relayed_both_ways(self, peers_file, client, peer_terminal):
+        port, seen = peer_terminal
+        peers_file.write_text(f'[[peers]]\nkey = "a"\nbase_url = "http://127.0.0.1:{port}"\n')
+        with client.websocket_connect("/ws/peers/a/terminal/artifact-7") as ws:
+            assert ws.receive_bytes() == b"scrollback"
+            ws.send_text("ls\r")
+            assert ws.receive_text() == "ls\r"
+            ws.send_bytes(b"\x03")
+            assert ws.receive_bytes() == b"\x03"
+        assert seen == ["/ws/terminal/artifact-7"]
+
+    def test_peer_refusal_reaches_the_browser_as_1008(self, peers_file, client, peer_terminal):
+        port, _ = peer_terminal
+        peers_file.write_text(f'[[peers]]\nkey = "a"\nbase_url = "http://127.0.0.1:{port}"\n')
+        with client.websocket_connect("/ws/peers/a/terminal/artifact-9") as ws:
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_bytes()
+        assert exc.value.code == 1008
+
+    def test_non_artifact_terminal_is_refused(self, peers_file, client, peer_terminal):
+        port, seen = peer_terminal
+        peers_file.write_text(f'[[peers]]\nkey = "a"\nbase_url = "http://127.0.0.1:{port}"\n')
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with client.websocket_connect("/ws/peers/a/terminal/work-7"):
+                pass
+        assert exc.value.code == 1008
+        assert seen == []
+
+    def test_unreachable_peer_is_1008_and_is_logged(self, peers_file, client, monkeypatch):
+        peers_file.write_text('[[peers]]\nkey = "a"\nbase_url = "http://127.0.0.1:1"\n')
+        emitted = []
+        monkeypatch.setattr(log, "emit", lambda event, *a, **kw: emitted.append(event))
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with client.websocket_connect("/ws/peers/a/terminal/artifact-7"):
+                pass
+        assert exc.value.code == 1008
+        assert emitted == ["work_peer_unreachable"]
+
+    def test_opaque_origin_is_refused(self, peers_file, client):
+        with pytest.raises(WebSocketDisconnect) as exc:
+            with client.websocket_connect("/ws/peers/a/terminal/artifact-7", headers={"origin": "null"}):
+                pass
+        assert exc.value.code == 1008
+
+
 class TestPeerArtifactLinks:
     def _read(self, path):
         return (work_peers.Path(__file__).parent.parent.parent / path).read_text()
@@ -367,6 +455,12 @@ class TestPeerArtifactLinks:
         assert 'const apiBase = peer ? "/api/work/peers/" + encodeURIComponent(peer) : "";' in text
         assert 'const fileUrl = apiBase + "/api/work/artifact_file/" + id;' in text
         assert 'fetch(apiBase + "/api/work/artifacts/" + id)' in text
+
+    def test_viewer_asks_claude_on_the_peer(self):
+        text = self._read("templates/work_artifact.html")
+        assert 'getElementById("bottom").style.display' not in text
+        assert "fetch(`${apiBase}/api/work/artifacts/${id}/claude/start`" in text
+        assert "`/ws/peers/${encodeURIComponent(peer)}/terminal/artifact-${id}`" in text
 
     def test_no_page_sends_the_browser_to_a_peer_base_url_for_an_artifact(self):
         for path in ("templates/work_detail.html", "templates/work_summary.html",
