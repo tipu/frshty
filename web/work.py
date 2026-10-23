@@ -9,8 +9,8 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
 import core.db as db
 import core.log as log
 import core.terminal as terminal
-from services import (work_artifacts, work_debrief, work_launch, work_peers,
-                      work_store, work_tickets, work_worktree)
+from services import (disk_usage, work_artifacts, work_debrief, work_launch,
+                      work_peers, work_store, work_tickets, work_worktree)
 from web.pages import _template
 from web.sandbox import origin_is_opaque, policy_for
 from web.tickets import schedule_discuss_kill
@@ -191,6 +191,11 @@ def api_work_items(q: str = "", projects: str = "", done_page: int = 1, archive:
             "projects": work_launch.project_entries(),
             "agents": list(terminal.AGENTS),
             "slack_available": work_launch.slack_available()}
+
+
+@router.get("/api/work/disk")
+def api_work_disk(refresh: int = 0):
+    return disk_usage.refresh(force=True) if refresh else disk_usage.latest()
 
 
 @router.post("/api/work/items/archive-completed")
