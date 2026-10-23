@@ -10,8 +10,8 @@ import core.correspondence as correspondence
 import core.db as db
 import core.llm as llm
 import core.log as log
-from services import (work_artifacts, work_launch, work_store, work_tickets,
-                      work_worktree)
+from services import (disk_usage, work_artifacts, work_launch, work_store,
+                      work_tickets, work_worktree)
 
 SCAN_INTERVAL = 60
 DEBRIEF_TIMEOUT = 300
@@ -605,6 +605,10 @@ def _scan_loop():
                          f"removed task worktree {gone['path']}")
         except Exception as e:
             log.emit("work_worktree_gc_error", f"{type(e).__name__}: {e}")
+        try:
+            disk_usage.refresh()
+        except Exception as e:
+            log.emit("disk_usage_error", f"{type(e).__name__}: {e}")
         try:
             work_store.sweep_progress()
         except Exception as e:
