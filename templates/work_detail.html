@@ -110,7 +110,10 @@
             @click="act('decline')">decline</span>
       <span class="text-xs text-red-400" v-if="actError">{{ actError }}</span>
     </div>
-    <details class="mt-2" v-if="item.launch_brief">
+  </div>
+  <div class="sec" v-if="item.scope === 'proposal' && item.launch_brief">
+    <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Why frshty proposed this</h2>
+    <details :open="item.state === 'proposed'">
       <summary class="text-xs text-gray-500 cursor-pointer">evidence frshty acted on</summary>
       <pre class="text-xs mt-1" style="white-space:pre-wrap">{{ item.launch_brief }}</pre>
     </details>
