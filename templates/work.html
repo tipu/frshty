@@ -17,6 +17,11 @@
 <link rel="stylesheet" href="/static/frshty-mobile.css">
 <style>
 .wintake { width: 100%; background: var(--ln-bg); border: 1px solid var(--ln-border-hi); border-radius: 6px; padding: 7px 10px; color: var(--ln-text); font-size: 12.5px; }
+.wdisk { display: block; }
+.wdisk summary { cursor: pointer; }
+.wdisk-list { width: 100%; margin: 8px 0; border-collapse: collapse; font-size: 12px; }
+.wdisk-list td { padding: 3px 8px 3px 0; vertical-align: top; }
+.wdisk-list td.ln-mono { word-break: break-all; }
 .wsum { white-space: pre-wrap; font-size: 12.5px; color: var(--ln-text-2); background: var(--ln-bg); border: 1px solid var(--ln-border); border-radius: 6px; padding: 8px 12px; margin-top: 8px; }
 </style>
 <script src="/static/frshty-usage.js"></script>
@@ -70,6 +75,34 @@
   </div>
 
   <div class="ln-small" style="color:var(--ln-red)" v-for="(msg, key) in peerErrors" :key="key">{{ key }}: {{ msg }}</div>
+
+  <details class="ln-banner wdisk" :class="{ 'ln-banner-warn': d.high }" v-for="d in diskShown" :key="d.peer">
+    <summary>
+      <span class="ln-banner-icon" v-if="d.high">⚠</span>
+      <b>Disk on {{ hostName(d.peer) }}:</b>
+      frshty holds {{ bytes(d.total_bytes) }}<span v-if="d.disk">, the disk has {{ d.disk.free_percent }}% free</span>.
+      <span v-if="d.high">{{ d.reasons.join("; ") }}.</span>
+      {{ d.reclaimable_count }} folder(s) idle {{ d.idle_days }}+ days hold {{ bytes(d.reclaimable_bytes) }}. Clear these first:
+    </summary>
+    <table class="wdisk-list">
+      <tr v-for="u in d.suggestions" :key="u.path" :title="u.path">
+        <td class="ln-mono">{{ bytes(u.bytes) }}</td>
+        <td>{{ u.kind }}</td>
+        <td class="ln-mono">{{ u.path }}</td>
+        <td>idle {{ u.idle_days }} d</td>
+        <td>
+          <a v-for="i in u.items" :key="i.id" :href="taskHref({ id: i.id, peer: d.peer })" style="margin-right:6px">#{{ i.id }} {{ i.state }}</a>
+          <span class="ln-muted" v-if="!u.items.length">no task</span>
+        </td>
+        <td :style="u.uncommitted ? 'color:var(--ln-amber)' : ''">
+          <span v-if="u.uncommitted === null">git status failed</span>
+          <span v-else-if="u.uncommitted">{{ u.uncommitted }} uncommitted file(s)</span>
+          <span v-else-if="u.uncommitted === 0" class="ln-muted">clean</span>
+        </td>
+      </tr>
+    </table>
+    <div class="ln-small ln-muted">Suggestions only. frshty deletes nothing from this list. Scanned {{ d.scanned_at }}.</div>
+  </details>
 
   <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center" v-if="filterProjects.length">
     <span class="ln-hint">project</span>
@@ -304,6 +337,7 @@ frshtyApp({
       intakeRepo: "",
       intakeTray: PasteImages.tray(), fupTray: {},
       intakeAgent: localStorage.getItem("workAgent") || "claude",
+      diskReports: {},
       connError: "", replyText: {}, sumOpen: {}, approveBusy: {}, propText: {}, linkmap: null, threads: [],
       fupOpen: {}, fupText: {}, fupBusy: {}, fupError: {}, fupLaunched: {},
       peers: [], peerMeta: {}, peerErrors: {}, peerLinkmaps: {},
@@ -316,6 +350,11 @@ frshtyApp({
     };
   },
   computed: {
+    diskShown() {
+      if (this.view !== "board") return [];
+      return this.hosts().map(h => this.diskReports[h])
+        .filter(d => d && (d.high || (d.suggestions || []).length));
+    },
     visibleGroups() {
       if (this.view !== "archive") return this.groupOrder;
       return this.showCanceled ? ["canceled", "done"] : ["done"];
@@ -559,6 +598,25 @@ frshtyApp({
             await (await fetch(this.apiUrl(p.key, "/api/work/linkmap"))).json();
         } catch (e) {}
       }
+    },
+    async loadDisk() {
+      await Promise.all(this.hosts().map(async key => {
+        try {
+          const r = await fetch(this.apiUrl(key, "/api/work/disk"));
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          this.diskReports[key] = Object.assign(await r.json(), { peer: key });
+        } catch (e) {
+          delete this.diskReports[key];
+        }
+      }));
+    },
+    bytes(n) {
+      let size = n || 0;
+      for (const unit of ["B", "KB", "MB", "GB"]) {
+        if (size < 1024) return unit === "B" ? size + " B" : size.toFixed(1) + " " + unit;
+        size /= 1024;
+      }
+      return size.toFixed(1) + " TB";
     },
     async loadPeers() {
       try {
@@ -874,7 +932,8 @@ frshtyApp({
     const b = document.getElementById("boot-error");
     if (b) b.remove();
     Promise.all([this.loadConfig(), this.loadPeers()]).then(() => {
-      this.loadLinkmap(); this.refresh(); this.loadThreads();
+      this.loadLinkmap(); this.refresh(); this.loadThreads(); this.loadDisk();
+      setInterval(() => this.loadDisk(), 600000);
       setInterval(() => { this.refresh(); this.loadThreads(); }, 15000);
     });
   },
