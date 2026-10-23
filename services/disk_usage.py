@@ -99,7 +99,7 @@ def _items_for(kind: str, path: Path) -> list[dict]:
     match = ITEM_DIR.match(path.name)
     if match and kind in ("worktree", "artifact"):
         ids.add(int(match.group(1)))
-    if kind == "worktree":
+    if kind != "other":
         inside = str(path).rstrip(os.sep) + os.sep
         ids |= {r["work_item_id"] for r in db.query_all(
             "SELECT work_item_id, path FROM work_worktrees WHERE path LIKE ?",
