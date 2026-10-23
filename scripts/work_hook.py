@@ -352,7 +352,7 @@ def main() -> int:
                 if not any(_mentions(command, w)
                            for w in ("commit", "push", "merge")):
                     return 0
-                _bind_db()
+                work_store = _bind_db()
                 from services import work_launch
                 cwd = data.get("cwd") or ""
                 gate = {"decision": "allow", "reason": "not gated"}
@@ -366,7 +366,12 @@ def main() -> int:
                                 repo, repo, "Commit", "commit gate")
                             if gate["reason"]:
                                 break
-                        if not gate["reason"]:
+                        if gate["reason"]:
+                            work_store.record_gate(
+                                session_id, "commit_gate", "fail",
+                                {"command": (gate.get("command") or command)[:300],
+                                 "shared": gate.get("shared") or [gate["need_worktree"]]})
+                        else:
                             gate = {"decision": "allow",
                                     "reason": "no project owns this repository",
                                     "command": gate.get("command") or ""}
