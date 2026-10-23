@@ -324,6 +324,8 @@ def test_run_proposes_a_task_for_a_problem_once_while_it_persists(tmp_path):
     assert row["objective"] == "[apexco] Repair the broken worktrees."
     assert row["contexts"] == "frshty" and row["launch_cwd"] == str(tmp_path)
     assert "work_worktree_broken x9" in row["launch_brief"]
+    assert row["current_checkpoint"] == ("Proposed by global_watch on personal: git status fails "
+                                         "in every worktree (evidence: work_worktree_broken x9)")
     assert outs[0]["proposed_tasks"] == [{"work_item_id": row["id"],
                                           "task_key": "broken-worktrees", "instance": "apexco"}]
     assert outs[1]["proposed_tasks"] == []
