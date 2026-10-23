@@ -154,3 +154,14 @@ def test_a_folder_without_git_reports_no_uncommitted_count(tmp_path):
     _folder(root / "worktrees" / "app" / "work-778", 64, 30)
     report = disk_usage.scan(NOW, base=root)
     assert "uncommitted" not in report["suggestions"][0]
+
+
+def test_an_unfinished_run_inside_an_orphaned_folder_keeps_it(tmp_path):
+    root = tmp_path / "root"
+    waiting = _item("needs_you", 10)
+    unit = _folder(root / "orphaned-worktrees" / "recovered", 64, 10)
+    work_store.add_run(waiting, "sid-orphan", f"work-{waiting}", str(unit))
+
+    report = disk_usage.scan(NOW, base=root)
+
+    assert report["suggestions"] == []
