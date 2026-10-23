@@ -71,6 +71,13 @@ def run_hook(payload, board_file=None):
                           text=True, timeout=180, env=env)
 
 
+def commit_gate_verdicts(item_id):
+    rows = db.query_all(
+        "SELECT payload FROM work_events WHERE work_item_id = ? AND kind = 'commit_gate' "
+        "ORDER BY id", (item_id,))
+    return [json.loads(r["payload"])["verdict"] for r in rows]
+
+
 def deny_reason(result):
     if not result.stdout.strip():
         return ""
@@ -135,6 +142,22 @@ class TestWriteGate:
         out = json.loads(result.stdout)["hookSpecificOutput"]
         assert out["permissionDecision"] == "allow"
         assert "Claude-Session" not in out["updatedInput"]["command"]
+        assert commit_gate_verdicts(item_id) == ["stripped"]
+
+    def test_records_a_fail_when_the_board_keeps_the_commit_deny(self, tmp_path):
+        repo = make_repo(tmp_path)
+        wt = tmp_path / "wt"
+        _git(repo, "worktree", "add", "-b", "side", str(wt))
+        item_id = work_store.create_item("owned commit")
+        sid = _run(item_id)
+        with FakeBoard({"path": str(wt), "branch": "side"}) as board:
+            result = run_hook({"session_id": sid, "hook_event_name": "PreToolUse",
+                               "tool_name": "Bash", "cwd": str(repo),
+                               "tool_input": {"command": 'git commit -m "fix: thing"'}},
+                              board_file(tmp_path, board.url))
+        assert result.returncode == 0, result.stderr
+        assert str(wt) in deny_reason(result)
+        assert commit_gate_verdicts(item_id) == ["fail"]
 
     def test_denies_even_when_the_task_already_owns_a_worktree_of_that_repo(self, tmp_path,
                                                                            monkeypatch):
