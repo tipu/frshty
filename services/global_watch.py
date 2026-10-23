@@ -40,7 +40,14 @@ task on the board as a proposal for the operator to approve. The task key the
 model gives is the proposal key, so a fault that persists is proposed once:
 an open, running, declined or canceled proposal holds its key. The model sees
 the tasks that already hold a key and reuses the key for the same fault. The
-run opens nothing while max_open_tasks of its proposals wait on the board."""
+run opens nothing while max_open_tasks of its proposals wait on the board.
+
+The run also reads the stalled tickets and pull requests that the watchdog of
+every instance reports at /api/watchdog/due, and proposes one doctor task for
+each. Only the frshty instance changes frshty code, so this check runs there,
+and a doctor task runs there too. The proposal key names the instance, the
+bucket, the entity and the time the stall began, so a stall is proposed once,
+and a stall that clears and comes back is proposed again."""
 import asyncio
 import math
 import tempfile
@@ -60,6 +67,10 @@ DEFAULT_STALE_HOURS = 2
 DEFAULT_DIGEST_MINUTES = 30
 PENDING_PATH = "/api/work/pending"
 PENDING_TIMEOUT = 3.0
+DUE_PATH = "/api/watchdog/due"
+DUE_TIMEOUT = 10.0
+STALL_KEY_PREFIX = "watchdog:"
+DEFAULT_MAX_OPEN_STALLS = 5
 OWN_EVENT_PREFIX = "global_watch"
 FETCH_LIMIT = 5000
 ERROR_MARKERS = ("error", "fail", "crash")
@@ -135,6 +146,18 @@ and the check proposed this task.
 
 The likely cause is the model's guess from an event digest. Confirm the
 problem in the instance's events and state before you change anything.
+"""
+
+
+STALL_BRIEF = """
+
+## Where this stall lives
+
+The watchdog of instance {instance} reported this stall to the global_watch
+check on {host}, and the check proposed this task. The ticket or pull request
+lives on {instance}, at {base_url}. Paths in the evidence are paths on the
+host that runs {instance}. Read its state there, and change ticket state
+through the HTTP API of {instance}. A change to frshty code belongs here.
 """
 
 
@@ -412,6 +435,88 @@ def propose_tasks(config: dict, problems: list[dict], since: str, now: datetime,
     return proposed, capped
 
 
+def read_due(instances: list[dict]) -> tuple[dict[str, list[dict]], dict[str, str]]:
+    """Each instance's watchdog reports, and the instances that gave none."""
+    async def _all():
+        return await asyncio.gather(*[call_instance(inst["base_url"], "GET", DUE_PATH,
+                                                    timeout=DUE_TIMEOUT) for inst in instances])
+
+    due: dict[str, list[dict]] = {}
+    errors: dict[str, str] = {}
+    for inst, payload in zip(instances, asyncio.run(_all()) if instances else []):
+        if isinstance(payload, dict) and isinstance(payload.get("due"), list):
+            due[inst["key"]] = [r for r in payload["due"] if isinstance(r, dict)]
+            continue
+        err = payload.get("error") if isinstance(payload, dict) else None
+        errors[inst["key"]] = " ".join(str(err or f"unexpected response: {str(payload)[:100]}").split())
+    return due, errors
+
+
+def _stall_key(instance: str, report: dict) -> str:
+    return (f"{STALL_KEY_PREFIX}{instance}:{report.get('bucket')}:"
+            f"{report.get('entity_id')}:{report.get('first_seen_at')}")
+
+
+def propose_stalls(config: dict, instances: list[dict],
+                   prior_errors: dict[str, str]) -> tuple[list[dict], dict[str, str]]:
+    """Put one doctor proposal on the board for each stall a watchdog reports.
+
+    Returns the proposals and the instances whose reports could not be read.
+    The unreadable instances go to the feed only when that set changes."""
+    cfg = settings(config)
+    if not cfg.get("propose_stalls", True):
+        return [], {}
+    due, errors = read_due(instances)
+    if errors and sorted(errors) != sorted(prior_errors):
+        log.emit("global_watch_stalls_unread",
+                 "global_watch could not read the stalls of "
+                 + "; ".join(f"{k}: {v}" for k, v in sorted(errors.items())),
+                 links={"global": "/global"}, meta={"errors": errors})
+    if not any(due.values()):
+        return [], errors
+    limit = int(cfg.get("max_open_stalls", DEFAULT_MAX_OPEN_STALLS))
+    row = db.query_one("SELECT COUNT(*) AS n FROM work_items WHERE proposal_key LIKE ? AND state = ?",
+                       (STALL_KEY_PREFIX + "%", work_store.PROPOSED_STATE))
+    waiting = int(row["n"]) if row else 0
+    entry = next((e for e in work_launch.project_entries() if e["key"] == TASK_PROJECT), None)
+    host = config["job"]["key"]
+    by_key = {inst["key"]: inst for inst in instances}
+    proposed: list[dict] = []
+    for instance in sorted(due):
+        for report in due[instance]:
+            objective = " ".join(str(report.get("objective") or "").split())
+            if not objective or not report.get("entity_id") or waiting >= limit:
+                continue
+            key = _stall_key(instance, report)
+            brief = str(report.get("brief") or "") + STALL_BRIEF.format(
+                instance=instance, host=host, base_url=by_key[instance]["base_url"])
+            try:
+                item_id = work_store.create_proposal(
+                    f"[{instance}] {objective}",
+                    note=f"Stall reported by the watchdog on {instance}",
+                    instance_key=work_store.BOARD_INSTANCE_KEY,
+                    contexts=TASK_PROJECT if entry else "", cwd=entry["root"] if entry else "",
+                    brief=brief, proposal_key=key)
+            except work_store.ProposalKeyHeld:
+                continue
+            except Exception as e:
+                log.emit("global_watch_stall_failed",
+                         f"global_watch could not propose a doctor task for {instance}"
+                         f" {report.get('entity_id')}: {type(e).__name__}: {e}",
+                         links={"global": "/global"}, meta={"proposal_key": key})
+                continue
+            waiting += 1
+            log.emit("global_watch_stall_proposed",
+                     f"global_watch proposed doctor task {item_id} for {instance}"
+                     f" {report.get('bucket')} {report.get('entity_id')}",
+                     links={"detail": f"/tasks/{item_id}", "global": "/global"},
+                     meta={"work_item_id": item_id, "proposal_key": key,
+                           "instance": instance, "bucket": report.get("bucket"),
+                           "entity_id": report.get("entity_id")})
+            proposed.append({"work_item_id": item_id, "proposal_key": key, "instance": instance})
+    return proposed, errors
+
+
 def _fingerprint(findings: list[dict]) -> list[str]:
     return sorted(f"{f['kind']}:{f['instance']}:{f.get('event', '')}" for f in findings)
 
@@ -466,6 +571,7 @@ def run(config: dict, now: datetime | None = None, job_id: int | None = None) ->
         agent_open = _report_agent(verdict, prior)
         proposed, capped = propose_tasks(config, verdict.get("problems") or [], digest_since, now,
                                          prior.get("capped_tasks") or [])
+    stalls, stall_errors = propose_stalls(config, instances, prior.get("stall_errors") or {})
 
     state.save(_STATE_MODULE, {"last_run_at": now.isoformat(),
                                "fingerprint": fingerprint,
@@ -475,7 +581,10 @@ def run(config: dict, now: datetime | None = None, job_id: int | None = None) ->
                                "agent_open": agent_open,
                                "agent_problems": verdict.get("problems") or [],
                                "proposed_tasks": proposed,
-                               "capped_tasks": capped})
+                               "capped_tasks": capped,
+                               "proposed_stalls": stalls,
+                               "stall_errors": stall_errors})
     return {"findings": findings, "expected": expected, "agent": verdict,
             "proposed_tasks": proposed,
+            "proposed_stalls": stalls,
             "instances_seen": sorted({ev.get("instance_key") for ev in events})}

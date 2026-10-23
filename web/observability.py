@@ -9,6 +9,7 @@ from starlette.concurrency import run_in_threadpool
 
 import core.db as db
 import core.log as log
+from manager import watchdog
 from services import pending_work
 from web.state import _config, _configs_by_host, active_config, primary_config, events_enabled
 
@@ -213,6 +214,11 @@ async def api_global_events(limit: int = 5000, unread: bool = False, since_hours
 @router.get("/api/work/pending")
 def api_work_pending():
     return pending_work.snapshot(_config.get("job", {}).get("key", ""))
+
+
+@router.get("/api/watchdog/due")
+def api_watchdog_due():
+    return watchdog.due_reports()
 
 
 SYSTEM_EVENTS = {"cycle_start", "cycle_end", "cycle_sleep"}

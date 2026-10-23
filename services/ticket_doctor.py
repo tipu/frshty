@@ -26,7 +26,7 @@ from services import work_launch, work_store, work_worktree
 
 FRSHTY_ROOT = str(Path(__file__).resolve().parent.parent)
 FRSHTY_TAG = "frshty"
-FRSHTY_BOARD = "personal"
+FRSHTY_BOARD = "frshty"
 MAX_DESCRIPTION = 2000
 MAX_STATE_CHARS = 12000
 JOB_LIMIT = 25
@@ -34,6 +34,16 @@ EVENT_LIMIT = 40
 TRANSITION_LIMIT = 25
 DOC_LIMIT = 40
 HISTORY_LIMIT = 20
+
+
+def enabled(config: dict) -> bool:
+    """Whether this instance launches doctor tasks itself.
+
+    Off unless the instance config turns it on. A doctor task reads and
+    changes frshty code, and only the frshty instance owns that code. Every
+    other instance reports its stalled tickets through manager/watchdog.py,
+    and the frshty instance proposes the doctor task on its own board."""
+    return bool(((config or {}).get("doctor") or {}).get("enabled", False))
 
 
 def _instance_key(config: dict) -> str:
@@ -244,8 +254,13 @@ def frshty_writable() -> bool:
     return bool(common) and os.access(common, os.W_OK)
 
 
+def evidence(config: dict, key: str, ts: dict) -> str:
+    """The snapshot and the pipeline map, with no routing for code changes."""
+    return snapshot(config, key, ts) + "\n" + PIPELINE_MAP
+
+
 def brief(config: dict, key: str, ts: dict) -> str:
-    text = snapshot(config, key, ts) + "\n" + PIPELINE_MAP
+    text = evidence(config, key, ts)
     if frshty_writable():
         return text
     board = (config.get("work") or {}).get("frshty_board") or FRSHTY_BOARD
@@ -282,6 +297,9 @@ def _live_item(run: dict | None) -> int | None:
 def launch(config: dict, key: str, description: str) -> dict:
     """Launch the doctor task for one ticket. Returns the work_launch result,
     or {"error": ...} when the ticket is unknown or the work layer is down."""
+    if not enabled(config):
+        return {"error": "the doctor is off on this instance: the frshty instance"
+                         " proposes doctor tasks for stalled tickets on its board"}
     description = (description or "").strip()
     if not description:
         return {"error": "describe what is wrong before running the doctor"}

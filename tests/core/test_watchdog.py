@@ -32,6 +32,7 @@ def _config(**watchdog_settings):
         "job": {"key": "test"},
         "workspace": {"root": "/tmp/ws", "tickets_dir": "tickets"},
         "manager": {"watchdog": watchdog_settings},
+        "doctor": {"enabled": True},
         "_base_url": "http://localhost:8000",
     }
 
@@ -880,6 +881,74 @@ class TestRun:
 
         assert state.load("watchdog").get("last_scan_at") is None
         assert watchdog.due_for_scan(_config(), NOW + timedelta(minutes=1)) is True
+
+
+class TestDoctorOff:
+    """An instance where the doctor is off opens nothing. It reports the
+    stall for the frshty instance to propose."""
+
+    def _off(self):
+        return {**_config(), "doctor": {"enabled": False}}
+
+    def test_a_due_ticket_is_reported_and_not_opened(self):
+        _block_ticket("DEV-330", reason="task run_tests failed; releasing repo gate")
+        _scan(self._off(), NOW)
+
+        opened, doctor, launch = _scan(self._off(), NOW + timedelta(hours=7))
+
+        assert opened == []
+        assert doctor.call_count == 0
+        assert launch.call_count == 0
+        [report] = watchdog.due_reports()["due"]
+        assert report["bucket"] == "blocked_tickets"
+        assert report["entity_id"] == "DEV-330"
+        assert report["first_seen_at"] == NOW.isoformat()
+        assert report["objective"].startswith("Doctor ticket DEV-330 (test).")
+        assert "reason=task run_tests failed" in report["objective"]
+        assert "## Ticket snapshot" in report["brief"]
+        assert "frshty code changes go to the frshty board" not in report["brief"]
+
+    def test_a_ticket_inside_its_window_is_not_reported(self):
+        """Negative control: the report holds only what is due."""
+        _block_ticket("DEV-331")
+        _scan(self._off(), NOW)
+
+        _scan(self._off(), NOW + timedelta(hours=5))
+
+        assert watchdog.due_reports()["due"] == []
+
+    def test_a_cleared_stall_leaves_the_report(self):
+        _block_ticket("DEV-332")
+        _scan(self._off(), NOW)
+        _scan(self._off(), NOW + timedelta(hours=7))
+        state.reset_ticket("DEV-332", target="new", reason="operator restart")
+
+        _scan(self._off(), NOW + timedelta(hours=8))
+
+        assert watchdog.due_reports()["due"] == []
+
+    def test_a_due_pr_is_reported_with_its_brief(self):
+        _blocked_comment("api/45", "c-1")
+        with patch.object(watchdog, "_pr_is_live", return_value=True):
+            _scan(self._off(), NOW)
+            _scan(self._off(), NOW + timedelta(hours=7))
+
+        [report] = watchdog.due_reports()["due"]
+        assert report["entity_id"] == "api/45"
+        assert report["ticket_key"] == ""
+        assert report["objective"].startswith("Doctor PR api#45 (test).")
+        assert "## PR snapshot" in report["brief"]
+
+    def test_doctor_is_off_unless_the_config_turns_it_on(self):
+        _block_ticket("DEV-333")
+        config = {k: v for k, v in _config().items() if k != "doctor"}
+        _scan(config, NOW)
+
+        opened, doctor, _ = _scan(config, NOW + timedelta(hours=7))
+
+        assert opened == []
+        assert doctor.call_count == 0
+        assert [r["entity_id"] for r in watchdog.due_reports()["due"]] == ["DEV-333"]
 
 
 class TestInstanceIsolation:
