@@ -1,18 +1,23 @@
 import asyncio
 import os
+import re
+import ssl
 import threading
 import tomllib
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import httpx
+import websockets
 from starlette.concurrency import run_in_threadpool
+from starlette.websockets import WebSocket, WebSocketDisconnect
 
 import core.log as log
 
 PEERS_PATH = Path(__file__).parent.parent / "config" / "peers.toml"
 ALLOWED_PREFIX = "api/work/"
 FILE_PREFIX = "api/work/artifact_file/"
+TERMINAL_KEY = re.compile(r"artifact-\d+")
 FILE_HEADERS = ("content-type", "content-length", "content-range", "accept-ranges",
                 "content-disposition", "content-encoding", "content-security-policy",
                 "last-modified", "etag")
@@ -173,3 +178,78 @@ async def open_file(key: str, path: str, range_header: str = "",
             await client.aclose()
 
     return resp.status_code, headers, body(), ""
+
+
+def terminal_url(key: str, term_key: str) -> tuple[str, str]:
+    """Turn a peer key and an artifact terminal key into the peer's websocket URL.
+
+    Only an artifact terminal is reachable. A ticket or task terminal on the
+    peer runs an agent with write access, and the viewer page never needs it."""
+    if not TERMINAL_KEY.fullmatch(term_key):
+        return "", f"peer terminal not allowed: {term_key}"
+    peer = find(key)
+    if peer is None:
+        return "", f"unknown peer '{key}'"
+    base = peer["base_url"].replace("https://", "wss://", 1).replace("http://", "ws://", 1)
+    return f"{base}/ws/terminal/{term_key}", ""
+
+
+async def relay_terminal(websocket: WebSocket, key: str, term_key: str,
+                         timeout: float = DEFAULT_TIMEOUT) -> None:
+    """Relay one browser terminal websocket to the same terminal on a peer.
+
+    The browser cannot reach a peer's base_url, so the board opens the
+    websocket to the peer and copies frames both ways. A refused or unreachable
+    peer closes the browser socket with 1008, which the viewer shows as an
+    unavailable terminal instead of a reconnect loop."""
+    url, error = await run_in_threadpool(terminal_url, key, term_key)
+    if error:
+        await websocket.close(code=1008, reason=error)
+        return
+    context = None
+    if url.startswith("wss://"):
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+    try:
+        upstream = await websockets.connect(url, max_size=None, ssl=context,
+                                            open_timeout=min(CONNECT_TIMEOUT, timeout))
+    except (OSError, TimeoutError, websockets.WebSocketException) as e:
+        reason = f"{type(e).__name__}: {e}"
+        await run_in_threadpool(log.emit, "work_peer_unreachable",
+                                f"WS {url} failed: {reason}",
+                                meta={"peer": key, "path": f"ws/terminal/{term_key}", "url": url})
+        await websocket.close(code=1008, reason=f"peer '{key}' is unreachable")
+        return
+    await websocket.accept()
+    try:
+        async with upstream:
+            async def down():
+                async for message in upstream:
+                    if isinstance(message, bytes):
+                        await websocket.send_bytes(message)
+                    else:
+                        await websocket.send_text(message)
+
+            async def up():
+                while True:
+                    message = await websocket.receive()
+                    if message["type"] == "websocket.disconnect":
+                        return
+                    if message.get("bytes") is not None:
+                        await upstream.send(message["bytes"])
+                    elif message.get("text") is not None:
+                        await upstream.send(message["text"])
+
+            tasks = [asyncio.create_task(down()), asyncio.create_task(up())]
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+    except (OSError, websockets.WebSocketException, WebSocketDisconnect):
+        pass
+    finally:
+        code = upstream.close_code if upstream.close_code in (1000, 1008, 1011) else 1000
+        try:
+            await websocket.close(code=code)
+        except RuntimeError:
+            pass
