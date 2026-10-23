@@ -3,11 +3,12 @@
 `scan` measures every entry of frshty_root(). It splits the worktrees and
 artifacts folders into one unit per task folder and the orphaned-worktrees
 folder into one unit per entry, because those are the units an operator
-clears. A unit is a suggestion when no unfinished task uses it and nothing in
-it changed for IDLE_DAYS. A task folder named work-<id> belongs to that task,
-and so does every task whose recorded worktree lies inside it. Suggestions
-come largest first. Each worktree suggestion that holds a git tree counts the
-uncommitted files in it, so the operator sees what a removal would lose.
+clears. A unit is a suggestion when no unfinished task uses it, nothing in
+it changed for IDLE_DAYS, and it holds more than MIN_SUGGEST_BYTES. A task
+folder named work-<id> belongs to that task, and so does every task whose
+recorded worktree lies inside it. Suggestions come largest first. Each
+worktree suggestion that holds a git tree counts the uncommitted files in it,
+so the operator sees what a removal would lose.
 
 Nothing here deletes anything. The automatic sweeps in work_worktree.gc and
 work_artifacts.gc_artifacts stay the only code that removes a folder.
@@ -33,6 +34,7 @@ from core.paths import frshty_root
 from services import work_store
 
 IDLE_DAYS = 3
+MIN_SUGGEST_BYTES = 100 * 1024 ** 2
 WARN_BYTES = 20 * 1024 ** 3
 WARN_FREE_PERCENT = 10
 SCAN_INTERVAL_S = 3600
@@ -168,7 +170,7 @@ def scan(now: float | None = None, base: Path | None = None) -> dict:
                       "in_use": any(_in_use(i) for i in items)})
     total = sum(u["bytes"] for u in units)
     candidates = sorted((u for u in units if u["kind"] != "other" and not u["in_use"]
-                         and u["idle_days"] >= IDLE_DAYS and u["bytes"]),
+                         and u["idle_days"] >= IDLE_DAYS and u["bytes"] > MIN_SUGGEST_BYTES),
                         key=lambda u: (-u["bytes"], u["path"]))
     suggestions = candidates[:MAX_SUGGESTIONS]
     for unit in suggestions:
@@ -194,6 +196,7 @@ def scan(now: float | None = None, base: Path | None = None) -> dict:
     return {"scanned_at": datetime.fromtimestamp(now, timezone.utc).isoformat(),
             "root": str(base), "total_bytes": total, "by_kind": by_kind, "disk": disk,
             "high": bool(reasons), "reasons": reasons, "idle_days": IDLE_DAYS,
+            "min_bytes": MIN_SUGGEST_BYTES,
             "reclaimable_bytes": sum(u["bytes"] for u in candidates),
             "reclaimable_count": len(candidates), "suggestions": suggestions}
 

@@ -16,13 +16,15 @@ from tests.features.test_work_worktree import make_repo, _git
 DAY = 86400
 NOW = time.time()
 Usage = namedtuple("Usage", "total used free")
+MIN_SUGGEST_BYTES = disk_usage.MIN_SUGGEST_BYTES
 
 
 @pytest.fixture(autouse=True)
 def _isolated(tmp_path, fresh_db):
     state.init(tmp_path / "state")
     disk_usage._report = None
-    with patch.object(disk_usage.shutil, "disk_usage", return_value=Usage(100, 50, 50)):
+    with patch.object(disk_usage.shutil, "disk_usage", return_value=Usage(100, 50, 50)), \
+            patch.object(disk_usage, "MIN_SUGGEST_BYTES", 0):
         yield
     disk_usage._report = None
 
@@ -165,3 +167,30 @@ def test_an_unfinished_run_inside_an_orphaned_folder_keeps_it(tmp_path):
     report = disk_usage.scan(NOW, base=root)
 
     assert report["suggestions"] == []
+
+
+def test_suggests_only_folders_over_the_minimum_size(tmp_path):
+    root = tmp_path / "root"
+    _folder(root / "artifacts" / "work-901", 64, 10)
+    _folder(root / "artifacts" / "work-902", 256, 10)
+    with patch.object(disk_usage, "MIN_SUGGEST_BYTES", 128 * 1024):
+        report = disk_usage.scan(NOW, base=root)
+    assert [u["name"] for u in report["suggestions"]] == ["work-902"]
+    assert report["reclaimable_count"] == 1
+    assert report["reclaimable_bytes"] == report["suggestions"][0]["bytes"]
+    assert report["min_bytes"] == 128 * 1024
+
+
+def test_suggests_nothing_of_100_mb_or_less(tmp_path):
+    root = tmp_path / "root"
+    _folder(root / "artifacts" / "work-903", 1, 10)
+    _folder(root / "artifacts" / "work-904", 1, 10)
+    sizes = {"work-903": 100 * 1024 ** 2, "work-904": 100 * 1024 ** 2 + 1}
+
+    def measure(path):
+        return sizes.get(path.name, 0), NOW - 10 * DAY
+
+    with patch.object(disk_usage, "MIN_SUGGEST_BYTES", MIN_SUGGEST_BYTES), \
+            patch.object(disk_usage, "_measure", side_effect=measure):
+        report = disk_usage.scan(NOW, base=root)
+    assert [u["name"] for u in report["suggestions"]] == ["work-904"]
