@@ -1673,7 +1673,8 @@ def api_start_dev(key: str):
 @router.get("/api/tickets/{key}/doctor")
 def api_ticket_doctor_history(key: str):
     """Every doctor request made for this ticket, newest first."""
-    return {"runs": ticket_doctor.history(_config, key)}
+    return {"runs": ticket_doctor.history(_config, key),
+            "enabled": ticket_doctor.enabled(_config)}
 
 
 @router.post("/api/tickets/{key}/doctor")
@@ -1684,6 +1685,8 @@ def api_ticket_doctor(key: str, body: dict):
         message = result["error"]
         if message.startswith("unknown ticket"):
             return JSONResponse(result, status_code=404)
+        if message.startswith("the doctor is off"):
+            return JSONResponse(result, status_code=409)
         if "personal instance" in message:
             return JSONResponse(result, status_code=503)
         if "launch failed" in message:
