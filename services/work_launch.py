@@ -2634,7 +2634,9 @@ def gate_commit(session_id: str, command: str, cwd: str = "") -> dict:
     worktree. A task that resolved none owns nothing, and a rule keyed on
     ownership would let exactly that task commit into the shared tree. A deny
     carries `need_worktree`, the repository the caller has to obtain a
-    worktree of, so the message can name a real directory.
+    worktree of, so the message can name a real directory. That deny is not
+    recorded here: only the board knows whether a project owns the
+    repository, so the caller records the fail once the board keeps it.
     Returns {"decision": "allow"|"deny", "reason": str}."""
     if parse_commit(command) is None:
         return {"decision": "allow", "reason": "not a commit"}
@@ -2690,8 +2692,6 @@ def gate_commit(session_id: str, command: str, cwd: str = "") -> dict:
     shared = _commit_repos(command, cwd)
     if not shared:
         return allow()
-    work_store.record_gate(session_id, "commit_gate", "fail",
-                           {"command": command[:300], "shared": shared})
     # Keyed on the repository that was denied. A task can hold a worktree of
     # more than one repository, and naming the newest would send the agent to
     # commit one repository's changes into another repository's tree.
