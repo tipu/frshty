@@ -111,7 +111,7 @@ textarea.reply-box { background: #1a1a1a; border: 1px solid #333; color: #e0e0e0
            title="guided slide walkthrough">▶ Present</a>
         <button @click="openDiscuss" class="ln-btn ln-btn-discuss"
                 title="Open a separate claude (cl) terminal in this ticket's worktree dir">💬 Discuss</button>
-        <button @click="openDoctor" class="ln-btn ln-btn-amber"
+        <button v-if="doctorEnabled" @click="openDoctor" class="ln-btn ln-btn-amber"
                 title="Diagnose why this ticket is stuck: launches a task that reads the frshty code and this ticket's state">🩺 Doctor</button>
         <a v-if="ticketUrl" :href="ticketUrl" target="_blank" class="ln-btn"
            title="Open this ticket in the upstream tracker">Open Ticket &nearr;</a>
@@ -980,6 +980,7 @@ frshtyApp({
         const redoProofSubmitting = ref(false);
         const doctorOpen = ref(false);
         const doctorRuns = ref([]);
+        const doctorEnabled = ref(false);
         const doctorHistoryOpen = ref(false);
         const doctorDescription = ref('');
         const doctorSubmitting = ref(false);
@@ -1496,6 +1497,7 @@ frshtyApp({
                 if (!r.ok) return;
                 const d = await r.json();
                 doctorRuns.value = d.runs || [];
+                doctorEnabled.value = !!d.enabled;
             } catch (e) {
                 console.warn('doctor history fetch failed', e);
             }
@@ -2260,7 +2262,7 @@ frshtyApp({
             runServices, resetTerminal, openDiscuss, toggleMaximize,
             doctorOpen, doctorDescription, doctorSubmitting, doctorError,
             openDoctor, closeDoctor, submitDoctor,
-            doctorRuns, doctorRunning, doctorHistoryOpen, loadDoctorRuns,
+            doctorRuns, doctorRunning, doctorHistoryOpen, loadDoctorRuns, doctorEnabled,
             doctorStateLabel, doctorStateClass,
             ticketTasks, ticketTasksOpen, openTicketTasks, taskStateLabel, taskStateClass,
         };
