@@ -639,7 +639,11 @@
     <div class="rd-h">Objective the agent starts on</div>
     <textarea class="rd-input" rows="4" :value="c.propText[c.rowKey(it)] ?? it.objective"
               @input="c.propText[c.rowKey(it)] = $event.target.value"></textarea>
-    <details v-if="it.launch_brief"><summary class="rd-muted">evidence frshty acted on</summary><pre class="rd-pre">{{ it.launch_brief }}</pre></details>
+  </div>
+
+  <div class="rd-sec" v-if="it.scope === 'proposal' && it.launch_brief">
+    <div class="rd-h">Why frshty proposed this</div>
+    <details :open="it.state === 'proposed'"><summary class="rd-muted">evidence frshty acted on</summary><pre class="rd-pre">{{ it.launch_brief }}</pre></details>
   </div>
 
   <div class="rd-sec rd-progress" v-if="c.progressNote(it) && it.state !== 'done'">
