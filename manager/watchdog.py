@@ -58,6 +58,7 @@ MAX_DETAIL_CHARS = 600
 _STATE_MODULE = "watchdog"
 _LIVE_JOB_STATES = ("queued", "running")
 LIVE_JOB_MAX_AGE_HOURS = 6
+MAX_DUE_REPORTS = 20
 _FENCE_BUCKET = "migration"
 _NON_COVERING_JOBS = frozenset({"advance_ticket"})
 
@@ -520,6 +521,41 @@ def _open_task(config: dict, instance_key: str, rule: Rule, entry: Entry,
                               brief=_pr_brief(instance_key, entry, rule))
 
 
+def _due_report(config: dict, instance_key: str, rule: Rule, entry: Entry,
+                observation: dict, now: datetime) -> dict:
+    """One stalled entity, written for the frshty instance to propose.
+
+    The doctor runs on the frshty instance, which cannot read this instance's
+    state, so the report carries the objective and the evidence the doctor
+    task would have started from."""
+    description = _description(instance_key, rule, entry, observation, now)
+    if entry.ticket_key:
+        objective = f"Doctor ticket {entry.ticket_key} ({instance_key}). {description}"
+        brief = ticket_doctor.evidence(config, entry.ticket_key,
+                                       state.load_ticket(entry.ticket_key) or {})
+    else:
+        repo, _, pr_id = entry.entity_id.partition("/")
+        objective = f"Doctor PR {repo}#{pr_id} ({instance_key}). {description}"
+        brief = _pr_brief(instance_key, entry, rule)
+    return {"bucket": rule.bucket, "entity_id": entry.entity_id,
+            "ticket_key": entry.ticket_key,
+            "first_seen_at": observation["first_seen_at"],
+            "objective": objective, "brief": brief}
+
+
+def _save_due(due: list[dict], now: datetime) -> None:
+    blob = state.load(_STATE_MODULE) or {}
+    blob["due"] = due[:MAX_DUE_REPORTS]
+    blob["due_at"] = _iso(now)
+    state.save(_STATE_MODULE, blob)
+
+
+def due_reports() -> dict:
+    """The stalled entities the last scan reported instead of opening."""
+    blob = state.load(_STATE_MODULE) or {}
+    return {"due": blob.get("due") or [], "due_at": blob.get("due_at") or ""}
+
+
 def _opened_today(instance_key: str, now: datetime) -> int:
     """Launches this watchdog attempted for this instance in the last 24 hours.
 
@@ -595,8 +631,13 @@ def scan(config: dict, instance_key: str = "", now: datetime | None = None,
     An exception out of a launch is a defect, so every entity is still handled
     and the exception is then re-raised: the job records it with a traceback
     rather than reporting a scan that opened nothing as a success. The attempt
-    ledger is written first, so the retry that failure invites is bounded."""
+    ledger is written first, so the retry that failure invites is bounded.
+
+    On an instance where the doctor is off, the scan opens nothing. It saves
+    every due entity as a report that due_reports() serves, and the frshty
+    instance proposes the doctor task on its own board."""
     instance_key = instance_key or state.active_instance_key()
+    launching = ticket_doctor.enabled(config)
     now = now or _now()
     if max_opens is None:
         max_opens = int(_settings(config).get("max_opens_per_scan",
@@ -610,6 +651,7 @@ def scan(config: dict, instance_key: str = "", now: datetime | None = None,
     attempts = 0
     raised: Exception | None = None
     opened: list[dict] = []
+    due: list[dict] = []
     for rule in RULES:
         try:
             entries = _entries(rule.bucket, instance_key, config)
@@ -620,7 +662,7 @@ def scan(config: dict, instance_key: str = "", now: datetime | None = None,
         grouped = _group(entries, _snoozed(instance_key, rule.bucket))
         for entity_id, entry in sorted(grouped.items()):
             observation = _observe(instance_key, rule.bucket, entry, now)
-            if attempts >= budget:
+            if launching and attempts >= budget:
                 continue
             if not _due(observation, rule, now):
                 continue
@@ -649,6 +691,17 @@ def scan(config: dict, instance_key: str = "", now: datetime | None = None,
                          f" {live_job} still working",
                          meta={"bucket": rule.bucket, "entity_id": entity_id,
                                "job_id": live_job})
+                continue
+            if not launching:
+                try:
+                    due.append(_due_report(config, instance_key, rule, entry, observation, now))
+                except Exception as e:
+                    raised = e
+                    log.emit("watchdog_report_failed",
+                             f"[{instance_key}] {rule.bucket} {entity_id} could not be"
+                             f" reported: {type(e).__name__}: {e}",
+                             meta={"bucket": rule.bucket, "entity_id": entity_id,
+                                   "traceback": traceback.format_exc()})
                 continue
             attempts += 1
             launch_id = _record_attempt(instance_key, rule.bucket, entity_id, now)
@@ -683,6 +736,7 @@ def scan(config: dict, instance_key: str = "", now: datetime | None = None,
                            "ticket_key": entry.ticket_key, "work_item_id": item_id,
                            "action": result.get("action", "launch")})
         _forget(instance_key, rule.bucket, set(grouped), now)
+    _save_due(due, now)
     if raised is not None:
         raise raised
     return opened
