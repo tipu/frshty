@@ -202,3 +202,34 @@ class TestEnsurePrWorktree:
             got = tickets._ensure_pr_worktree(_cfg(), {"key": "T-1"}, ts, ts["prs"][0], "http://base")
         assert got is None
         assert any(c.args[0] == "ticket_pr_worktree_failed" for c in mock_emit.call_args_list)
+
+
+class TestPrBaseMovedAfterDirtyBlock:
+    def _ts(self):
+        return _ts(base_sync={"myrepo/7": {
+            "base_sync_sha": "sha1", "base_sync_attempts": 2,
+            "last_base_error": "worktree has uncommitted changes (a.py); merge would overwrite them"}})
+
+    def test_true_when_dirty_worktree_is_now_clean(self, tmp_path):
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+        with patch("features.tickets._ticket_repo_path", return_value="/repo"), \
+             patch("features.tickets.ticket_worktree_path", return_value=tmp_path), \
+             patch("features.tickets.branch_sync.ls_remote_sha", return_value="sha1"):
+            assert tickets._pr_base_moved(_cfg(), self._ts()) is True
+
+    def test_false_while_worktree_stays_dirty(self, tmp_path):
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+        (tmp_path / "a.py").write_text("x")
+        with patch("features.tickets._ticket_repo_path", return_value="/repo"), \
+             patch("features.tickets.ticket_worktree_path", return_value=tmp_path), \
+             patch("features.tickets.branch_sync.ls_remote_sha", return_value="sha1"):
+            assert tickets._pr_base_moved(_cfg(), self._ts()) is False
+
+    def test_true_when_borrowed_branch_worktree_is_now_clean(self, tmp_path):
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+        with patch("features.tickets._ticket_repo_path", return_value="/repo"), \
+             patch("features.tickets.ticket_worktree_path", return_value=tmp_path / "absent"), \
+             patch("features.tickets.git_util.worktree_holding_branch", return_value=tmp_path) as holder, \
+             patch("features.tickets.branch_sync.ls_remote_sha", return_value="sha1"):
+            assert tickets._pr_base_moved(_cfg(), self._ts()) is True
+        assert holder.call_args.args[1] == "t-1-branch"
