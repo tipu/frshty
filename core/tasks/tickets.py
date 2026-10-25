@@ -1669,6 +1669,14 @@ def fix_review_findings(ctx: TaskContext) -> TaskResult:
     return TaskResult("ok")
 
 
+def _pr_head(platform, pr: dict) -> str:
+    try:
+        info = platform.get_pr_info(pr["repo"], pr["id"])
+    except Exception:
+        return ""
+    return info.get("head_sha", "") if isinstance(info, dict) else ""
+
+
 @task("fix_ci_failures",
       preconditions=[status_is("in_review"),
                      has_flag("_ci_failed_pending")],
@@ -1691,6 +1699,7 @@ def fix_ci_failures(ctx: TaskContext) -> TaskResult:
 
         for pr in prs:
             wt = _ensure_pr_worktree(ctx.config, {"key": ctx.ticket_key}, ts, pr, base_url)
+            head_before = _pr_head(platform, pr)
             outcome = triage_and_fix_pr(
                 platform, pr["repo"], pr["id"],
                 label=f"{ctx.ticket_key} {pr['repo']}#{pr['id']}",
@@ -1704,8 +1713,15 @@ def fix_ci_failures(ctx: TaskContext) -> TaskResult:
             meta = {"ticket": ctx.ticket_key, "repo": pr["repo"], "pr_id": pr["id"],
                     "failed_checks": failed_names}
 
-            if kind == "unrelated":
-                def _memo(current, names=failed_names):
+            if kind == "unrelated" and (not head_before
+                                        or _pr_head(platform, pr) != head_before):
+                log.emit("ticket_checks_unrelated_discarded",
+                         f"CI failure for {slug or ctx.ticket_key} {pr['repo']}#{pr['id']} was "
+                         f"triaged as unrelated, but the PR head was unknown or moved during "
+                         f"triage; the next poll triages it again",
+                         links=pr_link, meta={**meta, "head_before": head_before})
+            elif kind == "unrelated":
+                def _memo(current, names=failed_names, head=head_before):
                     if not current:
                         return None
                     unrelated = current.get("ci_unrelated_checks")
@@ -1715,6 +1731,9 @@ def fix_ci_failures(ctx: TaskContext) -> TaskResult:
                     seen = set(unrelated.get(pr_key) or [])
                     unrelated[pr_key] = sorted(seen | set(names))
                     current["ci_unrelated_checks"] = unrelated
+                    heads = current.get("ci_fix_heads") or {}
+                    heads[pr_key] = head
+                    current["ci_fix_heads"] = heads
                     return current
                 updated = state.update_ticket(ctx.ticket_key or "", _memo)
                 if updated:
@@ -1732,11 +1751,7 @@ def fix_ci_failures(ctx: TaskContext) -> TaskResult:
                 # MAX_CI_FIX_ATTEMPTS in _handle_ci_failure, and wedges the
                 # repo gate indefinitely. 'unrelated' and 'no_failing' don't
                 # count (nothing of ours was attempted).
-                try:
-                    info_after = platform.get_pr_info(pr["repo"], pr["id"])
-                    head_after = info_after.get("head_sha", "") if isinstance(info_after, dict) else ""
-                except Exception:
-                    head_after = ""
+                head_after = _pr_head(platform, pr)
 
                 def _bump(current):
                     if not current:

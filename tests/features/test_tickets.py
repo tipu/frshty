@@ -1981,6 +1981,7 @@ class TestFixCiFailuresTask:
         mock_platform.get_pr_checks.return_value = [{"name": "lint", "state": "FAILED"}]
         mock_platform.get_failed_logs.return_value = "logs"
         mock_platform.get_pr_diff.return_value = "diff"
+        mock_platform.get_pr_info.return_value = {"head_sha": "h1"}
         with patch("core.tasks.tickets.make_platform", return_value=mock_platform), \
              patch("features.pr_ci.run_balanced", return_value='{"caused_by_us": false, "reason": "flaky"}'), \
              patch("features.pr_ci.run_claude_code") as rcc:
@@ -1991,6 +1992,7 @@ class TestFixCiFailuresTask:
         ts = state.load("tickets")["PROJ-1"]
         assert ts.get("ci_fix_attempts", 0) == 0
         assert ts["ci_unrelated_checks"] == {"r/1": ["lint"]}
+        assert ts["ci_fix_heads"] == {"r/1": "h1"}
         assert "_ci_failed_pending" not in ts
 
     def test_caused_by_us_increments_and_clears_flag(self, fake_config, tmp_state, tmp_log):

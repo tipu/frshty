@@ -39,6 +39,22 @@ def green_check_names(checks) -> list[str]:
             if c.get("state", "").upper() in PASSED_STATES]
 
 
+def failing_check_names(checks) -> list[str]:
+    """Names of the checks reported as failed right now."""
+    return [c["name"] for c in (checks or [])
+            if c.get("state", "").upper() in FAILED_STATES]
+
+
+def held_unrelated(ts: dict, pr: dict, checks) -> bool:
+    """True when every failing check on this PR is one the CI fix path
+    triaged as not caused by the ticket's changes, so frshty has nothing
+    left to fix on it and waits for the base branch or a person."""
+    unrelated = ts.get("ci_unrelated_checks") or {}
+    covered = unrelated.get(f"{pr['repo']}/{pr['id']}", []) if isinstance(unrelated, dict) else []
+    failed = failing_check_names(checks)
+    return bool(failed) and set(failed) <= set(covered)
+
+
 def ci_summary(checks) -> str:
     """Collapse a get_pr_checks() result into one display state for the PR board:
     'unknown' (fetch failed, or a check in a state outside PASSED_STATES,
