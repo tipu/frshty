@@ -1,3 +1,4 @@
+import subprocess
 from unittest.mock import patch, MagicMock
 
 import core.branch_sync as branch_sync
@@ -141,3 +142,62 @@ class TestASyncThatCannotStartSpendsAnAttempt:
         out = _sync(_platform(), st, fetch_rc=1)
         assert out["result"] == "fetch_failed"
         assert st["base_sync_attempts"] == 1
+
+
+class TestDirtyBlockClears:
+    def _repo(self, tmp_path):
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        for cmd in (["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"],
+                    ["commit", "-q", "--allow-empty", "-m", "init"]):
+            subprocess.run(["git", *cmd], cwd=wt, check=True, capture_output=True)
+        return wt
+
+    def _capped(self):
+        return {"base_sync_sha": "basesha", "base_sync_attempts": branch_sync.MAX_BASE_SYNC_ATTEMPTS,
+                "last_base_error": f"{"worktree has uncommitted changes"} (a.py); merge would overwrite them"}
+
+    def test_clean_worktree_resets_a_dirty_cap_and_merges(self, tmp_path):
+        wt = self._repo(tmp_path)
+        platform = _platform()
+        st = self._capped()
+        real_run = subprocess.run
+
+        def fake_run(cmd, **kw):
+            if cmd[:2] == ["git", "fetch"]:
+                return MagicMock(returncode=0, stdout="", stderr="")
+            if cmd[:2] == ["git", "rev-list"]:
+                return MagicMock(returncode=0, stdout="3\n", stderr="")
+            return real_run(cmd, **kw)
+
+        with patch("core.branch_sync.ls_remote_sha", return_value="basesha"), \
+             patch("core.branch_sync.subprocess.run", side_effect=fake_run):
+            out = branch_sync.sync_branch_with_base(platform, "/repo", "main", "f", st, lambda: wt)
+        assert out["result"] == "synced"
+        assert st["base_sync_attempts"] == 0
+        assert "last_base_error" not in st
+        platform.merge_base.assert_called_once()
+
+    def test_still_dirty_worktree_stays_capped(self, tmp_path):
+        wt = self._repo(tmp_path)
+        (wt / "a.py").write_text("x")
+        platform = _platform()
+        st = self._capped()
+        with patch("core.branch_sync.ls_remote_sha", return_value="basesha"):
+            out = branch_sync.sync_branch_with_base(platform, "/repo", "main", "f", st, lambda: wt)
+        assert out["result"] == "capped"
+        assert st["base_sync_attempts"] == branch_sync.MAX_BASE_SYNC_ATTEMPTS
+        platform.merge_base.assert_not_called()
+
+    def test_merge_failure_cap_is_not_reset(self, tmp_path):
+        wt = self._repo(tmp_path)
+        platform = _platform()
+        st = {"base_sync_sha": "basesha", "base_sync_attempts": branch_sync.MAX_BASE_SYNC_ATTEMPTS,
+              "last_base_error": "CONFLICT in a.py"}
+        calls = []
+        with patch("core.branch_sync.ls_remote_sha", return_value="basesha"):
+            out = branch_sync.sync_branch_with_base(platform, "/repo", "main", "f", st,
+                                                    lambda: calls.append(1) or wt)
+        assert out["result"] == "capped"
+        assert calls == []
+        platform.merge_base.assert_not_called()
