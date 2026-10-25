@@ -17,7 +17,7 @@ import core.state as state
 import core.git_util as git_util
 from core.claude_runner import run_agentic, run_balanced, run_haiku, extract_json
 from core.llm import CODEX_EXEC, READ_ONLY_TOOLS, WRITE_TOOLS, run_external_model
-from core.config import base_branch_for, board_url, get_repos
+from core.config import board_url, get_repos
 import features.presentation as presentation
 from features.platforms import make_platform
 from services import review_store, work_launch, work_store
@@ -1354,8 +1354,7 @@ def _ensure_review_worktree(config, pr) -> Path | None:
         subprocess.run(["git", "reset", "--hard", f"origin/{pr['branch']}"], cwd=str(worktree_path), capture_output=True, timeout=60)
         return worktree_path
 
-    base_branch = base_branch_for(config, pr["repo"])
-    return git_util.add_or_reuse_worktree(repo_path, worktree_path, pr["branch"], base_branch=base_branch)
+    return git_util.add_detached_worktree(repo_path, worktree_path, pr["branch"])
 
 
 def _load_conventions(config, repo_name) -> str:

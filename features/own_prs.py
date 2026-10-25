@@ -1006,7 +1006,13 @@ def _ensure_worktree(config, pr) -> Path | None:
                      meta={"repo": pr["repo"], "pr_id": pr["id"],
                            "error": (reset.stderr or b"").decode(errors="replace")[:300]})
             return None
+        cleaned = git_util.run_git_status(worktree_path, ["clean", "-fd"])
+        if cleaned.returncode != 0:
+            log.emit("pr_worktree_reset_failed",
+                     f"{pr['repo']}#{pr['id']}: could not remove untracked files from the PR worktree",
+                     meta={"repo": pr["repo"], "pr_id": pr["id"],
+                           "error": (cleaned.stderr or "")[:300]})
+            return None
         return worktree_path
 
-    base_branch = base_branch_for(config, pr["repo"])
-    return git_util.add_or_reuse_worktree(repo_path, worktree_path, pr["branch"], base_branch=base_branch)
+    return git_util.add_detached_worktree(repo_path, worktree_path, pr["branch"])
