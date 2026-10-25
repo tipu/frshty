@@ -14,7 +14,7 @@ from core.config import resolve_env, get_repos, base_branch_for
 from core.claude_runner import run_claude_code
 from core.commit_message import merge_message_args
 from core.llm import NO_PUBLISH_RULE
-from features.pr_ci import FAILED_STATES, PASSED_STATES
+from features.pr_ci import FAILED_STATES, PASSED_STATES, held_unrelated
 
 
 def make_platform(config: dict):
@@ -199,6 +199,7 @@ class _CIMonitorMixin:
             ts["checks_started_at"] = datetime.now(timezone.utc).isoformat()
 
         all_passed = True
+        held = None
         for pr in prs:
             try:
                 checks = self.get_pr_checks(pr["repo"], pr["id"])
@@ -263,7 +264,14 @@ class _CIMonitorMixin:
                 continue
 
             if verdict == "failed":
-                return {"_ci_failed": True, "pr": pr, "checks": checks}
+                failure = {"_ci_failed": True, "pr": pr, "checks": checks}
+                if not held_unrelated(ts, pr, checks):
+                    return failure
+                held = held or failure
+                continue
+
+        if held:
+            return held
 
         if not all_passed:
             ts.pop("ci_passed", None)
@@ -277,6 +285,7 @@ class _CIMonitorMixin:
         ts.pop("checks_started_at", None)
         ts.pop("ci_fix_attempts", None)
         ts.pop("ci_fix_heads", None)
+        ts.pop("ci_unrelated_checks", None)
         ts.pop("_ci_timeout_state", None)
         ts.pop("_ci_no_ci_logged", None)
         return ts
