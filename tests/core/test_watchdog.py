@@ -13,7 +13,7 @@ import core.state as state
 from core.registry import Instances
 from core.tasks.registry import get_task
 from core.tasks.routes import _cron_routes
-from manager import watchdog
+from manager import staleness, watchdog
 from services import work_store
 
 NOW = datetime(2026, 9, 3, 12, 0, tzinfo=timezone.utc)
@@ -538,6 +538,23 @@ class TestUnwatchedBuckets:
         assert [e.entity_id for e in found["in_review_no_ci"]] == ["DEV-321"]
         assert [e.entity_id for e in found["stale_unattended"]] == ["DEV-322"]
         assert [e.entity_id for e in found["blocked_tickets"]] == ["DEV-325"]
+
+    def test_an_in_review_ticket_held_on_unrelated_checks_is_not_watched(self):
+        """Every red check was triaged as not caused by the ticket, so frshty
+        has nothing left to fix and a doctor task cannot clear it."""
+        state.save_ticket("DEV-326", {
+            "status": "in_review", "slug": "dev-326", "summary": "held",
+            "discovered_at": "2026-08-01T00:00:00Z", "ci_held_unrelated": True,
+            "prs": [{"repo": "api", "id": 3, "url": "http://pr/3"}]})
+        state.save_ticket("DEV-327", {
+            "status": "in_review", "slug": "dev-327", "summary": "red",
+            "discovered_at": "2026-08-01T00:00:00Z",
+            "prs": [{"repo": "api", "id": 4, "url": "http://pr/4"}]})
+
+        found = watchdog._entries("in_review_no_ci", "test", _config())
+
+        assert [e.entity_id for e in found] == ["DEV-327"]
+        assert [r["ticket_key"] for r in staleness.in_review_no_ci("test")] == ["DEV-326", "DEV-327"]
 
     def test_an_in_review_ticket_with_no_ci_opens_a_task_after_two_days(self):
         state.save_ticket("DEV-323", {

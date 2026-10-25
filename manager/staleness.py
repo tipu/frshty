@@ -240,6 +240,7 @@ def in_review_no_ci(instance_key: str) -> list[dict]:
             "ticket_key": r["ticket_key"],
             "summary": (d.get("summary") or "")[:140],
             "ci_fix_attempts": d.get("ci_fix_attempts", 0),
+            "ci_held_unrelated": bool(d.get("ci_held_unrelated")),
             "discovered_at": d.get("discovered_at", ""),
             "url": d.get("url", ""),
         })
