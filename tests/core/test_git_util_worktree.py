@@ -79,3 +79,45 @@ def test_returns_none_when_holder_is_not_visible(tmp_path):
 
     assert result is None
     assert not pr_wt.exists()
+
+
+def _clone_with_origin(tmp_path: Path, branch: str) -> Path:
+    origin = tmp_path / "origin.git"
+    seed = tmp_path / "seed"
+    _init_repo(seed)
+    _git(seed, "branch", branch)
+    subprocess.run(["git", "clone", "-q", "--bare", str(seed), str(origin)], check=True)
+    repo = tmp_path / "repo"
+    subprocess.run(["git", "clone", "-q", str(origin), str(repo)], check=True)
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    return repo
+
+
+def test_detached_worktree_does_not_borrow_a_dirty_holder(tmp_path):
+    repo = _clone_with_origin(tmp_path, "feature/d")
+    holder = tmp_path / "agent_wt"
+    _git(repo, "worktree", "add", str(holder), "feature/d")
+    (holder / "f.txt").write_text("agent edit in progress")
+
+    pr_wt = tmp_path / "pr_wt"
+    result = git_util.add_detached_worktree(repo, pr_wt, "feature/d")
+
+    assert result is not None
+    assert result.resolve() == pr_wt.resolve()
+    assert (pr_wt / "f.txt").read_text() == "x"
+    status = subprocess.run(["git", "status", "--porcelain"], cwd=str(pr_wt),
+                            capture_output=True, text=True, check=True)
+    assert status.stdout == ""
+    origin_tip = subprocess.run(["git", "rev-parse", "origin/feature/d"], cwd=str(repo),
+                                capture_output=True, text=True, check=True).stdout.strip()
+    assert git_util.head_sha(pr_wt) == origin_tip
+    assert (holder / "f.txt").read_text() == "agent edit in progress"
+
+
+def test_detached_worktree_returns_none_for_a_missing_remote_branch(tmp_path):
+    repo = _clone_with_origin(tmp_path, "feature/e")
+
+    pr_wt = tmp_path / "pr_wt"
+    assert git_util.add_detached_worktree(repo, pr_wt, "no/such-branch") is None
+    assert not pr_wt.exists()
