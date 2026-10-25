@@ -7,10 +7,12 @@ function owns the git decision-making and the per-branch sync state it
 reads/writes on the passed-in `st` dict.
 """
 import subprocess
+from pathlib import Path
 
 import core.git_util as git_util
 
 MAX_BASE_SYNC_ATTEMPTS = 2
+DIRTY_WORKTREE_ERROR = "worktree has uncommitted changes"
 
 
 def ls_remote_sha(repo_path, base_branch: str) -> str:
@@ -19,6 +21,19 @@ def ls_remote_sha(repo_path, base_branch: str) -> str:
     if result.returncode != 0 or not result.stdout.strip():
         return ""
     return result.stdout.split()[0]
+
+
+def blocked_by_dirty_worktree(st: dict) -> bool:
+    return (st.get("last_base_error") or "").startswith(DIRTY_WORKTREE_ERROR)
+
+
+def worktree_is_clean(worktree) -> bool:
+    if not worktree or not Path(worktree).is_dir():
+        return False
+    try:
+        return not git_util.run_git(worktree, ["status", "--porcelain"], timeout=30).stdout.strip()
+    except git_util.GitCommandError:
+        return False
 
 
 def _count_failure(st: dict, attempts: int, result: str, error: str) -> dict:
@@ -58,10 +73,17 @@ def sync_branch_with_base(platform, repo_path, base_branch: str, branch: str,
     if st.get("base_synced"):
         return {"result": "skip"}
     attempts = st.get("base_sync_attempts", 0)
+    worktree = None
     if attempts >= MAX_BASE_SYNC_ATTEMPTS:
-        return {"result": "capped", "attempts": attempts}
+        if not blocked_by_dirty_worktree(st):
+            return {"result": "capped", "attempts": attempts}
+        worktree = ensure_worktree()
+        if not worktree_is_clean(worktree):
+            return {"result": "capped", "attempts": attempts}
+        attempts = st["base_sync_attempts"] = 0
+        st.pop("last_base_error", None)
 
-    worktree = ensure_worktree()
+    worktree = worktree or ensure_worktree()
     if not worktree:
         return _count_failure(st, attempts, "no_worktree", "no worktree for the PR branch")
     fetch = subprocess.run(["git", "fetch", "origin", base_branch],
@@ -86,7 +108,7 @@ def sync_branch_with_base(platform, repo_path, base_branch: str, branch: str,
                 "attempts": st.get("base_sync_attempts", 0), "capped": False}
     if dirty:
         files = ", ".join(ln.strip().split(maxsplit=1)[-1] for ln in dirty.splitlines()[:5])
-        error = f"worktree has uncommitted changes ({files}); merge would overwrite them"
+        error = f"{DIRTY_WORKTREE_ERROR} ({files}); merge would overwrite them"
         st["base_sync_attempts"] = MAX_BASE_SYNC_ATTEMPTS
         st["last_base_error"] = error
         return {"result": "dirty_worktree", "error": error,

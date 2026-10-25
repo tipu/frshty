@@ -3320,6 +3320,13 @@ def _ensure_pr_worktree(config, ticket, ts, pr, base_url) -> Path | None:
     return made
 
 
+def _existing_pr_worktree(config, ts, pr, repo_path) -> Path | None:
+    wt = ticket_worktree_path(config, ts.get("slug") or "", pr["repo"])
+    if wt.is_dir():
+        return wt
+    return git_util.worktree_holding_branch(Path(repo_path), pr.get("branch") or ts.get("branch", ""))
+
+
 def _pr_base_moved(config, ts) -> bool:
     sync_state = ts.get("base_sync", {})
     for pr in ts.get("prs", []):
@@ -3335,6 +3342,9 @@ def _pr_base_moved(config, ts) -> bool:
         if st.get("base_synced"):
             continue
         if st.get("base_sync_attempts", 0) >= branch_sync.MAX_BASE_SYNC_ATTEMPTS:
+            if branch_sync.blocked_by_dirty_worktree(st) and branch_sync.worktree_is_clean(
+                    _existing_pr_worktree(config, ts, pr, repo_path)):
+                return True
             continue
         return True
     return False
