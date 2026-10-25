@@ -5,6 +5,7 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 import core.comments as comments
+import core.git_util as git_util
 import core.db as db
 import core.state as state
 from features import own_prs
@@ -2152,3 +2153,54 @@ class TestCachePrMetadata:
         seen = {}
         own_prs._cache_pr_metadata(platform, make_pr(), seen)
         assert seen["ci"] == "unknown"
+
+
+class TestPrWorktreeIsOwned:
+    """Observed on a monorepo PR (2026-10-22): an agent's task worktree held the
+    PR branch with uncommitted edits. _ensure_worktree handed that worktree to
+    the base sync, which refused the dirty tree on every base move, so the PR
+    stayed in conflict."""
+
+    def _repo(self, tmp_path):
+        seed = tmp_path / "seed"
+        subprocess.run(["git", "init", "-q", "-b", "main", str(seed)], check=True)
+        (seed / "a.py").write_text("one\n")
+        subprocess.run(["git", "-C", str(seed), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(seed), "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-q", "-m", "base"], check=True)
+        subprocess.run(["git", "-C", str(seed), "branch", "fix/thing"], check=True)
+        origin = tmp_path / "origin.git"
+        subprocess.run(["git", "clone", "-q", "--bare", str(seed), str(origin)], check=True)
+        repo = tmp_path / "repo"
+        subprocess.run(["git", "clone", "-q", str(origin), str(repo)], check=True)
+        return repo
+
+    def test_a_dirty_holder_is_not_borrowed(self, tmp_path):
+        repo = self._repo(tmp_path)
+        holder = tmp_path / "agent_wt"
+        subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", str(holder), "fix/thing"],
+                       check=True)
+        (holder / "a.py").write_text("agent edit\n")
+        config = {"_state_dir": tmp_path / "state"}
+
+        with patch("features.own_prs.get_repos", return_value=[{"name": "svc", "path": repo}]):
+            wt = own_prs._ensure_worktree(config, make_pr(repo="svc", branch="fix/thing"))
+
+        assert wt is not None
+        assert wt.resolve() != holder.resolve()
+        assert git_util.run_git(wt, ["status", "--porcelain"]).stdout == ""
+        assert (holder / "a.py").read_text() == "agent edit\n"
+
+    def test_reuse_drops_leftovers_of_an_earlier_run(self, tmp_path):
+        repo = self._repo(tmp_path)
+        config = {"_state_dir": tmp_path / "state"}
+        pr = make_pr(repo="svc", branch="fix/thing")
+
+        with patch("features.own_prs.get_repos", return_value=[{"name": "svc", "path": repo}]):
+            wt = own_prs._ensure_worktree(config, pr)
+            (wt / "a.py").write_text("half a fix\n")
+            (wt / "run_tests.sh").write_text("echo\n")
+            again = own_prs._ensure_worktree(config, pr)
+
+        assert again == wt
+        assert git_util.run_git(wt, ["status", "--porcelain"]).stdout == ""
