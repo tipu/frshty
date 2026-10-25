@@ -6,9 +6,12 @@ merge-ready on it, so a rerun that went pending, red or stalled left a ticket
 merged and reported as green."""
 from unittest.mock import MagicMock, patch
 
+import core.state as state
+import core.tasks.tickets as T
 import features.ticket_states as ticket_states
 import features.tickets as tickets
 from features.platforms import BitbucketPlatform
+from core.tasks.registry import TaskContext
 from tests.conftest import make_ticket, make_ticket_state
 
 
@@ -89,6 +92,123 @@ class TestMonitorCI:
              patch("features.platforms.log"):
             result = p.monitor_ci({"key": "DEV-1"}, _green_ts(), "http://base")
         assert result["ci_passed"] is True
+
+
+class TestUnrelatedHold:
+    def test_a_held_pr_does_not_hide_a_real_failure_on_a_later_pr(self):
+        p = _bb_platform()
+        ts = _green_ts(prs=[{"repo": "r", "id": 1, "url": "u"},
+                            {"repo": "s", "id": 2, "url": "v"}],
+                       ci_unrelated_checks={"r/1": ["Pipeline"]})
+        red = [{"name": "Pipeline", "state": "FAILED", "url": ""}]
+        with patch.object(p, "get_pr_checks", return_value=red), \
+             patch("features.platforms.log"):
+            result = p.monitor_ci({"key": "DEV-1"}, ts, "http://base")
+        assert result["_ci_failed"] is True
+        assert result["pr"]["id"] == 2
+
+    def test_a_ticket_held_only_on_unrelated_checks_is_flagged(self):
+        p = _bb_platform()
+        ts = _green_ts(prs=[{"repo": "r", "id": 1, "url": "u"},
+                            {"repo": "s", "id": 2, "url": "v"}],
+                       ci_unrelated_checks={"r/1": ["Pipeline"]})
+        checks = {1: [{"name": "Pipeline", "state": "FAILED", "url": ""}],
+                  2: [{"name": "Pipeline", "state": "SUCCESS", "url": ""}]}
+        with patch.object(p, "get_pr_checks", side_effect=lambda repo, i: checks[i]), \
+             patch("features.platforms.log"):
+            result = p.monitor_ci({"key": "DEV-1"}, ts, "http://base")
+        assert result["pr"]["id"] == 1
+        with patch("features.tickets.log"), patch("features.tickets._enqueue_stage") as eq:
+            out = tickets._handle_ci_failure({"key": "DEV-1"}, ts, result["pr"],
+                                             result["checks"], "http://base", "inst")
+        assert out["ci_held_unrelated"] is True
+        assert "_ci_failed_pending" not in out
+        eq.assert_not_called()
+
+    def test_a_new_commit_on_a_later_held_pr_gets_a_fresh_triage(self):
+        p = _bb_platform()
+        ts = _green_ts(prs=[{"repo": "r", "id": 1, "url": "u"},
+                            {"repo": "s", "id": 2, "url": "v"}],
+                       ci_unrelated_checks={"r/1": ["build"], "s/2": ["build"]},
+                       ci_fix_heads={"r/1": "a", "s/2": "b"})
+        info = {("r", 1): {"head_sha": "a"}, ("s", 2): {"head_sha": "c"}}
+        red = [{"name": "build", "state": "FAILED", "url": ""}]
+        tickets._drop_stale_unrelated(ts, info)
+        with patch.object(p, "get_pr_checks", return_value=red), \
+             patch("features.platforms.log"):
+            result = p.monitor_ci({"key": "DEV-1"}, ts, "http://base")
+        assert result["pr"]["id"] == 2
+        with patch("features.tickets.log"), patch("features.tickets._enqueue_stage") as eq, \
+             patch("features.tickets.state"):
+            out = tickets._handle_ci_failure({"key": "DEV-1"}, ts, result["pr"], red,
+                                             "http://base", "inst", head_sha="c")
+        assert "ci_held_unrelated" not in out
+        assert out["_ci_failed_pending"] is True
+        eq.assert_called_once_with("inst", "DEV-1", "fix_ci_failures")
+
+    def test_an_unrecorded_head_keeps_the_verdict(self):
+        ts = _green_ts(ci_unrelated_checks={"r/1": ["build"]})
+        tickets._drop_stale_unrelated(ts, {("r", 1): {"head_sha": "c"}})
+        assert ts["ci_unrelated_checks"] == {"r/1": ["build"]}
+
+    def test_an_unrelated_verdict_records_the_head_it_judged(self, tmp_state):
+        prs = [{"repo": "r", "id": 1, "url": "u"}, {"repo": "s", "id": 2, "url": "v"}]
+        state.save_ticket("DEV-1", {"status": "in_review", "slug": "dev-1", "prs": prs,
+                                    "_ci_failed_pending": True,
+                                    "ci_fix_heads": {"r/1": "a"}})
+        platform = MagicMock()
+        platform.get_pr_info.side_effect = lambda repo, i: {"head_sha": {1: "a", 2: "b"}[i]}
+        outcome = {"result": "unrelated", "failed_names": ["build"], "reason": "base"}
+        ctx = TaskContext(instance_key="", ticket_key="DEV-1", task="fix_ci_failures",
+                          payload={}, job_id=0, triggering_event_id=None,
+                          config={"_base_url": "http://base"}, registry=None, now=None)
+        with patch("core.tasks.tickets.make_platform", return_value=platform), \
+             patch("core.tasks.tickets._ensure_pr_worktree", return_value="/wt"), \
+             patch("features.pr_ci.triage_and_fix_pr", return_value=outcome), \
+             patch("core.tasks.tickets.log"):
+            T.fix_ci_failures(ctx)
+        saved = state.load_ticket("DEV-1")
+        assert saved["ci_fix_heads"] == {"r/1": "a", "s/2": "b"}
+        assert saved["ci_unrelated_checks"] == {"r/1": ["build"], "s/2": ["build"]}
+
+    def test_a_head_that_moves_during_triage_discards_the_verdict(self, tmp_state):
+        prs = [{"repo": "r", "id": 1, "url": "u"}]
+        state.save_ticket("DEV-1", {"status": "in_review", "slug": "dev-1", "prs": prs,
+                                    "_ci_failed_pending": True})
+        platform = MagicMock()
+        platform.get_pr_info.side_effect = [{"head_sha": "h1"}, {"head_sha": "h2"}]
+        outcome = {"result": "unrelated", "failed_names": ["build"], "reason": "base"}
+        ctx = TaskContext(instance_key="", ticket_key="DEV-1", task="fix_ci_failures",
+                          payload={}, job_id=0, triggering_event_id=None,
+                          config={"_base_url": "http://base"}, registry=None, now=None)
+        with patch("core.tasks.tickets.make_platform", return_value=platform), \
+             patch("core.tasks.tickets._ensure_pr_worktree", return_value="/wt"), \
+             patch("features.pr_ci.triage_and_fix_pr", return_value=outcome), \
+             patch("core.tasks.tickets.log") as log:
+            T.fix_ci_failures(ctx)
+        saved = state.load_ticket("DEV-1")
+        assert "ci_unrelated_checks" not in saved
+        assert log.emit.call_args.args[0] == "ticket_checks_unrelated_discarded"
+
+    def test_a_green_poll_forgets_the_unrelated_verdicts(self):
+        p = _bb_platform()
+        ts = _green_ts(ci_unrelated_checks={"r/1": ["build"]})
+        green = [{"name": "build", "state": "SUCCESS", "url": ""}]
+        with patch.object(p, "get_pr_checks", return_value=green), \
+             patch("features.platforms.log"):
+            result = p.monitor_ci({"key": "DEV-1"}, ts, "http://base")
+        assert result["ci_passed"] is True
+        assert "ci_unrelated_checks" not in result
+
+    def test_a_failure_outside_the_unrelated_set_clears_the_flag(self):
+        ts = _green_ts(ci_held_unrelated=True, ci_unrelated_checks={"r/1": ["lint"]})
+        checks = [{"name": "tests", "state": "FAILED", "url": ""}]
+        with patch("features.tickets.log"), patch("features.tickets._enqueue_stage"), \
+             patch("features.tickets.state"):
+            out = tickets._handle_ci_failure({"key": "DEV-1"}, ts, ts["prs"][0],
+                                             checks, "http://base", "inst")
+        assert "ci_held_unrelated" not in out
+        assert out["_ci_failed_pending"] is True
 
 
 def _reconciled(config, ticket, ts, base_url, **kwargs):

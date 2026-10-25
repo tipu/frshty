@@ -95,7 +95,7 @@ class TicketState(TypedDict, total=False):
     - PR markers: prs, pr_scheduled_at, pr_attempts, pr_failed_reason
     - conflict markers: conflict_resolution_attempts, last_conflict_error
     - CI markers: ci_fix_attempts, ci_fix_heads, ci_passed, checks_started_at,
-      _ci_failed_pending, _ci_timeout_state
+      _ci_failed_pending, _ci_timeout_state, ci_held_unrelated
     - comment markers: last_comment_ids, comment_fix_attempts
     - scope review markers: scope_review
     - misc: llm_sessions
@@ -134,6 +134,7 @@ class TicketState(TypedDict, total=False):
     checks_started_at: str
     _ci_failed_pending: bool
     _ci_timeout_state: dict
+    ci_held_unrelated: bool
     last_comment_ids: dict
     comment_fix_attempts: dict
     scope_review: dict
@@ -469,6 +470,8 @@ def _handle_in_review_ticket(
 
     if ts["status"] == "in_review":
         platform = _t.make_platform(config)
+        ts.pop("ci_held_unrelated", None)
+        _t._drop_stale_unrelated(ts, pr_info_map)
         result = platform.monitor_ci(ticket, ts, base_url)
         if result.get("_ci_failed"):
             failed_pr = result["pr"]

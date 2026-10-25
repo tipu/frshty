@@ -27,7 +27,7 @@ from core.llm import NO_PUBLISH_RULE
 from core.commit_message import COMMIT_SUBJECT_RULE, commit_subject, merge_message_args
 from core.ticket_status import TicketStatus, can_transition, transition
 from features.platforms import make_platform
-from features.pr_ci import ci_summary, FAILED_STATES, KEEP_GREEN_RULE
+from features.pr_ci import ci_summary, failing_check_names, held_unrelated, KEEP_GREEN_RULE
 from features.ticket_systems import make_ticket_system
 
 
@@ -1357,6 +1357,8 @@ def check(config: dict, instance_key: str = ""):
     - ci_unrelated_checks: per-PR ("repo/id" keyed) check names triaged as not
       caused by our changes; _handle_ci_failure skips re-triage while the
       failing PR's set is covered, cleared whenever a new commit is pushed.
+    - ci_held_unrelated: set by _handle_ci_failure while every failing check
+      on the failing PR is in ci_unrelated_checks; cleared before each CI poll.
     - _ci_failed_pending: queued/running CI-fix marker.
     - _ci_timeout_state: transient CI-stall state cleared before re-poll.
     - last_comment_ids: per-PR review-comment cursor.
@@ -3471,9 +3473,24 @@ def _merge(config, ticket, ts, base_url, force: bool = False) -> dict:
     return ts
 
 
+def _drop_stale_unrelated(ts: dict, pr_info_map: dict) -> None:
+    """Forget the unrelated verdict of every PR whose head moved since the CI
+    fix path last saw it, so a new commit on any PR gets a fresh triage."""
+    unrelated = ts.get("ci_unrelated_checks")
+    if not isinstance(unrelated, dict):
+        return
+    heads = ts.get("ci_fix_heads") or {}
+    for (repo, pr_id), info in pr_info_map.items():
+        pr_key = f"{repo}/{pr_id}"
+        head = (info or {}).get("head_sha", "")
+        if pr_key in unrelated and head and heads.get(pr_key) and heads[pr_key] != head:
+            unrelated.pop(pr_key)
+
+
 def _handle_ci_failure(ticket, ts, pr, checks, base_url, instance_key="", head_sha="") -> dict:
     ts.pop("ci_passed", None)
-    failed_names = [c["name"] for c in checks if c["state"].upper() in FAILED_STATES]
+    ts.pop("ci_held_unrelated", None)
+    failed_names = failing_check_names(checks)
 
     heads = ts.get("ci_fix_heads") or {}
     pr_key = f"{pr['repo']}/{pr['id']}"
@@ -3488,9 +3505,8 @@ def _handle_ci_failure(ticket, ts, pr, checks, base_url, instance_key="", head_s
         ts["ci_fix_heads"] = heads
         ts.pop("ci_unrelated_checks", None)
 
-    unrelated = ts.get("ci_unrelated_checks") or {}
-    unrelated_for_pr = unrelated.get(pr_key, []) if isinstance(unrelated, dict) else []
-    if failed_names and set(failed_names) <= set(unrelated_for_pr):
+    if held_unrelated(ts, pr, checks):
+        ts["ci_held_unrelated"] = True
         return ts
 
     fix_attempts = ts.get("ci_fix_attempts", 0)

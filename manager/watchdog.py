@@ -34,6 +34,10 @@ timesheet_underfilled are reports, not stalls. pr_comments_needs_reply looks
 like a fault and is not one: features/tickets.py:2473 assigns needs_reply
 precisely when a comment is a question rather than a change request, so the
 human reply is the designed next step, not a step that failed.
+An in_review_no_ci ticket whose only red checks were triaged as not caused
+by the ticket (ci_held_unrelated) is left out for the same reason: the fix
+belongs on the base branch or to the person who merges, and /today still
+lists it.
 """
 import os
 import re
@@ -175,6 +179,7 @@ def _entries(bucket: str, instance_key: str, config: dict) -> list[Entry]:
                   f"ci_fix_attempts={r.get('ci_fix_attempts', 0)},"
                   f" discovered_at={r.get('discovered_at') or 'unrecorded'}")
             for r in staleness.in_review_no_ci(instance_key)
+            if not r.get("ci_held_unrelated")
         ]
     if bucket == "stale_unattended":
         return [
