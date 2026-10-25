@@ -20,7 +20,7 @@ import core.queue as q
 import core.state as state
 from core.claude_runner import run_agentic, run_balanced, run_claude_code, extract_json
 from core.commit_message import COMMIT_SUBJECT_RULE, branch_key, commit_subject, keyed
-from core.config import base_branch_for, get_repos
+from core.config import get_repos
 from core.llm import CODEX_EXEC, READ_ONLY_TOOLS, WRITE_TOOLS, run_external_model
 from features.pr_ci import KEEP_GREEN_RULE
 from features.platforms import make_platform
@@ -438,7 +438,7 @@ def _ensure_worktree(config: dict, pr: dict) -> Path | None:
             return None
         git_util.run_git(worktree_path, ["fetch", "origin", pr["branch"]])
         git_util.run_git(worktree_path, ["reset", "--hard", f"origin/{pr['branch']}"])
+        git_util.run_git(worktree_path, ["clean", "-fd"])
         return worktree_path
 
-    base_branch = base_branch_for(config, pr["repo"])
-    return git_util.add_or_reuse_worktree(repo_path, worktree_path, pr["branch"], base_branch=base_branch)
+    return git_util.add_detached_worktree(repo_path, worktree_path, pr["branch"])

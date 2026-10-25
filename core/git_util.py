@@ -304,6 +304,30 @@ def add_or_reuse_worktree(repo_path: Path, worktree_path: Path, branch: str,
     return holder if holder.is_dir() else None
 
 
+def add_detached_worktree(repo_path: Path, worktree_path: Path, branch: str,
+                          timeout: int = 60) -> Path | None:
+    """Create a worktree at `worktree_path` on a detached HEAD at origin/`branch`.
+
+    A PR poller owns the worktree it writes to. `add_or_reuse_worktree` hands
+    out the worktree that already holds the branch, which can be an agent's
+    task worktree with that agent's uncommitted edits and unpushed commits in
+    it. The base sync then refuses the dirty tree on every base move and the PR
+    stays in conflict, and a fix committed there cannot be pushed because the
+    holder is behind the remote branch. A detached HEAD holds no branch, so
+    the add succeeds while another worktree has the branch checked out, and
+    push_branch pushes HEAD to the branch by name. Returns None when the
+    branch cannot be fetched or the worktree cannot be added."""
+    worktree_path.parent.mkdir(parents=True, exist_ok=True)
+    fetched = run_git_status(repo_path, ["fetch", "origin", branch], timeout=timeout)
+    if fetched.returncode != 0:
+        return None
+    prune_worktrees(repo_path, timeout=timeout)
+    added = run_git_status(
+        repo_path, [*WORKTREE_ADD, "--detach", str(worktree_path), f"origin/{branch}"],
+        timeout=timeout)
+    return worktree_path if added.returncode == 0 else None
+
+
 def pre_commit_candidates(repo_dir: Path) -> list[Path]:
     """Every path `_find_pre_commit` would consider, in preference order.
 
