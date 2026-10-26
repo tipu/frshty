@@ -132,3 +132,22 @@ def test_claude_config_dir_is_mounted_and_named_for_the_aliases(host, tmp_path):
     assert instance.claude_config_dir(c) == account
     assert (str(account), str(account), False) in instance.mounts(c, config_path, root)
     assert instance.claude_config_dir(config(slack, workspace)) is None
+
+
+def test_opencode_binary_and_state_are_mounted_only_when_installed(host, tmp_path, monkeypatch):
+    slack, root, workspace, config_path = host
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(instance, "HOME", home)
+    c = config(slack, workspace)
+    assert not any(inside == "/usr/local/bin/opencode"
+                   for _, inside, _ in instance.mounts(c, config_path, root))
+    binary = home / ".opencode" / "bin" / "opencode"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("")
+    (home / ".config" / "opencode").mkdir(parents=True)
+    (home / ".local" / "share" / "opencode").mkdir(parents=True)
+    binds = instance.mounts(c, config_path, root)
+    assert (str(binary), "/usr/local/bin/opencode", True) in binds
+    for name in (".config/opencode", ".local/share/opencode"):
+        assert (str(home / name), str(home / name), False) in binds

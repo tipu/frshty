@@ -2,7 +2,7 @@
 
 When a ticket finishes its implementation and before it proves itself, and
 again whenever the branch gains code while its PR is in review, three
-independent reviewers (claude, codex, agy) answer the same question from one
+independent reviewers (claude, codex, agy, deepseek) answer the same question from one
 byte-identical, path-only prompt: does every change on the branch serve the
 ticket, and does the branch carry unrelated changes that indicate a git
 problem (wrong or stale base, foreign commits, a polluted worktree)?
@@ -27,6 +27,7 @@ from core.consensus_plan import _fan_out, _run_stamp
 from core.llm import rules_directive
 
 SCOPE_FANOUT_TIMEOUT = 1800
+SCOPE_VOICES = ("claude", "codex", "agy", "deepseek")
 
 _SCOPE_VERDICT_RE = re.compile(r"^[ \t>*_`]*SCOPE VERDICT:[ \t*_`]*(PASS|FAIL)(?![A-Za-z0-9])",
                                re.MULTILINE | re.IGNORECASE)
@@ -161,7 +162,7 @@ def _write_report(ticket_dir: Path, ticket_key: str, votes: dict[str, str],
 
 def run_scope_review(config: dict, ticket_dir: Path, slug: str, *,
                      ticket_key: str = "") -> tuple[str | None, str]:
-    """Fan the scope question out to claude/codex/agy from one byte-identical
+    """Fan the scope question out to claude/codex/agy/deepseek from one byte-identical
     prompt, vote the verdicts, and write docs/scope-review.md. Returns
     (verdict, reason): verdict is "pass" or "fail", or None when no voice
     produced a usable verdict. FAIL wins a tie so a split vote holds the
@@ -185,7 +186,7 @@ def run_scope_review(config: dict, ticket_dir: Path, slug: str, *,
     (run_dir / "composed-prompt.md").write_text(prompt)
 
     results = _fan_out(prompt, ticket_dir, run_dir, include_dirs,
-                       SCOPE_FANOUT_TIMEOUT)
+                       SCOPE_FANOUT_TIMEOUT, voices=SCOPE_VOICES)
     votes: dict[str, str] = {}
     dropped: dict[str, str] = {}
     for name, r in results.items():

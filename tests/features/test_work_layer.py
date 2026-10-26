@@ -423,6 +423,25 @@ class TestIntake:
         assert f"runs past {work_store.TLDR_LONG_WORDS} words" in context
         assert "<stem>-tldr.html" in context
 
+    def test_intake_adds_deepseek_to_every_consensus(self, tmp_path, monkeypatch):
+        from unittest.mock import patch, MagicMock
+        from services import work_artifacts
+        monkeypatch.setattr(work_artifacts, "root", lambda: tmp_path / "artifact-store")
+        reg = MagicMock()
+        reg.config = {"workspace": {"root": tmp_path}}
+        instances = MagicMock()
+        instances.get.return_value = reg
+        with patch("services.work_launch.runtime.instances", return_value=instances), \
+             patch("services.work_launch.terminal.launch_claude") as mock_launch, \
+             patch("services.work_launch.terminal.session_healthy", return_value={"alive": True, "agent_running": True}):
+            client = self._client()
+            r = client.post("/api/work/intake", json={"text": "confer with the boys on this plan"})
+        assert r.status_code == 200, r.text
+        context = mock_launch.call_args.args[3]
+        assert work_store.CONFER_RULE in context
+        assert "confer with the boys" in work_store.CONFER_RULE
+        assert "opencode run -m openrouter/deepseek/deepseek-v4.1-flash" in context
+
     def test_intake_launch_failure_marks_item(self, tmp_path):
         from unittest.mock import patch, MagicMock
         reg = MagicMock()
