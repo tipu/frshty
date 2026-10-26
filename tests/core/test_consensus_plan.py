@@ -117,6 +117,29 @@ def test_fanout_builds_expected_commands(tmp_path, monkeypatch):
     cdx = recorded["codex"]
     assert "--skip-git-repo-check" in cdx["cmd"] and "-o" in cdx["cmd"]
     assert "--dangerously-bypass-approvals-and-sandbox" in cdx["cmd"]
+    assert "deepseek" not in results and "deepseek" not in recorded
+
+
+def test_fanout_runs_deepseek_through_opencode_when_named(tmp_path, monkeypatch):
+    recorded = {}
+
+    def fake_external(cmd, *, fn_name, model, prompt, **kw):
+        recorded[model] = {"cmd": cmd, "kw": kw}
+        return REAL_PLAN, 0
+
+    monkeypatch.setattr(cp, "run_external_model", fake_external)
+    monkeypatch.setattr(cp, "run_thinking", lambda prompt, **kw: REAL_PLAN)
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    results = cp._fan_out("PROMPT", tmp_path, run_dir, [str(tmp_path)], 30,
+                          voices=("claude", "codex", "agy", "deepseek"))
+
+    assert set(results) == {"claude", "codex", "agy", "deepseek"}
+    assert results["deepseek"]["valid"]
+    assert recorded["deepseek"]["cmd"] == ["opencode", "run", "-m",
+                                           "openrouter/deepseek/deepseek-v4.1-flash"]
+    assert recorded["deepseek"]["kw"]["stdin_text"] == "PROMPT"
 
 
 def test_quorum_degrades_to_claude_only_when_others_unavailable(tmp_path, monkeypatch):

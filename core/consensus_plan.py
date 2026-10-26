@@ -28,6 +28,7 @@ import core.log as log
 from core.config import get_repos, ticket_rules_files, ticket_worktree_path
 from core.llm import (
     CODEX_EXEC,
+    DEEPSEEK_RUN,
     NO_PUBLISH_RULE,
     rules_directive,
     run_thinking,
@@ -83,10 +84,14 @@ def _capture_baselines(config: dict, slug: str) -> dict[str, tuple[Path, str]]:
     return baselines
 
 
+PLAN_VOICES = ("claude", "codex", "agy")
+
+
 def _fan_out(prompt: str, ticket_dir: Path, run_dir: Path,
-             include_dirs: list[str], timeout: int) -> dict[str, dict]:
-    """Run the same prompt through codex, agy, and claude in parallel.
-    Returns {model: {"text", "valid", "reason"}}."""
+             include_dirs: list[str], timeout: int,
+             voices: tuple[str, ...] = PLAN_VOICES) -> dict[str, dict]:
+    """Run the same prompt through every named voice (claude, codex, agy,
+    deepseek) in parallel. Returns {model: {"text", "valid", "reason"}}."""
 
     def _claude() -> tuple[str | None, int | None]:
         text = run_thinking(prompt, cwd=ticket_dir, timeout=timeout)
@@ -114,9 +119,20 @@ def _fan_out(prompt: str, ticket_dir: Path, run_dir: Path,
             transcript_file=run_dir / "agy-transcript.txt",
         )
 
-    runners = {"claude": _claude, "codex": _codex, "agy": _agy}
+    def _deepseek() -> tuple[str | None, int | None]:
+        return run_external_model(
+            DEEPSEEK_RUN,
+            fn_name="ctp_deepseek", model="deepseek", prompt=prompt,
+            cwd=ticket_dir, timeout=timeout,
+            transcript_file=run_dir / "deepseek-transcript.txt",
+            stdin_text=prompt,
+        )
+
+    runners = {name: fn for name, fn in {
+        "claude": _claude, "codex": _codex, "agy": _agy, "deepseek": _deepseek,
+    }.items() if name in voices}
     results: dict[str, dict] = {}
-    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(runners)) as pool:
         futures = {pool.submit(fn): name for name, fn in runners.items()}
         for fut in concurrent.futures.as_completed(futures):
             name = futures[fut]
