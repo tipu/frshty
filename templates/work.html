@@ -281,6 +281,17 @@
 
     <aside style="display:flex;flex-direction:column;gap:12px">
       <div class="ln-card">
+        <div class="ln-card-head">Todo</div>
+        <div class="ln-todo-row" v-for="t in todos" :key="t.id">
+          <span class="ln-todo-text">{{ t.text }}</span>
+          <button class="ln-btn ln-btn-sm ln-btn-ghost" title="remove this item" @click="removeTodo(t)">×</button>
+        </div>
+        <form class="ln-card-body" @submit.prevent="addTodo">
+          <input class="wintake" style="box-sizing:border-box" v-model="todoText" placeholder="Add an item and press Enter" />
+          <div class="ln-small" style="color:var(--ln-red);margin-top:6px" v-if="todoError">{{ todoError }}</div>
+        </form>
+      </div>
+      <div class="ln-card">
         <div class="ln-card-head">
           Active threads
           <a class="ln-link ln-small" style="margin-left:auto" href="/threads">View all</a>
@@ -338,7 +349,7 @@ frshtyApp({
       intakeTray: PasteImages.tray(), fupTray: {},
       intakeAgent: localStorage.getItem("workAgent") || "claude",
       diskReports: {},
-      connError: "", replyText: {}, sumOpen: {}, approveBusy: {}, propText: {}, linkmap: null, threads: [],
+      connError: "", replyText: {}, sumOpen: {}, approveBusy: {}, propText: {}, linkmap: null, threads: [], todos: [], todoText: "", todoError: "",
       fupOpen: {}, fupText: {}, fupBusy: {}, fupError: {}, fupLaunched: {},
       peers: [], peerMeta: {}, peerErrors: {}, peerLinkmaps: {},
       searchText: "", projectFilter: JSON.parse(localStorage.getItem("workProjectFilter") || "[]"),
@@ -626,6 +637,38 @@ frshtyApp({
       } catch (e) {
         this.peers = [];
       }
+    },
+    async loadTodos() {
+      try {
+        const r = await fetch("/api/work/todo");
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        this.todos = (await r.json()).items || [];
+        this.todoError = "";
+      } catch (e) {
+        this.todoError = "Could not load the todo list: " + e.message;
+      }
+    },
+    async todoPost(url, body) {
+      try {
+        const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" },
+                                     body: JSON.stringify(body || {}) });
+        const d = await r.json().catch(() => ({}));
+        if (!r.ok) throw new Error(d.error || ("HTTP " + r.status));
+        this.todos = d.items || [];
+        this.todoError = "";
+        return true;
+      } catch (e) {
+        this.todoError = e.message;
+        return false;
+      }
+    },
+    async addTodo() {
+      const text = this.todoText.trim();
+      if (!text) return;
+      if (await this.todoPost("/api/work/todo", { text })) this.todoText = "";
+    },
+    async removeTodo(t) {
+      await this.todoPost("/api/work/todo/" + encodeURIComponent(t.id) + "/delete");
     },
     async loadThreads() {
       const perSource = await Promise.all(this.hosts().map(async key => {
@@ -932,7 +975,7 @@ frshtyApp({
     const b = document.getElementById("boot-error");
     if (b) b.remove();
     Promise.all([this.loadConfig(), this.loadPeers()]).then(() => {
-      this.loadLinkmap(); this.refresh(); this.loadThreads(); this.loadDisk();
+      this.loadLinkmap(); this.refresh(); this.loadThreads(); this.loadTodos(); this.loadDisk();
       setInterval(() => this.loadDisk(), 600000);
       setInterval(() => { this.refresh(); this.loadThreads(); }, 15000);
     });
