@@ -1,6 +1,8 @@
 import mimetypes
 import os
 import shlex
+import threading
+import uuid
 
 from fastapi import APIRouter, Body, Request, WebSocket
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
@@ -8,6 +10,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
 
 import core.db as db
 import core.log as log
+import core.state as state
 import core.terminal as terminal
 from services import (disk_usage, work_artifacts, work_debrief, work_launch,
                       work_peers, work_store, work_tickets, work_worktree)
@@ -99,6 +102,42 @@ async def ws_work_peer_terminal(websocket: WebSocket, key: str, term_key: str):
         await websocket.close(code=1008, reason="opaque origin")
         return
     await work_peers.relay_terminal(websocket, key, term_key)
+
+
+TODO_KV_KEY = "work_todo"
+_todo_lock = threading.Lock()
+
+
+def _todo_items() -> list:
+    return state.load(TODO_KV_KEY).get("items") or []
+
+
+@router.get("/api/work/todo")
+def api_work_todo():
+    return {"items": _todo_items()}
+
+
+@router.post("/api/work/todo")
+def api_work_todo_add(body: dict):
+    text = (body.get("text") or "").strip()
+    if not text:
+        return JSONResponse({"error": "todo text is empty"}, status_code=400)
+    with _todo_lock:
+        items = _todo_items()
+        items.append({"id": uuid.uuid4().hex, "text": text})
+        state.save(TODO_KV_KEY, {"items": items})
+    return {"items": items}
+
+
+@router.post("/api/work/todo/{todo_id}/delete")
+def api_work_todo_delete(todo_id: str):
+    with _todo_lock:
+        items = _todo_items()
+        kept = [it for it in items if it.get("id") != todo_id]
+        if len(kept) == len(items):
+            return JSONResponse({"error": "no such todo"}, status_code=404)
+        state.save(TODO_KV_KEY, {"items": kept})
+    return {"items": kept}
 
 
 @router.get("/api/work/threads")
