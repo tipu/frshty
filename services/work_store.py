@@ -102,6 +102,14 @@ BUDGET_SPENT_PROMPT = (
     "that names what remains, and end your turn. The board does not continue "
     "this run again until the operator replies."
 )
+CONFER_RULE = (
+    "When the objective says to confer with the boys, or asks for a "
+    "multi-model consensus or an adversarial review, add deepseek as one more "
+    "voice beside the others: run `opencode run -m "
+    f"{llm.DEEPSEEK_REVIEWER_MODEL} \"<prompt>\" < /dev/null` with the same "
+    "prompt the other voices get, and weigh its answer like theirs. opencode "
+    "waits for its standard input to close, so keep the redirect. "
+)
 TLDR_LONG_WORDS = 1200
 TLDR_RULE = (
     "Open every such document with a TL;DR section: put it first on the page, "
