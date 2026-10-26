@@ -417,7 +417,7 @@ def test_a_first_start_schedules_global_watch_one_interval_out(tmp_path):
 
 def _seed_pending():
     for key, status in [("A-1", "planning"), ("A-2", "in_review"), ("A-3", "in_review"),
-                        ("A-4", "done"), ("A-5", "pr_ready")]:
+                        ("A-4", "done"), ("A-5", "pr_ready"), ("A-6", "tests_failed")]:
         db.execute("INSERT INTO tickets (instance_key, ticket_key, status, updated_at) VALUES (?, ?, ?, ?)",
                    ("apexco", key, status, RECENT))
     db.execute("INSERT INTO tickets (instance_key, ticket_key, status, updated_at) VALUES (?, ?, ?, ?)",
@@ -439,7 +439,8 @@ def test_pending_work_splits_unfinished_work_by_who_acts_next(tmp_path):
     assert pending_work.snapshot("apexco") == {
         "agent": {"tickets": {"planning": 1}, "work_items": {"agent_working": 1},
                   "jobs": {"queued": 1, "running": 1}},
-        "person": {"tickets": {"in_review": 2, "pr_ready": 1}, "work_items": {"needs_you": 1}}}
+        "person": {"tickets": {"in_review": 2, "pr_ready": 1, "tests_failed": 1},
+                   "work_items": {"needs_you": 1}}}
 
 
 def test_pending_work_leaves_out_the_job_that_asks(tmp_path):
