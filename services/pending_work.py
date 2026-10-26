@@ -7,7 +7,7 @@ import core.db as db
 from services import work_store
 
 AGENT_TICKET_STATUSES = ("new", "researching", "planning", "reviewing", "testing",
-                         "tests_failed", "proving", "validation")
+                         "proving", "validation")
 CLOSED_TICKET_STATUSES = ("done", "epic", "ignored")
 AGENT_WORK_STATES = ("agent_working",)
 OPEN_JOB_STATUSES = ("queued", "running")
