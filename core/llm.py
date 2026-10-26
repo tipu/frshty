@@ -888,6 +888,8 @@ def validate_model_output(text: str | None, *, exit_code: int | None = 0,
 
 CODEX_EXEC = ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox",
               "--skip-git-repo-check"]
+DEEPSEEK_REVIEWER_MODEL = "openrouter/deepseek/deepseek-v4.1-flash"
+DEEPSEEK_RUN = ["opencode", "run", "-m", DEEPSEEK_REVIEWER_MODEL]
 
 
 def run_external_model(cmd: list[str], *, fn_name: str, model: str, prompt: str,
