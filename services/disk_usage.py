@@ -11,7 +11,7 @@ worktree suggestion that holds a git tree counts the uncommitted files in it,
 so the operator sees what a removal would lose.
 
 Nothing here deletes anything. The automatic sweeps in work_worktree.gc and
-work_artifacts.gc_artifacts stay the only code that removes a folder.
+work_artifacts.gc_artifacts stay the only code that deletes from disk.
 
 `refresh` runs `scan` at most once per SCAN_INTERVAL_S from the work board
 scan loop. The usage is high when frshty holds WARN_BYTES or more, or when

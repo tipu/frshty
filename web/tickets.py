@@ -513,15 +513,9 @@ def _submit_pr_sync(ticket_key: str, data: dict):
 
 
 @router.get("/api/tickets/list")
-def api_tickets_list():
-    from datetime import datetime, timedelta, timezone
+def api_tickets_list(include_old: int = 0):
     import core.db as _db
     tickets = state.list_tickets()
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
-    expired = [k for k, v in tickets.items() if v.get("status") == "done" and v.get("done_at") and v.get("done_at") < cutoff]
-    for k in expired:
-        state.delete_ticket(k)
-        del tickets[k]
     instance_key = _config.get("job", {}).get("key", "")
     pm_counts: dict[str, int] = {}
     val_badges: dict[str, str] = {}
@@ -547,7 +541,7 @@ def api_tickets_list():
     out = {}
     slugs: set[str] = set()
     for k, v in tickets.items():
-        if v.get("status") == "done":
+        if v.get("status") == "done" and not include_old:
             continue
         slug = v.get("slug", "")
         v["repo_count"] = _ticket_repo_count(slug)
