@@ -40,6 +40,7 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then python -m playwright i
 
 RUN groupadd -o -g "${HOST_GID}" frshty && \
     useradd -o -m -d "${HOST_HOME}" -s /bin/bash -u "${HOST_UID}" -g "${HOST_GID}" frshty && \
+    install -d -o frshty -g frshty "${HOST_HOME}/.config" "${HOST_HOME}/.local" "${HOST_HOME}/.local/share" "${HOST_HOME}/.local/state" && \
     mkdir -p /run/frshty/seed && \
     ln -s /app/scripts/totp /usr/local/bin/totp && \
     echo '[ -f /app/scripts/shell_aliases ] && . /app/scripts/shell_aliases' >> /etc/bash.bashrc && \

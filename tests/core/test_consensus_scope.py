@@ -99,6 +99,7 @@ class TestRunScopeReview:
             consensus_scope.run_scope_review(scope_config, tmp_path / "tickets" / slug, slug,
                                              ticket_key="PROJ-1")
         prompt = fan_out.call_args.args[0]
+        assert fan_out.call_args.kwargs["voices"] == ("claude", "codex", "agy", "deepseek")
         assert f"- {tmp_path / 'CLAUDE.md'}" in prompt
         assert str(wt / 'CLAUDE.md') not in prompt
 
