@@ -10,8 +10,8 @@ import core.correspondence as correspondence
 import core.db as db
 import core.llm as llm
 import core.log as log
-from services import (disk_usage, work_artifacts, work_launch, work_store,
-                      work_tickets, work_worktree)
+from services import (dir_slim, disk_usage, work_artifacts, work_launch,
+                      work_store, work_tickets, work_worktree)
 
 SCAN_INTERVAL = 60
 DEBRIEF_TIMEOUT = 300
@@ -599,6 +599,10 @@ def _scan_loop():
             work_artifacts.gc_artifacts()
         except Exception as e:
             log.emit("work_artifact_gc_error", f"{type(e).__name__}: {e}")
+        try:
+            dir_slim.sweep()
+        except Exception as e:
+            log.emit("dir_slim_error", f"{type(e).__name__}: {e}")
         try:
             for gone in work_worktree.gc():
                 log.emit("work_worktree_gc",
