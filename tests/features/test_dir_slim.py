@@ -215,6 +215,24 @@ class TestTickets:
         assert (package / ".git").is_dir()
         assert not (ticket_dir / "docs" / "proof.webm").exists()
 
+    def test_slims_a_ticket_under_an_empty_gitfile(self, root):
+        ticket_dir = _ticket(root, "t-7-gitfile", "merged", OLD)
+        (root / ".git").write_text("")
+        results = dir_slim.sweep(force=True)
+        assert [r["path"] for r in results] == [str(ticket_dir)]
+        assert not (ticket_dir / "docs" / "proof.webm").exists()
+        assert not (ticket_dir / "app" / "node_modules").exists()
+
+    def test_keeps_files_a_repo_above_an_empty_gitfile_tracks(self, root, tmp_path):
+        ticket_dir = _ticket(root, "t-8-above", "merged", OLD)
+        _git(tmp_path, "init", "-b", "main")
+        _git(tmp_path, "add", "-f", "ws/tickets/t-8-above/docs/proof.webm")
+        _git(tmp_path, "-c", "user.name=t", "-c", "user.email=t@example.com",
+             "commit", "-m", "proof")
+        (root / ".git").write_text("")
+        dir_slim.sweep(force=True)
+        assert (ticket_dir / "docs" / "proof.webm").exists()
+
 
 def test_never_slims_through_a_symlinked_task_root(tmp_path, wt_root, monkeypatch):
     _, tree = _task(tmp_path, monkeypatch, OLD)
