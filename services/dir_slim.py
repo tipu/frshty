@@ -50,7 +50,17 @@ def _enclosing_repo(top: Path) -> tuple[bool, Path | None]:
     found = git_util.run_git_status(top, ["rev-parse", "--show-toplevel"], timeout=30)
     if found.returncode == 0 and found.stdout.strip():
         return True, Path(found.stdout.strip())
-    return "not a git repository" in (found.stderr or ""), None
+    stderr = found.stderr or ""
+    if "not a git repository" in stderr:
+        return True, None
+    marker = "invalid gitfile format: "
+    if marker not in stderr:
+        return False, None
+    holder = (top / stderr.split(marker, 1)[1].splitlines()[0].strip()).parent
+    if holder.parent == holder:
+        return False, None
+    known, outer = _enclosing_repo(holder.parent)
+    return known and outer is None, None
 
 
 def _raise(error: OSError) -> None:
