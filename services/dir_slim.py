@@ -2,9 +2,10 @@
 
 A task worktree or a ticket directory keeps its dependency trees and its
 recorded videos long after the work on it ends. `sweep` deletes every
-directory named in SLIM_DIRS and every file whose suffix is in SLIM_SUFFIXES
+directory named in SLIM_DIRS or starting with a prefix in SLIM_DIR_PREFIXES,
+and every file whose suffix is in SLIM_SUFFIXES,
 once the work has been finished for SLIM_AFTER_DAYS. The worktree and the
-ticket directory stay. An install makes the dependencies again.
+ticket directory stay. An install or a build makes them again.
 
 A task worktree qualifies when every work item that ran in it is closed or
 archived, was last updated SLIM_AFTER_DAYS ago, and has no live session. A
@@ -34,7 +35,9 @@ from services import disk_usage, work_store, work_worktree
 
 SLIM_AFTER_DAYS = 5
 SWEEP_INTERVAL_S = 3600
-SLIM_DIRS = frozenset({"node_modules", "venv", ".venv"})
+SLIM_DIRS = frozenset({"node_modules", "venv", ".venv", ".next", "cdk.out",
+                       "__pycache__"})
+SLIM_DIR_PREFIXES = (".webpack_cache",)
 SLIM_SUFFIXES = frozenset({".mp4", ".webm"})
 TICKET_DONE_STATUSES = ("merged", "done", "ignored")
 
@@ -104,7 +107,8 @@ def _scan(top: Path, base: Path) -> tuple[list[tuple[Path, Path | None]], float]
             except OSError:
                 continue
             if is_dir:
-                if entry.name in SLIM_DIRS:
+                if (entry.name in SLIM_DIRS
+                        or entry.name.startswith(SLIM_DIR_PREFIXES)):
                     targets.append((path, repo))
                 else:
                     stack.append((path, repo))
