@@ -101,6 +101,7 @@ HOME = Path.home()
 CONTAINERS_ROOT = Path(os.environ.get("FRSHTY_CONTAINERS") or HOME / ".frshty-containers")
 SEED_DIR = "/run/frshty/seed"
 MODEL_DIRS = [".claude", ".codex", ".gemini"]
+OPENCODE_DIRS = [".config/opencode", ".local/share/opencode"]
 SEED_FILES = [".claude.json", ".gitconfig"]
 DOCKER_SOCKET = Path("/var/run/docker.sock")
 PEERS = CONTAINERS_ROOT / "peers.toml"
@@ -348,6 +349,12 @@ def mounts(config: dict, config_path: Path, root: Path) -> list[tuple[str, str, 
     agy = HOME / ".local" / "bin" / "agy"
     if agy.is_file():
         out.append((str(agy), "/usr/local/bin/agy", True))
+    opencode = HOME / ".opencode" / "bin" / "opencode"
+    if opencode.is_file():
+        out.append((str(opencode), "/usr/local/bin/opencode", True))
+        for name in OPENCODE_DIRS:
+            if (HOME / name).is_dir():
+                out.append((str(HOME / name), str(HOME / name), False))
     if PEERS.is_file():
         out.append((str(PEERS), "/app/config/peers.toml", True))
     claude_dir = claude_config_dir(config)
