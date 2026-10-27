@@ -131,6 +131,17 @@ class TestTickets:
         assert "T-1" in data
         assert "T-2" not in data
 
+    def test_old_done_ticket_keeps_its_row(self, client):
+        state.save("tickets", {
+            "T-1": {"status": "planning", "slug": "T-1-thing"},
+            "T-2": {"status": "done", "done_at": "2020-01-01T00:00:00Z"},
+        })
+        assert "T-2" not in client.get("/api/tickets/list").json()
+        assert state.load_ticket("T-2")["status"] == "done"
+        data = client.get("/api/tickets/list?include_old=1").json()
+        assert data["T-2"]["status"] == "done"
+        assert "T-1" in data
+
     def test_detail_not_found(self, client):
         resp = client.get("/api/tickets/NOPE/detail")
         assert resp.status_code == 404

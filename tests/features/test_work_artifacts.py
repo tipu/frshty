@@ -44,64 +44,114 @@ class TestItemDir:
         assert work_artifacts.item_dir(4242) == folder
 
 
+MB = 1024 * 1024
+
+
+def _write(path, size):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x" * size)
+    return path
+
+
 class TestGc:
-    def test_deletes_old_folder_and_keeps_fresh_one(self, tmp_path, monkeypatch):
+    def test_old_folder_keeps_its_report_and_loses_its_video(self, tmp_path, monkeypatch):
         root = _root(tmp_path, monkeypatch)
         old = work_artifacts.item_dir(1)
-        (old / "report.html").write_text("old")
+        report = _write(old / "report.html", 10)
+        video = _write(old / "demo.mp4", 10)
+        report_row = _row(str(report))
+        video_row = _row(str(video))
         _age(old, 40)
         fresh = work_artifacts.item_dir(2)
-        (fresh / "report.html").write_text("fresh")
+        fresh_video = _write(fresh / "demo.mp4", 10)
         result = work_artifacts.gc_artifacts()
-        assert result["removed"] == [str(old)]
-        assert not old.exists()
-        assert fresh.is_dir()
+        assert result["removed"] == [str(video)]
+        assert result["forgotten"] == 1
+        assert old.is_dir()
+        assert report.exists()
+        assert not video.exists()
+        assert fresh_video.exists()
+        assert db.query_one("SELECT id FROM work_artifacts WHERE id = ?", (report_row,))
+        assert db.query_one("SELECT id FROM work_artifacts WHERE id = ?", (video_row,)) is None
         assert (root / ".gc-stamp").exists()
+
+    def test_size_and_type_rules(self, tmp_path, monkeypatch):
+        _root(tmp_path, monkeypatch)
+        old = work_artifacts.item_dir(3)
+        kept = [_write(old / "big.html", 2 * MB),
+                _write(old / "big.md", 2 * MB),
+                _write(old / "small.png", 500 * 1024),
+                _write(old / "small.json", 500 * 1024),
+                _write(old / "sub" / "frame.jpg", 500 * 1024)]
+        gone = [_write(old / "big.png", 2 * MB),
+                _write(old / "big.json", 2 * MB),
+                _write(old / "repo.bundle", 10),
+                _write(old / "sub" / "pack-1.pack", 10),
+                _write(old / "sub" / "pack-1.idx", 10),
+                _write(old / "sub" / "pack-1.rev", 10),
+                _write(old / "sub" / "clip.WEBM", 10)]
+        _age(old, 40)
+        result = work_artifacts.gc_artifacts()
+        assert sorted(result["removed"]) == sorted(str(p) for p in gone)
+        assert all(p.exists() for p in kept)
+        assert not any(p.exists() for p in gone)
+        assert (old / "sub").is_dir()
+
+    def test_old_folder_that_ends_up_empty_stays(self, tmp_path, monkeypatch):
+        _root(tmp_path, monkeypatch)
+        old = work_artifacts.item_dir(4)
+        _write(old / "demo.mp4", 10)
+        (old / "empty").mkdir()
+        _age(old, 40)
+        work_artifacts.gc_artifacts()
+        assert old.is_dir()
+        assert list(old.iterdir()) == [old / "empty"]
+
+    def test_never_follows_a_symlink(self, tmp_path, monkeypatch):
+        _root(tmp_path, monkeypatch)
+        outside = tmp_path / "outside"
+        target = _write(outside / "demo.mp4", 10)
+        old = work_artifacts.item_dir(10)
+        (old / "link.mp4").symlink_to(target)
+        (old / "linkdir").symlink_to(outside, target_is_directory=True)
+        _write(old / "report.html", 10)
+        _age(old, 40)
+        stamp = time.time() - 40 * DAY
+        for link in ("link.mp4", "linkdir"):
+            os.utime(old / link, (stamp, stamp), follow_symlinks=False)
+        assert work_artifacts.gc_artifacts()["removed"] == []
+        assert target.exists()
+        assert (old / "link.mp4").is_symlink()
 
     def test_recent_nested_file_keeps_the_folder(self, tmp_path, monkeypatch):
         _root(tmp_path, monkeypatch)
         folder = work_artifacts.item_dir(3)
-        (folder / "sub").mkdir()
-        (folder / "sub" / "page.html").write_text("x")
+        _write(folder / "sub" / "demo.mp4", 10)
         _age(folder, 40)
-        recent = folder / "sub" / "page.html"
+        recent = folder / "sub" / "demo.mp4"
         os.utime(recent, None)
         assert work_artifacts.gc_artifacts()["removed"] == []
-        assert folder.is_dir()
-
-    def test_forgets_rows_under_the_deleted_folder(self, tmp_path, monkeypatch):
-        _root(tmp_path, monkeypatch)
-        folder = work_artifacts.item_dir(5)
-        (folder / "report.html").write_text("old")
-        _age(folder, 40)
-        gone = _row(str(folder / "report.html"))
-        kept = _row(str(tmp_path / "elsewhere" / "report.html"))
-        result = work_artifacts.gc_artifacts()
-        assert result["removed"] == [str(folder)]
-        assert result["forgotten"] == 1
-        assert db.query_one("SELECT id FROM work_artifacts WHERE id = ?", (gone,)) is None
-        assert db.query_one("SELECT id FROM work_artifacts WHERE id = ?", (kept,))
+        assert recent.exists()
 
     def test_sweeps_the_legacy_store(self, tmp_path, monkeypatch):
         _root(tmp_path, monkeypatch)
         legacy = tmp_path / "legacy"
         old = legacy / "work-7"
-        old.mkdir(parents=True)
-        (old / "report.html").write_text("old")
+        report = _write(old / "report.html", 10)
+        video = _write(old / "demo.mp4", 10)
         _age(old, 40)
         fresh = legacy / "work-8"
-        fresh.mkdir()
-        (fresh / "report.html").write_text("fresh")
-        (legacy / "stray.toml").write_text("x")
-        _age(legacy / "stray.toml", 40)
-        gone = _row(str(old / "report.html"))
-        kept = _row(str(fresh / "report.html"))
+        fresh_video = _write(fresh / "demo.mp4", 10)
+        _write(legacy / "stray.mp4", 10)
+        _age(legacy / "stray.mp4", 40)
+        gone = _row(str(video))
+        kept = _row(str(report))
         result = work_artifacts.gc_artifacts()
-        assert result["removed"] == [str(old)]
+        assert result["removed"] == [str(video)]
         assert result["forgotten"] == 1
-        assert not old.exists()
-        assert fresh.is_dir()
-        assert (legacy / "stray.toml").exists()
+        assert report.exists()
+        assert fresh_video.exists()
+        assert (legacy / "stray.mp4").exists()
         assert db.query_one("SELECT id FROM work_artifacts WHERE id = ?", (gone,)) is None
         assert db.query_one("SELECT id FROM work_artifacts WHERE id = ?", (kept,))
 
@@ -109,20 +159,20 @@ class TestGc:
         root = _root(tmp_path, monkeypatch)
         monkeypatch.setattr(work_artifacts, "legacy_root", lambda: root)
         old = work_artifacts.item_dir(9)
-        (old / "report.html").write_text("old")
+        video = _write(old / "demo.mp4", 10)
         _age(old, 40)
-        assert work_artifacts.gc_artifacts()["removed"] == [str(old)]
+        assert work_artifacts.gc_artifacts()["removed"] == [str(video)]
 
     def test_throttled_within_the_interval(self, tmp_path, monkeypatch):
         _root(tmp_path, monkeypatch)
         assert work_artifacts.gc_artifacts()["removed"] == []
         folder = work_artifacts.item_dir(6)
-        (folder / "report.html").write_text("old")
+        video = _write(folder / "demo.mp4", 10)
         _age(folder, 40)
         assert work_artifacts.gc_artifacts()["throttled"] is True
-        assert folder.is_dir()
+        assert video.exists()
         later = time.time() + work_artifacts.GC_INTERVAL_S + 1
-        assert work_artifacts.gc_artifacts(now=later)["removed"] == [str(folder)]
+        assert work_artifacts.gc_artifacts(now=later)["removed"] == [str(video)]
 
     def test_forgets_an_old_row_whose_scratch_file_is_gone(self, tmp_path, monkeypatch):
         _root(tmp_path, monkeypatch)

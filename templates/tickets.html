@@ -21,6 +21,7 @@
 <frshty-shell :features="features" :instance="instanceName">
 		<template #actions>
 			<label class="ln-show-ignored"><input type="checkbox" v-model="showDone"> show done</label>
+			<label class="ln-show-ignored"><input type="checkbox" v-model="showOldDone" @change="load"> show old done</label>
 			<label class="ln-show-ignored"><input type="checkbox" v-model="showIgnored"> show ignored</label>
 			<button class="ln-btn ln-btn-ghost">Filter</button>
 			<button class="ln-btn ln-btn-ghost">Sort</button>
@@ -266,14 +267,15 @@ frshtyApp({
 
 		const showIgnored = ref(false);
 		const showDone = ref(false);
+		const showOldDone = ref(false);
 		const visibleColumns = computed(() => {
 			const cols = COLUMNS.filter(col => Object.values(tickets.value).some(t => t.status === col));
-			if (showDone.value) cols.push('done');
+			if (showDone.value || showOldDone.value) cols.push('done');
 			if (showIgnored.value) cols.push('ignored');
 			return cols;
 		});
 
-		const totalCount = computed(() => Object.keys(tickets.value).length);
+		const totalCount = computed(() => Object.values(tickets.value).filter(t => t.status !== 'done').length);
 
 		function ticketsForColumn(col) {
 			return Object.entries(tickets.value)
@@ -321,7 +323,7 @@ frshtyApp({
 		async function load() {
 			try {
 				const [ticketsResp, configResp] = await Promise.all([
-					fetch('/api/tickets/list'),
+					fetch(showOldDone.value ? '/api/tickets/list?include_old=1' : '/api/tickets/list'),
 					fetch('/api/config'),
 				]);
 				tickets.value = await ticketsResp.json();
@@ -518,7 +520,7 @@ frshtyApp({
 			epicCardStyle,
 			discard, submitPr, closePrModal, onPrSubmit,
 			approve, reject, restart,
-			showIgnored, showDone, ignore, unignore,
+			showIgnored, showDone, showOldDone, load, ignore, unignore,
 		};
 	},
 }).mount('#app');
