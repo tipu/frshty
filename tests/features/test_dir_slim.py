@@ -83,6 +83,23 @@ class TestTasks:
         assert dir_slim.sweep(force=True) == []
         assert (tree / ".venv").is_dir()
 
+    def test_deletes_build_caches_and_keeps_generic_build_dirs(self, tmp_path, wt_root,
+                                                                monkeypatch):
+        _, tree = _task(tmp_path, monkeypatch, OLD)
+        caches = (".next", "cdk.out", "src/__pycache__", "apps/desktop/.webpack_cache_main")
+        for cache in caches:
+            (tree / cache).mkdir(parents=True)
+            (tree / cache / "blob").write_bytes(b"c" * 4096)
+        for kept in ("out", "dist", "build", ".webpack"):
+            (tree / kept).mkdir()
+            (tree / kept / "app.js").write_text("x")
+        results = dir_slim.sweep(force=True)
+        for cache in caches:
+            assert str(tree / cache) in results[0]["removed"]
+            assert not os.path.lexists(tree / cache)
+        for kept in ("out", "dist", "build", ".webpack"):
+            assert (tree / kept / "app.js").exists()
+
     def test_keeps_a_tracked_dependency_dir(self, tmp_path, wt_root, monkeypatch):
         _, tree = _task(tmp_path, monkeypatch, OLD)
         _git(tree, "add", "-f", "node_modules/pkg/index.js")
