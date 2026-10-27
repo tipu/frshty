@@ -10,7 +10,12 @@ ticket directory stay. An install or a build makes them again.
 A task worktree qualifies when every work item that ran in it is closed or
 archived, was last updated SLIM_AFTER_DAYS ago, and has no live session. A
 ticket directory qualifies when its ticket has a status in TICKET_DONE_STATUSES
-and no file outside SLIM_DIRS in it changed for SLIM_AFTER_DAYS.
+and no file outside SLIM_DIRS in it changed for SLIM_AFTER_DAYS. A folder under
+the tickets root that no ticket row of any instance names, such as a work-NNNN
+task folder, a review scratch folder or the folder of a purged ticket,
+qualifies by the same file age. A work-NNNN folder whose work item exists also
+waits for that item as a task worktree does. A folder with no ticket row whose
+name starts with a dot is never slimmed.
 
 A path that git tracks is never deleted, and neither is a directory that holds
 a git tree. A symlink is never followed and never deleted, so a .venv that
@@ -20,6 +25,7 @@ can then remove it.
 
 `sweep` runs from the work board scan loop at most once per SWEEP_INTERVAL_S."""
 import os
+import re
 import shutil
 import threading
 import time
@@ -40,6 +46,7 @@ SLIM_DIRS = frozenset({"node_modules", "venv", ".venv", ".next", "cdk.out",
 SLIM_DIR_PREFIXES = (".webpack_cache",)
 SLIM_SUFFIXES = frozenset({".mp4", ".webm"})
 TICKET_DONE_STATUSES = ("merged", "done", "ignored")
+WORK_FOLDER = re.compile(r"work-(\d+)(?:-|$)")
 
 _lock = threading.Lock()
 _last_sweep = 0.0
@@ -212,27 +219,66 @@ def slim_tasks(now: float) -> list[dict]:
     return results
 
 
+def _slim_idle(folder: Path, base: Path, now: float) -> dict | None:
+    """Slim `folder` when no file outside SLIM_DIRS in it changed for
+    SLIM_AFTER_DAYS. None when nothing qualifies."""
+    targets, newest = _scan(folder, base)
+    if not targets or now - newest < SLIM_AFTER_DAYS * 86400:
+        return None
+    return {"path": str(folder), **_delete(targets)}
+
+
+def _work_folder_ready(item_id: int, now: float) -> bool:
+    """Whether the work-NNNN folder of a work item may be slimmed: the item is
+    gone, or it is finished, idle for SLIM_AFTER_DAYS, and has no live
+    session."""
+    item = db.query_one(
+        "SELECT id, state, archived_at, updated_at FROM work_items WHERE id = ?",
+        (item_id,))
+    if item is None:
+        return True
+    if not _idle_long_enough(dict(item), now):
+        return False
+    return not terminal.session_healthy(f"work-{item_id}").get("alive")
+
+
 def slim_tickets(instance_key: str, config: dict, now: float) -> list[dict]:
-    """Slim every ticket directory of one instance whose ticket is done."""
+    """Slim every folder of one instance's tickets root whose ticket is done,
+    and every folder that no ticket row names."""
     ws = config.get("workspace") or {}
     if not ws.get("root"):
         return []
     tickets_root = Path(ws["root"]) / str(ws.get("tickets_dir") or "tickets")
+    if tickets_root.is_symlink() or not tickets_root.is_dir():
+        return []
     marks = ",".join("?" * len(TICKET_DONE_STATUSES))
-    rows = db.query_all(
+    done = {row["slug"] for row in db.query_all(
         f"SELECT slug FROM tickets WHERE instance_key = ? AND status IN ({marks}) "
         "AND slug IS NOT NULL AND slug != ''",
-        (instance_key, *TICKET_DONE_STATUSES))
+        (instance_key, *TICKET_DONE_STATUSES))}
+    known = {row["slug"] for row in db.query_all(
+        "SELECT DISTINCT slug FROM tickets WHERE slug IS NOT NULL AND slug != ''")}
     results = []
-    for row in rows:
-        ticket_dir = tickets_root / row["slug"]
-        if (ticket_dir.parent != tickets_root or ticket_dir.is_symlink()
-                or not ticket_dir.is_dir()):
+    for name in sorted(os.listdir(tickets_root)):
+        ticket_dir = tickets_root / name
+        if ticket_dir.is_symlink() or not ticket_dir.is_dir():
             continue
-        targets, newest = _scan(ticket_dir, tickets_root)
-        if not targets or now - newest < SLIM_AFTER_DAYS * 86400:
+        match = WORK_FOLDER.match(name)
+        if name in done:
+            result = _slim_idle(ticket_dir, tickets_root, now)
+        elif name in known or name.startswith("."):
             continue
-        results.append({"path": str(ticket_dir), **_delete(targets)})
+        elif match is None:
+            result = _slim_idle(ticket_dir, tickets_root, now)
+        elif not _work_folder_ready(int(match.group(1)), now):
+            continue
+        else:
+            with work_store.launch_lock:
+                if not _work_folder_ready(int(match.group(1)), now):
+                    continue
+                result = _slim_idle(ticket_dir, tickets_root, now)
+        if result is not None:
+            results.append(result)
     return results
 
 

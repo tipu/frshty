@@ -254,3 +254,104 @@ def test_never_slims_through_a_symlinked_task_ancestor(tmp_path, wt_root, monkey
     tree.parent.symlink_to(outside)
     assert dir_slim.sweep(force=True) == []
     assert (outside / tree.name / "personal.mp4").read_bytes() == b"mine"
+
+
+def _orphan(root: Path, name: str, age_days: float):
+    folder = root / "tickets" / name
+    (folder / "app" / "node_modules" / "pkg").mkdir(parents=True)
+    (folder / "app" / "node_modules" / "pkg" / "index.js").write_text("x")
+    (folder / "notes.md").write_text("notes")
+    (folder / "run.webm").write_bytes(b"v" * 4096)
+    stamp = time.time() - age_days * DAY
+    for base, dirs, files in os.walk(folder):
+        for name in dirs + files:
+            os.utime(os.path.join(base, name), (stamp, stamp))
+    return folder
+
+
+class TestFoldersWithoutTicketRow:
+    @pytest.fixture()
+    def root(self, tmp_path, monkeypatch, wt_root):
+        root = tmp_path / "ws"
+        (root / "tickets").mkdir(parents=True)
+        reg = SimpleNamespace(instance_key="inst", config=_ticket_config(root))
+        monkeypatch.setattr(dir_slim.runtime, "instances",
+                            lambda: SimpleNamespace(all=lambda: [reg]))
+        return root
+
+    def test_slims_a_scratch_folder_idle_long_ago(self, root):
+        folder = _orphan(root, "review-scratch", OLD)
+        results = dir_slim.sweep(force=True)
+        assert [r["path"] for r in results] == [str(folder)]
+        assert not (folder / "app" / "node_modules").exists()
+        assert not (folder / "run.webm").exists()
+        assert (folder / "notes.md").read_text() == "notes"
+
+    def test_keeps_a_scratch_folder_touched_recently(self, root):
+        folder = _orphan(root, "review-scratch", 1)
+        assert dir_slim.sweep(force=True) == []
+        assert (folder / "app" / "node_modules").is_dir()
+
+    def test_keeps_a_folder_of_an_open_ticket_of_any_instance(self, root):
+        folder = _orphan(root, "t-8-open", OLD)
+        db.execute(
+            "INSERT INTO tickets(instance_key, ticket_key, status, slug, data, updated_at) "
+            "VALUES ('other', 'T-8', 'in_review', 't-8-open', '{}', ?)",
+            (datetime.now(timezone.utc).isoformat(),))
+        assert dir_slim.sweep(force=True) == []
+        assert (folder / "run.webm").exists()
+
+    def test_keeps_a_dot_folder(self, root):
+        folder = _orphan(root, ".playwright-cli", OLD)
+        assert dir_slim.sweep(force=True) == []
+        assert (folder / "run.webm").exists()
+
+    def test_never_follows_a_symlinked_folder(self, root, tmp_path):
+        outside = _orphan(tmp_path / "elsewhere", "mine", OLD)
+        (root / "tickets" / "linked").symlink_to(outside)
+        assert dir_slim.sweep(force=True) == []
+        assert (outside / "run.webm").exists()
+
+    def test_slims_a_work_folder_whose_item_is_gone(self, root):
+        folder = _orphan(root, "work-99999-verify", OLD)
+        dir_slim.sweep(force=True)
+        assert not (folder / "app" / "node_modules").exists()
+
+    def test_keeps_a_work_folder_whose_item_is_open(self, root):
+        item_id = _item("still open")
+        folder = _orphan(root, f"work-{item_id}", OLD)
+        assert dir_slim.sweep(force=True) == []
+        assert (folder / "app" / "node_modules").is_dir()
+
+    def test_keeps_a_work_folder_whose_item_finished_recently(self, root):
+        item_id = _item("just done")
+        _finish(item_id, archived=False, days_ago=1)
+        folder = _orphan(root, f"work-{item_id}-verify", OLD)
+        assert dir_slim.sweep(force=True) == []
+        assert (folder / "run.webm").exists()
+
+    def test_keeps_a_work_folder_with_a_live_session(self, root, monkeypatch):
+        item_id = _item("done long ago")
+        _finish(item_id, archived=True, days_ago=OLD)
+        folder = _orphan(root, f"work-{item_id}", OLD)
+        monkeypatch.setattr(dir_slim.terminal, "session_healthy",
+                            lambda key, agent="claude": {"alive": True})
+        assert dir_slim.sweep(force=True) == []
+        assert (folder / "run.webm").exists()
+
+    def test_slims_a_work_folder_whose_item_finished_long_ago(self, root):
+        item_id = _item("done long ago")
+        _finish(item_id, archived=True, days_ago=OLD)
+        folder = _orphan(root, f"work-{item_id}", OLD)
+        results = dir_slim.sweep(force=True)
+        assert [r["path"] for r in results] == [str(folder)]
+        assert not (folder / "run.webm").exists()
+
+    def test_rechecks_a_work_folder_under_the_launch_lock(self, root, monkeypatch):
+        item_id = _item("reopened")
+        folder = _orphan(root, f"work-{item_id}", OLD)
+        answers = iter([True, False])
+        monkeypatch.setattr(dir_slim, "_work_folder_ready",
+                            lambda item, now: next(answers))
+        assert dir_slim.sweep(force=True) == []
+        assert (folder / "run.webm").exists()
