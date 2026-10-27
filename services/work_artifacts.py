@@ -5,14 +5,16 @@ A session writes its reports, pages, images and videos into
 /tmp, or the hosted Claude artifact publisher. The board serves an artifact
 from disk long after the session's tmux pane is gone, so the file has to
 survive a reboot and stay on this machine. `gc_artifacts` bounds the growth:
-it deletes an item's folder, in the store or in the legacy store, once
-nothing inside it was written for MAX_AGE_DAYS, forgets the rows that pointed into that folder, and forgets the
-older rows that still point into /tmp at a file a reboot has wiped.
+once nothing inside an item's folder, in the store or in the legacy store,
+was written for MAX_AGE_DAYS, it deletes the bulky files in that folder and
+keeps the folder, its reports and its small images. It forgets the rows that
+pointed at a deleted file, and forgets the older rows that still point into
+/tmp at a file a reboot has wiped.
 """
 import base64
 import binascii
 import os
-import shutil
+import stat
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,6 +33,9 @@ INTAKE_IMAGE_TYPES = {"image/png": ".png", "image/jpeg": ".jpg",
                       "image/gif": ".gif", "image/webp": ".webp"}
 MAX_INTAKE_IMAGES = 8
 MAX_INTAKE_IMAGE_BYTES = 10 * 1024 * 1024
+BULKY_BYTES = 1024 * 1024
+ALWAYS_BULKY_SUFFIXES = {".mp4", ".webm", ".bundle", ".pack", ".idx", ".rev"}
+NEVER_BULKY_SUFFIXES = {".html", ".md"}
 
 
 def root() -> Path:
@@ -143,11 +148,37 @@ def _newest_mtime(folder: Path) -> float:
     return newest
 
 
-def _forget_rows(folder: Path) -> int:
-    prefix = str(folder) + os.sep
+def _is_bulky(name: str, size: int) -> bool:
+    """A file the sweep may delete: a video, git data, or any file over
+    BULKY_BYTES. A report page is never bulky, so the board keeps its links."""
+    suffix = os.path.splitext(name)[1].lower()
+    if suffix in NEVER_BULKY_SUFFIXES:
+        return False
+    return suffix in ALWAYS_BULKY_SUFFIXES or size > BULKY_BYTES
+
+
+def _delete_bulky_files(folder: Path) -> list[str]:
+    """Delete the bulky files anywhere under the folder. Folders stay, an
+    empty one included, and a symlink is neither followed nor deleted."""
+    deleted = []
+    for dirpath, _dirnames, filenames in os.walk(folder):
+        for name in filenames:
+            path = os.path.join(dirpath, name)
+            try:
+                st = os.lstat(path)
+                if not stat.S_ISREG(st.st_mode) or not _is_bulky(name, st.st_size):
+                    continue
+                os.unlink(path)
+            except OSError:
+                continue
+            deleted.append(path)
+    return deleted
+
+
+def _forget_rows(paths: list[str]) -> int:
+    deleted = set(paths)
     rows = db.query_all("SELECT id, path FROM work_artifacts")
-    stale = [r["id"] for r in rows
-             if r["path"] == str(folder) or r["path"].startswith(prefix)]
+    stale = [r["id"] for r in rows if r["path"] in deleted]
     if not stale:
         return 0
     with db.tx() as c:
@@ -197,8 +228,9 @@ def _store_folders(base: Path) -> list[Path]:
 
 def gc_artifacts(max_age_days: int = MAX_AGE_DAYS, now: float | None = None,
                  force: bool = False) -> dict:
-    """Delete artifact folders untouched for `max_age_days`. Self-throttled to
-    one sweep per GC_INTERVAL_S through a stamp file, so the scan loop can call
+    """Delete the bulky files of artifact folders untouched for
+    `max_age_days`. `removed` lists the deleted files. Self-throttled to one
+    sweep per GC_INTERVAL_S through a stamp file, so the scan loop can call
     this on every tick."""
     base = root()
     removed: list[str] = []
@@ -217,15 +249,15 @@ def gc_artifacts(max_age_days: int = MAX_AGE_DAYS, now: float | None = None,
         try:
             if _newest_mtime(entry) >= cutoff:
                 continue
-            shutil.rmtree(entry)
         except OSError:
             continue
-        removed.append(str(entry))
-        forgotten += _forget_rows(entry)
+        deleted = _delete_bulky_files(entry)
+        removed += deleted
+        forgotten += _forget_rows(deleted)
     forgotten += _forget_lost_scratch_rows(cutoff)
     if removed or forgotten:
         log.emit("work_artifact_gc",
-                 f"Deleted {len(removed)} artifact folder(s) and {forgotten} "
+                 f"Deleted {len(removed)} bulky artifact file(s) and {forgotten} "
                  f"artifact row(s) older than {max_age_days} days",
                  meta={"removed": removed, "forgotten_rows": forgotten})
     return {"removed": removed, "forgotten": forgotten}
