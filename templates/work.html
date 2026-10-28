@@ -851,11 +851,18 @@ frshtyApp({
           body: JSON.stringify({ action, until }),
         });
         if (!r.ok) { const d = await r.json(); this.connError = d.error || ("action failed HTTP " + r.status); }
+        else if (action === "archive" || action === "unarchive") this.dropRow(it);
       } catch (e) {
         this.connError = "action failed: " + e.message;
       }
-      await this.refresh();
-      await this.loadThreads();
+      this.refresh();
+      this.loadThreads();
+    },
+    dropRow(it) {
+      const key = this.rowKey(it);
+      for (const g of Object.keys(this.groups)) {
+        this.groups[g] = (this.groups[g] || []).filter(x => this.rowKey(x) !== key);
+      }
     },
     async archiveCompleted() {
       const n = this.count("done");
