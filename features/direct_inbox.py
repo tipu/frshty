@@ -31,7 +31,7 @@ from pathlib import Path
 import core.db as db
 import core.log as log
 import core.state as state
-from core.claude_runner import extract_json, run_agentic, run_haiku
+from core.claude_runner import extract_json, parse_structured, run_agentic, run_haiku, strict_object
 from core.llm import _SKIP_PERMISSIONS, consume_last_error, reset_last_error
 from services import work_launch, work_store
 
@@ -176,6 +176,15 @@ Answer with ONE json object and nothing else:
 
 {conversations}
 """
+
+TEXT_SCHEMA = strict_object({
+    "conversations": {"type": "array", "items": strict_object({
+        "index": {"type": "integer"},
+        "needs_reply": {"type": "boolean"},
+        "reason": {"type": "string"},
+        "objective": {"type": "string"},
+    })},
+})
 
 BRIEF = """
 
@@ -517,9 +526,9 @@ def read_texts(config: dict, instance_key: str) -> tuple[list[dict], str]:
     operator = str(_settings(config).get("operator_name") or "the account owner")
     output = run_haiku(TEXT_PROMPT.format(operator=operator,
                                           conversations="\n\n".join(blocks)),
-                       timeout=300)
-    verdict = extract_json(output or "")
-    if not isinstance(verdict, dict) or not isinstance(verdict.get("conversations"), list):
+                       timeout=300, schema=TEXT_SCHEMA)
+    verdict = parse_structured(output, TEXT_SCHEMA, fn_name="direct_inbox_texts")
+    if verdict is None:
         return conversations, _fail(instance_key, "direct_inbox_texts_judge_failed",
                          f"the model returned no verdict for {len(threads)} text"
                          " conversations", {"output": (output or "")[:500]})

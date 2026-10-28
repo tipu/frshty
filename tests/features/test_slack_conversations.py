@@ -3051,7 +3051,7 @@ def test_a_context_message_edited_while_the_model_reads_blocks_the_proposal(tmp_
                      propose_max_judgements_per_scan=1)
     sc.ingest(config, instance_key="astroco", now=NOW)
 
-    def judge(prompt):
+    def judge(prompt, **kwargs):
         _capture(tmp_path, [{
             "dt": "2026-09-03T19:40:00+00:00", "source": "ws", "endpoint": "e",
             "payload": {"type": "message", "subtype": "message_changed",
@@ -3105,7 +3105,7 @@ def test_a_context_edit_during_a_no_verdict_leaves_the_request_unjudged(tmp_path
                      propose_max_judgements_per_scan=1)
     sc.ingest(config, instance_key="astroco", now=NOW)
 
-    def judge(prompt):
+    def judge(prompt, **kwargs):
         _capture(tmp_path, [{
             "dt": "2026-09-03T19:40:00+00:00", "source": "ws", "endpoint": "e",
             "payload": {"type": "message", "subtype": "message_changed",

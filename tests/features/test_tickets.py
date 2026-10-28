@@ -1983,7 +1983,7 @@ class TestFixCiFailuresTask:
         mock_platform.get_pr_diff.return_value = "diff"
         mock_platform.get_pr_info.return_value = {"head_sha": "h1"}
         with patch("core.tasks.tickets.make_platform", return_value=mock_platform), \
-             patch("features.pr_ci.run_balanced", return_value='{"caused_by_us": false, "reason": "flaky"}'), \
+             patch("features.pr_ci.run_balanced", return_value='{"caused_by_us": false, "reason": "flaky", "fix_hint": ""}'), \
              patch("features.pr_ci.run_claude_code") as rcc:
             result = fix_ci_failures(self._ctx(fake_config))
         assert result.status == "ok"

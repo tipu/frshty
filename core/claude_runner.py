@@ -5,6 +5,8 @@ from core.llm import (
     run_agentic,
     run_fast as run_haiku,
     extract_json,
+    parse_structured,
+    strict_object,
 )
 
 run_sonnet = run_balanced
@@ -17,4 +19,6 @@ __all__ = [
     "run_haiku",
     "run_sonnet",
     "extract_json",
+    "parse_structured",
+    "strict_object",
 ]

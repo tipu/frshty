@@ -15,7 +15,8 @@ from urllib.parse import urlsplit
 import core.log as log
 import core.state as state
 import core.git_util as git_util
-from core.claude_runner import run_agentic, run_balanced, run_haiku, extract_json
+from core.claude_runner import (run_agentic, run_balanced, run_haiku, extract_json,
+                                parse_structured, strict_object)
 from core.llm import CODEX_EXEC, READ_ONLY_TOOLS, WRITE_TOOLS, run_external_model
 from core.config import board_url, get_repos
 import features.presentation as presentation
@@ -919,6 +920,11 @@ VALIDATE_PROMPT = (
     "Return ONLY a JSON object (no markdown fences):\n"
     '{"decision":"valid"|"false_positive"|"uncertain","defeating_line":<line number from the context, or null>,"reason":"one sentence"}\n'
 )
+VALIDATE_SCHEMA = strict_object({
+    "decision": {"type": "string", "enum": ["valid", "false_positive", "uncertain"]},
+    "defeating_line": {"type": ["integer", "null"]},
+    "reason": {"type": "string"},
+})
 
 
 def _read_function_context(worktree: Path, file_path: str, target_line: int) -> str:
@@ -983,15 +989,12 @@ def _validate_single(args):
         f"FILE: {path}, LINE: {line}\n\n"
         f"CODE CONTEXT:\n{context}\n"
     )
-    output = run_balanced(prompt, timeout=120)
-    if not output:
-        return issue
-
-    data = extract_json(output)
+    data = parse_structured(run_balanced(prompt, timeout=120, schema=VALIDATE_SCHEMA),
+                            VALIDATE_SCHEMA, fn_name="review_validate")
     if not data:
         return issue
 
-    if data.get("decision") != "false_positive":
+    if data["decision"] != "false_positive":
         return issue
 
     reason = data.get("reason", "")

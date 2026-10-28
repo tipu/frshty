@@ -32,7 +32,7 @@ RUN apt-get update && apt-get install -y unzip oathtool && \
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir httpx fastapi 'uvicorn[standard]' watchfiles mcp playwright pytest uv pipenv pre-commit && \
+RUN pip install --no-cache-dir httpx fastapi 'uvicorn[standard]' watchfiles jsonschema mcp playwright pytest uv pipenv pre-commit && \
     python -m playwright install --with-deps chromium && \
     chmod -R a+rX /ms-playwright
 
