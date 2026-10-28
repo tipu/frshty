@@ -442,6 +442,24 @@ class TestIntake:
         assert "confer with the boys" in work_store.CONFER_RULE
         assert "opencode run -m openrouter/deepseek/deepseek-v4.1-flash" in context
 
+    def test_intake_tells_claude_to_navigate_with_lsp(self, tmp_path, monkeypatch):
+        from unittest.mock import patch, MagicMock
+        from services import work_artifacts
+        import core.llm as llm
+        monkeypatch.setattr(work_artifacts, "root", lambda: tmp_path / "artifact-store")
+        reg = MagicMock()
+        reg.config = {"workspace": {"root": tmp_path}}
+        instances = MagicMock()
+        instances.get.return_value = reg
+        with patch("services.work_launch.runtime.instances", return_value=instances), \
+             patch("services.work_launch.terminal.launch_claude") as mock_launch, \
+             patch("services.work_launch.terminal.session_healthy", return_value={"alive": True, "agent_running": True}):
+            client = self._client()
+            r = client.post("/api/work/intake", json={"text": "find the callers of split_pin"})
+        assert r.status_code == 200, r.text
+        context = mock_launch.call_args.args[3]
+        assert llm.LSP_RULE in context
+
     def test_intake_launch_failure_marks_item(self, tmp_path):
         from unittest.mock import patch, MagicMock
         reg = MagicMock()
@@ -1840,6 +1858,19 @@ class TestFollowup:
         assert mock_agent.call_args.kwargs["agent"] == "codex"
         child = db.query_one("SELECT contexts FROM work_items WHERE id = ?", (out["item_id"],))
         assert child["contexts"] == "acme,slack_int"
+
+    def test_codex_followup_gets_no_lsp_rule(self, tmp_path):
+        from unittest.mock import patch
+        from services import work_launch
+        import core.llm as llm
+        parent = self._done_parent_with("", provider="codex")
+        p_inst, p_launch, p_health = self._patched(tmp_path)
+        with p_inst, p_launch, p_health, \
+             patch("services.work_launch.terminal.launch_agent") as mock_agent:
+            out = work_launch.launch_followup(parent, "next step")
+        assert "error" not in out, out
+        assert mock_agent.call_args.kwargs["agent"] == "codex"
+        assert llm.LSP_RULE not in mock_agent.call_args.args[3]
 
     def test_followup_keeps_an_explicit_empty_context(self, tmp_path):
         from unittest.mock import patch

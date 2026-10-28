@@ -165,7 +165,13 @@ class TestTicketPresentation:
 
         def fake_run(prompt, **kwargs):
             seen["prompt"] = prompt
-            return '{"requirements": [{"id": "c1", "requirement": "x", "status": "met"}]}'
+            seen["schema"] = kwargs["schema"]
+            return json.dumps({
+                "problem": "p", "approach": "a", "steps": [],
+                "requirements": [{"id": "c1", "requirement": "x", "status": "met", "how": "h",
+                                  "prs": ["api#4"], "steps": [], "gap": ""}],
+                "verdict": {"solves_problem": True, "summary": "s", "concerns": []},
+                "visual": {"flow": [], "before": [], "after": []}})
 
         criteria = [{"id": "c1", "criterion": "Export the report as CSV"},
                     {"id": "c2", "criterion": "Email the report nightly"}]
@@ -173,6 +179,7 @@ class TestTicketPresentation:
         with patch("features.presentation.run_balanced", side_effect=fake_run):
             out = presentation.build_ticket_presentation("Reports", criteria, diffs, None)
         assert out["requirements"][0]["status"] == "met"
+        assert seen["schema"] == presentation.TICKET_PRESENTATION_SCHEMA
         prompt = seen["prompt"]
         assert "- c1: Export the report as CSV" in prompt
         assert "- c2: Email the report nightly" in prompt

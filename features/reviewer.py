@@ -15,7 +15,8 @@ from urllib.parse import urlsplit
 import core.log as log
 import core.state as state
 import core.git_util as git_util
-from core.claude_runner import run_agentic, run_balanced, run_haiku, extract_json
+from core.claude_runner import (run_agentic, run_balanced, run_haiku, extract_json,
+                                parse_structured, strict_object)
 from core.llm import CODEX_EXEC, READ_ONLY_TOOLS, WRITE_TOOLS, run_external_model
 from core.config import board_url, get_repos
 import features.presentation as presentation
@@ -178,6 +179,29 @@ REVIEW_MAX_CHANGED_LINES = 8000
 REVIEW_TOOLS = READ_ONLY_TOOLS
 REVIEW_DENIED_TOOLS = WRITE_TOOLS
 REVIEW_PERSONA_TIMEOUT = 1200
+
+MERGE_SCHEMA = strict_object({
+    "verdict": {"type": "string", "enum": ["approved", "changes_requested"]},
+    "author": {"type": "string"},
+    "source_branch": {"type": "string"},
+    "destination_branch": {"type": "string"},
+    "date": {"type": "string"},
+    "summary": {"type": "string"},
+    "issues": {"type": "array", "items": strict_object({
+        "repo": {"type": "string"},
+        "severity": {"type": "string", "enum": ["blocking", "suggestion", "question"]},
+        "path": {"type": ["string", "null"]},
+        "line": {"type": ["integer", "null"]},
+        "start_line": {"type": ["integer", "null"]},
+        "body": {"type": "string"},
+        "persona": {"type": "string"},
+        "tool_assisted": {"type": "boolean"},
+        "agreed_by": {"type": "array", "items": {"type": "string"}},
+    })},
+    "blocking_summary": {"type": "array", "items": {"type": "string"}},
+    "suggestions_summary": {"type": "array", "items": {"type": "string"}},
+    "questions_summary": {"type": "array", "items": {"type": "string"}},
+})
 
 JSON_OUTPUT_SCHEMA = (
     'OUTPUT FORMAT: Return a single JSON object (no markdown fences, no explanation) with this schema:\n'
@@ -809,15 +833,11 @@ def _merge_reviews(results: list[tuple[str, dict]]) -> dict:
         "Return a single JSON object (no markdown fences) with the same schema as the inputs plus 'agreed_by' on each issue.\n\n"
         f"--- REVIEWS ---\n{merge_input}\n--- END REVIEWS ---"
     )
-    output = run_balanced(merge_prompt, timeout=300)
-    if output:
-        data = extract_json(output)
-        if data:
-            if "issues" not in data and len(data) == 1:
-                data = next(iter(data.values()))
-            if isinstance(data.get("issues"), list):
-                data["issues"] = _collapse_persona_duplicates(data["issues"])
-                return data
+    data = parse_structured(run_balanced(merge_prompt, timeout=300, schema=MERGE_SCHEMA),
+                            MERGE_SCHEMA, fn_name="review_merge")
+    if data:
+        data["issues"] = _collapse_persona_duplicates(data["issues"])
+        return data
 
     log.emit("review_merge_fallback",
              "persona merge model returned nothing; merging the persona lists in code",
@@ -919,6 +939,11 @@ VALIDATE_PROMPT = (
     "Return ONLY a JSON object (no markdown fences):\n"
     '{"decision":"valid"|"false_positive"|"uncertain","defeating_line":<line number from the context, or null>,"reason":"one sentence"}\n'
 )
+VALIDATE_SCHEMA = strict_object({
+    "decision": {"type": "string", "enum": ["valid", "false_positive", "uncertain"]},
+    "defeating_line": {"type": ["integer", "null"]},
+    "reason": {"type": "string"},
+})
 
 
 def _read_function_context(worktree: Path, file_path: str, target_line: int) -> str:
@@ -983,15 +1008,12 @@ def _validate_single(args):
         f"FILE: {path}, LINE: {line}\n\n"
         f"CODE CONTEXT:\n{context}\n"
     )
-    output = run_balanced(prompt, timeout=120)
-    if not output:
-        return issue
-
-    data = extract_json(output)
+    data = parse_structured(run_balanced(prompt, timeout=120, schema=VALIDATE_SCHEMA),
+                            VALIDATE_SCHEMA, fn_name="review_validate")
     if not data:
         return issue
 
-    if data.get("decision") != "false_positive":
+    if data["decision"] != "false_positive":
         return issue
 
     reason = data.get("reason", "")
@@ -1054,6 +1076,18 @@ def _simplify_body_with_context(body: str, code_context: str | None, file_path: 
     return output if output else body
 
 
+WALKTHROUGH_SCHEMA = strict_object({
+    "comment_type": {"type": "string", "enum": ["local", "behavioral", "contract"]},
+    "explanation": {"type": "string"},
+    "snippets": {"type": "array", "items": strict_object({
+        "role": {"type": "string", "enum": ["flagged", "related"]},
+        "code": {"type": "string"},
+        "start_line": {"type": "integer"},
+        "explanation": {"type": "string"},
+    })},
+})
+
+
 def build_walkthrough_context(comment: dict, worktree: Path | None) -> dict:
     file_path = comment.get("path", "")
     line = int(comment.get("line", 0) or 0)
@@ -1082,17 +1116,14 @@ def build_walkthrough_context(comment: dict, worktree: Path | None) -> dict:
         'Return ONLY valid JSON (no markdown): {"comment_type":"local|behavioral|contract","explanation":"overall explanation","snippets":[{"role":"flagged|related","code":"lines preserving NUM: text format","start_line":<int>,"explanation":"how this block relates to the comment"}]}'
     )
 
-    result = run_haiku(prompt)
-    if not result:
-        return {"explanation": body, "snippets": []}
-
-    parsed = extract_json(result)
+    parsed = parse_structured(run_haiku(prompt, schema=WALKTHROUGH_SCHEMA),
+                              WALKTHROUGH_SCHEMA, fn_name="review_walkthrough")
     if not parsed:
         return {"explanation": body, "snippets": []}
 
     return {
-        "explanation": parsed.get("explanation", body),
-        "snippets": parsed.get("snippets", []),
+        "explanation": parsed["explanation"],
+        "snippets": parsed["snippets"],
     }
 
 
@@ -1119,6 +1150,11 @@ EXPLAIN_PROMPT = (
     '{"valid":"yes"|"no"|"partly","explanation":"the plain explanation, several short sentences"}\n\n'
 )
 
+EXPLAIN_SCHEMA = strict_object({
+    "valid": {"type": "string", "enum": ["yes", "no", "partly"]},
+    "explanation": {"type": "string"},
+})
+
 SUMMARY_SNIPPET_LINES = 30
 
 SUMMARY_PROMPT = (
@@ -1143,6 +1179,19 @@ SUMMARY_PROMPT = (
     "Do not modify any file. Do not commit. Do not push.\n\n"
 )
 
+SUMMARY_SCHEMA = strict_object({
+    "valid": {"type": "string", "enum": ["yes", "no", "partly"]},
+    "summary": {"type": "string"},
+    "plain": {"type": "string"},
+    "code": {"type": "array", "items": strict_object({
+        "path": {"type": "string"},
+        "start": {"type": "integer"},
+        "end": {"type": "integer"},
+        "code": {"type": "string"},
+        "note": {"type": "string"},
+    })},
+})
+
 EXPLAIN_TIMEOUT = 600
 EXPLAINERS = {"explainer": "claude", "explainer_codex": "codex"}
 SUMMARY_FIELD = "explainer_summary"
@@ -1152,13 +1201,14 @@ def explain_key(comment: dict) -> tuple:
     return (comment.get("path") or "", str(comment.get("line") or ""), comment.get("body") or "")
 
 
-def _ask_codex(prompt: str, cwd: Path) -> str | None:
+def _ask_codex(prompt: str, cwd: Path, schema: dict) -> str | None:
     with tempfile.TemporaryDirectory(prefix="frshty-explain-") as tmp:
         last = Path(tmp) / "last.md"
         text, exit_code = run_external_model(
             [*CODEX_EXEC, "-c", 'model_reasoning_effort="medium"', "-o", str(last), "-"],
             fn_name="review_explain_codex", model="codex", prompt=prompt, cwd=cwd,
-            timeout=EXPLAIN_TIMEOUT, last_message_file=last, stdin_text=prompt)
+            timeout=EXPLAIN_TIMEOUT, last_message_file=last, stdin_text=prompt,
+            output_schema=schema)
     return text if exit_code == 0 else None
 
 
@@ -1177,12 +1227,12 @@ def explain_comment(comment: dict, branch_dir: Path, worktree: Path | None,
         + f"{comment.get('body', '')}\n"
     )
     if model == "codex":
-        output = _ask_codex(prompt, worktree or branch_dir)
+        output = _ask_codex(prompt, worktree or branch_dir, EXPLAIN_SCHEMA)
     else:
         output = run_balanced(prompt, worktree=worktree or branch_dir, timeout=EXPLAIN_TIMEOUT,
-                              function_name="review_explain")
-    data = extract_json(output) if output else None
-    if not isinstance(data, dict) or not str(data.get("explanation") or "").strip():
+                              function_name="review_explain", schema=EXPLAIN_SCHEMA)
+    data = parse_structured(output, EXPLAIN_SCHEMA, fn_name="review_explain", model=model)
+    if not data or not data["explanation"].strip():
         log.emit("review_explain_failed",
                  f"No {model} explanation for {comment.get('path') or 'general'}:"
                  f"{comment.get('line') or ''} in {branch_dir.name}",
@@ -1190,9 +1240,7 @@ def explain_comment(comment: dict, branch_dir: Path, worktree: Path | None,
                        "line": comment.get("line"), "model": model,
                        "output": (output or "")[:500]})
         return None
-    valid = str(data.get("valid") or "").strip().lower()
-    return {"valid": valid if valid in ("yes", "no", "partly") else "partly",
-            "text": str(data["explanation"]).strip()}
+    return {"valid": data["valid"], "text": data["explanation"].strip()}
 
 
 def _snippet(part: dict, worktree: Path | None) -> dict | None:
@@ -1250,10 +1298,9 @@ def summarize_comment(comment: dict, answers: dict, branch_dir: Path,
                   for field, model in EXPLAINERS.items())
     )
     output = run_balanced(prompt, worktree=worktree or branch_dir, timeout=EXPLAIN_TIMEOUT,
-                          function_name="review_explain_summary")
-    data = extract_json(output) if output else None
-    if (not isinstance(data, dict) or not str(data.get("summary") or "").strip()
-            or not str(data.get("plain") or "").strip()):
+                          function_name="review_explain_summary", schema=SUMMARY_SCHEMA)
+    data = parse_structured(output, SUMMARY_SCHEMA, fn_name="review_explain_summary")
+    if not data or not data["summary"].strip() or not data["plain"].strip():
         log.emit("review_explain_failed",
                  f"No summary for {comment.get('path') or 'general'}:"
                  f"{comment.get('line') or ''} in {branch_dir.name}",
@@ -1261,12 +1308,10 @@ def summarize_comment(comment: dict, answers: dict, branch_dir: Path,
                        "line": comment.get("line"), "model": "summary",
                        "output": (output or "")[:500]})
         return None
-    valid = str(data.get("valid") or "").strip().lower()
-    parts = data.get("code") if isinstance(data.get("code"), list) else []
-    return {"valid": valid if valid in ("yes", "no", "partly") else "partly",
-            "summary": str(data["summary"]).strip(),
-            "plain": str(data["plain"]).strip(),
-            "code": [s for s in (_snippet(p, worktree) for p in parts[:3]) if s],
+    return {"valid": data["valid"],
+            "summary": data["summary"].strip(),
+            "plain": data["plain"].strip(),
+            "code": [s for s in (_snippet(p, worktree) for p in data["code"][:3]) if s],
             "models": {model: answers[field].get("valid") for field, model in EXPLAINERS.items()}}
 
 

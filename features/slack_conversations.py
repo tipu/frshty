@@ -97,7 +97,7 @@ import core.db as db
 import core.log as log
 import core.slack_capture as slack_capture
 import core.state as state
-from core.claude_runner import extract_json, run_haiku
+from core.claude_runner import parse_structured, run_haiku, strict_object
 from features import slack_monitor
 from services import work_launch, work_store
 
@@ -185,6 +185,12 @@ Participants: {participants}
 
 {transcript}
 """
+
+JUDGE_SCHEMA = strict_object({
+    "actionable": {"type": "boolean"},
+    "reason": {"type": "string"},
+    "objective": {"type": "string"},
+})
 
 DECLINED_RULE = """
 This conversation already opened a task and the operator declined it. This line
@@ -1985,11 +1991,8 @@ def _judge(row: dict, transcript: str, participants: list[str], channel: str,
         channel=channel,
         participants=", ".join(participants) or "(unknown)",
         transcript=transcript,
-    ))
-    if not raw:
-        return None
-    parsed = extract_json(raw)
-    return parsed if isinstance(parsed, dict) else None
+    ), schema=JUDGE_SCHEMA)
+    return parse_structured(raw, JUDGE_SCHEMA, fn_name="slack_conversation_judge")
 
 
 def _longest_backtick_run(text: str) -> int:

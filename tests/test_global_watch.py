@@ -197,7 +197,7 @@ def _codex(text, code=0):
 
 
 def test_ask_agent_runs_codex_only_on_the_cheap_model_in_a_read_only_sandbox():
-    with _codex('{"status": "ok", "problems": []}') as call:
+    with _codex('{"problems": []}') as call:
         verdict = global_watch.ask_agent(_agent_config(), "DIGEST", SINCE, NOW)
 
     cmd = call.call_args.args[0]
@@ -207,6 +207,7 @@ def test_ask_agent_runs_codex_only_on_the_cheap_model_in_a_read_only_sandbox():
     assert cmd[cmd.index("--sandbox") + 1] == "read-only"
     assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
     assert "DIGEST" in call.call_args.kwargs["stdin_text"]
+    assert call.call_args.kwargs["output_schema"] == global_watch.AGENT_SCHEMA
     assert verdict == {"status": "ok", "problems": []}
 
 
@@ -235,27 +236,33 @@ def test_ask_agent_asks_for_a_problem_list_and_no_separate_status():
 def test_ask_agent_derives_the_status_from_the_problem_list():
     with _codex('{"problems": []}'):
         assert global_watch.ask_agent(_agent_config(), "D", SINCE, NOW) == {"status": "ok", "problems": []}
-    problem = {"instance": "apexco", "what": "scan_tickets repeats"}
+    problem = _problem("apexco", "scan-tickets-repeats")
     with _codex(json.dumps({"problems": [problem]})):
         assert global_watch.ask_agent(_agent_config(), "D", SINCE, NOW) == {
             "status": "problem", "problems": [problem]}
 
 
 def test_ask_agent_fails_a_problem_without_details():
-    for problems in ([{"instance": "apexco", "what": " "}], [{"what": "scan_tickets repeats"}],
-                     ["scan_tickets repeats"]):
+    for problems in ([{**_problem("apexco", "k"), "what": " "}],
+                     [{**_problem(" ", "k")}]):
         with _codex(json.dumps({"problems": problems})):
             verdict = global_watch.ask_agent(_agent_config(), "D", SINCE, NOW)
         assert verdict["status"] == "failed"
         assert verdict["reason"].startswith("a problem names no instance or detail")
+    for problems in ([{"what": "scan_tickets repeats"}], ["scan_tickets repeats"]):
+        with _codex(json.dumps({"problems": problems})):
+            verdict = global_watch.ask_agent(_agent_config(), "D", SINCE, NOW)
+        assert verdict["status"] == "failed"
+        assert verdict["reason"].startswith("unparseable verdict")
 
 
 def test_run_posts_the_agent_verdict_only_when_it_changes(tmp_path):
     state.init(tmp_path)
     db.init(tmp_path / "t.db", ROOT / "migrations")
-    problem = ('{"status": "problem", "problems": [{"instance": "apexco", "what": "scan_tickets'
-               ' repeats with no progress", "evidence": "scan_tickets x40", "likely_cause": "wedged job"}]}')
-    healthy = '{"status": "ok", "problems": []}'
+    problem = ('{"problems": [{"instance": "apexco", "what": "scan_tickets'
+               ' repeats with no progress", "evidence": "scan_tickets x40", "likely_cause": "wedged job",'
+               ' "task_key": "scan-tickets-wedged", "task": "Unwedge scan_tickets."}]}')
+    healthy = '{"problems": []}'
     with patch.object(global_watch, "discover_instances",
                       return_value=[{"key": "personal", "base_url": "x"}]), \
          patch.object(global_watch, "read_feed", return_value=([_ev("personal", "a")], {})), \
@@ -263,7 +270,8 @@ def test_run_posts_the_agent_verdict_only_when_it_changes(tmp_path):
                       side_effect=[(problem, 0), (problem, 0), (None, None), (None, None), (healthy, 0)]), \
          patch.object(global_watch.log, "emit") as emit:
         for i in range(5):
-            out = global_watch.run(_agent_config(), now=NOW + timedelta(minutes=15 * i))
+            out = global_watch.run({**_agent_config(), "global_watch": {"enabled": True, "propose_tasks": False}},
+                                  now=NOW + timedelta(minutes=15 * i))
 
     assert [c.args[0] for c in emit.call_args_list] == [
         "global_watch_agent_alert", "global_watch_agent_failed", "global_watch_agent_recovered"]
@@ -301,7 +309,7 @@ def _problem(instance, task_key, task="Repair the broken worktrees."):
 
 
 def _verdict(*problems):
-    return json.dumps({"status": "problem", "problems": list(problems)})
+    return json.dumps({"problems": list(problems)})
 
 
 def _run_agent(tmp_path, replies, config=None):
