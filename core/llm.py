@@ -4,6 +4,7 @@ import json
 import os
 import re
 import secrets
+import signal
 import subprocess
 import tempfile
 import threading
@@ -1121,18 +1122,26 @@ def run_external_model(cmd: list[str], *, fn_name: str, model: str, prompt: str,
     env = {**os.environ, **(env_extra or {})}
     _mark_running(inv_id)
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, cwd=str(cwd) if cwd else None,
-            env=env, timeout=timeout,
-            input=stdin_text.encode() if stdin_text is not None else None,
+        proc = subprocess.Popen(
+            cmd, stdin=subprocess.PIPE if stdin_text is not None else None,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cwd=str(cwd) if cwd else None, env=env, start_new_session=True,
         )
-    except subprocess.TimeoutExpired:
-        _record_end(inv_id, t0, "timeout", None, None)
-        return None, None
     except OSError as e:
         return _spawn_failed(inv_id, t0, fn_name, model, e), None
-    stdout = result.stdout.decode(errors="replace") if result.stdout else ""
-    stderr = result.stderr.decode(errors="replace") if result.stderr else ""
+    try:
+        out, err = proc.communicate(
+            input=stdin_text.encode() if stdin_text is not None else None, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except OSError:
+            proc.kill()
+        proc.communicate()
+        _record_end(inv_id, t0, "timeout", None, None)
+        return None, None
+    stdout = out.decode(errors="replace") if out else ""
+    stderr = err.decode(errors="replace") if err else ""
     if transcript_file is not None:
         try:
             transcript_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1149,9 +1158,9 @@ def run_external_model(cmd: list[str], *, fn_name: str, model: str, prompt: str,
             text = ""
     if not text.strip():
         text = stdout
-    status = "success" if result.returncode == 0 else "error"
-    _record_end(inv_id, t0, status, result.returncode, text)
-    return text, result.returncode
+    status = "success" if proc.returncode == 0 else "error"
+    _record_end(inv_id, t0, status, proc.returncode, text)
+    return text, proc.returncode
 
 
 def extract_json(text: str) -> dict | None:
