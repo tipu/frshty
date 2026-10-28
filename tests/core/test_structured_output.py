@@ -2,8 +2,8 @@
 
 claude -p takes --json-schema and puts the checked answer in the result
 envelope as structured_output. codex exec takes --output-schema with a file.
-opencode run has no schema flag, so the schema goes into the prompt and
-parse_structured checks the answer afterwards.
+opencode run has no schema flag, so a schema call goes to a private
+`opencode serve` process with format json_schema and reads info.structured.
 """
 import json
 import os
@@ -112,28 +112,130 @@ def test_parse_structured_reads_an_answer_inside_the_schema():
     assert llm.parse_structured(None, VERDICT, fn_name="t") is None
 
 
-def test_the_opencode_tiers_put_the_schema_in_the_prompt():
+FAKE_OPENCODE_SERVE = r"""
+import base64, json, os, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+RECORD = os.environ["FAKE_OPENCODE_RECORD"]
+REPLY = json.load(open(os.environ["FAKE_OPENCODE_REPLY"]))
+EXPECTED = "Basic " + base64.b64encode(
+    ("opencode:" + os.environ["OPENCODE_SERVER_PASSWORD"]).encode()).decode()
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["content-length"])))
+        if self.headers.get("authorization") != EXPECTED:
+            self.send_response(401)
+            self.end_headers()
+            return
+        with open(RECORD, "a") as f:
+            f.write(json.dumps({"argv": sys.argv[1:], "path": self.path, "body": body,
+                                "config": os.environ.get("OPENCODE_CONFIG_CONTENT"),
+                                "cwd": os.getcwd()}) + "\n")
+        out = {"id": "ses_1"} if self.path == "/session" else REPLY
+        data = json.dumps(out).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *args):
+        pass
+
+
+server = HTTPServer(("127.0.0.1", 0), Handler)
+print(f"opencode server listening on http://127.0.0.1:{server.server_port}", flush=True)
+server.serve_forever()
+"""
+
+
+def _fake_opencode(tmp_path: Path, monkeypatch, reply: dict) -> Path:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    record = tmp_path / "record.jsonl"
+    reply_file = tmp_path / "reply.json"
+    reply_file.write_text(json.dumps(reply))
+    server = tmp_path / "fake_serve.py"
+    server.write_text(FAKE_OPENCODE_SERVE)
+    fake = bin_dir / "opencode"
+    fake.write_text(f"#!/bin/sh\nexec {sys.executable} {server} \"$@\"\n")
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_OPENCODE_RECORD", str(record))
+    monkeypatch.setenv("FAKE_OPENCODE_REPLY", str(reply_file))
+    db.execute("DELETE FROM kv WHERE key='llm_guard'")
+    return record
+
+
+def _requests(record: Path) -> list[dict]:
+    return [json.loads(line) for line in record.read_text().splitlines()]
+
+
+def test_the_opencode_tiers_send_the_schema_to_the_serve_api(tmp_path, monkeypatch):
+    record = _fake_opencode(tmp_path, monkeypatch, {
+        "info": {"structured": {"verdict": "PASS", "reason": "7 is prime"}}, "parts": []})
     provider = llm.OpenCodeProvider({"llm": {"opencode": {}}})
-    prompts = []
 
-    def capture(cmd, fn_name, model, prompt, cwd, timeout, env_overrides=None):
-        prompts.append(prompt)
-        return '{"verdict": "PASS", "reason": "r"}'
+    outs = [provider.fast("q", schema=VERDICT),
+            provider.balanced("q", worktree=tmp_path, schema=VERDICT),
+            provider.agentic("q", cwd=tmp_path, system_prompt="sys", schema=VERDICT)]
 
-    with patch.object(provider, "_run", side_effect=capture):
-        provider.fast("q", schema=VERDICT)
-        provider.balanced("q", schema=VERDICT)
-        provider.agentic("q", cwd=Path("."), schema=VERDICT)
-        provider.fast("plain")
+    for out in outs:
+        assert json.loads(out) == {"verdict": "PASS", "reason": "7 is prime"}
+    messages = [r for r in _requests(record) if r["path"] == "/session/ses_1/message"]
+    assert len(messages) == 3
+    for m in messages:
+        assert m["argv"][:3] == ["serve", "--port", "0"]
+        assert m["body"]["format"] == {"type": "json_schema", "schema": VERDICT}
+    fast, balanced, agentic = messages
+    assert fast["body"]["tools"] == {"*": False, "StructuredOutput": True}
+    assert fast["body"]["model"] == {"providerID": "openrouter",
+                                     "modelID": "deepseek/deepseek-v4-flash"}
+    assert fast["body"]["parts"] == [{"type": "text", "text": "q"}]
+    assert fast["config"] == llm.NO_TOOLS_OPENCODE_ENV["OPENCODE_CONFIG_CONTENT"]
+    assert balanced["body"]["tools"] == {"*": False, "StructuredOutput": True}
+    assert balanced["cwd"] == str(tmp_path)
+    assert "tools" not in agentic["body"]
+    assert agentic["body"]["parts"] == [{"type": "text", "text": "sys\n\nq"}]
+    assert agentic["config"] == llm.ALL_TOOLS_OPENCODE_ENV["OPENCODE_CONFIG_CONTENT"]
 
-    for prompt in prompts[:3]:
-        assert prompt.startswith("q\n\n")
-        assert json.dumps(VERDICT) in prompt
-    assert prompts[3] == "plain"
-    with patch.object(provider, "_run", return_value='{"verdict": "NO", "reason": "r"}'), \
-         patch.object(llm.log, "emit"):
-        assert llm.parse_structured(provider.fast("q", schema=VERDICT), VERDICT,
-                                    fn_name="t") is None
+
+def test_an_opencode_reply_without_structured_output_answers_none_and_says_so(
+        tmp_path, monkeypatch):
+    _fake_opencode(tmp_path, monkeypatch, {"info": {"error": {
+        "name": "StructuredOutputError",
+        "data": {"message": "Model did not produce structured output"}}}, "parts": []})
+    llm.reset_last_error()
+    with patch.object(llm.log, "emit") as emit:
+        out = llm.OpenCodeProvider({"llm": {"opencode": {}}}).fast("q", schema=VERDICT)
+    assert out is None
+    assert "no structured output" in llm.consume_last_error()
+    invalid = [c for c in emit.call_args_list if c.args[0] == "llm_schema_invalid"]
+    assert len(invalid) == 1
+    assert "StructuredOutputError" in invalid[0].args[1]
+
+
+def test_an_opencode_server_that_dies_before_listening_answers_none(tmp_path, monkeypatch):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "opencode"
+    fake.write_text("#!/bin/sh\necho boom\nexit 3\n")
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", f"{bin_dir}:{os.environ['PATH']}")
+    db.execute("DELETE FROM kv WHERE key='llm_guard'")
+    out = llm.OpenCodeProvider({"llm": {"opencode": {}}}).fast("q", schema=VERDICT, timeout=10)
+    assert out is None
+
+
+def test_an_opencode_call_without_a_schema_still_uses_opencode_run():
+    provider = llm.OpenCodeProvider({"llm": {"opencode": {}}})
+    with patch.object(provider, "_run", return_value="plain answer") as run, \
+         patch.object(provider, "_run_structured") as structured:
+        assert provider.fast("plain") == "plain answer"
+    assert run.call_args.args[0][:2] == ["opencode", "run"]
+    structured.assert_not_called()
 
 
 def test_codex_gets_the_schema_as_a_file_after_exec(tmp_path):

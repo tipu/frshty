@@ -1,11 +1,14 @@
+import base64
 import contextvars
 import json
 import os
 import re
+import secrets
 import subprocess
 import tempfile
 import threading
 import time
+import urllib.request
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -377,6 +380,11 @@ NO_TOOLS_FLAGS = ("--tools", "", "--strict-mcp-config")
 NO_TOOLS_OPENCODE_ENV = {
     "OPENCODE_CONFIG_CONTENT": json.dumps({"permission": {"*": {"*": "deny"}}}),
 }
+ALL_TOOLS_OPENCODE_ENV = {
+    "OPENCODE_CONFIG_CONTENT": json.dumps({"permission": {"*": {"*": "allow"}}}),
+}
+STRUCTURED_ONLY_TOOLS = {"*": False, "StructuredOutput": True}
+_LOCAL_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 PUBLISH_DENIED_TOOLS = ("Bash(git push:*)", "Bash(curl:*)", "Bash(gh:*)")
 HEADLESS_DENIED_TOOLS = ("ScheduleWakeup",)
 NO_PUBLISH_RULE = (
@@ -741,10 +749,12 @@ class OpenCodeProvider(LLMProvider):
                  tools: list[str] | None = None, timeout: int = 600,
                  function_name: str = "run_balanced", schema: dict | None = None,
                  **kwargs) -> str | None:
-        prompt = _schema_prompt(prompt, schema)
+        cwd = worktree if worktree and worktree.is_dir() else None
+        if schema:
+            return self._run_structured(prompt, schema, function_name, self.model_balanced,
+                                        cwd, timeout, tools=STRUCTURED_ONLY_TOOLS)
         cmd = ["opencode", "run", prompt, "--model", self.model_balanced,
                "--dangerously-skip-permissions"]
-        cwd = worktree if worktree and worktree.is_dir() else None
         return self._run(cmd, function_name, self.model_balanced, prompt, cwd, timeout)
 
     def agentic(self, prompt: str, *, cwd: Path, system_prompt: str | None = None,
@@ -752,8 +762,10 @@ class OpenCodeProvider(LLMProvider):
                 denied_tools: list[str] | None = None, timeout: int = 1200,
                 model: str | None = None, function_name: str = "run_agentic",
                 schema: dict | None = None, **kwargs) -> str | None:
-        prompt = _schema_prompt(prompt, schema)
         full = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
+        if schema:
+            return self._run_structured(full, schema, function_name, self.model_thinking,
+                                        cwd, timeout, env_overrides=ALL_TOOLS_OPENCODE_ENV)
         cmd = ["opencode", "run", full, "--model", self.model_thinking,
                "--dangerously-skip-permissions"]
         return self._run(cmd, function_name, self.model_thinking, full, cwd, timeout)
@@ -768,7 +780,10 @@ class OpenCodeProvider(LLMProvider):
         --dangerously-skip-permissions alone leaves the classifier able to act.
         The deny-everything configuration is handed to it in the environment
         instead."""
-        prompt = _schema_prompt(prompt, schema)
+        if schema:
+            return self._run_structured(prompt, schema, "run_fast", self.model_fast, None,
+                                        timeout, tools=STRUCTURED_ONLY_TOOLS,
+                                        env_overrides=NO_TOOLS_OPENCODE_ENV)
         cmd = ["opencode", "run", prompt, "--model", self.model_fast]
         return self._run(cmd, "run_fast", self.model_fast, prompt, None, timeout,
                          env_overrides=NO_TOOLS_OPENCODE_ENV)
@@ -778,15 +793,7 @@ class OpenCodeProvider(LLMProvider):
              env_overrides: dict[str, str] | None = None) -> str | None:
         inv_id = _record_start(fn_name, model, prompt, cwd, None, timeout)
         t0 = time.monotonic()
-        blocked, reason, remaining_s = _guard_status()
-        if blocked:
-            _record_end(inv_id, t0, "blocked", None, _guard_block_output(reason, remaining_s))
-            log.emit("llm_guard_blocked",
-                     f"[{_active_instance_key()}] skipped {model} invocation "
-                     f"while cooldown active ({remaining_s}s left)",
-                     meta={"instance_key": _active_instance_key(),
-                           "reason": reason, "remaining_s": remaining_s})
-            _flag_guard_blocked()
+        if _opencode_guard_blocks(inv_id, t0, model):
             return None
         acquire_start = time.monotonic()
         with _llm_sem:
@@ -812,14 +819,114 @@ class OpenCodeProvider(LLMProvider):
             _record_end(inv_id, t0, "success", result.returncode, output)
             return output
 
+    def _run_structured(self, prompt: str, schema: dict, fn_name: str, model: str,
+                        cwd: Path | None, timeout: int, *, tools: dict | None = None,
+                        env_overrides: dict[str, str] | None = None) -> str | None:
+        """A schema call through a private `opencode serve` process.
 
-def _schema_prompt(prompt: str, schema: dict | None) -> str:
-    """`opencode run` has no schema flag, so the schema goes into the prompt
-    and parse_structured checks the answer against it afterwards."""
-    if not schema:
-        return prompt
-    return (f"{prompt}\n\nReturn ONLY one JSON object that matches this JSON Schema, "
-            f"with no other text:\n{json.dumps(schema)}")
+        `opencode run` has no schema flag. The server API takes
+        format: json_schema, adds a StructuredOutput tool, and returns the
+        checked answer in info.structured. A tool map that denies "*" must
+        allow StructuredOutput by name, or the model cannot answer at all.
+        The server binds 127.0.0.1 with a one-time password and lives only for
+        this call. Returns the JSON of the answer, or None."""
+        inv_id = _record_start(fn_name, model, prompt, cwd, None, timeout)
+        t0 = time.monotonic()
+        if _opencode_guard_blocks(inv_id, t0, model):
+            return None
+        provider_id, _, model_id = model.partition("/")
+        body = {"model": {"providerID": provider_id, "modelID": model_id},
+                "format": {"type": "json_schema", "schema": schema},
+                "parts": [{"type": "text", "text": prompt}]}
+        if tools is not None:
+            body["tools"] = tools
+        acquire_start = time.monotonic()
+        with _llm_sem:
+            _mark_running(inv_id, queued_s=time.monotonic() - acquire_start)
+            deadline = time.monotonic() + timeout
+            password = secrets.token_urlsafe(24)
+            with tempfile.TemporaryFile() as server_log:
+                try:
+                    server = subprocess.Popen(
+                        ["opencode", "serve", "--port", "0", "--hostname", "127.0.0.1"],
+                        stdin=subprocess.DEVNULL, stdout=server_log, stderr=subprocess.STDOUT,
+                        cwd=str(cwd) if cwd else None,
+                        env={**os.environ, **(env_overrides or {}),
+                             "OPENCODE_SERVER_PASSWORD": password},
+                    )
+                except OSError as e:
+                    return _spawn_failed(inv_id, t0, fn_name, model, e)
+                try:
+                    url = _opencode_serve_url(server, server_log, deadline)
+                    session = _opencode_post(url, "/session", {}, password, deadline)
+                    reply = _opencode_post(url, f"/session/{session['id']}/message", body,
+                                           password, deadline)
+                except (OSError, ValueError, KeyError, TypeError) as e:
+                    if time.monotonic() >= deadline:
+                        _record_end(inv_id, t0, "timeout", None, None)
+                        return None
+                    output = (f"{type(e).__name__}: {e}\n[server]\n"
+                              + os.pread(server_log.fileno(), 65536, 0).decode(errors="replace"))
+                    _trip_llm_guard(output)
+                    _record_end(inv_id, t0, "error", None, output)
+                    return None
+                finally:
+                    server.terminate()
+                    try:
+                        server.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        server.kill()
+                        server.wait()
+            info = reply.get("info") if isinstance(reply, dict) else None
+            structured = info.get("structured") if isinstance(info, dict) else None
+            if not isinstance(structured, dict):
+                error = info.get("error") if isinstance(info, dict) else None
+                detail = json.dumps(error) if error else "no structured output in the reply"
+                _trip_llm_guard(detail)
+                _record_end(inv_id, t0, "error", None, detail)
+                _last_error_cv.set(f"opencode {fn_name} returned no structured output")
+                _emit_schema_invalid(fn_name, model, detail)
+                return None
+            text = json.dumps(structured)
+            _record_end(inv_id, t0, "success", 0, text)
+            return text
+
+
+def _opencode_guard_blocks(inv_id: str | None, t0: float, model: str) -> bool:
+    blocked, reason, remaining_s = _guard_status()
+    if not blocked:
+        return False
+    _record_end(inv_id, t0, "blocked", None, _guard_block_output(reason, remaining_s))
+    log.emit("llm_guard_blocked",
+             f"[{_active_instance_key()}] skipped {model} invocation "
+             f"while cooldown active ({remaining_s}s left)",
+             meta={"instance_key": _active_instance_key(),
+                   "reason": reason, "remaining_s": remaining_s})
+    _flag_guard_blocked()
+    return True
+
+
+def _opencode_serve_url(server: subprocess.Popen, server_log, deadline: float) -> str:
+    """The base URL `opencode serve` prints once it listens."""
+    while True:
+        banner = os.pread(server_log.fileno(), 65536, 0).decode(errors="replace")
+        match = re.search(r"listening on (http://\S+)", banner)
+        if match:
+            return match.group(1)
+        if server.poll() is not None:
+            raise OSError(f"opencode serve exited with code {server.returncode} before it listened")
+        if time.monotonic() >= deadline:
+            raise TimeoutError("opencode serve did not start listening")
+        time.sleep(0.05)
+
+
+def _opencode_post(url: str, path: str, body: dict, password: str, deadline: float):
+    token = base64.b64encode(f"opencode:{password}".encode()).decode()
+    request = urllib.request.Request(
+        url + path, data=json.dumps(body).encode(),
+        headers={"content-type": "application/json", "authorization": f"Basic {token}"})
+    with _LOCAL_OPENER.open(request, timeout=max(deadline - time.monotonic(), 1)) as response:
+        return json.load(response)
 
 
 def strict_object(properties: dict) -> dict:
@@ -839,8 +946,8 @@ def _emit_schema_invalid(fn_name: str, model: str, detail: str) -> None:
 def parse_structured(text: str | None, schema: dict, *, fn_name: str,
                      model: str = "") -> dict | None:
     """The answer of a schema call as a dict, or None when there is no answer
-    or it does not match `schema`. Claude and codex validate the answer in the
-    CLI; this check also covers opencode, which only reads the schema as text."""
+    or it does not match `schema`. Claude, codex and opencode validate the
+    answer themselves; this check keeps a wrong shape from the caller anyway."""
     if text is None:
         return None
     data = extract_json(text)
