@@ -96,6 +96,12 @@ def dep_store_gc(ctx: TaskContext) -> TaskResult:
     return TaskResult("ok", artifacts=result)
 
 
+@task("pr_worktree_gc", timeout=1800)
+def pr_worktree_gc(ctx: TaskContext) -> TaskResult:
+    from features import pr_worktree_gc
+    return TaskResult("ok", artifacts=pr_worktree_gc.sweep(ctx.config))
+
+
 @task("log_retention", timeout=1800)
 def log_retention(ctx: TaskContext) -> TaskResult:
     return TaskResult("ok", artifacts=log.prune())
