@@ -126,6 +126,12 @@ def test_thinking_denies_publish_tools_beside_an_allow_list(tmp_path, monkeypatc
     assert argv[argv.index("--disallowedTools") + 1] == "ScheduleWakeup,Bash(git push:*),Bash(curl:*),Bash(gh:*)"
 
 
+def test_thinking_tells_the_agent_to_navigate_with_lsp(tmp_path, monkeypatch):
+    argv = _run_thinking(tmp_path, monkeypatch)
+    assert argv[argv.index("--append-system-prompt") + 1] == llm.LSP_RULE
+    assert "select:LSP" in llm.LSP_RULE
+
+
 def test_thinking_takes_a_narrower_deny_list(tmp_path, monkeypatch):
     argv = _run_thinking(tmp_path, monkeypatch, denied_tools=("Bash(curl:*)",))
     assert argv[argv.index("--disallowedTools") + 1] == "ScheduleWakeup,Bash(curl:*)"
