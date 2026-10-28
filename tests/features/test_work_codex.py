@@ -8,6 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import core.codex_session as codex_session
 import core.db as db
+import core.llm as llm
 import core.terminal as terminal
 from services import work_launch, work_store
 
@@ -197,11 +198,21 @@ class TestCodexLaunch:
     def test_the_review_stops_on_the_verdict(self, tmp_path, monkeypatch):
         for agent, other in (("claude", "codex"), ("codex", "claude")):
             prompt = _launch_prompt(tmp_path, monkeypatch, agent)
-            assert f"Stop when {other} reports no high or critical defect" in prompt
+            assert f"Stop when {other} and deepseek report no high or critical " \
+                   "defect" in prompt
             assert "every finding still open is one you rejected with a stated " \
                    "reason" in prompt
             assert "a second time only when you fixed" not in prompt
             assert "Never run it a third time" not in prompt
+
+    def test_deepseek_reviews_beside_the_other_model(self, tmp_path, monkeypatch):
+        for agent, other in (("claude", "codex"), ("codex", "claude")):
+            prompt = _launch_prompt(tmp_path, monkeypatch, agent)
+            assert "send the same question to deepseek as a second reviewer" in prompt
+            assert f"opencode run -m {llm.DEEPSEEK_REVIEWER_MODEL} " \
+                   '"$(cat <question-file>)" < /dev/null' in prompt
+            assert f"Weigh the deepseek findings like the {other} findings" in prompt
+            assert f"do not run {other} or deepseek" in prompt
 
     def test_the_review_is_capped_at_four_passes(self, tmp_path, monkeypatch):
         for agent in ("claude", "codex"):
