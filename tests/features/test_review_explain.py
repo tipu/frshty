@@ -52,10 +52,17 @@ class TestExplainComment:
             reviewer.explain_comment(_comment("x"), tmp_path, None)
         assert balanced.call_args.kwargs["worktree"] == tmp_path
 
-    def test_unknown_verdict_reads_as_partly(self, tmp_path):
+    def test_unknown_verdict_is_outside_the_schema(self, tmp_path):
         with patch.object(reviewer, "run_balanced", return_value=_answer(valid="maybe")), \
+             patch.object(reviewer, "log"), patch.object(llm, "log") as llm_log:
+            assert reviewer.explain_comment(_comment("x"), tmp_path, None) is None
+        assert llm_log.emit.call_args.args[0] == "llm_schema_invalid"
+
+    def test_claude_gets_the_explain_schema(self, tmp_path):
+        with patch.object(reviewer, "run_balanced", return_value=_answer()) as balanced, \
              patch.object(reviewer, "log"):
-            assert reviewer.explain_comment(_comment("x"), tmp_path, None)["valid"] == "partly"
+            reviewer.explain_comment(_comment("x"), tmp_path, None)
+        assert balanced.call_args.kwargs["schema"] == reviewer.EXPLAIN_SCHEMA
 
     def test_no_answer_is_logged_and_returns_none(self, tmp_path):
         with patch.object(reviewer, "run_balanced", return_value="not json"), \
@@ -94,8 +101,9 @@ class TestExplainCommentWithCodex:
 
     def test_codex_asks_codex_outside_the_sandbox(self, tmp_path):
         with patch.object(reviewer, "run_external_model", return_value=(_codex_answer(), 0)) as run:
-            out = reviewer._ask_codex("prompt", tmp_path)
+            out = reviewer._ask_codex("prompt", tmp_path, reviewer.EXPLAIN_SCHEMA)
         assert out == _codex_answer()
+        assert run.call_args.kwargs["output_schema"] == reviewer.EXPLAIN_SCHEMA
         cmd = run.call_args.args[0]
         assert cmd[:2] == ["codex", "exec"]
         assert "--dangerously-bypass-approvals-and-sandbox" in cmd
@@ -103,7 +111,7 @@ class TestExplainCommentWithCodex:
 
     def test_a_failed_codex_exit_gives_no_text(self, tmp_path):
         with patch.object(reviewer, "run_external_model", return_value=("partial", 1)):
-            assert reviewer._ask_codex("prompt", tmp_path) is None
+            assert reviewer._ask_codex("prompt", tmp_path, reviewer.EXPLAIN_SCHEMA) is None
 
 
 @pytest.fixture
@@ -193,7 +201,7 @@ class TestExplainReviewIsolation:
             seen.append(("claude", llm._active_instance_key()))
             return _answer()
 
-        def record_codex(prompt, cwd):
+        def record_codex(prompt, cwd, schema):
             seen.append(("codex", llm._active_instance_key()))
             return _codex_answer()
 
@@ -262,8 +270,8 @@ class TestSummarizeComment:
         worktree = tmp_path / "worktree"
         worktree.mkdir()
         (tmp_path / "secret.txt").write_text("key\n")
-        code = [{"path": "../secret.txt", "start": 1, "end": 1, "note": "x"},
-                {"path": "missing.py", "start": 1, "end": 1, "note": "x"}]
+        code = [{"path": "../secret.txt", "start": 1, "end": 1, "code": "x", "note": "x"},
+                {"path": "missing.py", "start": 1, "end": 1, "code": "x", "note": "x"}]
         with patch.object(reviewer, "run_balanced", return_value=_summary_answer(code)), \
              patch.object(reviewer, "log"):
             out = reviewer.summarize_comment(
@@ -274,7 +282,7 @@ class TestSummarizeComment:
         worktree = tmp_path / "worktree"
         worktree.mkdir()
         (worktree / "loop").symlink_to("loop")
-        code = [{"path": "loop", "start": 1, "end": 1, "note": "x"}]
+        code = [{"path": "loop", "start": 1, "end": 1, "code": "x", "note": "x"}]
         with patch.object(reviewer, "run_balanced", return_value=_summary_answer(code)), \
              patch.object(reviewer, "log"):
             out = reviewer.summarize_comment(
@@ -285,8 +293,8 @@ class TestSummarizeComment:
         worktree = tmp_path / "worktree"
         worktree.mkdir()
         (worktree / "a.py").write_text("\n".join(str(n) for n in range(1, 101)))
-        code = [{"path": "a.py", "start": 10, "end": 90, "note": ""},
-                {"path": "a.py", "start": 99, "end": 120, "note": ""}]
+        code = [{"path": "a.py", "start": 10, "end": 90, "code": "x", "note": ""},
+                {"path": "a.py", "start": 99, "end": 120, "code": "x", "note": ""}]
         with patch.object(reviewer, "run_balanced", return_value=_summary_answer(code)), \
              patch.object(reviewer, "log"):
             out = reviewer.summarize_comment(

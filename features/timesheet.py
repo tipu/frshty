@@ -16,11 +16,20 @@ import core.log as log
 import core.state as state
 import core.tz as tz
 from core.config import resolve_env, get_repos
-from core.claude_runner import run_haiku, extract_json
+from core.claude_runner import run_haiku, parse_structured, strict_object
 from features.platforms import make_platform
 from features import timesheet_select as tsel
 
 CACHE_FILE = None
+DAILY_SUMMARY_SCHEMA = strict_object({
+    "days": {"type": "array", "items": strict_object({
+        "date": {"type": "string"},
+        "tickets": {"type": "array", "items": strict_object({
+            "ticket": {"type": "string"},
+            "summary": {"type": "string"},
+        })},
+    })},
+})
 _day_cache = {}
 _ticket_cache = {}
 _analysis_cache = {}
@@ -835,17 +844,19 @@ def _summarize_daily_activity(grouped: dict) -> dict:
             "Summarize daily developer activity grouped by ticket. "
             "For each day+ticket, write ONE concise line (max 20 words) describing what was done. "
             "Combine commits, reviews, and claude sessions into a single summary per ticket per day. "
-            'Return ONLY valid JSON: {"YYYY-MM-DD": {"TICKET": "summary", ...}, ...}\n\n'
+            'Return ONLY valid JSON: {"days": [{"date": "YYYY-MM-DD", "tickets": '
+            '[{"ticket": "TICKET", "summary": "summary"}, ...]}, ...]}\n\n'
             + prompt_data[:8000]
         )
 
         result = {}
         try:
-            raw = run_haiku(prompt, timeout=180)
-            if raw:
-                parsed = extract_json(raw)
-                if parsed:
-                    result = parsed
+            parsed = parse_structured(run_haiku(prompt, timeout=180, schema=DAILY_SUMMARY_SCHEMA),
+                                      DAILY_SUMMARY_SCHEMA, fn_name="timesheet_daily_summary")
+            if parsed:
+                for day in parsed["days"]:
+                    result.setdefault(day["date"], {}).update(
+                        {t["ticket"]: t["summary"] for t in day["tickets"]})
         except Exception:
             pass
 
