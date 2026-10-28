@@ -5,8 +5,19 @@ from datetime import datetime, timezone
 import core.db as db
 import core.log as log
 import core.queue as q
-from core.claude_runner import extract_json, run_haiku
+from core.claude_runner import extract_json, parse_structured, run_haiku, strict_object
 from pm.prompts import PRE_APPROVAL
+
+PRE_APPROVAL_SCHEMA = strict_object({
+    "verdict": {"type": "string", "enum": ["clean", "flagged"]},
+    "findings": {"type": "array", "items": strict_object({
+        "category": {"type": "string",
+                     "enum": ["duplicate", "criteria_quality", "dependency_order"]},
+        "severity": {"type": "string", "enum": ["info", "warning", "high"]},
+        "message": {"type": "string"},
+        "related_ticket_keys": {"type": "array", "items": {"type": "string"}},
+    })},
+})
 
 
 def _now() -> str:
@@ -59,20 +70,15 @@ def run_pre_approval(instance_key: str, ticket_key: str, ticket_data: dict) -> d
         f"CANDIDATE_SET (active + in-flight tickets in same instance):\n"
         f"{candidates}\n"
     )
-    raw = run_haiku(PRE_APPROVAL + payload)
-    if not raw:
+    parsed = parse_structured(run_haiku(PRE_APPROVAL + payload, schema=PRE_APPROVAL_SCHEMA),
+                              PRE_APPROVAL_SCHEMA, fn_name="pm_pre_approval")
+    if parsed is None:
         log.emit("pm_review_failed",
-                 f"haiku returned empty for pre-approval review of {ticket_key}",
+                 f"haiku returned no valid pre-approval review of {ticket_key}",
                  meta={"ticket": ticket_key})
         return None
-    parsed = extract_json(raw)
-    if not parsed or not isinstance(parsed.get("findings"), list):
-        log.emit("pm_review_parse_failed",
-                 f"could not parse pm output for {ticket_key}",
-                 meta={"ticket": ticket_key, "raw": raw[:500]})
-        return None
-    verdict = parsed.get("verdict", "clean")
-    findings = parsed.get("findings", [])
+    verdict = parsed["verdict"]
+    findings = parsed["findings"]
     db.execute(
         "INSERT INTO pm_review"
         "(instance_key, ticket_key, prd_section_id, checkpoint_type, verdict, findings, created_at)"
