@@ -22,13 +22,17 @@ def config_dir() -> Path:
     return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
 
 
+def _reject_constant(name: str):
+    raise ValueError(f"{name} is not valid JSON")
+
+
 def problems() -> list[str]:
     """One line per plugin file that exists and does not hold a JSON object."""
     found = []
     for name in PLUGIN_FILES:
         path = config_dir() / "plugins" / name
         try:
-            text = path.read_text()
+            text = path.read_bytes()
         except FileNotFoundError:
             continue
         except OSError as e:
@@ -38,7 +42,7 @@ def problems() -> list[str]:
             found.append(f"{path}: empty ({len(text)} bytes)")
             continue
         try:
-            data = json.loads(text)
+            data = json.loads(text, parse_constant=_reject_constant)
         except ValueError as e:
             found.append(f"{path}: invalid JSON: {e}")
             continue

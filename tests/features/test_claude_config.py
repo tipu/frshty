@@ -25,10 +25,11 @@ def test_valid_and_missing_files_are_fine():
     assert claude_config.problems() == []
 
 
-@pytest.mark.parametrize("text,needle", [("", "empty"), ("{\"m\": ", "invalid JSON"),
-                                         ("[]", "JSON list")])
+@pytest.mark.parametrize("text,needle", [(b"", "empty"), (b'{"m": ', "invalid JSON"),
+                                         (b"[]", "JSON list"), (b'{"m": NaN}', "invalid JSON"),
+                                         (b'{"m": "\xff"}', "invalid JSON")])
 def test_unreadable_file_is_named(text, needle):
-    _write("known_marketplaces.json", text)
+    (claude_config.config_dir() / "plugins" / "known_marketplaces.json").write_bytes(text)
     found = claude_config.problems()
     assert len(found) == 1
     assert "known_marketplaces.json" in found[0] and needle in found[0]
