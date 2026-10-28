@@ -18,7 +18,8 @@ import core.git_util as git_util
 import core.log as log
 import core.queue as q
 import core.state as state
-from core.claude_runner import run_agentic, run_balanced, run_claude_code, extract_json
+from core.claude_runner import (run_agentic, run_balanced, run_claude_code, parse_structured,
+                                strict_object)
 from core.commit_message import COMMIT_SUBJECT_RULE, branch_key, commit_subject, keyed
 from core.config import get_repos
 from core.llm import CODEX_EXEC, READ_ONLY_TOOLS, WRITE_TOOLS, run_external_model
@@ -44,6 +45,27 @@ REVIEW_SCHEMA = (
     'medium/low = everything else. Only report findings grounded in the diff. '
     'LINE RULES: line numbers refer to the NEW version of the file, derived from the @@ hunk headers.\n'
 )
+
+_FINDING_FIELDS = {
+    "path": {"type": "string"},
+    "line": {"type": ["integer", "null"]},
+    "title": {"type": "string"},
+    "body": {"type": "string"},
+}
+FINDINGS_SCHEMA = strict_object({
+    "summary": {"type": "string"},
+    "findings": {"type": "array", "items": strict_object({
+        "severity": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
+        **_FINDING_FIELDS,
+    })},
+})
+CONSOLIDATE_SCHEMA = strict_object({
+    "findings": {"type": "array", "items": strict_object({
+        "severity": {"type": "string", "enum": list(ACTIONABLE)},
+        **_FINDING_FIELDS,
+        "providers": {"type": "array", "items": {"type": "string"}},
+    })},
+})
 
 REVIEW_PROMPT = (
     "Review this pull request diff for defects. Your single concern: real problems that must be "
@@ -168,10 +190,11 @@ def _claude_review(config: dict, prompt: str, worktree: Path | None) -> dict | N
         output = run_agentic(prompt, cwd=worktree, tools=READ_ONLY_TOOLS,
                              denied_tools=WRITE_TOOLS, model=model,
                              timeout=CLAUDE_REVIEW_TIMEOUT,
-                             function_name="autofix_claude_review")
+                             function_name="autofix_claude_review", schema=FINDINGS_SCHEMA)
     else:
-        output = run_balanced(prompt, model=model, timeout=CLAUDE_REVIEW_TIMEOUT)
-    return extract_json(output) if output else None
+        output = run_balanced(prompt, model=model, timeout=CLAUDE_REVIEW_TIMEOUT,
+                              schema=FINDINGS_SCHEMA)
+    return parse_structured(output, FINDINGS_SCHEMA, fn_name="autofix_claude_review")
 
 
 def _codex_review(config: dict, prompt: str, worktree: Path, pr_key: str) -> dict | None:
@@ -188,6 +211,7 @@ def _codex_review(config: dict, prompt: str, worktree: Path, pr_key: str) -> dic
             last_message_file=last,
             transcript_file=run_dir / "autofix-transcript.txt",
             stdin_text=prompt,
+            output_schema=FINDINGS_SCHEMA,
         )
     except OSError as e:
         log.emit("pr_autofix_codex_error", f"{pr_key}: codex could not run: {type(e).__name__}: {e}",
@@ -195,7 +219,7 @@ def _codex_review(config: dict, prompt: str, worktree: Path, pr_key: str) -> dic
         return None
     if exit_code != 0 or not text:
         return None
-    return extract_json(text)
+    return parse_structured(text, FINDINGS_SCHEMA, fn_name="pr_autofix_codex", model="codex")
 
 
 def _normalize_findings(data: dict | None, provider: str) -> list[dict]:
@@ -242,14 +266,10 @@ def _consolidate(config: dict, pr: dict, by_provider: dict[str, list[dict]]) -> 
         + '\nReturn JSON: {"findings":[{"severity":"critical"|"high","path":"...","line":123,'
           '"title":"...","body":"...","providers":["claude","codex"]}]}'
     )
-    output = run_balanced(prompt, timeout=CONSOLIDATE_TIMEOUT)
-    merged = extract_json(output) if output else None
-    result = []
-    if merged and isinstance(merged.get("findings"), list):
-        for f in merged["findings"]:
-            if isinstance(f, dict) and f.get("body") and str(f.get("severity", "")).lower() in ACTIONABLE:
-                f["severity"] = str(f["severity"]).lower()
-                result.append(f)
+    merged = parse_structured(run_balanced(prompt, timeout=CONSOLIDATE_TIMEOUT,
+                                           schema=CONSOLIDATE_SCHEMA),
+                              CONSOLIDATE_SCHEMA, fn_name="pr_autofix_consolidate")
+    result = [f for f in merged["findings"] if f["body"]] if merged else []
     if result:
         return result
 

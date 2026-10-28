@@ -14,7 +14,16 @@ source_text is the contract; structured fields are derivative.
 import json
 
 import core.log as log
-from core.claude_runner import extract_json, run_haiku
+from core.claude_runner import parse_structured, run_haiku, strict_object
+
+CRITERIA_SCHEMA = strict_object({
+    "criteria": {"type": "array", "items": strict_object({
+        "id": {"type": "string"},
+        "criterion": {"type": "string"},
+        "playwright": {"type": "array", "items": {"type": "string"}},
+        "tests_required": {"type": "array", "items": {"type": "string"}},
+    })},
+})
 
 ENRICH_PROMPT = """You are translating an unstructured ticket description into structured acceptance criteria.
 
@@ -59,12 +68,12 @@ def enrich(source_text: str) -> dict | None:
     (without source_text), or None on failure. Caller wraps with source_text."""
     if not source_text or not source_text.strip():
         return None
-    out = run_haiku(ENRICH_PROMPT + source_text)
+    out = run_haiku(ENRICH_PROMPT + source_text, schema=CRITERIA_SCHEMA)
     if not out:
         log.emit("enrich_failed", "haiku returned empty for acceptance enrichment")
         return None
-    parsed = extract_json(out)
-    if not parsed or not isinstance(parsed.get("criteria"), list):
+    parsed = parse_structured(out, CRITERIA_SCHEMA, fn_name="acceptance_enrich")
+    if parsed is None:
         log.emit("enrich_parse_failed", "could not parse JSON criteria from haiku output",
                  meta={"raw": out[:500]})
         return None
