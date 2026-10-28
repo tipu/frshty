@@ -192,8 +192,25 @@ def test_grep_tool_allows_a_pattern_that_is_not_a_definition_lookup(tmp_path, pa
     assert gate.grep_reason(pattern, _transcript(tmp_path)) == ""
 
 
+def _position_lookup(operation, file_path, line, character, cwd, tool_id="toolu_pos"):
+    entry = json.loads(_tool_use("LSP", {"operation": operation, "filePath": file_path,
+                                         "line": line, "character": character}, tool_id))
+    entry["cwd"] = cwd
+    return json.dumps(entry)
+
+
+@pytest.mark.parametrize("operation", ["findReferences", "goToDefinition"])
+def test_a_position_lookup_opens_the_gate_for_the_identifier_there(tmp_path, operation):
+    (tmp_path / "a.py").write_text("import os\n\ndef split_pin(x):\n    return x\n")
+    path = _transcript(tmp_path, *_LOADED, _position_lookup(operation, "a.py", 3, 5, str(tmp_path)),
+                       _tool_result("Found 1 references across 1 files:\n\na.py:\n  Line 3:5",
+                                    "toolu_pos"))
+    assert gate.bash_reason('grep -n "def split_pin" a.py', path) == ""
+    assert gate.bash_reason('grep -n "def other" a.py', path) == gate.DENY_REASON.format(name="other")
+
+
 def test_grep_tool_passes_once_the_symbol_is_looked_up(tmp_path):
-    path = _transcript(tmp_path, *_LOADED, _lsp("findReferences", "foo"))
+    path = _transcript(tmp_path, *_LOADED, _lsp("workspaceSymbol", "foo"))
     assert gate.grep_reason(r"def\s+foo", path) == ""
 
 
@@ -279,6 +296,9 @@ def test_every_definition_in_one_command_needs_a_lookup(tmp_path):
     assert gate.bash_reason('grep -n "def foo" a.py; grep -n "def bar" a.py', path) == \
         gate.DENY_REASON.format(name="bar")
     assert gate.grep_reason("def foo|def bar", path) == gate.DENY_REASON.format(name="bar")
+    assert gate.grep_reason("def (foo|bar)", path) == gate.DENY_REASON.format(name="bar")
+    assert gate.bash_reason(r'grep -rnE "(def|class)\s+(foo|bar)" core/', path) == \
+        gate.DENY_REASON.format(name="bar")
 
 
 @pytest.mark.parametrize("line", [

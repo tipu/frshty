@@ -20,8 +20,9 @@ the start of the command line or after `|`, `&&`, `;` and the like. The word
 in a heredoc body, a `python -c` string or an echo argument does not count.
 
 The gate allows the grep for X once the transcript shows an LSP
-workspaceSymbol, goToDefinition or findReferences call whose query or result
-names X. A grep that names several definitions needs a lookup for each.
+workspaceSymbol, goToDefinition or findReferences call whose query, result
+or position names X. The position names the identifier at the line and
+character of the call in its file. A grep that names several definitions needs a lookup for each.
 A ToolSearch call alone opens nothing. Two cases open the gate for
 the rest of the session: an LSP result that says "No LSP server available",
 and a ToolSearch for LSP that finds no LSP tool. A transcript that cannot be
@@ -40,7 +41,8 @@ DENY_REASON = (
     "file and line of the symbol. Use findReferences for its callers and "
     "goToDefinition for its definition. The gate opens per symbol: a grep "
     "for `{name}` passes after a workspaceSymbol, goToDefinition or "
-    "findReferences call whose query or result names `{name}`. Loading LSP "
+    "findReferences call whose query, result or position names `{name}`. "
+    "Loading LSP "
     "alone does not open it. When ToolSearch finds no LSP tool or LSP "
     "answers \"No LSP server available\", the gate opens for the rest of the "
     "session, so run the grep again."
@@ -62,7 +64,8 @@ _GROUP = r"\\b|\\<|\\>|\((?:\?:)?|\)" + _QUANTIFIER + "?"
 _DEFINITION = re.compile(
     r"(?:\b|(?<=\\[A-Za-z]))" + _KEYWORD + r"(?:\\?\|" + _KEYWORD + r"){0,3}(?:\\?\))?"
     r"(?:" + _GROUP + r")*(?:" + _SPACE + r")(?:" + _SPACE + r"|" + _GROUP + r")*"
-    r"((?:[A-Za-z_]|\$[\w$])[\w$]*)")
+    r"((?:[A-Za-z_]|\$[\w$])[\w$]*(?:\\?\|(?!" + _KEYWORD + r"\b)(?:[A-Za-z_]|\$[\w$])[\w$]*)*)")
+_ALTERNATIVE = re.compile(r"\\?\|")
 _LOOKUPS = {"workspaceSymbol", "goToDefinition", "findReferences"}
 _NO_SERVER = "No LSP server available"
 _LSP_DEFINITION = re.compile(r'"name"\s*:\s*"LSP"')
@@ -175,6 +178,12 @@ def _search_words(words: list[str]) -> list[str] | None:
     return None
 
 
+def _names(text: str) -> list[str]:
+    """The symbols whose definitions `text` names, with `def (a|b)` giving
+    both a and b."""
+    return [name for m in _DEFINITION.finditer(text) for name in _ALTERNATIVE.split(m.group(1))]
+
+
 def _symbols(command: str) -> list[str]:
     """The symbols whose definitions the greps in `command` look for."""
     try:
@@ -193,7 +202,7 @@ def _symbols(command: str) -> list[str]:
             continue
         search = _search_words(words)
         if search:
-            names += [m.group(1) for m in _DEFINITION.finditer(" ".join(search))]
+            names += _names(" ".join(search))
     return names
 
 
@@ -201,6 +210,20 @@ def _symbol(command: str) -> str:
     """The first symbol whose definition a grep in `command` looks for, ""
     when the command runs no such grep."""
     return next(iter(_symbols(command)), "")
+
+
+def _word_at(path: str, line, character) -> str:
+    """The identifier at the 1-based `line` and `character` of the file at
+    `path`, "" when there is none or the file cannot be read."""
+    if not isinstance(line, int) or not isinstance(character, int) or not os.path.isfile(path):
+        return ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            text = next((t for number, t in enumerate(f, 1) if number == line), "")
+    except OSError:
+        return ""
+    return next((m.group() for m in re.finditer(r"[\w$]+", text)
+                 if m.start() < character <= m.end() + 1), "")
 
 
 def _result_text(content) -> str:
@@ -243,6 +266,9 @@ def _lsp_lookups(transcript_path: str) -> list[str] | None:
                             calls[str(block.get("id"))] = ("LSP", operation)
                             if operation in _LOOKUPS:
                                 texts.append(str(tool_input.get("query") or ""))
+                                texts.append(_word_at(os.path.join(str(entry.get("cwd") or ""),
+                                                                   str(tool_input.get("filePath") or "")),
+                                                      tool_input.get("line"), tool_input.get("character")))
                         elif block.get("name") == "ToolSearch" and "LSP" in str(tool_input.get("query") or ""):
                             calls[str(block.get("id"))] = ("ToolSearch", "")
                     elif block.get("type") == "tool_result":
@@ -268,14 +294,14 @@ def _lsp_lookups(transcript_path: str) -> list[str] | None:
 def bash_reason(command: str, transcript_path: str) -> str:
     """The deny reason for a definition grep for a symbol the session has not
     looked up with LSP, "" to allow."""
-    return _reason(_symbols(command or ""), transcript_path)
+    return _reason(_symbols(command if isinstance(command, str) else ""), transcript_path)
 
 
 def grep_reason(pattern: str, transcript_path: str) -> str:
     """The deny reason for a Grep tool call whose pattern looks up the
     definition of a symbol the session has not looked up with LSP, "" to
     allow."""
-    return _reason([m.group(1) for m in _DEFINITION.finditer(pattern or "")], transcript_path)
+    return _reason(_names(pattern if isinstance(pattern, str) else ""), transcript_path)
 
 
 def _reason(names: list[str], transcript_path: str) -> str:
