@@ -16,7 +16,7 @@ import core.git_util as git_util
 
 import core.log as log
 import core.state as state
-from core.claude_runner import run_claude_code, run_haiku, extract_json
+from core.claude_runner import run_claude_code, run_haiku, parse_structured, strict_object
 from core.commit_message import COMMIT_SUBJECT_RULE, HOOKS_RULE, commit_subject, keyed, merge_message_args
 from core.llm import NO_PUBLISH_RULE, rules_directive
 from core.config import (
@@ -2242,6 +2242,10 @@ Do NOT:
 Output JSON only, no markdown fence:
 {{"title": "{ticket_key}: <one-line summary specific to this repo's changes>", "description": "<2-4 sentence markdown description>"}}
 """
+_PR_DESCRIPTION_SCHEMA = strict_object({
+    "title": {"type": "string"},
+    "description": {"type": "string"},
+})
 
 
 _PR_DESCRIPTIONS_SESSION_PROMPT = """You are writing pull request titles and descriptions for ticket {ticket_key}. The work is complete and about to become one PR per repo — your prose is what reviewers read first, so ground it in the full pipeline context, not just the diff.
@@ -2390,17 +2394,17 @@ def generate_pr_descriptions(ctx: TaskContext) -> TaskResult:
                 manifest=manifest or "(no change-manifest available)",
                 diff=diff_text,
             )
-            raw = run_haiku(prompt)
-            parsed = extract_json(raw) if raw else None
-            if not parsed or not isinstance(parsed, dict):
+            raw = run_haiku(prompt, schema=_PR_DESCRIPTION_SCHEMA)
+            parsed = parse_structured(raw, _PR_DESCRIPTION_SCHEMA, fn_name="pr_description")
+            if parsed is None:
                 failed.append(name)
                 log.emit("pr_description_parse_failed",
                          f"{ctx.ticket_key}/{name}: could not parse haiku output",
                          meta={"ticket": ctx.ticket_key, "repo": name,
                                "raw": (raw or "")[:500]})
                 continue
-            title = parsed.get("title") or ""
-            description = str(parsed.get("description") or "").strip()
+            title = parsed["title"]
+            description = parsed["description"].strip()
         if not description:
             failed.append(name)
             continue
