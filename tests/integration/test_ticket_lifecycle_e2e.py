@@ -312,7 +312,7 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
         "_base_url": "http://testserver",
     }
 
-    def fake_run_haiku(prompt: str, timeout: int = 0) -> str:
+    def fake_run_haiku(prompt: str, timeout: int = 0, **kwargs) -> str:
         if "Classify this engineering ticket" in prompt:
             return "code"
         if "Triage each PR review comment" in prompt:
@@ -421,7 +421,6 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
          patch("features.tickets.run_balanced", side_effect=fake_run_haiku), \
          patch("features.tickets.extract_json", side_effect=fake_extract_json), \
          patch("features.pr_ci.run_balanced", side_effect=fake_run_haiku), \
-         patch("features.pr_ci.extract_json", side_effect=fake_extract_json), \
          patch("features.pr_ci.run_claude_code", side_effect=fake_run_claude_code), \
          patch("core.tasks.tickets.run_claude_code", side_effect=fake_run_claude_code), \
          patch("core.commit_message.run_haiku",
@@ -429,7 +428,7 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
          patch("features.tickets.run_claude_code", side_effect=fake_run_claude_code), \
          patch("core.tasks.tickets.run_consensus_plan", side_effect=fake_consensus_plan), \
          patch("features.acceptance.run_haiku", side_effect=fake_run_haiku), \
-         patch("features.acceptance.extract_json", side_effect=lambda raw: None):
+         patch("features.acceptance.parse_structured", return_value=None):
         pool.start()
         try:
             _enqueue_and_wait(instance_key, "scan_tickets")

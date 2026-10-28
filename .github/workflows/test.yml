@@ -14,7 +14,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install httpx fastapi uvicorn watchfiles websockets pytest
+      - run: pip install httpx fastapi uvicorn watchfiles websockets jsonschema pytest
       - run: pytest tests/ -v -m "not slow"
 
   gates:
@@ -38,6 +38,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install httpx fastapi uvicorn watchfiles websockets pytest
+      - run: pip install httpx fastapi uvicorn watchfiles websockets jsonschema pytest
       - run: python3 scripts/mutation_check.py
       - run: ./scripts/harness_check.sh

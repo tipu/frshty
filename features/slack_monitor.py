@@ -8,8 +8,12 @@ from pathlib import Path
 import core.log as log
 import core.slack_capture as slack_capture
 import core.state as state
-from core.claude_runner import run_haiku, extract_json
+from core.claude_runner import parse_structured, run_haiku, strict_object
 
+ACTIONABLE_SCHEMA = strict_object({
+    "actionable": {"type": "boolean"},
+    "reason": {"type": "string"},
+})
 
 def _msg_ts_iso(record: dict) -> str:
     """Slack message wall-clock time in ISO. Uses payload.ts (authoritative
@@ -213,10 +217,11 @@ def check(config: dict):
             continue
         classification = run_haiku(
             f"Is this Slack thread message actionable for me (needs my response or action)? "
-            f"Reply JSON: {{\"actionable\": true/false, \"reason\": \"brief\"}}\n\n{text}"
+            f"Reply JSON: {{\"actionable\": true/false, \"reason\": \"brief\"}}\n\n{text}",
+            schema=ACTIONABLE_SCHEMA,
         )
-        parsed = extract_json(classification) if classification else None
-        if isinstance(parsed, dict) and parsed.get("actionable") is True:
+        parsed = parse_structured(classification, ACTIONABLE_SCHEMA, fn_name="slack_actionable")
+        if parsed and parsed["actionable"]:
             log.emit("slack_actionable_item", f"Actionable thread message: {text[:80]}",
                 links={"detail": f"{base_url}/slack"},
                 meta={"text": text[:200]})

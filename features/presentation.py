@@ -28,12 +28,59 @@ import core.git_util as git_util
 import core.log as log
 import core.state as state
 import features.acceptance as acceptance
-from core.claude_runner import run_balanced, extract_json
+from core.claude_runner import run_balanced, parse_structured, strict_object
 from core.config import get_repos
 from features.platforms import make_platform
 from features.ticket_systems import make_ticket_system
 from services import review_store
 
+
+_STEP_FIELDS = {
+    "title": {"type": "string"},
+    "file": {"type": "string"},
+    "code": {"type": "string"},
+    "narrative": {"type": "string"},
+    "check": {"type": "string", "enum": ["ok", "concern"]},
+    "check_note": {"type": "string"},
+}
+_VERDICT = strict_object({
+    "solves_problem": {"type": "boolean"},
+    "summary": {"type": "string"},
+    "concerns": {"type": "array", "items": {"type": "string"}},
+})
+_VISUAL = strict_object({
+    "flow": {"type": "array", "items": strict_object({
+        "label": {"type": "string"},
+        "kind": {"type": "string", "enum": ["input", "process", "decision", "store", "output"]},
+        "note": {"type": "string"},
+        "step": {"type": "integer"},
+    })},
+    "before": {"type": "array", "items": {"type": "string"}},
+    "after": {"type": "array", "items": {"type": "string"}},
+})
+PRESENTATION_SCHEMA = strict_object({
+    "problem": {"type": "string"},
+    "approach": {"type": "string"},
+    "steps": {"type": "array", "items": strict_object(_STEP_FIELDS)},
+    "verdict": _VERDICT,
+    "visual": _VISUAL,
+})
+TICKET_PRESENTATION_SCHEMA = strict_object({
+    "problem": {"type": "string"},
+    "approach": {"type": "string"},
+    "steps": {"type": "array", "items": strict_object({**_STEP_FIELDS, "pr": {"type": "string"}})},
+    "requirements": {"type": "array", "items": strict_object({
+        "id": {"type": "string"},
+        "requirement": {"type": "string"},
+        "status": {"type": "string", "enum": ["met", "partial", "not_met"]},
+        "how": {"type": "string"},
+        "prs": {"type": "array", "items": {"type": "string"}},
+        "steps": {"type": "array", "items": {"type": "integer"}},
+        "gap": {"type": "string"},
+    })},
+    "verdict": _VERDICT,
+    "visual": _VISUAL,
+})
 
 _inflight: set[tuple] = set()
 _inflight_lock = threading.Lock()
@@ -97,13 +144,9 @@ def build_presentation(ticket_goal: str, diff_text: str, worktree: Path | None) 
         '"visual":{"flow":[{"label":"...","kind":"input|process|decision|store|output","note":"...","step":1}],"before":["..."],"after":["..."]}}\n\n'
         f"--- DIFF START ---\n{diff_text[:60000]}\n--- DIFF END ---"
     )
-    output = run_balanced(prompt, worktree=worktree, tools=tools, timeout=900)
-    if not output:
-        return {}
-    parsed = extract_json(output)
-    if not isinstance(parsed, dict):
-        return {}
-    return parsed
+    output = run_balanced(prompt, worktree=worktree, tools=tools, timeout=900,
+                          schema=PRESENTATION_SCHEMA)
+    return parse_structured(output, PRESENTATION_SCHEMA, fn_name="build_presentation") or {}
 
 
 def build_ticket_presentation(ticket_goal: str, criteria: list[dict],
@@ -189,13 +232,10 @@ def build_ticket_presentation(ticket_goal: str, criteria: list[dict],
         '"visual":{"flow":[{"label":"...","kind":"input|process|decision|store|output","note":"...","step":1}],"before":["..."],"after":["..."]}}\n\n'
         f"--- DIFFS START ---\n{diff_text}\n--- DIFFS END ---"
     )
-    output = run_balanced(prompt, worktree=worktree, tools=tools, timeout=900)
-    if not output:
-        return {}
-    parsed = extract_json(output)
-    if not isinstance(parsed, dict):
-        return {}
-    return parsed
+    output = run_balanced(prompt, worktree=worktree, tools=tools, timeout=900,
+                          schema=TICKET_PRESENTATION_SCHEMA)
+    return parse_structured(output, TICKET_PRESENTATION_SCHEMA,
+                            fn_name="build_ticket_presentation") or {}
 
 
 def resolve_ticket_goal(config: dict, branch: str, repo: str, pr_id: int) -> str:

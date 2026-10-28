@@ -231,13 +231,13 @@ def test_ten_concurrent_prd_tickets_serialize_and_complete(tmp_path):
 
     counter = {"i": 0}
 
-    def fake_run_haiku(prompt: str, timeout: int = 0) -> str:
+    def fake_run_haiku(prompt: str, timeout: int = 0, **kwargs) -> str:
         if "Classify each PR review comment" in prompt:
             return '{"results": []}'
         if "Reply with JSON:" in prompt and "actionable" in prompt:
             return '{"actionable": false, "reason": "no comment"}'
         if "caused_by_us" in prompt:
-            return '{"caused_by_us": false, "reason": "ci passed"}'
+            return '{"caused_by_us": false, "reason": "ci passed", "fix_hint": ""}'
         if "ranking software tickets" in prompt:
             # _RANKER_PROMPT in features/tickets.py — features.tickets.extract_json
             # is patched to a strict json.loads (no fallback), so any non-JSON
@@ -341,9 +341,7 @@ def test_ten_concurrent_prd_tickets_serialize_and_complete(tmp_path):
          patch("features.tickets.run_haiku", side_effect=fake_run_haiku), \
          patch("features.tickets.extract_json", side_effect=fake_extract_json), \
          patch("core.tasks.tickets.run_haiku", side_effect=fake_run_haiku), \
-         patch("core.tasks.tickets.extract_json", side_effect=fake_extract_json), \
          patch("features.pr_ci.run_balanced", side_effect=fake_run_haiku), \
-         patch("features.pr_ci.extract_json", side_effect=fake_extract_json), \
          patch("features.pr_ci.run_claude_code", side_effect=fake_run_claude_code), \
          patch("core.tasks.tickets.run_claude_code", side_effect=fake_run_claude_code), \
          patch("core.commit_message.run_haiku",

@@ -1,4 +1,6 @@
+import sqlite3
 import threading
+import time
 from datetime import datetime, timezone
 
 import pytest
@@ -12,6 +14,7 @@ from web.usage import router as usage_router
 
 
 def _clear():
+    usage.flush()
     db.execute("DELETE FROM usage_counters")
 
 
@@ -57,6 +60,7 @@ class TestRecord:
         _clear()
         usage.record("route", "GET /x", instance="acme")
         usage.record("route", "GET /x", instance="acme")
+        usage.flush()
         row = db.query_one(
             "SELECT count FROM usage_counters WHERE kind='route' AND name='GET /x'")
         assert row["count"] == 2
@@ -64,6 +68,7 @@ class TestRecord:
     def test_batch_count(self):
         _clear()
         usage.record("ui", "/x button:Save", n=5)
+        usage.flush()
         row = db.query_one(
             "SELECT count FROM usage_counters WHERE kind='ui'")
         assert row["count"] == 5
@@ -72,6 +77,7 @@ class TestRecord:
         _clear()
         usage.record("route", "GET /x", instance="acme")
         usage.record("route", "GET /x", instance="someclient")
+        usage.flush()
         rows = db.query_all(
             "SELECT instance FROM usage_counters WHERE name='GET /x'")
         assert {r["instance"] for r in rows} == {"acme", "someclient"}
@@ -79,23 +85,58 @@ class TestRecord:
     def test_empty_name_is_noop(self):
         _clear()
         usage.record("ui", "   ")
+        usage.flush()
         assert db.query_all("SELECT * FROM usage_counters") == []
 
     def test_name_whitespace_collapsed_and_capped(self):
         _clear()
         usage.record("ui", "a   b\t c" + "x" * 500)
+        usage.flush()
         row = db.query_one("SELECT name FROM usage_counters")
         assert row["name"].startswith("a b c")
         assert len(row["name"]) == 200
 
-    def test_failure_emits_instead_of_raising(self, monkeypatch):
+    def test_failure_emits_and_keeps_the_counts(self, monkeypatch):
+        _clear()
         emitted = []
-        monkeypatch.setattr(usage.db, "execute",
-                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+        real_tx = usage.db.tx
+        monkeypatch.setattr(usage.db, "tx",
+                            lambda: (_ for _ in ()).throw(sqlite3.OperationalError("disk I/O error")))
+        monkeypatch.setattr(usage.log, "emit",
+                            lambda event, summary, **k: emitted.append(event))
+        usage.record("route", "GET /x", n=3)
+        usage.flush()
+        assert emitted == ["usage_record_failed"]
+        monkeypatch.setattr(usage.db, "tx", real_tx)
+        usage.flush()
+        row = db.query_one("SELECT count FROM usage_counters WHERE name='GET /x'")
+        assert row["count"] == 3
+
+
+    def test_oversized_count_is_dropped(self):
+        _clear()
+        usage.record("ui", "/x button:Big", n=2 ** 63)
+        usage.record("ui", "/x button:Save", n=2)
+        usage.flush()
+        rows = db.query_all("SELECT name, count FROM usage_counters")
+        assert rows == [{"name": "/x button:Save", "count": 2}]
+
+    def test_permanent_failure_drops_the_batch(self, monkeypatch):
+        _clear()
+        emitted = []
+        real_tx = usage.db.tx
+        monkeypatch.setattr(usage.db, "tx",
+                            lambda: (_ for _ in ()).throw(OverflowError("too big")))
         monkeypatch.setattr(usage.log, "emit",
                             lambda event, summary, **k: emitted.append(event))
         usage.record("route", "GET /x")
+        usage.flush()
+        monkeypatch.setattr(usage.db, "tx", real_tx)
+        usage.record("route", "GET /y")
+        usage.flush()
         assert emitted == ["usage_record_failed"]
+        rows = db.query_all("SELECT name FROM usage_counters")
+        assert rows == [{"name": "GET /y"}]
 
 
 class TestIsTracked:
@@ -113,32 +154,45 @@ class TestIsTracked:
 class TestRouteMiddleware:
     def test_records_route_template(self, client):
         client.get("/tickets/DEV-123")
+        usage.flush()
         row = db.query_one(
             "SELECT name FROM usage_counters WHERE kind='route'")
         assert row["name"] == "GET /tickets/{key}"
 
     def test_skip_listed_route_not_recorded(self, client):
         client.get("/api/status")
+        usage.flush()
         assert db.query_all(
             "SELECT * FROM usage_counters WHERE kind='route'") == []
 
     def test_404_not_recorded(self, client):
         client.get("/no/such/page")
+        usage.flush()
         assert db.query_all(
             "SELECT * FROM usage_counters WHERE kind='route'") == []
 
-    def test_record_runs_off_the_event_loop(self, client, monkeypatch):
-        seen = {}
+    def test_response_does_not_wait_for_the_usage_write(self, client, monkeypatch):
+        release = threading.Event()
+        real_tx = usage.db.tx
 
-        @client.app.get("/api/loop-thread")
-        async def loop_thread():
-            seen["loop"] = threading.get_ident()
-            return {}
+        def slow_tx():
+            release.wait(10)
+            return real_tx()
 
-        monkeypatch.setattr(usage, "record",
-                            lambda *a, **kw: seen.setdefault("record", threading.get_ident()))
-        client.get("/api/loop-thread")
-        assert seen["record"] != seen["loop"]
+        monkeypatch.setattr(usage.db, "tx", slow_tx)
+        flusher = threading.Thread(target=usage.flush)
+        try:
+            client.get("/api/thing")
+            flusher.start()
+            t0 = time.time()
+            assert client.get("/api/thing").status_code == 200
+            assert time.time() - t0 < 2
+        finally:
+            release.set()
+            flusher.join()
+        usage.flush()
+        row = db.query_one("SELECT count FROM usage_counters WHERE name='GET /api/thing'")
+        assert row["count"] == 2
 
 
 class TestUiEndpoint:
@@ -148,6 +202,7 @@ class TestUiEndpoint:
             "events": [{"element": "button:Retry", "count": 3}],
         })
         assert resp.json() == {"ok": True, "recorded": 1}
+        usage.flush()
         row = db.query_one(
             "SELECT name, count FROM usage_counters WHERE kind='ui'")
         assert row["name"] == "/tickets/{key} button:Retry"
@@ -168,6 +223,7 @@ class TestUiEndpoint:
                        {"element": "a:y", "count": 0}],
         })
         assert resp.json() == {"ok": True, "recorded": 0}
+        usage.flush()
         assert db.query_all("SELECT * FROM usage_counters WHERE kind='ui'") == []
 
 
