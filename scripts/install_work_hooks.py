@@ -12,6 +12,7 @@ EVENTS = ("SessionStart", "UserPromptSubmit", "Stop", "SessionEnd", "Notificatio
 DEFAULT_DIRS = ("~/.claude",)
 PUSH_GATE_TIMEOUT = 2700
 WRITE_GATE_TIMEOUT = 300
+LSP_GATE_TIMEOUT = 15
 WRITE_GATE_MATCHER = "Edit|Write|NotebookEdit|MultiEdit"
 # Every tool that could carry a message to a person. The matcher is a
 # regular expression over the tool name, and a name this pattern misses
@@ -66,6 +67,9 @@ def _wanted_entries(event: str, command: str) -> list[dict]:
             {"matcher": "Bash",
              "hooks": [{"type": "command", "command": command,
                         "timeout": PUSH_GATE_TIMEOUT}]},
+            {"matcher": "Grep",
+             "hooks": [{"type": "command", "command": command,
+                        "timeout": LSP_GATE_TIMEOUT}]},
             {"matcher": WRITE_GATE_MATCHER,
              "hooks": [{"type": "command", "command": command,
                         "timeout": WRITE_GATE_TIMEOUT}]},

@@ -1,4 +1,4 @@
-"""Refuse a symbol grep from a task session that has not loaded the LSP tool.
+r"""Refuse a symbol grep from a task session that has not loaded the LSP tool.
 
 Every claude task carries llm.LSP_RULE, which asks for workspaceSymbol before
 grep. LSP is a deferred tool, so a session must call ToolSearch once before
@@ -9,11 +9,13 @@ greps such as `grep -n "class OpenCodeProvider" core/llm.py` and
 workspaceSymbol answers. The prompt is a request; this gate is the constraint.
 
 The gate denies a grep whose text names a definition (`def X`, `class X`,
-`function X`, `interface X`) until the transcript shows a ToolSearch query
-that names LSP or an LSP call. One such call opens the gate for the rest of
-the session, so a session whose files have no LSP server, or whose ToolSearch
-finds no LSP tool, pays one call and then greps freely. A transcript that
-cannot be read opens the gate: a missed nudge costs a grep, not a defect.
+`function X`, `interface X`), written plain or as a regular expression such
+as `def\s+X`, and a Grep tool call whose pattern does the same, until the
+transcript shows a ToolSearch query that names LSP or an LSP call. One such
+call opens the gate for the rest of the session, so a session whose files
+have no LSP server, or whose ToolSearch finds no LSP tool, pays one call and
+then greps freely. A transcript that cannot be read opens the gate: a missed
+nudge costs a grep, not a defect.
 """
 import json
 import re
@@ -31,8 +33,15 @@ DENY_REASON = (
 )
 
 _SEARCH = re.compile(r"(?<![\w-])(grep|egrep|rg|ag|ack)(?![\w-])")
+_KEYWORD = r"(?:def|class|function|interface)"
+_QUANTIFIER = r"(?:(?:\\?[+*?]|\\?\{\d*,?\d*\\?\})\??)"
+_SPACE = (r"(?:\s|\\\\?[sthW]|\\\\? |\[(?: |\t|\\t|\\s|\[:space:\]|\[:blank:\])+\])"
+          + _QUANTIFIER + r"?|\." + _QUANTIFIER)
+_GROUP = r"\\b|\\<|\\>|\((?:\?:)?|\)" + _QUANTIFIER + "?"
 _DEFINITION = re.compile(
-    r"\b(?:def|class|function|interface)\s+([A-Za-z_$][\w$]*)")
+    r"(?:\b|(?<=\\[A-Za-z]))" + _KEYWORD + r"(?:\\?\|" + _KEYWORD + r"){0,3}(?:\\?\))?"
+    r"(?:" + _GROUP + r")*(?:" + _SPACE + r")(?:" + _SPACE + r"|" + _GROUP + r")*"
+    r"((?:[A-Za-z_]|\$[\w$])[\w$]*)")
 
 
 def _symbol(command: str) -> str:
@@ -75,7 +84,17 @@ def _loaded_lsp(transcript_path: str) -> bool:
 def bash_reason(command: str, transcript_path: str) -> str:
     """The deny reason for a symbol grep in a session that has not loaded
     LSP, "" to allow."""
-    name = _symbol(command or "")
+    return _reason(_symbol(command or ""), transcript_path)
+
+
+def grep_reason(pattern: str, transcript_path: str) -> str:
+    """The deny reason for a Grep tool call whose pattern looks up a
+    definition in a session that has not loaded LSP, "" to allow."""
+    match = _DEFINITION.search(pattern or "")
+    return _reason(match.group(1) if match else "", transcript_path)
+
+
+def _reason(name: str, transcript_path: str) -> str:
     if not name or not transcript_path or _loaded_lsp(transcript_path):
         return ""
     return DENY_REASON.format(name=name)
