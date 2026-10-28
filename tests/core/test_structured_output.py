@@ -9,14 +9,27 @@ import json
 import os
 import stat
 import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT))
 
 import core.db as db  # noqa: E402
 import core.llm as llm  # noqa: E402
+
+
+class _FakeProc:
+    def __init__(self, stdout: bytes):
+        self.returncode = 0
+        self._stdout = stdout
+
+    def communicate(self, input=None, timeout=None):
+        return self._stdout, b""
+
 
 VERDICT = llm.strict_object({
     "verdict": {"type": "string", "enum": ["PASS", "FAIL"]},
@@ -241,15 +254,14 @@ def test_an_opencode_call_without_a_schema_still_uses_opencode_run():
 def test_codex_gets_the_schema_as_a_file_after_exec(tmp_path):
     seen = {}
 
-    def fake_run(cmd, **kwargs):
+    def fake_popen(cmd, **kwargs):
         at = cmd.index("--output-schema")
         seen["cmd"] = cmd
         seen["schema"] = json.loads(Path(cmd[at + 1]).read_text())
         seen["path"] = Path(cmd[at + 1])
-        return type("R", (), {"returncode": 0, "stdout": b'{"verdict":"PASS","reason":"r"}',
-                              "stderr": b""})()
+        return _FakeProc(b'{"verdict":"PASS","reason":"r"}')
 
-    with patch.object(llm.subprocess, "run", side_effect=fake_run):
+    with patch.object(llm.subprocess, "Popen", side_effect=fake_popen):
         text, code = llm.run_external_model(
             [*llm.CODEX_EXEC, "-"], fn_name="t", model="codex", prompt="q",
             stdin_text="q", output_schema=VERDICT)
@@ -263,7 +275,23 @@ def test_codex_gets_the_schema_as_a_file_after_exec(tmp_path):
 
 
 def test_a_codex_run_without_a_schema_gets_no_schema_flag():
-    with patch.object(llm.subprocess, "run") as run:
-        run.return_value = type("R", (), {"returncode": 0, "stdout": b"x", "stderr": b""})()
+    with patch.object(llm.subprocess, "Popen", return_value=_FakeProc(b"x")) as popen:
         llm.run_external_model([*llm.CODEX_EXEC, "-"], fn_name="t", model="codex", prompt="q")
-    assert "--output-schema" not in run.call_args.args[0]
+    assert "--output-schema" not in popen.call_args.args[0]
+
+
+def test_a_timed_out_external_run_kills_the_child_the_wrapper_started(tmp_path):
+    pid_file = tmp_path / "child.pid"
+    wrapper = tmp_path / "wrapper.sh"
+    wrapper.write_text(f"#!/bin/sh\nsleep 60 &\necho $! > {pid_file}\nwait\n")
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IEXEC)
+
+    text, code = llm.run_external_model([str(wrapper)], fn_name="t", model="codex",
+                                        prompt="q", timeout=1)
+
+    assert (text, code) == (None, None)
+    child = int(pid_file.read_text())
+    with pytest.raises(ProcessLookupError):
+        for _ in range(50):
+            os.kill(child, 0)
+            time.sleep(0.1)
