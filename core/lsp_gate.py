@@ -30,7 +30,6 @@ read opens the gate: a missed nudge costs a grep, not a defect.
 import json
 import os
 import re
-import shlex
 
 DENY_REASON = (
     "Blocked by the LSP gate: this grep looks up the definition of `{name}`, "
@@ -52,7 +51,7 @@ _WRAPPERS = {"sudo", "xargs", "env", "time", "nice", "nohup", "command", "exec",
              "timeout", "stdbuf", "then", "do", "else", "if", "elif", "while",
              "until", "!", "{"}
 _SHELLS = {"bash", "sh", "zsh", "dash"}
-_SEPARATORS = set(";&|()\n")
+_SEPARATORS = ";&|()\n"
 _ASSIGNMENT = re.compile(r"[A-Za-z_]\w*=")
 _HEREDOC = re.compile(r"(?<!<)<<-?[ \t]*(['\"]?)([\w.-]+)\1")
 _KEYWORD = r"(?:def|class|function|interface)"
@@ -84,19 +83,48 @@ def _strip_heredocs(command: str) -> str:
 
 
 def _segments(command: str) -> list[list[str]]:
-    """The simple commands of `command` as word lists, split at `|`, `&&`,
-    `;`, newlines and parentheses, with comments dropped. Each word keeps its
-    quotes. Raises ValueError on unbalanced quotes."""
-    lexer = shlex.shlex(_strip_heredocs(command).replace("\n", "\n;"), posix=False,
-                        punctuation_chars=";&|()<>\n")
-    lexer.whitespace = " \t\r"
-    lexer.whitespace_split = True
+    """The simple commands of `command` as word lists, split at unquoted `|`,
+    `&`, `;`, newlines and parentheses, with comments dropped. Each word keeps
+    its quotes and backslashes. Raises ValueError on an unclosed quote."""
+    text = _strip_heredocs(command)
     segments: list[list[str]] = [[]]
-    for token in lexer:
-        if set(token) <= _SEPARATORS:
-            segments.append([])
+    word: list[str] = []
+    quote = ""
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if quote:
+            word.append(char)
+            if char == "\\" and quote == '"' and i + 1 < len(text):
+                i += 1
+                word.append(text[i])
+            elif char == quote:
+                quote = ""
+        elif char == "\\":
+            word.append(text[i:i + 2])
+            i += 1
+        elif char in "'\"":
+            quote = char
+            word.append(char)
+        elif char == "#" and not word:
+            newline = text.find("\n", i)
+            if newline < 0:
+                break
+            i = newline
+            continue
+        elif char in _SEPARATORS or char in " \t\r":
+            if word:
+                segments[-1].append("".join(word))
+                word = []
+            if char in _SEPARATORS:
+                segments.append([])
         else:
-            segments[-1].append(token)
+            word.append(char)
+        i += 1
+    if quote:
+        raise ValueError("unclosed quote")
+    if word:
+        segments[-1].append("".join(word))
     return [s for s in segments if s]
 
 
@@ -107,7 +135,7 @@ def _unquote(word: str) -> str:
 
 
 def _command(word: str) -> str:
-    return os.path.basename(word.lstrip("`"))
+    return os.path.basename(_unquote(word.lstrip("`")))
 
 
 def _search_words(words: list[str]) -> list[str] | None:
@@ -132,9 +160,17 @@ def _search_words(words: list[str]) -> list[str] | None:
                 return words[j + 1:]
         return None
     if name in _WRAPPERS:
+        option_argument = False
         for j in range(i + 1, len(words)):
             if _command(words[j]) in _SEARCH_TOOLS or _command(words[j]) in ("git", "find"):
                 return _search_words(words[j:])
+            if words[j].startswith("-"):
+                option_argument = True
+            elif option_argument:
+                option_argument = False
+            elif not (_ASSIGNMENT.match(words[j]) or _command(words[j]) in _WRAPPERS
+                      or words[j].isdigit()):
+                return None
     return None
 
 
