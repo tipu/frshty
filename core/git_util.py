@@ -206,18 +206,11 @@ def prune_worktrees(repo_path, timeout: int = 60) -> list[str]:
     them, gets the lock here."""
     roots = [os.path.realpath(frshty_root()), os.path.realpath(core_config.TASK_WORKTREE_ROOT),
              *sorted(_owned_roots)]
-    listed = run_git_status(repo_path, ["worktree", "list", "--porcelain"], timeout=timeout)
-    if listed.returncode != 0:
+    blocks = worktree_entries(repo_path, timeout=timeout)
+    if blocks is None:
         return []
     dropped = []
-    blocks, block = [], []
-    for line in listed.stdout.splitlines() + [""]:
-        if line:
-            block.append(line)
-        elif block:
-            blocks.append(block)
-            block = []
-    for lines in blocks[1:]:
+    for lines in blocks:
         if not lines[0].startswith("worktree "):
             continue
         current = lines[0][len("worktree "):].strip()
@@ -235,6 +228,62 @@ def prune_worktrees(repo_path, timeout: int = 60) -> list[str]:
             run_git_status(repo_path, ["worktree", "lock", "--reason", WORKTREE_LOCK_REASON,
                                        current], timeout=timeout)
     return dropped
+
+
+def worktree_entries(repo_path, timeout: int = 60) -> list[list[str]] | None:
+    """The `git worktree list --porcelain` block of every linked worktree,
+    the main checkout left out. None when git cannot list them."""
+    listed = run_git_status(repo_path, ["worktree", "list", "--porcelain"], timeout=timeout)
+    if listed.returncode != 0:
+        return None
+    blocks, block = [], []
+    for line in listed.stdout.splitlines() + [""]:
+        if line:
+            block.append(line)
+        elif block:
+            blocks.append(block)
+            block = []
+    return blocks[1:]
+
+
+def worktree_loss(worktree, timeout: int = 60) -> str:
+    """What removing `worktree` would lose: "" when it has no modified and no
+    untracked file and a remote-tracking branch holds its HEAD, else the
+    reason it must stay."""
+    status = run_git_status(worktree, ["--no-optional-locks", "status", "--porcelain"],
+                            timeout=timeout)
+    if status.returncode != 0:
+        return f"git status failed: {status.stderr.strip()[:200]}"
+    if status.stdout.strip():
+        return "local changes"
+    held = run_git_status(worktree, ["for-each-ref", "--count=1", "--contains", "HEAD",
+                                     "refs/remotes"], timeout=timeout)
+    if held.returncode != 0:
+        return f"git for-each-ref failed: {held.stderr.strip()[:200]}"
+    if not held.stdout.strip():
+        return "HEAD is on no remote branch"
+    return ""
+
+
+def release_worktree(repo_path, worktree, timeout: int = 60) -> str:
+    """Unlock and remove a worktree frshty locked, when removing it loses nothing.
+
+    worktree_loss decides what would be lost. Plain `git worktree remove`
+    checks the files again after the unlock, so a file written in between
+    keeps the worktree, and the lock goes back on. Returns "" when the
+    worktree is gone, else the reason it stays."""
+    loss = worktree_loss(worktree, timeout=timeout)
+    if loss:
+        return loss
+    unlocked = run_git_status(repo_path, ["worktree", "unlock", str(worktree)], timeout=timeout)
+    if unlocked.returncode != 0:
+        return f"git worktree unlock failed: {unlocked.stderr.strip()[:200]}"
+    removed = run_git_status(repo_path, ["worktree", "remove", str(worktree)], timeout=timeout)
+    if removed.returncode != 0:
+        run_git_status(repo_path, ["worktree", "lock", "--reason", WORKTREE_LOCK_REASON,
+                                   str(worktree)], timeout=timeout)
+        return f"git worktree remove failed: {removed.stderr.strip()[:200]}"
+    return ""
 
 
 def git_dirs(directory) -> tuple[str, str]:
