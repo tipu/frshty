@@ -306,7 +306,7 @@ class TestInstallerUpgrade:
             {"matcher": "AskUserQuestion",
              "hooks": [{"type": "command", "command": command, "timeout": 10}]}]}}))
         added = mod.install_into(str(settings), events=("PreToolUse",))
-        assert added == ["PreToolUse[Bash]",
+        assert added == ["PreToolUse[Bash]", "PreToolUse[Grep]",
                          f"PreToolUse[{mod.WRITE_GATE_MATCHER}]",
                          f"PreToolUse[{mod.CORRESPONDENCE_MATCHER}]"]
         data = json.loads(settings.read_text())
