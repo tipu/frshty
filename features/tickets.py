@@ -22,7 +22,8 @@ import features.defence as defence
 from core import external_log
 from core.config import base_branch_for, get_repos, ticket_worktree_path, resolve_env
 from core.deps import run_dep_command, relink_shared_venv
-from core.claude_runner import run_haiku, run_balanced, run_claude_code, extract_json
+from core.claude_runner import (run_haiku, run_balanced, run_claude_code, extract_json,
+                                parse_structured, strict_object)
 from core.llm import NO_PUBLISH_RULE
 from core.commit_message import COMMIT_SUBJECT_RULE, commit_subject, merge_message_args
 from core.ticket_status import TicketStatus, can_transition, transition
@@ -475,6 +476,20 @@ Reply with JSON only, no prose. Include ONLY tickets that have real dependencies
 {{"dependencies": [{{"key": "<dependent_key>", "blocked_by": ["<blocker_key>"], "reason": "brief"}}]}}
 """
 
+_RANKER_SCHEMA = strict_object({
+    "dependencies": {"type": "array", "items": strict_object({
+        "key": {"type": "string"},
+        "blocked_by": {"type": "array", "items": {"type": "string"}},
+        "reason": {"type": "string"},
+    })},
+})
+_TRIAGE_SCHEMA = strict_object({
+    "results": {"type": "array", "items": strict_object({
+        "i": {"type": "integer"},
+        "actionable": {"type": "boolean"},
+    })},
+})
+
 
 def _rank_new_tickets(instance_key: str) -> dict:
     """Run a single haiku call to assign blocked_by on status=new tickets in this instance.
@@ -518,23 +533,18 @@ def _rank_new_tickets(instance_key: str) -> dict:
         return {"ranked": len(new_keys), "reason": "single_ticket_no_blockers"}
     lines = [f"- {t['key']} [{t['status']}]: {t['summary']}\n  {t['description']}" for t in in_scope]
     prompt = _RANKER_PROMPT.format(ticket_list="\n".join(lines))
-    raw = run_haiku(prompt, timeout=60)
-    parsed = extract_json(raw) if raw else None
+    raw = run_haiku(prompt, timeout=60, schema=_RANKER_SCHEMA)
+    parsed = parse_structured(raw, _RANKER_SCHEMA, fn_name="ticket_ranker")
     deps_by_key: dict[str, list[str]] = {}
-    if isinstance(parsed, dict):
-        deps = parsed.get("dependencies") or []
-        if isinstance(deps, list):
-            valid_keys = {t["key"] for t in in_scope}
-            for entry in deps:
-                if not isinstance(entry, dict):
-                    continue
-                key = entry.get("key")
-                blockers = entry.get("blocked_by") or []
-                if key not in valid_keys or not isinstance(blockers, list):
-                    continue
-                filtered = [b for b in blockers if b in valid_keys and b != key]
-                if filtered:
-                    deps_by_key[key] = filtered
+    if parsed:
+        valid_keys = {t["key"] for t in in_scope}
+        for entry in parsed["dependencies"]:
+            key = entry["key"]
+            if key not in valid_keys:
+                continue
+            filtered = [b for b in entry["blocked_by"] if b in valid_keys and b != key]
+            if filtered:
+                deps_by_key[key] = filtered
     deps_by_key = _break_cycles(deps_by_key)
     ranked_at = datetime.now(timezone.utc).isoformat()
     mutated = 0
@@ -2804,13 +2814,12 @@ def _check_in_review(config, ticket, ts, base_url, pr_info_map=None) -> dict:
             )
             + '\n\nReply with JSON: {"results":[{"i":0,"actionable":true|false}, ...]}'
         )
-        batch_raw = run_balanced(batch_prompt)
-        batch_parsed = extract_json(batch_raw) if batch_raw else None
+        batch_parsed = parse_structured(run_balanced(batch_prompt, schema=_TRIAGE_SCHEMA),
+                                        _TRIAGE_SCHEMA, fn_name="ticket_comment_triage")
         classifications: dict[int, bool] = {}
-        if isinstance(batch_parsed, dict) and isinstance(batch_parsed.get("results"), list):
+        if batch_parsed:
             for r in batch_parsed["results"]:
-                if isinstance(r, dict) and isinstance(r.get("i"), int):
-                    classifications[r["i"]] = bool(r.get("actionable"))
+                classifications[r["i"]] = r["actionable"]
 
         if new_comments and not classifications:
             log.emit("ticket_pr_comment_classify_failed",

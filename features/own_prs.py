@@ -11,7 +11,8 @@ from core.comments import (MAX_AUTOMATED_REVIEW_FIX_RUNS, automated_review_skip_
                            automated_review_skips, is_automated_review)
 import core.git_util as git_util
 import core.branch_sync as branch_sync
-from core.claude_runner import run_claude_code, run_haiku, run_balanced, extract_json
+from core.claude_runner import (run_claude_code, run_haiku, run_balanced, parse_structured,
+                                strict_object)
 from core.commit_message import COMMIT_SUBJECT_RULE, branch_key, commit_subject, keyed
 from core.config import base_branch_for, get_repos
 from features.pr_ci import KEEP_GREEN_RULE, ci_summary
@@ -21,6 +22,13 @@ RECLAIM_STALE_SECONDS = 1200
 MAX_COMMENT_RETRIES = 3
 NEW_COMMENT_BASELINE_HOURS = 24
 COMMENT_DEBOUNCE_MINUTES = 30
+TRIAGE_SCHEMA = strict_object({
+    "results": {"type": "array", "items": strict_object({
+        "id": {"type": "integer"},
+        "actionable": {"type": "boolean"},
+        "reason": {"type": "string"},
+    })},
+})
 
 
 def _debounce_seconds(config) -> int:
@@ -371,16 +379,9 @@ def _process_detected_comments(config, instance_key, platform, pr, pr_ref, base_
         f"{comment_list}\n\n"
         'Reply with JSON: {"results": [{"id": 0, "actionable": true, "reason": "brief reason"}, ...]}'
     )
-    batch_raw = run_balanced(batch_prompt, timeout=120)
-    classifications = {}
-    if batch_raw:
-        parsed_batch = extract_json(batch_raw)
-        if isinstance(parsed_batch, list):
-            for item in parsed_batch:
-                classifications[item.get("id", -1)] = item
-        elif isinstance(parsed_batch, dict) and any(isinstance(v, list) for v in parsed_batch.values()):
-            for item in next(v for v in parsed_batch.values() if isinstance(v, list)):
-                classifications[item.get("id", -1)] = item
+    parsed_batch = parse_structured(run_balanced(batch_prompt, timeout=120, schema=TRIAGE_SCHEMA),
+                                    TRIAGE_SCHEMA, fn_name="own_pr_comment_triage")
+    classifications = {item["id"]: item for item in parsed_batch["results"]} if parsed_batch else {}
 
     for i, comment in enumerate(all_to_process):
         comment_id = str(comment["id"])

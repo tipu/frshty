@@ -1,6 +1,7 @@
 """Generate structured tickets from a PRD section via claude -p."""
 import core.log as log
-from core.claude_runner import extract_json, run_haiku
+from core.claude_runner import parse_structured, run_haiku, strict_object
+from features.acceptance import CRITERIA_SCHEMA
 
 
 GENERATOR_PROMPT = """You are a PRD-to-tickets generator.
@@ -44,31 +45,34 @@ Rules:
 PRD SECTION:
 """
 
+GENERATOR_SCHEMA = strict_object({
+    "tickets": {"type": "array", "items": strict_object({
+        "title": {"type": "string"},
+        "summary": {"type": "string"},
+        "description": {"type": "string"},
+        "acceptance_criteria": CRITERIA_SCHEMA,
+    })},
+})
+
 
 def generate(section: dict) -> list[dict]:
     """Returns list of {title, summary, description, acceptance_criteria} dicts.
     Empty list on failure or no tickets."""
     body = f"## {section['header']}\n{section['content']}"
-    raw = run_haiku(GENERATOR_PROMPT + body, timeout=300)
+    raw = run_haiku(GENERATOR_PROMPT + body, timeout=300, schema=GENERATOR_SCHEMA)
     if not raw:
         log.emit("prd_generator_empty",
                  f"haiku returned empty for section '{section['header']}'",
                  meta={"stable_key": section["stable_key"]})
         return []
-    parsed = extract_json(raw)
-    if not parsed or not isinstance(parsed.get("tickets"), list):
+    parsed = parse_structured(raw, GENERATOR_SCHEMA, fn_name="prd_generator")
+    if parsed is None:
         log.emit("prd_generator_parse_failed",
                  f"could not parse generator output for '{section['header']}'",
                  meta={"stable_key": section["stable_key"], "raw": raw[:500]})
         return []
     out: list[dict] = []
     for t in parsed["tickets"]:
-        if not isinstance(t, dict):
-            continue
-        ac = t.get("acceptance_criteria") or {}
-        if not isinstance(ac, dict) or not isinstance(ac.get("criteria"), list):
-            continue
-        ac["source_text"] = body
-        t["acceptance_criteria"] = ac
+        t["acceptance_criteria"]["source_text"] = body
         out.append(t)
     return out
