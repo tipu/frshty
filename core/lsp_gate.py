@@ -101,7 +101,8 @@ def _segments(command: str) -> list[list[str]]:
             elif char == quote:
                 quote = ""
         elif char == "\\":
-            word.append(text[i:i + 2])
+            if text[i + 1:i + 2] != "\n":
+                word.append(text[i:i + 2])
             i += 1
         elif char in "'\"":
             quote = char
