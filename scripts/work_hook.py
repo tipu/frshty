@@ -348,6 +348,19 @@ def main() -> int:
                         }
                     }))
                 return 0
+            if tool == "Grep":
+                reason = lsp_gate.grep_reason(
+                    str((data.get("tool_input") or {}).get("pattern") or ""),
+                    data.get("transcript_path") or "")
+                if reason:
+                    print(json.dumps({
+                        "hookSpecificOutput": {
+                            "hookEventName": "PreToolUse",
+                            "permissionDecision": "deny",
+                            "permissionDecisionReason": reason,
+                        }
+                    }))
+                return 0
             if tool == "Bash":
                 command = (data.get("tool_input") or {}).get("command") or ""
                 reason = lsp_gate.bash_reason(command, data.get("transcript_path") or "")
