@@ -55,6 +55,10 @@ def _transcript(tmp_path, *lines):
     ('bash -c \'grep -rn "def foo" core/\'', "foo"),
     ("python3 - <<'EOF'\nprint(1)\nEOF\ngrep -n 'def foo' a.py", "foo"),
     ('LC_ALL=C /usr/bin/grep -n "def foo" a.py', "foo"),
+    ('find . -name "*.py" | xargs -I {} grep -n "def foo" {}', "foo"),
+    ('sudo -u root grep -n "def foo" a.py', "foo"),
+    ('bash -e -c \'grep -rn "def foo" core/\'', "foo"),
+    ("cat <<A <<B\none\nA\ntwo\nB\ngrep -n 'def foo' a.py", "foo"),
     (r'grep -rnE "def\s+parse_structured" core/', "parse_structured"),
     (r'rg "^\s*class\s+OpenCodeProvider\b" core/', "OpenCodeProvider"),
     (r'grep -n "def\\s\+parse_structured" core/llm.py', "parse_structured"),
@@ -79,6 +83,9 @@ def test_denies_a_symbol_grep_before_lsp_is_loaded(tmp_path, command, name):
     "python3 - <<'EOF'\nimport re\ntext = open('a.py').read()\nprint('grep' in text)\n# def X\nEOF",
     "cat > a.sh <<EOF\ngrep -n 'def foo' a.py\nEOF\nls",
     '# grep -n "def foo" a.py',
+    '# note; grep -n "def foo" a.py',
+    "grep -n ordinary a.py # def foo",
+    'echo ";" "grep" "def foo"',
     r'grep -rnE "def\s+\w+" core/',
     r'grep -rn "class\s*$" core/',
     'grep -rn "Function.prototype" web/',
@@ -257,3 +264,24 @@ def test_installer_registers_the_grep_tool():
 def test_a_heredoc_body_is_not_a_grep():
     command = "python3 - <<'EOF'\nimport re\nsrc = re.sub('grep', 'rg', src)\n# `def X`\nEOF"
     assert gate._symbol(command) == ""
+
+
+def test_every_definition_in_one_command_needs_a_lookup(tmp_path):
+    path = _transcript(tmp_path, *_LOADED, _lsp("workspaceSymbol", "foo"))
+    assert gate.bash_reason('grep -n "def foo" a.py; grep -n "def bar" a.py', path) == \
+        gate.DENY_REASON.format(name="bar")
+    assert gate.grep_reason("def foo|def bar", path) == gate.DENY_REASON.format(name="bar")
+
+
+@pytest.mark.parametrize("line", [
+    '["tool_use"]',
+    '"tool_use"',
+    json.dumps({"message": {"content": [{"type": "tool_use", "id": "u", "name": "LSP",
+                                         "input": {"operation": []}}]}}),
+    json.dumps({"message": {"content": [{"type": "tool_use", "id": "u", "name": "LSP",
+                                         "input": "workspaceSymbol"}]}}),
+])
+def test_a_malformed_transcript_line_does_not_break_the_gate(tmp_path, line):
+    path = _transcript(tmp_path, line)
+    assert gate.bash_reason('grep -n "def foo" a.py', path) == gate.DENY_REASON.format(name="foo")
+    assert gate.grep_reason("def foo", path) == gate.DENY_REASON.format(name="foo")
