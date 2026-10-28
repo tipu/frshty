@@ -5,6 +5,8 @@ ARG HOST_GID=1000
 ARG HOST_HOME=/home/frshty
 ARG HOOK_DIR=
 
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ENV NODE_PATH=/usr/lib/node_modules
 ENV PLAYWRIGHT_MCP_SANDBOX=false
