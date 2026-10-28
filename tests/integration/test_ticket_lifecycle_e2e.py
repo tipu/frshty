@@ -312,7 +312,7 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
         "_base_url": "http://testserver",
     }
 
-    def fake_run_haiku(prompt: str, timeout: int = 0) -> str:
+    def fake_run_haiku(prompt: str, timeout: int = 0, **kwargs) -> str:
         if "Classify this engineering ticket" in prompt:
             return "code"
         if "Triage each PR review comment" in prompt:
@@ -421,7 +421,6 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
          patch("features.tickets.run_balanced", side_effect=fake_run_haiku), \
          patch("features.tickets.extract_json", side_effect=fake_extract_json), \
          patch("features.pr_ci.run_balanced", side_effect=fake_run_haiku), \
-         patch("features.pr_ci.extract_json", side_effect=fake_extract_json), \
          patch("features.pr_ci.run_claude_code", side_effect=fake_run_claude_code), \
          patch("core.tasks.tickets.run_claude_code", side_effect=fake_run_claude_code), \
          patch("core.commit_message.run_haiku",

@@ -5,11 +5,10 @@ call through triage_and_fix_pr so behavior is identical: causality check via
 Haiku first, fix via headless claude only if the failure is caused by our
 changes, attempt cap enforced by the caller.
 """
-import json
 import re
 from pathlib import Path
 
-from core.claude_runner import run_balanced, run_claude_code, extract_json
+from core.claude_runner import run_balanced, run_claude_code, parse_structured, strict_object
 
 
 FIX_TIMEOUT = 1800
@@ -25,6 +24,11 @@ PENDING_STATES = ("PENDING", "QUEUED", "IN_PROGRESS", "INPROGRESS", "WAITING", "
 # adds ERROR, ACTION_REQUIRED, STALE and STARTUP_FAILURE, and reading "not
 # failed and not pending" as passed would call every one of them green.
 PASSED_STATES = ("SUCCESS", "NEUTRAL", "SKIPPED")
+CAUSALITY_SCHEMA = strict_object({
+    "caused_by_us": {"type": "boolean"},
+    "reason": {"type": "string"},
+    "fix_hint": {"type": "string"},
+})
 
 KEEP_GREEN_RULE = (
     "Before you commit, run the repository's own lint and test commands and confirm they "
@@ -122,17 +126,16 @@ def triage_and_fix_pr(platform, repo: str, pr_id: int, label: str,
         "Reply with EXACTLY one JSON object:\n"
         '{"caused_by_us": true/false, "reason": "brief explanation", "fix_hint": "what to change if caused_by_us"}'
     )
-    classification = run_balanced(causality_prompt, timeout=180)
+    classification = run_balanced(causality_prompt, timeout=180, schema=CAUSALITY_SCHEMA)
     if not classification:
         return {"result": "haiku_empty", "attempts": attempts, "failed_names": failed_names}
-    try:
-        analysis = extract_json(classification) or json.loads(classification.strip())
-    except (json.JSONDecodeError, TypeError):
+    analysis = parse_structured(classification, CAUSALITY_SCHEMA, fn_name="pr_ci_causality")
+    if analysis is None:
         return {"result": "haiku_parse_error", "attempts": attempts, "failed_names": failed_names}
 
-    caused = bool(analysis.get("caused_by_us", False))
-    reason = analysis.get("reason", "")
-    fix_hint = analysis.get("fix_hint", "")
+    caused = analysis["caused_by_us"]
+    reason = analysis["reason"]
+    fix_hint = analysis["fix_hint"]
 
     if not caused:
         return {"result": "unrelated", "attempts": attempts,

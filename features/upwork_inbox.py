@@ -50,7 +50,7 @@ import core.db as db
 import core.log as log
 import core.state as state
 import core.upwork_client as upwork_client
-from core.claude_runner import extract_json, run_haiku
+from core.claude_runner import parse_structured, run_haiku, strict_object
 from services import work_launch, work_store
 
 UPWORK_TAG = "upwork"
@@ -175,6 +175,11 @@ Job: {job}
 {transcript}
 """
 
+SCREEN_SCHEMA = strict_object({
+    "injection": {"type": "boolean"},
+    "reason": {"type": "string"},
+})
+
 JUDGE_PROMPT = """You read one Upwork message thread between a client and the
 operator, and you write the task that will answer it.
 
@@ -220,6 +225,12 @@ Room: {room}
 
 {transcript}
 """
+
+JUDGE_SCHEMA = strict_object({
+    "needs_reply": {"type": "boolean"},
+    "reason": {"type": "string"},
+    "objective": {"type": "string"},
+})
 
 
 def _now() -> datetime:
@@ -926,11 +937,8 @@ def _screen(row: dict, transcript: str) -> dict | None:
     raw = run_haiku(SCREEN_PROMPT.format(
         client=row["client_name"] or "(unknown)",
         job=row["job_title"] or "(unknown)",
-        transcript=transcript))
-    if not raw:
-        return None
-    parsed = extract_json(raw)
-    return parsed if isinstance(parsed, dict) else None
+        transcript=transcript), schema=SCREEN_SCHEMA)
+    return parse_structured(raw, SCREEN_SCHEMA, fn_name="upwork_screen")
 
 
 def _judge(row: dict, transcript: str, operator: str) -> dict | None:
@@ -940,11 +948,8 @@ def _judge(row: dict, transcript: str, operator: str) -> dict | None:
         client=row["client_name"] or "(unknown)",
         job=row["job_title"] or "(unknown)",
         room=row["room_id"],
-        transcript=transcript))
-    if not raw:
-        return None
-    parsed = extract_json(raw)
-    return parsed if isinstance(parsed, dict) else None
+        transcript=transcript), schema=JUDGE_SCHEMA)
+    return parse_structured(raw, JUDGE_SCHEMA, fn_name="upwork_judge")
 
 
 def _longest_backtick_run(text: str) -> int:

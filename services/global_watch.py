@@ -57,7 +57,7 @@ from pathlib import Path
 import core.db as db
 import core.log as log
 import core.state as state
-from core.llm import extract_json, run_external_model
+from core.llm import parse_structured, run_external_model, strict_object
 from core.discovery import call_instance, discover_instances
 from services import pending_work, work_launch, work_store
 from web.observability import _fetch_local_global_events, _fetch_remote_global_events
@@ -131,6 +131,17 @@ KNOWN TASKS
 DIGEST
 {digest}
 """
+
+AGENT_SCHEMA = strict_object({
+    "problems": {"type": "array", "items": strict_object({
+        "instance": {"type": "string"},
+        "what": {"type": "string"},
+        "evidence": {"type": "string"},
+        "likely_cause": {"type": "string"},
+        "task_key": {"type": "string"},
+        "task": {"type": "string"},
+    })},
+})
 TASK_BRIEF = """
 
 ## Why this task exists
@@ -326,19 +337,17 @@ def ask_agent(config: dict, digest: str, since: str, now: datetime,
                "-o", str(last), "-"]
         text, code = run_external_model(cmd, fn_name="global_watch_agent", model=f"codex:{model}",
                                         prompt=prompt, cwd=Path(tmp), timeout=AGENT_TIMEOUT,
-                                        last_message_file=last, stdin_text=prompt)
+                                        last_message_file=last, stdin_text=prompt,
+                                        output_schema=AGENT_SCHEMA)
     if code != 0 or not text:
         return {"status": "failed", "reason": f"codex exit={code}"}
-    verdict = extract_json(text)
-    if not isinstance(verdict, dict) or not isinstance(verdict.get("problems"), list):
+    verdict = parse_structured(text, AGENT_SCHEMA, fn_name="global_watch_agent",
+                               model=f"codex:{model}")
+    if verdict is None:
         return {"status": "failed", "reason": f"unparseable verdict: {text.strip()[:200]}"}
-    problems = [p for p in verdict["problems"] if isinstance(p, dict)]
-    if len(problems) != len(verdict["problems"]) or any(
-            not str(p.get("instance") or "").strip() or not str(p.get("what") or "").strip()
-            for p in problems):
+    problems = verdict["problems"]
+    if any(not p["instance"].strip() or not p["what"].strip() for p in problems):
         return {"status": "failed", "reason": f"a problem names no instance or detail: {text.strip()[:200]}"}
-    if verdict.get("status") == "problem" and not problems:
-        return {"status": "failed", "reason": "problem verdict names no problem"}
     return {"status": "problem" if problems else "ok", "problems": problems}
 
 

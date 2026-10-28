@@ -3,12 +3,15 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
+
+import jsonschema
 
 import core.db as _db
 import core.log as log
@@ -228,6 +231,10 @@ def _guard_block_output(reason: str, remaining_s: int) -> str:
 
 def _model_args(model: str | None) -> list[str]:
     return ["--model", model] if model else []
+
+
+def _schema_args(schema: dict | None) -> list[str]:
+    return ["--json-schema", json.dumps(schema)] if schema else []
 
 
 def _record_start(function_name: str, model: str, prompt: str,
@@ -584,12 +591,15 @@ class ClaudeProvider(LLMProvider):
 
     def _run_print(self, cmd: list[str], *, prompt: str, function_name: str,
                    model: str, cwd: Path | None, tools: list[str] | None,
-                   timeout: int, label: str) -> tuple[str | None, dict | None]:
+                   timeout: int, label: str,
+                   schema: dict | None = None) -> tuple[str | None, dict | None]:
         """Shared body of every `claude -p` call: guard, queue, run, record.
 
         `cwd` is the real process working directory, not just an --add-dir
         grant, so the model explores the checkout it was pointed at.
-        Returns (text, result_envelope); text is None on block/timeout/error."""
+        Returns (text, result_envelope); text is None on block/timeout/error.
+        With `schema` the CLI validates the answer itself and the text is the
+        JSON of its `structured_output`; a run without one returns None."""
         inv_id = _record_start(function_name, model, prompt, cwd, tools, timeout)
         t0 = time.monotonic()
         blocked, reason, remaining_s = _guard_status()
@@ -628,15 +638,24 @@ class ClaudeProvider(LLMProvider):
                 _record_end(inv_id, t0, "error", result.returncode, raw)
                 return None, None
             text, usage = _parse_claude_json_output(raw)
+            if schema is not None:
+                structured = (usage or {}).get("structured_output")
+                if not isinstance(structured, dict):
+                    _record_end(inv_id, t0, "error", result.returncode, text, usage=usage)
+                    _last_error_cv.set(f"{label} returned no structured output")
+                    _emit_schema_invalid(function_name, model, "no structured_output in the result")
+                    return None, usage
+                text = json.dumps(structured)
             _record_end(inv_id, t0, "success", result.returncode, text, usage=usage)
             return text, usage
 
     def balanced(self, prompt: str, *, worktree: Path | None = None,
                  tools: list[str] | None = None, timeout: int = 600,
                  model: str | None = None, function_name: str = "run_balanced",
-                 **kwargs) -> str | None:
+                 schema: dict | None = None, **kwargs) -> str | None:
         chosen_model = model or _DEFAULT_MODEL
-        cmd = self._cmd("-p", "-", "--output-format", "json", *_model_args(model))
+        cmd = self._cmd("-p", "-", "--output-format", "json", *_model_args(model),
+                        *_schema_args(schema))
         cwd = worktree if worktree and worktree.is_dir() else None
         if cwd:
             cmd += ["--dangerously-skip-permissions", "--add-dir", str(cwd)]
@@ -645,14 +664,14 @@ class ClaudeProvider(LLMProvider):
         cmd += _denied_tools_args(None)
         text, _ = self._run_print(cmd, prompt=prompt, function_name=function_name,
                                   model=chosen_model, cwd=cwd, tools=tools,
-                                  timeout=timeout, label="Claude")
+                                  timeout=timeout, label="Claude", schema=schema)
         return text
 
     def agentic(self, prompt: str, *, cwd: Path, system_prompt: str | None = None,
                 add_dirs: list[Path] | None = None, tools: list[str] | None = None,
                 denied_tools: list[str] | None = None, timeout: int = 1200,
                 model: str | None = None, function_name: str = "run_agentic",
-                **kwargs) -> str | None:
+                schema: dict | None = None, **kwargs) -> str | None:
         """Multi-turn Claude Code run rooted in `cwd`.
 
         balanced() hands the model one prompt and takes the first answer, so a
@@ -664,7 +683,7 @@ class ClaudeProvider(LLMProvider):
         read-only without a permission dialog."""
         chosen_model = model or _DEFAULT_MODEL
         cmd = self._cmd("-p", "-", "--output-format", "json", *_model_args(model),
-                        "--permission-mode", "dontAsk")
+                        "--permission-mode", "dontAsk", *_schema_args(schema))
         if system_prompt:
             cmd += ["--append-system-prompt", system_prompt]
         if tools:
@@ -674,15 +693,17 @@ class ClaudeProvider(LLMProvider):
             cmd += ["--add-dir", str(extra)]
         text, usage = self._run_print(cmd, prompt=prompt, function_name=function_name,
                                       model=chosen_model, cwd=cwd, tools=tools,
-                                      timeout=timeout, label="Claude agent")
-        if text is not None and (usage or {}).get("num_turns") == 1:
+                                      timeout=timeout, label="Claude agent", schema=schema)
+        answer_turns = 2 if schema else 1
+        if text is not None and (usage or {}).get("num_turns") == answer_turns:
             log.emit("llm_agentic_single_turn",
                      f"{function_name} answered in one turn without using a tool in {cwd}",
                      meta={"function_name": function_name, "model": chosen_model,
                            "cwd": str(cwd), "prompt_length": len(prompt)})
         return text
 
-    def fast(self, prompt: str, *, timeout: int = 120, **kwargs) -> str | None:
+    def fast(self, prompt: str, *, timeout: int = 120, schema: dict | None = None,
+             **kwargs) -> str | None:
         """Classify or summarize one prompt in a single turn, with no tools.
 
         Every caller of this tier hands the model the whole payload and takes
@@ -696,10 +717,10 @@ class ClaudeProvider(LLMProvider):
         model = _DEFAULT_MODEL
         cmd = [self.bin, *(a for a in self.extra_args if a != _SKIP_PERMISSIONS),
                "-p", "-", "--output-format", "json",
-               *NO_TOOLS_FLAGS]
+               *NO_TOOLS_FLAGS, *_schema_args(schema)]
         text, _ = self._run_print(cmd, prompt=prompt, function_name="run_haiku",
                                   model=model, cwd=None, tools=None,
-                                  timeout=timeout, label="Claude fast")
+                                  timeout=timeout, label="Claude fast", schema=schema)
         return text
 
 
@@ -718,7 +739,9 @@ class OpenCodeProvider(LLMProvider):
 
     def balanced(self, prompt: str, *, worktree: Path | None = None,
                  tools: list[str] | None = None, timeout: int = 600,
-                 function_name: str = "run_balanced", **kwargs) -> str | None:
+                 function_name: str = "run_balanced", schema: dict | None = None,
+                 **kwargs) -> str | None:
+        prompt = _schema_prompt(prompt, schema)
         cmd = ["opencode", "run", prompt, "--model", self.model_balanced,
                "--dangerously-skip-permissions"]
         cwd = worktree if worktree and worktree.is_dir() else None
@@ -728,13 +751,15 @@ class OpenCodeProvider(LLMProvider):
                 add_dirs: list[Path] | None = None, tools: list[str] | None = None,
                 denied_tools: list[str] | None = None, timeout: int = 1200,
                 model: str | None = None, function_name: str = "run_agentic",
-                **kwargs) -> str | None:
+                schema: dict | None = None, **kwargs) -> str | None:
+        prompt = _schema_prompt(prompt, schema)
         full = f"{system_prompt}\n\n{prompt}" if system_prompt else prompt
         cmd = ["opencode", "run", full, "--model", self.model_thinking,
                "--dangerously-skip-permissions"]
         return self._run(cmd, function_name, self.model_thinking, full, cwd, timeout)
 
-    def fast(self, prompt: str, *, timeout: int = 120, **kwargs) -> str | None:
+    def fast(self, prompt: str, *, timeout: int = 120, schema: dict | None = None,
+             **kwargs) -> str | None:
         """One-shot classification with no tools. See ClaudeProvider.fast:
         this tier reads text written by other people.
 
@@ -743,6 +768,7 @@ class OpenCodeProvider(LLMProvider):
         --dangerously-skip-permissions alone leaves the classifier able to act.
         The deny-everything configuration is handed to it in the environment
         instead."""
+        prompt = _schema_prompt(prompt, schema)
         cmd = ["opencode", "run", prompt, "--model", self.model_fast]
         return self._run(cmd, "run_fast", self.model_fast, prompt, None, timeout,
                          env_overrides=NO_TOOLS_OPENCODE_ENV)
@@ -785,6 +811,48 @@ class OpenCodeProvider(LLMProvider):
                 return None
             _record_end(inv_id, t0, "success", result.returncode, output)
             return output
+
+
+def _schema_prompt(prompt: str, schema: dict | None) -> str:
+    """`opencode run` has no schema flag, so the schema goes into the prompt
+    and parse_structured checks the answer against it afterwards."""
+    if not schema:
+        return prompt
+    return (f"{prompt}\n\nReturn ONLY one JSON object that matches this JSON Schema, "
+            f"with no other text:\n{json.dumps(schema)}")
+
+
+def strict_object(properties: dict) -> dict:
+    """A JSON Schema object that requires every property and allows no other.
+    codex --output-schema accepts only this strict form; claude accepts it too."""
+    return {"type": "object", "properties": properties,
+            "required": list(properties), "additionalProperties": False}
+
+
+def _emit_schema_invalid(fn_name: str, model: str, detail: str) -> None:
+    log.emit("llm_schema_invalid",
+             f"[{_active_instance_key()}] {fn_name} ({model}) answered outside its schema: {detail}",
+             meta={"instance_key": _active_instance_key(), "function": fn_name,
+                   "model": model, "detail": detail[:500]})
+
+
+def parse_structured(text: str | None, schema: dict, *, fn_name: str,
+                     model: str = "") -> dict | None:
+    """The answer of a schema call as a dict, or None when there is no answer
+    or it does not match `schema`. Claude and codex validate the answer in the
+    CLI; this check also covers opencode, which only reads the schema as text."""
+    if text is None:
+        return None
+    data = extract_json(text)
+    if data is None:
+        _emit_schema_invalid(fn_name, model, "no JSON object in the answer")
+        return None
+    try:
+        jsonschema.validate(data, schema)
+    except jsonschema.ValidationError as e:
+        _emit_schema_invalid(fn_name, model, e.message)
+        return None
+    return data
 
 
 def _spawn_failed(inv_id: str | None, started_ms: float, fn_name: str,
@@ -912,10 +980,15 @@ def run_external_model(cmd: list[str], *, fn_name: str, model: str, prompt: str,
                        env_extra: dict[str, str] | None = None,
                        last_message_file: Path | None = None,
                        transcript_file: Path | None = None,
-                       stdin_text: str | None = None) -> tuple[str | None, int | None]:
+                       stdin_text: str | None = None,
+                       output_schema: dict | None = None) -> tuple[str | None, int | None]:
     """Run a non-Claude model CLI (codex, agy) under the same invocation
     logging as Claude. Returns (text, exit_code); both are None when the CLI
     times out or cannot be started at all.
+
+    `output_schema` is for `codex exec` only: it is written to a file and
+    passed as --output-schema, and the caller reads the answer with
+    parse_structured.
 
     Pass the prompt via `stdin_text` (with a `-` placeholder in `cmd`) instead
     of as an argv element when it can be large: Linux caps a single argv
@@ -926,6 +999,16 @@ def run_external_model(cmd: list[str], *, fn_name: str, model: str, prompt: str,
     `transcript_file` for debugging — callers must read the returned text, not
     the transcript. Vendor usage limits do NOT trip the shared Claude guard;
     they surface to the caller via validate_model_output instead."""
+    if output_schema is not None:
+        with tempfile.TemporaryDirectory(prefix="frshty-schema-") as tmp:
+            schema_file = Path(tmp) / "schema.json"
+            schema_file.write_text(json.dumps(output_schema))
+            at = cmd.index("exec") + 1
+            return run_external_model(
+                [*cmd[:at], "--output-schema", str(schema_file), *cmd[at:]],
+                fn_name=fn_name, model=model, prompt=prompt, cwd=cwd, timeout=timeout,
+                env_extra=env_extra, last_message_file=last_message_file,
+                transcript_file=transcript_file, stdin_text=stdin_text)
     inv_id = _record_start(fn_name, model, prompt, cwd, None, timeout)
     t0 = time.monotonic()
     env = {**os.environ, **(env_extra or {})}
