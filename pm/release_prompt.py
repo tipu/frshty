@@ -1,4 +1,4 @@
-"""Whole-release inspection prompt. JSON-fenced output parsed by extract_json."""
+"""Whole-release inspection prompt. JSON output checked by parse_structured against RELEASE_SCHEMA."""
 
 RELEASE_INSPECT = """You are the PM agent. Inspect a completed release as a whole product, not ticket-by-ticket. Every member ticket is in a terminal state (merged/validation/done).
 
