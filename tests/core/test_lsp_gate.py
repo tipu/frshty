@@ -14,9 +14,25 @@ from services import work_store
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
-def _tool_use(name, tool_input):
+def _tool_use(name, tool_input, tool_id="toolu_1"):
     return json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [
-        {"type": "tool_use", "id": "toolu_1", "name": name, "input": tool_input}]}})
+        {"type": "tool_use", "id": tool_id, "name": name, "input": tool_input}]}})
+
+
+def _tool_result(content, tool_id="toolu_1"):
+    return json.dumps({"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": tool_id, "content": content}]}})
+
+
+def _lsp(operation, query=None, tool_id="toolu_lsp"):
+    tool_input = {"operation": operation, "filePath": "a.py", "line": 1, "character": 1}
+    if query is not None:
+        tool_input["query"] = query
+    return _tool_use("LSP", tool_input, tool_id)
+
+
+_LOADED = (_tool_use("ToolSearch", {"query": "select:LSP", "max_results": 1}, "toolu_ts"),
+           _tool_result([{"type": "tool_reference", "tool_name": "LSP"}], "toolu_ts"))
 
 
 def _transcript(tmp_path, *lines):
@@ -31,6 +47,21 @@ def _transcript(tmp_path, *lines):
     ("rg 'async def launch' services/", "launch"),
     ('cd web && grep -rn "function renderBoard" static/', "renderBoard"),
     ('git grep -n "interface TaskRow"', "TaskRow"),
+    ('cat a.py | grep -n "def foo"', "foo"),
+    ('cd core && grep -n "def foo" a.py', "foo"),
+    ('ls; rg "class Foo"', "Foo"),
+    ('find . -name "*.py" | xargs grep -n "def foo"', "foo"),
+    ('find . -name "*.py" -exec grep -n "def foo" {} +', "foo"),
+    ('bash -c \'grep -rn "def foo" core/\'', "foo"),
+    ("python3 - <<'EOF'\nprint(1)\nEOF\ngrep -n 'def foo' a.py", "foo"),
+    ('LC_ALL=C /usr/bin/grep -n "def foo" a.py', "foo"),
+    ('find . -name "*.py" | xargs -I {} grep -n "def foo" {}', "foo"),
+    ('sudo -u root grep -n "def foo" a.py', "foo"),
+    ('bash -e -c \'grep -rn "def foo" core/\'', "foo"),
+    ('diff <(grep -n "def foo" a.py) b.txt', "foo"),
+    ('"grep" -n "def foo" a.py', "foo"),
+    ('grep -rn \\\n  "def foo" core/', "foo"),
+    ("cat <<A <<B\none\nA\ntwo\nB\ngrep -n 'def foo' a.py", "foo"),
     (r'grep -rnE "def\s+parse_structured" core/', "parse_structured"),
     (r'rg "^\s*class\s+OpenCodeProvider\b" core/', "OpenCodeProvider"),
     (r'grep -n "def\\s\+parse_structured" core/llm.py', "parse_structured"),
@@ -50,6 +81,19 @@ def test_denies_a_symbol_grep_before_lsp_is_loaded(tmp_path, command, name):
     "grep -n LSP_RULE core/llm.py",
     'git log --grep "class Foo"',
     'echo "def foo"',
+    'echo "grep -n def foo" > notes.txt',
+    'python3 -c "import subprocess; subprocess.run([\'grep\', \'def foo\'])"',
+    "python3 - <<'EOF'\nimport re\ntext = open('a.py').read()\nprint('grep' in text)\n# def X\nEOF",
+    "cat > a.sh <<EOF\ngrep -n 'def foo' a.py\nEOF\nls",
+    '# grep -n "def foo" a.py',
+    '# note; grep -n "def foo" a.py',
+    "grep -n ordinary a.py # def foo",
+    'echo ";" "grep" "def foo"',
+    'env echo grep "def foo"',
+    'xargs echo grep "def foo"',
+    'echo a\\; grep "def foo" a.py',
+    'echo prefix"; grep def foo"',
+    'grep -n TODO a.py \\\n# def foo',
     r'grep -rnE "def\s+\w+" core/',
     r'grep -rn "class\s*$" core/',
     'grep -rn "Function.prototype" web/',
@@ -61,13 +105,49 @@ def test_allows_a_grep_that_is_not_a_definition_lookup(tmp_path, command):
     assert gate.bash_reason(command, path) == ""
 
 
-@pytest.mark.parametrize("line", [
-    _tool_use("ToolSearch", {"query": "select:LSP", "max_results": 1}),
-    _tool_use("LSP", {"operation": "workspaceSymbol", "filePath": "a.py",
-                      "line": 1, "character": 1, "query": "x"}),
-])
-def test_one_lsp_load_opens_the_gate(tmp_path, line):
-    path = _transcript(tmp_path, line)
+def test_a_tool_search_alone_keeps_the_gate_shut(tmp_path):
+    path = _transcript(tmp_path, *_LOADED)
+    assert gate.bash_reason('grep -n "def foo" a.py', path) == gate.DENY_REASON.format(name="foo")
+
+
+def test_a_workspace_symbol_for_the_name_opens_the_gate_for_that_name(tmp_path):
+    path = _transcript(tmp_path, *_LOADED, _lsp("workspaceSymbol", "foo"),
+                       _tool_result("No symbols found in workspace.", "toolu_lsp"))
+    assert gate.bash_reason('grep -n "def foo" a.py', path) == ""
+    assert gate.grep_reason(r"def\s+foo", path) == ""
+
+
+def test_a_workspace_symbol_for_another_name_keeps_the_gate_shut(tmp_path):
+    path = _transcript(tmp_path, *_LOADED, _lsp("workspaceSymbol", "foobar"),
+                       _tool_result("Found 1 symbols in workspace:\n\na.py:\n  foobar (Function) - Line 3",
+                                    "toolu_lsp"))
+    assert gate.bash_reason('grep -n "def foo" a.py', path) == gate.DENY_REASON.format(name="foo")
+    assert gate.grep_reason(r"def\s+foo", path) == gate.DENY_REASON.format(name="foo")
+
+
+def test_a_lookup_result_that_names_the_symbol_opens_the_gate(tmp_path):
+    path = _transcript(tmp_path, *_LOADED, _lsp("workspaceSymbol", "parse"),
+                       _tool_result("Found 2 symbols in workspace:\n\ncore/llm.py:\n"
+                                    "  parse_structured (Function) - Line 40", "toolu_lsp"))
+    assert gate.bash_reason('grep -n "def parse_structured" core/llm.py', path) == ""
+
+
+def test_a_document_symbol_call_does_not_open_the_gate(tmp_path):
+    path = _transcript(tmp_path, *_LOADED, _lsp("documentSymbol"),
+                       _tool_result("foo (Function) - Line 3", "toolu_lsp"))
+    assert gate.bash_reason('grep -n "def foo" a.py', path) == gate.DENY_REASON.format(name="foo")
+
+
+def test_no_lsp_server_opens_the_gate_for_the_session(tmp_path):
+    path = _transcript(tmp_path, *_LOADED, _lsp("workspaceSymbol", "bar"),
+                       _tool_result("No LSP server available for file type: .sh", "toolu_lsp"))
+    assert gate.bash_reason('grep -n "def foo" a.py', path) == ""
+    assert gate.grep_reason(r"function\s+baz", path) == ""
+
+
+def test_a_tool_search_that_finds_no_lsp_tool_opens_the_gate(tmp_path):
+    path = _transcript(tmp_path, _tool_use("ToolSearch", {"query": "select:LSP"}, "toolu_ts"),
+                       _tool_result("No matching deferred tools found", "toolu_ts"))
     assert gate.bash_reason('grep -n "def foo" a.py', path) == ""
 
 
@@ -112,8 +192,25 @@ def test_grep_tool_allows_a_pattern_that_is_not_a_definition_lookup(tmp_path, pa
     assert gate.grep_reason(pattern, _transcript(tmp_path)) == ""
 
 
-def test_grep_tool_passes_once_lsp_is_loaded(tmp_path):
-    path = _transcript(tmp_path, _tool_use("ToolSearch", {"query": "select:LSP"}))
+def _position_lookup(operation, file_path, line, character, cwd, tool_id="toolu_pos"):
+    entry = json.loads(_tool_use("LSP", {"operation": operation, "filePath": file_path,
+                                         "line": line, "character": character}, tool_id))
+    entry["cwd"] = cwd
+    return json.dumps(entry)
+
+
+@pytest.mark.parametrize("operation", ["findReferences", "goToDefinition"])
+def test_a_position_lookup_opens_the_gate_for_the_identifier_there(tmp_path, operation):
+    (tmp_path / "a.py").write_text("import os\n\ndef split_pin(x):\n    return x\n")
+    path = _transcript(tmp_path, *_LOADED, _position_lookup(operation, "a.py", 3, 5, str(tmp_path)),
+                       _tool_result("Found 1 references across 1 files:\n\na.py:\n  Line 3:5",
+                                    "toolu_pos"))
+    assert gate.bash_reason('grep -n "def split_pin" a.py', path) == ""
+    assert gate.bash_reason('grep -n "def other" a.py', path) == gate.DENY_REASON.format(name="other")
+
+
+def test_grep_tool_passes_once_the_symbol_is_looked_up(tmp_path):
+    path = _transcript(tmp_path, *_LOADED, _lsp("workspaceSymbol", "foo"))
     assert gate.grep_reason(r"def\s+foo", path) == ""
 
 
@@ -187,3 +284,32 @@ def test_installer_registers_the_grep_tool():
     installer.__spec__.loader.exec_module(installer)
     matchers = [e["matcher"] for e in installer._wanted_entries("PreToolUse", "cmd")]
     assert "Grep" in matchers
+
+
+def test_a_heredoc_body_is_not_a_grep():
+    command = "python3 - <<'EOF'\nimport re\nsrc = re.sub('grep', 'rg', src)\n# `def X`\nEOF"
+    assert gate._symbol(command) == ""
+
+
+def test_every_definition_in_one_command_needs_a_lookup(tmp_path):
+    path = _transcript(tmp_path, *_LOADED, _lsp("workspaceSymbol", "foo"))
+    assert gate.bash_reason('grep -n "def foo" a.py; grep -n "def bar" a.py', path) == \
+        gate.DENY_REASON.format(name="bar")
+    assert gate.grep_reason("def foo|def bar", path) == gate.DENY_REASON.format(name="bar")
+    assert gate.grep_reason("def (foo|bar)", path) == gate.DENY_REASON.format(name="bar")
+    assert gate.bash_reason(r'grep -rnE "(def|class)\s+(foo|bar)" core/', path) == \
+        gate.DENY_REASON.format(name="bar")
+
+
+@pytest.mark.parametrize("line", [
+    '["tool_use"]',
+    '"tool_use"',
+    json.dumps({"message": {"content": [{"type": "tool_use", "id": "u", "name": "LSP",
+                                         "input": {"operation": []}}]}}),
+    json.dumps({"message": {"content": [{"type": "tool_use", "id": "u", "name": "LSP",
+                                         "input": "workspaceSymbol"}]}}),
+])
+def test_a_malformed_transcript_line_does_not_break_the_gate(tmp_path, line):
+    path = _transcript(tmp_path, line)
+    assert gate.bash_reason('grep -n "def foo" a.py', path) == gate.DENY_REASON.format(name="foo")
+    assert gate.grep_reason("def foo", path) == gate.DENY_REASON.format(name="foo")
