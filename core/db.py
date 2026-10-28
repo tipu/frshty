@@ -1,6 +1,7 @@
 import json
 import random
 import sqlite3
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -8,6 +9,8 @@ from typing import Any
 
 _DB_PATH: Path | None = None
 _MIGRATIONS_DIR: Path | None = None
+_KEEPER: sqlite3.Connection | None = None
+_KEEPER_LOCK = threading.Lock()
 
 
 def init(db_path: Path, migrations_dir: Path) -> None:
@@ -16,6 +19,29 @@ def init(db_path: Path, migrations_dir: Path) -> None:
     _MIGRATIONS_DIR = migrations_dir
     db_path.parent.mkdir(parents=True, exist_ok=True)
     _apply_migrations()
+    _keep_wal_open()
+
+
+def _keep_wal_open() -> None:
+    """Hold one idle connection open for the life of the process.
+
+    Every query opens and closes its own connection. When the last connection
+    to a WAL database closes, SQLite checkpoints, fsyncs and deletes the WAL
+    file, and the next query creates it again. Under host IO pressure that
+    fsync stalls for seconds. This connection never runs a transaction, so it
+    blocks no checkpoint; it only keeps every other close from being the last.
+    """
+    global _KEEPER
+    with _KEEPER_LOCK:
+        if _KEEPER is not None:
+            _KEEPER.close()
+            _KEEPER = None
+        conn = sqlite3.connect(str(_DB_PATH), timeout=30.0, isolation_level=None,
+                               check_same_thread=False)
+        if conn.execute("PRAGMA journal_mode").fetchone()[0] != "wal":
+            conn.close()
+            return
+        _KEEPER = conn
 
 
 def path() -> Path | None:
