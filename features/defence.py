@@ -30,7 +30,7 @@ from pathlib import Path
 
 import core.git_util as git_util
 import core.log as log
-from core.claude_runner import run_balanced, extract_json
+from core.claude_runner import run_balanced, extract_json, parse_structured, strict_object
 from core.deps import relink_shared_venv
 from core.llm import CODEX_EXEC, run_external_model
 
@@ -232,6 +232,12 @@ Reply with JSON only:
 """
 
 
+_JUDGE_SCHEMA = strict_object({
+    "verdict": {"type": "string", "enum": [SUBSTANTIATED, REFUTED, INCONCLUSIVE]},
+    "reason": {"type": "string"},
+})
+
+
 def _list_test_files(worktree: Path, limit: int = 400) -> list[str]:
     out = subprocess.run(["git", "ls-files"], cwd=str(worktree),
                          capture_output=True, text=True, timeout=60).stdout
@@ -266,19 +272,16 @@ def _judge_blind(config: dict, claim: str, diff: str, result: DefenceResult,
         [*CODEX_EXEC, "-"],
         fn_name="defence_judge", model="codex", prompt=prompt,
         cwd=worktree, timeout=JUDGE_TIMEOUT,
-        stdin_text=prompt,
+        stdin_text=prompt, output_schema=_JUDGE_SCHEMA,
     )
     judge = "codex"
     if not text:
-        text = run_balanced(prompt, timeout=JUDGE_TIMEOUT) or ""
+        text = run_balanced(prompt, timeout=JUDGE_TIMEOUT, schema=_JUDGE_SCHEMA)
         judge = "claude"
-    parsed = extract_json(text) if text else None
-    if not isinstance(parsed, dict):
+    parsed = parse_structured(text, _JUDGE_SCHEMA, fn_name="defence_judge", model=judge)
+    if parsed is None:
         return judge, INCONCLUSIVE, "judge returned no parseable verdict"
-    verdict = str(parsed.get("verdict", "")).upper()
-    if verdict not in (SUBSTANTIATED, REFUTED, INCONCLUSIVE):
-        verdict = INCONCLUSIVE
-    return judge, verdict, str(parsed.get("reason", ""))[:300]
+    return judge, parsed["verdict"], parsed["reason"][:300]
 
 
 def substantiate(config: dict, claim: str, repo_name: str, worktree: Path,
