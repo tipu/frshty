@@ -34,15 +34,19 @@ def _project(tmp_path):
     return repo, state, config
 
 
-def _add(repo, state, sub, branch, age=OLD):
-    path = state / sub / branch
-    added = git_util.add_detached_worktree(repo, path, branch)
-    assert added == path
+def _age(path, age=OLD):
     git_dir, _ = git_util.git_dirs(path)
     for name in ("index", "HEAD", os.path.join("logs", "HEAD")):
         p = os.path.join(git_dir, name)
         if os.path.exists(p):
             os.utime(p, (age, age))
+
+
+def _add(repo, state, sub, branch, age=OLD):
+    path = state / sub / branch
+    added = git_util.add_detached_worktree(repo, path, branch)
+    assert added == path
+    _age(path, age)
     return path
 
 
@@ -64,9 +68,7 @@ def test_removes_an_idle_pushed_clean_worktree_and_keeps_the_rest(tmp_path):
     local = _add(repo, state, "pr_worktrees", "local")
     _git(local, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "--allow-empty",
          "-m", "unpushed")
-    git_dir, _ = git_util.git_dirs(local)
-    for name in ("index", "HEAD", os.path.join("logs", "HEAD")):
-        os.utime(os.path.join(git_dir, name), (OLD, OLD))
+    _age(local)
 
     result = pr_worktree_gc.sweep(config, force=True)
 
@@ -143,3 +145,38 @@ def test_a_failed_remove_puts_the_lock_back(tmp_path, monkeypatch):
     assert git_util.release_worktree(repo, done) == "git worktree remove failed: boom"
     monkeypatch.undo()
     assert _locked(repo, str(done))
+
+
+def test_keeps_an_untracked_file_that_status_config_hides(tmp_path):
+    repo, state, config = _project(tmp_path)
+    _git(repo, "config", "status.showUntrackedFiles", "no")
+    done = _add(repo, state, "pr_worktrees", "done")
+    (done / "unique").write_text("work")
+
+    result = pr_worktree_gc.sweep(config, force=True)
+
+    assert result == {"removed": [], "kept": {str(done): "local changes"}}
+    assert (done / "unique").read_text() == "work"
+
+
+def test_keeps_a_change_behind_skip_worktree(tmp_path):
+    repo, state, config = _project(tmp_path)
+    done = _add(repo, state, "pr_worktrees", "done")
+    _git(done, "update-index", "--skip-worktree", ".gitignore")
+    (done / ".gitignore").write_text("changed\n")
+    _age(done)
+
+    result = pr_worktree_gc.sweep(config, force=True)
+
+    assert result == {"removed": [], "kept": {
+        str(done): "a file is marked skip-worktree or assume-unchanged"}}
+    assert (done / ".gitignore").read_text() == "changed\n"
+
+
+def test_a_worktree_used_during_the_sweep_stays_locked(tmp_path):
+    repo, state, _ = _project(tmp_path)
+    done = _add(repo, state, "pr_worktrees", "done")
+
+    assert git_util.release_worktree(repo, done, still_idle=lambda: False) == \
+        "used during the sweep"
+    assert done.is_dir() and _locked(repo, str(done))
