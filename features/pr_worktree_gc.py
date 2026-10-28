@@ -38,9 +38,9 @@ STAMP = ".pr-worktree-gc-stamp"
 
 
 def _last_used(worktree: str) -> float | None:
-    """The newest change to the worktree's HEAD or index. A fetch, a reset, a
-    commit and a checkout each write one of them. None when git cannot name
-    the worktree's admin directory."""
+    """The newest change to the worktree's HEAD or index. A reset, a commit
+    and a checkout each write one of them. None when git cannot name the
+    worktree's admin directory."""
     git_dir, _ = git_util.git_dirs(worktree)
     if not git_dir:
         return None
@@ -48,6 +48,11 @@ def _last_used(worktree: str) -> float | None:
                                            ("index", "HEAD", os.path.join("logs", "HEAD")))
              if os.path.exists(p)]
     return max(times) if times else None
+
+
+def _idle(worktree: str, cutoff: float) -> bool:
+    used = _last_used(worktree)
+    return used is not None and used < cutoff
 
 
 def sweep(config: dict, now: float | None = None, force: bool = False,
@@ -90,12 +95,13 @@ def sweep(config: dict, now: float | None = None, force: bool = False,
             if used is None:
                 kept[path] = "admin directory not found"
                 continue
-            if used >= cutoff:
+            if not _idle(path, cutoff):
                 continue
             if dry_run:
                 reason = git_util.worktree_loss(path)
             else:
-                reason = git_util.release_worktree(repo["path"], path)
+                reason = git_util.release_worktree(repo["path"], path,
+                                                   still_idle=lambda p=path: _idle(p, cutoff))
             if reason:
                 kept[path] = reason
             else:

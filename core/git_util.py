@@ -249,13 +249,22 @@ def worktree_entries(repo_path, timeout: int = 60) -> list[list[str]] | None:
 def worktree_loss(worktree, timeout: int = 60) -> str:
     """What removing `worktree` would lose: "" when it has no modified and no
     untracked file and a remote-tracking branch holds its HEAD, else the
-    reason it must stay."""
-    status = run_git_status(worktree, ["--no-optional-locks", "status", "--porcelain"],
-                            timeout=timeout)
+    reason it must stay.
+
+    --untracked-files=all overrides a status.showUntrackedFiles=no config.
+    `git status` cannot see a change to a file marked skip-worktree or
+    assume-unchanged, so a worktree with such a file stays."""
+    status = run_git_status(worktree, ["--no-optional-locks", "status", "--porcelain",
+                                       "--untracked-files=all"], timeout=timeout)
     if status.returncode != 0:
         return f"git status failed: {status.stderr.strip()[:200]}"
     if status.stdout.strip():
         return "local changes"
+    tags = run_git_status(worktree, ["ls-files", "-v"], timeout=timeout)
+    if tags.returncode != 0:
+        return f"git ls-files failed: {tags.stderr.strip()[:200]}"
+    if any(ln[:1] == "S" or ln[:1].islower() for ln in tags.stdout.splitlines()):
+        return "a file is marked skip-worktree or assume-unchanged"
     held = run_git_status(worktree, ["for-each-ref", "--count=1", "--contains", "HEAD",
                                      "refs/remotes"], timeout=timeout)
     if held.returncode != 0:
@@ -265,25 +274,31 @@ def worktree_loss(worktree, timeout: int = 60) -> str:
     return ""
 
 
-def release_worktree(repo_path, worktree, timeout: int = 60) -> str:
+def release_worktree(repo_path, worktree, timeout: int = 60, still_idle=None) -> str:
     """Unlock and remove a worktree frshty locked, when removing it loses nothing.
 
-    worktree_loss decides what would be lost. Plain `git worktree remove`
-    checks the files again after the unlock, so a file written in between
-    keeps the worktree, and the lock goes back on. Returns "" when the
-    worktree is gone, else the reason it stays."""
+    worktree_loss decides what would be lost. `still_idle`, when given, is
+    asked again after the unlock, so a writer that took the worktree after the
+    first check keeps it. Plain `git worktree remove` checks the files again,
+    so a file written in between keeps the worktree, and the lock goes back
+    on. Returns "" when the worktree is gone, else the reason it stays."""
     loss = worktree_loss(worktree, timeout=timeout)
     if loss:
         return loss
     unlocked = run_git_status(repo_path, ["worktree", "unlock", str(worktree)], timeout=timeout)
     if unlocked.returncode != 0:
         return f"git worktree unlock failed: {unlocked.stderr.strip()[:200]}"
-    removed = run_git_status(repo_path, ["worktree", "remove", str(worktree)], timeout=timeout)
-    if removed.returncode != 0:
-        run_git_status(repo_path, ["worktree", "lock", "--reason", WORKTREE_LOCK_REASON,
-                                   str(worktree)], timeout=timeout)
-        return f"git worktree remove failed: {removed.stderr.strip()[:200]}"
-    return ""
+    if still_idle is not None and not still_idle():
+        reason = "used during the sweep"
+    else:
+        removed = run_git_status(repo_path, ["worktree", "remove", str(worktree)],
+                                 timeout=timeout)
+        if removed.returncode == 0:
+            return ""
+        reason = f"git worktree remove failed: {removed.stderr.strip()[:200]}"
+    run_git_status(repo_path, ["worktree", "lock", "--reason", WORKTREE_LOCK_REASON,
+                               str(worktree)], timeout=timeout)
+    return reason
 
 
 def git_dirs(directory) -> tuple[str, str]:
