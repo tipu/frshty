@@ -376,6 +376,20 @@ NO_PUBLISH_RULE = (
     "Do not push, do not open a pull request, and do not update the ticket in "
     "Jira or any other tracker: frshty does those steps itself."
 )
+LSP_RULE = (
+    "Navigate code with the LSP tool before you use grep. LSP is a deferred "
+    "tool: load it once with ToolSearch, query \"select:LSP\", before its first "
+    "use. On Python, JavaScript and TypeScript files, use workspaceSymbol with "
+    "the symbol name as the query to find the file and line of a symbol, "
+    "findReferences to find the callers of a symbol, goToDefinition to find "
+    "where a symbol is defined, hover to read its type, and documentSymbol to "
+    "list the symbols in a file. Do not grep for a symbol name to find a "
+    "position for LSP: workspaceSymbol gives that position. "
+    "Use grep only to search for text that is not a symbol, such as a log "
+    "message, a config key or a comment, and for file types that have no LSP "
+    "server. When ToolSearch finds no LSP tool, an LSP call is refused, or LSP "
+    "answers \"No LSP server available\", use grep. "
+)
 
 
 def _denied_tools_args(denied_tools: tuple[str, ...] | list[str] | None) -> list[str]:
@@ -440,6 +454,7 @@ class ClaudeProvider(LLMProvider):
         else:
             cmd += ["--dangerously-skip-permissions"]
         cmd += _denied_tools_args(denied_tools)
+        cmd += ["--append-system-prompt", LSP_RULE]
         inv_id = _record_start("run_claude_code", chosen_model, prompt, cwd, allowed_tools, timeout)
         t0 = time.monotonic()
         blocked, reason, remaining_s = _guard_status()
