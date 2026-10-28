@@ -414,7 +414,11 @@ def _cross_check_block(agent: str, config: dict) -> str:
     changed since the pass before it. Measured on codex-cli 0.153.4, a
     resumed pass that asked one question without repeating the first pass's
     material cost 247 tokens, and the same question in a fresh session cost
-    3165 tokens and could not answer it."""
+    3165 tokens and could not answer it.
+
+    Deepseek reviews beside the other model on every pass. opencode prints no
+    session id in its default output, so each deepseek pass is a fresh run
+    and gets the full question, not only what changed."""
     reviewer = _reviewer_cmd(agent, config)
     other = reviewer["other"]
     return (
@@ -428,17 +432,24 @@ def _cross_check_block(agent: str, config: dict) -> str:
         f"coverage suggestions. Tell {other} to give the severity and the concrete "
         f"failure case for each finding. Keep the session id of the {other} run: "
         f"{reviewer['id_hint']}. Run `{reviewer['first']}` from the "
-        "working directory with that file on stdin. Fix every finding you agree with. "
+        "working directory with that file on stdin. In the same pass, send the same "
+        "question to deepseek as a second reviewer: run `opencode run -m "
+        f"{llm.DEEPSEEK_REVIEWER_MODEL} \"$(cat <question-file>)\" < /dev/null` from "
+        "the working directory. opencode waits for its standard input to close, so "
+        "keep the redirect. Deepseek keeps no session between passes, so on a later "
+        "pass give deepseek the first question and what changed since. Weigh the "
+        f"deepseek findings like the {other} findings. Fix every finding you agree with. "
         f"State every finding you rejected and the reason. Run {other} again when a "
         "high or critical finding is left that you did not reject, and run that pass "
         f"as `{reviewer['resume']}` with the session id of the first run, so {other} "
         "keeps the context of the earlier passes instead of reading the tree again. A "
         f"resumed session already holds the earlier passes, so give {other} only what "
-        f"changed since the pass before it. Stop when {other} reports no high or "
-        "critical defect, or when every finding still open is one you rejected with a "
+        f"changed since the pass before it. Stop when {other} and deepseek report no "
+        "high or critical defect, or when every finding still open is one you rejected with a "
         "stated reason. Run at most four passes in total. Stop at the fourth pass even "
         "when a finding is still open, and name that finding in your checkpoint. If "
-        f"you changed no code, do not run {other}, and say so in your checkpoint. "
+        f"you changed no code, do not run {other} or deepseek, and say so in your "
+        "checkpoint. "
     )
 
 
