@@ -2,9 +2,20 @@
 from __future__ import annotations
 
 import core.log as log
-from core.claude_runner import extract_json, run_haiku
+from core.claude_runner import parse_structured, run_haiku, strict_object
 from features import releases as _releases
 from pm.release_prompt import RELEASE_INSPECT
+
+RELEASE_SCHEMA = strict_object({
+    "verdict": {"type": "string", "enum": ["pass", "fail"]},
+    "findings": {"type": "array", "items": strict_object({
+        "category": {"type": "string", "enum": ["scope_drift", "cohesion", "regression_risk",
+                                                "missing_focus", "quality"]},
+        "severity": {"type": "string", "enum": ["info", "warning", "high"]},
+        "message": {"type": "string"},
+        "related_ticket_keys": {"type": "array", "items": {"type": "string"}},
+    })},
+})
 
 
 def run_release_inspection(instance_key: str, release_id: int,
@@ -34,21 +45,19 @@ def run_release_inspection(instance_key: str, release_id: int,
                  meta={"release_key": rel["release_key"], "hash": new_hash})
         return None
     payload = _releases.build_inspection_payload(config, rel, tickets, md_text)
-    raw = run_haiku(RELEASE_INSPECT + payload[:30000], timeout=300)
+    raw = run_haiku(RELEASE_INSPECT + payload[:30000], timeout=300, schema=RELEASE_SCHEMA)
     if not raw:
         log.emit("release_inspect_failed",
                  f"haiku returned empty for release {rel['release_key']}",
                  meta={"release_key": rel["release_key"]})
         return None
-    parsed = extract_json(raw)
-    if not parsed or parsed.get("verdict") not in ("pass", "fail"):
+    parsed = parse_structured(raw, RELEASE_SCHEMA, fn_name="release_inspect")
+    if parsed is None:
         log.emit("release_inspect_parse_failed",
                  f"could not parse haiku output for release {rel['release_key']}",
                  meta={"release_key": rel["release_key"], "raw_head": (raw or "")[:500]})
         return None
-    findings = parsed.get("findings") or []
-    if not isinstance(findings, list):
-        findings = []
+    findings = parsed["findings"]
     verdict = parsed["verdict"]
     review = _releases.insert_release_review(
         release_id=release_id,

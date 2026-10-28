@@ -106,7 +106,7 @@ class TestBuildPlan:
 
     def test_the_llm_pick_replaces_the_deterministic_order(self, tmp_state):
         answer = json.dumps({"goals": [
-            {"ticket_key": "PROJ-3", "rationale": "unblocks the release"},
+            {"ticket_key": "PROJ-3", "target_state": "", "rationale": "unblocks the release"},
         ]})
         with patch.object(planner.staleness, "aggregate_all", return_value=self._buckets()), \
              patch.object(planner, "_load_priorities", return_value=("ship it", "h")), \
@@ -116,7 +116,7 @@ class TestBuildPlan:
         assert plan["goals"][0]["rationale"] == "unblocks the release"
 
     def test_a_ticket_the_llm_invented_is_dropped(self, tmp_state):
-        answer = json.dumps({"goals": [{"ticket_key": "NOPE-9", "rationale": "x"}]})
+        answer = json.dumps({"goals": [{"ticket_key": "NOPE-9", "target_state": "", "rationale": "x"}]})
         with patch.object(planner.staleness, "aggregate_all", return_value=self._buckets()), \
              patch.object(planner, "_load_priorities", return_value=("", "")), \
              patch.object(planner.llm, "run_fast", return_value=answer):
