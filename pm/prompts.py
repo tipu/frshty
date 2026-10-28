@@ -1,5 +1,5 @@
 """PM agent prompts. Inputs are concatenated context strings; outputs are
-fenced JSON parsed by core.claude_runner.extract_json."""
+JSON checked by core.claude_runner.parse_structured against a schema."""
 
 PRE_APPROVAL = """You are the PM agent. Review one new ticket against the active and recently-shipped pool.
 

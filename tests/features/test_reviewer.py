@@ -189,12 +189,15 @@ class TestMergeReviews:
         assert len(result["issues"]) == 2
 
     def test_merged_output_collapses_same_line_findings(self):
-        merged = {"verdict": "changes_requested", "issues": [
-            {"body": "one", "severity": "blocking", "path": "a.ts", "line": 26,
-             "agreed_by": ["spec"]},
-            {"body": "two", "severity": "blocking", "path": "a.ts", "line": 26,
-             "agreed_by": ["breakage"]},
-        ]}
+        issue = {"repo": "app", "severity": "blocking", "path": "a.ts", "line": 26,
+                 "start_line": 26, "tool_assisted": False}
+        merged = {"verdict": "changes_requested", "author": "", "source_branch": "",
+                  "destination_branch": "", "date": "", "summary": "",
+                  "blocking_summary": [], "suggestions_summary": [], "questions_summary": [],
+                  "issues": [
+                      {**issue, "body": "one", "persona": "spec", "agreed_by": ["spec"]},
+                      {**issue, "body": "two", "persona": "breakage", "agreed_by": ["breakage"]},
+                  ]}
         with patch("features.reviewer.run_balanced", return_value=json.dumps(merged)):
             result = reviewer._merge_reviews([("spec", {"issues": []}), ("breakage", {"issues": []})])
         assert len(result["issues"]) == 1

@@ -16,7 +16,7 @@ import core.state as state
 import core.terminal as terminal
 import features.presentation as presentation
 import features.reviewer as reviewer
-from core.claude_runner import run_haiku, extract_json
+from core.claude_runner import run_haiku, parse_structured, strict_object
 from core.config import get_repos
 from features.platforms import make_platform
 from features.ticket_systems import make_ticket_system
@@ -402,6 +402,14 @@ def _split_diff_by_file(diff_text: str, max_files: int = 40, per_file_chars: int
     return out
 
 
+FILE_SUMMARIES_SCHEMA = strict_object({
+    "files": {"type": "array", "items": strict_object({
+        "path": {"type": "string"},
+        "summary": {"type": "string"},
+    })},
+})
+
+
 def _generate_file_summaries(goal: str, per_file: dict) -> dict:
     listing = "\n\n".join(f"### {p}\n{d}" for p, d in per_file.items())[:25000]
     prompt = (
@@ -410,13 +418,14 @@ def _generate_file_summaries(goal: str, per_file: dict) -> dict:
         "For each changed file below, write ONE concise, specific, technical sentence on how "
         "that file contributes to the goal. No fluff, no restating the filename.\n\n"
         f"{listing}\n\n"
-        'Reply with JSON only, mapping each exact file path to its sentence: '
-        '{"path/to/file": "one sentence", ...}'
+        'Reply with JSON only, one entry per file with its exact path and its sentence: '
+        '{"files": [{"path": "path/to/file", "summary": "one sentence"}, ...]}'
     )
-    raw = run_haiku(prompt)
-    parsed = extract_json(raw) if raw else None
-    if isinstance(parsed, dict):
-        return {k: str(v) for k, v in parsed.items() if k in per_file and v}
+    parsed = parse_structured(run_haiku(prompt, schema=FILE_SUMMARIES_SCHEMA),
+                              FILE_SUMMARIES_SCHEMA, fn_name="review_file_summaries")
+    if parsed:
+        return {f["path"]: f["summary"] for f in parsed["files"]
+                if f["path"] in per_file and f["summary"]}
     return {}
 
 
