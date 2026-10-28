@@ -49,6 +49,13 @@ _TARGET_STATE_FOR_BUCKET: dict[str, str] = {
 
 _GOAL_LIMIT = 3
 _LLM_CANDIDATE_LIMIT = 12
+_GOALS_SCHEMA = llm.strict_object({
+    "goals": {"type": "array", "items": llm.strict_object({
+        "ticket_key": {"type": "string"},
+        "target_state": {"type": "string"},
+        "rationale": {"type": "string"},
+    })},
+})
 
 
 def _ticket_key_of(item: Any) -> str | None:
@@ -139,28 +146,24 @@ def _llm_pick_top(candidates: list[dict], priorities_text: str,
         '"rationale":"one short line"}]}'
     )
     try:
-        out = llm.run_fast(prompt, timeout=60)
+        out = llm.run_fast(prompt, timeout=60, schema=_GOALS_SCHEMA)
     except Exception as e:
         log.emit("today_planner_llm_error",
                  f"[{instance_key}] {type(e).__name__}: {e}")
         return None
-    if not out:
+    parsed = llm.parse_structured(out, _GOALS_SCHEMA, fn_name="today_planner")
+    if parsed is None:
         return None
-    parsed = llm.extract_json(out) or {}
-    goals = parsed.get("goals")
-    if not isinstance(goals, list):
-        return None
+    goals = parsed["goals"]
     by_key = {c["ticket_key"]: c for c in candidates}
     picked: list[dict] = []
     for g in goals[:_GOAL_LIMIT]:
-        if not isinstance(g, dict):
-            continue
-        tk = g.get("ticket_key")
+        tk = g["ticket_key"]
         if not tk or tk not in by_key:
             continue
         base = dict(by_key[tk])
-        base["rationale"] = str(g.get("rationale") or base.get("summary", ""))[:200]
-        if g.get("target_state"):
+        base["rationale"] = (g["rationale"] or base.get("summary", ""))[:200]
+        if g["target_state"]:
             base["target_state"] = g["target_state"]
         picked.append(base)
     return picked or None

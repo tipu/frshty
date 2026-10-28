@@ -428,7 +428,7 @@ def test_ticket_lifecycle_end_to_end(tmp_path):
          patch("features.tickets.run_claude_code", side_effect=fake_run_claude_code), \
          patch("core.tasks.tickets.run_consensus_plan", side_effect=fake_consensus_plan), \
          patch("features.acceptance.run_haiku", side_effect=fake_run_haiku), \
-         patch("features.acceptance.extract_json", side_effect=lambda raw: None):
+         patch("features.acceptance.parse_structured", return_value=None):
         pool.start()
         try:
             _enqueue_and_wait(instance_key, "scan_tickets")

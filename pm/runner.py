@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import core.db as db
 import core.log as log
 import core.queue as q
-from core.claude_runner import extract_json, parse_structured, run_haiku, strict_object
+from core.claude_runner import parse_structured, run_haiku, strict_object
 from pm.prompts import PRE_APPROVAL
 
 PRE_APPROVAL_SCHEMA = strict_object({
@@ -13,6 +13,16 @@ PRE_APPROVAL_SCHEMA = strict_object({
     "findings": {"type": "array", "items": strict_object({
         "category": {"type": "string",
                      "enum": ["duplicate", "criteria_quality", "dependency_order"]},
+        "severity": {"type": "string", "enum": ["info", "warning", "high"]},
+        "message": {"type": "string"},
+        "related_ticket_keys": {"type": "array", "items": {"type": "string"}},
+    })},
+})
+
+PRD_REVIEW_SCHEMA = strict_object({
+    "verdict": {"type": "string", "enum": ["clean", "flagged"]},
+    "findings": {"type": "array", "items": strict_object({
+        "category": {"type": "string", "enum": ["conflict", "gap", "cohesion"]},
         "severity": {"type": "string", "enum": ["info", "warning", "high"]},
         "message": {"type": "string"},
         "related_ticket_keys": {"type": "array", "items": {"type": "string"}},
@@ -145,13 +155,13 @@ def run_prd_update(instance_key: str, section_id: int,
         + ("\n".join(f"  - {t['key']} [{t['status']}]: {t['summary']}" for t in shipped)
            or "  (none)")
     )
-    raw = run_haiku(PRD_UPDATE + payload)
+    raw = run_haiku(PRD_UPDATE + payload, schema=PRD_REVIEW_SCHEMA)
     if not raw:
         log.emit("pm_prd_update_failed", f"haiku empty for section {section_id}",
                  meta={"section_id": section_id})
         return None
-    parsed = extract_json(raw)
-    if not parsed or not isinstance(parsed.get("findings"), list):
+    parsed = parse_structured(raw, PRD_REVIEW_SCHEMA, fn_name="pm_prd_update")
+    if parsed is None:
         log.emit("pm_prd_update_parse_failed", f"parse failed for section {section_id}",
                  meta={"section_id": section_id, "raw": raw[:500]})
         return None
@@ -159,11 +169,11 @@ def run_prd_update(instance_key: str, section_id: int,
         "INSERT INTO pm_review"
         "(instance_key, ticket_key, prd_section_id, checkpoint_type, verdict, findings, created_at)"
         " VALUES (?, NULL, ?, 'prd_update', ?, ?, ?)",
-        (instance_key, section_id, parsed.get("verdict", "clean"),
-         json.dumps(parsed.get("findings", [])), _now()),
+        (instance_key, section_id, parsed["verdict"],
+         json.dumps(parsed["findings"]), _now()),
     )
     log.emit("pm_prd_update_complete",
-             f"[{instance_key}] section {section_id}: {parsed.get('verdict')}",
+             f"[{instance_key}] section {section_id}: {parsed['verdict']}",
              meta={"section_id": section_id})
     return parsed
 
@@ -199,22 +209,21 @@ def run_post_shipping(instance_key: str) -> dict | None:
             d = {}
         parts.append(f"\n- {r['ticket_key']} [{r['status']}]: {d.get('summary','')}")
     payload = "\n".join(parts)[:30000]
-    raw = run_haiku(POST_SHIPPING_COHESION + payload, timeout=300)
-    if not raw:
-        return None
-    parsed = extract_json(raw)
-    if not parsed or not isinstance(parsed.get("findings"), list):
+    parsed = parse_structured(run_haiku(POST_SHIPPING_COHESION + payload, timeout=300,
+                                        schema=PRD_REVIEW_SCHEMA),
+                              PRD_REVIEW_SCHEMA, fn_name="pm_post_shipping")
+    if parsed is None:
         return None
     db.execute(
         "INSERT INTO pm_review"
         "(instance_key, ticket_key, prd_section_id, checkpoint_type, verdict, findings, created_at)"
         " VALUES (?, NULL, NULL, 'post_shipping', ?, ?, ?)",
-        (instance_key, parsed.get("verdict", "clean"),
-         json.dumps(parsed.get("findings", [])), _now()),
+        (instance_key, parsed["verdict"],
+         json.dumps(parsed["findings"]), _now()),
     )
     log.emit("pm_post_shipping_complete",
-             f"[{instance_key}] post-shipping cohesion: {parsed.get('verdict')}",
-             meta={"findings_count": len(parsed.get('findings', []))})
+             f"[{instance_key}] post-shipping cohesion: {parsed['verdict']}",
+             meta={"findings_count": len(parsed['findings'])})
     return parsed
 
 
