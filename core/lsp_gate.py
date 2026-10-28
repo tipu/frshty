@@ -21,7 +21,8 @@ in a heredoc body, a `python -c` string or an echo argument does not count.
 
 The gate allows the grep for X once the transcript shows an LSP
 workspaceSymbol, goToDefinition or findReferences call whose query or result
-names X. A ToolSearch call alone opens nothing. Two cases open the gate for
+names X. A grep that names several definitions needs a lookup for each.
+A ToolSearch call alone opens nothing. Two cases open the gate for
 the rest of the session: an LSP result that says "No LSP server available",
 and a ToolSearch for LSP that finds no LSP tool. A transcript that cannot be
 read opens the gate: a missed nudge costs a grep, not a defect.
@@ -69,30 +70,27 @@ _LSP_DEFINITION = re.compile(r'"name"\s*:\s*"LSP"')
 
 
 def _strip_heredocs(command: str) -> str:
-    """`command` without the body of each heredoc."""
+    """`command` without the body and end line of each heredoc."""
     out = []
-    pos = 0
-    while True:
-        match = _HEREDOC.search(command, pos)
-        newline = command.find("\n", match.end()) if match else -1
-        if match is None or newline < 0:
-            out.append(command[pos:])
-            return "".join(out)
-        out.append(command[pos:newline + 1])
-        end = re.compile(r"^[ \t]*" + re.escape(match.group(2)) + r"[ \t]*$", re.MULTILINE).search(
-            command, newline + 1)
-        if not end:
-            return "".join(out)
-        pos = end.end()
+    pending: list[str] = []
+    for line in command.split("\n"):
+        if pending:
+            if line.strip() == pending[0]:
+                pending.pop(0)
+            continue
+        out.append(line)
+        pending = [m.group(2) for m in _HEREDOC.finditer(line)]
+    return "\n".join(out)
 
 
 def _segments(command: str) -> list[list[str]]:
     """The simple commands of `command` as word lists, split at `|`, `&&`,
-    `;`, newlines and parentheses. Raises ValueError on unbalanced quotes."""
-    lexer = shlex.shlex(_strip_heredocs(command), posix=True, punctuation_chars=";&|()<>\n")
+    `;`, newlines and parentheses, with comments dropped. Each word keeps its
+    quotes. Raises ValueError on unbalanced quotes."""
+    lexer = shlex.shlex(_strip_heredocs(command).replace("\n", "\n;"), posix=False,
+                        punctuation_chars=";&|()<>\n")
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
-    lexer.commenters = ""
     segments: list[list[str]] = [[]]
     for token in lexer:
         if set(token) <= _SEPARATORS:
@@ -102,47 +100,70 @@ def _segments(command: str) -> list[list[str]]:
     return [s for s in segments if s]
 
 
+def _unquote(word: str) -> str:
+    if len(word) > 1 and word[0] == word[-1] and word[0] in "'\"":
+        return word[1:-1]
+    return word
+
+
+def _command(word: str) -> str:
+    return os.path.basename(word.lstrip("`"))
+
+
 def _search_words(words: list[str]) -> list[str] | None:
     """The words from the search tool on when `words` runs a search tool,
     None otherwise."""
-    for i, word in enumerate(words):
-        name = os.path.basename(word.lstrip("`"))
-        if name in _SEARCH_TOOLS:
-            return words[i:]
-        if name == "git":
-            rest = words[i + 1:]
-            while rest and rest[0].startswith("-"):
-                rest = rest[2:] if rest[0] in ("-C", "-c") else rest[1:]
-            return rest if rest[:1] == ["grep"] else None
-        if name == "find":
-            for j, arg in enumerate(words[i + 1:-1], i + 1):
-                if arg in ("-exec", "-execdir") and os.path.basename(words[j + 1]) in _SEARCH_TOOLS:
-                    return words[j + 1:]
-            return None
-        if not (_ASSIGNMENT.match(word) or name in _WRAPPERS or word.startswith("-")
-                or word.isdigit()):
-            return None
+    i = 0
+    while i < len(words) and _ASSIGNMENT.match(words[i]):
+        i += 1
+    if i == len(words):
+        return None
+    name = _command(words[i])
+    if name in _SEARCH_TOOLS:
+        return words[i:]
+    if name == "git":
+        rest = words[i + 1:]
+        while rest and rest[0].startswith("-"):
+            rest = rest[2:] if rest[0] in ("-C", "-c") else rest[1:]
+        return rest if rest[:1] == ["grep"] else None
+    if name == "find":
+        for j in range(i + 1, len(words) - 1):
+            if words[j] in ("-exec", "-execdir") and _command(words[j + 1]) in _SEARCH_TOOLS:
+                return words[j + 1:]
+        return None
+    if name in _WRAPPERS:
+        for j in range(i + 1, len(words)):
+            if _command(words[j]) in _SEARCH_TOOLS or _command(words[j]) in ("git", "find"):
+                return _search_words(words[j:])
     return None
 
 
-def _symbol(command: str) -> str:
-    """The symbol whose definition a grep in `command` looks for, "" when the
-    command runs no such grep."""
+def _symbols(command: str) -> list[str]:
+    """The symbols whose definitions the greps in `command` look for."""
     try:
         segments = _segments(command)
     except ValueError:
-        return ""
+        return []
+    names: list[str] = []
     for words in segments:
-        if os.path.basename(words[0]) in _SHELLS and len(words) > 2 and re.fullmatch(r"-\w*c", words[1]):
-            name = _symbol(words[2])
-            if name:
-                return name
+        if _command(words[0]) in _SHELLS:
+            for j in range(1, len(words) - 1):
+                if not words[j].startswith("-"):
+                    break
+                if re.fullmatch(r"-\w*c\w*", words[j]):
+                    names += _symbols(_unquote(words[j + 1]))
+                    break
             continue
         search = _search_words(words)
-        match = _DEFINITION.search(" ".join(search)) if search else None
-        if match:
-            return match.group(1)
-    return ""
+        if search:
+            names += [m.group(1) for m in _DEFINITION.finditer(" ".join(search))]
+    return names
+
+
+def _symbol(command: str) -> str:
+    """The first symbol whose definition a grep in `command` looks for, ""
+    when the command runs no such grep."""
+    return next(iter(_symbols(command)), "")
 
 
 def _result_text(content) -> str:
@@ -169,17 +190,21 @@ def _lsp_lookups(transcript_path: str) -> list[str] | None:
                     entry = json.loads(line)
                 except ValueError:
                     continue
-                content = (entry.get("message") or {}).get("content")
+                message = entry.get("message") if isinstance(entry, dict) else None
+                content = message.get("content") if isinstance(message, dict) else None
                 if not isinstance(content, list):
                     continue
                 for block in content:
                     if not isinstance(block, dict):
                         continue
                     if block.get("type") == "tool_use":
-                        tool_input = block.get("input") or {}
+                        tool_input = block.get("input")
+                        if not isinstance(tool_input, dict):
+                            continue
+                        operation = str(tool_input.get("operation") or "")
                         if block.get("name") == "LSP":
-                            calls[str(block.get("id"))] = ("LSP", str(tool_input.get("operation") or ""))
-                            if tool_input.get("operation") in _LOOKUPS:
+                            calls[str(block.get("id"))] = ("LSP", operation)
+                            if operation in _LOOKUPS:
                                 texts.append(str(tool_input.get("query") or ""))
                         elif block.get("name") == "ToolSearch" and "LSP" in str(tool_input.get("query") or ""):
                             calls[str(block.get("id"))] = ("ToolSearch", "")
@@ -206,24 +231,24 @@ def _lsp_lookups(transcript_path: str) -> list[str] | None:
 def bash_reason(command: str, transcript_path: str) -> str:
     """The deny reason for a definition grep for a symbol the session has not
     looked up with LSP, "" to allow."""
-    return _reason(_symbol(command or ""), transcript_path)
+    return _reason(_symbols(command or ""), transcript_path)
 
 
 def grep_reason(pattern: str, transcript_path: str) -> str:
     """The deny reason for a Grep tool call whose pattern looks up the
     definition of a symbol the session has not looked up with LSP, "" to
     allow."""
-    match = _DEFINITION.search(pattern or "")
-    return _reason(match.group(1) if match else "", transcript_path)
+    return _reason([m.group(1) for m in _DEFINITION.finditer(pattern or "")], transcript_path)
 
 
-def _reason(name: str, transcript_path: str) -> str:
-    if not name or not transcript_path:
+def _reason(names: list[str], transcript_path: str) -> str:
+    if not names or not transcript_path:
         return ""
     lookups = _lsp_lookups(transcript_path)
     if lookups is None:
         return ""
-    named = re.compile(r"(?<![\w$])" + re.escape(name) + r"(?![\w$])")
-    if any(named.search(text) for text in lookups):
-        return ""
-    return DENY_REASON.format(name=name)
+    for name in names:
+        named = re.compile(r"(?<![\w$])" + re.escape(name) + r"(?![\w$])")
+        if not any(named.search(text) for text in lookups):
+            return DENY_REASON.format(name=name)
+    return ""
