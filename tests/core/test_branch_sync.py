@@ -246,3 +246,49 @@ class TestDirtyBlockClears:
         assert out["result"] == "capped"
         assert calls == []
         platform.merge_base.assert_not_called()
+
+
+class TestSharedHeadsListing:
+    def _sync(self, local_refs, heads):
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            return MagicMock(returncode=0, stdout="0\n", stderr="")
+
+        with patch("core.branch_sync.ls_remote_sha") as per_branch, \
+             patch("core.branch_sync.git_util.remote_ref_sha",
+                   side_effect=lambda wt, ref: local_refs.get(ref, "")), \
+             patch("core.branch_sync.subprocess.run", side_effect=fake_run):
+            out = branch_sync.sync_branch_with_base(_platform(), "/repo", "main", "f", {},
+                                                    lambda: "/wt", heads=heads)
+        per_branch.assert_not_called()
+        return out, [c for c in calls if c[:2] == ["git", "fetch"]]
+
+    def test_refs_already_fetched_are_not_fetched_again(self):
+        out, fetches = self._sync({"main": "basesha", "f": "headsha"},
+                                  {"main": "basesha", "f": "headsha"})
+        assert out["result"] == "uptodate"
+        assert fetches == []
+
+    def test_moved_base_is_fetched(self):
+        out, fetches = self._sync({"main": "oldsha", "f": "headsha"},
+                                  {"main": "basesha", "f": "headsha"})
+        assert out["result"] == "uptodate"
+        assert fetches == [["git", "fetch", "origin", "main", "f"]]
+
+    def test_moved_branch_is_fetched(self):
+        out, fetches = self._sync({"main": "basesha", "f": "oldhead"},
+                                  {"main": "basesha", "f": "headsha"})
+        assert out["result"] == "uptodate"
+        assert fetches == [["git", "fetch", "origin", "main", "f"]]
+
+    def test_base_missing_from_the_listing_reads_as_a_failed_ls_remote(self):
+        out, _ = self._sync({"main": "basesha"}, {})
+        assert out["result"] == "ls_remote_failed"
+
+    def test_parked_reads_the_branch_head_from_the_listing(self):
+        st = {"base_sync_parked": {"head": "h1", "base": "main"}}
+        with patch("core.branch_sync.ls_remote_sha") as per_branch:
+            assert branch_sync.parked("/repo", "feature", "main", st, {"feature": "h1"}) is True
+        per_branch.assert_not_called()

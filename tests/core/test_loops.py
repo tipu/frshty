@@ -4,6 +4,7 @@ ticket job chain that re-queued itself with the ticket unchanged, a poll that
 failed on a deleted worktree, a comment push that failed inside an ok job,
 and a proposal filed again after each decline."""
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -197,13 +198,22 @@ def _file(objective: str) -> int:
     return work_store.create_proposal(objective, instance_key="board")
 
 
+def _decline_long_ago(item_id: int) -> None:
+    """Decline a proposal before the DECLINE_HOLD_DAYS hold, so the same
+    objective can be filed again and the loop check sees it."""
+    work_store.apply_action(item_id, "decline")
+    old = (datetime.now(timezone.utc)
+           - timedelta(days=work_store.DECLINE_HOLD_DAYS + 1)).isoformat()
+    db.execute("UPDATE work_items SET archived_at = ? WHERE id = ?", (old, item_id))
+
+
 def test_a_proposal_filed_again_after_two_declines_is_one_loop(pool):
     first = _file("Unblock T-9 — it has sat in stuck since 2026-09-17")
-    work_store.apply_action(first, "decline")
+    _decline_long_ago(first)
     other = _file("Unblock T-10 — it has sat in stuck since 2026-09-17")
-    work_store.apply_action(other, "decline")
+    _decline_long_ago(other)
     second = _file("Unblock T-9 — it has sat in stuck since 2026-09-18")
-    work_store.apply_action(second, "decline")
+    _decline_long_ago(second)
     assert _loop_events() == []
 
     third = _file("Unblock T-9 — it has sat in stuck since 2026-09-19")
@@ -212,7 +222,7 @@ def test_a_proposal_filed_again_after_two_declines_is_one_loop(pool):
     assert found[0]["meta"] == {"loop": "proposal", "work_item_id": third,
                                 "declined": [first, second]}
 
-    work_store.apply_action(third, "decline")
+    _decline_long_ago(third)
     _file("Unblock T-9 — it has sat in stuck since 2026-09-20")
     assert len(_loop_events()) == 1
 
@@ -232,3 +242,36 @@ def test_the_digest_is_the_ticket_state_the_transition_left(pool):
     row = db.query_one("SELECT ticket_digest FROM jobs WHERE id=?", (job_id,))
     assert row["ticket_digest"] == loops.ticket_digest(state.load_ticket("T-1"))
     assert row["ticket_digest"] != loops.ticket_digest({"status": "in_review", "rounds": 1})
+
+
+def _loop_items() -> list[dict]:
+    return db.query_all("SELECT id, objective, state FROM work_items"
+                        " WHERE proposal_key LIKE 'job-loop:%'", ())
+
+
+def _requeue_loop(pool, ticket: str) -> None:
+    @task("requeue_self")
+    def requeue_self(ctx: TaskContext) -> TaskResult:
+        q.enqueue_job(ctx.instance_key, "requeue_self", ticket_key=ctx.ticket_key)
+        return TaskResult("ok", "nothing to do")
+
+    q.enqueue_job("t", "requeue_self", ticket_key=ticket)
+    for _ in range(N):
+        _run_next(pool)
+
+
+def test_a_stopped_job_loop_files_one_board_item(pool):
+    state.save_ticket("T-1", {"status": "in_review"})
+    _requeue_loop(pool, "T-1")
+    [item] = _loop_items()
+    assert item["state"] == work_store.PROPOSED_STATE
+    assert "requeue_self on T-1" in item["objective"] and str(N) in item["objective"]
+    assert work_store.proposal_class(item["objective"]) == work_store.OTHER_CLASS
+    assert db.query_all("SELECT 1 FROM log_events WHERE event=?",
+                        (worker_mod.LOOP_ITEM_FILE_ERROR,)) == []
+
+    _run_next(pool)
+    state.save_ticket("T-1", {"status": "in_review", "head": "abc1234"})
+    _requeue_loop(pool, "T-1")
+    assert len(_loop_events()) == 2
+    assert len(_loop_items()) == 1, "a loop that returns while its item is open files no second item"

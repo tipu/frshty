@@ -617,10 +617,14 @@ def _open_tasks(instance_key: str, now: datetime, max_pending: int) -> list[dict
                                  reason=row["reason"] or "not stated",
                                  evidence=row["evidence"])
             note = f"Opened from a direct {channel} by {row['who']}"[:MAX_NOTE_CHARS]
-            item_id = work_store.create_proposal(
-                objective, note=note, instance_key=instance_key,
-                contexts=",".join(tag for tag in (instance_key, FOLLOWUP_TAG) if tag),
-                cwd=_cwd_for(instance_key), brief=brief, conn=c, now=stamp)
+            try:
+                item_id = work_store.create_proposal(
+                    objective, note=note, instance_key=instance_key,
+                    contexts=",".join(tag for tag in (instance_key, FOLLOWUP_TAG) if tag),
+                    cwd=_cwd_for(instance_key), brief=brief, conn=c, now=stamp,
+                    decline_hold=False)
+            except work_store.ProposalSuppressed:
+                continue
             c.execute("UPDATE direct_followups SET work_item_id = ? WHERE id = ?",
                       (item_id, row["id"]))
         log.emit("direct_followup_task_opened",

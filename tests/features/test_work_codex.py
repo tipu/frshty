@@ -232,6 +232,12 @@ class TestCodexLaunch:
         assert "Do not wait for a process in a shell loop that sleeps and checks" in prompt
         assert "Run the long command in the background" in prompt
 
+    def test_the_brief_hands_a_ci_wait_to_the_board(self, tmp_path, monkeypatch):
+        prompt = _launch_prompt(tmp_path, monkeypatch, "claude")
+        assert "end your turn with the line `waiting on PR #N checks`" in prompt
+        assert "the board polls the checks and resumes you with the result" in prompt
+        assert work_store.CI_WAIT_RE.search("waiting on PR #7 checks")
+
     def test_the_prompt_puts_the_question_file_on_stdin(self, tmp_path, monkeypatch):
         prompt = _launch_prompt(tmp_path, monkeypatch, "claude")
         assert "Write your question to a file" in prompt
@@ -418,6 +424,20 @@ class TestCodexNotify:
         events = db.query_all("SELECT payload FROM work_events WHERE work_item_id = ? "
                               "AND kind = 'progress'", (item_id,))
         assert [json.loads(e["payload"])["text"] for e in events] == ["migrations applied"]
+
+    def test_a_live_check_from_an_earlier_message_is_recorded(self, tmp_path):
+        item_id, sid = _mkrun("codex notify earlier live check")
+        _rollout(tmp_path, "thread-6", [
+            {"type": "AgentMessage",
+             "content": [{"type": "Text", "text": "LIVE_CHECK: test -f /app/ready"}]},
+            {"type": "AgentMessage", "phase": "final_answer",
+             "content": [{"type": "Text", "text": "Done.\nWORK_DONE"}]}])
+        r = self._notify(sid, {"type": "agent-turn-complete", "thread-id": "thread-6",
+                               "last-assistant-message": "Done.\nWORK_DONE"},
+                         codex_home=tmp_path)
+        assert r.returncode == 0, r.stderr
+        item = db.query_one("SELECT live_check FROM work_items WHERE id = ?", (item_id,))
+        assert item["live_check"] == "test -f /app/ready"
 
     def test_foreign_session_writes_nothing(self):
         before = db.query_one("SELECT COUNT(*) AS n FROM work_events")["n"]
