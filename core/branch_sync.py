@@ -46,10 +46,10 @@ def branch_head(repo_path, branch: str) -> str:
 
 def _lapsed(blocked_at) -> bool:
     try:
-        at = datetime.fromisoformat(blocked_at)
+        return datetime.now(timezone.utc) - datetime.fromisoformat(blocked_at) >= timedelta(
+            hours=BLOCK_LAPSE_HOURS)
     except (TypeError, ValueError):
         return True
-    return datetime.now(timezone.utc) - at >= timedelta(hours=BLOCK_LAPSE_HOURS)
 
 
 def blocker_cleared(st: dict, repo_path, branch: str, base_sha: str, worktree_fn) -> bool:
@@ -62,11 +62,11 @@ def blocker_cleared(st: dict, repo_path, branch: str, base_sha: str, worktree_fn
     head moves, and a new base commit does not clear it. Any block lapses
     after BLOCK_LAPSE_HOURS, so a cause that cleared unseen costs one try a
     day, not a PR that never syncs again."""
+    if _lapsed(st.get("base_sync_blocked_at")):
+        return True
     if blocked_by_dirty_worktree(st):
         return worktree_is_clean(worktree_fn())
     if st.get("base_sync_result") in TRANSIENT_RESULTS and st.get("base_sync_blocked_base") != base_sha:
-        return True
-    if _lapsed(st.get("base_sync_blocked_at")):
         return True
     head = branch_head(repo_path, branch)
     return bool(head) and head != st.get("base_sync_head")

@@ -304,3 +304,13 @@ class TestABaseSyncBlockClears:
     def test_any_block_lapses_after_a_day(self):
         old = (datetime.now(timezone.utc) - timedelta(hours=branch_sync.BLOCK_LAPSE_HOURS)).isoformat()
         assert self._cleared(self._capped("push_failed", old), "main1") is True
+
+    def test_a_dirty_worktree_block_lapses_too(self):
+        old = (datetime.now(timezone.utc) - timedelta(hours=branch_sync.BLOCK_LAPSE_HOURS)).isoformat()
+        st = {**self._capped("dirty_worktree", old),
+              "last_base_error": branch_sync.DIRTY_WORKTREE_ERROR + " (a.py)"}
+        with patch("core.branch_sync.ls_remote_sha", return_value="head1"):
+            assert branch_sync.blocker_cleared(st, "/repo", "feature", "main1", lambda: None) is True
+
+    def test_a_stamp_without_a_timezone_counts_as_lapsed(self):
+        assert self._cleared(self._capped("push_failed", "2026-10-01T00:00:00"), "main1") is True
