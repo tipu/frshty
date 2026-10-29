@@ -7,6 +7,7 @@ function owns the git decision-making and the per-branch sync state it
 reads/writes on the passed-in `st` dict.
 """
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import core.blocked as blocked_attempts
@@ -14,6 +15,8 @@ import core.git_util as git_util
 
 MAX_BASE_SYNC_ATTEMPTS = 2
 DIRTY_WORKTREE_ERROR = "worktree has uncommitted changes"
+TRANSIENT_RESULTS = ("no_worktree", "fetch_failed")
+BLOCK_LAPSE_HOURS = 24
 
 
 def ls_remote_sha(repo_path, base_branch: str) -> str:
@@ -41,15 +44,30 @@ def branch_head(repo_path, branch: str) -> str:
     return ls_remote_sha(repo_path, f"refs/heads/{branch}") if branch else ""
 
 
-def blocker_cleared(st: dict, repo_path, branch: str, worktree_fn) -> bool:
+def _lapsed(blocked_at) -> bool:
+    try:
+        at = datetime.fromisoformat(blocked_at)
+    except (TypeError, ValueError):
+        return True
+    return datetime.now(timezone.utc) - at >= timedelta(hours=BLOCK_LAPSE_HOURS)
+
+
+def blocker_cleared(st: dict, repo_path, branch: str, base_sha: str, worktree_fn) -> bool:
     """Whether the blocker that capped this sync can have gone away.
 
-    A dirty worktree clears when the worktree is clean. Every other blocker
-    (a merge conflict, a refused push, a foreign author) clears only when
-    the PR branch head moves. A new commit on the base does not clear a
-    blocker, so it buys no new attempt."""
+    A dirty worktree clears when the worktree is clean. A sync that could
+    not start (no worktree, a failed fetch) is not about the branch, so a
+    new base commit buys it one more try. Every other blocker (a merge
+    conflict, a refused push, a foreign author) clears when the PR branch
+    head moves, and a new base commit does not clear it. Any block lapses
+    after BLOCK_LAPSE_HOURS, so a cause that cleared unseen costs one try a
+    day, not a PR that never syncs again."""
     if blocked_by_dirty_worktree(st):
         return worktree_is_clean(worktree_fn())
+    if st.get("base_sync_result") in TRANSIENT_RESULTS and st.get("base_sync_blocked_base") != base_sha:
+        return True
+    if _lapsed(st.get("base_sync_blocked_at")):
+        return True
     head = branch_head(repo_path, branch)
     return bool(head) and head != st.get("base_sync_head")
 
@@ -61,6 +79,9 @@ def _block(st: dict, attempts: int, result: str, error: str, repo_path, branch: 
     st["base_sync_attempts"] = attempts
     st["last_base_error"] = error
     st["base_sync_head"] = head
+    st["base_sync_result"] = result
+    st["base_sync_blocked_base"] = st.get("base_sync_sha", "")
+    st["base_sync_blocked_at"] = datetime.now(timezone.utc).isoformat()
     blocked_attempts.record(resource, blocked_attempts.SYNC_BASE,
                             blocked_attempts.blocker_of(result, error), error, head)
 
@@ -69,7 +90,8 @@ def _unblock(st: dict, resource: str) -> None:
     st["base_synced"] = True
     st["base_sync_attempts"] = 0
     st.pop("last_base_error", None)
-    st.pop("base_sync_head", None)
+    for k in ("base_sync_head", "base_sync_result", "base_sync_blocked_base", "base_sync_blocked_at"):
+        st.pop(k, None)
     blocked_attempts.clear(resource, blocked_attempts.SYNC_BASE)
 
 
@@ -90,7 +112,8 @@ def sync_branch_with_base(platform, repo_path, base_branch: str, branch: str,
     """Merge base into branch when base has moved ahead, then push.
 
     st keys (read/written): base_sync_sha, base_synced, base_sync_attempts,
-    last_base_error, base_sync_head. A move of base clears base_synced but
+    last_base_error, base_sync_head, base_sync_result, base_sync_blocked_base,
+    base_sync_blocked_at. A move of base clears base_synced but
     keeps the attempts: only a success or a cleared blocker resets them.
     resource names the PR ("repo#id") in the durable blocked record; an
     empty resource writes no record. ensure_worktree is a zero-arg callable
@@ -116,7 +139,7 @@ def sync_branch_with_base(platform, repo_path, base_branch: str, branch: str,
     if attempts >= MAX_BASE_SYNC_ATTEMPTS:
         if blocked_by_dirty_worktree(st):
             worktree = ensure_worktree()
-        if not blocker_cleared(st, repo_path, branch, lambda: worktree):
+        if not blocker_cleared(st, repo_path, branch, base_sha, lambda: worktree):
             return {"result": "capped", "attempts": attempts}
         attempts = st["base_sync_attempts"] = 0
         st.pop("last_base_error", None)

@@ -3361,7 +3361,7 @@ def _pr_base_moved(config, ts) -> bool:
         st = sync_state.get(f"{pr['repo']}/{pr['id']}", {})
         if st.get("base_sync_attempts", 0) >= branch_sync.MAX_BASE_SYNC_ATTEMPTS:
             if branch_sync.blocker_cleared(
-                    st, repo_path, pr.get("branch") or ts.get("branch", ""),
+                    st, repo_path, pr.get("branch") or ts.get("branch", ""), base_sha,
                     lambda: _existing_pr_worktree(config, ts, pr, repo_path)):
                 return True
             continue
