@@ -14,6 +14,7 @@ import core.state as state
 import core.comments as comments
 from core.comments import (MAX_AUTOMATED_REVIEW_FIX_RUNS, automated_review_skip_reason,
                            automated_review_skips)
+import core.blocked as blocked_attempts
 import core.branch_sync as branch_sync
 import core.freshness as freshness
 import core.consensus_scope as consensus_scope
@@ -443,6 +444,8 @@ def _enqueue_stage(instance_key: str, ticket_key: str, task_name: str,
     if task_name in _REPO_GATED_TASKS:
         if _repo_gate_blocked(instance_key, ticket_key):
             return None
+    if blocked_attempts.job_blocked(instance_key, ticket_key, task_name):
+        return None
     existing = q.jobs_for_ticket(instance_key, ticket_key, limit=max(200, MAX_STAGE_RETRIES + 1))
     if any(j["task"] == task_name and j["status"] in ("queued", "running") for j in existing):
         return None
@@ -3360,28 +3363,32 @@ def _pr_base_moved(config, ts) -> bool:
         if branch_sync.parked(repo_path, pr.get("branch") or ts.get("branch", ""),
                               pr.get("base") or base_branch_for(config, pr["repo"]), st):
             continue
-        if st.get("base_sync_sha") != base_sha:
-            return True
-        exit_reason = BASE_SYNC.exit_reason(st.get("base_sync_attempts", 0),
-                                            converged=bool(st.get("base_synced")))
-        if exit_reason == "converged":
-            continue
-        if exit_reason == "budget_spent":
-            if branch_sync.blocked_by_dirty_worktree(st) and branch_sync.worktree_is_clean(
-                    _existing_pr_worktree(config, ts, pr, repo_path)):
+        if not BASE_SYNC.may_continue(st.get("base_sync_attempts", 0)):
+            if branch_sync.blocker_cleared(
+                    st, repo_path, pr.get("branch") or ts.get("branch", ""), base_sha,
+                    lambda: _existing_pr_worktree(config, ts, pr, repo_path)):
                 return True
             continue
-        return True
+        if st.get("base_sync_sha") != base_sha or not st.get("base_synced"):
+            return True
     return False
 
 
-def _sync_pr_base(config, ticket, ts, base_url) -> dict:
+BASE_SYNC_FAILURES = ("no_worktree", "fetch_failed", "dirty_worktree",
+                      "merge_failed", "push_failed", "ls_remote_failed")
+
+
+def _sync_pr_base(config, ticket, ts, base_url) -> tuple[dict, list[str]]:
+    """Merge base into each PR of the ticket. Returns the ticket state and
+    one line per PR whose base was not merged, so the caller can report the
+    sync as failed and the stage retry cap can count it."""
+    failures: list[str] = []
     if not config.get("pr", {}).get("auto_update_branch"):
-        return ts
+        return ts, failures
     prs = ts.get("prs", [])
     branch = ts.get("branch", "")
     if not prs or not branch:
-        return ts
+        return ts, failures
     platform = make_platform(config)
     key = ticket["key"]
     sync_state = ts.setdefault("base_sync", {})
@@ -3395,8 +3402,11 @@ def _sync_pr_base(config, ticket, ts, base_url) -> dict:
         outcome = branch_sync.sync_branch_with_base(
             platform, repo_path, base_branch, pr.get("branch") or branch, st,
             lambda pr=pr: _ensure_pr_worktree(config, ticket, ts, pr, base_url),
-            ticket_key=key)
+            ticket_key=key, resource=f"{pr['repo']}#{pr['id']}")
         result = outcome["result"]
+        if result in BASE_SYNC_FAILURES:
+            failures.append(f"{pr['repo']}#{pr['id']} {result}"
+                            f"{(': ' + outcome['error'][:160]) if outcome.get('error') else ''}")
         links = {"detail": f"{base_url}/tickets/{key}", "pr": pr.get("url", "")}
         meta = {"ticket": key, "repo": pr["repo"], "pr_id": pr["id"], "base": base_branch}
         if result == "synced":
@@ -3424,7 +3434,7 @@ def _sync_pr_base(config, ticket, ts, base_url) -> dict:
                      f"Merged {base_branch} into {_label(key, ts)} PR #{pr['id']} "
                      f"but push failed: {outcome.get('error', '')[:100]}",
                      links=links, meta={**meta, "error": outcome.get("error", "")})
-    return ts
+    return ts, failures
 
 
 def reconcile_comments_now(config, ts: dict) -> tuple[str, list[dict]]:
