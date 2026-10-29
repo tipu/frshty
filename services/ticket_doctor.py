@@ -187,8 +187,11 @@ PIPELINE_MAP = """
 - `features/tickets.py` `check()` runs every handler on a poll;
   `advance_ticket()` runs only the handler for this ticket's status and returns
   early when another job for the ticket is already running.
-- `core/tasks/tickets.py` holds the task bodies, their preconditions,
-  `on_entry_status` and `on_success_status`.
+- `core/tasks/tickets.py` holds the task bodies, their preconditions and
+  `on_entry_status`.
+- `core/ticket_status.py` holds the graph: the legal edges (`_ALLOWED`), the
+  edge each task takes on success (`SUCCESS_EDGES`), and the bounded retry
+  loops (`CYCLES`) with their budgets.
 - `core/tasks/preconditions.py` holds the gates. A task whose precondition
   fails is marked `skipped`, and the ticket does not move.
 - `core/tasks/routes.py` maps an event kind to the jobs it enqueues.

@@ -8,7 +8,8 @@ Unlike TESTING.md (which is a hint, not a gate), PROOF.md is a true gate:
 import pytest
 from unittest.mock import patch
 
-from core.tasks.tickets import enter_proving, _enter_proving_target
+from core.tasks.tickets import enter_proving
+from core.ticket_status import success_target
 from core.tasks.registry import TaskContext, TaskResult
 
 
@@ -110,23 +111,16 @@ class TestWorktreeGuard:
 
 
 class TestEnterProvingTarget:
-    def _ctx(self):
-        return TaskContext(
-            instance_key="acme", ticket_key="PROJ-1", task="enter_proving",
-            payload={}, job_id=0, triggering_event_id=None, config={},
-            registry=None, now=None,
-        )
-
     def test_routes_to_proving_when_proof_present(self):
         result = TaskResult("ok", artifacts={"has_proof_md": True})
-        assert _enter_proving_target(self._ctx(), result) == "proving"
+        assert success_target("enter_proving", "testing", result.artifacts) == "proving"
 
     def test_routes_to_pr_ready_when_proof_absent(self):
         result = TaskResult("ok", artifacts={"has_proof_md": False})
-        assert _enter_proving_target(self._ctx(), result) == "pr_ready"
+        assert success_target("enter_proving", "testing", result.artifacts) == "pr_ready"
 
     def test_routes_to_pr_ready_when_artifacts_missing_key(self):
         """Default safety: missing key → skip path (pr_ready), not
         unintended activation of proving."""
         result = TaskResult("ok", artifacts={})
-        assert _enter_proving_target(self._ctx(), result) == "pr_ready"
+        assert success_target("enter_proving", "testing", result.artifacts) == "pr_ready"

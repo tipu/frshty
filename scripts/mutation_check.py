@@ -130,8 +130,8 @@ MUTATIONS = [
         "gate": "a ticket with no PROOF.md skips proving instead of entering it",
         "target": "tests/features/test_proof_md_gate.py::TestEnterProvingTarget"
                   "::test_routes_to_pr_ready_when_proof_absent",
-        "path": "core/tasks/tickets.py",
-        "old": '    return "proving" if result.artifacts.get("has_proof_md") else "pr_ready"',
+        "path": "core/ticket_status.py",
+        "old": '    return "proving" if artifacts.get("has_proof_md") else "pr_ready"',
         "new": '    return "proving"',
     },
     {
