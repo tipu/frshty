@@ -1713,8 +1713,22 @@ def fix_ci_failures(ctx: TaskContext) -> TaskResult:
             meta = {"ticket": ctx.ticket_key, "repo": pr["repo"], "pr_id": pr["id"],
                     "failed_checks": failed_names}
 
-            if kind == "unrelated" and (not head_before
-                                        or _pr_head(platform, pr) != head_before):
+            discarded = kind == "unrelated" and (not head_before
+                                                 or _pr_head(platform, pr) != head_before)
+            if failed_names:
+                def _triaged(current, names=failed_names,
+                             unrelated=kind == "unrelated" and not discarded):
+                    if not current:
+                        return None
+                    pr_key = f"{pr['repo']}/{pr['id']}"
+                    triaged = current.get("ci_triaged_checks") or {}
+                    seen = set(triaged.get(pr_key) or [])
+                    triaged[pr_key] = sorted(seen - set(names) if unrelated else seen | set(names))
+                    current["ci_triaged_checks"] = triaged
+                    return current
+                ts = state.update_ticket(ctx.ticket_key or "", _triaged) or ts
+
+            if discarded:
                 log.emit("ticket_checks_unrelated_discarded",
                          f"CI failure for {slug or ctx.ticket_key} {pr['repo']}#{pr['id']} was "
                          f"triaged as unrelated, but the PR head was unknown or moved during "
@@ -1753,20 +1767,14 @@ def fix_ci_failures(ctx: TaskContext) -> TaskResult:
                 # count (nothing of ours was attempted).
                 head_after = _pr_head(platform, pr)
 
-                def _bump(current, names=failed_names):
+                def _bump(current):
                     if not current:
                         return None
-                    pr_key = f"{pr['repo']}/{pr['id']}"
                     current["ci_fix_attempts"] = current.get("ci_fix_attempts", 0) + 1
                     if head_after:
                         heads = current.get("ci_fix_heads") or {}
-                        heads[pr_key] = head_after
+                        heads[f"{pr['repo']}/{pr['id']}"] = head_after
                         current["ci_fix_heads"] = heads
-                    tried = current.get("ci_fix_checks")
-                    if not isinstance(tried, dict):
-                        tried = {}
-                    tried[pr_key] = sorted(set(tried.get(pr_key) or []) | set(names))
-                    current["ci_fix_checks"] = tried
                     current.pop("ci_passed", None)
                     current.pop("checks_started_at", None)
                     current.pop("ci_unrelated_checks", None)

@@ -1228,6 +1228,7 @@ def api_restart_ticket(key: str):
         if not ts:
             return ts
         ts.pop("ci_fix_attempts", None)
+        ts.pop("ci_triaged_checks", None)
         ts.pop("pr_attempts", None)
         ts.pop("conflict_resolution_attempts", None)
         ts.pop("last_conflict_error", None)
