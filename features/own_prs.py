@@ -22,6 +22,7 @@ RECLAIM_STALE_SECONDS = 1200
 MAX_COMMENT_RETRIES = 3
 NEW_COMMENT_BASELINE_HOURS = 24
 COMMENT_DEBOUNCE_MINUTES = 30
+INACTIVE_PR_DAYS = 30
 CLASSIFY_FAILED = "classification failed"
 NO_CHANGES = "no changes produced"
 NO_CHANGE_REASON = "the fix run read the comment and changed nothing"
@@ -72,6 +73,8 @@ def check(config: dict):
     base_url = config["_base_url"]
 
     active_keys: set[str] = set()
+    heads_cache: dict = {}
+    now = datetime.now(timezone.utc)
     for pr in my_prs:
         if _ticket_owns(pr):
             continue
@@ -80,10 +83,11 @@ def check(config: dict):
         seen = pr_state.get(pr_key, {})
 
         _cache_pr_metadata(platform, pr, seen)
-        _check_comments(config, instance_key, platform, pr, base_url, seen=seen)
-        if not _ticket_owns(pr):
-            _check_base_fresh(config, platform, pr, seen, base_url)
-            _check_ci(config, platform, pr, seen, base_url)
+        if _recently_updated(pr, now):
+            _check_comments(config, instance_key, platform, pr, base_url, seen=seen)
+            if not _ticket_owns(pr):
+                _check_base_fresh(config, platform, pr, seen, base_url, heads_cache=heads_cache)
+                _check_ci(config, platform, pr, seen, base_url, heads_cache=heads_cache)
         _check_stale(pr, seen, base_url)
 
         pr_state[pr_key] = seen
@@ -92,6 +96,37 @@ def check(config: dict):
         del pr_state[stale_key]
 
     state.save("own_prs", pr_state)
+
+
+def _recently_updated(pr: dict, now: datetime) -> bool:
+    """False for an open PR nobody touched in INACTIVE_PR_DAYS.
+
+    Such a PR still gets its digest metadata, but not the comment, CI and base
+    sync work: on a slow remote that work cost every poll minutes for PRs
+    untouched for months. A new comment or push moves updated_on and brings
+    the PR back. A PR without a readable updated_on is treated as active, so a
+    platform that does not report it loses nothing."""
+    updated = pr.get("updated_on") or ""
+    try:
+        ts = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return now - ts <= timedelta(days=INACTIVE_PR_DAYS)
+
+
+def _remote_heads(repo_path, heads_cache: dict | None) -> dict | None:
+    """The poll's shared origin listing for repo_path, read once per poll.
+
+    None (no cache) keeps the per-branch ls-remote for callers outside the
+    poll."""
+    if heads_cache is None or not repo_path:
+        return None
+    key = str(repo_path)
+    if key not in heads_cache:
+        heads_cache[key] = branch_sync.remote_heads(repo_path)
+    return heads_cache[key]
 
 
 def _cache_pr_metadata(platform, pr: dict, seen: dict) -> None:
@@ -873,7 +908,7 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
         return False, reason
 
 
-def _check_ci(config, platform, pr, seen, base_url):
+def _check_ci(config, platform, pr, seen, base_url, heads_cache=None):
     from features.tickets import MAX_CI_FIX_ATTEMPTS
     from features.pr_ci import (triage_and_fix_pr, ci_summary, FAILED_STATES,
                                 PENDING_STATES)
@@ -909,7 +944,7 @@ def _check_ci(config, platform, pr, seen, base_url):
     if not lock.acquire(blocking=False):
         return
     try:
-        worktree = _ensure_worktree(config, pr)
+        worktree = _ensure_worktree(config, pr, heads_cache=heads_cache)
         if not worktree:
             return
 
@@ -994,7 +1029,7 @@ def _repo_path_for(config, pr):
     return None
 
 
-def _check_base_fresh(config, platform, pr, seen, base_url):
+def _check_base_fresh(config, platform, pr, seen, base_url, heads_cache=None):
     if not config.get("pr", {}).get("auto_update_branch"):
         return
     base_branch = pr.get("base") or base_branch_for(config, pr["repo"])
@@ -1009,8 +1044,9 @@ def _check_base_fresh(config, platform, pr, seen, base_url):
     try:
         outcome = branch_sync.sync_branch_with_base(
             platform, repo_path, base_branch, pr["branch"], seen,
-            lambda: _ensure_worktree(config, pr), ticket_key=branch_key(pr["branch"]),
-            resource=pr_ref)
+            lambda: _ensure_worktree(config, pr, heads_cache=heads_cache),
+            ticket_key=branch_key(pr["branch"]), resource=pr_ref,
+            heads=_remote_heads(repo_path, heads_cache))
     finally:
         lock.release()
     result = outcome["result"]
@@ -1044,7 +1080,7 @@ def _check_stale(pr, seen, base_url):
         seen["stale_notified"] = True
 
 
-def _ensure_worktree(config, pr) -> Path | None:
+def _ensure_worktree(config, pr, heads_cache=None) -> Path | None:
     state_dir = config["_state_dir"]
     branch_slug = pr["branch"].replace("/", "-")
     worktree_path = state_dir / "pr_worktrees" / branch_slug
@@ -1061,7 +1097,9 @@ def _ensure_worktree(config, pr) -> Path | None:
     if (worktree_path / ".git").is_file():
         if not worktree_path.resolve().is_relative_to(state_dir.resolve()):
             return None
-        subprocess.run(["git", "fetch", "origin", pr["branch"]], cwd=str(worktree_path), capture_output=True, timeout=60)
+        heads = _remote_heads(repo_path, heads_cache)
+        if heads is None or git_util.remote_ref_sha(worktree_path, pr["branch"]) != heads.get(pr["branch"]):
+            subprocess.run(["git", "fetch", "origin", pr["branch"]], cwd=str(worktree_path), capture_output=True, timeout=60)
         reset = subprocess.run(["git", "reset", "--hard", f"origin/{pr['branch']}"], cwd=str(worktree_path), capture_output=True, timeout=60)
         if reset.returncode != 0:
             log.emit("pr_worktree_reset_failed",

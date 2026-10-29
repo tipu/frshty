@@ -15,9 +15,11 @@ import core.queue as q
 import core.state as state
 import core.tasks.registry as registry
 from core.job_logs import job_pid_path
+from services import work_store
 
 ORPHAN_POLL_INTERVAL = 60
 FAILURE_REPORT_INTERVAL = 3600
+LOOP_ITEM_FILE_ERROR = "loop_item_file_error"
 
 normalize_reason = loops.normalize_reason
 
@@ -455,6 +457,40 @@ class WorkerPool:
                  meta={"loop": "job", "task": found["task"], "ticket": found["ticket_key"],
                        "count": found["count"], "first_job_id": found["first_job_id"],
                        "last_job_id": found["last_job_id"], "blocked": stopped})
+        if stopped:
+            self._file_loop_item(job["instance_key"], found)
+
+    def _file_loop_item(self, instance_key: str, found: dict) -> None:
+        """File one board item for a loop the block stopped.
+
+        The block stops the jobs, but only the feed said so, and a loop that
+        nobody reads about wakes again after its block lapses. The proposal
+        key names the instance, task and ticket, so a loop that comes back
+        while its item is open files no second item, and a declined item
+        holds the same objective for DECLINE_HOLD_DAYS. The objective names
+        the instance in words, not as a bracketed tag, so the class mute does
+        not read it as a health nag."""
+        task, ticket = found["task"], found["ticket_key"]
+        reason = (found["reason"] or found["status"])[:300]
+        try:
+            work_store.create_proposal(
+                f"Job loop on {instance_key}: {task} on {ticket} ended {found['status']} "
+                f"{found['count']} times with no state change",
+                note=f"frshty stopped {task} on {ticket} until the ticket changes: {reason}",
+                instance_key=work_store.BOARD_INSTANCE_KEY,
+                brief=f"The {task} job on ticket {ticket} of instance {instance_key} ended "
+                      f"{found['status']} {found['count']} times in a row (jobs "
+                      f"{found['first_job_id']}..{found['last_job_id']}) and left the ticket "
+                      f"state the same each time. Last reason: {reason}. frshty stopped the "
+                      f"next run of {task} on {ticket} until the ticket state changes. Find "
+                      f"why the job repeats and fix the cause.",
+                proposal_key=f"job-loop:{instance_key}:{task}:{ticket}")
+        except work_store.ProposalKeyHeld:
+            return
+        except Exception as e:
+            log.emit(LOOP_ITEM_FILE_ERROR,
+                     f"{task} ticket={ticket}: could not file the loop item: "
+                     f"{type(e).__name__}: {e}", meta={"ticket": ticket, "task": task})
 
     def _run_one(self, job: dict) -> None:
         import core.state as state

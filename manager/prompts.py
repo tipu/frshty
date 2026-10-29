@@ -26,6 +26,7 @@ Bucket → priority mapping (use this to assign each entity):
 - regressions_recent      → "regressions to investigate"
 - timesheet_underfilled   → "log time" / "8h logged"
 - billcom_invoice_due     → "bill.com invoice" / "monthly invoice is SENT" / "last month invoiced"
+- client_pr_proposals_skipped → "client PR requests" / "merge or review requests". Always exactly ONE line: `<count> merge/review requests on client repositories were not filed as tasks (e.g. <first example>).`
 
 Rules:
 - Output markdown. Match the operator's preferred terseness from PRIORITIES (one line per entity is the default unless they ask otherwise).

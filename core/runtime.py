@@ -28,6 +28,7 @@ from core.beat import BeatThread
 from core.event_bus import Dispatcher
 from core.registry import Instances
 from core.worker import WorkerPool
+from services import live_check
 
 DEFAULT_DB_PATH = db_path()
 DEFAULT_MIGRATIONS = Path(__file__).resolve().parent.parent / "migrations"
@@ -549,6 +550,17 @@ def _seed_recurring_schedules(instance_configs: list[dict]) -> None:
                                         next_run_at=next_run)
         else:
             scheduler.delete(key, "global_watch")
+        if live_check.enabled(c):
+            minutes = live_check.LIVE_CHECK_INTERVAL_MINUTES
+            next_run = now_pst + timedelta(minutes=minutes)
+            existing = scheduler.run_at(key, "work_live_check")
+            if existing is not None and existing <= next_run:
+                next_run = existing
+            scheduler.upsert_recurring(key, "work_live_check", "work_live_check",
+                                        cadence=f"every_{minutes}m",
+                                        next_run_at=next_run)
+        else:
+            scheduler.delete(key, "work_live_check")
         today_cfg = c.get("today_agent") or {}
         if today_cfg.get("enabled"):
             cadence = today_cfg.get("cadence", "daily_8_local")

@@ -24,7 +24,7 @@ import core.terminal as terminal
 from core.tasks.tickets import (
     TEST_RUN_TIMEOUT, _NO_LOCAL_PY_VENV_SENTINEL, _detect_runner, _run_repo_tests,
 )
-from services import work_artifacts, work_store, work_tickets, work_worktree
+from services import live_check, work_artifacts, work_store, work_tickets, work_worktree
 
 
 def personal_config() -> dict | None:
@@ -45,16 +45,41 @@ def _board_work() -> dict:
 
     The board's config names the projects that have no instance of their own
     ([work.projects], key to root directory) and the projects the operator
-    reviews himself ([work] self_merge). A process with no instance registry
-    reads the same file off disk."""
+    reviews himself ([work] self_merge). It also says which proposals the
+    board files ([work] client_pr_proposals and mute_declined_proposals, read
+    by proposal_policy). A process with no instance registry reads the same
+    file off disk."""
     config = personal_config() or _config_on_disk(core_config.BOARD_INSTANCE_KEY)
     work = (config or {}).get("work")
     if not isinstance(work, dict):
         return {}
     projects = work.get("projects")
     self_merge = work.get("self_merge")
-    return {"projects": projects if isinstance(projects, dict) else {},
-            "self_merge": [str(k) for k in self_merge] if isinstance(self_merge, list) else []}
+    out = {"projects": projects if isinstance(projects, dict) else {},
+           "self_merge": [str(k) for k in self_merge] if isinstance(self_merge, list) else []}
+    for key in ("client_pr_proposals", "mute_declined_proposals"):
+        if isinstance(work.get(key), bool):
+            out[key] = work[key]
+    return out
+
+
+def proposal_policy() -> dict:
+    """Which proposals the board files, read off the board's [work] table.
+
+    client_pr_proposals, default false: a proposal to merge, approve or
+    review a pull request on a project the operator does not review himself
+    (client_projects) is not filed. He makes that call in the
+    client's own tool, and he approved 4 of 43 such proposals in two months.
+    The morning digest names what was skipped instead. The test is the
+    project, not the instance, so the frshty board and the projects in
+    [work] self_merge keep their merge proposals.
+
+    mute_declined_proposals, default true: a proposal class the operator
+    declined more than work_store.MUTE_DECLINED_SHARE of, over its last
+    work_store.MUTE_WINDOW proposals, is not filed any more."""
+    work = _board_work()
+    return {"client_pr_proposals": work.get("client_pr_proposals", False),
+            "mute_declined_proposals": work.get("mute_declined_proposals", True)}
 
 
 def _instance_config(key: str) -> dict | None:
@@ -757,6 +782,18 @@ def merge_approval_required(contexts) -> bool:
     return any(k not in own for k in project_keys(contexts))
 
 
+def client_projects(contexts) -> list[str]:
+    """The projects a task selected that the operator does not review
+    himself. Unlike merge_approval_required, a task that selects no project
+    names no client: it is the board's own work, not a client's. A source
+    tag such as upwork or followup has no project config, so it names no
+    client either. A project that [work.projects] lists is one."""
+    own = self_merge_projects()
+    listed = _board_work().get("projects", {})
+    return [k for k in _context_keys(contexts)
+            if k not in own and (k in listed or _instance_config(k) or _config_on_disk(k))]
+
+
 def ci_env_enabled_for(contexts) -> bool:
     """Whether the push gate runs a package.json test script with CI=true.
 
@@ -922,9 +959,14 @@ def _start(item_id: int, plan: dict, slack: bool, brief: str) -> dict:
             "each pass of that loop costs a full turn. Run the long command in the "
             "background and use the notification your harness sends when it ends. If "
             "your harness sends no such notification, run the command in the "
-            "foreground with a timeout long enough to hold it. "
-            "When you stop, state a one-line checkpoint. "
+            "foreground with a timeout long enough to hold it. A foreground sleep "
+            "over 30 seconds, `gh pr checks --watch` and `gh run watch` are refused. "
+            "To wait for the checks of a pull request, end your turn with the line "
+            "`waiting on PR #N checks`, where N is the pull request number; the "
+            "board polls the checks and resumes you with the result. "
+            "When you stop, state a one-line checkpoint that starts with `Checkpoint:`. "
             + work_store.PROGRESS_RULE + work_store.RUN_BUDGET_RULE
+            + (work_store.LIVE_CHECK_RULE if live_check.enabled(config) else "")
             + work_store.CONFER_RULE +
             "When you hit a decision point, decide yourself by default: pick the "
             "most correct, cleanest, simplest option and keep going. Ask the "
@@ -936,7 +978,7 @@ def _start(item_id: int, plan: dict, slack: bool, brief: str) -> dict:
             "Use that same tool for anything only the operator can supply — a "
             "secret, a one-time code, an approval — not only for a decision. A "
             "request written in prose does not reach the operator. "
-            + _correspondence_rule(config) +
+            + work_store.SECRET_RULE + _correspondence_rule(config) +
             "When you produce a file the operator will open (report, page, video, image), "
             f"write it under {artifact_dir}/ unless it belongs in a repository, and print "
             "a line: ARTIFACT: /absolute/path - one-line description. Never write such a "
@@ -1446,6 +1488,8 @@ def propose(objective: str, contexts, note: str = "", proposal_key: str = "") ->
             objective, note=note, instance_key=work_store.BOARD_INSTANCE_KEY,
             contexts=",".join(keys), cwd=entries[keys[0]]["root"],
             proposal_key=proposal_key)
+    except work_store.ProposalSuppressed as e:
+        return {"error": str(e)}
     except work_store.ProposalKeyHeld as e:
         return {"error": str(e), "item_id": e.holder["id"]}
     return {"item_id": item_id}

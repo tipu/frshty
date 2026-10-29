@@ -120,12 +120,10 @@
   </div>
   <div class="sec" v-if="item.state === 'needs_ack'">
     <h2 class="text-sm font-bold uppercase text-gray-400 mb-1">Acknowledge</h2>
-    <div class="text-xs text-gray-600 mb-2">The agent reported this task done. Read the summary below, then acknowledge it to complete it, archive it to acknowledge and file it in one step, or reopen it if the work is not finished. Continue reopens it, restarts its agent if the session is gone, and puts the cursor in the Correct box, so the same agent picks up where it stopped.</div>
+    <div class="text-xs text-gray-600 mb-2">The agent reported this task done. Read the summary below, then acknowledge it to complete it and file it in the archive, or reopen it if the work is not finished. Continue reopens it, restarts its agent if the session is gone, and puts the cursor in the Correct box, so the same agent picks up where it stopped.</div>
     <div class="flex flex-wrap gap-2 items-center">
       <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#14532d;color:#86efac"
             @click="act('ack')">acknowledge</span>
-      <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#1e293b;color:#cbd5e1"
-            @click="act('archive')">acknowledge and archive</span>
       <span class="text-xs px-3 py-1 rounded cursor-pointer" style="background:#3b2f14;color:#fbbf24"
             v-if="provider === 'claude'" title="reopen this task, restart its agent if the session is gone, and put the cursor in the Correct box"
             @click="continueTask">{{ continueBusy ? "continuing…" : "continue" }}</span>

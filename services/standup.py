@@ -918,6 +918,9 @@ def _nudge(item: dict, config: dict | None, now: datetime,
                 (item_id, db.dump_json({**payload, **out}), _iso(now)))
     except _NudgeRefused as e:
         return {"item_id": item_id, "grade": grade, "error": str(e)}
+    except work_store.ProposalSuppressed as e:
+        work_store.report_suppressed(None, e)
+        return {"item_id": item_id, "grade": grade, "error": str(e)}
     except Exception as e:
         log.emit("standup_nudge_failed",
                  f"action item {item_id}: the nudge could not be written: "

@@ -1,6 +1,7 @@
 import core.log as log
 from core.tasks.registry import TaskContext, TaskResult, task
 from core.tasks.preconditions import feature_enabled
+from services import live_check
 
 
 @task("poll_own_prs", preconditions=[feature_enabled("review_prs")], timeout=180)
@@ -80,6 +81,13 @@ def global_watch(ctx: TaskContext) -> TaskResult:
     from services import global_watch as watch
     out = watch.run(ctx.config, job_id=ctx.job_id)
     return TaskResult("ok", artifacts=out)
+
+
+@task("work_live_check", timeout=live_check.LIVE_CHECKS_PER_RUN * live_check.LIVE_CHECK_TIMEOUT_SECONDS + 60)
+def work_live_check(ctx: TaskContext) -> TaskResult:
+    if not live_check.enabled(ctx.config):
+        return TaskResult("ok", artifacts={"skipped": "live_check disabled"})
+    return TaskResult("ok", artifacts={"checks": live_check.run_due(ctx.config, now=ctx.now)})
 
 
 @task("scheduler_check", timeout=60)
