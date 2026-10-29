@@ -25,6 +25,7 @@ import core.log as log
 from core.config import base_branch_for, get_repos, ticket_rules_files, ticket_worktree_path
 from core.consensus_plan import _fan_out, _run_stamp
 from core.llm import rules_directive
+from core.ticket_status import SCOPE_FIX
 
 SCOPE_FANOUT_TIMEOUT = 1800
 SCOPE_VOICES = ("claude", "codex", "agy", "deepseek")
@@ -122,11 +123,7 @@ def scope_fingerprint(config: dict, ts: dict) -> str:
     return ";".join(sorted(parts))
 
 
-# A correction pass is one LLM run plus a fresh proof, so it is not free, and a
-# third pass would mean the reviewers and the fixer disagree about what the
-# ticket is. That disagreement is the operator's to settle, so the gate goes
-# back to holding the branch once the budget is spent.
-MAX_SCOPE_FIX_ATTEMPTS = 2
+MAX_SCOPE_FIX_ATTEMPTS = SCOPE_FIX.budget
 
 
 def scope_fix_attempts(ts: dict) -> int:
@@ -139,7 +136,7 @@ def scope_fix_attempts(ts: dict) -> int:
 
 
 def scope_fix_exhausted(ts: dict) -> bool:
-    return scope_fix_attempts(ts) >= MAX_SCOPE_FIX_ATTEMPTS
+    return not SCOPE_FIX.may_continue(scope_fix_attempts(ts))
 
 
 def _write_report(ticket_dir: Path, ticket_key: str, votes: dict[str, str],

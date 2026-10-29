@@ -27,7 +27,8 @@ from core.claude_runner import (run_haiku, run_balanced, run_claude_code, extrac
                                 parse_structured, strict_object)
 from core.llm import NO_PUBLISH_RULE
 from core.commit_message import COMMIT_SUBJECT_RULE, commit_subject, merge_message_args
-from core.ticket_status import TicketStatus, can_transition, transition
+from core.ticket_status import (BASE_SYNC, SCOPE_FIX, TicketStatus,
+                                can_transition, transition)
 from features.platforms import make_platform
 from features.pr_ci import ci_summary, failing_check_names, held_unrelated, KEEP_GREEN_RULE
 from features.ticket_systems import make_ticket_system
@@ -314,7 +315,7 @@ def _scope_fix_budget_spent(instance_key: str, ticket_key: str, ts: dict) -> boo
     is, so the gate stops correcting and the operator decides."""
     if consensus_scope.scope_fix_exhausted(ts):
         return True
-    return _scope_fix_runs(instance_key, ticket_key) >= consensus_scope.MAX_SCOPE_FIX_ATTEMPTS
+    return not SCOPE_FIX.may_continue(_scope_fix_runs(instance_key, ticket_key))
 
 
 def _enqueue_scope_fix(instance_key: str, ticket_key: str, ts: dict) -> int | None:
@@ -3362,7 +3363,7 @@ def _pr_base_moved(config, ts) -> bool:
         if branch_sync.parked(repo_path, pr.get("branch") or ts.get("branch", ""),
                               pr.get("base") or base_branch_for(config, pr["repo"]), st):
             continue
-        if st.get("base_sync_attempts", 0) >= branch_sync.MAX_BASE_SYNC_ATTEMPTS:
+        if not BASE_SYNC.may_continue(st.get("base_sync_attempts", 0)):
             if branch_sync.blocker_cleared(
                     st, repo_path, pr.get("branch") or ts.get("branch", ""), base_sha,
                     lambda: _existing_pr_worktree(config, ts, pr, repo_path)):
