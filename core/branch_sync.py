@@ -73,23 +73,6 @@ def _unblock(st: dict, resource: str) -> None:
     blocked_attempts.clear(resource, blocked_attempts.SYNC_BASE)
 
 
-def _unpushed(worktree, repo_path, branch: str) -> bool:
-    """Whether HEAD holds commits the remote PR branch lacks: a base merge
-    whose push failed. Such a branch is not behind base, but it is not
-    synced either."""
-    remote = branch_head(repo_path, branch)
-    if not remote:
-        return False
-    try:
-        local = git_util.run_git(worktree, ["rev-parse", "HEAD"], timeout=10).stdout.strip()
-        if not local or local == remote:
-            return False
-        return git_util.run_git(worktree, ["merge-base", "--is-ancestor", remote, "HEAD"],
-                                allowed_codes=(0, 1), timeout=10).returncode == 0
-    except git_util.GitCommandError:
-        return False
-
-
 def _count_failure(st: dict, attempts: int, result: str, error: str, repo_path, branch: str,
                    resource: str) -> dict:
     """Spend one attempt on a sync that could not start.
@@ -142,21 +125,20 @@ def sync_branch_with_base(platform, repo_path, base_branch: str, branch: str,
     if not worktree:
         return _count_failure(st, attempts, "no_worktree", "no worktree for the PR branch",
                               repo_path, branch, resource)
-    fetch = subprocess.run(["git", "fetch", "origin", base_branch],
+    fetch = subprocess.run(["git", "fetch", "origin", base_branch, branch],
                            cwd=str(worktree), capture_output=True, text=True, timeout=60)
     if fetch.returncode != 0:
         return _count_failure(st, attempts, "fetch_failed", (fetch.stderr or "").strip()[:200],
                               repo_path, branch, resource)
     try:
-        behind = git_util.run_git(worktree, ["rev-list", "--count", f"HEAD..origin/{base_branch}"],
-                                  timeout=10).stdout.strip()
+        behind = git_util.run_git(
+            worktree, ["rev-list", "--count", f"origin/{branch}..origin/{base_branch}"],
+            timeout=10).stdout.strip()
     except git_util.GitCommandError as e:
         return _count_failure(st, attempts, "fetch_failed", str(e)[:200], repo_path, branch, resource)
     if behind == "0":
-        if not _unpushed(worktree, repo_path, branch):
-            _unblock(st, resource)
-            return {"result": "uptodate"}
-        return _push(platform, worktree, branch, base_branch, st, attempts, repo_path, resource)
+        _unblock(st, resource)
+        return {"result": "uptodate"}
 
     # A failed `git status` returns empty stdout, which reads as a clean tree and
     # walks straight past the dirty_worktree guard below into a merge and a push.
