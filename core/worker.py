@@ -1,6 +1,5 @@
 import json
 import os
-import re
 import signal
 import threading
 import time
@@ -10,6 +9,7 @@ from typing import Callable
 import core.db as db
 import core.llm as llm
 import core.log as log
+import core.loops as loops
 import core.queue as q
 import core.state as state
 import core.tasks.registry as registry
@@ -18,16 +18,7 @@ from core.job_logs import job_pid_path
 ORPHAN_POLL_INTERVAL = 60
 FAILURE_REPORT_INTERVAL = 3600
 
-_HEX_RE = re.compile(r"\b(?=[0-9a-f]*\d)[0-9a-f]{7,}\b", re.IGNORECASE)
-_DIGITS_RE = re.compile(r"\d+")
-
-
-def normalize_reason(reason: str | None) -> str:
-    """Strip the parts of a failure reason that change between runs of the
-    same failure: commit shas, ids, counts and timestamps."""
-    text = _HEX_RE.sub("<hex>", reason or "")
-    text = _DIGITS_RE.sub("N", text)
-    return " ".join(text.split())[:300]
+normalize_reason = loops.normalize_reason
 
 
 class FailureStreaks:
@@ -89,7 +80,8 @@ def transition_ticket_and_emit(ticket_key: str | None, instance_key: str | None,
     target runs the checked transition of state.transition_ticket with fields
     as co-field updates. mutate runs an unchecked state.update_ticket. With
     neither, no ticket row is written. job_id marks that job finished with
-    job_status and job_response. next_events are extra events to insert; each
+    job_status and job_response, and with the digest core.loops compares,
+    read from the ticket row this transaction just wrote. next_events are extra events to insert; each
     needs a "kind" and takes this instance_key unless it names its own.
     advance inserts a ticket_advance event for ticket_key when an
     instance_key is known. Returns the saved ticket, or None when no ticket
@@ -100,7 +92,9 @@ def transition_ticket_and_emit(ticket_key: str | None, instance_key: str | None,
 
     def _commit(c) -> None:
         if job_id is not None:
-            q.finish_job(c, job_id, job_status, job_response or {})
+            digest = (loops.ticket_digest_in(c, state.active_instance_key(), ticket_key)
+                      if ticket_key else None)
+            q.finish_job(c, job_id, job_status, job_response or {}, digest)
         for ev in next_events or []:
             q.insert_event(c, source, ev["kind"], ev.get("payload", {}),
                            ev.get("instance_key", instance_key))
@@ -434,6 +428,19 @@ class WorkerPool:
                 meta = {"category": "noise", "repeat": count}
         log.emit("job_finished", summary, meta=meta)
 
+    def _flag_loop(self, job: dict) -> None:
+        """Emit loop_detected once when this job makes a loop."""
+        found = loops.job_loop(job)
+        if not found:
+            return
+        log.emit(loops.LOOP_EVENT,
+                 f"{found['task']} ticket={found['ticket_key']} ended {found['status']} "
+                 f"{found['count']} times in a row with no state change"
+                 f"{(': ' + found['reason'][:200]) if found['reason'] else ''}",
+                 meta={"loop": "job", "task": found["task"], "ticket": found["ticket_key"],
+                       "count": found["count"], "first_job_id": found["first_job_id"],
+                       "last_job_id": found["last_job_id"]})
+
     def _run_one(self, job: dict) -> None:
         import core.state as state
         import core.job_logs as job_logs
@@ -447,6 +454,7 @@ class WorkerPool:
         state_token = None
         log_tokens = None
         live_token = job_logs.use_live_job(instance_key, job["id"])
+        chain_token = q.use_chain(job.get("root_job_id") or job["id"])
         state_dir = reg.config.get("_state_dir")
         if state_dir is not None:
             state_token = state.use(state_dir)
@@ -500,6 +508,10 @@ class WorkerPool:
                     next_events=next_events, advance=False,
                 )
             self._emit_job_finished(job, result)
+            try:
+                self._flag_loop(job)
+            except Exception as e:
+                log.emit(loops.LOOP_CHECK_ERROR, f"job_id={job['id']}: {type(e).__name__}: {e}")
         finally:
             log_path = job_logs.job_log_path(instance_key, job["id"])
             if log_path.exists() and log_path.stat().st_size == 0:
@@ -509,5 +521,6 @@ class WorkerPool:
             if state_token is not None:
                 state.reset(state_token)
             job_logs.reset_live_job(live_token)
+            q.reset_chain(chain_token)
             with self._live_lock:
                 self._live_jobs.discard(job["id"])
