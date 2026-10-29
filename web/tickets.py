@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.websockets import WebSocket
 
+import core.blocked as blocked_attempts
 import core.config as cfg
 import core.consensus_scope as consensus_scope
 import core.db as db
@@ -1595,6 +1596,7 @@ def api_retry_job(key: str, body: dict):
             return JSONResponse({"error": "job not found"}, status_code=404)
         job = {"task": row["task"], "payload": row["payload"]}
     payload = job["payload"] if isinstance(job["payload"], dict) else json.loads(job["payload"] or "{}")
+    blocked_attempts.clear_job(instance_key, key, job["task"])
     q.emit_event(source="ui", kind="ui_retry",
                  payload={"task": job["task"], "payload": payload, "ticket_key": key},
                  instance_key=instance_key)

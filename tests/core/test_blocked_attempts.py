@@ -189,3 +189,37 @@ class TestARefusedPushWaitsForTheBranchHead:
         assert self._tick(platform, st, "main11", "head3")["result"] == "synced"
         assert st["base_sync_attempts"] == 0
         assert blocked_attempts.find("app#4562", blocked_attempts.SYNC_BASE, instance_key="t") == []
+
+    def test_a_merge_whose_push_failed_is_pushed_again_not_called_up_to_date(self, pool):
+        platform = MagicMock()
+        platform.push_branch.return_value = {"ok": False, "error": self.REFUSED}
+        st = {"base_sync_sha": "main0", "base_sync_attempts": 1,
+              "last_base_error": self.REFUSED, "base_sync_head": "head1"}
+        refs = {"main": "main1", "refs/heads/feature": "head1"}
+
+        def run_git(wt, args, timeout, allowed_codes=(0,)):
+            return MagicMock(returncode=0, stdout={"rev-list": "0\n", "rev-parse": "merged\n"}.get(args[0], ""))
+
+        with patch("core.branch_sync.ls_remote_sha", side_effect=lambda repo, ref: refs[ref]), \
+             patch("core.branch_sync.subprocess.run", return_value=MagicMock(returncode=0, stderr="")), \
+             patch("core.branch_sync.git_util.run_git", side_effect=run_git):
+            out = branch_sync.sync_branch_with_base(platform, "/repo", "main", "feature", st,
+                                                    lambda: "/wt", resource="app#4562")
+        assert out["result"] == "push_failed", "a local merge that never reached the PR is not synced"
+        assert st["base_sync_attempts"] == branch_sync.MAX_BASE_SYNC_ATTEMPTS
+        platform.merge_base.assert_not_called()
+
+
+class TestAJobBlockLapses:
+    def test_a_block_older_than_the_window_lets_one_run_through(self, pool):
+        state.save_ticket("T-1", {"status": "reviewing"})
+        assert blocked_attempts.block_job("t", "T-1", "loop_sync", "failed", "provider down")
+        assert blocked_attempts.job_blocked("t", "T-1", "loop_sync")
+        db.execute("UPDATE blocked_attempts SET last_at='2000-01-01T00:00:00+00:00'")
+        assert blocked_attempts.job_blocked("t", "T-1", "loop_sync") is None
+
+    def test_an_operator_retry_clears_the_block(self, pool):
+        state.save_ticket("T-1", {"status": "reviewing"})
+        blocked_attempts.block_job("t", "T-1", "loop_sync", "failed", "provider down")
+        blocked_attempts.clear_job("t", "T-1", "loop_sync")
+        assert blocked_attempts.job_blocked("t", "T-1", "loop_sync") is None

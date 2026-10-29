@@ -9,7 +9,10 @@ push refused 235 times, two more each time main moved.
 One row names a resource (a ticket key, or a PR as "repo#id"), an action and
 the blocker that stopped it. The wake column holds the input that has to
 change before one more try is worth it: the PR branch head for a base sync,
-the ticket digest for a job the loop detector stopped. A new commit on main
+the ticket digest for a job the loop detector stopped. A job block also
+lapses after JOB_BLOCK_HOURS, so an outside cause that clears with no ticket
+change (a provider outage) costs one run per window, not a stuck ticket. An
+operator retry clears the block. A new commit on main
 is not a wake input, because it does not change a foreign author, a dirty
 worktree or a missing token.
 
@@ -17,7 +20,7 @@ A write here never fails its caller. A database error is emitted as an event
 and the caller goes on. A gate that cannot read the record lets the job run,
 and says so on the event feed.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import core.db as db
 import core.log as log
@@ -27,6 +30,7 @@ import core.state as state
 SYNC_BASE = "sync_base"
 JOB_PREFIX = "job:"
 UNBLOCKED_TASKS = ("advance_ticket",)
+JOB_BLOCK_HOURS = 2
 
 
 def _now() -> str:
@@ -133,8 +137,8 @@ def block_job(instance_key: str, ticket_key: str | None, task: str, status: str,
 
 def job_blocked(instance_key: str, ticket_key: str | None, task: str) -> dict | None:
     """The block that stops this job, or None. A block whose ticket state
-    has changed since it was written no longer stops the job: the change
-    buys one more try."""
+    has changed since it was written, or that is older than JOB_BLOCK_HOURS,
+    no longer stops the job: the change or the lapse buys one more try."""
     if not ticket_key or task in UNBLOCKED_TASKS:
         return None
     try:
@@ -145,10 +149,15 @@ def job_blocked(instance_key: str, ticket_key: str | None, task: str) -> dict | 
     except Exception as e:
         _failed("read", ticket_key, JOB_PREFIX + task, e)
         return None
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=JOB_BLOCK_HOURS)).isoformat()
     for row in rows:
-        if row["wake"] == digest:
+        if row["wake"] == digest and row["last_at"] >= cutoff:
             return row
     return None
+
+
+def clear_job(instance_key: str, ticket_key: str, task: str) -> None:
+    clear(ticket_key, JOB_PREFIX + task, instance_key=instance_key)
 
 
 def after_job(instance_key: str, ticket_key: str | None, task: str, status: str,
