@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timezone
 from typing import Callable
 
+import core.blocked as blocked_attempts
 import core.db as db
 import core.llm as llm
 import core.log as log
@@ -428,18 +429,29 @@ class WorkerPool:
                 meta = {"category": "noise", "repeat": count}
         log.emit("job_finished", summary, meta=meta)
 
-    def _flag_loop(self, job: dict) -> None:
-        """Emit loop_detected once when this job makes a loop."""
+    def _flag_loop(self, job: dict, result: registry.TaskResult) -> None:
+        """Emit loop_detected once when this job makes a loop, and block the
+        next run of the task on that ticket until the ticket state changes.
+        A run after the block woke that fails the same way blocks it again."""
         found = loops.job_loop(job)
         if not found:
+            if blocked_attempts.after_job(job["instance_key"], job["ticket_key"], job["task"],
+                                          result.status, result.reason):
+                log.emit("job_blocked_again",
+                         f"{job['task']} ticket={job['ticket_key']} job_id={job['id']} failed "
+                         f"the same way after its block woke: {(result.reason or '')[:200]}",
+                         meta={"ticket": job["ticket_key"], "task": job["task"]})
             return
+        stopped = blocked_attempts.block_job(job["instance_key"], found["ticket_key"],
+                                             found["task"], found["status"], found["reason"])
         log.emit(loops.LOOP_EVENT,
                  f"{found['task']} ticket={found['ticket_key']} ended {found['status']} "
                  f"{found['count']} times in a row with no state change"
-                 f"{(': ' + found['reason'][:200]) if found['reason'] else ''}",
+                 f"{(': ' + found['reason'][:200]) if found['reason'] else ''}"
+                 f"{'; the next run waits for a ticket change' if stopped else ''}",
                  meta={"loop": "job", "task": found["task"], "ticket": found["ticket_key"],
                        "count": found["count"], "first_job_id": found["first_job_id"],
-                       "last_job_id": found["last_job_id"]})
+                       "last_job_id": found["last_job_id"], "blocked": stopped})
 
     def _run_one(self, job: dict) -> None:
         import core.state as state
@@ -448,6 +460,15 @@ class WorkerPool:
         reg = self.registries.get(instance_key)
         if not reg:
             q.mark_done(job["id"], "failed", {"reason": f"unknown instance_key: {instance_key}"})
+            return
+        stop = blocked_attempts.job_blocked(instance_key, job["ticket_key"], job["task"])
+        if stop:
+            q.mark_done(job["id"], "skipped",
+                        {"reason": f"blocked by a loop: {stop['blocker'][:200]}"})
+            log.emit("job_blocked",
+                     f"{job['task']} ticket={job['ticket_key']} job_id={job['id']} skipped: "
+                     f"the same run looped with no ticket change: {stop['blocker'][:200]}",
+                     meta={"ticket": job["ticket_key"], "task": job["task"], "category": "noise"})
             return
         with self._live_lock:
             self._live_jobs.add(job["id"])
@@ -509,7 +530,7 @@ class WorkerPool:
                 )
             self._emit_job_finished(job, result)
             try:
-                self._flag_loop(job)
+                self._flag_loop(job, result)
             except Exception as e:
                 log.emit(loops.LOOP_CHECK_ERROR, f"job_id={job['id']}: {type(e).__name__}: {e}")
         finally:

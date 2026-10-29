@@ -12,7 +12,7 @@ def _platform(merge_ok=True, push_ok=True, error=""):
 
 
 def _sync(platform, st, base_sha="basesha", behind="3", worktree="/wt", fetch_rc=0, dirty=""):
-    fetch = MagicMock(returncode=fetch_rc, stdout="")
+    fetch = MagicMock(returncode=fetch_rc, stdout="", stderr="")
     rev = MagicMock(returncode=0, stdout=f"{behind}\n")
     status = MagicMock(returncode=0, stdout=dirty)
     with patch("core.branch_sync.ls_remote_sha", return_value=base_sha), \
@@ -83,7 +83,8 @@ class TestSyncBranchWithBase:
         assert st.get("base_synced") is not True
 
     def test_capped_skips_without_worktree(self):
-        st = {"base_sync_sha": "basesha", "base_sync_attempts": branch_sync.MAX_BASE_SYNC_ATTEMPTS}
+        st = {"base_sync_sha": "basesha", "base_sync_attempts": branch_sync.MAX_BASE_SYNC_ATTEMPTS,
+              "base_sync_head": "basesha"}
         called = []
         with patch("core.branch_sync.ls_remote_sha", return_value="basesha"):
             out = branch_sync.sync_branch_with_base(
@@ -193,7 +194,7 @@ class TestDirtyBlockClears:
         wt = self._repo(tmp_path)
         platform = _platform()
         st = {"base_sync_sha": "basesha", "base_sync_attempts": branch_sync.MAX_BASE_SYNC_ATTEMPTS,
-              "last_base_error": "CONFLICT in a.py"}
+              "last_base_error": "CONFLICT in a.py", "base_sync_head": "basesha"}
         calls = []
         with patch("core.branch_sync.ls_remote_sha", return_value="basesha"):
             out = branch_sync.sync_branch_with_base(platform, "/repo", "main", "f", st,

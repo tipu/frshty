@@ -2985,13 +2985,15 @@ def sync_pr_base(ctx: TaskContext) -> TaskResult:
               "description": ts.get("description", ""), "url": ts.get("url", "")}
     base_url = ctx.config.get("_base_url", "")
     try:
-        updated = tix._sync_pr_base(ctx.config, ticket, ts, base_url)
+        updated, failures = tix._sync_pr_base(ctx.config, ticket, ts, base_url)
     except Exception as e:
         log.emit("sync_pr_base_error",
                  f"[{ctx.instance_key}] {ctx.ticket_key}: {type(e).__name__}: {e}",
                  meta={"ticket": ctx.ticket_key})
         return TaskResult("failed", f"{type(e).__name__}: {e}")
     state.save_ticket(ctx.ticket_key, updated)
+    if failures:
+        return TaskResult("failed", "; ".join(failures))
     return TaskResult("ok")
 
 

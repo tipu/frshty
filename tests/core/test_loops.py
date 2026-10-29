@@ -70,8 +70,11 @@ def test_a_job_chain_that_requeues_itself_with_the_ticket_unchanged_is_one_loop(
     assert found[0]["meta"]["ticket"] == "T-1"
     assert found[0]["meta"]["first_job_id"] == first
 
-    for _ in range(N):
-        _run_next(pool)
+    stopped = _run_next(pool)
+    row = db.query_one("SELECT status, response FROM jobs WHERE id=?", (stopped["id"],))
+    assert row["status"] == "skipped", "the job the loop queued next is stopped, not run"
+    assert "blocked by a loop" in json.loads(row["response"])["reason"]
+    assert q.claim_next() is None, "a stopped job queues no successor, so the chain ends"
     assert len(_loop_events()) == 1, "a loop is flagged once, not once per run"
     roots = {r["root_job_id"] for r in db.query_all(
         "SELECT root_job_id FROM jobs WHERE id > ?", (first,))}
