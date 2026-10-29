@@ -76,6 +76,16 @@ class TestTransitions:
         item = db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))
         assert item["state"] == "agent_working"
 
+    def test_a_prompt_event_is_stored_with_its_secret_redacted(self):
+        item_id = _mkitem()
+        work_store.add_run(item_id, "sid-prompt-secret", "work-2", "/tmp")
+        work_store.record_event("sid-prompt-secret", "UserPromptSubmit",
+                                {"prompt": "use password: Hunter2!x for the login"})
+        rows = db.query_all("SELECT payload FROM work_events WHERE work_item_id = ? "
+                            "AND kind = 'UserPromptSubmit'", (item_id,))
+        assert rows and all("Hunter2!x" not in r["payload"] for r in rows)
+        assert any("password: [redacted]" in r["payload"] for r in rows)
+
     def test_session_end_keeps_done(self):
         item_id = _mkitem()
         work_store.add_run(item_id, "sid-done-1", "work-3", "/tmp")
@@ -155,6 +165,25 @@ class TestAcknowledgement:
         kinds = {e["kind"] for e in work_store.item_detail(item_id)["events"]}
         assert "operator_ack" in kinds
 
+    def test_acknowledging_files_the_task_in_the_archive_in_the_same_step(self, monkeypatch):
+        item_id = self._reported_done(monkeypatch, "ack files it")
+        assert "error" not in work_store.apply_action(item_id, "ack")
+        assert self._state(item_id)["archived_at"]
+        kinds = [e["kind"] for e in work_store.item_detail(item_id)["events"]]
+        assert {"operator_ack", "operator_archive"} <= set(kinds)
+        assert item_id not in {r["id"] for r in work_store.grouped_items()["done"]}
+        archived = work_store.grouped_items(q="ack files it", archived=True)
+        assert item_id in {r["id"] for rows in archived.values() for r in rows}
+
+    def test_acknowledging_a_task_waiting_on_a_question_changes_nothing(self):
+        item_id = _mkitem("asked the operator")
+        db.execute("UPDATE work_items SET state = 'needs_you', pending_question = 'q' "
+                   "WHERE id = ?", (item_id,))
+        assert "error" in work_store.apply_action(item_id, "ack")
+        row = self._state(item_id)
+        assert row["state"] == "needs_you"
+        assert not row["archived_at"]
+
     def test_acknowledging_marks_the_task_as_confirmed_by_the_operator(self, monkeypatch):
         item_id = self._reported_done(monkeypatch, "confirmed by the operator")
         work_store.apply_action(item_id, "ack")
@@ -218,6 +247,87 @@ class TestAcknowledgement:
         monkeypatch.setattr(work_launch, "personal_config", lambda: None)
         out = work_launch.launch_followup(item_id, "next step")
         assert "not done" not in out.get("error", "")
+
+
+class TestCheckpointCloses:
+    """A turn that ends on a closed checkpoint is done, as if it ended on WORK_DONE.
+
+    The operator typed "echo WORK_DONE" into sessions whose work was finished
+    and whose agent had only forgotten the marker. A checkpoint that names
+    anything open, or a message that asks the operator something, keeps the
+    task with the operator."""
+
+    def _turn(self, monkeypatch, tail, pending_question="", bg=False):
+        item_id = _mkitem("checkpoint task")
+        sid = f"sid-cp-{item_id}"
+        work_store.add_run(item_id, sid, f"work-{item_id}", "/tmp")
+        work_store.record_event(sid, "Stop", {})
+        if pending_question:
+            db.execute("UPDATE work_items SET pending_question = ? WHERE id = ?",
+                       (pending_question, item_id))
+        monkeypatch.setattr(work_store, "last_assistant_text", lambda p: tail)
+        monkeypatch.setattr(work_store, "pending_background_tasks",
+                            lambda p: {"t1"} if bg else set())
+        sent = MagicMock(return_value=True)
+        monkeypatch.setattr(work_store, "tmux_send", sent)
+        return item_id, work_store.maybe_autocontinue(sid, "/tmp/t.jsonl"), sent
+
+    def _state(self, item_id):
+        return db.query_one("SELECT state FROM work_items WHERE id = ?", (item_id,))["state"]
+
+    def test_a_closed_checkpoint_reports_the_task_done(self, monkeypatch):
+        item_id, out, sent = self._turn(
+            monkeypatch, "I merged PR #3.\n**Checkpoint:** the fix is merged and deployed.")
+        assert out == "needs_ack"
+        assert self._state(item_id) == "needs_ack"
+        sent.assert_not_called()
+        done = [e for e in work_store.item_detail(item_id)["events"]
+                if e["kind"] == "self_reported_done"]
+        assert json.loads(done[0]["payload"])["marker"] == "checkpoint"
+
+    @pytest.mark.parametrize("tail", [
+        "Checkpoint: deployed successfully; no outstanding work.",
+        "Checkpoint: nothing left to do, PR #3 merged.",
+    ])
+    def test_a_negated_open_word_still_closes_the_task(self, monkeypatch, tail):
+        item_id, out, _ = self._turn(monkeypatch, tail)
+        assert out == "needs_ack"
+        assert self._state(item_id) == "needs_ack"
+
+    @pytest.mark.parametrize("tail", [
+        "Checkpoint: explanation delivered; waiting for your build decision on the board.",
+        "Checkpoint: I am blocked on your login; PR #14 is ready.",
+        "Checkpoint: PR #9 opened, CI is running.",
+        "Checkpoint: part one shipped, part two remains.",
+        "Checkpoint: Patch committed; deployment outstanding.",
+        "Checkpoint: fix pushed, still unmerged.",
+        "Checkpoint: No deployment; waiting for CI.",
+        "Checkpoint: merged.\nShould I also clean up the branch?",
+        "The fix is merged and deployed.",
+        "Checkpoint: merged and deployed.\nPROGRESS: next I check the logs.",
+    ])
+    def test_an_open_checkpoint_or_a_question_keeps_the_task(self, monkeypatch, tail):
+        item_id, out, _ = self._turn(monkeypatch, tail)
+        assert out != "needs_ack"
+        assert self._state(item_id) not in ("needs_ack", "done")
+
+    def test_a_pending_question_keeps_the_task(self, monkeypatch):
+        item_id, out, _ = self._turn(
+            monkeypatch, "Checkpoint: merged and deployed.", pending_question='{"questions": []}')
+        assert out == "question"
+        assert self._state(item_id) == "needs_you"
+
+    def test_a_running_background_task_keeps_the_task(self, monkeypatch):
+        item_id, out, _ = self._turn(monkeypatch, "Checkpoint: merged and deployed.", bg=True)
+        assert out == "waiting_external"
+        assert self._state(item_id) == "waiting_external"
+
+    def test_work_done_still_records_its_own_marker(self, monkeypatch):
+        item_id, out, _ = self._turn(monkeypatch, "Checkpoint: open items remain.\nWORK_DONE")
+        assert out == "needs_ack"
+        done = [e for e in work_store.item_detail(item_id)["events"]
+                if e["kind"] == "self_reported_done"]
+        assert json.loads(done[0]["payload"])["marker"] == "WORK_DONE"
 
 
 class TestGrouping:
@@ -441,6 +551,43 @@ class TestIntake:
         assert work_store.CONFER_RULE in context
         assert "confer with the boys" in work_store.CONFER_RULE
         assert "OPENCODE_DISABLE_CLAUDE_CODE=1 opencode run -m openrouter/deepseek/deepseek-v4.1-flash" in context
+
+    def test_launch_and_continue_point_agents_at_the_secret_script(self, tmp_path, monkeypatch):
+        from unittest.mock import patch, MagicMock
+        from services import work_artifacts
+        monkeypatch.setattr(work_artifacts, "root", lambda: tmp_path / "artifact-store")
+        reg = MagicMock()
+        reg.config = {"workspace": {"root": tmp_path}}
+        instances = MagicMock()
+        instances.get.return_value = reg
+        with patch("services.work_launch.runtime.instances", return_value=instances), \
+             patch("services.work_launch.terminal.launch_claude") as mock_launch, \
+             patch("services.work_launch.terminal.session_healthy", return_value={"alive": True, "agent_running": True}):
+            r = self._client().post("/api/work/intake", json={"text": "deploy the staging app"})
+        assert r.status_code == 200, r.text
+        assert work_store.SECRET_RULE in mock_launch.call_args.args[3]
+        assert work_store.SECRET_RULE in work_store.CONTINUE_PROMPT_TEMPLATE
+        assert "python3 /app/scripts/secret.py <name>" in work_store.SECRET_RULE
+
+    @pytest.mark.parametrize("job_key, asked", [("frshty", True), ("personal", False)])
+    def test_intake_asks_for_a_live_check_only_where_it_runs(self, tmp_path, monkeypatch,
+                                                             job_key, asked):
+        from unittest.mock import patch, MagicMock
+        from services import work_artifacts
+        monkeypatch.setattr(work_artifacts, "root", lambda: tmp_path / "artifact-store")
+        reg = MagicMock()
+        reg.config = {"job": {"key": job_key}, "workspace": {"root": tmp_path}}
+        instances = MagicMock()
+        instances.get.return_value = reg
+        with patch("services.work_launch.runtime.instances", return_value=instances), \
+             patch("services.work_launch.terminal.launch_claude") as mock_launch, \
+             patch("services.work_launch.terminal.session_healthy", return_value={"alive": True, "agent_running": True}):
+            client = self._client()
+            r = client.post("/api/work/intake", json={"text": "fix the gate"})
+        assert r.status_code == 200, r.text
+        context = mock_launch.call_args.args[3]
+        assert (work_store.LIVE_CHECK_RULE in context) is asked
+        assert "one-line checkpoint that starts with `Checkpoint:`" in context
 
     def test_intake_tells_claude_to_navigate_with_lsp(self, tmp_path, monkeypatch):
         from unittest.mock import patch, MagicMock
@@ -1606,6 +1753,35 @@ class TestQuestions:
             "SELECT state, pending_question FROM work_items WHERE id = ?", (item_id,))
         assert item["state"] == "agent_working"
         assert item["pending_question"] == ""
+
+    def test_question_is_stored_redacted(self):
+        item_id, sid = self._mkrun("question secret")
+        asked = {"questions": [{"question": "Is password: Hunter2!x still right?",
+                                "header": "Login", "options": []}]}
+        assert work_store.record_question(sid, asked) == "recorded"
+        assert work_store.record_question(sid, asked) == "duplicate"
+        item = db.query_one("SELECT pending_question FROM work_items WHERE id = ?", (item_id,))
+        payloads = [e["payload"] for e in db.query_all(
+            "SELECT payload FROM work_events WHERE work_item_id = ?", (item_id,))]
+        assert "Hunter2!x" not in item["pending_question"] + "".join(payloads)
+        assert "[redacted]" in item["pending_question"]
+
+    def test_reply_sends_the_secret_and_stores_it_redacted(self, monkeypatch):
+        from unittest.mock import MagicMock
+        item_id, sid = self._mkrun("reply secret")
+        sender = MagicMock(return_value=True)
+        monkeypatch.setattr(work_store, "tmux_send", sender)
+        monkeypatch.setattr(work_store, "agent_running", lambda k, a="claude": True)
+        work_store.reply(item_id, "password: Hunter2!x and code 482913")
+        assert sender.call_args.args[1] == "password: Hunter2!x and code 482913"
+        row = db.query_one("SELECT payload FROM work_events WHERE work_item_id = ? "
+                           "AND kind = 'operator_reply'", (item_id,))
+        assert json.loads(row["payload"])["text"] == "password: [redacted] and code 482913"
+
+    def test_objective_is_stored_redacted(self):
+        item_id = _mkitem("log in as mtrainoul with password=Hunter2!x")
+        row = db.query_one("SELECT objective FROM work_items WHERE id = ?", (item_id,))
+        assert row["objective"] == "log in as mtrainoul with password=[redacted]"
 
     def test_done_clears_pending_question(self):
         item_id, sid = self._mkrun("question done clears")

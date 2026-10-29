@@ -1057,13 +1057,20 @@ class TestOperatorMergeApproval:
     He cannot merge a client pull request before a reviewer approves it, so a
     proposal that asks him to merge one is a question he cannot answer. A
     project he reviews himself waits for nobody, and its merge is proposed the
-    moment the run leaves it open."""
+    moment the run leaves it open.
+
+    The hold matters only on a board whose [work] client_pr_proposals is
+    true; by default a client merge is never proposed at all
+    (TestClientPullRequestProposals)."""
 
     @pytest.fixture(autouse=True)
-    def _fresh(self, fresh_db, tmp_path):
+    def _fresh(self, fresh_db, tmp_path, monkeypatch):
         state.init(tmp_path)
         state._default_instance_key = "personal"
         state._instance_key_cv.set("personal")
+        monkeypatch.setattr(work_debrief.work_launch, "proposal_policy",
+                            lambda: {"client_pr_proposals": True,
+                                     "mute_declined_proposals": True})
         yield
 
     DRAFT = "Merge PR #7 (https://github.com/acme/api/pull/7) into main."

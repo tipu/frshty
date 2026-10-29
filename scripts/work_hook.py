@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import core.correspondence as correspondence  # noqa: E402  (needs the path above)
 import core.lsp_gate as lsp_gate  # noqa: E402  (needs the path above)
+import core.sleep_gate as sleep_gate  # noqa: E402  (needs the path above)
 import core.worktree_prune_gate as worktree_prune_gate  # noqa: E402  (needs the path above)
 
 DB_PATH = os.environ.get("FRSHTY_DB") or os.path.join(os.environ.get("FRSHTY_ROOT") or os.path.expanduser("~/.frshty"), "frshty.db")
@@ -363,7 +364,10 @@ def main() -> int:
                 return 0
             if tool == "Bash":
                 command = (data.get("tool_input") or {}).get("command") or ""
-                reason = lsp_gate.bash_reason(command, data.get("transcript_path") or "")
+                reason = (lsp_gate.bash_reason(command, data.get("transcript_path") or "")
+                          or sleep_gate.bash_reason(
+                              command, bool((data.get("tool_input") or {})
+                                            .get("run_in_background"))))
                 if reason:
                     print(json.dumps({
                         "hookSpecificOutput": {
@@ -446,6 +450,7 @@ def main() -> int:
         if work_store.is_idle_stop(kind, payload):
             work_store.record_artifacts(session_id, transcript_path)
             work_store.record_progress(session_id, transcript_path)
+            work_store.record_live_check(session_id, transcript_path)
             work_store.maybe_autocontinue(session_id, transcript_path)
     except Exception as e:
         _report_hook_error(session_id, e)

@@ -4,6 +4,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
+import core.branch_sync as branch_sync
 import core.comments as comments
 import core.git_util as git_util
 import core.db as db
@@ -1912,7 +1913,8 @@ class TestTicketOwnership:
 
     def _run_check(self, tmp_path, tickets, on_comments=None):
         platform = MagicMock()
-        platform.list_my_open_prs.return_value = [make_pr(repo="svc", id=171)]
+        platform.list_my_open_prs.return_value = [
+            make_pr(repo="svc", id=171, updated_on=datetime.now(timezone.utc).isoformat())]
 
         def load(module):
             return tickets if module == "tickets" else {}
@@ -2240,3 +2242,131 @@ class TestPrWorktreeIsOwned:
 
         assert again == wt
         assert git_util.run_git(wt, ["status", "--porcelain"]).stdout == ""
+
+
+def _ago(days):
+    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+
+class TestOneRemoteListingPerRepository:
+    """The poll asked origin once per PR branch, and each call could wait 30 s
+    on a slow remote. One listing per repository must answer every PR."""
+
+    def _config(self, tmp_path):
+        return {"_state_dir": tmp_path, "_base_url": "http://base",
+                "job": {"key": "test", "platform": "github"},
+                "pr": {"auto_update_branch": True},
+                "workspace": {"repos": [], "base_branch": "main"}}
+
+    def _run(self, tmp_path, prs, repos):
+        platform = MagicMock()
+        platform.list_my_open_prs.return_value = prs
+        pr_state = {}
+        remote_calls = []
+
+        def fake_run(cmd, **kw):
+            remote_calls.append((cmd, kw.get("cwd")))
+            out = "".join(f"sha-{kw['cwd']}-{b}\trefs/heads/{b}\n" for b in ("main", "fix/a", "fix/b"))
+            return MagicMock(returncode=0, stdout=out, stderr="")
+
+        with patch("features.own_prs.make_platform", return_value=platform), \
+             patch("features.own_prs.state.load", side_effect=lambda m: pr_state if m == "own_prs" else {}), \
+             patch("features.own_prs.state.save"), \
+             patch("features.own_prs.get_repos", return_value=repos), \
+             patch("features.own_prs._cache_pr_metadata"), \
+             patch("features.own_prs._check_comments"), \
+             patch("features.own_prs._check_ci"), \
+             patch("features.own_prs._check_stale"), \
+             patch("features.own_prs._ensure_worktree", return_value=None), \
+             patch("core.branch_sync.subprocess.run", side_effect=fake_run):
+            own_prs.check(self._config(tmp_path))
+        return remote_calls, pr_state
+
+    def test_n_prs_of_one_repository_share_one_ls_remote(self, tmp_path):
+        prs = [make_pr(repo="svc", id=i, branch="fix/a", updated_on=_ago(1)) for i in range(1, 6)]
+        calls, pr_state = self._run(tmp_path, prs, [{"name": "svc", "path": "/repo/svc"}])
+        assert [c for c, _ in calls] == [["git", "ls-remote", "--heads", "origin"]]
+        assert {pr_state[f"svc/{i}"]["base_sync_sha"] for i in range(1, 6)} == {"sha-/repo/svc-main"}
+
+    def test_each_repository_is_listed_once(self, tmp_path):
+        prs = ([make_pr(repo="svc", id=i, updated_on=_ago(1)) for i in range(1, 4)]
+               + [make_pr(repo="web", id=i, updated_on=_ago(1)) for i in range(1, 3)])
+        repos = [{"name": "svc", "path": "/repo/svc"}, {"name": "web", "path": "/repo/web"}]
+        calls, pr_state = self._run(tmp_path, prs, repos)
+        assert sorted(cwd for _, cwd in calls) == ["/repo/svc", "/repo/web"]
+        assert pr_state["web/2"]["base_sync_sha"] == "sha-/repo/web-main"
+
+
+class TestInactivePrsSkipTheExpensiveWork:
+    def _run(self, tmp_path, prs):
+        platform = MagicMock()
+        platform.list_my_open_prs.return_value = prs
+        config = {"_state_dir": tmp_path, "_base_url": "http://base",
+                  "job": {"key": "test", "platform": "github"}, "workspace": {"repos": []}}
+        mocks = {}
+        with patch("features.own_prs.make_platform", return_value=platform), \
+             patch("features.own_prs.state.load", return_value={}), \
+             patch("features.own_prs.state.save") as mocks["save"], \
+             patch("features.own_prs._cache_pr_metadata") as mocks["meta"], \
+             patch("features.own_prs._check_comments") as mocks["comments"], \
+             patch("features.own_prs._check_base_fresh") as mocks["base"], \
+             patch("features.own_prs._check_ci") as mocks["ci"], \
+             patch("features.own_prs._check_stale") as mocks["stale"]:
+            own_prs.check(config)
+        return mocks
+
+    def test_a_pr_untouched_past_the_cutoff_keeps_only_its_digest_data(self, tmp_path):
+        old = make_pr(id=1, updated_on=_ago(own_prs.INACTIVE_PR_DAYS + 1))
+        fresh = make_pr(id=2, updated_on=_ago(own_prs.INACTIVE_PR_DAYS - 1))
+        mocks = self._run(tmp_path, [old, fresh])
+        assert [c.args[3]["id"] for c in mocks["comments"].call_args_list] == [2]
+        for name in ("base", "ci"):
+            assert [c.args[2]["id"] for c in mocks[name].call_args_list] == [2]
+        assert [c.args[1]["id"] for c in mocks["meta"].call_args_list] == [1, 2]
+        assert [c.args[0]["id"] for c in mocks["stale"].call_args_list] == [1, 2]
+        assert set(mocks["save"].call_args.args[1]) == {"myrepo/1", "myrepo/2"}
+
+    def test_a_pr_without_updated_on_is_treated_as_active(self, tmp_path):
+        pr = make_pr(id=3)
+        pr.pop("updated_on")
+        mocks = self._run(tmp_path, [pr])
+        mocks["comments"].assert_called_once()
+        mocks["base"].assert_called_once()
+        mocks["ci"].assert_called_once()
+
+
+class TestEnsureWorktreeFetchesOnlyOnChange:
+    def _fetches(self, config, pr, heads_cache):
+        real_run = subprocess.run
+        fetches = []
+
+        def spy(cmd, *a, **kw):
+            if cmd[:2] == ["git", "fetch"]:
+                fetches.append(cmd)
+            return real_run(cmd, *a, **kw)
+
+        with patch("features.own_prs.subprocess.run", side_effect=spy):
+            wt = own_prs._ensure_worktree(config, pr, heads_cache=heads_cache)
+        return wt, fetches
+
+    def test_unchanged_branch_is_not_fetched_and_a_moved_one_is(self, tmp_path):
+        repo = TestPrWorktreeIsOwned()._repo(tmp_path)
+        config = {"_state_dir": tmp_path / "state"}
+        pr = make_pr(repo="svc", branch="fix/thing")
+        with patch("features.own_prs.get_repos", return_value=[{"name": "svc", "path": repo}]):
+            own_prs._ensure_worktree(config, pr)
+            wt, fetches = self._fetches(config, pr, {})
+            assert fetches == []
+
+            seed = tmp_path / "seed"
+            subprocess.run(["git", "-C", str(seed), "checkout", "-q", "fix/thing"], check=True)
+            subprocess.run(["git", "-C", str(seed), "-c", "user.email=t@t", "-c", "user.name=t",
+                            "commit", "-q", "--allow-empty", "-m", "moved"], check=True)
+            subprocess.run(["git", "-C", str(seed), "push", "-q", str(tmp_path / "origin.git"),
+                            "fix/thing"], check=True)
+            moved = git_util.run_git(seed, ["rev-parse", "HEAD"]).stdout.strip()
+            wt, fetches = self._fetches(config, pr, {})
+
+        assert fetches == [["git", "fetch", "origin", "fix/thing"]]
+        assert git_util.head_sha(wt) == moved
+        assert branch_sync.remote_heads(repo)["fix/thing"] == moved

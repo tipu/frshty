@@ -19,6 +19,9 @@ same path and named by FRSHTY_ROOT, so every worktree the container registers
 in a shared repository names a path the host sees too. Its ssh/ is mounted at
 ~/.ssh. Its totp/, when present, is mounted read-only at ~/.totp for the
 totp command; it holds only the TOTP secrets of that instance's accounts.
+Its secrets/, when present, is mounted read-only at ~/.secrets for the
+secret command; it holds one file per secret of that instance, named by the
+secret, so an agent reads a password there instead of asking the operator.
 Its aws/, when present, is mounted at ~/.aws; it holds only the AWS profiles
 of that instance.
 An instance whose [slack] block names a workspace sees the slack_int checkout
@@ -355,6 +358,8 @@ def mounts(config: dict, config_path: Path, root: Path) -> list[tuple[str, str, 
            (str(config_path), f"/app/config/{key}.toml", False)]
     if (root / "totp").is_dir():
         out.append((str(root / "totp"), str(HOME / ".totp"), True))
+    if (root / "secrets").is_dir():
+        out.append((str(root / "secrets"), str(HOME / ".secrets"), True))
     if (root / "aws").is_dir():
         out.append((str(root / "aws"), str(HOME / ".aws"), False))
     workspace = _expand(config["workspace"]["root"])

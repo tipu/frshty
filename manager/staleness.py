@@ -6,11 +6,13 @@ scan_tickets writes external_status on every poll, which bumps updated_at
 status semantics instead.
 """
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import core.db as db
 import core.state as state
 from features.tickets import latest_pr_comments
+from services import work_store
 
 
 _LIMIT = 50
@@ -599,6 +601,26 @@ def timesheet_underfilled(instance_key: str, config: dict, target_hours: float =
     }]
 
 
+def client_pr_proposals_skipped(instance_key: str, hours: int = 24) -> list[dict]:
+    """The merge and review proposals on client projects that were not filed.
+
+    work_store does not file them (services/work_launch.proposal_policy), so
+    the digest is where the operator still hears of them. They come back as
+    one entity, so the digest spends one line on them however many there
+    were."""
+    rows = db.query_all(
+        "SELECT json_extract(meta, '$.objective') AS objective FROM log_events"
+        " WHERE instance_key=? AND event=? AND ts > ?"
+        " ORDER BY ts DESC LIMIT ?",
+        (instance_key, work_store.PROPOSAL_CLIENT_PR_SKIPPED_EVENT,
+         (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat(), _LIMIT),
+    )
+    if not rows:
+        return []
+    return [{"count": len(rows),
+             "examples": [(r["objective"] or "")[:140] for r in rows[:3]]}]
+
+
 def aggregate_all(instance_key: str, config: dict | None = None,
                   thresholds: dict | None = None, live: bool = False) -> dict:
     t = thresholds or {}
@@ -620,4 +642,5 @@ def aggregate_all(instance_key: str, config: dict | None = None,
         "regressions_recent":     regressions_recent(instance_key, t.get("regression_days", 7)),
         "timesheet_underfilled":  timesheet_underfilled(instance_key, cfg),
         "billcom_invoice_due":    billcom_invoice_due(instance_key, cfg, live=live),
+        "client_pr_proposals_skipped": client_pr_proposals_skipped(instance_key),
     }

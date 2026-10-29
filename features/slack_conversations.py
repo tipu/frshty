@@ -2374,12 +2374,18 @@ def propose(config: dict, instance_key: str = "", now: datetime | None = None) -
                  row["work_item_id"], work_store.DECLINED_REASON))
             if claimed.rowcount != 1:
                 continue
-            item_id = work_store.create_proposal(
-                objective, note=note, instance_key=instance_key,
-                contexts=",".join(contexts),
-                cwd=cwd, brief=brief, conn=c, now=stamp)
-            c.execute("UPDATE slack_conversations SET work_item_id = ? WHERE id = ?",
-                      (item_id, row["id"]))
+            try:
+                item_id = work_store.create_proposal(
+                    objective, note=note, instance_key=instance_key,
+                    contexts=",".join(contexts),
+                    cwd=cwd, brief=brief, conn=c, now=stamp)
+            except work_store.ProposalSuppressed:
+                item_id = None
+            else:
+                c.execute("UPDATE slack_conversations SET work_item_id = ? WHERE id = ?",
+                          (item_id, row["id"]))
+        if item_id is None:
+            continue
         if declined:
             counts["reopened"] += 1
             summary = (f"[{instance_key}] {channel} asks again after task"
