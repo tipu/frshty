@@ -90,6 +90,7 @@ An optional [container] block in the instance config tunes the container:
     slack_int = "~/slack_int"                # slack_int checkout; default ~/Documents/dev/slack_int
 """
 import argparse
+import fcntl
 import json
 import os
 import platform
@@ -99,6 +100,7 @@ import sys
 import tempfile
 import time
 import tomllib
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -646,10 +648,14 @@ def ensure() -> int:
             print(f"ensure: {config_path}: {type(e).__name__}: {e}", file=sys.stderr)
             failed.append(str(config_path))
             continue
-        if name in names or (CONTAINERS_ROOT / config["job"]["key"] / DOWN_MARKER).exists():
+        root = CONTAINERS_ROOT / config["job"]["key"]
+        if name in names or (root / DOWN_MARKER).exists():
             continue
         try:
-            r = up(config, config_path, capture=True)
+            with instance_lock(root):
+                if (root / DOWN_MARKER).exists() or name in existing_containers():
+                    continue
+                r = start(config, config_path, capture=True)
             code, error = r.returncode, (r.stderr or "").strip()
         except (SystemExit, subprocess.CalledProcessError, OSError) as e:
             code, error = 1, str(e)
@@ -664,9 +670,25 @@ def ensure() -> int:
     return 1 if failed else 0
 
 
+@contextmanager
+def instance_lock(root: Path):
+    """Hold ~/.frshty-containers/<key>/.lock, so `up`, `down` and `ensure` on
+    one instance never interleave."""
+    root.mkdir(parents=True, exist_ok=True)
+    with open(root / ".lock", "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
+
+
 def up(config: dict, config_path: Path, capture: bool = False) -> subprocess.CompletedProcess:
     root = CONTAINERS_ROOT / config["job"]["key"]
-    (root / DOWN_MARKER).unlink(missing_ok=True)
+    with instance_lock(root):
+        (root / DOWN_MARKER).unlink(missing_ok=True)
+        return start(config, config_path, capture)
+
+
+def start(config: dict, config_path: Path, capture: bool = False) -> subprocess.CompletedProcess:
+    root = CONTAINERS_ROOT / config["job"]["key"]
     cmd = run_args(config, config_path, check=False)
     subprocess.run(["docker", "rm", "-f", container_name(config)], capture_output=True)
     prepare_db_volume(config, root, move=True)
@@ -675,9 +697,9 @@ def up(config: dict, config_path: Path, capture: bool = False) -> subprocess.Com
 
 def down(config: dict) -> int:
     root = CONTAINERS_ROOT / config["job"]["key"]
-    root.mkdir(parents=True, exist_ok=True)
-    (root / DOWN_MARKER).write_text(datetime.now(timezone.utc).isoformat() + "\n")
-    return subprocess.run(["docker", "rm", "-f", container_name(config)]).returncode
+    with instance_lock(root):
+        (root / DOWN_MARKER).write_text(datetime.now(timezone.utc).isoformat() + "\n")
+        return subprocess.run(["docker", "rm", "-f", container_name(config)]).returncode
 
 
 def main(argv: list[str] | None = None) -> int:

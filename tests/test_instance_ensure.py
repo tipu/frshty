@@ -22,11 +22,11 @@ def setup(monkeypatch, tmp_path, existing: str, up_code: int = 0):
         cmd, 0, stdout=existing, stderr=""))
     ups = []
 
-    def up(config, config_path, capture=False):
+    def start(config, config_path, capture=False):
         ups.append((config["job"]["key"], config_path, capture))
         return subprocess.CompletedProcess([], up_code, stdout="", stderr="boom" if up_code else "")
 
-    monkeypatch.setattr(instance, "up", up)
+    monkeypatch.setattr(instance, "start", start)
     return ups
 
 
