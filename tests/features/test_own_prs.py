@@ -1025,7 +1025,7 @@ class TestFixComment:
         platform.resolve_comment.assert_not_called()
         mock_err.assert_called_once()
 
-    def test_no_changes_marks_error_not_resolved(self, tmp_path):
+    def test_no_changes_hands_the_comment_over_not_resolved(self, tmp_path):
         platform = MagicMock()
         config = {"_state_dir": tmp_path, "_base_url": "http://base", "job": {"key": "test"}}
 
@@ -1034,6 +1034,7 @@ class TestFixComment:
              patch("features.own_prs.run_claude_code", return_value="done"), \
              patch("features.own_prs._commit_fix", return_value=(False, "no changes produced")), \
              patch("features.own_prs.comments.mark_comment_error") as mock_err, \
+             patch("features.own_prs.comments.mark_comment_manual") as mock_manual, \
              patch("features.own_prs.comments.mark_comment_processed") as mock_proc, \
              patch("features.own_prs.log.emit"):
             ok, reason = own_prs.fix_comment(config, self._payload())
@@ -1042,7 +1043,8 @@ class TestFixComment:
         assert reason == "no changes produced"
         platform.push_branch.assert_not_called()
         platform.resolve_comment.assert_not_called()
-        mock_err.assert_called_once()
+        mock_err.assert_not_called()
+        mock_manual.assert_called_once()
         mock_proc.assert_not_called()
 
     def test_commit_failure_marks_error_not_resolved(self, tmp_path):
@@ -1308,7 +1310,7 @@ class TestFixCommentsBatch:
         mock_comments.mark_comment_deferred.assert_called_once()
         assert any(call.args[0] == "pr_comment_provider_failed" for call in mock_emit.call_args_list)
 
-    def test_no_changes_marks_all_error(self, tmp_path):
+    def test_no_changes_hands_all_over(self, tmp_path):
         platform = MagicMock()
         platform.get_pr_comments.return_value = [
             make_comment(id=10, author_id="r1", body="Fix this"),
@@ -1327,7 +1329,8 @@ class TestFixCommentsBatch:
         assert reason == "no changes produced"
         platform.push_branch.assert_not_called()
         platform.resolve_comment.assert_not_called()
-        assert mock_comments.mark_comment_error.call_count == 2
+        mock_comments.mark_comment_error.assert_not_called()
+        assert mock_comments.mark_comment_manual.call_count == 2
 
     def test_skips_resolved_and_deleted_comments(self, tmp_path):
         platform = MagicMock()

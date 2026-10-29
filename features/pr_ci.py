@@ -36,6 +36,14 @@ KEEP_GREEN_RULE = (
     "pyproject.toml. A change that turns a passing check red is not a fix. Do not push it."
 )
 
+FILE_TOOLS_KEEP_GREEN_RULE = (
+    "Make the change with the file tools, then stop. frshty stages, commits and pushes "
+    "your edits after you stop, so you do not need git. This run can refuse shell "
+    "commands. When it refuses git, lint or a test, do not try again, do not ask for "
+    "approval and do not wait: make the smallest edit that keeps the passing checks green, "
+    "and CI runs them on the push. A change that turns a passing check red is not a fix."
+)
+
 
 def green_check_names(checks) -> list[str]:
     """Names of the checks reported as passed right now."""
