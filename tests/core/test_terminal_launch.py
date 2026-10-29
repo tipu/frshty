@@ -71,6 +71,18 @@ class TestLaunchPaneCommand:
         assert "PLAYWRIGHT_MCP_SANDBOX=false" in args
         assert args[args.index("PLAYWRIGHT_MCP_SANDBOX=false") - 1] == "-e"
 
+    @pytest.mark.parametrize("exists", [False, True])
+    def test_opencode_in_the_pane_skips_claude_md(self, monkeypatch, tmp_path, exists):
+        monkeypatch.setattr(terminal, "_tmux_session_exists", lambda name: exists)
+        run = MagicMock(return_value=subprocess.CompletedProcess([], 0, "", ""))
+        monkeypatch.setattr(terminal.subprocess, "run", run)
+
+        terminal.launch_pane_command("work-9", str(tmp_path), "claude")
+
+        args = run.call_args_list[0].args[0]
+        assert args[args.index("OPENCODE_DISABLE_CLAUDE_CODE=1") - 1] == "-e"
+        assert run.call_args_list[0].kwargs["env"]["OPENCODE_DISABLE_CLAUDE_CODE"] == "1"
+
     def test_the_agent_runs_under_the_task_display(self):
         command = terminal.with_task_display("claude --resume 'a b'")
         argv = shlex.split(command)

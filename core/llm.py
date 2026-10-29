@@ -1081,6 +1081,8 @@ CODEX_EXEC = ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox",
               "--skip-git-repo-check"]
 DEEPSEEK_REVIEWER_MODEL = "openrouter/deepseek/deepseek-v4.1-flash"
 DEEPSEEK_RUN = ["opencode", "run", "-m", DEEPSEEK_REVIEWER_MODEL]
+DEEPSEEK_ENV = {"OPENCODE_DISABLE_CLAUDE_CODE": "1"}
+DEEPSEEK_SHELL = f"OPENCODE_DISABLE_CLAUDE_CODE=1 opencode run -m {DEEPSEEK_REVIEWER_MODEL}"
 
 
 def run_external_model(cmd: list[str], *, fn_name: str, model: str, prompt: str,
