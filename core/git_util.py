@@ -859,6 +859,19 @@ def head_sha(worktree) -> str:
         return ""
 
 
+def remote_ref_sha(worktree, branch: str) -> str:
+    """The sha the local origin/<branch> ref holds, or "" when git cannot say.
+
+    A caller compares it with the head origin reports to skip a fetch that
+    would bring nothing new. "" never matches a real sha, so an unreadable
+    ref falls through to the fetch."""
+    try:
+        return run_git(worktree, ["rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}"],
+                       allowed_codes=(0, 1), timeout=30).stdout.strip()
+    except (GitCommandError, subprocess.SubprocessError, OSError):
+        return ""
+
+
 AGENT_COMMIT_REFLOG_PREFIXES = ("commit:", "commit (amend):", "commit (initial):")
 REFLOG_SCAN_DEPTH = 50
 

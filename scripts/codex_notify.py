@@ -82,6 +82,8 @@ def main(argv: list[str]) -> int:
         work_store.record_artifacts(session_id, transcript, texts=[message])
         work_store.record_progress(session_id, transcript)
         work_store.record_progress(session_id, transcript, texts=[message])
+        work_store.record_live_check(session_id, transcript)
+        work_store.record_live_check(session_id, transcript, texts=[message])
         work_store.maybe_autocontinue(session_id, transcript, tail=message)
     except Exception as e:
         _report_hook_error(session_id, e)

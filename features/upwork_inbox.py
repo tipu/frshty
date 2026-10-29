@@ -1262,13 +1262,17 @@ def propose(config: dict, instance_key: str = "",
             if claimed.rowcount != 1:
                 continue
             if needs_reply:
-                item_id = work_store.create_proposal(
-                    objective, note=note, instance_key=instance_key,
-                    contexts=",".join(contexts),
-                    cwd=cwd, brief=brief, conn=c, now=stamp)
-                c.execute("UPDATE upwork_rooms SET work_item_id = ? WHERE id = ?",
-                          (item_id, row["id"]))
-        if not needs_reply:
+                try:
+                    item_id = work_store.create_proposal(
+                        objective, note=note, instance_key=instance_key,
+                        contexts=",".join(contexts),
+                        cwd=cwd, brief=brief, conn=c, now=stamp)
+                except work_store.ProposalSuppressed:
+                    item_id = None
+                else:
+                    c.execute("UPDATE upwork_rooms SET work_item_id = ? WHERE id = ?",
+                              (item_id, row["id"]))
+        if not needs_reply or item_id is None:
             continue
         if previous:
             summary = (f"[{instance_key}] {_room_label(row)} wrote again after"
@@ -1383,10 +1387,13 @@ def _raise_alert(instance_key: str, runs: int, error: str,
         instance=instance_key or "(unknown)", task=SCAN_TASK, runs=runs,
         error=error or "(none recorded)")
     contexts = [c for c in (instance_key, UPWORK_TAG) if c]
-    item_id = work_store.create_proposal(
-        objective, note=note, instance_key=instance_key,
-        contexts=",".join(contexts), cwd=_cwd_for(FRSHTY_PROJECT),
-        brief=brief, now=_iso(now))
+    try:
+        item_id = work_store.create_proposal(
+            objective, note=note, instance_key=instance_key,
+            contexts=",".join(contexts), cwd=_cwd_for(FRSHTY_PROJECT),
+            brief=brief, now=_iso(now))
+    except work_store.ProposalSuppressed:
+        return None
     blob = state.load(OUTAGE_STATE_MODULE)
     blob["open"] = {**(blob.get("open") or {}), instance_key: item_id}
     blob["last"] = {**(blob.get("last") or {}), instance_key: item_id}

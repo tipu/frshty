@@ -18,6 +18,7 @@ import core.db as db
 import core.llm as llm
 import core.log as log
 import core.loops as loops
+import core.redact as redact
 import core.tmux as tmux_target
 from services import work_artifacts
 
@@ -28,6 +29,8 @@ RUN_CHECK_IN_MINUTES = 73
 RUN_BUDGET_MINUTES = 240
 BOARD_INSTANCE_KEY = core_config.BOARD_INSTANCE_KEY
 BG_WAIT_RECHECK_HOURS = 2
+CI_WAIT_RECHECK_HOURS = 6
+CI_WAIT_RE = re.compile(r"\bwaiting on PR #(\d+) checks\b", re.IGNORECASE)
 PROPOSED_STATE = "proposed"
 DECLINED_REASON = "Proposal declined"
 GROUPS = ("proposed", "needs_ack", "needs_you", "agent_working", "waiting_external",
@@ -51,6 +54,7 @@ DONE_MARKER = "WORK_DONE"
 REVIEW_OBJECTIVE_PREFIX = "Review pull request #"
 ARTIFACT_MARKER = "ARTIFACT:"
 PROGRESS_MARKER = "PROGRESS:"
+LIVE_CHECK_MARKER = "LIVE_CHECK:"
 _IMAGE_ID_RE = re.compile(r"^(\d+)-(\d+)$")
 _IMAGE_MEDIA_RE = re.compile(r"^image/[a-z0-9.+-]+$")
 _MAX_IMAGE_BASE64 = 64 * 1024 * 1024
@@ -82,6 +86,17 @@ PROGRESS_RULE = (
     f"work, print one line starting {PROGRESS_MARKER} that names what you "
     "just established and what you are doing next. "
 )
+LIVE_CHECK_RULE = (
+    "When your change is deployed, print one line starting "
+    f"{LIVE_CHECK_MARKER} followed by one command that exits 0 when the "
+    "deployed change still has its effect and non-zero when it does not. The "
+    "board runs that command once, a day after you print it, in the shared "
+    "checkout of the repository, without a shell and with a two-minute "
+    "timeout, and reopens this task with its output when it fails. Make it "
+    "read only: it must change no file, no branch and no live state. When the "
+    "check needs a pipe or `&&`, write it as `bash -c '...'`. Skip the line "
+    "when the task changed nothing that runs. "
+)
 RUN_BUDGET_RULE = (
     f"This run has a wall-clock budget of {RUN_BUDGET_MINUTES // 60} hours. "
     f"After {RUN_CHECK_IN_MINUTES} minutes the board asks you to check in. "
@@ -110,6 +125,12 @@ CONFER_RULE = (
     f"`{llm.DEEPSEEK_SHELL} \"<prompt>\" < /dev/null` with the same "
     "prompt the other voices get, and weigh its answer like theirs. opencode "
     "waits for its standard input to close, so keep the redirect. "
+)
+SECRET_RULE = (
+    "Before you ask the operator for a password, a key or a token, run "
+    "`python3 /app/scripts/secret.py` to list the secrets this instance holds, "
+    "then `python3 /app/scripts/secret.py <name>` to print one. Ask only for a "
+    "secret that is not listed there, or for a one-time code. "
 )
 TLDR_LONG_WORDS = 1200
 TLDR_RULE = (
@@ -145,7 +166,7 @@ CONTINUE_PROMPT_TEMPLATE = (
     "their answer arrives as your next message, resume work from it. "
     "Use that same tool for anything only the operator can supply — a "
     "secret, a one-time code, an approval — not only for a decision. A "
-    "request written in prose does not reach the operator. "
+    "request written in prose does not reach the operator. " + SECRET_RULE +
     "{correspondence}"
     "Write any report, summary or other prose document for the operator as a "
     "self-contained .html file, never as Markdown or plain text. " + TLDR_RULE +
@@ -398,7 +419,7 @@ def create_item(objective: str, scope: str = "ad-hoc", scope_ref: str = "",
             "INSERT INTO work_items(objective, scope, scope_ref, instance_key, contexts, "
             "source_item_id, worktree_opt_out, critical, standup_item_id, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (objective, scope, scope_ref, instance_key, contexts, source_item_id,
+            (redact.redact_secrets(objective), scope, scope_ref, instance_key, contexts, source_item_id,
              1 if worktree_opt_out else 0, 1 if critical else 0, standup_item_id, now, now),
         )
         return cur.lastrowid
@@ -410,11 +431,186 @@ class ProposalKeyHeld(Exception):
         self.holder = holder
 
 
+DECLINE_HOLD_DAYS = 7
+MUTE_WINDOW = 20
+MUTE_DECLINED_SHARE = 0.8
+PROPOSAL_DECLINE_HELD_EVENT = "proposal_decline_held"
+PROPOSAL_CLIENT_PR_SKIPPED_EVENT = "proposal_client_pr_skipped"
+PROPOSAL_CLASS_MUTED_EVENT = "proposal_class_muted"
+SUPPRESSED_EVENT_QUIET_HOURS = 24
+OTHER_CLASS = "other"
+_TAG_PREFIX = r"^(?:\[[^\]]*\]\s*)?"
+_PR_REF_RE = re.compile(r"\bPRs?\b|\bpull[ -]requests?\b|#\d+|/pull(?:-requests)?/\d+",
+                        re.IGNORECASE)
+_PROPOSAL_CLASSES = (
+    ("merge_pr", re.compile(_TAG_PREFIX + r"(?:merge|approve)\b", re.IGNORECASE), True),
+    ("review_pr", re.compile(_TAG_PREFIX + r"review\b", re.IGNORECASE), True),
+    ("follow_up_person", re.compile(r"^follow[ -]up with\b", re.IGNORECASE), False),
+    ("health_doctor", re.compile(r"^(?:\[[^\]]*\]|doctor\b|restore\b)", re.IGNORECASE), False),
+)
+CLIENT_PR_CLASSES = ("merge_pr", "review_pr")
+
+
+class ProposalSuppressed(ProposalKeyHeld):
+    """A proposal the board refused to file, and why.
+
+    It is a ProposalKeyHeld so every caller that already treats a duplicate
+    as "not filed" treats this the same way. `event` names the rule, and
+    `holder` is the declined proposal behind it, {} when no single one is.
+    create_proposal fills in the objective and the instance, so a caller can
+    report the refusal again with report_suppressed."""
+    def __init__(self, event: str, detail: str, holder: dict | None = None,
+                 proposal_class: str = ""):
+        Exception.__init__(self, detail)
+        self.event = event
+        self.holder = holder or {}
+        self.proposal_class = proposal_class
+        self.objective = ""
+        self.instance_key: str | None = None
+
+
+def proposal_class(objective: str | None) -> str:
+    """The class of a proposal, read off the first words of its objective.
+
+    merge_pr and review_pr ask the operator to merge, approve or review a
+    pull request, and the objective has to name one. follow_up_person is the
+    "Follow up with <person>" card the inboxes file, and health_doctor is a
+    "Doctor ..." or "Restore ..." card or one global_watch filed, which tags
+    the instance in brackets. Everything else is OTHER_CLASS, which is never
+    muted."""
+    text = " ".join((objective or "").split())
+    for name, pattern, needs_pr in _PROPOSAL_CLASSES:
+        if pattern.search(text) and (not needs_pr or _PR_REF_RE.search(text)):
+            return name
+    return OTHER_CLASS
+
+
+def _held_by_decline(c, objective: str, instance_key: str | None,
+                     source_item_id: int | None) -> dict | None:
+    """The newest proposal of the same normalized objective the operator
+    declined on this instance within DECLINE_HOLD_DAYS, or None.
+
+    A follow-up counts only against declines of follow-ups of the same task:
+    two tasks can leave the same generic step ("open the pull request for the
+    pushed branch") on two different branches."""
+    wanted = loops.normalize_objective(objective)
+    if not wanted:
+        return None
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=DECLINE_HOLD_DAYS)).isoformat()
+    rows = c.execute(
+        "SELECT id, state, stop_reason, objective FROM work_items WHERE scope='proposal'"
+        " AND state=? AND stop_reason=? AND instance_key IS ? AND source_item_id IS ?"
+        " AND archived_at>=? ORDER BY id DESC",
+        (CANCELED_STATE, DECLINED_REASON, instance_key, source_item_id, cutoff)).fetchall()
+    for r in rows:
+        if loops.normalize_objective(r["objective"]) == wanted:
+            return {"id": r["id"], "state": r["state"], "stop_reason": r["stop_reason"]}
+    return None
+
+
+def _class_muted(c, klass: str, instance_key: str | None) -> dict | None:
+    """The newest declined proposal of this class when the operator declined
+    more than MUTE_DECLINED_SHARE of its last MUTE_WINDOW decided proposals on
+    this instance, else None. A class with fewer than MUTE_WINDOW decided
+    proposals is never muted. A proposal still waiting is not decided, and
+    one a newer debrief withdrew was never the operator's call."""
+    rows = c.execute(
+        "SELECT id, state, stop_reason, objective FROM work_items WHERE scope='proposal'"
+        " AND instance_key IS ? AND state != ? AND COALESCE(stop_reason, '') != ?"
+        " ORDER BY id DESC",
+        (instance_key, PROPOSED_STATE, SUPERSEDED_REASON))
+    window = []
+    for r in rows:
+        if proposal_class(r["objective"]) == klass:
+            window.append(r)
+            if len(window) == MUTE_WINDOW:
+                break
+    if len(window) < MUTE_WINDOW:
+        return None
+    declined = [r for r in window
+                if r["state"] == CANCELED_STATE and r["stop_reason"] == DECLINED_REASON]
+    if len(declined) <= MUTE_DECLINED_SHARE * MUTE_WINDOW:
+        return None
+    newest = declined[0]
+    return {"id": newest["id"], "state": newest["state"], "stop_reason": newest["stop_reason"],
+            "declined": len(declined)}
+
+
+def _refuse_proposal(c, objective: str, instance_key: str | None, contexts: str,
+                     source_item_id: int | None = None,
+                     decline_hold: bool = True) -> None:
+    """Raise ProposalSuppressed when a rule says this proposal is not filed.
+
+    A decline holds the same objective for DECLINE_HOLD_DAYS: the operator
+    declined the same nag 65 times on one board. A caller that holds a
+    declined conversation by rules of its own passes decline_hold=False. A
+    merge or review of a client pull request is not filed unless the board's
+    [work] client_pr_proposals says so. A class the operator keeps declining
+    is muted unless [work] mute_declined_proposals is false. work_launch is
+    imported here rather than at the top because work_launch imports this
+    module."""
+    from services import work_launch
+    holder = (_held_by_decline(c, objective, instance_key, source_item_id)
+              if decline_hold else None)
+    if holder is not None:
+        raise ProposalSuppressed(
+            PROPOSAL_DECLINE_HELD_EVENT,
+            f"the operator declined the same objective as work item #{holder['id']} "
+            f"less than {DECLINE_HOLD_DAYS} days ago", holder)
+    klass = proposal_class(objective)
+    if klass == OTHER_CLASS:
+        return
+    policy = work_launch.proposal_policy()
+    clients = (work_launch.client_projects(contexts)
+               if klass in CLIENT_PR_CLASSES and not policy["client_pr_proposals"] else [])
+    if clients:
+        raise ProposalSuppressed(
+            PROPOSAL_CLIENT_PR_SKIPPED_EVENT,
+            f"a {klass} proposal on a client project ({', '.join(clients)}) is not filed",
+            proposal_class=klass)
+    if not policy["mute_declined_proposals"]:
+        return
+    muted = _class_muted(c, klass, instance_key)
+    if muted is not None:
+        raise ProposalSuppressed(
+            PROPOSAL_CLASS_MUTED_EVENT,
+            f"proposal class {klass} is muted: the operator declined {muted['declined']} "
+            f"of its last {MUTE_WINDOW} proposals", muted, klass)
+
+
+def report_suppressed(conn, e: ProposalSuppressed) -> None:
+    """Emit one event for a proposal that was not filed.
+
+    A source that finds the same work on every scan asks again on every scan,
+    so the same rule and objective are reported once per
+    SUPPRESSED_EVENT_QUIET_HOURS. `conn` is the caller's open transaction, or
+    None to write on a connection of its own. create_proposal reports every
+    refusal. A caller whose transaction rolls back after it caught one calls
+    this again with None, because the rollback took the event with it."""
+    objective = e.objective
+    key = loops.normalize_objective(objective)
+    since = (datetime.now(timezone.utc)
+             - timedelta(hours=SUPPRESSED_EVENT_QUIET_HOURS)).isoformat()
+    sql = ("SELECT 1 AS present FROM log_events WHERE event=? AND instance_key=?"
+           " AND json_extract(meta, '$.objective_key')=? AND ts>=? LIMIT 1")
+    feed = e.instance_key or BOARD_INSTANCE_KEY
+    params = (e.event, feed, key, since)
+    seen = (conn.execute(sql, params).fetchone() if conn is not None
+            else db.query_one(sql, params))
+    if seen:
+        return
+    log.emit(e.event, f"proposal not filed: {e}: {objective[:160]}",
+             meta={"objective_key": key, "objective": objective[:300],
+                   "proposal_class": e.proposal_class or proposal_class(objective),
+                   "held_by": e.holder.get("id")},
+             instance_key=feed, conn=conn)
+
+
 def create_proposal(objective: str, note: str = "", instance_key: str | None = None,
                     contexts: str = "", cwd: str = "",
                     brief: str = "", conn=None, now: str | None = None,
                     source_item_id: int | None = None, critical: bool = False,
-                    proposal_key: str = "") -> int:
+                    proposal_key: str = "", decline_hold: bool = True) -> int:
     """Put a task on the board that no agent has started.
 
     frshty writes this when it decides by itself that something needs doing.
@@ -438,31 +634,46 @@ def create_proposal(objective: str, note: str = "", instance_key: str | None = N
     `proposal_key` names the piece of work the proposal asks for. When
     proposal_holding_key finds another proposal of that work, nothing is
     written and ProposalKeyHeld names it. The check and the insert share one
-    transaction, so two callers cannot both open the same work."""
-    if conn is not None:
-        return _insert_proposal(conn, objective, note, instance_key, contexts,
-                                cwd, brief, now, source_item_id, critical,
-                                proposal_key)
-    with db.tx() as c:
-        return _insert_proposal(c, objective, note, instance_key, contexts,
-                                cwd, brief, now, source_item_id, critical,
-                                proposal_key)
+    transaction, so two callers cannot both open the same work.
+
+    A proposal that _refuse_proposal turns away is not written either, and
+    ProposalSuppressed says which rule refused it. The event that reports it
+    is written after this call's own transaction closes, or on `conn`, so a
+    caller that catches the refusal inside its transaction keeps the event.
+    `decline_hold` False skips the DECLINE_HOLD_DAYS rule for a caller that
+    holds a declined conversation by rules of its own."""
+    try:
+        if conn is not None:
+            return _insert_proposal(conn, objective, note, instance_key, contexts,
+                                    cwd, brief, now, source_item_id, critical,
+                                    proposal_key, decline_hold)
+        with db.tx() as c:
+            return _insert_proposal(c, objective, note, instance_key, contexts,
+                                    cwd, brief, now, source_item_id, critical,
+                                    proposal_key, decline_hold)
+    except ProposalSuppressed as e:
+        e.objective = objective
+        e.instance_key = instance_key
+        report_suppressed(conn, e)
+        raise
 
 
 def _insert_proposal(c, objective: str, note: str, instance_key: str | None,
                      contexts: str, cwd: str, brief: str,
                      now: str | None = None, source_item_id: int | None = None,
-                     critical: bool = False, proposal_key: str = "") -> int:
+                     critical: bool = False, proposal_key: str = "",
+                     decline_hold: bool = True) -> int:
     now = now or _now()
     holder = proposal_holding_key(c, proposal_key)
     if holder is not None:
         raise ProposalKeyHeld(holder)
+    _refuse_proposal(c, objective, instance_key, contexts, source_item_id, decline_hold)
     cur = c.execute(
         "INSERT INTO work_items(objective, scope, instance_key, contexts, "
         "state, current_checkpoint, launch_cwd, launch_brief, source_item_id, "
         "critical, proposal_key, created_at, updated_at) "
         "VALUES (?, 'proposal', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (objective, instance_key, contexts, PROPOSED_STATE, note, cwd,
+        (redact.redact_secrets(objective), instance_key, contexts, PROPOSED_STATE, note, cwd,
          brief, source_item_id, 1 if critical else 0, proposal_key, now, now),
     )
     item_id = cur.lastrowid
@@ -495,7 +706,8 @@ def claim_proposal(item_id: int, objective: str | None = None) -> bool:
         claimed = c.execute(
             "UPDATE work_items SET state = 'agent_working', updated_at = ?, "
             "objective = COALESCE(?, objective) "
-            "WHERE id = ? AND state = ?", (now, objective, item_id, PROPOSED_STATE))
+            "WHERE id = ? AND state = ?",
+            (now, redact.redact_secrets(objective), item_id, PROPOSED_STATE))
         if claimed.rowcount != 1:
             return False
         c.execute(
@@ -774,6 +986,7 @@ def record_event(session_id: str, kind: str, payload: dict) -> bool:
     if kind == "SessionStart" and payload.get("source") == "resume":
         run_status, item_state = None, None
     bg_pending = False
+    ci_waiting = False
     if item_state == "needs_you" and is_idle_stop(kind, payload):
         transcript_path = payload.get("transcript_path") or ""
         tail = last_assistant_text(transcript_path)
@@ -781,6 +994,7 @@ def record_event(session_id: str, kind: str, payload: dict) -> bool:
         finished = bool(final_lines) and final_lines[-1] == DONE_MARKER
         if not finished and not _blocked_on_operator(tail):
             bg_pending = bool(pending_background_tasks(transcript_path))
+            ci_waiting = bool(CI_WAIT_RE.search(tail))
     permission = ""
     permission_closed = False
     if kind != "UserPromptSubmit":
@@ -810,7 +1024,7 @@ def record_event(session_id: str, kind: str, payload: dict) -> bool:
         c.execute(
             "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
-            (run["work_item_id"], run["id"], kind, db.dump_json(payload), now),
+            (run["work_item_id"], run["id"], kind, db.dump_json(redact.redact_json(payload)), now),
         )
         run_sets = ["transcript_path = COALESCE(NULLIF(?, ''), transcript_path)",
                     "transcript_cursor = MAX(transcript_cursor, ?)"]
@@ -824,6 +1038,8 @@ def record_event(session_id: str, kind: str, payload: dict) -> bool:
         run_params.append(run["id"])
         c.execute(f"UPDATE work_runs SET {', '.join(run_sets)} WHERE id = ?", tuple(run_params))
         if item["state"] in CLOSED_STATES:
+            return True
+        if ci_waiting and not permission and item["state"] == "waiting_external":
             return True
         if item_state:
             reason = ""
@@ -965,6 +1181,7 @@ def record_question(session_id: str, tool_input: dict) -> str:
     questions = [q for q in questions if isinstance(q, dict) and (q.get("question") or "").strip()]
     if not questions:
         return ""
+    questions = redact.redact_json(questions)
     now = _now()
     with db.tx() as c:
         run = c.execute(
@@ -1061,8 +1278,11 @@ def apply_action(item_id: int, action: str, until: str | None = None) -> dict:
             if item["state"] != "needs_ack":
                 return {"error": "only an agent-reported task can be acknowledged"}
             c.execute("UPDATE work_items SET state = 'done', stop_reason = '', "
-                      "pending_question = '', updated_at = ? WHERE id = ?",
-                      (now, item_id))
+                      "pending_question = '', archived_at = ?, updated_at = ? WHERE id = ?",
+                      (now, now, item_id))
+            c.execute(
+                "INSERT INTO work_events(work_item_id, kind, payload, created_at) "
+                "VALUES (?, 'operator_archive', '{}', ?)", (item_id, now))
         elif action == "decline":
             if item["state"] != PROPOSED_STATE:
                 return {"error": "only a proposed task can be declined"}
@@ -1507,6 +1727,48 @@ def record_progress(session_id: str, transcript_path: str,
     return newest
 
 
+def record_live_check(session_id: str, transcript_path: str,
+                      texts: list[str] | None = None) -> str:
+    """Store the newest LIVE_CHECK: command of a run on its item.
+
+    At least 25 frshty-board tasks reopened a fix that looked done and did
+    not hold a day later. The agent names the command that proves its live
+    effect, and `services.live_check` runs it once after a day. A new
+    command clears the last result, so the next fix gets its own run.
+    Returns the command it stored, or "" when there is none or it is
+    already stored."""
+    source = _assistant_texts(transcript_path) if texts is None else texts
+    newest = ""
+    for text in source:
+        for line in text.splitlines():
+            idx = line.find(LIVE_CHECK_MARKER)
+            if idx >= 0:
+                newest = line[idx + len(LIVE_CHECK_MARKER):].strip().strip("`").strip()[:1000]
+    if not newest:
+        return ""
+    with db.tx() as c:
+        run = c.execute(
+            "SELECT id, work_item_id FROM work_runs WHERE session_id = ?", (session_id,)
+        ).fetchone()
+        if not run:
+            return ""
+        item = c.execute("SELECT live_check FROM work_items WHERE id = ?",
+                         (run["work_item_id"],)).fetchone()
+        if not item or item["live_check"] == newest:
+            return ""
+        now = _now()
+        c.execute("UPDATE work_items SET live_check = ?, live_check_set_at = ?, "
+                  "live_check_ran_at = NULL, live_check_exit = NULL, "
+                  "live_check_output = '' WHERE id = ?",
+                  (newest, now, run["work_item_id"]))
+        c.execute(
+            "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+            "VALUES (?, ?, 'live_check_recorded', ?, ?)",
+            (run["work_item_id"], run["id"], db.dump_json({"command": newest}), now),
+        )
+    return newest
+
+
 USAGE_FUNCTION = "work_task"
 USAGE_WINDOW_DAYS = 7
 
@@ -1918,6 +2180,39 @@ def _blocked_on_operator(text: str) -> bool:
     return _ends_on_a_question(text) or _asks_operator(text)
 
 
+_CHECKPOINT_LINE_RE = re.compile(r"^checkpoint\s*[:\-\u2014]\s*(\S.*)$", re.IGNORECASE)
+_OPEN_CHECKPOINT_RE = re.compile(
+    r"\b(?:block\w*|wait\w*|pending|remain\w*|left|next|need\w*|until|once|"
+    r"todo|you|your|paus\w*|stuck|fail\w*|unfinished|not|cannot|can't|still|"
+    r"partial\w*|later|follow-?up|running|progress|ongoing|queued|retry\w*|again|"
+    r"outstanding|incomplete|missing|open|await\w*|defer\w*|skip\w*|tbd|wip|"
+    r"un(?:merged|deployed|pushed|committed|tested|released|verified|resolved))\b",
+    re.IGNORECASE)
+
+
+_NEGATED_RE = re.compile(r"\b(?:no|nothing|none|zero)(?:[ \t]+[\w-]+){1,2}", re.IGNORECASE)
+
+
+def _closes_on_checkpoint(text: str) -> bool:
+    """Whether the agent ended its turn on a checkpoint that reports the work closed.
+
+    The launch prompt asks for a one-line checkpoint when the agent stops and
+    for WORK_DONE when the objective is met. Agents often write the first and
+    forget the second, and the operator then typed "echo WORK_DONE" to close a
+    task whose work was already finished. Only a last line that starts with
+    "Checkpoint:" counts. On the frshty board the two such lines found both
+    reported a task that was waiting on the operator ("blocked on your
+    login", "waiting for your build decision"), so a checkpoint that names
+    anything open, blocked, waiting or addressed to the operator never closes
+    the task, and neither does a message that ends on a question or asks the
+    operator for something."""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    if not lines or _blocked_on_operator(text):
+        return False
+    m = _CHECKPOINT_LINE_RE.match(lines[-1].strip(_TRAILING_EMPHASIS + "> "))
+    return bool(m) and not _OPEN_CHECKPOINT_RE.search(_NEGATED_RE.sub(" ", m.group(1)))
+
+
 def _record_stop(c, run: dict, outcome: str, reason: str, now: str) -> None:
     """Write down why the board stopped pushing this item forward.
 
@@ -1942,11 +2237,13 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
     tail = last_assistant_text(transcript_path) if tail is None else tail.strip()
     final_lines = [ln.strip() for ln in tail.splitlines() if ln.strip()]
     finished = bool(final_lines) and final_lines[-1] == DONE_MARKER
+    by_checkpoint = not finished and _closes_on_checkpoint(tail)
     # Reading the transcript for background work happens before the
     # transaction, because it opens a file, and it is skipped for a turn that
     # is finished or is waiting on the operator, which are decided first.
     bg_pending = (not finished and not _blocked_on_operator(tail)
                   and bool(pending_background_tasks(transcript_path)))
+    finished = finished or (by_checkpoint and not bg_pending)
     now = _now()
     with db.tx() as c:
         run = c.execute(
@@ -1982,7 +2279,9 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
             c.execute(
                 "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
                 "VALUES (?, ?, 'self_reported_done', ?, ?)",
-                (run["work_item_id"], run["id"], db.dump_json({"tail": excerpt}), now),
+                (run["work_item_id"], run["id"],
+                 db.dump_json({"tail": excerpt, "marker": "checkpoint" if by_checkpoint
+                               else DONE_MARKER}), now),
             )
             if not auto_ack:
                 return "needs_ack"
@@ -2004,6 +2303,22 @@ def maybe_autocontinue(session_id: str, transcript_path: str, tail: str | None =
                 (run["work_item_id"], run["id"], now),
             )
             return "question"
+        ci_wait = CI_WAIT_RE.search(tail)
+        if ci_wait:
+            pr = int(ci_wait.group(1))
+            c.execute(
+                "UPDATE work_items SET state = 'waiting_external', snoozed_until = ?, "
+                "stop_reason = ?, updated_at = ? WHERE id = ?",
+                ((datetime.now(timezone.utc)
+                  + timedelta(hours=CI_WAIT_RECHECK_HOURS)).isoformat(),
+                 f"Waiting on PR #{pr} checks", now, run["work_item_id"]),
+            )
+            c.execute(
+                "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
+                "VALUES (?, ?, 'ci_wait', ?, ?)",
+                (run["work_item_id"], run["id"], db.dump_json({"pr": pr}), now),
+            )
+            return "ci_wait"
         if bg_pending:
             # A turn that ends on a background task is not idle work the
             # board can push forward. Ten items reached the continuation cap
@@ -2138,7 +2453,7 @@ def reply(item_id: int, text: str, question: str | None = None) -> dict:
         c.execute(
             "INSERT INTO work_events(work_item_id, work_run_id, kind, payload, created_at) "
             "VALUES (?, ?, 'operator_reply', ?, ?)",
-            (item_id, run["id"], db.dump_json({"text": text[:500]}), now),
+            (item_id, run["id"], db.dump_json({"text": redact.redact_secrets(text)[:500]}), now),
         )
     return {"id": item_id, "action": "reply"}
 
@@ -2585,8 +2900,10 @@ def grouped_items(now: datetime | None = None, q: str = "",
     made a task the operator turned down read as a task frshty finished.
 
     A task the agent reported done lands in needs_ack, not in done. The
-    operator acknowledges it to complete it, or archives it, which
-    acknowledges and files it in one step. An unacknowledged task is never
+    operator acknowledges it, which completes it and files it in the archive
+    in one step. The operator clicked ack and then archive on the same task
+    about 250 times in two months, and the second click carried no decision.
+    Archive does the same on a needs_ack task. An unacknowledged task is never
     archived, so it never reaches the archive view.
 
     A task the operator canceled lands in its own canceled group, not in
