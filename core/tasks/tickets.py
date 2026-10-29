@@ -1713,8 +1713,22 @@ def fix_ci_failures(ctx: TaskContext) -> TaskResult:
             meta = {"ticket": ctx.ticket_key, "repo": pr["repo"], "pr_id": pr["id"],
                     "failed_checks": failed_names}
 
-            if kind == "unrelated" and (not head_before
-                                        or _pr_head(platform, pr) != head_before):
+            discarded = kind == "unrelated" and (not head_before
+                                                 or _pr_head(platform, pr) != head_before)
+            if failed_names:
+                def _triaged(current, names=failed_names,
+                             unrelated=kind == "unrelated" and not discarded):
+                    if not current:
+                        return None
+                    pr_key = f"{pr['repo']}/{pr['id']}"
+                    triaged = current.get("ci_triaged_checks") or {}
+                    seen = set(triaged.get(pr_key) or [])
+                    triaged[pr_key] = sorted(seen - set(names) if unrelated else seen | set(names))
+                    current["ci_triaged_checks"] = triaged
+                    return current
+                ts = state.update_ticket(ctx.ticket_key or "", _triaged) or ts
+
+            if discarded:
                 log.emit("ticket_checks_unrelated_discarded",
                          f"CI failure for {slug or ctx.ticket_key} {pr['repo']}#{pr['id']} was "
                          f"triaged as unrelated, but the PR head was unknown or moved during "
