@@ -53,6 +53,15 @@ class TestPrBaseMoved:
             assert tickets._pr_base_moved(_cfg(), ts) is True
 
 
+    def test_false_while_parked_although_base_advanced(self):
+        ts = _ts(base_sync={"myrepo/7": {"base_sync_sha": "old",
+                                         "base_sync_parked": {"head": "h1", "base": "main"}}})
+        heads = {"main": "new", "refs/heads/t-1-branch": "h1"}
+        with patch("features.tickets._ticket_repo_path", return_value="/repo"), \
+             patch("features.tickets.branch_sync.ls_remote_sha", side_effect=lambda repo, ref: heads[ref]):
+            assert tickets._pr_base_moved(_cfg(), ts) is False
+
+
 class TestSyncPrBase:
     def test_disabled_flag_noop(self):
         with patch("features.tickets.branch_sync.sync_branch_with_base") as mock_sync:

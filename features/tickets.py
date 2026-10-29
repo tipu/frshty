@@ -3356,6 +3356,9 @@ def _pr_base_moved(config, ts) -> bool:
         if not base_sha:
             continue
         st = sync_state.get(f"{pr['repo']}/{pr['id']}", {})
+        if branch_sync.parked(repo_path, pr.get("branch") or ts.get("branch", ""),
+                              pr.get("base") or base_branch_for(config, pr["repo"]), st):
+            continue
         if st.get("base_sync_sha") != base_sha:
             return True
         if st.get("base_synced"):

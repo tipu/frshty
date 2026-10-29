@@ -36,6 +36,21 @@ def worktree_is_clean(worktree) -> bool:
         return False
 
 
+def parked(repo_path, branch: str, base_branch: str, st: dict) -> bool:
+    """True while a push the identity guard refused would be refused again.
+
+    The refusal depends on the commits of the PR branch and on its base, not
+    on the base head, so a moved base must not wake the sync. A new head on
+    the PR branch or a new base branch for the PR does."""
+    park = st.get("base_sync_parked")
+    if not park:
+        return False
+    if park.get("base") == base_branch and ls_remote_sha(repo_path, f"refs/heads/{branch}") == park.get("head"):
+        return True
+    st.pop("base_sync_parked", None)
+    return False
+
+
 def _count_failure(st: dict, attempts: int, result: str, error: str) -> dict:
     """Spend one attempt on a sync that could not start.
 
@@ -56,12 +71,14 @@ def sync_branch_with_base(platform, repo_path, base_branch: str, branch: str,
     worktree Path (or None) — only invoked once base is known to have moved,
     so the common no-op tick costs a single ls-remote.
 
-    Returns {"result": one of skip|capped|no_base|ls_remote_failed|
+    Returns {"result": one of parked|skip|capped|no_base|ls_remote_failed|
     no_worktree|dirty_worktree|fetch_failed|uptodate|merge_failed|push_failed|
     synced, ...}.
     """
     if not base_branch or not repo_path:
         return {"result": "no_base"}
+    if parked(repo_path, branch, base_branch, st):
+        return {"result": "parked"}
     base_sha = ls_remote_sha(repo_path, base_branch)
     if not base_sha:
         return {"result": "ls_remote_failed"}
@@ -125,6 +142,9 @@ def sync_branch_with_base(platform, repo_path, base_branch: str, branch: str,
     pushed = platform.push_branch(worktree, branch)
     if not pushed.get("ok"):
         st["base_sync_attempts"] = attempts + 1
+        head = ls_remote_sha(repo_path, f"refs/heads/{branch}") if pushed.get("identity_blocked") else ""
+        if head:
+            st["base_sync_parked"] = {"head": head, "base": base_branch}
         return {"result": "push_failed", "error": pushed.get("error", ""), "attempts": attempts + 1}
 
     st["base_synced"] = True
