@@ -970,7 +970,8 @@ class TestHandleCiFailureStub:
         eq.assert_not_called()
 
     def test_max_attempts_transitions_pr_failed_and_clears_flag(self):
-        ts = make_ticket_state(status="in_review", ci_fix_attempts=2, _ci_failed_pending=True)
+        ts = make_ticket_state(status="in_review", ci_fix_attempts=2, _ci_failed_pending=True,
+                               ci_triaged_checks={"r/1": ["lint"]})
         pr = {"repo": "r", "id": 1, "url": "u"}
         checks = [{"name": "lint", "state": "FAILED"}]
         with patch("features.tickets._enqueue_stage") as eq, \
@@ -979,6 +980,21 @@ class TestHandleCiFailureStub:
         assert result["status"] == "pr_failed"
         assert "_ci_failed_pending" not in result
         eq.assert_not_called()
+
+    def test_max_attempts_triages_a_check_no_fix_attempt_saw(self):
+        """ENG-3231: both fix attempts went to `test`. The next red check was
+        `evals`, an LLM-judge check triaged unrelated three times before. The
+        cap parked the ticket at pr_failed before `evals` got any triage."""
+        ts = make_ticket_state(status="in_review", ci_fix_attempts=2,
+                               ci_triaged_checks={"r/1": ["test"]})
+        pr = {"repo": "r", "id": 1, "url": "u"}
+        checks = [{"name": "test", "state": "SUCCESS"}, {"name": "evals", "state": "FAILURE"}]
+        with patch("features.tickets._enqueue_stage") as eq, \
+             patch("features.tickets.log"):
+            result = tickets._handle_ci_failure(make_ticket(), ts, pr, checks, "http://base", "inst")
+        assert result["status"] == "in_review"
+        assert result["_ci_failed_pending"] is True
+        eq.assert_called_once_with("inst", "PROJ-1", "fix_ci_failures")
 
     def test_re_enqueues_when_flag_stuck_with_no_inflight_job(self):
         """Stuck _ci_failed_pending (from a prior fix_ci_failures that got
@@ -1095,7 +1111,8 @@ class TestHandleCiFailureStub:
 
     def test_same_head_after_cap_parks_pr_failed(self):
         ts = make_ticket_state(status="in_review", ci_fix_attempts=2,
-                                ci_fix_heads={"r/1": "sha2"})
+                                ci_fix_heads={"r/1": "sha2"},
+                                ci_triaged_checks={"r/1": ["lint"]})
         pr = {"repo": "r", "id": 1, "url": "u"}
         checks = [{"name": "lint", "state": "FAILED"}]
         with patch("features.tickets._enqueue_stage") as eq, \
@@ -1105,63 +1122,6 @@ class TestHandleCiFailureStub:
         assert result["status"] == "pr_failed"
         assert result["ci_fix_attempts"] == 2
         eq.assert_not_called()
-
-    def test_untried_check_after_cap_resets_budget_and_retries(self):
-        ts = make_ticket_state(status="in_review", ci_fix_attempts=2,
-                                ci_fix_heads={"r/1": "sha2"},
-                                ci_fix_checks={"r/1": ["test"]})
-        pr = {"repo": "r", "id": 1, "url": "u"}
-        checks = [{"name": "test", "state": "SUCCESS"},
-                  {"name": "evals", "state": "FAILURE"}]
-        with patch("features.tickets._enqueue_stage") as eq, \
-             patch("features.tickets.log"):
-            result = tickets._handle_ci_failure(make_ticket(), ts, pr, checks,
-                                                "http://base", "inst", head_sha="sha2")
-        assert result["status"] == "in_review"
-        assert result["ci_fix_attempts"] == 0
-        assert result["ci_fix_checks"] == {"r/1": ["evals", "test"]}
-        assert result["_ci_failed_pending"] is True
-        eq.assert_called_once_with("inst", "PROJ-1", "fix_ci_failures")
-
-    def test_tried_check_after_cap_parks_pr_failed(self):
-        ts = make_ticket_state(status="in_review", ci_fix_attempts=2,
-                                ci_fix_heads={"r/1": "sha2"},
-                                ci_fix_checks={"r/1": ["evals", "test"]})
-        pr = {"repo": "r", "id": 1, "url": "u"}
-        checks = [{"name": "evals", "state": "FAILURE"}]
-        with patch("features.tickets._enqueue_stage") as eq, \
-             patch("features.tickets.log"):
-            result = tickets._handle_ci_failure(make_ticket(), ts, pr, checks,
-                                                "http://base", "inst", head_sha="sha2")
-        assert result["status"] == "pr_failed"
-        assert result["ci_fix_attempts"] == 2
-        eq.assert_not_called()
-
-    def test_untargeted_pr_after_cap_resets_budget(self):
-        ts = make_ticket_state(status="in_review", ci_fix_attempts=2,
-                                ci_fix_heads={"r/1": "sha1", "s/2": "sha2"},
-                                ci_fix_checks={"r/1": ["lint"]})
-        pr = {"repo": "s", "id": 2, "url": "u"}
-        checks = [{"name": "evals", "state": "FAILURE"}]
-        with patch("features.tickets._enqueue_stage") as eq, \
-             patch("features.tickets.log"):
-            result = tickets._handle_ci_failure(make_ticket(), ts, pr, checks,
-                                                "http://base", "inst", head_sha="sha2")
-        assert result["ci_fix_attempts"] == 0
-        eq.assert_called_once_with("inst", "PROJ-1", "fix_ci_failures")
-
-    def test_head_move_clears_tried_checks(self):
-        ts = make_ticket_state(status="in_review", ci_fix_attempts=2,
-                                ci_fix_heads={"r/1": "sha1"},
-                                ci_fix_checks={"r/1": ["lint"]})
-        pr = {"repo": "r", "id": 1, "url": "u"}
-        checks = [{"name": "lint", "state": "FAILED"}]
-        with patch("features.tickets._enqueue_stage"), \
-             patch("features.tickets.log"):
-            result = tickets._handle_ci_failure(make_ticket(), ts, pr, checks,
-                                                "http://base", "inst", head_sha="sha2")
-        assert "ci_fix_checks" not in result
-        assert result["ci_fix_attempts"] == 0
 
     def test_spent_budget_with_no_recorded_head_resets(self):
         """Tickets parked before head tracking existed have a spent budget but
@@ -1179,7 +1139,8 @@ class TestHandleCiFailureStub:
         eq.assert_called_once_with("inst", "PROJ-1", "fix_ci_failures")
 
     def test_no_head_sha_keeps_cap_behavior(self):
-        ts = make_ticket_state(status="in_review", ci_fix_attempts=2)
+        ts = make_ticket_state(status="in_review", ci_fix_attempts=2,
+                               ci_triaged_checks={"r/1": ["lint"]})
         pr = {"repo": "r", "id": 1, "url": "u"}
         checks = [{"name": "lint", "state": "FAILED"}]
         with patch("features.tickets._enqueue_stage") as eq, \
@@ -1995,6 +1956,97 @@ class TestFixCiFailuresTask:
         assert ts["ci_fix_attempts"] == tickets.MAX_CI_FIX_ATTEMPTS
         assert len(enqueued) == tickets.MAX_CI_FIX_ATTEMPTS - 1
 
+    def _cap_triage(self, fake_config, verdict):
+        from core.tasks.tickets import fix_ci_failures
+        import core.state as state
+        slug = "PROJ-1-do-the-thing"
+        pr = {"repo": "r", "id": 1, "url": "u"}
+        checks = [{"name": "test", "state": "SUCCESS"}, {"name": "evals", "state": "FAILURE"}]
+        self._seed(make_ticket_state(
+            status="in_review", _ci_failed_pending=True, slug=slug, prs=[pr],
+            ci_fix_attempts=tickets.MAX_CI_FIX_ATTEMPTS,
+            ci_fix_heads={"r/1": "h2"}, ci_triaged_checks={"r/1": ["test"]},
+        ))
+        wt = fake_config["workspace"]["root"] / "tickets" / slug / "r"
+        wt.mkdir(parents=True)
+        mock_platform = MagicMock()
+        mock_platform.get_pr_checks.return_value = checks
+        mock_platform.get_failed_logs.return_value = "logs"
+        mock_platform.get_pr_diff.return_value = "diff"
+        mock_platform.get_pr_info.return_value = {"head_sha": "h2"}
+        with patch("core.tasks.tickets.make_platform", return_value=mock_platform), \
+             patch("features.pr_ci.run_balanced", return_value=verdict), \
+             patch("features.pr_ci.run_claude_code") as rcc, \
+             patch("features.tickets._enqueue_stage") as eq:
+            assert fix_ci_failures(self._ctx(fake_config)).status == "ok"
+            ts = state.load("tickets")["PROJ-1"]
+            ts = tickets._handle_ci_failure(make_ticket(), ts, pr, checks,
+                                            "http://base", "inst", head_sha="h2")
+        rcc.assert_not_called()
+        return ts, eq
+
+    def test_at_cap_an_unrelated_new_check_holds_instead_of_parking(self, fake_config, tmp_state, tmp_log):
+        ts, eq = self._cap_triage(
+            fake_config, '{"caused_by_us": false, "reason": "flaky judge", "fix_hint": ""}')
+        assert ts["status"] == "in_review"
+        assert ts["ci_held_unrelated"] is True
+        assert ts["ci_fix_attempts"] == tickets.MAX_CI_FIX_ATTEMPTS
+        eq.assert_not_called()
+
+    def test_an_unrelated_verdict_is_not_kept_past_the_next_fix(self, fake_config, tmp_state, tmp_log):
+        from core.tasks.tickets import fix_ci_failures
+        import core.state as state
+        slug = "PROJ-1-do-the-thing"
+        self._seed(make_ticket_state(status="in_review", _ci_failed_pending=True, slug=slug,
+                                     prs=[{"repo": "r", "id": 1, "url": "u"}],
+                                     ci_triaged_checks={"r/1": ["evals"]}))
+        (fake_config["workspace"]["root"] / "tickets" / slug / "r").mkdir(parents=True)
+        mock_platform = MagicMock()
+        mock_platform.get_pr_checks.return_value = [{"name": "evals", "state": "FAILURE"}]
+        mock_platform.get_failed_logs.return_value = "logs"
+        mock_platform.get_pr_diff.return_value = "diff"
+        mock_platform.get_pr_info.return_value = {"head_sha": "h1"}
+        with patch("core.tasks.tickets.make_platform", return_value=mock_platform), \
+             patch("features.pr_ci.run_balanced",
+                   return_value='{"caused_by_us": false, "reason": "flaky", "fix_hint": ""}'):
+            fix_ci_failures(self._ctx(fake_config))
+        assert state.load("tickets")["PROJ-1"]["ci_triaged_checks"] == {"r/1": []}
+
+    def test_at_cap_a_discarded_unrelated_verdict_parks_instead_of_looping(
+            self, fake_config, tmp_state, tmp_log):
+        from core.tasks.tickets import fix_ci_failures
+        import core.state as state
+        slug = "PROJ-1-do-the-thing"
+        pr = {"repo": "r", "id": 1, "url": "u"}
+        checks = [{"name": "evals", "state": "FAILURE"}]
+        self._seed(make_ticket_state(
+            status="in_review", _ci_failed_pending=True, slug=slug, prs=[pr],
+            ci_fix_attempts=tickets.MAX_CI_FIX_ATTEMPTS, ci_triaged_checks={"r/1": ["test"]},
+        ))
+        (fake_config["workspace"]["root"] / "tickets" / slug / "r").mkdir(parents=True)
+        mock_platform = MagicMock()
+        mock_platform.get_pr_checks.return_value = checks
+        mock_platform.get_failed_logs.return_value = "logs"
+        mock_platform.get_pr_diff.return_value = "diff"
+        mock_platform.get_pr_info.return_value = {}
+        with patch("core.tasks.tickets.make_platform", return_value=mock_platform), \
+             patch("features.pr_ci.run_balanced",
+                   return_value='{"caused_by_us": false, "reason": "flaky", "fix_hint": ""}'), \
+             patch("features.tickets._enqueue_stage") as eq:
+            fix_ci_failures(self._ctx(fake_config))
+            ts = state.load("tickets")["PROJ-1"]
+            ts = tickets._handle_ci_failure(make_ticket(), ts, pr, checks, "http://base", "inst")
+        assert ts["status"] == "pr_failed"
+        eq.assert_not_called()
+
+    def test_at_cap_a_caused_new_check_parks_after_one_triage(self, fake_config, tmp_state, tmp_log):
+        ts, eq = self._cap_triage(
+            fake_config, '{"caused_by_us": true, "reason": "our diff", "fix_hint": "fix it"}')
+        assert ts["status"] == "pr_failed"
+        assert ts["pr_failed_reason"] == "ci_failed"
+        assert ts["ci_fix_attempts"] == tickets.MAX_CI_FIX_ATTEMPTS
+        eq.assert_not_called()
+
     def test_uses_the_worktree_that_holds_the_pr_branch(self, fake_config, tmp_state, tmp_log, tmp_path):
         from core.tasks.tickets import fix_ci_failures
 
@@ -2105,7 +2157,6 @@ class TestFixCiFailuresTask:
         ts = state.load("tickets")["PROJ-1"]
         assert ts["ci_fix_attempts"] == 1
         assert ts["ci_fix_heads"] == {"r/1": "sha9"}
-        assert ts["ci_fix_checks"] == {"r/1": ["lint"]}
 
     def test_exception_clears_pending_flag(self, fake_config, tmp_state, tmp_log):
         from core.tasks.tickets import fix_ci_failures
@@ -3457,9 +3508,9 @@ class TestRecheckPrFailed:
         assert ts["status"] == "pr_failed"
         assert mock_log.emit.call_count == 0
 
-    def _recheck_checks(self, fake_config, ci_fix_checks, failing):
+    def _recheck_checks(self, fake_config, triaged, failing):
         ts = self._ts(pr_failed_reason="ci_failed",
-                      ci_fix_heads={"repo/99": "sha2"}, ci_fix_checks=ci_fix_checks)
+                      ci_fix_heads={"repo/99": "sha2"}, ci_triaged_checks=triaged)
         mock_platform = MagicMock()
         mock_platform.get_pr_info.return_value = {
             "state": "OPEN", "approvers": [], "head_sha": "sha2"}
@@ -3469,20 +3520,20 @@ class TestRecheckPrFailed:
              patch("features.tickets.log"):
             return tickets._recheck_pr_failed(fake_config, self._ticket(), ts, "http://b")
 
-    def test_ci_failed_same_head_untried_check_recovers(self, fake_config):
+    def test_ci_failed_same_head_untriaged_check_recovers(self, fake_config):
         ts = self._recheck_checks(fake_config, {"repo/99": ["test"]}, ["test", "evals"])
         assert ts["status"] == "in_review"
 
-    def test_ci_failed_same_head_tried_checks_stay_parked(self, fake_config):
+    def test_ci_failed_same_head_triaged_checks_stay_parked(self, fake_config):
         ts = self._recheck_checks(fake_config, {"repo/99": ["evals", "test"]}, ["evals"])
         assert ts["status"] == "pr_failed"
 
-    def test_ci_failed_untried_check_behind_a_capped_pr_stays_parked(self, fake_config):
+    def test_ci_failed_untriaged_check_behind_a_capped_pr_stays_parked(self, fake_config):
         ts = self._ts(pr_failed_reason="ci_failed",
                       prs=[{"repo": "repo", "id": 99, "url": "u"},
                            {"repo": "other", "id": 7, "url": "u"}],
                       ci_fix_heads={"repo/99": "sha2", "other/7": "sha2"},
-                      ci_fix_checks={"repo/99": ["test"]})
+                      ci_triaged_checks={"repo/99": ["test"]})
         mock_platform = MagicMock()
         mock_platform.get_pr_info.return_value = {
             "state": "OPEN", "approvers": [], "head_sha": "sha2"}
@@ -3626,7 +3677,8 @@ class TestPrFailedReason:
         )
 
     def test_ci_failed_tags_reason(self):
-        ts = make_ticket_state(status="in_review", ci_fix_attempts=2, _ci_failed_pending=True)
+        ts = make_ticket_state(status="in_review", ci_fix_attempts=2, _ci_failed_pending=True,
+                               ci_triaged_checks={"r/1": ["lint"]})
         pr = {"repo": "r", "id": 1, "url": "u"}
         checks = [{"name": "lint", "state": "FAILED"}]
         with patch("features.tickets._enqueue_stage"), patch("features.tickets.log"):

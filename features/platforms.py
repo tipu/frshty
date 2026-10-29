@@ -285,8 +285,8 @@ class _CIMonitorMixin:
         ts.pop("checks_started_at", None)
         ts.pop("ci_fix_attempts", None)
         ts.pop("ci_fix_heads", None)
-        ts.pop("ci_fix_checks", None)
         ts.pop("ci_unrelated_checks", None)
+        ts.pop("ci_triaged_checks", None)
         ts.pop("_ci_timeout_state", None)
         ts.pop("_ci_no_ci_logged", None)
         return ts
