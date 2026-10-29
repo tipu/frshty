@@ -103,6 +103,46 @@ class TestSyncBranchWithBase:
         assert st["base_sync_attempts"] == 0
 
 
+class TestIdentityPark:
+    def _ls(self, heads):
+        return lambda repo, ref: heads.get(ref, "")
+
+    def test_identity_refusal_parks_on_the_branch_head(self):
+        platform = _platform(push_ok=False, error="1 commit(s) on feature are not authored by me")
+        platform.push_branch.return_value["identity_blocked"] = True
+        st = {}
+        out = _sync(platform, st, behind="4")
+        assert out["result"] == "push_failed"
+        assert st["base_sync_parked"] == {"head": "basesha", "base": "main"}
+
+    def test_other_push_failure_does_not_park(self):
+        st = {}
+        _sync(_platform(push_ok=False, error="non-ff"), st, behind="4")
+        assert "base_sync_parked" not in st
+
+    def test_parked_sync_ignores_a_moved_base(self):
+        platform = _platform()
+        st = {"base_sync_sha": "oldbase", "base_sync_parked": {"head": "h1", "base": "main"}}
+        with patch("core.branch_sync.ls_remote_sha",
+                   side_effect=self._ls({"refs/heads/feature": "h1", "main": "newbase"})):
+            out = branch_sync.sync_branch_with_base(platform, "/repo", "main", "feature", st, lambda: "/wt")
+        assert out["result"] == "parked"
+        assert st["base_sync_sha"] == "oldbase"
+        platform.merge_base.assert_not_called()
+
+    def test_new_branch_head_unparks(self):
+        st = {"base_sync_parked": {"head": "h1", "base": "main"}}
+        with patch("core.branch_sync.ls_remote_sha", side_effect=self._ls({"refs/heads/feature": "h2"})):
+            assert branch_sync.parked("/repo", "feature", "main", st) is False
+        assert "base_sync_parked" not in st
+
+    def test_new_base_branch_unparks(self):
+        st = {"base_sync_parked": {"head": "h1", "base": "stack-1"}}
+        with patch("core.branch_sync.ls_remote_sha", side_effect=self._ls({"refs/heads/feature": "h1"})):
+            assert branch_sync.parked("/repo", "feature", "main", st) is False
+        assert "base_sync_parked" not in st
+
+
 class TestDirtyWorktree:
     def test_dirty_worktree_blocks_merge_and_caps(self, tmp_path):
         import core.branch_sync as bs
