@@ -209,7 +209,7 @@ class TestCodexLaunch:
         for agent, other in (("claude", "codex"), ("codex", "claude")):
             prompt = _launch_prompt(tmp_path, monkeypatch, agent)
             assert "send the same question to deepseek as a second reviewer" in prompt
-            assert f"opencode run -m {llm.DEEPSEEK_REVIEWER_MODEL} " \
+            assert f"OPENCODE_DISABLE_CLAUDE_CODE=1 opencode run -m {llm.DEEPSEEK_REVIEWER_MODEL} " \
                    '"$(cat <question-file>)" < /dev/null' in prompt
             assert f"Weigh the deepseek findings like the {other} findings" in prompt
             assert f"do not run {other} or deepseek" in prompt
