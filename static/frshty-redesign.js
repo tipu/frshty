@@ -602,7 +602,6 @@
     </template>
     <template v-else-if="it.state === 'needs_ack'">
       <button class="ln-btn ln-btn-primary" @click="c.act(it, 'ack')">Acknowledge <kbd>a</kbd></button>
-      <button class="ln-btn" @click="c.act(it, 'archive')">Archive <kbd>e</kbd></button>
       <button class="ln-btn" @click="c.focusRef('followup')">Follow up <kbd>f</kbd></button>
       <button class="ln-btn ln-btn-ghost" @click="c.act(it, 'reopen')">Reopen</button>
     </template>

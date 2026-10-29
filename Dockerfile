@@ -46,6 +46,7 @@ RUN groupadd -o -g "${HOST_GID}" frshty && \
     mkdir -p /run/frshty/seed /etc/codex && \
     printf 'sandbox_mode = "danger-full-access"\napproval_policy = "never"\n' > /etc/codex/config.toml && \
     ln -s /app/scripts/totp /usr/local/bin/totp && \
+    ln -s /app/scripts/secret.py /usr/local/bin/secret && \
     echo '[ -f /app/scripts/shell_aliases ] && . /app/scripts/shell_aliases' >> /etc/bash.bashrc && \
     if [ -n "${HOOK_DIR}" ]; then mkdir -p "$(dirname "${HOOK_DIR}")" && ln -s /app "${HOOK_DIR}"; fi
 
