@@ -26,7 +26,7 @@ from core.claude_runner import (run_haiku, run_balanced, run_claude_code, extrac
                                 parse_structured, strict_object)
 from core.llm import NO_PUBLISH_RULE
 from core.commit_message import COMMIT_SUBJECT_RULE, commit_subject, merge_message_args
-from core.ticket_status import (BASE_SYNC, SCOPE_FIX, TicketStatus,
+from core.ticket_status import (BASE_SYNC, SCOPE_FIX, TEST_FIX, TicketStatus,
                                 can_transition, transition)
 from features.platforms import make_platform
 from features.pr_ci import ci_summary, failing_check_names, held_unrelated, KEEP_GREEN_RULE
@@ -109,7 +109,7 @@ _GATE_OCCUPYING_STATUSES = ("planning", "reviewing", "testing", "proving")
 # can linger indefinitely waiting for a human to merge.
 _GATE_OCCUPYING_AUTO_MERGE = _GATE_OCCUPYING_STATUSES + ("pr_ready", "in_review")
 
-MAX_TEST_FIX_ATTEMPTS = 3
+MAX_TEST_FIX_ATTEMPTS = TEST_FIX.budget
 
 _TERMINAL_STATUSES = frozenset({"merged", "done"})
 
