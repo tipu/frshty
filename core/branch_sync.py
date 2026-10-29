@@ -7,13 +7,17 @@ function owns the git decision-making and the per-branch sync state it
 reads/writes on the passed-in `st` dict.
 """
 import subprocess
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import core.blocked as blocked_attempts
 import core.git_util as git_util
 from core.ticket_status import BASE_SYNC
 
 MAX_BASE_SYNC_ATTEMPTS = BASE_SYNC.budget
 DIRTY_WORKTREE_ERROR = "worktree has uncommitted changes"
+TRANSIENT_RESULTS = ("no_worktree", "fetch_failed")
+BLOCK_LAPSE_HOURS = 24
 
 
 def ls_remote_sha(repo_path, base_branch: str) -> str:
@@ -52,24 +56,84 @@ def parked(repo_path, branch: str, base_branch: str, st: dict) -> bool:
     return False
 
 
-def _count_failure(st: dict, attempts: int, result: str, error: str) -> dict:
+def branch_head(repo_path, branch: str) -> str:
+    return ls_remote_sha(repo_path, f"refs/heads/{branch}") if branch else ""
+
+
+def _lapsed(blocked_at) -> bool:
+    try:
+        return datetime.now(timezone.utc) - datetime.fromisoformat(blocked_at) >= timedelta(
+            hours=BLOCK_LAPSE_HOURS)
+    except (TypeError, ValueError):
+        return True
+
+
+def blocker_cleared(st: dict, repo_path, branch: str, base_sha: str, worktree_fn) -> bool:
+    """Whether the blocker that capped this sync can have gone away.
+
+    A dirty worktree clears when the worktree is clean. A sync that could
+    not start (no worktree, a failed fetch) is not about the branch, so a
+    new base commit buys it one more try. Every other blocker (a merge
+    conflict, a refused push, a foreign author) clears when the PR branch
+    head moves, and a new base commit does not clear it. Any block lapses
+    after BLOCK_LAPSE_HOURS, so a cause that cleared unseen costs one try a
+    day, not a PR that never syncs again."""
+    if _lapsed(st.get("base_sync_blocked_at")):
+        return True
+    if blocked_by_dirty_worktree(st):
+        return worktree_is_clean(worktree_fn())
+    if st.get("base_sync_result") in TRANSIENT_RESULTS and st.get("base_sync_blocked_base") != base_sha:
+        return True
+    head = branch_head(repo_path, branch)
+    return bool(head) and head != st.get("base_sync_head")
+
+
+def _block(st: dict, attempts: int, result: str, error: str, repo_path, branch: str,
+           resource: str) -> None:
+    """Record one blocked attempt on st and in the durable record."""
+    head = branch_head(repo_path, branch)
+    st["base_sync_attempts"] = attempts
+    st["last_base_error"] = error
+    st["base_sync_head"] = head
+    st["base_sync_result"] = result
+    st["base_sync_blocked_base"] = st.get("base_sync_sha", "")
+    st["base_sync_blocked_at"] = datetime.now(timezone.utc).isoformat()
+    blocked_attempts.record(resource, blocked_attempts.SYNC_BASE,
+                            blocked_attempts.blocker_of(result, error), error, head)
+
+
+def _unblock(st: dict, resource: str) -> None:
+    st["base_synced"] = True
+    st["base_sync_attempts"] = 0
+    st.pop("last_base_error", None)
+    for k in ("base_sync_head", "base_sync_result", "base_sync_blocked_base", "base_sync_blocked_at"):
+        st.pop(k, None)
+    blocked_attempts.clear(resource, blocked_attempts.SYNC_BASE)
+
+
+def _count_failure(st: dict, attempts: int, result: str, error: str, repo_path, branch: str,
+                   resource: str) -> dict:
     """Spend one attempt on a sync that could not start.
 
     Callers re-queue the sync while an attempt is left, so a failure that
     spends none re-queues it for ever and starves every later stage."""
-    st["base_sync_attempts"] = attempts + 1
-    st["last_base_error"] = error
+    _block(st, attempts + 1, result, error, repo_path, branch, resource)
     return {"result": result, "error": error, "attempts": attempts + 1,
             "capped": not BASE_SYNC.may_continue(attempts + 1)}
 
 
 def sync_branch_with_base(platform, repo_path, base_branch: str, branch: str,
-                          st: dict, ensure_worktree, ticket_key: str = "") -> dict:
+                          st: dict, ensure_worktree, ticket_key: str = "",
+                          resource: str = "") -> dict:
     """Merge base into branch when base has moved ahead, then push.
 
     st keys (read/written): base_sync_sha, base_synced, base_sync_attempts,
-    last_base_error. ensure_worktree is a zero-arg callable returning the
-    worktree Path (or None) — only invoked once base is known to have moved,
+    last_base_error, base_sync_head, base_sync_result, base_sync_blocked_base,
+    base_sync_blocked_at. A move of base clears base_synced but
+    keeps the attempts: only a success or a cleared blocker resets them.
+    resource names the PR ("repo#id") in the durable blocked record; an
+    empty resource writes no record. ensure_worktree is a zero-arg callable
+    returning the worktree Path (or None) — only invoked once base is known to have moved,
     so the common no-op tick costs a single ls-remote.
 
     Returns {"result": one of parked|skip|capped|no_base|ls_remote_failed|
@@ -85,37 +149,37 @@ def sync_branch_with_base(platform, repo_path, base_branch: str, branch: str,
         return {"result": "ls_remote_failed"}
     if st.get("base_sync_sha") != base_sha:
         st["base_sync_sha"] = base_sha
-        st["base_sync_attempts"] = 0
         st.pop("base_synced", None)
-        st.pop("last_base_error", None)
     attempts = st.get("base_sync_attempts", 0)
     exit_reason = BASE_SYNC.exit_reason(attempts, converged=bool(st.get("base_synced")))
     if exit_reason == "converged":
         return {"result": "skip"}
     worktree = None
     if exit_reason == "budget_spent":
-        if not blocked_by_dirty_worktree(st):
-            return {"result": "capped", "attempts": attempts}
-        worktree = ensure_worktree()
-        if not worktree_is_clean(worktree):
+        if blocked_by_dirty_worktree(st):
+            worktree = ensure_worktree()
+        if not blocker_cleared(st, repo_path, branch, base_sha, lambda: worktree):
             return {"result": "capped", "attempts": attempts}
         attempts = st["base_sync_attempts"] = 0
         st.pop("last_base_error", None)
 
     worktree = worktree or ensure_worktree()
     if not worktree:
-        return _count_failure(st, attempts, "no_worktree", "no worktree for the PR branch")
-    fetch = subprocess.run(["git", "fetch", "origin", base_branch],
+        return _count_failure(st, attempts, "no_worktree", "no worktree for the PR branch",
+                              repo_path, branch, resource)
+    fetch = subprocess.run(["git", "fetch", "origin", base_branch, branch],
                            cwd=str(worktree), capture_output=True, text=True, timeout=60)
     if fetch.returncode != 0:
-        return _count_failure(st, attempts, "fetch_failed", (fetch.stderr or "").strip()[:200])
+        return _count_failure(st, attempts, "fetch_failed", (fetch.stderr or "").strip()[:200],
+                              repo_path, branch, resource)
     try:
-        behind = git_util.run_git(worktree, ["rev-list", "--count", f"HEAD..origin/{base_branch}"],
-                                  timeout=10).stdout.strip()
+        behind = git_util.run_git(
+            worktree, ["rev-list", "--count", f"origin/{branch}..origin/{base_branch}"],
+            timeout=10).stdout.strip()
     except git_util.GitCommandError as e:
-        return _count_failure(st, attempts, "fetch_failed", str(e)[:200])
+        return _count_failure(st, attempts, "fetch_failed", str(e)[:200], repo_path, branch, resource)
     if behind == "0":
-        st["base_synced"] = True
+        _unblock(st, resource)
         return {"result": "uptodate"}
 
     # A failed `git status` returns empty stdout, which reads as a clean tree and
@@ -128,26 +192,28 @@ def sync_branch_with_base(platform, repo_path, base_branch: str, branch: str,
     if dirty:
         files = ", ".join(ln.strip().split(maxsplit=1)[-1] for ln in dirty.splitlines()[:5])
         error = f"{DIRTY_WORKTREE_ERROR} ({files}); merge would overwrite them"
-        st["base_sync_attempts"] = MAX_BASE_SYNC_ATTEMPTS
-        st["last_base_error"] = error
+        _block(st, MAX_BASE_SYNC_ATTEMPTS, "dirty_worktree", error, repo_path, branch, resource)
         return {"result": "dirty_worktree", "error": error,
                 "attempts": MAX_BASE_SYNC_ATTEMPTS, "capped": True}
 
     merged = platform.merge_base(worktree, base_branch, prev_error=st.get("last_base_error"),
                                  ticket_key=ticket_key)
     if not merged.get("ok"):
-        st["base_sync_attempts"] = attempts + 1
-        st["last_base_error"] = merged.get("error", "")
-        return {"result": "merge_failed", "error": merged.get("error", ""),
-                "attempts": attempts + 1, "capped": not BASE_SYNC.may_continue(attempts + 1)}
+        return _count_failure(st, attempts, "merge_failed", merged.get("error", ""),
+                              repo_path, branch, resource)
 
+    return _push(platform, worktree, branch, base_branch, st, attempts, repo_path, resource)
+
+
+def _push(platform, worktree, branch: str, base_branch: str, st: dict, attempts: int,
+          repo_path, resource: str) -> dict:
     pushed = platform.push_branch(worktree, branch)
     if not pushed.get("ok"):
-        st["base_sync_attempts"] = attempts + 1
-        head = ls_remote_sha(repo_path, f"refs/heads/{branch}") if pushed.get("identity_blocked") else ""
-        if head:
-            st["base_sync_parked"] = {"head": head, "base": base_branch}
-        return {"result": "push_failed", "error": pushed.get("error", ""), "attempts": attempts + 1}
-
-    st["base_synced"] = True
+        if pushed.get("identity_blocked"):
+            head = branch_head(repo_path, branch)
+            if head:
+                st["base_sync_parked"] = {"head": head, "base": base_branch}
+        return _count_failure(st, attempts, "push_failed", pushed.get("error", ""),
+                              repo_path, branch, resource)
+    _unblock(st, resource)
     return {"result": "synced", "base": base_branch}

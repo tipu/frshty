@@ -121,10 +121,21 @@ class TestSyncPrBase:
     def test_saves_what_the_feature_layer_returned(self, fake_config, tmp_state):
         _seed(status="in_review")
         updated = {**state.load_ticket("PROJ-1"), "base_synced_at": "2026-09-02T00:00:00Z"}
-        with patch("features.tickets._sync_pr_base", return_value=updated):
+        with patch("features.tickets._sync_pr_base", return_value=(updated, [])):
             result = T.sync_pr_base(_ctx(fake_config, "sync_pr_base"))
         assert result.status == "ok"
         assert state.load_ticket("PROJ-1")["base_synced_at"] == "2026-09-02T00:00:00Z"
+
+    def test_a_base_that_was_not_merged_fails_the_task_and_keeps_the_state(
+            self, fake_config, tmp_state):
+        _seed(status="in_review")
+        updated = {**state.load_ticket("PROJ-1"), "base_sync": {"r/7": {"base_sync_attempts": 1}}}
+        failure = "r#7 dirty_worktree: worktree has uncommitted changes (a.py)"
+        with patch("features.tickets._sync_pr_base", return_value=(updated, [failure])):
+            result = T.sync_pr_base(_ctx(fake_config, "sync_pr_base"))
+        assert result.status == "failed"
+        assert result.reason == failure
+        assert state.load_ticket("PROJ-1")["base_sync"] == {"r/7": {"base_sync_attempts": 1}}
 
     def test_an_exception_is_logged_and_fails_the_task(self, fake_config, tmp_state):
         _seed(status="in_review")
