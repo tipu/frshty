@@ -1,0 +1,11 @@
+[Unit]
+Description=Recreate every frshty instance container that no longer exists
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=HOME=%h
+WorkingDirectory=%h/Documents/dev/frshty/frshty
+ExecStart=/usr/bin/python3 %h/Documents/dev/frshty/frshty/scripts/instance.py ensure
