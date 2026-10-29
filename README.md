@@ -117,6 +117,7 @@ scripts/instance.py check config/frshty.toml  # prove key and git access, then e
 scripts/instance.py up config/frshty.toml     # run it; restarts with docker
 scripts/instance.py logs config/frshty.toml
 scripts/instance.py down config/frshty.toml
+scripts/instance.py ensure                    # recreate every container that no longer exists
 scripts/instance.py reload                    # restart frshty.py in every instance on new code
 ```
 
@@ -127,6 +128,17 @@ A container sees its own workspace at the host path the config names, the model 
 On first boot the container generates an ed25519 key in `ssh/` and adds it to the account the instance works as: the GitHub account in `[github].account`, through a `GH_TOKEN` the launcher reads with `gh auth token --user`, or the Bitbucket user in `[bitbucket]`. A restart reuses the key and adds nothing. The GitHub token needs the `admin:public_key` scope and the Bitbucket API token needs `read:ssh-key:bitbucket` and `write:ssh-key:bitbucket`. Without them the container refuses to start and says which scope is missing.
 
 The container uses the host network. An optional `[container]` block sets its port, worker and model limits, extra mounts, and extra files to copy into its home directory; `scripts/instance.py` documents each key. The work board of a container belongs to its own instance, through `FRSHTY_BOARD_INSTANCE`. The container reads its config from `~/.frshty-containers/<key>/config/<key>.toml`: `up` copies the config it is given there, and refuses when a different file is already there. List every container in `~/.frshty-containers/peers.toml` to see all of them on one board; each container skips its own entry.
+
+The restart policy `unless-stopped` brings a container back after a crash or a reboot, but `docker rm` deletes the container, and nothing recreates it. `ensure` reads every `~/.frshty-containers/*/config/*.toml` and runs `up` for each config whose container does not exist. It leaves a container that exists in any state, running or exited, as it is. `down` writes the marker file `~/.frshty-containers/<key>/down`, and `up` removes it. `ensure` skips an instance that holds the marker, so an instance taken down on purpose stays down. For each container it recreates, `ensure` prints one line to the journal and writes one `container_recreated` event to the instance's feed, which the global feed shows. On a Linux host, a systemd user timer runs `ensure` every minute. The unit runs the checkout at `~/Documents/dev/frshty/frshty`; edit `scripts/systemd/frshty-ensure.service` first when the checkout lives elsewhere. Install it from the checkout:
+
+```
+mkdir -p ~/.config/systemd/user
+cp scripts/systemd/frshty-ensure.service scripts/systemd/frshty-ensure.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now frshty-ensure.timer
+loginctl enable-linger "$USER"                # run the timer without a login session
+journalctl --user -u frshty-ensure.service    # one line per recreated container
+```
 
 `scripts/instance.py gateway-up --port 7130` starts one more container, the gateway. It runs no instance. It reads the instances from `~/.frshty-containers/peers.toml`, adds an instance dropdown to the top right of every page, and forwards each page, action and terminal to the container of the picked instance. The choice lives in a browser cookie. `reload` restarts the gateway when it exists; a host with one instance runs no gateway.
 
