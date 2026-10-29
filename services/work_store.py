@@ -17,6 +17,7 @@ import core.config as core_config
 import core.db as db
 import core.llm as llm
 import core.log as log
+import core.loops as loops
 import core.tmux as tmux_target
 from services import work_artifacts
 
@@ -470,6 +471,15 @@ def _insert_proposal(c, objective: str, note: str, instance_key: str | None,
         "VALUES (?, 'proposal_created', ?, ?)",
         (item_id, db.dump_json({"note": note}), now),
     )
+    declined = loops.declined_repeats(c, objective, instance_key, CANCELED_STATE,
+                                      DECLINED_REASON, item_id)
+    if declined:
+        log.emit(loops.LOOP_EVENT,
+                 f"proposal #{item_id} was filed again after the operator declined "
+                 f"the same objective {len(declined)} times "
+                 f"({', '.join('#' + str(i) for i in declined)}): {objective[:160]}",
+                 meta={"loop": "proposal", "work_item_id": item_id, "declined": declined},
+                 instance_key=instance_key or "", conn=c)
     return item_id
 
 
