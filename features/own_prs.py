@@ -8,20 +8,23 @@ import core.queue as q
 import core.state as state
 import core.comments as comments
 from core.comments import (MAX_AUTOMATED_REVIEW_FIX_RUNS, automated_review_skip_reason,
-                           automated_review_skips, is_automated_review)
+                           automated_review_skips, is_automated_review, is_bot_report)
 import core.git_util as git_util
 import core.branch_sync as branch_sync
 from core.claude_runner import (run_claude_code, run_haiku, run_balanced, parse_structured,
                                 strict_object)
 from core.commit_message import COMMIT_SUBJECT_RULE, branch_key, commit_subject, keyed
 from core.config import base_branch_for, get_repos
-from features.pr_ci import KEEP_GREEN_RULE, ci_summary
+from features.pr_ci import FILE_TOOLS_KEEP_GREEN_RULE, ci_summary
 from features.platforms import make_platform
 
 RECLAIM_STALE_SECONDS = 1200
 MAX_COMMENT_RETRIES = 3
 NEW_COMMENT_BASELINE_HOURS = 24
 COMMENT_DEBOUNCE_MINUTES = 30
+CLASSIFY_FAILED = "classification failed"
+NO_CHANGES = "no changes produced"
+NO_CHANGE_REASON = "the fix run read the comment and changed nothing"
 TRIAGE_SCHEMA = strict_object({
     "results": {"type": "array", "items": strict_object({
         "id": {"type": "integer"},
@@ -251,6 +254,9 @@ def _check_comments(config, instance_key, platform, pr, base_url, seen=None, tic
         ]
         seen[flag] = True
 
+    all_to_process += _untriaged_comments(instance_key, pr_key, by_id, user_id,
+                                          {str(c["id"]) for c in all_to_process}, skips)
+
     _settle_revived_tombstones(instance_key, pr_key, detection,
                                {str(c["id"]) for c in all_to_process})
 
@@ -265,6 +271,42 @@ def _check_comments(config, instance_key, platform, pr, base_url, seen=None, tic
 
     _flush_deferred_comments(config, instance_key, pr, pr_key, pr_ref, base_url, by_id, seen, ticket_key,
                              skips)
+
+
+def _untriaged_comments(instance_key, pr_key, by_id, user_id, queued_ids, skips):
+    """Comments whose triage failed, sent back to triage.
+
+    A failed triage leaves the row in 'new' with no error charged. The reclaim
+    pass read every 'new' row as a failed fix and deferred it, so the fixer ran
+    on a comment nobody had read as a change request: a question, an approval,
+    a bot report. The fixer then changed nothing, or ran into the same provider
+    outage on every poll."""
+    out = []
+    for row in comments.get_unprocessed_comments(instance_key, "pr", pr_key):
+        comment_id = str(row["comment_id"])
+        comment = by_id.get(comment_id)
+        if (row.get("state") != "new" or row.get("last_error") != CLASSIFY_FAILED
+                or comment is None or comment_id in queued_ids
+                or comment.get("author_id") == user_id or comment.get("resolved")
+                or automated_review_skip_reason(comment, _review_key, skips)):
+            continue
+        out.append(comment)
+    return out
+
+
+def _settle_unchanged(instance_key, pr_key, comment) -> None:
+    """Settle a comment the fix run read and left without a change.
+
+    The run finished and judged that nothing needed to change, so the next run
+    reads the same comment and the same code and judges the same. Charging it
+    as a failed attempt sent it back for three more runs. A bot is owed no
+    reply, so its comment closes. A person's comment goes to the operator."""
+    comment_id = str(comment["id"])
+    if is_bot_report(comment):
+        comments.mark_comment_seen(instance_key, "pr", pr_key, comment_id,
+                                   comment.get("updated_at") or comment.get("created_at"))
+    else:
+        comments.mark_comment_manual(instance_key, "pr", pr_key, comment_id, NO_CHANGE_REASON)
 
 
 def _drop_bot_rewrites(instance_key, pr, pr_key, pr_ref, base_url, candidates, answered_ids):
@@ -407,13 +449,16 @@ def _process_detected_comments(config, instance_key, platform, pr, pr_ref, base_
             log.emit("pr_comment_classify_failed",
                      f"{pr_ref}: Could not classify (LLM empty/unparseable), will retry — {comment['body'][:80]}",
                      links=links, meta=meta)
-            comments.mark_comment_retryable(instance_key, "pr", pr_key, comment_id, "classification failed")
+            comments.mark_comment_retryable(instance_key, "pr", pr_key, comment_id, CLASSIFY_FAILED)
             continue
 
         if actionable:
             comments.mark_comment_deferred(instance_key, "pr", pr_key, comment_id, edited_at)
             _push_fix_deadline(config, seen)
             log.emit("pr_comment_deferred", f"{pr_ref}: Deferred for batch fix (window pushed to {seen['fix_deadline']}) — {comment['body'][:80]}", links=links, meta=meta)
+        elif is_bot_report(comment):
+            log.emit("pr_comment_bot_report_settled", f"{pr_ref}: Bot report, no change asked ({reason}) — {comment['body'][:80]}", links=links, meta=meta)
+            comments.mark_comment_seen(instance_key, "pr", pr_key, comment_id, edited_at)
         else:
             log.emit("pr_comment_flagged_manual", f"{pr_ref}: Ambiguous ({reason}) — {comment['body'][:80]}", links=links, meta=meta)
             comments.mark_comment_manual(instance_key, "pr", pr_key, comment_id,
@@ -485,13 +530,15 @@ def _settle_manual_comments(instance_key, pr_key, by_id):
     """Take a comment out of the operator's bucket once the platform settles it.
 
     The fixer never reads a manual row, so the reclaim pass cannot clear it.
-    Without this the bucket keeps a comment the reviewer already resolved."""
+    Without this the bucket keeps a comment the reviewer already resolved. A
+    bot's report owes the operator nothing either, and rows written before
+    triage settled bot reports would otherwise stay in the bucket."""
     for row in comments.get_manual_comments(instance_key, "pr", pr_key):
         comment_id = str(row["comment_id"])
         comment = by_id.get(comment_id)
         if comment is None:
             comments.mark_comment_deleted(instance_key, "pr", pr_key, comment_id)
-        elif comment.get("resolved"):
+        elif comment.get("resolved") or is_bot_report(comment):
             comments.mark_comment_processed(instance_key, "pr", pr_key, comment_id)
 
 
@@ -591,7 +638,7 @@ def _commit_fix(worktree, message, context: str = "",
     if not staged:
         if git_util.agent_committed(worktree, head_before):
             return True, ""
-        return False, "no changes produced"
+        return False, NO_CHANGES
     if context:
         message = commit_subject(worktree, message, context)
     message = keyed(config, message, ticket_key)
@@ -625,7 +672,7 @@ def fix_comment(config, payload) -> tuple[bool, str | None]:
             context = (
                 f"File: {comment.get('path', 'unknown')}\nLine: {comment.get('line', 'unknown')}\n\n"
                 f"Review comment: {comment['body']}\n\nFix this review comment.\n\n"
-                + KEEP_GREEN_RULE + "\n\n"
+                + FILE_TOOLS_KEEP_GREEN_RULE + "\n\n"
                 + COMMIT_SUBJECT_RULE
             )
             head_before = git_util.head_sha(worktree)
@@ -647,6 +694,10 @@ def fix_comment(config, payload) -> tuple[bool, str | None]:
                 worktree, f"fix: address review comment on {comment.get('path', 'unknown')}",
                 context=comment["body"], head_before=head_before, pre_dirty=pre_dirty,
                 config=config, ticket_key=branch_key(pr["branch"]))
+            if not committed and commit_reason == NO_CHANGES:
+                log.emit("pr_comment_unchanged", f"{pr_ref}: {NO_CHANGE_REASON} — {comment['body'][:80]}", links=links, meta={**meta, "reason": commit_reason})
+                _settle_unchanged(instance_key, pr_key, comment)
+                return False, commit_reason
             if not committed:
                 log.emit("pr_comment_blocked", f"{pr_ref}: {commit_reason} — {comment['body'][:80]}", links=links, meta={**meta, "reason": commit_reason})
                 comments.mark_comment_error(instance_key, "pr", pr_key, comment_id, commit_reason)
@@ -757,7 +808,7 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
             context = (
                 f"The following {len(pending)} review comments were left on this PR. "
                 f"Address ALL of them.\n\n{comment_list}\n\nFix every review comment above.\n\n"
-                + KEEP_GREEN_RULE + "\n\n"
+                + FILE_TOOLS_KEEP_GREEN_RULE + "\n\n"
                 + COMMIT_SUBJECT_RULE
             )
             head_before = git_util.head_sha(worktree)
@@ -773,6 +824,13 @@ def fix_comments_batch(config, payload) -> tuple[bool, str | None]:
                 worktree, f"fix: address {len(pending)} review comments",
                 context=comment_list, head_before=head_before, pre_dirty=pre_dirty,
                 config=config, ticket_key=branch_key(pr["branch"]))
+            if not committed and commit_reason == NO_CHANGES:
+                log.emit("pr_comment_unchanged",
+                         f"{pr_ref}: {NO_CHANGE_REASON} — batch of {len(pending)} comment(s)",
+                         links=links, meta={**meta, "reason": commit_reason})
+                for c in pending:
+                    _settle_unchanged(instance_key, pr_key, c)
+                return False, commit_reason
             if not committed:
                 return _fail_all(pending_ids, commit_reason)
 
