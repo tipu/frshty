@@ -11,9 +11,11 @@ from core.comments import MAX_AUTOMATED_REVIEW_FIX_RUNS
 from core.consensus_scope import MAX_SCOPE_FIX_ATTEMPTS
 from core.tasks.registry import _REGISTRY, task
 from core.ticket_status import (AUTOMATED_REVIEW_FIX, BASE_SYNC, CYCLES, PR_AUTOFIX,
-                                SCOPE_FIX, SUCCESS_EDGES, TicketStatus, can_transition,
-                                success_target)
+                                SCOPE_FIX, SUCCESS_EDGES, TEST_FIX, TicketStatus,
+                                approval_edge, can_transition, epic_edge, success_target)
+from core.ticket_status import tests_failed_edge as exit_edge_of_testing
 from features.pr_autofix import MAX_ATTEMPTS as PR_AUTOFIX_MAX_ATTEMPTS
+from features.tickets import MAX_TEST_FIX_ATTEMPTS
 
 EXPECTED_SUCCESS = {
     "start_planning": "reviewing",
@@ -58,17 +60,26 @@ class TestSuccessEdges:
 class TestCycles:
     def test_the_four_loops_are_declared(self):
         assert {c.name for c in CYCLES} == {"scope_fix", "base_sync", "pr_autofix",
-                                            "automated_review_fix"}
+                                            "automated_review_fix", "test_fix"}
 
     def test_budgets(self):
         assert (SCOPE_FIX.budget, BASE_SYNC.budget, PR_AUTOFIX.budget,
-                AUTOMATED_REVIEW_FIX.budget) == (2, 2, 3, 2)
+                AUTOMATED_REVIEW_FIX.budget, TEST_FIX.budget) == (2, 2, 3, 2, 3)
 
     def test_module_constants_read_the_graph(self):
         assert MAX_SCOPE_FIX_ATTEMPTS == SCOPE_FIX.budget
         assert MAX_BASE_SYNC_ATTEMPTS == BASE_SYNC.budget
         assert PR_AUTOFIX_MAX_ATTEMPTS == PR_AUTOFIX.budget
         assert MAX_AUTOMATED_REVIEW_FIX_RUNS == AUTOMATED_REVIEW_FIX.budget
+        assert MAX_TEST_FIX_ATTEMPTS == TEST_FIX.budget
+
+    @pytest.mark.parametrize("cycle", [c for c in CYCLES if c.exit_edge], ids=lambda c: c.name)
+    def test_an_exit_edge_is_legal_from_the_node(self, cycle):
+        assert can_transition(cycle.node.value, cycle.exit_edge.value)
+
+    def test_test_fix_leaves_testing_for_tests_failed(self):
+        assert (TEST_FIX.node, TEST_FIX.exit_edge) == (TicketStatus.testing,
+                                                       TicketStatus.tests_failed)
 
     @pytest.mark.parametrize("cycle", CYCLES, ids=lambda c: c.name)
     def test_every_cycle_task_is_registered(self, cycle):
@@ -92,3 +103,24 @@ class TestCycles:
         assert not cycle.may_continue(cycle.budget)
         assert cycle.exit_reason(cycle.budget + 1) == "budget_spent"
         assert cycle.exit_reason(cycle.budget, converged=True) == "converged"
+
+
+class TestHandlerEdges:
+    def test_test_fix_edge_waits_until_the_budget_is_spent(self):
+        assert [exit_edge_of_testing(n) for n in range(5)] == [None, None, None,
+                                                        "tests_failed", "tests_failed"]
+
+    def test_epic_edge(self):
+        assert epic_edge("Epic") == "epic"
+        assert epic_edge("Story") is None
+        assert epic_edge(None) is None
+
+    def test_approval_edge(self):
+        assert approval_edge(True, None) == "pending_approval"
+        assert approval_edge(True, "pending") == "pending_approval"
+        assert approval_edge(True, "approved") is None
+        assert approval_edge(True, "rejected") is None
+        assert approval_edge(False, None) is None
+
+    def test_the_epic_edge_is_legal_from_new(self):
+        assert can_transition("new", "epic")
