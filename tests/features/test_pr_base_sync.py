@@ -221,7 +221,8 @@ class TestPrBaseMovedAfterDirtyBlock:
     def _ts(self):
         return _ts(base_sync={"myrepo/7": {
             "base_sync_sha": "sha1", "base_sync_attempts": 2,
-            "last_base_error": "worktree has uncommitted changes (a.py); merge would overwrite them"}})
+            "last_base_error": "worktree has uncommitted changes (a.py); merge would overwrite them",
+            "base_sync_blocked_at": datetime.now(timezone.utc).isoformat()}})
 
     def test_true_when_dirty_worktree_is_now_clean(self, tmp_path):
         subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)

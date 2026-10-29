@@ -158,7 +158,8 @@ class TestDirtyBlockClears:
 
     def _capped(self):
         return {"base_sync_sha": "basesha", "base_sync_attempts": branch_sync.MAX_BASE_SYNC_ATTEMPTS,
-                "last_base_error": f"{"worktree has uncommitted changes"} (a.py); merge would overwrite them"}
+                "last_base_error": f"{"worktree has uncommitted changes"} (a.py); merge would overwrite them",
+                "base_sync_blocked_at": datetime.now(timezone.utc).isoformat()}
 
     def test_clean_worktree_resets_a_dirty_cap_and_merges(self, tmp_path):
         wt = self._repo(tmp_path)
