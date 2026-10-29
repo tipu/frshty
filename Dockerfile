@@ -43,7 +43,8 @@ RUN if [ "$(dpkg --print-architecture)" = "amd64" ]; then python -m playwright i
 RUN groupadd -o -g "${HOST_GID}" frshty && \
     useradd -o -m -d "${HOST_HOME}" -s /bin/bash -u "${HOST_UID}" -g "${HOST_GID}" frshty && \
     install -d -o frshty -g frshty "${HOST_HOME}/.config" "${HOST_HOME}/.local" "${HOST_HOME}/.local/share" "${HOST_HOME}/.local/state" && \
-    mkdir -p /run/frshty/seed && \
+    mkdir -p /run/frshty/seed /etc/codex && \
+    printf 'sandbox_mode = "danger-full-access"\napproval_policy = "never"\n' > /etc/codex/config.toml && \
     ln -s /app/scripts/totp /usr/local/bin/totp && \
     echo '[ -f /app/scripts/shell_aliases ] && . /app/scripts/shell_aliases' >> /etc/bash.bashrc && \
     if [ -n "${HOOK_DIR}" ]; then mkdir -p "$(dirname "${HOOK_DIR}")" && ln -s /app "${HOOK_DIR}"; fi
