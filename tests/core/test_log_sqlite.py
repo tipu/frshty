@@ -337,6 +337,7 @@ class TestEmitSurvivesADeadDatabase:
             raise sqlite3.OperationalError("disk I/O error")
 
         monkeypatch.setattr(db, "execute", boom)
+        monkeypatch.setattr(db, "_connect", boom)
         record = log.emit("worker_claim_error", "w3: OperationalError: disk I/O error")
         assert record["event"] == "worker_claim_error"
         assert "log_emit_failed" in capsys.readouterr().err
