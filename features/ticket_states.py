@@ -95,7 +95,7 @@ class TicketState(TypedDict, total=False):
     - PR markers: prs, pr_scheduled_at, pr_attempts, pr_failed_reason
     - conflict markers: conflict_resolution_attempts, last_conflict_error
     - CI markers: ci_fix_attempts, ci_fix_heads, ci_passed, checks_started_at,
-      _ci_failed_pending, _ci_timeout_state, ci_held_unrelated
+      _ci_failed_pending, _ci_timeout_state, ci_held_unrelated, ci_triaged_checks
     - comment markers: last_comment_ids, comment_fix_attempts
     - scope review markers: scope_review
     - misc: llm_sessions
@@ -130,6 +130,7 @@ class TicketState(TypedDict, total=False):
     last_conflict_error: str
     ci_fix_attempts: int
     ci_fix_heads: dict
+    ci_triaged_checks: dict
     ci_passed: bool
     checks_started_at: str
     _ci_failed_pending: bool
