@@ -90,6 +90,7 @@ class Dispatcher:
                         payload=j.get("payload", {}),
                         ticket_key=j.get("ticket_key"),
                         triggering_event_id=ev["id"],
+                        root_job_id=ev["root_job_id"],
                     )
                 handled = True
             reason = "routed" if handled else "unrouted"
