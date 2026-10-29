@@ -106,8 +106,8 @@ BUDGET_SPENT_PROMPT = (
 CONFER_RULE = (
     "When the objective says to confer with the boys, or asks for a "
     "multi-model consensus or an adversarial review, add deepseek as one more "
-    "voice beside the others: run `opencode run -m "
-    f"{llm.DEEPSEEK_REVIEWER_MODEL} \"<prompt>\" < /dev/null` with the same "
+    "voice beside the others: run "
+    f"`{llm.DEEPSEEK_SHELL} \"<prompt>\" < /dev/null` with the same "
     "prompt the other voices get, and weigh its answer like theirs. opencode "
     "waits for its standard input to close, so keep the redirect. "
 )

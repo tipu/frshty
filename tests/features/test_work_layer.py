@@ -440,7 +440,7 @@ class TestIntake:
         context = mock_launch.call_args.args[3]
         assert work_store.CONFER_RULE in context
         assert "confer with the boys" in work_store.CONFER_RULE
-        assert "opencode run -m openrouter/deepseek/deepseek-v4.1-flash" in context
+        assert "OPENCODE_DISABLE_CLAUDE_CODE=1 opencode run -m openrouter/deepseek/deepseek-v4.1-flash" in context
 
     def test_intake_tells_claude_to_navigate_with_lsp(self, tmp_path, monkeypatch):
         from unittest.mock import patch, MagicMock
