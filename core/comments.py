@@ -447,7 +447,7 @@ def get_unprocessed_comments(
     """Get all unprocessed comments for a resource."""
     return db.query_all(
         """
-        SELECT comment_id, comment_edited_at, state, error_count, last_checked_at
+        SELECT comment_id, comment_edited_at, state, error_count, last_checked_at, last_error
         FROM comment_state
         WHERE instance_key = ? AND resource_type = ? AND resource_id = ?
         AND state IN ('new', 'processing')
@@ -505,6 +505,15 @@ def reports_checks_failed(comment: dict) -> bool:
     caused the failure before it changes anything. A comment fix on the same
     report skips that decision and commits work the ticket did not ask for."""
     return bool(CHECKS_FAILED_RE.match(comment.get("body") or ""))
+
+
+def is_bot_report(comment: dict) -> bool:
+    """Whether a comment comes from a bot or a pipeline rather than a person.
+
+    A bot is owed no reply. A Bitbucket pipeline posts its status report from
+    a person's account, so the report text counts as well as the author."""
+    return (bool(comment.get("author_is_bot")) or reports_checks_passed(comment)
+            or reports_checks_failed(comment))
 
 
 def automated_review_skips(comments: list[dict], key, fixed: set) -> dict:

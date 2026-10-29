@@ -105,7 +105,12 @@ class TestCommentFixersCarryTheRule:
              patch("features.own_prs.comments.mark_comment_processed"), \
              patch("features.own_prs.log.emit"):
             own_prs.fix_comment(self._config(tmp_path), payload)
-        assert pr_ci.KEEP_GREEN_RULE in fixer.call_args[0][0]
+        prompt = fixer.call_args[0][0]
+        assert pr_ci.FILE_TOOLS_KEEP_GREEN_RULE in prompt
+        assert pr_ci.KEEP_GREEN_RULE not in prompt, (
+            "this fixer runs with file tools only; an order to run lint and tests "
+            "first sent the agent after git and test commands the run refuses, and "
+            "it ended with no edit or at the timeout")
 
     def test_own_pr_batch_comment_fix(self, tmp_path):
         platform = MagicMock()
@@ -120,7 +125,12 @@ class TestCommentFixersCarryTheRule:
              patch("features.own_prs.log.emit"):
             mock_comments.unowed_comment_ids.return_value = set()
             own_prs.fix_comments_batch(self._config(tmp_path), payload)
-        assert pr_ci.KEEP_GREEN_RULE in fixer.call_args[0][0]
+        prompt = fixer.call_args[0][0]
+        assert pr_ci.FILE_TOOLS_KEEP_GREEN_RULE in prompt
+        assert pr_ci.KEEP_GREEN_RULE not in prompt, (
+            "this fixer runs with file tools only; an order to run lint and tests "
+            "first sent the agent after git and test commands the run refuses, and "
+            "it ended with no edit or at the timeout")
 
     def test_pr_autofix_finding_fix(self, tmp_path):
         findings = [{"severity": "critical", "path": "a.py", "line": 3,
@@ -148,7 +158,12 @@ class TestCommentFixersCarryTheRule:
              patch("features.pr_autofix.log.emit"):
             run_git.return_value = MagicMock(returncode=1, stdout="abc1234\n")
             pr_autofix.run(config, {"pr": make_pr(cross_repo=False)})
-        assert pr_ci.KEEP_GREEN_RULE in fixer.call_args[0][0]
+        prompt = fixer.call_args[0][0]
+        assert pr_ci.FILE_TOOLS_KEEP_GREEN_RULE in prompt
+        assert pr_ci.KEEP_GREEN_RULE not in prompt, (
+            "this fixer runs with file tools only; an order to run lint and tests "
+            "first sent the agent after git and test commands the run refuses, and "
+            "it ended with no edit or at the timeout")
 
     def test_ticket_pr_comment_fix(self, fresh_db, fake_config, tmp_state):
         slug = "PROJ-1-do-the-thing"

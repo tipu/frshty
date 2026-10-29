@@ -66,6 +66,7 @@ def test_a_single_failure_is_still_owed():
     2026-06-02, never retried and never shown. One failure is owed."""
     _set_instance()
     _insert_comment("spa-dashboard/149", "c-transient", "new", 1, "classification failed")
+    state.save("own_prs", {"spa-dashboard/149": {}})
 
     out = staleness.blocked_pr_comments("test")
 
@@ -78,6 +79,7 @@ def test_a_row_with_no_error_is_owed_as_stalled():
     touched has none, and was invisible for that reason alone."""
     _set_instance()
     _insert_comment("spa-dashboard/150", "c-quiet", "new", 0, None)
+    state.save("own_prs", {"spa-dashboard/150": {}})
 
     out = staleness.blocked_pr_comments("test")
 
@@ -89,6 +91,7 @@ def test_a_row_with_no_error_is_owed_as_stalled():
 def test_a_manual_comment_is_owed_and_named_manual():
     _set_instance()
     _insert_comment("spa-dashboard/151", "c-manual", "manual", 0, "open question")
+    state.save("own_prs", {"spa-dashboard/151": {}})
 
     out = staleness.blocked_pr_comments("test")
 
@@ -102,5 +105,38 @@ def test_a_deleted_comment_leaves_the_bucket():
     finished pins it in the bucket for good."""
     _set_instance()
     _insert_comment("spa-dashboard/300", "c-deleted", "deleted", 6, "no changes produced")
+
+    assert staleness.blocked_pr_comments("test") == []
+
+
+def test_a_comment_on_a_closed_pr_leaves_the_bucket():
+    """The poll settles a row, and a closed pull request leaves the poll. On
+    2026-10-28, 107 of 199 manual rows sat on closed pull requests and the
+    morning digest listed every one of them as blocked work."""
+    _set_instance()
+    _insert_comment("spa-dashboard/152", "c-open", "manual", 0, "open question")
+    _insert_comment("spa-dashboard/90", "c-closed", "manual", 0, "Automated CI status report")
+    state.save("own_prs", {"spa-dashboard/152": {"title": "DEV-1", "url": "http://pr/152"}})
+
+    out = staleness.blocked_pr_comments("test")
+
+    assert [r["comment_id"] for r in out] == ["c-open"]
+
+
+def test_closed_pr_rows_do_not_crowd_out_the_open_ones():
+    _set_instance()
+    for i in range(60):
+        _insert_comment("spa-dashboard/91", f"c-closed-{i}", "new", 5, "boom")
+    _insert_comment("spa-dashboard/153", "c-open", "new", 1, "boom")
+    state.save("own_prs", {"spa-dashboard/153": {}})
+
+    out = staleness.blocked_pr_comments("test")
+
+    assert [r["comment_id"] for r in out] == ["c-open"]
+
+
+def test_no_polled_pr_means_nothing_owed():
+    _set_instance()
+    _insert_comment("spa-dashboard/92", "c-closed", "manual", 0, "open question")
 
     assert staleness.blocked_pr_comments("test") == []
