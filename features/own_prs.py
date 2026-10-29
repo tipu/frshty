@@ -1009,7 +1009,8 @@ def _check_base_fresh(config, platform, pr, seen, base_url):
     try:
         outcome = branch_sync.sync_branch_with_base(
             platform, repo_path, base_branch, pr["branch"], seen,
-            lambda: _ensure_worktree(config, pr), ticket_key=branch_key(pr["branch"]))
+            lambda: _ensure_worktree(config, pr), ticket_key=branch_key(pr["branch"]),
+            resource=pr_ref)
     finally:
         lock.release()
     result = outcome["result"]

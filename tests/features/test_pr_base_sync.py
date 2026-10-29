@@ -35,15 +35,26 @@ class TestPrBaseMoved:
             assert tickets._pr_base_moved(_cfg(), ts) is True
 
     def test_false_when_capped_on_current_sha(self):
-        ts = _ts(base_sync={"myrepo/7": {"base_sync_sha": "sha1", "base_sync_attempts": 2}})
+        ts = _ts(base_sync={"myrepo/7": {"base_sync_sha": "sha1", "base_sync_attempts": 2,
+                                         "base_sync_head": "sha1"}})
         with patch("features.tickets._ticket_repo_path", return_value="/repo"), \
              patch("features.tickets.branch_sync.ls_remote_sha", return_value="sha1"):
             assert tickets._pr_base_moved(_cfg(), ts) is False
 
-    def test_true_when_capped_but_base_advanced(self):
-        ts = _ts(base_sync={"myrepo/7": {"base_sync_sha": "old", "base_sync_attempts": 2}})
+    def test_false_when_capped_and_only_the_base_advanced(self):
+        ts = _ts(base_sync={"myrepo/7": {"base_sync_sha": "old", "base_sync_attempts": 2,
+                                         "base_sync_head": "h1"}})
+        heads = {"main": "new", "refs/heads/t-1-branch": "h1"}
         with patch("features.tickets._ticket_repo_path", return_value="/repo"), \
-             patch("features.tickets.branch_sync.ls_remote_sha", return_value="new"):
+             patch("features.tickets.branch_sync.ls_remote_sha", side_effect=lambda repo, ref: heads[ref]):
+            assert tickets._pr_base_moved(_cfg(), ts) is False
+
+    def test_true_when_capped_and_the_pr_branch_head_moved(self):
+        ts = _ts(base_sync={"myrepo/7": {"base_sync_sha": "old", "base_sync_attempts": 2,
+                                         "base_sync_head": "h1"}})
+        heads = {"main": "new", "refs/heads/t-1-branch": "h2"}
+        with patch("features.tickets._ticket_repo_path", return_value="/repo"), \
+             patch("features.tickets.branch_sync.ls_remote_sha", side_effect=lambda repo, ref: heads[ref]):
             assert tickets._pr_base_moved(_cfg(), ts) is True
 
     def test_true_when_under_attempt_cap(self):
