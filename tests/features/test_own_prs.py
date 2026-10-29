@@ -2056,6 +2056,32 @@ class TestCiFixBudget:
         assert "ci_cap_emitted" not in seen
 
 
+    def _attempts_given(self, checks, seen, tmp_path):
+        platform = MagicMock()
+        platform.get_pr_checks.return_value = checks
+        worktree = tmp_path / "wt"
+        worktree.mkdir(exist_ok=True)
+        with patch("features.own_prs._ensure_worktree", return_value=worktree), \
+             patch("features.own_prs.subprocess.run") as mock_run, \
+             patch("features.pr_ci.triage_and_fix_pr",
+                   return_value={"result": "capped", "attempts": 2,
+                                 "failed_names": ["evals"]}) as mock_triage, \
+             patch("features.own_prs.log.emit"):
+            mock_run.return_value = MagicMock(returncode=0, stdout="head1\n")
+            own_prs._check_ci({"_state_dir": tmp_path}, platform, make_pr(), seen, "http://base")
+        return mock_triage.call_args.kwargs["attempts"]
+
+    def test_a_check_no_attempt_targeted_gets_a_fresh_budget(self, tmp_path):
+        seen = {"ci_fix_attempts": 2, "ci_fix_checks": ["test"], "ci_fix_sha": "head1"}
+        assert self._attempts_given([{"state": "FAILURE", "name": "evals"}], seen, tmp_path) == 0
+        assert seen["ci_fix_attempts"] == 0
+        assert seen["ci_fix_checks"] == ["evals", "test"]
+
+    def test_a_check_an_attempt_targeted_stays_capped(self, tmp_path):
+        seen = {"ci_fix_attempts": 2, "ci_fix_checks": ["evals"]}
+        assert self._attempts_given([{"state": "FAILURE", "name": "evals"}], seen, tmp_path) == 2
+
+
 class TestUnrelatedCheckRecord:
     """A base sync gives the PR a new head every hour and a new head re-opens
     triage, so a flaky check gets judged again and again until one roll says
