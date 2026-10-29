@@ -160,7 +160,7 @@ def _write_report(ticket_dir: Path, ticket_key: str, votes: dict[str, str],
 def run_scope_review(config: dict, ticket_dir: Path, slug: str, *,
                      ticket_key: str = "") -> tuple[str | None, str]:
     """Fan the scope question out to claude/codex/agy/deepseek from one byte-identical
-    prompt, vote the verdicts, and write docs/scope-review.md. Returns
+    prompt (deepseek gets it without the project rules files), vote the verdicts, and write docs/scope-review.md. Returns
     (verdict, reason): verdict is "pass" or "fail", or None when no voice
     produced a usable verdict. FAIL wins a tie so a split vote holds the
     ticket rather than shipping a contested branch."""
@@ -175,15 +175,17 @@ def run_scope_review(config: dict, ticket_dir: Path, slug: str, *,
     if not repo_lines:
         return None, "no repo worktree has a branch diff to review"
 
-    prompt = SCOPE_DIRECTIVE.format(docs_dir=ticket_dir / "docs",
-                                    repo_list="\n".join(repo_lines))
+    base_prompt = SCOPE_DIRECTIVE.format(docs_dir=ticket_dir / "docs",
+                                         repo_list="\n".join(repo_lines))
+    prompt = base_prompt
     rules = rules_directive(ticket_rules_files(config))
     if rules:
         prompt = f"{prompt}\n\n{rules}"
     (run_dir / "composed-prompt.md").write_text(prompt)
 
     results = _fan_out(prompt, ticket_dir, run_dir, include_dirs,
-                       SCOPE_FANOUT_TIMEOUT, voices=SCOPE_VOICES)
+                       SCOPE_FANOUT_TIMEOUT, voices=SCOPE_VOICES,
+                       deepseek_prompt=base_prompt)
     votes: dict[str, str] = {}
     dropped: dict[str, str] = {}
     for name, r in results.items():
