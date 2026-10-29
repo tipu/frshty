@@ -18,6 +18,7 @@ from starlette.concurrency import run_in_threadpool
 
 import core.state as state
 import core.tmux as tmux_target
+from core.llm import DEEPSEEK_ENV
 from core.paths import frshty_root
 
 MAX_SCROLLBACK = 1024 * 1024
@@ -276,6 +277,7 @@ def _child_env():
         "TMUX": "",
     }
     env.update({k: os.environ[k] for k in STATE_ENV + IMAGE_ENV + ALIAS_ENV if os.environ.get(k)})
+    env.update(DEEPSEEK_ENV)
     return env
 
 
@@ -284,6 +286,8 @@ def _pane_env_args() -> list[str]:
     for key in IMAGE_ENV + ALIAS_ENV:
         if os.environ.get(key):
             args += ["-e", f"{key}={os.environ[key]}"]
+    for key, value in DEEPSEEK_ENV.items():
+        args += ["-e", f"{key}={value}"]
     return args
 
 
