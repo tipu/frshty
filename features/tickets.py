@@ -879,7 +879,7 @@ def _reingest_merged_ticket(config: dict, ticket: dict, ts: dict, base_url: str)
 
     for field in ("prs", "ci_fix_attempts", "ci_fix_heads", "pr_attempts", "ci_passed",
                   "checks_started_at", "_ci_failed_pending", "pr_scheduled_at",
-                  "ci_unrelated_checks",
+                  "ci_unrelated_checks", "ci_triaged_checks",
                   "conflict_resolution_attempts", "last_comment_ids",
                   "comment_fix_attempts", "done_at"):
         ts.pop(field, None)
@@ -3182,6 +3182,7 @@ def _reconcile_prs(ts: dict, open_prs: list[dict], key: str = "",
         ts.pop("ci_passed", None)
         ts.pop("checks_started_at", None)
         ts.pop("ci_unrelated_checks", None)
+        ts.pop("ci_triaged_checks", None)
 
     return ts
 
@@ -3520,6 +3521,7 @@ def _handle_ci_failure(ticket, ts, pr, checks, base_url, instance_key="", head_s
                 links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
                 meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"], "head_sha": head_sha})
             ts["ci_fix_attempts"] = 0
+        ts.pop("ci_triaged_checks", None)
         heads[pr_key] = head_sha
         ts["ci_fix_heads"] = heads
         ts.pop("ci_unrelated_checks", None)
@@ -3529,8 +3531,9 @@ def _handle_ci_failure(ticket, ts, pr, checks, base_url, instance_key="", head_s
         return ts
 
     fix_attempts = ts.get("ci_fix_attempts", 0)
+    triaged = (ts.get("ci_triaged_checks") or {}).get(pr_key, [])
 
-    if fix_attempts >= MAX_CI_FIX_ATTEMPTS:
+    if fix_attempts >= MAX_CI_FIX_ATTEMPTS and set(failed_names) <= set(triaged):
         log.emit("ticket_checks_failed", f"CI failed for {_label(ticket['key'], ts)} after {fix_attempts} fix attempts: {', '.join(failed_names)}",
             links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
             meta={"ticket": ticket["key"], "failed_checks": failed_names})

@@ -93,10 +93,8 @@ def triage_and_fix_pr(platform, repo: str, pr_id: int, label: str,
     if not failed_names:
         return {"result": "no_failing", "attempts": attempts, "failed_names": []}
 
-    if attempts >= max_attempts:
-        return {"result": "capped", "attempts": attempts, "failed_names": failed_names}
-
-    if worktree is None or not Path(worktree).is_dir():
+    capped = attempts >= max_attempts
+    if not capped and (worktree is None or not Path(worktree).is_dir()):
         return {"result": "worktree_missing", "attempts": attempts, "failed_names": failed_names}
 
     failure_logs = platform.get_failed_logs(repo, pr_id)
@@ -140,6 +138,9 @@ def triage_and_fix_pr(platform, repo: str, pr_id: int, label: str,
     if not caused:
         return {"result": "unrelated", "attempts": attempts,
                 "failed_names": failed_names, "reason": reason}
+
+    if capped:
+        return {"result": "capped", "attempts": attempts, "failed_names": failed_names}
 
     green_names = green_check_names(checks)
     keep_green = (

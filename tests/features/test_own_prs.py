@@ -2117,6 +2117,39 @@ class TestUnrelatedCheckRecord:
             own_prs._check_ci({"_state_dir": tmp_path}, platform, make_pr(), seen, "http://base")
         assert seen["ci_unrelated_checks"] == ["evals"]
 
+    def test_a_capped_head_is_triaged_once(self, tmp_path):
+        platform = self._platform([{"state": "FAILURE", "name": "evals"}])
+        seen = {"ci_fix_attempts": 2}
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        with patch("features.own_prs._ensure_worktree", return_value=worktree), \
+             patch("features.own_prs.subprocess.run") as mock_run, \
+             patch("features.pr_ci.triage_and_fix_pr",
+                   return_value={"result": "capped", "attempts": 2,
+                                 "failed_names": ["evals"]}) as mock_triage, \
+             patch("features.own_prs.log.emit"):
+            mock_run.return_value = MagicMock(returncode=0, stdout="head1\n")
+            own_prs._check_ci({"_state_dir": tmp_path}, platform, make_pr(), seen, "http://base")
+            own_prs._check_ci({"_state_dir": tmp_path}, platform, make_pr(), seen, "http://base")
+        assert mock_triage.call_count == 1
+        assert seen["ci_cap_emitted"] is True
+
+    def test_a_failed_triage_at_the_cap_is_not_retried_on_the_same_head(self, tmp_path):
+        platform = self._platform([{"state": "FAILURE", "name": "evals"}])
+        seen = {"ci_fix_attempts": 2}
+        worktree = tmp_path / "wt"
+        worktree.mkdir()
+        with patch("features.own_prs._ensure_worktree", return_value=worktree), \
+             patch("features.own_prs.subprocess.run") as mock_run, \
+             patch("features.pr_ci.triage_and_fix_pr",
+                   return_value={"result": "haiku_empty", "attempts": 2,
+                                 "failed_names": ["evals"]}) as mock_triage, \
+             patch("features.own_prs.log.emit"):
+            mock_run.return_value = MagicMock(returncode=0, stdout="head1\n")
+            own_prs._check_ci({"_state_dir": tmp_path}, platform, make_pr(), seen, "http://base")
+            own_prs._check_ci({"_state_dir": tmp_path}, platform, make_pr(), seen, "http://base")
+        assert mock_triage.call_count == 1
+
     def test_a_recovered_check_is_forgotten(self, tmp_path):
         platform = self._platform([{"state": "SUCCESS", "name": "evals"},
                                    {"state": "FAILURE", "name": "lint"}])

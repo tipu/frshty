@@ -889,6 +889,9 @@ def _check_ci(config, platform, pr, seen, base_url):
         kind = outcome["result"]
         failed_names = outcome.get("failed_names", [])
 
+        if attempts >= MAX_CI_FIX_ATTEMPTS:
+            seen["ci_fix_sha"] = head
+
         if kind == "capped":
             if not seen.get("ci_cap_emitted"):
                 log.emit("pr_checks_failed",
