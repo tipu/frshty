@@ -1,17 +1,33 @@
 import json
+from contextvars import ContextVar, Token
 from datetime import datetime, timezone
 
 import core.db as _db
+
+
+_chain_root: ContextVar[int | None] = ContextVar("chain_root", default=None)
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def use_chain(root_job_id: int) -> Token:
+    """Name the job chain the running job belongs to. Every job and event
+    written while it runs carries this root, so core.loops can tell a chain
+    that feeds itself from a cron tick that starts a new one."""
+    return _chain_root.set(root_job_id)
+
+
+def reset_chain(token: Token) -> None:
+    _chain_root.reset(token)
+
+
 def insert_event(c, source: str, kind: str, payload: dict, instance_key: str | None = None) -> int:
     cur = c.execute(
-        "INSERT INTO events(instance_key, source, kind, payload, created_at) VALUES (?, ?, ?, ?, ?)",
-        (instance_key, source, kind, _db.dump_json(payload or {}), _now()),
+        "INSERT INTO events(instance_key, source, kind, payload, created_at, root_job_id)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        (instance_key, source, kind, _db.dump_json(payload or {}), _now(), _chain_root.get()),
     )
     return cur.lastrowid or 0
 
@@ -22,12 +38,15 @@ def emit_event(source: str, kind: str, payload: dict, instance_key: str | None =
 
 
 def enqueue_job(instance_key: str, task: str, payload: dict | None = None,
-                ticket_key: str | None = None, triggering_event_id: int | None = None) -> int:
+                ticket_key: str | None = None, triggering_event_id: int | None = None,
+                root_job_id: int | None = None) -> int:
+    root = root_job_id if root_job_id is not None else _chain_root.get()
     with _db.tx() as c:
         cur = c.execute(
-            "INSERT INTO jobs(instance_key, ticket_key, task, payload, enqueued_at, triggering_event_id)"
-            " VALUES (?, ?, ?, ?, ?, ?)",
-            (instance_key, ticket_key, task, _db.dump_json(payload or {}), _now(), triggering_event_id),
+            "INSERT INTO jobs(instance_key, ticket_key, task, payload, enqueued_at,"
+            " triggering_event_id, root_job_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (instance_key, ticket_key, task, _db.dump_json(payload or {}), _now(),
+             triggering_event_id, root),
         )
         return cur.lastrowid or 0
 
@@ -37,7 +56,8 @@ def claim_next() -> dict | None:
     with _db.tx() as c:
         row = c.execute(
             """
-            SELECT j.id, j.instance_key, j.ticket_key, j.task, j.payload, j.triggering_event_id
+            SELECT j.id, j.instance_key, j.ticket_key, j.task, j.payload, j.triggering_event_id,
+                   j.root_job_id
             FROM jobs j
             WHERE j.status = 'queued'
               AND NOT EXISTS (
@@ -75,13 +95,15 @@ def claim_next() -> dict | None:
             "task": row["task"],
             "payload": json.loads(row["payload"] or "{}"),
             "triggering_event_id": row["triggering_event_id"],
+            "root_job_id": row["root_job_id"],
         }
 
 
-def finish_job(c, job_id: int, status: str, response: dict) -> None:
+def finish_job(c, job_id: int, status: str, response: dict,
+               ticket_digest: str | None = None) -> None:
     c.execute(
-        "UPDATE jobs SET status=?, finished_at=?, response=? WHERE id=?",
-        (status, _now(), _db.dump_json(response), job_id),
+        "UPDATE jobs SET status=?, finished_at=?, response=?, ticket_digest=? WHERE id=?",
+        (status, _now(), _db.dump_json(response), ticket_digest, job_id),
     )
 
 
@@ -116,7 +138,7 @@ def sweep_stale(max_age_seconds: int = 3600) -> int:
 
 def undispatched_events(limit: int = 100) -> list[dict]:
     return _db.query_all(
-        "SELECT id, instance_key, source, kind, payload FROM events"
+        "SELECT id, instance_key, source, kind, payload, root_job_id FROM events"
         " WHERE dispatched_at IS NULL ORDER BY id LIMIT ?",
         (limit,),
     )

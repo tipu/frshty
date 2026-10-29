@@ -6,6 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import core.db as _db
+import core.loops as _loops
 from core.state import _instance_key_cv as _instance_key_cv
 
 _default_job_key: str = ""
@@ -49,13 +50,27 @@ def _active_instance_key() -> str:
 
 
 def emit(event: str, summary: str, links: dict | None = None, meta: dict | None = None,
-         job: str = "", instance_key: str = ""):
+         job: str = "", instance_key: str = "", conn=None):
     """Write one event to the feed.
 
     `job` and `instance_key` name the feed the event belongs to. They default
     to the ones this process was started with. A process that holds none, such
     as an agent hook, states them instead, because an event filed under an
-    empty key is read by no feed."""
+    empty key is read by no feed.
+
+    `conn` writes the event on a caller's open transaction. db.tx holds an
+    immediate lock, so a write on a second connection would wait for it.
+
+    A failure event that repeats with the same text for one ticket is a retry
+    loop, and core.loops says when to add one loop_detected event for it. The
+    event, the check and the loop event share one transaction, so two
+    failures written at once cannot both count the same streak."""
+    if conn is None and _loops.is_retry_event(event):
+        try:
+            with _db.tx() as c:
+                return emit(event, summary, links, meta, job, instance_key, conn=c)
+        except Exception as e:
+            print(f"[{job}] log_emit_failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
     clean_links = {k: v for k, v in (links or {}).items() if v}
     job = job or _active_job_key()
     instance_key = instance_key or _active_instance_key()
@@ -70,15 +85,38 @@ def emit(event: str, summary: str, links: dict | None = None, meta: dict | None 
         "links": clean_links,
         "meta": meta or {},
     }
+    sql = "INSERT OR IGNORE INTO log_events(id, instance_key, job, event, summary, links, meta, ts) VALUES(?,?,?,?,?,?,?,?)"
+    params = (record_id, instance_key, job, event, summary, json.dumps(clean_links), json.dumps(meta or {}), ts)
+    written = False
     try:
-        _db.execute(
-            "INSERT OR IGNORE INTO log_events(id, instance_key, job, event, summary, links, meta, ts) VALUES(?,?,?,?,?,?,?,?)",
-            (record_id, instance_key, job, event, summary, json.dumps(clean_links), json.dumps(meta or {}), ts)
-        )
+        if conn is not None:
+            conn.execute(sql, params)
+        else:
+            _db.execute(sql, params)
+        written = True
     except Exception as e:
         print(f"[{job}] log_emit_failed: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
     print(f"[{job}] {event}: {summary}", flush=True)
+    if written and _loops.is_retry_event(event):
+        _flag_retry(event, instance_key, job, (meta or {}).get("ticket"), conn)
     return record
+
+
+def _flag_retry(event: str, instance_key: str, job: str, ticket, conn) -> None:
+    try:
+        looping = _loops.retry_loop(instance_key, event, ticket, conn)
+    except Exception as e:
+        emit(_loops.LOOP_CHECK_ERROR, f"{event}: {type(e).__name__}: {e}",
+             job=job, instance_key=instance_key, conn=conn)
+        return
+    if not looping:
+        return
+    emit(_loops.LOOP_EVENT,
+         f"{event} repeated {_loops.LOOP_THRESHOLD} times in a row with the same text"
+         f"{(' on ' + str(ticket)) if ticket else ''} and nothing changed between them",
+         meta={"loop": "retry", "event": event, "ticket": ticket,
+               "count": _loops.LOOP_THRESHOLD},
+         job=job, instance_key=instance_key, conn=conn)
 
 
 MAX_LOG_LINES = 50000
