@@ -367,8 +367,11 @@ class WorkerPool:
                              meta={"ticket": ctx.ticket_key})
                 return
 
+        recovered = registry.TaskResult("ok")
+        if task_def.get("on_success") is not None:
+            task_def["on_success"](ctx, recovered)
         on_success = task_def.get("on_success_status")
-        target = on_success(ctx, registry.TaskResult("ok")) if callable(on_success) else on_success
+        target = on_success(ctx, recovered) if callable(on_success) else on_success
         has_target = isinstance(target, str) and bool(target) and bool(ctx.ticket_key)
         try:
             transition_ticket_and_emit(

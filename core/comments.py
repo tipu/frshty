@@ -2,8 +2,9 @@ import re
 from datetime import datetime, timezone
 
 import core.db as db
+from core.ticket_status import AUTOMATED_REVIEW_FIX
 
-MAX_AUTOMATED_REVIEW_FIX_RUNS = 2
+MAX_AUTOMATED_REVIEW_FIX_RUNS = AUTOMATED_REVIEW_FIX.budget
 AUTOMATED_REVIEW_KINDS = ("issue_comment", "review_body")
 CHECKS_PASSED_RE = re.compile(r"^[#\s]*\W*\s*(?:All \d+ checks? passed\b|[^\n]+? passed \u2014 `[0-9a-f]{7,40}`)",
                               re.IGNORECASE)
@@ -539,7 +540,7 @@ def automated_review_skips(comments: list[dict], key, fixed: set) -> dict:
     automated_keys = {key(c) for c in automated}
     passed = {key(c) for c in automated if reports_checks_passed(c)}
     failed = {key(c) for c in automated if reports_checks_failed(c)}
-    capped = len(automated_keys & fixed) >= MAX_AUTOMATED_REVIEW_FIX_RUNS
+    capped = not AUTOMATED_REVIEW_FIX.may_continue(len(automated_keys & fixed))
     skips = {}
     for k in automated_keys:
         if k not in current:
