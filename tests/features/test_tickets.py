@@ -3508,6 +3508,42 @@ class TestRecheckPrFailed:
         assert ts["status"] == "pr_failed"
         assert mock_log.emit.call_count == 0
 
+    def _recheck_checks(self, fake_config, triaged, failing):
+        ts = self._ts(pr_failed_reason="ci_failed",
+                      ci_fix_heads={"repo/99": "sha2"}, ci_triaged_checks=triaged)
+        mock_platform = MagicMock()
+        mock_platform.get_pr_info.return_value = {
+            "state": "OPEN", "approvers": [], "head_sha": "sha2"}
+        mock_platform.get_pr_checks.return_value = [
+            {"name": name, "state": "FAILURE"} for name in failing]
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.log"):
+            return tickets._recheck_pr_failed(fake_config, self._ticket(), ts, "http://b")
+
+    def test_ci_failed_same_head_untriaged_check_recovers(self, fake_config):
+        ts = self._recheck_checks(fake_config, {"repo/99": ["test"]}, ["test", "evals"])
+        assert ts["status"] == "in_review"
+
+    def test_ci_failed_same_head_triaged_checks_stay_parked(self, fake_config):
+        ts = self._recheck_checks(fake_config, {"repo/99": ["evals", "test"]}, ["evals"])
+        assert ts["status"] == "pr_failed"
+
+    def test_ci_failed_untriaged_check_behind_a_capped_pr_stays_parked(self, fake_config):
+        ts = self._ts(pr_failed_reason="ci_failed",
+                      prs=[{"repo": "repo", "id": 99, "url": "u"},
+                           {"repo": "other", "id": 7, "url": "u"}],
+                      ci_fix_heads={"repo/99": "sha2", "other/7": "sha2"},
+                      ci_triaged_checks={"repo/99": ["test"]})
+        mock_platform = MagicMock()
+        mock_platform.get_pr_info.return_value = {
+            "state": "OPEN", "approvers": [], "head_sha": "sha2"}
+        mock_platform.get_pr_checks.side_effect = lambda repo, pr_id: [
+            {"name": "test" if repo == "repo" else "evals", "state": "FAILURE"}]
+        with patch("features.tickets.make_platform", return_value=mock_platform), \
+             patch("features.tickets.log"):
+            ts = tickets._recheck_pr_failed(fake_config, self._ticket(), ts, "http://b")
+        assert ts["status"] == "pr_failed"
+
     def test_ci_failed_head_moved_recovers(self, fake_config):
         ts = self._ts(pr_failed_reason="ci_failed",
                       ci_fix_heads={"repo/99": "sha2"})
