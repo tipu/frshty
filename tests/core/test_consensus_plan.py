@@ -140,6 +140,12 @@ def test_fanout_runs_deepseek_through_opencode_when_named(tmp_path, monkeypatch)
     assert recorded["deepseek"]["cmd"] == ["opencode", "run", "-m",
                                            "openrouter/deepseek/deepseek-v4.1-flash"]
     assert recorded["deepseek"]["kw"]["stdin_text"] == "PROMPT"
+    assert recorded["deepseek"]["kw"]["env_extra"] == {"OPENCODE_DISABLE_CLAUDE_CODE": "1"}
+
+    cp._fan_out("PROMPT\n\nRULES", tmp_path, run_dir, [str(tmp_path)], 30,
+                voices=("codex", "deepseek"), deepseek_prompt="PROMPT")
+    assert recorded["deepseek"]["kw"]["stdin_text"] == "PROMPT"
+    assert recorded["codex"]["kw"]["stdin_text"] == "PROMPT\n\nRULES"
 
 
 def test_quorum_degrades_to_claude_only_when_others_unavailable(tmp_path, monkeypatch):
