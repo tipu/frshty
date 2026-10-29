@@ -1361,7 +1361,8 @@ def check(config: dict, instance_key: str = ""):
     - ci_fix_attempts: CI fix attempt count.
     - ci_fix_heads: per-PR head SHA last seen by the CI fix path; a head that
       moves after the budget is spent resets ci_fix_attempts, and a parked
-      ci_failed ticket stays parked until a head moves or CI stops failing.
+      ci_failed ticket stays parked until a head moves, CI stops failing, or
+      a check outside ci_triaged_checks fails.
     - ci_passed: marker from monitor_ci that checks passed.
     - checks_started_at: CI monitoring window start timestamp.
     - ci_unrelated_checks: per-PR ("repo/id" keyed) check names triaged as not
@@ -2572,13 +2573,13 @@ def _recheck_pr_failed(config, ticket, ts, base_url) -> dict:
         except Exception:
             return ts
         pr_state = info.get("state", "")
-        _cache_pr_health(platform, pr, info)
+        checks = _cache_pr_health(platform, pr, info)
         if pr_state == "MERGED":
             continue
         all_merged = False
         if pr_state == "OPEN":
             any_open = True
-            open_infos.append((pr, info))
+            open_infos.append((pr, info, checks))
             if info.get("mergeable") == "CONFLICTING":
                 any_open_conflicting = True
 
@@ -2598,10 +2599,16 @@ def _recheck_pr_failed(config, ticket, ts, base_url) -> dict:
             heads = ts.get("ci_fix_heads") or {}
             head_moved = any(
                 info.get("head_sha") and heads.get(f"{pr['repo']}/{pr['id']}") != info["head_sha"]
-                for pr, info in open_infos
+                for pr, info, _ in open_infos
             )
-            still_red = any(pr.get("ci") in ("failing", "unknown") for pr, _ in open_infos)
-            if still_red and not head_moved:
+            triaged = ts.get("ci_triaged_checks") or {}
+            failed = next(((pr, checks) for pr, _, checks in open_infos
+                           if failing_check_names(checks) and not held_unrelated(ts, pr, checks)), None)
+            untriaged = bool(triaged) and failed is not None and not (
+                set(failing_check_names(failed[1])) <= set(triaged.get(f"{failed[0]['repo']}/{failed[0]['id']}") or [])
+            )
+            still_red = any(pr.get("ci") in ("failing", "unknown") for pr, _, _ in open_infos)
+            if still_red and not head_moved and not untriaged:
                 return ts
 
         log.emit("ticket_pr_failed_recovered_open",
@@ -2639,7 +2646,7 @@ def _build_pr_info_map(platform, prs: list[dict]) -> dict:
     return out
 
 
-def _cache_pr_health(platform, pr: dict, info: dict) -> None:
+def _cache_pr_health(platform, pr: dict, info: dict) -> list | None:
     """Persist per-PR review/CI state onto the ticket's pr entry so the PR board
     serves from cache without live platform calls, and bump poll_count — a high
     count against an unmerged PR flags a stuck poll loop (e.g. CI never recovers).
@@ -2652,10 +2659,12 @@ def _cache_pr_health(platform, pr: dict, info: dict) -> None:
     pr["poll_count"] = pr.get("poll_count", 0) + 1
     pr["last_polled_at"] = now
     try:
-        pr["ci"] = ci_summary(platform.get_pr_checks(pr["repo"], pr["id"]))
+        checks = platform.get_pr_checks(pr["repo"], pr["id"])
     except Exception:
-        pr["ci"] = "unknown"
+        checks = None
+    pr["ci"] = ci_summary(checks)
     pr["ci_checked_at"] = now
+    return checks
 
 
 ISSUE_COMMENT_BASELINE_HOURS = 24
