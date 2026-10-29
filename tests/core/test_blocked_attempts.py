@@ -9,6 +9,7 @@ had its push refused 235 times: each new commit on main reset the attempt
 counter and bought two more refused pushes."""
 import json
 import subprocess
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -280,3 +281,26 @@ class TestARefusedPushWithRealGit:
         assert out["result"] == "push_failed", (
             "the local merge never reached the PR, so the PR is still behind main")
         assert not st.get("base_synced")
+
+
+class TestABaseSyncBlockClears:
+    def _capped(self, result, blocked_at=None):
+        return {"base_sync_sha": "main1", "base_sync_attempts": branch_sync.MAX_BASE_SYNC_ATTEMPTS,
+                "last_base_error": "error", "base_sync_head": "head1", "base_sync_result": result,
+                "base_sync_blocked_base": "main1",
+                "base_sync_blocked_at": blocked_at or datetime.now(timezone.utc).isoformat()}
+
+    def _cleared(self, st, base_sha):
+        with patch("core.branch_sync.ls_remote_sha", return_value="head1"):
+            return branch_sync.blocker_cleared(st, "/repo", "feature", base_sha, lambda: "/wt")
+
+    def test_a_sync_that_could_not_start_retries_when_main_moves(self):
+        assert self._cleared(self._capped("fetch_failed"), "main1") is False
+        assert self._cleared(self._capped("fetch_failed"), "main2") is True
+
+    def test_a_refused_push_does_not_retry_when_main_moves(self):
+        assert self._cleared(self._capped("push_failed"), "main2") is False
+
+    def test_any_block_lapses_after_a_day(self):
+        old = (datetime.now(timezone.utc) - timedelta(hours=branch_sync.BLOCK_LAPSE_HOURS)).isoformat()
+        assert self._cleared(self._capped("push_failed", old), "main1") is True

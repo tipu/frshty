@@ -1,4 +1,5 @@
 import subprocess
+from datetime import datetime, timezone
 from unittest.mock import patch, MagicMock
 
 import core.branch_sync as branch_sync
@@ -84,7 +85,8 @@ class TestSyncBranchWithBase:
 
     def test_capped_skips_without_worktree(self):
         st = {"base_sync_sha": "basesha", "base_sync_attempts": branch_sync.MAX_BASE_SYNC_ATTEMPTS,
-              "base_sync_head": "basesha"}
+              "base_sync_head": "basesha",
+              "base_sync_blocked_at": datetime.now(timezone.utc).isoformat()}
         called = []
         with patch("core.branch_sync.ls_remote_sha", return_value="basesha"):
             out = branch_sync.sync_branch_with_base(
@@ -194,7 +196,8 @@ class TestDirtyBlockClears:
         wt = self._repo(tmp_path)
         platform = _platform()
         st = {"base_sync_sha": "basesha", "base_sync_attempts": branch_sync.MAX_BASE_SYNC_ATTEMPTS,
-              "last_base_error": "CONFLICT in a.py", "base_sync_head": "basesha"}
+              "last_base_error": "CONFLICT in a.py", "base_sync_head": "basesha",
+              "base_sync_blocked_at": datetime.now(timezone.utc).isoformat()}
         calls = []
         with patch("core.branch_sync.ls_remote_sha", return_value="basesha"):
             out = branch_sync.sync_branch_with_base(platform, "/repo", "main", "f", st,
