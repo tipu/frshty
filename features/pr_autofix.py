@@ -23,7 +23,7 @@ from core.claude_runner import (run_agentic, run_balanced, run_claude_code, pars
 from core.commit_message import COMMIT_SUBJECT_RULE, branch_key, commit_subject, keyed
 from core.config import get_repos
 from core.llm import CODEX_EXEC, READ_ONLY_TOOLS, WRITE_TOOLS, run_external_model
-from features.pr_ci import KEEP_GREEN_RULE
+from features.pr_ci import FILE_TOOLS_KEEP_GREEN_RULE
 from features.platforms import make_platform
 
 CLAUDE_REVIEW_TIMEOUT = 900
@@ -393,7 +393,7 @@ def run(config: dict, payload: dict) -> tuple[bool, str | None]:
                 f"A consolidated code review of this PR produced {len(findings)} critical/high "
                 f"finding(s). Resolve ALL of them with the smallest correct change. "
                 f"Do not refactor beyond what a finding requires.\n\n{findings_list}\n\n"
-                + KEEP_GREEN_RULE + "\n\n"
+                + FILE_TOOLS_KEEP_GREEN_RULE + "\n\n"
                 + COMMIT_SUBJECT_RULE
             )
             result = run_claude_code(fix_prompt, cwd=worktree, timeout=FIX_TIMEOUT,
