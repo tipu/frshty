@@ -102,6 +102,9 @@ class TestRunScopeReview:
         assert fan_out.call_args.kwargs["voices"] == ("claude", "codex", "agy", "deepseek")
         assert f"- {tmp_path / 'CLAUDE.md'}" in prompt
         assert str(wt / 'CLAUDE.md') not in prompt
+        deepseek_prompt = fan_out.call_args.kwargs["deepseek_prompt"]
+        assert prompt.startswith(deepseek_prompt)
+        assert "CLAUDE.md" not in deepseek_prompt
 
     def test_all_pass(self, tmp_path, scope_config):
         (result, ticket_dir) = self._run(tmp_path, scope_config, _fanout_result(
