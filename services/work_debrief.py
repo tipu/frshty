@@ -11,7 +11,8 @@ import core.db as db
 import core.llm as llm
 import core.log as log
 from services import (claude_config, dir_slim, disk_usage, work_artifacts,
-                      work_launch, work_store, work_tickets, work_worktree)
+                      work_ci_wait, work_launch, work_store, work_tickets,
+                      work_worktree)
 
 SCAN_INTERVAL = 60
 DEBRIEF_TIMEOUT = 300
@@ -632,6 +633,12 @@ def _scan_loop():
         except Exception as e:
             log.emit("work_run_budget_error", f"{type(e).__name__}: {e}")
         try:
+            for act in work_ci_wait.sweep_ci_waits():
+                log.emit("work_ci_wait_done",
+                         f"work item {act['id']}: PR #{act['pr']} checks: {act['result']}")
+        except Exception as e:
+            log.emit("work_ci_wait_error", f"{type(e).__name__}: {e}")
+        try:
             for item_id in work_store.auto_archive_quiet_items():
                 log.emit("work_auto_archived",
                          f"work item {item_id}: acknowledged and archived by itself; "
@@ -847,6 +854,9 @@ def _propose_followup_locked(followup_id: int, objective: str = "") -> dict:
             raise RuntimeError(result["error"])
         detail = f"{PROPOSED_DETAIL_PREFIX}{result['item_id']}"
         status = "proposed"
+    except work_store.ProposalSuppressed as e:
+        detail = f"not proposed: {e}"[:300]
+        status = "dismissed"
     except work_store.ProposalKeyHeld as e:
         detail = DUPLICATE_DETAIL.format(id=e.holder["id"], state=e.holder["state"])
         status = "dismissed"

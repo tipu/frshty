@@ -199,12 +199,10 @@
               </template>
               <template v-else-if="g === 'needs_ack'">
                 <button class="ln-btn ln-btn-sm ln-btn-primary"
-                        title="accept the agent's report and complete this task" @click="act(it, 'ack')">Acknowledge</button>
+                        title="accept the agent's report, complete this task and file it in the archive" @click="act(it, 'ack')">Acknowledge</button>
                 <button class="ln-btn ln-btn-sm ln-btn-ghost"
                         title="launch the next run from this one; it keeps this task's projects and agent"
                         @click="toggleFollowup(it)">{{ fupOpen[rowKey(it)] ? 'Follow up ▾' : 'Follow up ▸' }}</button>
-                <button class="ln-btn ln-btn-sm ln-btn-ghost"
-                        title="acknowledge and file it in the archive in one step" @click="act(it, 'archive')">Archive</button>
                 <button class="ln-btn ln-btn-sm ln-btn-ghost"
                         title="the work is not finished; send it back" @click="act(it, 'reopen')">Reopen</button>
               </template>
