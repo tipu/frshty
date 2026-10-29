@@ -74,25 +74,32 @@ def blocked_pr_comments(instance_key: str) -> list[dict]:
     comment keeps the error_count of its last live attempt and can never reach
     'processed', so reading only 'processed' as finished pins it in this
     bucket for good. Serves: comments that would otherwise sit silent in the
-    event log."""
+    event log.
+
+    Only a pull request frshty still polls counts. The poll is the only thing
+    that settles a row, and a closed pull request leaves the poll, so its rows
+    never settle: on 2026-10-28, 107 of 199 manual rows sat on closed pull
+    requests."""
+    pr_state = state.load("own_prs") or {}
+    polled = [k for k, v in pr_state.items() if isinstance(v, dict)]
+    if not polled:
+        return []
     marks = ",".join("?" * len(TERMINAL_COMMENT_STATES))
+    pr_marks = ",".join("?" * len(polled))
     rows = db.query_all(
         "SELECT resource_id, comment_id, state, error_count, last_error, last_checked_at"
         " FROM comment_state"
         " WHERE instance_key=? AND resource_type='pr'"
         f" AND state NOT IN ({marks})"
+        f" AND resource_id IN ({pr_marks})"
         " ORDER BY error_count DESC, last_checked_at ASC LIMIT ?",
-        (instance_key, *TERMINAL_COMMENT_STATES, _LIMIT),
+        (instance_key, *TERMINAL_COMMENT_STATES, *polled, _LIMIT),
     )
-    if not rows:
-        return []
-    pr_state = state.load("own_prs") or {}
     out: list[dict] = []
     for r in rows:
         resource_id = r["resource_id"]
         repo, _, pr_id = resource_id.partition("/")
-        seen = pr_state.get(resource_id)
-        seen = seen if isinstance(seen, dict) else {}
+        seen = pr_state[resource_id]
         error_count = r["error_count"] or 0
         reason_kind = _owed_reason_kind(r["state"], error_count)
         out.append({
