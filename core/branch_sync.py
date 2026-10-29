@@ -10,8 +10,9 @@ import subprocess
 from pathlib import Path
 
 import core.git_util as git_util
+from core.ticket_status import BASE_SYNC
 
-MAX_BASE_SYNC_ATTEMPTS = 2
+MAX_BASE_SYNC_ATTEMPTS = BASE_SYNC.budget
 DIRTY_WORKTREE_ERROR = "worktree has uncommitted changes"
 
 
@@ -59,7 +60,7 @@ def _count_failure(st: dict, attempts: int, result: str, error: str) -> dict:
     st["base_sync_attempts"] = attempts + 1
     st["last_base_error"] = error
     return {"result": result, "error": error, "attempts": attempts + 1,
-            "capped": attempts + 1 >= MAX_BASE_SYNC_ATTEMPTS}
+            "capped": not BASE_SYNC.may_continue(attempts + 1)}
 
 
 def sync_branch_with_base(platform, repo_path, base_branch: str, branch: str,
@@ -87,11 +88,12 @@ def sync_branch_with_base(platform, repo_path, base_branch: str, branch: str,
         st["base_sync_attempts"] = 0
         st.pop("base_synced", None)
         st.pop("last_base_error", None)
-    if st.get("base_synced"):
-        return {"result": "skip"}
     attempts = st.get("base_sync_attempts", 0)
+    exit_reason = BASE_SYNC.exit_reason(attempts, converged=bool(st.get("base_synced")))
+    if exit_reason == "converged":
+        return {"result": "skip"}
     worktree = None
-    if attempts >= MAX_BASE_SYNC_ATTEMPTS:
+    if exit_reason == "budget_spent":
         if not blocked_by_dirty_worktree(st):
             return {"result": "capped", "attempts": attempts}
         worktree = ensure_worktree()
@@ -137,7 +139,7 @@ def sync_branch_with_base(platform, repo_path, base_branch: str, branch: str,
         st["base_sync_attempts"] = attempts + 1
         st["last_base_error"] = merged.get("error", "")
         return {"result": "merge_failed", "error": merged.get("error", ""),
-                "attempts": attempts + 1, "capped": attempts + 1 >= MAX_BASE_SYNC_ATTEMPTS}
+                "attempts": attempts + 1, "capped": not BASE_SYNC.may_continue(attempts + 1)}
 
     pushed = platform.push_branch(worktree, branch)
     if not pushed.get("ok"):

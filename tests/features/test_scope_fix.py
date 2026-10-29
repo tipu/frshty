@@ -13,7 +13,7 @@ import core.state as state
 from core.consensus_scope import MAX_SCOPE_FIX_ATTEMPTS
 from core.tasks.registry import TaskContext, TaskResult, run_task
 from core.tasks.tickets import (
-    _SCOPE_FIX_PROMPT, _branch_moved_off_the_verdict, _scope_fix_target,
+    _SCOPE_FIX_PROMPT, _branch_moved_off_the_verdict, _close_scope_fix_pass,
     CommitBlocked, fix_scope_findings,
 )
 from features.tickets import _scope_fix_incomplete
@@ -436,13 +436,13 @@ class TestARecoveredJobDoesNotSpeakForThePush:
     def test_a_result_with_no_body_behind_it_leaves_the_mark(self, tmp_path, tmp_state):
         _seed(tmp_path, tmp_state, status="in_review",
               scope_fix={"attempts": 1, "incomplete": "queued and not finished"})
-        _scope_fix_target(_ctx(tmp_path), TaskResult("ok"))
+        _close_scope_fix_pass(_ctx(tmp_path), TaskResult("ok"))
         assert _scope_fix_incomplete(state.load_ticket(KEY))
 
     def test_a_body_that_finished_takes_the_mark_off(self, tmp_path, tmp_state):
         _seed(tmp_path, tmp_state, status="in_review",
               scope_fix={"attempts": 1, "incomplete": "queued and not finished"})
-        _scope_fix_target(_ctx(tmp_path),
+        _close_scope_fix_pass(_ctx(tmp_path),
                           TaskResult("ok", artifacts={"completed": True}))
         assert _scope_fix_incomplete(state.load_ticket(KEY)) == ""
 

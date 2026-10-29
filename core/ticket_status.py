@@ -1,4 +1,6 @@
+from dataclasses import dataclass
 from enum import Enum
+from typing import Callable
 
 
 class TicketStatus(str, Enum):
@@ -83,3 +85,82 @@ def transition(current: str, target: str, *, blocked_from: str | None = None) ->
             f"blocked from {blocked_from or 'nowhere recorded'}"
         )
     return tgt.value
+
+
+def _enter_proving_edge(status: str | None, artifacts: dict) -> str:
+    """enter_proving routes to `proving` when a PROOF.md exists at
+    workspace.root, otherwise it skips straight to `pr_ready`. A missing
+    artifact takes the skip path."""
+    return "proving" if artifacts.get("has_proof_md") else "pr_ready"
+
+
+def _scope_fix_edge(status: str | None, artifacts: dict) -> str | None:
+    """fix_scope_findings goes back to `proving` only while the ticket is
+    still holding its PR. A ticket corrected before its proof is already in
+    `proving` and stays there. A ticket whose PR the operator opened over the
+    verdict keeps its status, because the body pushed to that PR."""
+    return "proving" if status == "pr_ready" else None
+
+
+SuccessEdge = str | Callable[[str | None, dict], str | None]
+
+SUCCESS_EDGES: dict[str, SuccessEdge] = {
+    "start_planning": TicketStatus.reviewing.value,
+    "enter_testing": TicketStatus.testing.value,
+    "enter_proving": _enter_proving_edge,
+    "mark_ready": TicketStatus.pr_ready.value,
+    "fix_scope_findings": _scope_fix_edge,
+    "do_research": TicketStatus.done.value,
+    "validate_merged_ticket": TicketStatus.done.value,
+}
+
+
+def success_target(task: str, status: str | None, artifacts: dict) -> str | None:
+    """The status a successful run of `task` moves the ticket to, or None.
+
+    SUCCESS_EDGES holds the edge each task takes when it succeeds. A selector
+    reads the ticket status at the moment of success and the artifacts of the
+    run. The task registry reads this table, so a task declares no success
+    edge of its own."""
+    edge = SUCCESS_EDGES.get(task)
+    return edge(status, artifacts) if callable(edge) else edge
+
+
+@dataclass(frozen=True)
+class Cycle:
+    """A bounded retry loop in the graph.
+
+    `node` is the ticket status the loop runs on, or None for a loop that
+    runs on any pull request, a ticket PR or not. `task` runs one pass. `budget` is
+    the number of passes the loop may spend. `exit_reason` is the check every
+    caller makes before it starts another pass."""
+    name: str
+    node: TicketStatus | None
+    task: str
+    budget: int
+
+    def exit_reason(self, attempts: int, converged: bool = False) -> str | None:
+        """Why the loop stops, or None while another pass may run.
+
+        A converged loop stops whatever budget is left. A loop that spent its
+        budget stops even when it did not converge."""
+        if converged:
+            return "converged"
+        if attempts >= self.budget:
+            return "budget_spent"
+        return None
+
+    def may_continue(self, attempts: int, converged: bool = False) -> bool:
+        return self.exit_reason(attempts, converged) is None
+
+
+# A correction pass is one LLM run plus a fresh proof, so it is not free, and a
+# third pass would mean the reviewers and the fixer disagree about what the
+# ticket is. That disagreement is the operator's to settle, so the gate goes
+# back to holding the branch once the budget is spent.
+SCOPE_FIX = Cycle("scope_fix", TicketStatus.proving, "fix_scope_findings", 2)
+BASE_SYNC = Cycle("base_sync", TicketStatus.in_review, "sync_pr_base", 2)
+PR_AUTOFIX = Cycle("pr_autofix", None, "pr_autofix_run", 3)
+AUTOMATED_REVIEW_FIX = Cycle("automated_review_fix", None, "fix_pr_comments", 2)
+
+CYCLES: tuple[Cycle, ...] = (SCOPE_FIX, BASE_SYNC, PR_AUTOFIX, AUTOMATED_REVIEW_FIX)

@@ -23,6 +23,7 @@ from core.claude_runner import (run_agentic, run_balanced, run_claude_code, pars
 from core.commit_message import COMMIT_SUBJECT_RULE, branch_key, commit_subject, keyed
 from core.config import get_repos
 from core.llm import CODEX_EXEC, READ_ONLY_TOOLS, WRITE_TOOLS, run_external_model
+from core.ticket_status import PR_AUTOFIX
 from features.pr_ci import FILE_TOOLS_KEEP_GREEN_RULE
 from features.platforms import make_platform
 
@@ -30,7 +31,7 @@ CLAUDE_REVIEW_TIMEOUT = 900
 CODEX_REVIEW_TIMEOUT = 1200
 CONSOLIDATE_TIMEOUT = 240
 FIX_TIMEOUT = 1500
-MAX_ATTEMPTS = 3
+MAX_ATTEMPTS = PR_AUTOFIX.budget
 DIFF_CHAR_CAP = 400_000
 ACTIONABLE = ("critical", "high")
 SEEDED_KEY = "_seeded"
@@ -138,7 +139,7 @@ def check(config: dict):
                      f"{pr['repo']}#{pr['id']}: new PR — queued claude+codex review",
                      links={"pr": pr["url"]},
                      meta={"repo": pr["repo"], "pr_id": pr["id"], "author": pr.get("author", "")})
-        elif rec.get("status") == "error" and rec.get("attempts", 0) < MAX_ATTEMPTS:
+        elif rec.get("status") == "error" and PR_AUTOFIX.may_continue(rec.get("attempts", 0)):
             rec["status"] = "queued"
             q.enqueue_job(instance_key, "pr_autofix_run", payload={"pr": pr})
             log.emit("pr_autofix_requeued",
