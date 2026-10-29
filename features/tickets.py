@@ -877,7 +877,7 @@ def _reingest_merged_ticket(config: dict, ticket: dict, ts: dict, base_url: str)
         cur_latest is not None and snap_latest is not None and cur_latest > snap_latest
     )
 
-    for field in ("prs", "ci_fix_attempts", "ci_fix_heads", "pr_attempts", "ci_passed",
+    for field in ("prs", "ci_fix_attempts", "ci_fix_heads", "ci_fix_checks", "pr_attempts", "ci_passed",
                   "checks_started_at", "_ci_failed_pending", "pr_scheduled_at",
                   "ci_unrelated_checks",
                   "conflict_resolution_attempts", "last_comment_ids",
@@ -1362,6 +1362,9 @@ def check(config: dict, instance_key: str = ""):
     - ci_fix_heads: per-PR head SHA last seen by the CI fix path; a head that
       moves after the budget is spent resets ci_fix_attempts, and a parked
       ci_failed ticket stays parked until a head moves or CI stops failing.
+    - ci_fix_checks: per-PR check names that a counted CI fix attempt
+      targeted; a failing check outside this set resets a spent
+      ci_fix_attempts, cleared whenever the head moves.
     - ci_passed: marker from monitor_ci that checks passed.
     - checks_started_at: CI monitoring window start timestamp.
     - ci_unrelated_checks: per-PR ("repo/id" keyed) check names triaged as not
@@ -2572,13 +2575,13 @@ def _recheck_pr_failed(config, ticket, ts, base_url) -> dict:
         except Exception:
             return ts
         pr_state = info.get("state", "")
-        _cache_pr_health(platform, pr, info)
+        checks = _cache_pr_health(platform, pr, info)
         if pr_state == "MERGED":
             continue
         all_merged = False
         if pr_state == "OPEN":
             any_open = True
-            open_infos.append((pr, info))
+            open_infos.append((pr, info, checks))
             if info.get("mergeable") == "CONFLICTING":
                 any_open_conflicting = True
 
@@ -2598,10 +2601,16 @@ def _recheck_pr_failed(config, ticket, ts, base_url) -> dict:
             heads = ts.get("ci_fix_heads") or {}
             head_moved = any(
                 info.get("head_sha") and heads.get(f"{pr['repo']}/{pr['id']}") != info["head_sha"]
-                for pr, info in open_infos
+                for pr, info, _ in open_infos
             )
-            still_red = any(pr.get("ci") in ("failing", "unknown") for pr, _ in open_infos)
-            if still_red and not head_moved:
+            tried = ts.get("ci_fix_checks") or {}
+            failed = next(((pr, checks) for pr, _, checks in open_infos
+                           if failing_check_names(checks) and not held_unrelated(ts, pr, checks)), None)
+            untried = bool(tried) and failed is not None and bool(
+                set(failing_check_names(failed[1])) - set(tried.get(f"{failed[0]['repo']}/{failed[0]['id']}") or [])
+            )
+            still_red = any(pr.get("ci") in ("failing", "unknown") for pr, _, _ in open_infos)
+            if still_red and not head_moved and not untried:
                 return ts
 
         log.emit("ticket_pr_failed_recovered_open",
@@ -2639,7 +2648,7 @@ def _build_pr_info_map(platform, prs: list[dict]) -> dict:
     return out
 
 
-def _cache_pr_health(platform, pr: dict, info: dict) -> None:
+def _cache_pr_health(platform, pr: dict, info: dict) -> list | None:
     """Persist per-PR review/CI state onto the ticket's pr entry so the PR board
     serves from cache without live platform calls, and bump poll_count — a high
     count against an unmerged PR flags a stuck poll loop (e.g. CI never recovers).
@@ -2652,10 +2661,12 @@ def _cache_pr_health(platform, pr: dict, info: dict) -> None:
     pr["poll_count"] = pr.get("poll_count", 0) + 1
     pr["last_polled_at"] = now
     try:
-        pr["ci"] = ci_summary(platform.get_pr_checks(pr["repo"], pr["id"]))
+        checks = platform.get_pr_checks(pr["repo"], pr["id"])
     except Exception:
-        pr["ci"] = "unknown"
+        checks = None
+    pr["ci"] = ci_summary(checks)
     pr["ci_checked_at"] = now
+    return checks
 
 
 ISSUE_COMMENT_BASELINE_HOURS = 24
@@ -3179,6 +3190,7 @@ def _reconcile_prs(ts: dict, open_prs: list[dict], key: str = "",
         ts["conflict_resolution_attempts"] = 0
         ts["ci_fix_attempts"] = 0
         ts.pop("ci_fix_heads", None)
+        ts.pop("ci_fix_checks", None)
         ts.pop("ci_passed", None)
         ts.pop("checks_started_at", None)
         ts.pop("ci_unrelated_checks", None)
@@ -3523,12 +3535,23 @@ def _handle_ci_failure(ticket, ts, pr, checks, base_url, instance_key="", head_s
         heads[pr_key] = head_sha
         ts["ci_fix_heads"] = heads
         ts.pop("ci_unrelated_checks", None)
+        ts.pop("ci_fix_checks", None)
 
     if held_unrelated(ts, pr, checks):
         ts["ci_held_unrelated"] = True
         return ts
 
     fix_attempts = ts.get("ci_fix_attempts", 0)
+
+    tried = ts.get("ci_fix_checks") or {}
+    untried = sorted(set(failed_names) - set(tried.get(pr_key) or []))
+    if fix_attempts >= MAX_CI_FIX_ATTEMPTS and tried and untried:
+        log.emit("ticket_ci_fix_budget_reset",
+            f"{_label(ticket['key'], ts)}: {', '.join(untried)} on {pr_key} never had a CI fix attempt; resetting fix budget",
+            links={"detail": f"{base_url}/tickets/{ticket['key']}", "pr": pr.get("url", "")},
+            meta={"ticket": ticket["key"], "repo": pr["repo"], "pr_id": pr["id"], "untried_checks": untried})
+        ts["ci_fix_attempts"] = fix_attempts = 0
+        ts["ci_fix_checks"] = {**tried, pr_key: sorted(set(tried.get(pr_key) or []) | set(untried))}
 
     if fix_attempts >= MAX_CI_FIX_ATTEMPTS:
         log.emit("ticket_checks_failed", f"CI failed for {_label(ticket['key'], ts)} after {fix_attempts} fix attempts: {', '.join(failed_names)}",

@@ -1753,14 +1753,20 @@ def fix_ci_failures(ctx: TaskContext) -> TaskResult:
                 # count (nothing of ours was attempted).
                 head_after = _pr_head(platform, pr)
 
-                def _bump(current):
+                def _bump(current, names=failed_names):
                     if not current:
                         return None
+                    pr_key = f"{pr['repo']}/{pr['id']}"
                     current["ci_fix_attempts"] = current.get("ci_fix_attempts", 0) + 1
                     if head_after:
                         heads = current.get("ci_fix_heads") or {}
-                        heads[f"{pr['repo']}/{pr['id']}"] = head_after
+                        heads[pr_key] = head_after
                         current["ci_fix_heads"] = heads
+                    tried = current.get("ci_fix_checks")
+                    if not isinstance(tried, dict):
+                        tried = {}
+                    tried[pr_key] = sorted(set(tried.get(pr_key) or []) | set(names))
+                    current["ci_fix_checks"] = tried
                     current.pop("ci_passed", None)
                     current.pop("checks_started_at", None)
                     current.pop("ci_unrelated_checks", None)

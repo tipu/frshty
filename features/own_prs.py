@@ -843,6 +843,7 @@ def _check_ci(config, platform, pr, seen, base_url):
         seen.pop("ci_unrelated_sha", None)
         if summary == "passing":
             seen.pop("ci_fix_attempts", None)
+            seen.pop("ci_fix_checks", None)
             seen.pop("ci_cap_emitted", None)
         return
     failing = [c for c in checks if c.get("state", "").upper() in FAILED_STATES]
@@ -857,6 +858,19 @@ def _check_ci(config, platform, pr, seen, base_url):
 
         head = subprocess.run(["git", "rev-parse", "HEAD"],
                               cwd=str(worktree), capture_output=True, text=True, timeout=10).stdout.strip()
+
+        tried = seen.get("ci_fix_checks") or []
+        untried = sorted({c["name"] for c in failing} - set(tried))
+        if seen.get("ci_fix_attempts", 0) >= MAX_CI_FIX_ATTEMPTS and tried and untried:
+            log.emit("pr_ci_fix_budget_reset",
+                     f"{pr['repo']}#{pr['id']}: {', '.join(untried)} never had a CI fix attempt; resetting fix budget",
+                     links={"pr": pr["url"], "detail": f"{base_url}/"},
+                     meta={"repo": pr["repo"], "pr_id": pr["id"], "untried_checks": untried})
+            seen["ci_fix_attempts"] = 0
+            seen["ci_fix_checks"] = sorted(set(tried) | set(untried))
+            seen.pop("ci_fix_sha", None)
+            seen.pop("ci_cap_emitted", None)
+
         # Don't re-triage the same commit we already acted on (either fixed or
         # classified as unrelated). New commits reset this.
         if seen.get("ci_fix_sha") == head or seen.get("ci_unrelated_sha") == head:
@@ -913,6 +927,7 @@ def _check_ci(config, platform, pr, seen, base_url):
                                         cwd=str(worktree), capture_output=True, text=True, timeout=10).stdout.strip()
             seen["ci_fix_sha"] = new_head
             seen["ci_fix_attempts"] = outcome["attempts"]
+            seen["ci_fix_checks"] = sorted(set(seen.get("ci_fix_checks") or []) | set(failed_names))
             seen.pop("ci_cap_emitted", None)
             log.emit("pr_ci_fix_sent",
                      f"{pr_ref}: Sent CI fix (attempt {outcome['attempts']}/{MAX_CI_FIX_ATTEMPTS}): {outcome.get('fix_hint','')[:80]}",
