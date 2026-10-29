@@ -574,7 +574,7 @@ class BitbucketPlatform(_CIMonitorMixin):
         if blocked:
             log.emit("git_identity_push_blocked", blocked,
                      meta={"repo": Path(repo_path).name, "branch": branch})
-            return {"ok": False, "error": blocked}
+            return {"ok": False, "error": blocked, "identity_blocked": True}
         args = ["push", "-u", "origin", f"HEAD:refs/heads/{branch}"]
         if force:
             args.insert(1, "--force-with-lease")
@@ -1156,7 +1156,7 @@ class GitHubPlatform(_CIMonitorMixin):
         if blocked:
             log.emit("git_identity_push_blocked", blocked,
                      meta={"repo": Path(repo_path).name, "branch": branch})
-            return {"ok": False, "error": blocked}
+            return {"ok": False, "error": blocked, "identity_blocked": True}
         args = ["push", "-u", "origin", f"HEAD:refs/heads/{branch}"]
         if force:
             args.insert(1, "--force-with-lease")
