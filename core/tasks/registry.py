@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Any, Callable
 
 import core.state as state
+from core.ticket_status import SUCCESS_EDGES, success_target
 
 _REGISTRY: dict[str, dict] = {}
 
@@ -45,6 +46,22 @@ def read_result(artifacts: dict) -> TaskResult:
 Precondition = Callable[[TaskContext], tuple[bool, str]]
 Postcondition = Callable[[TaskContext], tuple[bool, str]]
 SuccessStatus = str | Callable[[TaskContext, "TaskResult"], str | None] | None
+SuccessHook = Callable[[TaskContext, "TaskResult"], None]
+
+
+def _graph_success_status(name: str) -> SuccessStatus:
+    """The success edge core.ticket_status.SUCCESS_EDGES declares for a task.
+
+    A selector reads the ticket status at the moment of success, so it is
+    wrapped to load that status from state."""
+    edge = SUCCESS_EDGES.get(name)
+    if not callable(edge):
+        return edge
+
+    def target(ctx: TaskContext, result: "TaskResult") -> str | None:
+        status = (state.load_ticket(ctx.ticket_key) or {}).get("status") if ctx.ticket_key else None
+        return success_target(name, status, result.artifacts)
+    return target
 
 
 def task(name: str,
@@ -52,7 +69,18 @@ def task(name: str,
          postconditions: list[Postcondition] | None = None,
          on_entry_status: str | None = None,
          on_success_status: SuccessStatus = None,
+         on_success: SuccessHook | None = None,
          timeout: int = 60):
+    """Register a task.
+
+    A task named in core.ticket_status.SUCCESS_EDGES takes its success edge
+    from that table and must not declare one. `on_success` runs after the
+    postconditions pass and before the success edge is read."""
+    if name in SUCCESS_EDGES:
+        if on_success_status is not None:
+            raise ValueError(f"task {name}: the success edge is declared in core.ticket_status.SUCCESS_EDGES")
+        on_success_status = _graph_success_status(name)
+
     def deco(fn):
         _REGISTRY[name] = {
             "fn": fn,
@@ -60,6 +88,7 @@ def task(name: str,
             "postconditions": list(postconditions or []),
             "on_entry_status": on_entry_status,
             "on_success_status": on_success_status,
+            "on_success": on_success,
             "timeout": timeout,
         }
         return fn
@@ -178,6 +207,7 @@ def run_task(ctx: TaskContext, *, defer_success_status: bool = False) -> TaskRes
     postconds = entry["postconditions"]
     on_entry = entry.get("on_entry_status")
     on_success = entry.get("on_success_status")
+    success_hook = entry.get("on_success")
     held = (state.load_ticket(ctx.ticket_key) or {}).get(state.FOREIGN_PRS_KEY) if ctx.ticket_key else None
     if held:
         return TaskResult("skipped", "held: ticket has open PR(s) frshty did not open: "
@@ -212,6 +242,8 @@ def run_task(ctx: TaskContext, *, defer_success_status: bool = False) -> TaskRes
         if not ok:
             return _release_gate_on_failure(ctx, TaskResult("failed", f"postcondition: {reason}",
                               artifacts=result.artifacts, next_events=result.next_events))
+    if success_hook is not None:
+        success_hook(ctx, result)
     if on_success is not None:
         target = on_success(ctx, result) if callable(on_success) else on_success
         if target and defer_success_status:

@@ -25,11 +25,12 @@ from core.config import (
 from core.deps import relink_shared_venv
 from core.consensus_plan import run_consensus_plan
 from core.consensus_scope import (
-    MAX_SCOPE_FIX_ATTEMPTS, SCOPE_FANOUT_TIMEOUT, report_summary,
+    SCOPE_FANOUT_TIMEOUT, report_summary,
     repos_with_branch_diff, run_scope_review, scope_fingerprint,
     scope_fix_attempts,
 )
 from core.tasks.registry import TaskContext, TaskResult, task
+from core.ticket_status import SCOPE_FIX
 import features.defence as defence
 from core.tasks.preconditions import (
     status_is, auto_pr_true, file_exists, file_contains, feature_enabled, has_flag,
@@ -1375,7 +1376,6 @@ def setup_prd_ticket(ctx: TaskContext) -> TaskResult:
 @task("start_planning",
       preconditions=[status_is("new", "planning"), repo_gate_clear],
       postconditions=[file_exists("docs/change-manifest.md")],
-      on_success_status="reviewing",
       timeout=PLAN_TIMEOUT)
 def start_planning(ctx: TaskContext) -> TaskResult:
     from features import acceptance
@@ -1850,7 +1850,6 @@ def backfill_artifacts(ctx: TaskContext) -> TaskResult:
 @task("enter_testing",
       preconditions=[status_is("reviewing"),
                      file_contains("docs/tri-review.md", r"VERDICT:\s*PASS")],
-      on_success_status="testing",
       timeout=15)
 def enter_testing(ctx: TaskContext) -> TaskResult:
     """Pure state transition reviewing → testing. TESTING.md is read later
@@ -2072,18 +2071,9 @@ def _fire_ticket_dev_complete(ctx: TaskContext) -> None:
     }, ctx.config)
 
 
-def _enter_proving_target(ctx: TaskContext, result: TaskResult) -> str:
-    """Callable on_success_status for enter_proving: route to `proving` when
-    a PROOF.md exists at workspace.root, otherwise skip straight to
-    `pr_ready`. The body fires ticket_dev_complete only on the skip path so
-    the event is dispatched exactly once per ticket either way."""
-    return "proving" if result.artifacts.get("has_proof_md") else "pr_ready"
-
-
 @task("enter_proving",
       preconditions=[status_is("testing"),
                      file_contains("docs/test-runs.md", r"VERDICT:\s*PASS")],
-      on_success_status=_enter_proving_target,
       timeout=15)
 def enter_proving(ctx: TaskContext) -> TaskResult:
     """Bridge from testing to either proving (PROOF.md present) or pr_ready
@@ -2199,7 +2189,6 @@ def prove(ctx: TaskContext) -> TaskResult:
 @task("mark_ready",
       preconditions=[status_is("proving"),
                      file_exists("docs/proof.md")],
-      on_success_status="pr_ready",
       timeout=900 + COMMIT_PHASE_TIMEOUT)
 def mark_ready(ctx: TaskContext) -> TaskResult:
     """Final gate: proving → pr_ready after proof is on disk. Fires
@@ -2727,31 +2716,19 @@ def _mark_scope_fix_open(ctx: TaskContext, reason: str) -> None:
     mark_scope_fix_open(ctx.ticket_key or "", {}, reason)
 
 
-def _scope_fix_target(ctx: TaskContext, result: TaskResult) -> str | None:
-    """Callable on_success_status for fix_scope_findings: back to `proving`
-    only while the ticket is still holding its PR.
+def _close_scope_fix_pass(ctx: TaskContext, result: TaskResult) -> None:
+    """Success hook for fix_scope_findings. The success edge itself is
+    core.ticket_status.SUCCESS_EDGES["fix_scope_findings"], and it reads the
+    ticket status after this hook, because the operator can open the PR over
+    the verdict while the postcondition runs.
 
-    A ticket corrected before its proof is already in `proving` and stays
-    there: the gate re-runs against the corrected branch and the proof
-    follows the pass.
-
-    The operator can open the PR over the verdict from the same modal that
-    queued this correction. Pulling a ticket with an open PR into proving
-    would strand that review, so the body pushes to the PR instead and this
-    leaves the status where it is. The status is read here rather than taken
-    from the body's artifacts because the override can land while the
-    postcondition runs, and because a restart recovers this task through the
-    postconditions alone, with no artifacts to read.
-
-    This is also where the pass stops being open, and only for a body that ran
+    This is where the pass stops being open, and only for a body that ran
     to its end and passed every postcondition. A restart recovers an orphaned
     job through the postconditions alone and hands this an empty result, and
     those postconditions read local state: the push to an open PR is exactly
     what such a job may never have reached."""
     if result.artifacts.get("completed"):
         clear_scope_fix_open(ctx.ticket_key or "")
-    current = (state.load_ticket(ctx.ticket_key or "") or {}).get("status")
-    return "proving" if current == "pr_ready" else None
 
 
 def _branch_moved_off_the_verdict(ctx: TaskContext) -> tuple[bool, str]:
@@ -2774,7 +2751,7 @@ def _branch_moved_off_the_verdict(ctx: TaskContext) -> tuple[bool, str]:
                      status_is("proving", "pr_ready")],
       postconditions=[file_exists("docs/scope-fix.md"),
                       _branch_moved_off_the_verdict],
-      on_success_status=_scope_fix_target,
+      on_success=_close_scope_fix_pass,
       timeout=SCOPE_FIX_TIMEOUT)
 def fix_scope_findings(ctx: TaskContext) -> TaskResult:
     """Take the changes a failed consensus scope review named off the branch,
@@ -2809,7 +2786,7 @@ def fix_scope_findings(ctx: TaskContext) -> TaskResult:
                           hard_block=True)
     ts = state.load_ticket(ctx.ticket_key or "") or {}
     attempts = scope_fix_attempts(ts)
-    if attempts >= MAX_SCOPE_FIX_ATTEMPTS:
+    if not SCOPE_FIX.may_continue(attempts):
         return TaskResult("skipped",
                           f"scope correction already ran {attempts} times")
     fingerprint = scope_fingerprint(ctx.config, ts)
@@ -3112,7 +3089,6 @@ def _research_digest(path: Path) -> str | None:
       preconditions=[status_is("new", "researching")],
       postconditions=[file_exists("docs/research.md")],
       on_entry_status="researching",
-      on_success_status="done",
       timeout=RESEARCH_TIMEOUT)
 def do_research(ctx: TaskContext) -> TaskResult:
     """Research-only path: investigate the ticket and produce docs/research.md.
@@ -3186,7 +3162,6 @@ def _smoke_subject(summary: dict) -> str:
 @task("validate_merged_ticket",
       preconditions=[status_is("merged", "validation")],
       on_entry_status="validation",
-      on_success_status="done",
       timeout=VALIDATION_TIMEOUT)
 def validate_merged_ticket(ctx: TaskContext) -> TaskResult:
     from features import validation
