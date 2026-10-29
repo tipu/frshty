@@ -5,6 +5,7 @@
     scripts/instance.py check config/frshty.toml
     scripts/instance.py up    config/frshty.toml
     scripts/instance.py down  config/frshty.toml
+    scripts/instance.py ensure
     scripts/instance.py logs  config/frshty.toml
     scripts/instance.py gvoice-login config/personal.toml
     scripts/instance.py reload
@@ -43,6 +44,15 @@ read-only at /app, not the copy baked into the image. `reload` sends SIGHUP
 to every instance container, and each restarts frshty.py on the new code while
 the tmux sessions of its running agents live on. Rebuild the image only when
 the Dockerfile changes.
+
+`down` writes the marker file ~/.frshty-containers/<key>/down, and `up`
+removes it. `ensure` runs `up` for each ~/.frshty-containers/*/config/*.toml
+whose container does not exist, unless its instance holds that marker. A
+container that exists in any state, running or exited, stays as it is.
+`docker rm` deletes a container, so its restart policy cannot bring it back;
+the frshty-ensure systemd timer runs `ensure` every minute for that case.
+Each recreation prints one line and writes one container_recreated event to
+the instance's feed.
 
 The container reads its config from ~/.frshty-containers/<key>/config/<key>.toml
 and the instance list from ~/.frshty-containers/peers.toml. Both paths outlive
@@ -83,12 +93,15 @@ import argparse
 import json
 import os
 import platform
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 import tomllib
+from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -105,6 +118,7 @@ OPENCODE_DIRS = [".config/opencode", ".local/share/opencode"]
 SEED_FILES = [".claude.json", ".gitconfig"]
 DOCKER_SOCKET = Path("/var/run/docker.sock")
 PEERS = CONTAINERS_ROOT / "peers.toml"
+DOWN_MARKER = "down"
 GVOICE_PROFILE = "gvoice"
 GVOICE_URL = "https://voice.google.com/u/0/messages"
 GVOICE_DIR = "/usr/lib/node_modules/google-voice-cli"
@@ -592,10 +606,84 @@ def reload(timeout: float = drain.DRAIN_SECONDS + 120) -> int:
     return 0
 
 
+def existing_containers() -> set[str]:
+    r = subprocess.run(["docker", "ps", "-a", "--format", "{{.Names}}"],
+                       capture_output=True, text=True, check=True)
+    return set(r.stdout.split())
+
+
+def feed_event(config: dict, event: str, summary: str) -> None:
+    """Write one event to the instance's own feed, which the global feed
+    reads. A database on a Docker volume is out of reach from the host."""
+    key = config["job"]["key"]
+    db = CONTAINERS_ROOT / key / "state" / "frshty.db"
+    if db_volume(config) or not db.exists():
+        print(f"ensure: {key}: no feed database at {db}", file=sys.stderr)
+        return
+    try:
+        conn = sqlite3.connect(str(db), timeout=30.0, isolation_level=None)
+        try:
+            conn.execute("INSERT INTO log_events(id, instance_key, job, event, summary, links, meta, ts) "
+                         "VALUES(?,?,?,?,?,?,?,?)",
+                         (uuid4().hex[:12], key, key, event, summary, "{}", "{}",
+                          datetime.now(timezone.utc).isoformat()))
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        print(f"ensure: {key}: feed event to {db} failed: {e}", file=sys.stderr)
+
+
+def ensure() -> int:
+    """Run `up` for every instance config whose container does not exist and
+    whose instance holds no down marker. Returns 1 when any `up` fails."""
+    names = existing_containers()
+    failed = []
+    for config_path in sorted(CONTAINERS_ROOT.glob("*/config/*.toml")):
+        try:
+            config = load(str(config_path))
+            name = container_name(config)
+        except (OSError, tomllib.TOMLDecodeError, KeyError) as e:
+            print(f"ensure: {config_path}: {type(e).__name__}: {e}", file=sys.stderr)
+            failed.append(str(config_path))
+            continue
+        if name in names or (CONTAINERS_ROOT / config["job"]["key"] / DOWN_MARKER).exists():
+            continue
+        try:
+            r = up(config, config_path, capture=True)
+            code, error = r.returncode, (r.stderr or "").strip()
+        except (SystemExit, subprocess.CalledProcessError, OSError) as e:
+            code, error = 1, str(e)
+        if code == 0:
+            summary = f"Container {name} did not exist; ensure recreated it from {config_path}"
+            print(f"ensure: {summary}", flush=True)
+            feed_event(config, "container_recreated", summary)
+        else:
+            print(f"ensure: {name} did not exist; up from {config_path} failed: {error}",
+                  file=sys.stderr, flush=True)
+            failed.append(name)
+    return 1 if failed else 0
+
+
+def up(config: dict, config_path: Path, capture: bool = False) -> subprocess.CompletedProcess:
+    root = CONTAINERS_ROOT / config["job"]["key"]
+    (root / DOWN_MARKER).unlink(missing_ok=True)
+    cmd = run_args(config, config_path, check=False)
+    subprocess.run(["docker", "rm", "-f", container_name(config)], capture_output=True)
+    prepare_db_volume(config, root, move=True)
+    return subprocess.run(cmd, capture_output=capture, text=True)
+
+
+def down(config: dict) -> int:
+    root = CONTAINERS_ROOT / config["job"]["key"]
+    root.mkdir(parents=True, exist_ok=True)
+    (root / DOWN_MARKER).write_text(datetime.now(timezone.utc).isoformat() + "\n")
+    return subprocess.run(["docker", "rm", "-f", container_name(config)]).returncode
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="instance.py")
     parser.add_argument("action", choices=["build", "check", "up", "down", "logs", "reload",
-                                           "gateway-up", "gateway-down", "gvoice-login"])
+                                           "ensure", "gateway-up", "gateway-down", "gvoice-login"])
     parser.add_argument("config", nargs="?")
     parser.add_argument("--port", type=int, default=7130, help="gateway listen port")
     args = parser.parse_args(argv)
@@ -603,6 +691,8 @@ def main(argv: list[str] | None = None) -> int:
         return build()
     if args.action == "reload":
         return reload()
+    if args.action == "ensure":
+        return ensure()
     if args.action == "gateway-up":
         subprocess.run(["docker", "rm", "-f", GATEWAY], capture_output=True)
         return subprocess.run(gateway_args(args.port)).returncode
@@ -619,14 +709,11 @@ def main(argv: list[str] | None = None) -> int:
             prepare_db_volume(config, CONTAINERS_ROOT / config["job"]["key"], move=False)
         return subprocess.run(cmd).returncode
     if args.action == "up":
-        cmd = run_args(config, config_path, check=False)
-        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
-        prepare_db_volume(config, CONTAINERS_ROOT / config["job"]["key"], move=True)
-        return subprocess.run(cmd).returncode
+        return up(config, config_path).returncode
     if args.action == "gvoice-login":
         return subprocess.run(gvoice_login_args(config)).returncode
     if args.action == "down":
-        return subprocess.run(["docker", "rm", "-f", name]).returncode
+        return down(config)
     return subprocess.run(["docker", "logs", "--tail", "200", name]).returncode
 
 
