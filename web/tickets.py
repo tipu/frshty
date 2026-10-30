@@ -1262,9 +1262,9 @@ def api_restart_ticket(key: str):
     status = ts.get("status", "")
     instance_key = _config.get("job", {}).get("key", "")
     if instance_key and status in ("new", "planning"):
-        q.enqueue_job(instance_key, "start_planning", ticket_key=key)
+        q.enqueue_job(instance_key, "start_planning", ticket_key=key, once=True)
     elif instance_key and status == "reviewing":
-        q.enqueue_job(instance_key, "start_reviewing", ticket_key=key)
+        q.enqueue_job(instance_key, "start_reviewing", ticket_key=key, once=True)
     else:
         _transition_and_advance(key)
     return {"status": "restarted"}

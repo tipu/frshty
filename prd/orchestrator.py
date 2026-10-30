@@ -92,9 +92,9 @@ def _create_generated_ticket(instance_key: str, section_id: int,
     state.save_ticket(key, ts)
     _link_ticket(section_id, instance_key, key)
     if (config.get("pm_agent") or {}).get("enabled", True):
-        q.enqueue_job(instance_key, "pm_pre_approval", ticket_key=key)
+        q.enqueue_job(instance_key, "pm_pre_approval", ticket_key=key, once=True)
     if not approval_required:
-        q.enqueue_job(instance_key, "start_planning", ticket_key=key)
+        q.enqueue_job(instance_key, "start_planning", ticket_key=key, once=True)
     return key
 
 
@@ -205,9 +205,9 @@ def scan(config: dict, instance_key: str) -> dict:
             state.save_ticket(synth_key, ts)
             _link_ticket(sid, instance_key, synth_key)
             if (config.get("pm_agent") or {}).get("enabled", True):
-                q.enqueue_job(instance_key, "pm_pre_approval", ticket_key=synth_key)
+                q.enqueue_job(instance_key, "pm_pre_approval", ticket_key=synth_key, once=True)
             if ts["status"] == "new":
-                q.enqueue_job(instance_key, "start_planning", ticket_key=synth_key)
+                q.enqueue_job(instance_key, "start_planning", ticket_key=synth_key, once=True)
             summary["tickets_created"] += 1
         summary["modified"] += 1
 
