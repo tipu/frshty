@@ -225,7 +225,10 @@ def test_an_unreadable_transcript_opens_the_gate(tmp_path):
     assert gate.bash_reason('grep -n "def foo" a.py', "") == ""
 
 
-def _run_hook(session_id, command, transcript_path, tool="Bash"):
+def _run_hook(session_id, command, transcript_path, tool="Bash", pipeline=False):
+    env = {k: v for k, v in os.environ.items() if k != gate.GATE_ENV}
+    if pipeline:
+        env[gate.GATE_ENV] = "1"
     tool_input = {"command": command} if tool == "Bash" else {"pattern": command}
     return subprocess.run(
         [sys.executable, "scripts/work_hook.py"], cwd=ROOT,
@@ -234,7 +237,7 @@ def _run_hook(session_id, command, transcript_path, tool="Bash"):
                           "transcript_path": transcript_path,
                           "tool_input": tool_input}),
         capture_output=True, text=True, timeout=120,
-        env={**os.environ, "FRSHTY_DB": str(db._DB_PATH)},
+        env={**env, "FRSHTY_DB": str(db._DB_PATH)},
     )
 
 
@@ -253,6 +256,23 @@ def test_hook_denies_a_symbol_grep_in_a_task(tmp_path):
 def test_hook_leaves_a_session_that_is_not_a_task_alone(tmp_path):
     r = _run_hook("sid-not-a-work-run", 'grep -n "def parse_structured" core/llm.py',
                   _transcript(tmp_path))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == ""
+
+
+def test_hook_denies_a_symbol_grep_in_a_pipeline_session(tmp_path):
+    for tool, pattern in (("Bash", 'grep -n "def parse_structured" core/llm.py'),
+                          ("Grep", r"def\s+parse_structured")):
+        r = _run_hook("sid-pipeline-run", pattern, _transcript(tmp_path), tool=tool, pipeline=True)
+        assert r.returncode == 0, r.stderr
+        out = json.loads(r.stdout)["hookSpecificOutput"]
+        assert out["permissionDecision"] == "deny"
+        assert out["permissionDecisionReason"] == gate.DENY_REASON.format(name="parse_structured")
+
+
+def test_hook_allows_a_text_grep_in_a_pipeline_session(tmp_path):
+    r = _run_hook("sid-pipeline-run", 'grep -rn "llm_schema_invalid" core/',
+                  _transcript(tmp_path), pipeline=True)
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == ""
 

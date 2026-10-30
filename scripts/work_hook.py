@@ -248,6 +248,43 @@ def _mentions(command: str, word: str) -> bool:
     return word in command
 
 
+def _lsp_reason(data: dict) -> str:
+    """The LSP gate's deny reason for a Bash or Grep call, "" to allow."""
+    tool_input = data.get("tool_input") or {}
+    transcript_path = data.get("transcript_path") or ""
+    if data.get("tool_name") == "Bash":
+        return lsp_gate.bash_reason(tool_input.get("command") or "", transcript_path)
+    if data.get("tool_name") == "Grep":
+        return lsp_gate.grep_reason(str(tool_input.get("pattern") or ""), transcript_path)
+    return ""
+
+
+def _lsp_output(data: dict) -> dict | None:
+    """The hook answer of the LSP gate: None to allow, an allow with the
+    rewritten command when lsp_gate.bash_rewrite can drop the refused grep
+    and run the rest, a deny otherwise."""
+    reason = _lsp_reason(data)
+    if not reason:
+        return None
+    tool_input = data.get("tool_input") or {}
+    command = tool_input.get("command") or ""
+    if data.get("tool_name") == "Bash" and not any(
+            _mentions(command, w) for w in ("commit", "push", "merge")):
+        trimmed = lsp_gate.bash_rewrite(command, data.get("transcript_path") or "")
+        if trimmed and not sleep_gate.bash_reason(trimmed, bool(tool_input.get("run_in_background"))):
+            return {"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
+                "permissionDecisionReason": LSP_TRIMMED_REASON,
+                "updatedInput": {**tool_input, "command": trimmed},
+            }}
+    return {"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": reason,
+    }}
+
+
 def _bind_db():
     import core.db as db
     from services import work_store
@@ -296,6 +333,11 @@ def main() -> int:
                         "permissionDecisionReason": reason,
                     }
                 }))
+                return 0
+        if kind == "PreToolUse" and os.environ.get(lsp_gate.GATE_ENV):
+            output = _lsp_output(data)
+            if output:
+                print(json.dumps(output))
                 return 0
         row, readable = _is_work_run(session_id)
         if not row:
@@ -355,36 +397,18 @@ def main() -> int:
                     }))
                 return 0
             if tool == "Grep":
-                reason = lsp_gate.grep_reason(
-                    str((data.get("tool_input") or {}).get("pattern") or ""),
-                    data.get("transcript_path") or "")
-                if reason:
-                    print(json.dumps({
-                        "hookSpecificOutput": {
-                            "hookEventName": "PreToolUse",
-                            "permissionDecision": "deny",
-                            "permissionDecisionReason": reason,
-                        }
-                    }))
+                output = _lsp_output(data)
+                if output:
+                    print(json.dumps(output))
                 return 0
             if tool == "Bash":
                 command = (data.get("tool_input") or {}).get("command") or ""
-                background = bool((data.get("tool_input") or {}).get("run_in_background"))
-                reason = lsp_gate.bash_reason(command, data.get("transcript_path") or "")
-                if reason and not any(_mentions(command, w) for w in ("commit", "push", "merge")):
-                    trimmed = lsp_gate.bash_rewrite(command, data.get("transcript_path") or "")
-                    if trimmed and not sleep_gate.bash_reason(trimmed, background):
-                        print(json.dumps({
-                            "hookSpecificOutput": {
-                                "hookEventName": "PreToolUse",
-                                "permissionDecision": "allow",
-                                "permissionDecisionReason": LSP_TRIMMED_REASON,
-                                "updatedInput": {**(data.get("tool_input") or {}),
-                                                 "command": trimmed},
-                            }
-                        }))
-                        return 0
-                reason = reason or sleep_gate.bash_reason(command, background)
+                output = _lsp_output(data)
+                if output:
+                    print(json.dumps(output))
+                    return 0
+                reason = sleep_gate.bash_reason(
+                    command, bool((data.get("tool_input") or {}).get("run_in_background")))
                 if reason:
                     print(json.dumps({
                         "hookSpecificOutput": {
