@@ -67,12 +67,18 @@ def api_work_peers():
 
     The board asks every source for its own items and merges them in the
     browser, so a peer that is asleep costs one failed request instead of
-    stalling the local board."""
-    return {"peers": work_peers.peers()}
+    stalling the local board. A board that is not [work] admin federates
+    nobody, so it names no other instance."""
+    return {"peers": work_peers.peers() if work_launch.board_admin() else []}
+
+
+NOT_ADMIN = "this board is not [work] admin; it reads no peer"
 
 
 @router.get("/api/work/peers/{key}/api/work/artifact_file/{name:path}")
 async def api_work_peer_artifact_file(key: str, name: str, request: Request):
+    if not work_launch.board_admin():
+        return JSONResponse({"error": NOT_ADMIN}, status_code=403)
     status, headers, body, error = await work_peers.open_file(
         key, "api/work/artifact_file/" + name, request.headers.get("range", ""))
     if error:
@@ -82,6 +88,8 @@ async def api_work_peer_artifact_file(key: str, name: str, request: Request):
 
 @router.get("/api/work/peers/{key}/{path:path}")
 async def api_work_peer_get(key: str, path: str, request: Request):
+    if not work_launch.board_admin():
+        return JSONResponse({"error": NOT_ADMIN}, status_code=403)
     status, payload = await work_peers.request(key, "GET", path,
                                                params=dict(request.query_params))
     return JSONResponse(payload, status_code=status)
@@ -90,6 +98,8 @@ async def api_work_peer_get(key: str, path: str, request: Request):
 @router.post("/api/work/peers/{key}/{path:path}")
 async def api_work_peer_post(key: str, path: str, request: Request,
                              body: dict | None = Body(default=None)):
+    if not work_launch.board_admin():
+        return JSONResponse({"error": NOT_ADMIN}, status_code=403)
     status, payload = await work_peers.request(key, "POST", path,
                                                params=dict(request.query_params),
                                                body=body or {})
@@ -100,6 +110,9 @@ async def api_work_peer_post(key: str, path: str, request: Request,
 async def ws_work_peer_terminal(websocket: WebSocket, key: str, term_key: str):
     if origin_is_opaque(websocket.headers.get("origin", "")):
         await websocket.close(code=1008, reason="opaque origin")
+        return
+    if not work_launch.board_admin():
+        await websocket.close(code=1008, reason=NOT_ADMIN)
         return
     await work_peers.relay_terminal(websocket, key, term_key)
 

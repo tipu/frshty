@@ -60,7 +60,18 @@ def _board_work() -> dict:
     for key in ("client_pr_proposals", "mute_declined_proposals"):
         if isinstance(work.get(key), bool):
             out[key] = work[key]
+    out["admin"] = work.get("admin") is True
     return out
+
+
+def board_admin() -> bool:
+    """Whether this board may name projects other than its own instances.
+
+    [work] admin, default false. An admin board federates the peers in
+    config/peers.toml and offers the frshty checkout and [work.projects]. Every
+    other board shows its own instances and nothing else, so a client
+    instance never lists another client's tasks or projects."""
+    return _board_work().get("admin", False)
 
 
 def proposal_policy() -> dict:
@@ -163,6 +174,8 @@ def project_entries() -> list[dict]:
         repos = [r["name"] for r in work_worktree._repos_of(cfg)]
         entries.append({"key": key, "root": str(ws.get("root", "")), "repos": repos,
                         "primary": bool((cfg.get("work") or {}).get("dispatch", True))})
+    if not board_admin():
+        return sorted(entries, key=lambda e: e["key"])
     extras = {"frshty": _frshty_checkout()}
     for key, root in _board_work().get("projects", {}).items():
         extras.setdefault(str(key), os.path.expanduser(str(root)))
