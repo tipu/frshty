@@ -133,11 +133,14 @@ class Cycle:
     `node` is the ticket status the loop runs on, or None for a loop that
     runs on any pull request, a ticket PR or not. `task` runs one pass. `budget` is
     the number of passes the loop may spend. `exit_reason` is the check every
-    caller makes before it starts another pass."""
+    caller makes before it starts another pass. `exit_edge` is the status the
+    ticket moves to when the budget is spent, or None when the loop stops in
+    place."""
     name: str
     node: TicketStatus | None
     task: str
     budget: int
+    exit_edge: TicketStatus | None = None
 
     def exit_reason(self, attempts: int, converged: bool = False) -> str | None:
         """Why the loop stops, or None while another pass may run.
@@ -162,5 +165,32 @@ SCOPE_FIX = Cycle("scope_fix", TicketStatus.proving, "fix_scope_findings", 2)
 BASE_SYNC = Cycle("base_sync", TicketStatus.in_review, "sync_pr_base", 2)
 PR_AUTOFIX = Cycle("pr_autofix", None, "pr_autofix_run", 3)
 AUTOMATED_REVIEW_FIX = Cycle("automated_review_fix", None, "fix_pr_comments", 2)
+TEST_FIX = Cycle("test_fix", TicketStatus.testing, "run_tests_and_fix", 3,
+                 exit_edge=TicketStatus.tests_failed)
 
-CYCLES: tuple[Cycle, ...] = (SCOPE_FIX, BASE_SYNC, PR_AUTOFIX, AUTOMATED_REVIEW_FIX)
+CYCLES: tuple[Cycle, ...] = (SCOPE_FIX, BASE_SYNC, PR_AUTOFIX, AUTOMATED_REVIEW_FIX, TEST_FIX)
+
+
+def epic_edge(issue_type: str | None) -> str | None:
+    """`epic` for a container issue (a Jira Epic, a Linear Project), else None.
+
+    frshty tracks an epic for UI grouping and never plans, codes or PRs it."""
+    return TicketStatus.epic.value if issue_type == "Epic" else None
+
+
+def approval_edge(approval_required: bool, approval_status: str | None) -> str | None:
+    """`pending_approval` for a `new` ticket that waits for a human, else None.
+
+    The handler writes this status with the ticket state and not through
+    transition(), so `new -> pending_approval` is not in _ALLOWED."""
+    if approval_required and approval_status not in ("approved", "rejected"):
+        return TicketStatus.pending_approval.value
+    return None
+
+
+def tests_failed_edge(attempts: int) -> str | None:
+    """The status a `testing` ticket with a FAIL verdict moves to, or None
+    while TEST_FIX may run another pass."""
+    if TEST_FIX.may_continue(attempts):
+        return None
+    return TEST_FIX.exit_edge.value
