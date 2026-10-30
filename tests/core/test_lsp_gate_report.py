@@ -56,4 +56,22 @@ def test_the_summary_reports_the_lsp_share():
     found = [{"next": "lsp", "path": "a"}, {"next": "grep", "path": "a"},
              {"next": "lsp", "path": "b"}, {"next": "other", "path": "b"}]
     assert report.gate_summary(found) == {"denials": 4, "sessions": 2, "lsp": 2, "grep": 1,
-                                          "other": 1, "end": 0, "lsp_share": 0.5}
+                                          "other": 1, "end": 0, "lsp_share": 0.5, "flooded": 0}
+
+
+def test_a_workspace_symbol_flood_after_a_refusal_is_counted(tmp_path):
+    short = gate.SHORT_DENY_REASON.format(name="loop", file="a.py")
+    path = tmp_path / "s.jsonl"
+    path.write_text("\n".join([
+        _use("a", "Bash", {"command": 'grep -n "def loop" a.py'}), _denied("a", "fetch_rows"),
+        _use("b", "LSP", {"operation": "workspaceSymbol", "query": "loop"}),
+        _result("b", "Found 531 symbols in workspace:"),
+        _use("c", "Bash", {"command": 'grep -n "def loop" b.py'}),
+        _result("c", "PreToolUse:Bash hook error: " + short, True),
+        _use("d", "LSP", {"operation": "documentSymbol", "filePath": "b.py"}),
+        _result("d", "Document symbols:\nloop (Function) - Line 3"),
+    ]) + "\n")
+    found = report.transcript_denials(str(path))
+    assert [(d["id"], d["next"], d["flooded"]) for d in found] == [("a", "lsp", True),
+                                                                   ("c", "lsp", False)]
+    assert report.gate_summary(found)["flooded"] == 1

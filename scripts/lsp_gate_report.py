@@ -5,7 +5,9 @@ grep the LSP gate refused or removed from a command, it looks at the next
 tool call. A ToolSearch that
 loads LSP is skipped, because a session must load LSP before its first LSP
 call. The next call is "lsp", "grep" (a Bash grep or the Grep tool),
-"other", or "end" when the session stopped.
+"other", or "end" when the session stopped. A next call that is a
+workspaceSymbol returning more than FLOOD symbols counts as "flooded": the
+work-314 query "loop" returned 531.
 
 The cost part reads the work_task rows of claude_invocations, which the
 board sweep writes for every task run, and sums the cost and the duration of
@@ -21,6 +23,7 @@ task run has no cost. It exits 0 otherwise.
 import argparse
 import json
 import os
+import re
 import sqlite3
 import statistics
 import sys
@@ -34,6 +37,8 @@ DB_PATH = os.environ.get("FRSHTY_DB") or os.path.join(
     os.environ.get("FRSHTY_ROOT") or os.path.expanduser("~/.frshty"), "frshty.db")
 DEFAULT_ROOTS = [os.path.expanduser("~/.claude/projects")]
 MARKERS = (b"Blocked by the LSP gate", b"[LSP gate] The grep for")
+FLOOD = 50
+_FOUND = re.compile(r"Found (\d+) symbols")
 
 
 def _parse_time(text: str) -> datetime:
@@ -66,6 +71,7 @@ def transcript_denials(path: str) -> list[dict]:
     tool call."""
     uses: list[tuple[str, str, dict, str]] = []
     refused: set[str] = set()
+    results: dict[str, str] = {}
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
             if '"tool_use"' not in line and '"tool_result"' not in line:
@@ -88,6 +94,7 @@ def transcript_denials(path: str) -> list[dict]:
                                  str(entry.get("timestamp") or "")))
                 elif block.get("type") == "tool_result":
                     text = _text(block.get("content"))
+                    results[str(block.get("tool_use_id"))] = text
                     if (block.get("is_error") and lsp_gate._REFUSED.match(text.strip())) or \
                             lsp_gate._REMOVED.search(text):
                         refused.add(str(block.get("tool_use_id")))
@@ -96,12 +103,17 @@ def transcript_denials(path: str) -> list[dict]:
         if tool_id not in refused or not stamp:
             continue
         kind = "end"
-        for _, name, tool_input, _ in uses[index + 1:]:
+        flooded = False
+        for next_id, name, tool_input, _ in uses[index + 1:]:
             if name == "ToolSearch" and "LSP" in str(tool_input.get("query") or ""):
                 continue
             kind = _kind(name, tool_input)
+            count = _FOUND.search(results.get(next_id, ""))
+            flooded = kind == "lsp" and tool_input.get("operation") == "workspaceSymbol" and \
+                bool(count) and int(count.group(1)) > FLOOD
             break
-        found.append({"id": tool_id, "at": _parse_time(stamp), "next": kind, "path": path})
+        found.append({"id": tool_id, "at": _parse_time(stamp), "next": kind, "path": path,
+                      "flooded": flooded})
     return found
 
 
@@ -134,7 +146,8 @@ def gate_summary(found: list[dict]) -> dict:
               for kind in ("lsp", "grep", "other", "end")}
     total = len(found)
     return {"denials": total, "sessions": len({d["path"] for d in found}), **counts,
-            "lsp_share": round(counts["lsp"] / total, 3) if total else None}
+            "lsp_share": round(counts["lsp"] / total, 3) if total else None,
+            "flooded": sum(1 for d in found if d.get("flooded"))}
 
 
 def task_rows(db_path: str, since: datetime) -> list[sqlite3.Row]:
