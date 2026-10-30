@@ -59,11 +59,13 @@ def gh_login(token: str) -> None:
         raise ssh_keys.KeyBootstrapError(f"gh auth login failed: {r.stderr.strip()[:300]}")
 
 
-def supervise(cmd: list[str], drain_timeout: float = drain.DRAIN_SECONDS + DRAIN_GRACE) -> int:
+def supervise(cmd: list[str], drain_timeout: float = drain.DRAIN_SECONDS + DRAIN_GRACE,
+              kill_grace: float = drain.EXIT_GRACE) -> int:
     """Run `cmd` until it exits on its own. SIGHUP asks it to drain with
     DRAIN_SIGNAL and starts it again once it exits. A child still running
-    drain_timeout seconds after the SIGHUP gets SIGTERM. SIGTERM and SIGINT
-    stop it and end the container."""
+    drain_timeout seconds after the SIGHUP gets SIGTERM, and SIGKILL when it
+    is still running kill_grace seconds after that. SIGTERM and SIGINT stop
+    it and end the container."""
     restart = stopping = False
     hup_at: float | None = None
     child: subprocess.Popen | None = None
@@ -90,15 +92,17 @@ def supervise(cmd: list[str], drain_timeout: float = drain.DRAIN_SECONDS + DRAIN
         restart = False
         hup_at = None
         child = subprocess.Popen(cmd)
-        forced = False
+        forced_at: float | None = None
         while True:
             try:
                 code = child.wait(timeout=1)
                 break
             except subprocess.TimeoutExpired:
-                if hup_at is not None and not forced and time.monotonic() - hup_at > drain_timeout:
+                if hup_at is not None and forced_at is None and time.monotonic() - hup_at > drain_timeout:
                     child.terminate()
-                    forced = True
+                    forced_at = time.monotonic()
+                elif forced_at is not None and time.monotonic() - forced_at > kill_grace:
+                    child.kill()
         if stopping or not restart:
             return code
         print(json.dumps({"restart": "SIGHUP", "exit": code}), flush=True)
