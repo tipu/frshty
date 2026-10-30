@@ -359,10 +359,7 @@ def _install_deps(config: dict | None, repo_name: str, path: Path) -> None:
     if config is None:
         return
     try:
-        deps.relink_shared_venv(config, repo_name, path)
-        for dep in (config.get("workspace") or {}).get("dep_commands", []) or []:
-            if dep.get("match") == repo_name:
-                deps.run_dep_command(config, repo_name, path, dep["cmd"])
+        deps.install_worktree_deps(config, repo_name, path)
     except Exception as e:
         log.emit("work_worktree_deps_failed",
                  f"{repo_name}: {type(e).__name__}: {e}",

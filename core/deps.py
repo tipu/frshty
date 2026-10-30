@@ -197,6 +197,21 @@ def run_dep_command(config: dict, repo_name: str, wt_path: Path, cmd: str) -> bo
     return result.returncode == 0
 
 
+def install_worktree_deps(config: dict, repo_name: str, wt_path: Path,
+                          key: str = "dep_commands") -> None:
+    """Relink the shared venv and run every `workspace.<key>` entry that
+    matches `repo_name` in `wt_path`. A failed command is logged, not raised,
+    so the caller still gets its worktree."""
+    relink_shared_venv(config, repo_name, wt_path)
+    for dep in (config.get("workspace") or {}).get(key, []) or []:
+        if dep.get("match") != repo_name:
+            continue
+        if not run_dep_command(config, repo_name, wt_path, dep["cmd"]):
+            log.emit("worktree_dep_command_failed",
+                     f"{repo_name}: `{dep['cmd']}` failed in {wt_path}",
+                     meta={"repo": repo_name, "cmd": dep["cmd"], "worktree": str(wt_path)})
+
+
 def export_pnpm_store(config: dict) -> None:
     """Point pnpm's content-addressable store at a path that is shared by
     every ticket worktree, survives container rebuilds, and sits on the
