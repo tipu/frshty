@@ -1,8 +1,11 @@
 import json
 import os
 
+import pytest
+
 import core.config as core_config
 import core.db as db
+import core.llm as llm
 from services import work_store
 
 
@@ -57,7 +60,7 @@ class TestTranscriptUsage:
         got = work_store.transcript_usage(str(_claude_transcript(tmp_path)))
         assert got == {"model": "claude-opus-5-5", "input_tokens": 6,
                        "cache_creation_input_tokens": 157, "cache_read_input_tokens": 3070,
-                       "output_tokens": 35}
+                       "output_tokens": 35, "cost_usd": 0.002012}
 
     def test_codex_reads_the_last_cumulative_total(self, tmp_path):
         got = work_store.transcript_usage(str(_codex_rollout(tmp_path)))
@@ -89,6 +92,7 @@ class TestSweepUsage:
         assert row["status"] == "running"
         assert (row["input_tokens"], row["output_tokens"]) == (6, 35)
         assert row["cache_read_input_tokens"] == 3070
+        assert row["cost_usd"] == 0.002012
 
     def test_sweep_skips_an_unchanged_run_and_rereads_a_grown_one(self, tmp_path):
         item_id = work_store.create_item("grow")
@@ -119,3 +123,45 @@ class TestSweepUsage:
         db.execute("UPDATE work_runs SET status = 'finished' WHERE id = ?", (run_id,))
         work_store.sweep_usage()
         assert _row(run_id)["status"] == "success"
+
+
+class TestMessageCost:
+    @pytest.mark.parametrize("model,usage,cost", [
+        ("claude-opus-5-5", {"input_tokens": 1_000_000}, 4.0),
+        ("claude-opus-5-5", {"output_tokens": 1_000_000}, 20.0),
+        ("claude-opus-5-5", {"cache_read_input_tokens": 1_000_000}, 0.2),
+        ("claude-opus-5-5", {"cache_creation_input_tokens": 1_000_000}, 5.0),
+        ("claude-opus-5-5", {"cache_creation_input_tokens": 1_000_000, "cache_creation": {
+            "ephemeral_1h_input_tokens": 1_000_000, "ephemeral_5m_input_tokens": 0}}, 8.0),
+        ("claude-opus-5-5", {"input_tokens": 1_000_000, "speed": "fast"}, 8.0),
+        ("claude-haiku-4-5-20251001", {"output_tokens": 1_000_000}, 5.0),
+        ("claude-haiku-5-5", {"input_tokens": 100_000}, 0.01),
+        ("claude-haiku-5-5", {"input_tokens": 100_001}, 100_001 * 0.5 / 1_000_000),
+        ("claude-fable-5-1", {"cache_read_input_tokens": 1_000_000}, 0.25),
+    ])
+    def test_prices_each_token_kind(self, model, usage, cost):
+        assert llm.message_cost(model, usage) == pytest.approx(cost)
+
+    @pytest.mark.parametrize("model", ["gpt-6-astra", "claude-opus-5-55", ""])
+    def test_an_unpriced_model_has_no_cost(self, model):
+        assert llm.message_cost(model, {"input_tokens": 1}) is None
+
+    def test_one_unpriced_message_leaves_the_run_without_a_cost(self, tmp_path):
+        path = tmp_path / "s.jsonl"
+        path.write_text(_assistant("m1", "claude-opus-5-5", _usage(1, 0, 0, 1))
+                        + _assistant("m2", "mystery-model", _usage(1, 0, 0, 1)))
+        assert work_store.transcript_usage(str(path))["cost_usd"] is None
+
+
+class TestSweepCost:
+    def test_sweep_fills_the_cost_of_an_unchanged_run(self, tmp_path):
+        item_id = work_store.create_item("backfill cost")
+        run_id = work_store.add_run(item_id, f"sid-cost-{item_id}", f"work-{item_id}", str(tmp_path))
+        path = _claude_transcript(tmp_path)
+        db.execute("UPDATE work_runs SET transcript_path = ?, status = 'running' WHERE id = ?",
+                   (str(path), run_id))
+        work_store.sweep_usage()
+        db.execute("UPDATE claude_invocations SET cost_usd = NULL WHERE id = ?",
+                   (f"work-run-{run_id}",))
+        work_store.sweep_usage()
+        assert _row(run_id)["cost_usd"] == 0.002012

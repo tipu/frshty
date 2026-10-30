@@ -317,6 +317,51 @@ def _record_end(inv_id: str | None, started_ms: float, status: str,
         log.emit("claude_invocation_log_failed", f"failed to record claude end: {e}")
 
 
+MODEL_PRICES = (
+    ("claude-fable-5-1", 10.0, 50.0, 0.25),
+    ("claude-mythos-5-1", 10.0, 50.0, 0.25),
+    ("claude-fable-5", 10.0, 50.0, 1.0),
+    ("claude-mythos-5", 10.0, 50.0, 1.0),
+    ("claude-opus-5-5", 4.0, 20.0, 0.20),
+    ("claude-opus-5", 5.0, 25.0, 0.50),
+    ("claude-opus-4-8", 5.0, 25.0, 0.50),
+    ("claude-opus-4-7", 5.0, 25.0, 0.50),
+    ("claude-opus-4-6", 5.0, 25.0, 0.50),
+    ("claude-sonnet-5-5", 2.0, 10.0, 0.20),
+    ("claude-sonnet-5", 2.0, 10.0, 0.20),
+    ("claude-sonnet-4-6", 3.0, 15.0, 0.30),
+    ("claude-haiku-5-5", 0.10, 0.50, 0.01),
+    ("claude-haiku-4-5", 1.0, 5.0, 0.10),
+)
+_HAIKU_LONG_PROMPT = 100_000
+_MODEL_DATE = re.compile(r"-\d{8}$")
+
+
+def message_cost(model: str, usage: dict) -> float | None:
+    """The USD cost of one claude message from its usage block, None when the
+    model has no price in MODEL_PRICES. MODEL_PRICES holds the first-party
+    API price per million tokens of input, output and cache reads. A cache
+    write costs 1.25 times the input price for the 5-minute TTL and 2 times
+    for the 1-hour TTL. claude-haiku-5-5 costs 5 times more when the prompt
+    is longer than 100K tokens, and fast mode doubles every price."""
+    base = _MODEL_DATE.sub("", model)
+    price = next((p for p in MODEL_PRICES if base == p[0]), None)
+    if price is None:
+        return None
+    _, input_price, output_price, read_price = price
+    read = int(usage.get("cache_read_input_tokens") or 0)
+    written = int(usage.get("cache_creation_input_tokens") or 0)
+    split = usage.get("cache_creation") if isinstance(usage.get("cache_creation"), dict) else {}
+    hour = int(split.get("ephemeral_1h_input_tokens") or 0)
+    plain = int(usage.get("input_tokens") or 0)
+    factor = 2.0 if usage.get("speed") == "fast" else 1.0
+    if price[0] == "claude-haiku-5-5" and plain + read + written > _HAIKU_LONG_PROMPT:
+        factor *= 5
+    return factor * (plain * input_price + int(usage.get("output_tokens") or 0) * output_price
+                     + read * read_price + (written - hour) * 1.25 * input_price
+                     + hour * 2.0 * input_price) / 1_000_000
+
+
 def record_session_usage(inv_id: str, *, instance_key: str, function_name: str,
                          model: str, prompt: str, job_key: str, cwd: str,
                          started_at: str, finished_at: str,
@@ -329,8 +374,8 @@ def record_session_usage(inv_id: str, *, instance_key: str, function_name: str,
             "INSERT INTO claude_invocations(id, instance_key, job_key, function_name, model, "
             "prompt, prompt_length, cwd, started_at, finished_at, duration_ms, status, "
             "input_tokens, output_tokens, cache_creation_input_tokens, "
-            "cache_read_input_tokens) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
-            "ON CONFLICT(id) DO UPDATE SET model=excluded.model, "
+            "cache_read_input_tokens, cost_usd) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET model=excluded.model, cost_usd=excluded.cost_usd, "
             "finished_at=excluded.finished_at, duration_ms=excluded.duration_ms, "
             "status=excluded.status, input_tokens=excluded.input_tokens, "
             "output_tokens=excluded.output_tokens, "
@@ -339,7 +384,8 @@ def record_session_usage(inv_id: str, *, instance_key: str, function_name: str,
             (inv_id, instance_key, job_key, function_name, model, prompt,
              len(prompt), cwd, started_at, finished_at, duration_ms, status,
              usage.get("input_tokens"), usage.get("output_tokens"),
-             usage.get("cache_creation_input_tokens"), usage.get("cache_read_input_tokens")),
+             usage.get("cache_creation_input_tokens"), usage.get("cache_read_input_tokens"),
+             usage.get("cost_usd")),
         )
     except Exception as e:
         log.emit("claude_invocation_log_failed",

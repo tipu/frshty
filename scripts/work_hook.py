@@ -31,6 +31,11 @@ ATTRIBUTION_STRIPPED_REASON = (
     "Co-Authored-By trailer, no line saying an agent produced the work."
 )
 
+LSP_TRIMMED_REASON = (
+    "The LSP gate removed a definition grep from this command and ran the "
+    "rest. The output says which grep and which LSP call to make next."
+)
+
 QUESTION_DUPLICATE_REASON = (
     "You already asked this question and it is unanswered on the work board, "
     "so this second ask was dropped and the operator did not see it. Do not "
@@ -364,10 +369,22 @@ def main() -> int:
                 return 0
             if tool == "Bash":
                 command = (data.get("tool_input") or {}).get("command") or ""
-                reason = (lsp_gate.bash_reason(command, data.get("transcript_path") or "")
-                          or sleep_gate.bash_reason(
-                              command, bool((data.get("tool_input") or {})
-                                            .get("run_in_background"))))
+                background = bool((data.get("tool_input") or {}).get("run_in_background"))
+                reason = lsp_gate.bash_reason(command, data.get("transcript_path") or "")
+                if reason and not any(_mentions(command, w) for w in ("commit", "push", "merge")):
+                    trimmed = lsp_gate.bash_rewrite(command, data.get("transcript_path") or "")
+                    if trimmed and not sleep_gate.bash_reason(trimmed, background):
+                        print(json.dumps({
+                            "hookSpecificOutput": {
+                                "hookEventName": "PreToolUse",
+                                "permissionDecision": "allow",
+                                "permissionDecisionReason": LSP_TRIMMED_REASON,
+                                "updatedInput": {**(data.get("tool_input") or {}),
+                                                 "command": trimmed},
+                            }
+                        }))
+                        return 0
+                reason = reason or sleep_gate.bash_reason(command, background)
                 if reason:
                     print(json.dumps({
                         "hookSpecificOutput": {
