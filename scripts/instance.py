@@ -381,9 +381,12 @@ def mounts(config: dict, config_path: Path, root: Path) -> list[tuple[str, str, 
     claude_dir = claude_config_dir(config)
     if claude_dir:
         out.append((str(claude_dir), str(claude_dir), False))
-    slack_dir = (config.get("slack") or {}).get("messages_dir")
-    if slack_dir and (config.get("features") or {}).get("slack"):
-        out.append((str(_expand(slack_dir)), str(_expand(slack_dir)), False))
+    slack_cfg = config.get("slack") or {}
+    if (config.get("features") or {}).get("slack"):
+        for entry in [slack_cfg] + list(slack_cfg.get("workspaces") or []):
+            slack_dir = entry.get("messages_dir")
+            if slack_dir:
+                out.append((str(_expand(slack_dir)), str(_expand(slack_dir)), False))
     for extra in box.get("mounts") or []:
         out.append((str(_expand(extra)), str(_expand(extra)), False))
     for name in SEED_FILES + list(box.get("seed") or []):

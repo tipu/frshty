@@ -73,6 +73,13 @@ def load_config(path: str) -> dict:
     raw["commits"].setdefault("key_first", False)
 
     _resolve_slack_paths(raw["slack"])
+    seen = set()
+    for entry in raw["slack"].get("workspaces") or []:
+        name = str(entry.get("workspace") or "").strip()
+        if not name or name in seen:
+            raise ValueError(f"{path}: every [[slack.workspaces]] entry needs its own workspace name")
+        seen.add(name)
+        _resolve_slack_paths(entry)
 
     raw["_config_path"] = Path(path)
     raw["_state_dir"] = frshty_root() / raw["job"]["key"]
