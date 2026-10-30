@@ -346,7 +346,8 @@ class TestRepoGate:
         with patch("core.queue.jobs_for_ticket", return_value=[]), \
              patch("core.queue.enqueue_job") as eq:
             tickets._enqueue_stage("inst", "T-1", "start_planning")
-            eq.assert_called_once_with("inst", "start_planning", ticket_key="T-1", payload=None)
+            eq.assert_called_once_with("inst", "start_planning", ticket_key="T-1", payload=None,
+                                       once=True)
 
     def test_advance_ticket_not_blocked_by_own_running_job(self, fresh_db):
         """advance_ticket runs as a job that is itself 'running'; that must not
@@ -428,21 +429,26 @@ class TestEnqueueStage:
              patch("core.queue.enqueue_job") as eq:
             tickets._enqueue_stage("inst", "T-1", "start_planning")
             qj.assert_called_once_with("inst", "T-1", limit=200)
-            eq.assert_called_once_with("inst", "start_planning", ticket_key="T-1", payload=None)
+            eq.assert_called_once_with("inst", "start_planning", ticket_key="T-1", payload=None,
+                                       once=True)
 
     def test_skips_when_already_queued(self):
-        with patch("core.queue.jobs_for_ticket",
-                   return_value=[{"task": "start_planning", "status": "queued"}]), \
-             patch("core.queue.enqueue_job") as eq:
-            tickets._enqueue_stage("inst", "T-1", "start_planning")
-            eq.assert_not_called()
+        import core.queue as q
+        job_id = q.enqueue_job("inst", "start_planning", ticket_key="SKIP-Q")
+        q._db.execute("UPDATE jobs SET status = 'queued' WHERE id = ?", (job_id,))
+        try:
+            assert tickets._enqueue_stage("inst", "SKIP-Q", "start_planning") is None
+        finally:
+            q.mark_done(job_id, "ok", {})
 
     def test_skips_when_already_running(self):
-        with patch("core.queue.jobs_for_ticket",
-                   return_value=[{"task": "start_planning", "status": "running"}]), \
-             patch("core.queue.enqueue_job") as eq:
-            tickets._enqueue_stage("inst", "T-1", "start_planning")
-            eq.assert_not_called()
+        import core.queue as q
+        job_id = q.enqueue_job("inst", "start_planning", ticket_key="SKIP-R")
+        q._db.execute("UPDATE jobs SET status = 'running' WHERE id = ?", (job_id,))
+        try:
+            assert tickets._enqueue_stage("inst", "SKIP-R", "start_planning") is None
+        finally:
+            q.mark_done(job_id, "ok", {})
 
     def test_enqueues_when_only_finished_exist(self):
         with patch("core.queue.jobs_for_ticket",
@@ -952,12 +958,16 @@ class TestHandleCiFailureStub:
         ts = make_ticket_state(status="in_review", _ci_failed_pending=True)
         pr = {"repo": "r", "id": 1, "url": "u"}
         checks = [{"name": "lint", "state": "FAILED"}]
-        with patch.object(q, "jobs_for_ticket",
-                           return_value=[{"task": "fix_ci_failures", "status": "queued"}]), \
-             patch.object(q, "enqueue_job") as eq, \
-             patch("features.tickets.log"):
-            tickets._handle_ci_failure(make_ticket(), ts, pr, checks, "http://base", "inst")
-        eq.assert_not_called()
+        job_id = q.enqueue_job("inst", "fix_ci_failures", ticket_key="PROJ-1")
+        try:
+            with patch("features.tickets.log"):
+                tickets._handle_ci_failure(make_ticket(), ts, pr, checks, "http://base", "inst")
+            live = q._db.query_one(
+                "SELECT COUNT(*) AS n FROM jobs WHERE instance_key = 'inst' AND ticket_key = 'PROJ-1'"
+                " AND task = 'fix_ci_failures' AND status IN ('queued', 'running')")["n"]
+            assert live == 1
+        finally:
+            q.mark_done(job_id, "ok", {})
 
     def test_no_instance_key_does_not_enqueue(self):
         ts = make_ticket_state(status="in_review")
@@ -1010,7 +1020,8 @@ class TestHandleCiFailureStub:
              patch.object(q, "enqueue_job") as eq, \
              patch("features.tickets.log"):
             tickets._handle_ci_failure(make_ticket(), ts, pr, checks, "http://base", "inst")
-        eq.assert_called_once_with("inst", "fix_ci_failures", ticket_key="PROJ-1", payload=None)
+        eq.assert_called_once_with("inst", "fix_ci_failures", ticket_key="PROJ-1", payload=None,
+                                   once=True)
 
     def test_unrelated_verdict_skips_retriage(self):
         ts = make_ticket_state(status="in_review",

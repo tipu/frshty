@@ -39,9 +39,18 @@ def emit_event(source: str, kind: str, payload: dict, instance_key: str | None =
 
 def enqueue_job(instance_key: str, task: str, payload: dict | None = None,
                 ticket_key: str | None = None, triggering_event_id: int | None = None,
-                root_job_id: int | None = None) -> int:
+                root_job_id: int | None = None, once: bool = False) -> int | None:
+    """Queue one job. With once, the job is not queued and None is returned
+    when the same instance already has a queued or running job for this
+    ticket and task. The check and the insert share one BEGIN IMMEDIATE
+    transaction, so two callers that race cannot both queue the job."""
     root = root_job_id if root_job_id is not None else _chain_root.get()
     with _db.tx() as c:
+        if once and c.execute(
+                "SELECT 1 FROM jobs WHERE instance_key = ? AND ticket_key IS ? AND task = ?"
+                " AND status IN ('queued', 'running') LIMIT 1",
+                (instance_key, ticket_key, task)).fetchone():
+            return None
         cur = c.execute(
             "INSERT INTO jobs(instance_key, ticket_key, task, payload, enqueued_at,"
             " triggering_event_id, root_job_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
