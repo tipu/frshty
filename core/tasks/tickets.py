@@ -1367,8 +1367,8 @@ def setup_prd_ticket(ctx: TaskContext) -> TaskResult:
         except RuntimeError as e:
             return TaskResult("failed", str(e))
         state.save_ticket(ctx.ticket_key, updated)
-    q.enqueue_job(ctx.instance_key, "address_pm_findings", ticket_key=ctx.ticket_key)
-    q.enqueue_job(ctx.instance_key, "start_planning", ticket_key=ctx.ticket_key)
+    q.enqueue_job(ctx.instance_key, "address_pm_findings", ticket_key=ctx.ticket_key, once=True)
+    q.enqueue_job(ctx.instance_key, "start_planning", ticket_key=ctx.ticket_key, once=True)
     return TaskResult("ok", artifacts={"slug": updated.get("slug"),
                                         "branch": updated.get("branch")})
 

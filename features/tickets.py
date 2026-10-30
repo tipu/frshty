@@ -447,8 +447,6 @@ def _enqueue_stage(instance_key: str, ticket_key: str, task_name: str,
     if blocked_attempts.job_blocked(instance_key, ticket_key, task_name):
         return None
     existing = q.jobs_for_ticket(instance_key, ticket_key, limit=max(200, MAX_STAGE_RETRIES + 1))
-    if any(j["task"] == task_name and j["status"] in ("queued", "running") for j in existing):
-        return None
     cutoff = datetime.now(timezone.utc) - timedelta(hours=STAGE_RETRY_WINDOW_HOURS)
     consecutive = 0
     for j in existing:
@@ -464,7 +462,7 @@ def _enqueue_stage(instance_key: str, ticket_key: str, task_name: str,
     if consecutive >= MAX_STAGE_RETRIES:
         return None
     return q.enqueue_job(instance_key, task_name, ticket_key=ticket_key,
-                         payload=payload)
+                         payload=payload, once=True)
 
 
 _RANKER_PROMPT = """You are ranking software tickets for execution order. Each ticket below shows its key, title, and brief description.

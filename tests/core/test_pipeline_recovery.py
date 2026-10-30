@@ -239,21 +239,15 @@ class TestEnqueueStageRetryBudget:
             tix._enqueue_stage("inst", "T-1", "start_planning")
             eq.assert_called_once()
 
-    def test_skips_when_already_queued(self):
-        with patch("core.queue.jobs_for_ticket",
-                   return_value=[{"task": "start_planning", "status": "queued"}]), \
-             patch("core.queue.enqueue_job") as eq:
-            from features import tickets as tix
-            tix._enqueue_stage("inst", "T-1", "start_planning")
-            eq.assert_not_called()
+    def test_skips_when_already_queued(self, fresh_db):
+        from features import tickets as tix
+        _seed_job("inst", "start_planning", "SKIP-Q", "queued")
+        assert tix._enqueue_stage("inst", "SKIP-Q", "start_planning") is None
 
-    def test_skips_when_already_running(self):
-        with patch("core.queue.jobs_for_ticket",
-                   return_value=[{"task": "start_planning", "status": "running"}]), \
-             patch("core.queue.enqueue_job") as eq:
-            from features import tickets as tix
-            tix._enqueue_stage("inst", "T-1", "start_planning")
-            eq.assert_not_called()
+    def test_skips_when_already_running(self, fresh_db):
+        from features import tickets as tix
+        _seed_job("inst", "start_planning", "SKIP-R", "running")
+        assert tix._enqueue_stage("inst", "SKIP-R", "start_planning") is None
 
     def test_stops_retrying_after_max_consecutive_failures(self, fresh_db, tmp_path):
         """After MAX_STAGE_RETRIES consecutive failures of the same task,
@@ -499,7 +493,8 @@ class TestValidationRetry:
         with patch.object(tix, "MAX_STAGE_RETRIES", 5), \
              patch("core.queue.enqueue_job") as eq:
             tix._enqueue_stage("inst", "VAL-1", "validate_merged_ticket")
-            eq.assert_called_once_with("inst", "validate_merged_ticket", ticket_key="VAL-1", payload=None)
+            eq.assert_called_once_with("inst", "validate_merged_ticket", ticket_key="VAL-1", payload=None,
+                                       once=True)
 
     def test_validation_skips_when_already_queued(self, fresh_db, tmp_path):
         """Don't enqueue if a queued validate_merged_ticket already exists."""
@@ -513,10 +508,8 @@ class TestValidationRetry:
         _seed_job("inst", "validate_merged_ticket", "VAL-2", "queued")
 
         from features import tickets as tix
-        with patch.object(tix, "MAX_STAGE_RETRIES", 5), \
-             patch("core.queue.enqueue_job") as eq:
-            tix._enqueue_stage("inst", "VAL-2", "validate_merged_ticket")
-            eq.assert_not_called()
+        with patch.object(tix, "MAX_STAGE_RETRIES", 5):
+            assert tix._enqueue_stage("inst", "VAL-2", "validate_merged_ticket") is None
 
     def test_validation_skips_after_max_retries(self, fresh_db, tmp_path):
         """After MAX_STAGE_RETRIES consecutive failed validate_merged_ticket,
