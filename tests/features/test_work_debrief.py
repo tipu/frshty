@@ -885,11 +885,12 @@ class TestLaunchContexts:
         from services import work_launch
         instances, _ = self._instances(tmp_path)
         personal = MagicMock()
-        personal.config = {"workspace": {"root": str(tmp_path)}}
-        instances["personal"] = personal
+        personal.config = {"workspace": {"root": str(tmp_path)}, "work": {"admin": True}}
+        instances[work_launch.core_config.BOARD_INSTANCE_KEY] = personal
         monkeypatch.setattr(work_launch.runtime, "instances", lambda: instances)
         keys = [e["key"] for e in work_launch.project_entries()]
-        assert "frshty" in keys and "acme" in keys and "personal" in keys
+        assert "frshty" in keys and "acme" in keys
+        assert work_launch.core_config.BOARD_INSTANCE_KEY in keys
         assert keys == sorted(keys)
 
 
