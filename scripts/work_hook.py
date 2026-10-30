@@ -243,6 +243,17 @@ def _mentions(command: str, word: str) -> bool:
     return word in command
 
 
+def _lsp_reason(data: dict) -> str:
+    """The LSP gate's deny reason for a Bash or Grep call, "" to allow."""
+    tool_input = data.get("tool_input") or {}
+    transcript_path = data.get("transcript_path") or ""
+    if data.get("tool_name") == "Bash":
+        return lsp_gate.bash_reason(tool_input.get("command") or "", transcript_path)
+    if data.get("tool_name") == "Grep":
+        return lsp_gate.grep_reason(str(tool_input.get("pattern") or ""), transcript_path)
+    return ""
+
+
 def _bind_db():
     import core.db as db
     from services import work_store
@@ -283,6 +294,17 @@ def main() -> int:
         if kind == "PreToolUse" and data.get("tool_name") == "Bash":
             reason = worktree_prune_gate.bash_reason(
                 (data.get("tool_input") or {}).get("command") or "")
+            if reason:
+                print(json.dumps({
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": reason,
+                    }
+                }))
+                return 0
+        if kind == "PreToolUse" and os.environ.get(lsp_gate.GATE_ENV):
+            reason = _lsp_reason(data)
             if reason:
                 print(json.dumps({
                     "hookSpecificOutput": {
@@ -350,9 +372,7 @@ def main() -> int:
                     }))
                 return 0
             if tool == "Grep":
-                reason = lsp_gate.grep_reason(
-                    str((data.get("tool_input") or {}).get("pattern") or ""),
-                    data.get("transcript_path") or "")
+                reason = _lsp_reason(data)
                 if reason:
                     print(json.dumps({
                         "hookSpecificOutput": {
@@ -364,7 +384,7 @@ def main() -> int:
                 return 0
             if tool == "Bash":
                 command = (data.get("tool_input") or {}).get("command") or ""
-                reason = (lsp_gate.bash_reason(command, data.get("transcript_path") or "")
+                reason = (_lsp_reason(data)
                           or sleep_gate.bash_reason(
                               command, bool((data.get("tool_input") or {})
                                             .get("run_in_background"))))
