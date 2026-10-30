@@ -622,7 +622,10 @@ def _clock(value: str, fallback: str) -> tuple[int, int]:
 def drain_and_exit(timeout: float = drain.DRAIN_SECONDS) -> None:
     """Stop claiming jobs, wait up to timeout seconds for the live jobs to
     finish, and then send SIGTERM to this process so uvicorn shuts down. The
-    board keeps answering while the jobs drain. A second call returns at once."""
+    board keeps answering while the jobs drain. A process still alive
+    drain.EXIT_GRACE seconds after the SIGTERM exits with os._exit, because
+    uvicorn waits without limit for a request task that never ends. A second
+    call returns at once."""
     if not _drain_lock.acquire(blocking=False):
         return
     log.emit("drain_started", f"stop claiming jobs; wait up to {timeout:.0f}s for live jobs")
@@ -634,6 +637,10 @@ def drain_and_exit(timeout: float = drain.DRAIN_SECONDS) -> None:
     else:
         log.emit("drain_finished", "no live jobs; exiting")
     os.kill(os.getpid(), signal.SIGTERM)
+    time.sleep(drain.EXIT_GRACE)
+    log.emit("drain_exit_forced",
+             f"server still running {drain.EXIT_GRACE:.0f}s after SIGTERM; exiting hard")
+    os._exit(1)
 
 
 def install_drain_handler() -> None:
