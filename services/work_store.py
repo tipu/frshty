@@ -55,6 +55,7 @@ REVIEW_OBJECTIVE_PREFIX = "Review pull request #"
 ARTIFACT_MARKER = "ARTIFACT:"
 PROGRESS_MARKER = "PROGRESS:"
 LIVE_CHECK_MARKER = "LIVE_CHECK:"
+_MARKER_LEAD = "*_`>-\u2022 \t"
 _IMAGE_ID_RE = re.compile(r"^(\d+)-(\d+)$")
 _IMAGE_MEDIA_RE = re.compile(r"^image/[a-z0-9.+-]+$")
 _MAX_IMAGE_BASE64 = 64 * 1024 * 1024
@@ -1592,16 +1593,23 @@ def _assistant_texts(transcript_path: str) -> list[str]:
     return texts
 
 
+def _after_marker(line: str, marker: str) -> str | None:
+    """The text after a marker that starts the line, or None. A marker in the
+    middle of a line is prose that quotes the launch rule, not a report."""
+    stripped = line.strip().lstrip(_MARKER_LEAD)
+    return stripped[len(marker):] if stripped.startswith(marker) else None
+
+
 def record_artifacts(session_id: str, transcript_path: str,
                      texts: list[str] | None = None) -> int:
     found = []
     source = _assistant_texts(transcript_path) if texts is None else texts
     lines = [ln for t in source for ln in t.splitlines()]
     for line in lines:
-        idx = line.find(ARTIFACT_MARKER)
-        if idx < 0:
+        rest = _after_marker(line, ARTIFACT_MARKER)
+        if rest is None:
             continue
-        rest = line[idx + len(ARTIFACT_MARKER):].strip().replace("\u2014", " - ").replace("—", " - ")
+        rest = rest.strip().replace("\u2014", " - ").replace("—", " - ")
         for sep in (" — ", " - ", " -- "):
             if sep in rest:
                 path, note = rest.split(sep, 1)
@@ -1695,9 +1703,9 @@ def record_progress(session_id: str, transcript_path: str,
     newest = ""
     for text in source:
         for line in text.splitlines():
-            idx = line.find(PROGRESS_MARKER)
-            if idx >= 0:
-                newest = line[idx + len(PROGRESS_MARKER):].strip()[:300]
+            rest = _after_marker(line, PROGRESS_MARKER)
+            if rest is not None:
+                newest = rest.strip()[:300]
     if not newest:
         return ""
     now = _now()
@@ -1741,9 +1749,10 @@ def record_live_check(session_id: str, transcript_path: str,
     newest = ""
     for text in source:
         for line in text.splitlines():
-            idx = line.find(LIVE_CHECK_MARKER)
-            if idx >= 0:
-                newest = line[idx + len(LIVE_CHECK_MARKER):].strip().strip("`").strip()[:1000]
+            rest = _after_marker(line, LIVE_CHECK_MARKER)
+            command = "" if rest is None else rest.strip().strip("`").strip()[:1000]
+            if command and not command.startswith("<"):
+                newest = command
     if not newest:
         return ""
     with db.tx() as c:

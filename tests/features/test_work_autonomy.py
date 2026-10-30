@@ -446,6 +446,11 @@ class TestProgressLines:
         assert work_store.record_progress(sid, "", texts=["ordinary text"]) == ""
         assert _events(item_id, "progress") == []
 
+    def test_prose_that_quotes_the_rule_publishes_nothing(self):
+        item_id, sid = _mkrun("quoted progress")
+        assert work_store.record_progress(sid, "", texts=[work_store.PROGRESS_RULE]) == ""
+        assert _events(item_id, "progress") == []
+
     def test_the_board_row_carries_the_newest_progress_line(self):
         item_id, sid = _mkrun("board progress")
         work_store.record_progress(sid, "", texts=["PROGRESS: first", "PROGRESS: second"])

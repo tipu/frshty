@@ -114,6 +114,33 @@ def test_a_new_command_after_a_failure_is_checked_again(config):
     assert _item(item_id)["live_check_exit"] == 0
 
 
+QUOTED_RULE = ("Work item 303 stored `<command>`. A day later the frshty board runs that command "
+               "once and re-opens the task if it fails. The rule reads: print `LIVE_CHECK: <command>`.")
+
+
+@pytest.mark.parametrize("text", [
+    QUOTED_RULE,
+    work_store.LIVE_CHECK_RULE,
+    "LIVE_CHECK: <command>",
+    "LIVE_CHECK: `<command>`. A day later the frshty board runs that command once.",
+])
+def test_prose_that_quotes_the_rule_stores_no_command(text):
+    item_id = work_store.create_item("fix the gate")
+    sid = f"sid-live-{item_id}"
+    work_store.add_run(item_id, sid, f"work-{item_id}", "/tmp")
+    assert work_store.record_live_check(sid, "", texts=[text]) == ""
+    assert not _item(item_id)["live_check"]
+
+
+def test_a_real_command_survives_a_later_quote_of_the_rule():
+    item_id = work_store.create_item("fix the gate")
+    sid = f"sid-live-{item_id}"
+    work_store.add_run(item_id, sid, f"work-{item_id}", "/tmp")
+    command = _py("pass")
+    texts = [f"- `LIVE_CHECK: {command}`", QUOTED_RULE, "LIVE_CHECK: <command>"]
+    assert work_store.record_live_check(sid, "", texts=texts) == command
+
+
 @pytest.mark.parametrize("cfg, expected", [
     ({"job": {"key": "frshty"}}, True),
     ({"job": {"key": "personal"}}, False),
