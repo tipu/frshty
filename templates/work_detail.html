@@ -499,7 +499,7 @@ const app = frshtyApp({
       return this.api("/api/work/artifact_file/" + a.id);
     },
     viewerUrl(a) {
-      return "/artifacts/" + a.id + (this.peer ? "?peer=" + encodeURIComponent(this.peer) : "");
+      return "/artifacts/" + a.id + "/" + encodeURIComponent(a.path.split("/").pop()) + (this.peer ? "?peer=" + encodeURIComponent(this.peer) : "");
     },
     ts(at) {
       return window.frshtyTime.stamp(at);

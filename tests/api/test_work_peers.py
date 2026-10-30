@@ -466,6 +466,6 @@ class TestPeerArtifactLinks:
         for path in ("templates/work_detail.html", "templates/work_summary.html",
                      "templates/thread_detail.html", "static/frshty-redesign.js"):
             text = self._read(path)
-            assert '"/artifacts/" + a.id + (' in text, path
+            assert '"/artifacts/" + a.id + "/" + encodeURIComponent(a.path.split("/").pop()) + (' in text, path
             assert ') + "/artifacts/"' not in text, path
             assert ') + "/api/work/artifact_file/"' not in text, path

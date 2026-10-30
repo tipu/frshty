@@ -619,7 +619,7 @@ class TestPeerAwareThreads:
 
     def test_the_thread_page_opens_a_peer_artifact_through_this_board(self):
         text = self._read("templates/thread_detail.html")
-        assert '"/artifacts/" + a.id + (this.peer ? "?peer=" + encodeURIComponent(this.peer) : "")' in text
+        assert '"/artifacts/" + a.id + "/" + encodeURIComponent(a.path.split("/").pop()) + (this.peer ? "?peer=" + encodeURIComponent(this.peer) : "")' in text
         assert '(this.peerBase || "") + "/artifacts/"' not in text
 
     def test_the_thread_page_reports_an_unknown_peer(self):

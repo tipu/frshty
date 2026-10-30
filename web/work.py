@@ -603,7 +603,8 @@ def api_work_artifact_asset(artifact_id: int, name: str):
 
 
 @router.get("/artifacts/{artifact_id}", response_class=HTMLResponse)
-def artifact_viewer_page(artifact_id: int):
+@router.get("/artifacts/{artifact_id}/{name}", response_class=HTMLResponse)
+def artifact_viewer_page(artifact_id: int, name: str = ""):
     return _fresh(_template("work_artifact.html"))
 
 
