@@ -60,7 +60,7 @@ def test_agentic_passes_tools_add_dirs_and_system_prompt(tmp_path, monkeypatch):
     assert argv[argv.index("--allowedTools") + 1] == "Read,Bash(git:*)"
     assert argv[argv.index("--disallowedTools") + 1] == "ScheduleWakeup,Write,Edit"
     assert argv[argv.index("--add-dir") + 1] == str(extra)
-    assert argv[argv.index("--append-system-prompt") + 1] == "be a reviewer"
+    assert argv[argv.index("--append-system-prompt") + 1] == f"be a reviewer {llm.LSP_RULE}"
     assert "--dangerously-skip-permissions" not in argv
 
 
@@ -104,6 +104,30 @@ def test_balanced_runs_inside_the_worktree(tmp_path, monkeypatch):
     assert Path(lines[0]).resolve() == checkout.resolve()
     argv = lines[1:]
     assert argv[argv.index("--allowedTools") + 1] == "Read,Grep"
+
+
+def test_agentic_tells_the_agent_to_navigate_with_lsp(tmp_path, monkeypatch):
+    checkout = tmp_path / "worktree"
+    checkout.mkdir()
+    _, _, argv = _run(tmp_path, monkeypatch, checkout)
+    assert argv[argv.index("--append-system-prompt") + 1] == llm.LSP_RULE
+
+
+def test_balanced_in_a_worktree_tells_the_agent_to_navigate_with_lsp(tmp_path, monkeypatch):
+    checkout = tmp_path / "worktree"
+    checkout.mkdir()
+    record = tmp_path / "record.txt"
+    _install_recording_claude(tmp_path / "bin", record)
+    monkeypatch.setenv("PATH", f"{tmp_path / 'bin'}:{os.environ['PATH']}")
+    llm._providers.clear()
+    llm.run_balanced("hi", worktree=checkout, timeout=30)
+    argv = record.read_text().splitlines()[1:]
+    assert argv[argv.index("--append-system-prompt") + 1] == llm.LSP_RULE
+
+
+def test_claude_runs_carry_the_lsp_gate_flag(monkeypatch):
+    monkeypatch.delenv(llm.lsp_gate.GATE_ENV, raising=False)
+    assert llm.ClaudeProvider()._env()[llm.lsp_gate.GATE_ENV] == "1"
 
 
 def _run_thinking(tmp_path, monkeypatch, **kwargs):
