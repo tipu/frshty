@@ -352,7 +352,7 @@ def _ts_value(ts: str) -> float:
 
 def _operator_id(config: dict) -> str:
     return (str(_settings(config).get("user_id") or "").strip()
-            or str((state.load("slack") or {}).get("user_id") or "").strip())
+            or str((state.load(slack_capture.state_module(config, "slack")) or {}).get("user_id") or "").strip())
 
 
 def _names(config: dict) -> dict:
@@ -366,7 +366,7 @@ def _names(config: dict) -> dict:
     slack = _settings(config)
     names = slack_capture.user_names(str(slack.get("messages_dir") or "").strip(),
                                      str(slack.get("raw_path") or "").strip())
-    stored = (state.load("slack") or {}).get("names")
+    stored = (state.load(slack_capture.state_module(config, "slack")) or {}).get("names")
     if isinstance(stored, dict):
         names.update(stored)
     return names
@@ -1048,7 +1048,7 @@ def ingest(config: dict, instance_key: str = "", now: datetime | None = None) ->
     workspace = str(_settings(config).get("workspace") or "")
     operator_id = _operator_id(config)
     names = _names(config)
-    blob = state.load(STATE_MODULE) or {}
+    blob = state.load(slack_capture.state_module(config, STATE_MODULE)) or {}
 
     records, complete = _read_capture(config, blob, now)
     stamp = _iso(now)
@@ -1126,7 +1126,7 @@ def ingest(config: dict, instance_key: str = "", now: datetime | None = None) ->
         _spread_involvement_across_the_channel(c, instance_key)
 
     blob["last_ingest_at"] = _iso(now)
-    state.save(STATE_MODULE, blob)
+    state.save(slack_capture.state_module(config, STATE_MODULE), blob)
     # `complete` says every capture file this instance owns was read. When it
     # is false a thread's later messages may be sitting in a file the scan
     # could not open, so the index is not a fair account of what was said and
@@ -1624,10 +1624,12 @@ def _candidates(instance_key: str, config: dict, now: datetime) -> list[dict]:
     that names the operator nowhere is still read when it stands in a channel
     he is in, which is where a request written without a thread puts it."""
     operator_id = _operator_id(config)
+    scope = slack_capture.scope(config)
     rows = db.query_all(
         "SELECT * FROM slack_conversations"
         " WHERE instance_key = ? AND involves_operator = 1"
-        " ORDER BY last_ts DESC", (instance_key,))
+        " AND (? = '' OR workspace = ?)"
+        " ORDER BY last_ts DESC", (instance_key, scope, scope))
     out = [row for row in rows if _is_candidate(row, config, now, operator_id)]
     out = [row for row in out if _somebody_else_spoke(row["id"], operator_id)]
     # A conversation the model never answered is put behind every conversation

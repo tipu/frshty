@@ -7,6 +7,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 import core.log as log
+import core.slack_capture as slack_capture
 import core.state as state
 from web.state import _config
 
@@ -14,9 +15,18 @@ from web.state import _config
 router = APIRouter()
 
 
+def _slack_states() -> list[tuple[dict, dict]]:
+    return [(view, state.load(slack_capture.state_module(view, "slack")) or {})
+            for view in slack_capture.workspace_configs(_config)]
+
+
 @router.get("/api/slack/data")
 def api_slack_data():
-    return state.load("slack")
+    blobs = _slack_states()
+    if len(blobs) == 1:
+        return blobs[0][1]
+    return {"channel_digests": {f"{slack_capture.scope(view)} {k}": v for view, blob in blobs
+                                for k, v in (blob.get("channel_digests") or {}).items()}}
 
 
 @router.post("/api/slack/send/{reply_id}")
@@ -25,17 +35,19 @@ def api_slack_send(reply_id: str, body: dict):
     if not text:
         return JSONResponse({"error": "text required"}, status_code=400)
 
-    sl = state.load("slack")
-    replies = sl.get("replies", {})
-    ctx = replies.get(reply_id)
-    if not ctx:
+    found = [(view, blob["replies"][reply_id]) for view, blob in _slack_states()
+             if reply_id in (blob.get("replies") or {})]
+    if not found:
         return JSONResponse({"error": "reply_id not found"}, status_code=404)
+    if len(found) > 1:
+        return JSONResponse({"error": "reply_id names a message in more than one workspace"}, status_code=409)
+    view, ctx = found[0]
 
     workspace = ctx["workspace"]
     channel = ctx["channel"]
     thread_ts = ctx.get("thread_ts", "")
 
-    tokens_path = _config.get("slack", {}).get("raw_path", "")
+    tokens_path = view.get("slack", {}).get("raw_path", "")
     if tokens_path:
         tokens_file = str(Path(tokens_path).parent.parent / "tokens.json")
         try:

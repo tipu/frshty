@@ -133,6 +133,16 @@ pr_autofix = false                # github only: every PR the instance account o
 #                                     # its slot at once, so your own pace is what limits how
 #                                     # many are opened rather than a clock.
 # propose_max_judgements_per_scan = 3 # ceiling on model calls per scan
+#
+# An instance that reads several workspaces lists one entry per workspace
+# instead of messages_dir, raw_path, workspace and user_id above. Each entry is
+# laid over the [slack] block, keeps its own read position and operator id, and
+# proposes only from its own conversations. propose_max_pending stays one
+# ceiling for the whole instance; the other limits apply per workspace.
+# [[slack.workspaces]]
+# workspace = "myworkspace"
+# messages_dir = "/path/to/slack_int/messages/myworkspace"
+# user_id = "UXXXXXXX"
 # propose_judge_retry_minutes = 60    # a conversation the model answered nothing for is
 #                                     # held back this long, so it cannot spend the
 #                                     # allowance every scan and starve the ones behind it
