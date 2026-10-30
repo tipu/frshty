@@ -48,7 +48,8 @@ def check(config: dict):
     notify_max_age_hours = int(slack_cfg.get("notify_max_age_hours", 2))
     notify_cutoff_iso = (datetime.now(timezone.utc) - timedelta(hours=notify_max_age_hours)).isoformat()
 
-    sl = state.load("slack")
+    module = slack_capture.state_module(config, "slack")
+    sl = state.load(module)
     # The configured id wins over the discovered one. Discovery reads the boot
     # payloads, and the filtered capture drops them because they carry no
     # message, so on a filtered capture config is the only source there is.
@@ -71,7 +72,7 @@ def check(config: dict):
         sl["last_dt"] = now_iso
         offsets[name] = file_size
         sl["offsets"] = offsets
-        state.save("slack", sl)
+        state.save(module, sl)
         return
 
     with open(capture) as f:
@@ -82,7 +83,7 @@ def check(config: dict):
     if not new_lines:
         offsets[name] = new_offset
         sl["offsets"] = offsets
-        state.save("slack", sl)
+        state.save(module, sl)
         return
 
     names = sl.get("names", {})
@@ -289,7 +290,7 @@ def check(config: dict):
         })
     sl["mentions"] = existing_mentions[-50:]
 
-    state.save("slack", sl)
+    state.save(module, sl)
 
 
 def _offsets(sl: dict) -> dict:

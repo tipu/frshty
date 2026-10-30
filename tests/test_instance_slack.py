@@ -160,3 +160,19 @@ def test_opencode_binary_and_state_are_mounted_only_when_installed(host, tmp_pat
     assert (str(binary), "/usr/local/bin/opencode", True) in binds
     for name in (".config/opencode", ".local/share/opencode"):
         assert (str(home / name), str(home / name), False) in binds
+
+
+def test_every_listed_workspace_mounts_its_capture(host):
+    slack, root, workspace, config_path = host
+    (slack / "messages" / "quartzmeetings").mkdir()
+    c = config(slack, workspace, features={"slack": True},
+               slack={"workspaces": [
+                   {"workspace": "apexco", "messages_dir": str(slack / "messages" / "apexco")},
+                   {"workspace": "quartzmeetings", "messages_dir": str(slack / "messages" / "quartzmeetings")}]})
+    c["container"]["mounts"] = [str(slack.parent)]
+    instance.write_slack_tokens(c, root)
+    binds = instance.mounts(c, config_path, root)
+    for name in ("apexco", "quartzmeetings"):
+        folder = str(slack / "messages" / name)
+        assert (folder, folder, False) in binds
+    assert json.loads((root / "slack" / "tokens.json").read_text()) == {}
