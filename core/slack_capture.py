@@ -156,3 +156,33 @@ def user_names(messages_dir: str, raw_path: str = "") -> dict[str, str]:
         if isinstance(info, dict) and info.get("name"):
             out[str(uid)] = str(info["name"])
     return out
+
+
+def workspace_configs(config: dict) -> list[dict]:
+    """One config per Slack workspace the instance reads.
+
+    An instance reads one capture through its [slack] block. An instance that
+    lists [[slack.workspaces]] reads one capture per entry instead. Each entry
+    becomes a config whose [slack] block is the instance's block with the
+    entry laid over it, so every scanner keeps reading one capture per call.
+    The entry's workspace name scopes that config's state, because two
+    captures must never share a read position or an operator id."""
+    slack = (config or {}).get("slack") or {}
+    entries = slack.get("workspaces") or []
+    if not entries:
+        return [config]
+    base = {k: v for k, v in slack.items() if k != "workspaces"}
+    return [{**config, "slack": {**base, **entry, "state_scope": str(entry["workspace"])}}
+            for entry in entries]
+
+
+def scope(config: dict) -> str:
+    """The workspace a config from workspace_configs reads, "" for an
+    instance with one [slack] block."""
+    return str(((config or {}).get("slack") or {}).get("state_scope") or "")
+
+
+def state_module(config: dict, module: str) -> str:
+    """The state module a scanner keeps for the capture this config reads."""
+    name = scope(config)
+    return f"{module}:{name}" if name else module
