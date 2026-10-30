@@ -255,7 +255,8 @@ def _lsp_reason(data: dict) -> str:
     if data.get("tool_name") == "Bash":
         return lsp_gate.bash_reason(tool_input.get("command") or "", transcript_path)
     if data.get("tool_name") == "Grep":
-        return lsp_gate.grep_reason(str(tool_input.get("pattern") or ""), transcript_path)
+        return lsp_gate.grep_reason(str(tool_input.get("pattern") or ""), transcript_path,
+                                    str(tool_input.get("path") or ""))
     return ""
 
 
