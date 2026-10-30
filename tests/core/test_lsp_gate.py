@@ -519,3 +519,12 @@ def test_hook_denies_a_compound_command_that_commits(tmp_path):
     r = _run_hook(sid, 'git commit -m x; grep -n "def parse_structured" core/llm.py', _transcript(tmp_path))
     assert r.returncode == 0, r.stderr
     assert json.loads(r.stdout)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_hook_rewrites_a_compound_command_in_a_pipeline_run(tmp_path):
+    r = _run_hook("sid-pipeline-rewrite", 'sed -n 1p a.py; grep -n "def parse_structured" core/llm.py',
+                  _transcript(tmp_path), pipeline=True)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)["hookSpecificOutput"]
+    assert out["permissionDecision"] == "allow"
+    assert out["updatedInput"]["command"] == "sed -n 1p a.py; " + _notice("parse_structured")
