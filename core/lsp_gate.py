@@ -40,6 +40,15 @@ nothing ran and asks for the LSP call first. After a denial or a removal
 for X, every grep that searches for X as a word is refused until an LSP
 lookup names X. About 40 denials were listings such as `grep -n "def test_" f`;
 a prefix (`def test_`, `def test`, `def get_.*`) names no symbol.
+
+workspaceSymbol matches every symbol that contains the query. The work-315
+scan of 321 workspaceSymbol calls found that a query of 8 characters or
+fewer returned more than 50 symbols in 40 of 59 calls, and a longer query in
+7 of 262: the query "loop" returned 531 symbols. So for a name of SHORT_NAME
+characters or fewer, the gate asks for documentSymbol on the file the grep
+names, and a documentSymbol result that names X opens the gate for X. When
+such a grep names no file, workspaceSymbol cannot narrow the name, and the
+gate allows the grep.
 """
 import json
 import os
@@ -57,7 +66,8 @@ _NEXT_STEP = (
     "without the grep. You may send both in one response, the LSP call "
     "first. Do not grep for `{name}` in another form: every grep that "
     "searches for `{name}` is refused until an LSP workspaceSymbol, "
-    "goToDefinition or findReferences call names `{name}`. When LSP answers "
+    "documentSymbol, goToDefinition or findReferences call names `{name}`. "
+    "When LSP answers "
     "\"No LSP server available\" or ToolSearch finds no LSP tool, the gate "
     "opens for the rest of the session."
 )
@@ -82,6 +92,47 @@ REPEAT_REASON = (
     "refused a definition grep for `{name}` earlier in this session. " + _NEXT_STEP
 )
 
+SHORT_NAME = 8
+_SHORT = (
+    "`{name}` is a short name, and workspaceSymbol returns every symbol that "
+    "contains it: the query \"loop\" returned 531 symbols. "
+)
+_SHORT_NEXT_STEP = (
+    "Nothing in this command ran. " + _SHORT + "Make your next tool call this "
+    "one: LSP with operation documentSymbol, filePath \"{file}\", line 1 and "
+    "character 1. If LSP is not loaded yet, load it first with ToolSearch, "
+    "query \"select:LSP\", and then make that call. It lists the symbols of "
+    "{file} with their lines; read the line of `{name}` with Read. When "
+    "`{name}` is not in that list, {file} does not define it, and a grep for "
+    "`{name}` across a directory runs. When you know a line and character "
+    "where `{name}` is used, goToDefinition at that position also finds the "
+    "definition. After the LSP call, run the rest of this command again "
+    "without the grep. You may send both in one response, the LSP call "
+    "first. Every grep of a file that searches for `{name}` is refused until "
+    "an LSP documentSymbol, workspaceSymbol, goToDefinition or findReferences "
+    "call names `{name}`."
+)
+
+SHORT_DENY_REASON = (
+    "Blocked by the LSP gate: this grep looks up the definition of `{name}`, "
+    "and this session has not looked up `{name}` with LSP. " + _SHORT_NEXT_STEP
+)
+
+SHORT_REMOVED_NOTICE = (
+    "[LSP gate] The grep for `{name}` in this command did not run; the rest "
+    "of the command ran. This session has not looked up `{name}` with LSP. "
+    + _SHORT + "Make your next tool call LSP with operation documentSymbol, "
+    "filePath \"{file}\", line 1 and character 1. If LSP is not loaded yet, "
+    "load it first with ToolSearch, query \"select:LSP\". Every grep of a "
+    "file that searches for `{name}` is refused until an LSP lookup names "
+    "`{name}`."
+)
+
+SHORT_REPEAT_REASON = (
+    "Blocked by the LSP gate: this grep searches for `{name}`, and the gate "
+    "refused a definition grep for `{name}` earlier in this session. " + _SHORT_NEXT_STEP
+)
+
 _SEARCH_TOOLS = {"grep", "egrep", "fgrep", "rg", "ag", "ack"}
 _WRAPPERS = {"sudo", "xargs", "env", "time", "nice", "nohup", "command", "exec",
              "timeout", "stdbuf", "then", "do", "else", "if", "elif", "while",
@@ -101,8 +152,8 @@ _DEFINITION = re.compile(
     r"((?:[A-Za-z_]|\$[\w$])[\w$]*(?:\\?\|(?!" + _KEYWORD + r"\b)(?:[A-Za-z_]|\$[\w$])[\w$]*)*)")
 _ALTERNATIVE = re.compile(r"\\?\|")
 _PREFIX = re.compile(r"\.|\*|\+|\[|\\\\?w")
-_REMOVED = re.compile(r'\[LSP gate\] The grep for `[^`]+` in this command did not run.*?'
-                      r'operation workspaceSymbol, query "([\w$]+)"', re.S)
+_REMOVED = re.compile(r"\[LSP gate\] The grep for `([\w$]+)` in this command did not run; "
+                      r"the rest of the command ran\.")
 _HARMLESS_REDIRECT = re.compile(r"2>&1|&>\s*/dev/null|[12]?>\s*/dev/null")
 _FILTERS = {"cat", "find", "ls", "head", "tail", "sort", "uniq", "wc", "cut", "sed", "nl", "tr", "column"}
 _EXIT_STATUS = re.compile(r"\b(?:set|exec|eval|source|trap|pipefail|errexit)\b|\$[?{(]|`|>&[3-9]|(?:^|[;&|\n])\s*\.\s")
@@ -115,9 +166,19 @@ _FIND_ACTIONS = ("-delete", "-exec", "-ok", "-fprint", "-fls")
 _SED_PRINT = re.compile(r"\d+(?:,(?:\d+|\$))?p|\$p")
 _KEYWORDS = {"if", "then", "elif", "else", "fi", "while", "until", "for", "do", "done",
              "case", "esac", "function", "select", "!", "[[", "time", "coproc"}
-_REFUSED = re.compile(r'(?:PreToolUse:\w+ hook error: )?Blocked by the LSP gate:.*?'
-                      r'operation workspaceSymbol, query "([\w$]+)"', re.S)
+_REFUSED = re.compile(r"(?:PreToolUse:\w+ hook error: )?Blocked by the LSP gate: this grep "
+                      r"(?:looks up the definition of|searches for) `([\w$]+)`")
 _LOOKUPS = {"workspaceSymbol", "goToDefinition", "findReferences"}
+_RESULT_LOOKUPS = _LOOKUPS | {"documentSymbol"}
+_PATTERN_OPTIONS = {"-e", "-f", "--regexp", "--file"}
+_SHORT_ARGUMENTS = {"grep": "ABCmdD", "egrep": "ABCmdD", "fgrep": "ABCmdD", "rg": "ABCmgtTMj"}
+_ARGUMENT_OPTIONS = {"--glob", "--iglob", "--type", "--type-not", "--max-count", "--context",
+                     "--after-context", "--before-context", "--include", "--exclude",
+                     "--exclude-dir", "--threads", "--max-depth"}
+_FILE = re.compile(r"[\w./ -]*[\w-]\.[\w-]+")
+_FILE_CHARS = re.compile(r"[\w./~ -]+")
+_REDIRECT = re.compile(r"\d*(?:>>?|&>>?|<)&?")
+_ATTACHED_REDIRECT = re.compile(r"((?:\"[^\"]*\"|'[^']*'|[^'\"<>])+?)(\d*&?[<>].*)")
 _NO_SERVER = "No LSP server available"
 _LSP_DEFINITION = re.compile(r'"name"\s*:\s*"LSP"')
 
@@ -241,24 +302,117 @@ def _names(text: str) -> list[str]:
 
 def _searches(command: str) -> list[str]:
     """The text of each grep in `command`, from the search tool on."""
+    return [text for text, _ in _searches_in(command, "")[0]]
+
+
+def _changed_directory(directory: str | None, target: str | None) -> str | None:
+    """`directory` after a `cd` to `target`, None when either is unknown."""
+    if directory is None or not target or target.startswith("-") or \
+            not _FILE_CHARS.fullmatch(target):
+        return None
+    return os.path.join(directory, os.path.expanduser(target))
+
+
+def _searches_in(command: str, directory: str | None
+                 ) -> tuple[list[tuple[str, str | None]], str | None]:
+    """The text of each grep in `command` that starts in `directory` with
+    the directory it runs in, relative to the session directory, after each
+    `cd` and `git -C` before it, and the directory after `command`. A
+    directory is None when a `cd` goes somewhere the text does not name."""
     try:
         segments = _segments(command)
     except ValueError:
-        return []
-    texts: list[str] = []
+        return [], directory
+    found: list[tuple[str, str | None]] = []
+    grouped = _statements(command) is None
     for words in segments:
+        if _command(words[0]) == "cd":
+            directory = None if grouped else _changed_directory(
+                directory, _unquote(words[1]) if len(words) == 2 else None)
+            continue
         if _command(words[0]) in _SHELLS:
             for j in range(1, len(words) - 1):
                 if not words[j].startswith("-"):
                     break
                 if re.fullmatch(r"-\w*c\w*", words[j]):
-                    texts += _searches(_unquote(words[j + 1]))
+                    found += _searches_in(_unquote(words[j + 1]), directory)[0]
                     break
             continue
         search = _search_words(words)
         if search:
-            texts.append(" ".join(search))
-    return texts
+            here = directory
+            options = words[1:words.index("grep")] if _command(words[0]) == "git" else []
+            if "-C" in options[:-1]:
+                here = _changed_directory(directory, _unquote(options[options.index("-C") + 1]))
+            found.append((" ".join(search), here))
+    return found, directory
+
+
+def _is_file(path: str) -> bool:
+    """Whether `path` names one file: a plain path, not a glob or a quoted
+    word, that is a file on disk, or that does not exist and whose last part
+    has an extension."""
+    if not _FILE_CHARS.fullmatch(path):
+        return False
+    if os.path.exists(path):
+        return os.path.isfile(path)
+    return bool(_FILE.fullmatch(path)) and "." in os.path.basename(path).lstrip(".")
+
+
+def _file(text: str, directory: str = "") -> str:
+    """The first file that the grep `text` run in `directory` searches, as a
+    path from the session directory, "" when it names none: it reads stdin
+    or searches only directories or globs."""
+    try:
+        tool, *raw = _segments(text)[0]
+    except (ValueError, IndexError):
+        return ""
+    raw = [part for quoted in raw for part in
+           (_ATTACHED_REDIRECT.fullmatch(quoted).groups() if _ATTACHED_REDIRECT.fullmatch(quoted)
+            else (quoted,))]
+    arguments = _SHORT_ARGUMENTS.get(_command(tool), "ABCm")
+    positional: list[str] = []
+    inputs: list[str] = []
+    pattern_given = skip = ended = False
+    redirect = ""
+    for quoted in raw:
+        word = _unquote(quoted)
+        if skip:
+            skip = False
+        elif redirect:
+            if redirect == "<":
+                inputs.append(word)
+            redirect = ""
+        elif _REDIRECT.match(quoted):
+            operator = _REDIRECT.match(quoted).group()
+            target = _unquote(quoted[len(operator):])
+            if not target:
+                redirect = operator
+            elif operator == "<":
+                inputs.append(target)
+        elif ended or not word.startswith("-") or word == "-":
+            positional.append(word)
+        elif word == "--":
+            ended = True
+        elif word.startswith("--"):
+            if word in _PATTERN_OPTIONS:
+                pattern_given = skip = True
+            elif word.startswith(("--regexp=", "--file=")):
+                pattern_given = True
+            elif word in _ARGUMENT_OPTIONS:
+                skip = True
+        else:
+            for k, letter in enumerate(word[1:], 1):
+                if letter in "ef" or letter in arguments:
+                    pattern_given = pattern_given or letter in "ef"
+                    skip = k == len(word) - 1
+                    break
+    paths = [os.path.join(directory, p) for p in positional[0 if pattern_given else 1:] + inputs]
+    return next((os.path.normpath(p) for p in paths if _is_file(p)), "")
+
+
+def _short(name: str) -> bool:
+    return len(name) <= SHORT_NAME
 
 
 def _symbols(command: str) -> list[str]:
@@ -349,7 +503,7 @@ def _lsp_lookups(transcript_path: str) -> tuple[list[str], list[str]] | None:
                                 return None
                         elif _NO_SERVER in text:
                             return None
-                        elif call[1] in _LOOKUPS:
+                        elif call[1] in _RESULT_LOOKUPS:
                             texts.append(text)
     except OSError:
         return None
@@ -360,43 +514,69 @@ def bash_reason(command: str, transcript_path: str) -> str:
     """The deny reason for a definition grep for a symbol the session has not
     looked up with LSP, or for any grep for a symbol the gate refused a
     definition grep for, "" to allow."""
-    return _reason(_searches(command if isinstance(command, str) else ""), transcript_path)
+    return _reason(_located(command if isinstance(command, str) else "")[0], transcript_path)
 
 
-def grep_reason(pattern: str, transcript_path: str) -> str:
+def grep_reason(pattern: str, transcript_path: str, path: str = "") -> str:
     """The deny reason for a Grep tool call whose pattern looks up the
     definition of a symbol the session has not looked up with LSP, or
     searches for a symbol the gate refused a definition grep for, "" to
-    allow."""
-    return _reason([pattern] if isinstance(pattern, str) and pattern else [], transcript_path)
+    allow. `path` is the path the call searches."""
+    if not isinstance(pattern, str) or not pattern:
+        return _reason([], transcript_path)
+    return _reason([(pattern, path if isinstance(path, str) and _is_file(path) else "")],
+                   transcript_path)
+
+
+def _located(command: str, directory: str | None = ""
+             ) -> tuple[list[tuple[str, str]], str | None]:
+    """The text of each grep in `command` that starts in `directory` with
+    the first file it searches, as a path from the session directory, ""
+    when it names none or a `cd` before it went somewhere the text does not
+    name, and the directory after `command`."""
+    found, after = _searches_in(command, directory)
+    return [(text, _file(text, here) if here is not None else "") for text, here in found], after
 
 
 def _named(name: str) -> re.Pattern:
     return re.compile(r"(?<![\w$])" + re.escape(name) + r"(?![\w$])")
 
 
-def _reason(searches: list[str], transcript_path: str) -> str:
+def _reason(searches: list[tuple[str, str]], transcript_path: str) -> str:
     if not searches or not transcript_path:
         return ""
     state = _lsp_lookups(transcript_path)
     if state is None:
         return ""
-    template, name = _refusal(searches, state)
-    return template.format(name=name) if template else ""
+    kind, name, file = _refusal(searches, state)
+    if not kind:
+        return ""
+    templates = {"deny": (DENY_REASON, SHORT_DENY_REASON),
+                 "repeat": (REPEAT_REASON, SHORT_REPEAT_REASON)}[kind]
+    return templates[_short(name)].format(name=name, file=file)
 
 
-def _refusal(searches: list[str], state: tuple[list[str], list[str]]) -> tuple[str, str]:
-    """The deny template and the symbol it names for `searches`, ("", "")
-    to allow."""
+def _refusal(searches: list[tuple[str, str]],
+             state: tuple[list[str], list[str]]) -> tuple[str, str, str]:
+    """The kind of refusal, "deny" or "repeat", the symbol it names and the
+    file of its grep for `searches`, ("", "", "") to allow. A short name
+    in a grep that names no file is allowed."""
     lookups, refused = state
-    for name in [name for text in searches for name in _names(text)]:
-        if not any(_named(name).search(text) for text in lookups):
-            return DENY_REASON, name
+
+    def looked_up(name: str) -> bool:
+        return any(_named(name).search(text) for text in lookups)
+
+    for text, file in searches:
+        for name in _names(text):
+            if (file or not _short(name)) and not looked_up(name):
+                return "deny", name, file
     for name in dict.fromkeys(refused):
-        if any(_named(name).search(text) for text in searches) and \
-                not any(_named(name).search(text) for text in lookups):
-            return REPEAT_REASON, name
-    return "", ""
+        if looked_up(name):
+            continue
+        for text, file in searches:
+            if (file or not _short(name)) and _named(name).search(text):
+                return "repeat", name, file
+    return "", "", ""
 
 
 def _statements(command: str) -> list[tuple[str, str]] | None:
@@ -504,14 +684,17 @@ def bash_rewrite(command: str, transcript_path: str) -> str:
         return ""
     parts: list[str] = []
     removed = kept = 0
+    directory: str | None = ""
     for text, separator in statements:
-        template, name = _refusal(_searches(text), state)
-        if template:
+        located, directory = _located(text, directory)
+        kind, name, file = _refusal(located, state)
+        if kind:
             if separator == "&&" or not _removable(text):
                 return ""
             removed += 1
             indent = text[:len(text) - len(text.lstrip())]
-            parts.append(indent + "echo '" + REMOVED_NOTICE.format(name=name) + "'" + separator)
+            notice = (SHORT_REMOVED_NOTICE if _short(name) else REMOVED_NOTICE).format(name=name, file=file)
+            parts.append(indent + "echo '" + notice + "'" + separator)
             continue
         words = text.split()
         if words and words[0] != "cd":
