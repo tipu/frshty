@@ -60,6 +60,7 @@ def load_config(path: str) -> dict:
     ws.setdefault("branch_prefix", "")
     ws.setdefault("exclude", [])
     ws.setdefault("dep_commands", [])
+    ws.setdefault("review_dep_commands", [])
 
     raw["features"].setdefault("auto_review", True)
     raw["features"].setdefault("correspondence", True)
