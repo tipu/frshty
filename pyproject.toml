@@ -14,6 +14,7 @@ dependencies = [
 ]
 
 [tool.pytest.ini_options]
+tmp_path_retention_policy = "failed"
 markers = [
     "slow: heavy end-to-end test that needs a multi-core machine; CI runs with -m 'not slow'",
 ]
