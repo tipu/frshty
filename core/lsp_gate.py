@@ -32,6 +32,7 @@ import json
 import os
 import re
 
+GATE_ENV = "FRSHTY_LSP_GATE"
 DENY_REASON = (
     "Blocked by the LSP gate: this grep looks up the definition of `{name}`, "
     "and this session has not looked up `{name}` with LSP. If LSP is not "
