@@ -18,6 +18,7 @@ from uuid import uuid4
 import jsonschema
 
 import core.db as _db
+import core.lsp_gate as lsp_gate
 import core.log as log
 import core.state as _state
 from core.job_logs import active_live_log_path, active_live_pid_path
@@ -485,7 +486,7 @@ class ClaudeProvider(LLMProvider):
             self.env_overrides["CLAUDE_CONFIG_DIR"] = str(config_dir)
 
     def _env(self) -> dict[str, str]:
-        env = _env()
+        env = {**_env(), lsp_gate.GATE_ENV: "1"}
         for key, value in self.env_overrides.items():
             env[key] = os.path.expanduser(value)
         return env
@@ -713,7 +714,8 @@ class ClaudeProvider(LLMProvider):
                         *_schema_args(schema))
         cwd = worktree if worktree and worktree.is_dir() else None
         if cwd:
-            cmd += ["--dangerously-skip-permissions", "--add-dir", str(cwd)]
+            cmd += ["--dangerously-skip-permissions", "--add-dir", str(cwd),
+                    "--append-system-prompt", LSP_RULE]
             if tools:
                 cmd += ["--allowedTools", ",".join(tools)]
         cmd += _denied_tools_args(None)
@@ -739,8 +741,7 @@ class ClaudeProvider(LLMProvider):
         chosen_model = model or _DEFAULT_MODEL
         cmd = self._cmd("-p", "-", "--output-format", "json", *_model_args(model),
                         "--permission-mode", "dontAsk", *_schema_args(schema))
-        if system_prompt:
-            cmd += ["--append-system-prompt", system_prompt]
+        cmd += ["--append-system-prompt", f"{system_prompt} {LSP_RULE}" if system_prompt else LSP_RULE]
         if tools:
             cmd += ["--allowedTools", ",".join(tools)]
         cmd += _denied_tools_args(denied_tools)

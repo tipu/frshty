@@ -45,6 +45,7 @@ import json
 import os
 import re
 
+GATE_ENV = "FRSHTY_LSP_GATE"
 _NEXT_STEP = (
     "Nothing in this command ran. Make your next tool call this one: LSP with "
     "operation workspaceSymbol, query \"{name}\", any file of the project as "
