@@ -24,7 +24,7 @@ from typing import Protocol, TypedDict
 import core.freshness as freshness
 import core.log as log
 import core.state as state
-from core.ticket_status import TicketStatus
+from core.ticket_status import TicketStatus, approval_edge, epic_edge, tests_failed_edge
 from pm import runner as pm_runner
 
 import features.tickets as _t
@@ -156,12 +156,13 @@ def _handle_new_ticket(
     # never plans / codes / PRs them. Short-circuit before any pipeline kicks
     # in: park them in the terminal `epic` status, record the summary so the
     # UI can render the epic header, and return without enqueueing.
-    if ticket.get("issue_type") == "Epic":
-        if ts.get("status") != "epic":
+    epic = epic_edge(ticket.get("issue_type"))
+    if epic:
+        if ts.get("status") != epic:
             try:
-                state.transition_ticket(key, "epic", reason="auto: issue_type=Epic")
+                state.transition_ticket(key, epic, reason="auto: issue_type=Epic")
             except state.TicketStateError:
-                ts["status"] = "epic"
+                ts["status"] = epic
             if not existing:
                 log.emit("epic_found",
                          f"Epic tracked (not planned): {key} — {ticket.get('summary', '')}",
@@ -175,8 +176,9 @@ def _handle_new_ticket(
     if "source" not in ts:
         ts["source"] = _t._ticket_source(config)
     source = ts.get("source", _t._ticket_source(config))
-    if _t._approval_required(config, source) and ts.get("approval_status") not in ("approved", "rejected"):
-        ts["status"] = TicketStatus.pending_approval.value
+    approval = approval_edge(_t._approval_required(config, source), ts.get("approval_status"))
+    if approval:
+        ts["status"] = approval
         ts["approval_status"] = "pending"
         if "discovered_at" not in ts:
             ts["discovered_at"] = datetime.now(timezone.utc).isoformat()
@@ -337,10 +339,11 @@ def _handle_testing_ticket(
         _t._enqueue_stage(instance_key, key, "enter_proving")
     elif verdict == "FAIL":
         attempts = int(ts.get("test_fix_attempts", 0))
-        if attempts >= _t.MAX_TEST_FIX_ATTEMPTS:
+        exhausted = tests_failed_edge(attempts)
+        if exhausted:
             try:
-                state.transition_ticket(key, "tests_failed")
-                ts["status"] = "tests_failed"
+                state.transition_ticket(key, exhausted)
+                ts["status"] = exhausted
                 _t.emit_once(
                     ts, "tests_failed_at", "ticket_tests_failed",
                     f"{key}: tests failed after {attempts} attempts; "

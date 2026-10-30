@@ -30,7 +30,7 @@ from core.consensus_scope import (
     scope_fix_attempts,
 )
 from core.tasks.registry import TaskContext, TaskResult, task
-from core.ticket_status import SCOPE_FIX
+from core.ticket_status import SCOPE_FIX, TEST_FIX
 import features.defence as defence
 from core.tasks.preconditions import (
     status_is, auto_pr_true, file_exists, file_contains, feature_enabled, has_flag,
@@ -1959,7 +1959,6 @@ def run_tests_and_fix(ctx: TaskContext) -> TaskResult:
     `cap_reached` in three minutes on a spend limit, two of its three attempts
     never having reached claude, and the FAIL that cap recorded was not a
     verdict on the code."""
-    from features.tickets import MAX_TEST_FIX_ATTEMPTS
     ts = state.load_ticket(ctx.ticket_key or "") or {}
     ticket_dir = _ticket_dir(ctx)
     workspace = ticket_dir / "workspace"
@@ -2037,7 +2036,7 @@ def run_tests_and_fix(ctx: TaskContext) -> TaskResult:
     state.update_ticket(ctx.ticket_key or "",
                         lambda t: {**t, "test_fix_attempts": attempt} if t else t)
 
-    if attempt >= MAX_TEST_FIX_ATTEMPTS:
+    if not TEST_FIX.may_continue(attempt):
         return TaskResult("ok", artifacts={"attempt": attempt, "verdict": "FAIL",
                                             "cap_reached": True})
 
