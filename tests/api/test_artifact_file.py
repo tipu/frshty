@@ -307,3 +307,11 @@ class TestArtifactViewerRoutes:
         assert meta.json()["path"].endswith("report.html")
         assert search.status_code == 200
         assert "artifacts" in search.json()
+
+    def test_viewer_page_takes_the_file_name_after_the_id(self, tmp_path, monkeypatch):
+        artifact_id = _seed_report(tmp_path, monkeypatch)
+        with TestClient(self._app()) as client:
+            bare = client.get(f"/artifacts/{artifact_id}")
+            named = client.get(f"/artifacts/{artifact_id}/report.html")
+        assert named.status_code == 200
+        assert named.text == bare.text
