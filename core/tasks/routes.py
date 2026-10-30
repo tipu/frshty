@@ -43,6 +43,7 @@ def _cron_routes(event: dict, registries: dict) -> list[dict]:
         # scheduler_check handles legacy oneshot rows that aren't recurring.
         jobs.append({"instance_key": instance_key, "task": "scheduler_check"})
         jobs.append({"instance_key": instance_key, "task": "dep_store_gc"})
+        jobs.append({"instance_key": instance_key, "task": "tmp_gc"})
     return jobs
 
 
