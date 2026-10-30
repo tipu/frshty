@@ -1786,7 +1786,7 @@ def _claude_usage(files: list[str]) -> dict | None:
     """Token totals of claude transcripts. Claude writes one line per content
     block and repeats the usage of the message on each, so a message counts
     once by its id."""
-    by_message: dict[str, dict] = {}
+    by_message: dict[str, tuple[str, dict]] = {}
     model = ""
     for index, path in enumerate(files):
         try:
@@ -1804,7 +1804,7 @@ def _claude_usage(files: list[str]) -> dict | None:
                     if message.get("model") == "<synthetic>":
                         continue
                     key = str(message.get("id") or f"{index}:{len(by_message)}")
-                    by_message[key] = message["usage"]
+                    by_message[key] = (str(message.get("model") or ""), message["usage"])
                     if index == 0 and message.get("model"):
                         model = str(message["model"])
         except OSError:
@@ -1814,7 +1814,9 @@ def _claude_usage(files: list[str]) -> dict | None:
     totals = {"model": model}
     for field in ("input_tokens", "output_tokens", "cache_creation_input_tokens",
                   "cache_read_input_tokens"):
-        totals[field] = sum(int(u.get(field) or 0) for u in by_message.values())
+        totals[field] = sum(int(u.get(field) or 0) for _, u in by_message.values())
+    costs = [llm.message_cost(m, u) for m, u in by_message.values()]
+    totals["cost_usd"] = None if None in costs else round(sum(costs), 6)
     return totals
 
 
@@ -1844,7 +1846,7 @@ def sweep_usage() -> int:
     rows = db.query_all(
         "SELECT r.id, r.work_item_id, r.provider, r.session_id, r.transcript_path, r.cwd, "
         "r.status, r.started_at, r.agent_session_id, i.objective, "
-        "c.finished_at AS logged_at, c.status AS logged_status "
+        "c.finished_at AS logged_at, c.status AS logged_status, c.cost_usd AS logged_cost "
         "FROM work_runs r JOIN work_items i ON i.id = r.work_item_id "
         "LEFT JOIN claude_invocations c ON c.id = 'work-run-' || r.id "
         "WHERE r.started_at >= ?", (since,))
@@ -1864,7 +1866,8 @@ def sweep_usage() -> int:
         last = datetime.fromtimestamp(max(mtimes), timezone.utc)
         last_iso = last.isoformat()
         status = _usage_status(row["status"])
-        if row["logged_at"] and row["logged_at"] >= last_iso and row["logged_status"] == status:
+        if row["logged_at"] and row["logged_at"] >= last_iso and row["logged_status"] == status \
+                and (row["logged_cost"] is not None or row["provider"] != "claude"):
             continue
         found = transcript_usage(path)
         if found is None:
